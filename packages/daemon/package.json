@@ -1,0 +1,27 @@
+{
+  "name": "tribe-daemon",
+  "version": "0.1.0",
+  "description": "Tribe broker daemon — Unix socket server, SQLite state, session registry, message journal, and daemon plugin runtime",
+  "license": "MIT",
+  "author": "Bjørn Stabell <bjorn@stabell.org>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/beorn/tribe.git",
+    "directory": "packages/daemon"
+  },
+  "bin": {
+    "tribe-daemon": "./src/daemon.ts"
+  },
+  "exports": {
+    ".": "./src/daemon.ts"
+  },
+  "type": "module",
+  "dependencies": {
+    "loggily": "^0.8.0",
+    "tribe-wire": "workspace:*"
+  },
+  "engines": {
+    "bun": ">=1.3.13",
+    "node": ">=23.6.0"
+  }
+}
