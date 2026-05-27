@@ -33,10 +33,8 @@ import { createTimers } from "./timers.ts"
 import { defangModelInput } from "./lib/defang.ts"
 import { evaluateCwdPolicy, probeCwd, readCwdPolicyFromEnv, type CwdEvaluation } from "./lib/cwd-guardrail.ts"
 
-if (process.env.DEBUG_LOG) {
-  process.env.LOG_FILE ??= process.env.DEBUG_LOG
-  setSuppressConsole(true)
-}
+setSuppressConsole(true)
+if (process.env.DEBUG_LOG) process.env.LOG_FILE ??= process.env.DEBUG_LOG
 
 const log = createLogger("tribe:stdio-adapter")
 

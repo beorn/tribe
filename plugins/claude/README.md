@@ -1,6 +1,9 @@
-# @beorn/tribe
+# Claude Plugin Placeholder
 
-Claude Code integration for Tribe.
+The published Claude Code plugin is `@bearly/tribe` and currently remains in
+`github.com/beorn/bearly` during the cutover. This directory is a placeholder in
+the standalone `beorn/tribe` repository so the split keeps the host-integration
+boundary visible without creating or publishing an `@beorn` npm scope.
 
 This plugin is intentionally thin. It wires Claude Code to `tribe-wire`'s MCP
 stdio adapter and points that adapter at `tribe-daemon` when the host owns
@@ -12,7 +15,7 @@ daemon lifecycle.
 | --- | --- | --- |
 | Wire client | `tribe-wire` | Protocol client, `tribe` CLI, and `tribe mcp` adapter |
 | Daemon | `tribe-daemon` | Broker process, SQLite state, sessions, message journal, daemon plugins |
-| Claude plugin | `@beorn/tribe` | Claude Code MCP registration and daemon-script wiring |
+| Claude plugin | `@bearly/tribe` | Claude Code MCP registration and daemon-script wiring |
 
 Project workflow conventions such as `@chief`, `@agent/N`, beads, worktrees,
 and integration authority are outside this package. Those belong to the
@@ -21,8 +24,7 @@ consumer's tent/SOP layer.
 ## Install
 
 ```bash
-claude plugin marketplace add beorn/tribe
-claude plugin install tribe@beorn
+claude plugin install @bearly/tribe
 ```
 
 For a local project-level MCP config without plugin channels:
@@ -32,7 +34,7 @@ For a local project-level MCP config without plugin channels:
   "mcpServers": {
     "tribe": {
       "command": "bunx",
-      "args": ["tribe-wire", "mcp"]
+      "args": ["-p", "tribe-wire", "tribe", "mcp"]
     }
   }
 }

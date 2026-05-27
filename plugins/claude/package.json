@@ -1,7 +1,8 @@
 {
-  "name": "@beorn/tribe",
+  "name": "tribe-claude-plugin-placeholder",
   "version": "0.1.0",
-  "description": "Claude Code integration for Tribe coordination",
+  "private": true,
+  "description": "Placeholder for the Claude Code Tribe plugin; the published plugin package is @bearly/tribe",
   "license": "MIT",
   "repository": {
     "type": "git",

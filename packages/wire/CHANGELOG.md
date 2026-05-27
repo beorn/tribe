@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.1.1 — 2026-05-27
+
+### Fixed
+
+- **Suppress stdio-adapter console logs by default** so `tribe mcp` emits only
+  JSON-RPC messages on stdout. This keeps MCP clients from losing the server
+  during startup when the adapter logs connection or hot-reload status.
+
 ### Added
 
 - **README documenting the npm-consumer protocol surface** + the surface delineation

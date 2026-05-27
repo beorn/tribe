@@ -14,7 +14,7 @@ integration policy belong in a tent/SOP layer outside this repo.
 | --- | --- | --- | --- |
 | Wire client | `tribe-wire` | `tribe` | Unix-socket client, reconnecting transport, MCP stdio adapter, protocol CLI |
 | Daemon | `tribe-daemon` | `tribe-daemon` | Broker process, SQLite state, session registry, message journal, daemon plugin runtime |
-| Claude Code plugin | `@beorn/tribe` | n/a | MCP registration and host-managed daemon lifecycle |
+| Claude Code plugin | `@bearly/tribe` | n/a | MCP registration and host-managed daemon lifecycle, still maintained from `github.com/beorn/bearly` during cutover |
 
 ## Mental Model
 
@@ -35,8 +35,8 @@ Remote hosts should be able to run one of:
 
 ```bash
 tribe mcp --socket /tmp/tribe.sock
-bunx tribe-wire mcp --socket /tmp/tribe.sock
-npx -y tribe-wire mcp --socket /tmp/tribe.sock
+bunx -p tribe-wire tribe mcp --socket /tmp/tribe.sock
+npx -y --package=tribe-wire tribe mcp --socket /tmp/tribe.sock
 ```
 
 The package name is `tribe-wire` because package runners need package names.
@@ -49,7 +49,7 @@ packages/
   wire/      # npm tribe-wire; bin tribe
   daemon/    # npm tribe-daemon; bin tribe-daemon
 plugins/
-  claude/    # Claude Code plugin package
+  claude/    # placeholder; published Claude plugin remains @bearly/tribe
 docs/
   architecture.md
 ```
