@@ -1,5 +1,5 @@
 /**
- * Read/inspect verbs for the unified `tribe` CLI.
+ * Read/inspect verbs for the unified `tribe-wire` CLI.
  *
  * Family 1 of Phase A.2 verb-port — see
  * `@km/bearly/19231-tribe-cli-unify-phase-a2-verbs`. Each verb mirrors the

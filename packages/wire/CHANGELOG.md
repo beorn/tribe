@@ -2,11 +2,32 @@
 
 ## Unreleased
 
+## 0.1.3 — 2026-05-27
+
+### Changed
+
+- **Use `tribe-wire` as the executable name.** Package runners can now use
+  the direct form `bunx tribe-wire mcp ...` / `npx -y tribe-wire mcp ...`
+  because the npm package name and binary name match. This replaces the
+  previous `tribe` binary alias from 0.1.2.
+
+## 0.1.2 — 2026-05-27
+
+### Fixed
+
+- **Correct npm-published `tribe` binary metadata after the broken 0.1.1
+  publish.** 0.1.1 was published with `npm publish`, which ignored
+  `publishConfig` and left the registry metadata pointing at `src/cli.ts`.
+  0.1.2 republishes with `pnpm publish` so package runners install the
+  built `dist/cli.mjs` binary and dist subpath exports.
+- **Fail fast on the wrong publisher.** `prepublishOnly` now rejects non-pnpm
+  publish attempts with an explicit explanation and verification commands.
+
 ## 0.1.1 — 2026-05-27
 
 ### Fixed
 
-- **Suppress stdio-adapter console logs by default** so `tribe mcp` emits only
+- **Suppress stdio-adapter console logs by default** so `tribe-wire mcp` emits only
   JSON-RPC messages on stdout. This keeps MCP clients from losing the server
   during startup when the adapter logs connection or hot-reload status.
 
@@ -56,13 +77,13 @@ node_modules/tribe-wire/dist/cli.mjs` post-install. Upgrade
 
 ### Added
 
-- **`tribe` CLI binary (Phase A.MVP of `@km/bearly/tribe-cli-unify-phase-a-substrate`).**
-  The package now ships a `tribe` bin entry (`./src/cli.ts` in local dev,
-  `./dist/cli.mjs` post-publish). Subcommand dispatcher with `tribe mcp`
+- **`tribe-wire` CLI binary (Phase A.MVP of `@km/bearly/tribe-cli-unify-phase-a-substrate`).**
+  The package now ships a `tribe-wire` bin entry (`./src/cli.ts` in local dev,
+  `./dist/cli.mjs` post-publish). Subcommand dispatcher with `tribe-wire mcp`
   as the only subcommand in this release — runs the stdio MCP adapter
   with the same flag surface (`--name`, `--role`, `--socket`, `--account`,
   `--provider`, `--domains`) as the underlying `stdio-adapter.ts`. The
-  `mcp` subcommand exists to be invocable as `tribe mcp` from the bin
+  `mcp` subcommand exists to be invocable as `tribe-wire mcp` from the bin
   entry rather than `bun packages/wire/src/stdio-adapter.ts`.
 - **`tribe-wire/cli` subpath export.** Importing the cli module
   directly is supported for embedding scenarios; the bin entry is the
@@ -77,8 +98,8 @@ node_modules/tribe-wire/dist/cli.mjs` post-install. Upgrade
   (`retro.ts`, `install.ts`, `hook-dispatch.ts`, `activity-watch.ts`,
   `autostart-config.ts`, `hooks/index.ts`); some are daemon-internal
   (retro reads DB directly). The scope-split was chief-approved per the
-  "rename first, split later" refactor lesson — `tribe mcp` ships first
-  to unblock downstream consumers (`@beorn/tribe` plugin, daemon
+  "rename first, split later" refactor lesson — `tribe-wire mcp` ships first
+  to unblock downstream consumers (`@bearly/tribe` plugin, daemon
   hardening, notification renderer), verb migration follows.
 
 ## 0.3.0 — 2026-05-25
@@ -88,7 +109,7 @@ node_modules/tribe-wire/dist/cli.mjs` post-install. Upgrade
 - **`tribe-wire/stdio` subpath export.** The stdio MCP adapter
   (formerly `tools/stdio-adapter.ts`) now lives at
   `packages/wire/src/stdio-adapter.ts`. Importing the subpath runs
-  the adapter's module-level bootstrap — used by `@beorn/tribe`'s
+  the adapter's module-level bootstrap — used by `@bearly/tribe`'s
   `server.ts` so the plugin no longer ships a committed bundle.
 - **`tribe-wire/lib/socket`** — tribe-flavored facade over the
   core IPC primitives. Exports `TRIBE_PROTOCOL_VERSION`, `probeDaemonPid`,

@@ -17,7 +17,7 @@ export interface BaseTribe {
   readonly daemonSessionId: string
   /** Wall-clock ms when boot started. Used for uptime + suppress-window. */
   readonly startedAt: number
-  /** Daemon version (matches @beorn/tribe package.json). */
+  /** Daemon version (matches @bearly/tribe package.json). */
   readonly daemonVersion: string
   /** Process pid — captured once for diagnostics. */
   readonly daemonPid: number

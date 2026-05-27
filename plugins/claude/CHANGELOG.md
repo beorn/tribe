@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to `@beorn/tribe` are documented here.
+All notable changes to `@bearly/tribe` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this package adheres to [Semantic Versioning](https://semver.org/).
@@ -1079,7 +1079,7 @@ release cycle and **will be removed in 0.10**.
   their description.
 - Calling a tool by its old name dispatches to the new handler and emits
   exactly one `[deprecated]` line to stderr per process per tool.
-- **Old names will be removed in `@beorn/tribe` 0.10.** Migrate now.
+- **Old names will be removed in `@bearly/tribe` 0.10.** Migrate now.
 
 ### Migration
 

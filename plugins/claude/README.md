@@ -13,7 +13,7 @@ daemon lifecycle.
 
 | Component | Package | Owns |
 | --- | --- | --- |
-| Wire client | `tribe-wire` | Protocol client, `tribe` CLI, and `tribe mcp` adapter |
+| Wire client | `tribe-wire` | Protocol client, `tribe-wire` CLI, and `tribe-wire mcp` adapter |
 | Daemon | `tribe-daemon` | Broker process, SQLite state, sessions, message journal, daemon plugins |
 | Claude plugin | `@bearly/tribe` | Claude Code MCP registration and daemon-script wiring |
 
@@ -34,7 +34,7 @@ For a local project-level MCP config without plugin channels:
   "mcpServers": {
     "tribe": {
       "command": "bunx",
-      "args": ["-p", "tribe-wire", "tribe", "mcp"]
+      "args": ["tribe-wire", "mcp"]
     }
   }
 }

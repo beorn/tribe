@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 /**
- * `tribe` — unified CLI binary for the tribe-wire package.
+ * `tribe-wire` — unified CLI binary for the tribe-wire package.
  *
  * Phase A.MVP (@km/bearly/tribe-cli-unify-phase-a-substrate): shipped
- *   `tribe mcp` (stdio adapter forwarder).
+ *   `tribe-wire mcp` (stdio adapter forwarder).
  *
  * Phase A.2 (@km/bearly/19231-tribe-cli-unify-phase-a2-verbs) round 1:
  *   ships read/inspect + send/messaging verb families. Each family
@@ -13,15 +13,15 @@
  *
  * Subcommands today:
  *
- *   tribe mcp [--name <name>] [--role <role>] [--socket <path>] ...
+ *   tribe-wire mcp [--name <name>] [--role <role>] [--socket <path>] ...
  *     Runs the stdio MCP adapter that bridges Claude Code stdio to the
  *     tribe daemon's Unix socket. argv-forwarded (NOT Commander-parsed),
  *     so the stdio-adapter's own parseTribeArgs sees the full flag set.
  *
- *   tribe status | sessions | pending | log | health | inbox-status | activity
+ *   tribe-wire status | sessions | pending | log | health | inbox-status | activity
  *     Read/inspect verbs — register via cli/read.ts (Family 1).
  *
- *   tribe send | retro | alarm | alarm-status | alarm-ack
+ *   tribe-wire send | retro | alarm | alarm-status | alarm-ack
  *     Send/messaging verbs — register via cli/send.ts (Family 2).
  *
  *   Daemon lifecycle verbs intentionally live outside tribe-wire. Use a host
@@ -53,12 +53,12 @@ async function main(): Promise<void> {
 
   // Commander-routed subcommands (Phase A.2 verb families).
   const { Command } = await import("@silvery/commander")
-  const program = new Command("tribe")
+  const program = new Command("tribe-wire")
   program.description("tribe-wire CLI — coordinate through the tribe daemon")
   program.addHelpText(
     "after",
     `\nMCP adapter (argv-forwarded, not Commander-parsed):\n` +
-      `  tribe mcp [--name X --role Y --socket /path ...]\n` +
+      `  tribe-wire mcp [--name X --role Y --socket /path ...]\n` +
       `    Bridges Claude Code stdio to the tribe daemon's Unix socket.\n` +
       `    See: bun packages/wire/src/stdio-adapter.ts --help\n`,
   )

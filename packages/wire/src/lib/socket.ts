@@ -64,7 +64,7 @@ export type { JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcRespon
 //
 // These wrap the lower-level client versions to append tribe daemon args when
 // a host surface explicitly opts into spawning. The wire package itself does
-// not guess a daemon path: plain `tribe mcp` must either connect to an
+// not guess a daemon path: plain `tribe-wire mcp` must either connect to an
 // existing/forwarded socket or receive TRIBE_DAEMON_SCRIPT from a host plugin.
 // ---------------------------------------------------------------------------
 

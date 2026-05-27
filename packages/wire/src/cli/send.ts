@@ -1,5 +1,5 @@
 /**
- * Send/messaging verbs for the unified `tribe` CLI.
+ * Send/messaging verbs for the unified `tribe-wire` CLI.
  *
  * Family 2 of Phase A.2 verb-port — see
  * `@km/bearly/19231-tribe-cli-unify-phase-a2-verbs`. Each verb mirrors the
@@ -170,7 +170,7 @@ export function registerSendCommands(program: Command): void {
     .action((to: string, message: string[], opts: { type?: string }) => {
       const type = opts.type ?? "notify"
       if (!(VALID_MESSAGE_TYPES as readonly string[]).includes(type)) {
-        console.error(`tribe send: invalid --type '${type}' — expected one of: ${VALID_MESSAGE_TYPES.join(", ")}`)
+        console.error(`tribe-wire send: invalid --type '${type}' — expected one of: ${VALID_MESSAGE_TYPES.join(", ")}`)
         process.exit(2)
       }
       void cmdSend(to, message.join(" "), type as MessageType)

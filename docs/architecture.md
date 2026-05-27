@@ -10,8 +10,8 @@ Tribe has three reusable layers and one explicit non-goal.
 
 - JSON-RPC framing over Unix sockets
 - reconnecting daemon clients
-- MCP stdio adapter (`tribe mcp`)
-- protocol CLI verbs (`tribe send`, `tribe fetch`, `tribe members`, etc.)
+- MCP stdio adapter (`tribe-wire mcp`)
+- protocol CLI verbs (`tribe-wire send`, `tribe-wire fetch`, `tribe-wire members`, etc.)
 - MCP tool metadata
 
 It does not own daemon lifecycle by default. If no daemon is reachable, wire

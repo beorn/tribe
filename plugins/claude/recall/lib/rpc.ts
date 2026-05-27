@@ -13,7 +13,7 @@
 /**
  * Protocol version.
  *
- * - v4 (@beorn/tribe 0.10.0): legacy lore.* / tribe_* wire-name aliases
+ * - v4 (@bearly/tribe 0.10.0): legacy lore.* / tribe_* wire-name aliases
  *   removed. Daemons only speak the canonical tribe.* namespace. Clients
  *   running pre-0.10 that send legacy names now receive "method not found".
  *

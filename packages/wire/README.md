@@ -1,9 +1,7 @@
 # tribe-wire
 
-Tribe wire client library + unified `tribe` CLI binary. Connects to the
+Tribe wire client library + unified `tribe-wire` CLI binary. Connects to the
 Tribe daemon via Unix-socket IPC over JSON-RPC 2.0.
-
-[tribe]: https://www.npmjs.com/package/@beorn/tribe
 
 Package-runner entrypoint:
 
@@ -12,11 +10,11 @@ bunx tribe-wire mcp --socket /path/to/tribe.sock
 npx -y tribe-wire mcp --socket /path/to/tribe.sock
 ```
 
-If installed globally, the command remains `tribe`:
+If installed globally, the command is still `tribe-wire`:
 
 ```bash
-tribe mcp --socket /path/to/tribe.sock
-tribe status
+tribe-wire mcp --socket /path/to/tribe.sock
+tribe-wire status
 ```
 
 ## What's in the box
@@ -25,7 +23,7 @@ This package is the **wire/protocol surface** for the tribe daemon —
 everything an external coding agent (Claude Code, Codex, Gemini, etc.) needs
 to participate in a tribe without bundling the daemon itself.
 
-### `tribe` CLI
+### `tribe-wire` CLI
 
 12 protocol verbs that read or send via the daemon's Unix socket. Each is a thin RPC wrapper:
 
@@ -36,11 +34,11 @@ to participate in a tribe without bundling the daemon itself.
 | MCP adapter    | `mcp` (argv-forwarded; not Commander-parsed)                                 | Bridges Claude Code's stdio MCP wire to the tribe daemon's Unix socket — the entry point referenced by `.mcp.json` configs |
 
 ```bash
-tribe --help                                 # full Commander help + addHelpText MCP-adapter hint
-tribe status                                 # active sessions with uptime + last-seen
-tribe send '@chief' 'task X done' --type=notify
-tribe retro --since 2h --format markdown
-tribe mcp --name '@agent/3' --role member    # argv-forwarded; what .mcp.json invokes
+tribe-wire --help                                 # full Commander help + addHelpText MCP-adapter hint
+tribe-wire status                                 # active sessions with uptime + last-seen
+tribe-wire send '@chief' 'task X done' --type=notify
+tribe-wire retro --since 2h --format markdown
+tribe-wire mcp --name '@agent/3' --role member    # argv-forwarded; what .mcp.json invokes
 ```
 
 ### Library exports

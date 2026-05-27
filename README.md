@@ -12,7 +12,7 @@ integration policy belong in a tent/SOP layer outside this repo.
 
 | Component | Package | Binary | Owns |
 | --- | --- | --- | --- |
-| Wire client | `tribe-wire` | `tribe` | Unix-socket client, reconnecting transport, MCP stdio adapter, protocol CLI |
+| Wire client | `tribe-wire` | `tribe-wire` | Unix-socket client, reconnecting transport, MCP stdio adapter, protocol CLI |
 | Daemon | `tribe-daemon` | `tribe-daemon` | Broker process, SQLite state, session registry, message journal, daemon plugin runtime |
 | Claude Code plugin | `@bearly/tribe` | n/a | MCP registration and host-managed daemon lifecycle, still maintained from `github.com/beorn/bearly` during cutover |
 
@@ -20,7 +20,7 @@ integration policy belong in a tent/SOP layer outside this repo.
 
 ```text
 Claude / Codex / Hermes
-  -> tribe mcp                 # from package tribe-wire
+  -> tribe-wire mcp            # from package tribe-wire
   -> local or SSH-forwarded Unix socket
   -> tribe-daemon
   -> SQLite + daemon plugins
@@ -34,19 +34,19 @@ wire those pieces into an agent runtime.
 Remote hosts should be able to run one of:
 
 ```bash
-tribe mcp --socket /tmp/tribe.sock
-bunx -p tribe-wire tribe mcp --socket /tmp/tribe.sock
-npx -y --package=tribe-wire tribe mcp --socket /tmp/tribe.sock
+tribe-wire mcp --socket /tmp/tribe.sock
+bunx tribe-wire mcp --socket /tmp/tribe.sock
+npx -y tribe-wire mcp --socket /tmp/tribe.sock
 ```
 
-The package name is `tribe-wire` because package runners need package names.
-The binary is `tribe` because humans should type the product noun.
+The package name and binary name are both `tribe-wire` so package runners can
+use the direct form without a package/binary split.
 
 ## Repository Layout
 
 ```text
 packages/
-  wire/      # npm tribe-wire; bin tribe
+  wire/      # npm tribe-wire; bin tribe-wire
   daemon/    # npm tribe-daemon; bin tribe-daemon
 plugins/
   claude/    # placeholder; published Claude plugin remains @bearly/tribe

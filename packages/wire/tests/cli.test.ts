@@ -1,5 +1,5 @@
 /**
- * `tribe` CLI smoke tests — covers the Commander dispatcher post Phase A.2
+ * `tribe-wire` CLI smoke tests — covers the Commander dispatcher post Phase A.2
  * round 1 wiring. Verifies help surface, exit codes, the addHelpText MCP-adapter
  * hint, and unknown-command rejection. End-to-end daemon behavior is exercised
  * by daemon/package integration tests; per-family verb registration is
@@ -37,7 +37,7 @@ function runCli(args: string[], opts: { timeoutMs?: number } = {}): { stdout: st
   }
 }
 
-describe("tribe CLI — Commander dispatcher", () => {
+describe("tribe-wire CLI — Commander dispatcher", () => {
   it("--help prints the Commands list + MCP-adapter hint and exits 0", () => {
     const { stdout, code } = runCli(["--help"])
     expect(code).toBe(0)
@@ -49,7 +49,7 @@ describe("tribe CLI — Commander dispatcher", () => {
     expect(stdout).toMatch(/\bretro\b/)
     // addHelpText footer documents the argv-forwarded mcp subcommand.
     expect(stdout).toMatch(/MCP adapter \(argv-forwarded/)
-    expect(stdout).toMatch(/tribe mcp \[--name X/)
+    expect(stdout).toMatch(/tribe-wire mcp \[--name X/)
   })
 
   it("-h is equivalent to --help", () => {
