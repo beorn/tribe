@@ -1,0 +1,37 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'tribe-wire-v*'
+      - 'tribe-daemon-v*'
+      - 'beorn-tribe-v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+      - run: bun install --frozen-lockfile
+      - name: Publish package matching tag
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          case "$TAG" in
+            tribe-wire-v*)   PKG_DIR="packages/wire" ;;
+            tribe-daemon-v*) PKG_DIR="packages/daemon" ;;
+            beorn-tribe-v*)  PKG_DIR="plugins/claude" ;;
+            *) echo "Unknown tag pattern: $TAG"; exit 1 ;;
+          esac
+          cd "$PKG_DIR" && npm publish --access public

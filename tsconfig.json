@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "types": ["bun"]
+  },
+  "include": ["packages/*/src/**/*", "packages/*/tests/**/*", "plugins/*/**/*.ts"],
+  "exclude": ["node_modules", "**/dist", "**/node_modules"]
+}

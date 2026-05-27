@@ -1,7 +1,7 @@
 {
   "name": "tribe-wire",
   "version": "0.1.0",
-  "description": "Tribe wire client — Unix-socket IPC, JSON-RPC protocol, reconnecting client, MCP stdio adapter, and the `tribe` protocol CLI",
+  "description": "Tribe wire client \u2014 Unix-socket IPC, JSON-RPC protocol, reconnecting client, MCP stdio adapter, and the `tribe` protocol CLI",
   "keywords": [
     "claude-code",
     "cli",
@@ -18,14 +18,14 @@
     "url": "git+https://github.com/beorn/tribe/issues"
   },
   "license": "MIT",
-  "author": "Bjørn Stabell <bjorn@stabell.org>",
+  "author": "Bj\u00f8rn Stabell <bjorn@stabell.org>",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/beorn/tribe.git",
     "directory": "packages/wire"
   },
   "bin": {
-    "tribe": "./src/cli.ts"
+    "tribe": "./dist/cli.mjs"
   },
   "files": [
     "dist"
@@ -92,7 +92,8 @@
   },
   "scripts": {
     "build": "tsdown",
-    "prepublishOnly": "bun run build"
+    "prepublishOnly": "bun run build",
+    "prepack": "bun run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
@@ -121,6 +122,7 @@
     "format": "esm"
   },
   "engines": {
-    "node": ">=23.6.0"
+    "node": ">=20.6.0",
+    "bun": ">=1.3.13"
   }
 }
