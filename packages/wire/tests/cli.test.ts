@@ -10,6 +10,8 @@
 
 import { describe, expect, it } from "vitest"
 import { spawnSync } from "node:child_process"
+import { mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { resolve, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -89,5 +91,49 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       timeoutMs: 2000,
     })
     expect(res.stderr).not.toMatch(/unknown command 'mcp'/)
+  })
+
+  it("mcp subcommand keeps stdout JSON-only and captures startup diagnostics in DEBUG_LOG", () => {
+    const dir = mkdtempSync(resolve(tmpdir(), "tribe-wire-mcp-stdout-"))
+    const debugLog = resolve(dir, "debug.log")
+    try {
+      const res = spawnSync(BUN_BIN, [CLI, "mcp", "--name", "@test/cli-log", "--socket", "/tmp/no-tribe.sock"], {
+        encoding: "utf8",
+        timeout: 1000,
+        env: {
+          ...process.env,
+          DEBUG_LOG: debugLog,
+          LOG_FORMAT: "json",
+          LOG_LEVEL: "info",
+          TRIBE_NO_AUTOSTART: "1",
+        },
+      })
+
+      expect(stripAnsi(res.stdout ?? "")).not.toMatch(/tribe:stdio-adapter|Connecting to daemon|INFO/)
+      const log = readFileSync(debugLog, "utf8")
+      expect(log).toContain('"name":"tribe:stdio-adapter"')
+      expect(log).toContain("Connecting to daemon at /tmp/no-tribe.sock")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("mcp subcommand can stream loggily diagnostics to stderr via DEBUG_LOG=/dev/stderr", () => {
+    const res = spawnSync(BUN_BIN, [CLI, "mcp", "--name", "@test/cli-stderr", "--socket", "/tmp/no-tribe.sock"], {
+      encoding: "utf8",
+      timeout: 1000,
+      env: {
+        ...process.env,
+        DEBUG_LOG: "/dev/stderr",
+        LOG_FILE: "/dev/stderr",
+        LOG_FORMAT: "json",
+        LOG_LEVEL: "info",
+        TRIBE_NO_AUTOSTART: "1",
+      },
+    })
+
+    expect(stripAnsi(res.stdout ?? "")).not.toMatch(/tribe:stdio-adapter|Connecting to daemon|INFO/)
+    expect(res.stderr ?? "").toContain('"name":"tribe:stdio-adapter"')
+    expect(res.stderr ?? "").toContain("Connecting to daemon at /tmp/no-tribe.sock")
   })
 })
