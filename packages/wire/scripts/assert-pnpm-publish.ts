@@ -8,7 +8,7 @@ if (!userAgent.startsWith("pnpm/")) {
       "Reason: tribe-wire uses publishConfig to publish dist/*.mjs bin/exports",
       "while keeping src/*.ts exports for local workspace development. npm publish",
       "does not apply those publishConfig bin/exports fields, which publishes a",
-      "broken `tribe` binary that points at src/cli.ts.",
+      "broken `tribe-wire` binary that points at src/cli.ts.",
       "",
       "Use:",
       "  pnpm publish --access public --no-git-checks",

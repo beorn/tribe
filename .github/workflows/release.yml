@@ -22,6 +22,7 @@ jobs:
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
+      - run: corepack enable && corepack prepare pnpm@11.1.1 --activate
       - run: bun install --frozen-lockfile
       - name: Publish package matching tag
         env:
@@ -34,4 +35,4 @@ jobs:
             beorn-tribe-v*)  PKG_DIR="plugins/claude" ;;
             *) echo "Unknown tag pattern: $TAG"; exit 1 ;;
           esac
-          cd "$PKG_DIR" && npm publish --access public
+          cd "$PKG_DIR" && pnpm publish --access public --no-git-checks

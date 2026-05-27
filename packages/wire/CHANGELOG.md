@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.1.4 — 2026-05-27
+
+### Fixed
+
+- **Disable Claude-only channel notifications in MCP pull mode.** Generic
+  ACP/MCP clients such as Hermes reject `notifications/claude/channel`, so
+  `TRIBE_DELIVERY=pull` now suppresses both the experimental `claude/channel`
+  capability advertisement and the channel notification stream.
+
 ## 0.1.3 — 2026-05-27
 
 ### Changed

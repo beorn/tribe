@@ -1,6 +1,6 @@
 {
   "name": "tribe-wire",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Tribe wire client \u2014 Unix-socket IPC, JSON-RPC protocol, reconnecting client, MCP stdio adapter, and the `tribe-wire` protocol CLI",
   "keywords": [
     "claude-code",
