@@ -1041,7 +1041,7 @@ If you see a "method not found" or "unknown tool" error after upgrading,
 you (or a script/skill) are still using the pre-0.9 name. Consult the 0.9.0
 rename table below and update to the canonical `tribe.*` form.
 
-Per [docs/lessons/refactoring.md](../../docs/lessons/refactoring.md):
+Per [km's refactoring lesson](https://github.com/beorn/km/blob/main/docs/lessons/refactoring.md):
 deprecated is not done. The aliases existed exactly long enough to let users
 migrate; they're gone now.
 

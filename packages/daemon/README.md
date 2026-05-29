@@ -6,15 +6,22 @@ Broker daemon for Tribe.
 server, SQLite state, session registry, message journal, delivery modes, and
 daemon plugins.
 
-## Run
+## Status
+
+This package is staged and private during the bearly-to-tribe cutover. The
+published daemon/plugin path still lives in `github.com/beorn/bearly`; this
+package becomes runnable after the daemon runtime's recall/LLM dependencies are
+extracted or replaced.
+
+## Future Run
 
 ```bash
 tribe-daemon --socket ~/.local/share/tribe/tribe.sock
 ```
 
-Host plugins may autostart this daemon for their runtime. The wire package does
-not silently own daemon lifecycle; a missing daemon should be visible and
-actionable to callers.
+After cutover, host plugins may autostart this daemon for their runtime. The
+wire package does not silently own daemon lifecycle; a missing daemon should be
+visible and actionable to callers.
 
 ## Boundary
 

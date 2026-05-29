@@ -33,8 +33,15 @@ import { resolveRecallSocketPath } from "../../../../plugins/claude/recall/lib/c
 // Marker — used to identify tribe-installed hook entries
 // ---------------------------------------------------------------------------
 
-/** Stable substring we look for to identify "our" hook entries in settings.json. */
-export const TRIBE_HOOK_MARKER = "tribe-cli.ts hook "
+/** Stable substring we look for to identify current hook entries in settings.json. */
+export const TRIBE_HOOK_MARKER = "daemon.ts hook "
+
+const LEGACY_TRIBE_HOOK_MARKERS = ["tribe-cli.ts hook "] as const
+
+function isTribeHookCommand(command: string, tribeArg: string): boolean {
+  const markers = [TRIBE_HOOK_MARKER, ...LEGACY_TRIBE_HOOK_MARKERS]
+  return markers.some((marker) => command.includes(marker)) && command.trimEnd().endsWith(` ${tribeArg}`)
+}
 
 /** Claude Code hook events we install handlers for. */
 export const TRIBE_HOOK_EVENTS = [
@@ -168,7 +175,7 @@ function findTribeIndex(matchers: HookMatcher[], tribeArg: string): { mi: number
     for (let hi = 0; hi < m.hooks.length; hi++) {
       const h = m.hooks[hi]
       if (!h || typeof h.command !== "string") continue
-      if (h.command.includes(TRIBE_HOOK_MARKER) && h.command.trimEnd().endsWith(` ${tribeArg}`)) {
+      if (isTribeHookCommand(h.command, tribeArg)) {
         return { mi, hi }
       }
     }
@@ -359,8 +366,7 @@ export function planUninstall(env: InstallEnv): UninstallPlan {
         const h = m.hooks[hi]!
         if (
           typeof h.command === "string" &&
-          h.command.includes(TRIBE_HOOK_MARKER) &&
-          h.command.trimEnd().endsWith(` ${tribeArg}`)
+          isTribeHookCommand(h.command, tribeArg)
         ) {
           removed = h.command
           m.hooks.splice(hi, 1)
@@ -390,7 +396,12 @@ export function planUninstall(env: InstallEnv): UninstallPlan {
     // Match both the legacy `tribe/lore/server.ts` path and the post-rename
     // `tribe/recall/server.ts` path so the uninstaller cleans up stale
     // `lore`-keyed entries from either era.
-    const recallServerBasenames = ["tribe/recall/server.ts", "tribe/lore/server.ts"]
+    const recallServerBasenames = [
+      "tribe/recall/server.ts",
+      "tribe/lore/server.ts",
+      "plugins/claude/recall/server.ts",
+      "plugins/tribe/recall/server.ts",
+    ]
     const removeKey = (key: string): boolean => {
       const e = servers[key]
       if (!e) return false
@@ -496,7 +507,7 @@ export async function doctorReport(env: InstallEnv): Promise<DoctorReport> {
         const cmd = matchers[found.mi]!.hooks[found.hi]!.command
         // Command format: `<bun> <tribe-cli> hook <event>`. Extract the path.
         const parts = cmd.split(/\s+/).filter(Boolean)
-        const cliPath = parts.find((p) => p.endsWith("tribe-cli.ts"))
+        const cliPath = parts.find((p) => p.endsWith("daemon.ts") || p.endsWith("tribe-cli.ts"))
         if (!cliPath) {
           checks.push({
             name: `hook-${claudeName}`,

@@ -1,6 +1,7 @@
 {
   "name": "tribe-daemon",
   "version": "0.1.0",
+  "private": true,
   "description": "Tribe broker daemon \u2014 Unix socket server, SQLite state, session registry, message journal, and daemon plugin runtime",
   "license": "MIT",
   "author": "Bj\u00f8rn Stabell <bjorn@stabell.org>",

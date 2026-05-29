@@ -14,6 +14,11 @@
     "verbatimModuleSyntax": true,
     "types": ["bun"]
   },
-  "include": ["packages/*/src/**/*", "packages/*/tests/**/*", "plugins/*/**/*.ts"],
+  "include": [
+    "packages/wire/src/**/*",
+    "packages/wire/tests/**/*",
+    "packages/daemon/src/lib/*.test.ts",
+    "plugins/claude/tests/**/*.ts"
+  ],
   "exclude": ["node_modules", "**/dist", "**/node_modules"]
 }

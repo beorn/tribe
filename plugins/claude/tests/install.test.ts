@@ -33,7 +33,7 @@ function makeEnv(dir: string, overrides: Partial<InstallEnv> = {}): InstallEnv {
     tribeCliPath: resolve(dir, "tribe/packages/daemon/src/daemon.ts"),
     bunPath: "/usr/local/bin/bun",
     cwd: resolve(dir, "project"),
-    recallServerPath: resolve(dir, "bearly/plugins/claude/recall/server.ts"),
+    recallServerPath: resolve(dir, "tribe/plugins/claude/recall/server.ts"),
     mcpName: "tribe",
     autostartConfigPath: resolve(dir, "claude/tribe/config.json"),
     ...overrides,
