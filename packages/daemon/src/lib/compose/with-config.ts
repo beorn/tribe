@@ -10,8 +10,8 @@
 import { parseArgs } from "node:util"
 import { resolveSocketPath } from "tribe-wire/lib/socket"
 import { parseTribeArgs, resolveDbPath } from "tribe-wire/lib/config"
-import { resolveRecallDbPath } from "../../../../plugins/claude/recall/lib/config.ts"
-import { resolveSummarizerMode, type SummarizerMode } from "../../../../plugins/claude/recall/lib/summarizer.ts"
+import { resolveRecallDbPath } from "../../../../../plugins/claude/recall/lib/config.ts"
+import { resolveSummarizerMode, type SummarizerMode } from "../../../../../plugins/claude/recall/lib/summarizer.ts"
 import type { BaseTribe } from "./base.ts"
 
 export interface TribeConfig {

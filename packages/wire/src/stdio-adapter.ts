@@ -35,10 +35,14 @@ import { createConnectReplayGate, MAX_REPLAY_EVENTS, selectReplayEvents } from "
 import { evaluateCwdPolicy, probeCwd, readCwdPolicyFromEnv, type CwdEvaluation } from "./lib/cwd-guardrail.ts"
 import { resolveJoinDelivery } from "./lib/delivery.ts"
 
-if (process.env.DEBUG_LOG) {
-  process.env.LOG_FILE ??= process.env.DEBUG_LOG
-  setSuppressConsole(true)
-}
+// stdout IS the MCP wire — a single non-JSON line (a loggily INFO banner)
+// poisons the host's JSON-RPC parser and the session silently loses its
+// tribe tools. Console suppression is therefore UNCONDITIONAL here
+// (deliberate divergence from bearly's DEBUG_LOG-gated shape, which only
+// survives there because the bearly plugin wrapper always sets DEBUG_LOG).
+// Logs flow to LOG_FILE/DEBUG_LOG when set; otherwise they are dropped.
+setSuppressConsole(true)
+if (process.env.DEBUG_LOG) process.env.LOG_FILE ??= process.env.DEBUG_LOG
 
 const log = createLogger("tribe:stdio-adapter")
 

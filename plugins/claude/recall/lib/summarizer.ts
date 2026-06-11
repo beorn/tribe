@@ -6,11 +6,71 @@
  * Default off — daemons don't burn LLM credits unless the user enables it.
  */
 
-import { queryModel } from "../../../llm/src/lib/research.ts"
-import { getCheapModel, getCheapModels, type Model } from "../../../llm/src/lib/types.ts"
-import { isProviderAvailable } from "../../../llm/src/lib/providers.ts"
-
 export type SummarizerMode = "off" | "haiku" | "local"
+
+// ---------------------------------------------------------------------------
+// LLM backend — pluggable host dependency (19273 standalone boundary)
+// ---------------------------------------------------------------------------
+//
+// Model selection + querying live in bearly's `plugins/llm` — not bundled
+// with standalone tribe. Hosts that have it point `TRIBE_LLM_DIR` at that
+// plugin's `src` directory. Without it the summarizer behaves exactly like
+// mode "off" (its documented default) and logs the reason once when a mode
+// was explicitly requested — an enabled-but-impossible mode is a
+// misconfiguration, never a silent no-op.
+
+type Model = { provider: string; modelId: string }
+
+type LlmBackend = {
+  queryModel: (opts: {
+    model: Model
+    systemPrompt: string
+    question: string
+    stream: boolean
+    abortSignal?: AbortSignal
+  }) => Promise<{ response?: { content?: string; usage?: { estimatedCost?: unknown } } }>
+  getCheapModel: () => Model | null
+  getCheapModels: (n: number) => Model[]
+  isProviderAvailable: (provider: string) => boolean
+}
+
+let llmProbe: Promise<LlmBackend | null> | undefined
+let llmWarned = false
+
+async function loadLlmBackend(): Promise<LlmBackend | null> {
+  if (llmProbe !== undefined) return llmProbe
+  llmProbe = (async () => {
+    const dir = process.env.TRIBE_LLM_DIR
+    if (!dir) return null
+    try {
+      const [research, types, providers] = await Promise.all([
+        import(`${dir}/lib/research.ts`),
+        import(`${dir}/lib/types.ts`),
+        import(`${dir}/lib/providers.ts`),
+      ])
+      return {
+        queryModel: research.queryModel,
+        getCheapModel: types.getCheapModel,
+        getCheapModels: types.getCheapModels,
+        isProviderAvailable: providers.isProviderAvailable,
+      } as LlmBackend
+    } catch (err) {
+      process.stderr.write(
+        `[lore-summarizer] LLM backend FAILED to load from TRIBE_LLM_DIR=${dir}: ${err instanceof Error ? err.message : String(err)}\n`,
+      )
+      return null
+    }
+  })()
+  return llmProbe
+}
+
+function warnUnavailableOnce(mode: SummarizerMode): void {
+  if (llmWarned) return
+  llmWarned = true
+  process.stderr.write(
+    `[lore-summarizer] summarizer mode "${mode}" requested but no LLM backend is available (TRIBE_LLM_DIR unset or failed) — summaries disabled\n`,
+  )
+}
 
 export type SessionSummary = {
   focus: string
@@ -29,17 +89,18 @@ export function resolveSummarizerMode(raw?: string): SummarizerMode {
  * Pick the model to drive summaries for the given mode. Returns null when
  * the mode is "off" or no available provider matches.
  */
-export function pickSummaryModel(mode: SummarizerMode): Model | null {
+export function pickSummaryModel(mode: SummarizerMode, llm: LlmBackend): Model | null {
   if (mode === "off") return null
   if (mode === "haiku") {
     const haiku =
-      getCheapModels(8).find((m) => /haiku/i.test(m.modelId) && isProviderAvailable(m.provider)) ?? getCheapModel()
-    if (!haiku || !isProviderAvailable(haiku.provider)) return null
+      llm.getCheapModels(8).find((m) => /haiku/i.test(m.modelId) && llm.isProviderAvailable(m.provider)) ??
+      llm.getCheapModel()
+    if (!haiku || !llm.isProviderAvailable(haiku.provider)) return null
     return haiku
   }
   // mode === "local" — prefer any ollama-backed model; extend when we add
   // lmstudio to the provider enum.
-  const local = getCheapModels(8).find((m) => m.provider === "ollama" && isProviderAvailable(m.provider))
+  const local = llm.getCheapModels(8).find((m) => m.provider === "ollama" && llm.isProviderAvailable(m.provider))
   return local ?? null
 }
 
@@ -71,12 +132,17 @@ export async function summarizeTail(
   if (mode === "off") return null
   if (!tail || tail.trim().length === 0) return null
 
-  const model = pickSummaryModel(mode)
+  const llm = await loadLlmBackend()
+  if (!llm) {
+    warnUnavailableOnce(mode)
+    return null
+  }
+  const model = pickSummaryModel(mode, llm)
   if (!model) return null
 
   const startedAt = Date.now()
   try {
-    const result = await queryModel({
+    const result = await llm.queryModel({
       model,
       systemPrompt: SYSTEM_PROMPT,
       question: `TAIL:\n${tail.slice(-4000)}`,

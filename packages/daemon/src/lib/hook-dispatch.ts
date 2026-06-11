@@ -25,14 +25,81 @@
  * (lore + tribe) to one — the unified daemon hosts both surfaces.
  */
 
-import { setSuppressConsole } from "loggily"
-import { cmdSessionStart, cmdSessionEnd, cmdHook } from "../../../plugins/recall/src/lib/hooks.ts"
-import { emitInjectionDebugEvent, installInjectionFileWriter } from "../../../plugins/injection-envelope/src/debug.ts"
+import { createLogger, setSuppressConsole } from "loggily"
 import { ensureTribeDaemonIfConfigured } from "./autostart.ts"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
 export type HookEvent = "session-start" | "prompt" | "session-end" | "pre-compact"
+
+// ---------------------------------------------------------------------------
+// Hook engine — pluggable host dependency (19273 standalone boundary)
+// ---------------------------------------------------------------------------
+//
+// The hook handlers (session indexing, delta injection) and the injection
+// debug recorder live in bearly's `plugins/recall` / `plugins/injection-
+// envelope` — not bundled with standalone tribe. Hosts that have them point
+// `TRIBE_RECALL_ENGINE_DIR` / `TRIBE_INJECTION_DEBUG_DIR` at those plugins'
+// `src` directories. Standalone, `tribe hook <event>` is a defined no-op:
+// the daemon autostart still runs (that part IS tribe), the recall-side
+// indexing simply doesn't happen, and we say so on the loggily rail.
+
+const log = createLogger("tribe:hook-dispatch")
+
+type HookEngine = {
+  cmdSessionStart: () => Promise<void>
+  cmdSessionEnd: () => Promise<void>
+  cmdHook: () => Promise<void>
+}
+
+type InjectionDebug = {
+  emitInjectionDebugEvent: (event: Record<string, unknown>) => void
+  installInjectionFileWriter: (path: string) => void
+}
+
+let hookEngineProbe: Promise<HookEngine | null> | undefined
+async function loadHookEngine(): Promise<HookEngine | null> {
+  if (hookEngineProbe !== undefined) return hookEngineProbe
+  hookEngineProbe = (async () => {
+    const dir = process.env.TRIBE_RECALL_ENGINE_DIR
+    if (!dir) {
+      log.warn?.("recall hook engine not configured (TRIBE_RECALL_ENGINE_DIR unset) — session indexing/injection skipped")
+      return null
+    }
+    try {
+      const hooks = await import(`${dir}/lib/hooks.ts`)
+      return { cmdSessionStart: hooks.cmdSessionStart, cmdSessionEnd: hooks.cmdSessionEnd, cmdHook: hooks.cmdHook }
+    } catch (err) {
+      log.error?.(
+        `recall hook engine FAILED to load from TRIBE_RECALL_ENGINE_DIR=${dir}: ${err instanceof Error ? err.message : String(err)}`,
+      )
+      return null
+    }
+  })()
+  return hookEngineProbe
+}
+
+let injectionDebugProbe: Promise<InjectionDebug | null> | undefined
+async function loadInjectionDebug(): Promise<InjectionDebug | null> {
+  if (injectionDebugProbe !== undefined) return injectionDebugProbe
+  injectionDebugProbe = (async () => {
+    const dir = process.env.TRIBE_INJECTION_DEBUG_DIR
+    if (!dir) return null
+    try {
+      const mod = await import(`${dir}/debug.ts`)
+      return {
+        emitInjectionDebugEvent: mod.emitInjectionDebugEvent,
+        installInjectionFileWriter: mod.installInjectionFileWriter,
+      }
+    } catch (err) {
+      log.error?.(
+        `injection debug recorder FAILED to load from TRIBE_INJECTION_DEBUG_DIR=${dir}: ${err instanceof Error ? err.message : String(err)}`,
+      )
+      return null
+    }
+  })()
+  return injectionDebugProbe
+}
 
 /**
  * One-shot, idempotent muzzle of console output for the hook process.
@@ -64,25 +131,28 @@ export type HookEvent = "session-start" | "prompt" | "session-end" | "pre-compac
  * a hook code path, route it through loggily — don't intercept here.
  */
 let _muzzled = false
-function muzzleHookProcess(): void {
+async function muzzleHookProcess(): Promise<void> {
   if (_muzzled) return
   _muzzled = true
 
   // Layer 1 — silence loggily's default console sink.
   setSuppressConsole(true)
 
-  // Layer 2 — route `injection:*` events to a per-user JSONL.
+  // Layer 2 — route `injection:*` events to a per-user JSONL (only when the
+  // host ships the injection-envelope debug recorder).
+  const injection = await loadInjectionDebug()
+  if (!injection) return
   const path =
     process.env.INJECTION_DEBUG_LOG ??
     process.env.LOGGILY_FILE ??
     join(homedir(), ".local", "share", "bearly", "injection.jsonl")
   try {
-    installInjectionFileWriter(path)
+    injection.installInjectionFileWriter(path)
   } catch (err) {
     // The injection-envelope debug recorder owns its own /tmp fallback;
     // record the error there for later forensics. Never write to
     // stderr/stdout — that's the bug we're fixing.
-    emitInjectionDebugEvent({
+    injection.emitInjectionDebugEvent({
       source: "hook-dispatch",
       action: "error",
       reason: "installInjectionFileWriter_failed",
@@ -95,7 +165,7 @@ export async function dispatchHook(event: HookEvent): Promise<void> {
   // Muzzle BEFORE anything else — autostart, recall handlers, daemon
   // RPCs, plugin loading all use loggily and would otherwise leak text
   // into the hook's stdout/stderr. See muzzleHookProcess docstring.
-  muzzleHookProcess()
+  await muzzleHookProcess()
 
   // Fire-and-check autostart before the real handler runs. Errors are
   // swallowed internally — hooks must never crash here.
@@ -105,18 +175,26 @@ export async function dispatchHook(event: HookEvent): Promise<void> {
     /* never block the hook on autostart failure */
   }
 
+  const engine = await loadHookEngine()
+  if (!engine) {
+    // Standalone: daemon autostart above is tribe's half and already ran;
+    // the recall-side indexing half is host-supplied. Warned on the
+    // loggily rail (NEVER stdout — that is the hook protocol channel).
+    return
+  }
+
   switch (event) {
     case "session-start":
-      await cmdSessionStart()
+      await engine.cmdSessionStart()
       return
     case "session-end":
-      await cmdSessionEnd()
+      await engine.cmdSessionEnd()
       return
     case "prompt":
     case "pre-compact":
       // Both feed stdin JSON to the UserPromptSubmit-style handler. cmdHook
       // reads `hook_event_name` from stdin and routes accordingly.
-      await cmdHook()
+      await engine.cmdHook()
       return
   }
 }

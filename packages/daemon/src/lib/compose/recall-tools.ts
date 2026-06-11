@@ -12,7 +12,7 @@
  */
 
 import type { Tool, ToolContext } from "tribe-wire"
-import { TRIBE_METHODS } from "../../../../plugins/claude/recall/lib/rpc.ts"
+import { TRIBE_METHODS } from "../../../../../plugins/claude/recall/lib/rpc.ts"
 import type { RecallConnState, RecallHandlers } from "../recall-handlers.ts"
 
 export interface RecallToolExtra {

@@ -27,7 +27,7 @@ import {
   sessionRowToInfo,
   type RecallRepo,
   type SessionRow,
-} from "../../../plugins/claude/recall/lib/database.ts"
+} from "../../../../plugins/claude/recall/lib/database.ts"
 import {
   TRIBE_METHODS,
   RECALL_ERRORS,
@@ -52,18 +52,141 @@ import {
   type SessionsListResult,
   type StatusResult,
   type WorkspaceStateResult,
-} from "../../../plugins/claude/recall/lib/rpc.ts"
+} from "../../../../plugins/claude/recall/lib/rpc.ts"
 import {
   resolveSummarizerMode,
   summarizeTail,
   type SummarizerMode,
-} from "../../../plugins/claude/recall/lib/summarizer.ts"
-import { recallAgent } from "../../../plugins/recall/src/lib/agent.ts"
-import { planQuery, planVariants } from "../../../plugins/recall/src/lib/plan.ts"
-import { buildQueryContext } from "../../../plugins/recall/src/lib/context.ts"
-import { getCurrentSessionContext, extractSessionFocus } from "../../../plugins/recall/src/lib/session-context.ts"
-import { setRecallLogging } from "../../../plugins/recall/src/history/recall-shared.ts"
-import { createMemorySeenStore, runInjectDelta, type SeenStore } from "../../../plugins/recall/src/lib/inject-core.ts"
+} from "../../../../plugins/claude/recall/lib/summarizer.ts"
+// ---------------------------------------------------------------------------
+// Deep-recall engine — pluggable host dependency (19273 standalone boundary)
+// ---------------------------------------------------------------------------
+//
+// The lore PRIMITIVES (database / rpc / summarizer, imported above) ship with
+// this repo. The deep-recall ENGINE — the LLM recall agent, query planning,
+// transcript session-context extraction, and inject-delta — lives in bearly's
+// `plugins/recall` and is NOT bundled with standalone tribe. Hosts that have
+// it (km / bearly checkouts) point `TRIBE_RECALL_ENGINE_DIR` at that plugin's
+// `src` directory; without it the daemon still boots and serves coordination
+// + basic lore, while engine-backed verbs (tribe.ask / brief-fallback / plan /
+// inject_delta) and focus polling degrade with a LOUD, actionable message —
+// never silently (docs/principles.md § Fail Loud).
+
+type DeepRecallEngine = {
+  recallAgent: (
+    query: string,
+    opts: Record<string, unknown>,
+  ) => Promise<{
+    query: string
+    synthesis: string | null
+    results: ReadonlyArray<{
+      type: unknown
+      sessionId: string
+      sessionTitle: string
+      timestamp: string
+      snippet: string
+    }>
+    durationMs: number
+    llmCost?: number
+    fellThrough?: boolean
+    trace?: { synthPath?: string; synthCallsUsed?: number } | null
+  }>
+  planQuery: (
+    query: string,
+    context: unknown,
+    opts: { round: number },
+  ) => Promise<{ plan: unknown; elapsedMs: number; cost?: number; model?: string; error?: string }>
+  planVariants: (plan: unknown) => readonly string[]
+  buildQueryContext: () => unknown
+  getCurrentSessionContext: (opts: Record<string, unknown>) => {
+    sessionId: string
+    ageMs: number
+    exchangeCount: number
+    mentionedPaths: readonly string[]
+    mentionedBeads: readonly string[]
+    mentionedTokens: readonly string[]
+    recentMessages: string
+  } | null
+  extractSessionFocus: (
+    transcriptPath: string,
+    opts: { sessionId: string },
+  ) => {
+    lastActivityTs: number
+    ageMs: number
+    exchangeCount: number
+    mentionedPaths: readonly string[]
+    mentionedBeads: readonly string[]
+    mentionedTokens: readonly string[]
+    tail: string
+  } | null
+  setRecallLogging: (enabled: boolean) => void
+  createMemorySeenStore: () => SeenStore
+  runInjectDelta: (
+    prompt: string,
+    store: SeenStore,
+    opts: { limit?: number; ttlTurns?: number },
+  ) => Promise<{
+    skipped: boolean
+    reason?: string
+    additionalContext?: string
+    newKeys?: readonly string[]
+    turn?: number
+  }>
+}
+
+/** Structural mirror of the engine's SeenStore — only what this file touches. */
+type SeenStore = { size(): number; turn(): number }
+
+const ENGINE_UNAVAILABLE =
+  "deep-recall engine unavailable: this tribe-daemon is running standalone (TRIBE_RECALL_ENGINE_DIR unset or failed to load). " +
+  "Coordination (tribe.send/fetch/members) and basic lore work; tribe.ask/plan/inject_delta need the engine — " +
+  "point TRIBE_RECALL_ENGINE_DIR at a bearly plugins/recall/src checkout to enable them."
+
+let deepRecallEngine: DeepRecallEngine | null = null
+let deepRecallProbe: Promise<DeepRecallEngine | null> | undefined
+
+async function loadDeepRecallEngine(log: ReturnType<typeof createLogger>): Promise<DeepRecallEngine | null> {
+  if (deepRecallProbe !== undefined) return deepRecallProbe
+  deepRecallProbe = (async () => {
+    const dir = process.env.TRIBE_RECALL_ENGINE_DIR
+    if (!dir) {
+      log.warn?.(
+        "deep-recall engine not configured (TRIBE_RECALL_ENGINE_DIR unset) — tribe.ask/plan/inject_delta and focus polling are disabled; coordination and basic lore remain available",
+      )
+      return null
+    }
+    try {
+      const [agent, plan, context, sessionContext, shared, injectCore] = await Promise.all([
+        import(`${dir}/lib/agent.ts`),
+        import(`${dir}/lib/plan.ts`),
+        import(`${dir}/lib/context.ts`),
+        import(`${dir}/lib/session-context.ts`),
+        import(`${dir}/history/recall-shared.ts`),
+        import(`${dir}/lib/inject-core.ts`),
+      ])
+      deepRecallEngine = {
+        recallAgent: agent.recallAgent,
+        planQuery: plan.planQuery,
+        planVariants: plan.planVariants,
+        buildQueryContext: context.buildQueryContext,
+        getCurrentSessionContext: sessionContext.getCurrentSessionContext,
+        extractSessionFocus: sessionContext.extractSessionFocus,
+        setRecallLogging: shared.setRecallLogging,
+        createMemorySeenStore: injectCore.createMemorySeenStore,
+        runInjectDelta: injectCore.runInjectDelta,
+      } as DeepRecallEngine
+      log.info?.(`deep-recall engine loaded from ${dir}`)
+      return deepRecallEngine
+    } catch (err) {
+      // Configured but broken is an ERROR (misconfiguration), not a warn.
+      log.error?.(
+        `deep-recall engine FAILED to load from TRIBE_RECALL_ENGINE_DIR=${dir}: ${err instanceof Error ? err.message : String(err)} — engine verbs disabled`,
+      )
+      return null
+    }
+  })()
+  return deepRecallProbe
+}
 
 // ---------------------------------------------------------------------------
 // Public surface
@@ -108,7 +231,12 @@ const RECALL_METHOD_SET = new Set<string>(Object.values(TRIBE_METHODS))
 
 export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
   const log = createLogger("tribe:recall")
-  setRecallLogging(process.env.TRIBE_LOG === "1")
+  // Probe the engine eagerly so (a) the availability warning lands at boot,
+  // not on first use, and (b) the sync focus poller sees `deepRecallEngine`
+  // populated by the time its first 60s tick fires.
+  void loadDeepRecallEngine(log).then((engine) => {
+    engine?.setRecallLogging(process.env.TRIBE_LOG === "1")
+  })
 
   const db = openRecallDatabase(opts.dbPath)
   const repo: RecallRepo = createRecallRepo(db)
@@ -119,12 +247,13 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
   const summarizerMode: SummarizerMode = opts.summarizerMode ?? "off"
   const daemonVersion = opts.daemonVersion
 
-  // Per-session dedup state for lore.inject_delta
+  // Per-session dedup state for lore.inject_delta (stores come from the
+  // engine — only populated when it loaded).
   const injectStores = new Map<string, SeenStore>()
-  const injectStoreFor = (sessionId: string): SeenStore => {
+  const injectStoreFor = (engine: DeepRecallEngine, sessionId: string): SeenStore => {
     let store = injectStores.get(sessionId)
     if (!store) {
-      store = createMemorySeenStore()
+      store = engine.createMemorySeenStore()
       injectStores.set(sessionId, store)
     }
     return store
@@ -149,7 +278,9 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
   }
 
   async function handleAsk(_conn: RecallConnState, params: AskParams): Promise<AskResult> {
-    const result = await recallAgent(params.query, {
+    const engine = await loadDeepRecallEngine(log)
+    if (!engine) throw new Error(ENGINE_UNAVAILABLE)
+    const result = await engine.recallAgent(params.query, {
       limit: params.limit,
       since: params.since,
       projectFilter: params.projectFilter,
@@ -199,7 +330,12 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
       }
     }
 
-    const ctx = getCurrentSessionContext(override ? { sessionIdOverride: override } : {})
+    // Engine-backed fallback: without the engine the cached-focus path above
+    // is the only source — degrade to detected:false (probe already logged
+    // the availability warning loudly at boot).
+    const engine = await loadDeepRecallEngine(log)
+    if (!engine) return { sessionId: override ?? null, detected: false }
+    const ctx = engine.getCurrentSessionContext(override ? { sessionIdOverride: override } : {})
     if (!ctx) return { sessionId: null, detected: false }
     return {
       sessionId: ctx.sessionId,
@@ -214,9 +350,11 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
   }
 
   async function handlePlanOnly(_conn: RecallConnState, params: PlanOnlyParams): Promise<PlanOnlyResult> {
-    const context = buildQueryContext()
+    const engine = await loadDeepRecallEngine(log)
+    if (!engine) return { ok: false, elapsedMs: 0, cost: 0, error: ENGINE_UNAVAILABLE }
+    const context = engine.buildQueryContext()
     try {
-      const call = await planQuery(params.query, context, { round: 1 })
+      const call = await engine.planQuery(params.query, context, { round: 1 })
       if (!call.plan) {
         return {
           ok: false,
@@ -229,7 +367,7 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
       return {
         ok: true,
         plan: call.plan as unknown as Record<string, unknown>,
-        variants: planVariants(call.plan),
+        variants: engine.planVariants(call.plan),
         model: call.model,
         elapsedMs: call.elapsedMs,
         cost: call.cost ?? 0,
@@ -334,9 +472,11 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
   }
 
   async function handleInjectDelta(conn: RecallConnState, params: InjectDeltaParams): Promise<InjectDeltaResult> {
+    const engine = await loadDeepRecallEngine(log)
+    if (!engine) throw new Error(ENGINE_UNAVAILABLE)
     const sessionId = params.sessionId ?? conn.sessionId ?? "unknown"
-    const store = injectStoreFor(sessionId)
-    const core = await runInjectDelta(params.prompt ?? "", store, {
+    const store = injectStoreFor(engine, sessionId)
+    const core = await engine.runInjectDelta(params.prompt ?? "", store, {
       limit: params.limit,
       ttlTurns: params.ttlTurns,
     })
@@ -412,8 +552,12 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
 
   function refreshFocusFor(row: SessionRow): void {
     if (!row.transcript_path) return
+    // Sync poller: relies on the module-level engine populated by the eager
+    // boot-time probe. Without the engine, focus rows simply never populate
+    // (warned once at boot).
+    if (!deepRecallEngine) return
     try {
-      const focus = extractSessionFocus(row.transcript_path, { sessionId: row.session_id })
+      const focus = deepRecallEngine.extractSessionFocus(row.transcript_path, { sessionId: row.session_id })
       if (!focus) return
       repo.upsertFocus({
         claudePid: row.claude_pid,
@@ -531,4 +675,4 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
 }
 
 // Re-export the summarizer mode resolver so the daemon can parse args.
-export { resolveSummarizerMode } from "../../../plugins/claude/recall/lib/summarizer.ts"
+export { resolveSummarizerMode } from "../../../../plugins/claude/recall/lib/summarizer.ts"

@@ -1,0 +1,16 @@
+{
+  "name": "tribe",
+  "description": "Tribe — cross-session coordination for AI coding agents: discover, message, and coordinate work across multiple Claude Code sessions",
+  "owner": {
+    "name": "beorn",
+    "url": "https://github.com/beorn"
+  },
+  "plugins": [
+    {
+      "name": "tribe",
+      "description": "Cross-session coordination — sessions discover each other, exchange messages, and coordinate work through a shared daemon (tribe.join / send / fetch / members)",
+      "version": "0.1.0",
+      "source": "./plugins/claude"
+    }
+  ]
+}
