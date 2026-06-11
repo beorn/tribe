@@ -10,11 +10,11 @@ integration policy belong in a tent/SOP layer outside this repo.
 
 ## Components
 
-| Component | Package | Binary | Owns |
-| --- | --- | --- | --- |
-| Wire client | `tribe-wire` | `tribe-wire` | Unix-socket client, reconnecting transport, MCP stdio adapter, protocol CLI |
-| Daemon | `tribe-daemon` | `tribe-daemon` | Staged broker package; private until the bearly daemon/runtime cutover is complete |
-| Claude Code plugin | `@bearly/tribe` | n/a | MCP registration and host-managed daemon lifecycle, still maintained from `github.com/beorn/bearly` during cutover |
+| Component          | Package         | Binary         | Owns                                                                                                               |
+| ------------------ | --------------- | -------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Wire client        | `tribe-wire`    | `tribe-wire`   | Unix-socket client, reconnecting transport, MCP stdio adapter, protocol CLI                                        |
+| Daemon             | `tribe-daemon`  | `tribe-daemon` | Staged broker package; private until the bearly daemon/runtime cutover is complete                                 |
+| Claude Code plugin | `@bearly/tribe` | n/a            | MCP registration and host-managed daemon lifecycle, still maintained from `github.com/beorn/bearly` during cutover |
 
 ## Mental Model
 

@@ -364,10 +364,7 @@ export function planUninstall(env: InstallEnv): UninstallPlan {
       if (!Array.isArray(m.hooks)) continue
       for (let hi = m.hooks.length - 1; hi >= 0; hi--) {
         const h = m.hooks[hi]!
-        if (
-          typeof h.command === "string" &&
-          isTribeHookCommand(h.command, tribeArg)
-        ) {
+        if (typeof h.command === "string" && isTribeHookCommand(h.command, tribeArg)) {
           removed = h.command
           m.hooks.splice(hi, 1)
         }

@@ -265,7 +265,6 @@ describe("planInstall", () => {
     writeFileSync(env.autostartConfigPath, "not json {", "utf-8")
     expect(readTribeConfig(env.autostartConfigPath).autostart).toBe("daemon")
   })
-
 })
 
 describe("planUninstall", () => {

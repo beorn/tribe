@@ -11,11 +11,11 @@ daemon lifecycle.
 
 ## Components
 
-| Component | Package | Owns |
-| --- | --- | --- |
-| Wire client | `tribe-wire` | Protocol client, `tribe-wire` CLI, and `tribe-wire mcp` adapter |
-| Daemon | `tribe-daemon` | Broker process, SQLite state, sessions, message journal, daemon plugins |
-| Claude plugin | `@bearly/tribe` | Claude Code MCP registration and daemon-script wiring |
+| Component     | Package         | Owns                                                                    |
+| ------------- | --------------- | ----------------------------------------------------------------------- |
+| Wire client   | `tribe-wire`    | Protocol client, `tribe-wire` CLI, and `tribe-wire mcp` adapter         |
+| Daemon        | `tribe-daemon`  | Broker process, SQLite state, sessions, message journal, daemon plugins |
+| Claude plugin | `@bearly/tribe` | Claude Code MCP registration and daemon-script wiring                   |
 
 Project workflow conventions such as `@chief`, `@agent/N`, beads, worktrees,
 and integration authority are outside this package. Those belong to the

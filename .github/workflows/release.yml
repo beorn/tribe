@@ -3,9 +3,9 @@ name: release
 on:
   push:
     tags:
-      - 'tribe-wire-v*'
-      - 'tribe-daemon-v*'
-      - 'beorn-tribe-v*'
+      - "tribe-wire-v*"
+      - "tribe-daemon-v*"
+      - "beorn-tribe-v*"
 
 jobs:
   publish:
@@ -20,8 +20,8 @@ jobs:
           bun-version: latest
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
       - run: corepack enable && corepack prepare pnpm@11.1.1 --activate
       - run: bun install --frozen-lockfile
       - name: Publish package matching tag
