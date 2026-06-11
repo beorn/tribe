@@ -14,9 +14,7 @@ import * as os from "os"
 import { getDb, closeDb } from "../history/db"
 import { summarizeSessionBatch, type SessionSummary } from "./summarize-session"
 import { findSessionJsonl } from "./extract"
-import { getCheapModel } from "../../../llm/src/lib/types"
-import { queryModel } from "../../../llm/src/lib/research"
-import { isProviderAvailable } from "../../../llm/src/lib/providers"
+import { loadLlm } from "./llm-backend.ts"
 import { createRetroBeads } from "./summarize-beads"
 
 // ============================================================================
@@ -258,8 +256,9 @@ export async function summarizeDay(
   log(`LLM context: ${context.length} chars from ${usableSummaries.length} sessions`)
 
   // Check LLM availability
-  const model = getCheapModel()
-  if (!model || !isProviderAvailable(model.provider)) {
+  const llm = await loadLlm()
+  const model = llm?.getCheapModel()
+  if (!llm || !model || !llm.isProviderAvailable(model.provider)) {
     log(`no LLM provider available`)
     return {
       date,
@@ -273,7 +272,7 @@ export async function summarizeDay(
 
   // Synthesize
   const llmStart = Date.now()
-  const result = await queryModel({
+  const result = await llm.queryModel({
     question: context,
     model,
     systemPrompt: DAILY_SUMMARY_PROMPT,
@@ -549,8 +548,9 @@ export async function summarizeWeek(weekOf: string, opts: { verbose?: boolean } 
 
   log(`LLM context: ${context.length} chars`)
 
-  const model = getCheapModel()
-  if (!model || !isProviderAvailable(model.provider)) {
+  const llm2 = await loadLlm()
+  const model = llm2?.getCheapModel()
+  if (!llm2 || !model || !llm2.isProviderAvailable(model.provider)) {
     log(`no LLM provider available`)
     return {
       weekStart,
@@ -564,7 +564,7 @@ export async function summarizeWeek(weekOf: string, opts: { verbose?: boolean } 
   }
 
   const llmStart = Date.now()
-  const result = await queryModel({
+  const result = await llm2.queryModel({
     question: context,
     model,
     systemPrompt: WEEKLY_SUMMARY_PROMPT,

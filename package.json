@@ -1,7 +1,7 @@
 {
   "name": "tribe",
-  "private": true,
   "version": "0.0.0",
+  "private": true,
   "description": "Reusable Tribe coordination infrastructure: wire client, daemon, and host plugins",
   "license": "MIT",
   "author": "Bjørn Stabell <bjorn@stabell.org>",
@@ -17,10 +17,13 @@
   "scripts": {
     "build": "bun run --filter '*' build",
     "typecheck": "tsc --noEmit",
-    "test": "bunx --bun vitest run"
+    "test": "bunx --bun vitest run",
+    "fmt": "oxfmt --write .",
+    "fmt:check": "oxfmt --check ."
   },
   "devDependencies": {
     "@types/bun": "^1.3.12",
+    "oxfmt": "0.38.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.6"
   },

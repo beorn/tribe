@@ -16,7 +16,7 @@ import {
   getAllSessionTitles,
 } from "../history/db"
 import { reviewMemorySystem } from "../history/recall"
-import { formatCost } from "../../../llm/src/lib/types"
+import { formatCost } from "./llm-backend.ts"
 import {
   BOLD,
   RESET,

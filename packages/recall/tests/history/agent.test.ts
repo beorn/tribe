@@ -8,28 +8,38 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest"
-import { buildMockQueryModel, buildPlanJson, alwaysAvailable } from "../../../llm/src/lib/mock"
+import { buildMockQueryModel, buildPlanJson, alwaysAvailable } from "../helpers/llm-mock.ts"
 
 // ──────────────────────────────────────────────────────────────────────
-// Mock the LLM call sites BEFORE any module under test is imported.
-// buildMockQueryModel returns a single function; tests reconfigure the
-// scenarios by mutating a module-level `scenarios` array via holder refs.
+// Mock the LLM seam BEFORE any module under test is imported. All LLM
+// traffic now flows through src/lib/llm-backend (TRIBE_LLM_DIR seam), so
+// one module mock covers planner + synthesis + summaries. Tests
+// reconfigure the scenarios by mutating a module-level holder.
 // ──────────────────────────────────────────────────────────────────────
 
 const mockHolder: {
   fn: ReturnType<typeof buildMockQueryModel> | null
 } = { fn: null }
 
-vi.mock("../../../llm/src/lib/research", () => ({
-  queryModel: (opts: Parameters<NonNullable<typeof mockHolder.fn>>[0]) => {
-    if (!mockHolder.fn) throw new Error("Test did not install a mock queryModel")
-    return mockHolder.fn(opts)
-  },
-}))
-
-vi.mock("../../../llm/src/lib/providers", async (importOriginal) => {
-  const orig = await importOriginal<typeof import("../../../llm/src/lib/providers")>()
-  return { ...orig, isProviderAvailable: alwaysAvailable }
+vi.mock("../../src/lib/llm-backend", () => {
+  const fakeModel = (id: string) => ({ provider: "mock", modelId: id })
+  const backend = {
+    queryModel: (opts: Parameters<NonNullable<typeof mockHolder.fn>>[0]) => {
+      if (!mockHolder.fn) throw new Error("Test did not install a mock queryModel")
+      return mockHolder.fn(opts)
+    },
+    getModel: (id: string) => fakeModel(id),
+    getCheapModel: () => fakeModel("mock-cheap"),
+    getCheapModels: (max = 2) => [fakeModel("mock-cheap"), fakeModel("mock-cheap-2")].slice(0, Math.max(0, max)),
+    estimateCost: () => 0.0001,
+    isProviderAvailable: alwaysAvailable,
+  }
+  return {
+    loadLlm: async () => backend,
+    requireLlm: async () => backend,
+    formatCost: (cost: number) => `$${cost.toFixed(4)}`,
+    _resetLlmBackendForTests: () => {},
+  }
 })
 
 // Use bun:sqlite's `:memory:` path so each test gets a fresh DB when we

@@ -10,9 +10,7 @@
  *   - deeper: strong round-1 cluster → mine entities from top snippets
  */
 
-import { getCheapModel, getCheapModels, estimateCost, getModel, type Model } from "../../../llm/src/lib/types.ts"
-import { isProviderAvailable } from "../../../llm/src/lib/providers.ts"
-import { queryModel } from "../../../llm/src/lib/research.ts"
+import { loadLlm, type LlmBackend, type LlmModel } from "./llm-backend.ts"
 import type { RecallSearchResult } from "../history/recall-shared.ts"
 import type { QueryContext } from "./context.ts"
 import { renderContextPrompt } from "./context.ts"
@@ -120,7 +118,7 @@ export interface PlanOptions {
   priorVariants?: string[]
   timeoutMs?: number
   /** Force a specific model (v2 feature; currently unused). */
-  model?: Model
+  model?: LlmModel
 }
 
 /**
@@ -131,7 +129,15 @@ export async function planQuery(query: string, context: QueryContext, options: P
   const { round, mode, priorPlan, priorResults = [], priorVariants = [], timeoutMs = 2500 } = options
   const startedAt = Date.now()
 
-  const model = options.model ?? pickPlannerModel()
+  const llm = await loadLlm()
+  if (!llm) {
+    return {
+      plan: null,
+      elapsedMs: Date.now() - startedAt,
+      error: "no-llm-backend-available",
+    }
+  }
+  const model = options.model ?? pickPlannerModel(llm)
   if (!model) {
     return {
       plan: null,
@@ -151,7 +157,7 @@ export async function planQuery(query: string, context: QueryContext, options: P
   let rawResponse = ""
   let cost: number | undefined
   try {
-    const result = await queryModel({
+    const result = await llm.queryModel({
       question: userPrompt,
       model,
       systemPrompt,
@@ -171,7 +177,7 @@ export async function planQuery(query: string, context: QueryContext, options: P
     rawResponse = result.response.content ?? ""
     const usage = result.response.usage
     if (usage) {
-      cost = estimateCost(model, usage.promptTokens, usage.completionTokens)
+      cost = llm.estimateCost(model, usage.promptTokens, usage.completionTokens)
     }
   } catch (err) {
     clearTimeout(timer)
@@ -234,18 +240,18 @@ export function planVariants(plan: QueryPlan): string[] {
 // planner-sized prompts (~2s vs 5s+) in current testing.
 const PLANNER_PREFERENCE = ["claude-haiku-4-5-20251001", "gemini-2.0-flash-lite", "gpt-5-nano", "grok-3-fast"]
 
-function pickPlannerModel(): Model | undefined {
+function pickPlannerModel(llm: LlmBackend): LlmModel | undefined {
   for (const id of PLANNER_PREFERENCE) {
-    const m = getModel(id)
-    if (m && isProviderAvailable(m.provider)) return m
+    const m = llm.getModel(id)
+    if (m && llm.isProviderAvailable(m.provider)) return m
   }
 
   // Fallback: any available cheap model.
-  const cheap = getCheapModel()
-  if (cheap && isProviderAvailable(cheap.provider)) return cheap
+  const cheap = llm.getCheapModel()
+  if (cheap && llm.isProviderAvailable(cheap.provider)) return cheap
 
-  for (const m of getCheapModels(5)) {
-    if (isProviderAvailable(m.provider)) return m
+  for (const m of llm.getCheapModels(5)) {
+    if (llm.isProviderAvailable(m.provider)) return m
   }
   return undefined
 }

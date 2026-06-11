@@ -25,9 +25,13 @@ import { createLogger } from "loggily"
 import { hookRecall } from "../history/recall"
 import { getDb, closeDb, getIndexMeta } from "../history/db"
 import { summarizeUnprocessedDays } from "./summarize-daily"
-import { withDaemonCall } from "../../../tribe/recall/lib/socket.ts"
-import { resolveRecallSocketPath } from "../../../tribe/recall/lib/config.ts"
-import { TRIBE_METHODS, RECALL_PROTOCOL_VERSION, type InjectDeltaResult } from "../../../tribe/recall/lib/rpc.ts"
+import { withDaemonCall } from "../../../../plugins/claude/recall/lib/socket.ts"
+import { resolveRecallSocketPath } from "../../../../plugins/claude/recall/lib/config.ts"
+import {
+  TRIBE_METHODS,
+  RECALL_PROTOCOL_VERSION,
+  type InjectDeltaResult,
+} from "../../../../plugins/claude/recall/lib/rpc.ts"
 // Route every UserPromptSubmit emission through the envelope so the unified
 // activity log catches it (km-tribe.activity-log phase 2).
 import { emitHookJson as envelopeEmitHookJson } from "../../../injection-envelope/src/emit.ts"

@@ -18,8 +18,7 @@ import {
   getIndexMeta,
 } from "./db.ts"
 import type { ContentType } from "./types.ts"
-import { getCheapModels } from "../../../llm/src/lib/types"
-import { isProviderAvailable } from "../../../llm/src/lib/providers"
+import { loadLlm } from "../lib/llm-backend.ts"
 import { log, ONE_HOUR_MS, THIRTY_DAYS_MS } from "./recall-shared.ts"
 import type { RecallSearchResult } from "./recall-shared.ts"
 import { runInjectDelta, createTmpfileSeenStore } from "../lib/inject-core.ts"
@@ -384,7 +383,13 @@ export async function reviewMemorySystem(projectRoot: string): Promise<ReviewRes
   // ── LLM Race Benchmark ─────────────────────────────────────────────────
   log(`review: running LLM race benchmark...`)
   let llmRaceBenchmark: ReviewResult["llmRaceBenchmark"] = null
-  const raceModels = getCheapModels(2).filter((m) => isProviderAvailable(m.provider))
+  const reviewLlm = await loadLlm()
+  const raceModels = reviewLlm
+    ? reviewLlm.getCheapModels(2).filter((m) => reviewLlm.isProviderAvailable(m.provider))
+    : []
+  if (!reviewLlm) {
+    recommendations.push("LLM backend unavailable (TRIBE_LLM_DIR unset or failed) — race benchmark skipped")
+  }
 
   if (raceModels.length > 0) {
     const raceQueries = ["inline edit", "bug fix", "refactor", "test failure", "keyboard input"]

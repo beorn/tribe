@@ -33,16 +33,17 @@ import { join } from "node:path"
 export type HookEvent = "session-start" | "prompt" | "session-end" | "pre-compact"
 
 // ---------------------------------------------------------------------------
-// Hook engine — pluggable host dependency (19273 standalone boundary)
+// Hook engine — in-repo since the 19273 move (packages/recall +
+// packages/injection-envelope)
 // ---------------------------------------------------------------------------
 //
 // The hook handlers (session indexing, delta injection) and the injection
-// debug recorder live in bearly's `plugins/recall` / `plugins/injection-
-// envelope` — not bundled with standalone tribe. Hosts that have them point
-// `TRIBE_RECALL_ENGINE_DIR` / `TRIBE_INJECTION_DEBUG_DIR` at those plugins'
-// `src` directories. Standalone, `tribe hook <event>` is a defined no-op:
-// the daemon autostart still runs (that part IS tribe), the recall-side
-// indexing simply doesn't happen, and we say so on the loggily rail.
+// debug recorder ship with this repo. They still load lazily so the hook
+// process stays light, and `TRIBE_RECALL_ENGINE_DIR` /
+// `TRIBE_INJECTION_DEBUG_DIR` remain override seams for forks. A load
+// failure is a real error, reported on the loggily rail (NEVER stdout —
+// that is the hook protocol channel) — the hook then degrades to
+// autostart-only rather than crashing the Claude session.
 
 const log = createLogger("tribe:hook-dispatch")
 
@@ -61,17 +62,15 @@ let hookEngineProbe: Promise<HookEngine | null> | undefined
 async function loadHookEngine(): Promise<HookEngine | null> {
   if (hookEngineProbe !== undefined) return hookEngineProbe
   hookEngineProbe = (async () => {
-    const dir = process.env.TRIBE_RECALL_ENGINE_DIR
-    if (!dir) {
-      log.warn?.("recall hook engine not configured (TRIBE_RECALL_ENGINE_DIR unset) — session indexing/injection skipped")
-      return null
-    }
+    // In-repo engine is the default since the 19273 move; the env var is an
+    // override seam for forks/experiments only.
+    const dir = process.env.TRIBE_RECALL_ENGINE_DIR ?? new URL("../../../recall/src", import.meta.url).pathname
     try {
       const hooks = await import(`${dir}/lib/hooks.ts`)
       return { cmdSessionStart: hooks.cmdSessionStart, cmdSessionEnd: hooks.cmdSessionEnd, cmdHook: hooks.cmdHook }
     } catch (err) {
       log.error?.(
-        `recall hook engine FAILED to load from TRIBE_RECALL_ENGINE_DIR=${dir}: ${err instanceof Error ? err.message : String(err)}`,
+        `recall hook engine FAILED to load from ${dir}${process.env.TRIBE_RECALL_ENGINE_DIR ? " (TRIBE_RECALL_ENGINE_DIR override)" : " (in-repo default)"}: ${err instanceof Error ? err.message : String(err)} — session indexing/injection skipped`,
       )
       return null
     }
@@ -83,8 +82,10 @@ let injectionDebugProbe: Promise<InjectionDebug | null> | undefined
 async function loadInjectionDebug(): Promise<InjectionDebug | null> {
   if (injectionDebugProbe !== undefined) return injectionDebugProbe
   injectionDebugProbe = (async () => {
-    const dir = process.env.TRIBE_INJECTION_DEBUG_DIR
-    if (!dir) return null
+    // In-repo recorder is the default since the 19273 move; the env var is an
+    // override seam for forks/experiments only.
+    const dir =
+      process.env.TRIBE_INJECTION_DEBUG_DIR ?? new URL("../../../injection-envelope/src", import.meta.url).pathname
     try {
       const mod = await import(`${dir}/debug.ts`)
       return {
@@ -93,7 +94,7 @@ async function loadInjectionDebug(): Promise<InjectionDebug | null> {
       }
     } catch (err) {
       log.error?.(
-        `injection debug recorder FAILED to load from TRIBE_INJECTION_DEBUG_DIR=${dir}: ${err instanceof Error ? err.message : String(err)}`,
+        `injection debug recorder FAILED to load from ${dir}${process.env.TRIBE_INJECTION_DEBUG_DIR ? " (TRIBE_INJECTION_DEBUG_DIR override)" : " (in-repo default)"}: ${err instanceof Error ? err.message : String(err)}`,
       )
       return null
     }
@@ -138,8 +139,8 @@ async function muzzleHookProcess(): Promise<void> {
   // Layer 1 — silence loggily's default console sink.
   setSuppressConsole(true)
 
-  // Layer 2 — route `injection:*` events to a per-user JSONL (only when the
-  // host ships the injection-envelope debug recorder).
+  // Layer 2 — route `injection:*` events to a per-user JSONL via the in-repo
+  // injection-envelope debug recorder.
   const injection = await loadInjectionDebug()
   if (!injection) return
   const path =
@@ -177,9 +178,9 @@ export async function dispatchHook(event: HookEvent): Promise<void> {
 
   const engine = await loadHookEngine()
   if (!engine) {
-    // Standalone: daemon autostart above is tribe's half and already ran;
-    // the recall-side indexing half is host-supplied. Warned on the
-    // loggily rail (NEVER stdout — that is the hook protocol channel).
+    // Engine load failed (in-repo default or a broken override) — the
+    // autostart above already ran; the indexing half degrades. The error
+    // went to the loggily rail (NEVER stdout — the hook protocol channel).
     return
   }
 

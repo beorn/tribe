@@ -34,7 +34,7 @@ import {
 } from "./manifest.ts"
 // Observability: every UserPromptSubmit additionalContext emission writes
 // one line to the unified tribe activity log. See km-tribe.activity-log.
-import { writeInjectActivity } from "../../../tools/lib/tribe/activity-log.ts"
+import { writeInjectActivity } from "../../daemon/src/lib/activity-log.ts"
 
 /**
  * Trailing protocol reminder, emitted only when there is content to frame.

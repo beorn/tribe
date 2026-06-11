@@ -13,56 +13,15 @@ export type SummarizerMode = "off" | "haiku" | "local"
 // ---------------------------------------------------------------------------
 //
 // Model selection + querying live in bearly's `plugins/llm` — not bundled
-// with standalone tribe. Hosts that have it point `TRIBE_LLM_DIR` at that
-// plugin's `src` directory. Without it the summarizer behaves exactly like
-// mode "off" (its documented default) and logs the reason once when a mode
-// was explicitly requested — an enabled-but-impossible mode is a
+// with standalone tribe. The shared `llm-backend` seam in packages/recall
+// loads it from `TRIBE_LLM_DIR`. Without it the summarizer behaves exactly
+// like mode "off" (its documented default) and logs the reason once when a
+// mode was explicitly requested — an enabled-but-impossible mode is a
 // misconfiguration, never a silent no-op.
 
-type Model = { provider: string; modelId: string }
+import { loadLlm, type LlmBackend, type LlmModel as Model } from "../../../../packages/recall/src/lib/llm-backend.ts"
 
-type LlmBackend = {
-  queryModel: (opts: {
-    model: Model
-    systemPrompt: string
-    question: string
-    stream: boolean
-    abortSignal?: AbortSignal
-  }) => Promise<{ response?: { content?: string; usage?: { estimatedCost?: unknown } } }>
-  getCheapModel: () => Model | null
-  getCheapModels: (n: number) => Model[]
-  isProviderAvailable: (provider: string) => boolean
-}
-
-let llmProbe: Promise<LlmBackend | null> | undefined
 let llmWarned = false
-
-async function loadLlmBackend(): Promise<LlmBackend | null> {
-  if (llmProbe !== undefined) return llmProbe
-  llmProbe = (async () => {
-    const dir = process.env.TRIBE_LLM_DIR
-    if (!dir) return null
-    try {
-      const [research, types, providers] = await Promise.all([
-        import(`${dir}/lib/research.ts`),
-        import(`${dir}/lib/types.ts`),
-        import(`${dir}/lib/providers.ts`),
-      ])
-      return {
-        queryModel: research.queryModel,
-        getCheapModel: types.getCheapModel,
-        getCheapModels: types.getCheapModels,
-        isProviderAvailable: providers.isProviderAvailable,
-      } as LlmBackend
-    } catch (err) {
-      process.stderr.write(
-        `[lore-summarizer] LLM backend FAILED to load from TRIBE_LLM_DIR=${dir}: ${err instanceof Error ? err.message : String(err)}\n`,
-      )
-      return null
-    }
-  })()
-  return llmProbe
-}
 
 function warnUnavailableOnce(mode: SummarizerMode): void {
   if (llmWarned) return
@@ -132,7 +91,7 @@ export async function summarizeTail(
   if (mode === "off") return null
   if (!tail || tail.trim().length === 0) return null
 
-  const llm = await loadLlmBackend()
+  const llm = await loadLlm()
   if (!llm) {
     warnUnavailableOnce(mode)
     return null

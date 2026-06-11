@@ -22,12 +22,12 @@
     "start": "bun install --no-summary && bun server.ts"
   },
   "dependencies": {
-    "tribe-wire": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "tribe-daemon": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.27.1"
+    "tribe-wire": "workspace:*"
   },
   "engines": {
-    "node": ">=22.5.0",
-    "bun": ">=1.3.13"
+    "bun": ">=1.3.13",
+    "node": ">=22.5.0"
   }
 }

@@ -59,18 +59,20 @@ import {
   type SummarizerMode,
 } from "../../../../plugins/claude/recall/lib/summarizer.ts"
 // ---------------------------------------------------------------------------
-// Deep-recall engine — pluggable host dependency (19273 standalone boundary)
+// Deep-recall engine — in-repo since the 19273 move (packages/recall)
 // ---------------------------------------------------------------------------
 //
-// The lore PRIMITIVES (database / rpc / summarizer, imported above) ship with
-// this repo. The deep-recall ENGINE — the LLM recall agent, query planning,
-// transcript session-context extraction, and inject-delta — lives in bearly's
-// `plugins/recall` and is NOT bundled with standalone tribe. Hosts that have
-// it (km / bearly checkouts) point `TRIBE_RECALL_ENGINE_DIR` at that plugin's
-// `src` directory; without it the daemon still boots and serves coordination
-// + basic lore, while engine-backed verbs (tribe.ask / brief-fallback / plan /
-// inject_delta) and focus polling degrade with a LOUD, actionable message —
-// never silently (docs/principles.md § Fail Loud).
+// The lore PRIMITIVES (database / rpc / summarizer, imported above) and the
+// deep-recall ENGINE — the LLM recall agent, query planning, transcript
+// session-context extraction, and inject-delta — both ship with this repo
+// (the engine moved here from bearly's plugins/recall; L2 = wire + recall,
+// one repo). The engine still loads lazily so daemon startup stays light,
+// and `TRIBE_RECALL_ENGINE_DIR` remains an override seam for forks. A load
+// FAILURE is a real error: engine-backed verbs (tribe.ask / brief-fallback /
+// plan / inject_delta) and focus polling degrade with a LOUD, actionable
+// message — never silently (Fail Loud). The engine's LLM-dependent features
+// degrade further behind the TRIBE_LLM_DIR seam (see
+// packages/recall/src/lib/llm-backend.ts).
 
 type DeepRecallEngine = {
   recallAgent: (
@@ -138,9 +140,9 @@ type DeepRecallEngine = {
 type SeenStore = { size(): number; turn(): number }
 
 const ENGINE_UNAVAILABLE =
-  "deep-recall engine unavailable: this tribe-daemon is running standalone (TRIBE_RECALL_ENGINE_DIR unset or failed to load). " +
-  "Coordination (tribe.send/fetch/members) and basic lore work; tribe.ask/plan/inject_delta need the engine — " +
-  "point TRIBE_RECALL_ENGINE_DIR at a bearly plugins/recall/src checkout to enable them."
+  "deep-recall engine unavailable: the in-repo engine (packages/recall/src) failed to load — this is a bug or a broken " +
+  "TRIBE_RECALL_ENGINE_DIR override, not a missing optional dependency. Coordination (tribe.send/fetch/members) and " +
+  "basic lore still work; check the daemon log for the load error."
 
 let deepRecallEngine: DeepRecallEngine | null = null
 let deepRecallProbe: Promise<DeepRecallEngine | null> | undefined
@@ -148,13 +150,9 @@ let deepRecallProbe: Promise<DeepRecallEngine | null> | undefined
 async function loadDeepRecallEngine(log: ReturnType<typeof createLogger>): Promise<DeepRecallEngine | null> {
   if (deepRecallProbe !== undefined) return deepRecallProbe
   deepRecallProbe = (async () => {
-    const dir = process.env.TRIBE_RECALL_ENGINE_DIR
-    if (!dir) {
-      log.warn?.(
-        "deep-recall engine not configured (TRIBE_RECALL_ENGINE_DIR unset) — tribe.ask/plan/inject_delta and focus polling are disabled; coordination and basic lore remain available",
-      )
-      return null
-    }
+    // In-repo engine is the default since the 19273 move; the env var is an
+    // override seam for forks/experiments only.
+    const dir = process.env.TRIBE_RECALL_ENGINE_DIR ?? new URL("../../../recall/src", import.meta.url).pathname
     try {
       const [agent, plan, context, sessionContext, shared, injectCore] = await Promise.all([
         import(`${dir}/lib/agent.ts`),
@@ -178,9 +176,9 @@ async function loadDeepRecallEngine(log: ReturnType<typeof createLogger>): Promi
       log.info?.(`deep-recall engine loaded from ${dir}`)
       return deepRecallEngine
     } catch (err) {
-      // Configured but broken is an ERROR (misconfiguration), not a warn.
+      // The engine ships in-repo — a load failure is an ERROR, not a warn.
       log.error?.(
-        `deep-recall engine FAILED to load from TRIBE_RECALL_ENGINE_DIR=${dir}: ${err instanceof Error ? err.message : String(err)} — engine verbs disabled`,
+        `deep-recall engine FAILED to load from ${dir}${process.env.TRIBE_RECALL_ENGINE_DIR ? " (TRIBE_RECALL_ENGINE_DIR override)" : " (in-repo default)"}: ${err instanceof Error ? err.message : String(err)} — engine verbs disabled`,
       )
       return null
     }

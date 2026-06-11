@@ -9,9 +9,7 @@ import * as fs from "fs"
 import * as path from "path"
 import * as os from "os"
 import { extractSessionContent, type SessionExtract } from "./extract"
-import { getCheapModel } from "../../../llm/src/lib/types"
-import { queryModel } from "../../../llm/src/lib/research"
-import { isProviderAvailable } from "../../../llm/src/lib/providers"
+import { loadLlm } from "./llm-backend.ts"
 
 // ============================================================================
 // Types
@@ -160,8 +158,9 @@ export async function summarizeSession(
   }
 
   // Check LLM availability
-  const model = getCheapModel()
-  if (!model || !isProviderAvailable(model.provider)) {
+  const llm = await loadLlm()
+  const model = llm?.getCheapModel()
+  if (!llm || !model || !llm.isProviderAvailable(model.provider)) {
     log(`${extract.shortId}: no LLM provider available`)
     return {
       id: extract.id,
@@ -183,7 +182,7 @@ export async function summarizeSession(
   log(`${extract.shortId}: sending to LLM (${context.length} chars)`)
   const startTime = Date.now()
 
-  const result = await queryModel({
+  const result = await llm.queryModel({
     question: context,
     model,
     systemPrompt: SESSION_SUMMARY_PROMPT,

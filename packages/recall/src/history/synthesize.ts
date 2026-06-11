@@ -5,9 +5,7 @@
 
 import * as fs from "fs"
 import * as path from "path"
-import { getCheapModels, getCheapModel, estimateCost, type Model } from "../../../llm/src/lib/types"
-import { queryModel } from "../../../llm/src/lib/research"
-import { isProviderAvailable } from "../../../llm/src/lib/providers"
+import { loadLlm, requireLlm, type LlmModel } from "../lib/llm-backend.ts"
 import { log } from "./recall-shared.ts"
 import type { RecallSearchResult } from "./recall-shared.ts"
 
@@ -60,9 +58,11 @@ export interface LlmRaceResult {
 export async function raceLlmModels(
   context: string,
   systemPrompt: string,
-  models: Model[],
+  models: LlmModel[],
   timeoutMs: number,
 ): Promise<LlmRaceResult> {
+  // Models in hand imply the backend already loaded — this resolves from cache.
+  const llm = await requireLlm("raceLlmModels")
   const raceStart = Date.now()
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -76,7 +76,7 @@ export async function raceLlmModels(
 
   // Race all models
   const racePromises = models.map(async (model, i) => {
-    const result = await queryModel({
+    const result = await llm.queryModel({
       question: context,
       model,
       systemPrompt,
@@ -91,7 +91,7 @@ export async function raceLlmModels(
     const usage = result.response.usage
     if (usage) {
       mr.tokens = { input: usage.promptTokens, output: usage.completionTokens }
-      mr.cost = estimateCost(model, usage.promptTokens, usage.completionTokens)
+      mr.cost = llm.estimateCost(model, usage.promptTokens, usage.completionTokens)
     }
 
     // queryModel catches errors internally — check for abort/error
@@ -171,9 +171,10 @@ export async function synthesizeResults(
   results: RecallSearchResult[],
   timeoutMs: number,
 ): Promise<SynthesisResult> {
-  const models = getCheapModels(2).filter((m) => isProviderAvailable(m.provider))
+  const llm = await loadLlm()
+  const models = llm ? llm.getCheapModels(2).filter((m) => llm.isProviderAvailable(m.provider)) : []
   if (models.length === 0) {
-    log(`no LLM providers available for synthesis`)
+    log(llm ? `no LLM providers available for synthesis` : `no LLM backend (TRIBE_LLM_DIR) — synthesis skipped`)
     return { text: null }
   }
 
@@ -270,8 +271,13 @@ export async function remember(options: RememberOptions): Promise<RememberResult
   log(`extracted ${messages.length} chars from transcript (${Date.now() - extractStart}ms)`)
 
   // Check LLM availability
-  const model = getCheapModel()
-  if (!model || !isProviderAvailable(model.provider)) {
+  const llm = await loadLlm()
+  if (!llm) {
+    log(`no LLM backend (TRIBE_LLM_DIR) — remember skipped`)
+    return { skipped: true, reason: "no_llm_provider" }
+  }
+  const model = llm.getCheapModel()
+  if (!model || !llm.isProviderAvailable(model.provider)) {
     log(`no LLM provider available (model: ${model?.modelId ?? "none"}, provider: ${model?.provider ?? "none"})`)
     return { skipped: true, reason: "no_llm_provider" }
   }
@@ -280,7 +286,7 @@ export async function remember(options: RememberOptions): Promise<RememberResult
   const fullPrompt = `${REMEMBER_PROMPT}\n\nSession transcript (last messages):\n${messages}`
   log(`LLM synthesis: model=${model.modelId} provider=${model.provider} prompt=${fullPrompt.length} chars`)
   const llmStart = Date.now()
-  const result = await queryModel({ question: fullPrompt, model })
+  const result = await llm.queryModel({ question: fullPrompt, model })
   const synthesis = result.response.content
   log(`LLM responded in ${Date.now() - llmStart}ms`)
 

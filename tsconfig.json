@@ -18,6 +18,10 @@
     "packages/wire/src/**/*",
     "packages/wire/tests/**/*",
     "packages/daemon/src/lib/*.test.ts",
+    "packages/recall/src/**/*",
+    "packages/recall/tests/**/*",
+    "packages/injection-envelope/src/**/*",
+    "packages/injection-envelope/tests/**/*",
     "plugins/claude/tests/**/*.ts"
   ],
   "exclude": ["node_modules", "**/dist", "**/node_modules"]
