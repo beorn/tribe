@@ -42,3 +42,10 @@ export {
 // Composition — pipe + Scope + tool registry. See `hub/composition.md`.
 export type { Plugin, Tool, ToolContext, ToolHandler, ToolRegistry, WithTools } from "./composition/index.ts"
 export { Scope, createScope, disposable, pipe, withTool, withTools } from "./composition/index.ts"
+
+// HTTP MCP adapter — local loopback bridge (Silvercode SSH/AgentProxy route).
+export type { StartTribeHttpMcpServerOptions, TribeHttpMcpServer } from "./http-adapter.ts"
+export { startTribeHttpMcpServer } from "./http-adapter.ts"
+
+// Join delivery resolution (require-join-before-push contract, c6071f3 + 333193c).
+export { resolveJoinDelivery } from "./lib/delivery.ts"

@@ -24,23 +24,24 @@ describe("createLineParser", () => {
     expect((out[1] as { id: number }).id).toBe(2)
   })
 
-  it("skips invalid JSON without throwing", () => {
-    // Parser logs a warning for invalid JSON via loggily — silence it so
-    // the test-harness console-quiet check doesn't flag it. The behavior
-    // we're verifying is that the parser doesn't throw and still emits
-    // the valid line that follows the bad one.
+  it("skips invalid JSON without throwing and reports it via onInvalid", () => {
+    // The parser still emits its operator-facing loggily warning. Silence that
+    // expected warning under km's console-clean test harness; assert behavior
+    // through the explicit invalid-line seam instead of console output.
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const invalid: string[] = []
+    const out: JsonRpcMessage[] = []
     try {
-      const out: JsonRpcMessage[] = []
-      const parse = createLineParser((m) => out.push(m))
-      parse(Buffer.from('not-json\n{"jsonrpc":"2.0","id":1,"method":"a"}\n'))
+      const parse = createLineParser(
+        (m) => out.push(m),
+        (line) => invalid.push(line),
+      )
+      // Core contract: don't throw on a bad line, still emit the valid line after it.
+      expect(() => parse(Buffer.from('not-json\n{"jsonrpc":"2.0","id":1,"method":"a"}\n'))).not.toThrow()
       expect(out).toHaveLength(1)
       expect((out[0] as { method: string }).method).toBe("a")
-      // Sanity-check the warning fired with the bad input — we want the
-      // log behavior covered, not just suppressed.
-      expect(warnSpy).toHaveBeenCalled()
-      const firstCall = warnSpy.mock.calls[0]?.join(" ") ?? ""
-      expect(firstCall).toContain("not-json")
+      // And surface the bad input explicitly.
+      expect(invalid).toEqual(["not-json"])
     } finally {
       warnSpy.mockRestore()
     }

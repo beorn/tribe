@@ -766,9 +766,12 @@ export function createStatements(db: Database) {
       "SELECT id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, started_at, updated_at, filter_mode, filter_until, filter_mute, last_inbox_pull_seq, delivery FROM sessions",
     ),
 
-    /** Look up a session's delivery mode by name. Used by the broadcast pipeline
-     *  to skip socket fanout for pull-mode recipients (km-bearly.tribe-dm-delivery-gap). */
-    getSessionDeliveryByName: db.prepare("SELECT delivery FROM sessions WHERE name = $name LIMIT 1"),
+    /** Look up a connected session's delivery mode by id. Used by the broadcast
+     *  pipeline to skip socket fanout for pull-mode recipients
+     *  (km-bearly.tribe-dm-delivery-gap). Delivery is a per-connection
+     *  transport property; duplicate visible names can exist when a host
+     *  adapter and a backend tool adapter both represent one agent identity. */
+    getSessionDeliveryById: db.prepare("SELECT delivery FROM sessions WHERE id = $id LIMIT 1"),
 
     /** Update a session's delivery mode in place. */
     setSessionDelivery: db.prepare("UPDATE sessions SET delivery = $delivery, updated_at = $now WHERE id = $id"),
@@ -870,6 +873,14 @@ export function createStatements(db: Database) {
 
     /** Read-only fetch of the per-session pull cursor. */
     getInboxCursor: db.prepare("SELECT last_inbox_pull_seq FROM sessions WHERE id = $id"),
+
+    /**
+     * Presence heartbeat (@km/tribe/19784): every authenticated tool call
+     * touches the caller's row, so `last_seen` on tribe.members means
+     * "process spoke to the daemon recently" — send-only and empty-drain
+     * sessions no longer read as idle (the 2026-06-10 false-idle class).
+     */
+    touchSessionPresence: db.prepare("UPDATE sessions SET updated_at = $now WHERE id = $id"),
 
     /**
      * Name-claim replay: find the rowid of the oldest direct message addressed

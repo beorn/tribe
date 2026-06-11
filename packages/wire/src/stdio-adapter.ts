@@ -31,10 +31,14 @@ import { TOOLS_LIST } from "./lib/tools-list.ts"
 import { createLogger, setSuppressConsole } from "loggily"
 import { createTimers } from "./timers.ts"
 import { defangModelInput } from "./lib/defang.ts"
+import { createConnectReplayGate, MAX_REPLAY_EVENTS, selectReplayEvents } from "./lib/replay-cap.ts"
 import { evaluateCwdPolicy, probeCwd, readCwdPolicyFromEnv, type CwdEvaluation } from "./lib/cwd-guardrail.ts"
+import { resolveJoinDelivery } from "./lib/delivery.ts"
 
-setSuppressConsole(true)
-if (process.env.DEBUG_LOG) process.env.LOG_FILE ??= process.env.DEBUG_LOG
+if (process.env.DEBUG_LOG) {
+  process.env.LOG_FILE ??= process.env.DEBUG_LOG
+  setSuppressConsole(true)
+}
 
 const log = createLogger("tribe:stdio-adapter")
 
@@ -56,6 +60,19 @@ const CLAUDE_SESSION_NAME = resolveClaudeSessionName()
 // channel.
 const DELIVERY = process.env.TRIBE_DELIVERY === "pull" ? "pull" : "push"
 const CLAUDE_CHANNEL_ENABLED = DELIVERY === "push"
+// c6071f3: a connected MCP adapter is NOT a tribe member until the model
+// explicitly calls tribe.join — register anonymously in pull mode so a
+// pre-join bridge never claims push delivery or a name it may not keep.
+const REQUIRE_EXPLICIT_JOIN = process.env.TRIBE_REQUIRE_JOIN !== "0"
+
+// km 19442 — connect-time replay flood backstop. The wakeup→drain path is capped
+// by selectReplayEvents, but a stale/old daemon that still pushes message BODIES
+// as `channel` notifications bypasses that cap. This gate bounds the post-(re)connect
+// `channel` burst to MAX_REPLAY_EVENTS; dropped rows stay durable + fetchable. Knobs
+// exist for tests (small cap/window → deterministic burst assertions).
+const CHANNEL_REPLAY_MAX = Number(process.env.TRIBE_CHANNEL_REPLAY_MAX) || undefined
+const CHANNEL_REPLAY_WINDOW_MS = Number(process.env.TRIBE_CHANNEL_REPLAY_WINDOW_MS) || undefined
+const connectReplayGate = createConnectReplayGate({ maxEvents: CHANNEL_REPLAY_MAX, windowMs: CHANNEL_REPLAY_WINDOW_MS })
 
 // Worktree-isolation guardrail (km-bearly.tribe-codex-cwd-worktree-guardrail):
 // standalone codex / non-launcher MCP clients inherit the user's invocation
@@ -112,6 +129,7 @@ let daemonReady: Promise<DaemonClient>
  * message_id) — not user-visible content — so it's left as-is.
  */
 function sendChannel(content: string, meta: Record<string, string | undefined>): void {
+  if (!joined) return
   if (!CLAUDE_CHANNEL_ENABLED) return
   if (!mcp) return // Not yet initialized
   const safeContent = defangModelInput(content)
@@ -139,6 +157,7 @@ type TribeFetchResult = {
     content?: string
     bead?: string | null
     topic?: string | null
+    ts?: string
   }>
 }
 
@@ -167,7 +186,7 @@ const identityToken = createHash("sha256")
   .slice(0, 16)
 
 const registerParams = {
-  ...(args.name ? { name: args.name } : {}),
+  ...(args.name && !REQUIRE_EXPLICIT_JOIN ? { name: args.name } : {}),
   ...(args.role ? { role: args.role } : {}),
   domains: SESSION_DOMAINS,
   project: process.cwd(),
@@ -183,7 +202,7 @@ const registerParams = {
   claudeSessionId: CLAUDE_SESSION_ID,
   claudeSessionName: CLAUDE_SESSION_NAME,
   identityToken,
-  delivery: DELIVERY,
+  delivery: REQUIRE_EXPLICIT_JOIN ? "pull" : DELIVERY,
   // @km/infra/15641 Phase 1 — per-session account/provider label sourced
   // from `ag` via TRIBE_ACCOUNT / TRIBE_PROVIDER env vars (which ag sets
   // at backend-launch time). Tribe stores them; quota visibility lives in
@@ -202,6 +221,9 @@ const registerParams = {
 daemonReady = createReconnectingClient({
   socketPath: SOCKET_PATH,
   async onConnect(client) {
+    // km 19442 — open a fresh connect-replay window so a stale daemon's body-push
+    // burst on (re)connect is bounded (see connectReplayGate + the `channel` handler).
+    connectReplayGate.reset(Date.now())
     const reg = (await client.call("register", registerParams)) as {
       sessionId: string
       name: string
@@ -240,6 +262,8 @@ daemonReady = createReconnectingClient({
   },
   onReconnect() {
     log.info?.(`Reconnected to daemon`)
+    // km 19442 — a reconnect can replay the daemon's pending body-push burst; rebound it.
+    connectReplayGate.reset(Date.now())
   },
 }).then((client) => {
   daemon = client
@@ -252,17 +276,26 @@ daemonReady = createReconnectingClient({
 
 const joinInstruction = `If you receive a stdio-adapter auto-identify message, just call tribe.join with a short name for your focus area. Omit the role parameter — the daemon auto-assigns chief to the first session and member to the rest. No need to call tribe.members or tribe.fetch afterward — just join silently and continue.`
 
+// Shared turn-start inbox guidance for every role variant. Kept deliberately
+// SMALL: new messages already arrive inline as <channel> envelopes (push delivery
+// via drainDaemonInbox below), so the turn-start call is a small catch-up drain —
+// NOT a full replay. The old `limit: 50` window re-pulled already-seen ambient
+// traffic on every turn and flooded long-running agent context.
+// See km @km/tribe/19442-turn-start-fetch-context-flood.
+const turnStartInboxCheck = `Turn-start inbox check:
+- New messages also arrive inline as <channel> envelopes — read those first; you do not need to fetch to receive them.
+- For turn-start catch-up keep the drain SMALL: tribe.fetch({ limit: 10 }). Do NOT pull a large window every turn — replaying ~50 events re-surfaces already-seen ambient traffic and floods context.
+- For a specific peer's latest, use the snapshot filter: tribe.fetch({ with: <your session name>, limit: 10 }) or tribe.fetch({ from: <peer>, limit: 10 }) — these return the newest matching messages; use them to find a thread, not to replay the whole channel.
+- Surface only actionable items: direct messages, requests, blockers, assignments, chief verdicts, CI alerts, or user-relevant coordination.
+- Ignore routine ambient joins/leaves, git commits, low-severity status, and notification-only events unless explicitly asked.`
+
 const chiefInstructions = `Messages from other Claude Code sessions arrive as <channel source="tribe" from="..." type="..." bead="...">.
 
 You are the chief of a tribe — a coordinator for multiple Claude Code sessions working on the same project.
 
 ${joinInstruction}
 
-Turn-start inbox check:
-- At the start of each user turn, call tribe.fetch({ limit: 50 }) before responding.
-- If direct-message context is needed, also call tribe.fetch({ with: <your session name>, limit: 20 }).
-- Surface only actionable items: direct messages, requests, blockers, assignments, chief verdicts, CI alerts, or user-relevant coordination.
-- Ignore routine ambient joins/leaves, git commits, low-severity status, and notification-only events unless explicitly asked.
+${turnStartInboxCheck}
 
 Coordination protocol:
 - Use tribe.members() to see who's online and their domains
@@ -285,11 +318,7 @@ You are a tribe member — a worker session coordinated by the chief.
 
 ${joinInstruction}
 
-Turn-start inbox check:
-- At the start of each user turn, call tribe.fetch({ limit: 50 }) before responding.
-- If direct-message context is needed, also call tribe.fetch({ with: <your session name>, limit: 20 }).
-- Surface only actionable items: direct messages, requests, blockers, assignments, chief verdicts, CI alerts, or user-relevant coordination.
-- Ignore routine ambient joins/leaves, git commits, low-severity status, and notification-only events unless explicitly asked.
+${turnStartInboxCheck}
 
 Coordination protocol:
 - When you START work on a task, broadcast what you're doing: tribe.send(to="*", message="starting: <task>")
@@ -321,11 +350,7 @@ Tribe messages:
 
 const pullInstructions = `Tribe coordination is available through MCP tools.
 
-Turn-start inbox check:
-- At the start of each user turn, call tribe.fetch({ limit: 50 }) before responding.
-- If direct-message context is needed, also call tribe.fetch({ with: <your session name>, limit: 20 }).
-- Surface only actionable items: direct messages, requests, blockers, assignments, chief verdicts, CI alerts, or user-relevant coordination.
-- Ignore routine ambient joins/leaves, git commits, low-severity status, and notification-only events unless explicitly asked.
+${turnStartInboxCheck}
 
 Coordination protocol:
 - Use tribe.members() to see who's online and their domains.
@@ -397,7 +422,20 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   try {
     // Attach identity_token to join so the daemon can adopt prior
     // session state when Claude Code restarts and the agent calls join again.
-    const payload = name === "join" ? { ...a, identity_token: identityToken } : a
+    const payload =
+      name === "join"
+        ? {
+            ...a,
+            // Pull-only adapters have no channel reader. Do not let a model
+            // self-report push and make later tribe.fetch calls skip directs.
+            delivery: resolveJoinDelivery({
+              adapterDelivery: DELIVERY,
+              requestedDelivery: a.delivery,
+              allowRequestedDelivery: CLAUDE_CHANNEL_ENABLED,
+            }),
+            identity_token: identityToken,
+          }
+        : a
     // Tool names are bare verbs ("send", "fetch"); daemon wire methods use "tribe." prefix
     const daemonMethod = `tribe.${name}`
     // A tool call may arrive before the background daemon connect resolves
@@ -405,6 +443,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     const d = daemon ?? (await daemonReady)
     const result = await d.call(daemonMethod, payload)
     // Update local name/role after join/rename
+    if (name === "join") joined = true
     if (name === "join" || name === "rename") {
       const r = result as { content: Array<{ type: string; text: string }> }
       try {
@@ -508,6 +547,7 @@ import { watch as fsWatch } from "node:fs"
 // Auto-rename: when this session claims a bead, rename to the bead scope
 // e.g., claiming "km-storage.foo" renames session to "km-storage"
 let autoRenamed = false
+let joined = !REQUIRE_EXPLICIT_JOIN
 function tryAutoRenameOnClaim(content: string): void {
   if (autoRenamed) return
   // Only auto-rename if session still has auto-generated name (km-N-XXX pattern)
@@ -564,11 +604,20 @@ function drainDaemonInbox(): void {
     try {
       do {
         drainAgain = false
-        for (;;) {
-          const result = parseToolText<TribeFetchResult>(await daemon?.call("tribe.fetch", { limit: 500 }))
-          const events = result?.events ?? []
-          for (const event of events) forwardFetchedEvent(event)
-          if (events.length < 500) break
+        // Connection-time replay cap (km @km/tribe/19442): one bounded drain
+        // advances the session cursor for every fetched row, but only a recent,
+        // capped subset is surfaced as <channel> envelopes. A large stale backlog
+        // used to be forwarded wholesale (limit:500 looped until empty), flooding
+        // agent context on connect. Older/excess events are still drained (the
+        // cursor moves past them, so they never re-arrive) — just not replayed.
+        const result = parseToolText<TribeFetchResult>(await daemon?.call("tribe.fetch", { limit: 500 }))
+        const events = result?.events ?? []
+        const { forward, skippedOld, capped } = selectReplayEvents(events, { now: Date.now() })
+        for (const event of forward) forwardFetchedEvent(event)
+        if (skippedOld > 0 || capped > 0) {
+          log.warn?.(
+            `tribe drain: surfaced ${forward.length}/${events.length} event(s) (skipped ${skippedOld} older than 1d, ${capped} over cap ${MAX_REPLAY_EVENTS}); rest drained but not replayed`,
+          )
         }
       } while (drainAgain)
     } catch (err) {
@@ -592,8 +641,20 @@ void daemonReady
       if (method === "channel") {
         const content = String(params?.content ?? "")
         const type = markedType(String(params?.type ?? "notify"))
-        // Auto-rename on bead claim by this session
+        // Auto-rename on bead claim by this session — runs even when the forward is
+        // capped below; the rename is opportunistic and idempotent (durable in the DB).
         if (type === "bead:claimed") tryAutoRenameOnClaim(content)
+        // km 19442 — bound a stale daemon's connect-time body-push burst. Steady-state
+        // live messages pass freely; only an over-cap (re)connect storm is dropped here
+        // (the rows stay durable in the daemon journal and remain fetchable via tribe.fetch).
+        if (!connectReplayGate.admit(Date.now())) {
+          if (connectReplayGate.dropped === 1) {
+            log.warn?.(
+              `tribe channel-push: connect-replay burst over cap ${MAX_REPLAY_EVENTS} — dropping excess body-pushes (durable + fetchable). Likely a stale tribe plugin/daemon; see km 19442.`,
+            )
+          }
+          return
+        }
         sendChannel(content, {
           from: String(params?.from ?? "unknown"),
           type,
