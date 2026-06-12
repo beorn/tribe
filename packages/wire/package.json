@@ -41,7 +41,8 @@
     "./lib/cwd-guardrail": "./src/lib/cwd-guardrail.ts",
     "./lib/hot-reload": "./src/lib/hot-reload.ts",
     "./lib/transcript": "./src/lib/transcript.ts",
-    "./lib/defang": "./src/lib/defang.ts"
+    "./lib/defang": "./src/lib/defang.ts",
+    "./http": "./src/http-adapter.ts"
   },
   "publishConfig": {
     "bin": {
