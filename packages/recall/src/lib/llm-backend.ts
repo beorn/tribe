@@ -81,6 +81,8 @@ export async function loadLlm(): Promise<LlmBackend | null> {
       } as LlmBackend
     } catch (err) {
       warnOnce(`backend FAILED to load from TRIBE_LLM_DIR=${dir}: ${err instanceof Error ? err.message : String(err)}`)
+      // silent-fallback-allow: loud-by-design — warnOnce() above logs the load
+      // failure once per process; null is the documented no-LLM degrade mode.
       return null
     }
   })()
