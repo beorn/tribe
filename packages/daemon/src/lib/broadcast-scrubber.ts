@@ -23,6 +23,7 @@
  */
 
 import { createLogger } from "loggily"
+import { loadLlm } from "../../../recall/src/lib/llm-backend.ts"
 
 const log = createLogger("tribe:broadcast")
 
@@ -160,12 +161,22 @@ let haikuRewriterWarned = false
 export async function rewriteViaHaiku(content: string, signal?: AbortSignal): Promise<string> {
   // Default: haiku rewrite ON. Set TRIBE_REWRITE=off to disable.
   if (process.env.TRIBE_REWRITE === "off") return content
+  // LLM querying lives behind the recall package's TRIBE_LLM_DIR seam — the
+  // rewrite layer degrades to regex-only without it, and says so ONCE. (The
+  // old bearly-path dynamic import threw on every call in standalone and the
+  // catch swallowed it — the haiku layer was silently dead.)
+  const llm = await loadLlm()
+  if (!llm) {
+    if (!haikuRewriterWarned) {
+      haikuRewriterWarned = true
+      log.info?.(
+        "haiku rewrite layer unavailable (no LLM backend; TRIBE_LLM_DIR unset or failed) — regex-only scrub active",
+      )
+    }
+    return content
+  }
   try {
-    // Dynamic import so the daemon starts even if the llm plugin is absent.
-    const { queryModel } = await import("../../../plugins/llm/src/lib/research.ts")
-    const { getCheapModels } = await import("../../../plugins/llm/src/lib/types.ts")
-    const { isProviderAvailable } = await import("../../../plugins/llm/src/lib/providers.ts")
-    const haiku = getCheapModels(8).find((m) => /haiku/i.test(m.modelId) && isProviderAvailable(m.provider))
+    const haiku = llm.getCheapModels(8).find((m) => /haiku/i.test(m.modelId) && llm.isProviderAvailable(m.provider))
     if (!haiku) {
       if (!haikuRewriterWarned) {
         haikuRewriterWarned = true
@@ -173,7 +184,7 @@ export async function rewriteViaHaiku(content: string, signal?: AbortSignal): Pr
       }
       return content
     }
-    const result = await queryModel({
+    const result = await llm.queryModel({
       model: haiku,
       systemPrompt: HAIKU_REWRITE_PROMPT,
       question: `Input:\n${content.slice(0, 1200)}`,

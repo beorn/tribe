@@ -1,4 +1,8 @@
-# @bearly/injection-envelope
+# tribe-injection-envelope
+
+Ships with the tribe repository (`packages/injection-envelope`); consumed by
+the recall engine's hook emission and the daemon's hook dispatch via in-repo
+imports.
 
 Single chokepoint for prompt-injection defense in Claude Code
 `UserPromptSubmit` hook emission. Provides:
@@ -43,7 +47,7 @@ library via `tools/lint-injection-emitters.ts` (wired into
 ## Usage
 
 ```ts
-import { wrapInjectedContext, emitHookJson } from "@bearly/injection-envelope"
+import { wrapInjectedContext, emitHookJson } from "../injection-envelope/src/index.ts"
 
 const additionalContext = wrapInjectedContext({
   source: "qmd", // RegisteredSource — compile-time gated
@@ -78,7 +82,7 @@ process.stdout.write(emitHookJson("UserPromptSubmit", additionalContext))
 Every emitter must declare its source as one of the
 `RegisteredSource` union members:
 
-- `recall` — bearly session-history FTS
+- `recall` — tribe-recall session-history FTS
 - `qmd` — qmd-backed vault markdown
 - `tribe` — channel messages from other Claude sessions
 - `telegram` — telegram bot inbound

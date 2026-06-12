@@ -2,7 +2,7 @@
   "name": "tribe",
   "version": "0.0.0",
   "private": true,
-  "description": "Reusable Tribe coordination infrastructure: wire client, daemon, and host plugins",
+  "description": "Reusable Tribe coordination + memory infrastructure: wire client, daemon, recall engine, and host plugins",
   "license": "MIT",
   "author": "Bjørn Stabell <bjorn@stabell.org>",
   "repository": {

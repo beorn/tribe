@@ -4,9 +4,6 @@
   "workspaces": {
     "": {
       "name": "tribe",
-      "dependencies": {
-        "loggily": "^0.10.2",
-      },
       "devDependencies": {
         "@types/bun": "^1.3.12",
         "oxfmt": "0.38.0",
@@ -21,7 +18,9 @@
         "tribe-daemon": "./src/daemon.ts",
       },
       "dependencies": {
-        "loggily": "^0.10.1",
+        "loggily": "^0.10.2",
+        "tribe-injection-envelope": "workspace:*",
+        "tribe-recall": "workspace:*",
         "tribe-wire": "workspace:*",
       },
     },
@@ -29,7 +28,7 @@
       "name": "tribe-injection-envelope",
       "version": "0.1.0",
       "dependencies": {
-        "loggily": "^0.10.1",
+        "loggily": "^0.10.2",
       },
     },
     "packages/recall": {
@@ -37,7 +36,7 @@
       "version": "0.2.0",
       "dependencies": {
         "@silvery/commander": "^0.19.2",
-        "loggily": "^0.10.1",
+        "loggily": "^0.10.2",
         "zod": "^4.3.6",
       },
     },
@@ -50,7 +49,7 @@
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.27.1",
         "@silvery/commander": "^0.19.2",
-        "loggily": "^0.10.1",
+        "loggily": "^0.10.2",
       },
       "devDependencies": {
         "tsdown": "^0.21.7",

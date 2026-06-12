@@ -47,15 +47,17 @@ export type HookEvent = "session-start" | "prompt" | "session-end" | "pre-compac
 
 const log = createLogger("tribe:hook-dispatch")
 
+// Typed off the REAL in-repo modules (`typeof import` is type-only; runtime
+// loading stays lazy + dynamic below so the hook process starts light).
 type HookEngine = {
-  cmdSessionStart: () => Promise<void>
-  cmdSessionEnd: () => Promise<void>
-  cmdHook: () => Promise<void>
+  cmdSessionStart: (typeof import("../../../recall/src/lib/hooks.ts"))["cmdSessionStart"]
+  cmdSessionEnd: (typeof import("../../../recall/src/lib/hooks.ts"))["cmdSessionEnd"]
+  cmdHook: (typeof import("../../../recall/src/lib/hooks.ts"))["cmdHook"]
 }
 
 type InjectionDebug = {
-  emitInjectionDebugEvent: (event: Record<string, unknown>) => void
-  installInjectionFileWriter: (path: string) => void
+  emitInjectionDebugEvent: (typeof import("../../../injection-envelope/src/debug.ts"))["emitInjectionDebugEvent"]
+  installInjectionFileWriter: (typeof import("../../../injection-envelope/src/debug.ts"))["installInjectionFileWriter"]
 }
 
 let hookEngineProbe: Promise<HookEngine | null> | undefined

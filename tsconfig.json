@@ -17,7 +17,7 @@
   "include": [
     "packages/wire/src/**/*",
     "packages/wire/tests/**/*",
-    "packages/daemon/src/lib/*.test.ts",
+    "packages/daemon/src/**/*",
     "packages/recall/src/**/*",
     "packages/recall/tests/**/*",
     "packages/injection-envelope/src/**/*",

@@ -23,7 +23,9 @@
     ".": "./src/daemon.ts"
   },
   "dependencies": {
-    "loggily": "^0.10.1",
+    "loggily": "^0.10.2",
+    "tribe-injection-envelope": "workspace:*",
+    "tribe-recall": "workspace:*",
     "tribe-wire": "workspace:*"
   },
   "engines": {

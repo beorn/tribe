@@ -1,20 +1,37 @@
 # Tribe
 
-Reusable coordination infrastructure for coding-agent sessions.
+Reusable coordination + memory infrastructure for coding-agent sessions.
 
 Tribe lets multiple agent sessions discover each other, exchange messages, and
-share project context through a local daemon. This repository owns the reusable
-infrastructure only: wire protocol, daemon, and host integrations. Project
-workflow conventions such as `@chief`, `@agent/N`, beads, worktrees, and
-integration policy belong in a tent/SOP layer outside this repo.
+share project context through a local daemon — with session-history recall
+built in. This repository owns the reusable infrastructure only: wire protocol,
+daemon, recall engine, and host integrations. Project workflow conventions such
+as `@chief`, `@agent/N`, beads, worktrees, and integration policy belong in a
+tent/SOP layer outside this repo.
+
+## Quick start (Claude Code)
+
+```text
+/plugin marketplace add beorn/tribe
+/plugin install tribe@tribe
+```
+
+Restart Claude Code; the `tribe.*` MCP tools (join, send, fetch, members, …)
+appear and the daemon autostarts on first use. Two sessions on the same machine
+can then talk: `tribe.join({name: "a"})` in one, `tribe.send({to: "a", ...})`
+in the other.
 
 ## Components
 
-| Component          | Package         | Binary         | Owns                                                                                                               |
-| ------------------ | --------------- | -------------- | ------------------------------------------------------------------------------------------------------------------ |
-| Wire client        | `tribe-wire`    | `tribe-wire`   | Unix-socket client, reconnecting transport, MCP stdio adapter, protocol CLI                                        |
-| Daemon             | `tribe-daemon`  | `tribe-daemon` | Staged broker package; private until the bearly daemon/runtime cutover is complete                                 |
-| Claude Code plugin | `@bearly/tribe` | n/a            | MCP registration and host-managed daemon lifecycle, still maintained from `github.com/beorn/bearly` during cutover |
+| Component          | Package                    | Binary         | Owns                                                                          |
+| ------------------ | -------------------------- | -------------- | ----------------------------------------------------------------------------- |
+| Wire client        | `tribe-wire`               | `tribe-wire`   | Unix-socket client, reconnecting transport, MCP stdio adapter, protocol CLI   |
+| Daemon             | `tribe-daemon`             | `tribe-daemon` | Broker process, SQLite state, session registry, message journal, plugins      |
+| Recall engine      | `tribe-recall`             | n/a            | FTS5 session-history search, LLM planner/agent, hook handlers, lore summaries |
+| Injection envelope | `tribe-injection-envelope` | n/a            | Prompt-injection defense: envelope framing, sanitizer, hook JSON emission     |
+| Claude Code plugin | `plugins/claude`           | n/a            | Marketplace plugin: MCP registration + host-managed daemon lifecycle          |
+
+`tribe-wire` is published to npm; the rest ship with this repository.
 
 ## Mental Model
 
@@ -23,12 +40,25 @@ Claude / Codex / Hermes
   -> tribe-wire mcp            # from package tribe-wire
   -> local or SSH-forwarded Unix socket
   -> tribe-daemon
-  -> SQLite + daemon plugins
+  -> SQLite + daemon plugins + recall engine
 ```
 
-`tribe-wire` talks to an existing tribe. `tribe-daemon` is the staged home for
-the broker process; the published daemon/plugin path still lives in bearly until
-that cutover is complete. Host plugins wire those pieces into an agent runtime.
+`tribe-wire` talks to an existing tribe. `tribe-daemon` is the broker process;
+it lazy-loads the in-repo recall engine for memory verbs (`tribe.ask`,
+`tribe.brief`, delta injection). Host plugins wire those pieces into an agent
+runtime.
+
+## LLM features (optional)
+
+Coordination and FTS search work with zero configuration. Features that call an
+LLM (synthesis, query planner, session summaries) need an external backend:
+point `TRIBE_LLM_DIR` at a directory exposing `lib/types.ts`, `lib/research.ts`,
+and `lib/providers.ts` (e.g. bearly's `plugins/llm/src`). Without it those
+features degrade to their documented no-LLM paths — loudly, never silently.
+
+`TRIBE_RECALL_ENGINE_DIR` and `TRIBE_INJECTION_DEBUG_DIR` override the in-repo
+engine/recorder locations for forks and experiments; you normally never set
+them.
 
 ## Remote Agent Entry Point
 
@@ -47,18 +77,28 @@ use the direct form without a package/binary split.
 
 ```text
 packages/
-  wire/      # npm tribe-wire; bin tribe-wire
-  daemon/    # npm tribe-daemon; bin tribe-daemon
+  wire/                # npm tribe-wire; bin tribe-wire
+  daemon/              # tribe-daemon broker (private)
+  recall/              # tribe-recall engine (private)
+  injection-envelope/  # tribe-injection-envelope (private)
 plugins/
-  claude/    # placeholder; published Claude plugin remains @bearly/tribe
+  claude/              # Claude Code marketplace plugin (tribe@tribe)
 docs/
   architecture.md
 ```
 
-## Status
+## Development
 
-This repository is being extracted from `github.com/beorn/bearly`.
-`tribe-wire` is published and usable as the remote MCP adapter. `tribe-daemon`
-and the Claude plugin are staged/private until daemon runtime dependencies and
-host-plugin lifecycle are fully cut over. Destructive bearly cleanup happens
-after package publishing, plugin install, and downstream consumers are verified.
+```bash
+bun install
+bun run test        # vitest, all packages
+bun run typecheck
+bun run fmt:check
+```
+
+## History
+
+Extracted from `github.com/beorn/bearly` in June 2026 (km bead
+`@km/bearly/19273-tribe-repo-split`), with `git subtree split` history for the
+recall and injection-envelope packages. bearly retains the LLM toolkit
+(`plugins/llm`) and a migration pointer.

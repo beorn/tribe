@@ -74,70 +74,24 @@ import {
 // degrade further behind the TRIBE_LLM_DIR seam (see
 // packages/recall/src/lib/llm-backend.ts).
 
+// Engine surface typed off the REAL in-repo modules (`typeof import` is
+// type-only — runtime loading stays lazy + dynamic below). The hand-written
+// structural mirror this replaces existed only because the engine used to
+// live in a repo tsc couldn't see; real types make engine API drift a CI
+// typecheck failure instead of a runtime surprise.
 type DeepRecallEngine = {
-  recallAgent: (
-    query: string,
-    opts: Record<string, unknown>,
-  ) => Promise<{
-    query: string
-    synthesis: string | null
-    results: ReadonlyArray<{
-      type: unknown
-      sessionId: string
-      sessionTitle: string
-      timestamp: string
-      snippet: string
-    }>
-    durationMs: number
-    llmCost?: number
-    fellThrough?: boolean
-    trace?: { synthPath?: string; synthCallsUsed?: number } | null
-  }>
-  planQuery: (
-    query: string,
-    context: unknown,
-    opts: { round: number },
-  ) => Promise<{ plan: unknown; elapsedMs: number; cost?: number; model?: string; error?: string }>
-  planVariants: (plan: unknown) => readonly string[]
-  buildQueryContext: () => unknown
-  getCurrentSessionContext: (opts: Record<string, unknown>) => {
-    sessionId: string
-    ageMs: number
-    exchangeCount: number
-    mentionedPaths: readonly string[]
-    mentionedBeads: readonly string[]
-    mentionedTokens: readonly string[]
-    recentMessages: string
-  } | null
-  extractSessionFocus: (
-    transcriptPath: string,
-    opts: { sessionId: string },
-  ) => {
-    lastActivityTs: number
-    ageMs: number
-    exchangeCount: number
-    mentionedPaths: readonly string[]
-    mentionedBeads: readonly string[]
-    mentionedTokens: readonly string[]
-    tail: string
-  } | null
-  setRecallLogging: (enabled: boolean) => void
-  createMemorySeenStore: () => SeenStore
-  runInjectDelta: (
-    prompt: string,
-    store: SeenStore,
-    opts: { limit?: number; ttlTurns?: number },
-  ) => Promise<{
-    skipped: boolean
-    reason?: string
-    additionalContext?: string
-    newKeys?: readonly string[]
-    turn?: number
-  }>
+  recallAgent: (typeof import("../../../recall/src/lib/agent.ts"))["recallAgent"]
+  planQuery: (typeof import("../../../recall/src/lib/plan.ts"))["planQuery"]
+  planVariants: (typeof import("../../../recall/src/lib/plan.ts"))["planVariants"]
+  buildQueryContext: (typeof import("../../../recall/src/lib/context.ts"))["buildQueryContext"]
+  getCurrentSessionContext: (typeof import("../../../recall/src/lib/session-context.ts"))["getCurrentSessionContext"]
+  extractSessionFocus: (typeof import("../../../recall/src/lib/session-context.ts"))["extractSessionFocus"]
+  setRecallLogging: (typeof import("../../../recall/src/history/recall-shared.ts"))["setRecallLogging"]
+  createMemorySeenStore: (typeof import("../../../recall/src/lib/inject-core.ts"))["createMemorySeenStore"]
+  runInjectDelta: (typeof import("../../../recall/src/lib/inject-core.ts"))["runInjectDelta"]
 }
 
-/** Structural mirror of the engine's SeenStore — only what this file touches. */
-type SeenStore = { size(): number; turn(): number }
+type SeenStore = ReturnType<DeepRecallEngine["createMemorySeenStore"]>
 
 const ENGINE_UNAVAILABLE =
   "deep-recall engine unavailable: the in-repo engine (packages/recall/src) failed to load — this is a bug or a broken " +

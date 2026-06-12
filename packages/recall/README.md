@@ -1,12 +1,22 @@
-# recall
+# tribe-recall
 
 Session history search for Claude Code. FTS5-indexed search across past sessions with LLM synthesis and file recovery.
 
-## Install
+Ships with the tribe repository (`packages/recall`); the daemon lazy-loads it
+for the memory verbs (`tribe.ask`, `tribe.brief`, delta injection) and the
+`tribe hook` handlers index sessions through it. LLM-backed features (synthesis,
+planner, summaries) need `TRIBE_LLM_DIR` pointed at an external backend (see the
+repo README); FTS search and file recovery work without one.
+
+## CLI
 
 ```bash
-claude plugin install recall@bearly
+bun packages/recall/src/cli.ts "query terms"
 ```
+
+The `bun tools/recall.ts …` spellings below are the bearly-era host alias for
+the same CLI; substitute `packages/recall/src/cli.ts` when running from this
+repository.
 
 ## Modes
 
