@@ -219,7 +219,7 @@ describe("stdio adapter delivery modes", () => {
   it("pull delivery does not advertise or emit Claude-only channel notifications", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath)
-    child = spawn(process.execPath, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
         ...process.env,

@@ -115,7 +115,21 @@ describe("stdio adapter — daemon-unavailable degrade", () => {
     expect(child.exitCode).toBeNull()
     expect(stderr).not.toContain("Unhandled")
 
-    // 4. Exactly ONE degrade notice in the log — not one per call.
+    // 4. Exactly ONE degrade notice in the log — not one per call. The
+    // notice comes from the BACKGROUND daemonReady rejection while tool
+    // calls return on the degrade fast path, so wait for it to land before
+    // counting (the count, not the timing, is the contract).
+    await waitFor(
+      () => {
+        try {
+          return readFileSync(logPath, "utf8").includes("running solo")
+        } catch {
+          return false
+        }
+      },
+      5_000,
+      "degrade notice in adapter log",
+    )
     const log = readFileSync(logPath, "utf8")
     const notices = log.split("\n").filter((l) => l.includes("running solo"))
     expect(notices.length).toBe(1)

@@ -115,6 +115,9 @@ let daemonReady: Promise<DaemonClient>
 // MCP handshake answered, every tribe tool returns ONE clear sentence, and the
 // degrade is announced exactly once (log + channel), never once per call.
 let daemonDegradedReason: string | null = null
+// Version-skew guard (km 19851): warn exactly once per process, not on
+// every reconnect.
+let versionSkewWarned = false
 
 /**
  * Forward a channel notification to Claude Code.
@@ -238,10 +241,27 @@ daemonReady = createReconnectingClient({
       name: string
       role: string
       chief: string
+      protocolVersion?: number
     }
     myName = reg.name
     myRole = reg.role
     log.info?.(`Registered as ${myName} (${myRole})`)
+    // Version-skew guard (km 19851): with the daemon embedded in host
+    // binaries, two host versions can share one daemon — the first-started
+    // binary's daemon serves the rest. Skew is warn-once, never a block:
+    // the daemon already tolerates older clients, and a hard fail would
+    // break exactly the zero-config flow the embedding exists for.
+    if (
+      !versionSkewWarned &&
+      typeof reg.protocolVersion === "number" &&
+      reg.protocolVersion !== TRIBE_PROTOCOL_VERSION
+    ) {
+      versionSkewWarned = true
+      log.warn?.(
+        `tribe protocol version skew: this session speaks v${TRIBE_PROTOCOL_VERSION}, daemon speaks v${reg.protocolVersion}. ` +
+          `Coordination continues; restart the daemon (or the older sessions) to align.`,
+      )
+    }
     void client.call("subscribe").catch(() => {})
 
     // Startup banner — emit tribe state to the channel so the agent (and user) sees the setup
