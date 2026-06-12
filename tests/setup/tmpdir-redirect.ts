@@ -36,3 +36,13 @@ for (const name of readdirSync(TEST_TMP_BASE)) {
   }
 }
 process.env.TMPDIR = TEST_TMP_BASE
+
+// Socket guard — tests must NEVER reach the real per-user tribe daemon.
+// resolveSocketPath() falls back TRIBE_SOCKET -> XDG_RUNTIME_DIR ->
+// ~/.local/share/tribe/tribe.sock, so an unset env in a test-spawned CLI or
+// adapter resolves to the LIVE daemon socket (the 2026-06-12 daemon-death
+// incident made the class concrete even though no test was proven lethal).
+// Hermetic by construction: point the env fallback at a per-run path that
+// no daemon listens on. Tests that want a daemon pass an explicit --socket
+// or set TRIBE_SOCKET themselves (explicit always wins over this default).
+process.env.TRIBE_SOCKET = join(TEST_TMP_BASE, "no-real-daemon.sock")

@@ -51,7 +51,7 @@ async function callDaemon(method: string, params?: Record<string, unknown>): Pro
     const code = (err as NodeJS.ErrnoException).code
     if (code === "ECONNREFUSED" || code === "ENOENT") {
       console.error(`No daemon running (socket: ${socketPath})`)
-      console.error(`Start one with: tribe start`)
+      console.error(`Start one with: bun tribe-daemon (package tribe-daemon), or let a host autostart it`)
       process.exit(1)
     }
     throw err
