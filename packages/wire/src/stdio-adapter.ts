@@ -110,6 +110,11 @@ let mcp: Server
 let daemon: DaemonClient | undefined
 // oxlint-disable-next-line eslint(prefer-const) -- assigned in the daemon block below
 let daemonReady: Promise<DaemonClient>
+// Daemon-unavailable degrade ("loud but soft", km 19851): when the daemon can
+// never start, the adapter stays alive as a fully functional solo session —
+// MCP handshake answered, every tribe tool returns ONE clear sentence, and the
+// degrade is announced exactly once (log + channel), never once per call.
+let daemonDegradedReason: string | null = null
 
 /**
  * Forward a channel notification to Claude Code.
@@ -272,6 +277,22 @@ daemonReady = createReconnectingClient({
 }).then((client) => {
   daemon = client
   return client
+})
+
+// The ONE degrade notice. Without this catch, a daemon that can never start
+// (no socket + no daemon script — e.g. a standalone install with a broken
+// spawn path) rejects `daemonReady` and every chained `.then` unhandled.
+daemonReady.catch((err: unknown) => {
+  daemonDegradedReason = err instanceof Error ? err.message : String(err)
+  log.warn?.(`tribe daemon unavailable — running solo (${daemonDegradedReason})`)
+  try {
+    sendChannel(`**tribe** unavailable — running solo. This session works normally; tribe tools are disabled.`, {
+      from: "tribe-startup",
+      type: "system",
+    })
+  } catch {
+    // Channel may not be wired yet/at all — the log line above is the notice.
+  }
 })
 
 // ---------------------------------------------------------------------------
@@ -446,6 +467,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         : a
     // Tool names are bare verbs ("send", "fetch"); daemon wire methods use "tribe." prefix
     const daemonMethod = `tribe.${name}`
+    // Degraded: the daemon can never come up. One clear sentence per call,
+    // never the raw connect error (km 19851 loud-but-soft).
+    if (daemonDegradedReason !== null && daemon === undefined) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `tribe unavailable — running solo (daemon could not start). This session works normally without tribe; restart it to retry.`,
+          },
+        ],
+      }
+    }
     // A tool call may arrive before the background daemon connect resolves
     // (the daemon block is non-blocking) — await `daemonReady` in that case.
     const d = daemon ?? (await daemonReady)
@@ -639,6 +672,9 @@ function drainDaemonInbox(): void {
 
 // Forward daemon notifications to Claude Code. Registered once the
 // background daemon connect resolves; handlers persist across reconnects.
+// The trailing catch keeps a degraded (never-started) daemon from turning
+// this chain into an unhandled rejection — the degrade notice is owned by
+// the daemonReady.catch above.
 void daemonReady
   .then((d) =>
     d.onNotification((method, params) => {
