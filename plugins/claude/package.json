@@ -1,8 +1,8 @@
 {
-  "name": "tribe-claude-plugin-placeholder",
+  "name": "tribe-claude-plugin",
   "version": "0.1.0",
   "private": true,
-  "description": "Placeholder for the Claude Code Tribe plugin; the published plugin package is @bearly/tribe",
+  "description": "Claude Code Tribe plugin — MCP registration + host-managed daemon lifecycle (installed as tribe@tribe from this repo's marketplace)",
   "license": "MIT",
   "repository": {
     "type": "git",

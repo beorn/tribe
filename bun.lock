@@ -57,7 +57,7 @@
       },
     },
     "plugins/claude": {
-      "name": "tribe-claude-plugin-placeholder",
+      "name": "tribe-claude-plugin",
       "version": "0.1.0",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.27.1",
@@ -495,7 +495,7 @@
 
     "tree-kill": ["tree-kill@1.2.2", "", { "bin": { "tree-kill": "cli.js" } }, "sha512-L0Orpi8qGpRG//Nd+H90vFB+3iHnue1zSSGmNOOCh1GLJ7rUKVwV2HvijphGQS2UmhUZewS9VgvxYIdgr+fG1A=="],
 
-    "tribe-claude-plugin-placeholder": ["tribe-claude-plugin-placeholder@workspace:plugins/claude"],
+    "tribe-claude-plugin": ["tribe-claude-plugin@workspace:plugins/claude"],
 
     "tribe-daemon": ["tribe-daemon@workspace:packages/daemon"],
 

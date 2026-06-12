@@ -30,11 +30,11 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js"
-import { recallAgent } from "../../recall/src/lib/agent.ts"
-import { planQuery, planVariants } from "../../recall/src/lib/plan.ts"
-import { buildQueryContext } from "../../recall/src/lib/context.ts"
-import { getCurrentSessionContext } from "../../recall/src/lib/session-context.ts"
-import { setRecallLogging } from "../../recall/src/history/recall-shared.ts"
+import { recallAgent } from "../../../packages/recall/src/lib/agent.ts"
+import { planQuery, planVariants } from "../../../packages/recall/src/lib/plan.ts"
+import { buildQueryContext } from "../../../packages/recall/src/lib/context.ts"
+import { getCurrentSessionContext } from "../../../packages/recall/src/lib/session-context.ts"
+import { setRecallLogging } from "../../../packages/recall/src/history/recall-shared.ts"
 import { createReconnectingClient, type LoreClient } from "./lib/socket.ts"
 import { resolveSocketPath as resolveTribeSocketPath } from "tribe-wire/lib/socket"
 import { ensureTribeDaemonIfConfigured } from "../../../packages/daemon/src/lib/autostart.ts"
@@ -48,7 +48,7 @@ import {
   type SessionStateResult,
   type InjectDeltaResult,
 } from "./lib/rpc.ts"
-import { hookRecall } from "../../recall/src/history/recall.ts"
+import { hookRecall } from "../../../packages/recall/src/history/recall.ts"
 
 // Silence stderr logging — MCP stdio protocol allows stderr, but it's noisy.
 // Re-enable by setting TRIBE_LOG=1.

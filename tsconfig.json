@@ -22,7 +22,7 @@
     "packages/recall/tests/**/*",
     "packages/injection-envelope/src/**/*",
     "packages/injection-envelope/tests/**/*",
-    "plugins/claude/tests/**/*.ts"
+    "plugins/claude/**/*.ts"
   ],
   "exclude": ["node_modules", "**/dist", "**/node_modules"]
 }
