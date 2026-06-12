@@ -45,6 +45,26 @@ import {
 import { TOOLS_LIST } from "tribe-wire/lib/tools-list"
 import { pruneOldActivityLogs } from "./lib/activity-log.ts"
 
+// ---------------------------------------------------------------------------
+// `daemon.ts hook <event>` — Claude Code hook entry point. This is the
+// command `tribe install` plants in ~/.claude/settings.json (see
+// lib/install.ts TRIBE_HOOK_MARKER). It must dispatch and EXIT before the
+// daemon pipe below boots: a hook invocation never starts a broker
+// in-process — dispatchHook owns detached autostart itself.
+// ---------------------------------------------------------------------------
+
+if (process.argv[2] === "hook") {
+  const HOOK_EVENTS = ["session-start", "prompt", "session-end", "pre-compact"] as const
+  const event = process.argv[3] as (typeof HOOK_EVENTS)[number] | undefined
+  if (!event || !HOOK_EVENTS.includes(event)) {
+    process.stderr.write(`tribe-daemon hook: unknown event "${event ?? ""}" (expected ${HOOK_EVENTS.join("|")})\n`)
+    process.exit(2)
+  }
+  const { dispatchHook } = await import("./lib/hook-dispatch.ts")
+  await dispatchHook(event)
+  process.exit(0)
+}
+
 const log = createLogger("tribe:daemon")
 
 // ---------------------------------------------------------------------------
