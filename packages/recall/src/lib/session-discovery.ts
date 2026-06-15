@@ -17,9 +17,17 @@
  *
  * Transcript roots covered:
  *   - ~/.claude/projects/<slug>/*.jsonl                          (Claude Code)
- *   - ~/.config/ag/profiles/claude/<account>/projects/<slug>/*.jsonl  (ag Claude)
  *   - ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl               (Codex CLI)
- *   - ~/.config/ag/profiles/codex/<account>/sessions/YYYY/MM/DD/rollout-*.jsonl (ag Codex)
+ *   - ~/.config/ag/profiles/<provider>/<account>/...             (ag profiles)
+ *
+ * ag-profile roots are discovered provider-agnostically: every subdir of
+ * `~/.config/ag/profiles` is treated as a provider, mapped to a session layout
+ * via PROVIDER_ADAPTERS (claude → projects/, codex → sessions/). A provider ag
+ * can route but recall has no adapter for (e.g. `grok`) is reported as an
+ * unsupported provider rather than silently skipped, so recall never quietly
+ * degrades into a Claude/Codex-only memory surface. Roots that resolve to the
+ * same real directory (the shared Claude store reached via a profile symlink)
+ * are deduped so candidate counts stay honest.
  */
 
 import * as fs from "fs"
@@ -52,12 +60,36 @@ export interface SessionCandidate {
   rootKind: string
 }
 
+/**
+ * A provider that ag can route (a configured `~/.config/ag/profiles/<provider>`
+ * with ≥1 account) but recall has no transcript adapter for — so its sessions
+ * are NOT searched. Surfaced loudly instead of being silently skipped.
+ */
+export interface UnsupportedProvider {
+  /** Provider dir name under `~/.config/ag/profiles`. */
+  provider: string
+  /** Absolute provider directory. */
+  dir: string
+  /** Configured account subdirs (proof the provider is actually set up). */
+  accountCount: number
+  /** Fail-loud explanation of why recall cannot read this provider. */
+  reason: string
+}
+
 export interface SessionDiscoveryDiagnostics {
   cwd: string
   /** Roots that existed and were scanned. */
   searchedRoots: string[]
   /** Roots that did not exist (skipped). */
   missingRoots: string[]
+  /**
+   * Roots skipped because they resolve to an already-scanned real directory —
+   * e.g. an ag Claude profile whose `projects/` symlinks into the shared stock
+   * store (@km/accounts 19850). Reported so the dedup is visible, not silent.
+   */
+  dedupedRoots: string[]
+  /** ag providers configured but unsupported by recall (no transcript adapter). */
+  unsupportedProviders: UnsupportedProvider[]
   /** Total transcript files inspected across all roots (within the scan window). */
   candidateCount: number
   /** Candidates whose cwd matched the caller's cwd. */
@@ -94,36 +126,88 @@ export interface SessionDiscoveryResult {
 const DAY_MS = 24 * 60 * 60 * 1000
 
 // ============================================================================
-// Root enumeration
+// Provider adapters + root enumeration
 // ============================================================================
 
+/** How recall reads one ag provider's session store. */
+interface ProviderAdapter {
+  /** Session-store subdir under the profile home (e.g. "projects", "sessions"). */
+  sessionSubdir: string
+  format: SessionFormat
+}
+
 /**
- * Enumerate every known transcript root for a given home directory. ag-profile
- * roots are discovered by listing the per-account dirs; the base Claude/Codex
- * roots are always included even if absent (so diagnostics can report them).
+ * The authoritative ag provider/profile-home convention lives in `@km/accounts`
+ * (`AccountProfileProvider = "claude" | "codex" | "grok"`, profiles under
+ * `~/.config/ag/profiles/<provider>/<account>/`). recall is a standalone
+ * package and cannot import that workspace module, so the layout knowledge it
+ * needs for *session discovery* is mirrored here. Keep this table in sync when
+ * `@km/accounts` adds a provider whose on-disk session format is known.
+ *
+ * A provider ag can route but recall has no adapter for (e.g. `grok` today) is
+ * reported as an {@link UnsupportedProvider} — loudly, never silently skipped.
  */
-export function sessionRoots(homeDir: string): SessionRoot[] {
+const PROVIDER_ADAPTERS: Record<string, ProviderAdapter> = {
+  claude: { sessionSubdir: "projects", format: "claude" },
+  codex: { sessionSubdir: "sessions", format: "codex" },
+  // grok: routed by ag, but recall has no transcript adapter yet → unsupported.
+}
+
+export interface RootEnumeration {
+  roots: SessionRoot[]
+  unsupported: UnsupportedProvider[]
+}
+
+/**
+ * Enumerate every transcript root recall can read, plus any ag provider that is
+ * configured but has no recall adapter. The native Claude/Codex roots are
+ * always included (even if absent, so diagnostics can report them). ag-profile
+ * roots are discovered generically: each subdir of `~/.config/ag/profiles` is a
+ * provider — supported providers contribute one root per account; an
+ * unsupported provider with ≥1 configured account is reported for a loud
+ * diagnostic instead of being silently ignored.
+ */
+export function enumerateRoots(homeDir: string): RootEnumeration {
   const roots: SessionRoot[] = [
     { dir: path.join(homeDir, ".claude", "projects"), format: "claude", kind: "claude" },
     { dir: path.join(homeDir, ".codex", "sessions"), format: "codex", kind: "codex" },
   ]
+  const unsupported: UnsupportedProvider[] = []
 
   const agBase = path.join(homeDir, ".config", "ag", "profiles")
-  for (const account of listSubdirs(path.join(agBase, "claude"))) {
-    roots.push({
-      dir: path.join(agBase, "claude", account, "projects"),
-      format: "claude",
-      kind: `ag-claude:${account}`,
-    })
+  for (const provider of listSubdirs(agBase).sort()) {
+    const providerDir = path.join(agBase, provider)
+    const accounts = listSubdirs(providerDir)
+    const adapter = PROVIDER_ADAPTERS[provider]
+    if (adapter) {
+      for (const account of accounts) {
+        roots.push({
+          dir: path.join(providerDir, account, adapter.sessionSubdir),
+          format: adapter.format,
+          kind: `ag-${provider}:${account}`,
+        })
+      }
+    } else if (accounts.length > 0) {
+      unsupported.push({
+        provider,
+        dir: providerDir,
+        accountCount: accounts.length,
+        reason:
+          `ag provider "${provider}" is configured (${accounts.length} account(s)) but recall has no ` +
+          `session-format adapter for it — its transcripts are NOT searched. Add an entry to ` +
+          `PROVIDER_ADAPTERS in session-discovery.ts once its on-disk session layout is known.`,
+      })
+    }
   }
-  for (const account of listSubdirs(path.join(agBase, "codex"))) {
-    roots.push({
-      dir: path.join(agBase, "codex", account, "sessions"),
-      format: "codex",
-      kind: `ag-codex:${account}`,
-    })
-  }
-  return roots
+  return { roots, unsupported }
+}
+
+/**
+ * Backward-compatible supported-root list. Prefer {@link enumerateRoots} when
+ * you also need unsupported-provider diagnostics.
+ */
+export function sessionRoots(homeDir: string): SessionRoot[] {
+  return enumerateRoots(homeDir).roots
 }
 
 // ============================================================================
@@ -142,17 +226,32 @@ export function discoverActiveSession(opts: DiscoverOptions): SessionDiscoveryRe
   const maxCodexInspect = opts.maxCodexInspect ?? 80
   const cwd = opts.cwd
 
-  const roots = sessionRoots(homeDir)
+  const { roots, unsupported } = enumerateRoots(homeDir)
   const searchedRoots: string[] = []
   const missingRoots: string[] = []
+  const dedupedRoots: string[] = []
   const exclusions: string[] = []
   const matched: SessionCandidate[] = []
+  const seenReal = new Set<string>()
   let candidateCount = 0
 
   for (const root of roots) {
     if (!fs.existsSync(root.dir)) {
       missingRoots.push(`${root.kind} (${tilde(root.dir, homeDir)})`)
       continue
+    }
+    // Dedup roots that resolve to the same real directory — e.g. an ag Claude
+    // profile whose `projects/` symlinks into the shared stock store
+    // (@km/accounts 19850). Without this the shared store is scanned once per
+    // profile and candidate counts double. Native roots are listed first, so
+    // they win and the symlinked profile copies are the ones dropped.
+    const real = realpathOrNull(root.dir)
+    if (real !== null) {
+      if (seenReal.has(real)) {
+        dedupedRoots.push(`${root.kind} (${tilde(root.dir, homeDir)} → ${tilde(real, homeDir)})`)
+        continue
+      }
+      seenReal.add(real)
     }
     searchedRoots.push(`${root.kind} (${tilde(root.dir, homeDir)})`)
 
@@ -189,6 +288,8 @@ export function discoverActiveSession(opts: DiscoverOptions): SessionDiscoveryRe
     cwd,
     searchedRoots,
     missingRoots,
+    dedupedRoots,
+    unsupportedProviders: unsupported,
     candidateCount,
     matchedCount: matched.length,
     chosen: chosen
@@ -212,6 +313,11 @@ export function renderDiscoveryDiagnostics(d: SessionDiscoveryDiagnostics): stri
   lines.push(`cwd: ${d.cwd}`)
   lines.push(`searched ${d.searchedRoots.length} root(s): ${d.searchedRoots.join("; ") || "(none)"}`)
   if (d.missingRoots.length > 0) lines.push(`absent root(s): ${d.missingRoots.join("; ")}`)
+  if (d.dedupedRoots.length > 0) lines.push(`deduped root(s): ${d.dedupedRoots.join("; ")}`)
+  if (d.unsupportedProviders.length > 0) {
+    lines.push("unsupported provider(s):")
+    for (const u of d.unsupportedProviders) lines.push(`  - ${u.provider} (${u.accountCount} account(s)): ${u.reason}`)
+  }
   lines.push(`candidates inspected: ${d.candidateCount}, cwd-matched: ${d.matchedCount}`)
   if (d.chosen) {
     lines.push(
@@ -394,8 +500,9 @@ function readCodexSessionMeta(filepath: string): CodexMeta | null {
     try {
       obj = JSON.parse(line)
     } catch {
-      // First line may be truncated by the read window; only the first full
-      // line matters for session_meta, which is always line 1.
+      // silent-fallback-allow: a first line that won't parse means the read
+      // window truncated it or this isn't a codex rollout — session_meta is
+      // always line 1, so there is nothing further to recover here.
       return null
     }
     if (!obj || typeof obj !== "object") return null
@@ -424,6 +531,16 @@ export function cwdMatches(sessionCwd: string | null, targetCwd: string): boolea
   const a = sessionCwd.endsWith("/") ? sessionCwd : sessionCwd + "/"
   const b = targetCwd.endsWith("/") ? targetCwd : targetCwd + "/"
   return b.startsWith(a) || a.startsWith(b)
+}
+
+/** Resolve a path's real (symlink-followed) location, or null if it can't be read. */
+function realpathOrNull(p: string): string | null {
+  try {
+    return fs.realpathSync(p)
+  } catch {
+    // silent-fallback-allow: a path we cannot realpath is scanned without dedup.
+    return null
+  }
 }
 
 function listSubdirs(dir: string): string[] {

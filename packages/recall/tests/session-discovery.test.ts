@@ -8,7 +8,7 @@
  * asserts discovery + current-brief pick the Codex session and explain why.
  */
 import { describe, test, expect, beforeEach, afterEach } from "vitest"
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync, symlinkSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { discoverActiveSession, cwdMatches, renderDiscoveryDiagnostics } from "../src/lib/session-discovery.ts"
@@ -197,6 +197,88 @@ describe("discoverActiveSession", () => {
     expect(candidate).toBeNull()
     expect(diagnostics.candidateCount).toBe(0)
     expect(diagnostics.missingRoots.length).toBeGreaterThan(0)
+  })
+})
+
+describe("provider-agnostic ag profile discovery (19933)", () => {
+  /** Write a Claude-format transcript under an explicit projects root (e.g. an ag-profile). */
+  function writeClaudeSessionAt(projectsRoot: string, sessionId: string, ageMs: number): string {
+    const dir = join(projectsRoot, CLAUDE_SLUG)
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, `${sessionId}.jsonl`)
+    writeFileSync(
+      file,
+      JSON.stringify({
+        type: "user",
+        timestamp: iso(ageMs),
+        message: { role: "user", content: "ag-profile claude work on session-discovery.ts" },
+      }) + "\n",
+      "utf8",
+    )
+    const t = new Date(Date.now() - ageMs)
+    utimesSync(file, t, t)
+    return file
+  }
+
+  test("enumerates supported ag providers generically and labels each profile root", () => {
+    // A Claude profile with its OWN projects dir (distinct path — not the shared symlink).
+    const agClaudeProjects = join(home, ".config", "ag", "profiles", "claude", "work@x.com", "projects")
+    writeClaudeSessionAt(agClaudeProjects, "aaaa1111-agclaude", 4 * 60_000)
+    // A Codex profile, fresher — should win across providers.
+    writeCodexSession({
+      account: "work@x.com",
+      sessionId: "bbbb2222-agcodex",
+      cwd: CWD,
+      contentAgeMs: 1 * 60_000,
+      mtimeAgeMs: 1 * 60_000,
+    })
+
+    const { candidate, diagnostics } = discoverActiveSession({ cwd: CWD, homeDir: home })
+    expect(diagnostics.searchedRoots.some((r) => r.startsWith("ag-claude:work@x.com"))).toBe(true)
+    expect(diagnostics.searchedRoots.some((r) => r.startsWith("ag-codex:work@x.com"))).toBe(true)
+    // Newest relevant session across native + ag-profile roots wins.
+    expect(candidate?.sessionId).toBe("bbbb2222-agcodex")
+    expect(diagnostics.unsupportedProviders.length).toBe(0)
+  })
+
+  test("fails loud on a configured-but-unsupported provider instead of silently ignoring it", () => {
+    // grok is a real ag provider (AccountProfileProvider) but recall has no session adapter.
+    const grokProfile = join(home, ".config", "ag", "profiles", "grok", "k@x.com")
+    mkdirSync(grokProfile, { recursive: true })
+    writeFileSync(join(grokProfile, "auth.json"), "{}", "utf8")
+
+    const { diagnostics } = discoverActiveSession({ cwd: CWD, homeDir: home })
+    const grok = diagnostics.unsupportedProviders.find((p) => p.provider === "grok")
+    expect(grok).toBeDefined()
+    expect(grok!.accountCount).toBeGreaterThanOrEqual(1)
+    expect(grok!.reason).toMatch(/adapter/i)
+
+    const rendered = renderDiscoveryDiagnostics(diagnostics)
+    expect(rendered).toMatch(/grok/)
+    expect(rendered).toMatch(/unsupported/i)
+  })
+
+  test("an empty provider dir with no configured accounts is not flagged as unsupported", () => {
+    mkdirSync(join(home, ".config", "ag", "profiles", "grok"), { recursive: true })
+    const { diagnostics } = discoverActiveSession({ cwd: CWD, homeDir: home })
+    expect(diagnostics.unsupportedProviders.length).toBe(0)
+  })
+
+  test("shared Claude store reached via an ag-profile symlink is scanned once, not double-counted", () => {
+    // Native shared store with one session for CWD.
+    writeClaudeSession("dddd4444-shared", 5 * 60_000, 5 * 60_000)
+    // ag Claude profile whose projects/ symlinks back to the shared stock store (@km/accounts 19850).
+    const agClaudeDir = join(home, ".config", "ag", "profiles", "claude", "shared@x.com")
+    mkdirSync(agClaudeDir, { recursive: true })
+    symlinkSync(join(home, ".claude", "projects"), join(agClaudeDir, "projects"))
+
+    const { candidate, diagnostics } = discoverActiveSession({ cwd: CWD, homeDir: home })
+    expect(candidate?.sessionId).toBe("dddd4444-shared")
+    expect(diagnostics.candidateCount).toBe(1) // counted once
+    expect(diagnostics.matchedCount).toBe(1)
+    expect(diagnostics.dedupedRoots.length).toBeGreaterThanOrEqual(1)
+    // No phantom "older matching session" line from the symlinked duplicate.
+    expect(diagnostics.exclusions.join(" ")).not.toMatch(/older matching session/i)
   })
 })
 
