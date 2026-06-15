@@ -17,6 +17,7 @@ import {
 } from "../history/db"
 import { reviewMemorySystem } from "../history/recall"
 import { formatCost } from "./llm-backend.ts"
+import { discoverActiveSession, renderDiscoveryDiagnostics } from "./session-discovery.ts"
 import {
   BOLD,
   RESET,
@@ -56,9 +57,16 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
   // chief recovery gets index/hook diagnostics promptly. `--bench` opts in.
   const skipLlm = !opts.bench
 
+  // Active-session discovery diagnostics (@km/bearly/19943): a bounded
+  // filesystem scan (mtime-windowed, codex-inspect-capped) — NO LLM. Makes the
+  // searched roots, session-candidate counts, freshness, exclusions, and
+  // unsupported providers visible, so a "refreshed index but found nothing"
+  // recovery (the 19943 repro) is diagnosable instead of opaque.
+  const sessionDiscovery = discoverActiveSession({ cwd: process.cwd() }).diagnostics
+
   if (opts.json) {
     const review = await reviewMemorySystem(projectRoot, { skipLlm })
-    console.log(JSON.stringify(review, null, 2))
+    console.log(JSON.stringify({ ...review, sessionDiscovery }, null, 2))
     return
   }
 
@@ -201,6 +209,13 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
   console.log(
     `  ${hk.sessionMemoryFiles > 0 ? CHECK : WARN} ${hk.sessionMemoryFiles} session memory file${hk.sessionMemoryFiles !== 1 ? "s" : ""}`,
   )
+  console.log()
+
+  // ── Active Session Discovery ────────────────────────────────────────────
+  console.log(`${BOLD}Active Session Discovery${RESET}`)
+  for (const line of renderDiscoveryDiagnostics(sessionDiscovery).split("\n")) {
+    console.log(`  ${line}`)
+  }
   console.log()
 
   // ── LLM Race Benchmark ─────────────────────────────────────────────────
