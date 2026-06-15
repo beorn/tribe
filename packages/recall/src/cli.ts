@@ -106,9 +106,10 @@ program
 // ── status ──────────────────────────────────────────────────────────────
 program
   .command("status")
-  .description("Dashboard: activity, stats, index health, hook config")
+  .description("Dashboard: activity, stats, index health, hook config (bounded — no LLM calls by default)")
   .option("--json", "Output as JSON")
-  .action(async (opts: { json?: boolean }) => {
+  .option("--bench", "Also run the LLM synthesis test + multi-model race benchmark (slow)")
+  .action(async (opts: { json?: boolean; bench?: boolean }) => {
     await cmdStatus(opts)
   })
 
@@ -173,15 +174,16 @@ program
 // ── current-brief ────────────────────────────────────────────────────
 program
   .command("current-brief")
-  .description("Print a compact summary of the current Claude Code session (for /recall skill embed)")
+  .description("Print a compact summary of the current agent session (for /recall skill embed)")
   .option("--json", "JSON output")
   .action(async (opts: { json?: boolean }) => {
-    const { getCurrentSessionContext, renderSessionBrief } = await import("./lib/session-context.ts")
-    const ctx = getCurrentSessionContext()
+    const { getCurrentSessionContextWithDiagnostics, renderSessionBriefResult } =
+      await import("./lib/session-context.ts")
+    const result = getCurrentSessionContextWithDiagnostics()
     if (opts.json) {
-      console.log(JSON.stringify(ctx, null, 2))
+      console.log(JSON.stringify(result, null, 2))
     } else {
-      console.log(renderSessionBrief(ctx))
+      console.log(renderSessionBriefResult(result))
     }
   })
 

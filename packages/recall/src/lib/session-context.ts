@@ -13,6 +13,12 @@ import * as fs from "fs"
 import * as path from "path"
 import * as os from "os"
 import { execSync } from "child_process"
+import {
+  discoverActiveSession,
+  renderDiscoveryDiagnostics,
+  type SessionDiscoveryDiagnostics,
+  type SessionFormat,
+} from "./session-discovery.ts"
 
 // ============================================================================
 // Types
@@ -51,6 +57,19 @@ export interface BuildSessionContextOptions {
   sessionIdOverride?: string
   /** Override cwd (for testing). */
   cwdOverride?: string
+  /** Override home dir (for testing). Defaults to os.homedir(). */
+  homeOverride?: string
+}
+
+/** Why a current-session lookup produced no usable context. */
+export type NoSessionReason = "no-candidate" | "unreadable" | "empty" | "stale"
+
+export interface CurrentSessionResolution {
+  context: SessionContext | null
+  /** Always present — explains what roots were searched and what was chosen. */
+  diagnostics: SessionDiscoveryDiagnostics
+  /** Set when `context` is null; null when a session was resolved. */
+  reason: NoSessionReason | null
 }
 
 // ============================================================================
@@ -58,11 +77,32 @@ export interface BuildSessionContextOptions {
 // ============================================================================
 
 /**
- * Read the current Claude Code session context.
+ * Read the current agent session context.
  * Returns null if no session is active, the file is missing, or the session
- * is stale (> maxAgeMs).
+ * is stale (> maxAgeMs). For the reason + searched-roots diagnostics, use
+ * {@link getCurrentSessionContextWithDiagnostics}.
  */
 export function getCurrentSessionContext(opts: BuildSessionContextOptions = {}): SessionContext | null {
+  return getCurrentSessionContextWithDiagnostics(opts).context
+}
+
+/**
+ * Like {@link getCurrentSessionContext} but always returns diagnostics so an
+ * empty/wrong-session outcome can be explained loudly (searched roots, chosen
+ * path/id, candidate count, freshness, exclusion reasons) instead of failing
+ * silently. This is the canonical entry for `recall current-brief`.
+ *
+ * Detection priority (best → fallback):
+ *   1. Explicit override (tests) / CLAUDE_SESSION_ID env var
+ *   2. Sentinel file written by the UserPromptSubmit hook, keyed by the
+ *      ancestor claude PID — deterministic even with parallel Claude sessions
+ *   3. Cross-root discovery — the freshest cwd-matching transcript across
+ *      Claude + Codex + ag-profile roots (handles Codex/ag seats the old
+ *      Claude-only heuristic silently missed).
+ */
+export function getCurrentSessionContextWithDiagnostics(
+  opts: BuildSessionContextOptions = {},
+): CurrentSessionResolution {
   const {
     tailLines = 400,
     maxChars = 6000,
@@ -70,59 +110,79 @@ export function getCurrentSessionContext(opts: BuildSessionContextOptions = {}):
     maxAgeMs = 30 * 60_000,
     sessionIdOverride,
     cwdOverride,
+    homeOverride,
   } = opts
 
+  const home = homeOverride ?? os.homedir()
   const cwd = cwdOverride ?? process.cwd()
+  const now = Date.now()
 
-  // Detection priority (best to fallback):
-  //   1. Explicit override (tests)
-  //   2. CLAUDE_SESSION_ID env var (ideal, but Claude Code doesn't set this
-  //      in Bash subprocess env today)
-  //   3. Sentinel file written by the UserPromptSubmit hook, keyed by the
-  //      ancestor claude PID — deterministic even with parallel sessions
-  //   4. Most-recently-modified JSONL for this cwd — last-resort heuristic
-  const explicitId = sessionIdOverride ?? process.env.CLAUDE_SESSION_ID
-  let sessionId = explicitId
+  // Always run discovery — it gives us both the fallback candidate AND the
+  // diagnostics we return on every path (loud, never silent).
+  const discovery = discoverActiveSession({ cwd, homeDir: home, now })
+  const diagnostics = discovery.diagnostics
+
+  // Priority 1/2: explicit id / env / sentinel (Claude-only resolution).
+  let sessionId = sessionIdOverride ?? process.env.CLAUDE_SESSION_ID
   let jsonlPath: string | null = null
+  let format: SessionFormat = "claude"
+  let via = "discovery"
 
   if (sessionId) {
-    jsonlPath = resolveSessionJsonl(sessionId, cwd)
+    jsonlPath = resolveSessionJsonl(sessionId, cwd, home)
+    if (jsonlPath) via = sessionIdOverride ? "override" : "env:CLAUDE_SESSION_ID"
   }
   if (!jsonlPath) {
-    const viaSentinel = readSessionSentinel()
+    const viaSentinel = readSessionSentinel(home)
     if (viaSentinel) {
       sessionId = viaSentinel.sessionId
-      jsonlPath = viaSentinel.transcriptPath ?? resolveSessionJsonl(viaSentinel.sessionId, viaSentinel.cwd ?? cwd)
+      jsonlPath = viaSentinel.transcriptPath ?? resolveSessionJsonl(viaSentinel.sessionId, viaSentinel.cwd ?? cwd, home)
+      if (jsonlPath) via = "sentinel"
     }
   }
-  if (!jsonlPath) {
-    // Last-resort fallback: most-recently-modified JSONL. Works for typical
-    // single-session use but can misidentify under concurrent sessions.
-    const found = findMostRecentJsonl(cwd)
-    if (found) {
-      jsonlPath = found.path
-      sessionId = found.sessionId
+  if (!jsonlPath && discovery.candidate) {
+    // Priority 3: cross-root discovery.
+    jsonlPath = discovery.candidate.path
+    sessionId = discovery.candidate.sessionId
+    format = discovery.candidate.format
+    via = discovery.candidate.rootKind
+  }
+
+  // Keep diagnostics honest: point `chosen` at the session we actually use.
+  if (jsonlPath && sessionId) {
+    diagnostics.chosen = {
+      path: jsonlPath,
+      sessionId,
+      format,
+      rootKind: via,
+      ageMs: now - safeMtime(jsonlPath, now),
     }
   }
-  if (!jsonlPath || !sessionId) return null
+
+  if (!jsonlPath || !sessionId) {
+    return { context: null, diagnostics, reason: "no-candidate" }
+  }
 
   let lines: string[]
   try {
     lines = readLastLines(jsonlPath, tailLines)
   } catch {
-    // silent-fallback-allow: unreadable session tail means no current-session context.
-    return null
+    // silent-fallback-allow: surfaced via diagnostics + reason below.
+    return { context: null, diagnostics, reason: "unreadable" }
   }
-  if (lines.length === 0) return null
+  if (lines.length === 0) return { context: null, diagnostics, reason: "empty" }
 
-  const messages = extractUserAssistantText(lines)
-  if (messages.length === 0) return null
+  const messages = extractMessages(lines, format)
+  if (messages.length === 0) return { context: null, diagnostics, reason: "empty" }
 
   const lastTimestamp = findLastTimestamp(lines)
-  const ageMs = lastTimestamp !== null ? Date.now() - lastTimestamp : null
+  const ageMs = lastTimestamp !== null ? now - lastTimestamp : null
 
-  // Stale sessions: drop. The user has moved on; context will mislead the planner.
-  if (ageMs !== null && ageMs > maxAgeMs) return null
+  // Stale sessions: drop the context but keep diagnostics so the caller can
+  // explain "found session X, but it's 45m old (> 30m freshness)".
+  if (ageMs !== null && ageMs > maxAgeMs) {
+    return { context: null, diagnostics, reason: "stale" }
+  }
 
   // Flatten, keep the TAIL (most recent) within budget
   const flat = messages.map(formatExchange).join("\n\n")
@@ -133,13 +193,26 @@ export function getCurrentSessionContext(opts: BuildSessionContextOptions = {}):
   const mentionedTokens = extractTechTokens(recentMessages).slice(0, maxTokens)
 
   return {
-    sessionId,
-    ageMs,
-    recentMessages,
-    exchangeCount: messages.length,
-    mentionedPaths,
-    mentionedBeads,
-    mentionedTokens,
+    context: {
+      sessionId,
+      ageMs,
+      recentMessages,
+      exchangeCount: messages.length,
+      mentionedPaths,
+      mentionedBeads,
+      mentionedTokens,
+    },
+    diagnostics,
+    reason: null,
+  }
+}
+
+function safeMtime(filepath: string, fallback: number): number {
+  try {
+    return fs.statSync(filepath).mtimeMs
+  } catch {
+    // silent-fallback-allow: missing file → treat as "now" so ageMs reads 0.
+    return fallback
   }
 }
 
@@ -149,7 +222,7 @@ export function getCurrentSessionContext(opts: BuildSessionContextOptions = {}):
  * it as speculative context before Claude reasons about the query.
  */
 export function renderSessionBrief(ctx: SessionContext | null): string {
-  if (!ctx) return "(no active Claude Code session — skipping session context)"
+  if (!ctx) return "(no active agent session — skipping session context)"
 
   const lines: string[] = []
   const age = ctx.ageMs === null ? "unknown age" : `${Math.round(ctx.ageMs / 60_000)}m ago`
@@ -173,6 +246,30 @@ export function renderSessionBrief(ctx: SessionContext | null): string {
     lines.push(indent(preview, "  "))
   }
 
+  return lines.join("\n")
+}
+
+/**
+ * Render a full current-brief result: the session brief when one was found,
+ * or a loud diagnostic block explaining why no active session was identified
+ * (which roots were searched, what was chosen, freshness, exclusion reasons).
+ */
+export function renderSessionBriefResult(result: CurrentSessionResolution): string {
+  if (result.context) return renderSessionBrief(result.context)
+
+  const reasonLabel: Record<NoSessionReason, string> = {
+    "no-candidate": "no cwd-matching session transcript found",
+    unreadable: "the chosen transcript could not be read",
+    empty: "the chosen transcript had no readable messages",
+    stale: "the freshest matching session is older than the freshness window",
+  }
+  const why = result.reason ? reasonLabel[result.reason] : "unknown"
+
+  const lines: string[] = []
+  lines.push(`(no active agent session — ${why})`)
+  lines.push("")
+  lines.push("Session discovery diagnostics:")
+  lines.push(indent(renderDiscoveryDiagnostics(result.diagnostics), "  "))
   return lines.join("\n")
 }
 
@@ -272,8 +369,6 @@ export function extractSessionFocus(
 // Session sentinel reader
 // ============================================================================
 
-const SENTINEL_DIR = path.join(os.homedir(), ".claude", "bearly-sessions")
-
 interface SessionSentinelRead {
   claudePid: number
   sessionId: string
@@ -285,16 +380,17 @@ interface SessionSentinelRead {
 /**
  * Read the sentinel written by the UserPromptSubmit hook. Walks up the
  * process tree to find the ancestor `claude` process, then reads
- * `~/.claude/bearly-sessions/pid-<pid>.json`.
+ * `<home>/.claude/bearly-sessions/pid-<pid>.json`.
  *
  * Returns null if no ancestor claude PID is found or no sentinel exists
  * for it. Silent on all errors — sentinel is an optimization, not required.
  */
-function readSessionSentinel(): SessionSentinelRead | null {
+function readSessionSentinel(home: string): SessionSentinelRead | null {
+  const sentinelDir = path.join(home, ".claude", "bearly-sessions")
   // First try: any ancestor PID has a sentinel. Walk up cheaply.
   const ancestors = walkProcessAncestors(6)
   for (const pid of ancestors) {
-    const file = path.join(SENTINEL_DIR, `pid-${pid}.json`)
+    const file = path.join(sentinelDir, `pid-${pid}.json`)
     try {
       if (!fs.existsSync(file)) continue
       const raw = fs.readFileSync(file, "utf8")
@@ -337,45 +433,7 @@ function walkProcessAncestors(maxDepth: number): number[] {
   return pids
 }
 
-/**
- * Fallback when CLAUDE_SESSION_ID isn't set: find the most recently modified
- * JSONL file for the current project. Walks up the directory tree so callers
- * in a subdirectory still find their root project's session.
- */
-function findMostRecentJsonl(cwd: string): { path: string; sessionId: string } | null {
-  const home = os.homedir()
-  let dir: string = cwd
-
-  for (let i = 0; i < 6; i++) {
-    const slug = dir.replaceAll("/", "-")
-    const projectDir = path.resolve(home, ".claude/projects", slug)
-    if (fs.existsSync(projectDir)) {
-      try {
-        const entries = fs.readdirSync(projectDir, { withFileTypes: true })
-        let best: { path: string; mtime: number } | null = null
-        for (const e of entries) {
-          if (!e.isFile() || !e.name.endsWith(".jsonl")) continue
-          const full = path.join(projectDir, e.name)
-          const mtime = fs.statSync(full).mtimeMs
-          if (!best || mtime > best.mtime) best = { path: full, mtime }
-        }
-        if (best) {
-          const sessionId = path.basename(best.path, ".jsonl")
-          return { path: best.path, sessionId }
-        }
-      } catch {
-        /* skip */
-      }
-    }
-    const parent = path.dirname(dir)
-    if (parent === dir) break
-    dir = parent
-  }
-  return null
-}
-
-function resolveSessionJsonl(sessionId: string, cwd: string): string | null {
-  const home = os.homedir()
+function resolveSessionJsonl(sessionId: string, cwd: string, home: string = os.homedir()): string | null {
   const slug = cwd.replaceAll("/", "-")
   const candidate = path.resolve(home, ".claude/projects", slug, `${sessionId}.jsonl`)
   if (fs.existsSync(candidate)) return candidate
@@ -486,6 +544,69 @@ function extractText(content: unknown): string {
     }
   }
   return parts.join("\n")
+}
+
+/** Dispatch message extraction by transcript format. */
+function extractMessages(lines: string[], format: SessionFormat): Exchange[] {
+  return format === "codex" ? extractCodexText(lines) : extractUserAssistantText(lines)
+}
+
+/**
+ * Extract user/assistant text from a Codex rollout transcript. Each line is
+ * `{ timestamp, type: "response_item", payload: { type: "message", role,
+ * content: [{ type: "input_text" | "output_text", text }] } }`. `developer`
+ * and `reasoning` records are skipped — only user/assistant turns carry intent.
+ */
+function extractCodexText(lines: string[]): Exchange[] {
+  const out: Exchange[] = []
+
+  for (const raw of lines) {
+    let obj: unknown
+    try {
+      obj = JSON.parse(raw)
+    } catch {
+      continue
+    }
+    if (!obj || typeof obj !== "object") continue
+
+    const rec = obj as {
+      type?: string
+      timestamp?: string | number
+      payload?: { type?: string; role?: string; content?: unknown }
+    }
+    if (rec.type !== "response_item") continue
+    const p = rec.payload
+    if (!p || p.type !== "message") continue
+    if (p.role !== "user" && p.role !== "assistant") continue
+
+    const text = extractCodexContent(p.content)
+    if (!text || text.length < 3) continue
+
+    out.push({ role: p.role, text, timestamp: parseTimestamp(rec.timestamp) })
+  }
+
+  return out
+}
+
+function extractCodexContent(content: unknown): string {
+  if (typeof content === "string") return content
+  if (!Array.isArray(content)) return ""
+
+  const parts: string[] = []
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue
+    const b = block as { type?: string; text?: unknown }
+    if ((b.type === "input_text" || b.type === "output_text") && typeof b.text === "string") {
+      parts.push(b.text)
+    }
+  }
+  return parts.join("\n")
+}
+
+function parseTimestamp(ts: string | number | undefined): number | null {
+  if (typeof ts === "number") return ts
+  if (typeof ts === "string") return Date.parse(ts) || null
+  return null
 }
 
 function formatExchange(e: Exchange): string {

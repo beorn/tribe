@@ -23,7 +23,23 @@ export { recallAgent } from "./lib/agent.ts"
 export { planQuery, planVariants } from "./lib/plan.ts"
 export { fanoutSearch, mergeFanouts } from "./lib/fanout.ts"
 export { buildQueryContext, renderContextPrompt } from "./lib/context.ts"
-export { getCurrentSessionContext, extractSessionFocus } from "./lib/session-context.ts"
+export {
+  getCurrentSessionContext,
+  getCurrentSessionContextWithDiagnostics,
+  renderSessionBrief,
+  renderSessionBriefResult,
+  extractSessionFocus,
+} from "./lib/session-context.ts"
+export type { CurrentSessionResolution, NoSessionReason } from "./lib/session-context.ts"
+export { discoverActiveSession, sessionRoots, cwdMatches, renderDiscoveryDiagnostics } from "./lib/session-discovery.ts"
+export type {
+  SessionFormat,
+  SessionRoot,
+  SessionCandidate,
+  SessionDiscoveryDiagnostics,
+  SessionDiscoveryResult,
+  DiscoverOptions,
+} from "./lib/session-discovery.ts"
 export { writeTrace } from "./lib/trace.ts"
 
 export { analyzeQuality, isAcceptable } from "./lib/quality-gate.ts"
@@ -49,7 +65,7 @@ export type {
   RememberOptions,
   RememberResult,
 } from "./history/synthesize.ts"
-export type { HookResult, ReviewResult } from "./history/scanner.ts"
+export type { HookResult, ReviewResult, ReviewOptions } from "./history/scanner.ts"
 export type { QueryContext } from "./lib/context.ts"
 export type { PlanCall, QueryPlan } from "./lib/plan.ts"
 export type { FanoutResult } from "./lib/fanout.ts"

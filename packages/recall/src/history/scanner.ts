@@ -194,9 +194,20 @@ export interface ReviewResult {
  *
  * @param projectRoot - Absolute path to the project root (for finding settings.json)
  */
-export async function reviewMemorySystem(projectRoot: string): Promise<ReviewResult> {
+export interface ReviewOptions {
+  /**
+   * Skip every LLM-bound stage (the recall synthesis test + the multi-model
+   * race benchmark). Used by the default `recall status` so chief recovery
+   * gets bounded index/hook diagnostics without blocking 20s+ on provider
+   * round-trips. Opt back in with `recall status --bench`.
+   */
+  skipLlm?: boolean
+}
+
+export async function reviewMemorySystem(projectRoot: string, opts: ReviewOptions = {}): Promise<ReviewResult> {
   const startTime = Date.now()
-  log(`review: starting diagnostics for ${projectRoot}`)
+  const skipLlm = opts.skipLlm ?? false
+  log(`review: starting diagnostics for ${projectRoot}${skipLlm ? " (bounded — LLM stages skipped)" : ""}`)
   const recommendations: string[] = []
 
   // ── Index Health ──────────────────────────────────────────────────────
@@ -330,68 +341,76 @@ export async function reviewMemorySystem(projectRoot: string): Promise<ReviewRes
   }
 
   // ── Recall Quality Test ───────────────────────────────────────────────
-  log(`review: testing recall quality with live LLM synthesis...`)
   let recallTest: ReviewResult["recallTest"] = null
-  try {
-    const testQuery = "inline edit"
-    const startTime = Date.now()
-    const result = await recall(testQuery, {
-      limit: 5,
-      timeout: 8000,
-    })
-    const durationMs = Date.now() - startTime
-    const uniqueSessions = new Set(result.results.map((r) => r.sessionId)).size
+  if (skipLlm) {
+    log(`review: skipping live LLM synthesis test (bounded mode)`)
+  } else {
+    log(`review: testing recall quality with live LLM synthesis...`)
+    try {
+      const testQuery = "inline edit"
+      const startTime = Date.now()
+      const result = await recall(testQuery, {
+        limit: 5,
+        timeout: 8000,
+      })
+      const durationMs = Date.now() - startTime
+      const uniqueSessions = new Set(result.results.map((r) => r.sessionId)).size
 
-    recallTest = {
-      query: testQuery,
-      synthesisOk: result.synthesis !== null && result.synthesis.length > 0,
-      synthesisLength: result.synthesis?.length ?? 0,
-      llmCost: result.llmCost ?? null,
-      durationMs,
-      resultCount: result.results.length,
-      uniqueSessions,
-    }
+      recallTest = {
+        query: testQuery,
+        synthesisOk: result.synthesis !== null && result.synthesis.length > 0,
+        synthesisLength: result.synthesis?.length ?? 0,
+        llmCost: result.llmCost ?? null,
+        durationMs,
+        resultCount: result.results.length,
+        uniqueSessions,
+      }
 
-    // Recall quality recommendations
-    if (!recallTest.synthesisOk) {
-      recommendations.push("LLM synthesis failed — check API keys (OPENAI_API_KEY, etc.)")
-    } else {
-      if (recallTest.synthesisLength < 50) {
-        recommendations.push(`Synthesis too short (${recallTest.synthesisLength} chars) — may not be useful`)
-      } else if (recallTest.synthesisLength > 2000) {
-        recommendations.push(`Synthesis too long (${recallTest.synthesisLength} chars) — consider reducing --limit`)
+      // Recall quality recommendations
+      if (!recallTest.synthesisOk) {
+        recommendations.push("LLM synthesis failed — check API keys (OPENAI_API_KEY, etc.)")
+      } else {
+        if (recallTest.synthesisLength < 50) {
+          recommendations.push(`Synthesis too short (${recallTest.synthesisLength} chars) — may not be useful`)
+        } else if (recallTest.synthesisLength > 2000) {
+          recommendations.push(`Synthesis too long (${recallTest.synthesisLength} chars) — consider reducing --limit`)
+        }
+        if (durationMs > 8000) {
+          recommendations.push(`Synthesis is slow (${(durationMs / 1000).toFixed(1)}s) — consider reducing --limit`)
+        }
+        if (
+          recallTest.synthesisOk &&
+          recallTest.synthesisLength >= 50 &&
+          recallTest.synthesisLength <= 2000 &&
+          durationMs <= 8000
+        ) {
+          const cost = recallTest.llmCost ? `$${recallTest.llmCost.toFixed(4)}` : "N/A"
+          recommendations.push(
+            `Synthesis working — ${recallTest.synthesisLength} chars in ${(durationMs / 1000).toFixed(1)}s (${cost})`,
+          )
+        }
       }
-      if (durationMs > 8000) {
-        recommendations.push(`Synthesis is slow (${(durationMs / 1000).toFixed(1)}s) — consider reducing --limit`)
-      }
-      if (
-        recallTest.synthesisOk &&
-        recallTest.synthesisLength >= 50 &&
-        recallTest.synthesisLength <= 2000 &&
-        durationMs <= 8000
-      ) {
-        const cost = recallTest.llmCost ? `$${recallTest.llmCost.toFixed(4)}` : "N/A"
-        recommendations.push(
-          `Synthesis working — ${recallTest.synthesisLength} chars in ${(durationMs / 1000).toFixed(1)}s (${cost})`,
-        )
-      }
+    } catch {
+      recommendations.push("Recall test threw an error — check DB and LLM setup")
     }
-  } catch {
-    recommendations.push("Recall test threw an error — check DB and LLM setup")
   }
 
   // ── LLM Race Benchmark ─────────────────────────────────────────────────
-  log(`review: running LLM race benchmark...`)
   let llmRaceBenchmark: ReviewResult["llmRaceBenchmark"] = null
-  const reviewLlm = await loadLlm()
+  if (skipLlm) {
+    log(`review: skipping LLM race benchmark (bounded mode)`)
+    recommendations.push("Bounded status: LLM checks skipped — run `recall status --bench` to benchmark providers")
+  }
+  const reviewLlm = skipLlm ? null : await loadLlm()
   const raceModels = reviewLlm
     ? reviewLlm.getCheapModels(2).filter((m) => reviewLlm.isProviderAvailable(m.provider))
     : []
-  if (!reviewLlm) {
+  if (!skipLlm && !reviewLlm) {
     recommendations.push("LLM backend unavailable (TRIBE_LLM_DIR unset or failed) — race benchmark skipped")
   }
 
-  if (raceModels.length > 0) {
+  if (!skipLlm && raceModels.length > 0) {
+    log(`review: running LLM race benchmark...`)
     const raceQueries = ["inline edit", "bug fix", "refactor", "test failure", "keyboard input"]
     const raceTimeoutMs = 10000 // generous for benchmarking
     const raceResults: NonNullable<ReviewResult["llmRaceBenchmark"]>["results"] = []
@@ -514,7 +533,9 @@ export async function reviewMemorySystem(projectRoot: string): Promise<ReviewRes
         )
       }
     }
-  } else {
+  } else if (!skipLlm && reviewLlm) {
+    // Backend loaded but no cheap providers were available — genuinely a config
+    // gap. In bounded mode (skipLlm) we never loaded a backend, so stay quiet.
     recommendations.push("No cheap LLM providers available for race benchmark — check API keys")
   }
 

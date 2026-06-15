@@ -50,11 +50,14 @@ function getProjectRoot(): string {
   return dir
 }
 
-export async function cmdStatus(opts: { json?: boolean }): Promise<void> {
+export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Promise<void> {
   const projectRoot = getProjectRoot()
+  // Bounded by default: skip the LLM synthesis test + multi-model race so
+  // chief recovery gets index/hook diagnostics promptly. `--bench` opts in.
+  const skipLlm = !opts.bench
 
   if (opts.json) {
-    const review = await reviewMemorySystem(projectRoot)
+    const review = await reviewMemorySystem(projectRoot, { skipLlm })
     console.log(JSON.stringify(review, null, 2))
     return
   }
@@ -187,7 +190,7 @@ export async function cmdStatus(opts: { json?: boolean }): Promise<void> {
   }
 
   // ── Hook Configuration ──────────────────────────────────────────────
-  const review = await reviewMemorySystem(projectRoot)
+  const review = await reviewMemorySystem(projectRoot, { skipLlm })
   const hk = review.hookConfig
 
   console.log(`${BOLD}Hook Configuration${RESET}`)
