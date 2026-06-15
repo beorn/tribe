@@ -19,7 +19,8 @@ describe("hermetic socket env", () => {
   it("TRIBE_SOCKET is the per-run guard path, never the real daemon socket", () => {
     const guard = process.env.TRIBE_SOCKET
     expect(guard).toBeDefined()
-    expect(guard).toContain("no-real-daemon.sock")
+    expect(guard).toContain("tribe-guard")
+    expect(guard).toMatch(/tribe\.sock$/)
     expect(resolveSocketPath()).toBe(guard)
     expect(resolveSocketPath()).not.toContain(".local/share/tribe")
   })

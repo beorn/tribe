@@ -17,6 +17,7 @@
  * swept at worker startup so leaks can never re-accumulate into the same
  * pathology.
  */
+import { randomUUID } from "node:crypto"
 import { mkdirSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs"
 import { join } from "node:path"
 
@@ -42,7 +43,12 @@ process.env.TMPDIR = TEST_TMP_BASE
 // ~/.local/share/tribe/tribe.sock, so an unset env in a test-spawned CLI or
 // adapter resolves to the LIVE daemon socket (the 2026-06-12 daemon-death
 // incident made the class concrete even though no test was proven lethal).
-// Hermetic by construction: point the env fallback at a per-run path that
-// no daemon listens on. Tests that want a daemon pass an explicit --socket
-// or set TRIBE_SOCKET themselves (explicit always wins over this default).
-process.env.TRIBE_SOCKET = join(TEST_TMP_BASE, "no-real-daemon.sock")
+// Hermetic by construction: point the env fallback at a unique per-setup
+// path. The unique directory matters because killed live-daemon tests can
+// leave detached processes behind; a fixed "never-created" socket path
+// eventually becomes a real accepting socket. Tests that want a daemon pass an
+// explicit --socket or set TRIBE_SOCKET themselves (explicit always wins over
+// this default).
+const TRIBE_GUARD_DIR = join(TEST_TMP_BASE, "tribe-guard", randomUUID())
+mkdirSync(TRIBE_GUARD_DIR, { recursive: true })
+process.env.TRIBE_SOCKET = join(TRIBE_GUARD_DIR, "tribe.sock")
