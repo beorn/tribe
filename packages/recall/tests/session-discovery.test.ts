@@ -12,7 +12,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync, symlinkSync 
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { discoverActiveSession, cwdMatches, renderDiscoveryDiagnostics } from "../src/lib/session-discovery.ts"
-import { getCurrentSessionContextWithDiagnostics } from "../src/lib/session-context.ts"
+import { getCurrentSessionContextWithDiagnostics, renderSessionBriefResult } from "../src/lib/session-context.ts"
 
 let home: string
 const CWD = "/Users/test/Code/pim/km"
@@ -302,6 +302,32 @@ describe("getCurrentSessionContextWithDiagnostics", () => {
     expect(result.context!.recentMessages).toContain("chief recovery")
     expect(result.context!.recentMessages).toContain("recall-reliability epic")
     expect(result.context!.recentMessages).not.toContain("ignore me")
+  })
+
+  test("19933 residual: surfaces unsupported providers even when a session IS found", () => {
+    // The fail-loud must be visible on the common (session-found) path too — not
+    // only when discovery finds nothing. A configured grok profile must warn.
+    writeCodexSession({
+      account: "d@delei.org",
+      sessionId: "019eca53-codex-fresh",
+      cwd: CWD,
+      contentAgeMs: 2 * 60_000,
+      mtimeAgeMs: 2 * 60_000,
+    })
+    const grokProfile = join(home, ".config", "ag", "profiles", "grok", "k@x.com")
+    mkdirSync(grokProfile, { recursive: true })
+    writeFileSync(join(grokProfile, "auth.json"), "{}", "utf8")
+
+    const result = getCurrentSessionContextWithDiagnostics({ cwdOverride: CWD, homeOverride: home })
+    expect(result.context).not.toBeNull() // a session WAS found
+    expect(result.diagnostics.unsupportedProviders.some((p) => p.provider === "grok")).toBe(true)
+
+    const rendered = renderSessionBriefResult(result)
+    // The brief itself is present...
+    expect(rendered).toContain(result.context!.sessionId.slice(0, 8))
+    // ...AND the unsupported-provider notice is visible, not swallowed.
+    expect(rendered).toMatch(/grok/)
+    expect(rendered).toMatch(/unsupported/i)
   })
 
   test("stale-only: returns no context but explains the staleness via diagnostics", () => {

@@ -250,12 +250,32 @@ export function renderSessionBrief(ctx: SessionContext | null): string {
 }
 
 /**
+ * One-line fail-loud notice for ag providers that are configured but have no
+ * recall session adapter. Surfaced on BOTH the session-found and no-session
+ * paths so recall never quietly degrades into a Claude/Codex-only memory
+ * surface when, say, a grok profile is set up. Empty string when all good.
+ */
+function renderUnsupportedProviderNotice(d: SessionDiscoveryDiagnostics): string {
+  if (d.unsupportedProviders.length === 0) return ""
+  const names = d.unsupportedProviders.map((u) => `${u.provider} (${u.accountCount} account(s))`).join(", ")
+  return (
+    `NOTE: recall is NOT searching configured-but-unsupported provider(s): ${names}. ` +
+    `Add a session adapter (PROVIDER_ADAPTERS in session-discovery) to include them.`
+  )
+}
+
+/**
  * Render a full current-brief result: the session brief when one was found,
  * or a loud diagnostic block explaining why no active session was identified
  * (which roots were searched, what was chosen, freshness, exclusion reasons).
+ * Either way, an unsupported-provider notice is appended when one applies.
  */
 export function renderSessionBriefResult(result: CurrentSessionResolution): string {
-  if (result.context) return renderSessionBrief(result.context)
+  if (result.context) {
+    const brief = renderSessionBrief(result.context)
+    const notice = renderUnsupportedProviderNotice(result.diagnostics)
+    return notice ? `${brief}\n\n${notice}` : brief
+  }
 
   const reasonLabel: Record<NoSessionReason, string> = {
     "no-candidate": "no cwd-matching session transcript found",
