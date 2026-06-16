@@ -913,6 +913,11 @@ export function createStatements(db: Database) {
       WHERE m.recipient = $name
         AND m.kind = 'direct'
         AND m.sender != $name
+        -- Clamp the replay to a recent horizon (@km/tribe/20002): without this,
+        -- a long-lived name with days of undrained directs rewinds the cursor to
+        -- the OLDEST unread row and replays the entire stale backlog on every
+        -- join/rename. Bounding by ts surfaces the recent gap, not all history.
+        AND m.ts >= $since_ts
         AND m.rowid > COALESCE(
           (
             -- Watermark: highest seq either pushed (last_delivered_seq) OR

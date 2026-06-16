@@ -239,6 +239,17 @@ export function sendMessage(
  *
  * See `@km/bearly/tribe-daemon-production-hardening` — gap-direct replay.
  */
+/**
+ * Recent-gap horizon for name-claim replay (@km/tribe/20002). A reclaiming
+ * session sees unread directs newer than `now - HORIZON`; older directs are NOT
+ * auto-replayed (they remain in history, reachable via an explicit `from:` /
+ * `since:` snapshot fetch). Bounds the cursor rewind so a long-lived name with
+ * days of undrained directs no longer floods the next default-drain with stale
+ * backlog. 12h covers crash/respawn + overnight reclaim gaps while excluding
+ * multi-day backlog.
+ */
+export const NAME_CLAIM_REPLAY_HORIZON_MS = 12 * 60 * 60 * 1000
+
 export function replayUnreadForClaimedName(
   ctx: TribeContext,
   claimedName: string,
@@ -247,6 +258,7 @@ export function replayUnreadForClaimedName(
   const oldest = ctx.stmts.oldestUnreadDirectForName.get({
     $name: claimedName,
     $self_id: ctx.sessionId,
+    $since_ts: now - NAME_CLAIM_REPLAY_HORIZON_MS,
   }) as { rowid: number | null } | undefined
   const oldestRowid = oldest?.rowid ?? null
   if (oldestRowid == null) return null
