@@ -141,6 +141,15 @@ export interface ReviewResult {
     recallHookConfigured: boolean
     rememberHookConfigured: boolean
     sessionMemoryFiles: number
+    /**
+     * Whether a local `.claude/settings.json` exists at the checked root. When
+     * false, the `*Configured` booleans mean UNKNOWN-for-this-root, NOT
+     * globally absent: this root simply has no local hook config (e.g. a clean
+     * integration clone), while ag/profile hooks may be configured elsewhere.
+     */
+    localConfigPresent: boolean
+    /** The settings.json path that was probed (so a caller sees WHERE it looked). */
+    localConfigPath: string
   }
   searchBenchmarks: {
     query: string
@@ -559,8 +568,9 @@ function percentile(sorted: number[], pct: number): number {
   return sorted[Math.max(0, idx)]!
 }
 
-function checkHookConfig(projectRoot: string, recommendations: string[]): ReviewResult["hookConfig"] {
+export function checkHookConfig(projectRoot: string, recommendations: string[]): ReviewResult["hookConfig"] {
   const settingsPath = path.join(projectRoot, ".claude", "settings.json")
+  const localConfigPresent = fs.existsSync(settingsPath)
   let userPromptSubmitConfigured = false
   let sessionEndConfigured = false
 
@@ -574,13 +584,23 @@ function checkHookConfig(projectRoot: string, recommendations: string[]): Review
       sessionEndConfigured = "SessionEnd" in settings.hooks
     }
   } catch {
-    recommendations.push("Could not read .claude/settings.json — hook config unknown")
+    // Distinguish "no local config at this root" (the clean/temp-root shape —
+    // unknown, not absent: profile hooks may live elsewhere) from a present but
+    // unreadable/malformed file.
+    recommendations.push(
+      localConfigPresent
+        ? `Could not read ${settingsPath} — hook config unknown (present but unreadable/malformed)`
+        : `No local .claude/settings.json at ${projectRoot} — hook config UNKNOWN for this root, not absent ` +
+            `(ag/profile hooks may be configured elsewhere). Run from the live repo root to check local hooks.`,
+    )
   }
 
-  if (!userPromptSubmitConfigured) {
+  // Only flag "not configured" when there IS a local config to judge against —
+  // otherwise the booleans are unknown-not-absent (see localConfigPresent).
+  if (localConfigPresent && !userPromptSubmitConfigured) {
     recommendations.push("UserPromptSubmit hook not configured — auto-recall is disabled")
   }
-  if (!sessionEndConfigured) {
+  if (localConfigPresent && !sessionEndConfigured) {
     recommendations.push("SessionEnd hook not configured — session lessons won't be saved")
   }
 
@@ -658,6 +678,8 @@ function checkHookConfig(projectRoot: string, recommendations: string[]): Review
     recallHookConfigured,
     rememberHookConfigured,
     sessionMemoryFiles,
+    localConfigPresent,
+    localConfigPath: settingsPath,
   }
 }
 

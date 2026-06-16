@@ -144,6 +144,9 @@ describe("discoverActiveSession", () => {
     expect(diagnostics.searchedRoots.some((r) => r.startsWith("ag-codex:d@delei.org"))).toBe(true)
     expect(diagnostics.exclusions.join(" ")).toMatch(/older matching session/i)
     expect(renderDiscoveryDiagnostics(diagnostics)).toContain("chosen:")
+    // 19988: a real match is NOT cwd-unmatched and carries no remediation.
+    expect(diagnostics.cwdUnmatched).toBe(false)
+    expect(diagnostics.remediation).toBeNull()
   })
 
   test("covers ~/.codex/sessions root, not just ag-profile codex", () => {
@@ -190,13 +193,23 @@ describe("discoverActiveSession", () => {
     expect(candidate).toBeNull()
     expect(diagnostics.matchedCount).toBe(0)
     expect(diagnostics.exclusions.join(" ")).toMatch(/cwd mismatch/i)
+    // 19988: sessions EXIST but none for this cwd → flag the temp/clean-root
+    // shape distinctly, with an actionable remediation.
+    expect(diagnostics.candidateCount).toBeGreaterThan(0)
+    expect(diagnostics.cwdUnmatched).toBe(true)
+    expect(diagnostics.remediation).toMatch(/not a recorded session root/i)
+    expect(diagnostics.remediation).toMatch(/live repo root/i)
   })
 
-  test("empty home: reports missing roots and no candidate", () => {
+  test("empty home: reports missing roots and no candidate (NOT cwd-unmatched)", () => {
     const { candidate, diagnostics } = discoverActiveSession({ cwd: CWD, homeDir: home })
     expect(candidate).toBeNull()
     expect(diagnostics.candidateCount).toBe(0)
     expect(diagnostics.missingRoots.length).toBeGreaterThan(0)
+    // 19988: a genuine no-session result (0 candidates) is NOT cwd-unmatched —
+    // the distinction the temp-root diagnostic depends on.
+    expect(diagnostics.cwdUnmatched).toBe(false)
+    expect(diagnostics.remediation).toBeNull()
   })
 })
 

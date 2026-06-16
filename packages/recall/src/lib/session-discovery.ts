@@ -104,6 +104,20 @@ export interface SessionDiscoveryDiagnostics {
   } | null
   /** Human-readable reasons candidates were excluded. */
   exclusions: string[]
+  /**
+   * True when transcripts EXIST (candidateCount > 0) but NONE ran in `cwd` —
+   * the "fresh index, looks healthy, but matched nothing" shape of a clean /
+   * temporary integration root (every session excluded by cwd mismatch). This
+   * is distinct from a genuine no-session result (candidateCount === 0, e.g. an
+   * empty index), so a caller can tell "wrong cwd" from "nothing recorded".
+   */
+  cwdUnmatched: boolean
+  /**
+   * Actionable remediation when {@link cwdUnmatched} is true; `null` otherwise.
+   * Discovery is cwd-based, so the fix is to run from a real project root — not
+   * a search-scope flag.
+   */
+  remediation: string | null
 }
 
 export interface DiscoverOptions {
@@ -284,6 +298,16 @@ export function discoverActiveSession(opts: DiscoverOptions): SessionDiscoveryRe
     )
   }
 
+  // Distinguish a not-a-project-root cwd (sessions exist, none match — the
+  // clean/temp integration-root shape) from a genuine no-session result.
+  const cwdUnmatched = matched.length === 0 && candidateCount > 0
+  const remediation = cwdUnmatched
+    ? `cwd '${cwd}' is not a recorded session root — ${candidateCount} session(s) were inspected but none ran here ` +
+      `(every candidate was excluded by cwd mismatch). This is the clean/temp integration-root shape, NOT an empty ` +
+      `index. recall discovery is cwd-based: run it from the live repo root (or the agent's working dir) to pick up ` +
+      `the active session. NOTE: \`--project <glob>\` only narrows SEARCH scope; it does not redirect discovery.`
+    : null
+
   const diagnostics: SessionDiscoveryDiagnostics = {
     cwd,
     searchedRoots,
@@ -302,6 +326,8 @@ export function discoverActiveSession(opts: DiscoverOptions): SessionDiscoveryRe
         }
       : null,
     exclusions,
+    cwdUnmatched,
+    remediation,
   }
 
   return { candidate: chosen, diagnostics }
@@ -330,6 +356,10 @@ export function renderDiscoveryDiagnostics(d: SessionDiscoveryDiagnostics): stri
   if (d.exclusions.length > 0) {
     lines.push("exclusions:")
     for (const e of d.exclusions) lines.push(`  - ${e}`)
+  }
+  if (d.cwdUnmatched && d.remediation) {
+    lines.push(`cwd-unmatched (sessions exist, none for this cwd):`)
+    lines.push(`  ${d.remediation}`)
   }
   return lines.join("\n")
 }

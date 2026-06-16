@@ -202,10 +202,19 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
   const hk = review.hookConfig
 
   console.log(`${BOLD}Hook Configuration${RESET}`)
-  console.log(`  ${hk.userPromptSubmitConfigured ? CHECK : CROSS} UserPromptSubmit hook configured`)
-  console.log(`  ${hk.sessionEndConfigured ? CHECK : CROSS} SessionEnd hook configured`)
-  console.log(`  ${hk.recallHookConfigured ? CHECK : CROSS} recall.ts hook command`)
-  console.log(`  ${hk.rememberHookConfigured ? CHECK : CROSS} recall.ts remember command`)
+  if (!hk.localConfigPresent) {
+    // No local .claude/settings.json at the checked root (the clean/temp-root
+    // shape): the hook booleans are UNKNOWN-for-this-root, not absent — say so
+    // instead of rendering a misleading row of ✗.
+    console.log(`  ${WARN} hook config UNKNOWN — no local .claude/settings.json at this root`)
+    console.log(`  ${DIM}  checked: ${hk.localConfigPath}${RESET}`)
+    console.log(`  ${DIM}  ag/profile hooks may be configured elsewhere; run from the live repo root to check.${RESET}`)
+  } else {
+    console.log(`  ${hk.userPromptSubmitConfigured ? CHECK : CROSS} UserPromptSubmit hook configured`)
+    console.log(`  ${hk.sessionEndConfigured ? CHECK : CROSS} SessionEnd hook configured`)
+    console.log(`  ${hk.recallHookConfigured ? CHECK : CROSS} recall.ts hook command`)
+    console.log(`  ${hk.rememberHookConfigured ? CHECK : CROSS} recall.ts remember command`)
+  }
   console.log(
     `  ${hk.sessionMemoryFiles > 0 ? CHECK : WARN} ${hk.sessionMemoryFiles} session memory file${hk.sessionMemoryFiles !== 1 ? "s" : ""}`,
   )
