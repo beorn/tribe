@@ -11,6 +11,7 @@ import { existsSync, readFileSync, statSync } from "node:fs"
 import { validateName, sanitizeMessage } from "./validation.ts"
 import { sendMessage, logEvent, replayUnreadForClaimedName } from "./messaging.ts"
 import { isPidAlive as pidStillAlive } from "./session.ts"
+import { gatherCodePin } from "./code-pin.ts"
 import { senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
 import type { LifecycleStore, LifecycleSnapshotRecord } from "./lifecycle-store.ts"
 
@@ -805,7 +806,17 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
         ?.n ?? 0,
   }
 
-  const result: Record<string, unknown> = { members, unread, stats, checked_at: new Date().toISOString() }
+  // Stale-code detector (@km/tribe/20033): surface whether the running daemon
+  // is provably older than the on-disk / superproject-pinned tribe code, so a
+  // stale daemon serving old handlers is observable (not silent) to any
+  // tribe.health() reader and the health-monitor.
+  const result: Record<string, unknown> = {
+    members,
+    unread,
+    stats,
+    code_pin: gatherCodePin(),
+    checked_at: new Date().toISOString(),
+  }
   // L4 of @km/tribe/stable-coordination: surface the chief-reconciler's
   // four-source reconciliation (live processes / bead claims / worktrees /
   // tribe sessions) inline so any session asking tribe.health() sees

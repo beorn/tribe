@@ -44,6 +44,7 @@ import {
 } from "./lib/compose/index.ts"
 import { TOOLS_LIST } from "tribe-wire/lib/tools-list"
 import { pruneOldActivityLogs } from "./lib/activity-log.ts"
+import { gatherCodePin } from "./lib/code-pin.ts"
 
 // ---------------------------------------------------------------------------
 // `daemon.ts hook <event>` — Claude Code hook entry point. This is the
@@ -221,6 +222,24 @@ log.info?.(`DB: ${tribe.config.dbPath}`)
 log.info?.(`PID: ${process.pid}`)
 if (tribe.recall) log.info?.(`Recall DB: ${tribe.config.recallDbPath}`)
 log.info?.(`Daemon ready (pid=${process.pid}, clients=${tribe.registry.clients.size})`)
+
+// Stale-code startup guard (@km/tribe/20033). At startup running == on-disk
+// (just captured), so this fires on the "autostarting from a dirty submodule"
+// case (on-disk != superproject pin). The running != on-disk case (checkout
+// advanced under a long-lived daemon) is surfaced over the process lifetime via
+// tribe.health()'s `code_pin`. Loud, non-fatal: a dirty pin must not autostart
+// silently, but we don't brick a deliberate standalone/dev run.
+{
+  const codePin = gatherCodePin()
+  if (codePin.stale) {
+    log.warn?.(
+      `STALE DAEMON CODE (@km/tribe/20033): ${codePin.reason} ` +
+        `[running=${codePin.running ?? "?"} on_disk=${codePin.on_disk ?? "?"} pin=${codePin.superproject_pin ?? "?"}]`,
+    )
+  } else {
+    log.debug?.(`code pin ok (running=${codePin.running ?? "unknown"})`)
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Run loop — resolves when the daemon's scope aborts (shutdown / SIGTERM /
