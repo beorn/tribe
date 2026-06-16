@@ -3,7 +3,6 @@
  * Replaces: review, now, hour, day, stats commands.
  */
 
-import * as path from "path"
 import * as fs from "fs"
 import * as os from "os"
 import {
@@ -18,6 +17,7 @@ import {
 import { reviewMemorySystem } from "../history/recall"
 import { formatCost } from "./llm-backend.ts"
 import { discoverActiveSession, renderDiscoveryDiagnostics } from "./session-discovery.ts"
+import { resolveHostProjectRoot } from "./project-root.ts"
 import {
   BOLD,
   RESET,
@@ -38,21 +38,12 @@ import {
   formatSessionId,
 } from "./format"
 
-/**
- * Resolve the project root directory.
- * The recall.ts script lives at vendor/bearly/tools/recall.ts
- * So project root is 4 levels up from __dirname (plugins/recall/src/lib/ → plugins/recall/src/ → plugins/recall/ → plugins/ → vendor/bearly/)
- */
-function getProjectRoot(): string {
-  let dir = path.resolve(import.meta.dir)
-  for (let i = 0; i < 4; i++) {
-    dir = path.dirname(dir)
-  }
-  return dir
-}
-
 export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Promise<void> {
-  const projectRoot = getProjectRoot()
+  // Resolve the project root from the CALLER's cwd, not this file's location.
+  // recall is a vendored submodule, so a code-relative walk lands on
+  // vendor/tribe and makes hook config always read "unknown" (19990); cwd-based
+  // resolution inspects the real host repo's .claude/settings.json.
+  const projectRoot = resolveHostProjectRoot(process.cwd())
   // Bounded by default: skip the LLM synthesis test + multi-model race so
   // chief recovery gets index/hook diagnostics promptly. `--bench` opts in.
   const skipLlm = !opts.bench
