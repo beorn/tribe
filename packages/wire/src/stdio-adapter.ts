@@ -483,6 +483,15 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
               allowRequestedDelivery: CLAUDE_CHANNEL_ENABLED,
             }),
             identity_token: identityToken,
+            // @km/tribe/19975 — forward the launch-time account/provider label
+            // on join (symmetric with registerParams). A join is authoritative
+            // for these in the daemon, so re-joining corrects a row that was
+            // first seeded with a stale label. Only attach when the model
+            // didn't pass its own, and only when ag set the env (TRIBE_ACCOUNT
+            // / TRIBE_PROVIDER) — an unset launch context omits them and the
+            // daemon-side COALESCE preserves any existing good label.
+            ...(a.account === undefined && args.account ? { account: args.account } : {}),
+            ...(a.provider === undefined && args.provider ? { provider: args.provider } : {}),
           }
         : a
     // Tool names are bare verbs ("send", "fetch"); daemon wire methods use "tribe." prefix

@@ -789,7 +789,10 @@ export function createStatements(db: Database) {
     renameSession: db.prepare("UPDATE sessions SET name = $new_name, updated_at = $now WHERE id = $session_id"),
 
     updateSessionMeta: db.prepare(`
-		UPDATE sessions SET name = $name, role = $role, domains = $domains, updated_at = $now
+		UPDATE sessions SET name = $name, role = $role, domains = $domains,
+			account = COALESCE($account, account),
+			provider = COALESCE($provider, provider),
+			updated_at = $now
 		WHERE id = $id
 	`),
 
