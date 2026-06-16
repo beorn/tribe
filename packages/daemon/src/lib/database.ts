@@ -762,6 +762,21 @@ export function createStatements(db: Database) {
 		ORDER BY opened_at ASC
 	`),
 
+    /** Ball-tracker GC (@km/tribe/20008): delete pending rows opened before a
+     *  cutoff. A ball that never got a reply (dead recipient, out-of-band close,
+     *  bead-closed handoff) otherwise stays "open" forever and pollutes
+     *  tribe.pending. Deletes only the ball-tracker row — message history is
+     *  untouched. Global form drives the periodic cleanup. */
+    gcStalePendingRequests: db.prepare("DELETE FROM pending_request WHERE opened_at < $cutoff"),
+
+    /** Ball-tracker GC scoped to one recipient — the EXPLICIT repair path
+     *  (tribe.pending prune) safe to run during chief recovery: only deletes the
+     *  owner's balls older than the cutoff; fresh balls + other recipients are
+     *  untouched. */
+    gcStalePendingForRecipient: db.prepare(
+      "DELETE FROM pending_request WHERE recipient = $recipient AND opened_at < $cutoff",
+    ),
+
     allSessions: db.prepare(
       "SELECT id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, started_at, updated_at, filter_mode, filter_until, filter_mute, last_inbox_pull_seq, delivery FROM sessions",
     ),

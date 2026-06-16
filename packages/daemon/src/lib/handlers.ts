@@ -403,6 +403,20 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
   const owner = (a.owner as string) ?? ctx.getName()
   const staleMs = typeof a.stale_ms === "number" ? a.stale_ms : null
   const now = Date.now()
+
+  // Explicit repair path (@km/tribe/20008): prune stale balls for `owner`. Safe
+  // to run during chief recovery — it REQUIRES a stale_ms threshold so it can
+  // only ever delete balls older than that age (fresh request/reply balls and
+  // other recipients are untouched), and it removes only the ball-tracker row,
+  // never message history.
+  if (a.prune === true) {
+    if (staleMs === null) {
+      return jsonResult({ error: "prune requires stale_ms (the minimum ball age, in ms, to GC)." })
+    }
+    const res = ctx.stmts.gcStalePendingForRecipient.run({ $recipient: owner, $cutoff: now - staleMs })
+    return jsonResult({ owner, pruned: res.changes ?? 0, stale_ms: staleMs })
+  }
+
   const rows = ctx.stmts.selectPendingForRecipient.all({ $recipient: owner }) as Array<{
     request_id: string
     sender: string

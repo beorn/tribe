@@ -291,8 +291,16 @@ export function cleanupOldData(ctx: TribeContext): void {
   const msgsDel = ctx.stmts.deleteExpiredMessages.run({ $cutoff: cutoff })
   // Clean dedup keys older than 1 day (they only need to survive the poll race window)
   ctx.stmts.cleanupDedup.run({ $cutoff: now_ms - 24 * 60 * 60 * 1000 })
+  // Ball-tracker GC (@km/tribe/20008): a pending request that never got a reply
+  // would otherwise stay "open" forever and pollute tribe.pending. Tie the GC to
+  // the SAME cutoff as message retention — a ball never outlives the message that
+  // opened it. Fresh request/reply balls (well within 7d) are untouched; only the
+  // ball-tracker row is removed, never message history.
+  const pendingDel = ctx.stmts.gcStalePendingRequests.run({ $cutoff: cutoff })
 
-  if ((msgsDel.changes ?? 0) > 0) {
-    log.info?.(`cleanup: ${archived.changes ?? 0} msgs archived, ${msgsDel.changes} msgs deleted`)
+  if ((msgsDel.changes ?? 0) > 0 || (pendingDel.changes ?? 0) > 0) {
+    log.info?.(
+      `cleanup: ${archived.changes ?? 0} msgs archived, ${msgsDel.changes ?? 0} msgs deleted, ${pendingDel.changes ?? 0} stale pending balls GC'd`,
+    )
   }
 }
