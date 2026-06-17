@@ -19,9 +19,10 @@
  * registered on root scope.
  */
 
-import { createConnection, createServer, type Server } from "node:net"
+import { createServer, type Server } from "node:net"
 import { existsSync, unlinkSync, chmodSync } from "node:fs"
 import { createLogger } from "loggily"
+import { waitForSocketAlive } from "tribe-wire/lib/socket"
 import type { BaseTribe } from "./base.ts"
 import type { WithConfig } from "./with-config.ts"
 
@@ -57,24 +58,13 @@ export interface WithSocketServer {
  */
 export async function probeAndCleanSocket(socketPath: string): Promise<boolean> {
   if (!existsSync(socketPath)) return false
-  const alive = await new Promise<boolean>((resolvePromise) => {
-    const probe = createConnection(socketPath)
-    let settled = false
-    const finish = (v: boolean): void => {
-      if (settled) return
-      settled = true
-      try {
-        probe.destroy()
-      } catch {
-        /* ignore */
-      }
-      resolvePromise(v)
-    }
-    probe.once("connect", () => finish(true))
-    probe.once("error", () => finish(false))
-    const t = setTimeout(() => finish(false), 500) as unknown as { unref?: () => void }
-    t.unref?.()
-  })
+  // Retry the liveness probe before declaring the socket stale. A single probe
+  // can transiently fail against a LIVE daemon (full accept backlog, hot-reload
+  // re-exec window, socket mid-churn during a startup storm). Unlinking a live
+  // socket here would orphan the running daemon and let THIS process bind a
+  // competing one — the split-brain that left every pane "active-pane-no-tribe".
+  // waitForSocketAlive biases toward detecting life. See tribe-wire client.ts.
+  const alive = await waitForSocketAlive(socketPath)
   if (alive) return true
   try {
     unlinkSync(socketPath)
@@ -96,6 +86,11 @@ export function withSocketServer<T extends BaseTribe & WithConfig>(): (t: T) => 
 
     let server: Server
     let inheritedFd = false
+    // True once THIS process owns the bound socket file (fresh-start path). A
+    // daemon that lost a cold-start bind race (EADDRINUSE — its listen callback
+    // never fires) leaves this false, so its cleanup defer below will NOT unlink
+    // the winner's socket. Guards against a losing daemon orphaning the winner.
+    let bound = false
 
     if (inheritFd !== null) {
       server = createServer()
@@ -105,6 +100,7 @@ export function withSocketServer<T extends BaseTribe & WithConfig>(): (t: T) => 
     } else {
       server = createServer()
       server.listen(socketPath, () => {
+        bound = true
         try {
           chmodSync(socketPath, 0o600)
         } catch {
@@ -132,7 +128,7 @@ export function withSocketServer<T extends BaseTribe & WithConfig>(): (t: T) => 
       } catch {
         /* already closing */
       }
-      if (!inheritedFd && !socket.handedOff) {
+      if (!inheritedFd && !socket.handedOff && bound) {
         try {
           unlinkSync(socketPath)
         } catch {
