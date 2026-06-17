@@ -1172,7 +1172,18 @@ function handleLifecyclePublish(ctx: TribeContext, a: ToolArgs, opts: HandlerOpt
   if (payload === undefined || payload === null) {
     return jsonResult({ error: "snapshot field is required" })
   }
-  const record = store.set(ctx.getName(), ctx.sessionId, payload, Date.now())
+  // A publisher MAY attribute the snapshot to an explicit session name. This is
+  // required for multiplexing observers (one silvercode host watches many agent
+  // sessions over a single daemon connection): the connection name is the host,
+  // not the agent, so without this every host's snapshots collapse onto one
+  // shared name and `tribe.lifecycle("@agent/N")` can't find them (bead 20080).
+  // Falls back to the connection's own name for single-identity publishers.
+  const explicitName = a.sessionName
+  if (explicitName !== undefined && typeof explicitName !== "string") {
+    return jsonResult({ error: "sessionName field must be a string when provided" })
+  }
+  const sessionName = typeof explicitName === "string" && explicitName.length > 0 ? explicitName : ctx.getName()
+  const record = store.set(sessionName, ctx.sessionId, payload, Date.now())
   return jsonResult({
     published: true,
     sessionName: record.sessionName,

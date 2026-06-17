@@ -394,6 +394,11 @@ export const TOOLS_LIST = [
             "Opaque lifecycle snapshot. Publisher-owned shape (e.g. { currentState, activeTool, elapsedMs, softDeadlineMs, hardDeadlineMs }). Daemon stores verbatim.",
           additionalProperties: true,
         },
+        sessionName: {
+          type: "string",
+          description:
+            "Attribute the snapshot to this session name (the daemon's store key). Required for multiplexing publishers — one host observing many agent sessions over a single connection — so each agent's snapshot is keyed by its own name. Omit to use the connection's own name.",
+        },
       },
       required: ["snapshot"],
     },
