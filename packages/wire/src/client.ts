@@ -137,18 +137,102 @@ export type ConnectOrStartOpts = {
   noSpawn?: boolean
   /** Max reconnect attempts after spawning. Default 10. */
   maxStartupAttempts?: number
+  /**
+   * How many times to retry connecting to an *existing* daemon before deciding
+   * it is dead and reclaiming/spawning. Default 5. See `connectExisting` for
+   * why a single connect is unsafe.
+   */
+  connectAttempts?: number
+  /** @internal test seam — override the connect primitive. */
+  connectFn?: (path: string, o?: ConnectToDaemonOpts) => Promise<DaemonClient>
+}
+
+/**
+ * Connect to an *existing* daemon, retrying on a transient ECONNREFUSED.
+ *
+ * Why this exists: a single connect cannot distinguish "stale socket, daemon
+ * dead" from "live daemon, momentarily unreachable". On macOS/BSD a connect to
+ * a LIVE Unix-domain socket returns ECONNREFUSED when the accept backlog is
+ * full; the same transient refusal happens during the daemon's hot-reload
+ * re-exec window and while a socket is being churned by a mis-fired respawn.
+ * Treating that refusal as "dead" is exactly what made `connectOrStart` unlink
+ * a live daemon's socket and spawn a competitor — the split-brain that left
+ * every pane reporting "active-pane-no-tribe" / "no alive hats".
+ *
+ * Retrying a few times with backoff connects to a live-but-busy daemon; only a
+ * genuinely dead/stale socket keeps refusing for the whole window. ENOENT (no
+ * socket file at all) short-circuits to `null` on the first try — there is
+ * nothing to wait for, the caller should spawn. Non-refusal errors propagate.
+ *
+ * Returns a connected client, or `null` when the socket stays unreachable.
+ */
+export async function connectExisting(
+  socketPath: string,
+  opts?: {
+    callTimeoutMs?: number
+    /** Total connect attempts before giving up. Default 5. */
+    attempts?: number
+    /** @internal test seam — override the connect primitive. */
+    connectFn?: (path: string, o?: ConnectToDaemonOpts) => Promise<DaemonClient>
+    /** @internal test seam — override the backoff delay. */
+    delayFn?: (ms: number) => Promise<void>
+  },
+): Promise<DaemonClient | null> {
+  const attempts = Math.max(1, opts?.attempts ?? 5)
+  const connectFn = opts?.connectFn ?? connectToDaemon
+  const delayFn = opts?.delayFn ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      return await connectFn(socketPath, { callTimeoutMs: opts?.callTimeoutMs })
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code
+      // No socket file → daemon truly absent; don't burn the retry budget.
+      if (code === "ENOENT") return null
+      // Anything other than "refused" is not the transient case → surface it.
+      if (code !== "ECONNREFUSED") throw err
+      // Refused: stale OR live-but-busy. Back off and retry before deciding.
+      if (attempt < attempts - 1) await delayFn(Math.min(50 * 2 ** attempt, 1000))
+    }
+  }
+  return null
 }
 
 export async function connectOrStart(socketPath: string, opts?: ConnectOrStartOpts): Promise<DaemonClient> {
-  try {
-    return await connectToDaemon(socketPath, { callTimeoutMs: opts?.callTimeoutMs })
-  } catch (err: unknown) {
-    const code = (err as NodeJS.ErrnoException).code
-    if (code !== "ECONNREFUSED" && code !== "ENOENT") throw err
-    if (opts?.noSpawn) throw err
+  // Connect to an existing daemon, retrying transient refusals so we never
+  // mistake a live-but-busy daemon for a dead one (see `connectExisting`).
+  const existing = await connectExisting(socketPath, {
+    callTimeoutMs: opts?.callTimeoutMs,
+    attempts: opts?.connectAttempts,
+    connectFn: opts?.connectFn,
+  })
+  if (existing) return existing
+
+  if (opts?.noSpawn) {
+    throw Object.assign(new Error(`connectOrStart: no reachable daemon at ${socketPath} (noSpawn)`), {
+      code: "ECONNREFUSED",
+    })
   }
 
+  // No daemon answered after retries. A socket FILE may still be present —
+  // stale, or owned by a daemon that recovered in the last few ms. NEVER unlink
+  // a socket a live daemon owns: that orphans every other client and forces the
+  // split-brain spawn this whole function exists to avoid. Probe once more;
+  // only reclaim a confirmed-dead file.
   if (existsSync(socketPath)) {
+    if (await isSocketAlive(socketPath)) {
+      const revived = await connectExisting(socketPath, {
+        callTimeoutMs: opts?.callTimeoutMs,
+        attempts: 3,
+        connectFn: opts?.connectFn,
+      })
+      if (revived) return revived
+      // Alive at the kernel level but no client handshake completes — surface
+      // rather than destroy a live socket and spawn a competitor.
+      throw Object.assign(
+        new Error(`connectOrStart: socket ${socketPath} is alive but unreachable; refusing to unlink a live daemon`),
+        { code: "EBUSY" },
+      )
+    }
     try {
       unlinkSync(socketPath)
     } catch {
@@ -175,11 +259,12 @@ export async function connectOrStart(socketPath: string, opts?: ConnectOrStartOp
   const maxAttempts = opts?.maxStartupAttempts ?? 10
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     await new Promise<void>((r) => setTimeout(r, Math.min(100 * 2 ** attempt, 2000)))
-    try {
-      return await connectToDaemon(socketPath, { callTimeoutMs: opts?.callTimeoutMs })
-    } catch {
-      /* keep trying */
-    }
+    const client = await connectExisting(socketPath, {
+      callTimeoutMs: opts?.callTimeoutMs,
+      attempts: 1,
+      connectFn: opts?.connectFn,
+    })
+    if (client) return client
   }
 
   throw new Error(`Failed to connect to daemon at ${socketPath} after starting it`)
@@ -309,4 +394,30 @@ export function isSocketAlive(socketPath: string): Promise<boolean> {
     socket.once("connect", () => done(true))
     socket.once("error", () => done(false))
   })
+}
+
+/**
+ * Liveness probe with retry — the safe counterpart to `isSocketAlive`.
+ *
+ * A single `isSocketAlive` probe returns false on a transient ECONNREFUSED
+ * (full accept backlog, hot-reload re-exec window, socket mid-churn). Callers
+ * that act DESTRUCTIVELY on a "dead" verdict — e.g. the daemon unlinking a
+ * socket it believes is stale before binding its own — must not trust a single
+ * probe. Retrying biases toward detecting life: returns true as soon as any
+ * probe connects, and only returns false after every attempt refuses.
+ */
+export async function waitForSocketAlive(
+  socketPath: string,
+  opts?: { attempts?: number; delayMs?: number; aliveFn?: (p: string) => Promise<boolean> },
+): Promise<boolean> {
+  const attempts = Math.max(1, opts?.attempts ?? 5)
+  const aliveFn = opts?.aliveFn ?? isSocketAlive
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (await aliveFn(socketPath)) return true
+    if (attempt < attempts - 1) {
+      const ms = opts?.delayMs ?? Math.min(50 * 2 ** attempt, 1000)
+      await new Promise<void>((r) => setTimeout(r, ms))
+    }
+  }
+  return false
 }

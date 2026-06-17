@@ -43,7 +43,7 @@ export const TRIBE_PROTOCOL_VERSION = 5
 // Re-exports from the surrounding tribe-client package
 // ---------------------------------------------------------------------------
 
-export { connectToDaemon, isSocketAlive } from "../client.ts"
+export { connectExisting, connectToDaemon, isSocketAlive, waitForSocketAlive } from "../client.ts"
 export { createLineParser } from "../parser.ts"
 export {
   isNotification,

@@ -25,6 +25,7 @@ import {
   resolveProjectId,
 } from "./lib/config.ts"
 import { resolveSocketPath, createReconnectingClient, TRIBE_PROTOCOL_VERSION, type DaemonClient } from "./lib/socket.ts"
+import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
 import { spawn } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { TOOLS_LIST } from "./lib/tools-list.ts"
@@ -230,96 +231,143 @@ const registerParams = {
 // handshake long enough for codex's MCP launcher to time out and relaunch
 // the server — the double-spawn seen in the connect logs. Tool calls that
 // arrive before the daemon is ready `await daemonReady` in the handler.
-daemonReady = createReconnectingClient({
-  socketPath: SOCKET_PATH,
-  async onConnect(client) {
-    // km 19442 — open a fresh connect-replay window so a stale daemon's body-push
-    // burst on (re)connect is bounded (see connectReplayGate + the `channel` handler).
-    connectReplayGate.reset(Date.now())
-    const reg = (await client.call("register", registerParams)) as {
-      sessionId: string
-      name: string
-      role: string
-      chief: string
-      protocolVersion?: number
-    }
-    myName = reg.name
-    myRole = reg.role
-    log.info?.(`Registered as ${myName} (${myRole})`)
-    // Version-skew guard (km 19851): with the daemon embedded in host
-    // binaries, two host versions can share one daemon — the first-started
-    // binary's daemon serves the rest. Skew is warn-once, never a block:
-    // the daemon already tolerates older clients, and a hard fail would
-    // break exactly the zero-config flow the embedding exists for.
-    if (
-      !versionSkewWarned &&
-      typeof reg.protocolVersion === "number" &&
-      reg.protocolVersion !== TRIBE_PROTOCOL_VERSION
-    ) {
-      versionSkewWarned = true
-      log.warn?.(
-        `tribe protocol version skew: this session speaks v${TRIBE_PROTOCOL_VERSION}, daemon speaks v${reg.protocolVersion}. ` +
-          `Coordination continues; restart the daemon (or the older sessions) to align.`,
-      )
-    }
-    void client.call("subscribe").catch(() => {})
-
-    // Startup banner — emit tribe state to the channel so the agent (and user) sees the setup
-    try {
-      const membersResult = (await client.call("tribe.members", {})) as { content: Array<{ text: string }> }
-      const membersData = JSON.parse(membersResult.content?.[0]?.text ?? "{}") as {
-        sessions?: Array<{ name: string; role: string; alive: boolean; uptime_min: number; delivery?: string }>
+function startDaemonConnection(): Promise<DaemonClient> {
+  return createReconnectingClient({
+    socketPath: SOCKET_PATH,
+    async onConnect(client) {
+      // km 19442 — open a fresh connect-replay window so a stale daemon's body-push
+      // burst on (re)connect is bounded (see connectReplayGate + the `channel` handler).
+      connectReplayGate.reset(Date.now())
+      const reg = (await client.call("register", registerParams)) as {
+        sessionId: string
+        name: string
+        role: string
+        chief: string
+        protocolVersion?: number
       }
-      const sessions = (membersData.sessions ?? []).filter((s: { alive: boolean }) => s.alive)
-      const chief = reg.chief || sessions.find((s: { role: string }) => s.role === "chief")?.name || "(none)"
-      const peers =
-        sessions
-          .filter((s: { name: string }) => s.name !== myName)
-          .map((s: { name: string; role: string }) => `${s.name} (${s.role})`)
-          .join(", ") || "(solo)"
+      myName = reg.name
+      myRole = reg.role
+      log.info?.(`Registered as ${myName} (${myRole})`)
+      // Version-skew guard (km 19851): with the daemon embedded in host
+      // binaries, two host versions can share one daemon — the first-started
+      // binary's daemon serves the rest. Skew is warn-once, never a block:
+      // the daemon already tolerates older clients, and a hard fail would
+      // break exactly the zero-config flow the embedding exists for.
+      if (
+        !versionSkewWarned &&
+        typeof reg.protocolVersion === "number" &&
+        reg.protocolVersion !== TRIBE_PROTOCOL_VERSION
+      ) {
+        versionSkewWarned = true
+        log.warn?.(
+          `tribe protocol version skew: this session speaks v${TRIBE_PROTOCOL_VERSION}, daemon speaks v${reg.protocolVersion}. ` +
+            `Coordination continues; restart the daemon (or the older sessions) to align.`,
+        )
+      }
+      void client.call("subscribe").catch(() => {})
 
-      const shortSocket = SOCKET_PATH.replace(process.env.HOME ?? "", "~")
-      const banner = `**tribe** ${myName} (${myRole}) · chief: ${chief} · ${DELIVERY} · peers: ${peers} · ${shortSocket}`
-      sendChannel(banner, { from: "tribe-startup", type: "system" })
-    } catch {
-      // Non-fatal — banner is diagnostic, don't block startup
-      log.debug?.("Startup banner failed (non-fatal)")
-    }
-  },
-  onDisconnect() {
-    log.debug?.(`Daemon connection lost`)
-  },
-  onReconnect() {
-    log.info?.(`Reconnected to daemon`)
-    // km 19442 — a reconnect can replay the daemon's pending body-push burst; rebound it.
-    connectReplayGate.reset(Date.now())
-  },
-}).then((client) => {
-  daemon = client
-  return client
-})
+      // Startup banner — emit tribe state to the channel so the agent (and user) sees the setup
+      try {
+        const membersResult = (await client.call("tribe.members", {})) as { content: Array<{ text: string }> }
+        const membersData = JSON.parse(membersResult.content?.[0]?.text ?? "{}") as {
+          sessions?: Array<{ name: string; role: string; alive: boolean; uptime_min: number; delivery?: string }>
+        }
+        const sessions = (membersData.sessions ?? []).filter((s: { alive: boolean }) => s.alive)
+        const chief = reg.chief || sessions.find((s: { role: string }) => s.role === "chief")?.name || "(none)"
+        const peers =
+          sessions
+            .filter((s: { name: string }) => s.name !== myName)
+            .map((s: { name: string; role: string }) => `${s.name} (${s.role})`)
+            .join(", ") || "(solo)"
+
+        const shortSocket = SOCKET_PATH.replace(process.env.HOME ?? "", "~")
+        const banner = `**tribe** ${myName} (${myRole}) · chief: ${chief} · ${DELIVERY} · peers: ${peers} · ${shortSocket}`
+        sendChannel(banner, { from: "tribe-startup", type: "system" })
+      } catch {
+        // Non-fatal — banner is diagnostic, don't block startup
+        log.debug?.("Startup banner failed (non-fatal)")
+      }
+    },
+    onDisconnect() {
+      log.debug?.(`Daemon connection lost`)
+    },
+    onReconnect() {
+      log.info?.(`Reconnected to daemon`)
+      // km 19442 — a reconnect can replay the daemon's pending body-push burst; rebound it.
+      connectReplayGate.reset(Date.now())
+    },
+  }).then((client) => {
+    daemon = client
+    // A successful (re)connect clears the degrade — the session is live again.
+    daemonDegradedReason = null
+    return client
+  })
+}
 
 // The ONE degrade notice. Without this catch, a daemon that can never start
 // (no socket + no daemon script — e.g. a standalone install with a broken
-// spawn path) rejects `daemonReady` and every chained `.then` unhandled.
-daemonReady.catch((err: unknown) => {
-  daemonDegradedReason = err instanceof Error ? err.message : String(err)
-  log.warn?.(`tribe daemon unavailable — running solo (${daemonDegradedReason})`)
-  try {
-    sendChannel(`**tribe** unavailable — running solo. This session works normally; tribe tools are disabled.`, {
-      from: "tribe-startup",
-      type: "system",
+// spawn path) rejects the connect promise and every chained `.then` unhandled.
+// Re-armed on each recovery attempt (see recoverDaemonIfDegraded), but the
+// notice itself fires exactly ONCE per process (km 19851): re-setting the
+// reason each time keeps state accurate without spamming the log/channel on
+// every failed retry.
+let degradeAnnounced = false
+function armDegradeNotice(p: Promise<DaemonClient>): void {
+  p.catch((err: unknown) => {
+    daemonDegradedReason = err instanceof Error ? err.message : String(err)
+    if (degradeAnnounced) return
+    degradeAnnounced = true
+    log.warn?.(`tribe daemon unavailable — running solo (${daemonDegradedReason})`)
+    try {
+      sendChannel(`**tribe** unavailable — running solo. This session works normally; tribe tools are disabled.`, {
+        from: "tribe-startup",
+        type: "system",
+      })
+    } catch {
+      // Channel may not be wired yet/at all — the log line above is the notice.
+    }
+  })
+}
+
+// Self-heal: a degraded session re-attempts the daemon connect on demand. The
+// reconnect loop only covers post-connect drops, so an initial-connect failure
+// (transient ECONNREFUSED during a startup herd, daemon briefly down at launch)
+// would otherwise pin the session solo until restart. Throttled so a daemon
+// that is genuinely down is not respawned/hammered on every tool call.
+let lastDaemonRecoveryMs = 0
+const DAEMON_RECOVERY_THROTTLE_MS = 5_000
+async function recoverDaemonIfDegraded(): Promise<void> {
+  const nowMs = Date.now()
+  if (
+    !shouldAttemptDaemonRecovery({
+      daemonConnected: daemon !== undefined,
+      degraded: daemonDegradedReason !== null,
+      lastAttemptMs: lastDaemonRecoveryMs,
+      nowMs,
+      throttleMs: DAEMON_RECOVERY_THROTTLE_MS,
     })
-  } catch {
-    // Channel may not be wired yet/at all — the log line above is the notice.
+  ) {
+    return
   }
-})
+  lastDaemonRecoveryMs = nowMs
+  const attempt = startDaemonConnection()
+  armDegradeNotice(attempt)
+  daemonReady = attempt
+  try {
+    await attempt
+  } catch {
+    // Still unreachable — daemonDegradedReason is re-set by armDegradeNotice.
+  }
+}
+
+daemonReady = startDaemonConnection()
+armDegradeNotice(daemonReady)
 
 // ---------------------------------------------------------------------------
 // MCP Server
 // ---------------------------------------------------------------------------
 
-const joinInstruction = `If you receive a stdio-adapter auto-identify message, just call tribe.join with a short name for your focus area. Omit the role parameter — the daemon auto-assigns chief to the first session and member to the rest. No need to call tribe.members or tribe.fetch afterward — just join silently and continue.`
+const joinInstruction = `If you receive a stdio-adapter auto-identify message, just call tribe.join with a short name for your focus area. Omit the role parameter — the daemon registers every session as a plain "member"; it does NOT assign "chief" by connect order. "chief" is a bead-lease hat (claimed via /up / the bead lease system), not a daemon-assigned role. No need to call tribe.members or tribe.fetch afterward — just join silently and continue.`
 
 // Shared turn-start inbox guidance for every role variant. Kept deliberately
 // SMALL: new messages already arrive inline as <channel> envelopes (push delivery
@@ -496,14 +544,20 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         : a
     // Tool names are bare verbs ("send", "fetch"); daemon wire methods use "tribe." prefix
     const daemonMethod = `tribe.${name}`
-    // Degraded: the daemon can never come up. One clear sentence per call,
-    // never the raw connect error (km 19851 loud-but-soft).
+    // Degraded: an earlier connect failed. Before answering solo, self-heal —
+    // the daemon may be up now (it was briefly down / its socket was churned
+    // during a startup herd). Throttled inside recoverDaemonIfDegraded.
+    if (daemonDegradedReason !== null && daemon === undefined) {
+      await recoverDaemonIfDegraded()
+    }
+    // Still degraded after the retry → one clear sentence per call, never the
+    // raw connect error (km 19851 loud-but-soft).
     if (daemonDegradedReason !== null && daemon === undefined) {
       return {
         content: [
           {
             type: "text",
-            text: `tribe unavailable — running solo (daemon could not start). This session works normally without tribe; restart it to retry.`,
+            text: `tribe unavailable — running solo. This session works normally without tribe; it auto-retries the daemon connection periodically — restart it to force an immediate retry.`,
           },
         ],
       }
