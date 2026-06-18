@@ -5,8 +5,10 @@ Session history search for Claude Code. FTS5-indexed search across past sessions
 Ships with the tribe repository (`packages/recall`); the daemon lazy-loads it
 for the memory verbs (`tribe.ask`, `tribe.brief`, delta injection) and the
 `tribe hook` handlers index sessions through it. LLM-backed features (synthesis,
-planner, summaries) need `TRIBE_LLM_DIR` pointed at an external backend (see the
-repo README); FTS search and file recovery work without one.
+planner, summaries) use a host-local bearly LLM backend when available
+(`vendor/bearly/plugins/llm/src` or a sibling `bearly/plugins/llm/src` checkout);
+`TRIBE_LLM_DIR` remains the explicit override. FTS search and file recovery work
+without an LLM backend.
 
 ## CLI
 

@@ -51,10 +51,12 @@ runtime.
 ## LLM features (optional)
 
 Coordination and FTS search work with zero configuration. Features that call an
-LLM (synthesis, query planner, session summaries) need an external backend:
-point `TRIBE_LLM_DIR` at a directory exposing `lib/types.ts`, `lib/research.ts`,
-and `lib/providers.ts` (e.g. bearly's `plugins/llm/src`). Without it those
-features degrade to their documented no-LLM paths — loudly, never silently.
+LLM (synthesis, query planner, session summaries) need an external backend.
+Host checkouts that include bearly are discovered automatically from
+`vendor/bearly/plugins/llm/src` or a sibling `bearly/plugins/llm/src` checkout.
+For custom layouts, point `TRIBE_LLM_DIR` at a directory exposing
+`lib/types.ts`, `lib/research.ts`, and `lib/providers.ts`. Without a backend,
+those features degrade to their documented no-LLM paths — loudly, never silently.
 
 `TRIBE_RECALL_ENGINE_DIR` and `TRIBE_INJECTION_DEBUG_DIR` override the in-repo
 engine/recorder locations for forks and experiments; you normally never set

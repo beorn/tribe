@@ -16,6 +16,10 @@
  * resolve into a repo that may not be checked out.
  */
 
+import { existsSync } from "node:fs"
+import { dirname, join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
+
 export type LlmModel = { provider: string; modelId: string }
 
 export type LlmUsage = {
@@ -52,17 +56,35 @@ export type LlmBackend = {
 let probe: Promise<LlmBackend | null> | undefined
 let warned = false
 
+const REQUIRED_BACKEND_FILES = ["lib/types.ts", "lib/research.ts", "lib/providers.ts"] as const
+
 /**
- * Load the LLM backend from TRIBE_LLM_DIR. Cached after the first call.
+ * Resolve the LLM backend directory. TRIBE_LLM_DIR is the explicit override;
+ * when unset, host checkouts may provide bearly at the repo root
+ * (`vendor/bearly/plugins/llm/src`) or as a sibling checkout
+ * (`../bearly/plugins/llm/src`).
+ */
+function resolveLlmBackendDir(): string | null {
+  const explicit = process.env.TRIBE_LLM_DIR
+  if (explicit) return explicit
+  for (const candidate of candidateLlmBackendDirs()) {
+    if (backendDirExists(candidate)) return candidate
+  }
+  return null
+}
+
+/**
+ * Load the LLM backend from TRIBE_LLM_DIR or a host-local bearly checkout.
+ * Cached after the first call.
  * Returns null (with a one-time stderr warning) when the backend is absent
  * or fails to load — callers take their documented no-LLM degrade path.
  */
 export async function loadLlm(): Promise<LlmBackend | null> {
   if (probe !== undefined) return probe
   probe = (async () => {
-    const dir = process.env.TRIBE_LLM_DIR
+    const dir = resolveLlmBackendDir()
     if (!dir) {
-      warnOnce("TRIBE_LLM_DIR is unset")
+      warnOnce("TRIBE_LLM_DIR is unset and no local bearly plugins/llm/src was found")
       return null
     }
     try {
@@ -80,13 +102,49 @@ export async function loadLlm(): Promise<LlmBackend | null> {
         isProviderAvailable: providers.isProviderAvailable,
       } as LlmBackend
     } catch (err) {
-      warnOnce(`backend FAILED to load from TRIBE_LLM_DIR=${dir}: ${err instanceof Error ? err.message : String(err)}`)
+      const source = process.env.TRIBE_LLM_DIR ? `TRIBE_LLM_DIR=${dir}` : `auto-discovered ${dir}`
+      warnOnce(`backend FAILED to load from ${source}: ${err instanceof Error ? err.message : String(err)}`)
       // silent-fallback-allow: loud-by-design — warnOnce() above logs the load
       // failure once per process; null is the documented no-LLM degrade mode.
       return null
     }
   })()
   return probe
+}
+
+function* candidateLlmBackendDirs(): Generator<string> {
+  const seen = new Set<string>()
+  const roots = [process.env.CLAUDE_PROJECT_DIR, process.cwd(), dirname(fileURLToPath(import.meta.url))]
+  for (const root of roots) {
+    if (!root) continue
+    for (const parent of ancestorDirs(root)) {
+      for (const candidate of [
+        join(parent, "vendor", "bearly", "plugins", "llm", "src"),
+        join(parent, "bearly", "plugins", "llm", "src"),
+        join(parent, "plugins", "llm", "src"),
+      ]) {
+        const resolved = resolve(candidate)
+        if (seen.has(resolved)) continue
+        seen.add(resolved)
+        yield resolved
+      }
+    }
+  }
+}
+
+function ancestorDirs(start: string): string[] {
+  const dirs: string[] = []
+  let current = resolve(start)
+  while (true) {
+    dirs.push(current)
+    const parent = dirname(current)
+    if (parent === current) return dirs
+    current = parent
+  }
+}
+
+function backendDirExists(dir: string): boolean {
+  return REQUIRED_BACKEND_FILES.every((file) => existsSync(join(dir, file)))
 }
 
 /**
@@ -99,8 +157,8 @@ export async function requireLlm(feature: string): Promise<LlmBackend> {
   if (!llm) {
     throw new Error(
       `${feature} requires an LLM backend, but none is available. ` +
-        `Point TRIBE_LLM_DIR at a directory exposing lib/types.ts, lib/research.ts, lib/providers.ts ` +
-        `(e.g. bearly's plugins/llm/src).`,
+        `Place bearly at vendor/bearly or ../bearly, or point TRIBE_LLM_DIR at a directory exposing ` +
+        `lib/types.ts, lib/research.ts, lib/providers.ts.`,
     )
   }
   return llm
