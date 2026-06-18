@@ -30,7 +30,7 @@ function makeContext(db: Database, stmts: TribeStatements): TribeContext {
     db,
     stmts,
     sessionId: SESSION_ID,
-    sessionRole: "chief",
+    sessionRole: "member",
     initialName: NAME,
     domains: [],
     claudeSessionId: null,
