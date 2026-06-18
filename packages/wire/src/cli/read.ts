@@ -58,6 +58,24 @@ async function callDaemon(method: string, params?: Record<string, unknown>): Pro
   }
 }
 
+/**
+ * Unwrap an MCP tool result's JSON content (`content[0].text` → parsed), or
+ * return the raw value when there is no parseable content. Shared by the read
+ * verbs that consume MCP-formatted daemon replies (`health`, `doctor`) so the
+ * unwrap is not re-derived per verb.
+ */
+export function mcpJsonContent(raw: unknown): unknown {
+  const text = (raw as { content?: ReadonlyArray<{ text?: string }> })?.content?.[0]?.text
+  if (typeof text === "string") {
+    try {
+      return JSON.parse(text)
+    } catch {
+      /* not JSON — fall back to the raw value */
+    }
+  }
+  return raw
+}
+
 // ---------------------------------------------------------------------------
 // Formatting helpers (shared with the legacy CLI; same byte-for-byte output)
 // ---------------------------------------------------------------------------
@@ -343,8 +361,7 @@ async function cmdHealth(): Promise<void> {
   console.log("TRIBE HEALTH DIAGNOSTICS\n")
   // The health response comes from tribe_health handler, which returns MCP-formatted content
   try {
-    const text = result.content?.[0]?.text ?? JSON.stringify(result)
-    const data = JSON.parse(text) as Record<string, unknown>
+    const data = mcpJsonContent(result) as Record<string, unknown>
     for (const [key, value] of Object.entries(data)) {
       if (key === "issues" && Array.isArray(value)) {
         if ((value as unknown[]).length) {
@@ -439,16 +456,7 @@ export function evaluateDoctor(health: DoctorHealthShape): DoctorVerdict {
 
 /** Extract the health payload from a callDaemon result (MCP-wrapped or raw). */
 function parseDoctorHealth(raw: unknown): DoctorHealthShape {
-  const obj = raw as { content?: Array<{ text?: string }> }
-  const text = obj?.content?.[0]?.text
-  if (typeof text === "string") {
-    try {
-      return JSON.parse(text) as DoctorHealthShape
-    } catch {
-      /* fall through to the raw object below */
-    }
-  }
-  return (raw ?? {}) as DoctorHealthShape
+  return (mcpJsonContent(raw) ?? {}) as DoctorHealthShape
 }
 
 async function cmdDoctor(opts: { fix?: boolean }): Promise<void> {

@@ -10,7 +10,29 @@
  */
 
 import { describe, expect, test } from "vitest"
-import { evaluateDoctor } from "../src/cli/read.ts"
+import { evaluateDoctor, mcpJsonContent } from "../src/cli/read.ts"
+
+describe("mcpJsonContent (MCP tool-result unwrap, shared by health + doctor)", () => {
+  test("MCP-wrapped JSON content → parsed object", () => {
+    const wrapped = { content: [{ type: "text", text: JSON.stringify({ code_pin: { stale: false } }) }] }
+    expect(mcpJsonContent(wrapped)).toEqual({ code_pin: { stale: false } })
+  })
+
+  test("no content array (raw object reply) → returned as-is", () => {
+    const raw = { code_pin: { stale: true } }
+    expect(mcpJsonContent(raw)).toBe(raw)
+  })
+
+  test("content present but not JSON → falls back to the raw value (no throw)", () => {
+    const wrapped = { content: [{ type: "text", text: "not json {" }] }
+    expect(mcpJsonContent(wrapped)).toBe(wrapped)
+  })
+
+  test("null / undefined → returned verbatim (caller guards)", () => {
+    expect(mcpJsonContent(null)).toBeNull()
+    expect(mcpJsonContent(undefined)).toBeUndefined()
+  })
+})
 
 describe("evaluateDoctor (@km/tribe/20033 daemon staleness probe)", () => {
   test("missing code_pin field → stale (bootstrap gap: daemon too old to self-report)", () => {
