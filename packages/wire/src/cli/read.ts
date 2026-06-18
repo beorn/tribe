@@ -58,6 +58,24 @@ async function callDaemon(method: string, params?: Record<string, unknown>): Pro
   }
 }
 
+/**
+ * Unwrap an MCP tool result's JSON content (`content[0].text` → parsed), or
+ * return the raw value when there is no parseable content. Shared by the read
+ * verbs that consume MCP-formatted daemon replies (`health`, `doctor`) so the
+ * unwrap is not re-derived per verb.
+ */
+export function mcpJsonContent(raw: unknown): unknown {
+  const text = (raw as { content?: ReadonlyArray<{ text?: string }> })?.content?.[0]?.text
+  if (typeof text === "string") {
+    try {
+      return JSON.parse(text)
+    } catch {
+      /* not JSON — fall back to the raw value */
+    }
+  }
+  return raw
+}
+
 // ---------------------------------------------------------------------------
 // Formatting helpers (shared with the legacy CLI; same byte-for-byte output)
 // ---------------------------------------------------------------------------
@@ -343,8 +361,7 @@ async function cmdHealth(): Promise<void> {
   console.log("TRIBE HEALTH DIAGNOSTICS\n")
   // The health response comes from tribe_health handler, which returns MCP-formatted content
   try {
-    const text = result.content?.[0]?.text ?? JSON.stringify(result)
-    const data = JSON.parse(text) as Record<string, unknown>
+    const data = mcpJsonContent(result) as Record<string, unknown>
     for (const [key, value] of Object.entries(data)) {
       if (key === "issues" && Array.isArray(value)) {
         if ((value as unknown[]).length) {
@@ -384,6 +401,96 @@ async function cmdHealth(): Promise<void> {
     // Fallback: just print the raw result
     console.log(JSON.stringify(result, null, 2))
   }
+}
+
+// ---------------------------------------------------------------------------
+// Doctor — daemon code-staleness check (@km/tribe/20033 prevention)
+// ---------------------------------------------------------------------------
+
+/**
+ * @km/tribe/20033 prevention — daemon code-staleness doctor.
+ *
+ * The in-daemon `code_pin` detector (handleHealth) can only report staleness
+ * when the running daemon is new enough to CONTAIN it. A daemon that predates
+ * the detector serves old handlers AND cannot self-report — its `tribe.health()`
+ * comes back with no `code_pin` field at all. `evaluateDoctor` treats that
+ * absence as a positive staleness signal: a missing known-current field on a
+ * method that fresh daemons always populate IS the stale signal. This is
+ * bootstrap-proof, closing the gap the in-daemon detector left open — the
+ * detector lives inside the daemon, so it cannot catch a daemon too old to
+ * contain it; the probe must live outside (here).
+ */
+export interface DoctorVerdict {
+  stale: boolean
+  /** Operator-facing remedy, or null when fresh. */
+  reason: string | null
+  /** running/on-disk/pin SHAs when the daemon could self-report, else null. */
+  detail: { running: string | null; on_disk: string | null; superproject_pin: string | null } | null
+}
+
+interface DoctorHealthShape {
+  code_pin?: {
+    stale: boolean
+    reason: string | null
+    running: string | null
+    on_disk: string | null
+    superproject_pin: string | null
+  }
+}
+
+/** Pure staleness decision — no IO, so all three classes unit-test cleanly. */
+export function evaluateDoctor(health: DoctorHealthShape): DoctorVerdict {
+  const cp = health.code_pin
+  if (cp === undefined) {
+    return {
+      stale: true,
+      reason:
+        "running daemon predates the code_pin detector (@km/tribe/20033): its tribe.health() has no `code_pin` field, so it is too old to self-report. Stop it so the next autostart respawns from current source.",
+      detail: null,
+    }
+  }
+  const detail = { running: cp.running, on_disk: cp.on_disk, superproject_pin: cp.superproject_pin }
+  if (cp.stale) return { stale: true, reason: cp.reason, detail }
+  return { stale: false, reason: null, detail }
+}
+
+/** Extract the health payload from a callDaemon result (MCP-wrapped or raw). */
+function parseDoctorHealth(raw: unknown): DoctorHealthShape {
+  return (mcpJsonContent(raw) ?? {}) as DoctorHealthShape
+}
+
+async function cmdDoctor(opts: { fix?: boolean }): Promise<void> {
+  const health = parseDoctorHealth(await callDaemon("tribe.health"))
+  const verdict = evaluateDoctor(health)
+
+  console.log("TRIBE DOCTOR — daemon code-staleness check\n")
+  if (verdict.detail) {
+    const d = verdict.detail
+    console.log(`  running=${d.running ?? "?"}  on_disk=${d.on_disk ?? "?"}  pin=${d.superproject_pin ?? "?"}`)
+  }
+
+  if (!verdict.stale) {
+    console.log("  OK — running daemon matches the on-disk + superproject-pinned tribe code.")
+    return
+  }
+
+  console.error(`  STALE — ${verdict.reason}`)
+  if (opts.fix) {
+    // Operator-gated only — never auto, never in the hot hook path. The actual
+    // restart is a lifecycle op (which lives in the tribe-daemon package, not
+    // this read-only CLI), so --fix prints the exact operator remedy rather
+    // than mutating live daemon state from here. Restart-execution wiring is
+    // the tracked lifecycle follow-up slice.
+    console.error(
+      "\n  --fix (operator-gated remedy):\n" +
+        "    1. if on_disk != pin: update the tribe submodule to its pin, then\n" +
+        "    2. stop the stale daemon (it idle-exits; or kill its `daemon.ts` pid)\n" +
+        "       so the next autostart respawns from current source, then\n" +
+        "    3. re-run `tribe doctor` to confirm OK.\n" +
+        "  (Automated restart is the tracked lifecycle follow-up; not wired here.)",
+    )
+  }
+  process.exit(1)
 }
 
 /**
@@ -461,6 +568,12 @@ export function registerReadCommands(program: Command): void {
     .command("health")
     .description("Run health diagnostics")
     .action(() => void cmdHealth())
+
+  program
+    .command("doctor")
+    .description("Check whether the running daemon is serving stale code (@km/tribe/20033)")
+    .option("--fix", "Print the operator-gated remedy for a stale daemon (does not auto-restart)")
+    .action((opts: { fix?: boolean }) => void cmdDoctor(opts))
 
   program
     .command("inbox-status")
