@@ -340,6 +340,38 @@ export const TOOLS_LIST = [
     ),
   },
   {
+    name: "repair",
+    description:
+      "Operator repair for bounded daemon state fixes. Currently supports advancing one session's inbox cursor to the message tail without deleting history.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        session: {
+          type: "string",
+          description: "Session name to repair. Defaults to the caller's current session.",
+        },
+        inbox_cursor: {
+          type: "string",
+          enum: ["tail"],
+          description: 'Repair mode. Use "tail" to advance the inbox cursor to the current journal tail.',
+        },
+      },
+      required: ["inbox_cursor"],
+    },
+    outputSchema: OBJ(
+      {
+        repaired: { type: "boolean" },
+        session: { type: "string" },
+        repair: { type: "string" },
+        cursor_before: { type: "number" },
+        cursor_after: { type: "number" },
+        tail: { type: "number" },
+        ...ERROR_SHAPE,
+      },
+      "Repair result: { repaired, session, repair, cursor_before, cursor_after, tail } or { error }.",
+    ),
+  },
+  {
     name: "filter",
     description:
       "Per-session filter for incoming channel events. mode controls focus level; mute stores topic globs to silence until the optional timestamp. Empty args clears the filter.",

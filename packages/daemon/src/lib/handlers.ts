@@ -106,6 +106,7 @@ export const TRIBE_COORD_METHODS = {
   reload: "tribe.reload",
   retro: "tribe.retro",
   debug: "tribe.debug",
+  repair: "tribe.repair",
   filter: "tribe.filter",
   lifecyclePublish: "tribe.lifecycle.publish",
   lifecycle: "tribe.lifecycle",
@@ -301,6 +302,8 @@ export function handleToolCall(
       return handleRetro(ctx, a)
     case TRIBE_COORD_METHODS.debug:
       return handleDebug(ctx, a, opts)
+    case TRIBE_COORD_METHODS.repair:
+      return handleRepair(ctx, a)
     case TRIBE_COORD_METHODS.filter:
       return handleFilter(ctx, a)
     case TRIBE_COORD_METHODS.lifecyclePublish:
@@ -699,9 +702,10 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
 
   // Name-claim replay: a session may call `tribe.join({name:"adhoc1"})` to
   // claim a name whose prior holder disconnected without draining their
-  // inbox. Mirrors handleRename — see `replayUnreadForClaimedName` for the
-  // why-this-matters.
-  const replayedTo = replayUnreadForClaimedName(ctx, joinName)
+  // inbox. A same-name join is only a refresh, not a claim; replaying there
+  // ignores this session's own drained cursor and can rewind default fetch
+  // into already-seen history.
+  const replayedTo = prevName === joinName ? null : replayUnreadForClaimedName(ctx, joinName)
   if (replayedTo !== null) {
     log.info?.(`name-claim replay: cursor rewound to ${replayedTo} for "${joinName}" (join)`)
     opts.notifyWakeupForReplay?.(ctx.sessionId, joinName)
@@ -891,6 +895,34 @@ function handleDebug(_ctx: TribeContext, _a: ToolArgs, opts: HandlerOpts): ToolR
         cursors: [],
       }
   return jsonResult(state)
+}
+
+function handleRepair(ctx: TribeContext, a: ToolArgs): ToolResult {
+  const sessionName = typeof a.session === "string" && a.session.length > 0 ? a.session : ctx.getName()
+  const repairMode = (a.inbox_cursor ?? a.inboxCursor) as unknown
+  if (repairMode !== "tail") {
+    return jsonResult({ error: 'repair requires inbox_cursor: "tail"' })
+  }
+
+  const row = ctx.db
+    .prepare("SELECT id, last_inbox_pull_seq FROM sessions WHERE name = $name LIMIT 1")
+    .get({ $name: sessionName }) as { id: string; last_inbox_pull_seq: number } | null
+  if (!row) {
+    return jsonResult({ error: `session not found: ${sessionName}` })
+  }
+
+  const tail = (ctx.stmts.getMessageTailSeq.get() as { seq: number } | null)?.seq ?? 0
+  ctx.stmts.advanceInboxCursor.run({ $id: row.id, $seq: tail, $now: Date.now() })
+  const after = ctx.stmts.getInboxCursor.get({ $id: row.id }) as { last_inbox_pull_seq: number } | null
+
+  return jsonResult({
+    repaired: true,
+    session: sessionName,
+    repair: "inbox_cursor_to_tail",
+    cursor_before: row.last_inbox_pull_seq,
+    cursor_after: after?.last_inbox_pull_seq ?? row.last_inbox_pull_seq,
+    tail,
+  })
 }
 
 // ---------------------------------------------------------------------------
