@@ -6,25 +6,19 @@
  * and *moves* (not deletes) failures to a sibling quarantine dir with a
  * .reason sidecar. Reversible: an operator can audit and restore.
  *
- * Defaults to ~/Bear/Vault/raw/chats/ → ~/Bear/Vault/raw/chats-quarantine/.
- * Override with --chats / --quarantine for other vaults or test runs.
+ * Requires explicit --chats / --quarantine arguments, or
+ * RECALL_SESSIONS_DIR / RECALL_QUARANTINE_DIR in the environment.
  *
  * Safety: prompts for confirmation unless --yes. Always prints a summary.
  *
  * Usage:
- *   bun src/lib/purge-corrupted.ts                    # ~/Bear/Vault/raw/chats/
- *   bun src/lib/purge-corrupted.ts --yes              # skip confirm
- *   bun src/lib/purge-corrupted.ts --dry-run          # report only, move nothing
- *   bun src/lib/purge-corrupted.ts --chats /tmp/...   # custom source
+ *   bun src/lib/purge-corrupted.ts --chats /tmp/chats --quarantine /tmp/bad
+ *   bun src/lib/purge-corrupted.ts --chats /tmp/chats --quarantine /tmp/bad --yes
+ *   bun src/lib/purge-corrupted.ts --chats /tmp/chats --quarantine /tmp/bad --dry-run
  */
 import { readFileSync, readdirSync, writeFileSync, renameSync, existsSync, mkdirSync, statSync } from "node:fs"
 import { join } from "node:path"
-import { homedir } from "node:os"
 import { analyzeQuality } from "./quality-gate.ts"
-
-const HOME = homedir()
-const DEFAULT_CHATS = `${HOME}/Bear/Vault/raw/chats`
-const DEFAULT_QUARANTINE = `${HOME}/Bear/Vault/raw/chats-quarantine`
 
 interface Options {
   chatsDir: string
@@ -33,10 +27,14 @@ interface Options {
   dryRun: boolean
 }
 
+function envPath(name: "RECALL_SESSIONS_DIR" | "RECALL_QUARANTINE_DIR"): string {
+  return process.env[name]?.trim() ?? ""
+}
+
 function parseArgs(argv: string[]): Options {
   const opts: Options = {
-    chatsDir: DEFAULT_CHATS,
-    quarantineDir: DEFAULT_QUARANTINE,
+    chatsDir: envPath("RECALL_SESSIONS_DIR"),
+    quarantineDir: envPath("RECALL_QUARANTINE_DIR"),
     yes: false,
     dryRun: false,
   }
@@ -49,9 +47,9 @@ function parseArgs(argv: string[]): Options {
     else if (a === "--help" || a === "-h") {
       process.stderr.write(
         `purge-corrupted — quarantine corrupted recall exports\n\n` +
-          `usage: purge-corrupted [--chats DIR] [--quarantine DIR] [--yes] [--dry-run]\n\n` +
-          `  --chats DIR        source of .md chats (default ${DEFAULT_CHATS})\n` +
-          `  --quarantine DIR   destination for bad chats (default ${DEFAULT_QUARANTINE})\n` +
+          `usage: purge-corrupted --chats DIR --quarantine DIR [--yes] [--dry-run]\n\n` +
+          `  --chats DIR        source of .md chats (or RECALL_SESSIONS_DIR)\n` +
+          `  --quarantine DIR   destination for bad chats (or RECALL_QUARANTINE_DIR)\n` +
           `  --yes, -y          skip confirmation prompt\n` +
           `  --dry-run, -n      report only, move nothing\n` +
           `  --help, -h         this message\n`,
@@ -61,6 +59,14 @@ function parseArgs(argv: string[]): Options {
       process.stderr.write(`purge-corrupted: unknown arg "${a}"\n`)
       process.exit(2)
     }
+  }
+  if (!opts.chatsDir) {
+    process.stderr.write("purge-corrupted: --chats DIR is required; no default chat-log directory is used\n")
+    process.exit(2)
+  }
+  if (!opts.quarantineDir) {
+    process.stderr.write("purge-corrupted: --quarantine DIR is required; no default quarantine directory is used\n")
+    process.exit(2)
   }
   return opts
 }

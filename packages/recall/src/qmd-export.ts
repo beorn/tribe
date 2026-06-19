@@ -3,10 +3,10 @@
  * recall — qmd-backed session memory search and exporter.
  *
  * Replaces the km-project-local `bun recall` (bearly FTS5 over
- * ~/.claude/session-index.db) with a unified, cross-project tool. Exports
- * Claude Code session JSONLs as plain markdown into ~/Bear/Vault/raw/chats/
- * so qmd (which already has a "sessions" collection indexing that dir) can
- * search, embed, and rerank them like any other markdown.
+ * ~/.claude/session-index.db) with a unified, cross-project tool. When
+ * RECALL_SESSIONS_DIR and RECALL_REJECTED_DIR are explicitly set, exports
+ * Claude Code session JSONLs as plain markdown so qmd can search, embed, and
+ * rerank them like any other markdown.
  *
  * Commands:
  *   recall <query> [-n N] [-c cols] [--json]    hybrid search via qmd
@@ -49,13 +49,38 @@ import { emitInjectionDebugEvent } from "../../injection-envelope/src/debug.ts"
 import { analyzeQuality, isAcceptable } from "./lib/quality-gate.ts"
 
 const HOME = homedir()
-const SESSIONS_DIR = process.env.RECALL_SESSIONS_DIR ?? `${HOME}/Bear/Vault/raw/chats`
-// Quarantined / rejected docs land here with a .reason sidecar instead of
-// being indexed. Reversible: an operator can grep through the rejection
-// reasons, validate, and restore by moving back to chats/.
-const REJECTED_DIR = process.env.RECALL_REJECTED_DIR ?? `${HOME}/Bear/Vault/raw/chats-rejected`
 const CLAUDE_PROJECTS_DIR = `${HOME}/.claude/projects`
 const QMD = "qmd"
+
+interface ExportDirs {
+  sessionsDir: string
+  rejectedDir: string
+}
+
+function explicitEnv(name: "RECALL_SESSIONS_DIR" | "RECALL_REJECTED_DIR"): string | undefined {
+  const value = process.env[name]?.trim()
+  return value ? value : undefined
+}
+
+function resolveExportDirs(isHook: boolean): ExportDirs | undefined {
+  const sessionsDir = explicitEnv("RECALL_SESSIONS_DIR")
+  const rejectedDir = explicitEnv("RECALL_REJECTED_DIR")
+  const missing = [
+    sessionsDir ? undefined : "RECALL_SESSIONS_DIR",
+    rejectedDir ? undefined : "RECALL_REJECTED_DIR",
+  ].filter((name): name is string => Boolean(name))
+
+  if (sessionsDir && rejectedDir) return { sessionsDir, rejectedDir }
+
+  const message = `recall export: ${missing.join(" and ")} required; no default export directory is used`
+  if (isHook) {
+    process.stderr.write(`${message}; skipping export\n`)
+    return undefined
+  }
+
+  process.stderr.write(`${message}\n`)
+  process.exit(2)
+}
 
 // ── JSONL session parsing ────────────────────────────────────────────────
 
@@ -295,7 +320,6 @@ function gcNudge(): void {
 }
 
 function cmdExport(args: string[]): void {
-  if (!existsSync(SESSIONS_DIR)) mkdirSync(SESSIONS_DIR, { recursive: true })
   const force = args.includes("--force")
   const all = args.includes("--all")
   const isHook = args.includes("--hook")
@@ -352,7 +376,7 @@ function cmdExport(args: string[]): void {
     if (positional.includes("/") || positional.endsWith(".jsonl")) {
       // Restrict explicit paths to jsonl files under ~/.claude/projects/ so
       // users can't accidentally (or be tricked into) exporting arbitrary
-      // filesystem content into raw/chats/.
+      // filesystem content into the configured export directory.
       const abs = resolve(positional)
       if (!abs.startsWith(CLAUDE_PROJECTS_DIR + "/") || !abs.endsWith(".jsonl")) {
         process.stderr.write(
@@ -371,6 +395,14 @@ function cmdExport(args: string[]): void {
     }
   }
 
+  const exportDirs = resolveExportDirs(isHook)
+  if (!exportDirs) {
+    if (isHook) process.stdout.write(emitHookJson("SessionEnd"))
+    return
+  }
+  const { sessionsDir, rejectedDir } = exportDirs
+  if (!existsSync(sessionsDir)) mkdirSync(sessionsDir, { recursive: true })
+
   let written = 0
   let skipped = 0
   let empty = 0
@@ -382,8 +414,8 @@ function cmdExport(args: string[]): void {
       continue
     }
     const filename = sessionFilename(meta)
-    const outPath = join(SESSIONS_DIR, filename)
-    const rejectedPath = join(REJECTED_DIR, filename)
+    const outPath = join(sessionsDir, filename)
+    const rejectedPath = join(rejectedDir, filename)
     // Skip existing files unless one of:
     //   --force         explicit rewrite
     //   SessionEnd hook (--hook alone, without --catchup) — we want the
@@ -410,7 +442,7 @@ function cmdExport(args: string[]): void {
       // not deletion.
       const verdict = analyzeQuality(md)
       if (verdict.rejectReason) {
-        if (!existsSync(REJECTED_DIR)) mkdirSync(REJECTED_DIR, { recursive: true })
+        if (!existsSync(rejectedDir)) mkdirSync(rejectedDir, { recursive: true })
         writeFileSync(rejectedPath, md, "utf-8")
         writeFileSync(
           `${rejectedPath}.reason`,
@@ -608,8 +640,8 @@ function cmdHook(): void {
 
   // BM25-only, no collection filter — qmd searches all configured collections.
   // Keeps the hook <200ms and avoids the LLM/Metal paths that can hang.
-  // Request more than we'll show so we can dedupe (the vault collection's
-  // glob currently picks up raw/chats/ too, producing duplicate hits).
+  // Request more than we'll show so we can dedupe overlapping qmd
+  // collections.
   const out = qmdQuery(prompt, { limit: 8, json: true })
   let hits: QmdHit[] = []
   try {
@@ -630,8 +662,8 @@ function cmdHook(): void {
   }
 
   // Dedupe by file basename — catches files indexed twice across overlapping
-  // collections (e.g. sessions/ and vault/ both pick up raw/chats/*.md, and
-  // vault/archive/ mirrors km/imports/).
+  // collections (e.g. sessions/ and vault/ both pick up the same exported
+  // transcript, and vault/archive/ mirrors km/imports/).
   const seen = new Set<string>()
   const deduped = hits
     .filter((h) => {
@@ -717,11 +749,13 @@ function cmdIndex(): void {
 
 function cmdStatus(): void {
   const jsonlCount = listAllJsonlPaths().length
-  const chatsCount = existsSync(SESSIONS_DIR) ? readdirSync(SESSIONS_DIR).filter((f) => f.endsWith(".md")).length : 0
+  const sessionsDir = explicitEnv("RECALL_SESSIONS_DIR")
+  const chatsCount =
+    sessionsDir && existsSync(sessionsDir) ? readdirSync(sessionsDir).filter((f) => f.endsWith(".md")).length : 0
   process.stdout.write(`recall status\n`)
   process.stdout.write(`  JSONL sessions on disk: ${jsonlCount}\n`)
   process.stdout.write(`  markdown chats exported: ${chatsCount}\n`)
-  process.stdout.write(`  chats dir: ${SESSIONS_DIR}\n`)
+  process.stdout.write(`  chats dir: ${sessionsDir ?? "(unset; export disabled)"}\n`)
   process.stdout.write(`\nqmd status:\n`)
   spawnSync(QMD, ["status"], { stdio: "inherit" })
 }
@@ -740,13 +774,18 @@ usage:
   recall status                                  show counts + qmd status
   recall help                                    this message
 
-export target: ${SESSIONS_DIR}
+export targets:
+  RECALL_SESSIONS_DIR   required for accepted markdown exports
+  RECALL_REJECTED_DIR   required for rejected markdown exports
 
 bootstrap / one-time:
   recall export --all          # write markdown for every session
   recall index                 # refresh qmd's sessions collection
 
 self-healing via Claude Code hooks (~/.claude/settings.json):
+
+  Set RECALL_SESSIONS_DIR and RECALL_REJECTED_DIR in the hook environment.
+  Without both, export hooks no-op and do not choose a default destination.
 
   hooks.SessionStart:
     { "type": "command", "command": "recall export --catchup --hook" }
@@ -763,8 +802,7 @@ self-healing via Claude Code hooks (~/.claude/settings.json):
       # injects qmd search hits as Session Memory
 
 With all three hooks wired up, missed exports self-heal on the next
-session start. No manual intervention needed; use \`recall export --all\`
-only for a forced full rebuild.
+session start. Use \`recall export --all\` only for a forced full rebuild.
 `)
 }
 
