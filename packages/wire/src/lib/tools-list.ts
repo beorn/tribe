@@ -445,6 +445,34 @@ export const TOOLS_LIST = [
     ),
   },
   {
+    name: "health.publish",
+    description:
+      "Publish an agent recovery (force-settle / restart / rotation) as an ambient `health:recovery` broadcast (km @ag/super/20327 lateral channel). The topic is set SERVER-SIDE — clients cannot set topics via tribe.send. `content` is the human-readable summary; `agent`/`seq` are optional metadata for consumer dedup/ordering.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        content: { type: "string", description: "Human-readable recovery summary (required, non-empty)." },
+        agent: { type: "string", description: "The recovering agent's tribe name (optional metadata)." },
+        seq: {
+          type: "number",
+          description:
+            "Per-agent monotonic recovery sequence from the lateral producer (optional; consumer dedup/ordering).",
+        },
+      },
+      required: ["content"],
+    },
+    outputSchema: OBJ(
+      {
+        published: { type: "boolean" },
+        id: { type: "string", description: "Message id assigned by the daemon." },
+        agent: { type: "string", description: "Echo of the recovering agent's name, when supplied." },
+        seq: { type: "number", description: "Echo of the recovery sequence, when supplied." },
+        ...ERROR_SHAPE,
+      },
+      "Publish result: { published, id } on success, { error } when content is missing/empty.",
+    ),
+  },
+  {
     name: "lifecycle",
     description:
       "Read the latest tool-call-lifecycle snapshot for a session (or all sessions). Diagnostic surface for chief / observers — see @km/infra/15630-stuck-agent-observability § S4.",

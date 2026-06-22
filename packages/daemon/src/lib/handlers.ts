@@ -110,8 +110,18 @@ export const TRIBE_COORD_METHODS = {
   filter: "tribe.filter",
   lifecyclePublish: "tribe.lifecycle.publish",
   lifecycle: "tribe.lifecycle",
+  healthPublish: "tribe.health.publish",
   pending: "tribe.pending",
 } as const
+
+/**
+ * The lateral recovery channel's topic (km @ag/super/20324-chain-refactor/20327
+ * gap-4). `tribe.health.publish` stamps every recovery broadcast with this topic
+ * SERVER-SIDE — the diagnostics tribe adapter treats `health:*` events as ambient
+ * visibility, so chief/deck SEE an agent's force-settle / restart / rotation
+ * instead of it rendering only in the agent's own pane.
+ */
+const HEALTH_RECOVERY_TOPIC = "health:recovery"
 
 export type TribeCoordMethod = (typeof TRIBE_COORD_METHODS)[keyof typeof TRIBE_COORD_METHODS]
 
@@ -308,6 +318,8 @@ export function handleToolCall(
       return handleFilter(ctx, a)
     case TRIBE_COORD_METHODS.lifecyclePublish:
       return handleLifecyclePublish(ctx, a, opts)
+    case TRIBE_COORD_METHODS.healthPublish:
+      return handleHealthPublish(ctx, a, opts)
     case TRIBE_COORD_METHODS.lifecycle:
       return handleLifecycle(a, opts)
     case TRIBE_COORD_METHODS.pending:
@@ -1221,6 +1233,41 @@ function handleLifecyclePublish(ctx: TribeContext, a: ToolArgs, opts: HandlerOpt
     sessionName: record.sessionName,
     receivedAt: new Date(record.receivedAt).toISOString(),
   })
+}
+
+/**
+ * km @ag/super/20324-chain-refactor/20327 gap-4 — publish an agent recovery
+ * (force-settle / restart / rotation) as an ambient `health:recovery` broadcast.
+ *
+ * Why a dedicated tool (not tribe.send): the send tool deliberately omits topic
+ * (clients cannot set arbitrary topics — trust.ts gates registered topics), and
+ * `health:*` topics are daemon-classified (the accountly-plugin emits them
+ * server-side). This is the host-facing seam for that same server-side
+ * classification, mirroring tribe.lifecycle.publish. The recovering agent's
+ * identity travels in `content` (and `agent`/`seq` metadata) — the connection is
+ * the host, not the agent.
+ */
+function handleHealthPublish(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): ToolResult {
+  const content = a.content
+  if (typeof content !== "string" || content.length === 0) {
+    return jsonResult({ error: "content field is required (a non-empty string)" })
+  }
+  // Optional metadata for consumer dedup/ordering — the per-agent monotonic seq
+  // from the lateral producer. Never load-bearing for the emit itself.
+  const agent = typeof a.agent === "string" ? a.agent : undefined
+  const seq = typeof a.seq === "number" ? a.seq : undefined
+  const result = sendMessage(
+    ctx,
+    "*",
+    sanitizeMessage(content),
+    HEALTH_RECOVERY_TOPIC, // type == topic, mirroring the accountly-plugin's health:* broadcasts
+    undefined,
+    undefined,
+    "broadcast",
+    { delivery: "pull", topic: HEALTH_RECOVERY_TOPIC },
+  )
+  logEvent(ctx, `message.sent.${HEALTH_RECOVERY_TOPIC}`, undefined, { agent, seq, message_id: result.id })
+  return jsonResult({ published: true, id: result.id, agent, seq })
 }
 
 function handleLifecycle(a: ToolArgs, opts: HandlerOpts): ToolResult {
