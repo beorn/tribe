@@ -79,7 +79,8 @@ export function openDatabase(path: string): Database {
 		topic      TEXT,
 		room_id    TEXT,
 		request    TEXT,
-		reply      TEXT
+		reply      TEXT,
+		summary    TEXT
 	)`)
 
   db.run(`CREATE TABLE IF NOT EXISTS messages_archive (
@@ -98,7 +99,8 @@ export function openDatabase(path: string): Database {
 		room_id     TEXT,
 		archived_at INTEGER NOT NULL,
 		request     TEXT,
-		reply       TEXT
+		reply       TEXT,
+		summary     TEXT
 	)`)
 
   // Ball-tracker: per-(request_id, recipient) row for every open request.
@@ -704,6 +706,27 @@ const MIGRATIONS: readonly Migration[] = [
       db.run("CREATE INDEX IF NOT EXISTS idx_pending_sender ON pending_request(sender)")
     },
   },
+  {
+    version: 17,
+    name: "add-messages-summary",
+    up(db) {
+      // llm-authored-tribe-summary-persistence (20316 #3): persist an authored
+      // one-line summary alongside each message so the channel UI can show the
+      // sender's own one-liner by default instead of a render-time heuristic.
+      // Existing databases get a nullable column; fresh installs already have it
+      // from the CREATE TABLE blocks above. Idempotent — introspect before ALTER.
+      for (const table of ["messages", "messages_archive"]) {
+        const exists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='${table}'`).get() as {
+          name: string
+        } | null
+        if (!exists) continue
+        const cols = new Set(
+          (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((r) => r.name),
+        )
+        if (!cols.has("summary")) db.run(`ALTER TABLE ${table} ADD COLUMN summary TEXT`)
+      }
+    },
+  },
 ]
 
 // ---------------------------------------------------------------------------
@@ -728,9 +751,9 @@ export function createStatements(db: Database) {
 
     insertMessage: db.prepare(`
 		INSERT INTO messages (id, type, sender, recipient, kind, content, bead_id, ref, ts,
-			delivery, topic, room_id, request, reply)
+			delivery, topic, room_id, request, reply, summary)
 		VALUES ($id, $type, $sender, $recipient, $kind, $content, $bead_id, $ref, $ts,
-			$delivery, $topic, $room_id, $request, $reply)
+			$delivery, $topic, $room_id, $request, $reply, $summary)
 	`),
 
     /** Ball-tracker insert: opens a new pending request (one row per recipient).
@@ -839,11 +862,11 @@ export function createStatements(db: Database) {
     archiveExpiredMessages: db.prepare(`
 		INSERT OR IGNORE INTO messages_archive (
 			seq, id, type, sender, recipient, kind, content, bead_id, ref, ts,
-			delivery, topic, room_id, archived_at
+			delivery, topic, room_id, summary, archived_at
 		)
 		SELECT
 			rowid, id, type, sender, recipient, kind, content, bead_id, ref, ts,
-			delivery, topic, room_id, $archived_at
+			delivery, topic, room_id, summary, $archived_at
 		FROM messages
 		WHERE ts < $cutoff
 	`),
@@ -874,7 +897,7 @@ export function createStatements(db: Database) {
      *  exceeds the session's pull cursor and whose recipient matches. */
     getInboxRows: db.prepare(`
 		SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts,
-			delivery, topic, room_id
+			delivery, topic, room_id, summary
 		FROM messages
 		WHERE rowid > $since
 			AND (recipient = $name OR recipient = '*')

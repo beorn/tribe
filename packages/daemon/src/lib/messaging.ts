@@ -56,6 +56,34 @@ export type Classification = {
   delivery?: Delivery
   topic?: string
   roomId?: string
+  /**
+   * Authored one-line summary of the message (the LLM-generated one-liner shown
+   * by default in the channel UI; the body discloses the full markdown). When a
+   * sender omits it, the send boundary derives one via `deriveSummary` rather
+   * than rejecting the message — see the derive-not-reject design call on
+   * @ag/code/20113-visual-polish/llm-authored-tribe-summary-persistence.
+   */
+  summary?: string
+}
+
+/**
+ * Derive a one-line summary from message content — the fallback when a sender
+ * omits an authored `summary`. Takes the first non-empty line, collapses
+ * whitespace, and truncates to `max` cols at a word boundary (mirrors the
+ * channel UI's `clip()` so derived and authored one-liners read alike). Never
+ * throws and never returns junk: an empty/whitespace-only body yields "".
+ */
+export function deriveSummary(content: string, max = 80): string {
+  const firstLine =
+    content
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line.length > 0) ?? ""
+  const flat = firstLine.replace(/\s+/g, " ").trim()
+  if (flat.length <= max) return flat
+  const sliced = flat.slice(0, max - 1)
+  const ws = sliced.lastIndexOf(" ")
+  return `${ws > max - 12 ? sliced.slice(0, ws) : sliced}…`
 }
 
 /**
@@ -167,6 +195,7 @@ export function sendMessage(
     $room_id: classification.roomId ?? null,
     $request: requestId,
     $reply: replyId,
+    $summary: classification.summary ?? null,
   })
   const rowid = Number(result.lastInsertRowid)
   // Ball-tracker side-effects: open or close pending_request rows.

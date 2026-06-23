@@ -9,7 +9,7 @@ import type { TribeRole } from "tribe-wire/lib/config"
 const log = createLogger("tribe:handlers")
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { validateName, sanitizeMessage } from "./validation.ts"
-import { sendMessage, logEvent, replayUnreadForClaimedName } from "./messaging.ts"
+import { sendMessage, deriveSummary, logEvent, replayUnreadForClaimedName } from "./messaging.ts"
 import { isPidAlive as pidStillAlive } from "./session.ts"
 import { gatherCodePin } from "./code-pin.ts"
 import { senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
@@ -375,6 +375,13 @@ function handleSend(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): ToolRes
   const requestFlag = requestArg === true
   const requestId = typeof requestArg === "string" ? requestArg : null
   const replyId = typeof replyArg === "string" ? replyArg : null
+  // 20316 #3 derive-not-reject: an LLM sender SHOULD author a one-line `summary`
+  // (the channel UI shows it by default; the body discloses the markdown). If
+  // omitted, derive one from the message rather than rejecting it, and flag the
+  // derive back to the caller (no-silent) so the authored-one-liner habit shows.
+  const summaryArg = typeof a.summary === "string" ? a.summary.trim() : ""
+  const summaryDerived = summaryArg.length === 0
+  const summary = summaryDerived ? deriveSummary(sanitized) : summaryArg
   const result = sendMessage(
     ctx,
     a.to as string,
@@ -383,7 +390,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): ToolRes
     a.bead as string | undefined,
     a.ref as string | undefined,
     "direct",
-    {},
+    { summary },
     {
       request: requestFlag ? undefined : (requestId ?? undefined),
       reply: replyId ?? undefined,
@@ -407,8 +414,20 @@ function handleSend(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): ToolRes
   logEvent(ctx, `message.sent.${msgType}`, a.bead as string | undefined, {
     to: a.to,
     message_id: result.id,
+    ...(summaryDerived ? { summary_derived: true } : {}),
   })
-  return jsonResult({ sent: true, id: result.id })
+  return jsonResult({
+    sent: true,
+    id: result.id,
+    summary,
+    ...(summaryDerived
+      ? {
+          summary_derived: true,
+          warning:
+            "no `summary` provided — derived a one-liner from the message; pass an authored `summary` for the channel one-liner.",
+        }
+      : {}),
+  })
 }
 
 function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): ToolResult {
@@ -954,6 +973,7 @@ type FetchRow = {
   delivery: string
   topic: string | null
   room_id: string | null
+  summary: string | null
 }
 
 type SnapshotFilters = {
@@ -1000,7 +1020,7 @@ function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRo
   const order = filters.since !== null ? "ASC" : "DESC"
   const rows = ctx.db
     .prepare(`
-      SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id
+      SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary
       FROM messages
       WHERE ${conditions.join("\n        AND ")}
       ORDER BY rowid ${order}
@@ -1066,7 +1086,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
     const placeholders = ids.map(() => "?").join(", ")
     rows = ctx.db
       .prepare(`
-        SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id
+        SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary
         FROM messages
         WHERE id IN (${placeholders})
           AND kind != 'event'
@@ -1119,6 +1139,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
     delivery: r.delivery,
     topic: r.topic,
     room_id: r.room_id,
+    summary: r.summary,
   }))
   return jsonResult({ events, cursor: outputCursor })
 }
