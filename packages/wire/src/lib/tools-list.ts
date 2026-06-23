@@ -46,6 +46,11 @@ export const TOOLS_LIST = [
       properties: {
         to: { type: "string", description: 'Recipient session name, or "*" for broadcast' },
         message: { type: "string", description: "Message content" },
+        summary: {
+          type: "string",
+          description:
+            "Authored one-line summary — the channel UI shows it by default and discloses the markdown body on click. Optional but recommended for LLM senders; if omitted the daemon derives one from the message's first line and sets `summary_derived: true` (derive-not-reject — the message is never dropped for a missing summary).",
+        },
         type: {
           type: "string",
           description:
@@ -78,9 +83,18 @@ export const TOOLS_LIST = [
       {
         sent: { type: "boolean", description: "True on successful send." },
         id: { type: "string", description: "Message id assigned by the daemon." },
+        summary: {
+          type: "string",
+          description: "The one-liner stored with the message (authored, or derived from the message when omitted).",
+        },
+        summary_derived: {
+          type: "boolean",
+          description: "Present and true when no `summary` was provided and one was derived (no-silent flag).",
+        },
+        warning: { type: "string", description: "Human-readable note emitted when the summary was derived." },
         ...ERROR_SHAPE,
       },
-      "Send result: { sent, id } on success, { error } on validation failure.",
+      "Send result: { sent, id, summary } on success (summary_derived + warning when derived), { error } on validation failure.",
     ),
   },
   {

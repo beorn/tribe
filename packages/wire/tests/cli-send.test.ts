@@ -36,11 +36,13 @@ describe("registerSendCommands", () => {
     expect(names).toEqual(expect.arrayContaining(["send", "alarm", "alarm-status", "alarm-ack", "retro"]))
   })
 
-  test("send verb is registered with description and --type option", () => {
+  test("send verb is registered with description and --type / --summary options", () => {
     const cmd = findCmd(buildProgram(), "send")
     expect(cmd).toBeDefined()
     expect(cmd!.description()).toMatch(/send a message/i)
-    expect(optionFlags(cmd!)).toEqual(expect.arrayContaining(["--type"]))
+    // --summary lets a sender author the channel one-liner (20316 #3); when
+    // omitted the daemon derives one (derive-not-reject).
+    expect(optionFlags(cmd!)).toEqual(expect.arrayContaining(["--type", "--summary"]))
   })
 
   test("send verb declares <to> and <message...> arguments", () => {

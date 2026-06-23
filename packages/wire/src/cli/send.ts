@@ -73,9 +73,19 @@ type MessageType = (typeof VALID_MESSAGE_TYPES)[number]
 // Command implementations (ported verbatim from tools/tribe-cli.ts)
 // ---------------------------------------------------------------------------
 
-async function cmdSend(to: string, message: string, type: MessageType = "notify"): Promise<void> {
-  await callDaemon("tribe.send", { to, message, type })
+async function cmdSend(to: string, message: string, type: MessageType = "notify", summary?: string): Promise<void> {
+  const result = (await callDaemon("tribe.send", {
+    to,
+    message,
+    type,
+    ...(summary ? { summary } : {}),
+  })) as { summary?: string; summary_derived?: boolean; warning?: string }
   console.log(`Sent message to ${to}`)
+  // Derive-not-reject: surface (no-silent) when the daemon derived a one-liner
+  // because none was authored, so the sender learns to pass `--summary`.
+  if (result.summary_derived) {
+    console.warn(`  no --summary given; derived one-liner: "${result.summary ?? ""}"`)
+  }
 }
 
 /**
@@ -167,13 +177,17 @@ export function registerSendCommands(program: Command): void {
     .argument("<to>", "Target session name")
     .argument("<message...>", "Message text")
     .option("-t, --type <type>", `Message type: ${VALID_MESSAGE_TYPES.join("|")} (default: notify)`)
-    .action((to: string, message: string[], opts: { type?: string }) => {
+    .option(
+      "-s, --summary <summary>",
+      "Authored one-line summary shown by default in the channel UI (derived from the message if omitted)",
+    )
+    .action((to: string, message: string[], opts: { type?: string; summary?: string }) => {
       const type = opts.type ?? "notify"
       if (!(VALID_MESSAGE_TYPES as readonly string[]).includes(type)) {
         console.error(`tribe-wire send: invalid --type '${type}' — expected one of: ${VALID_MESSAGE_TYPES.join(", ")}`)
         process.exit(2)
       }
-      void cmdSend(to, message.join(" "), type as MessageType)
+      void cmdSend(to, message.join(" "), type as MessageType, opts.summary)
     })
 
   program
