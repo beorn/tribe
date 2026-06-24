@@ -155,6 +155,22 @@ interface Msg {
   ts: number
 }
 
+export type InboxWaitResult = {
+  session: string
+  unread_count: number
+  oldest_unread_age_min: number
+  oldest_unread_ts: number
+  waited_ms: number
+  timed_out: boolean
+  aborted: boolean
+}
+
+type InboxWaitCall = (args: { session: string; timeoutMs: number }) => Promise<InboxWaitResult>
+
+const INBOX_WAIT_CHUNK_MS = 30_000
+const INBOX_WAIT_RETRY_DELAY_MS = 250
+const INBOX_WAIT_UNAVAILABLE_GRACE_MS = 2_000
+
 // ---------------------------------------------------------------------------
 // Command implementations (ported verbatim from tools/tribe-cli.ts)
 // ---------------------------------------------------------------------------
@@ -527,18 +543,98 @@ async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promi
   )
 }
 
+type InboxWaitErrorKind = "transport-close" | "daemon-unavailable" | null
+
+function inboxWaitErrorKind(err: unknown): InboxWaitErrorKind {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code
+  if (code === "ENOENT" || code === "ECONNREFUSED") return "daemon-unavailable"
+  if (code === "ECONNRESET" || code === "EPIPE") return "transport-close"
+  const message = err instanceof Error ? err.message : String(err)
+  return /connection closed|socket closed|socket hang up|closed before response/i.test(message)
+    ? "transport-close"
+    : null
+}
+
+export function isRetryableInboxWaitError(err: unknown): boolean {
+  return inboxWaitErrorKind(err) !== null
+}
+
+function totalWaited(result: InboxWaitResult, startedAt: number, now: () => number): InboxWaitResult {
+  return { ...result, waited_ms: Math.max(result.waited_ms, Math.max(0, now() - startedAt)) }
+}
+
+function timeoutInboxWaitResult(session: string, startedAt: number, now: () => number): InboxWaitResult {
+  return {
+    session,
+    unread_count: 0,
+    oldest_unread_age_min: 0,
+    oldest_unread_ts: 0,
+    waited_ms: Math.max(0, now() - startedAt),
+    timed_out: true,
+    aborted: false,
+  }
+}
+
+export async function waitForInboxWithReconnect(opts: {
+  session: string
+  timeoutMs: number
+  call: InboxWaitCall
+  now?: () => number
+  sleep?: (ms: number) => Promise<void>
+  maxChunkMs?: number
+  retryDelayMs?: number
+  unavailableGraceMs?: number
+}): Promise<InboxWaitResult> {
+  const now = opts.now ?? Date.now
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  const maxChunkMs = opts.maxChunkMs ?? INBOX_WAIT_CHUNK_MS
+  const retryDelayMs = opts.retryDelayMs ?? INBOX_WAIT_RETRY_DELAY_MS
+  const unavailableGraceMs = opts.unavailableGraceMs ?? INBOX_WAIT_UNAVAILABLE_GRACE_MS
+  const startedAt = now()
+  const deadline = startedAt + Math.max(0, opts.timeoutMs)
+
+  while (true) {
+    const remainingMs = Math.max(0, deadline - now())
+    if (remainingMs <= 0) return timeoutInboxWaitResult(opts.session, startedAt, now)
+
+    try {
+      const result = await opts.call({ session: opts.session, timeoutMs: Math.min(maxChunkMs, remainingMs) })
+      if (result.unread_count > 0) return totalWaited(result, startedAt, now)
+      if (result.aborted || result.timed_out) {
+        if (now() >= deadline) return timeoutInboxWaitResult(opts.session, startedAt, now)
+        continue
+      }
+      return totalWaited(result, startedAt, now)
+    } catch (err) {
+      const kind = inboxWaitErrorKind(err)
+      if (!kind) throw err
+      if (kind === "daemon-unavailable" && now() - startedAt >= unavailableGraceMs) throw err
+      const afterErrorRemainingMs = Math.max(0, deadline - now())
+      if (afterErrorRemainingMs <= 0) return timeoutInboxWaitResult(opts.session, startedAt, now)
+      const pauseMs = Math.min(retryDelayMs, afterErrorRemainingMs)
+      if (pauseMs > 0) await sleep(pauseMs)
+    }
+  }
+}
+
+async function callInboxWaitChunk(session: string, timeoutMs: number): Promise<InboxWaitResult> {
+  const socketPath = resolveSocketPath()
+  const client = await connectToDaemon(socketPath, { callTimeoutMs: Math.max(10_000, timeoutMs + 5_000) })
+  try {
+    return (await client.call("cli_inbox_wait", { session, timeout_ms: timeoutMs })) as InboxWaitResult
+  } finally {
+    client.close()
+  }
+}
+
 async function cmdInboxWait(opts: { session?: string; timeoutMs?: number; json?: boolean }): Promise<void> {
   const session = opts.session ?? "@chief"
   const timeoutMs = opts.timeoutMs ?? 30_000
-  const result = (await callDaemon("cli_inbox_wait", { session, timeout_ms: timeoutMs })) as {
-    session: string
-    unread_count: number
-    oldest_unread_age_min: number
-    oldest_unread_ts: number
-    waited_ms: number
-    timed_out: boolean
-    aborted: boolean
-  }
+  const result = await waitForInboxWithReconnect({
+    session,
+    timeoutMs,
+    call: ({ session: chunkSession, timeoutMs: chunkTimeoutMs }) => callInboxWaitChunk(chunkSession, chunkTimeoutMs),
+  })
   if (opts.json) {
     console.log(JSON.stringify(result))
     return

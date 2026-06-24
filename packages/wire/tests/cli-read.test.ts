@@ -11,7 +11,7 @@
 
 import { describe, expect, test } from "vitest"
 import { Command } from "@silvery/commander"
-import { registerReadCommands } from "../src/cli/read.ts"
+import { registerReadCommands, waitForInboxWithReconnect, type InboxWaitResult } from "../src/cli/read.ts"
 
 function buildProgram(): Command {
   const program = new Command("tribe-test")
@@ -118,5 +118,141 @@ describe("registerReadCommands", () => {
       expect(typeof c.name()).toBe("string")
       expect(typeof c.description()).toBe("string")
     }
+  })
+})
+
+describe("waitForInboxWithReconnect", () => {
+  function timeoutResult(session: string, waitedMs: number): InboxWaitResult {
+    return {
+      session,
+      unread_count: 0,
+      oldest_unread_age_min: 0,
+      oldest_unread_ts: 0,
+      waited_ms: waitedMs,
+      timed_out: true,
+      aborted: false,
+    }
+  }
+
+  test("retries retryable transport close without losing the original absolute deadline", async () => {
+    let now = 1_000
+    const chunkCalls: number[] = []
+    const result = await waitForInboxWithReconnect({
+      session: "@ci",
+      timeoutMs: 65_000,
+      maxChunkMs: 30_000,
+      retryDelayMs: 250,
+      now: () => now,
+      sleep: async (ms) => {
+        now += ms
+      },
+      call: async ({ timeoutMs }) => {
+        chunkCalls.push(timeoutMs)
+        if (chunkCalls.length === 1) {
+          now += 12_000
+          throw new Error("Connection closed")
+        }
+        now += 5_000
+        return {
+          session: "@ci",
+          unread_count: 1,
+          oldest_unread_age_min: 0,
+          oldest_unread_ts: now,
+          waited_ms: 5_000,
+          timed_out: false,
+          aborted: false,
+        }
+      },
+    })
+
+    expect(chunkCalls).toEqual([30_000, 30_000])
+    expect(result.unread_count).toBe(1)
+    expect(result.waited_ms).toBe(17_250)
+    expect(result.timed_out).toBe(false)
+  })
+
+  test("clamps the last retry to remaining time and returns timeout for reload churn at deadline", async () => {
+    let now = 0
+    const chunkCalls: number[] = []
+    const result = await waitForInboxWithReconnect({
+      session: "@ci",
+      timeoutMs: 35_000,
+      maxChunkMs: 30_000,
+      retryDelayMs: 0,
+      now: () => now,
+      sleep: async (ms) => {
+        now += ms
+      },
+      call: async ({ timeoutMs }) => {
+        chunkCalls.push(timeoutMs)
+        now += timeoutMs
+        throw Object.assign(new Error("Connection closed"), { code: "ECONNRESET" })
+      },
+    })
+
+    expect(chunkCalls).toEqual([30_000, 5_000])
+    expect(result).toEqual(timeoutResult("@ci", 35_000))
+  })
+
+  test("daemon-unavailable errors retry only during the short startup grace, then stay loud", async () => {
+    let now = 0
+    const chunkCalls: number[] = []
+    const missing = Object.assign(new Error("connect ENOENT /tmp/tribe.sock"), { code: "ENOENT" })
+
+    await expect(
+      waitForInboxWithReconnect({
+        session: "@ci",
+        timeoutMs: 120_000,
+        maxChunkMs: 30_000,
+        retryDelayMs: 1_000,
+        unavailableGraceMs: 2_000,
+        now: () => now,
+        sleep: async (ms) => {
+          now += ms
+        },
+        call: async ({ timeoutMs }) => {
+          chunkCalls.push(timeoutMs)
+          throw missing
+        },
+      }),
+    ).rejects.toBe(missing)
+
+    expect(chunkCalls).toEqual([30_000, 30_000, 30_000])
+  })
+
+  test("daemon-unavailable errors can recover during the startup grace", async () => {
+    let now = 0
+    const chunkCalls: number[] = []
+    const result = await waitForInboxWithReconnect({
+      session: "@ci",
+      timeoutMs: 120_000,
+      maxChunkMs: 30_000,
+      retryDelayMs: 500,
+      unavailableGraceMs: 2_000,
+      now: () => now,
+      sleep: async (ms) => {
+        now += ms
+      },
+      call: async ({ timeoutMs }) => {
+        chunkCalls.push(timeoutMs)
+        if (chunkCalls.length === 1) {
+          throw Object.assign(new Error("connect ECONNREFUSED /tmp/tribe.sock"), { code: "ECONNREFUSED" })
+        }
+        now += 250
+        return {
+          session: "@ci",
+          unread_count: 1,
+          oldest_unread_age_min: 0,
+          oldest_unread_ts: now,
+          waited_ms: 250,
+          timed_out: false,
+          aborted: false,
+        }
+      },
+    })
+
+    expect(chunkCalls).toEqual([30_000, 30_000])
+    expect(result.unread_count).toBe(1)
+    expect(result.waited_ms).toBe(750)
   })
 })
