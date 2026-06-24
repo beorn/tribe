@@ -28,13 +28,13 @@ import { resolveSocketPath, createReconnectingClient, TRIBE_PROTOCOL_VERSION, ty
 import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
 import { spawn } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
-import { TOOLS_LIST } from "./lib/tools-list.ts"
+import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { createLogger, setSuppressConsole } from "loggily"
 import { createTimers } from "./timers.ts"
 import { defangModelInput } from "./lib/defang.ts"
 import { createConnectReplayGate, MAX_REPLAY_EVENTS, selectReplayEvents } from "./lib/replay-cap.ts"
 import { evaluateCwdPolicy, probeCwd, readCwdPolicyFromEnv, type CwdEvaluation } from "./lib/cwd-guardrail.ts"
-import { resolveJoinDelivery } from "./lib/delivery.ts"
+import { deliveryCapabilityInstruction, resolveDeliveryCapability, resolveJoinDelivery } from "./lib/delivery.ts"
 
 // stdout IS the MCP wire — a single non-JSON line (a loggily INFO banner)
 // poisons the host's JSON-RPC parser and the session silently loses its
@@ -65,6 +65,12 @@ const CLAUDE_SESSION_NAME = resolveClaudeSessionName()
 // channel.
 const DELIVERY = process.env.TRIBE_DELIVERY === "pull" ? "pull" : "push"
 const CLAUDE_CHANNEL_ENABLED = DELIVERY === "push"
+const DELIVERY_CAPABILITY = resolveDeliveryCapability({
+  delivery: DELIVERY,
+  channel: CLAUDE_CHANNEL_ENABLED,
+  pullTransport: process.env.TRIBE_PULL_TRANSPORT ?? process.env.TRIBE_WAIT_TRANSPORT,
+})
+const TRIBE_TOOLS_LIST = toolListForDeliveryCapability(DELIVERY_CAPABILITY)
 // c6071f3: a connected MCP adapter is NOT a tribe member until the model
 // explicitly calls tribe.join — register anonymously in pull mode so a
 // pre-join bridge never claims push delivery or a name it may not keep.
@@ -368,6 +374,7 @@ armDegradeNotice(daemonReady)
 // ---------------------------------------------------------------------------
 
 const joinInstruction = `If you receive a stdio-adapter auto-identify message, just call tribe.join with a short name for your focus area. Omit the role parameter — the daemon registers every session as a plain "member"; it does NOT assign "chief" by connect order. "chief" is a bead-lease hat (claimed via /up / the bead lease system), not a daemon-assigned role. No need to call tribe.members or tribe.fetch afterward — just join silently and continue.`
+const deliveryInstruction = deliveryCapabilityInstruction(DELIVERY_CAPABILITY)
 
 // Shared turn-start inbox guidance for every role variant. Kept deliberately
 // SMALL: new messages already arrive inline as <channel> envelopes (push delivery
@@ -387,6 +394,8 @@ const chiefInstructions = `Messages from other Claude Code sessions arrive as <c
 You are the chief of a tribe — a coordinator for multiple Claude Code sessions working on the same project.
 
 ${joinInstruction}
+
+${deliveryInstruction}
 
 ${turnStartInboxCheck}
 
@@ -410,6 +419,8 @@ const memberInstructions = `Messages from other Claude Code sessions arrive as <
 You are a tribe member — a worker session coordinated by the chief.
 
 ${joinInstruction}
+
+${deliveryInstruction}
 
 ${turnStartInboxCheck}
 
@@ -448,7 +459,7 @@ ${turnStartInboxCheck}
 Coordination protocol:
 - Use tribe.members() to see who's online and their domains.
 - Use tribe.send(to, message, type) to assign work, answer queries, broadcast status, or request help.
-- Use tribe.inbox.wait({ timeout_ms }) for intentional idle waits instead of repeated tribe.fetch loops.
+- ${deliveryInstruction}
 - Keep tribe messages short: 1-3 lines, plain text only.`
 
 // `experimental["claude/channel"]` registers this MCP server as a Claude Code
@@ -510,7 +521,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => {
       )
     }, 500)
   }
-  return { tools: TOOLS_LIST }
+  return { tools: TRIBE_TOOLS_LIST }
 })
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {

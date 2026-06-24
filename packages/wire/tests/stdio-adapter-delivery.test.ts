@@ -274,6 +274,41 @@ describe("stdio adapter delivery modes", () => {
     expect(joinRequest?.params?.delivery).toBe("pull")
   })
 
+  it("advertises pullTransport metadata in tools/list", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath)
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "pull",
+        TRIBE_PULL_TRANSPORT: "cli",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+
+    writeJson(child, initializePayload(1))
+    await waitForLine(child, (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    writeJson(child, toolsListPayload(2))
+    const list = await waitForLine(child, (line) => line.id === 2)
+
+    const tools = ((list.result as { tools?: Array<Record<string, unknown>> } | undefined)?.tools ?? []) as Array<{
+      name?: string
+      description?: string
+      _meta?: Record<string, unknown>
+    }>
+    const waitTool = tools.find((tool) => tool.name === "inbox.wait")
+    expect(waitTool?.description).toContain("pullTransport=cli")
+    expect(waitTool?._meta?.["tribe.deliveryCapability"]).toMatchObject({
+      delivery: "pull",
+      pullTransport: "cli",
+      idleStrategy: "cli-inbox-wait",
+    })
+  })
+
   it("push delivery registers pull and suppresses channel notifications until tribe.join", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath)

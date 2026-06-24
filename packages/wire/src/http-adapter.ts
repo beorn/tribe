@@ -12,9 +12,16 @@ import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js"
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { createHash, randomUUID } from "node:crypto"
-import { TOOLS_LIST } from "./lib/tools-list.ts"
+import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { resolveSocketPath, createReconnectingClient, TRIBE_PROTOCOL_VERSION, type DaemonClient } from "./lib/socket.ts"
-import { resolveJoinDelivery } from "./lib/delivery.ts"
+import {
+  deliveryCapabilityInstruction,
+  resolveDeliveryCapability,
+  resolveJoinDelivery,
+  type TribeDelivery,
+  type TribeDeliveryCapability,
+  type TribePullTransport,
+} from "./lib/delivery.ts"
 
 export type TribeHttpMcpServer = {
   readonly port: number
@@ -28,7 +35,8 @@ export type StartTribeHttpMcpServerOptions = {
   readonly name?: string
   readonly role?: string
   readonly domains?: readonly string[]
-  readonly delivery?: "push" | "pull"
+  readonly delivery?: TribeDelivery
+  readonly pullTransport?: TribePullTransport
   readonly project?: string
   readonly projectName?: string
   readonly projectId?: string
@@ -38,7 +46,11 @@ export type StartTribeHttpMcpServerOptions = {
 export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptions = {}): Promise<TribeHttpMcpServer> {
   const socketPath = resolveSocketPath(opts.socketPath)
   const requireJoin = opts.requireJoin !== false
-  const delivery = opts.delivery ?? "pull"
+  const deliveryCapability = resolveDeliveryCapability({
+    delivery: opts.delivery ?? "pull",
+    channel: false,
+    pullTransport: opts.pullTransport,
+  })
   const sessionId = randomUUID()
   let myName = "pending"
   let myRole = opts.role ?? "member"
@@ -62,7 +74,7 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
         peerSocket: null,
         pid: process.pid,
         identityToken,
-        delivery: requireJoin ? "pull" : delivery,
+        delivery: requireJoin ? "pull" : deliveryCapability.delivery,
       })) as { name?: string; role?: string }
       if (reg.name) myName = reg.name
       if (reg.role) myRole = reg.role
@@ -80,7 +92,8 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
       const mcp = createMcpServer({
         daemon,
         identityToken,
-        defaultDelivery: delivery,
+        defaultDelivery: deliveryCapability.delivery,
+        deliveryCapability,
         getName: () => myName,
         setName: (name) => {
           myName = name
@@ -116,21 +129,23 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
 function createMcpServer(opts: {
   readonly daemon: DaemonClient
   readonly identityToken: string
-  readonly defaultDelivery: "push" | "pull"
+  readonly defaultDelivery: TribeDelivery
+  readonly deliveryCapability: TribeDeliveryCapability
   readonly getName: () => string
   readonly setName: (name: string) => void
   readonly setRole: (role: string) => void
 }): McpServer {
+  const toolsList = toolListForDeliveryCapability(opts.deliveryCapability)
   const mcp = new McpServer(
     { name: "tribe", version: "0.14.1" },
     {
       capabilities: { tools: {} },
       instructions:
-        "Tribe coordination is available through MCP tools. Call tribe.join(name, delivery) before relying on tribe notifications or inbox routing. Pull-mode clients should use tribe.inbox.wait for intentional idle waits instead of repeated tribe.fetch loops.",
+        `Tribe coordination is available through MCP tools. Call tribe.join(name, delivery) before relying on tribe notifications or inbox routing. ${deliveryCapabilityInstruction(opts.deliveryCapability)}`,
     },
   )
 
-  mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS_LIST }))
+  mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolsList }))
   mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     const { name, arguments: toolArgs } = req.params
     const a = (toolArgs ?? {}) as Record<string, unknown>

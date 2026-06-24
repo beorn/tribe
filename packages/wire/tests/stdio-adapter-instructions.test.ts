@@ -52,4 +52,11 @@ describe("turn-start inbox instruction (km 19442 context-flood guard)", () => {
     expect(src).toMatch(/from: <peer>/)
     expect(src).toMatch(/newest matching/)
   })
+
+  it("points idle-wait policy at delivery capability metadata instead of hardcoded fetch loops", () => {
+    expect(src).toContain("TRIBE_PULL_TRANSPORT")
+    expect(src).toContain("const deliveryInstruction = deliveryCapabilityInstruction(DELIVERY_CAPABILITY)")
+    expect(src).not.toContain("native Codex should use CLI")
+    expect(src).not.toContain("Silver UI/Silvercode")
+  })
 })

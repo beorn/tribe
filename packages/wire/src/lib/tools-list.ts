@@ -17,6 +17,12 @@
  * time without renaming the contract.
  */
 
+import {
+  DEFAULT_TRIBE_DELIVERY_CAPABILITY,
+  deliveryCapabilityInstruction,
+  type TribeDeliveryCapability,
+} from "./delivery.ts"
+
 const ERROR_SHAPE = {
   error: { type: "string", description: "Error message — present when the tool refused or hit an exception." },
 } as const
@@ -36,7 +42,7 @@ const OBJ = (
   additionalProperties: true,
 })
 
-export const TOOLS_LIST = [
+const BASE_TOOLS_LIST = [
   {
     name: "send",
     description: 'Send a message to one tribe member, or to everyone with to: "*".',
@@ -141,7 +147,7 @@ export const TOOLS_LIST = [
         },
         timeout_ms: {
           type: "number",
-          description: "Wait limit in milliseconds. Defaults to 30000.",
+          description: "Wait limit in milliseconds. Defaults to 30000. Effective duration may be capped by the MCP host.",
         },
       },
     },
@@ -552,3 +558,35 @@ export const TOOLS_LIST = [
     ),
   },
 ]
+
+function inboxWaitDescription(capability: TribeDeliveryCapability): string {
+  const base =
+    "Long-poll the actionable inbox for a session until a direct message arrives or the timeout elapses. Defaults to the caller's session."
+  if (capability.idleStrategy === "cli-inbox-wait") {
+    return `${deliveryCapabilityInstruction(capability)} ${base} This MCP tool remains callable for short diagnostic waits, but the advertised idle wait primitive is CLI because this host may cap long-running MCP calls.`
+  }
+  if (capability.idleStrategy === "host-stream") {
+    return `${deliveryCapabilityInstruction(capability)} ${base} This MCP tool remains callable for diagnostics, but the advertised idle wait primitive is the host Tribe stream.`
+  }
+  if (capability.idleStrategy === "channel") {
+    return `${deliveryCapabilityInstruction(capability)} ${base} This MCP tool remains callable for diagnostics, but the advertised idle wait primitive is channel delivery.`
+  }
+  return `${deliveryCapabilityInstruction(capability)} ${base}`
+}
+
+export function toolListForDeliveryCapability(
+  capability: TribeDeliveryCapability = DEFAULT_TRIBE_DELIVERY_CAPABILITY,
+): typeof BASE_TOOLS_LIST {
+  return BASE_TOOLS_LIST.map((tool) => {
+    if (tool.name !== "inbox.wait") return tool
+    return {
+      ...tool,
+      description: inboxWaitDescription(capability),
+      _meta: {
+        "tribe.deliveryCapability": capability,
+      },
+    }
+  }) as typeof BASE_TOOLS_LIST
+}
+
+export const TOOLS_LIST = toolListForDeliveryCapability()
