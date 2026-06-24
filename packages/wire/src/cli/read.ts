@@ -32,6 +32,7 @@
 import { Command, int } from "@silvery/commander"
 import { connectToDaemon, resolveSocketPath } from "../lib/socket.ts"
 import { watchActivity } from "../lib/activity-watch.ts"
+import { runInboxWait, type ActionableSnapshot, type InboxWaitResult } from "../lib/inbox-wait.ts"
 
 // ---------------------------------------------------------------------------
 // Daemon connection
@@ -522,6 +523,172 @@ async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promi
 }
 
 // ---------------------------------------------------------------------------
+// inbox-wait — shared long-poll primitive (@km/bearly/20352-inbox-wait)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a `--timeout` duration into milliseconds. Accepts `NNs|NNm|NNh|NNd`
+ * and the literals `0` / `none` / `infinite` (→ `Infinity`, wait forever).
+ * Returns undefined on unparseable input so the caller can exit loud.
+ */
+export function parseTimeoutMs(spec: string): number | undefined {
+  const s = spec.trim().toLowerCase()
+  if (s === "0" || s === "none" || s === "infinite" || s === "inf") return Infinity
+  const match = s.match(/^(\d+)\s*([smhd])$/)
+  if (!match) return undefined
+  const n = Number(match[1])
+  if (!Number.isFinite(n) || n < 0) return undefined
+  switch (match[2]) {
+    case "s":
+      return n * 1000
+    case "m":
+      return n * 60_000
+    case "h":
+      return n * 3_600_000
+    case "d":
+      return n * 86_400_000
+    default:
+      return undefined
+  }
+}
+
+/**
+ * `inbox-wait` — block until an ACTIONABLE inbox event arrives for `session`,
+ * or until `--timeout` elapses, or until a termination signal is received.
+ *
+ * Mechanism: bounded long-poll. The actionable check reuses the daemon's
+ * canonical `getUnreadDms` predicate via the `cli_inbox_status` RPC — the SAME
+ * filter the chief-silent watchdog + health-monitor consume — so there is no
+ * second, drifting definition of "actionable". The daemon's push `wakeup`
+ * notification (fired on every message insert to connected sockets) is wired in
+ * as an ACCELERATOR: it breaks the inter-poll sleep early so an arriving event
+ * is observed promptly rather than at the next interval boundary. The
+ * authoritative decision is always the actionable probe, so ambient/broadcast
+ * wakeups never produce a false return. The loop AWAITS its sleep between
+ * probes — it is zero-spin by construction (no tight re-query).
+ *
+ * Exit codes: 0 = actionable event arrived (drain via `tribe.fetch`);
+ * 64 = timeout (back off + re-arm); 0 = clean exit on SIGINT/SIGTERM;
+ * 1 = daemon unreachable (from the shared `callDaemon` helper).
+ */
+async function cmdInboxWait(opts: {
+  session: string
+  timeoutMs: number
+  pollIntervalMs: number
+  json?: boolean
+}): Promise<void> {
+  const socketPath = resolveSocketPath()
+
+  // One long-lived connection for the duration of the wait: the probe RPC plus
+  // the push-wakeup accelerator share it. Daemon-unreachable surfaces as exit 1
+  // exactly like the other read verbs (mirrors `callDaemon`).
+  let client
+  try {
+    client = await connectToDaemon(socketPath)
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === "ECONNREFUSED" || code === "ENOENT") {
+      console.error(`No daemon running (socket: ${socketPath})`)
+      console.error(`Start one with: bun tribe-daemon (package tribe-daemon), or let a host autostart it`)
+      process.exit(1)
+    }
+    throw err
+  }
+
+  // Push-wakeup accelerator. Each daemon `wakeup` notification resolves a
+  // one-shot promise that the inter-poll sleep races against, so the next probe
+  // fires immediately instead of waiting out the interval. Re-armed after each
+  // wakeup. NOT authoritative — the probe still decides actionability.
+  let wakeResolve: (() => void) | null = null
+  client.onNotification((method) => {
+    if (method === "wakeup" && wakeResolve) {
+      const r = wakeResolve
+      wakeResolve = null
+      r()
+    }
+  })
+  // Subscribe so the daemon pushes notifications down this connection.
+  try {
+    await client.call("subscribe")
+  } catch {
+    // silent-fallback-allow: subscribe is the OPTIONAL push accelerator; on
+    // failure the wait degrades to pure bounded-poll (still correct, just no
+    // early-break). The actionable probe below is the load-bearing path.
+  }
+
+  const pollActionable = async (): Promise<ActionableSnapshot> => {
+    const row = (await client.call("cli_inbox_status", { session: opts.session })) as {
+      unread_count?: number
+      oldest_unread_ts?: number
+    }
+    return { count: row.unread_count ?? 0, oldestTs: row.oldest_unread_ts ?? 0 }
+  }
+
+  // sleep(ms) resolves on the timer OR an early push-wakeup, whichever fires
+  // first. This is the zero-spin guarantee AND the push accelerator in one.
+  const sleep = (ms: number): Promise<void> =>
+    new Promise<void>((resolve) => {
+      let done = false
+      const finish = (): void => {
+        if (done) return
+        done = true
+        wakeResolve = null
+        clearTimeout(timer)
+        resolve()
+      }
+      const timer = setTimeout(finish, ms)
+      ;(timer as { unref?: () => void }).unref?.()
+      wakeResolve = finish
+    })
+
+  // Clean exit on termination signals: resolve the signal promise so the loop
+  // returns `reason:"signal"` (exit 0) at its next checkpoint.
+  let signalResolve: (() => void) | null = null
+  const signal = new Promise<void>((resolve) => {
+    signalResolve = resolve
+  })
+  const onSignal = (): void => signalResolve?.()
+  process.once("SIGINT", onSignal)
+  process.once("SIGTERM", onSignal)
+
+  let result: InboxWaitResult
+  try {
+    result = await runInboxWait({
+      pollActionable,
+      timeoutMs: opts.timeoutMs,
+      pollIntervalMs: opts.pollIntervalMs,
+      sleep,
+      signal,
+    })
+  } finally {
+    process.removeListener("SIGINT", onSignal)
+    process.removeListener("SIGTERM", onSignal)
+    client.close()
+  }
+
+  if (opts.json) {
+    console.log(
+      JSON.stringify({
+        session: opts.session,
+        reason: result.reason,
+        exit_code: result.exitCode,
+        unread_count: result.snapshot?.count ?? 0,
+        oldest_unread_ts: result.snapshot?.oldestTs ?? 0,
+        polls: result.polls,
+      }),
+    )
+  } else if (result.reason === "actionable") {
+    const n = result.snapshot?.count ?? 0
+    console.log(`${opts.session}: ${n} actionable inbox event${n === 1 ? "" : "s"} — drain via tribe.fetch.`)
+  } else if (result.reason === "timeout") {
+    console.error(`${opts.session}: no actionable inbox event within timeout — back off and re-arm.`)
+  } else {
+    console.error(`${opts.session}: inbox-wait interrupted by signal.`)
+  }
+  process.exit(result.exitCode)
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -581,6 +748,37 @@ export function registerReadCommands(program: Command): void {
     .option("--session <name>", "Session to inspect (default: @chief)", "@chief")
     .option("--json", "Emit machine-readable JSON (for hooks)")
     .action((opts: { session?: string; json?: boolean }) => void cmdInboxStatus(opts))
+
+  program
+    .command("inbox-wait")
+    .description("Long-poll: block until an actionable inbox event arrives for a session (no busy-loop)")
+    .option("--session <name>", "Session to wait for (default: @chief)", "@chief")
+    .option("--timeout <duration>", "Max wait, e.g. 30s, 5m, 1h, or 0/none to wait forever", "5m")
+    .option("--poll-interval <duration>", "Bounded sleep between polls (cap), e.g. 500ms, 1s", "1s")
+    .option("--json", "Emit machine-readable JSON (for hooks / loop callers)")
+    .action((opts: { session?: string; timeout?: string; pollInterval?: string; json?: boolean }) => {
+      const timeoutMs = parseTimeoutMs(opts.timeout ?? "5m")
+      if (timeoutMs === undefined) {
+        console.error(`tribe inbox-wait: bad --timeout '${opts.timeout}' (expected NNs|NNm|NNh|NNd or 0/none)`)
+        process.exit(2)
+      }
+      // --poll-interval also accepts a bare `NNms` form; fall back to the
+      // duration parser for s/m/h/d. Default 1s. Floor at 50ms so a 0/typo
+      // can't spin.
+      const rawPoll = (opts.pollInterval ?? "1s").trim().toLowerCase()
+      const msMatch = rawPoll.match(/^(\d+)\s*ms$/)
+      const pollIntervalMs = msMatch ? Number(msMatch[1]) : parseTimeoutMs(rawPoll)
+      if (pollIntervalMs === undefined || !Number.isFinite(pollIntervalMs)) {
+        console.error(`tribe inbox-wait: bad --poll-interval '${opts.pollInterval}' (expected NNms|NNs|NNm)`)
+        process.exit(2)
+      }
+      void cmdInboxWait({
+        session: opts.session ?? "@chief",
+        timeoutMs,
+        pollIntervalMs: Math.max(50, pollIntervalMs),
+        json: opts.json,
+      })
+    })
 
   program
     .command("activity")

@@ -86,6 +86,20 @@ describe("registerReadCommands", () => {
     expect(flags.some((f) => f.includes("color"))).toBe(true)
   })
 
+  // @km/bearly/20352-inbox-wait — the shared long-poll primitive. Registered
+  // alongside the read verbs so @ci + agent idle loops can WAIT for actionable
+  // inbox events instead of busy-loop polling.
+  test("inbox-wait verb is registered with --session and --timeout", () => {
+    const program = buildProgram()
+    const names = program.commands.map((c) => c.name())
+    expect(names).toContain("inbox-wait")
+    const cmd = findCmd(program, "inbox-wait")
+    expect(cmd).toBeDefined()
+    const flags = optionFlags(cmd!)
+    expect(flags).toEqual(expect.arrayContaining(["--session", "--timeout"]))
+    expect(cmd!.description()).toMatch(/wait|long-poll|actionable/i)
+  })
+
   test("idempotent — each call returns Commander-shaped sub-commands", () => {
     const program = new Command("tribe-test")
     registerReadCommands(program)
