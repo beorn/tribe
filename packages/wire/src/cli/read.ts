@@ -308,6 +308,10 @@ function parseStaleMs(spec: string): number | undefined {
   }
 }
 
+function parseDurationMs(spec: string): number | undefined {
+  return parseStaleMs(spec)
+}
+
 /**
  * Ball-tracker query — list open requests where `owner` is responsible for
  * replying. Wraps the `tribe.pending` MCP tool added in
@@ -521,6 +525,38 @@ async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promi
   )
 }
 
+async function cmdInboxWait(opts: { session?: string; timeoutMs?: number; json?: boolean }): Promise<void> {
+  const session = opts.session ?? "@chief"
+  const timeoutMs = opts.timeoutMs ?? 30_000
+  const result = (await callDaemon("cli_inbox_wait", { session, timeout_ms: timeoutMs })) as {
+    session: string
+    unread_count: number
+    oldest_unread_age_min: number
+    oldest_unread_ts: number
+    waited_ms: number
+    timed_out: boolean
+    aborted: boolean
+  }
+  if (opts.json) {
+    console.log(JSON.stringify(result))
+    return
+  }
+  if (result.aborted) {
+    console.log(`${session}: inbox wait aborted.`)
+    return
+  }
+  if (result.timed_out || result.unread_count === 0) {
+    console.log(`${session}: no actionable DMs within ${Math.round(timeoutMs / 1000)}s.`)
+    process.exitCode = 64
+    return
+  }
+  const n = result.unread_count
+  console.log(
+    `${session}: ${n} unread actionable DM${n === 1 ? "" : "s"}, ` +
+      `oldest ${result.oldest_unread_age_min}min ago (waited ${Math.round(result.waited_ms / 1000)}s).`,
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
@@ -581,6 +617,21 @@ export function registerReadCommands(program: Command): void {
     .option("--session <name>", "Session to inspect (default: @chief)", "@chief")
     .option("--json", "Emit machine-readable JSON (for hooks)")
     .action((opts: { session?: string; json?: boolean }) => void cmdInboxStatus(opts))
+
+  program
+    .command("inbox-wait")
+    .description("Block until the target session receives an actionable DM or the timeout elapses")
+    .option("--session <name>", "Session to inspect (default: @chief)", "@chief")
+    .option("--timeout <duration>", "Wait limit (e.g. 30s, 1m, 5m)", "30s")
+    .option("--json", "Emit machine-readable JSON (for hooks)")
+    .action((opts: { session?: string; timeout?: string; json?: boolean }) => {
+      const timeoutMs = opts.timeout ? parseDurationMs(opts.timeout) : undefined
+      if (opts.timeout && timeoutMs === undefined) {
+        console.error(`tribe inbox-wait: bad --timeout '${opts.timeout}' (expected NNs|NNm|NNh)`)
+        process.exit(2)
+      }
+      void cmdInboxWait({ session: opts.session, timeoutMs, json: opts.json })
+    })
 
   program
     .command("activity")

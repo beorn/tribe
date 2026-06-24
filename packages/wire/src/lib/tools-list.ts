@@ -1,9 +1,8 @@
 /**
  * Tribe MCP tools list — tool definitions for ListToolsRequest.
  *
- * Public coordination surface:
- *   tribe.send, tribe.fetch, tribe.members, tribe.filter, tribe.join.
- * Admin/diagnostic verbs remain separate.
+ * Public coordination surface is the entries in `TOOLS_LIST` below. Admin and
+ * diagnostic verbs remain separate.
  *
  * Every tool also declares an `outputSchema` that mirrors the
  * `structuredContent` shape emitted by `handlers.ts::jsonResult`. Hosts
@@ -127,6 +126,37 @@ export const TOOLS_LIST = [
         ...ERROR_SHAPE,
       },
       "Pending requests for owner.",
+    ),
+  },
+  {
+    name: "inbox.wait",
+    description:
+      "Long-poll the actionable inbox for a session until a direct message arrives or the timeout elapses. Defaults to the caller's session.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        session: {
+          type: "string",
+          description: "Session name to wait on. Defaults to the caller's own session.",
+        },
+        timeout_ms: {
+          type: "number",
+          description: "Wait limit in milliseconds. Defaults to 30000.",
+        },
+      },
+    },
+    outputSchema: OBJ(
+      {
+        session: { type: "string", description: "The session that was waited on." },
+        unread_count: { type: "number", description: "Actionable unread direct-message count at return time." },
+        oldest_unread_age_min: { type: "number", description: "Age of the oldest actionable unread DM, in minutes." },
+        oldest_unread_ts: { type: "number", description: "Oldest actionable unread DM timestamp (unix ms)." },
+        waited_ms: { type: "number", description: "How long the wait lasted." },
+        timed_out: { type: "boolean", description: "True when the timeout elapsed before a DM arrived." },
+        aborted: { type: "boolean", description: "True when the connection closed before a DM arrived." },
+        ...ERROR_SHAPE,
+      },
+      "Inbox wait result.",
     ),
   },
   {

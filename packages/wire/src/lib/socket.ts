@@ -27,10 +27,11 @@ import {
  * Wire-protocol version. Bump on any payload-shape change a client cares about.
  * v5 (current) carries channel notifications with `topic`; the
  * per-event reply hint is derived at delivery time, not pushed on the wire.
- * RPCs: `tribe.send` / `tribe.fetch` / `tribe.members` / `tribe.filter` /
- * `tribe.rename` / `tribe.health` / `tribe.join` / `tribe.reload` /
- * `tribe.retro` / `tribe.chief` / `tribe.claim-chief` / `tribe.release-chief` /
- * `tribe.debug`. See plugins/claude/CHANGELOG.md for the full history.
+ * RPCs: `tribe.send` / `tribe.fetch` / `tribe.members` / `tribe.inbox.wait` /
+ * `tribe.filter` / `tribe.rename` / `tribe.health` / `tribe.join` /
+ * `tribe.reload` / `tribe.retro` / `tribe.chief` / `tribe.claim-chief` /
+ * `tribe.release-chief` / `tribe.debug`. See plugins/claude/CHANGELOG.md for
+ * the full history.
  *
  * 0.14.0 added two OPTIONAL fields on `assign`-typed channel envelopes —
  * `bead_state` (fresh snapshot from `.beads/backup/issues.jsonl`) and

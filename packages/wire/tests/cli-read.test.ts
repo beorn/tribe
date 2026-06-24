@@ -34,7 +34,16 @@ describe("registerReadCommands", () => {
     const program = buildProgram()
     const names = program.commands.map((c) => c.name())
     expect(names).toEqual(
-      expect.arrayContaining(["status", "sessions", "pending", "log", "health", "inbox-status", "activity"]),
+      expect.arrayContaining([
+        "status",
+        "sessions",
+        "pending",
+        "log",
+        "health",
+        "inbox-status",
+        "inbox-wait",
+        "activity",
+      ]),
     )
   })
 
@@ -75,6 +84,13 @@ describe("registerReadCommands", () => {
     expect(cmd).toBeDefined()
     const flags = optionFlags(cmd!)
     expect(flags).toEqual(expect.arrayContaining(["--session", "--json"]))
+  })
+
+  test("inbox-wait verb accepts --session, --timeout, and --json", () => {
+    const cmd = findCmd(buildProgram(), "inbox-wait")
+    expect(cmd).toBeDefined()
+    const flags = optionFlags(cmd!)
+    expect(flags).toEqual(expect.arrayContaining(["--session", "--timeout", "--json"]))
   })
 
   test("activity verb accepts --follow, --since, and --no-color", () => {

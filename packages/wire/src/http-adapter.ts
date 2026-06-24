@@ -126,7 +126,7 @@ function createMcpServer(opts: {
     {
       capabilities: { tools: {} },
       instructions:
-        "Tribe coordination is available through MCP tools. Call tribe.join(name, delivery) before relying on tribe notifications or inbox routing.",
+        "Tribe coordination is available through MCP tools. Call tribe.join(name, delivery) before relying on tribe notifications or inbox routing. Pull-mode clients should use tribe.inbox.wait for intentional idle waits instead of repeated tribe.fetch loops.",
     },
   )
 

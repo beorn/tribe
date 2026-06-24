@@ -100,6 +100,7 @@ export const TRIBE_COORD_METHODS = {
   send: "tribe.send",
   fetch: "tribe.fetch",
   members: "tribe.members",
+  inboxWait: "tribe.inbox.wait",
   rename: "tribe.rename",
   health: "tribe.health",
   join: "tribe.join",
@@ -270,6 +271,10 @@ export type HandlerOpts = {
    *  store isn't available, instead of throwing. See `lifecycle-store.ts`
    *  + `@km/infra/15630-stuck-agent-observability` § S4. */
   getLifecycleStore?: () => LifecycleStore
+  /** Optional: inbox wait primitive shared by CLI and MCP. */
+  inboxWait?: {
+    wait: (session: string, connId: string, timeoutMs: number) => Promise<unknown>
+  }
   /**
    * Optional: fire a JSON-RPC `wakeup` notification at the claiming session's
    * live socket so push-mode clients drain gap directs immediately, without
@@ -300,6 +305,8 @@ export function handleToolCall(
       return handleFetch(ctx, a)
     case TRIBE_COORD_METHODS.members:
       return handleSessions(ctx, a, opts)
+    case TRIBE_COORD_METHODS.inboxWait:
+      return handleInboxWait(ctx, a, opts)
     case TRIBE_COORD_METHODS.rename:
       return handleRename(ctx, a, opts)
     case TRIBE_COORD_METHODS.join:
@@ -954,6 +961,16 @@ function handleRepair(ctx: TribeContext, a: ToolArgs): ToolResult {
     cursor_after: after?.last_inbox_pull_seq ?? row.last_inbox_pull_seq,
     tail,
   })
+}
+
+function handleInboxWait(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult | Promise<ToolResult> {
+  const session = typeof a.session === "string" && a.session.length > 0 ? a.session : ctx.getName()
+  const timeoutRaw = a.timeout_ms ?? a.timeoutMs
+  const timeoutMs = Number.isFinite(Number(timeoutRaw)) ? Number(timeoutRaw) : 30_000
+  if (!opts.inboxWait) {
+    return jsonResult({ error: "inbox wait is unavailable in this handler context" })
+  }
+  return opts.inboxWait.wait(session, ctx.sessionId, timeoutMs).then((result) => jsonResult(result))
 }
 
 // ---------------------------------------------------------------------------

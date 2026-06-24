@@ -43,6 +43,7 @@ import { detectRole, resolveProjectId, type TribeRole } from "tribe-wire/lib/con
 import { createTribeContext, type TribeContext } from "../context.ts"
 import { handleToolCall, isRemovedTribeMethod, removedTribeMethodMessage, TRIBE_COORD_METHODS } from "../handlers.ts"
 import { createLifecycleStore } from "../lifecycle-store.ts"
+import { createInboxWaitManager } from "../inbox-wait.ts"
 import { logEvent, sendMessage } from "../messaging.ts"
 import { registerSession, NameConflictError } from "../session.ts"
 import { adoptByPidCwd, adoptIdentity, resolveName, type PriorSession } from "../resolve-name.ts"
@@ -136,6 +137,31 @@ export function withDispatcher<
       })
     }
 
+    function readInboxStatus(sessionName: string): {
+      session: string
+      unread_count: number
+      oldest_unread_age_min: number
+      oldest_unread_ts: number
+    } {
+      const row = stmts.getUnreadDms.get({ $name: sessionName }) as { count: number; oldest_ts: number } | undefined
+      const unread_count = row?.count ?? 0
+      const oldest_ts = row?.oldest_ts ?? 0
+      const oldest_unread_age_min = oldest_ts > 0 ? Math.floor((Date.now() - oldest_ts) / 60_000) : 0
+      return {
+        session: sessionName,
+        unread_count,
+        oldest_unread_age_min,
+        oldest_unread_ts: oldest_ts,
+      }
+    }
+
+    const inboxWait = createInboxWaitManager(readInboxStatus)
+    const previousOnMessageInserted = daemonCtx.onMessageInserted
+    daemonCtx.onMessageInserted = (info) => {
+      previousOnMessageInserted?.(info)
+      inboxWait.onMessageInserted(info)
+    }
+
     /** In-memory per-session lifecycle-snapshot cache. Last-write-wins;
      *  lost on daemon restart by design (sessions re-publish on the next
      *  state transition). Wired via `getLifecycleStore` so direct-handler
@@ -176,6 +202,7 @@ export function withDispatcher<
       getActiveSessionIds: () => registry.getActiveSessionIds(),
       getActiveSessionInfo: () => registry.getActiveSessionInfo(),
       getLifecycleStore: () => lifecycleStore,
+      inboxWait,
       notifyWakeupForReplay,
       getDebugState: () => ({
         clients: Array.from(clients.values()).map((c) => ({
@@ -569,18 +596,22 @@ export function withDispatcher<
            */
           case "cli_inbox_status": {
             const sessionName = String(p.session ?? "@chief")
-            const row = stmts.getUnreadDms.get({ $name: sessionName }) as
-              | { count: number; oldest_ts: number }
-              | undefined
-            const unread_count = row?.count ?? 0
-            const oldest_ts = row?.oldest_ts ?? 0
-            const oldest_unread_age_min = oldest_ts > 0 ? Math.floor((Date.now() - oldest_ts) / 60_000) : 0
-            return makeResponse(id, {
-              session: sessionName,
-              unread_count,
-              oldest_unread_age_min,
-              oldest_unread_ts: oldest_ts,
-            })
+            return makeResponse(id, readInboxStatus(sessionName))
+          }
+
+          case "cli_inbox_wait": {
+            const sessionName = String(p.session ?? "@chief")
+            const timeoutMsRaw = Number(p.timeout_ms ?? 30_000)
+            const timeoutMs = Number.isFinite(timeoutMsRaw) ? timeoutMsRaw : 30_000
+            return makeResponse(id, await inboxWait.wait(sessionName, connId, timeoutMs))
+          }
+
+          case "tribe.inbox.wait": {
+            const client = clients.get(connId)
+            const sessionName = String(p.session ?? client?.name ?? "@chief")
+            const timeoutMsRaw = Number(p.timeout_ms ?? 30_000)
+            const timeoutMs = Number.isFinite(timeoutMsRaw) ? timeoutMsRaw : 30_000
+            return makeResponse(id, await inboxWait.wait(sessionName, connId, timeoutMs))
           }
 
           /**
@@ -809,6 +840,7 @@ export function withDispatcher<
         }
         broadcast.flushConnection(connId)
         broadcast.discardConnection(connId)
+        inboxWait.cancelConnection(connId)
         clients.delete(connId)
         socketToClient.delete(sock)
         if (recallHandlers && client) recallHandlers.dropConn(client.recall.sessionId)

@@ -448,6 +448,7 @@ ${turnStartInboxCheck}
 Coordination protocol:
 - Use tribe.members() to see who's online and their domains.
 - Use tribe.send(to, message, type) to assign work, answer queries, broadcast status, or request help.
+- Use tribe.inbox.wait({ timeout_ms }) for intentional idle waits instead of repeated tribe.fetch loops.
 - Keep tribe messages short: 1-3 lines, plain text only.`
 
 // `experimental["claude/channel"]` registers this MCP server as a Claude Code
