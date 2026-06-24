@@ -17,10 +17,11 @@ import type { TribeContext } from "./context.ts"
  *   - `event`     — journal-only row, never delivered to any client
  *                   (recipient = '*' but delivery filter checks `kind` first)
  *
- * Classification (actionable vs ambient) lives on the separate `delivery`
- * column — see `Delivery` below. The two axes are independent: a broadcast
- * can be `push` (actionable bell) or `pull` (ambient inbox-only), and a
- * direct message is always `push`.
+ * Channel fanout lives on the separate `delivery` column — see `Delivery`
+ * below. The two axes are independent: a broadcast can be `push`
+ * (channel-delivered) or `pull` (ambient inbox-only), and a direct message
+ * defaults to `push`. `inbox.wait` actionability is a narrower type-level
+ * contract (`request` / `query` / `assign` / `verdict`).
  */
 export type MessageKind = "direct" | "broadcast" | "event"
 
@@ -169,7 +170,7 @@ export function sendMessage(
   // Default kind inference: '*' is a broadcast unless the caller explicitly
   // passed 'event'. This keeps existing call sites correct without audit.
   const resolvedKind: MessageKind = kind === "event" ? "event" : recipient === "*" ? "broadcast" : kind
-  // Direct messages are inherently actionable. Events are journal-only and
+  // Direct messages default to channel fanout. Events are journal-only and
   // never delivered, so delivery is irrelevant — keep the column populated for
   // schema invariants.
   const delivery: Delivery = classification.delivery ?? "push"

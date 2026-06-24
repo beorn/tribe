@@ -137,7 +137,7 @@ const BASE_TOOLS_LIST = [
   {
     name: "inbox.wait",
     description:
-      "Long-poll the actionable inbox for a session until a direct message arrives or the timeout elapses. Defaults to the caller's session.",
+      "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -147,7 +147,8 @@ const BASE_TOOLS_LIST = [
         },
         timeout_ms: {
           type: "number",
-          description: "Wait limit in milliseconds. Defaults to 30000. Effective duration may be capped by the MCP host.",
+          description:
+            "Wait limit in milliseconds. Defaults to 30000. Effective duration may be capped by the MCP host.",
         },
       },
     },
@@ -561,7 +562,7 @@ const BASE_TOOLS_LIST = [
 
 function inboxWaitDescription(capability: TribeDeliveryCapability): string {
   const base =
-    "Long-poll the actionable inbox for a session until a direct message arrives or the timeout elapses. Defaults to the caller's session."
+    "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session."
   if (capability.idleStrategy === "cli-inbox-wait") {
     return `${deliveryCapabilityInstruction(capability)} ${base} This MCP tool remains callable for short diagnostic waits, but the advertised idle wait primitive is CLI because this host may cap long-running MCP calls.`
   }

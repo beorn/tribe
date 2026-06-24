@@ -123,6 +123,51 @@ describe("createInboxWaitManager", () => {
     expect(result.waited_ms).toBeGreaterThanOrEqual(0)
   })
 
+  it("does not wake on direct notify messages", async () => {
+    vi.useFakeTimers()
+    let unread = 0
+    const manager = createInboxWaitManager((session) => status(session, unread))
+
+    const wait = manager.wait("@ci", "conn-1", 1_000)
+    let settled = false
+    wait.then(() => {
+      settled = true
+    })
+
+    manager.onMessageInserted(
+      message({
+        type: "notify",
+        kind: "direct",
+        recipient: "@ci",
+        sender: "@chief",
+        content: "policy note",
+      }),
+    )
+
+    vi.advanceTimersByTime(50)
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    unread = 1
+    manager.onMessageInserted(
+      message({
+        type: "request",
+        kind: "direct",
+        recipient: "@ci",
+        sender: "@chief",
+        content: "please ack this policy",
+      }),
+    )
+
+    const result = await wait
+    expect(result).toMatchObject({
+      session: "@ci",
+      unread_count: 1,
+      timed_out: false,
+      aborted: false,
+    })
+  })
+
   it("times out when no actionable message arrives", async () => {
     vi.useFakeTimers()
     const manager = createInboxWaitManager((session) => status(session, 0))

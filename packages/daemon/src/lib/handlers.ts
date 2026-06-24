@@ -135,8 +135,9 @@ export type TribeCoordMethod = (typeof TRIBE_COORD_METHODS)[keyof typeof TRIBE_C
  *
  *   1. Notifications (`from: daemon`, broadcasts `to: "*"`) are AMBIENT —
  *      surface them in fetch reads but never act on them.
- *   2. Direct messages addressed `to: <your name>` OR any `assign` / `query` /
- *      `request` / `verdict` typed message are the ACTIONABLE channel.
+ *   2. `assign` / `query` / `request` / `verdict` typed messages are the
+ *      ACTIONABLE channel. Direct `notify` / `status` / `response` rows are
+ *      inbox-visible, but they do not wake `inbox.wait`.
  *   3. When an actionable message needs no response and no comment, reply with
  *      ONLY `<ack/>` (or `<ack id="<msgid>"/>` to correlate) — silvercode
  *      suppresses bare-ack replies from the chat bubble, so a quiet
@@ -148,8 +149,9 @@ export const TRIBE_JOIN_PRIMER =
   "Tribe notification semantics: messages from `from: daemon` (github:push, " +
   'session events, health) and broadcasts (`to: "*"`) are AMBIENT awareness ' +
   "only — surface in `tribe.fetch` reads but DO NOT act on them. Direct " +
-  "messages addressed `to: <your name>`, or any message with " +
-  "`type: assign`/`query`/`request`/`verdict`, are the actionable channel. " +
+  "`type: assign`/`query`/`request`/`verdict` messages are the actionable " +
+  "channel and wake `inbox.wait`. Direct `notify`/`status`/`response` rows are " +
+  "inbox-visible, but not wakeable. " +
   "When an actionable message needs no response and no comment, reply with " +
   '`<ack/>` (or `<ack id="<msgid>"/>` to correlate) and nothing else — ' +
   "silvercode suppresses bare-ack replies from the chat bubble."
