@@ -24,6 +24,7 @@
 import { existsSync, readdirSync, statSync, unlinkSync } from "node:fs"
 import { cpus, totalmem, freemem, loadavg } from "node:os"
 import { createLogger } from "loggily"
+import { isReaperExempt } from "tribe-wire"
 import { createTimers } from "./timers.ts"
 import type { TribePluginApi, TribeClientApi } from "./plugin-api.ts"
 
@@ -1033,6 +1034,9 @@ export async function checkReaper(
   thresholds: HealthThresholds,
   state: AlertState,
   api: TribeClientApi,
+  // gap 1: a PID an operator marked exempt (a live #undead repro) is never reaped.
+  // Injected for tests; production reads the on-disk exempt markers.
+  isExempt: (pid: number) => boolean = isReaperExempt,
 ): Promise<void> {
   if (!thresholds.reaperEnabled) return
 
@@ -1050,6 +1054,9 @@ export async function checkReaper(
     // Skip processes owned by active sessions
     const owner = attributeToSession(proc.pid, pidToParent, sessions)
     if (owner) continue
+
+    // gap 1: never even track an operator-exempted PID as a reaper suspect.
+    if (isExempt(proc.pid)) continue
 
     // Check process age via ps -p <pid> -o etime=
     let etime = ""
@@ -1094,6 +1101,14 @@ export async function checkReaper(
 
   // Process suspects through the lifecycle
   for (const [pid, suspect] of state.reaperSuspects) {
+    // gap 1: an exemption can land AFTER a PID was tracked — honor it at the
+    // decision point too, so an exempt repro is never asked-about or killed.
+    if (isExempt(pid)) {
+      log.info?.(`reaper: PID ${pid} is reaper-exempt — skipping (live repro / under investigation)`)
+      state.reaperSuspects.delete(pid)
+      continue
+    }
+
     // After 3 samples: ask sessions to claim
     if (suspect.samples >= 3 && !suspect.asked) {
       suspect.asked = true

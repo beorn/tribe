@@ -28,6 +28,17 @@ export { withDaemonCall } from "./util.ts"
 // Socket path discovery
 export { resolvePeerSocketPath, resolveSocketPath } from "./paths.ts"
 
+// Reaper-exempt markers — exempt a PID from the health-reaper auto-kill (gap 1)
+export type { ReaperExemptEntry } from "./reaper-exempt.ts"
+export {
+  clearReaperExempt,
+  isReaperExempt,
+  listReaperExempt,
+  reaperExemptMarkerPath,
+  resolveReaperExemptDir,
+  setReaperExempt,
+} from "./reaper-exempt.ts"
+
 // Topic trust registry
 export type { SessionRoster, SessionRosterEntry, TopicGlob, TrustTier } from "./trust.ts"
 export {
