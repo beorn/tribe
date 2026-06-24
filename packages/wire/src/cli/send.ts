@@ -18,6 +18,7 @@
  *
  * Verbs in this family:
  *   - send          (line ~581 in tools/tribe-cli.ts)
+ *   - join          one-shot CLI join/rejoin checkpoint
  *   - alarm <reason>(line ~629)
  *   - alarm-status  (line ~635)
  *   - alarm-ack     (line ~641)
@@ -26,7 +27,7 @@
 
 import { existsSync } from "node:fs"
 import type { Command } from "@silvery/commander"
-import { connectToDaemon, resolveSocketPath } from "../lib/socket.ts"
+import { connectToDaemon, resolveSocketPath, TRIBE_PROTOCOL_VERSION } from "../lib/socket.ts"
 import { resolveDbPath } from "../lib/config.ts"
 import { formatMarkdown, generateRetro, parseDuration } from "../lib/retro.ts"
 
@@ -56,6 +57,23 @@ async function callDaemon(method: string, params?: Record<string, unknown>): Pro
   }
 }
 
+/**
+ * Unwrap an MCP tool result's JSON content (`content[0].text` -> parsed), or
+ * return the raw value when there is no parseable content. Local copy for the
+ * send/messaging verb family until the CLI-daemon seam is extracted.
+ */
+function mcpJsonContent(raw: unknown): unknown {
+  const text = (raw as { content?: ReadonlyArray<{ text?: string }> })?.content?.[0]?.text
+  if (typeof text === "string") {
+    try {
+      return JSON.parse(text)
+    } catch {
+      /* not JSON - fall back to the raw value */
+    }
+  }
+  return raw
+}
+
 /** Thin wrapper so `retro` uses the same DB resolution as the daemon. */
 function resolveDbPathFromCli(): string {
   return resolveDbPath({})
@@ -68,6 +86,17 @@ function resolveDbPathFromCli(): string {
 
 const VALID_MESSAGE_TYPES = ["assign", "status", "query", "response", "notify", "request", "verdict"] as const
 type MessageType = (typeof VALID_MESSAGE_TYPES)[number]
+
+function collectDomain(value: string, previous: string[]): string[] {
+  return [...previous, value]
+}
+
+function parseDomains(values: string[] | undefined): string[] {
+  return (values ?? [])
+    .flatMap((value) => value.split(","))
+    .map((value) => value.trim())
+    .filter(Boolean)
+}
 
 // ---------------------------------------------------------------------------
 // Command implementations (ported verbatim from tools/tribe-cli.ts)
@@ -86,6 +115,69 @@ async function cmdSend(to: string, message: string, type: MessageType = "notify"
   if (result.summary_derived) {
     console.warn(`  no --summary given; derived one-liner: "${result.summary ?? ""}"`)
   }
+}
+
+async function cmdJoin(
+  name: string,
+  opts: { role?: string; domain?: string[]; delivery?: string; json?: boolean },
+): Promise<void> {
+  const delivery = opts.delivery ?? "pull"
+  if (delivery !== "push" && delivery !== "pull") {
+    console.error(`tribe-wire join: invalid --delivery '${delivery}' — expected 'push' or 'pull'`)
+    process.exit(2)
+  }
+
+  const cwd = process.cwd()
+  const role = opts.role ?? "member"
+  const domains = parseDomains(opts.domain)
+  const socketPath = resolveSocketPath()
+  const ephemeralName = `cli-join-${process.pid}-${Date.now()}`
+  let result: {
+    joined?: boolean
+    name?: string
+    role?: string
+    domains?: string[]
+    delivery?: string
+    previous_name?: string
+    error?: string
+  }
+  try {
+    const client = await connectToDaemon(socketPath)
+    try {
+      await client.call("register", {
+        name: ephemeralName,
+        role: "member",
+        domains: [],
+        delivery,
+        project: cwd,
+        projectName: cwd.split("/").filter(Boolean).at(-1) ?? "unknown",
+        pid: process.pid,
+        protocolVersion: TRIBE_PROTOCOL_VERSION,
+      })
+      result = mcpJsonContent(await client.call("tribe.join", { name, role, domains, delivery })) as typeof result
+    } finally {
+      client.close()
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === "ECONNREFUSED" || code === "ENOENT") {
+      console.error(`No daemon running (socket: ${socketPath})`)
+      console.error(`Start one with: bun tribe-daemon (package tribe-daemon), or let a host autostart it`)
+      process.exit(1)
+    }
+    throw err
+  }
+
+  if (opts.json) {
+    console.log(JSON.stringify(result))
+    return
+  }
+  if (result.error) {
+    console.error(`tribe-wire join: ${result.error}`)
+    process.exit(1)
+  }
+  console.log(`Joined ${result.name ?? name} as ${result.role ?? role} (delivery=${result.delivery ?? delivery}).`)
+  if (result.previous_name) console.log(`  previous: ${result.previous_name}`)
 }
 
 /**
@@ -189,6 +281,24 @@ export function registerSendCommands(program: Command): void {
       }
       void cmdSend(to, message.join(" "), type as MessageType, opts.summary)
     })
+
+  program
+    .command("join")
+    .description("Join/rejoin the tribe from this one-shot CLI process")
+    .argument("<name>", "Session name to claim, e.g. @chief or @ci")
+    .option("-r, --role <role>", "Session role (default: member)", "member")
+    .option(
+      "-d, --domain <domain>",
+      "Domain label; repeat or comma-separate for multiple",
+      collectDomain,
+      [] as string[],
+    )
+    .option("--delivery <mode>", "Delivery mode: pull or push (default: pull)", "pull")
+    .option("--json", "Emit machine-readable JSON")
+    .action(
+      (name: string, opts: { role?: string; domain?: string[]; delivery?: string; json?: boolean }) =>
+        void cmdJoin(name, opts),
+    )
 
   program
     .command("alarm <reason>")

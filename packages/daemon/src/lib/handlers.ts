@@ -3,6 +3,7 @@
  */
 
 import { createLogger } from "loggily"
+import { randomUUID } from "node:crypto"
 import type { TribeContext } from "./context.ts"
 import type { TribeRole } from "tribe-wire/lib/config"
 
@@ -942,19 +943,40 @@ function handleRepair(ctx: TribeContext, a: ToolArgs): ToolResult {
     return jsonResult({ error: 'repair requires inbox_cursor: "tail"' })
   }
 
-  const row = ctx.db
+  const tail = (ctx.stmts.getMessageTailSeq.get() as { seq: number } | null)?.seq ?? 0
+  let createdSession = false
+  let row = ctx.db
     .prepare("SELECT id, last_inbox_pull_seq FROM sessions WHERE name = $name LIMIT 1")
     .get({ $name: sessionName }) as { id: string; last_inbox_pull_seq: number } | null
   if (!row) {
-    return jsonResult({ error: `session not found: ${sessionName}` })
+    const now = Date.now()
+    const id = `repair-${randomUUID()}`
+    ctx.stmts.upsertSession.run({
+      $id: id,
+      $name: sessionName,
+      $role: "member",
+      $domains: "[]",
+      $pid: 0,
+      $cwd: process.cwd(),
+      $project_id: null,
+      $claude_session_id: null,
+      $claude_session_name: null,
+      $identity_token: null,
+      $now: now,
+      $delivery: "pull",
+      $account: null,
+      $provider: null,
+    })
+    row = { id, last_inbox_pull_seq: 0 }
+    createdSession = true
   }
 
-  const tail = (ctx.stmts.getMessageTailSeq.get() as { seq: number } | null)?.seq ?? 0
   ctx.stmts.advanceInboxCursor.run({ $id: row.id, $seq: tail, $now: Date.now() })
   const after = ctx.stmts.getInboxCursor.get({ $id: row.id }) as { last_inbox_pull_seq: number } | null
 
   return jsonResult({
     repaired: true,
+    created_session: createdSession,
     session: sessionName,
     repair: "inbox_cursor_to_tail",
     cursor_before: row.last_inbox_pull_seq,

@@ -30,7 +30,7 @@ function optionFlags(cmd: Command): string[] {
 }
 
 describe("registerReadCommands", () => {
-  test("registers all 7 read verbs", () => {
+  test("registers all read verbs", () => {
     const program = buildProgram()
     const names = program.commands.map((c) => c.name())
     expect(names).toEqual(
@@ -42,6 +42,7 @@ describe("registerReadCommands", () => {
         "health",
         "inbox-status",
         "inbox-wait",
+        "repair",
         "activity",
       ]),
     )
@@ -91,6 +92,13 @@ describe("registerReadCommands", () => {
     expect(cmd).toBeDefined()
     const flags = optionFlags(cmd!)
     expect(flags).toEqual(expect.arrayContaining(["--session", "--timeout", "--json"]))
+  })
+
+  test("repair verb accepts --session, --inbox-cursor, and --json", () => {
+    const cmd = findCmd(buildProgram(), "repair")
+    expect(cmd).toBeDefined()
+    const flags = optionFlags(cmd!)
+    expect(flags).toEqual(expect.arrayContaining(["--session", "--inbox-cursor", "--json"]))
   })
 
   test("activity verb accepts --follow, --since, and --no-color", () => {

@@ -30,10 +30,10 @@ function optionFlags(cmd: Command): string[] {
 }
 
 describe("registerSendCommands", () => {
-  test("registers all 5 send/messaging verbs", () => {
+  test("registers all send/messaging verbs", () => {
     const program = buildProgram()
     const names = program.commands.map((c) => c.name())
-    expect(names).toEqual(expect.arrayContaining(["send", "alarm", "alarm-status", "alarm-ack", "retro"]))
+    expect(names).toEqual(expect.arrayContaining(["send", "join", "alarm", "alarm-status", "alarm-ack", "retro"]))
   })
 
   test("send verb is registered with description and --type / --summary options", () => {
@@ -53,6 +53,15 @@ describe("registerSendCommands", () => {
     const args = (cmd as unknown as { _args?: Array<{ variadic?: boolean }> })._args ?? []
     expect(args.length).toBe(2)
     expect(args[1]!.variadic).toBe(true)
+  })
+
+  test("join verb declares <name> and accepts role, domain, delivery, and json flags", () => {
+    const cmd = findCmd(buildProgram(), "join")
+    expect(cmd).toBeDefined()
+    expect(cmd!.description()).toMatch(/join|rejoin/i)
+    const args = (cmd as unknown as { _args?: Array<{ variadic?: boolean }> })._args ?? []
+    expect(args.length).toBe(1)
+    expect(optionFlags(cmd!)).toEqual(expect.arrayContaining(["--role", "--domain", "--delivery", "--json"]))
   })
 
   test("alarm verb is registered and accepts --by", () => {

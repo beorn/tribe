@@ -22,6 +22,7 @@
  *   - log           (line ~610)
  *   - health        (line ~617)
  *   - inbox-status  (line ~622)
+ *   - repair        (operator-bounded state repair)
  *   - activity      (line ~674)
  *
  * The legacy `tools/tribe-cli.ts` continues to ship these same verbs until
@@ -558,6 +559,39 @@ async function cmdInboxWait(opts: { session?: string; timeoutMs?: number; json?:
   )
 }
 
+async function cmdRepair(opts: { session?: string; inboxCursor?: string; json?: boolean }): Promise<void> {
+  const session = opts.session ?? "@chief"
+  const inboxCursor = opts.inboxCursor ?? "tail"
+  if (inboxCursor !== "tail") {
+    console.error(`tribe repair: bad --inbox-cursor '${inboxCursor}' (expected 'tail')`)
+    process.exit(2)
+  }
+
+  const result = mcpJsonContent(await callDaemon("tribe.repair", { session, inbox_cursor: inboxCursor })) as {
+    error?: string
+    repaired?: boolean
+    session?: string
+    repair?: string
+    cursor_before?: number
+    cursor_after?: number
+    tail?: number
+  }
+
+  if (opts.json) {
+    console.log(JSON.stringify(result))
+    return
+  }
+  if (result.error) {
+    console.error(`tribe repair: ${result.error}`)
+    process.exit(1)
+  }
+
+  console.log(
+    `Repaired ${result.session ?? session}: inbox cursor ` +
+      `${result.cursor_before ?? "?"} -> ${result.cursor_after ?? "?"} (tail ${result.tail ?? "?"}).`,
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
@@ -633,6 +667,14 @@ export function registerReadCommands(program: Command): void {
       }
       void cmdInboxWait({ session: opts.session, timeoutMs, json: opts.json })
     })
+
+  program
+    .command("repair")
+    .description("Operator-bounded daemon state repair")
+    .option("--session <name>", "Session to repair (default: @chief)", "@chief")
+    .option("--inbox-cursor <mode>", "Inbox cursor repair mode; currently only 'tail'", "tail")
+    .option("--json", "Emit machine-readable JSON")
+    .action((opts: { session?: string; inboxCursor?: string; json?: boolean }) => void cmdRepair(opts))
 
   program
     .command("activity")

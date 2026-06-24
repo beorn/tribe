@@ -131,4 +131,31 @@ describe("@km/tribe/20032 - pull cursor monotonicity across same-session join", 
     expect(afterRepair.events).toEqual([])
     expect(afterRepair.cursor).toBe(drainedRowid)
   })
+
+  it("operator repair can create a cursor checkpoint for an absent named session", () => {
+    const ctx = makeContext(db, stmts)
+    const opts = makeOpts()
+    const tail = insertDirect(stmts, "absent chief backlog")
+
+    const repair = parseToolJson(handleToolCall(ctx, "tribe.repair", { session: NAME, inbox_cursor: "tail" }, opts))
+    expect(repair).toMatchObject({
+      repaired: true,
+      created_session: true,
+      session: NAME,
+      cursor_before: 0,
+      cursor_after: tail,
+      tail,
+    })
+
+    const row = db
+      .prepare("SELECT name, role, pid, delivery, last_inbox_pull_seq FROM sessions WHERE name = ?")
+      .get(NAME) as { name: string; role: string; pid: number; delivery: string; last_inbox_pull_seq: number } | null
+    expect(row).toMatchObject({
+      name: NAME,
+      role: "member",
+      pid: 0,
+      delivery: "pull",
+      last_inbox_pull_seq: tail,
+    })
+  })
 })

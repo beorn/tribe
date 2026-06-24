@@ -482,6 +482,7 @@ export function withDispatcher<
           case TRIBE_COORD_METHODS.reload:
           case TRIBE_COORD_METHODS.retro:
           case TRIBE_COORD_METHODS.debug:
+          case TRIBE_COORD_METHODS.repair:
           case TRIBE_COORD_METHODS.filter:
           case TRIBE_COORD_METHODS.lifecyclePublish:
           case TRIBE_COORD_METHODS.healthPublish:
