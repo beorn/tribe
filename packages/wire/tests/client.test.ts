@@ -58,6 +58,21 @@ function spawnFakeDaemon(socketPath: string): Promise<{ server: Server; clients:
   })
 }
 
+function spawnClosingDaemon(socketPath: string): Promise<{ server: Server }> {
+  return new Promise((resolveServer) => {
+    const server = createServer((socket) => {
+      const parse = createLineParser((msg) => {
+        if (isRequest(msg)) socket.end()
+      })
+      socket.on("data", parse)
+      socket.on("error", () => {
+        /* ignore */
+      })
+    })
+    server.listen(socketPath, () => resolveServer({ server }))
+  })
+}
+
 describe("connectToDaemon", () => {
   let tmpDir: string
 
@@ -106,6 +121,17 @@ describe("connectToDaemon", () => {
   it("rejects with ENOENT when the socket file does not exist", async () => {
     const missing = join(tmpDir, "nope.sock")
     await expect(connectToDaemon(missing)).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("rejects pending calls when the daemon closes the socket without a response", async () => {
+    const sock = join(tmpDir, "d.sock")
+    const { server } = await spawnClosingDaemon(sock)
+    try {
+      const client = await connectToDaemon(sock, { callTimeoutMs: 60_000 })
+      await expect(client.call("never-responds")).rejects.toThrow("Connection closed")
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()))
+    }
   })
 })
 
