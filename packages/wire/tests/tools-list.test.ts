@@ -22,10 +22,27 @@ describe("tribe MCP tools list", () => {
     const tool = tools.find((entry) => entry.name === "inbox.wait")
     expect(tool?.description).toContain("pullTransport=cli")
     expect(tool?.description).toContain("bun tribe inbox-wait")
+    expect(tool?.description).toContain("one max-window CLI wait")
+    expect(tool?.description).toContain("repeated short waits")
     expect((tool as { _meta?: Record<string, unknown> })._meta?.["tribe.deliveryCapability"]).toMatchObject({
       delivery: "pull",
       pullTransport: "cli",
       idleStrategy: "cli-inbox-wait",
+    })
+  })
+
+  it("tells host-stream clients not to poll", () => {
+    const tools = toolListForDeliveryCapability(
+      resolveDeliveryCapability({ delivery: "pull", channel: false, pullTransport: "host-stream" }),
+    )
+    const tool = tools.find((entry) => entry.name === "inbox.wait")
+    expect(tool?.description).toContain("pullTransport=host-stream")
+    expect(tool?.description).toContain("host Tribe stream")
+    expect(tool?.description).toContain("do not poll")
+    expect((tool as { _meta?: Record<string, unknown> })._meta?.["tribe.deliveryCapability"]).toMatchObject({
+      delivery: "pull",
+      pullTransport: "host-stream",
+      idleStrategy: "host-stream",
     })
   })
 })
