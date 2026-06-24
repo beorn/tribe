@@ -550,7 +550,9 @@ function inboxWaitErrorKind(err: unknown): InboxWaitErrorKind {
   if (code === "ENOENT" || code === "ECONNREFUSED") return "daemon-unavailable"
   if (code === "ECONNRESET" || code === "EPIPE") return "transport-close"
   const message = err instanceof Error ? err.message : String(err)
-  return /connection closed|socket closed|socket hang up|closed before response/i.test(message)
+  return /connection closed|socket closed|socket hang up|closed before response|request cli_inbox_wait timed out/i.test(
+    message,
+  )
     ? "transport-close"
     : null
 }

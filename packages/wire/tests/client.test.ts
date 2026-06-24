@@ -44,6 +44,8 @@ function spawnFakeDaemon(socketPath: string): Promise<{ server: Server; clients:
           } else if (msg.method === "ping") {
             socket.write(makeResponse(msg.id, { pong: true }))
             socket.write(makeNotification("pushed", { from: "ping" }))
+          } else if (msg.method === "closeWithoutResponse") {
+            socket.end()
           } else {
             socket.write(makeResponse(msg.id, null))
           }
@@ -97,6 +99,18 @@ describe("connectToDaemon", () => {
       expect(seen).toHaveLength(1)
       expect(seen[0]!.method).toBe("pushed")
       expect(seen[0]!.params).toEqual({ from: "ping" })
+      client.close()
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  })
+
+  it("rejects pending calls when the socket closes without a response", async () => {
+    const sock = join(tmpDir, "d.sock")
+    const { server } = await spawnFakeDaemon(sock)
+    try {
+      const client = await connectToDaemon(sock)
+      await expect(client.call("closeWithoutResponse")).rejects.toThrow("Connection closed")
       client.close()
     } finally {
       await new Promise<void>((r) => server.close(() => r()))

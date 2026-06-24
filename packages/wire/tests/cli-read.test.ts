@@ -194,6 +194,42 @@ describe("waitForInboxWithReconnect", () => {
     expect(result).toEqual(timeoutResult("@ci", 35_000))
   })
 
+  test("retries lost wait RPC timeouts caused by daemon reload", async () => {
+    let now = 0
+    const chunkCalls: number[] = []
+    const result = await waitForInboxWithReconnect({
+      session: "@ci",
+      timeoutMs: 45_000,
+      maxChunkMs: 30_000,
+      retryDelayMs: 100,
+      now: () => now,
+      sleep: async (ms) => {
+        now += ms
+      },
+      call: async ({ timeoutMs }) => {
+        chunkCalls.push(timeoutMs)
+        if (chunkCalls.length === 1) {
+          now += 35_000
+          throw new Error("Request cli_inbox_wait timed out")
+        }
+        now += 500
+        return {
+          session: "@ci",
+          unread_count: 1,
+          oldest_unread_age_min: 0,
+          oldest_unread_ts: now,
+          waited_ms: 500,
+          timed_out: false,
+          aborted: false,
+        }
+      },
+    })
+
+    expect(chunkCalls).toEqual([30_000, 9_900])
+    expect(result.unread_count).toBe(1)
+    expect(result.waited_ms).toBe(35_600)
+  })
+
   test("daemon-unavailable errors retry only during the short startup grace, then stay loud", async () => {
     let now = 0
     const chunkCalls: number[] = []

@@ -58,6 +58,12 @@ export function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts):
     const ac = new AbortController()
     const timers = createTimers(ac.signal)
 
+    function rejectPending(err: Error): void {
+      for (const [, p] of pending) p.reject(err)
+      pending.clear()
+      ac.abort()
+    }
+
     const parse = createLineParser((msg) => {
       if (isResponse(msg)) {
         const p = pending.get(msg.id)
@@ -78,8 +84,10 @@ export function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts):
       socket.removeListener("error", reject)
       socket.on("error", (err) => {
         log.error?.(`Connection error: ${err.message}`)
-        for (const [, p] of pending) p.reject(err)
-        pending.clear()
+        rejectPending(err)
+      })
+      socket.on("close", () => {
+        rejectPending(new Error("Connection closed"))
       })
 
       let timeouts = 0
@@ -109,9 +117,7 @@ export function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts):
           notificationHandlers.push(handler)
         },
         close() {
-          for (const [, p] of pending) p.reject(new Error("Connection closed"))
-          pending.clear()
-          ac.abort()
+          rejectPending(new Error("Connection closed"))
           socket.end()
         },
         socket,
