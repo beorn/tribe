@@ -11,7 +11,7 @@
 
 import { describe, expect, test } from "vitest"
 import { Command } from "@silvery/commander"
-import { registerReadCommands } from "../src/cli/read.ts"
+import { inboxWaitCallTimeoutMs, registerReadCommands } from "../src/cli/read.ts"
 
 function buildProgram(): Command {
   const program = new Command("tribe-test")
@@ -91,6 +91,11 @@ describe("registerReadCommands", () => {
     expect(cmd).toBeDefined()
     const flags = optionFlags(cmd!)
     expect(flags).toEqual(expect.arrayContaining(["--session", "--timeout", "--json"]))
+  })
+
+  test("inbox-wait daemon call timeout exceeds the requested long-poll timeout", () => {
+    expect(inboxWaitCallTimeoutMs(30_000)).toBeGreaterThan(30_000)
+    expect(inboxWaitCallTimeoutMs(120_000)).toBeGreaterThan(120_000)
   })
 
   test("activity verb accepts --follow, --since, and --no-color", () => {

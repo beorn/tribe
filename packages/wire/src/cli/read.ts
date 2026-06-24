@@ -37,10 +37,14 @@ import { watchActivity } from "../lib/activity-watch.ts"
 // Daemon connection
 // ---------------------------------------------------------------------------
 
-async function callDaemon(method: string, params?: Record<string, unknown>): Promise<unknown> {
+async function callDaemon(
+  method: string,
+  params?: Record<string, unknown>,
+  opts?: { callTimeoutMs?: number },
+): Promise<unknown> {
   const socketPath = resolveSocketPath()
   try {
-    const client = await connectToDaemon(socketPath)
+    const client = await connectToDaemon(socketPath, { callTimeoutMs: opts?.callTimeoutMs })
     try {
       const result = await client.call(method, params)
       return result
@@ -56,6 +60,10 @@ async function callDaemon(method: string, params?: Record<string, unknown>): Pro
     }
     throw err
   }
+}
+
+export function inboxWaitCallTimeoutMs(timeoutMs: number): number {
+  return Math.max(10_000, timeoutMs + 5_000)
 }
 
 /**
@@ -528,7 +536,13 @@ async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promi
 async function cmdInboxWait(opts: { session?: string; timeoutMs?: number; json?: boolean }): Promise<void> {
   const session = opts.session ?? "@chief"
   const timeoutMs = opts.timeoutMs ?? 30_000
-  const result = (await callDaemon("cli_inbox_wait", { session, timeout_ms: timeoutMs })) as {
+  const result = (await callDaemon(
+    "cli_inbox_wait",
+    { session, timeout_ms: timeoutMs },
+    {
+      callTimeoutMs: inboxWaitCallTimeoutMs(timeoutMs),
+    },
+  )) as {
     session: string
     unread_count: number
     oldest_unread_age_min: number
