@@ -18,7 +18,7 @@
  *     tribe daemon's Unix socket. argv-forwarded (NOT Commander-parsed),
  *     so the stdio-adapter's own parseTribeArgs sees the full flag set.
  *
- *   tribe-wire status | sessions | pending | log | health | inbox-status | inbox-wait | activity
+ *   tribe-wire status | sessions | pending | log | health | inbox-status | inbox-wait | reload | activity
  *     Read/inspect verbs — register via cli/read.ts (Family 1).
  *
  *   tribe-wire send | retro | alarm | alarm-status | alarm-ack

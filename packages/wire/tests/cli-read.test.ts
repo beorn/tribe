@@ -11,7 +11,12 @@
 
 import { describe, expect, test } from "vitest"
 import { Command } from "@silvery/commander"
-import { registerReadCommands, waitForInboxWithReconnect, type InboxWaitResult } from "../src/cli/read.ts"
+import {
+  formatReloadResult,
+  registerReadCommands,
+  waitForInboxWithReconnect,
+  type InboxWaitResult,
+} from "../src/cli/read.ts"
 
 function buildProgram(): Command {
   const program = new Command("tribe-test")
@@ -42,6 +47,7 @@ describe("registerReadCommands", () => {
         "health",
         "inbox-status",
         "inbox-wait",
+        "reload",
         "repair",
         "activity",
       ]),
@@ -101,6 +107,14 @@ describe("registerReadCommands", () => {
     expect(flags).toEqual(expect.arrayContaining(["--session", "--inbox-cursor", "--json"]))
   })
 
+  test("reload verb accepts --reason and --json", () => {
+    const cmd = findCmd(buildProgram(), "reload")
+    expect(cmd).toBeDefined()
+    expect(cmd!.description()).toMatch(/hot-reload/i)
+    const flags = optionFlags(cmd!)
+    expect(flags).toEqual(expect.arrayContaining(["--reason", "--json"]))
+  })
+
   test("activity verb accepts --follow, --since, and --no-color", () => {
     const cmd = findCmd(buildProgram(), "activity")
     expect(cmd).toBeDefined()
@@ -118,6 +132,20 @@ describe("registerReadCommands", () => {
       expect(typeof c.name()).toBe("string")
       expect(typeof c.description()).toBe("string")
     }
+  })
+})
+
+describe("formatReloadResult", () => {
+  test("formats the daemon reload acknowledgement with pid and reason", () => {
+    expect(formatReloadResult({ reloading: true, reason: "pick up CLI fix", pid: 1234 })).toBe(
+      "Reloading tribe daemon (pid 1234): pick up CLI fix.",
+    )
+  })
+
+  test("formats older daemon reload acknowledgements without pid", () => {
+    expect(formatReloadResult({ reloading: true, reason: "manual reload" })).toBe(
+      "Reloading tribe daemon: manual reload.",
+    )
   })
 })
 

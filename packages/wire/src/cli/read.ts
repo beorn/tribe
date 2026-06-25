@@ -22,6 +22,7 @@
  *   - log           (line ~610)
  *   - health        (line ~617)
  *   - inbox-status  (line ~622)
+ *   - reload        (MCP/RPC tribe.reload hot-reload parity)
  *   - repair        (operator-bounded state repair)
  *   - activity      (line ~674)
  *
@@ -76,6 +77,19 @@ export function mcpJsonContent(raw: unknown): unknown {
     }
   }
   return raw
+}
+
+interface ReloadResult {
+  error?: string
+  reloading?: boolean
+  reason?: string
+  pid?: number
+}
+
+export function formatReloadResult(result: ReloadResult): string {
+  const pid = typeof result.pid === "number" ? ` (pid ${result.pid})` : ""
+  const reason = result.reason ?? "manual reload"
+  return `Reloading tribe daemon${pid}: ${reason}.`
 }
 
 // ---------------------------------------------------------------------------
@@ -690,6 +704,22 @@ async function cmdRepair(opts: { session?: string; inboxCursor?: string; json?: 
   )
 }
 
+async function cmdReload(opts: { reason?: string; json?: boolean }): Promise<void> {
+  const params: Record<string, unknown> = opts.reason ? { reason: opts.reason } : {}
+  const result = mcpJsonContent(await callDaemon("tribe.reload", params)) as ReloadResult
+
+  if (opts.json) {
+    console.log(JSON.stringify(result))
+    return
+  }
+  if (result.error) {
+    console.error(`tribe reload: ${result.error}`)
+    process.exit(1)
+  }
+
+  console.log(formatReloadResult(result))
+}
+
 // ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
@@ -773,6 +803,13 @@ export function registerReadCommands(program: Command): void {
     .option("--inbox-cursor <mode>", "Inbox cursor repair mode; currently only 'tail'", "tail")
     .option("--json", "Emit machine-readable JSON")
     .action((opts: { session?: string; inboxCursor?: string; json?: boolean }) => void cmdRepair(opts))
+
+  program
+    .command("reload")
+    .description("Hot-reload the tribe daemon via RPC tribe.reload")
+    .option("--reason <text>", "Why the reload is needed (logged by the daemon)")
+    .option("--json", "Emit machine-readable JSON")
+    .action((opts: { reason?: string; json?: boolean }) => void cmdReload(opts))
 
   program
     .command("activity")

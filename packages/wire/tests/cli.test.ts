@@ -47,6 +47,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     expect(stdout).toMatch(/Commands:/)
     // A few canonical verbs from each registered family are visible.
     expect(stdout).toMatch(/\bstatus\b/)
+    expect(stdout).toMatch(/\breload\b/)
     expect(stdout).toMatch(/\bsend\b/)
     expect(stdout).toMatch(/\bretro\b/)
     // addHelpText footer documents the argv-forwarded mcp subcommand.
