@@ -123,4 +123,49 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
     const after = membersFor(ctx, opts, "@agent/2")
     expect(after).toMatchObject({ account: "keep@x.org", provider: "codex" })
   })
+
+  it("join persists a session row when the caller was only live in the daemon client map", () => {
+    const sessionId = "sess-pending-only"
+    const ctx = makeContext(db, stmts, sessionId, "pending-abc123")
+    const opts = makeOpts(new Set([sessionId]))
+    const historic = stmts.insertMessage.run({
+      $id: "historic-chief-request",
+      $type: "request",
+      $sender: "@agent/1",
+      $recipient: "@chief",
+      $kind: "direct",
+      $content: "old request before the pending-only client joined",
+      $bead_id: null,
+      $ref: null,
+      $ts: Date.now() - 13 * 60 * 60 * 1000,
+      $delivery: "pull",
+      $topic: null,
+      $room_id: null,
+      $request: null,
+      $reply: null,
+    })
+
+    handleToolCall(ctx, "tribe.join", { name: "@chief", delivery: "pull", provider: "codex" }, opts)
+
+    const row = db
+      .prepare("SELECT id, name, role, delivery, provider, last_inbox_pull_seq FROM sessions WHERE id = ?")
+      .get(sessionId) as {
+      id: string
+      name: string
+      role: string
+      delivery: string
+      provider: string
+      last_inbox_pull_seq: number
+    } | null
+    expect(row).toMatchObject({
+      id: sessionId,
+      name: "@chief",
+      role: "member",
+      delivery: "pull",
+      provider: "codex",
+    })
+    expect(row?.last_inbox_pull_seq).toBeGreaterThanOrEqual(Number(historic.lastInsertRowid))
+
+    expect(membersFor(ctx, opts, "@chief")).toMatchObject({ name: "@chief", provider: "codex" })
+  })
 })

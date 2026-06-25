@@ -11,7 +11,7 @@ const log = createLogger("tribe:handlers")
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { validateName, sanitizeMessage } from "./validation.ts"
 import { sendMessage, deriveSummary, logEvent, replayUnreadForClaimedName } from "./messaging.ts"
-import { isPidAlive as pidStillAlive } from "./session.ts"
+import { isPidAlive as pidStillAlive, registerSession } from "./session.ts"
 import { gatherCodePin } from "./code-pin.ts"
 import { senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
 import type { LifecycleStore, LifecycleSnapshotRecord } from "./lifecycle-store.ts"
@@ -674,6 +674,26 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   const joinNameError = validateName(joinName)
   if (joinNameError) {
     return jsonResult({ error: joinNameError })
+  }
+
+  const hasSelfRow = ctx.db.prepare("SELECT 1 FROM sessions WHERE id = $id LIMIT 1").get({ $id: ctx.sessionId }) as {
+    1: number
+  } | null
+  if (!hasSelfRow) {
+    const requestedDelivery = a.delivery === "push" || a.delivery === "pull" ? a.delivery : undefined
+    registerSession(
+      ctx,
+      undefined,
+      (sessionId) => opts.getActiveSessionIds().has(sessionId),
+      identityToken,
+      0,
+      requestedDelivery,
+      process.cwd(),
+      joinAccount,
+      joinProvider,
+    )
+    const tail = (ctx.stmts.getMessageTailSeq.get() as { seq: number } | null)?.seq ?? 0
+    ctx.stmts.resetSessionDeliveryOffsets.run({ $id: ctx.sessionId, $seq: tail, $ts: Date.now() })
   }
 
   // Check if name is taken. Like handleRename, reclaim from non-active holders
