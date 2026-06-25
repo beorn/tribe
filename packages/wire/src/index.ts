@@ -60,3 +60,7 @@ export { startTribeHttpMcpServer } from "./http-adapter.ts"
 
 // Join delivery resolution (require-join-before-push contract, c6071f3 + 333193c).
 export { resolveJoinDelivery } from "./lib/delivery.ts"
+
+// Runtime identity — `<version>+<sha>` for `tribe-wire --version` + daemon startup
+// (@km/infra/20359, vendor-local; mirrors code-pin's running-code visibility).
+export { formatRuntimeId, gitShortHead, tribeWireRuntimeId, wireVersion } from "./runtime-id.ts"

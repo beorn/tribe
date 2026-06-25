@@ -15,7 +15,7 @@
  */
 
 import { createLogger } from "loggily"
-import { pipe, withTool, withTools, createScope } from "tribe-wire"
+import { pipe, withTool, withTools, createScope, formatRuntimeId } from "tribe-wire"
 import { gitPlugin } from "./lib/git-plugin.ts"
 import { beadsPlugin } from "./lib/beads-plugin.ts"
 import { githubPlugin } from "./lib/github-plugin.ts"
@@ -44,7 +44,7 @@ import {
 } from "./lib/compose/index.ts"
 import { TOOLS_LIST } from "tribe-wire/lib/tools-list"
 import { pruneOldActivityLogs } from "./lib/activity-log.ts"
-import { gatherCodePin } from "./lib/code-pin.ts"
+import { gatherCodePin, STARTUP_SHA } from "./lib/code-pin.ts"
 
 // ---------------------------------------------------------------------------
 // `daemon.ts hook <event>` — Claude Code hook entry point. This is the
@@ -216,6 +216,10 @@ if (tribe.recall) {
   for (const t of recallTools(tribe.recall)) tribe.tools.set(t.name, t)
 }
 
+// Loud startup identity: name the version+sha THIS process loaded so a stale
+// long-lived daemon is visible at a glance, not only on the code-pin stale path
+// below (@km/infra/20359). STARTUP_SHA is frozen at module import = process start.
+log.info?.(`tribe daemon ${formatRuntimeId(tribe.daemonVersion, STARTUP_SHA ? STARTUP_SHA.slice(0, 12) : null)}`)
 log.info?.(`Starting tribe daemon`)
 log.info?.(`Socket: ${tribe.config.socketPath}`)
 log.info?.(`DB: ${tribe.config.dbPath}`)

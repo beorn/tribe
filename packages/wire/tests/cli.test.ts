@@ -55,6 +55,12 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     expect(stdout).toMatch(/tribe-wire mcp \[--name X/)
   })
 
+  it("--version prints `tribe-wire <semver>+<sha>` and exits 0 (20359 identity)", () => {
+    const { stdout, code } = runCli(["--version"])
+    expect(code).toBe(0)
+    expect(stdout.trim()).toMatch(/^tribe-wire \d+\.\d+\.\d+.*\+(?:[0-9a-f]+|unknown)$/)
+  })
+
   it("-h is equivalent to --help", () => {
     const { stdout, code } = runCli(["-h"])
     expect(code).toBe(0)

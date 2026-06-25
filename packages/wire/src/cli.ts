@@ -29,10 +29,21 @@
  */
 
 const ARGV_FORWARDED_SUBCOMMANDS = new Set(["mcp"])
+const VERSION_FLAGS = new Set(["--version", "-V", "-v", "version"])
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2)
   const sub = argv[0]
+
+  // Version identity runs BEFORE Commander, short-circuited like `mcp`, so the
+  // output is the canonical `<name> <version>+<sha>` shape (the drill-parseable
+  // form the rest of the system uses) rather than Commander's bare semver.
+  // @km/infra/20359 — vendor-local id (tribe-wire's own version + git sha).
+  if (sub && VERSION_FLAGS.has(sub)) {
+    const { tribeWireRuntimeId } = await import("./runtime-id.ts")
+    process.stdout.write(`tribe-wire ${tribeWireRuntimeId()}\n`)
+    return
+  }
 
   // argv-forwarded subcommands run BEFORE Commander parses, so the child can
   // see its own raw flags via process.argv. (Commander's strict mode would
