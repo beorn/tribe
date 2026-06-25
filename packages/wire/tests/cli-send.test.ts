@@ -11,7 +11,7 @@
 
 import { describe, expect, test } from "vitest"
 import { Command } from "@silvery/commander"
-import { registerSendCommands } from "../src/cli/send.ts"
+import { buildSendPayload, registerSendCommands } from "../src/cli/send.ts"
 
 function buildProgram(): Command {
   const program = new Command("tribe-test")
@@ -36,13 +36,66 @@ describe("registerSendCommands", () => {
     expect(names).toEqual(expect.arrayContaining(["send", "join", "alarm", "alarm-status", "alarm-ack", "retro"]))
   })
 
-  test("send verb is registered with description and --type / --summary options", () => {
+  test("send verb is registered with description and message/ball-tracker options", () => {
     const cmd = findCmd(buildProgram(), "send")
     expect(cmd).toBeDefined()
     expect(cmd!.description()).toMatch(/send a message/i)
     // --summary lets a sender author the channel one-liner (20316 #3); when
     // omitted the daemon derives one (derive-not-reject).
-    expect(optionFlags(cmd!)).toEqual(expect.arrayContaining(["--type", "--summary"]))
+    expect(optionFlags(cmd!)).toEqual(
+      expect.arrayContaining(["--type", "--summary", "--reply", "--request", "--fanout"]),
+    )
+  })
+
+  test("buildSendPayload keeps the legacy payload shape when ball-tracker flags are omitted", () => {
+    expect(buildSendPayload({ to: "@agent/8", message: "hello", type: "notify" })).toEqual({
+      to: "@agent/8",
+      message: "hello",
+      type: "notify",
+    })
+  })
+
+  test("buildSendPayload forwards request/reply/fanout fields for tribe.send", () => {
+    expect(
+      buildSendPayload({
+        to: "@chief",
+        message: "answered",
+        type: "response",
+        summary: "answered",
+        reply: "req-123",
+      }),
+    ).toEqual({
+      to: "@chief",
+      message: "answered",
+      type: "response",
+      summary: "answered",
+      reply: "req-123",
+    })
+
+    expect(
+      buildSendPayload({
+        to: "@agent/8",
+        message: "please handle",
+        type: "request",
+        request: true,
+        fanout: "all",
+      }),
+    ).toEqual({
+      to: "@agent/8",
+      message: "please handle",
+      type: "request",
+      request: true,
+      fanout: "all",
+    })
+
+    expect(
+      buildSendPayload({
+        to: "@agent/8",
+        message: "please handle",
+        type: "request",
+        request: "req-456",
+      }),
+    ).toMatchObject({ request: "req-456" })
   })
 
   test("send verb declares <to> and <message...> arguments", () => {

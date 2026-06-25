@@ -462,6 +462,12 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
     return jsonResult({ owner, pruned: res.changes ?? 0, stale_ms: staleMs })
   }
 
+  const closeId = typeof a.close === "string" && a.close.length > 0 ? a.close : null
+  if (closeId) {
+    const res = ctx.stmts.closePendingRequest.run({ $request_id: closeId, $recipient: owner })
+    return jsonResult({ owner, request_id: closeId, closed: res.changes ?? 0 })
+  }
+
   const rows = ctx.stmts.selectPendingForRecipient.all({ $recipient: owner }) as Array<{
     request_id: string
     sender: string

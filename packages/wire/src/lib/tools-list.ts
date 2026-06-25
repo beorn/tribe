@@ -117,6 +117,11 @@ const BASE_TOOLS_LIST = [
           type: "number",
           description: "Filter to requests opened more than this many milliseconds ago (stale-detection).",
         },
+        close: {
+          type: "string",
+          description:
+            "Close exactly one pending request for owner without sending a reply message. Use for mechanical cleanup after verified out-of-band completion.",
+        },
       },
     },
     outputSchema: OBJ(
@@ -129,6 +134,8 @@ const BASE_TOOLS_LIST = [
           items: { type: "object", additionalProperties: true },
         },
         count: { type: "number", description: "Number of open requests in the pending list." },
+        request_id: { type: "string", description: "Request id closed when `close` is used." },
+        closed: { type: "number", description: "Number of pending rows closed when `close` is used." },
         ...ERROR_SHAPE,
       },
       "Pending requests for owner.",

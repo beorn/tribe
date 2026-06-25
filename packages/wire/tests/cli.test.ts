@@ -62,6 +62,26 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     expect(stdout).toMatch(/Commands:/)
   })
 
+  it("send --help exposes ball-tracker fields", () => {
+    const { stdout, code } = runCli(["send", "--help"])
+    expect(code).toBe(0)
+    expect(stdout).toMatch(/--reply <request_id>/)
+    expect(stdout).toMatch(/--request \[request_id\]/)
+    expect(stdout).toMatch(/--fanout <mode>/)
+  })
+
+  it("send rejects invalid fanout before daemon connection", () => {
+    const { stderr, code } = runCli(["send", "@chief", "hello", "--fanout", "many"])
+    expect(code).toBe(2)
+    expect(stderr).toMatch(/invalid --fanout 'many'/)
+  })
+
+  it("pending --close requires an explicit owner for one-shot CLI identity", () => {
+    const { stderr, code } = runCli(["pending", "--close", "req-123"])
+    expect(code).toBe(2)
+    expect(stderr).toMatch(/--close requires --owner/)
+  })
+
   it("bare `help` prints help and exits 0", () => {
     const { stdout, code } = runCli(["help"])
     expect(code).toBe(0)

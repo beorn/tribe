@@ -350,13 +350,20 @@ function parseDurationMs(spec: string): number | undefined {
  * @km/tribe/message-ball-tracker Phase 2a. Used by §C1 chief loop step 0.5
  * (call with `--owner @chief --stale 15m` to surface dropped balls).
  */
-async function cmdPending(owner: string | undefined, staleMs: number | undefined): Promise<void> {
+async function cmdPending(
+  owner: string | undefined,
+  staleMs: number | undefined,
+  close: string | undefined,
+): Promise<void> {
   const args: Record<string, unknown> = {}
   if (owner) args.owner = owner
   if (staleMs !== undefined) args.stale_ms = staleMs
+  if (close) args.close = close
   const result = (await callDaemon("tribe.pending", args)) as {
     structuredContent?: {
       owner?: string
+      request_id?: string
+      closed?: number
       pending?: Array<{
         request_id: string
         sender: string
@@ -371,6 +378,12 @@ async function cmdPending(owner: string | undefined, staleMs: number | undefined
   const payload = result.structuredContent
   if (!payload) {
     console.log("No structured result returned.")
+    return
+  }
+  if (close) {
+    console.log(
+      `Closed ${payload.closed ?? 0} pending request(s) for ${payload.owner ?? owner ?? "(caller)"}: ${payload.request_id ?? close}`,
+    )
     return
   }
   const count = payload.count ?? 0
@@ -747,13 +760,20 @@ export function registerReadCommands(program: Command): void {
     .description("List open ball-tracker requests for an owner (§C1 chief loop step 0.5)")
     .option("-o, --owner <name>", "Owner session name (default: caller)")
     .option("-s, --stale <duration>", "Only show requests older than this (e.g. 15m, 1h)")
-    .action((opts: { owner?: string; stale?: string }) => {
+    .option("--close <request_id>", "Close one pending request for the owner after verified out-of-band completion")
+    .action((opts: { owner?: string; stale?: string; close?: string }) => {
       const stale = opts.stale ? parseStaleMs(opts.stale) : undefined
       if (opts.stale && stale === undefined) {
         console.error(`tribe pending: bad --stale '${opts.stale}' (expected NNs|NNm|NNh)`)
         process.exit(2)
       }
-      void cmdPending(opts.owner, stale)
+      if (opts.close && !opts.owner) {
+        console.error(
+          "tribe pending: --close requires --owner because one-shot CLI callers are not a registered session",
+        )
+        process.exit(2)
+      }
+      void cmdPending(opts.owner, stale, opts.close)
     })
 
   program

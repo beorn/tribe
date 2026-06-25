@@ -7,7 +7,7 @@
  *  - periodic auto-GC in `cleanupOldData` (ball never outlives its message's 7d
  *    retention);
  *  - the scoped `gcStalePendingForRecipient` engine behind the explicit
- *    `tribe.pending` prune (safe chief-recovery repair — age-bounded + scoped).
+ *    `tribe.pending` prune/close (safe chief-recovery repair — scoped).
  * Neither deletes message history; only ball-tracker rows are removed.
  */
 
@@ -16,10 +16,28 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
-import { createStatements, openDatabase } from "./database.ts"
+import { createTribeContext } from "./context.ts"
+import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
+import { handleToolCall, type HandlerOpts } from "./handlers.ts"
 import { cleanupOldData } from "./session.ts"
 
 const DAY = 24 * 60 * 60 * 1000
+type ToolJson = Record<string, unknown>
+
+function makeOpts(): HandlerOpts {
+  return {
+    cleanup: () => undefined,
+    userRenamed: false,
+    setUserRenamed: () => undefined,
+    getActiveSessionIds: () => new Set(["sess-chief"]),
+    getActiveSessionInfo: () => [],
+  }
+}
+
+function parseToolJson(result: ReturnType<typeof handleToolCall>): ToolJson {
+  const text = (result as { content: Array<{ text: string }> }).content[0]?.text ?? "{}"
+  return JSON.parse(text) as ToolJson
+}
 
 describe("pending-ball GC (@km/tribe/20008)", () => {
   let tmpDir: string
@@ -38,7 +56,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
   }
 
   function openBall(
-    stmts: ReturnType<typeof createStatements>,
+    stmts: TribeStatements,
     o: { id: string; recipient: string; openedAt: number; sender?: string },
   ): void {
     stmts.openPendingRequest.run({
@@ -51,7 +69,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
     })
   }
 
-  function openIds(stmts: ReturnType<typeof createStatements>, recipient: string): string[] {
+  function openIds(stmts: TribeStatements, recipient: string): string[] {
     return (stmts.selectPendingForRecipient.all({ $recipient: recipient }) as Array<{ request_id: string }>).map(
       (r) => r.request_id,
     )
@@ -104,6 +122,34 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       // The normal reply path still closes it.
       stmts.closePendingRequest.run({ $request_id: "live", $recipient: "@chief" })
       expect(openIds(stmts, "@chief")).toEqual([])
+    } finally {
+      db.close()
+    }
+  })
+
+  it("explicit close deletes exactly one owner's pending ball", () => {
+    const { db, stmts } = setup()
+    try {
+      const now = Date.now()
+      openBall(stmts, { id: "done", recipient: "@chief", openedAt: now })
+      openBall(stmts, { id: "keep", recipient: "@chief", openedAt: now })
+      openBall(stmts, { id: "done", recipient: "@agent/2", openedAt: now })
+      const ctx = createTribeContext({
+        db,
+        stmts,
+        sessionId: "sess-chief",
+        sessionRole: "member",
+        initialName: "@chief",
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+      })
+
+      const res = parseToolJson(handleToolCall(ctx, "tribe.pending", { close: "done" }, makeOpts()))
+
+      expect(res).toMatchObject({ owner: "@chief", request_id: "done", closed: 1 })
+      expect(openIds(stmts, "@chief")).toEqual(["keep"])
+      expect(openIds(stmts, "@agent/2")).toEqual(["done"])
     } finally {
       db.close()
     }

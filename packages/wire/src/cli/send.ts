@@ -86,6 +86,41 @@ function resolveDbPathFromCli(): string {
 
 const VALID_MESSAGE_TYPES = ["assign", "status", "query", "response", "notify", "request", "verdict"] as const
 type MessageType = (typeof VALID_MESSAGE_TYPES)[number]
+const VALID_FANOUTS = ["first", "all"] as const
+type Fanout = (typeof VALID_FANOUTS)[number]
+
+type SendPayloadInput = {
+  to: string
+  message: string
+  type?: MessageType
+  summary?: string
+  request?: boolean | string
+  reply?: string
+  fanout?: Fanout
+}
+
+type SendPayload = {
+  to: string
+  message: string
+  type: MessageType
+  summary?: string
+  request?: true | string
+  reply?: string
+  fanout?: Fanout
+}
+
+export function buildSendPayload(input: SendPayloadInput): SendPayload {
+  const payload: SendPayload = {
+    to: input.to,
+    message: input.message,
+    type: input.type ?? "notify",
+  }
+  if (input.summary) payload.summary = input.summary
+  if (input.request !== undefined && input.request !== false) payload.request = input.request
+  if (input.reply) payload.reply = input.reply
+  if (input.fanout) payload.fanout = input.fanout
+  return payload
+}
 
 function collectDomain(value: string, previous: string[]): string[] {
   return [...previous, value]
@@ -102,14 +137,13 @@ function parseDomains(values: string[] | undefined): string[] {
 // Command implementations (ported verbatim from tools/tribe-cli.ts)
 // ---------------------------------------------------------------------------
 
-async function cmdSend(to: string, message: string, type: MessageType = "notify", summary?: string): Promise<void> {
-  const result = (await callDaemon("tribe.send", {
-    to,
-    message,
-    type,
-    ...(summary ? { summary } : {}),
-  })) as { summary?: string; summary_derived?: boolean; warning?: string }
-  console.log(`Sent message to ${to}`)
+async function cmdSend(input: SendPayloadInput): Promise<void> {
+  const result = (await callDaemon("tribe.send", buildSendPayload(input))) as {
+    summary?: string
+    summary_derived?: boolean
+    warning?: string
+  }
+  console.log(`Sent message to ${input.to}`)
   // Derive-not-reject: surface (no-silent) when the daemon derived a one-liner
   // because none was authored, so the sender learns to pass `--summary`.
   if (result.summary_derived) {
@@ -273,14 +307,42 @@ export function registerSendCommands(program: Command): void {
       "-s, --summary <summary>",
       "Authored one-line summary shown by default in the channel UI (derived from the message if omitted)",
     )
-    .action((to: string, message: string[], opts: { type?: string; summary?: string }) => {
-      const type = opts.type ?? "notify"
-      if (!(VALID_MESSAGE_TYPES as readonly string[]).includes(type)) {
-        console.error(`tribe-wire send: invalid --type '${type}' — expected one of: ${VALID_MESSAGE_TYPES.join(", ")}`)
-        process.exit(2)
-      }
-      void cmdSend(to, message.join(" "), type as MessageType, opts.summary)
-    })
+    .option("--reply <request_id>", "Ball-tracker: close the tracked request with this id")
+    .option(
+      "--request [request_id]",
+      "Ball-tracker: open a tracked request; omit request_id to use the sent message id",
+    )
+    .option("--fanout <mode>", `Ball-tracker fanout mode: ${VALID_FANOUTS.join("|")} (default: first)`)
+    .action(
+      (
+        to: string,
+        message: string[],
+        opts: { type?: string; summary?: string; request?: boolean | string; reply?: string; fanout?: string },
+      ) => {
+        const type = opts.type ?? "notify"
+        if (!(VALID_MESSAGE_TYPES as readonly string[]).includes(type)) {
+          console.error(
+            `tribe-wire send: invalid --type '${type}' — expected one of: ${VALID_MESSAGE_TYPES.join(", ")}`,
+          )
+          process.exit(2)
+        }
+        if (opts.fanout !== undefined && !(VALID_FANOUTS as readonly string[]).includes(opts.fanout)) {
+          console.error(
+            `tribe-wire send: invalid --fanout '${opts.fanout}' — expected one of: ${VALID_FANOUTS.join(", ")}`,
+          )
+          process.exit(2)
+        }
+        void cmdSend({
+          to,
+          message: message.join(" "),
+          type: type as MessageType,
+          summary: opts.summary,
+          request: opts.request === false ? undefined : opts.request,
+          reply: opts.reply,
+          fanout: opts.fanout as Fanout | undefined,
+        })
+      },
+    )
 
   program
     .command("join")
