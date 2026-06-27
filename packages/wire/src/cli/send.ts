@@ -27,9 +27,22 @@
 
 import { existsSync } from "node:fs"
 import type { Command } from "@silvery/commander"
+import {
+  cliArgument,
+  cliOption,
+  TRIBE_DELIVERY_MODES,
+  TRIBE_FANOUTS,
+  TRIBE_MESSAGE_TYPES,
+  visibleCliProjectionForMcp,
+  type TribeFanout as Fanout,
+  type TribeMessageType as MessageType,
+} from "../command-descriptors.ts"
 import { connectToDaemon, resolveSocketPath, TRIBE_PROTOCOL_VERSION } from "../lib/socket.ts"
 import { resolveDbPath } from "../lib/config.ts"
 import { formatMarkdown, generateRetro, parseDuration } from "../lib/retro.ts"
+
+const SEND_CLI = visibleCliProjectionForMcp("send")
+const JOIN_CLI = visibleCliProjectionForMcp("join")
 
 // ---------------------------------------------------------------------------
 // Daemon connection (shared shape with read.ts — kept local per
@@ -83,11 +96,6 @@ function resolveDbPathFromCli(): string {
 // Message-type contract — shared with the daemon validator (kept in lockstep
 // with the legacy `tools/tribe-cli.ts` definition; do not drift).
 // ---------------------------------------------------------------------------
-
-const VALID_MESSAGE_TYPES = ["assign", "status", "query", "response", "notify", "request", "verdict"] as const
-type MessageType = (typeof VALID_MESSAGE_TYPES)[number]
-const VALID_FANOUTS = ["first", "all"] as const
-type Fanout = (typeof VALID_FANOUTS)[number]
 
 type SendPayloadInput = {
   to: string
@@ -156,8 +164,8 @@ async function cmdJoin(
   opts: { role?: string; domain?: string[]; delivery?: string; json?: boolean },
 ): Promise<void> {
   const delivery = opts.delivery ?? "pull"
-  if (delivery !== "push" && delivery !== "pull") {
-    console.error(`tribe-wire join: invalid --delivery '${delivery}' — expected 'push' or 'pull'`)
+  if (!(TRIBE_DELIVERY_MODES as readonly string[]).includes(delivery)) {
+    console.error(`tribe-wire join: invalid --delivery '${delivery}' — expected ${TRIBE_DELIVERY_MODES.join("|")}`)
     process.exit(2)
   }
 
@@ -297,22 +305,23 @@ async function cmdRetro(opts: { since?: string; format: string; db?: string }): 
  * Bead: @km/bearly/19231-tribe-cli-unify-phase-a2-verbs
  */
 export function registerSendCommands(program: Command): void {
+  const sendTo = cliArgument(SEND_CLI, "to")
+  const sendMessage = cliArgument(SEND_CLI, "message")
+  const sendType = cliOption(SEND_CLI, "type")
+  const sendSummary = cliOption(SEND_CLI, "summary")
+  const sendReply = cliOption(SEND_CLI, "reply")
+  const sendRequest = cliOption(SEND_CLI, "request")
+  const sendFanout = cliOption(SEND_CLI, "fanout")
   program
-    .command("send")
-    .description("Send a message to a session")
-    .argument("<to>", "Target session name")
-    .argument("<message...>", "Message text")
-    .option("-t, --type <type>", `Message type: ${VALID_MESSAGE_TYPES.join("|")} (default: notify)`)
-    .option(
-      "-s, --summary <summary>",
-      "Authored one-line summary shown by default in the channel UI (derived from the message if omitted)",
-    )
-    .option("--reply <request_id>", "Ball-tracker: close the tracked request with this id")
-    .option(
-      "--request [request_id]",
-      "Ball-tracker: open a tracked request; omit request_id to use the sent message id",
-    )
-    .option("--fanout <mode>", `Ball-tracker fanout mode: ${VALID_FANOUTS.join("|")} (default: first)`)
+    .command(SEND_CLI.name)
+    .description(SEND_CLI.description)
+    .argument(`<${sendTo.name}>`, sendTo.description)
+    .argument(`<${sendMessage.name}...>`, sendMessage.description)
+    .option(sendType.flags, sendType.description)
+    .option(sendSummary.flags, sendSummary.description)
+    .option(sendReply.flags, sendReply.description)
+    .option(sendRequest.flags, sendRequest.description)
+    .option(sendFanout.flags, sendFanout.description)
     .action(
       (
         to: string,
@@ -320,15 +329,15 @@ export function registerSendCommands(program: Command): void {
         opts: { type?: string; summary?: string; request?: boolean | string; reply?: string; fanout?: string },
       ) => {
         const type = opts.type ?? "notify"
-        if (!(VALID_MESSAGE_TYPES as readonly string[]).includes(type)) {
+        if (!(TRIBE_MESSAGE_TYPES as readonly string[]).includes(type)) {
           console.error(
-            `tribe-wire send: invalid --type '${type}' — expected one of: ${VALID_MESSAGE_TYPES.join(", ")}`,
+            `tribe-wire send: invalid --type '${type}' — expected one of: ${TRIBE_MESSAGE_TYPES.join(", ")}`,
           )
           process.exit(2)
         }
-        if (opts.fanout !== undefined && !(VALID_FANOUTS as readonly string[]).includes(opts.fanout)) {
+        if (opts.fanout !== undefined && !(TRIBE_FANOUTS as readonly string[]).includes(opts.fanout)) {
           console.error(
-            `tribe-wire send: invalid --fanout '${opts.fanout}' — expected one of: ${VALID_FANOUTS.join(", ")}`,
+            `tribe-wire send: invalid --fanout '${opts.fanout}' — expected one of: ${TRIBE_FANOUTS.join(", ")}`,
           )
           process.exit(2)
         }
@@ -344,19 +353,19 @@ export function registerSendCommands(program: Command): void {
       },
     )
 
+  const joinName = cliArgument(JOIN_CLI, "name")
+  const joinRole = cliOption(JOIN_CLI, "role")
+  const joinDomain = cliOption(JOIN_CLI, "domain")
+  const joinDelivery = cliOption(JOIN_CLI, "delivery")
+  const joinJson = cliOption(JOIN_CLI, "json")
   program
-    .command("join")
-    .description("Join/rejoin the tribe from this one-shot CLI process")
-    .argument("<name>", "Session name to claim, e.g. @chief or @ci")
-    .option("-r, --role <role>", "Session role (default: member)", "member")
-    .option(
-      "-d, --domain <domain>",
-      "Domain label; repeat or comma-separate for multiple",
-      collectDomain,
-      [] as string[],
-    )
-    .option("--delivery <mode>", "Delivery mode: pull or push (default: pull)", "pull")
-    .option("--json", "Emit machine-readable JSON")
+    .command(JOIN_CLI.name)
+    .description(JOIN_CLI.description)
+    .argument(`<${joinName.name}>`, joinName.description)
+    .option(joinRole.flags, joinRole.description, joinRole.default)
+    .option(joinDomain.flags, joinDomain.description, collectDomain, [] as string[])
+    .option(joinDelivery.flags, joinDelivery.description, joinDelivery.default)
+    .option(joinJson.flags, joinJson.description)
     .action(
       (name: string, opts: { role?: string; domain?: string[]; delivery?: string; json?: boolean }) =>
         void cmdJoin(name, opts),

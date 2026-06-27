@@ -61,6 +61,29 @@ export { startTribeHttpMcpServer } from "./http-adapter.ts"
 // Join delivery resolution (require-join-before-push contract, c6071f3 + 333193c).
 export { resolveJoinDelivery } from "./lib/delivery.ts"
 
+// Command descriptors - source of truth for MCP/CLI/help/future UI projection.
+export type {
+  JsonObject,
+  JsonSchemaObject,
+  TribeCliArgument,
+  TribeCliOption,
+  TribeCliProjection,
+  TribeCommandDescriptor,
+  TribeFanout,
+  TribeMcpTool,
+  TribeMessageType,
+} from "./command-descriptors.ts"
+export {
+  TRIBE_COMMAND_DESCRIPTORS,
+  TRIBE_DELIVERY_MODES,
+  TRIBE_FANOUTS,
+  TRIBE_MESSAGE_TYPES,
+  cliArgument,
+  cliOption,
+  commandDescriptorByMcpName,
+  visibleCliProjectionForMcp,
+} from "./command-descriptors.ts"
+
 // Runtime identity — `<version>+<sha>` for `tribe-wire --version` + daemon startup
 // (@km/infra/20359, vendor-local; mirrors code-pin's running-code visibility).
 export { formatRuntimeId, gitShortHead, tribeWireRuntimeId, wireVersion } from "./runtime-id.ts"

@@ -32,9 +32,14 @@
  */
 
 import { Command, int } from "@silvery/commander"
+import { cliOption, visibleCliProjectionForMcp } from "../command-descriptors.ts"
 import { connectToDaemon, resolveSocketPath } from "../lib/socket.ts"
 import { watchActivity } from "../lib/activity-watch.ts"
 import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-exempt.ts"
+
+const PENDING_CLI = visibleCliProjectionForMcp("pending")
+const INBOX_WAIT_CLI = visibleCliProjectionForMcp("inbox.wait")
+const REPAIR_CLI = visibleCliProjectionForMcp("repair")
 
 // ---------------------------------------------------------------------------
 // Daemon connection
@@ -687,8 +692,9 @@ async function cmdInboxWait(opts: { session?: string; timeoutMs?: number; json?:
 async function cmdRepair(opts: { session?: string; inboxCursor?: string; json?: boolean }): Promise<void> {
   const session = opts.session ?? "@chief"
   const inboxCursor = opts.inboxCursor ?? "tail"
-  if (inboxCursor !== "tail") {
-    console.error(`tribe repair: bad --inbox-cursor '${inboxCursor}' (expected 'tail')`)
+  const allowedInboxCursors = cliOption(REPAIR_CLI, "inbox-cursor").enum ?? []
+  if (!allowedInboxCursors.includes(inboxCursor)) {
+    console.error(`tribe repair: bad --inbox-cursor '${inboxCursor}' (expected ${allowedInboxCursors.join("|")})`)
     process.exit(2)
   }
 
@@ -755,19 +761,22 @@ export function registerReadCommands(program: Command): void {
     .option("-a, --all", "Include historical (disconnected) sessions")
     .action((opts: { all?: boolean }) => void cmdSessions(!!opts.all))
 
+  const pendingOwner = cliOption(PENDING_CLI, "owner")
+  const pendingStale = cliOption(PENDING_CLI, "stale")
+  const pendingClose = cliOption(PENDING_CLI, "close")
   program
-    .command("pending")
-    .description("List open ball-tracker requests for an owner (§C1 chief loop step 0.5)")
-    .option("-o, --owner <name>", "Owner session name (default: caller)")
-    .option("-s, --stale <duration>", "Only show requests older than this (e.g. 15m, 1h)")
-    .option("--close <request_id>", "Close one pending request for the owner after verified out-of-band completion")
+    .command(PENDING_CLI.name)
+    .description(PENDING_CLI.description)
+    .option(pendingOwner.flags, pendingOwner.description)
+    .option(pendingStale.flags, pendingStale.description)
+    .option(pendingClose.flags, pendingClose.description)
     .action((opts: { owner?: string; stale?: string; close?: string }) => {
       const stale = opts.stale ? parseStaleMs(opts.stale) : undefined
       if (opts.stale && stale === undefined) {
         console.error(`tribe pending: bad --stale '${opts.stale}' (expected NNs|NNm|NNh)`)
         process.exit(2)
       }
-      if (opts.close && !opts.owner) {
+      if (opts.close && pendingClose.requires?.includes("owner") && !opts.owner) {
         console.error(
           "tribe pending: --close requires --owner because one-shot CLI callers are not a registered session",
         )
@@ -801,12 +810,15 @@ export function registerReadCommands(program: Command): void {
     .option("--json", "Emit machine-readable JSON (for hooks)")
     .action((opts: { session?: string; json?: boolean }) => void cmdInboxStatus(opts))
 
+  const inboxWaitSession = cliOption(INBOX_WAIT_CLI, "session")
+  const inboxWaitTimeout = cliOption(INBOX_WAIT_CLI, "timeout")
+  const inboxWaitJson = cliOption(INBOX_WAIT_CLI, "json")
   program
-    .command("inbox-wait")
-    .description("Block until the target session receives an actionable DM or the timeout elapses")
-    .option("--session <name>", "Session to inspect (default: @chief)", "@chief")
-    .option("--timeout <duration>", "Wait limit (e.g. 30s, 1m, 5m)", "30s")
-    .option("--json", "Emit machine-readable JSON (for hooks)")
+    .command(INBOX_WAIT_CLI.name)
+    .description(INBOX_WAIT_CLI.description)
+    .option(inboxWaitSession.flags, inboxWaitSession.description, inboxWaitSession.default)
+    .option(inboxWaitTimeout.flags, inboxWaitTimeout.description, inboxWaitTimeout.default)
+    .option(inboxWaitJson.flags, inboxWaitJson.description)
     .action((opts: { session?: string; timeout?: string; json?: boolean }) => {
       const timeoutMs = opts.timeout ? parseDurationMs(opts.timeout) : undefined
       if (opts.timeout && timeoutMs === undefined) {
@@ -816,12 +828,15 @@ export function registerReadCommands(program: Command): void {
       void cmdInboxWait({ session: opts.session, timeoutMs, json: opts.json })
     })
 
+  const repairSession = cliOption(REPAIR_CLI, "session")
+  const repairInboxCursor = cliOption(REPAIR_CLI, "inbox-cursor")
+  const repairJson = cliOption(REPAIR_CLI, "json")
   program
-    .command("repair")
-    .description("Operator-bounded daemon state repair")
-    .option("--session <name>", "Session to repair (default: @chief)", "@chief")
-    .option("--inbox-cursor <mode>", "Inbox cursor repair mode; currently only 'tail'", "tail")
-    .option("--json", "Emit machine-readable JSON")
+    .command(REPAIR_CLI.name)
+    .description(REPAIR_CLI.description)
+    .option(repairSession.flags, repairSession.description, repairSession.default)
+    .option(repairInboxCursor.flags, repairInboxCursor.description, repairInboxCursor.default)
+    .option(repairJson.flags, repairJson.description)
     .action((opts: { session?: string; inboxCursor?: string; json?: boolean }) => void cmdRepair(opts))
 
   program
