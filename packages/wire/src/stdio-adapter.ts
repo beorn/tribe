@@ -71,10 +71,14 @@ const DELIVERY_CAPABILITY = resolveDeliveryCapability({
   pullTransport: process.env.TRIBE_PULL_TRANSPORT ?? process.env.TRIBE_WAIT_TRANSPORT,
 })
 const TRIBE_TOOLS_LIST = toolListForDeliveryCapability(DELIVERY_CAPABILITY)
-// c6071f3: a connected MCP adapter is NOT a tribe member until the model
-// explicitly calls tribe.join — register anonymously in pull mode so a
-// pre-join bridge never claims push delivery or a name it may not keep.
+// c6071f3: a connected MCP adapter is NOT a push-delivered tribe member until
+// the model explicitly calls tribe.join. Keep pre-join delivery pull-only, but
+// seed explicit @personas at register time so configured Codex identities
+// (`TRIBE_NAME=@chief`, `@agent/N`, etc.) never surface as unknown-*.
 const REQUIRE_EXPLICIT_JOIN = process.env.TRIBE_REQUIRE_JOIN !== "0"
+const LAUNCH_NAME = typeof args.name === "string" && args.name.trim().length > 0 ? args.name.trim() : undefined
+const REGISTER_WITH_LAUNCH_NAME =
+  LAUNCH_NAME !== undefined && (!REQUIRE_EXPLICIT_JOIN || isExplicitTribePersonaName(LAUNCH_NAME))
 
 // km 19442 — connect-time replay flood backstop. The wakeup→drain path is capped
 // by selectReplayEvents, but a stale/old daemon that still pushes message BODIES
@@ -205,7 +209,7 @@ const identityToken = createHash("sha256")
   .slice(0, 16)
 
 const registerParams = {
-  ...(args.name && !REQUIRE_EXPLICIT_JOIN ? { name: args.name } : {}),
+  ...(REGISTER_WITH_LAUNCH_NAME ? { name: LAUNCH_NAME } : {}),
   ...(args.role ? { role: args.role } : {}),
   domains: SESSION_DOMAINS,
   project: process.cwd(),
@@ -228,6 +232,10 @@ const registerParams = {
   // ag, not here.
   ...(args.account ? { account: args.account } : {}),
   ...(args.provider ? { provider: args.provider } : {}),
+}
+
+function isExplicitTribePersonaName(name: string): boolean {
+  return /^@[a-z0-9][a-z0-9_./-]{0,31}$/.test(name)
 }
 
 // NON-BLOCKING: the daemon connect runs in the background. We do NOT await

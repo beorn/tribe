@@ -274,6 +274,31 @@ describe("stdio adapter delivery modes", () => {
     expect(joinRequest?.params?.delivery).toBe("pull")
   })
 
+  it("pull delivery seeds an explicit TRIBE_NAME persona at initial register", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath)
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_NAME: "@chief",
+        TRIBE_DELIVERY: "pull",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+
+    writeJson(child, initializePayload(1))
+    await waitForLine(child, (line) => line.id === 1)
+
+    const register = daemon.requests.find((msg) => msg.method === "register") as
+      | { params?: { name?: string; delivery?: string } }
+      | undefined
+    expect(register?.params?.name).toBe("@chief")
+    expect(register?.params?.delivery).toBe("pull")
+  })
+
   it("advertises pullTransport metadata in tools/list", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath)
@@ -309,7 +334,7 @@ describe("stdio adapter delivery modes", () => {
     })
   })
 
-  it("push delivery registers pull and suppresses channel notifications until tribe.join", async () => {
+  it("push delivery registers explicit persona as pull and suppresses channel notifications until tribe.join", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath)
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
@@ -335,7 +360,7 @@ describe("stdio adapter delivery modes", () => {
     const register = daemon.requests.find((msg) => msg.method === "register") as
       | { params?: { name?: string; delivery?: string } }
       | undefined
-    expect(register?.params?.name).toBeUndefined()
+    expect(register?.params?.name).toBe("@agent/test")
     expect(register?.params?.delivery).toBe("pull")
 
     daemon.clients[0]?.write(makeNotification("channel", { from: "chief", type: "request", content: "before" }))
