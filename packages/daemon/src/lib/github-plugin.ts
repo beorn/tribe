@@ -36,6 +36,17 @@ export function getGitHubToken(): string | null {
   }
 }
 
+/**
+ * Human-readable label for WHERE the GitHub monitor token is sourced from, so a
+ * credential-rejection warning can name the exact thing to refresh. Mirrors
+ * getGitHubToken's precedence (env first, gh CLI second) but is a pure env check
+ * — no subprocess — so it is safe to call on the per-failure log path. The label
+ * is the config source, NOT the token value (never log the token).
+ */
+export function gitHubTokenSourceLabel(): string {
+  return process.env.GITHUB_TOKEN ? "GITHUB_TOKEN env var" : "`gh auth token` (gh CLI login)"
+}
+
 // ---------------------------------------------------------------------------
 // Repo detection
 // ---------------------------------------------------------------------------
@@ -209,16 +220,34 @@ export interface PollError {
  * the daemon discards). A rate-limit burst and a DNS blip were
  * indistinguishable from the tribe side (km 19779).
  *
- * Buckets: "rate-limited" (GitHub rate-limit body), "HTTP <status>" (any
- * other API error response), "network/fetch" (no response at all). Reports
- * bucket counts plus one sample message and the last-seen rate-limit budget
- * so the cause is auditable from the broadcast alone.
+ * Buckets: "rate-limited" (GitHub rate-limit body), "auth-401"/"auth-403"
+ * (credential/permission rejection — the read-only GitHub MONITOR rail's token
+ * is bad or lacks scope; this is NOT a git-SSH or integrator failure; km 20593),
+ * "HTTP <status>" (any other API error response), "network/fetch" (no response
+ * at all). Reports bucket counts plus one sample message and the last-seen
+ * rate-limit budget so the cause is auditable from the broadcast alone.
+ *
+ * When an auth bucket is present, appends an actionable credential-owner note:
+ * names the token source (so the owner knows WHICH credential to refresh) and
+ * states that only the monitor rail is affected — git SSH and the integrator are
+ * UNAFFECTED. This keeps a daemon-side monitor-credential problem from being
+ * mis-read by @ci/sitrep as a CI/integration failure (km 20593). tokenSource
+ * defaults to gitHubTokenSourceLabel(); pass it explicitly in tests.
  */
-export function summarizePollErrors(errors: PollError[], remaining: number, total: number): string {
+export function summarizePollErrors(
+  errors: PollError[],
+  remaining: number,
+  total: number,
+  tokenSource?: string,
+): string {
   const classOf = (msg: string): string => {
     if (/rate limit/i.test(msg)) return "rate-limited"
-    const status = msg.match(/GitHub API (\d{3})/)
-    if (status) return `HTTP ${status[1]}`
+    const status = msg.match(/GitHub API (\d{3})/)?.[1]
+    // 401 = bad/expired credentials; non-rate-limit 403 = token lacks scope.
+    // Both are credential-rail problems distinct from a transient HTTP/network blip.
+    if (status === "401") return "auth-401"
+    if (status === "403") return "auth-403"
+    if (status) return `HTTP ${status}`
     return "network/fetch"
   }
   const counts = new Map<string, number>()
@@ -231,7 +260,14 @@ export function summarizePollErrors(errors: PollError[], remaining: number, tota
     .map(([cls, n]) => `${cls}×${n}`)
     .join(", ")
   const sample = errors[0]!
-  return `${buckets}; sample ${sample.repo}: ${sample.message.slice(0, 120)}; rate limit ${remaining}/${total}`
+  const base = `${buckets}; sample ${sample.repo}: ${sample.message.slice(0, 120)}; rate limit ${remaining}/${total}`
+  const hasAuth = [...counts.keys()].some((c) => c.startsWith("auth-"))
+  if (!hasAuth) return base
+  const src = tokenSource ?? gitHubTokenSourceLabel()
+  return (
+    `${base} — GitHub MONITOR-RAIL credential rejected (token source: ${src}); ` +
+    `refresh with \`gh auth login\` or set GITHUB_TOKEN; git SSH + integrator UNAFFECTED`
+  )
 }
 
 async function fetchWorkflowRuns(
