@@ -4,6 +4,7 @@
 
 import { createLogger } from "loggily"
 import { randomUUID } from "node:crypto"
+import { resolveInboxWaitOptions } from "tribe-wire"
 import type { TribeContext } from "./context.ts"
 import type { TribeRole } from "tribe-wire/lib/config"
 
@@ -1019,9 +1020,7 @@ function handleRepair(ctx: TribeContext, a: ToolArgs): ToolResult {
 }
 
 function handleInboxWait(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult | Promise<ToolResult> {
-  const session = typeof a.session === "string" && a.session.length > 0 ? a.session : ctx.getName()
-  const timeoutRaw = a.timeout_ms ?? a.timeoutMs
-  const timeoutMs = Number.isFinite(Number(timeoutRaw)) ? Number(timeoutRaw) : 30_000
+  const { session, timeoutMs } = resolveInboxWaitOptions(a, { defaultSession: ctx.getName() })
   if (!opts.inboxWait) {
     return jsonResult({ error: "inbox wait is unavailable in this handler context" })
   }

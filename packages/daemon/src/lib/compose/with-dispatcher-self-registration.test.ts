@@ -8,6 +8,7 @@ import { TRIBE_PROTOCOL_VERSION, type JsonRpcRequest } from "tribe-wire/lib/sock
 import type { TribeRole } from "tribe-wire/lib/config"
 import { createTribeContext } from "../context.ts"
 import { openDatabase, createStatements } from "../database.ts"
+import { sendMessage } from "../messaging.ts"
 import type { ClientSession } from "./with-client-registry.ts"
 import { withDispatcher } from "./with-dispatcher.ts"
 
@@ -28,6 +29,14 @@ type CliStatusResult = {
     pid: number
     role: TribeRole
   }>
+}
+
+type InboxWaitResult = {
+  session: string
+  unread_count: number
+  waited_ms: number
+  timed_out: boolean
+  aborted: boolean
 }
 
 type JsonRpcResponse<T> = {
@@ -118,6 +127,32 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
     )
 
     expect(duplicate.message).toBe(`Name "@agent/9" is already taken by live pid ${liveHolderPid}`)
+  })
+})
+
+describe("dispatcher inbox-wait parsing", () => {
+  it("uses the same timeoutMs fallback accepted by the MCP handler", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const wait = harness.dispatcher.handleRequest(
+      {
+        jsonrpc: "2.0",
+        id: "wait",
+        method: "tribe.inbox.wait",
+        params: { session: "@agent/wait", timeoutMs: 0 },
+      },
+      "conn-wait",
+    )
+
+    await new Promise((resolveWait) => setTimeout(resolveWait, 20))
+    harness.sendActionable("@agent/wait")
+
+    const result = parseResult<InboxWaitResult>(await wait)
+    expect(result.session).toBe("@agent/wait")
+    expect(result.unread_count).toBe(0)
+    expect(result.timed_out).toBe(true)
+    expect(result.aborted).toBe(false)
   })
 })
 
@@ -219,6 +254,9 @@ function createDispatcherHarness() {
         },
       }
       return daemon.dispatcher.handleRequest(req, connId)
+    },
+    sendActionable(recipient: string) {
+      sendMessage(daemonCtx, recipient, "wake inbox wait", "request", undefined, undefined, "direct")
     },
     addPendingClient(connId: string): TestSocket {
       const socket = createTestSocket()

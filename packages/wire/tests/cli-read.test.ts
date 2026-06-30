@@ -17,6 +17,7 @@ import {
   waitForInboxWithReconnect,
   type InboxWaitResult,
 } from "../src/cli/read.ts"
+import { resolveInboxWaitOptions } from "../src/lib/inbox-wait-options.ts"
 
 function buildProgram(): Command {
   const program = new Command("tribe-test")
@@ -146,6 +147,23 @@ describe("formatReloadResult", () => {
     expect(formatReloadResult({ reloading: true, reason: "manual reload" })).toBe(
       "Reloading tribe daemon: manual reload.",
     )
+  })
+})
+
+describe("resolveInboxWaitOptions", () => {
+  test("normalizes default, snake_case, and camelCase inbox-wait inputs", () => {
+    expect(resolveInboxWaitOptions({}, { defaultSession: "@agent/5" })).toEqual({
+      session: "@agent/5",
+      timeoutMs: 30_000,
+    })
+    expect(resolveInboxWaitOptions({ session: "@ci", timeout_ms: "120000" })).toEqual({
+      session: "@ci",
+      timeoutMs: 120_000,
+    })
+    expect(resolveInboxWaitOptions({ timeoutMs: 0 }, { defaultSession: "@agent/5" })).toEqual({
+      session: "@agent/5",
+      timeoutMs: 0,
+    })
   })
 })
 

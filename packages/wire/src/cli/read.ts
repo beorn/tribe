@@ -33,6 +33,7 @@
 
 import { Command, int } from "@silvery/commander"
 import { cliOption, visibleCliProjectionForMcp } from "../command-descriptors.ts"
+import { DEFAULT_INBOX_WAIT_SESSION, resolveInboxWaitOptions } from "../lib/inbox-wait-options.ts"
 import { connectToDaemon, resolveSocketPath } from "../lib/socket.ts"
 import { watchActivity } from "../lib/activity-watch.ts"
 import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-exempt.ts"
@@ -662,8 +663,10 @@ async function callInboxWaitChunk(session: string, timeoutMs: number): Promise<I
 }
 
 async function cmdInboxWait(opts: { session?: string; timeoutMs?: number; json?: boolean }): Promise<void> {
-  const session = opts.session ?? "@chief"
-  const timeoutMs = opts.timeoutMs ?? 30_000
+  const { session, timeoutMs } = resolveInboxWaitOptions(
+    { session: opts.session, timeoutMs: opts.timeoutMs },
+    { defaultSession: DEFAULT_INBOX_WAIT_SESSION },
+  )
   const result = await waitForInboxWithReconnect({
     session,
     timeoutMs,

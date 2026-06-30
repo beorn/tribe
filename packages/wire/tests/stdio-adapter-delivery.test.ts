@@ -20,7 +20,7 @@ type FakeDaemon = {
 
 function spawnFakeDaemon(
   socketPath: string,
-  opts: { fetchEvents?: Array<Record<string, unknown>> } = {},
+  opts: { fetchEvents?: Array<Record<string, unknown>>; inboxWaitResult?: Record<string, unknown> } = {},
 ): Promise<FakeDaemon> {
   const clients: Socket[] = []
   const requests: Record<string, unknown>[] = []
@@ -61,6 +61,29 @@ function spawnFakeDaemon(
           socket.write(
             makeResponse(msg.id, {
               content: [{ type: "text", text: JSON.stringify({ events: opts.fetchEvents ?? [] }) }],
+            }),
+          )
+          return
+        }
+        if (msg.method === "tribe.inbox.wait") {
+          socket.write(
+            makeResponse(msg.id, {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify(
+                    opts.inboxWaitResult ?? {
+                      session: "@agent/test",
+                      unread_count: 0,
+                      oldest_unread_age_min: 0,
+                      oldest_unread_ts: 0,
+                      waited_ms: 0,
+                      timed_out: true,
+                      aborted: false,
+                    },
+                  ),
+                },
+              ],
             }),
           )
           return
@@ -332,6 +355,72 @@ describe("stdio adapter delivery modes", () => {
       pullTransport: "cli",
       idleStrategy: "cli-inbox-wait",
     })
+  })
+
+  it("bridges tools/list and tools/call for inbox.wait with structured content", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath, {
+      inboxWaitResult: {
+        session: "@agent/test",
+        unread_count: 2,
+        oldest_unread_age_min: 1,
+        oldest_unread_ts: 123,
+        waited_ms: 17,
+        timed_out: false,
+        aborted: false,
+      },
+    })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "pull",
+        TRIBE_PULL_TRANSPORT: "cli",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+
+    writeJson(child, initializePayload(1))
+    await waitForLine(child, (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+
+    writeJson(child, toolsListPayload(2))
+    const list = await waitForLine(child, (line) => line.id === 2)
+    const tools = ((list.result as { tools?: Array<Record<string, unknown>> } | undefined)?.tools ?? []) as Array<{
+      name?: string
+      _meta?: Record<string, unknown>
+    }>
+    expect(tools.find((tool) => tool.name === "inbox.wait")?._meta?.["tribe.deliveryCapability"]).toMatchObject({
+      idleStrategy: "cli-inbox-wait",
+      pullTransport: "cli",
+    })
+
+    writeJson(child, callToolPayload(3, "inbox.wait", { session: "@agent/test", timeout_ms: 17 }))
+    const call = await waitForLine(child, (line) => line.id === 3)
+    const content = ((call.result as { content?: Array<{ text?: string }> } | undefined)?.content ?? []) as Array<{
+      text?: string
+    }>
+    const parsed = JSON.parse(content[0]?.text ?? "{}") as {
+      session?: string
+      unread_count?: number
+      waited_ms?: number
+      timed_out?: boolean
+      aborted?: boolean
+    }
+    expect(parsed).toMatchObject({
+      session: "@agent/test",
+      unread_count: 2,
+      waited_ms: 17,
+      timed_out: false,
+      aborted: false,
+    })
+
+    const daemonRequest = daemon.requests.find((msg) => msg.method === "tribe.inbox.wait") as
+      | { params?: { session?: string; timeout_ms?: number } }
+      | undefined
+    expect(daemonRequest?.params).toMatchObject({ session: "@agent/test", timeout_ms: 17 })
   })
 
   it("push delivery registers explicit persona as pull and suppresses channel notifications until tribe.join", async () => {

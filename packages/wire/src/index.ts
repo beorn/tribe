@@ -61,6 +61,15 @@ export { startTribeHttpMcpServer } from "./http-adapter.ts"
 // Join delivery resolution (require-join-before-push contract, c6071f3 + 333193c).
 export { resolveJoinDelivery } from "./lib/delivery.ts"
 
+// Inbox-wait option parsing shared by CLI and MCP/raw daemon call paths.
+export type { InboxWaitOptions, InboxWaitOptionSource } from "./lib/inbox-wait-options.ts"
+export {
+  DEFAULT_INBOX_WAIT_SESSION,
+  DEFAULT_INBOX_WAIT_TIMEOUT_MS,
+  parseInboxWaitTimeoutMs,
+  resolveInboxWaitOptions,
+} from "./lib/inbox-wait-options.ts"
+
 // Command descriptors - source of truth for MCP/CLI/help/future UI projection.
 export type {
   JsonObject,

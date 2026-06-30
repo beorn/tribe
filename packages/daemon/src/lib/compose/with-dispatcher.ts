@@ -30,6 +30,7 @@
 import { randomUUID } from "node:crypto"
 import { type Socket as NetSocket } from "node:net"
 import { createLogger } from "loggily"
+import { DEFAULT_INBOX_WAIT_SESSION, resolveInboxWaitOptions } from "tribe-wire"
 import {
   createLineParser,
   isRequest,
@@ -601,17 +602,17 @@ export function withDispatcher<
           }
 
           case "cli_inbox_wait": {
-            const sessionName = String(p.session ?? "@chief")
-            const timeoutMsRaw = Number(p.timeout_ms ?? 30_000)
-            const timeoutMs = Number.isFinite(timeoutMsRaw) ? timeoutMsRaw : 30_000
+            const { session: sessionName, timeoutMs } = resolveInboxWaitOptions(p, {
+              defaultSession: DEFAULT_INBOX_WAIT_SESSION,
+            })
             return makeResponse(id, await inboxWait.wait(sessionName, connId, timeoutMs))
           }
 
           case "tribe.inbox.wait": {
             const client = clients.get(connId)
-            const sessionName = String(p.session ?? client?.name ?? "@chief")
-            const timeoutMsRaw = Number(p.timeout_ms ?? 30_000)
-            const timeoutMs = Number.isFinite(timeoutMsRaw) ? timeoutMsRaw : 30_000
+            const { session: sessionName, timeoutMs } = resolveInboxWaitOptions(p, {
+              defaultSession: client?.name ?? DEFAULT_INBOX_WAIT_SESSION,
+            })
             return makeResponse(id, await inboxWait.wait(sessionName, connId, timeoutMs))
           }
 
