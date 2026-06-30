@@ -106,7 +106,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           summary: {
             type: "string",
             description:
-              "Authored one-line summary - the channel UI shows it by default and discloses the markdown body on click. Optional but recommended for LLM senders; if omitted the daemon derives one from the message's first line and sets `summary_derived: true` (derive-not-reject - the message is never dropped for a missing summary).",
+              "Authored one-line summary - the channel UI shows it by default and discloses the markdown body on click. Required for LLM senders; non-LLM callers may omit it and the daemon derives one from the message's first line. When derived, the response includes `summary_derived: true`.",
           },
           type: {
             type: "string",
@@ -142,11 +142,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           id: { type: "string", description: "Message id assigned by the daemon." },
           summary: {
             type: "string",
-            description: "The one-liner stored with the message (authored, or derived from the message when omitted).",
+            description:
+              "The one-liner stored with the message. Authored by LLM senders; derived from the message only for non-LLM callers who omit it.",
           },
           summary_derived: {
             type: "boolean",
-            description: "Present and true when no `summary` was provided and one was derived (no-silent flag).",
+            description: "Present and true when a non-LLM sender omitted `summary` and the daemon derived one.",
           },
           warning: { type: "string", description: "Human-readable note emitted when the summary was derived." },
           ...ERROR_SHAPE,
@@ -175,7 +176,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           name: "summary",
           flags: "-s, --summary <summary>",
           description:
-            "Authored one-line summary shown by default in the channel UI (derived from the message if omitted)",
+            "Authored one-line summary shown by default in the channel UI (required for LLM senders; derived for non-LLM callers if omitted)",
         },
         {
           name: "reply",

@@ -385,11 +385,16 @@ function handleSend(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): ToolRes
   const requestFlag = requestArg === true
   const requestId = typeof requestArg === "string" ? requestArg : null
   const replyId = typeof replyArg === "string" ? replyArg : null
-  // 20316 #3 derive-not-reject: an LLM sender SHOULD author a one-line `summary`
-  // (the channel UI shows it by default; the body discloses the markdown). If
-  // omitted, derive one from the message rather than rejecting it, and flag the
-  // derive back to the caller (no-silent) so the authored-one-liner habit shows.
   const summaryArg = typeof a.summary === "string" ? a.summary.trim() : ""
+  const llmSender = ctx.claudeSessionId !== null || ctx.claudeSessionName !== null
+  if (llmSender && summaryArg.length === 0) {
+    return jsonResult({
+      error: "tribe.send: summary is required for LLM senders; author a one-line summary before sending.",
+    })
+  }
+  // 20316 #3: LLM senders must author the one-line summary up front. Non-LLM
+  // callers still get the derived fallback so legacy CLI/human sends remain
+  // ergonomic.
   const summaryDerived = summaryArg.length === 0
   const summary = summaryDerived ? deriveSummary(sanitized) : summaryArg
   const result = sendMessage(

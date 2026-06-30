@@ -2,10 +2,8 @@
  * llm-authored-tribe-summary-persistence (km 20316 #3): a message carries an
  * authored one-line `summary` that persists alongside its content and rides
  * back out on fetch, so a channel UI can show the sender's own one-liner by
- * default (and disclose the markdown body on demand). When a sender omits the
- * summary, the daemon derives one from the message (first line, truncated)
- * rather than rejecting the send — and flags the derive back to the caller so
- * the omission is never silent.
+ * default (and disclose the markdown body on demand). LLM senders must author
+ * the summary up front; non-LLM callers still get the derived fallback.
  */
 
 import { Database } from "bun:sqlite"
@@ -28,7 +26,13 @@ const PROJECT_ID = "summary-proj"
 
 type ToolJson = Record<string, unknown>
 
-function makeContext(db: Database, stmts: TribeStatements, name: string, sessionId: string): TribeContext {
+function makeContext(
+  db: Database,
+  stmts: TribeStatements,
+  name: string,
+  sessionId: string,
+  opts?: { claudeSessionId?: string | null; claudeSessionName?: string | null },
+): TribeContext {
   return createTribeContext({
     db,
     stmts,
@@ -36,8 +40,8 @@ function makeContext(db: Database, stmts: TribeStatements, name: string, session
     sessionRole: "member",
     initialName: name,
     domains: [],
-    claudeSessionId: null,
-    claudeSessionName: null,
+    claudeSessionId: opts?.claudeSessionId ?? null,
+    claudeSessionName: opts?.claudeSessionName ?? null,
   })
 }
 
@@ -77,7 +81,7 @@ describe("deriveSummary", () => {
   })
 })
 
-describe("tribe.send summary — persist + derive-not-reject", () => {
+describe("tribe.send summary — persist + LLM-reject / non-LLM fallback", () => {
   let tmpDir: string
   let db: Database
   let stmts: TribeStatements
@@ -99,6 +103,15 @@ describe("tribe.send summary — persist + derive-not-reject", () => {
     return parseToolJson(handleToolCall(ctx, "tribe.send", args, makeOpts()))
   }
 
+  function sendAsLlm(args: ToolJson): ToolJson {
+    const ctx = makeContext(db, stmts, SENDER, SENDER_ID, {
+      claudeSessionId: "claude-session-123",
+      claudeSessionName: "claude",
+    })
+    registerSession(ctx, PROJECT_ID, () => true, null, 1234, "push", "/repo", null, "claude")
+    return parseToolJson(handleToolCall(ctx, "tribe.send", args, makeOpts()))
+  }
+
   it("persists an authored summary verbatim and does not flag a derive", () => {
     const res = send({ to: RECIPIENT, message: "Full plan:\n\n- rebase\n- push", summary: "rebase then push" })
     expect(res.sent).toBe(true)
@@ -110,7 +123,7 @@ describe("tribe.send summary — persist + derive-not-reject", () => {
     expect(row.summary).toBe("rebase then push")
   })
 
-  it("derives a one-liner + warns (no-silent) when summary is omitted — never rejects", () => {
+  it("derives a one-liner + warns (no-silent) when a non-LLM sender omits summary", () => {
     const res = send({ to: RECIPIENT, message: "Landing 20316 now\n\nlong **markdown** body follows here" })
     expect(res.sent).toBe(true) // derive-not-reject: the message still sends
     expect(res.summary).toBe("Landing 20316 now")
@@ -120,6 +133,17 @@ describe("tribe.send summary — persist + derive-not-reject", () => {
       summary: string | null
     }
     expect(row.summary).toBe("Landing 20316 now")
+  })
+
+  it("rejects a missing summary for an LLM-originated sender", () => {
+    const res = sendAsLlm({ to: RECIPIENT, message: "Landing 20316 now\n\nlong **markdown** body follows here" })
+    expect(res.sent).toBeUndefined()
+    expect(typeof res.error).toBe("string")
+    expect(String(res.error)).toMatch(/summary/i)
+    const count = db.prepare("SELECT COUNT(*) AS n FROM messages WHERE content LIKE $content").get({
+      $content: "Landing 20316 now%",
+    }) as { n: number }
+    expect(count.n).toBe(0)
   })
 
   it("rides the summary back out on fetch so the recipient UI can show it", () => {

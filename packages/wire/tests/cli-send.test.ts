@@ -40,11 +40,13 @@ describe("registerSendCommands", () => {
     const cmd = findCmd(buildProgram(), "send")
     expect(cmd).toBeDefined()
     expect(cmd!.description()).toMatch(/send a message/i)
-    // --summary lets a sender author the channel one-liner (20316 #3); when
-    // omitted the daemon derives one (derive-not-reject).
+    // --summary lets a sender author the channel one-liner (20316 #3); LLM
+    // senders must provide it, while non-LLM callers may still omit it.
     expect(optionFlags(cmd!)).toEqual(
       expect.arrayContaining(["--type", "--summary", "--reply", "--request", "--fanout"]),
     )
+    const summaryOpt = cmd!.options.find((o) => o.long === "--summary")
+    expect(summaryOpt?.description).toMatch(/required for llm senders/i)
   })
 
   test("buildSendPayload keeps the legacy payload shape when ball-tracker flags are omitted", () => {

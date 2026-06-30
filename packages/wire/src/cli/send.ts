@@ -147,9 +147,14 @@ function parseDomains(values: string[] | undefined): string[] {
 
 async function cmdSend(input: SendPayloadInput): Promise<void> {
   const result = (await callDaemon("tribe.send", buildSendPayload(input))) as {
+    error?: string
     summary?: string
     summary_derived?: boolean
     warning?: string
+  }
+  if (typeof result.error === "string" && result.error.length > 0) {
+    console.error(`tribe-wire send: ${result.error}`)
+    process.exit(1)
   }
   console.log(`Sent message to ${input.to}`)
   // Derive-not-reject: surface (no-silent) when the daemon derived a one-liner
