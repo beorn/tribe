@@ -131,6 +131,51 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
 })
 
 describe("dispatcher inbox-wait parsing", () => {
+  it("wakes waits for actionable messages sent through a registered client context", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    harness.addPendingClient("conn-sender")
+    await harness.register("conn-sender", {
+      name: "@agent/sender",
+      pid: liveHolderPid,
+      project: "/tmp/km-wt9",
+    })
+
+    const wait = harness.dispatcher.handleRequest(
+      {
+        jsonrpc: "2.0",
+        id: "wait",
+        method: "tribe.inbox.wait",
+        params: { session: "@agent/wait", timeoutMs: 100 },
+      },
+      "conn-wait",
+    )
+
+    await new Promise((resolveWait) => setTimeout(resolveWait, 20))
+    parseResult(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "send",
+          method: "tribe.send",
+          params: {
+            to: "@agent/wait",
+            message: "wake inbox wait",
+            type: "request",
+          },
+        },
+        "conn-sender",
+      ),
+    )
+
+    const result = parseResult<InboxWaitResult>(await wait)
+    expect(result.session).toBe("@agent/wait")
+    expect(result.unread_count).toBe(1)
+    expect(result.timed_out).toBe(false)
+    expect(result.aborted).toBe(false)
+  })
+
   it("uses the same timeoutMs fallback accepted by the MCP handler", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose

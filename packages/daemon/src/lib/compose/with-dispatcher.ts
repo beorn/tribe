@@ -41,7 +41,7 @@ import {
   type JsonRpcRequest,
 } from "tribe-wire/lib/socket"
 import { detectRole, resolveProjectId, type TribeRole } from "tribe-wire/lib/config"
-import { createTribeContext, type TribeContext } from "../context.ts"
+import { createTribeContext, type MessageInsertedInfo, type TribeContext } from "../context.ts"
 import { handleToolCall, isRemovedTribeMethod, removedTribeMethodMessage, TRIBE_COORD_METHODS } from "../handlers.ts"
 import { createLifecycleStore } from "../lifecycle-store.ts"
 import { createInboxWaitManager } from "../inbox-wait.ts"
@@ -158,10 +158,11 @@ export function withDispatcher<
 
     const inboxWait = createInboxWaitManager(readInboxStatus)
     const previousOnMessageInserted = daemonCtx.onMessageInserted
-    daemonCtx.onMessageInserted = (info) => {
+    const onMessageInserted = (info: MessageInsertedInfo) => {
       previousOnMessageInserted?.(info)
       inboxWait.onMessageInserted(info)
     }
+    daemonCtx.onMessageInserted = onMessageInserted
 
     /** In-memory per-session lifecycle-snapshot cache. Last-write-wins;
      *  lost on daemon restart by design (sessions re-publish on the next
@@ -420,7 +421,7 @@ export function withDispatcher<
               domains,
               claudeSessionId,
               claudeSessionName,
-              onMessageInserted: broadcast.messageTap,
+              onMessageInserted,
             })
 
             const deliveryRaw = (p.delivery as string) ?? "push"
