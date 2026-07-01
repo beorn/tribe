@@ -257,6 +257,8 @@ describe("stdio adapter delivery modes", () => {
     writeJson(child, initializePayload(1))
     const init = await waitForLine(child, (line) => line.id === 1)
     expect(JSON.stringify(init)).not.toContain("claude/channel")
+    expect(JSON.stringify(init)).not.toContain("New messages also arrive inline as <channel> envelopes")
+    expect(JSON.stringify(init)).toContain("This session is pull-delivery")
 
     writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
     writeJson(child, toolsListPayload(2))
@@ -441,6 +443,7 @@ describe("stdio adapter delivery modes", () => {
     writeJson(child, initializePayload(1))
     const init = await waitForLine(child, (line) => line.id === 1)
     expect(JSON.stringify(init)).toContain("claude/channel")
+    expect(JSON.stringify(init)).toContain("New messages also arrive inline as <channel> envelopes")
 
     writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
     writeJson(child, toolsListPayload(2))
