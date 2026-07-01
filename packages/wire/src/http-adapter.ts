@@ -140,8 +140,7 @@ function createMcpServer(opts: {
     { name: "tribe", version: "0.14.1" },
     {
       capabilities: { tools: {} },
-      instructions:
-        `Tribe coordination is available through MCP tools. Call tribe.join(name, delivery) before relying on tribe notifications or inbox routing. ${deliveryCapabilityInstruction(opts.deliveryCapability)}`,
+      instructions: `Tribe coordination is available through MCP tools. Call tribe.join(name, delivery) before relying on tribe notifications or inbox routing. ${deliveryCapabilityInstruction(opts.deliveryCapability)}`,
     },
   )
 

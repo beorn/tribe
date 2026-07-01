@@ -53,11 +53,13 @@ describe("resolveDeliveryCapability", () => {
   })
 
   it("supports host-stream as a pull transport for hosts with their own stream", () => {
-    expect(resolveDeliveryCapability({ delivery: "pull", channel: false, pullTransport: "host-stream" })).toMatchObject({
-      delivery: "pull",
-      channel: false,
-      pullTransport: "host-stream",
-      idleStrategy: "host-stream",
-    })
+    expect(resolveDeliveryCapability({ delivery: "pull", channel: false, pullTransport: "host-stream" })).toMatchObject(
+      {
+        delivery: "pull",
+        channel: false,
+        pullTransport: "host-stream",
+        idleStrategy: "host-stream",
+      },
+    )
   })
 })
