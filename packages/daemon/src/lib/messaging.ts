@@ -91,9 +91,9 @@ export function deriveSummary(content: string, max = 80): string {
  * Ball-tracker fields — see @km/tribe/message-ball-tracker. A message with
  * `request` opens a tracked request; a message with `reply` closes one.
  * Both fields are optional and orthogonal to `type` (the message's
- * free-form metadata label). Phase 2a handles single-recipient (1:1)
- * semantics; multi-target (`to: [...]`) and broadcast (`to: "*"`) fanout
- * is Phase 2b.
+ * free-form metadata label). This lower-level writer handles one durable
+ * recipient string; `handleSend` resolves explicit multi-target lists and
+ * broadcast snapshots into per-recipient pending rows.
  */
 export type BallTracker = {
   /**
@@ -200,11 +200,9 @@ export function sendMessage(
   })
   const rowid = Number(result.lastInsertRowid)
   // Ball-tracker side-effects: open or close pending_request rows.
-  // Phase 2a scope is single-recipient (kind='direct') only. Broadcast (`*`)
-  // and multi-target (`to: [...]`) fanout land in Phase 2b — they require
-  // recipient-snapshot resolution via room_members / explicit list. Event
-  // rows are journal-only and never participate. Closing a reply is allowed
-  // on direct rows; non-direct kinds silently skip the close as well.
+  // sendMessage only knows about one durable recipient string. Multi-target
+  // and broadcast recipient snapshots are resolved by handleSend, which opens
+  // additional pending_request rows after the message row exists.
   if (resolvedKind === "direct") {
     if (requestId) {
       ctx.stmts.openPendingRequest.run({
@@ -217,14 +215,18 @@ export function sendMessage(
       })
     }
     if (replyId) {
-      // For Phase 2a we always close exactly the (request_id, recipient) row.
-      // Phase 2b will read the request's `fanout` column and close-all when
-      // fanout='first'. Single-recipient 1:1 case is unaffected — there's
-      // only one row to close.
-      ctx.stmts.closePendingRequest.run({
+      const row = ctx.stmts.selectPendingForRequestRecipient.get({
         $request_id: replyId,
         $recipient: ctx.getName(),
-      })
+      }) as { fanout: string } | null
+      if (row?.fanout === "first") {
+        ctx.stmts.closePendingRequestAll.run({ $request_id: replyId })
+      } else {
+        ctx.stmts.closePendingRequest.run({
+          $request_id: replyId,
+          $recipient: ctx.getName(),
+        })
+      }
     }
   }
   ctx.onMessageInserted?.({

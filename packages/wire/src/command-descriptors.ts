@@ -93,15 +93,18 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
   {
     id: "tribe.send",
     title: "Send Message",
-    description: 'Send a message to one tribe member, or to everyone with to: "*".',
+    description: 'Send a message to one tribe member, multiple members, or everyone with to: "*".',
     lifetime: "live-session",
     mcp: {
       name: "send",
-      description: 'Send a message to one tribe member, or to everyone with to: "*".',
+      description: 'Send a message to one tribe member, multiple members, or everyone with to: "*".',
       inputSchema: {
         type: "object",
         properties: {
-          to: { type: "string", description: 'Recipient session name, or "*" for broadcast' },
+          to: {
+            oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, minItems: 1 }],
+            description: 'Recipient session name, recipient session names, or "*" for broadcast',
+          },
           message: { type: "string", description: "Message content" },
           summary: {
             type: "string",
@@ -130,7 +133,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             type: "string",
             enum: TRIBE_FANOUTS,
             description:
-              "Multi-recipient ball routing: 'first' (default, AMQP competing-consumers) or 'all' (per-recipient ball). Phase 2a applies only to single-recipient/explicit cases; broadcast/multi-target fanout is Phase 2b.",
+              "Multi-recipient ball routing: 'first' (default, AMQP competing-consumers) or 'all' (per-recipient ball). Broadcast and explicit multi-target requests snapshot recipients at send time.",
             default: "first",
           },
         },
@@ -157,7 +160,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     },
     cli: available({
       name: "send",
-      description: 'Send a message to one tribe member, or to everyone with to: "*".',
+      description: 'Send a message to one tribe member, multiple members, or everyone with to: "*".',
       lifetime: "one-shot",
       mapsToMcp: "send",
       arguments: [

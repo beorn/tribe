@@ -14,8 +14,9 @@
  *      pending_request row is created even if request were set.
  *  (4) `selectPendingForRecipient` returns open requests sorted oldest-first.
  *
- * Phase 2b will cover broadcast + multi-target fanout (recipient snapshot from
- * room_members for `to: "*"`, explicit list for `to: [...]`).
+ * Broadcast and explicit multi-target fanout are covered at the `handleSend`
+ * layer; this file keeps the lower-level `sendMessage` substrate pinned to one
+ * durable recipient string.
  */
 
 import { Database } from "bun:sqlite"
@@ -205,7 +206,7 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
     expect(rows.c).toBe(0)
   })
 
-  it("broadcast (`*`) skips pending_request — Phase 2b will resolve recipient snapshot", () => {
+  it("broadcast (`*`) is journaled by sendMessage; handleSend owns pending snapshots", () => {
     const chief = makeContext(db, stmts, "@chief")
     sendMessage(
       chief,
@@ -220,13 +221,14 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
         request: "req-broadcast-deferred",
       },
     )
-    // Phase 2a: broadcast doesn't open a tracker (requires room_members snapshot).
+    // sendMessage records the broadcast row only; handleSend resolves the live
+    // room_members snapshot and opens per-recipient pending rows.
     const rows = db
       .prepare("SELECT COUNT(*) as c FROM pending_request WHERE request_id = ?")
       .get("req-broadcast-deferred") as { c: number }
     expect(rows.c).toBe(0)
-    // But the message row itself records the request id — Phase 2b can backfill
-    // pending_request from the broadcast message + room_members.
+    // The message row itself records the request id for the higher-level
+    // handler path to use as the snapshot's tracker id.
     const msg = db.prepare("SELECT request, kind FROM messages WHERE request = ?").get("req-broadcast-deferred") as {
       request: string
       kind: string

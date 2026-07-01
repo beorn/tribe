@@ -756,6 +756,10 @@ export function createStatements(db: Database) {
 			$delivery, $topic, $room_id, $request, $reply, $summary)
 	`),
 
+    setMessageRequest: db.prepare(`
+		UPDATE messages SET request = $request WHERE id = $id
+	`),
+
     /** Ball-tracker insert: opens a new pending request (one row per recipient).
      *  See @km/tribe/message-ball-tracker Phase 2. */
     openPendingRequest: db.prepare(`
@@ -774,6 +778,16 @@ export function createStatements(db: Database) {
     /** Ball-tracker close-all: for fanout='first' on broadcast, deletes ALL rows on first reply. */
     closePendingRequestAll: db.prepare(`
 		DELETE FROM pending_request WHERE request_id = $request_id
+	`),
+
+    /** Ball-tracker lookup: used when a reply arrives to decide whether this
+     *  recipient's row is fanout='first' (close all) or fanout='all'
+     *  (close only the replying recipient). */
+    selectPendingForRequestRecipient: db.prepare(`
+		SELECT fanout
+		FROM pending_request
+		WHERE request_id = $request_id AND recipient = $recipient
+		LIMIT 1
 	`),
 
     /** Ball-tracker query: open requests addressed to a particular recipient (the "owner"

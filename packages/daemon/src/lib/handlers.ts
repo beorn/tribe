@@ -364,11 +364,61 @@ function parseDomains(value: string): string[] {
   return Array.isArray(parsed) && parsed.every((v) => typeof v === "string") ? parsed : []
 }
 
-function handleSend(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): ToolResult {
+function normalizeRecipients(value: unknown): string | string[] | null {
+  if (typeof value === "string" && value.length > 0) return value
+  if (Array.isArray(value) && value.length > 0 && value.every((v) => typeof v === "string" && v.length > 0)) {
+    return [...new Set(value as string[])]
+  }
+  return null
+}
+
+function activeBroadcastRecipients(ctx: TribeContext, opts: HandlerOpts): string[] {
+  const activeIds = [...opts.getActiveSessionIds()]
+  if (activeIds.length === 0) return []
+  const placeholders = activeIds.map(() => "?").join(", ")
+  const rows = ctx.db
+    .prepare(`
+      SELECT DISTINCT s.name
+      FROM sessions s
+      INNER JOIN room_members rm ON rm.session_id = s.id
+      WHERE s.id IN (${placeholders})
+        AND s.name != ?
+        AND s.role = 'member'
+      ORDER BY s.name ASC
+    `)
+    .all(...activeIds, ctx.getName()) as Array<{ name: string }>
+  return rows.map((row) => row.name)
+}
+
+function openPendingRows(
+  ctx: TribeContext,
+  recipients: readonly string[],
+  requestId: string,
+  messageId: string,
+  openedAt: number,
+  fanout: "first" | "all" | undefined,
+): void {
+  for (const recipient of recipients) {
+    ctx.stmts.openPendingRequest.run({
+      $request_id: requestId,
+      $recipient: recipient,
+      $sender: ctx.getName(),
+      $opened_at: openedAt,
+      $message_id: messageId,
+      $fanout: fanout ?? "first",
+    })
+  }
+}
+
+function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
   // The tribe-wire daemon is role-agnostic (F12 of
   // @km/tribe/15496-coordination-drift): every message type is delivered to
   // every session with no role gate. `assign` / `verdict` are ordinary
   // message types — coordination authority is an L3 concern, not a daemon one.
+  const recipients = normalizeRecipients(a.to)
+  if (recipients === null) {
+    return jsonResult({ error: "tribe.send: `to` must be a non-empty string or array of non-empty strings." })
+  }
   const msgType = (a.type as string) ?? "notify"
   const sanitized = sanitizeMessage(a.message as string)
   // Ball-tracker fields (@km/tribe/message-ball-tracker Phase 2a):
@@ -398,9 +448,50 @@ function handleSend(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): ToolRes
   // ergonomic.
   const summaryDerived = summaryArg.length === 0
   const summary = summaryDerived ? deriveSummary(sanitized) : summaryArg
+  if (Array.isArray(recipients)) {
+    const sharedRequestId = requestFlag ? randomUUID() : requestId
+    const results = recipients.map((recipient) =>
+      sendMessage(
+        ctx,
+        recipient,
+        sanitized,
+        msgType,
+        a.bead as string | undefined,
+        a.ref as string | undefined,
+        "direct",
+        { summary },
+        {
+          request: sharedRequestId ?? undefined,
+          reply: replyId ?? undefined,
+          fanout: fanoutArg,
+        },
+      ),
+    )
+    logEvent(ctx, `message.sent.${msgType}`, a.bead as string | undefined, {
+      to: recipients,
+      message_ids: results.map((r) => r.id),
+      ...(sharedRequestId ? { request_id: sharedRequestId } : {}),
+      ...(summaryDerived ? { summary_derived: true } : {}),
+    })
+    return jsonResult({
+      sent: true,
+      id: results[0]?.id ?? null,
+      ids: results.map((r) => r.id),
+      ...(sharedRequestId ? { request_id: sharedRequestId } : {}),
+      summary,
+      ...(summaryDerived
+        ? {
+            summary_derived: true,
+            warning:
+              "no `summary` provided — derived a one-liner from the message; pass an authored `summary` for the channel one-liner.",
+          }
+        : {}),
+    })
+  }
+
   const result = sendMessage(
     ctx,
-    a.to as string,
+    recipients,
     sanitized,
     msgType,
     a.bead as string | undefined,
@@ -416,19 +507,31 @@ function handleSend(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): ToolRes
   // Truthy-shorthand fixup: the canonical convention is request_id == message_id.
   // sendMessage already wrote the message; we now open the pending row using
   // the freshly-assigned id (no second SQL insert path — same statement).
-  // Skipped for broadcast/event rows since Phase 2a is single-recipient-only.
-  if (requestFlag && (a.to as string) !== "*") {
+  if (requestFlag) {
+    ctx.stmts.setMessageRequest.run({ $id: result.id, $request: result.id })
+  }
+  if (requestFlag && recipients !== "*") {
     ctx.stmts.openPendingRequest.run({
       $request_id: result.id,
-      $recipient: a.to as string,
+      $recipient: recipients,
       $sender: ctx.getName(),
       $opened_at: result.ts,
       $message_id: result.id,
       $fanout: fanoutArg ?? "first",
     })
   }
+  if ((requestFlag || requestId) && recipients === "*") {
+    openPendingRows(
+      ctx,
+      activeBroadcastRecipients(ctx, opts),
+      requestFlag ? result.id : requestId!,
+      result.id,
+      result.ts,
+      fanoutArg,
+    )
+  }
   logEvent(ctx, `message.sent.${msgType}`, a.bead as string | undefined, {
-    to: a.to,
+    to: recipients,
     message_id: result.id,
     ...(summaryDerived ? { summary_derived: true } : {}),
   })

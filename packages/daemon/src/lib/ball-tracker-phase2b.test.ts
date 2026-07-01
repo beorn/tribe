@@ -1,0 +1,210 @@
+/**
+ * @km/tribe/message-ball-tracker — Phase 2b fanout tests.
+ *
+ * Covers broadcast + explicit multi-target semantics on top of the Phase 2a
+ * single-recipient substrate.
+ */
+
+import type { Database } from "bun:sqlite"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { afterEach, beforeEach, describe, expect, it } from "vitest"
+
+import { createTribeContext, type TribeContext } from "./context.ts"
+import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
+import { handleToolCall, type HandlerOpts } from "./handlers.ts"
+import { registerSession } from "./session.ts"
+
+const PROJECT_ID = "ball-tracker-phase2b"
+
+function makeContext(db: Database, stmts: TribeStatements, name: string, sessionId: string): TribeContext {
+  return createTribeContext({
+    db,
+    stmts,
+    sessionId,
+    sessionRole: "member",
+    initialName: name,
+    domains: [],
+    claudeSessionId: null,
+    claudeSessionName: null,
+  })
+}
+
+function makeOpts(activeIds: readonly string[]): HandlerOpts {
+  return {
+    cleanup: () => undefined,
+    userRenamed: false,
+    setUserRenamed: () => undefined,
+    getActiveSessionIds: () => new Set(activeIds),
+    getActiveSessionInfo: () => [],
+  }
+}
+
+function parseToolJson(result: ReturnType<typeof handleToolCall>): Record<string, unknown> {
+  const text = (result as { content: Array<{ text: string }> }).content[0]?.text ?? "{}"
+  return JSON.parse(text) as Record<string, unknown>
+}
+
+function pendingRecipients(db: Database, requestId: string): string[] {
+  const rows = db
+    .prepare("SELECT recipient FROM pending_request WHERE request_id = ? ORDER BY recipient ASC")
+    .all(requestId) as Array<{ recipient: string }>
+  return rows.map((row) => row.recipient)
+}
+
+describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
+  let tmpDir: string
+  let db: Database
+  let stmts: TribeStatements
+  let chief: TribeContext
+  let agent1: TribeContext
+  let agent2: TribeContext
+  let staleAgent: TribeContext
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "ball-tracker-phase2b-"))
+    db = openDatabase(join(tmpDir, "tribe.db"))
+    stmts = createStatements(db)
+
+    chief = makeContext(db, stmts, "@chief", "sess-chief")
+    agent1 = makeContext(db, stmts, "@agent/1", "sess-agent-1")
+    agent2 = makeContext(db, stmts, "@agent/2", "sess-agent-2")
+    staleAgent = makeContext(db, stmts, "@agent/stale", "sess-stale")
+
+    registerSession(chief, PROJECT_ID, () => true, null, 1001, "push", "/repo", null, "claude")
+    registerSession(agent1, PROJECT_ID, () => true, null, 1002, "push", "/repo", null, "claude")
+    registerSession(agent2, PROJECT_ID, () => true, null, 1003, "push", "/repo", null, "claude")
+    registerSession(staleAgent, PROJECT_ID, () => false, null, 1004, "push", "/repo", null, "claude")
+  })
+
+  afterEach(() => {
+    db.close()
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it("broadcast request snapshots active room members and excludes sender", () => {
+    const res = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        { to: "*", message: "who can take this?", type: "request", request: "req-broadcast", fanout: "first" },
+        makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+      ),
+    )
+
+    expect(res.sent).toBe(true)
+    expect(pendingRecipients(db, "req-broadcast")).toEqual(["@agent/1", "@agent/2"])
+
+    const row = db.prepare("SELECT recipient, kind, request FROM messages WHERE id = ?").get(res.id as string) as {
+      recipient: string
+      kind: string
+      request: string | null
+    }
+    expect(row).toMatchObject({ recipient: "*", kind: "broadcast", request: "req-broadcast" })
+  })
+
+  it("broadcast request:true uses the message id as the persisted request id", () => {
+    const res = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        { to: "*", message: "ack this", type: "request", request: true, fanout: "all" },
+        makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+      ),
+    )
+    const id = res.id as string
+
+    expect(pendingRecipients(db, id)).toEqual(["@agent/1", "@agent/2"])
+    const row = db.prepare("SELECT request FROM messages WHERE id = ?").get(id) as { request: string | null }
+    expect(row.request).toBe(id)
+  })
+
+  it("rejects an empty multi-target recipient list", () => {
+    const res = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        { to: [], message: "nobody", type: "request", request: "req-empty" },
+        makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+      ),
+    )
+
+    expect(typeof res.error).toBe("string")
+    expect(pendingRecipients(db, "req-empty")).toEqual([])
+  })
+
+  it("explicit multi-target request opens one pending row per named recipient", () => {
+    const res = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        {
+          to: ["@agent/1", "@agent/2"],
+          message: "both of you ack",
+          type: "request",
+          request: "req-multi",
+          fanout: "all",
+        },
+        makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+      ),
+    )
+
+    expect(res.sent).toBe(true)
+    expect(pendingRecipients(db, "req-multi")).toEqual(["@agent/1", "@agent/2"])
+
+    const rows = db
+      .prepare("SELECT recipient, kind, request FROM messages WHERE request = ? ORDER BY recipient ASC")
+      .all("req-multi") as Array<{ recipient: string; kind: string; request: string }>
+    expect(rows).toEqual([
+      { recipient: "@agent/1", kind: "direct", request: "req-multi" },
+      { recipient: "@agent/2", kind: "direct", request: "req-multi" },
+    ])
+  })
+
+  it("fanout='first' closes every pending recipient row on the first valid reply", () => {
+    parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        { to: "*", message: "who can take this?", type: "request", request: "req-first", fanout: "first" },
+        makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+      ),
+    )
+    expect(pendingRecipients(db, "req-first")).toEqual(["@agent/1", "@agent/2"])
+
+    parseToolJson(
+      handleToolCall(
+        agent1,
+        "tribe.send",
+        { to: "@chief", message: "I can", type: "response", reply: "req-first" },
+        makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+      ),
+    )
+
+    expect(pendingRecipients(db, "req-first")).toEqual([])
+  })
+
+  it("fanout='all' closes only the replying recipient row", () => {
+    parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        { to: "*", message: "everyone ack", type: "request", request: "req-all", fanout: "all" },
+        makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+      ),
+    )
+    expect(pendingRecipients(db, "req-all")).toEqual(["@agent/1", "@agent/2"])
+
+    parseToolJson(
+      handleToolCall(
+        agent1,
+        "tribe.send",
+        { to: "@chief", message: "acked", type: "response", reply: "req-all" },
+        makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+      ),
+    )
+
+    expect(pendingRecipients(db, "req-all")).toEqual(["@agent/2"])
+  })
+})
