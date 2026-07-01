@@ -34,7 +34,12 @@ import { createTimers } from "./timers.ts"
 import { defangModelInput } from "./lib/defang.ts"
 import { createConnectReplayGate, MAX_REPLAY_EVENTS, selectReplayEvents } from "./lib/replay-cap.ts"
 import { evaluateCwdPolicy, probeCwd, readCwdPolicyFromEnv, type CwdEvaluation } from "./lib/cwd-guardrail.ts"
-import { deliveryCapabilityInstruction, resolveDeliveryCapability, resolveJoinDelivery } from "./lib/delivery.ts"
+import {
+  deliveryCapabilityInstruction,
+  resolveDeliveryCapability,
+  resolveJoinDelivery,
+  type TribeDeliveryCapability,
+} from "./lib/delivery.ts"
 
 // stdout IS the MCP wire — a single non-JSON line (a loggily INFO banner)
 // poisons the host's JSON-RPC parser and the session silently loses its
@@ -385,17 +390,35 @@ const joinInstruction = `If you receive a stdio-adapter auto-identify message, j
 const deliveryInstruction = deliveryCapabilityInstruction(DELIVERY_CAPABILITY)
 
 // Shared turn-start inbox guidance for every role variant. Kept deliberately
-// SMALL: new messages already arrive inline as <channel> envelopes (push delivery
-// via drainDaemonInbox below), so the turn-start call is a small catch-up drain —
-// NOT a full replay. The old `limit: 50` window re-pulled already-seen ambient
-// traffic on every turn and flooded long-running agent context.
-// See km @km/tribe/19442-turn-start-fetch-context-flood.
-const turnStartInboxCheck = `Turn-start inbox check:
+// SMALL: the turn-start call is a small catch-up drain, NOT a full replay. The
+// old `limit: 50` window re-pulled already-seen ambient traffic on every turn
+// and flooded long-running agent context. See km @km/tribe/19442.
+function turnStartInboxCheckForDelivery(capability: TribeDeliveryCapability): string {
+  if (capability.idleStrategy === "channel") {
+    return `Turn-start inbox check:
 - New messages also arrive inline as <channel> envelopes — read those first; you do not need to fetch to receive them.
 - For turn-start catch-up keep the drain SMALL: tribe.fetch({ limit: 10 }). Do NOT pull a large window every turn — replaying ~50 events re-surfaces already-seen ambient traffic and floods context.
 - For a specific peer's latest, use the snapshot filter: tribe.fetch({ with: <your session name>, limit: 10 }) or tribe.fetch({ from: <peer>, limit: 10 }) — these return the newest matching messages; use them to find a thread, not to replay the whole channel.
 - Surface only actionable items: direct messages, requests, blockers, assignments, chief verdicts, CI alerts, or user-relevant coordination.
 - Ignore routine ambient joins/leaves, git commits, low-severity status, and notification-only events unless explicitly asked.`
+  }
+  if (capability.idleStrategy === "host-stream") {
+    return `Turn-start inbox check:
+- Host-provided Tribe stream events may already be visible — handle actionable streamed messages first.
+- For turn-start catch-up keep the drain SMALL: tribe.fetch({ limit: 10 }). Do NOT pull a large window every turn — replaying ~50 events re-surfaces already-seen ambient traffic and floods context.
+- For a specific peer's latest, use the snapshot filter: tribe.fetch({ with: <your session name>, limit: 10 }) or tribe.fetch({ from: <peer>, limit: 10 }) — these return the newest matching messages; use them to find a thread, not to replay the whole channel.
+- Surface only actionable items: direct messages, requests, blockers, assignments, chief verdicts, CI alerts, or user-relevant coordination.
+- Ignore routine ambient joins/leaves, git commits, low-severity status, and notification-only events unless explicitly asked.`
+  }
+  return `Turn-start inbox check:
+- This session is pull-delivery; tribe messages do not arrive as channel envelopes. Use the advertised inbox-wait/host cadence for idle waits, then do a small catch-up drain.
+- For turn-start catch-up keep the drain SMALL: tribe.fetch({ limit: 10 }). Do NOT pull a large window every turn — replaying ~50 events re-surfaces already-seen ambient traffic and floods context.
+- For a specific peer's latest, use the snapshot filter: tribe.fetch({ with: <your session name>, limit: 10 }) or tribe.fetch({ from: <peer>, limit: 10 }) — these return the newest matching messages; use them to find a thread, not to replay the whole channel.
+- Surface only actionable items: direct messages, requests, blockers, assignments, chief verdicts, CI alerts, or user-relevant coordination.
+- Ignore routine ambient joins/leaves, git commits, low-severity status, and notification-only events unless explicitly asked.`
+}
+
+const turnStartInboxCheck = turnStartInboxCheckForDelivery(DELIVERY_CAPABILITY)
 
 const chiefInstructions = `Messages from other Claude Code sessions arrive as <channel source="tribe" from="..." type="..." bead="...">.
 
