@@ -119,6 +119,8 @@ export interface PlanOptions {
   timeoutMs?: number
   /** Force a specific model (v2 feature; currently unused). */
   model?: LlmModel
+  /** Test/host seam; defaults to loading TRIBE_LLM_DIR. */
+  llm?: LlmBackend
 }
 
 /**
@@ -129,7 +131,7 @@ export async function planQuery(query: string, context: QueryContext, options: P
   const { round, mode, priorPlan, priorResults = [], priorVariants = [], timeoutMs = 2500 } = options
   const startedAt = Date.now()
 
-  const llm = await loadLlm()
+  const llm = options.llm ?? (await loadLlm())
   if (!llm) {
     return {
       plan: null,

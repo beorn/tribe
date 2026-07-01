@@ -14,23 +14,32 @@
  */
 
 import { describe, test, expect, beforeEach, vi } from "vitest"
-import {
+
+const {
   CONTEXT_PROTOCOL_FOOTER,
   createMemorySeenStore,
   rewriteImperativeAsReported,
-  runInjectDelta,
-} from "../src/lib/inject-core.ts"
+  runInjectDelta: runInjectDeltaImpl,
+} = await import("../src/lib/inject-core.ts")
 
-// Recall must be mocked — the unit test doesn't go near the FTS db.
-vi.mock("../src/history/search.ts", () => ({
-  recall: vi.fn(),
-}))
-vi.mock("../src/history/project-sources.ts", () => ({
-  ensureProjectSourcesIndexed: vi.fn(),
-}))
+const recallMock = vi.fn()
+const ensureProjectSourcesIndexedMock = vi.fn()
 
-import { recall } from "../src/history/search.ts"
-const recallMock = recall as unknown as ReturnType<typeof vi.fn>
+function runInjectDelta(
+  prompt: Parameters<typeof runInjectDeltaImpl>[0],
+  store: Parameters<typeof runInjectDeltaImpl>[1],
+  opts: Parameters<typeof runInjectDeltaImpl>[2] = {},
+): ReturnType<typeof runInjectDeltaImpl> {
+  return runInjectDeltaImpl(prompt, store, {
+    ...opts,
+    deps: {
+      recall: recallMock as unknown as typeof import("../src/history/search.ts").recall,
+      ensureProjectSourcesIndexed: ensureProjectSourcesIndexedMock,
+      findGlossaryAnchor: () => null,
+      ...opts.deps,
+    },
+  })
+}
 
 function mockRecall(
   results: Array<{

@@ -16,16 +16,22 @@ export { CLAUDE_DIR, DB_PATH, PROJECTS_DIR, PLANS_DIR, TODOS_DIR, MAX_CONTENT_SI
 
 let dbInstance: Database | null = null
 
+function currentDbPath(): string {
+  return process.env.RECALL_DB_PATH?.trim() || DB_PATH
+}
+
 export function getDb(): Database {
   if (dbInstance) return dbInstance
 
+  const dbPath = currentDbPath()
+
   // Ensure .claude directory exists
-  const claudeDir = path.dirname(DB_PATH)
+  const claudeDir = path.dirname(dbPath)
   if (!fs.existsSync(claudeDir)) {
     fs.mkdirSync(claudeDir, { recursive: true })
   }
 
-  dbInstance = new Database(DB_PATH)
+  dbInstance = new Database(dbPath)
 
   // Enable WAL mode for concurrent access (multiple Claude sessions)
   // WAL allows readers to not block writers and vice versa

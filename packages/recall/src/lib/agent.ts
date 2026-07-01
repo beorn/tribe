@@ -22,6 +22,7 @@ import { buildQueryContext, renderContextPrompt, type QueryContext } from "./con
 import { planQuery, planVariants, type PlanCall, type QueryPlan } from "./plan.ts"
 import { fanoutSearch, mergeFanouts, type FanoutResult } from "./fanout.ts"
 import { writeTrace, type RoundTrace, type TracePayload } from "./trace.ts"
+import type { LlmBackend } from "./llm-backend.ts"
 
 // ============================================================================
 // Options
@@ -44,6 +45,10 @@ export interface AgentRecallOptions extends RecallOptions {
    * Set false to always synth on the final merged results (one at a time).
    */
   speculativeSynth?: boolean
+  /** Test/host seam; defaults to loading TRIBE_LLM_DIR. */
+  deps?: {
+    llm?: LlmBackend
+  }
 }
 
 export interface AgentRecallResult extends RecallResult {
@@ -118,6 +123,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
   // Speculative synth defaults on — env var or explicit option can disable.
   const speculativeSynth =
     options.speculativeSynth !== undefined ? options.speculativeSynth : process.env.RECALL_SPECULATIVE_SYNTH !== "0"
+  const llm = options.deps?.llm
 
   let decision: { round2Mode: "wider" | "deeper" | "off"; reason: string } = {
     round2Mode: "off",
@@ -158,7 +164,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
   // ──────────────────────────────────────────────────────────────────────
   // Round 1
   // ──────────────────────────────────────────────────────────────────────
-  const planR1 = await planQuery(query, context, { round: 1, timeoutMs: planTimeoutMs })
+  const planR1 = await planQuery(query, context, { round: 1, timeoutMs: planTimeoutMs, llm })
   planElapsed.push(planR1.elapsedMs)
   if (planR1.cost) planCosts.push(planR1.cost)
 
@@ -211,7 +217,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
   const speculativeSynthStart = Date.now()
   const speculativeSynthPromise: Promise<{ text: string | null; cost?: number }> | null =
     speculativeSynth && fanoutR1.results.length > 0
-      ? synthesizeResults(query, fanoutR1.results, timeout).catch(() => ({ text: null }))
+      ? synthesizeResults(query, fanoutR1.results, timeout, llm).catch(() => ({ text: null }))
       : null
   if (speculativeSynthPromise) {
     log(`agent: speculative synth fired on round-1 results (${fanoutR1.results.length} docs)`)
@@ -234,6 +240,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
         priorResults: fanoutR1.results,
         priorVariants: variantsR1,
         timeoutMs: planTimeoutMs,
+        llm,
       })
       planElapsed.push(planR2.elapsedMs)
       if (planR2.cost) planCosts.push(planR2.cost)
@@ -306,7 +313,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
       // call whose result we're abandoning, and our cost + synth-count
       // report should reflect that honestly.
       const [freshResult, abandonedSpec] = await Promise.all([
-        synthesizeResults(query, finalFanout.results, timeout),
+        synthesizeResults(query, finalFanout.results, timeout, llm),
         speculativeSynthPromise ?? Promise.resolve({ text: null as string | null, cost: undefined }),
       ])
       synthesis = {

@@ -7,7 +7,7 @@ import * as path from "path"
 import * as os from "os"
 
 export const CLAUDE_DIR = path.join(os.homedir(), ".claude")
-export const DB_PATH = path.join(CLAUDE_DIR, "session-index.db")
+export const DB_PATH = process.env.RECALL_DB_PATH?.trim() || path.join(CLAUDE_DIR, "session-index.db")
 export const PROJECTS_DIR = path.join(CLAUDE_DIR, "projects")
 export const PLANS_DIR = path.join(CLAUDE_DIR, "plans")
 export const TODOS_DIR = path.join(CLAUDE_DIR, "todos")

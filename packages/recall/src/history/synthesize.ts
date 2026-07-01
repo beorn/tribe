@@ -5,7 +5,7 @@
 
 import * as fs from "fs"
 import * as path from "path"
-import { loadLlm, requireLlm, type LlmModel } from "../lib/llm-backend.ts"
+import { loadLlm, requireLlm, type LlmBackend, type LlmModel } from "../lib/llm-backend.ts"
 import { log } from "./recall-shared.ts"
 import type { RecallSearchResult } from "./recall-shared.ts"
 
@@ -60,9 +60,10 @@ export async function raceLlmModels(
   systemPrompt: string,
   models: LlmModel[],
   timeoutMs: number,
+  llmOverride?: LlmBackend,
 ): Promise<LlmRaceResult> {
   // Models in hand imply the backend already loaded — this resolves from cache.
-  const llm = await requireLlm("raceLlmModels")
+  const llm = llmOverride ?? (await requireLlm("raceLlmModels"))
   const raceStart = Date.now()
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -170,11 +171,17 @@ export async function synthesizeResults(
   query: string,
   results: RecallSearchResult[],
   timeoutMs: number,
+  llmOverride?: LlmBackend,
 ): Promise<SynthesisResult> {
-  const llm = await loadLlm()
-  const models = llm ? llm.getCheapModels(2).filter((m) => llm.isProviderAvailable(m.provider)) : []
+  const llm = llmOverride ?? (await loadLlm())
+  if (!llm) {
+    log(`no LLM backend (TRIBE_LLM_DIR) — synthesis skipped`)
+    return { text: null }
+  }
+
+  const models = llm.getCheapModels(2).filter((m) => llm.isProviderAvailable(m.provider))
   if (models.length === 0) {
-    log(llm ? `no LLM providers available for synthesis` : `no LLM backend (TRIBE_LLM_DIR) — synthesis skipped`)
+    log(`no LLM providers available for synthesis`)
     return { text: null }
   }
 
@@ -182,7 +189,7 @@ export async function synthesizeResults(
   const modelNames = models.map((m) => m.modelId).join(", ")
   log(`LLM synthesis: racing [${modelNames}] context=${context.length} chars timeout=${timeoutMs}ms`)
 
-  const race = await raceLlmModels(context, SYNTHESIS_PROMPT, models, timeoutMs)
+  const race = await raceLlmModels(context, SYNTHESIS_PROMPT, models, timeoutMs, llm)
 
   if (race.winner) {
     log(`LLM winner: ${race.winner} in ${race.totalMs}ms`)

@@ -3,11 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 
-// Use an isolated in-memory recall DB. The mock is hoisted before src imports.
-vi.mock("../../src/history/db-schema", async (importOriginal) => {
-  const orig = await importOriginal<typeof import("../../src/history/db-schema")>()
-  return { ...orig, DB_PATH: ":memory:" }
-})
+process.env.RECALL_DB_PATH = ":memory:"
 
 const mockAgent: {
   result: Awaited<typeof import("../../src/lib/agent")>["recallAgent"] | null
@@ -40,8 +36,8 @@ vi.mock("../../src/lib/refresh.ts", async (importOriginal) => {
   }
 })
 
-import { cmdSearch } from "../../src/lib/search"
-import { closeDb, getDb, setIndexMeta } from "../../src/history/db"
+const { cmdSearch } = await import("../../src/lib/search")
+const { closeDb, getDb, setIndexMeta } = await import("../../src/history/db")
 
 function seedMessage(content: string): void {
   const db = getDb()

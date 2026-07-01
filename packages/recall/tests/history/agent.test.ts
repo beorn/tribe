@@ -9,46 +9,26 @@
 
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest"
 import { buildMockQueryModel, buildPlanJson, alwaysAvailable } from "../helpers/llm-mock.ts"
+import type { LlmBackend } from "../../src/lib/llm-backend.ts"
 
-// ──────────────────────────────────────────────────────────────────────
-// Mock the LLM seam BEFORE any module under test is imported. All LLM
-// traffic now flows through src/lib/llm-backend (TRIBE_LLM_DIR seam), so
-// one module mock covers planner + synthesis + summaries. Tests
-// reconfigure the scenarios by mutating a module-level holder.
-// ──────────────────────────────────────────────────────────────────────
+process.env.RECALL_DB_PATH = ":memory:"
 
 const mockHolder: {
   fn: ReturnType<typeof buildMockQueryModel> | null
 } = { fn: null }
 
-vi.mock("../../src/lib/llm-backend", () => {
-  const fakeModel = (id: string) => ({ provider: "mock", modelId: id })
-  const backend = {
-    queryModel: (opts: Parameters<NonNullable<typeof mockHolder.fn>>[0]) => {
-      if (!mockHolder.fn) throw new Error("Test did not install a mock queryModel")
-      return mockHolder.fn(opts)
-    },
-    getModel: (id: string) => fakeModel(id),
-    getCheapModel: () => fakeModel("mock-cheap"),
-    getCheapModels: (max = 2) => [fakeModel("mock-cheap"), fakeModel("mock-cheap-2")].slice(0, Math.max(0, max)),
-    estimateCost: () => 0.0001,
-    isProviderAvailable: alwaysAvailable,
-  }
-  return {
-    loadLlm: async () => backend,
-    requireLlm: async () => backend,
-    formatCost: (cost: number) => `$${cost.toFixed(4)}`,
-    _resetLlmBackendForTests: () => {},
-  }
-})
-
-// Use bun:sqlite's `:memory:` path so each test gets a fresh DB when we
-// close + reopen via closeDb() in afterEach. Vi.mock factory is hoisted
-// so we can't close over top-level consts; the path is inlined.
-vi.mock("../../src/history/db-schema", async (importOriginal) => {
-  const orig = await importOriginal<typeof import("../../src/history/db-schema")>()
-  return { ...orig, DB_PATH: ":memory:" }
-})
+const fakeModel = (id: string) => ({ provider: "mock", modelId: id })
+const llm = {
+  queryModel: (opts: Parameters<NonNullable<typeof mockHolder.fn>>[0]) => {
+    if (!mockHolder.fn) throw new Error("Test did not install a mock queryModel")
+    return mockHolder.fn(opts)
+  },
+  getModel: (id: string) => fakeModel(id),
+  getCheapModel: () => fakeModel("mock-cheap"),
+  getCheapModels: (max = 2) => [fakeModel("mock-cheap"), fakeModel("mock-cheap-2")].slice(0, Math.max(0, max)),
+  estimateCost: () => 0.0001,
+  isProviderAvailable: alwaysAvailable,
+} satisfies LlmBackend
 
 // Disable context-build side effects that aren't relevant to agent orchestration
 vi.mock("../../src/lib/context", async (importOriginal) => {
@@ -70,12 +50,19 @@ vi.mock("../../src/lib/context", async (importOriginal) => {
 })
 
 // ──────────────────────────────────────────────────────────────────────
-// Imports AFTER vi.mock declarations (hoisted by Vitest)
+// Imports AFTER vi.mock declarations so the DB + LLM seams are isolated.
 // ──────────────────────────────────────────────────────────────────────
 
-import { recallAgent } from "../../src/lib/agent"
-import { setRecallLogging } from "../../src/history/recall-shared"
-import { getDb, closeDb } from "../../src/history/db"
+const { recallAgent: recallAgentImpl } = await import("../../src/lib/agent")
+const { setRecallLogging } = await import("../../src/history/recall-shared")
+const { getDb, closeDb } = await import("../../src/history/db")
+
+function recallAgent(
+  query: Parameters<typeof recallAgentImpl>[0],
+  options: Parameters<typeof recallAgentImpl>[1] = {},
+): ReturnType<typeof recallAgentImpl> {
+  return recallAgentImpl(query, { ...options, deps: { ...options.deps, llm } })
+}
 
 // ──────────────────────────────────────────────────────────────────────
 // Fixture helpers

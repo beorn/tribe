@@ -148,6 +148,12 @@ export interface RunInjectDeltaOptions {
    * Override for callers that want to see all results (e.g., debug tools).
    */
   minRank?: number
+  /** Test seam for isolating recall/project-source dependencies. */
+  deps?: {
+    recall?: typeof recall
+    ensureProjectSourcesIndexed?: typeof ensureProjectSourcesIndexed
+    findGlossaryAnchor?: typeof findGlossaryAnchor
+  }
 }
 
 /**
@@ -194,6 +200,9 @@ export async function runInjectDelta(
   const minLength = opts.minSnippetLength ?? 20
   const snippetChars = opts.snippetChars ?? 300
   const minRank = opts.minRank ?? MIN_RANK_THRESHOLD
+  const recallImpl = opts.deps?.recall ?? recall
+  const ensureProjectSourcesIndexedImpl = opts.deps?.ensureProjectSourcesIndexed ?? ensureProjectSourcesIndexed
+  const findGlossaryAnchorImpl = opts.deps?.findGlossaryAnchor ?? findGlossaryAnchor
 
   const skipReason = classifyPromptSkip(prompt)
   if (skipReason && TRIVIAL_SKIP_REASONS.has(skipReason)) {
@@ -242,7 +251,7 @@ export async function runInjectDelta(
   // createTestApp ..."). The full prompt runs first; if it returns no
   // results, we retry with the glossary anchor before giving up.
   const promptHasSalience = hasSalience(prompt)
-  const glossaryHit = findGlossaryAnchor(prompt)
+  const glossaryHit = findGlossaryAnchorImpl(prompt)
   let recallQuerySeed: string | null = !promptHasSalience ? glossaryHit : null
 
   // Question-shaped prompts get a more permissive bypass threshold:
@@ -263,7 +272,7 @@ export async function runInjectDelta(
     return { skipped: true, reason: "low_salience" }
   }
 
-  ensureProjectSourcesIndexed()
+  ensureProjectSourcesIndexedImpl()
 
   const turn = store.advanceTurn()
 
@@ -283,14 +292,14 @@ export async function runInjectDelta(
     // so users can still grep their live session explicitly.
     excludeCurrentSession: true,
   } as const
-  let result = await recall(recallQuery, recallOpts)
+  let result = await recallImpl(recallQuery, recallOpts)
 
   // Fallback: full-prompt FTS found nothing, but the prompt has a known
   // project anchor (camelCase symbol, framework name) buried in generic
   // English. Retry with the glossary anchor alone — this rescues prompts
   // where the salient term is dominated by surrounding common words.
   if (result.results.length === 0 && glossaryHit && recallQuery !== glossaryHit) {
-    result = await recall(glossaryHit, recallOpts)
+    result = await recallImpl(glossaryHit, recallOpts)
   }
 
   if (result.results.length === 0) {
