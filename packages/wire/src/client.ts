@@ -145,7 +145,7 @@ export type ConnectOrStartOpts = {
   maxStartupAttempts?: number
   /**
    * How many times to retry connecting to an *existing* daemon before deciding
-   * it is dead and reclaiming/spawning. Default 5. See `connectExisting` for
+   * it is dead and reclaiming/spawning. Default 10. See `connectExisting` for
    * why a single connect is unsafe.
    */
   connectAttempts?: number
@@ -176,7 +176,7 @@ export async function connectExisting(
   socketPath: string,
   opts?: {
     callTimeoutMs?: number
-    /** Total connect attempts before giving up. Default 5. */
+    /** Total connect attempts before giving up. Default 10. */
     attempts?: number
     /** @internal test seam — override the connect primitive. */
     connectFn?: (path: string, o?: ConnectToDaemonOpts) => Promise<DaemonClient>
@@ -184,7 +184,7 @@ export async function connectExisting(
     delayFn?: (ms: number) => Promise<void>
   },
 ): Promise<DaemonClient | null> {
-  const attempts = Math.max(1, opts?.attempts ?? 5)
+  const attempts = Math.max(1, opts?.attempts ?? 10)
   const connectFn = opts?.connectFn ?? connectToDaemon
   const delayFn = opts?.delayFn ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
   for (let attempt = 0; attempt < attempts; attempt++) {

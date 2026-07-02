@@ -143,6 +143,24 @@ describe("connectExisting (retry before declaring a daemon dead)", () => {
     expect(delays).toEqual([50, 100])
   })
 
+  it("default retry budget survives a startup-herd refusal streak", async () => {
+    let calls = 0
+    const delays: number[] = []
+    const client = await connectExisting("/ignored.sock", {
+      connectFn: async () => {
+        calls++
+        if (calls < 7) throw errno("ECONNREFUSED")
+        return FAKE_CLIENT
+      },
+      delayFn: async (ms) => {
+        delays.push(ms)
+      },
+    })
+    expect(client).toBe(FAKE_CLIENT)
+    expect(calls).toBe(7)
+    expect(delays).toEqual([50, 100, 200, 400, 800, 1000])
+  })
+
   it("short-circuits to null on ENOENT without retrying (no socket file)", async () => {
     let calls = 0
     const client = await connectExisting("/ignored.sock", {

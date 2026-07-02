@@ -4,9 +4,10 @@
 // told every chief/member/pull session to call `tribe.fetch({ limit: 50 })` on
 // EVERY user turn. New messages already arrive inline as <channel> envelopes, so
 // the 50-event window re-pulled already-seen ambient traffic each turn and burned
-// long-running agent context. The fix extracts one shared `turnStartInboxCheck`
-// constant (killing the 3-way drift that produced three copies of the limit) and
-// caps the turn-start drain at 10.
+// long-running agent context. The fix routes all role variants through one shared
+// `turnStartInboxCheck` constant and caps the turn-start drain at 10. Delivery
+// capability variants live in one helper so channel/host-stream/pull wording can
+// differ without reintroducing role-level drift.
 //
 // This is a grep-guard: it reads the adapter SOURCE as text and never imports the
 // module (the adapter constructs an MCP Server + registers daemon handlers at load
@@ -20,10 +21,11 @@ const SRC = resolve(dirname(fileURLToPath(import.meta.url)), "../src/stdio-adapt
 const src = readFileSync(SRC, "utf8")
 
 describe("turn-start inbox instruction (km 19442 context-flood guard)", () => {
-  it("defines the turn-start guidance exactly once (single source of truth)", () => {
+  it("defines the turn-start guidance through one shared delivery helper", () => {
     expect((src.match(/const turnStartInboxCheck\b/g) ?? []).length).toBe(1)
-    // the literal block text exists only inside the constant, not duplicated
-    expect((src.match(/Turn-start inbox check:/g) ?? []).length).toBe(1)
+    expect((src.match(/function turnStartInboxCheckForDelivery\b/g) ?? []).length).toBe(1)
+    // one literal per delivery mode: channel, host-stream, and pull
+    expect((src.match(/Turn-start inbox check:/g) ?? []).length).toBe(3)
   })
 
   it("shares that one block across all three role variants (chief/member/pull)", () => {
