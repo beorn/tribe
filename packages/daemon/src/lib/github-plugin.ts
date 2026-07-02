@@ -158,6 +158,43 @@ let apiCallsSaved = 0
 let rateLimitRemaining = 5000
 let rateLimitTotal = 5000
 
+/**
+ * Rate-limit metadata attached to a ghFetch error so the POLL LOOP (not the
+ * per-request warn) owns the response: pause polling until the budget resets
+ * instead of hammering every repo every tick (km ci-github-rate-limits).
+ *
+ * `primary` = the hourly REST budget (403 + "rate limit" body, or
+ * x-ratelimit-remaining: 0). `secondary` = abuse/burst detection (429, or a
+ * retry-after header). resetAtMs is null when GitHub sent no usable header —
+ * callers apply their own default pause.
+ */
+export interface RateLimitInfo {
+  kind: "primary" | "secondary"
+  resetAtMs: number | null
+}
+
+/** Extract the RateLimitInfo a ghFetch error carries, if any. */
+export function rateLimitInfoOf(err: unknown): RateLimitInfo | null {
+  const info = (err as { rateLimit?: RateLimitInfo } | null)?.rateLimit
+  return info ?? null
+}
+
+export function detectRateLimit(res: Response, body: string): RateLimitInfo | null {
+  const retryAfterSec = parseInt(res.headers.get("retry-after") ?? "", 10)
+  if (res.status === 429 || Number.isFinite(retryAfterSec)) {
+    return {
+      kind: "secondary",
+      resetAtMs: Number.isFinite(retryAfterSec) ? Date.now() + retryAfterSec * 1000 : null,
+    }
+  }
+  const remaining = parseInt(res.headers.get("x-ratelimit-remaining") ?? "", 10)
+  if (res.status === 403 && (/rate limit/i.test(body) || remaining === 0)) {
+    const resetSec = parseInt(res.headers.get("x-ratelimit-reset") ?? "", 10)
+    return { kind: "primary", resetAtMs: Number.isFinite(resetSec) ? resetSec * 1000 : null }
+  }
+  return null
+}
+
 export async function ghFetch<T>(path: string, headers: Record<string, string>): Promise<T> {
   const url = path.startsWith("https://") ? path : `https://api.github.com${path}`
   const reqHeaders: Record<string, string> = { ...headers }
@@ -181,14 +218,10 @@ export async function ghFetch<T>(path: string, headers: Record<string, string>):
 
   if (!res.ok) {
     const body = await res.text()
-    if (res.status === 403 && body.includes("rate limit")) {
-      const reset = res.headers.get("x-ratelimit-reset")
-      const resetIn = reset ? Math.ceil((parseInt(reset, 10) * 1000 - Date.now()) / 60000) : "?"
-      log.warn?.(
-        `RATE LIMITED — resets in ${resetIn} min. Calls made: ${apiCallsMade}, saved by ETag: ${apiCallsSaved}`,
-      )
-    }
-    throw new Error(`GitHub API ${res.status}: ${body.slice(0, 200)}`)
+    const err = new Error(`GitHub API ${res.status}: ${body.slice(0, 200)}`)
+    const rateLimit = detectRateLimit(res, body)
+    if (rateLimit) Object.assign(err, { rateLimit })
+    throw err
   }
 
   const data = (await res.json()) as T
@@ -260,7 +293,11 @@ export function summarizePollErrors(
     .map(([cls, n]) => `${cls}×${n}`)
     .join(", ")
   const sample = errors[0]!
-  const base = `${buckets}; sample ${sample.repo}: ${sample.message.slice(0, 120)}; rate limit ${remaining}/${total}`
+  // Collapse whitespace so a raw multi-line API payload in the error body
+  // can never spray log-line-shaped content into the warn (the defang layer
+  // otherwise redacts each sprayed line into `[n]` noise in member panes).
+  const sampleMsg = sample.message.replace(/\s+/g, " ").slice(0, 120)
+  const base = `${buckets}; sample ${sample.repo}: ${sampleMsg}; rate limit ${remaining}/${total}`
   const hasAuth = [...counts.keys()].some((c) => c.startsWith("auth-"))
   if (!hasAuth) return base
   const src = tokenSource ?? gitHubTokenSourceLabel()
@@ -268,6 +305,163 @@ export function summarizePollErrors(
     `${base} — GitHub MONITOR-RAIL credential rejected (token source: ${src}); ` +
     `refresh with \`gh auth login\` or set GITHUB_TOKEN; git SSH + integrator UNAFFECTED`
   )
+}
+
+// ---------------------------------------------------------------------------
+// Poll health — pause/backoff gate + warn dedup
+// ---------------------------------------------------------------------------
+
+/** Escalating pause steps for an all-repos-down outage (network or API). */
+const OUTAGE_BACKOFF_STEPS_MS = [2 * 60_000, 5 * 60_000, 15 * 60_000]
+/** Re-warn at most this often while the same failure signature persists. */
+const WARN_HEARTBEAT_MS = 10 * 60_000
+/** Pause when rate-limited but GitHub sent no usable reset header. */
+const RATE_LIMIT_DEFAULT_PAUSE_MS = 15 * 60_000
+/** Never pause longer than this, even if the reset header says so. */
+const PAUSE_CAP_MS = 90 * 60_000
+/** Slack past the advertised reset so we don't resume a second early. */
+const RATE_LIMIT_RESUME_SLACK_MS = 30_000
+
+export interface PollReport {
+  /** Warn line to emit, or null when deduped/quiet. */
+  warn: string | null
+  /** Info line (pause/resume/recovery notes), or null. */
+  info: string | null
+}
+
+export interface PollHealth {
+  /**
+   * Call at the top of a poll tick. `skip: true` means the gate is paused
+   * (rate-limit or outage backoff) — do not poll. On the first tick after a
+   * pause expires, `info` carries a resume note (emit once).
+   */
+  checkGate(): { skip: boolean; info: string | null }
+  /**
+   * Report a completed poll pass for one leg ("events" | "workflows").
+   * Owns rate-limit pausing, outage backoff, warn dedup, and recovery notes.
+   */
+  report(leg: string, result: { errors: PollError[]; repoCount: number; rateLimit: RateLimitInfo | null }): PollReport
+}
+
+/**
+ * Shared poll-health gate for the GitHub plugin's polling legs.
+ *
+ * Why this exists (km ci-github-rate-limits + tribe-server-health-rollout,
+ * 2026-07-02): during a rate-limit burst or a network outage the old code
+ * kept polling every repo every tick and emitted an identical
+ * "N/N repos failed" warn each time — 23/23-repo warn floods every 60s,
+ * with raw API payload samples, sprayed into the daemon log and (post-defang)
+ * into member panes. The fix is state, not louder logging:
+ *
+ * - RATE LIMIT: polling PAUSES until x-ratelimit-reset (+30s slack, capped),
+ *   warned ONCE with the reset time; one resume note on expiry. The pause is
+ *   shared across legs — one budget, one clock.
+ * - OUTAGE (every repo failed): escalating pause 2m → 5m → 15m, warned once
+ *   per escalation; recovery note when a poll succeeds again.
+ * - WARN DEDUP: an unchanged failure signature (same leg, same class×count
+ *   buckets) re-warns at most every 10 min, with a suppressed-count suffix;
+ *   a changed signature warns immediately. Recovery (errors → 0 after a
+ *   warned state) emits one info line.
+ *
+ * Pure state machine over injected `now` — no timers, fully unit-testable.
+ * retire-when: the plugin moves from polling to webhook/push topology (the
+ * AVOID leg of km ci-github-rate-limits) — delete together with the pollers.
+ */
+export function createPollHealth(now: () => number = Date.now): PollHealth {
+  let pausedUntilMs = 0
+  let pauseReason: "rate-limit" | "outage" | null = null
+  let outageStep = -1 // index into OUTAGE_BACKOFF_STEPS_MS; -1 = healthy
+  const legs = new Map<string, { signature: string; lastWarnAtMs: number; suppressed: number }>()
+
+  const fmtMin = (ms: number): string => `${Math.max(1, Math.round(ms / 60_000))}min`
+
+  function pause(reason: "rate-limit" | "outage", untilMs: number): void {
+    pausedUntilMs = Math.min(untilMs, now() + PAUSE_CAP_MS)
+    pauseReason = reason
+  }
+
+  return {
+    checkGate() {
+      if (pausedUntilMs > now()) return { skip: true, info: null }
+      if (pauseReason !== null) {
+        // Pause just expired — resume and say so once.
+        const reason = pauseReason
+        pauseReason = null
+        pausedUntilMs = 0
+        return { skip: false, info: `github polling resumed after ${reason} pause` }
+      }
+      return { skip: false, info: null }
+    },
+
+    report(leg, { errors, repoCount, rateLimit }) {
+      const state = legs.get(leg) ?? { signature: "", lastWarnAtMs: 0, suppressed: 0 }
+      legs.set(leg, state)
+
+      // --- Recovery: clean poll after a warned state ---
+      if (errors.length === 0) {
+        let info: string | null = null
+        if (state.signature !== "") {
+          info = `github ${leg}: recovered — all repos polling clean`
+          state.signature = ""
+          state.lastWarnAtMs = 0
+          state.suppressed = 0
+        }
+        if (outageStep >= 0) outageStep = -1
+        return { warn: null, info }
+      }
+
+      const summary = summarizePollErrors(errors, rateLimitRemaining, rateLimitTotal)
+
+      // --- Rate limit: pause polling until the budget resets, warn once ---
+      if (rateLimit) {
+        const alreadyPaused = pauseReason === "rate-limit" && pausedUntilMs > now()
+        const untilMs = (rateLimit.resetAtMs ?? now() + RATE_LIMIT_DEFAULT_PAUSE_MS) + RATE_LIMIT_RESUME_SLACK_MS
+        // Floor at 5min: a stale/past reset header must not degrade into a
+        // warn-per-minute loop — the exact failure shape this gate removes.
+        pause("rate-limit", Math.max(untilMs, now() + 5 * 60_000))
+        if (alreadyPaused) return { warn: null, info: null }
+        return {
+          warn:
+            `github ${leg}: ${rateLimit.kind} rate limit hit — PAUSING all github polling ` +
+            `for ${fmtMin(pausedUntilMs - now())} (until budget reset) — ${summary}`,
+          info: null,
+        }
+      }
+
+      // --- Outage: every repo failed → escalating backoff ---
+      if (errors.length >= repoCount && repoCount > 0) {
+        outageStep = Math.min(outageStep + 1, OUTAGE_BACKOFF_STEPS_MS.length - 1)
+        const stepMs = OUTAGE_BACKOFF_STEPS_MS[outageStep]!
+        pause("outage", now() + stepMs)
+        state.signature = `outage:${errors.length}/${repoCount}`
+        state.lastWarnAtMs = now()
+        return {
+          warn:
+            `github ${leg}: ${errors.length}/${repoCount} repos failed (ALL) — backing off ` +
+            `${fmtMin(stepMs)} — ${summary}`,
+          info: null,
+        }
+      }
+      outageStep = -1
+
+      // --- Partial failure: dedup identical signatures ---
+      const signature = `${leg}:${summary.split("; sample")[0]}`
+      const changed = signature !== state.signature
+      const heartbeatDue = now() - state.lastWarnAtMs >= WARN_HEARTBEAT_MS
+      if (!changed && !heartbeatDue) {
+        state.suppressed++
+        return { warn: null, info: null }
+      }
+      const suffix = state.suppressed > 0 ? ` (${state.suppressed} identical warns suppressed)` : ""
+      state.signature = signature
+      state.lastWarnAtMs = now()
+      state.suppressed = 0
+      return {
+        warn: `github ${leg}: ${errors.length}/${repoCount} repos failed — ${summary}${suffix}`,
+        info: null,
+      }
+    },
+  }
 }
 
 async function fetchWorkflowRuns(
@@ -453,10 +647,17 @@ export const githubPlugin: TribePluginApi = {
     log.info?.(`event types: ${eventTypes.join(", ")}, workflow notify: ${workflowNotify}`)
     log.info?.(`cursor: ${cursorPath}`)
 
+    // Shared pause/backoff gate + warn dedup for both polling legs
+    const pollHealth = createPollHealth()
+
     // --- Event polling ---
 
     async function pollEvents(): Promise<void> {
+      const gate = pollHealth.checkGate()
+      if (gate.info) log.info?.(gate.info)
+      if (gate.skip) return
       const errors: PollError[] = []
+      let rateLimit: RateLimitInfo | null = null
       for (const r of repos) {
         try {
           const events = await fetchRepoEvents(r, githubHeaders)
@@ -522,20 +723,23 @@ export const githubPlugin: TribePluginApi = {
           const message = err instanceof Error ? err.message : String(err)
           errors.push({ repo: r, message })
           log.debug?.(`error polling ${r}: ${message}`)
+          rateLimit = rateLimitInfoOf(err)
+          if (rateLimit) break // budget exhausted — stop hammering remaining repos
         }
       }
-      // Batch report: one summary instead of N individual errors
-      if (errors.length > 0) {
-        log.warn?.(
-          `github events: ${errors.length}/${repos.size} repos failed — ${summarizePollErrors(errors, rateLimitRemaining, rateLimitTotal)}`,
-        )
-      }
+      const report = pollHealth.report("events", { errors, repoCount: repos.size, rateLimit })
+      if (report.warn) log.warn?.(report.warn)
+      if (report.info) log.info?.(report.info)
     }
 
     // --- Workflow run polling ---
 
     async function pollWorkflows(): Promise<void> {
+      const gate = pollHealth.checkGate()
+      if (gate.info) log.info?.(gate.info)
+      if (gate.skip) return
       const errors: PollError[] = []
+      let rateLimit: RateLimitInfo | null = null
       for (const r of repos) {
         if (!eventTypes.includes("workflow_run")) continue
         try {
@@ -626,13 +830,13 @@ export const githubPlugin: TribePluginApi = {
           const message = err instanceof Error ? err.message : String(err)
           errors.push({ repo: r, message })
           log.debug?.(`error polling workflows for ${r}: ${message}`)
+          rateLimit = rateLimitInfoOf(err)
+          if (rateLimit) break // budget exhausted — stop hammering remaining repos
         }
       }
-      if (errors.length > 0) {
-        log.warn?.(
-          `github workflows: ${errors.length}/${repos.size} repos failed — ${summarizePollErrors(errors, rateLimitRemaining, rateLimitTotal)}`,
-        )
-      }
+      const report = pollHealth.report("workflows", { errors, repoCount: repos.size, rateLimit })
+      if (report.warn) log.warn?.(report.warn)
+      if (report.info) log.info?.(report.info)
     }
 
     const ac = new AbortController()

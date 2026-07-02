@@ -3,11 +3,24 @@
  *   generic "HTTP 401" with no actionable guidance, so a daemon-side monitor
  *   credential problem is indistinguishable from a transient network/integration
  *   blip — @ci and sitrep mis-read it as an integration failure (km 20593).
- * @level L2 — classification + actionable diagnostic on the warn line.
- * @consumer summarizePollErrors / gitHubTokenSourceLabel in github-plugin.ts
+ *   AND: during a rate-limit burst or network outage the poller keeps hammering
+ *   every repo every 60s and re-emits an identical "N/N repos failed" warn each
+ *   tick — a warn flood that sprays raw API payloads into the daemon log and
+ *   (post-defang, as `[n]` lines) into member panes
+ *   (km ci-github-rate-limits + tribe-server-health-rollout, 2026-07-02).
+ * @level L2 — classification + pause/backoff state machine + warn dedup.
+ * @consumer summarizePollErrors / createPollHealth / detectRateLimit in github-plugin.ts
  */
 import { describe, expect, test } from "vitest"
-import { gitHubTokenSourceLabel, summarizePollErrors, type PollError } from "./github-plugin.ts"
+import {
+  createPollHealth,
+  detectRateLimit,
+  gitHubTokenSourceLabel,
+  rateLimitInfoOf,
+  summarizePollErrors,
+  type PollError,
+  type RateLimitInfo,
+} from "./github-plugin.ts"
 
 const auth401: PollError = { repo: "beorn/bearly", message: "GitHub API 401: Bad credentials" }
 const forbidden403: PollError = { repo: "beorn/termless", message: "GitHub API 403: Resource not accessible" }
@@ -62,6 +75,202 @@ describe("summarizePollErrors — monitor-rail auth classification (20593)", () 
     expect(out).toContain("auth-401×1")
     expect(out).toContain("network/fetch×1")
     expect(out).toContain("credential rejected")
+  })
+})
+
+describe("summarizePollErrors — sample sanitization (payload spray)", () => {
+  test("a multi-line raw API payload in the sample collapses to one line", () => {
+    const sprayed: PollError = {
+      repo: "beorn/km",
+      message: 'GitHub API 403: {\n  "message": "API rate limit exceeded",\n  "documentation_url": "..."\n}',
+    }
+    const out = summarizePollErrors([sprayed], 0, 5000)
+    expect(out).not.toContain("\n")
+    expect(out).toContain("API rate limit exceeded")
+  })
+})
+
+describe("detectRateLimit / rateLimitInfoOf — 403/429 classification", () => {
+  test("403 + rate-limit body = primary, with resetAtMs from x-ratelimit-reset", () => {
+    const resetSec = 1_900_000_000
+    const res = new Response("", {
+      status: 403,
+      headers: { "x-ratelimit-reset": String(resetSec), "x-ratelimit-remaining": "0" },
+    })
+    const info = detectRateLimit(res, "API rate limit exceeded for user")
+    expect(info).toEqual({ kind: "primary", resetAtMs: resetSec * 1000 })
+  })
+
+  test("403 with remaining=0 counts as rate limit even without the body phrase", () => {
+    const res = new Response("", { status: 403, headers: { "x-ratelimit-remaining": "0" } })
+    expect(detectRateLimit(res, "Forbidden")?.kind).toBe("primary")
+  })
+
+  test("429 = secondary, resetAtMs from retry-after seconds", () => {
+    const res = new Response("", { status: 429, headers: { "retry-after": "60" } })
+    const info = detectRateLimit(res, "too many requests")
+    expect(info?.kind).toBe("secondary")
+    expect(info?.resetAtMs).toBeGreaterThan(Date.now())
+  })
+
+  test("plain 403 scope rejection is NOT a rate limit; plain errors carry no info", () => {
+    const res = new Response("", { status: 403, headers: { "x-ratelimit-remaining": "4999" } })
+    expect(detectRateLimit(res, "Resource not accessible by integration")).toBeNull()
+    expect(rateLimitInfoOf(new Error("GitHub API 500: boom"))).toBeNull()
+  })
+
+  test("rateLimitInfoOf reads the info a ghFetch error carries", () => {
+    const err = Object.assign(new Error("GitHub API 403: rate limit"), {
+      rateLimit: { kind: "primary", resetAtMs: 123 } satisfies RateLimitInfo,
+    })
+    expect(rateLimitInfoOf(err)).toEqual({ kind: "primary", resetAtMs: 123 })
+  })
+})
+
+describe("createPollHealth — pause/backoff gate + warn dedup (2026-07-02 flood)", () => {
+  const MIN = 60_000
+  const fail = (repo: string): PollError => ({ repo, message: "fetch failed: ECONNRESET" })
+  const allFail = (n: number): PollError[] => Array.from({ length: n }, (_, i) => fail(`beorn/repo${i}`))
+
+  function clock(startMs = 10_000_000) {
+    let t = startMs
+    return { now: () => t, advance: (ms: number) => (t += ms) }
+  }
+
+  test("an unchanged failure signature warns once, then stays silent until the 10min heartbeat", () => {
+    const c = clock()
+    const health = createPollHealth(c.now)
+    const errors = [fail("beorn/km")]
+    const first = health.report("events", { errors, repoCount: 23, rateLimit: null })
+    expect(first.warn).toContain("1/23 repos failed")
+
+    // Same signature every 60s tick — all suppressed
+    for (let i = 0; i < 9; i++) {
+      c.advance(MIN)
+      expect(health.report("events", { errors, repoCount: 23, rateLimit: null }).warn).toBeNull()
+    }
+
+    // Heartbeat re-warn carries the suppressed count
+    c.advance(2 * MIN)
+    const heartbeat = health.report("events", { errors, repoCount: 23, rateLimit: null })
+    expect(heartbeat.warn).toContain("9 identical warns suppressed")
+  })
+
+  test("a changed failure signature warns immediately (no dedup across causes)", () => {
+    const c = clock()
+    const health = createPollHealth(c.now)
+    health.report("events", { errors: [fail("beorn/km")], repoCount: 23, rateLimit: null })
+    c.advance(MIN)
+    const changed = health.report("events", {
+      errors: [{ repo: "beorn/km", message: "GitHub API 401: Bad credentials" }],
+      repoCount: 23,
+      rateLimit: null,
+    })
+    expect(changed.warn).toContain("auth-401")
+  })
+
+  test("recovery after a warned state emits one info line, then silence", () => {
+    const c = clock()
+    const health = createPollHealth(c.now)
+    health.report("events", { errors: [fail("beorn/km")], repoCount: 23, rateLimit: null })
+    c.advance(MIN)
+    const recovered = health.report("events", { errors: [], repoCount: 23, rateLimit: null })
+    expect(recovered.info).toContain("recovered")
+    expect(recovered.warn).toBeNull()
+    const quiet = health.report("events", { errors: [], repoCount: 23, rateLimit: null })
+    expect(quiet.info).toBeNull()
+  })
+
+  test("legs dedup independently — a workflows warn is not suppressed by an events warn", () => {
+    const c = clock()
+    const health = createPollHealth(c.now)
+    health.report("events", { errors: [fail("beorn/km")], repoCount: 23, rateLimit: null })
+    const wf = health.report("workflows", { errors: [fail("beorn/km")], repoCount: 23, rateLimit: null })
+    expect(wf.warn).toContain("workflows")
+  })
+
+  test("ALL repos failing = outage: escalating backoff 2m -> 5m -> 15m, gate skips while paused", () => {
+    const c = clock()
+    const health = createPollHealth(c.now)
+
+    const first = health.report("events", { errors: allFail(23), repoCount: 23, rateLimit: null })
+    expect(first.warn).toContain("23/23 repos failed (ALL)")
+    expect(first.warn).toContain("backing off 2min")
+
+    // Paused: gate skips
+    expect(health.checkGate().skip).toBe(true)
+    c.advance(2 * MIN + 1)
+    const resumed = health.checkGate()
+    expect(resumed.skip).toBe(false)
+    expect(resumed.info).toContain("resumed after outage pause")
+
+    // Still down — escalate
+    const second = health.report("events", { errors: allFail(23), repoCount: 23, rateLimit: null })
+    expect(second.warn).toContain("backing off 5min")
+    c.advance(5 * MIN + 1)
+    health.checkGate()
+    const third = health.report("events", { errors: allFail(23), repoCount: 23, rateLimit: null })
+    expect(third.warn).toContain("backing off 15min")
+
+    // Cap: stays at 15min
+    c.advance(15 * MIN + 1)
+    health.checkGate()
+    const fourth = health.report("events", { errors: allFail(23), repoCount: 23, rateLimit: null })
+    expect(fourth.warn).toContain("backing off 15min")
+
+    // Network back — recovery resets the ladder
+    c.advance(15 * MIN + 1)
+    health.checkGate()
+    expect(health.report("events", { errors: [], repoCount: 23, rateLimit: null }).info).toContain("recovered")
+    const fresh = health.report("events", { errors: allFail(23), repoCount: 23, rateLimit: null })
+    expect(fresh.warn).toContain("backing off 2min")
+  })
+
+  test("rate limit pauses ALL polling until reset (+slack), warns once, resumes with a note", () => {
+    const c = clock()
+    const health = createPollHealth(c.now)
+    const rl: RateLimitInfo = { kind: "primary", resetAtMs: c.now() + 30 * MIN }
+
+    const hit = health.report("events", { errors: [fail("beorn/km")], repoCount: 23, rateLimit: rl })
+    expect(hit.warn).toContain("PAUSING all github polling")
+    expect(hit.warn).toMatch(/for 3[01]min/) // 30min reset + 30s slack, rounded
+
+    // Same tick, other leg already in flight: silent (no double warn)
+    const other = health.report("workflows", { errors: [fail("beorn/km")], repoCount: 23, rateLimit: rl })
+    expect(other.warn).toBeNull()
+
+    // Both legs gated for the whole window
+    c.advance(29 * MIN)
+    expect(health.checkGate().skip).toBe(true)
+    c.advance(2 * MIN)
+    const resumed = health.checkGate()
+    expect(resumed.skip).toBe(false)
+    expect(resumed.info).toContain("resumed after rate-limit pause")
+  })
+
+  test("a stale/past reset header floors the pause at 5min — no warn-per-minute loop", () => {
+    const c = clock()
+    const health = createPollHealth(c.now)
+    const stale: RateLimitInfo = { kind: "primary", resetAtMs: c.now() - 10 * MIN }
+    health.report("events", { errors: [fail("beorn/km")], repoCount: 23, rateLimit: stale })
+    c.advance(4 * MIN)
+    expect(health.checkGate().skip).toBe(true)
+    c.advance(2 * MIN)
+    expect(health.checkGate().skip).toBe(false)
+  })
+
+  test("missing reset header uses the 15min default pause", () => {
+    const c = clock()
+    const health = createPollHealth(c.now)
+    health.report("events", {
+      errors: [fail("beorn/km")],
+      repoCount: 23,
+      rateLimit: { kind: "secondary", resetAtMs: null },
+    })
+    c.advance(14 * MIN)
+    expect(health.checkGate().skip).toBe(true)
+    c.advance(2 * MIN)
+    expect(health.checkGate().skip).toBe(false)
   })
 })
 
