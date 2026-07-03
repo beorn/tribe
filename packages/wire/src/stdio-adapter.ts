@@ -243,6 +243,23 @@ function isExplicitTribePersonaName(name: string): boolean {
   return /^@[a-z0-9][a-z0-9_./-]{0,31}$/.test(name)
 }
 
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+function isPersonaNameConflictError(err: unknown): boolean {
+  const errorLike = err as { code?: unknown; message?: unknown }
+  return (
+    errorLike.code === -32000 &&
+    typeof errorLike.message === "string" &&
+    /^Name "[^"]+" is already taken by live pid \d+/.test(errorLike.message)
+  )
+}
+
+function shouldFailLaunchOnRegisterError(err: unknown): boolean {
+  return REGISTER_WITH_LAUNCH_NAME && isPersonaNameConflictError(err)
+}
+
 // NON-BLOCKING: the daemon connect runs in the background. We do NOT await
 // it here — module evaluation continues straight through to `mcp.connect()`
 // so the MCP `initialize` handshake is answered immediately. Without this, a
@@ -333,7 +350,17 @@ function startDaemonConnection(): Promise<DaemonClient> {
 let degradeAnnounced = false
 function armDegradeNotice(p: Promise<DaemonClient>): void {
   p.catch((err: unknown) => {
-    daemonDegradedReason = err instanceof Error ? err.message : String(err)
+    if (shouldFailLaunchOnRegisterError(err)) {
+      const reason = errorMessage(err)
+      log.warn?.(`tribe registration failed for explicit launch persona ${LAUNCH_NAME}: ${reason}`)
+      daemon?.close()
+      proxyAc.abort()
+      process.exitCode = 2
+      process.exit()
+      return
+    }
+
+    daemonDegradedReason = errorMessage(err)
     if (degradeAnnounced) return
     degradeAnnounced = true
     log.warn?.(`tribe daemon unavailable — running solo (${daemonDegradedReason})`)

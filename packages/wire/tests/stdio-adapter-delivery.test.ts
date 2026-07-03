@@ -6,7 +6,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { createServer, type Server, type Socket } from "node:net"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createLineParser } from "../src/parser.ts"
-import { isRequest, makeNotification, makeResponse } from "../src/rpc.ts"
+import { isRequest, makeError, makeNotification, makeResponse } from "../src/rpc.ts"
 import { MAX_REPLAY_EVENTS } from "../src/lib/replay-cap.ts"
 
 const ADAPTER = resolve(dirname(fileURLToPath(import.meta.url)), "../src/stdio-adapter.ts")
@@ -20,7 +20,11 @@ type FakeDaemon = {
 
 function spawnFakeDaemon(
   socketPath: string,
-  opts: { fetchEvents?: Array<Record<string, unknown>>; inboxWaitResult?: Record<string, unknown> } = {},
+  opts: {
+    fetchEvents?: Array<Record<string, unknown>>
+    inboxWaitResult?: Record<string, unknown>
+    registerError?: { code: number; message: string; data?: unknown }
+  } = {},
 ): Promise<FakeDaemon> {
   const clients: Socket[] = []
   const requests: Record<string, unknown>[] = []
@@ -31,6 +35,12 @@ function spawnFakeDaemon(
         if (!isRequest(msg)) return
         requests.push(msg as Record<string, unknown>)
         if (msg.method === "register") {
+          if (opts.registerError) {
+            socket.write(
+              makeError(msg.id, opts.registerError.code, opts.registerError.message, opts.registerError.data),
+            )
+            return
+          }
           socket.write(makeResponse(msg.id, { sessionId: "daemon-s1", name: "@agent/test", role: "member", chief: "" }))
           return
         }
@@ -96,6 +106,32 @@ function spawnFakeDaemon(
       })
     })
     server.listen(socketPath, () => resolveServer({ server, clients, requests }))
+  })
+}
+
+function waitForExit(
+  child: ChildProcessWithoutNullStreams,
+  opts: { timeoutMs?: number } = {},
+): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+  const timeoutMs = opts.timeoutMs ?? 2_000
+  return new Promise((resolveExit, reject) => {
+    if (child.exitCode !== null) {
+      resolveExit({ code: child.exitCode, signal: null })
+      return
+    }
+    const timer = setTimeout(() => {
+      cleanup()
+      reject(new Error("timed out waiting for adapter exit"))
+    }, timeoutMs)
+    const cleanup = () => {
+      clearTimeout(timer)
+      child.off("exit", onExit)
+    }
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      cleanup()
+      resolveExit({ code, signal })
+    }
+    child.on("exit", onExit)
   })
 }
 
@@ -322,6 +358,32 @@ describe("stdio adapter delivery modes", () => {
       | undefined
     expect(register?.params?.name).toBe("@chief")
     expect(register?.params?.delivery).toBe("pull")
+  })
+
+  it("explicit managed persona name conflicts fail loud instead of degrading to solo", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath, {
+      registerError: {
+        code: -32000,
+        message: 'Name "@agent/test" is already taken by live pid 4242',
+        data: { existing_names: ["@agent/test"], holder_pid: 4242 },
+      },
+    })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "pull",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+
+    const exit = await waitForExit(child)
+
+    expect(exit.code).not.toBe(0)
+    expect(daemon.requests.some((msg) => msg.method === "register")).toBe(true)
   })
 
   it("advertises pullTransport metadata in tools/list", async () => {
