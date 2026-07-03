@@ -280,7 +280,7 @@ describe("provider-agnostic ag profile discovery (19933)", () => {
   test("shared Claude store reached via an ag-profile symlink is scanned once, not double-counted", () => {
     // Native shared store with one session for CWD.
     writeClaudeSession("dddd4444-shared", 5 * 60_000, 5 * 60_000)
-    // ag Claude profile whose projects/ symlinks back to the shared stock store (@km/accounts 19850).
+    // ag Claude profile whose projects/ symlinks back to the shared stock store (@ag/accounts-core 19850).
     const agClaudeDir = join(home, ".config", "ag", "profiles", "claude", "shared@x.com")
     mkdirSync(agClaudeDir, { recursive: true })
     symlinkSync(join(home, ".claude", "projects"), join(agClaudeDir, "projects"))

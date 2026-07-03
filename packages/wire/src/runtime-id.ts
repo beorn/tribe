@@ -3,7 +3,7 @@
  * code a tribe process is running (the same #undead-adjacent check `code-pin`
  * makes for the daemon, surfaced for the per-invocation CLI + daemon startup).
  *
- * Standalone-safe by construction: node builtins only, NO `@hh/*` / km workspace
+ * Standalone-safe by construction: node builtins only, NO product workspace
  * deps (tribe-wire ships independently). A missing git or package.json degrades to
  * a visible `unknown` / `0.0.0`, never a fabricated SHA or version.
  *

@@ -85,7 +85,7 @@ export interface SessionDiscoveryDiagnostics {
   /**
    * Roots skipped because they resolve to an already-scanned real directory —
    * e.g. an ag Claude profile whose `projects/` symlinks into the shared stock
-   * store (@km/accounts 19850). Reported so the dedup is visible, not silent.
+   * store (@ag/accounts-core 19850). Reported so the dedup is visible, not silent.
    */
   dedupedRoots: string[]
   /** ag providers configured but unsupported by recall (no transcript adapter). */
@@ -151,12 +151,12 @@ interface ProviderAdapter {
 }
 
 /**
- * The authoritative ag provider/profile-home convention lives in `@km/accounts`
+ * The authoritative ag provider/profile-home convention lives in `@ag/accounts-core`
  * (`AccountProfileProvider = "claude" | "codex" | "grok"`, profiles under
  * `~/.config/ag/profiles/<provider>/<account>/`). recall is a standalone
  * package and cannot import that workspace module, so the layout knowledge it
  * needs for *session discovery* is mirrored here. Keep this table in sync when
- * `@km/accounts` adds a provider whose on-disk session format is known.
+ * `@ag/accounts-core` adds a provider whose on-disk session format is known.
  *
  * A provider ag can route but recall has no adapter for (e.g. `grok` today) is
  * reported as an {@link UnsupportedProvider} — loudly, never silently skipped.
@@ -256,7 +256,7 @@ export function discoverActiveSession(opts: DiscoverOptions): SessionDiscoveryRe
     }
     // Dedup roots that resolve to the same real directory — e.g. an ag Claude
     // profile whose `projects/` symlinks into the shared stock store
-    // (@km/accounts 19850). Without this the shared store is scanned once per
+    // (@ag/accounts-core 19850). Without this the shared store is scanned once per
     // profile and candidate counts double. Native roots are listed first, so
     // they win and the symlinked profile copies are the ones dropped.
     const real = realpathOrNull(root.dir)
