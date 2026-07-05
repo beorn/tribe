@@ -64,27 +64,58 @@ function makeOpts(inboxWait?: HandlerOpts["inboxWait"]): HandlerOpts {
   }
 }
 
-describe("createInboxWaitManager", () => {
-  it("returns immediately when actionable unread messages already exist", async () => {
-    const manager = createInboxWaitManager((session) => status(session, 3))
+function makeManager(unreadRef: { value: number }, drainCalls: string[] = []) {
+  return createInboxWaitManager(
+    (session) => status(session, unreadRef.value),
+    (session) => {
+      drainCalls.push(session)
+      const n = unreadRef.value
+      unreadRef.value = 0
+      return {
+        cursor: 100 + n,
+        events: Array.from({ length: n }, (_, i) => ({
+          id: `drained-${i}`,
+          rowid: 100 + i,
+          type: "request",
+          from: "@chief",
+          to: session,
+          content: `row ${i}`,
+          bead: null,
+          ref: null,
+          ts: new Date().toISOString(),
+          delivery: "pull",
+          topic: null,
+          room_id: null,
+          summary: null,
+        })),
+      }
+    },
+  )
+}
+
+describe("createInboxWaitManager — wait-and-drain (20843 v3)", () => {
+  it("drains and returns immediately when actionable unread messages already exist", async () => {
+    const drainCalls: string[] = []
+    const manager = makeManager({ value: 3 }, drainCalls)
     const result = await manager.wait("@ci", "conn-1", 30_000)
     expect(result).toMatchObject({
       session: "@ci",
-      unread_count: 3,
       timed_out: false,
       aborted: false,
       waited_ms: 0,
     })
+    expect((result as { events: unknown[] }).events).toHaveLength(3)
+    expect(drainCalls).toEqual(["@ci"])
   })
 
   it("ignores ambient traffic and wakes on actionable direct messages", async () => {
     vi.useFakeTimers()
-    let unread = 0
-    const manager = createInboxWaitManager((session) => status(session, unread))
+    const unread = { value: 0 }
+    const manager = makeManager(unread)
 
     const wait = manager.wait("@ci", "conn-1", 1_000)
     let settled = false
-    wait.then(() => {
+    void wait.then(() => {
       settled = true
     })
 
@@ -102,7 +133,7 @@ describe("createInboxWaitManager", () => {
     await Promise.resolve()
     expect(settled).toBe(false)
 
-    unread = 1
+    unread.value = 1
     manager.onMessageInserted(
       message({
         type: "query",
@@ -116,21 +147,21 @@ describe("createInboxWaitManager", () => {
     const result = await wait
     expect(result).toMatchObject({
       session: "@ci",
-      unread_count: 1,
       timed_out: false,
       aborted: false,
     })
+    expect((result as { events: unknown[] }).events).toHaveLength(1)
     expect(result.waited_ms).toBeGreaterThanOrEqual(0)
   })
 
   it("does not wake on direct notify messages", async () => {
     vi.useFakeTimers()
-    let unread = 0
-    const manager = createInboxWaitManager((session) => status(session, unread))
+    const unread = { value: 0 }
+    const manager = makeManager(unread)
 
     const wait = manager.wait("@ci", "conn-1", 1_000)
     let settled = false
-    wait.then(() => {
+    void wait.then(() => {
       settled = true
     })
 
@@ -148,7 +179,7 @@ describe("createInboxWaitManager", () => {
     await Promise.resolve()
     expect(settled).toBe(false)
 
-    unread = 1
+    unread.value = 1
     manager.onMessageInserted(
       message({
         type: "request",
@@ -162,15 +193,16 @@ describe("createInboxWaitManager", () => {
     const result = await wait
     expect(result).toMatchObject({
       session: "@ci",
-      unread_count: 1,
       timed_out: false,
       aborted: false,
     })
+    expect((result as { events: unknown[] }).events).toHaveLength(1)
   })
 
-  it("times out when no actionable message arrives", async () => {
+  it("times out when no actionable message arrives and performs the final drain", async () => {
     vi.useFakeTimers()
-    const manager = createInboxWaitManager((session) => status(session, 0))
+    const drainCalls: string[] = []
+    const manager = makeManager({ value: 0 }, drainCalls)
 
     const wait = manager.wait("@ci", "conn-1", 100)
     vi.advanceTimersByTime(100)
@@ -178,15 +210,19 @@ describe("createInboxWaitManager", () => {
     const result = await wait
     expect(result).toMatchObject({
       session: "@ci",
-      unread_count: 0,
       timed_out: true,
       aborted: false,
     })
+    expect((result as { events: unknown[] }).events).toEqual([])
+    // Exactly one drain per return — the timeout drain delivers any ambient
+    // rows that arrived during the window.
+    expect(drainCalls).toEqual(["@ci"])
   })
 
-  it("aborts pending waits when the connection closes", async () => {
+  it("aborts pending waits when the connection closes WITHOUT draining", async () => {
     vi.useFakeTimers()
-    const manager = createInboxWaitManager((session) => status(session, 0))
+    const drainCalls: string[] = []
+    const manager = makeManager({ value: 0 }, drainCalls)
 
     const wait = manager.wait("@ci", "conn-1", 1_000)
     manager.cancelConnection("conn-1")
@@ -194,10 +230,26 @@ describe("createInboxWaitManager", () => {
     const result = await wait
     expect(result).toMatchObject({
       session: "@ci",
-      unread_count: 0,
       timed_out: false,
       aborted: true,
     })
+    // The response is undeliverable — draining would silently consume rows.
+    expect(drainCalls).toEqual([])
+    expect((result as { events: unknown[] }).events).toEqual([])
+  })
+
+  it("peek preserves the status-only observer contract", async () => {
+    const drainCalls: string[] = []
+    const manager = makeManager({ value: 2 }, drainCalls)
+    const result = await manager.wait("@ci", "conn-1", 30_000, { peek: true })
+    expect(result).toMatchObject({
+      session: "@ci",
+      unread_count: 2,
+      timed_out: false,
+      aborted: false,
+    })
+    expect((result as { events?: unknown[] }).events).toBeUndefined()
+    expect(drainCalls).toEqual([])
   })
 })
 

@@ -275,9 +275,10 @@ export type HandlerOpts = {
    *  store isn't available, instead of throwing. See `lifecycle-store.ts`
    *  + `@km/infra/15630-stuck-agent-observability` § S4. */
   getLifecycleStore?: () => LifecycleStore
-  /** Optional: inbox wait primitive shared by CLI and MCP. */
+  /** Optional: wait-and-drain inbox primitive shared by CLI and MCP (20843).
+   *  `peek: true` preserves the status-only observer contract. */
   inboxWait?: {
-    wait: (session: string, connId: string, timeoutMs: number) => Promise<unknown>
+    wait: (session: string, connId: string, timeoutMs: number, opts?: { peek?: boolean }) => Promise<unknown>
   }
   /**
    * Optional: fire a JSON-RPC `wakeup` notification at the claiming session's
@@ -573,8 +574,42 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
 
   const closeId = typeof a.close === "string" && a.close.length > 0 ? a.close : null
   if (closeId) {
+    // 20843 S3: capture the ball's message_id BEFORE closing (close deletes
+    // the pending_request row). Closing the ball means the request is
+    // handled; if its message row is still unread by the owner, mark it read
+    // — otherwise the standing unread row immediately re-wakes the owner's
+    // next inbox wait (the re-wake loop class).
+    const ball = ctx.stmts.getPendingRequestRow.get({ $request_id: closeId, $recipient: owner }) as {
+      message_id: string
+    } | null
     const res = ctx.stmts.closePendingRequest.run({ $request_id: closeId, $recipient: owner })
-    return jsonResult({ owner, request_id: closeId, closed: res.changes ?? 0 })
+
+    let markedRead = false
+    let note: string | undefined
+    if (ball) {
+      const msg = ctx.stmts.getMessageSeqById.get({ $id: ball.message_id }) as {
+        seq: number
+        read_at: number | null
+      } | null
+      const cursorRow = ctx.stmts.getSessionByName.get({ $name: owner }) as {
+        last_inbox_pull_seq: number
+      } | null
+      const unread = msg !== null && msg.read_at === null && msg.seq > (cursorRow?.last_inbox_pull_seq ?? 0)
+      if (unread) {
+        ctx.stmts.markMessageRead.run({ $id: ball.message_id, $now: now })
+        markedRead = true
+        note =
+          `request ${closeId} was closed while its message row was still UNREAD by ${owner} — ` +
+          "marked read so it cannot re-wake the idle loop. Closing the ball means handled."
+      }
+    }
+    return jsonResult({
+      owner,
+      request_id: closeId,
+      closed: res.changes ?? 0,
+      marked_read: markedRead,
+      ...(note !== undefined ? { note } : {}),
+    })
   }
 
   const rows = ctx.stmts.selectPendingForRecipient.all({ $recipient: owner }) as Array<{
@@ -1127,7 +1162,9 @@ function handleInboxWait(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Too
   if (!opts.inboxWait) {
     return jsonResult({ error: "inbox wait is unavailable in this handler context" })
   }
-  return opts.inboxWait.wait(session, ctx.sessionId, timeoutMs).then((result) => jsonResult(result))
+  return opts.inboxWait
+    .wait(session, ctx.sessionId, timeoutMs, { peek: a.peek === true })
+    .then((result) => jsonResult(result))
 }
 
 // ---------------------------------------------------------------------------

@@ -134,11 +134,12 @@ describe("Tribe command descriptors", () => {
     }
   })
 
-  test("keeps MCP fetch explicitly hidden from CLI so it is not confused with log", () => {
+  test("CLI fetch is the timeout-0 drain alias riding inbox.wait, not MCP-fetch parity (20843 S2)", () => {
     const fetch = commandDescriptorByMcpName("fetch")
     expect(fetch).toBeDefined()
-    const cli = hiddenCliProjection(fetch!)
-    expect(cli.reason).toMatch(/log/i)
-    expect(cli.reason).toMatch(/snapshot/i)
+    const cli = visibleCliProjection(fetch!)
+    expect(cli.name).toBe("fetch")
+    expect(cli.description).toMatch(/timeout-0/i)
+    expect(cli.mapsToMcp).toBe("inbox.wait")
   })
 })

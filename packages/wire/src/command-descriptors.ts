@@ -274,12 +274,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     id: "tribe.inbox.wait",
     title: "Inbox Wait",
     description:
-      "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
+      "Wait-and-drain blocking receive (20843): block until a request/query/assign/verdict direct message arrives or the timeout elapses, then atomically drain the inbox and return the drained events. Ambient notify/status/health rows never wake the wait but are delivered on the timeout drain. peek:true preserves the status-only observer contract (drains nothing). Defaults to the caller's session.",
     lifetime: "live-session",
     mcp: {
       name: "inbox.wait",
       description:
-        "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
+        "Wait-and-drain blocking receive (20843): block until a request/query/assign/verdict direct message arrives or the timeout elapses, then atomically drain the inbox and return the drained events. Ambient notify/status/response rows never wake the wait but are delivered on the timeout drain. peek:true preserves the status-only observer contract (drains nothing). Defaults to the caller's session.",
       inputSchema: {
         type: "object",
         properties: {
@@ -290,28 +290,40 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           timeout_ms: {
             type: "number",
             description:
-              "Wait limit in milliseconds. Defaults to 30000. Effective duration may be capped by the MCP host.",
+              "Wait limit in milliseconds. Defaults to 30000. 0 performs one plain drain. Effective duration may be capped by the MCP host — keep MCP waits short and prefer the CLI (`tent await` / `tribe inbox-wait`) for long idle windows.",
+          },
+          peek: {
+            type: "boolean",
+            description:
+              "Observer mode: return the unread status WITHOUT draining (pre-20843 contract). Internal watchers only — role idle loops must drain.",
           },
         },
       },
       outputSchema: OBJ(
         {
           session: { type: "string", description: "The session that was waited on." },
-          unread_count: { type: "number", description: "Actionable unread direct-message count at return time." },
-          oldest_unread_age_min: { type: "number", description: "Age of the oldest actionable unread DM, in minutes." },
-          oldest_unread_ts: { type: "number", description: "Oldest actionable unread DM timestamp (unix ms)." },
+          events: {
+            type: "array",
+            description:
+              "Drained messages (absent on peek). Each: { id, rowid, type, from, to, content, bead?, ref?, ts (ISO), delivery, topic?, room_id?, summary? }.",
+            items: { type: "object", additionalProperties: true },
+          },
+          cursor: { type: "number", description: "Pull cursor after the drain (absent on peek)." },
+          unread_count: { type: "number", description: "peek only: actionable unread direct-message count." },
+          oldest_unread_age_min: { type: "number", description: "peek only: age of the oldest actionable unread DM, in minutes." },
+          oldest_unread_ts: { type: "number", description: "peek only: oldest actionable unread DM timestamp (unix ms)." },
           waited_ms: { type: "number", description: "How long the wait lasted." },
-          timed_out: { type: "boolean", description: "True when the timeout elapsed before a DM arrived." },
-          aborted: { type: "boolean", description: "True when the connection closed before a DM arrived." },
+          timed_out: { type: "boolean", description: "True when the timeout elapsed before an actionable DM arrived." },
+          aborted: { type: "boolean", description: "True when the connection closed before a DM arrived (nothing drained)." },
           ...ERROR_SHAPE,
         },
-        "Inbox wait result.",
+        "Wait-and-drain result: the drained batch, or status-only on peek.",
       ),
     },
     cli: available({
       name: "inbox-wait",
       description:
-        "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
+        "Wait-and-drain blocking receive (20843): block until a request/query/assign/verdict direct message arrives or the timeout elapses, then atomically drain the inbox and return the drained events. Ambient notify/status/health rows never wake the wait but are delivered on the timeout drain. peek:true preserves the status-only observer contract (drains nothing). Defaults to the caller's session.",
       lifetime: "one-shot",
       mapsToMcp: "inbox.wait",
       options: [
@@ -330,6 +342,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           transform: "duration-ms",
         },
         { name: "json", flags: "--json", description: "Emit machine-readable JSON (for hooks)" },
+        {
+          name: "peek",
+          flags: "--peek",
+          description: "Observer mode: status only, drains nothing (pre-20843 contract; internal watchers only)",
+        },
       ],
     }),
   },
@@ -381,10 +398,26 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         "Fetch result: { events, cursor } on success, { error } on argument validation failure.",
       ),
     },
-    cli: hidden(
-      "MCP fetch is a live-session cursor/snapshot primitive; the existing CLI log command is a daemon-log view and must not be treated as fetch parity.",
-      "log",
-    ),
+    cli: available({
+      name: "fetch",
+      description: "Drain the session's pending inbox once (timeout-0 alias of wait-and-drain; 20843 S2)",
+      lifetime: "one-shot",
+      // CLI fetch is NOT MCP-fetch parity: one-shot callers hold no live
+      // session cursor connection, so it rides the wait-and-drain primitive
+      // (cli_inbox_wait, timeout 0) addressed by session name. The MCP fetch
+      // snapshot filters (ids/with/from/to/since) stay MCP-only; `tribe log`
+      // remains the daemon-log view.
+      mapsToMcp: "inbox.wait",
+      options: [
+        {
+          name: "session",
+          flags: "--session <name>",
+          description: "Session to drain (default: @chief)",
+          default: "@chief",
+        },
+        { name: "json", flags: "--json", description: "Emit machine-readable JSON" },
+      ],
+    }),
   },
   {
     id: "tribe.members",

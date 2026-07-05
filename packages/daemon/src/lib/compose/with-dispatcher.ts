@@ -44,6 +44,7 @@ import { detectRole, resolveProjectId, type TribeRole } from "tribe-wire/lib/con
 import { createTribeContext, type MessageInsertedInfo, type TribeContext } from "../context.ts"
 import { handleToolCall, isRemovedTribeMethod, removedTribeMethodMessage, TRIBE_COORD_METHODS } from "../handlers.ts"
 import { createLifecycleStore } from "../lifecycle-store.ts"
+import { drainInboxByName, ensureDrainableSession } from "../inbox-drain.ts"
 import { createInboxWaitManager } from "../inbox-wait.ts"
 import { logEvent, sendMessage } from "../messaging.ts"
 import { registerSession, NameConflictError } from "../session.ts"
@@ -156,7 +157,11 @@ export function withDispatcher<
       }
     }
 
-    const inboxWait = createInboxWaitManager(readInboxStatus)
+    const inboxWait = createInboxWaitManager(
+      readInboxStatus,
+      (sessionName) => drainInboxByName(db, stmts, sessionName),
+      (sessionName) => ensureDrainableSession(db, stmts, sessionName),
+    )
     const previousOnMessageInserted = daemonCtx.onMessageInserted
     const onMessageInserted = (info: MessageInsertedInfo) => {
       previousOnMessageInserted?.(info)
@@ -606,7 +611,7 @@ export function withDispatcher<
             const { session: sessionName, timeoutMs } = resolveInboxWaitOptions(p, {
               defaultSession: DEFAULT_INBOX_WAIT_SESSION,
             })
-            return makeResponse(id, await inboxWait.wait(sessionName, connId, timeoutMs))
+            return makeResponse(id, await inboxWait.wait(sessionName, connId, timeoutMs, { peek: p.peek === true }))
           }
 
           case "tribe.inbox.wait": {
@@ -614,7 +619,7 @@ export function withDispatcher<
             const { session: sessionName, timeoutMs } = resolveInboxWaitOptions(p, {
               defaultSession: client?.name ?? DEFAULT_INBOX_WAIT_SESSION,
             })
-            return makeResponse(id, await inboxWait.wait(sessionName, connId, timeoutMs))
+            return makeResponse(id, await inboxWait.wait(sessionName, connId, timeoutMs, { peek: p.peek === true }))
           }
 
           /**

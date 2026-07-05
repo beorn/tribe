@@ -33,7 +33,7 @@ type CliStatusResult = {
 
 type InboxWaitResult = {
   session: string
-  unread_count: number
+  events?: Array<{ id: string; content: string }>
   waited_ms: number
   timed_out: boolean
   aborted: boolean
@@ -171,7 +171,9 @@ describe("dispatcher inbox-wait parsing", () => {
 
     const result = parseResult<InboxWaitResult>(await wait)
     expect(result.session).toBe("@agent/wait")
-    expect(result.unread_count).toBe(1)
+    // 20843 v3: the wake return IS the drained batch.
+    expect(result.events).toHaveLength(1)
+    expect(result.events?.[0]?.content).toBe("wake inbox wait")
     expect(result.timed_out).toBe(false)
     expect(result.aborted).toBe(false)
   })
@@ -195,7 +197,8 @@ describe("dispatcher inbox-wait parsing", () => {
 
     const result = parseResult<InboxWaitResult>(await wait)
     expect(result.session).toBe("@agent/wait")
-    expect(result.unread_count).toBe(0)
+    // timeoutMs 0 is the plain-drain alias: one atomic drain, timed_out set.
+    expect(result.events).toEqual([])
     expect(result.timed_out).toBe(true)
     expect(result.aborted).toBe(false)
   })

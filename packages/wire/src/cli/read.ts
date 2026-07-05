@@ -40,6 +40,7 @@ import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-
 
 const PENDING_CLI = visibleCliProjectionForMcp("pending")
 const INBOX_WAIT_CLI = visibleCliProjectionForMcp("inbox.wait")
+const FETCH_CLI = visibleCliProjectionForMcp("fetch")
 const REPAIR_CLI = visibleCliProjectionForMcp("repair")
 
 // ---------------------------------------------------------------------------
@@ -175,17 +176,41 @@ interface Msg {
   ts: number
 }
 
+/** One drained inbox row (20843 wait-and-drain return shape). */
+export type InboxWaitEvent = {
+  id: string
+  rowid: number
+  type: string
+  from: string
+  to: string
+  content: string
+  bead: string | null
+  ref: string | null
+  ts: string
+  delivery: string
+  topic: string | null
+  room_id: string | null
+  summary: string | null
+}
+
+/**
+ * Wait-and-drain result (20843): `events` is the drained batch. The legacy
+ * status fields (`unread_count` etc.) appear only on `--peek` observer calls,
+ * which never drain.
+ */
 export type InboxWaitResult = {
   session: string
-  unread_count: number
-  oldest_unread_age_min: number
-  oldest_unread_ts: number
+  events?: InboxWaitEvent[]
+  cursor?: number
+  unread_count?: number
+  oldest_unread_age_min?: number
+  oldest_unread_ts?: number
   waited_ms: number
   timed_out: boolean
   aborted: boolean
 }
 
-type InboxWaitCall = (args: { session: string; timeoutMs: number }) => Promise<InboxWaitResult>
+type InboxWaitCall = (args: { session: string; timeoutMs: number; peek?: boolean }) => Promise<InboxWaitResult>
 
 const INBOX_WAIT_CHUNK_MS = 30_000
 const INBOX_WAIT_RETRY_DELAY_MS = 250
@@ -598,12 +623,17 @@ function totalWaited(result: InboxWaitResult, startedAt: number, now: () => numb
   return { ...result, waited_ms: Math.max(result.waited_ms, Math.max(0, now() - startedAt)) }
 }
 
-function timeoutInboxWaitResult(session: string, startedAt: number, now: () => number): InboxWaitResult {
+function timeoutInboxWaitResult(
+  session: string,
+  startedAt: number,
+  now: () => number,
+  opts: { peek?: boolean; events?: InboxWaitEvent[] } = {},
+): InboxWaitResult {
   return {
     session,
-    unread_count: 0,
-    oldest_unread_age_min: 0,
-    oldest_unread_ts: 0,
+    ...(opts.peek === true
+      ? { unread_count: 0, oldest_unread_age_min: 0, oldest_unread_ts: 0 }
+      : { events: opts.events ?? [] }),
     waited_ms: Math.max(0, now() - startedAt),
     timed_out: true,
     aborted: false,
@@ -614,6 +644,7 @@ export async function waitForInboxWithReconnect(opts: {
   session: string
   timeoutMs: number
   call: InboxWaitCall
+  peek?: boolean
   now?: () => number
   sleep?: (ms: number) => Promise<void>
   maxChunkMs?: number
@@ -628,41 +659,92 @@ export async function waitForInboxWithReconnect(opts: {
   const startedAt = now()
   const deadline = startedAt + Math.max(0, opts.timeoutMs)
 
+  // Ambient rows drained by an intermediate chunk's timeout are HELD here and
+  // delivered on the final return — a transport chunk boundary must not look
+  // like a wake to the caller (20843: ambient never wakes the wait), and a
+  // drained row must never be dropped.
+  const accumulated: InboxWaitEvent[] = []
+
+  const finish = (result: InboxWaitResult): InboxWaitResult => {
+    if (opts.peek === true) return totalWaited(result, startedAt, now)
+    return totalWaited({ ...result, events: [...accumulated, ...(result.events ?? [])] }, startedAt, now)
+  }
+
   while (true) {
     const remainingMs = Math.max(0, deadline - now())
-    if (remainingMs <= 0) return timeoutInboxWaitResult(opts.session, startedAt, now)
+    if (remainingMs <= 0) {
+      return timeoutInboxWaitResult(opts.session, startedAt, now, { peek: opts.peek, events: accumulated })
+    }
 
     try {
-      const result = await opts.call({ session: opts.session, timeoutMs: Math.min(maxChunkMs, remainingMs) })
-      if (result.unread_count > 0) return totalWaited(result, startedAt, now)
+      const result = await opts.call({
+        session: opts.session,
+        timeoutMs: Math.min(maxChunkMs, remainingMs),
+        peek: opts.peek,
+      })
+      if ((result.unread_count ?? 0) > 0) return finish(result)
       if (result.aborted || result.timed_out) {
-        if (now() >= deadline) return timeoutInboxWaitResult(opts.session, startedAt, now)
+        accumulated.push(...(result.events ?? []))
+        if (now() >= deadline) {
+          return timeoutInboxWaitResult(opts.session, startedAt, now, { peek: opts.peek, events: accumulated })
+        }
         continue
       }
-      return totalWaited(result, startedAt, now)
+      return finish(result)
     } catch (err) {
       const kind = inboxWaitErrorKind(err)
       if (!kind) throw err
       if (kind === "daemon-unavailable" && now() - startedAt >= unavailableGraceMs) throw err
       const afterErrorRemainingMs = Math.max(0, deadline - now())
-      if (afterErrorRemainingMs <= 0) return timeoutInboxWaitResult(opts.session, startedAt, now)
+      if (afterErrorRemainingMs <= 0) {
+        return timeoutInboxWaitResult(opts.session, startedAt, now, { peek: opts.peek, events: accumulated })
+      }
       const pauseMs = Math.min(retryDelayMs, afterErrorRemainingMs)
       if (pauseMs > 0) await sleep(pauseMs)
     }
   }
 }
 
-async function callInboxWaitChunk(session: string, timeoutMs: number): Promise<InboxWaitResult> {
+async function callInboxWaitChunk(session: string, timeoutMs: number, peek?: boolean): Promise<InboxWaitResult> {
   const socketPath = resolveSocketPath()
   const client = await connectToDaemon(socketPath, { callTimeoutMs: Math.max(10_000, timeoutMs + 5_000) })
   try {
-    return (await client.call("cli_inbox_wait", { session, timeout_ms: timeoutMs })) as InboxWaitResult
+    return (await client.call("cli_inbox_wait", {
+      session,
+      timeout_ms: timeoutMs,
+      ...(peek === true ? { peek: true } : {}),
+    })) as InboxWaitResult
   } finally {
     client.close()
   }
 }
 
-async function cmdInboxWait(opts: { session?: string; timeoutMs?: number; json?: boolean }): Promise<void> {
+const ACTIONABLE_EVENT_TYPES = new Set(["request", "query", "verdict", "assign"])
+
+function printDrainedEvents(session: string, result: InboxWaitResult, timeoutMs: number): void {
+  const events = result.events ?? []
+  if (events.length === 0) {
+    console.log(`${session}: no messages within ${Math.round(timeoutMs / 1000)}s.`)
+    process.exitCode = 64
+    return
+  }
+  const actionable = events.filter((e) => ACTIONABLE_EVENT_TYPES.has(e.type)).length
+  console.log(
+    `${session}: drained ${events.length} message${events.length === 1 ? "" : "s"} ` +
+      `(${actionable} actionable, waited ${Math.round(result.waited_ms / 1000)}s).`,
+  )
+  for (const e of events) {
+    const head = (e.summary ?? e.content).split("\n")[0] ?? ""
+    console.log(`  [${e.type}] ${e.from} -> ${e.to}: ${head.length > 120 ? `${head.slice(0, 120)}…` : head}`)
+  }
+}
+
+async function cmdInboxWait(opts: {
+  session?: string
+  timeoutMs?: number
+  json?: boolean
+  peek?: boolean
+}): Promise<void> {
   const { session, timeoutMs } = resolveInboxWaitOptions(
     { session: opts.session, timeoutMs: opts.timeoutMs },
     { defaultSession: DEFAULT_INBOX_WAIT_SESSION },
@@ -670,26 +752,52 @@ async function cmdInboxWait(opts: { session?: string; timeoutMs?: number; json?:
   const result = await waitForInboxWithReconnect({
     session,
     timeoutMs,
-    call: ({ session: chunkSession, timeoutMs: chunkTimeoutMs }) => callInboxWaitChunk(chunkSession, chunkTimeoutMs),
+    peek: opts.peek,
+    call: ({ session: chunkSession, timeoutMs: chunkTimeoutMs, peek }) =>
+      callInboxWaitChunk(chunkSession, chunkTimeoutMs, peek),
   })
   if (opts.json) {
     console.log(JSON.stringify(result))
+    if (!opts.peek && (result.events ?? []).length === 0 && result.timed_out) process.exitCode = 64
     return
   }
   if (result.aborted) {
     console.log(`${session}: inbox wait aborted.`)
     return
   }
-  if (result.timed_out || result.unread_count === 0) {
-    console.log(`${session}: no actionable DMs within ${Math.round(timeoutMs / 1000)}s.`)
-    process.exitCode = 64
+  if (opts.peek === true) {
+    // Observer mode: status only, nothing drained (pre-20843 contract).
+    if (result.timed_out || (result.unread_count ?? 0) === 0) {
+      console.log(`${session}: no actionable DMs within ${Math.round(timeoutMs / 1000)}s.`)
+      process.exitCode = 64
+      return
+    }
+    const n = result.unread_count ?? 0
+    console.log(
+      `${session}: ${n} unread actionable DM${n === 1 ? "" : "s"}, ` +
+        `oldest ${result.oldest_unread_age_min}min ago (waited ${Math.round(result.waited_ms / 1000)}s).`,
+    )
     return
   }
-  const n = result.unread_count
-  console.log(
-    `${session}: ${n} unread actionable DM${n === 1 ? "" : "s"}, ` +
-      `oldest ${result.oldest_unread_age_min}min ago (waited ${Math.round(result.waited_ms / 1000)}s).`,
-  )
+  printDrainedEvents(session, result, timeoutMs)
+}
+
+/** `tribe fetch` — the timeout-0 alias of wait-and-drain: one plain atomic
+ *  drain of the session's inbox (20843 S2). Not the seat-facing idle loop —
+ *  that is `tent await`. */
+async function cmdFetch(opts: { session?: string; json?: boolean }): Promise<void> {
+  const { session } = resolveInboxWaitOptions({ session: opts.session }, { defaultSession: DEFAULT_INBOX_WAIT_SESSION })
+  const result = await callInboxWaitChunk(session, 0)
+  if (opts.json) {
+    console.log(JSON.stringify(result))
+    return
+  }
+  const events = result.events ?? []
+  if (events.length === 0) {
+    console.log(`${session}: inbox drained (0 pending messages).`)
+    return
+  }
+  printDrainedEvents(session, result, 0)
 }
 
 async function cmdRepair(opts: { session?: string; inboxCursor?: string; json?: boolean }): Promise<void> {
@@ -822,14 +930,24 @@ export function registerReadCommands(program: Command): void {
     .option(inboxWaitSession.flags, inboxWaitSession.description, inboxWaitSession.default)
     .option(inboxWaitTimeout.flags, inboxWaitTimeout.description, inboxWaitTimeout.default)
     .option(inboxWaitJson.flags, inboxWaitJson.description)
-    .action((opts: { session?: string; timeout?: string; json?: boolean }) => {
+    .option(cliOption(INBOX_WAIT_CLI, "peek").flags, cliOption(INBOX_WAIT_CLI, "peek").description)
+    .action((opts: { session?: string; timeout?: string; json?: boolean; peek?: boolean }) => {
       const timeoutMs = opts.timeout ? parseDurationMs(opts.timeout) : undefined
       if (opts.timeout && timeoutMs === undefined) {
         console.error(`tribe inbox-wait: bad --timeout '${opts.timeout}' (expected NNs|NNm|NNh)`)
         process.exit(2)
       }
-      void cmdInboxWait({ session: opts.session, timeoutMs, json: opts.json })
+      void cmdInboxWait({ session: opts.session, timeoutMs, json: opts.json, peek: opts.peek })
     })
+
+  const fetchSession = cliOption(FETCH_CLI, "session")
+  const fetchJson = cliOption(FETCH_CLI, "json")
+  program
+    .command(FETCH_CLI.name)
+    .description(FETCH_CLI.description)
+    .option(fetchSession.flags, fetchSession.description, fetchSession.default)
+    .option(fetchJson.flags, fetchJson.description)
+    .action((opts: { session?: string; json?: boolean }) => void cmdFetch(opts))
 
   const repairSession = cliOption(REPAIR_CLI, "session")
   const repairInboxCursor = cliOption(REPAIR_CLI, "inbox-cursor")

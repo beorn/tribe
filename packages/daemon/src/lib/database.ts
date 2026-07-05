@@ -80,7 +80,8 @@ export function openDatabase(path: string): Database {
 		room_id    TEXT,
 		request    TEXT,
 		reply      TEXT,
-		summary    TEXT
+		summary    TEXT,
+		read_at    INTEGER
 	)`)
 
   db.run(`CREATE TABLE IF NOT EXISTS messages_archive (
@@ -727,6 +728,27 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 18,
+    name: "add-messages-read-at",
+    up(db) {
+      // One-call idle loop (20843 S3): `pending --close` on a request whose
+      // message row is still unread also marks that row read, so closing the
+      // ball cannot leave a standing wake condition (the immediate re-wake
+      // loop class). The per-session pull cursor is a scalar and cannot mark
+      // a mid-range row consumed; `read_at` is the per-row read mark. Unread
+      // counting and the inbox drain both exclude read rows. Archive rows do
+      // not carry read state (the archive is history, not an inbox).
+      const exists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='messages'").get() as {
+        name: string
+      } | null
+      if (!exists) return
+      const cols = new Set(
+        (db.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>).map((r) => r.name),
+      )
+      if (!cols.has("read_at")) db.run("ALTER TABLE messages ADD COLUMN read_at INTEGER")
+    },
+  },
 ]
 
 // ---------------------------------------------------------------------------
@@ -778,6 +800,32 @@ export function createStatements(db: Database) {
     /** Ball-tracker close-all: for fanout='first' on broadcast, deletes ALL rows on first reply. */
     closePendingRequestAll: db.prepare(`
 		DELETE FROM pending_request WHERE request_id = $request_id
+	`),
+
+    /** Ball lookup before an explicit close — 20843 S3 needs the message_id
+     *  to decide whether the closed request's row is still unread. */
+    getPendingRequestRow: db.prepare(`
+		SELECT message_id, sender, opened_at
+		FROM pending_request
+		WHERE request_id = $request_id AND recipient = $recipient
+		LIMIT 1
+	`),
+
+    /** Message rowid + read mark for the unread check (20843 S3). */
+    getMessageSeqById: db.prepare("SELECT rowid AS seq, read_at FROM messages WHERE id = $id"),
+
+    /** Per-row read mark (20843 S3): a closed-ball request row is handled and
+     *  must stop counting as unread / appearing in the drain. */
+    markMessageRead: db.prepare("UPDATE messages SET read_at = $now WHERE id = $id AND read_at IS NULL"),
+
+    /** Latest session row for a name — drain/unread checks address sessions by
+     *  name (CLI callers are not the target session's connection). */
+    getSessionByName: db.prepare(`
+		SELECT id, last_inbox_pull_seq
+		FROM sessions
+		WHERE name = $name
+		ORDER BY updated_at DESC
+		LIMIT 1
 	`),
 
     /** Ball-tracker lookup: used when a reply arrives to decide whether this
@@ -867,6 +915,7 @@ export function createStatements(db: Database) {
       WHERE recipient = $name
         AND kind = 'direct'
         AND type IN ('request', 'query', 'verdict', 'assign')
+        AND read_at IS NULL
         AND rowid > COALESCE((SELECT last_inbox_pull_seq FROM sessions WHERE name = $name), 0)
     `),
 
@@ -917,6 +966,7 @@ export function createStatements(db: Database) {
 			AND (recipient = $name OR recipient = '*')
 			AND kind != 'event'
 			AND sender != $name
+			AND read_at IS NULL
 		ORDER BY rowid ASC
 		LIMIT $limit
 	`),

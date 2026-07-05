@@ -48,6 +48,7 @@ describe("registerReadCommands", () => {
         "health",
         "inbox-status",
         "inbox-wait",
+        "fetch",
         "reload",
         "repair",
         "activity",
@@ -169,11 +170,11 @@ describe("resolveInboxWaitOptions", () => {
 
 describe("waitForInboxWithReconnect", () => {
   function timeoutResult(session: string, waitedMs: number): InboxWaitResult {
+    // 20843 wait-and-drain: the deadline return carries the (empty) drained
+    // batch; legacy status zeros only appear on --peek.
     return {
       session,
-      unread_count: 0,
-      oldest_unread_age_min: 0,
-      oldest_unread_ts: 0,
+      events: [],
       waited_ms: waitedMs,
       timed_out: true,
       aborted: false,
