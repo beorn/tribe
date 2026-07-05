@@ -202,6 +202,8 @@ export type InboxWaitResult = {
   session: string
   events?: InboxWaitEvent[]
   cursor?: number
+  /** actionable | timeout | aborted — shared vocabulary with `tent await`. */
+  wakeReason?: string
   unread_count?: number
   oldest_unread_age_min?: number
   oldest_unread_ts?: number
@@ -633,7 +635,7 @@ function timeoutInboxWaitResult(
     session,
     ...(opts.peek === true
       ? { unread_count: 0, oldest_unread_age_min: 0, oldest_unread_ts: 0 }
-      : { events: opts.events ?? [] }),
+      : { events: opts.events ?? [], wakeReason: "timeout" }),
     waited_ms: Math.max(0, now() - startedAt),
     timed_out: true,
     aborted: false,

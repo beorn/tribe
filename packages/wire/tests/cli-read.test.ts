@@ -175,6 +175,7 @@ describe("waitForInboxWithReconnect", () => {
     return {
       session,
       events: [],
+      wakeReason: "timeout",
       waited_ms: waitedMs,
       timed_out: true,
       aborted: false,

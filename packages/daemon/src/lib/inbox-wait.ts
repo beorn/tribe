@@ -22,6 +22,9 @@ export type InboxWaitResult = {
   session: string
   events: InboxDrainEvent[]
   cursor: number
+  /** Why the wait returned — stable vocabulary shared with `tent await` (and
+   *  the future Habwire recv rebind): actionable | timeout | aborted. */
+  wakeReason: "actionable" | "timeout" | "aborted"
   waited_ms: number
   timed_out: boolean
   aborted: boolean
@@ -66,6 +69,7 @@ export function createInboxWaitManager(
       session,
       events: batch.events,
       cursor: batch.cursor,
+      wakeReason: flags.aborted ? "aborted" : flags.timedOut ? "timeout" : "actionable",
       waited_ms: Date.now() - startedAt,
       timed_out: flags.timedOut,
       aborted: flags.aborted,
