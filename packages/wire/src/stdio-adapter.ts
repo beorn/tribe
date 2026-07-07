@@ -84,6 +84,11 @@ const REQUIRE_EXPLICIT_JOIN = process.env.TRIBE_REQUIRE_JOIN !== "0"
 const LAUNCH_NAME = typeof args.name === "string" && args.name.trim().length > 0 ? args.name.trim() : undefined
 const REGISTER_WITH_LAUNCH_NAME =
   LAUNCH_NAME !== undefined && (!REQUIRE_EXPLICIT_JOIN || isExplicitTribePersonaName(LAUNCH_NAME))
+// 20703 — managed spawns set TRIBE_TAKEOVER=1 so an explicit-persona
+// respawn supersedes a stale live holder (daemon-side takeover) instead
+// of dying on NameConflict. Only honored together with an explicit
+// launch persona; ambient/auto-named sessions never take over.
+const TAKEOVER = REGISTER_WITH_LAUNCH_NAME && process.env.TRIBE_TAKEOVER === "1"
 
 // km 19442 — connect-time replay flood backstop. The wakeup→drain path is capped
 // by selectReplayEvents, but a stale/old daemon that still pushes message BODIES
@@ -215,6 +220,7 @@ const identityToken = createHash("sha256")
 
 const registerParams = {
   ...(REGISTER_WITH_LAUNCH_NAME ? { name: LAUNCH_NAME } : {}),
+  ...(TAKEOVER ? { takeover: true } : {}),
   ...(args.role ? { role: args.role } : {}),
   domains: SESSION_DOMAINS,
   project: process.cwd(),

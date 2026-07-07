@@ -400,6 +400,33 @@ export function withDispatcher<
               log.info?.(`Replacing live self-registration for ${resolvedName} pid=${clientPid}`)
               retireReplacedClient(samePidHolder)
             }
+
+            // 20703 — explicit-persona takeover. A managed respawn (adapter sends
+            // takeover=true only for explicit @persona launch names) supersedes a
+            // LIVE holder of the same name instead of failing loud: a stale MCP
+            // child from a replaced/ad-hoc parent session must not squat a numbered
+            // worker identity until a human kills it. The retired holder's socket is
+            // destroyed; when that stale child reconnects and re-registers, it hits
+            // the normal conflict path below and exits nonzero (c0b8caf) — the
+            // squatter dies cleanly. Non-takeover registrations keep fail-loud
+            // semantics via deduplicateName. Guarded on an explicit requested name
+            // so auto-named sessions can never steal.
+            if (p.takeover === true && typeof p.name === "string") {
+              const holder = Array.from(clients.values()).find((c) => c.id !== connId && c.name === resolvedName)
+              if (holder) {
+                log.warn?.(
+                  `takeover: superseding live holder of "${resolvedName}" (old pid ${holder.pid}, old session ${holder.ctx.sessionId}, new pid ${clientPid})`,
+                )
+                logEvent(holder.ctx, "session.superseded", undefined, {
+                  name: resolvedName,
+                  old_pid: holder.pid,
+                  new_pid: clientPid,
+                  reason: "explicit-persona takeover (20703)",
+                })
+                retireReplacedClient(holder)
+              }
+            }
+
             const name = deduplicateName(resolvedName)
             const domains = (p.domains as string[]) ?? []
             const peerSocket = (p.peerSocket as string) ?? null
