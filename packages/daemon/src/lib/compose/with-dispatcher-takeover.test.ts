@@ -22,7 +22,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Server, Socket as NetSocket } from "node:net"
 import type { Database } from "bun:sqlite"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { createScope } from "tribe-wire"
 import { TRIBE_PROTOCOL_VERSION, type JsonRpcRequest } from "tribe-wire/lib/socket"
 import type { TribeRole } from "tribe-wire/lib/config"
@@ -111,26 +111,49 @@ describe("dispatcher explicit-persona takeover (@ag/tribe/20703)", () => {
     )
 
     harness.addPendingClient("conn-taker")
-    const taker = parseResult<RegisterResult>(
-      await harness.register("conn-taker", { name: "@agent/78", pid: 4002, project: "/tmp/km-wt9-b", takeover: true }),
-    )
-    expect(taker.name).toBe("@agent/78")
+    // The takeover branch logs a loud recovery line via log.warn (routes to
+    // console.warn through loggily) — some runners (e.g. the hh vendor-project
+    // vitest setup) fail any test that produces console output, so the spy
+    // both captures the line for assertion and suppresses it from stdout.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      const taker = parseResult<RegisterResult>(
+        await harness.register("conn-taker", {
+          name: "@agent/78",
+          pid: 4002,
+          project: "/tmp/km-wt9-b",
+          takeover: true,
+        }),
+      )
+      expect(taker.name).toBe("@agent/78")
 
-    expect(holderSocket.destroyedByDispatcher).toBe(true)
+      expect(holderSocket.destroyedByDispatcher).toBe(true)
 
-    const status = parseResult<CliStatusResult>(await harness.cliStatus())
-    const agentSessions = status.sessions.filter((s) => s.name === "@agent/78")
-    expect(agentSessions).toHaveLength(1)
-    expect(agentSessions[0]?.pid).toBe(4002)
+      const status = parseResult<CliStatusResult>(await harness.cliStatus())
+      const agentSessions = status.sessions.filter((s) => s.name === "@agent/78")
+      expect(agentSessions).toHaveLength(1)
+      expect(agentSessions[0]?.pid).toBe(4002)
 
-    const events = harness.supersededEvents("@agent/78")
-    expect(events).toHaveLength(1)
-    expect(events[0]).toMatchObject({
-      name: "@agent/78",
-      old_pid: 4001,
-      new_pid: 4002,
-      reason: "explicit-persona takeover (20703)",
-    })
+      const events = harness.supersededEvents("@agent/78")
+      expect(events).toHaveLength(1)
+      expect(events[0]).toMatchObject({
+        name: "@agent/78",
+        old_pid: 4001,
+        new_pid: 4002,
+        reason: "explicit-persona takeover (20703)",
+      })
+
+      // Loud-recovery evidence: the warn line names the superseded name and
+      // both pids, so a human scanning logs can see the takeover happened
+      // without querying the journal.
+      const warnLines = warnSpy.mock.calls.map((call) => call.join(" "))
+      const takeoverLine = warnLines.find((line) => /takeover: superseding live holder of "@agent\/78"/.test(line))
+      expect(takeoverLine).toBeDefined()
+      expect(takeoverLine).toContain("old pid 4001")
+      expect(takeoverLine).toContain("new pid 4002")
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 
   it("(c) takeover requires an explicit name: takeover:true without `name` never supersedes, even on a resolved-name collision", async () => {
