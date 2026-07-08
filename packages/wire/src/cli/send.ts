@@ -130,6 +130,66 @@ export function buildSendPayload(input: SendPayloadInput): SendPayload {
   return payload
 }
 
+type PendingListResult = {
+  error?: string
+  pending?: Array<{ request_id?: string }>
+}
+
+type PendingCloseResult = {
+  error?: string
+  closed?: number
+}
+
+function replyOwnerFromEnv(env: NodeJS.ProcessEnv = process.env): string | null {
+  const name = env.TRIBE_SESSION_NAME?.trim() || env.TRIBE_NAME?.trim() || ""
+  return name.length > 0 ? name : null
+}
+
+function requireReplyOwner(reply: string): string {
+  const owner = replyOwnerFromEnv()
+  if (owner) return owner
+  console.error(
+    `tribe-wire send: --reply ${reply} requires TRIBE_NAME or TRIBE_SESSION_NAME so the one-shot CLI can close the pending owner.`,
+  )
+  console.error(`Example: TRIBE_NAME=@chief tribe send <recipient> --type response --reply ${reply} <message>`)
+  console.error(`Manual fallback: tribe pending --owner <owner> --close ${reply}`)
+  process.exit(2)
+}
+
+async function verifyPendingReplyOwner(owner: string, reply: string): Promise<void> {
+  const pending = mcpJsonContent(await callDaemon("tribe.pending", { owner })) as PendingListResult
+  if (pending.error) {
+    console.error(`tribe-wire send: cannot verify pending request ${reply} for ${owner}: ${pending.error}`)
+    console.error(`Not sending response. Check with: tribe pending --owner ${owner}`)
+    process.exit(1)
+  }
+  const hasRequest = (pending.pending ?? []).some((p) => p.request_id === reply)
+  if (!hasRequest) {
+    console.error(`tribe-wire send: no pending request ${reply} is owned by ${owner}; not sending response.`)
+    console.error(`Check the owner with: tribe pending --owner ${owner}`)
+    console.error(
+      `If this was already handled out of band, close explicitly with: tribe pending --owner ${owner} --close ${reply}`,
+    )
+    process.exit(1)
+  }
+}
+
+async function closePendingReplyOwner(owner: string, reply: string): Promise<void> {
+  const closed = mcpJsonContent(await callDaemon("tribe.pending", { owner, close: reply })) as PendingCloseResult
+  if (closed.error) {
+    console.error(
+      `tribe-wire send: response sent, but closing pending request ${reply} for ${owner} failed: ${closed.error}`,
+    )
+    console.error(`Close it manually with: tribe pending --owner ${owner} --close ${reply}`)
+    process.exit(1)
+  }
+  if (closed.closed !== 1) {
+    console.error(`tribe-wire send: response sent, but pending request ${reply} for ${owner} did not close.`)
+    console.error(`Close it manually with: tribe pending --owner ${owner} --close ${reply}`)
+    process.exit(1)
+  }
+}
+
 function collectDomain(value: string, previous: string[]): string[] {
   return [...previous, value]
 }
@@ -146,6 +206,9 @@ function parseDomains(values: string[] | undefined): string[] {
 // ---------------------------------------------------------------------------
 
 async function cmdSend(input: SendPayloadInput): Promise<void> {
+  const replyOwner = input.reply ? requireReplyOwner(input.reply) : null
+  if (input.reply && replyOwner) await verifyPendingReplyOwner(replyOwner, input.reply)
+
   const result = (await callDaemon("tribe.send", buildSendPayload(input))) as {
     error?: string
     summary?: string
@@ -156,6 +219,7 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     console.error(`tribe-wire send: ${result.error}`)
     process.exit(1)
   }
+  if (input.reply && replyOwner) await closePendingReplyOwner(replyOwner, input.reply)
   console.log(`Sent message to ${input.to}`)
   // Derive-not-reject: surface (no-silent) when the daemon derived a one-liner
   // because none was authored, so the sender learns to pass `--summary`.

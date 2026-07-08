@@ -11,7 +11,16 @@
 
 import { describe, expect, test } from "vitest"
 import { Command } from "@silvery/commander"
+import { spawn } from "node:child_process"
+import { mkdtempSync, rmSync } from "node:fs"
+import { createServer } from "node:net"
+import { tmpdir } from "node:os"
+import { dirname, join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 import { buildSendPayload, registerSendCommands } from "../src/cli/send.ts"
+
+const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "../src/cli.ts")
+const BUN_BIN = process.env.BUN_EXECUTABLE ?? "bun"
 
 function buildProgram(): Command {
   const program = new Command("tribe-test")
@@ -154,5 +163,109 @@ describe("registerSendCommands", () => {
       expect(typeof c.name()).toBe("string")
       expect(typeof c.description()).toBe("string")
     }
+  })
+
+  test("send --reply closes the pending owner from TRIBE_SESSION_NAME", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-send-reply-"))
+    const socketPath = join(tmp, "tribe.sock")
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = []
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as {
+            id: number
+            method: string
+            params?: Record<string, unknown>
+          }
+          calls.push({ method: request.method, params: request.params ?? {} })
+          const result =
+            request.method === "tribe.pending" && request.params?.close === "req-123"
+              ? { content: [{ text: JSON.stringify({ owner: "@chief", request_id: "req-123", closed: 1 }) }] }
+              : request.method === "tribe.pending"
+                ? {
+                    content: [
+                      {
+                        text: JSON.stringify({
+                          owner: "@chief",
+                          count: 1,
+                          pending: [{ request_id: "req-123", sender: "@agent/3" }],
+                        }),
+                      },
+                    ],
+                  }
+                : { sent: true }
+          socket.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\n")
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const res = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProc) => {
+        const child = spawn(BUN_BIN, [CLI, "send", "@agent/3", "done", "--type", "response", "--reply", "req-123"], {
+          env: {
+            ...process.env,
+            TRIBE_SOCKET: socketPath,
+            TRIBE_SESSION_NAME: "@chief",
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+        let stdout = ""
+        let stderr = ""
+        child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+        child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+        child.on("close", (code) => resolveProc({ code, stdout, stderr }))
+      })
+
+      expect(res).toMatchObject({ code: 0 })
+      expect(res.stdout).toContain("Sent message to @agent/3")
+      expect(calls).toEqual([
+        { method: "tribe.pending", params: { owner: "@chief" } },
+        {
+          method: "tribe.send",
+          params: { to: "@agent/3", message: "done", type: "response", reply: "req-123" },
+        },
+        { method: "tribe.pending", params: { owner: "@chief", close: "req-123" } },
+      ])
+    } finally {
+      server.close()
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  test("send --reply fails loudly when no pending owner identity is available", async () => {
+    const env: NodeJS.ProcessEnv = { ...process.env, TRIBE_SOCKET: "/tmp/tribe-wire-no-owner.sock" }
+    delete env.TRIBE_NAME
+    delete env.TRIBE_SESSION_NAME
+
+    const res = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProc) => {
+      const child = spawn(BUN_BIN, [CLI, "send", "@agent/3", "done", "--type", "response", "--reply", "req-123"], {
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+      })
+      let stdout = ""
+      let stderr = ""
+      child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+      child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+      child.on("close", (code) => resolveProc({ code, stdout, stderr }))
+    })
+
+    expect(res.code).toBe(2)
+    expect(res.stdout).toBe("")
+    expect(res.stderr).toContain("--reply req-123 requires TRIBE_NAME or TRIBE_SESSION_NAME")
+    expect(res.stderr).toContain("Manual fallback: tribe pending --owner <owner> --close req-123")
   })
 })
