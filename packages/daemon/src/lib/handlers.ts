@@ -11,7 +11,13 @@ import type { TribeRole } from "tribe-wire/lib/config"
 const log = createLogger("tribe:handlers")
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { validateName, sanitizeMessage } from "./validation.ts"
-import { sendMessage, deriveSummary, logEvent, replayUnreadForClaimedName } from "./messaging.ts"
+import {
+  sendMessage,
+  deriveSummary,
+  logEvent,
+  replayUnreadForClaimedName,
+  type SenderAttribution,
+} from "./messaging.ts"
 import { isPidAlive as pidStillAlive, registerSession } from "./session.ts"
 import { gatherCodePin } from "./code-pin.ts"
 import { senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
@@ -397,17 +403,25 @@ function openPendingRows(
   messageId: string,
   openedAt: number,
   fanout: "first" | "all" | undefined,
+  sender: string,
 ): void {
   for (const recipient of recipients) {
     ctx.stmts.openPendingRequest.run({
       $request_id: requestId,
       $recipient: recipient,
-      $sender: ctx.getName(),
+      $sender: sender,
       $opened_at: openedAt,
       $message_id: messageId,
       $fanout: fanout ?? "first",
     })
   }
+}
+
+function sendAttribution(ctx: TribeContext, a: ToolArgs): SenderAttribution {
+  if (ctx.getRole() !== "daemon") return {}
+  const sender = typeof a.sender === "string" ? a.sender.trim() : ""
+  if (sender.length === 0 || sender === ctx.getName()) return {}
+  return { sender, senderRole: "member" }
 }
 
 function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
@@ -448,6 +462,8 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   // ergonomic.
   const summaryDerived = summaryArg.length === 0
   const summary = summaryDerived ? deriveSummary(sanitized) : summaryArg
+  const attribution = sendAttribution(ctx, a)
+  const sender = attribution.sender ?? ctx.getName()
   if (Array.isArray(recipients)) {
     const sharedRequestId = requestFlag ? randomUUID() : requestId
     const results = recipients.map((recipient) =>
@@ -465,6 +481,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
           reply: replyId ?? undefined,
           fanout: fanoutArg,
         },
+        attribution,
       ),
     )
     logEvent(ctx, `message.sent.${msgType}`, a.bead as string | undefined, {
@@ -503,6 +520,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       reply: replyId ?? undefined,
       fanout: fanoutArg,
     },
+    attribution,
   )
   // Truthy-shorthand fixup: the canonical convention is request_id == message_id.
   // sendMessage already wrote the message; we now open the pending row using
@@ -514,7 +532,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     ctx.stmts.openPendingRequest.run({
       $request_id: result.id,
       $recipient: recipients,
-      $sender: ctx.getName(),
+      $sender: sender,
       $opened_at: result.ts,
       $message_id: result.id,
       $fanout: fanoutArg ?? "first",
@@ -528,6 +546,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       result.id,
       result.ts,
       fanoutArg,
+      sender,
     )
   }
   logEvent(ctx, `message.sent.${msgType}`, a.bead as string | undefined, {

@@ -236,7 +236,7 @@ describe("registerSendCommands", () => {
         { method: "tribe.pending", params: { owner: "@chief" } },
         {
           method: "tribe.send",
-          params: { to: "@agent/3", message: "done", type: "response", reply: "req-123" },
+          params: { to: "@agent/3", message: "done", type: "response", reply: "req-123", sender: "@chief" },
         },
         { method: "tribe.pending", params: { owner: "@chief", close: "req-123" } },
       ])
@@ -267,5 +267,78 @@ describe("registerSendCommands", () => {
     expect(res.stdout).toBe("")
     expect(res.stderr).toContain("--reply req-123 requires TRIBE_NAME or TRIBE_SESSION_NAME")
     expect(res.stderr).toContain("Manual fallback: tribe pending --owner <owner> --close req-123")
+  })
+
+  test("send forwards TRIBE_NAME as one-shot caller identity", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-send-identity-"))
+    const socketPath = join(tmp, "tribe.sock")
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = []
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as {
+            id: number
+            method: string
+            params?: Record<string, unknown>
+          }
+          calls.push({ method: request.method, params: request.params ?? {} })
+          socket.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { sent: true } }) + "\n")
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const res = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProc) => {
+        const child = spawn(
+          BUN_BIN,
+          [CLI, "send", "@agent/7", "please", "handle", "this", "--type", "request", "--request"],
+          {
+            env: {
+              ...process.env,
+              TRIBE_SOCKET: socketPath,
+              TRIBE_NAME: "@chief",
+            },
+            stdio: ["ignore", "pipe", "pipe"],
+          },
+        )
+        let stdout = ""
+        let stderr = ""
+        child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+        child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+        child.on("close", (code) => resolveProc({ code, stdout, stderr }))
+      })
+
+      expect(res).toMatchObject({ code: 0 })
+      expect(res.stdout).toContain("Sent message to @agent/7")
+      expect(calls).toEqual([
+        {
+          method: "tribe.send",
+          params: {
+            to: "@agent/7",
+            message: "please handle this",
+            type: "request",
+            request: true,
+            sender: "@chief",
+          },
+        },
+      ])
+    } finally {
+      server.close()
+      rmSync(tmp, { recursive: true, force: true })
+    }
   })
 })

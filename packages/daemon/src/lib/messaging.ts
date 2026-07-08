@@ -67,6 +67,11 @@ export type Classification = {
   summary?: string
 }
 
+export type SenderAttribution = {
+  sender?: string
+  senderRole?: string
+}
+
 /**
  * Derive a one-line summary from message content — the fallback when a sender
  * omits an authored `summary`. Takes the first non-empty line, collapses
@@ -164,9 +169,12 @@ export function sendMessage(
   kind: MessageKind = "direct",
   classification: Classification = {},
   ballTracker: BallTracker = {},
+  attribution: SenderAttribution = {},
 ): { id: string; ts: number; rowid: number } {
   const id = randomUUID()
   const ts = Date.now()
+  const sender = attribution.sender ?? ctx.getName()
+  const senderRole = attribution.senderRole ?? ctx.getRole()
   // Default kind inference: '*' is a broadcast unless the caller explicitly
   // passed 'event'. This keeps existing call sites correct without audit.
   const resolvedKind: MessageKind = kind === "event" ? "event" : recipient === "*" ? "broadcast" : kind
@@ -184,7 +192,7 @@ export function sendMessage(
   const result = ctx.stmts.insertMessage.run({
     $id: id,
     $type: type,
-    $sender: ctx.getName(),
+    $sender: sender,
     $recipient: recipient,
     $kind: resolvedKind,
     $content: content,
@@ -208,7 +216,7 @@ export function sendMessage(
       ctx.stmts.openPendingRequest.run({
         $request_id: requestId,
         $recipient: recipient,
-        $sender: ctx.getName(),
+        $sender: sender,
         $opened_at: ts,
         $message_id: id,
         $fanout: ballTracker.fanout ?? "first",
@@ -217,14 +225,14 @@ export function sendMessage(
     if (replyId) {
       const row = ctx.stmts.selectPendingForRequestRecipient.get({
         $request_id: replyId,
-        $recipient: ctx.getName(),
+        $recipient: sender,
       }) as { fanout: string } | null
       if (row?.fanout === "first") {
         ctx.stmts.closePendingRequestAll.run({ $request_id: replyId })
       } else {
         ctx.stmts.closePendingRequest.run({
           $request_id: replyId,
-          $recipient: ctx.getName(),
+          $recipient: sender,
         })
       }
     }
@@ -235,8 +243,8 @@ export function sendMessage(
     rowid,
     type,
     kind: resolvedKind,
-    sender: ctx.getName(),
-    senderRole: ctx.getRole(),
+    sender,
+    senderRole,
     recipient,
     content,
     bead_id: bead_id ?? null,

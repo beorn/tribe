@@ -115,9 +115,10 @@ type SendPayload = {
   request?: true | string
   reply?: string
   fanout?: Fanout
+  sender?: string
 }
 
-export function buildSendPayload(input: SendPayloadInput): SendPayload {
+export function buildSendPayload(input: SendPayloadInput, sender?: string | null): SendPayload {
   const payload: SendPayload = {
     to: input.to,
     message: input.message,
@@ -127,6 +128,7 @@ export function buildSendPayload(input: SendPayloadInput): SendPayload {
   if (input.request !== undefined && input.request !== false) payload.request = input.request
   if (input.reply) payload.reply = input.reply
   if (input.fanout) payload.fanout = input.fanout
+  if (sender) payload.sender = sender
   return payload
 }
 
@@ -143,6 +145,10 @@ type PendingCloseResult = {
 function replyOwnerFromEnv(env: NodeJS.ProcessEnv = process.env): string | null {
   const name = env.TRIBE_SESSION_NAME?.trim() || env.TRIBE_NAME?.trim() || ""
   return name.length > 0 ? name : null
+}
+
+function sendCallerFromEnv(env: NodeJS.ProcessEnv = process.env): string | null {
+  return replyOwnerFromEnv(env)
 }
 
 function requireReplyOwner(reply: string): string {
@@ -209,7 +215,7 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
   const replyOwner = input.reply ? requireReplyOwner(input.reply) : null
   if (input.reply && replyOwner) await verifyPendingReplyOwner(replyOwner, input.reply)
 
-  const result = (await callDaemon("tribe.send", buildSendPayload(input))) as {
+  const result = (await callDaemon("tribe.send", buildSendPayload(input, sendCallerFromEnv()))) as {
     error?: string
     summary?: string
     summary_derived?: boolean
