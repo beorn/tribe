@@ -232,6 +232,19 @@ function waitForStdout(
   })
 }
 
+async function waitForCondition(
+  predicate: () => boolean,
+  message: string,
+  opts: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<void> {
+  const deadline = Date.now() + (opts.timeoutMs ?? 3_000)
+  while (Date.now() < deadline) {
+    if (predicate()) return
+    await new Promise((resolveTick) => setTimeout(resolveTick, opts.intervalMs ?? 25))
+  }
+  throw new Error(`timed out waiting for ${message}`)
+}
+
 function writeJson(child: ChildProcessWithoutNullStreams, payload: Record<string, unknown>): void {
   child.stdin.write(`${JSON.stringify(payload)}\n`)
 }
@@ -385,6 +398,45 @@ describe("stdio adapter delivery modes", () => {
     expect(register?.params?.takeover).toBe(true)
   })
 
+  it.fails("21049: takeover is a launch capability and is not replayed after reconnect", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath)
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@chief"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "pull",
+        TRIBE_TAKEOVER: "1",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+
+    writeJson(child, initializePayload(1))
+    await waitForLine(child, (line) => line.id === 1)
+    await waitForCondition(
+      () =>
+        daemon!.requests.filter((msg) => msg.method === "register").length === 1 &&
+        daemon!.requests.some((msg) => msg.method === "tribe.members"),
+      "completed initial adapter registration",
+    )
+    await new Promise((resolveTick) => setTimeout(resolveTick, 50))
+
+    daemon.clients.at(-1)?.destroy()
+    await waitForCondition(
+      () => daemon!.requests.filter((msg) => msg.method === "register").length >= 2,
+      "adapter reconnect registration",
+    )
+
+    const registrations = daemon.requests.filter((msg) => msg.method === "register") as Array<{
+      params?: { name?: string; takeover?: boolean }
+    }>
+    expect(registrations[0]?.params).toMatchObject({ name: "@chief", takeover: true })
+    expect(registrations[1]?.params?.name).toBe("@chief")
+    expect(registrations[1]?.params && "takeover" in registrations[1].params).toBe(false)
+  })
+
   it("20703: without TRIBE_TAKEOVER, register never carries a takeover key", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath)
@@ -393,6 +445,7 @@ describe("stdio adapter delivery modes", () => {
       env: {
         ...process.env,
         TRIBE_DELIVERY: "pull",
+        TRIBE_TAKEOVER: "0",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
       },

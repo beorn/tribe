@@ -9,10 +9,11 @@
  */
 
 import { describe, expect, it } from "vitest"
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { createServer } from "node:net"
 import { tmpdir } from "node:os"
-import { resolve, dirname } from "node:path"
+import { resolve, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "../src/cli.ts")
@@ -37,6 +38,20 @@ function runCli(args: string[], opts: { timeoutMs?: number } = {}): { stdout: st
     stderr: stripAnsi(res.stderr ?? ""),
     code: res.status ?? -1,
   }
+}
+
+function runCliAsync(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+): Promise<{ stdout: string; stderr: string; code: number | null }> {
+  return new Promise((resolveRun) => {
+    const child = spawn(BUN_BIN, [CLI, ...args], { env, stdio: ["ignore", "pipe", "pipe"] })
+    let stdout = ""
+    let stderr = ""
+    child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+    child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+    child.on("close", (code) => resolveRun({ stdout: stripAnsi(stdout), stderr: stripAnsi(stderr), code }))
+  })
 }
 
 describe("tribe-wire CLI — Commander dispatcher", () => {
@@ -86,6 +101,95 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     const { stderr, code } = runCli(["pending", "--close", "req-123"])
     expect(code).toBe(2)
     expect(stderr).toMatch(/--close requires --owner/)
+  })
+
+  it("21049: read-only diagnostics never register an inherited managed persona", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-diagnostics-"))
+    const socketPath = join(dir, "tribe.sock")
+    const methods: string[] = []
+    const holder = {
+      id: "holder-session",
+      name: "@chief",
+      role: "member",
+      domains: ["coordination"],
+      pid: 4242,
+      claudeSessionId: null,
+      connectedAt: Date.now(),
+      uptimeMs: 1_000,
+      idleMs: 0,
+      cwd: "/repo",
+      source: "daemon",
+    }
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as { id: number; method: string }
+          methods.push(request.method)
+          const daemon = { pid: 99, uptime: 10, clients: 1, dbPath: join(dir, "tribe.db"), socketPath }
+          const result =
+            request.method === "cli_status"
+              ? { sessions: [holder], daemon }
+              : request.method === "cli_health"
+                ? { content: [{ type: "text", text: JSON.stringify({ issues: [] }) }], sessions: [holder], daemon }
+                : request.method === "cli_log"
+                  ? { messages: [] }
+                  : request.method === "tribe.health"
+                    ? {
+                        content: [
+                          {
+                            type: "text",
+                            text: JSON.stringify({
+                              code_pin: {
+                                stale: false,
+                                reason: null,
+                                running: "abc",
+                                on_disk: "abc",
+                                superproject_pin: "abc",
+                              },
+                            }),
+                          },
+                        ],
+                      }
+                    : { error: `unexpected method ${request.method}` }
+          socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`)
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const env = {
+        ...process.env,
+        TRIBE_SOCKET: socketPath,
+        TRIBE_NAME: "@chief",
+        TRIBE_TAKEOVER: "1",
+        TRIBE_NO_AUTOSTART: "1",
+      }
+
+      for (const args of [["doctor"], ["health"], ["status"], ["log", "--limit", "1"]]) {
+        const result = await runCliAsync(args, env)
+        expect(result, `${args[0]} failed: ${result.stderr}`).toMatchObject({ code: 0 })
+      }
+
+      expect(methods).toEqual(["tribe.health", "cli_health", "cli_status", "cli_log"])
+      expect(methods).not.toContain("register")
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it("bare `help` prints help and exits 0", () => {
