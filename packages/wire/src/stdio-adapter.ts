@@ -243,11 +243,10 @@ const baseRegisterParams = {
   ...(args.account ? { account: args.account } : {}),
   ...(args.provider ? { provider: args.provider } : {}),
 }
-let takeoverAvailable = TAKEOVER
-let registeredOnce = false
+let hasRegistered = false
 
 function registerParamsForConnection(): typeof baseRegisterParams & { takeover?: true } {
-  return takeoverAvailable ? { ...baseRegisterParams, takeover: true } : baseRegisterParams
+  return TAKEOVER && !hasRegistered ? { ...baseRegisterParams, takeover: true } : baseRegisterParams
 }
 
 function isExplicitTribePersonaName(name: string): boolean {
@@ -294,7 +293,6 @@ function startDaemonConnection(): Promise<DaemonClient> {
       // km 19442 — open a fresh connect-replay window so a stale daemon's body-push
       // burst on (re)connect is bounded (see connectReplayGate + the `channel` handler).
       connectReplayGate.reset(Date.now())
-      const attemptedTakeover = takeoverAvailable
       let reg: {
         sessionId: string
         name: string
@@ -308,11 +306,10 @@ function startDaemonConnection(): Promise<DaemonClient> {
         // Once this process has held the persona, a later name conflict means
         // another managed adapter superseded it. Exit instead of retrying or
         // reclaiming the persona from the new holder.
-        if (registeredOnce && shouldFailLaunchOnRegisterError(err)) failManagedPersonaRegistration(err)
+        if (hasRegistered && shouldFailLaunchOnRegisterError(err)) failManagedPersonaRegistration(err)
         throw err
       }
-      registeredOnce = true
-      if (attemptedTakeover) takeoverAvailable = false
+      hasRegistered = true
       myName = reg.name
       myRole = reg.role
       log.info?.(`Registered as ${myName} (${myRole})`)
