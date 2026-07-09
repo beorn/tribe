@@ -85,9 +85,9 @@ const LAUNCH_NAME = typeof args.name === "string" && args.name.trim().length > 0
 const REGISTER_WITH_LAUNCH_NAME =
   LAUNCH_NAME !== undefined && (!REQUIRE_EXPLICIT_JOIN || isExplicitTribePersonaName(LAUNCH_NAME))
 // 20703 — managed spawns set TRIBE_TAKEOVER=1 so an explicit-persona
-// respawn supersedes a stale live holder (daemon-side takeover) instead
-// of dying on NameConflict. Only honored together with an explicit
-// launch persona; ambient/auto-named sessions never take over.
+// respawn can supersede a stale live holder once. The capability is consumed
+// after the first successful registration; replaying it on reconnect lets two
+// displaced adapters evict each other forever (21049).
 const TAKEOVER = REGISTER_WITH_LAUNCH_NAME && process.env.TRIBE_TAKEOVER === "1"
 
 // km 19442 — connect-time replay flood backstop. The wakeup→drain path is capped
@@ -218,9 +218,8 @@ const identityToken = createHash("sha256")
   .digest("hex")
   .slice(0, 16)
 
-const registerParams = {
+const baseRegisterParams = {
   ...(REGISTER_WITH_LAUNCH_NAME ? { name: LAUNCH_NAME } : {}),
-  ...(TAKEOVER ? { takeover: true } : {}),
   ...(args.role ? { role: args.role } : {}),
   domains: SESSION_DOMAINS,
   project: process.cwd(),
@@ -244,6 +243,12 @@ const registerParams = {
   ...(args.account ? { account: args.account } : {}),
   ...(args.provider ? { provider: args.provider } : {}),
 }
+let takeoverAvailable = TAKEOVER
+let registeredOnce = false
+
+function registerParamsForConnection(): typeof baseRegisterParams & { takeover?: true } {
+  return takeoverAvailable ? { ...baseRegisterParams, takeover: true } : baseRegisterParams
+}
 
 function isExplicitTribePersonaName(name: string): boolean {
   return /^@[a-z0-9][a-z0-9_./-]{0,31}$/.test(name)
@@ -266,6 +271,15 @@ function shouldFailLaunchOnRegisterError(err: unknown): boolean {
   return REGISTER_WITH_LAUNCH_NAME && isPersonaNameConflictError(err)
 }
 
+function failManagedPersonaRegistration(err: unknown): never {
+  const reason = errorMessage(err)
+  log.warn?.(`tribe registration failed for explicit launch persona ${LAUNCH_NAME}: ${reason}`)
+  daemon?.close()
+  proxyAc.abort()
+  process.exitCode = 2
+  process.exit()
+}
+
 // NON-BLOCKING: the daemon connect runs in the background. We do NOT await
 // it here — module evaluation continues straight through to `mcp.connect()`
 // so the MCP `initialize` handshake is answered immediately. Without this, a
@@ -280,13 +294,25 @@ function startDaemonConnection(): Promise<DaemonClient> {
       // km 19442 — open a fresh connect-replay window so a stale daemon's body-push
       // burst on (re)connect is bounded (see connectReplayGate + the `channel` handler).
       connectReplayGate.reset(Date.now())
-      const reg = (await client.call("register", registerParams)) as {
+      const attemptedTakeover = takeoverAvailable
+      let reg: {
         sessionId: string
         name: string
         role: string
         chief: string
         protocolVersion?: number
       }
+      try {
+        reg = (await client.call("register", registerParamsForConnection())) as typeof reg
+      } catch (err) {
+        // Once this process has held the persona, a later name conflict means
+        // another managed adapter superseded it. Exit instead of retrying or
+        // reclaiming the persona from the new holder.
+        if (registeredOnce && shouldFailLaunchOnRegisterError(err)) failManagedPersonaRegistration(err)
+        throw err
+      }
+      registeredOnce = true
+      if (attemptedTakeover) takeoverAvailable = false
       myName = reg.name
       myRole = reg.role
       log.info?.(`Registered as ${myName} (${myRole})`)
@@ -356,15 +382,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
 let degradeAnnounced = false
 function armDegradeNotice(p: Promise<DaemonClient>): void {
   p.catch((err: unknown) => {
-    if (shouldFailLaunchOnRegisterError(err)) {
-      const reason = errorMessage(err)
-      log.warn?.(`tribe registration failed for explicit launch persona ${LAUNCH_NAME}: ${reason}`)
-      daemon?.close()
-      proxyAc.abort()
-      process.exitCode = 2
-      process.exit()
-      return
-    }
+    if (shouldFailLaunchOnRegisterError(err)) failManagedPersonaRegistration(err)
 
     daemonDegradedReason = errorMessage(err)
     if (degradeAnnounced) return

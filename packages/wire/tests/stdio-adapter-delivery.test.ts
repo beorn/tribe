@@ -24,10 +24,12 @@ function spawnFakeDaemon(
     fetchEvents?: Array<Record<string, unknown>>
     inboxWaitResult?: Record<string, unknown>
     registerError?: { code: number; message: string; data?: unknown }
+    registerErrorAfter?: number
   } = {},
 ): Promise<FakeDaemon> {
   const clients: Socket[] = []
   const requests: Record<string, unknown>[] = []
+  let registerCount = 0
   return new Promise((resolveServer) => {
     const server = createServer((socket) => {
       clients.push(socket)
@@ -35,7 +37,8 @@ function spawnFakeDaemon(
         if (!isRequest(msg)) return
         requests.push(msg as Record<string, unknown>)
         if (msg.method === "register") {
-          if (opts.registerError) {
+          registerCount++
+          if (opts.registerError && registerCount >= (opts.registerErrorAfter ?? 1)) {
             socket.write(
               makeError(msg.id, opts.registerError.code, opts.registerError.message, opts.registerError.data),
             )
@@ -398,7 +401,7 @@ describe("stdio adapter delivery modes", () => {
     expect(register?.params?.takeover).toBe(true)
   })
 
-  it.fails("21049: takeover is a launch capability and is not replayed after reconnect", async () => {
+  it("21049: takeover is a launch capability and is not replayed after reconnect", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath)
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@chief"], {
@@ -434,6 +437,47 @@ describe("stdio adapter delivery modes", () => {
     }>
     expect(registrations[0]?.params).toMatchObject({ name: "@chief", takeover: true })
     expect(registrations[1]?.params?.name).toBe("@chief")
+    expect(registrations[1]?.params && "takeover" in registrations[1].params).toBe(false)
+  })
+
+  it("21049: a displaced managed adapter exits on reconnect conflict", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath, {
+      registerError: {
+        code: -32000,
+        message: 'Name "@chief" is already taken by live pid 4242',
+        data: { existing_names: ["@chief"], holder_pid: 4242 },
+      },
+      registerErrorAfter: 2,
+    })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@chief"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "pull",
+        TRIBE_TAKEOVER: "1",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+
+    writeJson(child, initializePayload(1))
+    await waitForLine(child, (line) => line.id === 1)
+    await waitForCondition(
+      () => daemon!.requests.some((msg) => msg.method === "tribe.members"),
+      "completed initial adapter registration",
+    )
+    await new Promise((resolveTick) => setTimeout(resolveTick, 50))
+
+    daemon.clients.at(-1)?.destroy()
+    const exit = await waitForExit(child, { timeoutMs: 3_000 })
+
+    expect(exit.code).not.toBe(0)
+    const registrations = daemon.requests.filter((msg) => msg.method === "register") as Array<{
+      params?: { takeover?: boolean }
+    }>
+    expect(registrations).toHaveLength(2)
     expect(registrations[1]?.params && "takeover" in registrations[1].params).toBe(false)
   })
 
