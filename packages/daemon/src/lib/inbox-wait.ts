@@ -1,6 +1,5 @@
 import type { MessageInsertedInfo } from "./context.ts"
-
-const ACTIONABLE_TYPES = new Set(["request", "query", "verdict", "assign"])
+import { ACTIONABLE_TYPES_SET as ACTIONABLE_TYPES } from "./database.ts"
 
 export type InboxStatus = {
   session: string

@@ -123,6 +123,17 @@ export function openDatabase(path: string): Database {
   // lives on `sessions.last_delivered_seq`, and read-receipts were never
   // written by the post-event-bus code path. Fresh installs never create them.
 
+  // 19442 undead reframe — durable per-RECIPIENT actionable mailbox. One row
+  // per mailbox name; `last_actionable_seq` is the highest actionable rowid
+  // (direct request/query/verdict/assign) acknowledged for that name. Keyed by
+  // recipient — NOT session — so rename/rejoin/takeover retain the mailbox and
+  // recovery never needs to rewind a session's ambient pull cursor.
+  db.run(`CREATE TABLE IF NOT EXISTS mailbox_cursors (
+		recipient           TEXT PRIMARY KEY,
+		last_actionable_seq INTEGER NOT NULL DEFAULT 0,
+		updated_at          INTEGER NOT NULL
+	)`)
+
   db.run(`CREATE TABLE IF NOT EXISTS retros (
 		id          TEXT PRIMARY KEY,
 		tribe_start INTEGER NOT NULL,
@@ -727,11 +738,36 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 18,
+    name: "mailbox-cursors",
+    up(db) {
+      // 19442 undead reframe — recipient-keyed durable actionable cursor. The
+      // CREATE TABLE in openDatabase covers fresh installs; existing databases
+      // get the table here. No backfill: a missing row reads as cursor 0, and
+      // the first acknowledging fetch for each mailbox writes the real value.
+      db.run(`CREATE TABLE IF NOT EXISTS mailbox_cursors (
+				recipient           TEXT PRIMARY KEY,
+				last_actionable_seq INTEGER NOT NULL DEFAULT 0,
+				updated_at          INTEGER NOT NULL
+			)`)
+    },
+  },
 ]
 
 // ---------------------------------------------------------------------------
 // Prepared statements
 // ---------------------------------------------------------------------------
+
+/**
+ * The actionable message types — the ONE canonical set (19442). A DIRECT
+ * message of one of these types addressed to a name is "actionable": it opens
+ * work the recipient owes a response on. `inbox.wait` gates on it, the
+ * chief-silent watchdog counts it, and the mailbox recovery view selects it.
+ */
+export const ACTIONABLE_TYPES = ["request", "query", "verdict", "assign"] as const
+export const ACTIONABLE_TYPES_SET: ReadonlySet<string> = new Set(ACTIONABLE_TYPES)
+const ACTIONABLE_TYPES_SQL = ACTIONABLE_TYPES.map((t) => `'${t}'`).join(", ")
 
 export type TribeStatements = ReturnType<typeof createStatements>
 
@@ -866,7 +902,7 @@ export function createStatements(db: Database) {
       FROM messages
       WHERE recipient = $name
         AND kind = 'direct'
-        AND type IN ('request', 'query', 'verdict', 'assign')
+        AND type IN (${ACTIONABLE_TYPES_SQL})
         AND rowid > COALESCE((SELECT last_inbox_pull_seq FROM sessions WHERE name = $name), 0)
     `),
 
@@ -938,72 +974,55 @@ export function createStatements(db: Database) {
     touchSessionPresence: db.prepare("UPDATE sessions SET updated_at = $now WHERE id = $id"),
 
     /**
-     * Name-claim replay: find the rowid of the oldest direct message addressed
-     * to a name that no current or prior holder of that name has had delivered.
-     *
-     * "Prior holders" = session rows whose name is either the claimed name OR
-     * its tombstoned form (`<name>-dead-<id-prefix>`) — see handleJoin /
-     * handleRename for the tombstoning convention. The watermark is the MAX
-     * `last_delivered_seq` across all such rows EXCLUDING the claiming session
-     * (whose cursor was just reset to the log tail at register time and would
-     * otherwise hide all gap messages).
-     *
-     * Returns the oldest unread rowid, or null if none. The caller rewinds the
-     * claiming session's `last_inbox_pull_seq` to `rowid - 1` so the next
-     * `tribe.fetch` surfaces the gap directs.
-     *
-     * Why this matters: push delivery is session-id-bound. If A registers as
-     * "adhoc1", receives msg M1, disconnects; chief sends M2 to "adhoc1"; B
-     * connects (fresh cursor at tail) and renames to "adhoc1" — M2 is journaled
-     * but neither push-delivered nor reachable through B's default fetch (the
-     * tail-reset cursor is already past M2). See
-     * `@km/bearly/tribe-daemon-production-hardening` — name-claim replay.
+     * 19442 undead reframe — durable actionable mailbox, keyed by recipient
+     * NAME (not session). `last_actionable_seq` is the highest actionable
+     * rowid acknowledged for the mailbox. Rename/rejoin/takeover retain it,
+     * and recovery reads the actionable-only view below instead of rewinding
+     * any session's ambient pull cursor (the old rewind replayed every
+     * intervening ambient broadcast — the 97-row transcript flood).
      */
-    oldestUnreadDirectForName: db.prepare(`
-      SELECT MIN(m.rowid) AS rowid
-      FROM messages m
-      WHERE m.recipient = $name
-        AND m.kind = 'direct'
-        AND m.sender != $name
-        -- Clamp the replay to a recent horizon (@km/tribe/20002): without this,
-        -- a long-lived name with days of undrained directs rewinds the cursor to
-        -- the OLDEST unread row and replays the entire stale backlog on every
-        -- join/rename. Bounding by ts surfaces the recent gap, not all history.
-        AND m.ts >= $since_ts
-        AND m.rowid > COALESCE(
-          (
-            -- Watermark: highest seq either pushed (last_delivered_seq) OR
-            -- pulled (last_inbox_pull_seq) by any prior holder of the name.
-            -- We UNNEST both columns into a single value column and aggregate
-            -- with MAX. SQL's MAX aggregate ignores NULLs, so absent values
-            -- contribute nothing. The MAX-of-MAX scalar form doesn't compose
-            -- inside aggregate queries, so the UNION ALL is the portable shape.
-            SELECT MAX(seq) FROM (
-              SELECT s.last_delivered_seq AS seq
-                FROM sessions s
-                WHERE s.id != $self_id
-                  AND (s.name = $name OR s.name LIKE $name || '-dead-%')
-              UNION ALL
-              SELECT s.last_inbox_pull_seq AS seq
-                FROM sessions s
-                WHERE s.id != $self_id
-                  AND (s.name = $name OR s.name LIKE $name || '-dead-%')
-            )
-          ),
-          0
-        )
+    getMailboxCursor: db.prepare("SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $recipient"),
+
+    /** Advance-only (MAX) upsert of a mailbox's acknowledged actionable seq. */
+    advanceMailboxCursor: db.prepare(`
+      INSERT INTO mailbox_cursors (recipient, last_actionable_seq, updated_at)
+      VALUES ($recipient, $seq, $now)
+      ON CONFLICT(recipient) DO UPDATE SET
+        last_actionable_seq = MAX(last_actionable_seq, $seq),
+        updated_at = $now
     `),
 
     /**
-     * Rewind a session's inbox-pull cursor IFF the proposed value is LESS than
-     * the current value. This is the only place in the codebase that lowers
-     * `last_inbox_pull_seq` (vs `advanceInboxCursor` which only ever raises it
-     * via MAX). Used by name-claim replay to expose gap directs that the
-     * register-time tail-reset would otherwise have stepped over.
+     * The actionable-only recovery view (19442): unacknowledged DIRECT
+     * actionables addressed to a mailbox, oldest first. `$upto` bounds the
+     * scan to rows the ambient window will NOT return (rowid <= the session's
+     * pull cursor) so default-drain injection never duplicates a window row.
+     * NO age horizon — recovery is lossless by design; only a mailbox-cursor
+     * acknowledgement retires a row from this view.
      */
-    rewindInboxCursor: db.prepare(
-      "UPDATE sessions SET last_inbox_pull_seq = MIN(last_inbox_pull_seq, $seq), updated_at = $now WHERE id = $id",
-    ),
+    selectUnackedActionables: db.prepare(`
+      SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary
+      FROM messages
+      WHERE recipient = $name
+        AND kind = 'direct'
+        AND sender != $name
+        AND type IN (${ACTIONABLE_TYPES_SQL})
+        AND rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+        AND rowid <= $upto
+      ORDER BY rowid ASC
+      LIMIT $limit
+    `),
+
+    /** Count-only form of the recovery view — join/rename recovery reporting. */
+    countUnackedActionables: db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM messages
+      WHERE recipient = $name
+        AND kind = 'direct'
+        AND sender != $name
+        AND type IN (${ACTIONABLE_TYPES_SQL})
+        AND rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+    `),
 
     /**
      * Apply a session's filter — single update covering persistent mode +

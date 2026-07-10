@@ -256,63 +256,31 @@ export function sendMessage(
 }
 
 /**
- * Name-claim replay — surface gap directs the new holder would otherwise miss.
+ * 19442 undead reframe — actionable-mailbox recovery.
  *
  * Push delivery is session-id-bound: a message addressed to name X is fanned
  * out to whichever live socket currently holds X. If X is unheld (the prior
- * holder disconnected) when the message lands, it journals but never fans out.
- * A subsequent session that claims X via `tribe.join` / `tribe.rename` gets
- * its `last_inbox_pull_seq` reset to the log tail at register time, so even a
- * default `tribe.fetch` will step over those gap directs.
+ * holder disconnected) when an actionable direct lands, it journals but never
+ * fans out — and the successor's register-time tail-reset would step over it.
  *
- * This function finds the oldest direct addressed to `claimedName` that has
- * NOT been delivered to any session row currently or formerly holding that
- * name (including its tombstoned `<name>-dead-<id>` form), and — if it falls
- * before the claiming session's current pull cursor — rewinds the cursor to
- * `rowid - 1`. The next `tribe.fetch({limit:...})` surfaces the gap directs
- * in chronological order.
+ * The OLD mechanism rewound the claiming session's `last_inbox_pull_seq` to
+ * the oldest missed direct, which made the next default fetch replay every
+ * intervening AMBIENT broadcast too (joins, health warns, git pushes — the
+ * 97-row transcript flood). Count/age caps bounded the flood but preserved the
+ * structural leak: journal-window guards are not a model-context admission
+ * policy.
  *
- * Returns the rowid the cursor was rewound to (null if no replay was needed).
- * Callers may optionally fire a `wakeup` notification on the live socket so
- * push-mode clients drain immediately rather than waiting for the next
- * turn-start fetch.
- *
- * See `@km/bearly/tribe-daemon-production-hardening` — gap-direct replay.
+ * The reframe: recovery never touches the ambient session cursor. A durable
+ * `mailbox_cursors` row keyed by the RECIPIENT NAME tracks the highest
+ * acknowledged actionable rowid; `handleFetch`'s default drain injects the
+ * unacknowledged actionable directs (request / query / verdict / assign —
+ * `ACTIONABLE_TYPES` in database.ts) ahead of the ambient window and
+ * acknowledges exactly what it returns. Join/rename/takeover only need to
+ * COUNT the outstanding actionables (below) and nudge the client to drain.
  */
-/**
- * Recent-gap horizon for name-claim replay (@km/tribe/20002). A reclaiming
- * session sees unread directs newer than `now - HORIZON`; older directs are NOT
- * auto-replayed (they remain in history, reachable via an explicit `from:` /
- * `since:` snapshot fetch). Bounds the cursor rewind so a long-lived name with
- * days of undrained directs no longer floods the next default-drain with stale
- * backlog. 12h covers crash/respawn + overnight reclaim gaps while excluding
- * multi-day backlog.
- */
-export const NAME_CLAIM_REPLAY_HORIZON_MS = 12 * 60 * 60 * 1000
-
-export function replayUnreadForClaimedName(
-  ctx: TribeContext,
-  claimedName: string,
-  now: number = Date.now(),
-): number | null {
-  const oldest = ctx.stmts.oldestUnreadDirectForName.get({
-    $name: claimedName,
-    $self_id: ctx.sessionId,
-    $since_ts: now - NAME_CLAIM_REPLAY_HORIZON_MS,
-  }) as { rowid: number | null } | undefined
-  const oldestRowid = oldest?.rowid ?? null
-  if (oldestRowid == null) return null
-
-  const current = ctx.stmts.getInboxCursor.get({ $id: ctx.sessionId }) as { last_inbox_pull_seq: number } | undefined
-  const currentCursor = current?.last_inbox_pull_seq ?? 0
-
-  // Only rewind when the current cursor would hide the gap directs.
-  // `oldestRowid - 1` because `getInboxRows` uses `rowid > $since`.
-  const target = oldestRowid - 1
-  if (target >= currentCursor) return null
-
-  ctx.stmts.rewindInboxCursor.run({ $id: ctx.sessionId, $seq: target, $now: now })
-  return target
+export function countUnackedActionables(ctx: TribeContext, recipient: string): number {
+  const row = ctx.stmts.countUnackedActionables.get({ $name: recipient }) as { count: number } | undefined
+  return row?.count ?? 0
 }
 
 /**

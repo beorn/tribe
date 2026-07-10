@@ -819,12 +819,13 @@ function drainDaemonInbox(): void {
     try {
       do {
         drainAgain = false
-        // Connection-time replay cap (km @km/tribe/19442): one bounded drain
-        // advances the session cursor for every fetched row, but only a recent,
-        // capped subset is surfaced as <channel> envelopes. A large stale backlog
-        // used to be forwarded wholesale (limit:500 looped until empty), flooding
-        // agent context on connect. Older/excess events are still drained (the
-        // cursor moves past them, so they never re-arrive) — just not replayed.
+        // 19442: against a current daemon this drain returns only unacked
+        // actionable directs (the durable mailbox) plus genuinely-new rows —
+        // a claim/rename floods nothing by construction. The replay cap below
+        // is the STALE-DAEMON BACKSTOP: a legacy daemon that still rewinds
+        // cursors can dump a large backlog, and only a recent, capped subset
+        // may reach the model as <channel> envelopes. Excess rows are still
+        // drained (the cursor moves past them) — just not replayed.
         const result = parseToolText<TribeFetchResult>(await daemon?.call("tribe.fetch", { limit: 500 }))
         const events = result?.events ?? []
         const { forward, skippedOld, capped } = selectReplayEvents(events, { now: Date.now() })

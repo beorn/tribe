@@ -11,13 +11,8 @@ import type { TribeRole } from "tribe-wire/lib/config"
 const log = createLogger("tribe:handlers")
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { validateName, sanitizeMessage } from "./validation.ts"
-import {
-  sendMessage,
-  deriveSummary,
-  logEvent,
-  replayUnreadForClaimedName,
-  type SenderAttribution,
-} from "./messaging.ts"
+import { sendMessage, deriveSummary, logEvent, countUnackedActionables, type SenderAttribution } from "./messaging.ts"
+import { ACTIONABLE_TYPES_SET } from "./database.ts"
 import { isPidAlive as pidStillAlive, registerSession } from "./session.ts"
 import { gatherCodePin } from "./code-pin.ts"
 import { senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
@@ -287,11 +282,12 @@ export type HandlerOpts = {
   }
   /**
    * Optional: fire a JSON-RPC `wakeup` notification at the claiming session's
-   * live socket so push-mode clients drain gap directs immediately, without
-   * waiting for the next turn-start `tribe.fetch`. Daemon wires this through
-   * the broadcast capability; tests / smoke harness omit it (the cursor
-   * rewind is durable in the DB regardless — the wakeup is an opportunistic
-   * nudge). See `replayUnreadForClaimedName` in messaging.ts.
+   * live socket so push-mode clients drain recovered actionables immediately,
+   * without waiting for the next turn-start `tribe.fetch`. Daemon wires this
+   * through the broadcast capability; tests / smoke harness omit it (the
+   * mailbox state is durable in the DB regardless — the wakeup is an
+   * opportunistic nudge). See `countUnackedActionables` in messaging.ts and
+   * the mailbox injection in `handleFetch`.
    */
   notifyWakeupForReplay?: (sessionId: string, claimedName: string) => void
 }
@@ -746,15 +742,13 @@ function handleRename(
   ctx.stmts.renameSession.run({ $new_name: newName, $session_id: ctx.sessionId, $now: Date.now() })
   ctx.setName(newName)
   opts.setUserRenamed(true) // Explicit rename — name is now sticky, won't be overridden
-  // Name-claim replay: rewind the pull cursor so any direct messages addressed
-  // to `newName` that arrived while the name was unheld (or held by a session
-  // that disconnected before delivery) surface on the next `tribe.fetch`.
-  // Push delivery is session-id-bound; the rename re-binds the name to this
-  // session but the register-time tail-reset would otherwise hide gap directs.
-  // See `replayUnreadForClaimedName` for the semantics.
-  const replayedTo = replayUnreadForClaimedName(ctx, newName)
-  if (replayedTo !== null) {
-    log.info?.(`name-claim replay: cursor rewound to ${replayedTo} for "${newName}" (rename)`)
+  // Actionable-mailbox recovery (19442): the mailbox travels with the NAME.
+  // Any unacknowledged actionable directs addressed to `newName` surface on
+  // the next default `tribe.fetch` (injected ahead of the ambient window) —
+  // no cursor rewind, no ambient replay. Here we only count and nudge.
+  const recoveredActionables = countUnackedActionables(ctx, newName)
+  if (recoveredActionables > 0) {
+    log.info?.(`actionable-recovery: ${recoveredActionables} unacked actionable(s) await "${newName}" (rename)`)
     opts.notifyWakeupForReplay?.(ctx.sessionId, newName)
   }
   // Broadcast the rename
@@ -764,7 +758,7 @@ function handleRename(
     renamed: true,
     old_name: oldName,
     new_name: newName,
-    ...(replayedTo !== null ? { replayed_cursor: replayedTo } : {}),
+    ...(recoveredActionables > 0 ? { recovered_actionables: recoveredActionables } : {}),
   })
 }
 
@@ -895,14 +889,14 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
             | undefined
         )?.delivery ?? "push")
 
-  // Name-claim replay: a session may call `tribe.join({name:"adhoc1"})` to
-  // claim a name whose prior holder disconnected without draining their
-  // inbox. A same-name join is only a refresh, not a claim; replaying there
-  // ignores this session's own drained cursor and can rewind default fetch
-  // into already-seen history.
-  const replayedTo = prevName === joinName ? null : replayUnreadForClaimedName(ctx, joinName)
-  if (replayedTo !== null) {
-    log.info?.(`name-claim replay: cursor rewound to ${replayedTo} for "${joinName}" (join)`)
+  // Actionable-mailbox recovery (19442): claiming a name inherits its durable
+  // mailbox — any unacknowledged actionable directs surface on the next
+  // default `tribe.fetch` without touching the ambient session cursor. A
+  // same-name join is only a refresh, and the mailbox cursor already reflects
+  // everything this session has acknowledged, so counting is claim-only.
+  const recoveredActionables = prevName === joinName ? 0 : countUnackedActionables(ctx, joinName)
+  if (recoveredActionables > 0) {
+    log.info?.(`actionable-recovery: ${recoveredActionables} unacked actionable(s) await "${joinName}" (join)`)
     opts.notifyWakeupForReplay?.(ctx.sessionId, joinName)
   }
 
@@ -923,7 +917,7 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     previous_name: joinName !== prevName ? prevName : undefined,
     // 15654 Part 1 — notification-semantics primer. See TRIBE_JOIN_PRIMER docstring.
     primer: TRIBE_JOIN_PRIMER,
-    ...(replayedTo !== null ? { replayed_cursor: replayedTo } : {}),
+    ...(recoveredActionables > 0 ? { recovered_actionables: recoveredActionables } : {}),
   })
 }
 
@@ -1296,11 +1290,26 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
     rows = querySnapshotRows(ctx, { ...snapshotFilters, limit })
     shouldAdvance = !topicsAreSnapshot && since !== null && a.advance === true
   } else {
-    rows = ctx.stmts.getInboxRows.all({
-      $since: cursorBase,
+    // 19442 — inject unacknowledged actionable directs (the durable mailbox)
+    // ahead of the ambient window. Recovery rows are bounded to rowid <=
+    // cursorBase, so they can never duplicate a window row, and the ambient
+    // session cursor is never rewound — a claim/rename floods nothing. See
+    // selectUnackedActionables in database.ts.
+    const recovered = ctx.stmts.selectUnackedActionables.all({
       $name: currentName,
+      $upto: cursorBase,
       $limit: limit,
     }) as FetchRow[]
+    const windowBudget = limit - recovered.length
+    const windowRows =
+      windowBudget > 0
+        ? (ctx.stmts.getInboxRows.all({
+            $since: cursorBase,
+            $name: currentName,
+            $limit: windowBudget,
+          }) as FetchRow[])
+        : []
+    rows = [...recovered, ...windowRows]
     shouldAdvance = !topicsAreSnapshot && a.advance !== false
   }
 
@@ -1316,6 +1325,24 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
       const seq = Math.max(cursorBase, last.rowid)
       ctx.stmts.advanceInboxCursor.run({ $id: ctx.sessionId, $seq: seq, $now: Date.now() })
       outputCursor = seq
+    }
+  }
+
+  // 19442 — acknowledge returned actionables into the durable mailbox. The
+  // caller is about to see `filtered`; every actionable direct in it (typed
+  // per ACTIONABLE_TYPES, addressed to this name, not self-sent) advances the
+  // recipient-keyed mailbox cursor so no later claim of this name re-recovers
+  // it. Advance-only. A trust- or topic-excluded row is policy-excluded, not
+  // "unseen" — it never blocks the cursor.
+  if (shouldAdvance) {
+    let lastActionable = 0
+    for (const r of filtered) {
+      if (r.recipient === currentName && r.sender !== currentName && ACTIONABLE_TYPES_SET.has(r.type)) {
+        lastActionable = Math.max(lastActionable, r.rowid)
+      }
+    }
+    if (lastActionable > 0) {
+      ctx.stmts.advanceMailboxCursor.run({ $recipient: currentName, $seq: lastActionable, $now: Date.now() })
     }
   }
 

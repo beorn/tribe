@@ -726,7 +726,14 @@ describe("stdio adapter delivery modes", () => {
     expect(forwarded.length).toBe(3)
   })
 
-  it("bounds wakeup drain replay to recent capped events", async () => {
+  // 19442 reframe note: with the mailbox-cursor daemon the drain returns only
+  // unacked actionables + genuinely-new rows, so this cap never bites in
+  // steady state. It remains as the STALE-DAEMON BACKSTOP — the fake daemon
+  // below emulates a legacy daemon dumping a 100+ row backlog, and the
+  // adapter must still bound what reaches the model. The end-state invariant
+  // (exactly the actionable, zero ambient) lives in
+  // actionable-recovery-journey.test.ts against the REAL daemon.
+  it("bounds wakeup drain replay to recent capped events (stale-daemon backstop)", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const now = Date.now()
     const oldTs = new Date(now - 25 * 60 * 60 * 1000).toISOString()
