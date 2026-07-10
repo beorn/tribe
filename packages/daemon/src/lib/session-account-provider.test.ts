@@ -97,6 +97,32 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
     expect(corrected).toMatchObject({ account: "d@delei.org", provider: "codex" })
   })
 
+  it("a join without a prior self-row records the connected client's real pid, not 0 (21052)", () => {
+    const sessionId = "sess-cli-join"
+    const ctx = makeContext(db, stmts, sessionId, "@agent/7")
+    const opts: HandlerOpts = {
+      ...makeOpts(new Set([sessionId])),
+      getActiveSessionInfo: () => [
+        {
+          id: sessionId,
+          name: "@agent/7",
+          pid: 4242,
+          role: "member",
+          claudeSessionId: null,
+          registeredAt: Date.now(),
+        },
+      ],
+    }
+
+    // NO registerSession first — the join's late-registration branch
+    // (hasSelfRow=false) previously hardcoded pid 0, planting rows that defeat
+    // every isPidAlive liveness check downstream (the 19442 pid-0 ghost class).
+    handleToolCall(ctx, "tribe.join", { name: "@agent/7", delivery: "pull" }, opts)
+
+    const row = db.prepare("SELECT pid FROM sessions WHERE id = ?").get(sessionId) as { pid: number } | null
+    expect(row?.pid).toBe(4242)
+  })
+
   it("a join that omits account/provider preserves the existing labels", () => {
     const sessionId = "sess-agent"
     const ctx = makeContext(db, stmts, sessionId, "@agent/6")

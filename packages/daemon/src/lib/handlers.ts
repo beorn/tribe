@@ -809,12 +809,17 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   } | null
   if (!hasSelfRow) {
     const requestedDelivery = a.delivery === "push" || a.delivery === "pull" ? a.delivery : undefined
+    // 21052 — carry the connected client's REAL pid into the late-registration
+    // row. A hardcoded 0 here planted pid-0 rows that defeat every isPidAlive
+    // liveness check downstream (ghost holders that can never be evicted — the
+    // 19442 agent/4 class).
+    const selfPid = opts.getActiveSessionInfo().find((s) => s.id === ctx.sessionId)?.pid ?? 0
     registerSession(
       ctx,
       undefined,
       (sessionId) => opts.getActiveSessionIds().has(sessionId),
       identityToken,
-      0,
+      selfPid,
       requestedDelivery,
       process.cwd(),
       joinAccount,
