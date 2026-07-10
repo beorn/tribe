@@ -7,9 +7,16 @@
  */
 
 import type { Database } from "bun:sqlite"
+import { createLogger } from "loggily"
 import { openDatabase, createStatements, type TribeStatements } from "../database.ts"
+import { sweepDeadSessionRows } from "../session.ts"
 import type { BaseTribe } from "./base.ts"
 import type { WithConfig } from "./with-config.ts"
+
+const log = createLogger("tribe:daemon:db")
+
+/** 21052 — takeover tombstones older than this are GC'd at startup. */
+const DEAD_SESSION_ROW_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 
 export interface WithDatabase {
   readonly db: Database
@@ -19,6 +26,8 @@ export interface WithDatabase {
 export function withDatabase<T extends BaseTribe & WithConfig>(): (t: T) => T & WithDatabase {
   return (t) => {
     const db = openDatabase(t.config.dbPath)
+    const swept = sweepDeadSessionRows(db, DEAD_SESSION_ROW_MAX_AGE_MS)
+    if (swept > 0) log.info?.(`startup GC: swept ${swept} -dead- session tombstone row(s) older than 7d`)
     const stmts = createStatements(db)
     t.scope.defer(() => {
       try {

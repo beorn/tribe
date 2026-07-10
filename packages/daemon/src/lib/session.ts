@@ -43,6 +43,17 @@ function listSessionNames(ctx: TribeContext, isActive?: (sessionId: string) => b
     .sort()
 }
 
+/** 21052 — GC takeover tombstones at daemon startup. Rename-on-takeover leaves
+ *  `<name>-dead-<id8>` rows behind forever (452 accumulated by 2026-07-10);
+ *  they are forensic breadcrumbs, not routable identities, so rows older than
+ *  `maxAgeMs` are swept. Returns the number of rows deleted. Never touches
+ *  live-named rows — the GLOB is anchored to the tombstone convention. */
+export function sweepDeadSessionRows(db: import("bun:sqlite").Database, maxAgeMs: number, nowMs = Date.now()): number {
+  const cutoff = nowMs - maxAgeMs
+  const res = db.prepare("DELETE FROM sessions WHERE name GLOB '*-dead-*' AND updated_at < ?").run(cutoff)
+  return Number(res.changes ?? 0)
+}
+
 /** True iff the given OS PID exists and we have permission to signal it.
  *  Used by spawn-time identity binding to differentiate "zombie session
  *  the daemon thinks is alive but whose owning process is gone" from

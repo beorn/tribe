@@ -27,7 +27,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { createTribeContext, type TribeContext } from "./context.ts"
-import { registerSession } from "./session.ts"
+import { registerSession, sweepDeadSessionRows } from "./session.ts"
 import { handleToolCall, type HandlerOpts } from "./handlers.ts"
 
 const PROJECT_ID = "acct-provider-proj"
@@ -95,6 +95,24 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
 
     const corrected = membersFor(ctx, opts, "@chief")
     expect(corrected).toMatchObject({ account: "d@delei.org", provider: "codex" })
+  })
+
+  it("sweepDeadSessionRows GCs only -dead- tombstones older than the max age (21052)", () => {
+    const now = Date.now()
+    const mk = (sid: string, name: string) => {
+      const c = makeContext(db, stmts, sid, name)
+      registerSession(c, PROJECT_ID, () => false, null, 1234, "pull", "/repo", null, null)
+    }
+    mk("s-old-dead", "@agent/5-dead-aaaa1111")
+    mk("s-fresh-dead", "@agent/5-dead-bbbb2222")
+    mk("s-live", "@agent/5")
+    db.prepare("UPDATE sessions SET updated_at = ? WHERE id = 's-old-dead'").run(now - 8 * 24 * 3600 * 1000)
+
+    const swept = sweepDeadSessionRows(db, 7 * 24 * 3600 * 1000, now)
+
+    expect(swept).toBe(1)
+    const names = (db.prepare("SELECT name FROM sessions").all() as Array<{ name: string }>).map((r) => r.name).sort()
+    expect(names).toEqual(["@agent/5", "@agent/5-dead-bbbb2222"])
   })
 
   it("a join without a prior self-row records the connected client's real pid, not 0 (21052)", () => {
