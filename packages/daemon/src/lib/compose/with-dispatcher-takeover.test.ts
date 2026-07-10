@@ -65,6 +65,7 @@ type RegisterParams = {
   project: string
   claudeSessionName?: string
   takeover?: boolean
+  identityToken?: string
 }
 
 let cleanup: (() => Promise<void>) | null = null
@@ -188,6 +189,107 @@ describe("dispatcher explicit-persona takeover (@ag/tribe/20703)", () => {
     expect(agentSessions).toHaveLength(1)
     expect(agentSessions[0]?.pid).toBe(5001)
     expect(harness.supersededEvents("@agent/79")).toHaveLength(0)
+  })
+})
+
+describe("asymmetric identity displacement (@ag/tribe/21052)", () => {
+  // The 19442 agent/4 adapter-death class: a token-less carrier (CLI drains
+  // register with no identityToken) grabs a persona name across a daemon
+  // restart; the managed adapter's re-register then hits NameConflictError and
+  // its 20703 squatter-cleanup exit kills it permanently — the "squatter"
+  // verdict was wrong. A token-BEARING explicit-persona claim must displace a
+  // token-LESS live holder WITHOUT takeover. One-directional by construction:
+  // token-less claimants never displace, and token-vs-token keeps fail-loud
+  // semantics so 21049's mutual-eviction loop stays impossible.
+  it("(a) token-bearing explicit claim supersedes a token-less live holder without takeover", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const holderSocket = harness.addPendingClient("conn-cli-holder")
+    parseResult<RegisterResult>(
+      await harness.register("conn-cli-holder", { name: "@agent/81", pid: 6001, project: "/tmp/km-wt9-d" }),
+    )
+
+    harness.addPendingClient("conn-adapter")
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      const claimant = parseResult<RegisterResult>(
+        await harness.register("conn-adapter", {
+          name: "@agent/81",
+          pid: 6002,
+          project: "/tmp/km-wt9-d",
+          identityToken: "tok-agent81",
+        }),
+      )
+      expect(claimant.name).toBe("@agent/81")
+      expect(holderSocket.destroyedByDispatcher).toBe(true)
+
+      const status = parseResult<CliStatusResult>(await harness.cliStatus())
+      const agentSessions = status.sessions.filter((s) => s.name === "@agent/81")
+      expect(agentSessions).toHaveLength(1)
+      expect(agentSessions[0]?.pid).toBe(6002)
+
+      const events = harness.supersededEvents("@agent/81")
+      expect(events).toHaveLength(1)
+      expect(events[0]).toMatchObject({
+        name: "@agent/81",
+        old_pid: 6001,
+        new_pid: 6002,
+        reason: "identity displacement of token-less holder (21052)",
+      })
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it("(b) loop-proof pin: token-bearing vs token-bearing still fails loud (21049 unchanged)", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    harness.addPendingClient("conn-adapter-1")
+    parseResult<RegisterResult>(
+      await harness.register("conn-adapter-1", {
+        name: "@agent/82",
+        pid: 7001,
+        project: "/tmp/km-wt9-e",
+        identityToken: "tok-first",
+      }),
+    )
+
+    harness.addPendingClient("conn-adapter-2")
+    const err = parseError(
+      await harness.register("conn-adapter-2", {
+        name: "@agent/82",
+        pid: 7002,
+        project: "/tmp/km-wt9-e",
+        identityToken: "tok-second",
+      }),
+    )
+    expect(err.message).toBe('Name "@agent/82" is already taken by live pid 7001')
+    expect(harness.supersededEvents("@agent/82")).toHaveLength(0)
+  })
+
+  it("(c) token-less claimant never displaces a token-bearing holder", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const holderSocket = harness.addPendingClient("conn-adapter-holder")
+    parseResult<RegisterResult>(
+      await harness.register("conn-adapter-holder", {
+        name: "@agent/83",
+        pid: 8001,
+        project: "/tmp/km-wt9-f",
+        identityToken: "tok-holder",
+      }),
+    )
+
+    harness.addPendingClient("conn-cli-claimant")
+    const err = parseError(
+      await harness.register("conn-cli-claimant", { name: "@agent/83", pid: 8002, project: "/tmp/km-wt9-f" }),
+    )
+    expect(err.message).toBe('Name "@agent/83" is already taken by live pid 8001')
+    expect(holderSocket.destroyedByDispatcher).toBe(false)
+    expect(harness.supersededEvents("@agent/83")).toHaveLength(0)
   })
 })
 

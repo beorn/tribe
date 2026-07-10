@@ -429,6 +429,37 @@ export function withDispatcher<
               }
             }
 
+            // 21052 — asymmetric identity displacement. A token-BEARING explicit-
+            // persona claim supersedes a token-LESS live holder WITHOUT takeover:
+            // unmanaged carriers (CLI drains register with no identityToken) can
+            // grab a persona name across a daemon restart and then the managed
+            // adapter's re-register conflict exit — 20703's squatter cleanup,
+            // correct for adapter-vs-adapter — permanently kills the wrong party
+            // (the 19442 agent/4 adapter death). One-directional by construction:
+            // a token-less claimant never displaces anyone, and token-vs-token
+            // keeps fail-loud semantics, so 21049's mutual-eviction loop stays
+            // impossible.
+            if (typeof p.name === "string" && identityToken) {
+              const holder = Array.from(clients.values()).find((c) => c.id !== connId && c.name === resolvedName)
+              if (holder) {
+                const holderRow = db
+                  .prepare("SELECT identity_token FROM sessions WHERE id = ?")
+                  .get(holder.ctx.sessionId) as { identity_token: string | null } | null
+                if (!holderRow?.identity_token) {
+                  log.warn?.(
+                    `identity displacement: superseding token-less holder of "${resolvedName}" (old pid ${holder.pid}, old session ${holder.ctx.sessionId}, new pid ${clientPid})`,
+                  )
+                  logEvent(holder.ctx, "session.superseded", undefined, {
+                    name: resolvedName,
+                    old_pid: holder.pid,
+                    new_pid: clientPid,
+                    reason: "identity displacement of token-less holder (21052)",
+                  })
+                  retireReplacedClient(holder)
+                }
+              }
+            }
+
             const name = deduplicateName(resolvedName)
             const domains = (p.domains as string[]) ?? []
             const peerSocket = (p.peerSocket as string) ?? null
