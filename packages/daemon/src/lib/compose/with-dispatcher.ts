@@ -80,6 +80,25 @@ export interface DispatcherRuntimeHooks {
  */
 export type MethodHandler = (params: Record<string, unknown>, ctx: { connId: string }) => unknown | Promise<unknown>
 
+/**
+ * 19442-r2 — per-name session-announce debounce (SLIDING window). The first
+ * announce for a name passes; further join/left announces for the same name
+ * inside `windowMs` are suppressed, and every attempt — suppressed or not —
+ * re-arms the window, so a seat churning faster than the window stays silent
+ * until it stabilizes for a full window. `windowMs <= 0` disables the gate
+ * (TRIBE_NO_SUPPRESS parity). Pure over the caller-supplied clock so the
+ * churn-storm class is deterministically unit-testable.
+ */
+export function createSessionAnnounceGate(windowMs: number): (name: string, nowMs: number) => boolean {
+  const lastAttemptByName = new Map<string, number>()
+  return (name, nowMs) => {
+    if (windowMs <= 0) return true
+    const last = lastAttemptByName.get(name)
+    lastAttemptByName.set(name, nowMs)
+    return last === undefined || nowMs - last > windowMs
+  }
+}
+
 export interface Dispatcher {
   /** The accept-handler the socket server invokes. */
   handleConnection: (socket: NetSocket) => void
@@ -305,8 +324,16 @@ export function withDispatcher<
       stmts.resetSessionDeliveryOffsets.run({ $id: client.ctx.sessionId, $ts: Date.now(), $seq: tailSeq })
     }
 
+    // 19442-r2 — per-name announce debounce over the same suppressWindowMs
+    // knob. The startup window below stops hot-reload storms; this gate stops
+    // CHURNING seats (a crash-looping adapter rejoining every cycle) from
+    // rebroadcasting "<name> joined/left" to every member forever after it.
+    // Journal fidelity is unaffected (event.session.joined rows always write).
+    const announceGate = createSessionAnnounceGate(suppressWindowMs)
+
     function announceJoin(client: ClientSession): void {
       if (Date.now() - socket.startedAt <= suppressWindowMs) return
+      if (!announceGate(client.name, Date.now())) return
       let parentName: string | null = null
       if (client.claudeSessionId) {
         for (const [cid, c] of clients) {
@@ -899,7 +926,12 @@ export function withDispatcher<
         const client = clients.get(connId)
         if (client && client.role !== "pending") {
           log.info?.(`Client disconnected: ${client.name}`)
-          logActivity("session", `${client.name} left`)
+          // 19442-r2 — same per-name debounce as announceJoin: a churning
+          // seat's leave/join cycles coalesce to at most one channel line per
+          // window (the daemon log line above and the journal stay complete).
+          if (announceGate(client.name, Date.now())) {
+            logActivity("session", `${client.name} left`)
+          }
         }
         broadcast.flushConnection(connId)
         broadcast.discardConnection(connId)
