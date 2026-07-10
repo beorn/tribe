@@ -20,6 +20,7 @@ import { spawn } from "node:child_process"
 import { dirname } from "node:path"
 import { createLogger } from "loggily"
 import { createLineParser } from "./parser.ts"
+import { evaluateSpawnSourceForScript } from "./lib/spawn-pin-gate.ts"
 import { isNotification, isResponse, makeNotification, makeRequest } from "./rpc.ts"
 import { createTimers } from "./timers.ts"
 
@@ -253,6 +254,18 @@ export async function connectOrStart(socketPath: string, opts?: ConnectOrStartOp
   if (!script) {
     throw new Error(`connectOrStart: no daemon at ${socketPath} and no daemonScript provided to spawn one`)
   }
+
+  // 21052 — stale-pin auto-spawn gate. During the d463c5b rollout, this exact
+  // fallback resurrected a retired daemon pin from a stale source tree the
+  // moment the old daemon was terminated for replacement. Refuse a spawn whose
+  // source is provably older than the last pin that bound this socket; the
+  // refusal leaves the caller in the normal degraded/retry path so a current
+  // daemon (or a current adapter's spawn) wins instead.
+  const pinGate = evaluateSpawnSourceForScript(script, socketPath)
+  if (!pinGate.allow) {
+    throw Object.assign(new Error(`connectOrStart: ${pinGate.reason}`), { code: "ESTALEPIN" })
+  }
+  if (pinGate.reason) log.warn?.(pinGate.reason)
 
   const args = ["--socket", socketPath, ...(opts?.daemonArgs ?? [])]
   const child = spawn(process.execPath, [script, ...args], {

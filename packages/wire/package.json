@@ -42,6 +42,7 @@
     "./lib/hot-reload": "./src/lib/hot-reload.ts",
     "./lib/transcript": "./src/lib/transcript.ts",
     "./lib/defang": "./src/lib/defang.ts",
+    "./lib/spawn-pin-gate": "./src/lib/spawn-pin-gate.ts",
     "./http": "./src/http-adapter.ts"
   },
   "publishConfig": {

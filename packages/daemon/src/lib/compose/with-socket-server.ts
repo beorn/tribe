@@ -23,6 +23,8 @@ import { createServer, type Server } from "node:net"
 import { existsSync, unlinkSync, chmodSync } from "node:fs"
 import { createLogger } from "loggily"
 import { waitForSocketAlive } from "tribe-wire/lib/socket"
+import { evaluateSpawnSourceForTree, writePinSidecar } from "tribe-wire/lib/spawn-pin-gate"
+import { STARTUP_SHA } from "../code-pin.ts"
 import type { BaseTribe } from "./base.ts"
 import type { WithConfig } from "./with-config.ts"
 
@@ -98,6 +100,15 @@ export function withSocketServer<T extends BaseTribe & WithConfig>(): (t: T) => 
       inheritedFd = true
       log.info?.(`Inherited socket fd ${inheritFd} (hot-reload)`)
     } else {
+      // 21052 — the daemon's own door of the stale-pin gate: refuse to bind
+      // when THIS source tree is provably older than the last pin that bound
+      // this socket (the adapter-side gate in connectOrStart is the first
+      // door; this one catches spawns that bypass it). Loud fail-closed.
+      const pinGate = evaluateSpawnSourceForTree(import.meta.dir, socketPath)
+      if (!pinGate.allow) {
+        throw new Error(`refusing to bind ${socketPath}: ${pinGate.reason}`)
+      }
+      if (pinGate.reason) log.warn?.(pinGate.reason)
       server = createServer()
       server.listen(socketPath, () => {
         bound = true
@@ -106,6 +117,10 @@ export function withSocketServer<T extends BaseTribe & WithConfig>(): (t: T) => 
         } catch {
           /* not all platforms support it */
         }
+        // Record the pin that now owns this socket; the sidecar deliberately
+        // survives daemon death — "the last pin that ever bound" is the
+        // reference future auto-spawns must not downgrade past.
+        writePinSidecar(socketPath, STARTUP_SHA)
       })
       log.info?.(`Listening on ${socketPath}`)
     }
