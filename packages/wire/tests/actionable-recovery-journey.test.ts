@@ -12,6 +12,18 @@
  * channel notification — zero ambient replay — and a second fresh adapter
  * claiming the same name must surface NOTHING (the durable mailbox remembers
  * the acknowledgement).
+ *
+ * 21049 launch identity contract:
+ * - The provider launcher mints a UUID-strength launch id once and overwrites
+ *   any inherited value at every provider-launch boundary. Adapters only
+ *   forward that identity; they never mint or coalesce an empty/absent id.
+ * - An absent launch id preserves legacy per-transport registration. A stale
+ *   inherited id from a dead provider parent must not adopt that dead member,
+ *   even when an unsanitized caller also inherits the explicit TRIBE_NAME.
+ * - One live launch owns one persisted member id across transport replacement
+ *   and daemon restart. Deliberate whole-launch takeover mints a new member id.
+ * - Cross-launch refusal remains the existing typed registration/name-claim
+ *   exit-2 path. This journey adds no standalone gate surface.
  */
 
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
@@ -220,8 +232,8 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
   async function spawnLaunchAdapter(
     socketPath: string,
     logName: string,
-    launchId: string,
-    opts: { takeover?: boolean } = {},
+    launchId: string | undefined,
+    opts: { takeover?: boolean; launchParentPid?: number } = {},
   ): Promise<{ child: ChildProcessWithoutNullStreams; stdout: Record<string, unknown>[]; logPath: string }> {
     const logPath = join(tmpDir, logName)
     const child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", NAME], {
@@ -233,7 +245,8 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         TRIBE_NO_AUTOSTART: "1",
         TRIBE_REQUIRE_JOIN: "0",
         TRIBE_TAKEOVER: opts.takeover === false ? "0" : "1",
-        TRIBE_LAUNCH_ID: launchId,
+        ...(launchId === undefined ? {} : { TRIBE_LAUNCH_ID: launchId }),
+        ...(opts.launchParentPid === undefined ? {} : { TRIBE_LAUNCH_PARENT_PID: String(opts.launchParentPid) }),
         DEBUG: "tribe:*",
         DEBUG_LOG: logPath,
       },
@@ -304,17 +317,25 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     await waitForCondition(() => existsSync(socketPath), "daemon socket")
 
     const launchId = "provider-launch-a"
+    const launchParentPid = 41_001
     const launchAdapters = await Promise.all([
-      spawnLaunchAdapter(socketPath, "launch-adapter-1.log", launchId),
-      spawnLaunchAdapter(socketPath, "launch-adapter-2.log", launchId),
-      spawnLaunchAdapter(socketPath, "launch-adapter-3.log", launchId),
+      spawnLaunchAdapter(socketPath, "launch-adapter-1.log", launchId, { launchParentPid }),
+      spawnLaunchAdapter(socketPath, "launch-adapter-2.log", launchId, { launchParentPid }),
+      spawnLaunchAdapter(socketPath, "launch-adapter-3.log", launchId, { launchParentPid }),
     ])
 
     // Force every transport through daemon registration, then give displaced
     // transports time to reconnect. A provider launch is one logical member:
     // none of its independently spawned MCP adapters may evict another.
-    for (const [index, adapter] of launchAdapters.entries()) writeJson(adapter.child, callToolPayload(index + 2, "members", {}))
-    await new Promise((resolveTick) => setTimeout(resolveTick, 1_000))
+    for (const [index, adapter] of launchAdapters.entries())
+      writeJson(adapter.child, callToolPayload(index + 2, "members", {}))
+    await waitForCondition(
+      () =>
+        launchAdapters.every((adapter, index) => adapter.stdout.some((line) => line.id === index + 2)) ||
+        (existsSync(join(tmpDir, "daemon.log")) &&
+          readFileSync(join(tmpDir, "daemon.log"), "utf8").includes(`takeover: superseding live holder of "${NAME}"`)),
+      "all same-launch members responses or a takeover violation",
+    )
 
     const exitCodes = launchAdapters.map(({ child }) => child.exitCode)
     const logs = launchAdapters.map(({ logPath }) => (existsSync(logPath) ? readFileSync(logPath, "utf8") : ""))
@@ -324,7 +345,10 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
 
     for (const [index, adapter] of launchAdapters.entries()) {
       const id = index + 2
-      await waitForCondition(() => adapter.stdout.some((line) => line.id === id), `adapter ${index + 1} members response`)
+      await waitForCondition(
+        () => adapter.stdout.some((line) => line.id === id),
+        `adapter ${index + 1} members response`,
+      )
       const result = toolResult(adapter.stdout, id) as { sessions?: Array<{ name?: string; alive?: boolean }> }
       expect(result.sessions?.filter((session) => session.name === NAME && session.alive)).toHaveLength(1)
     }
@@ -340,6 +364,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const member = members.sessions?.find((session) => session.name === NAME)
     expect(member).toMatchObject({ launch_id: launchId })
     expect(member?.member_id).toEqual(expect.any(String))
+    const initialMemberId = member!.member_id!
     expect(member?.transport_pids?.toSorted((a, b) => a - b)).toEqual(
       launchAdapters.map(({ child }) => child.pid!).toSorted((a, b) => a - b),
     )
@@ -356,20 +381,21 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       callLaunchTool(launchAdapters[2]!, 23, "fetch", { limit: 50 }),
     ])) as [{ pending?: Array<{ request_id?: string }> }, { events?: Array<{ id?: string; content?: string }> }]
     expect(pending.pending?.some((request) => request.request_id === sent.id)).toBe(true)
-    expect(fetched.events?.some((event) => event.id === sent.id && event.content === "same-launch fan-in request")).toBe(
-      true,
-    )
+    expect(
+      fetched.events?.some((event) => event.id === sent.id && event.content === "same-launch fan-in request"),
+    ).toBe(true)
 
     // Replacing one transport inside the same provider launch retains the
     // logical member and restores the three-transport diagnostic set.
     launchAdapters[1]!.child.kill("SIGTERM")
     await once(launchAdapters[1]!.child, "exit")
-    const replacement = await spawnLaunchAdapter(socketPath, "launch-adapter-2b.log", launchId)
+    const replacement = await spawnLaunchAdapter(socketPath, "launch-adapter-2b.log", launchId, { launchParentPid })
     launchAdapters[1] = replacement
     const afterReconnect = (await callLaunchTool(replacement, 24, "members", {})) as {
-      sessions?: Array<{ name?: string; launch_id?: string; transport_pids?: number[] }>
+      sessions?: Array<{ name?: string; member_id?: string; launch_id?: string; transport_pids?: number[] }>
     }
     expect(afterReconnect.sessions?.find((session) => session.name === NAME)).toMatchObject({
+      member_id: initialMemberId,
       launch_id: launchId,
       transport_pids: expect.arrayContaining(launchAdapters.map(({ child }) => child.pid!)),
     })
@@ -385,10 +411,11 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       launchAdapters.map((adapter, index) => callLaunchTool(adapter, 30 + index, "members", {})),
     )
     for (const result of afterDaemonRestart as Array<{
-      sessions?: Array<{ name?: string; launch_id?: string; transport_pids?: number[] }>
+      sessions?: Array<{ name?: string; member_id?: string; launch_id?: string; transport_pids?: number[] }>
     }>) {
       expect(result.sessions?.filter((session) => session.name === NAME)).toHaveLength(1)
       expect(result.sessions?.find((session) => session.name === NAME)).toMatchObject({
+        member_id: initialMemberId,
         launch_id: launchId,
         transport_pids: expect.arrayContaining(launchAdapters.map(({ child }) => child.pid!)),
       })
@@ -397,6 +424,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     // A different provider launch must fail loud without takeover.
     const refused = await spawnLaunchAdapter(socketPath, "launch-b-refused.log", "provider-launch-b", {
       takeover: false,
+      launchParentPid: 42_001,
     })
     writeJson(refused.child, callToolPayload(40, "members", {}))
     await once(refused.child, "exit")
@@ -405,22 +433,58 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
 
     // A deliberate new launch with takeover supersedes the whole old launch
     // as one set, leaving no suffixed or -dead- session rows.
-    const successor = await spawnLaunchAdapter(socketPath, "launch-b-successor.log", "provider-launch-b")
+    const successor = await spawnLaunchAdapter(socketPath, "launch-b-successor.log", "provider-launch-b", {
+      launchParentPid: 42_001,
+    })
     const successorMembers = (await callLaunchTool(successor, 41, "members", {})) as {
-      sessions?: Array<{ name?: string; launch_id?: string; transport_pids?: number[] }>
+      sessions?: Array<{ name?: string; member_id?: string; launch_id?: string; transport_pids?: number[] }>
     }
     await waitForCondition(
       () => launchAdapters.every(({ child }) => child.exitCode !== null),
       "superseded launch adapters to exit",
     )
     expect(successorMembers.sessions?.filter((session) => session.name === NAME)).toEqual([
-      expect.objectContaining({ launch_id: "provider-launch-b", transport_pids: [successor.child.pid] }),
+      expect.objectContaining({
+        launch_id: "provider-launch-b",
+        transport_pids: [successor.child.pid],
+      }),
     ])
+    expect(successorMembers.sessions?.find((session) => session.name === NAME)?.member_id).not.toBe(initialMemberId)
     const db = openDatabase(dbPath)
     const rows = db.prepare("SELECT name FROM sessions ORDER BY name").all() as Array<{ name: string }>
     db.close()
     expect(rows).toEqual([{ name: NAME }])
     const finalDaemonLog = readFileSync(join(tmpDir, "daemon.log"), "utf8")
     expect(finalDaemonLog.match(/takeover: superseding live holder/g)).toHaveLength(1)
+  }, 30_000)
+
+  it.fails("does not adopt a dead launch when a new provider inherits its stale launch id", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const dbPath = join(tmpDir, "tribe.db")
+    daemonProc = spawnDaemon(socketPath, dbPath)
+    await waitForCondition(() => existsSync(socketPath), "daemon socket")
+
+    const staleLaunchId = "stale-dead-provider-launch"
+    const first = await spawnLaunchAdapter(socketPath, "stale-launch-1.log", staleLaunchId, {
+      launchParentPid: 51_001,
+    })
+    const firstMembers = (await callLaunchTool(first, 50, "members", {})) as {
+      sessions?: Array<{ name?: string; member_id?: string }>
+    }
+    const firstMemberId = firstMembers.sessions?.find((session) => session.name === NAME)?.member_id
+    expect(firstMemberId).toEqual(expect.any(String))
+    first.child.kill("SIGTERM")
+    await once(first.child, "exit")
+
+    const inherited = await spawnLaunchAdapter(socketPath, "stale-launch-2.log", staleLaunchId, {
+      launchParentPid: 52_001,
+    })
+    const inheritedMembers = (await callLaunchTool(inherited, 51, "members", {})) as {
+      sessions?: Array<{ name?: string; member_id?: string; launch_id?: string }>
+    }
+    const inheritedMember = inheritedMembers.sessions?.find((session) => session.name === NAME)
+    expect(inheritedMember).toMatchObject({ launch_id: staleLaunchId })
+    expect(inheritedMember?.member_id).toEqual(expect.any(String))
+    expect(inheritedMember?.member_id).not.toBe(firstMemberId)
   }, 30_000)
 })

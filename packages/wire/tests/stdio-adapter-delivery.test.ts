@@ -376,7 +376,7 @@ describe("stdio adapter delivery modes", () => {
     expect(register?.params?.delivery).toBe("pull")
   })
 
-  it("20703: TRIBE_TAKEOVER=1 with an explicit persona name plumbs takeover:true onto register", async () => {
+  it.fails("21049: explicit persona registration carries launch identity with takeover", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath)
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/9"], {
@@ -385,6 +385,8 @@ describe("stdio adapter delivery modes", () => {
         ...process.env,
         TRIBE_DELIVERY: "pull",
         TRIBE_TAKEOVER: "1",
+        TRIBE_LAUNCH_ID: "provider-launch-a",
+        TRIBE_LAUNCH_PARENT_PID: "41001",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
       },
@@ -395,10 +397,39 @@ describe("stdio adapter delivery modes", () => {
     await waitForLine(child, (line) => line.id === 1)
 
     const register = daemon.requests.find((msg) => msg.method === "register") as
-      | { params?: { name?: string; takeover?: boolean } }
+      | { params?: { name?: string; takeover?: boolean; launchId?: string; launchParentPid?: number } }
       | undefined
     expect(register?.params?.name).toBe("@agent/9")
     expect(register?.params?.takeover).toBe(true)
+    expect(register?.params?.launchId).toBe("provider-launch-a")
+    expect(register?.params?.launchParentPid).toBe(41_001)
+  })
+
+  it("21049: absent launch identity preserves legacy per-transport registration", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath)
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/9"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "pull",
+        TRIBE_TAKEOVER: "1",
+        TRIBE_LAUNCH_ID: "",
+        TRIBE_LAUNCH_PARENT_PID: "",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+
+    writeJson(child, initializePayload(1))
+    await waitForLine(child, (line) => line.id === 1)
+
+    const register = daemon.requests.find((msg) => msg.method === "register") as
+      | { params?: { launchId?: string; launchParentPid?: number } }
+      | undefined
+    expect(register?.params && "launchId" in register.params).toBe(false)
+    expect(register?.params && "launchParentPid" in register.params).toBe(false)
   })
 
   it("21049: takeover is a launch capability and is not replayed after reconnect", async () => {
