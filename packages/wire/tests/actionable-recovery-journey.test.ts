@@ -14,7 +14,7 @@
  * the acknowledgement).
  */
 
-import { existsSync, mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -150,6 +150,13 @@ function channelNotifications(lines: Record<string, unknown>[]): Record<string, 
   return lines.filter((line) => line.method === "notifications/claude/channel")
 }
 
+function toolResult(lines: Record<string, unknown>[], id: number): unknown {
+  const response = lines.find((line) => line.id === id)
+  const result = response?.result as { content?: Array<{ text?: string }> } | undefined
+  const text = result?.content?.[0]?.text
+  return typeof text === "string" ? JSON.parse(text) : undefined
+}
+
 describe("19442 actionable-recovery journey (real daemon + real adapter)", () => {
   let tmpDir: string
   let daemonProc: ChildProcessWithoutNullStreams | undefined
@@ -174,7 +181,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         ...process.env,
         TRIBE_NO_PLUGINS: "1",
         TRIBE_ACTIVITY_LOG: join(tmpDir, "activity.jsonl"),
+        DEBUG: "tribe:*",
         DEBUG_LOG: join(tmpDir, "daemon.log"),
+        LOG_FILE: join(tmpDir, "daemon.log"),
       },
       stdio: ["pipe", "pipe", "pipe"],
     })
@@ -207,6 +216,35 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     return { child, stdout }
   }
 
+  async function spawnLaunchAdapter(
+    socketPath: string,
+    logName: string,
+    launchId: string,
+  ): Promise<{ child: ChildProcessWithoutNullStreams; stdout: Record<string, unknown>[]; logPath: string }> {
+    const logPath = join(tmpDir, logName)
+    const child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", NAME], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "pull",
+        TRIBE_PULL_TRANSPORT: "mcp",
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_REQUIRE_JOIN: "0",
+        TRIBE_TAKEOVER: "1",
+        TRIBE_LAUNCH_ID: launchId,
+        DEBUG: "tribe:*",
+        DEBUG_LOG: logPath,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    adapters.push(child)
+    const stdout = collectStdoutJson(child)
+    writeJson(child, initializePayload(1))
+    await waitForCondition(() => stdout.some((line) => line.id === 1), `${logName} initialize response`)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    return { child, stdout, logPath }
+  }
+
   it("claiming the loaded name forwards EXACTLY the one actionable; a reconnect forwards none", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const dbPath = join(tmpDir, "tribe.db")
@@ -237,5 +275,50 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const second = await spawnAdapterAndJoin(socketPath, "adapter-2.log")
     await new Promise((resolveTick) => setTimeout(resolveTick, 700))
     expect(channelNotifications(second.stdout)).toHaveLength(0)
+  }, 30_000)
+
+  it.fails("fans three native adapters from one provider launch into one live member", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const dbPath = join(tmpDir, "tribe.db")
+    daemonProc = spawnDaemon(socketPath, dbPath)
+    await waitForCondition(() => existsSync(socketPath), "daemon socket")
+
+    const launchId = "provider-launch-a"
+    const launchAdapters = await Promise.all([
+      spawnLaunchAdapter(socketPath, "launch-adapter-1.log", launchId),
+      spawnLaunchAdapter(socketPath, "launch-adapter-2.log", launchId),
+      spawnLaunchAdapter(socketPath, "launch-adapter-3.log", launchId),
+    ])
+
+    // Force every transport through daemon registration, then give displaced
+    // transports time to reconnect. A provider launch is one logical member:
+    // none of its independently spawned MCP adapters may evict another.
+    for (const [index, adapter] of launchAdapters.entries()) {
+      writeJson(adapter.child, callToolPayload(index + 2, "members", {}))
+    }
+    await new Promise((resolveTick) => setTimeout(resolveTick, 1_000))
+
+    const exitCodes = launchAdapters.map(({ child }) => child.exitCode)
+    const logs = launchAdapters.map(({ logPath }) => (existsSync(logPath) ? readFileSync(logPath, "utf8") : ""))
+    expect(exitCodes, logs.join("\n--- adapter ---\n")).toEqual([null, null, null])
+    const daemonLog = readFileSync(join(tmpDir, "daemon.log"), "utf8")
+    expect(daemonLog).not.toContain(`takeover: superseding live holder of "${NAME}"`)
+
+    for (const [index, adapter] of launchAdapters.entries()) {
+      const id = index + 2
+      try {
+        await waitForCondition(
+          () => adapter.stdout.some((line) => line.id === id),
+          `adapter ${index + 1} members response`,
+        )
+      } catch (error) {
+        const log = existsSync(adapter.logPath) ? readFileSync(adapter.logPath, "utf8") : "(no adapter log)"
+        throw new Error(
+          `${error instanceof Error ? error.message : String(error)}; exit=${String(adapter.child.exitCode)}\n${log}`,
+        )
+      }
+      const result = toolResult(adapter.stdout, id) as { sessions?: Array<{ name?: string; alive?: boolean }> }
+      expect(result.sessions?.filter((session) => session.name === NAME && session.alive)).toHaveLength(1)
+    }
   }, 30_000)
 })
