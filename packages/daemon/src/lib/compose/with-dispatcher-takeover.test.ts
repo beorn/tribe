@@ -66,6 +66,8 @@ type RegisterParams = {
   claudeSessionName?: string
   takeover?: boolean
   identityToken?: string
+  launchId?: string
+  launchParentPid?: number
 }
 
 let cleanup: (() => Promise<void>) | null = null
@@ -78,6 +80,55 @@ afterEach(async () => {
 })
 
 describe("dispatcher explicit-persona takeover (@ag/tribe/20703)", () => {
+  it("rejects partial launch identity instead of silently downgrading to legacy registration", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    harness.addPendingClient("conn-id-only")
+    const idOnly = parseError(
+      await harness.register("conn-id-only", {
+        name: "@agent/76",
+        pid: 2901,
+        project: "/tmp/km-wt9-partial",
+        launchId: "provider-launch-a",
+      }),
+    )
+    expect(idOnly).toMatchObject({
+      code: -32602,
+      message: "register requires launchId and launchParentPid together; omit both for legacy transport registration",
+    })
+
+    harness.addPendingClient("conn-parent-only")
+    const parentOnly = parseError(
+      await harness.register("conn-parent-only", {
+        name: "@agent/76",
+        pid: 2902,
+        project: "/tmp/km-wt9-partial",
+        launchParentPid: 100,
+      }),
+    )
+    expect(parentOnly).toMatchObject({
+      code: -32602,
+      message: "register requires launchId and launchParentPid together; omit both for legacy transport registration",
+    })
+
+    harness.addPendingClient("conn-invalid-pair")
+    const invalidPair = parseError(
+      await harness.register("conn-invalid-pair", {
+        name: "@agent/76",
+        pid: 2903,
+        project: "/tmp/km-wt9-partial",
+        launchId: " ",
+        launchParentPid: 0,
+      }),
+    )
+    expect(invalidPair).toMatchObject({
+      code: -32602,
+      message:
+        "register launch identity requires a non-empty launchId and positive integer launchParentPid; omit both for legacy transport registration",
+    })
+  })
+
   it("(a) regression pin: without takeover, an explicit-name collision from a different live pid still fails loud", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose

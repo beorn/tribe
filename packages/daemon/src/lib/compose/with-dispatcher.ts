@@ -350,14 +350,28 @@ export function withDispatcher<
             const claudeSessionName = (p.claudeSessionName as string) ?? null
             const claudeSessionId = (p.claudeSessionId as string) ?? null
             const identityToken = (p.identityToken as string) ?? null
+            const hasLaunchId = p.launchId !== undefined && p.launchId !== null
+            const hasLaunchParentPid = p.launchParentPid !== undefined && p.launchParentPid !== null
+            if (hasLaunchId !== hasLaunchParentPid) {
+              return makeError(
+                id,
+                -32602,
+                "register requires launchId and launchParentPid together; omit both for legacy transport registration",
+              )
+            }
             const launchIdRaw = typeof p.launchId === "string" ? p.launchId.trim() : ""
             const launchParentPidRaw = Number(p.launchParentPid ?? 0)
-            // Launch identity is all-or-nothing. Empty/partial input stays on
-            // the legacy per-transport path and can never accidentally fan in.
-            const launchIdentity =
+            const launchIdentityValid =
               launchIdRaw.length > 0 && Number.isSafeInteger(launchParentPidRaw) && launchParentPidRaw > 0
-                ? { id: launchIdRaw, parentPid: launchParentPidRaw }
-                : null
+            if (hasLaunchId && !launchIdentityValid) {
+              return makeError(
+                id,
+                -32602,
+                "register launch identity requires a non-empty launchId and positive integer launchParentPid; omit both for legacy transport registration",
+              )
+            }
+            // Only complete absence selects legacy per-transport semantics.
+            const launchIdentity = launchIdentityValid ? { id: launchIdRaw, parentPid: launchParentPidRaw } : null
 
             let role = detectRole(db, { role: p.role as string | undefined })
             if (role === "daemon" || role === "pending") role = "member"
