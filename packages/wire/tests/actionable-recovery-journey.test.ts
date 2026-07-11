@@ -37,6 +37,7 @@ import { createStatements, openDatabase } from "../../daemon/src/lib/database.ts
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ADAPTER = resolve(HERE, "../src/stdio-adapter.ts")
+const CLI = resolve(HERE, "../src/cli.ts")
 const DAEMON = resolve(HERE, "../../daemon/src/daemon.ts")
 const BUN_BIN = process.versions.bun ? process.execPath : "bun"
 const PROVIDER_PARENT_WRAPPER = `
@@ -422,6 +423,43 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(
       fetched.events?.some((event) => event.id === sent.id && event.content === "same-launch fan-in request"),
     ).toBe(true)
+
+    // A one-shot CLI inherits the managed launch environment in native Codex.
+    // It may attribute the message to the persona, but it is not a member
+    // transport: sending and then exiting must not claim, evict, or announce
+    // departure for the logical launch that owns the live MCP adapters.
+    const cli = spawn(BUN_BIN, [CLI, "send", NAME, "one-shot same-name query", "--type", "query"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_SOCKET: socketPath,
+        TRIBE_NAME: NAME,
+        TRIBE_TAKEOVER: "1",
+        TRIBE_LAUNCH_ID: launchId,
+        TRIBE_NO_AUTOSTART: "1",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+    let cliStderr = ""
+    cli.stderr.on("data", (chunk: Buffer | string) => {
+      cliStderr += chunk.toString()
+    })
+    await once(cli, "exit")
+    expect(cli.exitCode, cliStderr).toBe(0)
+    expect(launchAdapters.map(({ child }) => child.exitCode)).toEqual([null, null, null])
+    const afterCli = await Promise.all(
+      launchAdapters.map((adapter, index) => callLaunchTool(adapter, 50 + index, "members", {})),
+    )
+    for (const result of afterCli as Array<{
+      sessions?: Array<{ name?: string; member_id?: string; launch_id?: string; transport_pids?: number[] }>
+    }>) {
+      expect(result.sessions?.find((session) => session.name === NAME)).toMatchObject({
+        member_id: initialMemberId,
+        launch_id: launchId,
+        transport_pids: expect.arrayContaining(launchAdapters.map(({ child }) => child.pid!)),
+      })
+    }
+    expect(readFileSync(join(tmpDir, "activity.jsonl"), "utf8")).not.toContain(`${NAME} left`)
 
     // Replacing one transport inside the same provider launch retains the
     // logical member and restores the three-transport diagnostic set.
