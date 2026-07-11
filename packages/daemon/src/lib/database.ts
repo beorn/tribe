@@ -924,8 +924,11 @@ export function createStatements(db: Database) {
         AND rowid > COALESCE((SELECT last_inbox_pull_seq FROM sessions WHERE name = $name), 0)
     `),
 
-    // Cleanup old dedup entries (called by retention)
-    cleanupDedup: db.prepare("DELETE FROM dedup WHERE ts < $cutoff"),
+    // Cleanup short-lived poll/event dedup entries. Launch takeover keys are
+    // durable authority fences, not race-window suppression: expiring one
+    // while an old adapter can still reconnect would let its inherited
+    // takeover bit reclaim a deliberately superseded persona (21049).
+    cleanupDedup: db.prepare("DELETE FROM dedup WHERE ts < $cutoff AND key NOT LIKE 'launch-takeover:%'"),
 
     archiveExpiredMessages: db.prepare(`
 		INSERT OR IGNORE INTO messages_archive (

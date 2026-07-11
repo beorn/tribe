@@ -241,6 +241,69 @@ describe("dispatcher explicit-persona takeover (@ag/tribe/20703)", () => {
     expect(agentSessions[0]?.pid).toBe(5001)
     expect(harness.supersededEvents("@agent/79")).toHaveLength(0)
   })
+
+  it("consumes takeover once per launch so a displaced launch cannot reclaim the persona", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    harness.addPendingClient("conn-launch-a")
+    parseResult<RegisterResult>(
+      await harness.register("conn-launch-a", {
+        name: "@agent/84",
+        pid: 8401,
+        project: "/tmp/km-wt9-launch-a",
+        launchId: "provider-launch-a",
+        launchParentPid: 84,
+        takeover: true,
+      }),
+    )
+    // The generic dedup store is retention-swept. Launch authority is not a
+    // poll-race key: it must survive for the full lifetime of any adapter that
+    // can still reconnect with the inherited launch identity.
+    harness.db
+      .prepare("INSERT INTO dedup (key, session_id, ts) VALUES (?, ?, ?)")
+      .run("short-lived:test-key", "daemon-test", 0)
+    harness.cleanupDedup(Number.MAX_SAFE_INTEGER)
+    expect(harness.db.prepare("SELECT key FROM dedup ORDER BY key").all()).toEqual([
+      { key: 'launch-takeover:["@agent/84","provider-launch-a",84]' },
+    ])
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      harness.addPendingClient("conn-launch-b")
+      parseResult<RegisterResult>(
+        await harness.register("conn-launch-b", {
+          name: "@agent/84",
+          pid: 8402,
+          project: "/tmp/km-wt9-launch-b",
+          launchId: "provider-launch-b",
+          launchParentPid: 85,
+          takeover: true,
+        }),
+      )
+
+      harness.addPendingClient("conn-launch-a-replay")
+      const replay = parseError(
+        await harness.register("conn-launch-a-replay", {
+          name: "@agent/84",
+          pid: 8403,
+          project: "/tmp/km-wt9-launch-a",
+          launchId: "provider-launch-a",
+          launchParentPid: 84,
+          takeover: true,
+        }),
+      )
+      expect(replay.message).toBe('Name "@agent/84" is already taken by live pid 8402')
+
+      const status = parseResult<CliStatusResult>(await harness.cliStatus())
+      expect(status.sessions.filter((session) => session.name === "@agent/84")).toEqual([
+        expect.objectContaining({ pid: 8402 }),
+      ])
+      expect(harness.supersededEvents("@agent/84")).toHaveLength(1)
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
 })
 
 describe("asymmetric identity displacement (@ag/tribe/21052)", () => {
@@ -488,6 +551,9 @@ function createDispatcherHarness() {
       return socket
     },
     db: db as Database,
+    cleanupDedup(cutoff: number) {
+      stmts.cleanupDedup.run({ $cutoff: cutoff })
+    },
     async dispose() {
       await scope[Symbol.asyncDispose]()
     },
