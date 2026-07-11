@@ -210,11 +210,20 @@ export function withDispatcher<
       notifyWakeupForReplay,
       getDebugState: () => ({
         clients: Array.from(clients.values()).map((c) => ({
-          id: c.ctx.sessionId,
+          member_id: c.ctx.sessionId,
           name: c.name,
           role: c.role,
           pid: c.pid,
+          launch_id: c.launchId,
+          launch_parent_pid: c.launchParentPid,
           registeredAt: c.registeredAt,
+        })),
+        members: registry.getActiveSessionInfo().map((member) => ({
+          member_id: member.id,
+          name: member.name,
+          launch_id: member.launchId,
+          launch_parent_pid: member.launchParentPid,
+          transport_pids: member.transportPids,
         })),
         cursors: db.prepare("SELECT id, name, last_delivered_ts, last_delivered_seq FROM sessions").all() as Array<{
           id: string
@@ -270,6 +279,8 @@ export function withDispatcher<
         projectName: string
         projectId: string
         pid: number
+        launchId: string | null
+        launchParentPid: number | null
         claudeSessionId: string | null
         peerSocket: string | null
         ctx: TribeContext
@@ -286,6 +297,8 @@ export function withDispatcher<
         projectName: fields.projectName,
         projectId: fields.projectId,
         pid: fields.pid,
+        launchId: fields.launchId,
+        launchParentPid: fields.launchParentPid,
         claudeSessionId: fields.claudeSessionId,
         peerSocket: fields.peerSocket,
         conn: relPath(socket.socketPath),
@@ -337,6 +350,14 @@ export function withDispatcher<
             const claudeSessionName = (p.claudeSessionName as string) ?? null
             const claudeSessionId = (p.claudeSessionId as string) ?? null
             const identityToken = (p.identityToken as string) ?? null
+            const launchIdRaw = typeof p.launchId === "string" ? p.launchId.trim() : ""
+            const launchParentPidRaw = Number(p.launchParentPid ?? 0)
+            // Launch identity is all-or-nothing. Empty/partial input stays on
+            // the legacy per-transport path and can never accidentally fan in.
+            const launchIdentity =
+              launchIdRaw.length > 0 && Number.isSafeInteger(launchParentPidRaw) && launchParentPidRaw > 0
+                ? { id: launchIdRaw, parentPid: launchParentPidRaw }
+                : null
 
             let role = detectRole(db, { role: p.role as string | undefined })
             if (role === "daemon" || role === "pending") role = "member"
@@ -356,7 +377,23 @@ export function withDispatcher<
             const clientPid = Number(p.pid ?? 0)
             const clientCwd = String(p.project ?? "")
             const pidCwdAdopted = adoptByPidCwd(db, clientPid, clientCwd, isActive)
-            let adopted: PriorSession | null = pidCwdAdopted ?? adoptIdentity(db, identityToken, isActive)
+            const launchPersisted =
+              launchIdentity && typeof p.name === "string"
+                ? (db
+                    .prepare(
+                      `SELECT id, name, role FROM sessions
+                       WHERE name = ? AND launch_id = ? AND launch_parent_pid = ?
+                       LIMIT 1`,
+                    )
+                    .get(p.name, launchIdentity.id, launchIdentity.parentPid) as PriorSession | null)
+                : null
+            const launchAdopted = launchPersisted && !isActive(launchPersisted.id) ? launchPersisted : null
+            // A validated launch identity is stronger than the legacy weak
+            // identity token. Never let a new launch with different provenance
+            // adopt a dead member merely because cwd/role hashed the same.
+            let adopted: PriorSession | null = launchIdentity
+              ? (pidCwdAdopted ?? launchAdopted)
+              : (pidCwdAdopted ?? adoptIdentity(db, identityToken, isActive))
 
             if (!p.role && adopted?.role) {
               const adoptedRole = adopted.role
@@ -368,6 +405,8 @@ export function withDispatcher<
             const project = String(p.project ?? process.cwd())
             const projectName = String(p.projectName ?? project.split("/").pop() ?? "unknown")
             const projectId = String(p.projectId ?? resolveProjectId(project))
+            const domains = (p.domains as string[]) ?? []
+            const peerSocket = (p.peerSocket as string) ?? null
 
             // Names currently held by live (connected) clients — flavor
             // auto-numbering picks the lowest free integer among these.
@@ -393,6 +432,46 @@ export function withDispatcher<
               takenNames,
               clientPid,
             })
+            const launch = launchIdentity
+            const sameLaunchHolder = launch
+              ? (Array.from(clients.values()).find(
+                  (client) =>
+                    client.id !== connId &&
+                    client.name === resolvedName &&
+                    client.launchId === launch.id &&
+                    client.launchParentPid === launch.parentPid,
+                ) ?? null)
+              : null
+            if (sameLaunchHolder && launch) {
+              const client = applyClient(connId, {
+                name: sameLaunchHolder.name,
+                role: sameLaunchHolder.role,
+                domains: sameLaunchHolder.domains,
+                project,
+                projectName,
+                projectId,
+                pid: clientPid,
+                launchId: launch.id,
+                launchParentPid: launch.parentPid,
+                claudeSessionId,
+                peerSocket,
+                ctx: sameLaunchHolder.ctx,
+              })
+              log.info?.(
+                `launch fan-in: ${resolvedName} member=${client.ctx.sessionId} transport pid=${clientPid} launch=${launch.id}`,
+              )
+              const coordState = db
+                .prepare("SELECT key, value FROM coordination WHERE project_id = ?")
+                .all(projectId) as Array<{ key: string; value: string | null }>
+              return makeResponse(id, {
+                sessionId: client.ctx.sessionId,
+                name: client.name,
+                role: client.role,
+                protocolVersion: TRIBE_PROTOCOL_VERSION,
+                coordinationState: coordState,
+                daemon: { pid: process.pid, uptime: Math.floor((Date.now() - socket.startedAt) / 1000) },
+              })
+            }
             const samePidHolder = findSamePidNameHolder(resolvedName, clientPid, connId)
             if (samePidHolder) {
               adopted = { id: samePidHolder.ctx.sessionId, name: samePidHolder.name, role: samePidHolder.role }
@@ -414,18 +493,23 @@ export function withDispatcher<
             // semantics via deduplicateName. Guarded on an explicit requested name
             // so auto-named sessions can never steal.
             if (p.takeover === true && typeof p.name === "string") {
-              const holder = Array.from(clients.values()).find((c) => c.id !== connId && c.name === resolvedName)
+              const holders = Array.from(clients.values()).filter(
+                (client) => client.id !== connId && client.name === resolvedName,
+              )
+              const holder = holders[0]
               if (holder) {
+                const oldPids = [...new Set(holders.map((client) => client.pid))]
                 log.warn?.(
-                  `takeover: superseding live holder of "${resolvedName}" (old pid ${holder.pid}, old session ${holder.ctx.sessionId}, new pid ${clientPid})`,
+                  `takeover: superseding live holder of "${resolvedName}" (old pid ${holder.pid}, old pids ${oldPids.join(",")}, old session ${holder.ctx.sessionId}, new pid ${clientPid})`,
                 )
                 logEvent(holder.ctx, "session.superseded", undefined, {
                   name: resolvedName,
                   old_pid: holder.pid,
+                  old_pids: oldPids,
                   new_pid: clientPid,
                   reason: "explicit-persona takeover (20703)",
                 })
-                retireReplacedClient(holder)
+                for (const replaced of holders) retireReplacedClient(replaced)
               }
             }
 
@@ -461,8 +545,6 @@ export function withDispatcher<
             }
 
             const name = deduplicateName(resolvedName)
-            const domains = (p.domains as string[]) ?? []
-            const peerSocket = (p.peerSocket as string) ?? null
             const pid = Number(p.pid ?? 0)
 
             const clientProtocolVersion = p.protocolVersion ? Number(p.protocolVersion) : undefined
@@ -503,6 +585,8 @@ export function withDispatcher<
               project,
               account,
               provider,
+              launchIdentity?.id ?? null,
+              launchIdentity?.parentPid ?? null,
             )
 
             const client = applyClient(connId, {
@@ -513,6 +597,8 @@ export function withDispatcher<
               projectName,
               projectId,
               pid,
+              launchId: launchIdentity?.id ?? null,
+              launchParentPid: launchIdentity?.parentPid ?? null,
               claudeSessionId,
               peerSocket,
               ctx: clientCtx,
@@ -870,6 +956,8 @@ export function withDispatcher<
         projectName: "unknown",
         projectId: "",
         pid: 0,
+        launchId: null,
+        launchParentPid: null,
         claudeSessionId: null,
         peerSocket: null,
         conn: "",
@@ -898,8 +986,15 @@ export function withDispatcher<
       sock.on("close", () => {
         const client = clients.get(connId)
         if (client && client.role !== "pending") {
-          log.info?.(`Client disconnected: ${client.name}`)
-          logActivity("session", `${client.name} left`)
+          const siblingTransport = Array.from(clients.values()).some(
+            (candidate) => candidate.id !== connId && candidate.ctx.sessionId === client.ctx.sessionId,
+          )
+          if (siblingTransport) {
+            log.debug?.(`Transport disconnected: ${client.name} pid=${client.pid}`)
+          } else {
+            log.info?.(`Client disconnected: ${client.name}`)
+            logActivity("session", `${client.name} left`)
+          }
         }
         broadcast.flushConnection(connId)
         broadcast.discardConnection(connId)

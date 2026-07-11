@@ -376,7 +376,7 @@ describe("stdio adapter delivery modes", () => {
     expect(register?.params?.delivery).toBe("pull")
   })
 
-  it.fails("21049: explicit persona registration carries launch identity with takeover", async () => {
+  it("21049: explicit persona registration carries launch identity with takeover", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath)
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/9"], {
@@ -386,7 +386,6 @@ describe("stdio adapter delivery modes", () => {
         TRIBE_DELIVERY: "pull",
         TRIBE_TAKEOVER: "1",
         TRIBE_LAUNCH_ID: "provider-launch-a",
-        TRIBE_LAUNCH_PARENT_PID: "41001",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
       },
@@ -402,7 +401,7 @@ describe("stdio adapter delivery modes", () => {
     expect(register?.params?.name).toBe("@agent/9")
     expect(register?.params?.takeover).toBe(true)
     expect(register?.params?.launchId).toBe("provider-launch-a")
-    expect(register?.params?.launchParentPid).toBe(41_001)
+    expect(register?.params?.launchParentPid).toBe(process.pid)
   })
 
   it("21049: absent launch identity preserves legacy per-transport registration", async () => {

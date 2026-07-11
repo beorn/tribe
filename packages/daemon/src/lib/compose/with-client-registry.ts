@@ -40,6 +40,10 @@ export type ClientSession = {
   projectName: string
   projectId: string
   pid: number
+  /** Provider-launch identity. Null keeps legacy one-transport semantics. */
+  launchId: string | null
+  /** Launcher PID provenance; paired with launchId to reject stale inheritance. */
+  launchParentPid: number | null
   claudeSessionId: string | null
   /** Peer socket path for direct proxy-to-proxy connections */
   peerSocket: string | null
@@ -74,6 +78,9 @@ export interface ClientRegistry {
     role: TribeRole
     claudeSessionId: string | null
     registeredAt: number
+    launchId: string | null
+    launchParentPid: number | null
+    transportPids: number[]
   }>
 }
 
@@ -98,16 +105,42 @@ export function withClientRegistry<T extends BaseTribe>(): (t: T) => T & WithCli
         return ids
       },
       getActiveSessionInfo() {
-        return Array.from(clients.values())
-          .filter(isParticipant)
-          .map((c) => ({
-            id: c.ctx.sessionId,
-            name: c.name,
-            pid: c.pid,
-            role: c.role,
-            claudeSessionId: c.claudeSessionId,
-            registeredAt: c.registeredAt,
-          }))
+        const members = new Map<
+          string,
+          {
+            id: string
+            name: string
+            pid: number
+            role: TribeRole
+            claudeSessionId: string | null
+            registeredAt: number
+            launchId: string | null
+            launchParentPid: number | null
+            transportPids: number[]
+          }
+        >()
+        for (const client of clients.values()) {
+          if (!isParticipant(client)) continue
+          const id = client.ctx.sessionId
+          const member = members.get(id)
+          if (member) {
+            if (client.pid > 0 && !member.transportPids.includes(client.pid)) member.transportPids.push(client.pid)
+            member.registeredAt = Math.min(member.registeredAt, client.registeredAt)
+            continue
+          }
+          members.set(id, {
+            id,
+            name: client.name,
+            pid: client.pid,
+            role: client.role,
+            claudeSessionId: client.claudeSessionId,
+            registeredAt: client.registeredAt,
+            launchId: client.launchId,
+            launchParentPid: client.launchParentPid,
+            transportPids: client.pid > 0 ? [client.pid] : [],
+          })
+        }
+        return Array.from(members.values())
       },
     }
 

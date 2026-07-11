@@ -100,6 +100,8 @@ export function registerSession(
   clientCwd?: string,
   account?: string | null,
   provider?: string | null,
+  launchId?: string | null,
+  launchParentPid?: number | null,
 ): void {
   const desiredName = ctx.getName()
   const now = Date.now()
@@ -174,6 +176,8 @@ export function registerSession(
       $claude_session_id: ctx.claudeSessionId,
       $claude_session_name: ctx.claudeSessionName,
       $identity_token: identityToken ?? null,
+      $launch_id: launchId ?? null,
+      $launch_parent_pid: launchParentPid ?? null,
       $now: now,
       $delivery: delivery ?? "push",
       $account: account ?? null,

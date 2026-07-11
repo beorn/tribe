@@ -89,6 +89,13 @@ const REGISTER_WITH_LAUNCH_NAME =
 // after the first successful registration; replaying it on reconnect lets two
 // displaced adapters evict each other forever (21049).
 const TAKEOVER = REGISTER_WITH_LAUNCH_NAME && process.env.TRIBE_TAKEOVER === "1"
+const LAUNCH_ID_RAW = process.env.TRIBE_LAUNCH_ID?.trim() ?? ""
+// 21049 — adapters forward a complete launcher-minted identity or nothing.
+// They never mint/default the id themselves. Parent provenance comes from the
+// actual process tree, NOT another inherited env var: an unsanitized nested
+// provider may inherit a stale launch id, but its adapter has a different OS
+// parent and therefore cannot fan into the old launch.
+const LAUNCH_IDENTITY = LAUNCH_ID_RAW.length > 0 ? { id: LAUNCH_ID_RAW, parentPid: process.ppid } : null
 
 // km 19442 — connect-time replay flood backstop. The wakeup→drain path is capped
 // by selectReplayEvents, but a stale/old daemon that still pushes message BODIES
@@ -235,6 +242,7 @@ const baseRegisterParams = {
   claudeSessionId: CLAUDE_SESSION_ID,
   claudeSessionName: CLAUDE_SESSION_NAME,
   identityToken,
+  ...(LAUNCH_IDENTITY ? { launchId: LAUNCH_IDENTITY.id, launchParentPid: LAUNCH_IDENTITY.parentPid } : {}),
   delivery: REQUIRE_EXPLICIT_JOIN ? "pull" : DELIVERY,
   // @km/infra/15641 Phase 1 — per-session account/provider label sourced
   // from `ag` via TRIBE_ACCOUNT / TRIBE_PROVIDER env vars (which ag sets

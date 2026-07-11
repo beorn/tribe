@@ -351,6 +351,9 @@ function createDispatcherHarness() {
           role: c.role,
           claudeSessionId: c.claudeSessionId,
           registeredAt: c.registeredAt,
+          launchId: c.launchId,
+          launchParentPid: c.launchParentPid,
+          transportPids: c.pid > 0 ? [c.pid] : [],
         }))
       },
     },
@@ -419,6 +422,8 @@ function createDispatcherHarness() {
         projectName: "km-wt9",
         projectId: "test-project",
         pid: 0,
+        launchId: null,
+        launchParentPid: null,
         claudeSessionId: null,
         peerSocket: null,
         conn: "test",

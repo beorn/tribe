@@ -39,6 +39,12 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const ADAPTER = resolve(HERE, "../src/stdio-adapter.ts")
 const DAEMON = resolve(HERE, "../../daemon/src/daemon.ts")
 const BUN_BIN = process.versions.bun ? process.execPath : "bun"
+const PROVIDER_PARENT_WRAPPER = `
+const command = JSON.parse(process.env.TRIBE_TEST_CHILD_COMMAND)
+const child = Bun.spawn(command, { stdin: "inherit", stdout: "inherit", stderr: "inherit", env: process.env })
+for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => child.kill(signal))
+process.exit(await child.exited)
+`
 
 const NAME = "@agent/3"
 
@@ -167,7 +173,12 @@ function toolResult(lines: Record<string, unknown>[], id: number): unknown {
   const response = lines.find((line) => line.id === id)
   const result = response?.result as { content?: Array<{ text?: string }> } | undefined
   const text = result?.content?.[0]?.text
-  return typeof text === "string" ? JSON.parse(text) : undefined
+  if (typeof text !== "string") return undefined
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new Error(text)
+  }
 }
 
 describe("19442 actionable-recovery journey (real daemon + real adapter)", () => {
@@ -233,25 +244,37 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     socketPath: string,
     logName: string,
     launchId: string | undefined,
-    opts: { takeover?: boolean; launchParentPid?: number } = {},
+    opts: { takeover?: boolean; distinctProviderParent?: boolean } = {},
   ): Promise<{ child: ChildProcessWithoutNullStreams; stdout: Record<string, unknown>[]; logPath: string }> {
     const logPath = join(tmpDir, logName)
-    const child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", NAME], {
-      cwd: tmpDir,
-      env: {
-        ...process.env,
-        TRIBE_DELIVERY: "pull",
-        TRIBE_PULL_TRANSPORT: "mcp",
-        TRIBE_NO_AUTOSTART: "1",
-        TRIBE_REQUIRE_JOIN: "0",
-        TRIBE_TAKEOVER: opts.takeover === false ? "0" : "1",
-        ...(launchId === undefined ? {} : { TRIBE_LAUNCH_ID: launchId }),
-        ...(opts.launchParentPid === undefined ? {} : { TRIBE_LAUNCH_PARENT_PID: String(opts.launchParentPid) }),
-        DEBUG: "tribe:*",
-        DEBUG_LOG: logPath,
+    const adapterCommand = [BUN_BIN, ADAPTER, "--socket", socketPath, "--name", NAME]
+    const child = spawn(
+      BUN_BIN,
+      opts.distinctProviderParent ? ["-e", PROVIDER_PARENT_WRAPPER] : adapterCommand.slice(1),
+      {
+        cwd: tmpDir,
+        env: {
+          ...process.env,
+          TRIBE_DELIVERY: "pull",
+          TRIBE_PULL_TRANSPORT: "mcp",
+          TRIBE_NO_AUTOSTART: "1",
+          TRIBE_REQUIRE_JOIN: "0",
+          TRIBE_TAKEOVER: opts.takeover === false ? "0" : "1",
+          ...(launchId === undefined ? {} : { TRIBE_LAUNCH_ID: launchId }),
+          ...(opts.distinctProviderParent
+            ? {
+                // Hostile/unsanitized nested launch: both identity inputs are
+                // inherited unchanged; only real OS-parent provenance differs.
+                TRIBE_NAME: NAME,
+                TRIBE_TEST_CHILD_COMMAND: JSON.stringify(adapterCommand),
+              }
+            : {}),
+          DEBUG: "tribe:*",
+          DEBUG_LOG: logPath,
+        },
+        stdio: ["pipe", "pipe", "pipe"],
       },
-      stdio: ["pipe", "pipe", "pipe"],
-    })
+    )
     adapters.push(child)
     const stdout = collectStdoutJson(child)
     writeJson(child, initializePayload(1))
@@ -310,18 +333,17 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(channelNotifications(second.stdout)).toHaveLength(0)
   }, 30_000)
 
-  it.fails("fans three native adapters from one provider launch into one live member", async () => {
+  it("fans three native adapters from one provider launch into one live member", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const dbPath = join(tmpDir, "tribe.db")
     daemonProc = spawnDaemon(socketPath, dbPath)
     await waitForCondition(() => existsSync(socketPath), "daemon socket")
 
     const launchId = "provider-launch-a"
-    const launchParentPid = 41_001
     const launchAdapters = await Promise.all([
-      spawnLaunchAdapter(socketPath, "launch-adapter-1.log", launchId, { launchParentPid }),
-      spawnLaunchAdapter(socketPath, "launch-adapter-2.log", launchId, { launchParentPid }),
-      spawnLaunchAdapter(socketPath, "launch-adapter-3.log", launchId, { launchParentPid }),
+      spawnLaunchAdapter(socketPath, "launch-adapter-1.log", launchId),
+      spawnLaunchAdapter(socketPath, "launch-adapter-2.log", launchId),
+      spawnLaunchAdapter(socketPath, "launch-adapter-3.log", launchId),
     ])
 
     // Force every transport through daemon registration, then give displaced
@@ -358,16 +380,32 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         name?: string
         member_id?: string
         launch_id?: string
+        launch_parent_pid?: number
         transport_pids?: number[]
       }>
     }
     const member = members.sessions?.find((session) => session.name === NAME)
-    expect(member).toMatchObject({ launch_id: launchId })
+    expect(member).toMatchObject({ launch_id: launchId, launch_parent_pid: process.pid })
     expect(member?.member_id).toEqual(expect.any(String))
     const initialMemberId = member!.member_id!
     expect(member?.transport_pids?.toSorted((a, b) => a - b)).toEqual(
       launchAdapters.map(({ child }) => child.pid!).toSorted((a, b) => a - b),
     )
+    const health = (await callLaunchTool(launchAdapters[1]!, 19, "health", {})) as {
+      members?: Array<{
+        name?: string
+        member_id?: string
+        launch_id?: string
+        launch_parent_pid?: number
+        transport_pids?: number[]
+      }>
+    }
+    expect(health.members?.find((session) => session.name === NAME)).toMatchObject({
+      member_id: initialMemberId,
+      launch_id: launchId,
+      launch_parent_pid: process.pid,
+      transport_pids: expect.arrayContaining(launchAdapters.map(({ child }) => child.pid!)),
+    })
 
     const sent = (await callLaunchTool(launchAdapters[0]!, 21, "send", {
       to: NAME,
@@ -378,7 +416,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(sent.id).toEqual(expect.any(String))
     const [pending, fetched] = (await Promise.all([
       callLaunchTool(launchAdapters[1]!, 22, "pending", { owner: NAME }),
-      callLaunchTool(launchAdapters[2]!, 23, "fetch", { limit: 50 }),
+      callLaunchTool(launchAdapters[2]!, 23, "fetch", { ids: [sent.id], limit: 50 }),
     ])) as [{ pending?: Array<{ request_id?: string }> }, { events?: Array<{ id?: string; content?: string }> }]
     expect(pending.pending?.some((request) => request.request_id === sent.id)).toBe(true)
     expect(
@@ -389,7 +427,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     // logical member and restores the three-transport diagnostic set.
     launchAdapters[1]!.child.kill("SIGTERM")
     await once(launchAdapters[1]!.child, "exit")
-    const replacement = await spawnLaunchAdapter(socketPath, "launch-adapter-2b.log", launchId, { launchParentPid })
+    const replacement = await spawnLaunchAdapter(socketPath, "launch-adapter-2b.log", launchId)
     launchAdapters[1] = replacement
     const afterReconnect = (await callLaunchTool(replacement, 24, "members", {})) as {
       sessions?: Array<{ name?: string; member_id?: string; launch_id?: string; transport_pids?: number[] }>
@@ -407,6 +445,14 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     await waitForCondition(() => !existsSync(socketPath), "old daemon socket removal")
     daemonProc = spawnDaemon(socketPath, dbPath)
     await waitForCondition(() => existsSync(socketPath), "restarted daemon socket")
+    await waitForCondition(
+      () =>
+        launchAdapters.every(({ logPath }) => {
+          if (!existsSync(logPath)) return false
+          return (readFileSync(logPath, "utf8").match(/Registered as/g) ?? []).length >= 2
+        }),
+      "all launch adapters to register after daemon restart",
+    )
     const afterDaemonRestart = await Promise.all(
       launchAdapters.map((adapter, index) => callLaunchTool(adapter, 30 + index, "members", {})),
     )
@@ -424,18 +470,15 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     // A different provider launch must fail loud without takeover.
     const refused = await spawnLaunchAdapter(socketPath, "launch-b-refused.log", "provider-launch-b", {
       takeover: false,
-      launchParentPid: 42_001,
     })
     writeJson(refused.child, callToolPayload(40, "members", {}))
-    await once(refused.child, "exit")
+    await waitForCondition(() => refused.child.exitCode !== null, "different launch refusal exit")
     expect(refused.child.exitCode).toBe(2)
     expect(readFileSync(refused.logPath, "utf8")).toContain(`Name "${NAME}" is already taken by live pid`)
 
     // A deliberate new launch with takeover supersedes the whole old launch
     // as one set, leaving no suffixed or -dead- session rows.
-    const successor = await spawnLaunchAdapter(socketPath, "launch-b-successor.log", "provider-launch-b", {
-      launchParentPid: 42_001,
-    })
+    const successor = await spawnLaunchAdapter(socketPath, "launch-b-successor.log", "provider-launch-b")
     const successorMembers = (await callLaunchTool(successor, 41, "members", {})) as {
       sessions?: Array<{ name?: string; member_id?: string; launch_id?: string; transport_pids?: number[] }>
     }
@@ -458,16 +501,14 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(finalDaemonLog.match(/takeover: superseding live holder/g)).toHaveLength(1)
   }, 30_000)
 
-  it.fails("does not adopt a dead launch when a new provider inherits its stale launch id", async () => {
+  it("does not adopt a dead launch when a new provider inherits its stale launch id", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const dbPath = join(tmpDir, "tribe.db")
     daemonProc = spawnDaemon(socketPath, dbPath)
     await waitForCondition(() => existsSync(socketPath), "daemon socket")
 
     const staleLaunchId = "stale-dead-provider-launch"
-    const first = await spawnLaunchAdapter(socketPath, "stale-launch-1.log", staleLaunchId, {
-      launchParentPid: 51_001,
-    })
+    const first = await spawnLaunchAdapter(socketPath, "stale-launch-1.log", staleLaunchId)
     const firstMembers = (await callLaunchTool(first, 50, "members", {})) as {
       sessions?: Array<{ name?: string; member_id?: string }>
     }
@@ -477,7 +518,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     await once(first.child, "exit")
 
     const inherited = await spawnLaunchAdapter(socketPath, "stale-launch-2.log", staleLaunchId, {
-      launchParentPid: 52_001,
+      distinctProviderParent: true,
     })
     const inheritedMembers = (await callLaunchTool(inherited, 51, "members", {})) as {
       sessions?: Array<{ name?: string; member_id?: string; launch_id?: string }>

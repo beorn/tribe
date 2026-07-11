@@ -251,6 +251,9 @@ export type ActiveSessionInfo = {
   role: string
   claudeSessionId: string | null
   registeredAt: number
+  launchId: string | null
+  launchParentPid: number | null
+  transportPids: number[]
 }
 
 export type HandlerOpts = {
@@ -619,6 +622,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
   // the table stops being inert. Liveness still comes from the daemon's
   // in-memory clients Map (no DB-level tri-state).
   const activeIds = opts.getActiveSessionIds()
+  const activeInfo = opts.getActiveSessionInfo()
   // INNER JOIN on room_members: a session that hasn't joined any room is not
   // visible. The startup invariant + per-register backfill (joinDefaultRoom)
   // guarantee every active session has a row, so this match is total in
@@ -629,7 +633,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     .prepare(`
       SELECT DISTINCT s.id, s.name, s.role, s.domains, s.pid, s.cwd,
         s.claude_session_id, s.claude_session_name, s.started_at, s.updated_at,
-        s.account, s.provider
+        s.account, s.provider, s.launch_id, s.launch_parent_pid
       FROM sessions s
       INNER JOIN room_members rm ON rm.session_id = s.id
       ORDER BY s.started_at
@@ -647,6 +651,8 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     updated_at: number
     account: string | null
     provider: string | null
+    launch_id: string | null
+    launch_parent_pid: number | null
   }>
 
   // By default return only currently-connected sessions. `a.all` exposes the
@@ -664,11 +670,16 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
 
   const sessions = visibleRows.map((r) => {
     const parent = r.claude_session_id ? parentMap.get(r.claude_session_id) : undefined
+    const active = activeInfo.find((session) => session.id === r.id)
     return {
+      member_id: r.id,
       name: r.name,
       role: r.role,
       domains: parseDomains(r.domains),
-      pid: r.pid,
+      pid: active?.pid ?? r.pid,
+      launch_id: r.launch_id,
+      launch_parent_pid: r.launch_parent_pid,
+      transport_pids: active?.transportPids ?? [],
       cwd: r.cwd,
       claude_session_id: r.claude_session_id,
       claude_session_name: r.claude_session_name,
@@ -945,6 +956,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
   const liveSessions = rows.filter((r) => byId.has(r.id))
 
   const members = liveSessions.map((s) => {
+    const active = byId.get(s.id)!
     const alive = true // by definition — only connected sessions reported
     // Find last message from this member
     const lastMsg = ctx.db
@@ -963,16 +975,21 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     // daemon thinks it's connected but the owning OS process is gone.
     // Surface this so health checks + chief reconciliation can detect
     // and clean up before a second `claude --name @agent/N` collides.
-    const pidAlive = !s.pid || s.pid <= 0 ? true : pidStillAlive(s.pid)
-    if (s.pid > 0 && !pidAlive) {
-      warnings.push(`pid ${s.pid} is dead — session is a zombie`)
+    const transportPids = active.transportPids
+    const pidAlive = transportPids.length === 0 || transportPids.some((pid) => pidStillAlive(pid))
+    if (!pidAlive) {
+      warnings.push(`transport pids ${transportPids.join(",")} are dead — session is a zombie`)
     }
 
     return {
+      member_id: s.id,
       name: s.name,
       role: s.role,
       domains: parseDomains(s.domains),
-      pid: s.pid,
+      pid: active.pid,
+      launch_id: active.launchId,
+      launch_parent_pid: active.launchParentPid,
+      transport_pids: transportPids,
       alive,
       pid_alive: pidAlive,
       last_message: lastMsgAge ? `${Math.round(lastMsgAge / 60_000)} min ago` : "never",
@@ -1117,6 +1134,8 @@ function handleRepair(ctx: TribeContext, a: ToolArgs): ToolResult {
       $claude_session_id: null,
       $claude_session_name: null,
       $identity_token: null,
+      $launch_id: null,
+      $launch_parent_pid: null,
       $now: now,
       $delivery: "pull",
       $account: null,

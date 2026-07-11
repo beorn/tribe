@@ -128,6 +128,9 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
           role: "member",
           claudeSessionId: null,
           registeredAt: Date.now(),
+          launchId: null,
+          launchParentPid: null,
+          transportPids: [4242],
         },
       ],
     }

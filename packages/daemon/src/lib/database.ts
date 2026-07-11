@@ -24,6 +24,8 @@ export function openDatabase(path: string): Database {
 		claude_session_id TEXT,
 		claude_session_name TEXT,
 		identity_token TEXT,
+		launch_id TEXT,
+		launch_parent_pid INTEGER,
 		started_at INTEGER NOT NULL,
 		updated_at INTEGER NOT NULL,
 		last_delivered_ts INTEGER,
@@ -193,6 +195,7 @@ export function openDatabase(path: string): Database {
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_kind_ts ON messages(kind, ts)")
   db.run("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at)")
   db.run("CREATE INDEX IF NOT EXISTS idx_sessions_identity ON sessions(identity_token)")
+  db.run("CREATE INDEX IF NOT EXISTS idx_sessions_launch_identity ON sessions(name, launch_id, launch_parent_pid)")
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts)")
   db.run("CREATE INDEX IF NOT EXISTS idx_coordination_project ON coordination(project_id)")
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_delivery_ts ON messages(delivery, ts)")
@@ -753,6 +756,18 @@ const MIGRATIONS: readonly Migration[] = [
 			)`)
     },
   },
+  {
+    version: 19,
+    name: "session-launch-identity",
+    up(db) {
+      const cols = new Set(
+        (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>).map((row) => row.name),
+      )
+      if (!cols.has("launch_id")) db.run("ALTER TABLE sessions ADD COLUMN launch_id TEXT")
+      if (!cols.has("launch_parent_pid")) db.run("ALTER TABLE sessions ADD COLUMN launch_parent_pid INTEGER")
+      db.run("CREATE INDEX IF NOT EXISTS idx_sessions_launch_identity ON sessions(name, launch_id, launch_parent_pid)")
+    },
+  },
 ]
 
 // ---------------------------------------------------------------------------
@@ -774,12 +789,13 @@ export type TribeStatements = ReturnType<typeof createStatements>
 export function createStatements(db: Database) {
   return {
     upsertSession: db.prepare(`
-		INSERT INTO sessions (id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, identity_token, started_at, updated_at, delivery, account, provider)
-		VALUES ($id, $name, $role, $domains, $pid, $cwd, $project_id, $claude_session_id, $claude_session_name, $identity_token, $now, $now, COALESCE($delivery, 'push'), $account, $provider)
+		INSERT INTO sessions (id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, identity_token, launch_id, launch_parent_pid, started_at, updated_at, delivery, account, provider)
+		VALUES ($id, $name, $role, $domains, $pid, $cwd, $project_id, $claude_session_id, $claude_session_name, $identity_token, $launch_id, $launch_parent_pid, $now, $now, COALESCE($delivery, 'push'), $account, $provider)
 		ON CONFLICT(id) DO UPDATE SET
 			name = $name, role = $role, domains = $domains,
 			pid = $pid, cwd = $cwd, project_id = $project_id, claude_session_id = $claude_session_id,
-			claude_session_name = $claude_session_name, identity_token = $identity_token, started_at = $now, updated_at = $now,
+			claude_session_name = $claude_session_name, identity_token = $identity_token,
+			launch_id = $launch_id, launch_parent_pid = $launch_parent_pid, started_at = $now, updated_at = $now,
 			delivery = COALESCE($delivery, delivery, 'push'),
 			account = COALESCE($account, account),
 			provider = COALESCE($provider, provider)
