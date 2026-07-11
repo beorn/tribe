@@ -19,6 +19,7 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
+import { once } from "node:events"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createStatements, openDatabase } from "../../daemon/src/lib/database.ts"
 
@@ -220,6 +221,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     socketPath: string,
     logName: string,
     launchId: string,
+    opts: { takeover?: boolean } = {},
   ): Promise<{ child: ChildProcessWithoutNullStreams; stdout: Record<string, unknown>[]; logPath: string }> {
     const logPath = join(tmpDir, logName)
     const child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", NAME], {
@@ -230,7 +232,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         TRIBE_PULL_TRANSPORT: "mcp",
         TRIBE_NO_AUTOSTART: "1",
         TRIBE_REQUIRE_JOIN: "0",
-        TRIBE_TAKEOVER: "1",
+        TRIBE_TAKEOVER: opts.takeover === false ? "0" : "1",
         TRIBE_LAUNCH_ID: launchId,
         DEBUG: "tribe:*",
         DEBUG_LOG: logPath,
@@ -243,6 +245,24 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     await waitForCondition(() => stdout.some((line) => line.id === 1), `${logName} initialize response`)
     writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
     return { child, stdout, logPath }
+  }
+
+  async function callLaunchTool(
+    adapter: { child: ChildProcessWithoutNullStreams; stdout: Record<string, unknown>[]; logPath: string },
+    id: number,
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<unknown> {
+    writeJson(adapter.child, callToolPayload(id, name, args))
+    try {
+      await waitForCondition(() => adapter.stdout.some((line) => line.id === id), `${name} response`)
+    } catch (error) {
+      const log = existsSync(adapter.logPath) ? readFileSync(adapter.logPath, "utf8") : "(no adapter log)"
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}; exit=${String(adapter.child.exitCode)}\n${log}`,
+      )
+    }
+    return toolResult(adapter.stdout, id)
   }
 
   it("claiming the loaded name forwards EXACTLY the one actionable; a reconnect forwards none", async () => {
@@ -293,9 +313,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     // Force every transport through daemon registration, then give displaced
     // transports time to reconnect. A provider launch is one logical member:
     // none of its independently spawned MCP adapters may evict another.
-    for (const [index, adapter] of launchAdapters.entries()) {
-      writeJson(adapter.child, callToolPayload(index + 2, "members", {}))
-    }
+    for (const [index, adapter] of launchAdapters.entries()) writeJson(adapter.child, callToolPayload(index + 2, "members", {}))
     await new Promise((resolveTick) => setTimeout(resolveTick, 1_000))
 
     const exitCodes = launchAdapters.map(({ child }) => child.exitCode)
@@ -306,19 +324,103 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
 
     for (const [index, adapter] of launchAdapters.entries()) {
       const id = index + 2
-      try {
-        await waitForCondition(
-          () => adapter.stdout.some((line) => line.id === id),
-          `adapter ${index + 1} members response`,
-        )
-      } catch (error) {
-        const log = existsSync(adapter.logPath) ? readFileSync(adapter.logPath, "utf8") : "(no adapter log)"
-        throw new Error(
-          `${error instanceof Error ? error.message : String(error)}; exit=${String(adapter.child.exitCode)}\n${log}`,
-        )
-      }
+      await waitForCondition(() => adapter.stdout.some((line) => line.id === id), `adapter ${index + 1} members response`)
       const result = toolResult(adapter.stdout, id) as { sessions?: Array<{ name?: string; alive?: boolean }> }
       expect(result.sessions?.filter((session) => session.name === NAME && session.alive)).toHaveLength(1)
     }
+
+    const members = (await callLaunchTool(launchAdapters[0]!, 20, "members", {})) as {
+      sessions?: Array<{
+        name?: string
+        member_id?: string
+        launch_id?: string
+        transport_pids?: number[]
+      }>
+    }
+    const member = members.sessions?.find((session) => session.name === NAME)
+    expect(member).toMatchObject({ launch_id: launchId })
+    expect(member?.member_id).toEqual(expect.any(String))
+    expect(member?.transport_pids?.toSorted((a, b) => a - b)).toEqual(
+      launchAdapters.map(({ child }) => child.pid!).toSorted((a, b) => a - b),
+    )
+
+    const sent = (await callLaunchTool(launchAdapters[0]!, 21, "send", {
+      to: NAME,
+      message: "same-launch fan-in request",
+      type: "request",
+      request: true,
+    })) as { id?: string }
+    expect(sent.id).toEqual(expect.any(String))
+    const [pending, fetched] = (await Promise.all([
+      callLaunchTool(launchAdapters[1]!, 22, "pending", { owner: NAME }),
+      callLaunchTool(launchAdapters[2]!, 23, "fetch", { limit: 50 }),
+    ])) as [{ pending?: Array<{ request_id?: string }> }, { events?: Array<{ id?: string; content?: string }> }]
+    expect(pending.pending?.some((request) => request.request_id === sent.id)).toBe(true)
+    expect(fetched.events?.some((event) => event.id === sent.id && event.content === "same-launch fan-in request")).toBe(
+      true,
+    )
+
+    // Replacing one transport inside the same provider launch retains the
+    // logical member and restores the three-transport diagnostic set.
+    launchAdapters[1]!.child.kill("SIGTERM")
+    await once(launchAdapters[1]!.child, "exit")
+    const replacement = await spawnLaunchAdapter(socketPath, "launch-adapter-2b.log", launchId)
+    launchAdapters[1] = replacement
+    const afterReconnect = (await callLaunchTool(replacement, 24, "members", {})) as {
+      sessions?: Array<{ name?: string; launch_id?: string; transport_pids?: number[] }>
+    }
+    expect(afterReconnect.sessions?.find((session) => session.name === NAME)).toMatchObject({
+      launch_id: launchId,
+      transport_pids: expect.arrayContaining(launchAdapters.map(({ child }) => child.pid!)),
+    })
+
+    // A daemon restart drops every socket simultaneously. All three native
+    // adapters must reconnect and re-fan into the persisted logical member.
+    daemonProc.kill("SIGTERM")
+    await once(daemonProc, "exit")
+    await waitForCondition(() => !existsSync(socketPath), "old daemon socket removal")
+    daemonProc = spawnDaemon(socketPath, dbPath)
+    await waitForCondition(() => existsSync(socketPath), "restarted daemon socket")
+    const afterDaemonRestart = await Promise.all(
+      launchAdapters.map((adapter, index) => callLaunchTool(adapter, 30 + index, "members", {})),
+    )
+    for (const result of afterDaemonRestart as Array<{
+      sessions?: Array<{ name?: string; launch_id?: string; transport_pids?: number[] }>
+    }>) {
+      expect(result.sessions?.filter((session) => session.name === NAME)).toHaveLength(1)
+      expect(result.sessions?.find((session) => session.name === NAME)).toMatchObject({
+        launch_id: launchId,
+        transport_pids: expect.arrayContaining(launchAdapters.map(({ child }) => child.pid!)),
+      })
+    }
+
+    // A different provider launch must fail loud without takeover.
+    const refused = await spawnLaunchAdapter(socketPath, "launch-b-refused.log", "provider-launch-b", {
+      takeover: false,
+    })
+    writeJson(refused.child, callToolPayload(40, "members", {}))
+    await once(refused.child, "exit")
+    expect(refused.child.exitCode).toBe(2)
+    expect(readFileSync(refused.logPath, "utf8")).toContain(`Name "${NAME}" is already taken by live pid`)
+
+    // A deliberate new launch with takeover supersedes the whole old launch
+    // as one set, leaving no suffixed or -dead- session rows.
+    const successor = await spawnLaunchAdapter(socketPath, "launch-b-successor.log", "provider-launch-b")
+    const successorMembers = (await callLaunchTool(successor, 41, "members", {})) as {
+      sessions?: Array<{ name?: string; launch_id?: string; transport_pids?: number[] }>
+    }
+    await waitForCondition(
+      () => launchAdapters.every(({ child }) => child.exitCode !== null),
+      "superseded launch adapters to exit",
+    )
+    expect(successorMembers.sessions?.filter((session) => session.name === NAME)).toEqual([
+      expect.objectContaining({ launch_id: "provider-launch-b", transport_pids: [successor.child.pid] }),
+    ])
+    const db = openDatabase(dbPath)
+    const rows = db.prepare("SELECT name FROM sessions ORDER BY name").all() as Array<{ name: string }>
+    db.close()
+    expect(rows).toEqual([{ name: NAME }])
+    const finalDaemonLog = readFileSync(join(tmpDir, "daemon.log"), "utf8")
+    expect(finalDaemonLog.match(/takeover: superseding live holder/g)).toHaveLength(1)
   }, 30_000)
 })
