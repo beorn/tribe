@@ -896,6 +896,8 @@ export function createStatements(db: Database) {
 		UPDATE sessions SET name = $name, role = $role, domains = $domains,
 			account = COALESCE($account, account),
 			provider = COALESCE($provider, provider),
+			pid = COALESCE($pid, pid),
+			cwd = COALESCE($cwd, cwd),
 			updated_at = $now
 		WHERE id = $id
 	`),

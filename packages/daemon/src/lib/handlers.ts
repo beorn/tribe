@@ -248,6 +248,7 @@ export type ActiveSessionInfo = {
   id: string
   name: string
   pid: number
+  cwd: string
   role: string
   claudeSessionId: string | null
   registeredAt: number
@@ -786,6 +787,7 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   // unlabelled join never wipes a good label.
   const joinAccount = (a.account as string) ?? null
   const joinProvider = (a.provider as string) ?? null
+  const selfInfo = opts.getActiveSessionInfo().find((session) => session.id === ctx.sessionId)
 
   // Identity-token adoption: if the caller supplies a token that matches a
   // non-active prior session, inherit its name/role when the caller didn't
@@ -820,19 +822,17 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   } | null
   if (!hasSelfRow) {
     const requestedDelivery = a.delivery === "push" || a.delivery === "pull" ? a.delivery : undefined
-    // 21052 — carry the connected client's REAL pid into the late-registration
-    // row. A hardcoded 0 here planted pid-0 rows that defeat every isPidAlive
-    // liveness check downstream (ghost holders that can never be evicted — the
-    // 19442 agent/4 class).
-    const selfPid = opts.getActiveSessionInfo().find((s) => s.id === ctx.sessionId)?.pid ?? 0
+    // 21052 — carry the connected client's metadata into the late-registration
+    // row. Daemon-local pid/cwd values make the persisted member identity sticky
+    // to the broker rather than the client that owns the session.
     registerSession(
       ctx,
       undefined,
       (sessionId) => opts.getActiveSessionIds().has(sessionId),
       identityToken,
-      selfPid,
+      selfInfo?.pid ?? 0,
       requestedDelivery,
-      process.cwd(),
+      selfInfo?.cwd ?? process.cwd(),
       joinAccount,
       joinProvider,
     )
@@ -879,6 +879,8 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     $domains: JSON.stringify(joinDomains),
     $account: joinAccount,
     $provider: joinProvider,
+    $pid: selfInfo?.pid ?? null,
+    $cwd: selfInfo?.cwd ?? null,
     $now: Date.now(),
   })
   ctx.setName(joinName)

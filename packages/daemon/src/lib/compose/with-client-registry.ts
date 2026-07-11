@@ -75,6 +75,7 @@ export interface ClientRegistry {
     id: string
     name: string
     pid: number
+    cwd: string
     role: TribeRole
     claudeSessionId: string | null
     registeredAt: number
@@ -111,6 +112,7 @@ export function withClientRegistry<T extends BaseTribe>(): (t: T) => T & WithCli
             id: string
             name: string
             pid: number
+            cwd: string
             role: TribeRole
             claudeSessionId: string | null
             registeredAt: number
@@ -132,6 +134,7 @@ export function withClientRegistry<T extends BaseTribe>(): (t: T) => T & WithCli
             id,
             name: client.name,
             pid: client.pid,
+            cwd: client.project,
             role: client.role,
             claudeSessionId: client.claudeSessionId,
             registeredAt: client.registeredAt,

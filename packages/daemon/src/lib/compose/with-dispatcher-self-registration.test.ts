@@ -256,6 +256,7 @@ function createDispatcherHarness() {
           id: c.ctx.sessionId,
           name: c.name,
           pid: c.pid,
+          cwd: c.project,
           role: c.role,
           claudeSessionId: c.claudeSessionId,
           registeredAt: c.registeredAt,

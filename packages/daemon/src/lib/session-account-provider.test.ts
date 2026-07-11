@@ -55,7 +55,7 @@ function makeOpts(activeIds: Set<string>): HandlerOpts {
   }
 }
 
-type MembersSession = { name: string; account?: string; provider?: string }
+type MembersSession = { name: string; pid: number; cwd: string; account?: string; provider?: string }
 
 function membersFor(ctx: TribeContext, opts: HandlerOpts, name: string): MembersSession | undefined {
   const result = handleToolCall(ctx, "tribe.members", {}, opts) as { content: Array<{ text: string }> }
@@ -117,6 +117,7 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
 
   it("a join without a prior self-row records the connected client's real pid, not 0 (21052)", () => {
     const sessionId = "sess-cli-join"
+    const clientCwd = "/repo/wt7"
     const ctx = makeContext(db, stmts, sessionId, "@agent/7")
     const opts: HandlerOpts = {
       ...makeOpts(new Set([sessionId])),
@@ -131,6 +132,7 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
           launchId: null,
           launchParentPid: null,
           transportPids: [4242],
+          cwd: clientCwd,
         },
       ],
     }
@@ -140,8 +142,44 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
     // every isPidAlive liveness check downstream (the 19442 pid-0 ghost class).
     handleToolCall(ctx, "tribe.join", { name: "@agent/7", delivery: "pull" }, opts)
 
-    const row = db.prepare("SELECT pid FROM sessions WHERE id = ?").get(sessionId) as { pid: number } | null
-    expect(row?.pid).toBe(4242)
+    const row = db.prepare("SELECT pid, cwd FROM sessions WHERE id = ?").get(sessionId) as {
+      pid: number
+      cwd: string
+    } | null
+    expect(row).toEqual({ pid: 4242, cwd: clientCwd })
+  })
+
+  it("a later join repairs stale pid/cwd from the connected client", () => {
+    const sessionId = "sess-client-meta"
+    const clientCwd = "/repo/wt4"
+    const ctx = makeContext(db, stmts, sessionId, "@agent/4")
+    const opts: HandlerOpts = {
+      ...makeOpts(new Set([sessionId])),
+      getActiveSessionInfo: () => [
+        {
+          id: sessionId,
+          name: "@agent/4",
+          pid: 94093,
+          role: "member",
+          claudeSessionId: null,
+          registeredAt: Date.now(),
+          launchId: null,
+          launchParentPid: null,
+          transportPids: [94093],
+          cwd: clientCwd,
+        },
+      ],
+    }
+
+    registerSession(ctx, PROJECT_ID, () => true, null, 6266, "pull", "/repo/daemon", null, "codex")
+    const persisted = () =>
+      db.prepare("SELECT pid, cwd FROM sessions WHERE id = ?").get(sessionId) as { pid: number; cwd: string }
+    expect(persisted()).toEqual({ pid: 6266, cwd: "/repo/daemon" })
+
+    handleToolCall(ctx, "tribe.join", { name: "@agent/4", delivery: "pull" }, opts)
+
+    expect(persisted()).toEqual({ pid: 94093, cwd: clientCwd })
+    expect(membersFor(ctx, opts, "@agent/4")).toMatchObject({ pid: 94093, cwd: clientCwd })
   })
 
   it("a join that omits account/provider preserves the existing labels", () => {
