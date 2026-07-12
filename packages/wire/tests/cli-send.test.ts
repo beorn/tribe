@@ -169,6 +169,7 @@ describe("registerSendCommands", () => {
     const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-send-reply-"))
     const socketPath = join(tmp, "tribe.sock")
     const calls: Array<{ method: string; params: Record<string, unknown> }> = []
+    let pendingOpen = true
     const server = createServer((socket) => {
       let buffer = ""
       socket.on("data", (chunk) => {
@@ -185,25 +186,39 @@ describe("registerSendCommands", () => {
             params?: Record<string, unknown>
           }
           calls.push({ method: request.method, params: request.params ?? {} })
-          const result =
-            request.method === "tribe.pending" && request.params?.close === undefined
-              ? {
-                  content: [
-                    {
-                      text: JSON.stringify({
-                        owner: "@chief",
-                        count: 1,
-                        pending: [{ request_id: "req-123", sender: "@agent/3" }],
-                      }),
-                    },
-                  ],
-                }
-              : request.method === "tribe.send"
-                ? {
+          let result: unknown
+          if (request.method === "tribe.pending" && request.params?.close === undefined) {
+            result = {
+              content: [
+                {
+                  text: JSON.stringify({
+                    owner: "@chief",
+                    count: pendingOpen ? 1 : 0,
+                    pending: pendingOpen ? [{ request_id: "req-123", sender: "@agent/3" }] : [],
+                  }),
+                },
+              ],
+            }
+          } else if (request.method === "tribe.pending" && request.params?.close === "req-123") {
+            const closed = pendingOpen ? 1 : 0
+            pendingOpen = false
+            result = { structuredContent: { owner: "@chief", request_id: "req-123", closed } }
+          } else if (request.method === "tribe.send") {
+            pendingOpen = false
+            const message = request.params?.message
+            result =
+              message === "missing"
+                ? { sent: true }
+                : {
                     sent: true,
-                    tracker: { request_id: "req-123", closed: request.params?.message === "done" ? 1 : 0 },
+                    tracker: {
+                      request_id: "req-123",
+                      closed: message === "done" ? 1 : message === "malformed" ? 1.5 : 0,
+                    },
                   }
-                : { error: `unexpected duplicate call ${request.method}` }
+          } else {
+            result = { error: `unexpected call ${request.method}` }
+          }
           socket.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\n")
         }
       })
@@ -217,9 +232,9 @@ describe("registerSendCommands", () => {
           resolveListen()
         })
       })
-      const runReply = (message: string) =>
+      const runCli = (args: string[]) =>
         new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProc) => {
-          const child = spawn(BUN_BIN, [CLI, "send", "@agent/3", message, "--type", "response", "--reply", "req-123"], {
+          const child = spawn(BUN_BIN, [CLI, ...args], {
             env: {
               ...process.env,
               TRIBE_SOCKET: socketPath,
@@ -233,36 +248,47 @@ describe("registerSendCommands", () => {
           child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
           child.on("close", (code) => resolveProc({ code, stdout, stderr }))
         })
+      const runReply = (message: string) =>
+        runCli(["send", "@agent/3", message, "--type", "response", "--reply", "req-123"])
 
       const res = await runReply("done")
 
       expect(res).toMatchObject({ code: 0 })
       expect(res.stdout).toContain("Closed 1 pending request row(s) for @chief: req-123")
       expect(res.stdout).toContain("Sent message to @agent/3")
+      expect(res.stderr).not.toContain("did not close")
 
+      // Literal 2026-07-12 repro: the reply already closed @chief's ball.
+      // A later explicit/manual close therefore returns 0; that must not make
+      // the earlier reply CLI retroactively print a false failure.
+      const manualClose = await runCli(["pending", "--owner", "@chief", "--close", "req-123"])
+      expect(manualClose).toMatchObject({ code: 0, stderr: "" })
+      expect(manualClose.stdout).toContain("Closed 0 pending request(s) for @chief: req-123")
+
+      pendingOpen = true
       const unproven = await runReply("unproven")
       expect(unproven.code).toBe(1)
       expect(unproven.stdout).toBe("")
       expect(unproven.stderr).toContain("committed tracker result closed 0 rows for req-123")
       expect(unproven.stderr).toContain("Verify current state with: tribe pending --owner @chief")
-      expect(calls).toEqual([
-        { method: "tribe.pending", params: { owner: "@chief" } },
-        {
-          method: "tribe.send",
-          params: { to: "@agent/3", message: "done", type: "response", reply: "req-123", sender: "@chief" },
-        },
-        { method: "tribe.pending", params: { owner: "@chief" } },
-        {
-          method: "tribe.send",
-          params: {
-            to: "@agent/3",
-            message: "unproven",
-            type: "response",
-            reply: "req-123",
-            sender: "@chief",
-          },
-        },
-      ])
+
+      pendingOpen = true
+      const missing = await runReply("missing")
+      expect(missing.code).toBe(1)
+      expect(missing.stdout).toBe("")
+      expect(missing.stderr).toContain("response sent, but the daemon returned no committed tracker proof for req-123")
+      expect(missing.stderr).toContain("Verify current state with: tribe pending --owner @chief")
+
+      pendingOpen = true
+      const malformed = await runReply("malformed")
+      expect(malformed.code).toBe(1)
+      expect(malformed.stdout).toBe("")
+      expect(malformed.stderr).toContain("response sent, but the daemon returned malformed committed tracker proof")
+      expect(malformed.stderr).toContain("Verify current state with: tribe pending --owner @chief")
+
+      const closes = calls.filter((call) => call.method === "tribe.pending" && call.params.close !== undefined)
+      expect(closes).toEqual([{ method: "tribe.pending", params: { owner: "@chief", close: "req-123" } }])
+      expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(4)
     } finally {
       server.close()
       rmSync(tmp, { recursive: true, force: true })

@@ -177,17 +177,26 @@ function reportCommittedReplyTracker(
   reply: string,
   tracker: { request_id?: string; closed?: number } | undefined,
 ): void {
-  if (tracker?.request_id !== reply || typeof tracker.closed !== "number") {
+  if (tracker === undefined) {
     console.error(`tribe-wire send: response sent, but the daemon returned no committed tracker proof for ${reply}.`)
     console.error(`Verify current state with: tribe pending --owner ${owner}`)
     process.exit(1)
   }
-  if (tracker.closed < 1) {
+  const closed = tracker.closed
+  if (tracker.request_id !== reply || typeof closed !== "number" || !Number.isSafeInteger(closed) || closed < 0) {
+    console.error(
+      `tribe-wire send: response sent, but the daemon returned malformed committed tracker proof for ${reply} ` +
+        `(expected request_id=${reply} and a non-negative integer closed count).`,
+    )
+    console.error(`Verify current state with: tribe pending --owner ${owner}`)
+    process.exit(1)
+  }
+  if (closed < 1) {
     console.error(`tribe-wire send: response sent, but its committed tracker result closed 0 rows for ${reply}.`)
     console.error(`Verify current state with: tribe pending --owner ${owner}`)
     process.exit(1)
   }
-  console.log(`Closed ${tracker.closed} pending request row(s) for ${owner}: ${reply}`)
+  console.log(`Closed ${closed} pending request row(s) for ${owner}: ${reply}`)
 }
 
 function collectDomain(value: string, previous: string[]): string[] {
