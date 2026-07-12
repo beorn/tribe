@@ -527,10 +527,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     },
     cli: available({
       name: "join",
-      description: "Join/rejoin: re-announce this session's name and domains after compaction or rejoin.",
+      description:
+        "Join/rejoin checkpoint: verify an already-persistent native session without claiming it from this one-shot CLI.",
       lifetime: "one-shot",
       mapsToMcp: "join",
-      arguments: [{ name: "name", description: "Session name to claim, e.g. @chief or @ci" }],
+      arguments: [{ name: "name", description: "Persistent session name to verify, e.g. @chief or @ci" }],
       options: [
         { name: "role", flags: "-r, --role <role>", description: "Session role (default: member)", default: "member" },
         {

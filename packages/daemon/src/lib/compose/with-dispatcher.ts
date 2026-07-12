@@ -770,6 +770,57 @@ export function withDispatcher<
             })
           }
 
+          // 21049 — a one-shot CLI cannot own persistent membership. The
+          // historical `register -> tribe.join -> close` sequence briefly
+          // stole an already-live persona and then announced it left when the
+          // diagnostic process exited. Checkpoint the native holder instead;
+          // the provider adapter remains the single membership authority.
+          case "cli_join": {
+            const name = typeof p.name === "string" ? p.name.trim() : ""
+            if (name.length === 0) {
+              return makeResponse(id, {
+                joined: false,
+                observed: false,
+                error: "join requires a non-empty persistent persona name",
+              })
+            }
+            const holders = Array.from(clients.values()).filter(
+              (client) => client.role !== "pending" && client.name === name,
+            )
+            const memberIds = [...new Set(holders.map((client) => client.ctx.sessionId))]
+            if (memberIds.length === 0) {
+              return makeResponse(id, {
+                joined: false,
+                observed: false,
+                error:
+                  `one-shot CLI cannot establish persistent membership for ${name}; ` +
+                  "submit a native Tribe join to the live provider pane",
+              })
+            }
+            if (memberIds.length !== 1) {
+              return makeResponse(id, {
+                joined: false,
+                observed: false,
+                error: `contradictory live membership for ${name}: ${memberIds.length} logical holders`,
+              })
+            }
+            const holder = holders[0]!
+            const transportPids = [...new Set(holders.map((client) => client.pid))].sort((a, b) => a - b)
+            const row = db.prepare("SELECT delivery FROM sessions WHERE id = ?").get(holder.ctx.sessionId) as {
+              delivery: string
+            } | null
+            return makeResponse(id, {
+              joined: true,
+              observed: true,
+              name: holder.name,
+              role: holder.role,
+              domains: holder.domains,
+              delivery: row?.delivery ?? "pull",
+              memberId: holder.ctx.sessionId,
+              transportPids,
+            })
+          }
+
           case "cli_log": {
             const limit = Number(p.limit ?? 20)
             const rows = db.prepare("SELECT * FROM messages ORDER BY ts DESC LIMIT ?").all(limit)

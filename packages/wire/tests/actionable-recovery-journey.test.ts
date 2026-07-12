@@ -462,6 +462,42 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     }
     expect(readFileSync(join(tmpDir, "activity.jsonl"), "utf8")).not.toContain(`${NAME} left`)
 
+    // Agent8 2026-07-11 recurrence: the startup fallback ran a one-shot
+    // `tribe join` while the native pane was already live. The old CLI
+    // registered a disposable member, renamed it onto the persona, and then
+    // emitted "left" on exit. Join is now an observation/checkpoint over the
+    // persistent native holder, never a second membership authority.
+    const cliJoin = spawn(BUN_BIN, [CLI, "join", NAME, "--domain", "test-lean", "--delivery", "pull", "--json"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_SOCKET: socketPath,
+        TRIBE_NAME: NAME,
+        TRIBE_TAKEOVER: "1",
+        TRIBE_LAUNCH_ID: launchId,
+        TRIBE_NO_AUTOSTART: "1",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+    let cliJoinStdout = ""
+    let cliJoinStderr = ""
+    cliJoin.stdout.on("data", (chunk: Buffer | string) => {
+      cliJoinStdout += chunk.toString()
+    })
+    cliJoin.stderr.on("data", (chunk: Buffer | string) => {
+      cliJoinStderr += chunk.toString()
+    })
+    await once(cliJoin, "exit")
+    expect(cliJoin.exitCode, cliJoinStderr).toBe(0)
+    expect(JSON.parse(cliJoinStdout)).toMatchObject({
+      joined: true,
+      observed: true,
+      name: NAME,
+      memberId: initialMemberId,
+    })
+    expect(launchAdapters.map(({ child }) => child.exitCode)).toEqual([null, null, null])
+    expect(readFileSync(join(tmpDir, "activity.jsonl"), "utf8")).not.toContain(`${NAME} left`)
+
     // Replacing one transport inside the same provider launch retains the
     // logical member and restores the three-transport diagnostic set.
     launchAdapters[1]!.child.kill("SIGTERM")

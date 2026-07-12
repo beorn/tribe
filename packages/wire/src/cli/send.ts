@@ -18,7 +18,7 @@
  *
  * Verbs in this family:
  *   - send          (line ~581 in tools/tribe-cli.ts)
- *   - join          one-shot CLI join/rejoin checkpoint
+ *   - join          observe/checkpoint a persistent native join
  *   - alarm <reason>(line ~629)
  *   - alarm-status  (line ~635)
  *   - alarm-ack     (line ~641)
@@ -37,7 +37,7 @@ import {
   type TribeFanout as Fanout,
   type TribeMessageType as MessageType,
 } from "../command-descriptors.ts"
-import { connectToDaemon, resolveSocketPath, TRIBE_PROTOCOL_VERSION } from "../lib/socket.ts"
+import { connectToDaemon, resolveSocketPath } from "../lib/socket.ts"
 import { resolveDbPath } from "../lib/config.ts"
 import { formatMarkdown, generateRetro, parseDuration } from "../lib/retro.ts"
 
@@ -244,13 +244,11 @@ async function cmdJoin(
     process.exit(2)
   }
 
-  const cwd = process.cwd()
   const role = opts.role ?? "member"
   const domains = parseDomains(opts.domain)
-  const socketPath = resolveSocketPath()
-  const ephemeralName = `cli-join-${process.pid}-${Date.now()}`
   let result: {
     joined?: boolean
+    observed?: boolean
     name?: string
     role?: string
     domains?: string[]
@@ -258,40 +256,15 @@ async function cmdJoin(
     previous_name?: string
     error?: string
   }
-  try {
-    const client = await connectToDaemon(socketPath)
-    try {
-      await client.call("register", {
-        name: ephemeralName,
-        role: "member",
-        domains: [],
-        delivery,
-        project: cwd,
-        projectName: cwd.split("/").filter(Boolean).at(-1) ?? "unknown",
-        pid: process.pid,
-        protocolVersion: TRIBE_PROTOCOL_VERSION,
-      })
-      result = mcpJsonContent(await client.call("tribe.join", { name, role, domains, delivery })) as typeof result
-    } finally {
-      client.close()
-    }
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code
-    if (code === "ECONNREFUSED" || code === "ENOENT") {
-      console.error(`No daemon running (socket: ${socketPath})`)
-      console.error(`Start one with: bun tribe-daemon (package tribe-daemon), or let a host autostart it`)
-      process.exit(1)
-    }
-    throw err
-  }
+  result = (await callDaemon("cli_join", { name, role, domains, delivery })) as typeof result
 
-  if (opts.json) {
-    console.log(JSON.stringify(result))
-    return
-  }
   if (result.error) {
     console.error(`tribe-wire join: ${result.error}`)
     process.exit(1)
+  }
+  if (opts.json) {
+    console.log(JSON.stringify(result))
+    return
   }
   console.log(`Joined ${result.name ?? name} as ${result.role ?? role} (delivery=${result.delivery ?? delivery}).`)
   if (result.previous_name) console.log(`  previous: ${result.previous_name}`)
