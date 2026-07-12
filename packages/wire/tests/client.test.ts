@@ -2,10 +2,11 @@ import { mkdtempSync, rmSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createServer, type Server, type Socket } from "node:net"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
   connectExisting,
   connectOrStart,
+  createReconnectingClient,
   connectToDaemon,
   type ConnectToDaemonOpts,
   type DaemonClient,
@@ -289,5 +290,47 @@ describe("connectOrStart (never destroys a live daemon's socket)", () => {
   it("noSpawn rejects instead of spawning when no daemon is reachable", async () => {
     const sock = join(tmpDir, "absent.sock")
     await expect(connectOrStart(sock, { noSpawn: true, connectAttempts: 1 })).rejects.toBeTruthy()
+  })
+})
+
+describe("createReconnectingClient transport recovery", () => {
+  let tmpDir: string
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "tribe-reconnect-"))
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it("re-arms callbacks and notifications after one client transport closes while the daemon stays healthy", async () => {
+    const sock = join(tmpDir, "d.sock")
+    const { server, clients } = await spawnFakeDaemon(sock)
+    const lifecycle: string[] = []
+    const pushed: string[] = []
+    const client = await createReconnectingClient({
+      socketPath: sock,
+      maxAttempts: 3,
+      maxStartupAttempts: 1,
+      onDisconnect: () => lifecycle.push("closed"),
+      onReconnect: () => lifecycle.push("reconnected"),
+    })
+    client.onNotification((method) => pushed.push(method))
+    try {
+      const socketInode = statSync(sock).ino
+      clients[0]?.destroy()
+      await vi.waitFor(() => {
+        expect(clients).toHaveLength(2)
+        expect(lifecycle).toEqual(["closed", "reconnected"])
+      })
+
+      await client.call("ping")
+      await vi.waitFor(() => expect(pushed).toContain("pushed"))
+      expect(statSync(sock).ino).toBe(socketInode)
+    } finally {
+      client.close()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
   })
 })
