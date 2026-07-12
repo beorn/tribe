@@ -82,6 +82,9 @@ const TRIBE_TOOLS_LIST = toolListForDeliveryCapability(DELIVERY_CAPABILITY)
 // (`TRIBE_NAME=@chief`, `@agent/N`, etc.) never surface as unknown-*.
 const REQUIRE_EXPLICIT_JOIN = process.env.TRIBE_REQUIRE_JOIN !== "0"
 const LAUNCH_NAME = typeof args.name === "string" && args.name.trim().length > 0 ? args.name.trim() : undefined
+if (LAUNCH_NAME?.startsWith("@") && !isExplicitTribePersonaName(LAUNCH_NAME)) {
+  failInvalidExplicitPersona(LAUNCH_NAME)
+}
 const REGISTER_WITH_LAUNCH_NAME =
   LAUNCH_NAME !== undefined && (!REQUIRE_EXPLICIT_JOIN || isExplicitTribePersonaName(LAUNCH_NAME))
 // 20703 — managed spawns set TRIBE_TAKEOVER=1 so an explicit-persona
@@ -259,6 +262,13 @@ function registerParamsForConnection(): typeof baseRegisterParams & { takeover?:
 
 function isExplicitTribePersonaName(name: string): boolean {
   return /^@[a-z0-9][a-z0-9_./-]{0,31}$/.test(name)
+}
+
+function failInvalidExplicitPersona(name: string): never {
+  log.warn?.(
+    `invalid explicit Tribe persona "${name}": expected @ followed by 1-32 lowercase letters, digits, _, ., /, or -`,
+  )
+  process.exit(2)
 }
 
 function errorMessage(err: unknown): string {

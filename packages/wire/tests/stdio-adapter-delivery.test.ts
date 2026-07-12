@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -374,6 +374,31 @@ describe("stdio adapter delivery modes", () => {
       | undefined
     expect(register?.params?.name).toBe("@chief")
     expect(register?.params?.delivery).toBe("pull")
+  })
+
+  it("21049: an invalid explicit persona fails loud instead of registering as unknown", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const logPath = join(tmpDir, "adapter.log")
+    daemon = await spawnFakeDaemon(socketPath)
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_NAME: "@agent/8/21049-landed-native-proof",
+        TRIBE_DELIVERY: "pull",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: logPath,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+
+    const exit = await waitForExit(child)
+
+    expect(exit.code).toBe(2)
+    expect(daemon.requests.some((msg) => msg.method === "register")).toBe(false)
+    expect(readFileSync(logPath, "utf8")).toContain(
+      'invalid explicit Tribe persona "@agent/8/21049-landed-native-proof"',
+    )
   })
 
   it("21049: explicit persona registration carries launch identity with takeover", async () => {
