@@ -33,6 +33,8 @@ const log = createLogger("tribe:socket")
 export interface SocketServer {
   readonly server: Server
   readonly socketPath: string
+  /** Resolves only after this candidate either owns the socket or loses the bind election. */
+  readonly binding: Promise<"listening" | "occupied">
   /** True when the server bound to an inherited fd (hot-reload re-exec). */
   readonly inheritedFd: boolean
   /** Wall-clock ms when bind completed — used for join-suppress window etc. */
@@ -93,10 +95,28 @@ export function withSocketServer<T extends BaseTribe & WithConfig>(): (t: T) => 
     // never fires) leaves this false, so its cleanup defer below will NOT unlink
     // the winner's socket. Guards against a losing daemon orphaning the winner.
     let bound = false
+    let resolveBinding!: (result: "listening" | "occupied") => void
+    let rejectBinding!: (error: Error) => void
+    const binding = new Promise<"listening" | "occupied">((resolve, reject) => {
+      resolveBinding = resolve
+      rejectBinding = reject
+    })
+    const onBindError = (error: NodeJS.ErrnoException) => {
+      if (error.code === "EADDRINUSE") {
+        resolveBinding("occupied")
+        return
+      }
+      rejectBinding(error)
+    }
 
     if (inheritFd !== null) {
       server = createServer()
-      server.listen({ fd: inheritFd })
+      server.once("error", onBindError)
+      server.listen({ fd: inheritFd }, () => {
+        server.removeListener("error", onBindError)
+        bound = true
+        resolveBinding("listening")
+      })
       inheritedFd = true
       log.info?.(`Inherited socket fd ${inheritFd} (hot-reload)`)
     } else {
@@ -110,7 +130,9 @@ export function withSocketServer<T extends BaseTribe & WithConfig>(): (t: T) => 
       }
       if (pinGate.reason) log.warn?.(pinGate.reason)
       server = createServer()
+      server.once("error", onBindError)
       server.listen(socketPath, () => {
+        server.removeListener("error", onBindError)
         bound = true
         try {
           chmodSync(socketPath, 0o600)
@@ -121,13 +143,15 @@ export function withSocketServer<T extends BaseTribe & WithConfig>(): (t: T) => 
         // survives daemon death — "the last pin that ever bound" is the
         // reference future auto-spawns must not downgrade past.
         writePinSidecar(socketPath, STARTUP_SHA)
+        resolveBinding("listening")
+        log.info?.(`Listening on ${socketPath}`)
       })
-      log.info?.(`Listening on ${socketPath}`)
     }
 
     const socket: SocketServer = {
       server,
       socketPath,
+      binding,
       inheritedFd,
       startedAt: Date.now(),
       handedOff: false,

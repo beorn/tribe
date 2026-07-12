@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "vitest"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { createServer, type Server as NetServer } from "node:net"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
@@ -111,6 +111,16 @@ describe("isDaemonAlive", () => {
     writeFileSync(socketPath, "") // leftover file, nothing bound
     const alive = await isDaemonAlive(socketPath, 100)
     expect(alive).toBe(false)
+  })
+
+  test("four simultaneous autostart probes never unlink the shared socket candidate", async () => {
+    const socketPath = resolve(dir, "startup-election.sock")
+    writeFileSync(socketPath, "")
+
+    const outcomes = await Promise.all(Array.from({ length: 4 }, () => isDaemonAlive(socketPath, 100)))
+
+    expect(outcomes).toEqual([false, false, false, false])
+    expect(existsSync(socketPath)).toBe(true)
   })
 
   test("returns true when a server is listening on the socket", async () => {
