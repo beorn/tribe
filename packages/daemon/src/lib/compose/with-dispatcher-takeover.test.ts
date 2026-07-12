@@ -422,6 +422,7 @@ function createDispatcherHarness() {
     socket: {
       server: fakeServer,
       socketPath: join(tempDir, "tribe.sock"),
+      binding: Promise.resolve("listening" as const),
       inheritedFd: false,
       startedAt: Date.now(),
       handedOff: false,

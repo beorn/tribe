@@ -138,6 +138,23 @@ const refs = {
 // ---------------------------------------------------------------------------
 
 const withSocketShape = withSocketServer<typeof partialShape>()(partialShape)
+const socketBinding = withSocketShape.socket.binding
+// Do not block composition on the listen callback: clients may connect as soon
+// as the socket is bound, so the dispatcher must attach in this same turn.
+// A losing candidate is notified asynchronously and exits after disposing its
+// partial/full shape; it never reaches for the winner's socket path.
+void socketBinding
+  .then(async (binding) => {
+    if (binding !== "occupied") return
+    log.info?.(`Another daemon won the bind election for ${withSocketShape.socket.socketPath}, exiting`)
+    await rootScope[Symbol.asyncDispose]()
+    process.exit(0)
+  })
+  .catch(async (error: unknown) => {
+    log.error?.(`Daemon socket bind failed: ${error instanceof Error ? error.message : String(error)}`)
+    await rootScope[Symbol.asyncDispose]()
+    process.exit(1)
+  })
 const withIdleQuitShape = withIdleQuit<typeof withSocketShape>({
   triggerShutdown: () => refs.shutdown(),
 })(withSocketShape)

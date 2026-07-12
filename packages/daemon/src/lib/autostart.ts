@@ -23,7 +23,7 @@
  */
 
 import { createConnection } from "node:net"
-import { existsSync, unlinkSync } from "node:fs"
+import { existsSync } from "node:fs"
 import { spawn } from "node:child_process"
 import { dirname, resolve } from "node:path"
 import { createLogger } from "loggily"
@@ -46,17 +46,16 @@ export type DaemonProbeResult = "alive" | "dead" | "stale-socket"
  * Attempt to connect to the daemon's Unix socket with a short timeout. Returns
  * `"alive"` on successful connect, `"dead"` when the socket file is absent or
  * refuses connections, `"stale-socket"` when the file exists but connect
- * fails.
- *
- * Stale sockets are cleaned up here — a leftover file from a previous daemon
- * that crashed without unlinking would otherwise block a fresh daemon from
- * binding.
+ * fails. This probe is deliberately non-destructive: several host processes
+ * can autostart concurrently, so an observer must never unlink a socket that
+ * another daemon candidate is establishing. The daemon's retrying pre-bind
+ * probe owns stale-socket reclamation and the bind itself elects the winner.
  */
 export function isDaemonAlive(socketPath: string, timeoutMs = 200): Promise<boolean> {
-  return new Promise((resolveFn) => {
+  return new Promise((resolve) => {
     // If the file doesn't exist, the daemon is definitely dead — no probe needed.
     if (!existsSync(socketPath)) {
-      resolveFn(false)
+      resolve(false)
       return
     }
 
@@ -72,24 +71,13 @@ export function isDaemonAlive(socketPath: string, timeoutMs = 200): Promise<bool
         /* ignore */
       }
       clearTimeout(timer)
-      if (!alive) cleanupStaleSocket(socketPath)
-      resolveFn(alive)
+      resolve(alive)
     }
 
     const timer = setTimeout(() => finish(false), timeoutMs)
     socket.once("connect", () => finish(true))
     socket.once("error", () => finish(false))
   })
-}
-
-function cleanupStaleSocket(socketPath: string): void {
-  // Only unlink if there's no live listener — isDaemonAlive already confirmed
-  // that. We still guard with existsSync in case two probes race.
-  try {
-    if (existsSync(socketPath)) unlinkSync(socketPath)
-  } catch {
-    /* best-effort */
-  }
 }
 
 // ---------------------------------------------------------------------------

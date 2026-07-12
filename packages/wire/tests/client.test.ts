@@ -1,6 +1,6 @@
-import { mkdtempSync, rmSync, statSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { createServer, type Server, type Socket } from "node:net"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
@@ -333,4 +333,122 @@ describe("createReconnectingClient transport recovery", () => {
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }
   })
+
+  it("elects one daemon across four simultaneous adapter starters and reconnects them to one successor", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const sock = join(tmpDir, "startup-election.sock")
+    const db = join(tmpDir, "startup-election.db")
+    const starts = join(tmpDir, "starter-pids.txt")
+    const gate = join(tmpDir, "starter-gate.txt")
+    const statuses = join(tmpDir, "starter-status.txt")
+    const wrapper = join(tmpDir, "daemon-start-barrier.ts")
+    const daemon = resolve(import.meta.dirname, "../../daemon/src/daemon.ts")
+    writeFileSync(gate, "0")
+    writeFileSync(
+      wrapper,
+      `import { appendFileSync, readFileSync } from "node:fs"
+const starts = ${JSON.stringify(starts)}
+const gate = ${JSON.stringify(gate)}
+const statuses = ${JSON.stringify(statuses)}
+appendFileSync(starts, \`${"${process.pid}"}\\n\`)
+process.on("exit", code => appendFileSync(statuses, \`${"${process.pid}"} exit ${"${code}"}\\n\`))
+process.on("uncaughtException", error => {
+  appendFileSync(statuses, \`${"${process.pid}"} uncaught ${"${error instanceof Error ? error.stack : String(error)}"}\\n\`)
+  process.exit(1)
+})
+process.on("unhandledRejection", error => {
+  appendFileSync(statuses, \`${"${process.pid}"} rejection ${"${error instanceof Error ? error.stack : String(error)}"}\\n\`)
+  process.exit(1)
+})
+const count = () => readFileSync(starts, "utf8").trim().split(/\\n/u).filter(Boolean).length
+const wave = Math.ceil(count() / 4)
+const deadline = Date.now() + 15_000
+while (Number(readFileSync(gate, "utf8")) < wave && Date.now() < deadline) await Bun.sleep(10)
+if (Number(readFileSync(gate, "utf8")) < wave) throw new Error(\`starter gate timed out for wave ${"${wave}"}\`)
+await import(${JSON.stringify(new URL(`file://${daemon}`).href)})
+`,
+    )
+
+    const previousNoPlugins = process.env.TRIBE_NO_PLUGINS
+    process.env.TRIBE_NO_PLUGINS = "1"
+    const clients: DaemonClient[] = []
+    const reconnected = new Set<number>()
+    const starterPids = () =>
+      existsSync(starts) ? readFileSync(starts, "utf8").trim().split(/\n/u).filter(Boolean).map(Number) : []
+    const pidAlive = (pid: number) => {
+      try {
+        process.kill(pid, 0)
+        return true
+      } catch {
+        return false
+      }
+    }
+    const stop = (pid: number) => {
+      try {
+        process.kill(pid, "SIGTERM")
+      } catch {
+        /* already exited */
+      }
+    }
+
+    try {
+      const connecting = Array.from({ length: 4 }, (_, index) =>
+        createReconnectingClient({
+          socketPath: sock,
+          daemonScript: wrapper,
+          daemonArgs: ["--db", db, "--foreground", "--no-lore"],
+          maxAttempts: 10,
+          maxStartupAttempts: 20,
+          onReconnect: () => reconnected.add(index),
+        }),
+      )
+      await vi.waitFor(() => expect(starterPids()).toHaveLength(4), { timeout: 10_000, interval: 25 })
+      writeFileSync(gate, "1")
+      try {
+        clients.push(...(await Promise.all(connecting)))
+      } catch (error) {
+        const evidence = existsSync(statuses) ? readFileSync(statuses, "utf8") : "(no child exit status)"
+        throw new Error(
+          `initial four-starter election failed; pids=${starterPids().join(",")} alive=${starterPids().filter(pidAlive).join(",")} socket=${existsSync(sock)}\n${evidence}`,
+          { cause: error },
+        )
+      }
+
+      const firstDaemonPids = await Promise.all(
+        clients.map(async (client) => (await client.call("cli_daemon")) as { pid: number }),
+      )
+      expect(new Set(firstDaemonPids.map(({ pid }) => pid)).size).toBe(1)
+      const firstWinner = firstDaemonPids[0]!.pid
+      const firstSocketInode = statSync(sock).ino
+      await vi.waitFor(() => expect(starterPids().slice(0, 4).filter(pidAlive)).toEqual([firstWinner]), {
+        timeout: 10_000,
+        interval: 25,
+      })
+      expect(statSync(sock).ino).toBe(firstSocketInode)
+
+      stop(firstWinner)
+      await vi.waitFor(() => expect(starterPids()).toHaveLength(8), { timeout: 15_000, interval: 25 })
+      writeFileSync(gate, "2")
+      await vi.waitFor(() => expect(reconnected.size).toBe(4), { timeout: 15_000, interval: 25 })
+
+      const secondDaemonPids = await Promise.all(
+        clients.map(async (client) => (await client.call("cli_daemon")) as { pid: number }),
+      )
+      expect(new Set(secondDaemonPids.map(({ pid }) => pid)).size).toBe(1)
+      const secondWinner = secondDaemonPids[0]!.pid
+      expect(secondWinner).not.toBe(firstWinner)
+      const secondSocketInode = statSync(sock).ino
+      await vi.waitFor(() => expect(starterPids().slice(4, 8).filter(pidAlive)).toEqual([secondWinner]), {
+        timeout: 10_000,
+        interval: 25,
+      })
+      expect(statSync(sock).ino).toBe(secondSocketInode)
+    } finally {
+      for (const client of clients) client.close()
+      for (const pid of starterPids()) stop(pid)
+      warn.mockRestore()
+      if (previousNoPlugins === undefined) delete process.env.TRIBE_NO_PLUGINS
+      else process.env.TRIBE_NO_PLUGINS = previousNoPlugins
+    }
+  }, 40_000)
 })
