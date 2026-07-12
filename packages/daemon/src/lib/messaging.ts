@@ -170,7 +170,7 @@ export function sendMessage(
   classification: Classification = {},
   ballTracker: BallTracker = {},
   attribution: SenderAttribution = {},
-): { id: string; ts: number; rowid: number } {
+): { id: string; ts: number; rowid: number; tracker?: { request_id: string; closed: number } } {
   const id = randomUUID()
   const ts = Date.now()
   const sender = attribution.sender ?? ctx.getName()
@@ -189,6 +189,7 @@ export function sendMessage(
   // `request === id` post-send.
   const requestId = ballTracker.request ?? null
   const replyId = ballTracker.reply ?? null
+  let tracker = replyId ? { request_id: replyId, closed: 0 } : undefined
   const result = ctx.stmts.insertMessage.run({
     $id: id,
     $type: type,
@@ -228,12 +229,14 @@ export function sendMessage(
         $recipient: sender,
       }) as { fanout: string } | null
       if (row?.fanout === "first") {
-        ctx.stmts.closePendingRequestAll.run({ $request_id: replyId })
+        const closed = ctx.stmts.closePendingRequestAll.run({ $request_id: replyId })
+        tracker = { request_id: replyId, closed: closed.changes ?? 0 }
       } else {
-        ctx.stmts.closePendingRequest.run({
+        const closed = ctx.stmts.closePendingRequest.run({
           $request_id: replyId,
           $recipient: sender,
         })
+        tracker = { request_id: replyId, closed: closed.changes ?? 0 }
       }
     }
   }
@@ -252,7 +255,7 @@ export function sendMessage(
     topic: classification.topic ?? null,
     roomId: classification.roomId ?? null,
   })
-  return { id, ts, rowid }
+  return { id, ts, rowid, ...(tracker ? { tracker } : {}) }
 }
 
 /**

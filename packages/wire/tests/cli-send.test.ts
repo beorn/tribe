@@ -165,7 +165,7 @@ describe("registerSendCommands", () => {
     }
   })
 
-  test("send --reply closes the pending owner from TRIBE_SESSION_NAME", async () => {
+  test("send --reply reports the daemon's committed tracker result without closing twice (20925)", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-send-reply-"))
     const socketPath = join(tmp, "tribe.sock")
     const calls: Array<{ method: string; params: Record<string, unknown> }> = []
@@ -186,21 +186,24 @@ describe("registerSendCommands", () => {
           }
           calls.push({ method: request.method, params: request.params ?? {} })
           const result =
-            request.method === "tribe.pending" && request.params?.close === "req-123"
-              ? { content: [{ text: JSON.stringify({ owner: "@chief", request_id: "req-123", closed: 1 }) }] }
-              : request.method === "tribe.pending"
+            request.method === "tribe.pending" && request.params?.close === undefined
+              ? {
+                  content: [
+                    {
+                      text: JSON.stringify({
+                        owner: "@chief",
+                        count: 1,
+                        pending: [{ request_id: "req-123", sender: "@agent/3" }],
+                      }),
+                    },
+                  ],
+                }
+              : request.method === "tribe.send"
                 ? {
-                    content: [
-                      {
-                        text: JSON.stringify({
-                          owner: "@chief",
-                          count: 1,
-                          pending: [{ request_id: "req-123", sender: "@agent/3" }],
-                        }),
-                      },
-                    ],
+                    sent: true,
+                    tracker: { request_id: "req-123", closed: request.params?.message === "done" ? 1 : 0 },
                   }
-                : { sent: true }
+                : { error: `unexpected duplicate call ${request.method}` }
           socket.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\n")
         }
       })
@@ -214,31 +217,51 @@ describe("registerSendCommands", () => {
           resolveListen()
         })
       })
-      const res = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProc) => {
-        const child = spawn(BUN_BIN, [CLI, "send", "@agent/3", "done", "--type", "response", "--reply", "req-123"], {
-          env: {
-            ...process.env,
-            TRIBE_SOCKET: socketPath,
-            TRIBE_SESSION_NAME: "@chief",
-          },
-          stdio: ["ignore", "pipe", "pipe"],
+      const runReply = (message: string) =>
+        new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProc) => {
+          const child = spawn(BUN_BIN, [CLI, "send", "@agent/3", message, "--type", "response", "--reply", "req-123"], {
+            env: {
+              ...process.env,
+              TRIBE_SOCKET: socketPath,
+              TRIBE_SESSION_NAME: "@chief",
+            },
+            stdio: ["ignore", "pipe", "pipe"],
+          })
+          let stdout = ""
+          let stderr = ""
+          child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+          child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+          child.on("close", (code) => resolveProc({ code, stdout, stderr }))
         })
-        let stdout = ""
-        let stderr = ""
-        child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
-        child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
-        child.on("close", (code) => resolveProc({ code, stdout, stderr }))
-      })
+
+      const res = await runReply("done")
 
       expect(res).toMatchObject({ code: 0 })
+      expect(res.stdout).toContain("Closed 1 pending request row(s) for @chief: req-123")
       expect(res.stdout).toContain("Sent message to @agent/3")
+
+      const unproven = await runReply("unproven")
+      expect(unproven.code).toBe(1)
+      expect(unproven.stdout).toBe("")
+      expect(unproven.stderr).toContain("committed tracker result closed 0 rows for req-123")
+      expect(unproven.stderr).toContain("Verify current state with: tribe pending --owner @chief")
       expect(calls).toEqual([
         { method: "tribe.pending", params: { owner: "@chief" } },
         {
           method: "tribe.send",
           params: { to: "@agent/3", message: "done", type: "response", reply: "req-123", sender: "@chief" },
         },
-        { method: "tribe.pending", params: { owner: "@chief", close: "req-123" } },
+        { method: "tribe.pending", params: { owner: "@chief" } },
+        {
+          method: "tribe.send",
+          params: {
+            to: "@agent/3",
+            message: "unproven",
+            type: "response",
+            reply: "req-123",
+            sender: "@chief",
+          },
+        },
       ])
     } finally {
       server.close()
@@ -266,7 +289,7 @@ describe("registerSendCommands", () => {
     expect(res.code).toBe(2)
     expect(res.stdout).toBe("")
     expect(res.stderr).toContain("--reply req-123 requires TRIBE_NAME or TRIBE_SESSION_NAME")
-    expect(res.stderr).toContain("Manual fallback: tribe pending --owner <owner> --close req-123")
+    expect(res.stderr).toContain("Inspect ownership first: tribe pending --owner <owner>")
   })
 
   test("send forwards TRIBE_NAME as one-shot caller identity", async () => {

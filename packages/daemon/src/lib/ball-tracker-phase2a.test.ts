@@ -125,7 +125,7 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
     ).toBe(1)
 
     // Close: agent/8 → chief with reply
-    sendMessage(
+    const replyResult = sendMessage(
       agent,
       "@chief",
       "yes, ship it",
@@ -138,6 +138,7 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
         reply: "req-xyz-789",
       },
     )
+    expect(replyResult.tracker).toEqual({ request_id: "req-xyz-789", closed: 1 })
 
     // Pending row gone.
     expect(

@@ -69,7 +69,12 @@ describe("Tribe command descriptors", () => {
   })
 
   test("preserves required args, defaults, enums, and transforms for parity commands", () => {
-    const send = visibleCliProjection(commandDescriptorByMcpName("send")!)
+    const sendDescriptor = commandDescriptorByMcpName("send")!
+    const send = visibleCliProjection(sendDescriptor)
+    expect(sendDescriptor.mcp.outputSchema.properties?.tracker).toMatchObject({
+      type: "object",
+      required: ["request_id", "closed"],
+    })
     expect(send.arguments?.map((arg) => [arg.name, arg.variadic ?? false])).toEqual([
       ["to", false],
       ["message", true],

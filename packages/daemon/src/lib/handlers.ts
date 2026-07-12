@@ -484,6 +484,12 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
         attribution,
       ),
     )
+    const tracker = replyId
+      ? {
+          request_id: replyId,
+          closed: results.reduce((total, item) => total + (item.tracker?.closed ?? 0), 0),
+        }
+      : undefined
     logEvent(ctx, `message.sent.${msgType}`, a.bead as string | undefined, {
       to: recipients,
       message_ids: results.map((r) => r.id),
@@ -495,6 +501,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       id: results[0]?.id ?? null,
       ids: results.map((r) => r.id),
       ...(sharedRequestId ? { request_id: sharedRequestId } : {}),
+      ...(tracker ? { tracker } : {}),
       summary,
       ...(summaryDerived
         ? {
@@ -557,6 +564,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   return jsonResult({
     sent: true,
     id: result.id,
+    ...(result.tracker ? { tracker: result.tracker } : {}),
     summary,
     ...(summaryDerived
       ? {

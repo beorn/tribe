@@ -143,6 +143,15 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           sent: { type: "boolean", description: "True on successful send." },
           id: { type: "string", description: "Message id assigned by the daemon." },
+          tracker: {
+            type: "object",
+            properties: {
+              request_id: { type: "string", description: "Request id handled by this reply." },
+              closed: { type: "number", description: "Pending rows closed by the committed send transaction." },
+            },
+            required: ["request_id", "closed"],
+            description: "Present for replies; reports the committed ball-tracker mutation.",
+          },
           summary: {
             type: "string",
             description:
@@ -155,7 +164,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           warning: { type: "string", description: "Human-readable note emitted when the summary was derived." },
           ...ERROR_SHAPE,
         },
-        "Send result: { sent, id, summary } on success (summary_derived + warning when derived), { error } on validation failure.",
+        "Send result: { sent, id, summary, tracker? } on success (tracker for replies; summary_derived + warning when derived), { error } on validation failure.",
       ),
     },
     cli: available({

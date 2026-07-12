@@ -137,11 +137,6 @@ type PendingListResult = {
   pending?: Array<{ request_id?: string }>
 }
 
-type PendingCloseResult = {
-  error?: string
-  closed?: number
-}
-
 function replyOwnerFromEnv(env: NodeJS.ProcessEnv = process.env): string | null {
   const name = env.TRIBE_SESSION_NAME?.trim() || env.TRIBE_NAME?.trim() || ""
   return name.length > 0 ? name : null
@@ -158,7 +153,7 @@ function requireReplyOwner(reply: string): string {
     `tribe-wire send: --reply ${reply} requires TRIBE_NAME or TRIBE_SESSION_NAME so the one-shot CLI can close the pending owner.`,
   )
   console.error(`Example: TRIBE_NAME=@chief tribe send <recipient> --type response --reply ${reply} <message>`)
-  console.error(`Manual fallback: tribe pending --owner <owner> --close ${reply}`)
+  console.error(`Inspect ownership first: tribe pending --owner <owner>`)
   process.exit(2)
 }
 
@@ -173,27 +168,26 @@ async function verifyPendingReplyOwner(owner: string, reply: string): Promise<vo
   if (!hasRequest) {
     console.error(`tribe-wire send: no pending request ${reply} is owned by ${owner}; not sending response.`)
     console.error(`Check the owner with: tribe pending --owner ${owner}`)
-    console.error(
-      `If this was already handled out of band, close explicitly with: tribe pending --owner ${owner} --close ${reply}`,
-    )
     process.exit(1)
   }
 }
 
-async function closePendingReplyOwner(owner: string, reply: string): Promise<void> {
-  const closed = mcpJsonContent(await callDaemon("tribe.pending", { owner, close: reply })) as PendingCloseResult
-  if (closed.error) {
-    console.error(
-      `tribe-wire send: response sent, but closing pending request ${reply} for ${owner} failed: ${closed.error}`,
-    )
-    console.error(`Close it manually with: tribe pending --owner ${owner} --close ${reply}`)
+function reportCommittedReplyTracker(
+  owner: string,
+  reply: string,
+  tracker: { request_id?: string; closed?: number } | undefined,
+): void {
+  if (tracker?.request_id !== reply || typeof tracker.closed !== "number") {
+    console.error(`tribe-wire send: response sent, but the daemon returned no committed tracker proof for ${reply}.`)
+    console.error(`Verify current state with: tribe pending --owner ${owner}`)
     process.exit(1)
   }
-  if (closed.closed !== 1) {
-    console.error(`tribe-wire send: response sent, but pending request ${reply} for ${owner} did not close.`)
-    console.error(`Close it manually with: tribe pending --owner ${owner} --close ${reply}`)
+  if (tracker.closed < 1) {
+    console.error(`tribe-wire send: response sent, but its committed tracker result closed 0 rows for ${reply}.`)
+    console.error(`Verify current state with: tribe pending --owner ${owner}`)
     process.exit(1)
   }
+  console.log(`Closed ${tracker.closed} pending request row(s) for ${owner}: ${reply}`)
 }
 
 function collectDomain(value: string, previous: string[]): string[] {
@@ -215,17 +209,18 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
   const replyOwner = input.reply ? requireReplyOwner(input.reply) : null
   if (input.reply && replyOwner) await verifyPendingReplyOwner(replyOwner, input.reply)
 
-  const result = (await callDaemon("tribe.send", buildSendPayload(input, sendCallerFromEnv()))) as {
+  const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input, sendCallerFromEnv()))) as {
     error?: string
     summary?: string
     summary_derived?: boolean
     warning?: string
+    tracker?: { request_id?: string; closed?: number }
   }
   if (typeof result.error === "string" && result.error.length > 0) {
     console.error(`tribe-wire send: ${result.error}`)
     process.exit(1)
   }
-  if (input.reply && replyOwner) await closePendingReplyOwner(replyOwner, input.reply)
+  if (input.reply && replyOwner) reportCommittedReplyTracker(replyOwner, input.reply, result.tracker)
   console.log(`Sent message to ${input.to}`)
   // Derive-not-reject: surface (no-silent) when the daemon derived a one-liner
   // because none was authored, so the sender learns to pass `--summary`.
