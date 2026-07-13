@@ -71,7 +71,7 @@ export type {
 export { withSignals } from "./with-signals.ts"
 export type { SignalHooks, WithSignals } from "./with-signals.ts"
 
-export { withHotReload } from "./with-hot-reload.ts"
+export { withHotReload, RELOAD_OK, RELOAD_REFUSED, RELOAD_DEGRADED } from "./with-hot-reload.ts"
 export type { HotReload, HotReloadOpts, WithHotReload } from "./with-hot-reload.ts"
 
 export { withIdleQuit } from "./with-idle-quit.ts"

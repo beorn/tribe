@@ -1,25 +1,53 @@
 /**
- * withHotReload — SIGHUP-driven re-exec for picking up new daemon code.
+ * withHotReload — SIGHUP-driven re-exec for picking up new daemon code, behind
+ * a safe-reload admission gate (@ag/tribe/20703).
  *
- * Two pieces:
+ * User doctrine 2026-07-13: watch-triggered hot-reload STAYS — staleness has
+ * cost us more than reloads — but a reload must never replace a working daemon
+ * with a broken one, and must be observable. ONE pipeline, two triggers:
  *
- *   1. `reload()` — close + unlink the listening socket, then spawn a DETACHED
- *      replacement (`detached:true` + `unref()`, no `--fd`) that binds the
- *      freed socket path fresh. The old process exits after a short delay.
- *      The replacement survives the old process's exit. (Earlier versions
- *      passed the listening fd to the child for zero-gap handoff, but Bun's
- *      `node:net` cannot `listen({ fd })` — fd inheritance crash-looped the
- *      child. Close-then-fresh-bind costs a sub-second reconnect window but
- *      works under Bun.)
+ *   watch (fs change → debounced SIGHUP) and explicit (`tribe reload` /
+ *   SIGHUP) both land in `reload()`, which runs the admission gate before any
+ *   re-exec.
  *
- *   2. Source file watcher — fs.watch on the daemon's source directories;
- *      coalesced via debounce; emits SIGHUP to the current process on change.
- *      Skipped when `disableWatch: true` (tests) or `TRIBE_NO_AUTORELOAD=1`.
+ * Pieces:
  *
- * The factory takes runtime callbacks the daemon supplies: `getStopPlugins()`
- * (called before spawn so plugin cursors flush), `triggerShutdown()` (called
- * after the spawn delay to release the old process). The withSignals factory
- * routes SIGHUP to `reload()`.
+ *   1. `reload()` — admission-gated re-exec. First `runAdmissionPrecheck`
+ *      spawns the ON-DISK daemon entry with `--precheck` (module graph loads,
+ *      exits before any DB open / socket bind — see daemon.ts). Only on a
+ *      passing precheck: close + unlink the listening socket, then spawn a
+ *      DETACHED replacement (`detached:true` + `unref()`, no `--fd`) that
+ *      binds the freed socket path fresh. The old process exits after a short
+ *      delay. (Earlier versions passed the listening fd to the child for
+ *      zero-gap handoff, but Bun's `node:net` cannot `listen({ fd })` — fd
+ *      inheritance crash-looped the child. Close-then-fresh-bind costs a
+ *      sub-second reconnect window but works under Bun.) On a FAILING
+ *      precheck: NO re-exec, plugins keep running, socket stays bound, and a
+ *      `daemon:reload-refused` event carries the literal candidate error.
+ *      THE INVARIANT: a broken source tree can never take down a working
+ *      daemon.
+ *
+ *   2. Post-reload verify — the replacement daemon boots with
+ *      `__TRIBE_RELOAD_VERIFY=1` + `__TRIBE_RELOAD_FROM_SHA=<old sha>`; once
+ *      its socket reports "listening" it probes its own `tribe.health` and
+ *      emits `daemon:reload-ok` (green) or `daemon:reload-degraded` (red,
+ *      LOUD, naming the degraded facts) stamped old→new SHA from the code-pin
+ *      machinery. No auto-rollback in this slice — the design note for
+ *      generation-pinned snapshots + rollback (and why full blue-green waits
+ *      for attach-by-token) lives in tribe-wire's lib/hot-reload.ts.
+ *
+ *   3. Source file watcher — fs.watch on the daemon's source directories;
+ *      coalesced via the shared reload debouncer (default 2s window,
+ *      `TRIBE_RELOAD_DEBOUNCE_MS`) so a gitlink bump touching 50 files fires
+ *      ONE reload; emits SIGHUP to the current process on change. Skipped
+ *      when `disableWatch: true` (tests) or `TRIBE_NO_AUTORELOAD=1`.
+ *
+ * The factory takes runtime callbacks the daemon supplies: `stopPlugins()`
+ * (called before spawn so plugin cursors flush — only AFTER admission),
+ * `triggerShutdown()` (called after the spawn delay to release the old
+ * process), `emitEvent` (reload events onto the tribe wire), `probeHealth`
+ * (the new generation's self-check). The withSignals factory routes SIGHUP to
+ * `reload()`.
  */
 
 import { spawn } from "node:child_process"
@@ -27,26 +55,170 @@ import { existsSync, readdirSync, readFileSync, unlinkSync, watch, type FSWatche
 import { createHash } from "node:crypto"
 import { dirname as pathDirname, resolve as pathResolve } from "node:path"
 import { createLogger } from "loggily"
+import {
+  createReloadDebouncer,
+  reloadDebounceMs,
+  reloadPrecheckTimeoutMs,
+  runAdmissionPrecheck,
+  type AdmissionResult,
+} from "tribe-wire/lib/hot-reload"
+import { STARTUP_SHA } from "../code-pin.ts"
 import type { BaseTribe } from "./base.ts"
 import type { WithSocketServer } from "./with-socket-server.ts"
 
 const log = createLogger("tribe:hot-reload")
 
+// ---------------------------------------------------------------------------
+// Reload event types — the observable contract. Emitted on the tribe wire
+// (broadcast + activity log via the daemon's emitEvent wiring) so every seat
+// and the health-monitor can see reload outcomes without scraping logs.
+// ---------------------------------------------------------------------------
+
+/** A candidate source tree failed admission; the running generation stays. */
+export const RELOAD_REFUSED = "daemon:reload-refused"
+/** A new generation booted and its health probe came back clean. */
+export const RELOAD_OK = "daemon:reload-ok"
+/** A new generation booted but reports degraded facts (or the probe failed). */
+export const RELOAD_DEGRADED = "daemon:reload-degraded"
+
+/** Env markers the committing generation stamps on the replacement so the new
+ *  process knows to run the post-reload verify and against which baseline. */
+const VERIFY_ENV = "__TRIBE_RELOAD_VERIFY"
+const FROM_SHA_ENV = "__TRIBE_RELOAD_FROM_SHA"
+
+type ReloadLog = { info?: (msg: string) => void; warn?: (msg: string) => void }
+
+const shortSha = (sha: string | null): string => (sha ? sha.slice(0, 12) : "unknown")
+
+// ---------------------------------------------------------------------------
+// Pure core 1 — admission-gated reload decision.
+// ---------------------------------------------------------------------------
+
+export interface AdmitAndReloadDeps {
+  /** Run the candidate precheck (real: runAdmissionPrecheck on the entry). */
+  runPrecheck: () => Promise<AdmissionResult>
+  /** Commit the re-exec (socket handoff + detached spawn + exit timers). */
+  commitReExec: () => void
+  /** Emit an observable reload event (type, content). */
+  emit: (type: string, content: string) => void
+  /** Log sink override (tests). Defaults to this module's logger. */
+  log?: ReloadLog
+}
+
+/**
+ * The admission gate: precheck the candidate, then EITHER commit the re-exec
+ * (exactly once) or refuse it — keep serving on the current generation, log
+ * loud, and emit `daemon:reload-refused` with the literal candidate error.
+ * A precheck that itself throws is a refusal, never an admission (fail-closed).
+ */
+export async function admitAndReload(
+  deps: AdmitAndReloadDeps,
+): Promise<{ admitted: boolean; precheck: AdmissionResult }> {
+  const lg = deps.log ?? log
+  let precheck: AdmissionResult
+  try {
+    precheck = await deps.runPrecheck()
+  } catch (err) {
+    precheck = {
+      ok: false,
+      code: null,
+      signal: null,
+      timedOut: false,
+      stderr: `precheck runner threw: ${err instanceof Error ? err.message : String(err)}`,
+    }
+  }
+
+  if (!precheck.ok) {
+    const why = precheck.timedOut
+      ? `candidate precheck timed out (killed; the candidate hung before completing module-graph load)`
+      : `candidate precheck exited ${precheck.code === null ? `via signal ${precheck.signal ?? "unknown"}` : `code ${precheck.code}`}${precheck.stderr ? `: ${precheck.stderr}` : ""}`
+    const content = `hot-reload REFUSED — keeping current generation (pid=${process.pid}, running=${shortSha(STARTUP_SHA)}): ${why}`
+    lg.warn?.(content)
+    deps.emit(RELOAD_REFUSED, content)
+    return { admitted: false, precheck }
+  }
+
+  deps.commitReExec()
+  return { admitted: true, precheck }
+}
+
+// ---------------------------------------------------------------------------
+// Pure core 2 — post-reload health verification (runs in the NEW generation).
+// ---------------------------------------------------------------------------
+
+export interface PostReloadVerifyDeps {
+  /** Probe this daemon's own health — the `degraded` contract from handleHealth. */
+  probeHealth: () => Promise<{ degraded: string[] }>
+  /** SHA the previous generation ran (from the env marker), null if unknown. */
+  fromSha: string | null
+  /** SHA this generation loaded (code-pin STARTUP_SHA), null if unknown. */
+  toSha: string | null
+  /** Emit an observable reload event (type, content). */
+  emit: (type: string, content: string) => void
+  /** Log sink override (tests). Defaults to this module's logger. */
+  log?: ReloadLog
+}
+
+/**
+ * The new generation's self-check: probe `tribe.health` once ready and emit
+ * `daemon:reload-ok` (clean) or `daemon:reload-degraded` (degraded facts named,
+ * LOUD). A probe failure is itself a degraded outcome — never silent.
+ */
+export async function runPostReloadVerify(deps: PostReloadVerifyDeps): Promise<{ ok: boolean; degraded: string[] }> {
+  const lg = deps.log ?? log
+  const gen = `${shortSha(deps.fromSha)} → ${shortSha(deps.toSha)}`
+  let degraded: string[]
+  try {
+    degraded = (await deps.probeHealth()).degraded
+  } catch (err) {
+    const content = `hot-reload DEGRADED (${gen}): post-reload health probe failed: ${err instanceof Error ? err.message : String(err)}`
+    lg.warn?.(content)
+    deps.emit(RELOAD_DEGRADED, content)
+    return { ok: false, degraded: [] }
+  }
+  if (degraded.length > 0) {
+    const content = `hot-reload DEGRADED (${gen}): new generation reports degraded facts: ${degraded.join(", ")}`
+    lg.warn?.(content)
+    deps.emit(RELOAD_DEGRADED, content)
+    return { ok: false, degraded }
+  }
+  const content = `hot-reload ok (${gen}): new generation healthy`
+  lg.info?.(content)
+  deps.emit(RELOAD_OK, content)
+  return { ok: true, degraded: [] }
+}
+
+// ---------------------------------------------------------------------------
+// Factory
+// ---------------------------------------------------------------------------
+
 export interface HotReloadOpts {
-  /** Called before re-exec so plugin state flushes to disk. */
+  /** Called before re-exec so plugin state flushes to disk (only on ADMITTED reloads). */
   stopPlugins: () => void
   /** Called after the spawn delay to abort/exit the current process. */
   triggerShutdown: () => void
+  /** Emit an observable reload event onto the tribe wire (broadcast + journal). */
+  emitEvent: (type: string, content: string) => void
+  /** Probe this daemon's own tribe.health `degraded` contract (post-reload verify). */
+  probeHealth: () => Promise<{ degraded: string[] }>
   /** Skip the source-watcher (tests + non-source bundles). */
   disableWatch?: boolean
-  /** ms between debounced source-change → SIGHUP emit. Default 500. */
+  /** Skip the boot-time post-reload verify (tests). */
+  disableVerify?: boolean
+  /** ms between debounced source-change → SIGHUP emit.
+   *  Default `reloadDebounceMs()` (2s; TRIBE_RELOAD_DEBOUNCE_MS). */
   watchDebounceMs?: number
   /** ms to give the new process before the old exits. Default 1000. */
   spawnDelayMs?: number
+  /** Admission precheck timeout.
+   *  Default `reloadPrecheckTimeoutMs()` (30s; TRIBE_RELOAD_PRECHECK_TIMEOUT_MS). */
+  precheckTimeoutMs?: number
+  /** Test seam — replace the real candidate spawn with a canned result. */
+  precheckRunner?: () => Promise<AdmissionResult>
 }
 
 export interface HotReload {
-  /** Trigger an immediate re-exec. The withSignals factory wires SIGHUP here. */
+  /** Trigger an admission-gated re-exec. The withSignals factory wires SIGHUP here. */
   reload(): void
   /** Active watchers — exposed so tests can await close(). */
   readonly watchers: ReadonlyArray<FSWatcher>
@@ -91,12 +263,46 @@ export function withHotReload<T extends BaseTribe & WithSocketServer>(
 ): (t: T) => T & WithHotReload {
   return (t) => {
     const spawnDelayMs = opts.spawnDelayMs ?? 1000
-    const watchDebounceMs = opts.watchDebounceMs ?? 500
+    const watchDebounceMs = opts.watchDebounceMs ?? reloadDebounceMs()
 
-    function reload(): void {
-      log.info?.("SIGHUP received — re-exec for hot-reload")
+    // -----------------------------------------------------------------------
+    // Post-reload verify (this process IS the new generation when the env
+    // marker is present). Read + clear the markers unconditionally so they
+    // never leak into further children; run the verify once the socket
+    // reports "listening" — that is "ready": DB open, dispatcher attached.
+    // -----------------------------------------------------------------------
+    const verifyRequested = process.env[VERIFY_ENV] === "1"
+    const verifyFromSha = process.env[FROM_SHA_ENV] || null
+    delete process.env[VERIFY_ENV]
+    delete process.env[FROM_SHA_ENV]
+    if (verifyRequested && !opts.disableVerify) {
+      void t.socket.binding
+        .then(async (binding) => {
+          if (binding !== "listening") return // lost the bind election — no generation to verify
+          await runPostReloadVerify({
+            probeHealth: opts.probeHealth,
+            fromSha: verifyFromSha,
+            toSha: STARTUP_SHA,
+            emit: opts.emitEvent,
+          })
+        })
+        .catch((err: unknown) => {
+          // runPostReloadVerify contains its probe errors; reaching here means
+          // emit/binding itself failed — still loud, never silent.
+          log.warn?.(`post-reload verify could not run: ${err instanceof Error ? err.message : String(err)}`)
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // Commit path — the pre-existing hardened re-exec, unchanged except that
+    // it now runs only AFTER admission and stamps the verify env markers.
+    // -----------------------------------------------------------------------
+    function commitReExec(): void {
+      log.info?.("hot-reload admitted — re-exec for new generation")
       // Stop plugins BEFORE spawning so cursor/state flushes to disk
-      // (prevents duplicate event delivery in the new process).
+      // (prevents duplicate event delivery in the new process). Deliberately
+      // NOT done for refused reloads — a refused reload must leave the
+      // running generation fully intact, plugins included.
       opts.stopPlugins()
 
       // Re-exec strategy: close-then-spawn-detached-fresh.
@@ -136,7 +342,12 @@ export function withHotReload<T extends BaseTribe & WithSocketServer>(
       const child = spawn(process.execPath, argv, {
         stdio: "ignore",
         detached: true,
-        env: process.env,
+        env: {
+          ...process.env,
+          // The replacement runs the post-reload verify against this baseline.
+          [VERIFY_ENV]: "1",
+          [FROM_SHA_ENV]: STARTUP_SHA ?? "",
+        },
       })
       child.unref()
 
@@ -173,6 +384,53 @@ export function withHotReload<T extends BaseTribe & WithSocketServer>(
       }, spawnDelayMs + 1500)
     }
 
+    // -----------------------------------------------------------------------
+    // Admission precheck of the ON-DISK entry (the candidate source tree).
+    // -----------------------------------------------------------------------
+    function runPrecheck(): Promise<AdmissionResult> {
+      if (opts.precheckRunner) return opts.precheckRunner()
+      const entry = process.argv[1]
+      if (!entry) {
+        // Fail-closed: no locatable entry means no way to validate a
+        // candidate — refuse rather than blind-fire a re-exec.
+        return Promise.resolve({
+          ok: false,
+          code: null,
+          signal: null,
+          timedOut: false,
+          stderr: "cannot locate daemon entry (process.argv[1] is empty) — refusing reload",
+        } satisfies AdmissionResult)
+      }
+      return runAdmissionPrecheck({
+        entry,
+        args: process.argv.slice(2).filter((a) => !a.startsWith("--fd")),
+        timeoutMs: opts.precheckTimeoutMs ?? reloadPrecheckTimeoutMs(),
+      })
+    }
+
+    // ONE pipeline, two triggers: both the watcher's debounced SIGHUP and an
+    // explicit `tribe reload` / SIGHUP land here and pass the admission gate.
+    let reloadInFlight = false
+    function reload(): void {
+      if (reloadInFlight) {
+        log.info?.("hot-reload already in flight — trigger coalesced")
+        return
+      }
+      reloadInFlight = true
+      log.info?.("reload requested — running admission precheck on the on-disk source")
+      void admitAndReload({ runPrecheck, commitReExec, emit: opts.emitEvent })
+        .catch((err: unknown) => {
+          // admitAndReload is fail-closed internally; reaching here means the
+          // emit wiring itself threw. Loud, and the daemon keeps serving.
+          log.warn?.(
+            `hot-reload admission error (daemon keeps serving): ${err instanceof Error ? err.message : String(err)}`,
+          )
+        })
+        .finally(() => {
+          reloadInFlight = false
+        })
+    }
+
     // Source-file watcher — auto-SIGHUP on code changes.
     const watchers: FSWatcher[] = []
     if (!opts.disableWatch && !process.env.TRIBE_NO_AUTORELOAD) {
@@ -184,18 +442,24 @@ export function withHotReload<T extends BaseTribe & WithSocketServer>(
       const sourceFiles = buildSourceFiles(toolsDir, libTribeDir)
 
       let sourceHash = computeSourceHash(sourceFiles)
-      let reloadDebounce: ReturnType<typeof setTimeout> | null = null
 
-      const onSourceChange = (filename: string | null): void => {
-        if (filename && !filename.endsWith(".ts")) return
-        if (reloadDebounce) clearTimeout(reloadDebounce)
-        reloadDebounce = setTimeout(() => {
+      // Shared debouncer: N fs events inside the window → ONE flush → ONE
+      // SIGHUP → ONE admission-gated reload. (Pre-20703 this was a bare 500ms
+      // timer; a gitlink bump spread over >500ms double-fired the re-exec.)
+      const debouncer = createReloadDebouncer({
+        windowMs: watchDebounceMs,
+        onFlush: () => {
           const newHash = computeSourceHash(sourceFiles)
           if (newHash === sourceHash) return // No actual change
           log.info?.(`Source changed (${sourceHash} → ${newHash}), triggering hot-reload`)
           sourceHash = newHash
           process.emit("SIGHUP")
-        }, watchDebounceMs)
+        },
+      })
+
+      const onSourceChange = (filename: string | null): void => {
+        if (filename && !filename.endsWith(".ts")) return
+        debouncer.trigger()
       }
 
       try {
@@ -214,7 +478,7 @@ export function withHotReload<T extends BaseTribe & WithSocketServer>(
       log.info?.(`Watching source files for auto-reload`)
 
       t.scope.defer(() => {
-        if (reloadDebounce) clearTimeout(reloadDebounce)
+        debouncer[Symbol.dispose]()
         for (const w of watchers) {
           try {
             w.close()
