@@ -158,6 +158,20 @@ export function deriveReplyHint(opts: { kind: MessageKind; recipient: string; se
  * `kind` defaults to `direct` for backward compatibility. Broadcasts should
  * pass `broadcast`; journal-only events should pass `event` (and route via
  * `logEvent` which sets the type prefix).
+ *
+ * `idempotencyKey` (20703 safe-reload) makes a send RETRYABLE across a daemon
+ * restart / connection loss without double-delivery. When a client mints a key
+ * and re-issues the send after a dropped connection, the key IS the message id
+ * (`messages.id` is the PRIMARY KEY — the natural idempotency ledger, retained
+ * as long as the message itself, unlike the 1-day `dedup` table TTL; no schema
+ * change). On REPLAY — a row with that id already exists — the call returns the
+ * ORIGINAL `{ id, ts, rowid }`, inserts NOTHING, fires NO fan-out, and opens NO
+ * second ball/pending row (the first send already committed those effects). A
+ * plain INSERT (not INSERT-OR-IGNORE) still runs on the first send: a
+ * PRIMARY-KEY collision from a genuine concurrent double-insert would throw
+ * loudly rather than silently drop — but the daemon runs `sendMessage`
+ * synchronously on a single event loop, so the read-then-insert is atomic
+ * within one call.
  */
 export function sendMessage(
   ctx: TribeContext,
@@ -170,8 +184,16 @@ export function sendMessage(
   classification: Classification = {},
   ballTracker: BallTracker = {},
   attribution: SenderAttribution = {},
+  idempotencyKey?: string,
 ): { id: string; ts: number; rowid: number; tracker?: { request_id: string; closed: number } } {
-  const id = randomUUID()
+  if (idempotencyKey !== undefined && idempotencyKey.length > 0) {
+    const prior = ctx.db.prepare("SELECT rowid, ts FROM messages WHERE id = $id").get({ $id: idempotencyKey }) as
+      | { rowid: number; ts: number }
+      | undefined
+    // Replay: the original send already committed the row + side-effects.
+    if (prior) return { id: idempotencyKey, ts: prior.ts, rowid: prior.rowid }
+  }
+  const id = idempotencyKey !== undefined && idempotencyKey.length > 0 ? idempotencyKey : randomUUID()
   const ts = Date.now()
   const sender = attribution.sender ?? ctx.getName()
   const senderRole = attribution.senderRole ?? ctx.getRole()
