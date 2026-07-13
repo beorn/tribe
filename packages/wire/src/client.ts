@@ -30,9 +30,21 @@ const log = createLogger("tribe-client:client")
 // Daemon client
 // ---------------------------------------------------------------------------
 
+/** Per-call overrides for `DaemonClient.call`. */
+export type DaemonCallOpts = {
+  /**
+   * Override the per-call request timeout (ms) for THIS call only. A timeout on
+   * a call that passed an explicit `timeoutMs` is treated as an INTENTIONAL
+   * long-poll expiry (e.g. `tribe.inbox.wait`): it does NOT count toward the
+   * consecutive-timeout connection-destroy policy. Calls that rely on the
+   * default `callTimeoutMs` keep the destroy-on-3-timeouts behavior.
+   */
+  timeoutMs?: number
+}
+
 export type DaemonClient = {
   /** Send a JSON-RPC request and wait for response */
-  call(method: string, params?: Record<string, unknown>): Promise<unknown>
+  call(method: string, params?: Record<string, unknown>, opts?: DaemonCallOpts): Promise<unknown>
   /** Send a notification (no response expected) */
   notify(method: string, params?: Record<string, unknown>): void
   /** Register a handler for server-pushed notifications */
@@ -93,7 +105,13 @@ export function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts):
 
       let timeouts = 0
       const client: DaemonClient = {
-        call(method, params) {
+        call(method, params, opts) {
+          // A caller-specified per-call timeout is an intentional deadline (a
+          // long-poll like tribe.inbox.wait). Its expiry is NOT evidence the
+          // daemon is dead, so it must not feed the 3-strike destroy counter —
+          // only default-timeout expiries do (see below).
+          const explicitTimeout = opts?.timeoutMs !== undefined
+          const perCallTimeoutMs = opts?.timeoutMs ?? callTimeoutMs
           return new Promise((res, rej) => {
             const id = nextId++
             pending.set(id, { resolve: res, reject: rej })
@@ -101,11 +119,12 @@ export function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts):
             timers.setTimeout(() => {
               if (!pending.delete(id)) return
               rej(new Error(`Request ${method} timed out`))
+              if (explicitTimeout) return
               if (++timeouts >= 3) {
                 log.warn?.(`${timeouts} consecutive timeouts, destroying connection`)
                 socket.destroy()
               }
-            }, callTimeoutMs)
+            }, perCallTimeoutMs)
           }).then((v) => {
             timeouts = 0
             return v

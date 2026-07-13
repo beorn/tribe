@@ -66,6 +66,10 @@ export type { InboxWaitOptions, InboxWaitOptionSource } from "./lib/inbox-wait-o
 export {
   DEFAULT_INBOX_WAIT_SESSION,
   DEFAULT_INBOX_WAIT_TIMEOUT_MS,
+  deriveInboxWaitCallTimeoutMs,
+  INBOX_WAIT_CALL_TIMEOUT_FLOOR_MS,
+  INBOX_WAIT_CALL_TIMEOUT_MARGIN_MS,
+  MAX_INBOX_WAIT_TIMEOUT_MS,
   parseInboxWaitTimeoutMs,
   resolveInboxWaitOptions,
 } from "./lib/inbox-wait-options.ts"

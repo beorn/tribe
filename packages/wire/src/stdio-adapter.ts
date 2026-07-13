@@ -24,7 +24,18 @@ import {
   resolveProjectName,
   resolveProjectId,
 } from "./lib/config.ts"
-import { resolveSocketPath, createReconnectingClient, TRIBE_PROTOCOL_VERSION, type DaemonClient } from "./lib/socket.ts"
+import {
+  resolveSocketPath,
+  createReconnectingClient,
+  TRIBE_PROTOCOL_VERSION,
+  type DaemonCallOpts,
+  type DaemonClient,
+} from "./lib/socket.ts"
+import {
+  deriveInboxWaitCallTimeoutMs,
+  MAX_INBOX_WAIT_TIMEOUT_MS,
+  resolveInboxWaitOptions,
+} from "./lib/inbox-wait-options.ts"
 import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
 import { spawn } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
@@ -265,9 +276,36 @@ let requiredMcpTransportHealth: RequiredMcpTransportHealth = {
   status: "advertised",
   reason: "awaiting daemon registration",
 }
+// 20703/21049 — the reconnecting proxy (`daemon`) is only assigned after the
+// INITIAL connect resolves, but the first advertised→live transition is computed
+// inside onConnect before that. Capture the live client there so the publish
+// below still has a client for that first transition.
+let transportStatusPublishClient: DaemonClient | undefined
+
+// 20703/21049 — the required-MCP transport status was computed but dead-ended
+// locally, so an adapter's advertised→live→closed churn was invisible to
+// chief/deck and the recurrence read as a daemon fault. Publish each status
+// TRANSITION (not repeats) over the EXISTING health rail; the daemon stamps it
+// server-side as a `health:recovery` pull broadcast (ambient/fetchable, not a
+// push flood). Managed explicit-persona launches only — anonymous pull adapters
+// would just add noise. Fully best-effort: this must never throw or block.
+function publishRequiredMcpTransportTransition(status: RequiredMcpTransportStatus, reason: string): void {
+  if (!REGISTER_WITH_LAUNCH_NAME) return
+  const client = daemon ?? transportStatusPublishClient
+  if (!client) return
+  const launchId = LAUNCH_IDENTITY?.id ?? "missing"
+  const content =
+    `tribe transport ${myName}: status=${status}; reason=${reason}; ` +
+    `launch_id=${launchId}; launch_parent_pid=${process.ppid}; transport_pid=${process.pid}`
+  client.call("tribe.health.publish", { content }).catch(() => {
+    /* best-effort visibility — never load-bearing */
+  })
+}
 
 function setRequiredMcpTransportHealth(status: RequiredMcpTransportStatus, reason: string): void {
+  const changed = requiredMcpTransportHealth.status !== status
   requiredMcpTransportHealth = { status, reason }
+  if (changed) publishRequiredMcpTransportTransition(status, reason)
 }
 
 function requiredMcpTransportFailureResult(): {
@@ -338,6 +376,10 @@ function startDaemonConnection(): Promise<DaemonClient> {
   return createReconnectingClient({
     socketPath: SOCKET_PATH,
     async onConnect(client) {
+      // 20703/21049 — the first advertised→live transition publishes from inside
+      // this callback, before `daemon` (the proxy) is assigned; give the publisher
+      // a client to use for it.
+      transportStatusPublishClient = client
       // km 19442 — open a fresh connect-replay window so a stale daemon's body-push
       // burst on (re)connect is bounded (see connectReplayGate + the `channel` handler).
       connectReplayGate.reset(Date.now())
@@ -707,6 +749,24 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         : a
     // Tool names are bare verbs ("send", "fetch"); daemon wire methods use "tribe." prefix
     const daemonMethod = `tribe.${name}`
+    // 20703 — inbox-wait advertises a 30s-default / max-window long-poll, but the
+    // wire client hard-caps every RPC at callTimeoutMs (10s): any wait >10s errored
+    // at 10s and every third one tore down a HEALTHY connection. Size a per-call
+    // socket deadline from the requested wait, and forward the (30-min-capped) wait
+    // so the daemon's own timeout returns a clean `timed_out` INSIDE that window.
+    // The per-call timeout is exempt from the 3-strike destroy (see client.ts).
+    // Hosts send the tool as "inbox.wait" (advertised) or "inbox_wait" (underscore).
+    let callOpts: DaemonCallOpts | undefined
+    let daemonPayload: Record<string, unknown> = payload
+    if (name === "inbox.wait" || name === "inbox_wait") {
+      const { timeoutMs: requestedWaitMs } = resolveInboxWaitOptions({
+        timeout_ms: a.timeout_ms,
+        timeoutMs: a.timeoutMs,
+      })
+      const cappedWaitMs = Math.min(requestedWaitMs, MAX_INBOX_WAIT_TIMEOUT_MS)
+      daemonPayload = { ...payload, timeout_ms: cappedWaitMs }
+      callOpts = { timeoutMs: deriveInboxWaitCallTimeoutMs(cappedWaitMs) }
+    }
     // Still degraded after the retry → one clear sentence per call, never the
     // raw connect error (km 19851 loud-but-soft).
     if (daemonDegradedReason !== null && daemon === undefined) {
@@ -722,7 +782,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     // A tool call may arrive before the background daemon connect resolves
     // (the daemon block is non-blocking) — await `daemonReady` in that case.
     const d = daemon ?? (await daemonReady)
-    const result = await d.call(daemonMethod, payload)
+    const result = await d.call(daemonMethod, daemonPayload, callOpts)
     // Update local name/role after join/rename
     if (name === "join") joined = true
     if (name === "join" || name === "rename") {
