@@ -416,7 +416,7 @@ function computeRegistryGauges(clients: RegistryClientSnapshot[], now: number): 
     }
     // null launchId is its own bucket: a token-less CLI carrier squatting a
     // persona alongside a launched adapter IS a collision (21052 signature).
-    launches.add(c.launchId ?? " null")
+    launches.add(c.launchId ?? "\0null")
   }
   let personas_multi_launch = 0
   for (const launches of launchIdsByName.values()) {
