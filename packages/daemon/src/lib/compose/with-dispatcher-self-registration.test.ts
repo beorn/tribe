@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Server, Socket as NetSocket } from "node:net"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { createScope } from "tribe-wire"
 import { TRIBE_PROTOCOL_VERSION, type JsonRpcRequest } from "tribe-wire/lib/socket"
 import type { TribeRole } from "tribe-wire/lib/config"
@@ -14,6 +14,7 @@ import { withDispatcher } from "./with-dispatcher.ts"
 
 type TestSocket = NetSocket & {
   destroyedByDispatcher: boolean
+  emitClose(): void
   writes: string[]
 }
 
@@ -130,6 +131,76 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
   })
 })
 
+describe("dispatcher session announcement recovery (@ag/tribe/21052/19442)", () => {
+  it("coalesces a reconnecting name without losing durable join events", async () => {
+    const suppressWindowMs = 10_000
+    let now = 100_000
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now)
+    try {
+      const harness = createDispatcherHarness({
+        suppressWindowMs,
+        socketStartedAt: now - suppressWindowMs - 1,
+      })
+      cleanup = harness.dispose
+
+      // The daemon-start window has elapsed, so this exercises live adapter
+      // churn rather than startup suppression. Every suppressed attempt must
+      // re-arm the per-name window, while another name remains independent.
+      const first = harness.connectClient()
+      await registerMember(harness, first.connId, "@agent/6")
+      now += 5_000
+      first.socket.emitClose()
+
+      now += 5_000
+      const second = harness.connectClient()
+      await registerMember(harness, second.connId, "@agent/6")
+      now += 5_000
+      second.socket.emitClose()
+
+      // The boundary itself is outside the window; callers must not need an
+      // undocumented extra millisecond before the next stable announcement.
+      now += 10_000
+      const stable = harness.connectClient()
+      await registerMember(harness, stable.connId, "@agent/6")
+      const independent = harness.connectClient()
+      await registerMember(harness, independent.connId, "@agent/7")
+
+      const announcements = harness.sessionAnnouncements("@agent/6")
+      expect(announcements).toHaveLength(2)
+      expect(announcements.every((content) => content.includes("@agent/6 joined (member)"))).toBe(true)
+      expect(harness.sessionAnnouncements("@agent/7")).toHaveLength(1)
+      expect(harness.sessionJoinEvents("@agent/6")).toHaveLength(3)
+      expect(harness.sessionJoinEvents("@agent/7")).toHaveLength(1)
+      expect(harness.sessionLeftEvents("@agent/6")).toHaveLength(2)
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+
+  it("suppresses both channel transitions during daemon startup without losing durable lifecycle events", async () => {
+    const suppressWindowMs = 10_000
+    let now = 200_000
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now)
+    try {
+      const harness = createDispatcherHarness({ suppressWindowMs, socketStartedAt: now })
+      cleanup = harness.dispose
+
+      const client = harness.connectClient()
+      await registerMember(harness, client.connId, "@agent/6")
+      // Even if this startup-created connection outlives the startup window,
+      // a suppressed join must not later produce an orphan "left" line.
+      now += 15_000
+      client.socket.emitClose()
+
+      expect(harness.sessionAnnouncements("@agent/6")).toEqual([])
+      expect(harness.sessionJoinEvents("@agent/6")).toHaveLength(1)
+      expect(harness.sessionLeftEvents("@agent/6")).toHaveLength(1)
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+})
+
 describe("dispatcher inbox-wait parsing", () => {
   it("wakes waits for actionable messages sent through a registered client context", async () => {
     const harness = createDispatcherHarness()
@@ -201,7 +272,7 @@ describe("dispatcher inbox-wait parsing", () => {
   })
 })
 
-function createDispatcherHarness() {
+function createDispatcherHarness(options: { suppressWindowMs?: number; socketStartedAt?: number } = {}) {
   const tempDir = mkdtempSync(join(tmpdir(), "tribe-dispatcher-"))
   const scope = createScope("dispatcher-self-registration-test")
   const db = openDatabase(join(tempDir, "tribe.sqlite"))
@@ -281,11 +352,11 @@ function createDispatcherHarness() {
       socketPath: join(tempDir, "tribe.sock"),
       binding: Promise.resolve("listening" as const),
       inheritedFd: false,
-      startedAt: Date.now(),
+      startedAt: options.socketStartedAt ?? Date.now(),
       handedOff: false,
     },
   }
-  const daemon = withDispatcher({ suppressWindowMs: Number.MAX_SAFE_INTEGER })(shape)
+  const daemon = withDispatcher({ suppressWindowMs: options.suppressWindowMs ?? Number.MAX_SAFE_INTEGER })(shape)
 
   return {
     dispatcher: daemon.dispatcher,
@@ -307,6 +378,31 @@ function createDispatcherHarness() {
     },
     sendActionable(recipient: string) {
       sendMessage(daemonCtx, recipient, "wake inbox wait", "request", undefined, undefined, "direct")
+    },
+    connectClient(): { connId: string; socket: TestSocket } {
+      const socket = createTestSocket()
+      daemon.dispatcher.handleConnection(socket)
+      const connId = socketToClient.get(socket)
+      if (!connId) throw new Error("dispatcher did not register the connected socket")
+      return { connId, socket }
+    },
+    sessionAnnouncements(name: string): string[] {
+      const rows = db
+        .prepare("SELECT content FROM messages WHERE type = 'session' ORDER BY ts ASC, id ASC")
+        .all() as Array<{ content: string }>
+      return rows.map((row) => row.content).filter((content) => content.includes(name))
+    },
+    sessionJoinEvents(name: string): Array<{ name: string }> {
+      const rows = db
+        .prepare("SELECT content FROM messages WHERE type = 'event.session.joined' ORDER BY ts ASC, id ASC")
+        .all() as Array<{ content: string }>
+      return rows.map((row) => JSON.parse(row.content) as { name: string }).filter((event) => event.name === name)
+    },
+    sessionLeftEvents(name: string): Array<{ name: string }> {
+      const rows = db
+        .prepare("SELECT content FROM messages WHERE type = 'event.session.left' ORDER BY ts ASC, id ASC")
+        .all() as Array<{ content: string }>
+      return rows.map((row) => JSON.parse(row.content) as { name: string }).filter((event) => event.name === name)
     },
     addPendingClient(connId: string): TestSocket {
       const socket = createTestSocket()
@@ -346,6 +442,20 @@ function parseResult<T>(line: string): T {
   return response.result as T
 }
 
+async function registerMember(
+  harness: ReturnType<typeof createDispatcherHarness>,
+  connId: string,
+  name: string,
+): Promise<RegisterResult> {
+  return parseResult<RegisterResult>(
+    await harness.register(connId, {
+      name,
+      pid: liveHolderPid,
+      project: "/tmp/km-wt6",
+    }),
+  )
+}
+
 function parseError(line: string): { code: number; message: string } {
   const response = JSON.parse(line) as JsonRpcResponse<unknown>
   expect(response.result).toBeUndefined()
@@ -354,6 +464,7 @@ function parseError(line: string): { code: number; message: string } {
 }
 
 function createTestSocket(): TestSocket {
+  const handlers = new Map<string, Array<(...args: unknown[]) => void>>()
   const socket = {
     destroyedByDispatcher: false,
     writes: [] as string[],
@@ -368,11 +479,27 @@ function createTestSocket(): TestSocket {
     end() {
       return this
     },
-    on() {
+    on(event: string, handler: (...args: unknown[]) => void) {
+      const eventHandlers = handlers.get(event) ?? []
+      eventHandlers.push(handler)
+      handlers.set(event, eventHandlers)
       return this
     },
-    once() {
+    once(event: string, handler: (...args: unknown[]) => void) {
+      const wrapped = (...args: unknown[]) => {
+        handlers.set(
+          event,
+          (handlers.get(event) ?? []).filter((candidate) => candidate !== wrapped),
+        )
+        handler(...args)
+      }
+      const eventHandlers = handlers.get(event) ?? []
+      eventHandlers.push(wrapped)
+      handlers.set(event, eventHandlers)
       return this
+    },
+    emitClose() {
+      for (const handler of handlers.get("close") ?? []) handler()
     },
   }
   return socket as unknown as TestSocket

@@ -80,6 +80,29 @@ export interface DispatcherRuntimeHooks {
  */
 export type MethodHandler = (params: Record<string, unknown>, ctx: { connId: string }) => unknown | Promise<unknown>
 
+/**
+ * Per-name sliding window for user-visible session announcements. The first
+ * attempt passes; every attempt re-arms its name, so a seat churning faster
+ * than the window stays quiet until a later transition occurs after a full
+ * quiet window. Durable lifecycle events are written independently of this
+ * broadcast-only throttle.
+ */
+function createSessionAnnounceGate(windowMs: number): (name: string, nowMs: number) => boolean {
+  const lastAttemptByName = new Map<string, number>()
+  return (name, nowMs) => {
+    if (windowMs <= 0) return true
+    // Session names are not a fixed universe. Expire inactive entries on the
+    // next announcement so transient/auto-suffixed identities are not retained
+    // for the daemon lifetime.
+    for (const [candidate, lastAttempt] of lastAttemptByName) {
+      if (nowMs - lastAttempt >= windowMs) lastAttemptByName.delete(candidate)
+    }
+    const lastAttempt = lastAttemptByName.get(name)
+    lastAttemptByName.set(name, nowMs)
+    return lastAttempt === undefined
+  }
+}
+
 export interface Dispatcher {
   /** The accept-handler the socket server invokes. */
   handleConnection: (socket: NetSocket) => void
@@ -122,6 +145,8 @@ export function withDispatcher<
     const getActivePluginNames = hooks.getActivePluginNames ?? (() => [])
     const getQuitTimeoutSec = hooks.getQuitTimeoutSec ?? (() => -1)
     const suppressWindowMs = hooks.suppressWindowMs ?? (process.env.TRIBE_NO_SUPPRESS ? 0 : 10_000)
+    const sessionAnnounceGate = createSessionAnnounceGate(suppressWindowMs)
+    const channelJoinAnnounced = new Set<string>()
 
     const methodHandlers = new Map<string, MethodHandler>()
     function register(method: string, handler: MethodHandler): void {
@@ -263,6 +288,7 @@ export function withDispatcher<
     function retireReplacedClient(client: ClientSession): void {
       broadcast.flushConnection(client.id)
       broadcast.discardConnection(client.id)
+      channelJoinAnnounced.delete(client.id)
       clients.delete(client.id)
       socketToClient.delete(client.socket)
       if (recallHandlers) recallHandlers.dropConn(client.recall.sessionId)
@@ -319,7 +345,9 @@ export function withDispatcher<
     }
 
     function announceJoin(client: ClientSession): void {
-      if (Date.now() - socket.startedAt <= suppressWindowMs) return
+      const now = Date.now()
+      const gateOpen = sessionAnnounceGate(client.name, now)
+      if (now - socket.startedAt <= suppressWindowMs || !gateOpen) return
       let parentName: string | null = null
       if (client.claudeSessionId) {
         for (const [cid, c] of clients) {
@@ -332,6 +360,7 @@ export function withDispatcher<
       const shortProject = client.project.replace(process.env.HOME ?? "", "~")
       const suffix = parentName ? ` (sub-agent of ${parentName})` : ""
       logActivity("session", `${client.name} joined (${client.role}) pid=${client.pid} ${shortProject}${suffix}`)
+      channelJoinAnnounced.add(client.id)
     }
 
     async function handleRequest(req: JsonRpcRequest, connId: string): Promise<string> {
@@ -1000,6 +1029,7 @@ export function withDispatcher<
       sock.on("close", () => {
         const client = clients.get(connId)
         if (client && client.role !== "pending") {
+          const hadChannelJoin = channelJoinAnnounced.delete(connId)
           const siblingTransport = Array.from(clients.values()).some(
             (candidate) => candidate.id !== connId && candidate.ctx.sessionId === client.ctx.sessionId,
           )
@@ -1007,7 +1037,18 @@ export function withDispatcher<
             log.debug?.(`Transport disconnected: ${client.name} pid=${client.pid}`)
           } else {
             log.info?.(`Client disconnected: ${client.name}`)
-            logActivity("session", `${client.name} left`)
+            // Durable history stays lossless even when the channel projection
+            // coalesces a churn storm or suppresses daemon-start noise.
+            logEvent(client.ctx, "session.left", undefined, {
+              name: client.name,
+              role: client.role,
+              domains: client.domains,
+            })
+            const now = Date.now()
+            const gateOpen = sessionAnnounceGate(client.name, now)
+            if (hadChannelJoin && now - socket.startedAt > suppressWindowMs && gateOpen) {
+              logActivity("session", `${client.name} left`)
+            }
           }
         }
         broadcast.flushConnection(connId)
