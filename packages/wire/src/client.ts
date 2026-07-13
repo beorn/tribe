@@ -335,6 +335,17 @@ const RETRIABLE_SNAPSHOT_METHODS = new Set([
  * class). `since` is treated as non-snapshot conservatively: it is the draining
  * idiom and pairs with `advance`; excluding it only forgoes a retry (safe),
  * whereas mis-including it could drop rows. Mirrors daemon `handleFetch`.
+ *
+ * FUTURE FIX (20703 → make the default drain retryable too, not shipped here):
+ * the default drain is un-retryable ONLY because the cursor advances at
+ * RESPONSE-SEND time on the daemon, so a lost response = silently-skipped rows.
+ * The safe-reload target is cursor-advance-on-delivery-ACK: `handleFetch`
+ * returns the window WITHOUT advancing; the client advances the cursor with a
+ * follow-up `tribe.fetch.ack {cursor}` only after it has the rows in hand. A
+ * dropped response then leaves the cursor un-advanced, so the retry re-reads
+ * the same window (at-least-once + idempotent apply) instead of losing it —
+ * and the drain joins this whitelist. Until that ships, a reconnect during a
+ * default drain must fail loud so the caller re-drains explicitly.
  */
 function isSnapshotFetch(params?: Record<string, unknown>): boolean {
   if (!params) return false
