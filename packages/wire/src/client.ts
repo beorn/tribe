@@ -309,6 +309,81 @@ export async function connectOrStart(socketPath: string, opts?: ConnectOrStartOp
 }
 
 // ---------------------------------------------------------------------------
+// Retry-on-reconnect policy (20703 safe-reload)
+// ---------------------------------------------------------------------------
+
+/**
+ * Pure-snapshot tribe.* methods: read-only, no cursor advance, no side effect
+ * (the per-call presence touch the daemon does for every tool call is
+ * idempotent). Re-issuing one after a reconnect is always safe.
+ */
+const RETRIABLE_SNAPSHOT_METHODS = new Set([
+  "tribe.members",
+  "tribe.health",
+  "tribe.pending",
+  "tribe.lifecycle",
+  "tribe.debug",
+])
+
+/**
+ * A `tribe.fetch` is a SNAPSHOT (safe to blind-retry) only when it reads
+ * without advancing the durable inbox cursor: an `ids` lookup, or a
+ * `with`/`from`/`to` peer filter, and never an explicit `advance:true` or a
+ * `since`-driven drain. The DEFAULT drain (none of those) advances the cursor
+ * AND acknowledges the actionable mailbox server-side — even if the response is
+ * lost — so a silent retry would skip rows (the NO-SILENT-ERRORS / message-loss
+ * class). `since` is treated as non-snapshot conservatively: it is the draining
+ * idiom and pairs with `advance`; excluding it only forgoes a retry (safe),
+ * whereas mis-including it could drop rows. Mirrors daemon `handleFetch`.
+ *
+ * FUTURE FIX (20703 → make the default drain retryable too, not shipped here):
+ * the default drain is un-retryable ONLY because the cursor advances at
+ * RESPONSE-SEND time on the daemon, so a lost response = silently-skipped rows.
+ * The safe-reload target is cursor-advance-on-delivery-ACK: `handleFetch`
+ * returns the window WITHOUT advancing; the client advances the cursor with a
+ * follow-up `tribe.fetch.ack {cursor}` only after it has the rows in hand. A
+ * dropped response then leaves the cursor un-advanced, so the retry re-reads
+ * the same window (at-least-once + idempotent apply) instead of losing it —
+ * and the drain joins this whitelist. Until that ships, a reconnect during a
+ * default drain must fail loud so the caller re-drains explicitly.
+ */
+function isSnapshotFetch(params?: Record<string, unknown>): boolean {
+  if (!params) return false
+  if (params.advance === true) return false
+  if (params.since !== undefined) return false
+  const hasIds = Array.isArray(params.ids) && params.ids.length > 0
+  const hasPeer =
+    (typeof params.with === "string" && params.with.length > 0) ||
+    (typeof params.from === "string" && params.from.length > 0) ||
+    (typeof params.to === "string" && params.to.length > 0)
+  return hasIds || hasPeer
+}
+
+/**
+ * Whether a tribe.* RPC may be transparently re-issued ONCE after a reconnect
+ * (see `createReconnectingClient`). True for pure snapshots, snapshot-mode
+ * fetch, and a `tribe.send` that carries a client-minted `idempotencyKey` (the
+ * daemon dedups by key so a retry cannot double-deliver). Everything else —
+ * default-drain fetch, register/join/rename, reload/repair/filter, un-keyed
+ * send, and long-poll `tribe.inbox.wait` — is NOT retriable and surfaces the
+ * failure to the caller.
+ */
+export function isRetriableTribeCall(method: string, params?: Record<string, unknown>): boolean {
+  if (RETRIABLE_SNAPSHOT_METHODS.has(method)) return true
+  if (method === "tribe.fetch") return isSnapshotFetch(params)
+  if (method === "tribe.send") return typeof params?.idempotencyKey === "string" && params.idempotencyKey.length > 0
+  return false
+}
+
+/** True for errors that mean the transport died (vs. a real RPC error). */
+function isConnectionClosed(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  if (/Connection closed/i.test(err.message)) return true
+  const code = (err as NodeJS.ErrnoException).code
+  return code === "EPIPE" || code === "ECONNRESET" || code === "ERR_STREAM_DESTROYED"
+}
+
+// ---------------------------------------------------------------------------
 // Reconnecting client
 // ---------------------------------------------------------------------------
 
@@ -353,13 +428,49 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
   let current = await connectOrStart(socketPath, startOpts)
   if (onConnect) await onConnect(current)
   let closed = false
+  let connected = true
   let reconnectAc: AbortController | null = null
   // Persistent notification handlers — replayed onto each new connection
   const notificationHandlers: Array<(method: string, params?: Record<string, unknown>) => void> = []
 
+  // 20703 safe-reload: callers waiting for the transport to come back after a
+  // disconnect. `call` uses this to bound a safe-call retry by the call's own
+  // deadline. A settled waiter clears its own timer and removes itself.
+  type ReconnectWaiter = { resolve: () => void; reject: (e: Error) => void }
+  const reconnectWaiters: Set<ReconnectWaiter> = new Set()
+  const drainWaiters = (settle: (w: ReconnectWaiter) => void) => {
+    for (const w of [...reconnectWaiters]) settle(w)
+  }
+  const waitForReconnect = (deadlineMs: number): Promise<void> => {
+    if (connected) return Promise.resolve()
+    if (closed) return Promise.reject(new Error("Connection closed"))
+    return new Promise<void>((resolve, reject) => {
+      let settled = false
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const waiter: ReconnectWaiter = {
+        resolve: () => finish(resolve),
+        reject: (e: Error) => finish(() => reject(e)),
+      }
+      const finish = (fn: () => void) => {
+        if (settled) return
+        settled = true
+        if (timer) clearTimeout(timer)
+        reconnectWaiters.delete(waiter)
+        fn()
+      }
+      reconnectWaiters.add(waiter)
+      timer = setTimeout(
+        () => finish(() => reject(new Error("Request timed out waiting for reconnect"))),
+        Math.max(0, deadlineMs - Date.now()),
+      )
+      ;(timer as { unref?: () => void }).unref?.()
+    })
+  }
+
   const setupReconnect = () => {
     current.socket.on("close", () => {
       if (closed) return
+      connected = false
       onDisconnect?.()
       reconnectAc?.abort()
       reconnectAc = new AbortController()
@@ -379,6 +490,8 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
             if (onConnect) await onConnect(current)
             for (const h of notificationHandlers) current.onNotification(h)
             setupReconnect()
+            connected = true
+            drainWaiters((w) => w.resolve())
             onReconnect?.()
             return
           } catch {
@@ -386,17 +499,45 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
           }
         }
         log.error?.(`Failed to reconnect after ${maxAttempts} attempts`)
+        // Fail loud: unblock any deadline-waiting safe-call retries.
+        drainWaiters((w) => w.reject(new Error(`Failed to reconnect after ${maxAttempts} attempts`)))
       })()
     })
   }
   setupReconnect()
 
+  // 20703 safe-reload: transparently re-issue a SAFE call ONCE across a
+  // reconnect so a daemon restart costs the caller latency, not an error. A
+  // call that fails with a connection-closed signal (or is issued while the
+  // transport is already down) waits for the reconnect — bounded by the call's
+  // own deadline (per-call `timeoutMs`, else `callTimeoutMs`, else 10s) — and
+  // re-issues exactly once on the new connection. Only `isRetriableTribeCall`
+  // methods qualify; everything else surfaces the failure unchanged.
+  const callWithRetry = (
+    method: string,
+    params?: Record<string, unknown>,
+    callOpts?: DaemonCallOpts,
+  ): Promise<unknown> => {
+    if (!isRetriableTribeCall(method, params)) return current.call(method, params, callOpts)
+    const budgetMs = callOpts?.timeoutMs ?? callTimeoutMs ?? 10_000
+    const deadlineMs = Date.now() + budgetMs
+    const issue = () => current.call(method, params, callOpts)
+    const attempt = connected ? issue() : waitForReconnect(deadlineMs).then(issue)
+    return attempt.catch((err: unknown) => {
+      if (closed || !isConnectionClosed(err)) throw err
+      // The transport died — wait for the reconnect and re-issue ONCE.
+      return waitForReconnect(deadlineMs).then(issue)
+    })
+  }
+
   return new Proxy(current, {
     get(_, prop) {
+      if (prop === "call") return callWithRetry
       if (prop === "close")
         return () => {
           closed = true
           reconnectAc?.abort()
+          drainWaiters((w) => w.reject(new Error("Connection closed")))
           current.close()
           current.socket.unref()
         }
