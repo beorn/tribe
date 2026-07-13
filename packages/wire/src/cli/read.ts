@@ -456,6 +456,48 @@ async function cmdHealth(): Promise<void> {
     // Fallback: just print the raw result
     console.log(JSON.stringify(result, null, 2))
   }
+
+  // @km/bearly/17018 — surface the observability facts + the degraded contract.
+  // A non-empty `degraded` array sets a non-zero exit code (consumed by
+  // `.claude/hooks/session-start-tribe-health.sh`). Set process.exitCode rather
+  // than process.exit so any buffered stdout still flushes.
+  const health = mcpJsonContent(result) as Record<string, unknown>
+  printHealthFacts(health)
+  const degraded = Array.isArray(health.degraded) ? (health.degraded as string[]) : []
+  if (degraded.length > 0) {
+    console.log(`\n  DEGRADED (${degraded.length}): ${degraded.join(", ")}`)
+    process.exitCode = 1
+  }
+}
+
+function fmtBytes(n: unknown): string {
+  if (typeof n !== "number" || !Number.isFinite(n)) return "?"
+  if (n < 1024) return `${n}B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`
+  return `${(n / (1024 * 1024)).toFixed(1)}MB`
+}
+
+/** Print the @km/bearly/17018 health facts (DB pressure, identity gauges, tool
+ *  latency) when the daemon reports them. Silently skipped for older daemons
+ *  that predate these facts. */
+function printHealthFacts(health: Record<string, unknown>): void {
+  if (typeof health.db_bytes === "number") {
+    console.log(
+      `\n  DB: db=${fmtBytes(health.db_bytes)} wal=${fmtBytes(health.wal_bytes)} sessions=${health.sessions_rows} messages=${health.messages_rows} archive=${health.archive_rows}`,
+    )
+  }
+  if (typeof health.clients_total === "number") {
+    console.log(
+      `  Registry: clients=${health.clients_total} members=${health.members_total} stale_placeholders=${health.pending_placeholder_conns} multi_launch_personas=${health.personas_multi_launch}`,
+    )
+  }
+  const tl = health.tool_latency as
+    | Record<string, { n: number; p50_ms: number; p95_ms: number; max_ms: number }>
+    | undefined
+  if (tl?.all) {
+    const a = tl.all
+    console.log(`  Tool latency (all, n=${a.n}): p50=${a.p50_ms}ms p95=${a.p95_ms}ms max=${a.max_ms}ms`)
+  }
 }
 
 // ---------------------------------------------------------------------------
