@@ -625,18 +625,29 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
   {
     id: "tribe.debug",
     title: "Debug",
-    description: "Dump daemon internals for troubleshooting - clients, per-session cursors.",
+    description:
+      "Dump daemon internals for troubleshooting - clients, members, per-session cursors. Cursors are capped to the 50 stalest + 10 newest unless `full: true` is passed.",
     lifetime: "diagnostic",
     mcp: {
       name: "debug",
-      description: "Dump daemon internals for troubleshooting - clients, per-session cursors.",
-      inputSchema: { type: "object", properties: {} },
+      description:
+        "Dump daemon internals for troubleshooting - clients, members, per-session cursors. The cursor dump is capped to the 50 stalest + 10 newest (with `cursors_total` + `cursors_truncated`); pass `full: true` for the complete dump.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          full: {
+            type: "boolean",
+            description: "Return the complete cursor dump instead of the capped stalest+newest summary.",
+          },
+        },
+      },
       outputSchema: OBJ(
         {
           clients: { type: "array", items: { type: "object", additionalProperties: true } },
+          cursors_total: { type: "number" },
           cursors: { type: "array", items: { type: "object", additionalProperties: true } },
         },
-        "Daemon internals - shape varies by daemon build; always at least { clients, cursors }.",
+        "Daemon internals - shape varies by daemon build; always at least { clients, cursors_total, cursors }.",
       ),
     },
     cli: hidden("MCP-only diagnostic; no one-shot CLI projection is defined in this slice."),

@@ -4,6 +4,7 @@
 
 import { createLogger } from "loggily"
 import { randomUUID } from "node:crypto"
+import type { Database } from "bun:sqlite"
 import { resolveInboxWaitOptions } from "tribe-wire"
 import type { TribeContext } from "./context.ts"
 import type { TribeRole } from "tribe-wire/lib/config"
@@ -271,8 +272,14 @@ export type HandlerOpts = {
   getActiveSessionInfo: () => ActiveSessionInfo[]
   /** Optional: dump daemon internals for `tribe.debug`. Daemon-only (tests using
    *  handlers directly can omit this — `tribe.debug` then returns a minimal
-   *  snapshot synthesized from the other accessors). */
-  getDebugState?: () => Record<string, unknown>
+   *  snapshot synthesized from the other accessors). `full: true` requests the
+   *  complete cursor dump; otherwise the daemon caps it (see summarizeCursors). */
+  getDebugState?: (opts?: { full?: boolean }) => Record<string, unknown>
+  /** Optional: raw registry client snapshot for the identity/pressure gauges in
+   *  `handleHealth` (@km/bearly/17018). The daemon wires this from its live
+   *  `clients` map; direct-handler callers (tests, smoke harness) omit it and
+   *  the registry gauges are then absent from the health result. */
+  getRegistryClients?: () => RegistryClientSnapshot[]
   /** Optional: per-session lifecycle-snapshot cache (last-write-wins).
    *  Returns the daemon's singleton store; omitted when running handlers
    *  outside the daemon (tests, smoke harness) — `tribe.lifecycle.publish`
@@ -296,6 +303,248 @@ export type HandlerOpts = {
   notifyWakeupForReplay?: (sessionId: string, claimedName: string) => void
 }
 
+// ---------------------------------------------------------------------------
+// Observability facts (@km/bearly/17018) — tool-latency window, registry +
+// identity gauges, DB-pressure gauges, and the degraded contract. Every fact
+// lives on the EXISTING handleHealth surface; no new daemon/poller/store/gate.
+// The 2026-07-13 20703 recurrence proved the daemon was fast but had zero
+// facts, so a 60-70s pane observation could not be attributed to any layer.
+// ---------------------------------------------------------------------------
+
+/** In-memory rolling window of tool-call durations (ms), keyed by tool name
+ *  without the `tribe.` prefix. Fixed-size per tool; lost on daemon restart by
+ *  design (mirrors the lifecycle store's ephemerality). Timed at the single
+ *  `handleToolCall` chokepoint so every tribe.* tool is covered. */
+const TOOL_LATENCY_WINDOW = 512
+const CANONICAL_TOOL_KEYS = ["fetch", "send", "members", "inbox.wait"] as const
+const toolLatencyWindows = new Map<string, number[]>()
+const COORD_METHOD_SET: ReadonlySet<string> = new Set(Object.values(TRIBE_COORD_METHODS))
+
+export type ToolLatencyStat = { n: number; p50_ms: number; p95_ms: number; max_ms: number }
+
+function toolLatencyKey(method: string): string {
+  return method.startsWith("tribe.") ? method.slice("tribe.".length) : method
+}
+
+function recordToolLatency(method: string, durationMs: number): void {
+  const key = toolLatencyKey(method)
+  let win = toolLatencyWindows.get(key)
+  if (!win) {
+    win = []
+    toolLatencyWindows.set(key, win)
+  }
+  win.push(durationMs)
+  if (win.length > TOOL_LATENCY_WINDOW) win.shift()
+}
+
+/** Test-only — wipe the rolling window so per-tool counts are deterministic. */
+export function resetToolLatencyWindows(): void {
+  toolLatencyWindows.clear()
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100
+}
+
+/** Nearest-rank percentile over an ascending-sorted sample array. */
+function percentile(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0
+  const rank = Math.ceil((p / 100) * sorted.length) - 1
+  const idx = Math.min(sorted.length - 1, Math.max(0, rank))
+  return sorted[idx]!
+}
+
+function statsFor(samples: number[]): ToolLatencyStat {
+  if (samples.length === 0) return { n: 0, p50_ms: 0, p95_ms: 0, max_ms: 0 }
+  const sorted = [...samples].sort((a, b) => a - b)
+  return {
+    n: sorted.length,
+    p50_ms: round2(percentile(sorted, 50)),
+    p95_ms: round2(percentile(sorted, 95)),
+    max_ms: round2(sorted[sorted.length - 1]!),
+  }
+}
+
+/** Per-tool {n,p50,p95,max} plus an `all` rollup. Canonical tools are always
+ *  present (stable contract) even with zero samples. */
+function computeToolLatency(): Record<string, ToolLatencyStat> {
+  const out: Record<string, ToolLatencyStat> = {}
+  for (const key of CANONICAL_TOOL_KEYS) out[key] = statsFor(toolLatencyWindows.get(key) ?? [])
+  const all: number[] = []
+  for (const [key, samples] of toolLatencyWindows) {
+    if (!(key in out)) out[key] = statsFor(samples)
+    all.push(...samples)
+  }
+  out.all = statsFor(all)
+  return out
+}
+
+/** Raw registry client snapshot used for the identity gauges. */
+export type RegistryClientSnapshot = {
+  sessionId: string
+  name: string
+  role: string
+  launchId: string | null
+  registeredAt: number
+}
+
+export type RegistryGauges = {
+  clients_total: number
+  members_total: number
+  pending_placeholder_conns: number
+  personas_multi_launch: number
+}
+
+/** A pending placeholder older than this is a leaked never-registered
+ *  connection (`tribe log -f` watchers, half-registered adapters). */
+const PENDING_PLACEHOLDER_STALE_MS = 60_000
+
+function computeRegistryGauges(clients: RegistryClientSnapshot[], now: number): RegistryGauges {
+  const memberSessionIds = new Set<string>()
+  const launchIdsByName = new Map<string, Set<string>>()
+  let pending_placeholder_conns = 0
+  for (const c of clients) {
+    if (c.role === "pending") {
+      if (now - c.registeredAt > PENDING_PLACEHOLDER_STALE_MS) pending_placeholder_conns++
+      continue
+    }
+    memberSessionIds.add(c.sessionId)
+    let launches = launchIdsByName.get(c.name)
+    if (!launches) {
+      launches = new Set()
+      launchIdsByName.set(c.name, launches)
+    }
+    // null launchId is its own bucket: a token-less CLI carrier squatting a
+    // persona alongside a launched adapter IS a collision (21052 signature).
+    launches.add(c.launchId ?? " null")
+  }
+  let personas_multi_launch = 0
+  for (const launches of launchIdsByName.values()) {
+    if (launches.size >= 2) personas_multi_launch++
+  }
+  return {
+    clients_total: clients.length,
+    members_total: memberSessionIds.size,
+    pending_placeholder_conns,
+    personas_multi_launch,
+  }
+}
+
+export type DbPressure = {
+  db_bytes: number
+  wal_bytes: number
+  sessions_rows: number
+  messages_rows: number
+  archive_rows: number
+}
+
+function countRows(db: Database, table: string): number {
+  return (db.prepare(`SELECT COUNT(*) as n FROM ${table}`).get() as { n: number }).n
+}
+
+function computeDbPressure(db: Database): DbPressure {
+  const dbPath = db.filename
+  let db_bytes = 0
+  let wal_bytes = 0
+  // db.filename is ":memory:" for in-memory DBs — no backing file, legitimately
+  // 0 bytes on disk. A real path that is missing throws loudly (a genuine fault,
+  // per NO SILENT ERRORS), rather than masking a vanished DB as healthy.
+  if (dbPath && dbPath !== ":memory:") {
+    db_bytes = statSync(dbPath).size
+    const walPath = `${dbPath}-wal`
+    // -wal is legitimately absent when the WAL has been fully checkpointed.
+    if (existsSync(walPath)) wal_bytes = statSync(walPath).size
+  }
+  return {
+    db_bytes,
+    wal_bytes,
+    sessions_rows: countRows(db, "sessions"),
+    messages_rows: countRows(db, "messages"),
+    archive_rows: countRows(db, "messages_archive"),
+  }
+}
+
+/** Documented degraded thresholds (@km/bearly/17018). Pragmatic constants — a
+ *  breach means the daemon is unhealthy and `tribe health` must exit non-zero. */
+export const HEALTH_THRESHOLDS = {
+  /** WAL file larger than 64MB — checkpoint/GC is falling behind. */
+  wal_bytes: 64 * 1024 * 1024,
+  /** sessions table ungarbage-collected. */
+  sessions_rows: 2000,
+  /** messages_archive is write-only plaster growing unbounded. */
+  archive_rows: 250_000,
+  /** leaked never-registered placeholder connections. */
+  pending_placeholder_conns: 5,
+  /** any persona held under ≥2 launch generations — identity-takeover churn. */
+  personas_multi_launch: 0,
+  /** any single tool's p95 over 5s. */
+  tool_p95_ms: 5000,
+} as const
+
+export type DegradedFacts = {
+  wal_bytes: number
+  sessions_rows: number
+  archive_rows: number
+  /** null when the registry accessor is unavailable (direct-handler context). */
+  pending_placeholder_conns: number | null
+  personas_multi_launch: number | null
+  /** per-tool p95; the `all` rollup is intentionally not a degrade trigger. */
+  tool_latency: Record<string, { p95_ms: number }>
+}
+
+/** Pure degraded-fact evaluator — names each breached fact. */
+export function evaluateDegraded(f: DegradedFacts): string[] {
+  const degraded: string[] = []
+  if (f.wal_bytes > HEALTH_THRESHOLDS.wal_bytes) degraded.push("wal_bytes")
+  if (f.sessions_rows > HEALTH_THRESHOLDS.sessions_rows) degraded.push("sessions_rows")
+  if (f.archive_rows > HEALTH_THRESHOLDS.archive_rows) degraded.push("archive_rows")
+  if (f.pending_placeholder_conns !== null && f.pending_placeholder_conns > HEALTH_THRESHOLDS.pending_placeholder_conns)
+    degraded.push("pending_placeholder_conns")
+  if (f.personas_multi_launch !== null && f.personas_multi_launch > HEALTH_THRESHOLDS.personas_multi_launch)
+    degraded.push("personas_multi_launch")
+  for (const [tool, stat] of Object.entries(f.tool_latency)) {
+    if (tool === "all") continue
+    if (stat.p95_ms > HEALTH_THRESHOLDS.tool_p95_ms) degraded.push(`tool_latency.${tool}.p95_ms`)
+  }
+  return degraded
+}
+
+// ---------------------------------------------------------------------------
+// Debug-dump cursor cap (@km/bearly/17018) — tribe.debug used to dump every
+// sessions row (thousands of cursors, MB payloads). Summarise to the stalest +
+// newest cursors unless the caller explicitly asks for the full dump.
+// ---------------------------------------------------------------------------
+
+export type CursorDumpRow = {
+  id: string
+  name: string
+  last_delivered_ts: number | null
+  last_delivered_seq: number | null
+}
+
+export type CursorDump = {
+  cursors_total: number
+  cursors: CursorDumpRow[]
+  cursors_truncated?: boolean
+}
+
+const DEBUG_CURSORS_STALEST = 50
+const DEBUG_CURSORS_NEWEST = 10
+
+/** {cursors_total, cursors} — the 50 stalest + 10 newest cursors by last
+ *  delivery, or the complete set when `full` (or when under the cap). A null
+ *  last_delivered_ts (never delivered) sorts as the stalest. */
+export function summarizeCursors(rows: CursorDumpRow[], opts?: { full?: boolean }): CursorDump {
+  const cursors_total = rows.length
+  if (opts?.full || rows.length <= DEBUG_CURSORS_STALEST + DEBUG_CURSORS_NEWEST) {
+    return { cursors_total, cursors: rows }
+  }
+  const sorted = [...rows].sort((a, b) => (a.last_delivered_ts ?? 0) - (b.last_delivered_ts ?? 0))
+  const stalest = sorted.slice(0, DEBUG_CURSORS_STALEST)
+  const newest = sorted.slice(sorted.length - DEBUG_CURSORS_NEWEST)
+  return { cursors_total, cursors: [...stalest, ...newest], cursors_truncated: true }
+}
+
 export function handleToolCall(
   ctx: TribeContext,
   name: string,
@@ -308,6 +557,44 @@ export function handleToolCall(
   // / empty-drain sessions read as idle (the 2026-06-10 false-idle class,
   // pinned in tests/tribe-delivery-semantics.test.ts).
   ctx.stmts.touchSessionPresence.run({ $id: ctx.sessionId, $now: Date.now() })
+
+  // Tool-latency window (@km/bearly/17018): time every tribe.* tool at this
+  // single chokepoint, on both sync and async return paths. Unknown / removed
+  // methods throw inside dispatchToolCall and are not recorded — they never did
+  // real work, so timing them would only pollute the window.
+  if (!COORD_METHOD_SET.has(name)) {
+    return dispatchToolCall(ctx, name, a, opts)
+  }
+  const startedAt = performance.now()
+  let result: ToolResult | Promise<ToolResult>
+  try {
+    result = dispatchToolCall(ctx, name, a, opts)
+  } catch (err) {
+    recordToolLatency(name, performance.now() - startedAt)
+    throw err
+  }
+  if (result instanceof Promise) {
+    return result.then(
+      (resolved) => {
+        recordToolLatency(name, performance.now() - startedAt)
+        return resolved
+      },
+      (err) => {
+        recordToolLatency(name, performance.now() - startedAt)
+        throw err
+      },
+    )
+  }
+  recordToolLatency(name, performance.now() - startedAt)
+  return result
+}
+
+function dispatchToolCall(
+  ctx: TribeContext,
+  name: string,
+  a: ToolArgs,
+  opts: HandlerOpts,
+): ToolResult | Promise<ToolResult> {
   switch (name) {
     case TRIBE_COORD_METHODS.send:
       return handleSend(ctx, a, opts)
@@ -1031,6 +1318,21 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
         ?.n ?? 0,
   }
 
+  // Observability facts (@km/bearly/17018) — tool latency, DB pressure, and
+  // (daemon-only) registry/identity gauges, folded into the degraded contract.
+  const tool_latency = computeToolLatency()
+  const dbPressure = computeDbPressure(ctx.db)
+  const registryClients = opts.getRegistryClients?.()
+  const registryGauges = registryClients ? computeRegistryGauges(registryClients, Date.now()) : null
+  const degraded = evaluateDegraded({
+    wal_bytes: dbPressure.wal_bytes,
+    sessions_rows: dbPressure.sessions_rows,
+    archive_rows: dbPressure.archive_rows,
+    pending_placeholder_conns: registryGauges?.pending_placeholder_conns ?? null,
+    personas_multi_launch: registryGauges?.personas_multi_launch ?? null,
+    tool_latency,
+  })
+
   // Stale-code detector (@km/tribe/20033): surface whether the running daemon
   // is provably older than the on-disk / superproject-pinned tribe code, so a
   // stale daemon serving old handlers is observable (not silent) to any
@@ -1039,6 +1341,14 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     members,
     unread,
     stats,
+    tool_latency,
+    db_bytes: dbPressure.db_bytes,
+    wal_bytes: dbPressure.wal_bytes,
+    sessions_rows: dbPressure.sessions_rows,
+    messages_rows: dbPressure.messages_rows,
+    archive_rows: dbPressure.archive_rows,
+    ...(registryGauges ?? {}),
+    degraded,
     code_pin: gatherCodePin(),
     checked_at: new Date().toISOString(),
   }
@@ -1104,15 +1414,18 @@ async function handleRetro(ctx: TribeContext, a: ToolArgs): Promise<ToolResult> 
   return jsonResult({ text: markdown }, { text: markdown })
 }
 
-function handleDebug(_ctx: TribeContext, _a: ToolArgs, opts: HandlerOpts): ToolResult {
+function handleDebug(_ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
   // Prefer the daemon-provided dump when available (richest snapshot: clients
   // Map, per-session cursors). Otherwise synthesize a minimal view from the
   // generic accessors so in-process tests still get meaningful output without
-  // wiring getDebugState.
+  // wiring getDebugState. `full: true` requests the complete cursor dump; the
+  // daemon otherwise caps it (@km/bearly/17018 — see summarizeCursors).
+  const full = a.full === true
   const state = opts.getDebugState
-    ? opts.getDebugState()
+    ? opts.getDebugState({ full })
     : {
         clients: opts.getActiveSessionInfo(),
+        cursors_total: 0,
         cursors: [],
       }
   return jsonResult(state)

@@ -192,9 +192,9 @@ describe("17018 — DB-pressure gauges", () => {
   it("exposes db/wal bytes and row counts", async () => {
     const health = parse(await handleToolCall(ctx, "tribe.health", {}, makeOpts()))
     expect(typeof health.db_bytes).toBe("number")
-    expect((health.db_bytes as number)).toBeGreaterThan(0)
+    expect(health.db_bytes as number).toBeGreaterThan(0)
     expect(typeof health.wal_bytes).toBe("number")
-    expect((health.wal_bytes as number)).toBeGreaterThanOrEqual(0)
+    expect(health.wal_bytes as number).toBeGreaterThanOrEqual(0)
     expect(health.sessions_rows).toBe(0)
     expect(typeof health.messages_rows).toBe("number")
     expect(health.archive_rows).toBe(0)

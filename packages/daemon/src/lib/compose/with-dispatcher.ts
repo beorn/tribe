@@ -42,7 +42,15 @@ import {
 } from "tribe-wire/lib/socket"
 import { detectRole, resolveProjectId, type TribeRole } from "tribe-wire/lib/config"
 import { createTribeContext, type MessageInsertedInfo, type TribeContext } from "../context.ts"
-import { handleToolCall, isRemovedTribeMethod, removedTribeMethodMessage, TRIBE_COORD_METHODS } from "../handlers.ts"
+import {
+  handleToolCall,
+  isRemovedTribeMethod,
+  removedTribeMethodMessage,
+  summarizeCursors,
+  TRIBE_COORD_METHODS,
+  type CursorDumpRow,
+  type RegistryClientSnapshot,
+} from "../handlers.ts"
 import { createLifecycleStore } from "../lifecycle-store.ts"
 import { createInboxWaitManager } from "../inbox-wait.ts"
 import { logEvent, sendMessage } from "../messaging.ts"
@@ -208,30 +216,43 @@ export function withDispatcher<
       getLifecycleStore: () => lifecycleStore,
       inboxWait,
       notifyWakeupForReplay,
-      getDebugState: () => ({
-        clients: Array.from(clients.values()).map((c) => ({
-          member_id: c.ctx.sessionId,
+      // Identity/pressure gauges (@km/bearly/17018) read the raw registry —
+      // pending placeholders + per-transport launch ids that the deduped
+      // getActiveSessionInfo hides.
+      getRegistryClients: (): RegistryClientSnapshot[] =>
+        Array.from(clients.values()).map((c) => ({
+          sessionId: c.ctx.sessionId,
           name: c.name,
           role: c.role,
-          pid: c.pid,
-          launch_id: c.launchId,
-          launch_parent_pid: c.launchParentPid,
+          launchId: c.launchId,
           registeredAt: c.registeredAt,
         })),
-        members: registry.getActiveSessionInfo().map((member) => ({
-          member_id: member.id,
-          name: member.name,
-          launch_id: member.launchId,
-          launch_parent_pid: member.launchParentPid,
-          transport_pids: member.transportPids,
-        })),
-        cursors: db.prepare("SELECT id, name, last_delivered_ts, last_delivered_seq FROM sessions").all() as Array<{
-          id: string
-          name: string
-          last_delivered_ts: number | null
-          last_delivered_seq: number | null
-        }>,
-      }),
+      getDebugState: (dbgOpts?: { full?: boolean }) => {
+        const cursorRows = db
+          .prepare("SELECT id, name, last_delivered_ts, last_delivered_seq FROM sessions")
+          .all() as CursorDumpRow[]
+        // @km/bearly/17018 — cap the cursor dump (was every sessions row: 4,908
+        // cursors / 1.6MB payloads). `full: true` restores the complete dump.
+        return {
+          clients: Array.from(clients.values()).map((c) => ({
+            member_id: c.ctx.sessionId,
+            name: c.name,
+            role: c.role,
+            pid: c.pid,
+            launch_id: c.launchId,
+            launch_parent_pid: c.launchParentPid,
+            registeredAt: c.registeredAt,
+          })),
+          members: registry.getActiveSessionInfo().map((member) => ({
+            member_id: member.id,
+            name: member.name,
+            launch_id: member.launchId,
+            launch_parent_pid: member.launchParentPid,
+            transport_pids: member.transportPids,
+          })),
+          ...summarizeCursors(cursorRows, { full: dbgOpts?.full }),
+        }
+      },
     } as const
 
     /** Generate a unique member-<pid> name, with random suffix if taken */
