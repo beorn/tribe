@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -481,7 +481,7 @@ describe("stdio adapter delivery modes", () => {
     expect(registrations[1]?.params && "takeover" in registrations[1].params).toBe(false)
   })
 
-  it("21049: a transient reconnect conflict keeps native MCP alive, reports the exact cause, and recovers", async () => {
+  it("21049: repeated legacy reconnect conflicts keep native MCP alive, report the exact cause, and recover", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath, {
       registerError: {
@@ -490,7 +490,7 @@ describe("stdio adapter delivery modes", () => {
         data: { existing_names: ["@chief"], holder_pid: 4242 },
       },
       registerErrorAfter: 2,
-      registerErrorUntil: 2,
+      registerErrorUntil: 3,
     })
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@chief"], {
       cwd: tmpDir,
@@ -498,7 +498,7 @@ describe("stdio adapter delivery modes", () => {
         ...process.env,
         TRIBE_DELIVERY: "pull",
         TRIBE_TAKEOVER: "1",
-        TRIBE_LAUNCH_ID: "provider-launch-a",
+        TRIBE_LAUNCH_ID: "",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
       },
@@ -528,15 +528,34 @@ describe("stdio adapter delivery modes", () => {
     expect(closedReply.result?.isError).toBe(true)
     expect(closedText).toContain("required MCP tribe status=closed")
     expect(closedText).toContain('Name "@chief" is already taken by live pid 4242')
-    expect(closedText).toContain("launch_id=provider-launch-a")
+    expect(closedText).toContain("launch_id=missing")
     expect(closedText).toContain(`transport_pid=${child.pid}`)
+    expect(closedText).toContain("reconnect_attempts=1")
 
     await waitForCondition(
       () => daemon!.requests.filter((msg) => msg.method === "register").length >= 3,
-      "automatic bounded reconnect after transient conflict",
+      "second consecutive reconnect registration conflict",
     )
-    const liveReplyPromise = waitForLine(child, (line) => line.id === 3)
+    await new Promise((resolveTick) => setTimeout(resolveTick, 50))
+    expect(child.exitCode).toBeNull()
+
+    const repeatedClosedReplyPromise = waitForLine(child, (line) => line.id === 3)
     writeJson(child, callToolPayload(3, "members", {}))
+    const repeatedClosedReply = (await repeatedClosedReplyPromise) as {
+      result?: { isError?: boolean; content?: Array<{ text?: string }> }
+    }
+    const repeatedClosedText = repeatedClosedReply.result?.content?.[0]?.text ?? ""
+    expect(repeatedClosedReply.result?.isError).toBe(true)
+    expect(repeatedClosedText).toContain("required MCP tribe status=closed")
+    expect(repeatedClosedText).toContain('Name "@chief" is already taken by live pid 4242')
+    expect(repeatedClosedText).toContain("reconnect_attempts=2")
+
+    await waitForCondition(
+      () => daemon!.requests.filter((msg) => msg.method === "register").length >= 4,
+      "automatic reconnect after repeated conflicts",
+    )
+    const liveReplyPromise = waitForLine(child, (line) => line.id === 4)
+    writeJson(child, callToolPayload(4, "members", {}))
     const liveReply = (await liveReplyPromise) as {
       result?: { isError?: boolean; content?: Array<{ text?: string }> }
     }
@@ -547,9 +566,45 @@ describe("stdio adapter delivery modes", () => {
     const registrations = daemon.requests.filter((msg) => msg.method === "register") as Array<{
       params?: { takeover?: boolean }
     }>
-    expect(registrations).toHaveLength(3)
+    expect(registrations).toHaveLength(4)
     expect(registrations[1]?.params && "takeover" in registrations[1].params).toBe(false)
     expect(registrations[2]?.params && "takeover" in registrations[2].params).toBe(false)
+    expect(registrations[3]?.params && "takeover" in registrations[3].params).toBe(false)
+  })
+
+  it("21049: a managed tool call recovers an initially unavailable daemon before reporting health", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const logPath = join(tmpDir, "adapter.log")
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@chief"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "pull",
+        TRIBE_TAKEOVER: "1",
+        TRIBE_LAUNCH_ID: "provider-launch-a",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: logPath,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    await waitForCondition(
+      () => existsSync(logPath) && readFileSync(logPath, "utf8").includes("tribe daemon unavailable"),
+      "initial daemon-unavailable state",
+    )
+
+    daemon = await spawnFakeDaemon(socketPath)
+    const replyPromise = waitForLine(child, (line) => line.id === 2)
+    writeJson(child, callToolPayload(2, "members", {}))
+    const reply = (await replyPromise) as {
+      result?: { isError?: boolean; content?: Array<{ text?: string }> }
+    }
+
+    expect(child.exitCode).toBeNull()
+    expect(reply.result?.isError).not.toBe(true)
+    expect(reply.result?.content?.[0]?.text).toContain('"sessions":[]')
+    expect(daemon.requests.some((msg) => msg.method === "register")).toBe(true)
   })
 
   it("20703: without TRIBE_TAKEOVER, register never carries a takeover key", async () => {

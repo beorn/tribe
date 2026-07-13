@@ -260,10 +260,6 @@ interface RequiredMcpTransportHealth {
   readonly reason: string
 }
 
-// One conflict may be a transient daemon-registration race during reconnect.
-// Keep native MCP stdio open for one bounded retry; a second consecutive
-// conflict is a durable displacement and retains the existing fail-loud exit.
-const MAX_MANAGED_REGISTRATION_CONFLICTS = 2
 let managedRegistrationConflicts = 0
 let requiredMcpTransportHealth: RequiredMcpTransportHealth = {
   status: "advertised",
@@ -281,8 +277,8 @@ function requiredMcpTransportFailureResult(): {
   const launchId = LAUNCH_IDENTITY?.id ?? "missing"
   const recovery =
     requiredMcpTransportHealth.status === "closed"
-      ? `bounded-reconnect=${managedRegistrationConflicts}/${MAX_MANAGED_REGISTRATION_CONFLICTS}`
-      : "bounded-reconnect=pending"
+      ? `reconnect_attempts=${managedRegistrationConflicts}`
+      : "reconnect_attempts=pending"
   return {
     content: [
       {
@@ -318,7 +314,7 @@ function isPersonaNameConflictError(err: unknown): boolean {
   )
 }
 
-function shouldFailLaunchOnRegisterError(err: unknown): boolean {
+function isManagedPersonaRegistrationConflict(err: unknown): boolean {
   return REGISTER_WITH_LAUNCH_NAME && isPersonaNameConflictError(err)
 }
 
@@ -355,17 +351,18 @@ function startDaemonConnection(): Promise<DaemonClient> {
       try {
         reg = (await client.call("register", registerParamsForConnection())) as typeof reg
       } catch (err) {
-        // A single post-registration conflict can be a transient reconnect
-        // race. Keep the native MCP pipe open and let the reconnecting client
-        // retry once, so Codex receives the exact cause instead of permanent
-        // `Transport closed`. A repeated conflict means a successor really
-        // displaced this launch; terminate then to prevent takeover ping-pong.
-        if (hasRegistered && shouldFailLaunchOnRegisterError(err)) {
+        // Legacy adapters launched without a logical launch id cannot tell a
+        // transient reconnect race from another adapter in the same provider
+        // launch. Closing their provider-owned stdio leaves native Codex with
+        // an advertised tool that can only report `Transport closed`, so keep
+        // stdio alive and reuse the bounded reconnect loop. Identified launches
+        // are different: the daemon fans same-launch transports together, so a
+        // conflict means an explicit different-launch takeover and
+        // must retain the existing fail-loud displacement behavior.
+        if (hasRegistered && isManagedPersonaRegistrationConflict(err)) {
+          if (LAUNCH_IDENTITY) failManagedPersonaRegistration(err)
           managedRegistrationConflicts += 1
           setRequiredMcpTransportHealth("closed", errorMessage(err))
-          if (managedRegistrationConflicts >= MAX_MANAGED_REGISTRATION_CONFLICTS) {
-            failManagedPersonaRegistration(err)
-          }
         }
         throw err
       }
@@ -445,7 +442,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
 let degradeAnnounced = false
 function armDegradeNotice(p: Promise<DaemonClient>): void {
   p.catch((err: unknown) => {
-    if (shouldFailLaunchOnRegisterError(err)) failManagedPersonaRegistration(err)
+    if (isManagedPersonaRegistrationConflict(err)) failManagedPersonaRegistration(err)
 
     daemonDegradedReason = errorMessage(err)
     if (degradeAnnounced) return
@@ -674,6 +671,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const a = (toolArgs ?? {}) as Record<string, unknown>
 
   try {
+    // Degraded: an earlier connect failed. Before reporting either managed
+    // transport health or solo mode, self-heal — the daemon may be up now.
+    // Throttled inside recoverDaemonIfDegraded.
+    if (daemonDegradedReason !== null && daemon === undefined) {
+      await recoverDaemonIfDegraded()
+    }
     if (REGISTER_WITH_LAUNCH_NAME && requiredMcpTransportHealth.status !== "live") {
       return requiredMcpTransportFailureResult()
     }
@@ -704,12 +707,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         : a
     // Tool names are bare verbs ("send", "fetch"); daemon wire methods use "tribe." prefix
     const daemonMethod = `tribe.${name}`
-    // Degraded: an earlier connect failed. Before answering solo, self-heal —
-    // the daemon may be up now (it was briefly down / its socket was churned
-    // during a startup herd). Throttled inside recoverDaemonIfDegraded.
-    if (daemonDegradedReason !== null && daemon === undefined) {
-      await recoverDaemonIfDegraded()
-    }
     // Still degraded after the retry → one clear sentence per call, never the
     // raw connect error (km 19851 loud-but-soft).
     if (daemonDegradedReason !== null && daemon === undefined) {
