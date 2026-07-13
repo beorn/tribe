@@ -57,7 +57,7 @@ export {
 } from "../rpc.ts"
 export { resolvePeerSocketPath, resolveSocketPath } from "../paths.ts"
 
-export type { DaemonClient } from "../client.ts"
+export type { DaemonCallOpts, DaemonClient } from "../client.ts"
 export type { JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse } from "../rpc.ts"
 
 // ---------------------------------------------------------------------------
