@@ -276,9 +276,36 @@ let requiredMcpTransportHealth: RequiredMcpTransportHealth = {
   status: "advertised",
   reason: "awaiting daemon registration",
 }
+// 20703/21049 — the reconnecting proxy (`daemon`) is only assigned after the
+// INITIAL connect resolves, but the first advertised→live transition is computed
+// inside onConnect before that. Capture the live client there so the publish
+// below still has a client for that first transition.
+let transportStatusPublishClient: DaemonClient | undefined
+
+// 20703/21049 — the required-MCP transport status was computed but dead-ended
+// locally, so an adapter's advertised→live→closed churn was invisible to
+// chief/deck and the recurrence read as a daemon fault. Publish each status
+// TRANSITION (not repeats) over the EXISTING health rail; the daemon stamps it
+// server-side as a `health:recovery` pull broadcast (ambient/fetchable, not a
+// push flood). Managed explicit-persona launches only — anonymous pull adapters
+// would just add noise. Fully best-effort: this must never throw or block.
+function publishRequiredMcpTransportTransition(status: RequiredMcpTransportStatus, reason: string): void {
+  if (!REGISTER_WITH_LAUNCH_NAME) return
+  const client = daemon ?? transportStatusPublishClient
+  if (!client) return
+  const launchId = LAUNCH_IDENTITY?.id ?? "missing"
+  const content =
+    `tribe transport ${myName}: status=${status}; reason=${reason}; ` +
+    `launch_id=${launchId}; launch_parent_pid=${process.ppid}; transport_pid=${process.pid}`
+  client.call("tribe.health.publish", { content }).catch(() => {
+    /* best-effort visibility — never load-bearing */
+  })
+}
 
 function setRequiredMcpTransportHealth(status: RequiredMcpTransportStatus, reason: string): void {
+  const changed = requiredMcpTransportHealth.status !== status
   requiredMcpTransportHealth = { status, reason }
+  if (changed) publishRequiredMcpTransportTransition(status, reason)
 }
 
 function requiredMcpTransportFailureResult(): {
@@ -349,6 +376,10 @@ function startDaemonConnection(): Promise<DaemonClient> {
   return createReconnectingClient({
     socketPath: SOCKET_PATH,
     async onConnect(client) {
+      // 20703/21049 — the first advertised→live transition publishes from inside
+      // this callback, before `daemon` (the proxy) is assigned; give the publisher
+      // a client to use for it.
+      transportStatusPublishClient = client
       // km 19442 — open a fresh connect-replay window so a stale daemon's body-push
       // burst on (re)connect is bounded (see connectReplayGate + the `channel` handler).
       connectReplayGate.reset(Date.now())
