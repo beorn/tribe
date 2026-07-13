@@ -413,6 +413,8 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       message: "same-launch fan-in request",
       type: "request",
       request: true,
+      // MCP adapter senders are LLM senders: handleSend requires an authored summary (20316 #3).
+      summary: "same-launch fan-in request",
     })) as { id?: string }
     expect(sent.id).toEqual(expect.any(String))
     const [pending, fetched] = (await Promise.all([
