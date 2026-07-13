@@ -24,7 +24,18 @@ import {
   resolveProjectName,
   resolveProjectId,
 } from "./lib/config.ts"
-import { resolveSocketPath, createReconnectingClient, TRIBE_PROTOCOL_VERSION, type DaemonClient } from "./lib/socket.ts"
+import {
+  resolveSocketPath,
+  createReconnectingClient,
+  TRIBE_PROTOCOL_VERSION,
+  type DaemonCallOpts,
+  type DaemonClient,
+} from "./lib/socket.ts"
+import {
+  deriveInboxWaitCallTimeoutMs,
+  MAX_INBOX_WAIT_TIMEOUT_MS,
+  resolveInboxWaitOptions,
+} from "./lib/inbox-wait-options.ts"
 import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
 import { spawn } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
@@ -707,6 +718,24 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         : a
     // Tool names are bare verbs ("send", "fetch"); daemon wire methods use "tribe." prefix
     const daemonMethod = `tribe.${name}`
+    // 20703 — inbox-wait advertises a 30s-default / max-window long-poll, but the
+    // wire client hard-caps every RPC at callTimeoutMs (10s): any wait >10s errored
+    // at 10s and every third one tore down a HEALTHY connection. Size a per-call
+    // socket deadline from the requested wait, and forward the (30-min-capped) wait
+    // so the daemon's own timeout returns a clean `timed_out` INSIDE that window.
+    // The per-call timeout is exempt from the 3-strike destroy (see client.ts).
+    // Hosts send the tool as "inbox.wait" (advertised) or "inbox_wait" (underscore).
+    let callOpts: DaemonCallOpts | undefined
+    let daemonPayload: Record<string, unknown> = payload
+    if (name === "inbox.wait" || name === "inbox_wait") {
+      const { timeoutMs: requestedWaitMs } = resolveInboxWaitOptions({
+        timeout_ms: a.timeout_ms,
+        timeoutMs: a.timeoutMs,
+      })
+      const cappedWaitMs = Math.min(requestedWaitMs, MAX_INBOX_WAIT_TIMEOUT_MS)
+      daemonPayload = { ...payload, timeout_ms: cappedWaitMs }
+      callOpts = { timeoutMs: deriveInboxWaitCallTimeoutMs(cappedWaitMs) }
+    }
     // Still degraded after the retry → one clear sentence per call, never the
     // raw connect error (km 19851 loud-but-soft).
     if (daemonDegradedReason !== null && daemon === undefined) {
@@ -722,7 +751,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     // A tool call may arrive before the background daemon connect resolves
     // (the daemon block is non-blocking) — await `daemonReady` in that case.
     const d = daemon ?? (await daemonReady)
-    const result = await d.call(daemonMethod, payload)
+    const result = await d.call(daemonMethod, daemonPayload, callOpts)
     // Update local name/role after join/rename
     if (name === "join") joined = true
     if (name === "join" || name === "rename") {
