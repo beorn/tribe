@@ -257,6 +257,16 @@ function writeJson(child: ChildProcessWithoutNullStreams, payload: Record<string
   child.stdin.write(`${JSON.stringify(payload)}\n`)
 }
 
+function writeJsonAndWaitForLine(
+  child: ChildProcessWithoutNullStreams,
+  payload: Record<string, unknown>,
+  predicate: (line: Record<string, unknown>) => boolean,
+): Promise<Record<string, unknown>> {
+  const line = waitForLine(child, predicate)
+  writeJson(child, payload)
+  return line
+}
+
 function initializePayload(id: number): Record<string, unknown> {
   return {
     jsonrpc: "2.0",
@@ -318,8 +328,7 @@ describe("stdio adapter delivery modes", () => {
     expect(JSON.stringify(init)).toContain("This session is pull-delivery")
 
     writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
-    writeJson(child, toolsListPayload(2))
-    await waitForLine(child, (line) => line.id === 2)
+    await writeJsonAndWaitForLine(child, toolsListPayload(2), (line) => line.id === 2)
 
     daemon.clients[0]?.write(makeNotification("channel", { from: "chief", type: "request", content: "status?" }))
     await new Promise((resolveTick) => setTimeout(resolveTick, 250))
@@ -341,14 +350,15 @@ describe("stdio adapter delivery modes", () => {
       stdio: ["pipe", "pipe", "pipe"],
     })
 
-    writeJson(child, initializePayload(1))
-    await waitForLine(child, (line) => line.id === 1)
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
     writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
-    writeJson(child, toolsListPayload(2))
-    await waitForLine(child, (line) => line.id === 2)
+    await writeJsonAndWaitForLine(child, toolsListPayload(2), (line) => line.id === 2)
 
-    writeJson(child, callToolPayload(3, "join", { name: "@agent/test", delivery: "push" }))
-    await waitForLine(child, (line) => line.id === 3)
+    await writeJsonAndWaitForLine(
+      child,
+      callToolPayload(3, "join", { name: "@agent/test", delivery: "push" }),
+      (line) => line.id === 3,
+    )
 
     const joinRequest = daemon.requests.find((msg) => msg.method === "tribe.join") as
       | { params?: { delivery?: string } }
@@ -371,8 +381,7 @@ describe("stdio adapter delivery modes", () => {
       stdio: ["pipe", "pipe", "pipe"],
     })
 
-    writeJson(child, initializePayload(1))
-    await waitForLine(child, (line) => line.id === 1)
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
 
     const register = daemon.requests.find((msg) => msg.method === "register") as
       | { params?: { name?: string; delivery?: string } }
@@ -397,8 +406,7 @@ describe("stdio adapter delivery modes", () => {
       stdio: ["pipe", "pipe", "pipe"],
     })
 
-    writeJson(child, initializePayload(1))
-    await waitForLine(child, (line) => line.id === 1)
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
 
     const register = daemon.requests.find((msg) => msg.method === "register") as
       | { params?: { name?: string; takeover?: boolean; launchId?: string; launchParentPid?: number } }
@@ -426,8 +434,7 @@ describe("stdio adapter delivery modes", () => {
       stdio: ["pipe", "pipe", "pipe"],
     })
 
-    writeJson(child, initializePayload(1))
-    await waitForLine(child, (line) => line.id === 1)
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
 
     const register = daemon.requests.find((msg) => msg.method === "register") as
       | { params?: { launchId?: string; launchParentPid?: number } }
@@ -451,8 +458,7 @@ describe("stdio adapter delivery modes", () => {
       stdio: ["pipe", "pipe", "pipe"],
     })
 
-    writeJson(child, initializePayload(1))
-    await waitForLine(child, (line) => line.id === 1)
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
     await waitForCondition(
       () =>
         daemon!.requests.filter((msg) => msg.method === "register").length === 1 &&
@@ -499,8 +505,7 @@ describe("stdio adapter delivery modes", () => {
       stdio: ["pipe", "pipe", "pipe"],
     })
 
-    writeJson(child, initializePayload(1))
-    await waitForLine(child, (line) => line.id === 1)
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
     await waitForCondition(
       () => daemon!.requests.some((msg) => msg.method === "tribe.members"),
       "completed initial adapter registration",
@@ -562,8 +567,7 @@ describe("stdio adapter delivery modes", () => {
       stdio: ["pipe", "pipe", "pipe"],
     })
 
-    writeJson(child, initializePayload(1))
-    await waitForLine(child, (line) => line.id === 1)
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
 
     const register = daemon.requests.find((msg) => msg.method === "register") as
       | { params?: { name?: string; takeover?: boolean } }
@@ -613,8 +617,7 @@ describe("stdio adapter delivery modes", () => {
       stdio: ["pipe", "pipe", "pipe"],
     })
 
-    writeJson(child, initializePayload(1))
-    await waitForLine(child, (line) => line.id === 1)
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
     writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
     writeJson(child, toolsListPayload(2))
     const list = await waitForLine(child, (line) => line.id === 2)
@@ -658,8 +661,7 @@ describe("stdio adapter delivery modes", () => {
       stdio: ["pipe", "pipe", "pipe"],
     })
 
-    writeJson(child, initializePayload(1))
-    await waitForLine(child, (line) => line.id === 1)
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
     writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
 
     writeJson(child, toolsListPayload(2))
@@ -720,8 +722,7 @@ describe("stdio adapter delivery modes", () => {
     expect(JSON.stringify(init)).toContain("New messages also arrive inline as <channel> envelopes")
 
     writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
-    writeJson(child, toolsListPayload(2))
-    await waitForLine(child, (line) => line.id === 2)
+    await writeJsonAndWaitForLine(child, toolsListPayload(2), (line) => line.id === 2)
 
     const register = daemon.requests.find((msg) => msg.method === "register") as
       | { params?: { name?: string; delivery?: string } }
@@ -733,8 +734,7 @@ describe("stdio adapter delivery modes", () => {
     await new Promise((resolveTick) => setTimeout(resolveTick, 250))
     expect(stdout.some((line) => line.method === "notifications/claude/channel")).toBe(false)
 
-    writeJson(child, callToolPayload(3, "join", { name: "@agent/test" }))
-    await waitForLine(child, (line) => line.id === 3)
+    await writeJsonAndWaitForLine(child, callToolPayload(3, "join", { name: "@agent/test" }), (line) => line.id === 3)
     const joinRequest = daemon.requests.find((msg) => msg.method === "tribe.join") as
       | { params?: { delivery?: string } }
       | undefined
@@ -763,15 +763,12 @@ describe("stdio adapter delivery modes", () => {
     })
     const stdout = collectStdoutJson(child)
 
-    writeJson(child, initializePayload(1))
-    await waitForLine(child, (line) => line.id === 1)
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
     writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
-    writeJson(child, toolsListPayload(2))
-    await waitForLine(child, (line) => line.id === 2)
+    await writeJsonAndWaitForLine(child, toolsListPayload(2), (line) => line.id === 2)
 
     // Join so push-mode channel forwarding is enabled.
-    writeJson(child, callToolPayload(3, "join", { name: "@agent/test" }))
-    await waitForLine(child, (line) => line.id === 3)
+    await writeJsonAndWaitForLine(child, callToolPayload(3, "join", { name: "@agent/test" }), (line) => line.id === 3)
 
     // Simulate a stale daemon dumping a 12-event message-BODY backlog on connect.
     for (let i = 0; i < 12; i++) {
@@ -827,11 +824,9 @@ describe("stdio adapter delivery modes", () => {
     })
     const stdout = collectStdoutJson(child)
 
-    writeJson(child, initializePayload(1))
-    await waitForLine(child, (line) => line.id === 1)
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
     writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
-    writeJson(child, callToolPayload(2, "join", { name: "@agent/test" }))
-    await waitForLine(child, (line) => line.id === 2)
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
 
     daemon.clients[0]?.write(makeNotification("wakeup", {}))
 
