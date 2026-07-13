@@ -136,6 +136,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
               "Multi-recipient ball routing: 'first' (default, AMQP competing-consumers) or 'all' (per-recipient ball). Broadcast and explicit multi-target requests snapshot recipients at send time.",
             default: "first",
           },
+          idempotencyKey: {
+            type: "string",
+            description:
+              "Client-minted key (UUID) that makes this send retryable across a daemon restart or dropped connection. The key becomes the message id; re-issuing the identical send returns the original message (`replayed: true`) with no double-delivery, second fan-out, or re-opened ball. Single recipient (string `to`, including '*') only — array `to` is rejected.",
+          },
         },
         required: ["to", "message"],
       },
@@ -161,10 +166,15 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             type: "boolean",
             description: "Present and true when a non-LLM sender omitted `summary` and the daemon derived one.",
           },
+          replayed: {
+            type: "boolean",
+            description:
+              "Present and true when an idempotency-keyed send matched an already-committed message; the original row was returned and no side-effects re-ran.",
+          },
           warning: { type: "string", description: "Human-readable note emitted when the summary was derived." },
           ...ERROR_SHAPE,
         },
-        "Send result: { sent, id, summary, tracker? } on success (tracker for replies; summary_derived + warning when derived), { error } on validation failure.",
+        "Send result: { sent, id, summary, tracker? } on success (tracker for replies; summary_derived + warning when derived; replayed for idempotent retries), { error } on validation failure.",
       ),
     },
     cli: available({

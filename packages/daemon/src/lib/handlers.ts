@@ -751,6 +751,18 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   const summary = summaryDerived ? deriveSummary(sanitized) : summaryArg
   const attribution = sendAttribution(ctx, a)
   const sender = attribution.sender ?? ctx.getName()
+  // 20703 safe-reload: a client-minted idempotency key makes THIS send
+  // retryable across a daemon restart (the key IS the message id — see
+  // sendMessage). Single-recipient/broadcast only: an array send writes one
+  // row PER recipient, so one key cannot name them all — fail loud rather
+  // than silently deliver to only the first recipient on replay.
+  const idempotencyKey =
+    typeof a.idempotencyKey === "string" && a.idempotencyKey.length > 0 ? a.idempotencyKey : undefined
+  if (idempotencyKey !== undefined && Array.isArray(recipients)) {
+    return jsonResult({
+      error: "tribe.send: idempotencyKey requires a single recipient (string `to`); array `to` is not retryable.",
+    })
+  }
   if (Array.isArray(recipients)) {
     const sharedRequestId = requestFlag ? randomUUID() : requestId
     const results = recipients.map((recipient) =>
@@ -815,7 +827,14 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       fanout: fanoutArg,
     },
     attribution,
+    idempotencyKey,
   )
+  // Replay of an idempotency-keyed send: the original call already ran every
+  // side-effect below (request fixup, pending rows, journal). Re-running them
+  // could re-open an already-answered ball — return the original result as-is.
+  if (result.replayed) {
+    return jsonResult({ sent: true, id: result.id, replayed: true, summary })
+  }
   // Truthy-shorthand fixup: the canonical convention is request_id == message_id.
   // sendMessage already wrote the message; we now open the pending row using
   // the freshly-assigned id (no second SQL insert path — same statement).

@@ -22,6 +22,7 @@ import type { TribeRole } from "tribe-wire/lib/config"
 
 import { createTribeContext, type MessageInsertedInfo, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
+import { handleToolCall, type HandlerOpts } from "./handlers.ts"
 import { sendMessage } from "./messaging.ts"
 
 function makeContext(
@@ -158,5 +159,108 @@ describe("sendMessage idempotency key (20703 safe-reload)", () => {
       db.prepare("SELECT COUNT(*) AS n FROM pending_request WHERE request_id = ?").get("req-1") as { n: number }
     ).n
     expect(pendingCount).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Handler-level wiring: tribe.send → handleSend → sendMessage. The messaging
+// tests above prove the ledger; these prove the tool surface honors the key,
+// that a replay skips handleSend's OWN post-insert side-effects (the
+// request:true pending-row fixup runs at the handler layer, outside
+// sendMessage), and that the unsupported array-`to` shape fails loud.
+// ---------------------------------------------------------------------------
+
+function makeOpts(activeIds: readonly string[]): HandlerOpts {
+  return {
+    cleanup: () => undefined,
+    userRenamed: false,
+    setUserRenamed: () => undefined,
+    getActiveSessionIds: () => new Set(activeIds),
+    getActiveSessionInfo: () => [],
+  }
+}
+
+function parseToolJson(result: ReturnType<typeof handleToolCall>): Record<string, unknown> {
+  const text = (result as { content: Array<{ text: string }> }).content[0]?.text ?? "{}"
+  return JSON.parse(text) as Record<string, unknown>
+}
+
+function pendingCountFor(db: Database, requestId: string): number {
+  return (db.prepare("SELECT COUNT(*) AS n FROM pending_request WHERE request_id = ?").get(requestId) as { n: number })
+    .n
+}
+
+describe("handleSend idempotency key wiring (20703 safe-reload)", () => {
+  let tmpDir: string
+  let db: Database
+  let stmts: TribeStatements
+  let sender: TribeContext
+  let worker: TribeContext
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "tribe-send-idempotency-handler-"))
+    db = openDatabase(join(tmpDir, "tribe.db"))
+    stmts = createStatements(db)
+    sender = makeContext(db, stmts, "@sender", "sess-h1", "member")
+    worker = makeContext(db, stmts, "@worker", "sess-h2", "member")
+  })
+
+  afterEach(() => {
+    db.close()
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it("a replayed keyed request send returns the original id and opens no second ball", () => {
+    const args = { to: "@worker", message: "do it", type: "request", request: true, idempotencyKey: "key-h1" }
+    const first = parseToolJson(handleToolCall(sender, "tribe.send", args, makeOpts(["sess-h1", "sess-h2"])))
+    expect(first.sent).toBe(true)
+    expect(first.id).toBe("key-h1")
+    expect(first.replayed).toBeUndefined()
+    expect(pendingCountFor(db, "key-h1")).toBe(1)
+
+    const replay = parseToolJson(handleToolCall(sender, "tribe.send", args, makeOpts(["sess-h1", "sess-h2"])))
+    expect(replay.sent).toBe(true)
+    expect(replay.id).toBe("key-h1")
+    expect(replay.replayed).toBe(true)
+    expect(countMessages(db, "@worker")).toBe(1)
+    expect(pendingCountFor(db, "key-h1")).toBe(1)
+  })
+
+  it("a replay arriving after the ball was answered does not re-open the pending row", () => {
+    const args = { to: "@worker", message: "handle this", type: "request", request: true, idempotencyKey: "key-h2" }
+    const first = parseToolJson(handleToolCall(sender, "tribe.send", args, makeOpts(["sess-h1", "sess-h2"])))
+    expect(pendingCountFor(db, first.id as string)).toBe(1)
+
+    const answered = parseToolJson(
+      handleToolCall(
+        worker,
+        "tribe.send",
+        { to: "@sender", message: "done", type: "response", reply: first.id },
+        makeOpts(["sess-h1", "sess-h2"]),
+      ),
+    )
+    expect(answered.sent).toBe(true)
+    expect(pendingCountFor(db, first.id as string)).toBe(0)
+
+    // The retry lands AFTER the reply (reconnect race): it must not resurrect
+    // the already-released ball.
+    const replay = parseToolJson(handleToolCall(sender, "tribe.send", args, makeOpts(["sess-h1", "sess-h2"])))
+    expect(replay.replayed).toBe(true)
+    expect(pendingCountFor(db, first.id as string)).toBe(0)
+    expect(countMessages(db, "@worker")).toBe(1)
+  })
+
+  it("array `to` with an idempotency key is rejected loudly, inserting nothing", () => {
+    const res = parseToolJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        { to: ["@worker", "@other"], message: "fan", idempotencyKey: "key-h3" },
+        makeOpts(["sess-h1"]),
+      ),
+    )
+    expect(res.error).toMatch(/single recipient/)
+    expect(countMessages(db, "@worker")).toBe(0)
+    expect(countMessages(db, "@other")).toBe(0)
   })
 })

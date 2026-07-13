@@ -185,13 +185,16 @@ export function sendMessage(
   ballTracker: BallTracker = {},
   attribution: SenderAttribution = {},
   idempotencyKey?: string,
-): { id: string; ts: number; rowid: number; tracker?: { request_id: string; closed: number } } {
+): { id: string; ts: number; rowid: number; replayed?: true; tracker?: { request_id: string; closed: number } } {
   if (idempotencyKey !== undefined && idempotencyKey.length > 0) {
     const prior = ctx.db.prepare("SELECT rowid, ts FROM messages WHERE id = $id").get({ $id: idempotencyKey }) as
       | { rowid: number; ts: number }
       | undefined
     // Replay: the original send already committed the row + side-effects.
-    if (prior) return { id: idempotencyKey, ts: prior.ts, rowid: prior.rowid }
+    // `replayed` lets handleSend skip ITS post-insert side-effects too (the
+    // request-flag pending-row open lives at the handler layer, and a replay
+    // arriving after the ball was answered must not re-open it).
+    if (prior) return { id: idempotencyKey, ts: prior.ts, rowid: prior.rowid, replayed: true }
   }
   const id = idempotencyKey !== undefined && idempotencyKey.length > 0 ? idempotencyKey : randomUUID()
   const ts = Date.now()
