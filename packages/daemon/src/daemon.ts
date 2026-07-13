@@ -41,7 +41,9 @@ import {
   withRuntime,
   withSignals,
   withSocketServer,
+  RELOAD_OK,
 } from "./lib/compose/index.ts"
+import { sendMessage } from "./lib/messaging.ts"
 import { TOOLS_LIST } from "tribe-wire/lib/tools-list"
 import { pruneOldActivityLogs } from "./lib/activity-log.ts"
 import { gatherCodePin, STARTUP_SHA } from "./lib/code-pin.ts"
@@ -63,6 +65,23 @@ if (process.argv[2] === "hook") {
   }
   const { dispatchHook } = await import("./lib/hook-dispatch.ts")
   await dispatchHook(event)
+  process.exit(0)
+}
+
+// ---------------------------------------------------------------------------
+// `--precheck` — safe-reload admission gate (@ag/tribe/20703). Reaching this
+// line proves the ENTIRE daemon module graph parsed and import-resolved (bun
+// loads the graph before executing top-level code), so a syntax or import-
+// resolution error in the candidate source tree crashes BEFORE this point
+// with a non-zero exit. Exit here, BEFORE the compose pipe below runs: no
+// config read, no DB open (withDatabase), no socket bind (withSocketServer),
+// no migrations, no plugins — the precheck must never touch production state.
+// withHotReload runs this against the ON-DISK source before every re-exec;
+// a failing candidate is refused and the running daemon keeps serving.
+// ---------------------------------------------------------------------------
+
+if (process.argv.includes("--precheck")) {
+  process.stdout.write("tribe-daemon precheck ok\n")
   process.exit(0)
 }
 
@@ -201,6 +220,36 @@ const withMCPShape = withMCPServer<typeof withDispatcherShape>({
 const withHotReloadShape = withHotReload<typeof withMCPShape>({
   stopPlugins: () => refs.stopPlugins(),
   triggerShutdown: () => refs.shutdown(),
+  // Reload observability (@ag/tribe/20703): daemon:reload-{refused,ok,degraded}
+  // land on the wire as daemon-sender broadcasts (activity log + fanout via the
+  // daemonCtx message tap). Refusals/degradations are push (actionable alarm);
+  // reload-ok is pull (ambient).
+  emitEvent: (type, content) => {
+    sendMessage(withMCPShape.daemonCtx, "*", content, type, undefined, undefined, "broadcast", {
+      delivery: type === RELOAD_OK ? "pull" : "push",
+      topic: type,
+    })
+  },
+  // Post-reload verify probes this daemon's own tribe.health through the
+  // dispatcher (unregistered connIds fall back to daemonCtx) and returns the
+  // degraded contract. A malformed health payload throws — the verify core
+  // reports it as reload-degraded rather than assuming green.
+  probeHealth: async () => {
+    const responseLine = await withMCPShape.dispatcher.handleRequest(
+      { jsonrpc: "2.0", id: `reload-verify-${Date.now()}`, method: "tribe.health", params: {} },
+      "reload-verify",
+    )
+    const parsed = JSON.parse(responseLine.trimEnd()) as {
+      result?: { structuredContent?: { degraded?: unknown } }
+      error?: { code: number; message: string }
+    }
+    if (parsed.error) throw new Error(parsed.error.message)
+    const degraded = parsed.result?.structuredContent?.degraded
+    if (!Array.isArray(degraded)) {
+      throw new Error("tribe.health returned no degraded[] contract — cannot verify the new generation")
+    }
+    return { degraded: degraded as string[] }
+  },
 })(withMCPShape)
 // Confirm withMCPShape carries the MCP server handle (for tests / status).
 log.debug?.(
