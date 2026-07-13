@@ -128,6 +128,16 @@ export interface AdmissionPrecheckOpts {
  *  Env-tunable via `TRIBE_RELOAD_PRECHECK_TIMEOUT_MS`. */
 export const DEFAULT_PRECHECK_TIMEOUT_MS = 30_000
 
+/** Resolve the precheck timeout from the env knob, falling back to the
+ *  default. Non-positive / unparseable values keep the default (a 0-timeout
+ *  would kill every candidate — a refuse-everything config error). */
+export function reloadPrecheckTimeoutMs(fallback = DEFAULT_PRECHECK_TIMEOUT_MS): number {
+  const raw = process.env.TRIBE_RELOAD_PRECHECK_TIMEOUT_MS
+  if (raw === undefined) return fallback
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? n : fallback
+}
+
 /**
  * Validate a candidate source tree WITHOUT touching production state: spawn
  * `execPath entry ...args precheckFlag` and observe its exit. The entry's
@@ -188,6 +198,41 @@ export function runAdmissionPrecheck(opts: AdmissionPrecheckOpts): Promise<Admis
     child.on("close", (code, signal) => finish(code, signal))
   })
 }
+
+// ---------------------------------------------------------------------------
+// Design note — generation-pinned snapshots + rollback (deliberately NOT in
+// this slice; recorded here per the 20703 safe-reload ladder).
+//
+// What ships now: debounce → admission precheck → re-exec → post-reload
+// health verify. A broken candidate is refused BEFORE the working generation
+// dies; a candidate that boots but reports `degraded` facts is announced
+// LOUDLY (reload-degraded) but stays up — no auto-rollback.
+//
+// Why no auto-rollback yet:
+//   1. The old generation is already gone by the time the new one can prove
+//      itself: re-exec is close-then-fresh-bind (Bun cannot listen on an
+//      inherited fd), so generations cannot overlap on the socket. Rolling
+//      back means re-execing the PRIOR source tree — but the watch trigger
+//      fired precisely because the tree CHANGED; the prior tree no longer
+//      exists on disk. Real rollback therefore requires generation-pinned
+//      snapshots: at each ADMITTED reload, snapshot the loaded tree keyed by
+//      its code-pin SHA (e.g. `git archive <sha>` into a generations dir),
+//      keep the last N, and on a red post-reload verify re-exec from the last
+//      green snapshot instead of the live checkout.
+//   2. Rollback without attach-idempotency trades one outage for two: every
+//      re-exec (forward or back) drops all client connections and forces the
+//      re-register storm through the takeover/conflict gauntlet — the primary
+//      damage in the 20703 recurrence. Full blue-green (boot the candidate
+//      alongside, verify for real, atomically swap the socket, keep the old
+//      generation warm until green) needs attach-by-token — clients
+//      re-attaching to a session token rather than a socket generation — so a
+//      swap or rollback is seat-safe by construction. Until attach-by-token
+//      lands, automated rollback would double the churn on exactly the
+//      failure path where churn hurts most.
+//
+// So: verify-and-alarm now; snapshots + rollback when attach-by-token makes
+// generation swaps invisible to seats.
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // setupHotReload — generic source-watch + re-exec (used by the stdio adapter).

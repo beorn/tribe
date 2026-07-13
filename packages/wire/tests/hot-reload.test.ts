@@ -19,7 +19,39 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
-import { createReloadDebouncer, runAdmissionPrecheck } from "../src/lib/hot-reload.ts"
+import {
+  createReloadDebouncer,
+  runAdmissionPrecheck,
+  reloadDebounceMs,
+  reloadPrecheckTimeoutMs,
+  DEFAULT_RELOAD_DEBOUNCE_MS,
+  DEFAULT_PRECHECK_TIMEOUT_MS,
+} from "../src/lib/hot-reload.ts"
+
+describe("env knobs", () => {
+  afterEach(() => {
+    delete process.env.TRIBE_RELOAD_DEBOUNCE_MS
+    delete process.env.TRIBE_RELOAD_PRECHECK_TIMEOUT_MS
+  })
+
+  it("reloadDebounceMs: default, env override, and garbage-keeps-default", () => {
+    expect(reloadDebounceMs()).toBe(DEFAULT_RELOAD_DEBOUNCE_MS)
+    process.env.TRIBE_RELOAD_DEBOUNCE_MS = "150"
+    expect(reloadDebounceMs()).toBe(150)
+    process.env.TRIBE_RELOAD_DEBOUNCE_MS = "0"
+    expect(reloadDebounceMs()).toBe(DEFAULT_RELOAD_DEBOUNCE_MS) // 0 would defeat coalescing
+    process.env.TRIBE_RELOAD_DEBOUNCE_MS = "not-a-number"
+    expect(reloadDebounceMs()).toBe(DEFAULT_RELOAD_DEBOUNCE_MS)
+  })
+
+  it("reloadPrecheckTimeoutMs: default, env override, and garbage-keeps-default", () => {
+    expect(reloadPrecheckTimeoutMs()).toBe(DEFAULT_PRECHECK_TIMEOUT_MS)
+    process.env.TRIBE_RELOAD_PRECHECK_TIMEOUT_MS = "5000"
+    expect(reloadPrecheckTimeoutMs()).toBe(5000)
+    process.env.TRIBE_RELOAD_PRECHECK_TIMEOUT_MS = "-1"
+    expect(reloadPrecheckTimeoutMs()).toBe(DEFAULT_PRECHECK_TIMEOUT_MS)
+  })
+})
 
 describe("createReloadDebouncer", () => {
   it("coalesces a burst of triggers within the window into ONE flush", async () => {
