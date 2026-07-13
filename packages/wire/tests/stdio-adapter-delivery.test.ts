@@ -25,6 +25,7 @@ function spawnFakeDaemon(
     inboxWaitResult?: Record<string, unknown>
     registerError?: { code: number; message: string; data?: unknown }
     registerErrorAfter?: number
+    registerErrorUntil?: number
   } = {},
 ): Promise<FakeDaemon> {
   const clients: Socket[] = []
@@ -38,7 +39,11 @@ function spawnFakeDaemon(
         requests.push(msg as Record<string, unknown>)
         if (msg.method === "register") {
           registerCount++
-          if (opts.registerError && registerCount >= (opts.registerErrorAfter ?? 1)) {
+          if (
+            opts.registerError &&
+            registerCount >= (opts.registerErrorAfter ?? 1) &&
+            registerCount <= (opts.registerErrorUntil ?? Number.POSITIVE_INFINITY)
+          ) {
             socket.write(
               makeError(msg.id, opts.registerError.code, opts.registerError.message, opts.registerError.data),
             )
@@ -470,7 +475,7 @@ describe("stdio adapter delivery modes", () => {
     expect(registrations[1]?.params && "takeover" in registrations[1].params).toBe(false)
   })
 
-  it("21049: a displaced managed adapter exits on reconnect conflict", async () => {
+  it("21049: a transient reconnect conflict keeps native MCP alive, reports the exact cause, and recovers", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath, {
       registerError: {
@@ -479,6 +484,7 @@ describe("stdio adapter delivery modes", () => {
         data: { existing_names: ["@chief"], holder_pid: 4242 },
       },
       registerErrorAfter: 2,
+      registerErrorUntil: 2,
     })
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@chief"], {
       cwd: tmpDir,
@@ -486,6 +492,7 @@ describe("stdio adapter delivery modes", () => {
         ...process.env,
         TRIBE_DELIVERY: "pull",
         TRIBE_TAKEOVER: "1",
+        TRIBE_LAUNCH_ID: "provider-launch-a",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
       },
@@ -501,14 +508,43 @@ describe("stdio adapter delivery modes", () => {
     await new Promise((resolveTick) => setTimeout(resolveTick, 50))
 
     daemon.clients.at(-1)?.destroy()
-    const exit = await waitForExit(child, { timeoutMs: 3_000 })
+    await waitForCondition(
+      () => daemon!.requests.filter((msg) => msg.method === "register").length === 2,
+      "transient reconnect registration conflict",
+    )
 
-    expect(exit.code).not.toBe(0)
+    expect(child.exitCode).toBeNull()
+    const closedReplyPromise = waitForLine(child, (line) => line.id === 2)
+    writeJson(child, callToolPayload(2, "members", {}))
+    const closedReply = (await closedReplyPromise) as {
+      result?: { isError?: boolean; content?: Array<{ text?: string }> }
+    }
+    const closedText = closedReply.result?.content?.[0]?.text ?? ""
+    expect(closedReply.result?.isError).toBe(true)
+    expect(closedText).toContain("required MCP tribe status=closed")
+    expect(closedText).toContain('Name "@chief" is already taken by live pid 4242')
+    expect(closedText).toContain("launch_id=provider-launch-a")
+    expect(closedText).toContain(`transport_pid=${child.pid}`)
+
+    await waitForCondition(
+      () => daemon!.requests.filter((msg) => msg.method === "register").length >= 3,
+      "automatic bounded reconnect after transient conflict",
+    )
+    const liveReplyPromise = waitForLine(child, (line) => line.id === 3)
+    writeJson(child, callToolPayload(3, "members", {}))
+    const liveReply = (await liveReplyPromise) as {
+      result?: { isError?: boolean; content?: Array<{ text?: string }> }
+    }
+
+    expect(child.exitCode).toBeNull()
+    expect(liveReply.result?.isError).not.toBe(true)
+    expect(liveReply.result?.content?.[0]?.text).toContain('"sessions":[]')
     const registrations = daemon.requests.filter((msg) => msg.method === "register") as Array<{
       params?: { takeover?: boolean }
     }>
-    expect(registrations).toHaveLength(2)
+    expect(registrations).toHaveLength(3)
     expect(registrations[1]?.params && "takeover" in registrations[1].params).toBe(false)
+    expect(registrations[2]?.params && "takeover" in registrations[2].params).toBe(false)
   })
 
   it("20703: without TRIBE_TAKEOVER, register never carries a takeover key", async () => {

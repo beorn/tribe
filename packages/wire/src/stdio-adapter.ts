@@ -253,6 +253,50 @@ const baseRegisterParams = {
 }
 let hasRegistered = false
 
+type RequiredMcpTransportStatus = "advertised" | "live" | "closed"
+
+interface RequiredMcpTransportHealth {
+  readonly status: RequiredMcpTransportStatus
+  readonly reason: string
+}
+
+// One conflict may be a transient daemon-registration race during reconnect.
+// Keep native MCP stdio open for one bounded retry; a second consecutive
+// conflict is a durable displacement and retains the existing fail-loud exit.
+const MAX_MANAGED_REGISTRATION_CONFLICTS = 2
+let managedRegistrationConflicts = 0
+let requiredMcpTransportHealth: RequiredMcpTransportHealth = {
+  status: "advertised",
+  reason: "awaiting daemon registration",
+}
+
+function setRequiredMcpTransportHealth(status: RequiredMcpTransportStatus, reason: string): void {
+  requiredMcpTransportHealth = { status, reason }
+}
+
+function requiredMcpTransportFailureResult(): {
+  readonly content: readonly [{ readonly type: "text"; readonly text: string }]
+  readonly isError: true
+} {
+  const launchId = LAUNCH_IDENTITY?.id ?? "missing"
+  const recovery =
+    requiredMcpTransportHealth.status === "closed"
+      ? `bounded-reconnect=${managedRegistrationConflicts}/${MAX_MANAGED_REGISTRATION_CONFLICTS}`
+      : "bounded-reconnect=pending"
+  return {
+    content: [
+      {
+        type: "text",
+        text:
+          `required MCP tribe status=${requiredMcpTransportHealth.status}; ` +
+          `stop_reason=${requiredMcpTransportHealth.reason}; ` +
+          `launch_id=${launchId}; launch_parent_pid=${process.ppid}; transport_pid=${process.pid}; ${recovery}`,
+      },
+    ],
+    isError: true,
+  }
+}
+
 function registerParamsForConnection(): typeof baseRegisterParams & { takeover?: true } {
   return TAKEOVER && !hasRegistered ? { ...baseRegisterParams, takeover: true } : baseRegisterParams
 }
@@ -311,13 +355,24 @@ function startDaemonConnection(): Promise<DaemonClient> {
       try {
         reg = (await client.call("register", registerParamsForConnection())) as typeof reg
       } catch (err) {
-        // Once this process has held the persona, a later name conflict means
-        // another managed adapter superseded it. Exit instead of retrying or
-        // reclaiming the persona from the new holder.
-        if (hasRegistered && shouldFailLaunchOnRegisterError(err)) failManagedPersonaRegistration(err)
+        // A single post-registration conflict can be a transient reconnect
+        // race. Keep the native MCP pipe open and let the reconnecting client
+        // retry once, so Codex receives the exact cause instead of permanent
+        // `Transport closed`. A repeated conflict means a successor really
+        // displaced this launch; terminate then to prevent takeover ping-pong.
+        if (hasRegistered && shouldFailLaunchOnRegisterError(err)) {
+          managedRegistrationConflicts += 1
+          setRequiredMcpTransportHealth("closed", errorMessage(err))
+          if (managedRegistrationConflicts >= MAX_MANAGED_REGISTRATION_CONFLICTS) {
+            failManagedPersonaRegistration(err)
+          }
+        }
         throw err
       }
       hasRegistered = true
+      managedRegistrationConflicts = 0
+      setRequiredMcpTransportHealth("live", "registered with tribe daemon")
+      daemonDegradedReason = null
       myName = reg.name
       myRole = reg.role
       log.info?.(`Registered as ${myName} (${myRole})`)
@@ -362,6 +417,9 @@ function startDaemonConnection(): Promise<DaemonClient> {
       }
     },
     onDisconnect() {
+      if (REGISTER_WITH_LAUNCH_NAME) {
+        setRequiredMcpTransportHealth("advertised", "daemon connection closed; reconnecting")
+      }
       log.debug?.(`Daemon connection lost`)
     },
     onReconnect() {
@@ -616,6 +674,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const a = (toolArgs ?? {}) as Record<string, unknown>
 
   try {
+    if (REGISTER_WITH_LAUNCH_NAME && requiredMcpTransportHealth.status !== "live") {
+      return requiredMcpTransportFailureResult()
+    }
     // Attach identity_token to join so the daemon can adopt prior
     // session state when Claude Code restarts and the agent calls join again.
     const payload =
