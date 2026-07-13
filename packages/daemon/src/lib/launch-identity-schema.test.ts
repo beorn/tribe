@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { openDatabase } from "./database.ts"
+import { LATEST_SCHEMA_VERSION, openDatabase } from "./database.ts"
 
 describe("session launch identity schema (migration v19)", () => {
   let tmpDir: string
@@ -66,7 +66,11 @@ describe("session launch identity schema (migration v19)", () => {
       expect(
         db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_sessions_launch_identity'").get(),
       ).toEqual({ name: "idx_sessions_launch_identity" })
-      expect(db.prepare("SELECT value FROM _schema_meta WHERE key='version'").get()).toEqual({ value: "19" })
+      // The DB is stamped at the latest migration version (derived, not a
+      // literal, so adding a migration doesn't re-break this assertion).
+      expect(db.prepare("SELECT value FROM _schema_meta WHERE key='version'").get()).toEqual({
+        value: String(LATEST_SCHEMA_VERSION),
+      })
     } finally {
       db.close()
     }

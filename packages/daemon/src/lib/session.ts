@@ -294,13 +294,32 @@ export function tryInitialRename(ctx: TribeContext, transcriptPath: string | nul
 // Cleanup
 // ---------------------------------------------------------------------------
 
-/** Archive old messages before trimming the hot log. `event_log` was merged
- *  into `messages WHERE kind='event'` by migration v8, so this retention path
- *  covers both direct/broadcast traffic and journal events. */
-export function cleanupOldData(ctx: TribeContext): void {
+/** Counts from one `cleanupOldData` sweep — the single source the cleanup log
+ *  line is derived from, and the seam tests assert against. */
+export type CleanupSummary = {
+  /** Messages copied into messages_archive this sweep. */
+  archived: number
+  /** Messages deleted from the hot `messages` table (past the 7d retention). */
+  msgsDeleted: number
+  /** Stale ball-tracker rows GC'd (@km/tribe/20008). */
+  pendingGcd: number
+  /** Idle session rows GC'd (17018). */
+  sessionsGcd: number
+  /** messages_archive rows pruned past the 30d forensic window (17018). */
+  archivePruned: number
+}
+
+/** Archive old messages before trimming the hot log, GC idle session rows, and
+ *  prune the forensic archive. `event_log` was merged into
+ *  `messages WHERE kind='event'` by migration v8, so message retention covers
+ *  both direct/broadcast traffic and journal events. Returns the per-sweep
+ *  counts (also emitted on the cleanup log line). */
+export function cleanupOldData(ctx: TribeContext): CleanupSummary {
   const SHORT_TTL = 7 * 24 * 60 * 60 * 1000 // 7 days
+  const ARCHIVE_TTL = 30 * 24 * 60 * 60 * 1000 // 30 days — forensic window
   const now_ms = Date.now()
   const cutoff = now_ms - SHORT_TTL
+  const archiveCutoff = now_ms - ARCHIVE_TTL
 
   const archived = ctx.stmts.archiveExpiredMessages.run({ $cutoff: cutoff, $archived_at: now_ms })
   const msgsDel = ctx.stmts.deleteExpiredMessages.run({ $cutoff: cutoff })
@@ -313,9 +332,53 @@ export function cleanupOldData(ctx: TribeContext): void {
   // ball-tracker row is removed, never message history.
   const pendingDel = ctx.stmts.gcStalePendingRequests.run({ $cutoff: cutoff })
 
-  if ((msgsDel.changes ?? 0) > 0 || (pendingDel.changes ?? 0) > 0) {
+  // 17018 — sessions-table GC. `sessions` was never GC'd (4,908 rows measured
+  // in the 2026-07-13 20703 review) because this function only swept
+  // messages/dedup/pending balls. Delete rows idle >= 7d by updated_at.
+  //
+  // Why recency (updated_at), NOT registry membership, is the correct fence —
+  // and why 7d idle is safely outside every reconnect-adoption window:
+  //   * `updated_at` is written at registration (registerSession) and refreshed
+  //     on EVERY authenticated tool call (touchSessionPresence). A connected,
+  //     working session therefore always has a fresh updated_at, so a row idle
+  //     >= 7d cannot be a live session. This holds even though cleanupOldData
+  //     also runs on the 6h interval while clients are connected: live sessions
+  //     bump updated_at far faster than the TTL.
+  //   * Reconnect adoption cannot want a 7-day-idle row. adoptByPidCwd
+  //     (resolve-name.ts) keys on the SAME live client OS pid reconnecting after
+  //     a daemon re-exec — but a live client process is exactly what keeps
+  //     updated_at fresh, so its row is never 7d idle. adoptIdentity, the
+  //     launch-identity lookup (with-dispatcher.ts), and adoptByProjectAndRole
+  //     only restore a *disconnected* session's friendly NAME on reconnect;
+  //     after 7 days that is equivalent to a cold-daemon fresh start, which
+  //     resolve-name.ts explicitly treats as acceptable ("cold daemon = fresh
+  //     1"). No message history is touched — `messages` is a separate table.
+  //
+  // The 21052 tombstone GC (sweepDeadSessionRows, name-anchored to '*-dead-*',
+  // run at daemon startup in with-database) is intentionally left untouched;
+  // this idle GC is a complementary superset that also bounds live-named rows.
+  const sessionsDel = ctx.stmts.gcIdleSessions.run({ $cutoff: cutoff })
+
+  // 17018 — messages_archive retention. The archive held 211,315 rows (~75MB,
+  // half the DB) with ZERO production readers — write-only forensic plaster
+  // that grew unbounded. Prune rows past the 30d forensic window. The archive
+  // INSERT path (archiveExpiredMessages, above) is unchanged, so the 30d window
+  // still fills; only aged-out rows are dropped.
+  const archiveDel = ctx.stmts.deleteExpiredArchive.run({ $cutoff: archiveCutoff })
+
+  const summary: CleanupSummary = {
+    archived: Number(archived.changes ?? 0),
+    msgsDeleted: Number(msgsDel.changes ?? 0),
+    pendingGcd: Number(pendingDel.changes ?? 0),
+    sessionsGcd: Number(sessionsDel.changes ?? 0),
+    archivePruned: Number(archiveDel.changes ?? 0),
+  }
+
+  if (summary.msgsDeleted > 0 || summary.pendingGcd > 0 || summary.sessionsGcd > 0 || summary.archivePruned > 0) {
     log.info?.(
-      `cleanup: ${archived.changes ?? 0} msgs archived, ${msgsDel.changes ?? 0} msgs deleted, ${pendingDel.changes ?? 0} stale pending balls GC'd`,
+      `cleanup: ${summary.archived} msgs archived, ${summary.msgsDeleted} msgs deleted, ${summary.pendingGcd} stale pending balls GC'd, ${summary.sessionsGcd} idle sessions GC'd, ${summary.archivePruned} archive rows pruned`,
     )
   }
+
+  return summary
 }

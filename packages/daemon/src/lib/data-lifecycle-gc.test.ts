@@ -141,9 +141,9 @@ describe("data-lifecycle GC (@km/bearly/17018)", () => {
       seedArchive(db, "old-3", now - 31 * DAY)
       seedArchive(db, "keep", now - 5 * DAY)
 
-      const summary = cleanupOldData(
-        { stmts } as unknown as Parameters<typeof cleanupOldData>[0],
-      ) as unknown as CleanupSummaryShape
+      const summary = cleanupOldData({ stmts } as unknown as Parameters<
+        typeof cleanupOldData
+      >[0]) as unknown as CleanupSummaryShape
 
       expect(summary.sessionsGcd).toBe(2)
       expect(summary.archivePruned).toBe(3)

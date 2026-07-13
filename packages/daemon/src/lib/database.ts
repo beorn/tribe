@@ -54,16 +54,14 @@ export function openDatabase(path: string): Database {
     if (migration.version <= currentVersion) continue
     migration.up(db)
   }
-  if (MIGRATIONS.length > 0 && MIGRATIONS[MIGRATIONS.length - 1]!.version > currentVersion) {
-    const latest = MIGRATIONS[MIGRATIONS.length - 1]!.version
+  if (LATEST_SCHEMA_VERSION > currentVersion) {
     db.run("INSERT INTO _schema_meta (key, value) VALUES ('version', $v) ON CONFLICT(key) DO UPDATE SET value = $v", {
-      $v: String(latest),
+      $v: String(LATEST_SCHEMA_VERSION),
     } as never)
-  } else if (versionRow === null && MIGRATIONS.length > 0) {
+  } else if (versionRow === null && LATEST_SCHEMA_VERSION > 0) {
     // Fresh install — stamp the current version so future migrations start from here.
-    const latest = MIGRATIONS[MIGRATIONS.length - 1]!.version
     db.run("INSERT OR IGNORE INTO _schema_meta (key, value) VALUES ('version', $v)", {
-      $v: String(latest),
+      $v: String(LATEST_SCHEMA_VERSION),
     } as never)
   }
 
@@ -204,6 +202,10 @@ export function openDatabase(path: string): Database {
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_room_ts ON messages(room_id, ts)")
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_ts ON messages_archive(ts)")
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_seq ON messages_archive(seq)")
+  // 17018 — the archive-retention DELETE scans `archived_at`; index it so the
+  // recurring prune seeks the expired range instead of scanning the whole
+  // (write-only, ~200k-row) archive on every 6h cleanup tick.
+  db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_archived_at ON messages_archive(archived_at)")
   db.run("CREATE INDEX IF NOT EXISTS idx_pending_recipient ON pending_request(recipient)")
   db.run("CREATE INDEX IF NOT EXISTS idx_pending_sender ON pending_request(sender)")
 
@@ -768,7 +770,34 @@ const MIGRATIONS: readonly Migration[] = [
       db.run("CREATE INDEX IF NOT EXISTS idx_sessions_launch_identity ON sessions(name, launch_id, launch_parent_pid)")
     },
   },
+  {
+    version: 20,
+    name: "messages-archive-retention-index",
+    up(db) {
+      // 17018 (Fix 1) — messages_archive retention. The archive grew unbounded
+      // (211k rows / ~75MB, half the DB, ZERO production readers) because
+      // cleanupOldData archived expired messages but never pruned the archive
+      // itself. The retention DELETE filters on `archived_at`; existing
+      // databases lack an index on that column, so the first ~200k-row prune
+      // (and every recurring one) would full-scan the archive.
+      //
+      // Fresh-install guard: openDatabase() runs migrations BEFORE the CREATE
+      // TABLE block, so on a fresh install messages_archive doesn't exist yet —
+      // it (and this index) come from the CREATE TABLE / CREATE INDEX block
+      // below. Skip here when the table is absent; index only pre-existing
+      // archives. Idempotent (IF NOT EXISTS).
+      const hasArchive = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='messages_archive'")
+        .get() as { name: string } | null
+      if (!hasArchive) return
+      db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_archived_at ON messages_archive(archived_at)")
+    },
+  },
 ]
+
+/** The schema version a fresh install / fully-migrated DB is stamped at —
+ *  derived from the migration list so it can never drift from it. */
+export const LATEST_SCHEMA_VERSION: number = MIGRATIONS.length > 0 ? MIGRATIONS[MIGRATIONS.length - 1]!.version : 0
 
 // ---------------------------------------------------------------------------
 // Prepared statements
@@ -940,6 +969,19 @@ export function createStatements(db: Database) {
 	`),
 
     deleteExpiredMessages: db.prepare("DELETE FROM messages WHERE ts < $cutoff"),
+
+    /** 17018 — sessions-table GC. Delete session rows idle since before the
+     *  cutoff (updated_at is bumped at registration and on every authenticated
+     *  tool call via touchSessionPresence, so it is the recency fence). Uses
+     *  idx_sessions_updated. Runs on the cleanupOldData cadence; see the safety
+     *  reasoning in session.ts (recency, not registry membership, is the guard). */
+    gcIdleSessions: db.prepare("DELETE FROM sessions WHERE updated_at < $cutoff"),
+
+    /** 17018 — messages_archive retention. Prune archive rows past the forensic
+     *  window; the archive INSERT path (archiveExpiredMessages) is unchanged.
+     *  Uses idx_messages_archive_archived_at. The archive has zero production
+     *  readers — this bounds the write-only table's growth. */
+    deleteExpiredArchive: db.prepare("DELETE FROM messages_archive WHERE archived_at < $cutoff"),
 
     updateLastDelivered: db.prepare(
       "UPDATE sessions SET last_delivered_ts = $ts, last_delivered_seq = $seq, updated_at = $ts WHERE id = $id",
