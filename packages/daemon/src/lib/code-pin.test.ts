@@ -30,6 +30,8 @@ function cleanGit(cwd: string, ...args: string[]): string | null {
       stdio: ["ignore", "pipe", "ignore"],
     }).trim()
   } catch {
+    // silent-fallback-allow: null deliberately models an indeterminate Git
+    // probe in this test helper so the fail-safe decision path can be asserted.
     return null
   }
 }
