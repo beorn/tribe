@@ -29,6 +29,7 @@ import { createTimers } from "./timers.ts"
 import type { TribePluginApi, TribeClientApi } from "./plugin-api.ts"
 
 const log = createLogger("tribe:health")
+const CPU_ALERT_COOLDOWN_MS = 5 * 60_000
 
 // ---------------------------------------------------------------------------
 // Types
@@ -164,38 +165,47 @@ export function defaultThresholds(): HealthThresholds {
 // Alert delivery — pure helper
 // ---------------------------------------------------------------------------
 
-/**
- * Decide which connected sessions should receive a CPU-style alert via the
- * broadcast/fan-out path, given the sessions already DM'd as load
- * contributors. Spec: `@km/tribe/15591-cpu-alert-noise`.
- *
- * Pre-15591 the alert path did two deliveries: (1) DM each load-contributing
- * session, then (2) `api.broadcast` to everyone. A session that was BOTH a
- * load contributor AND a broadcast recipient (the chief, typically) received
- * the same alert twice. This helper computes the broadcast-recipient set
- * with the DM-recipients excluded, so the delivery is exactly-once per
- * session.
- *
- * Fan-out runs for:
- *   - `critical` (always — chief gets notified even when chief is not the
- *     load contributor),
- *   - `warning` when no session is attributable (e.g. disk, worktree, or
- *     the load came from `unattributed` processes) — the daemon is
- *     role-agnostic (F12); whoever holds the `@chief` lease (an L3 fact)
- *     picks up the broadcast.
- *
- * Returns an empty array when the alert is a `warning` with attributed
- * contributors AND no unattributed component — the DM path covers it.
- */
-export function computeBroadcastTargets(args: {
+export type HealthAlertDeliveryPlan = { kind: "broadcast" } | { kind: "direct"; recipients: readonly string[] }
+
+/** Choose one fleet broadcast or one DM per unique responsible session. */
+export function planHealthAlertDelivery(args: {
   severity: "warning" | "critical"
   attributedSessions: Set<string>
-  allSessionNames: string[]
   hasUnattributed: boolean
-}): string[] {
-  const shouldFanOut = args.severity === "critical" || args.attributedSessions.size === 0 || args.hasUnattributed
-  if (!shouldFanOut) return []
-  return args.allSessionNames.filter((name) => !args.attributedSessions.has(name))
+}): HealthAlertDeliveryPlan {
+  const shouldBroadcast = args.severity === "critical" || args.attributedSessions.size === 0 || args.hasUnattributed
+  if (shouldBroadcast) return { kind: "broadcast" }
+  return {
+    kind: "direct",
+    recipients: [...args.attributedSessions].sort((a, b) => a.localeCompare(b, undefined, { numeric: true })),
+  }
+}
+
+/** Execute the delivery plan without per-client fleet fanout. */
+export function deliverHealthAlert(
+  api: Pick<TribeClientApi, "send" | "broadcast">,
+  alert: Pick<HealthAlert, "type" | "severity">,
+  message: string,
+  attributedSessions: Set<string>,
+  hasUnattributed: boolean,
+): HealthAlertDeliveryPlan {
+  const delivery = planHealthAlertDelivery({
+    severity: alert.severity,
+    attributedSessions,
+    hasUnattributed,
+  })
+  const topic = `health:${alert.type}:${alert.severity}`
+  if (delivery.kind === "broadcast") {
+    api.broadcast(message, topic, undefined, {
+      delivery: alert.severity === "critical" ? "push" : "pull",
+      topic,
+    })
+    return delivery
+  }
+  for (const recipient of delivery.recipients) {
+    api.send(recipient, message, topic, undefined, { delivery: "push", topic })
+  }
+  return delivery
 }
 
 // ---------------------------------------------------------------------------
@@ -806,6 +816,10 @@ export function evaluateAlerts(
   // --- CPU ---
   const cpuCriticalThreshold = cores * thresholds.cpuCriticalMultiplier
   const cpuWarningThreshold = cores * thresholds.cpuWarningMultiplier
+  const cpuCriticalCoolingDown =
+    metrics.timestamp - (state.firedAt.get("cpu:critical") ?? Number.NEGATIVE_INFINITY) < CPU_ALERT_COOLDOWN_MS
+  const cpuWarningCoolingDown =
+    metrics.timestamp - (state.firedAt.get("cpu:warning") ?? Number.NEGATIVE_INFINITY) < CPU_ALERT_COOLDOWN_MS
 
   if (load > cpuCriticalThreshold) {
     state.cpuAboveCritical++
@@ -820,9 +834,15 @@ export function evaluateAlerts(
     state.firedAlerts.delete("cpu:warning")
   }
 
-  if (state.cpuAboveCritical >= thresholds.sustainedSamples && !state.firedAlerts.has("cpu:critical")) {
+  if (
+    state.cpuAboveCritical >= thresholds.sustainedSamples &&
+    !state.firedAlerts.has("cpu:critical") &&
+    !cpuCriticalCoolingDown
+  ) {
     state.firedAlerts.add("cpu:critical")
     state.firedAlerts.delete("cpu:warning") // Supersedes warning
+    state.firedAt.set("cpu:critical", metrics.timestamp)
+    state.firedAt.set("cpu:warning", metrics.timestamp)
     alerts.push({
       type: "cpu",
       severity: "critical",
@@ -833,9 +853,11 @@ export function evaluateAlerts(
   } else if (
     state.cpuAboveWarning >= thresholds.sustainedSamples &&
     !state.firedAlerts.has("cpu:warning") &&
-    !state.firedAlerts.has("cpu:critical")
+    !state.firedAlerts.has("cpu:critical") &&
+    !cpuWarningCoolingDown
   ) {
     state.firedAlerts.add("cpu:warning")
+    state.firedAt.set("cpu:warning", metrics.timestamp)
     alerts.push({
       type: "cpu",
       severity: "warning",
@@ -1330,7 +1352,8 @@ export const healthMonitorPlugin: TribePluginApi = {
         // Pass active-agent count so process-count threshold scales with the
         // number of connected sessions; alarms tuned for solo dev shouldn't
         // fire on a healthy 4-agent baseline.
-        const alerts = evaluateAlerts(metrics, thresholds, alertState, sessions.length)
+        const activeAgentCount = new Set(sessions.map((session) => session.name)).size
+        const alerts = evaluateAlerts(metrics, thresholds, alertState, activeAgentCount)
 
         for (const alert of alerts) {
           // Group offenders by session
@@ -1353,40 +1376,11 @@ export const healthMonitorPlugin: TribePluginApi = {
           const msg = `${alert.message}${attribution}`
           log.info?.(`alert: ${msg}`)
 
-          // km-tribe.event-classification: criticals are actionable (push) so
-          // a session pays attention; warnings are ambient (pull). The reply
-          // hint is derived at delivery time (kind + sender role + recipient).
-          const isCritical = alert.severity === "critical"
-          const dmClass = {
-            delivery: "push",
-            topic: `health:${alert.type}:${alert.severity}`,
-          } as const
-          const broadcastClass = {
-            delivery: isCritical ? "push" : "pull",
-            topic: `health:${alert.type}:${alert.severity}`,
-          } as const
-          // Route: DM each responsible session
           const attributedSessions = new Set<string>()
           for (const [name] of sessionLoad) {
-            if (name !== "unattributed") {
-              attributedSessions.add(name)
-              api.send(name, msg, `health:${alert.type}:${alert.severity}`, undefined, dmClass)
-            }
+            if (name !== "unattributed") attributedSessions.add(name)
           }
-
-          // Fan-out: DM every connected session that did NOT just get the
-          // targeted DM above — same end result as `api.broadcast` but
-          // without the double-delivery to load contributors. Spec:
-          // @km/tribe/15591-cpu-alert-noise.
-          const broadcastTargets = computeBroadcastTargets({
-            severity: alert.severity,
-            attributedSessions,
-            allSessionNames: api.getSessionNames(),
-            hasUnattributed: sessionLoad.has("unattributed"),
-          })
-          for (const name of broadcastTargets) {
-            api.send(name, msg, `health:${alert.type}:${alert.severity}`, undefined, broadcastClass)
-          }
+          deliverHealthAlert(api, alert, msg, attributedSessions, sessionLoad.has("unattributed"))
         }
 
         // --- Chief-silent watchdog (every 3rd sample — ~30s) ---
