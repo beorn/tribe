@@ -691,6 +691,31 @@ describe("stdio adapter delivery modes", () => {
     })
   })
 
+  it("refuses MCP inbox.wait when the advertised idle transport is CLI", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath)
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@ci"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "pull",
+        TRIBE_PULL_TRANSPORT: "cli",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    writeJson(child, callToolPayload(2, "inbox.wait", { session: "@ci", timeout_ms: 30_000 }))
+    const call = await waitForLine(child, (line) => line.id === 2)
+    const result = call.result as { isError?: boolean; content?: Array<{ type?: string; text?: string }> } | undefined
+
+    expect(result?.isError).toBe(true)
+    expect(daemon.requests.some((request) => request.method === "tribe.inbox.wait")).toBe(false)
+  })
+
   it("bridges tools/list and tools/call for inbox.wait with structured content", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath, {
@@ -709,7 +734,7 @@ describe("stdio adapter delivery modes", () => {
       env: {
         ...process.env,
         TRIBE_DELIVERY: "pull",
-        TRIBE_PULL_TRANSPORT: "cli",
+        TRIBE_PULL_TRANSPORT: "mcp",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
       },
@@ -726,8 +751,8 @@ describe("stdio adapter delivery modes", () => {
       _meta?: Record<string, unknown>
     }>
     expect(tools.find((tool) => tool.name === "inbox.wait")?._meta?.["tribe.deliveryCapability"]).toMatchObject({
-      idleStrategy: "cli-inbox-wait",
-      pullTransport: "cli",
+      idleStrategy: "mcp-inbox.wait",
+      pullTransport: "mcp",
     })
 
     writeJson(child, callToolPayload(3, "inbox.wait", { session: "@agent/test", timeout_ms: 17 }))

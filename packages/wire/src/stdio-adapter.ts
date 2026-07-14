@@ -36,6 +36,7 @@ import { createConnectReplayGate, MAX_REPLAY_EVENTS, selectReplayEvents } from "
 import { evaluateCwdPolicy, probeCwd, readCwdPolicyFromEnv, type CwdEvaluation } from "./lib/cwd-guardrail.ts"
 import {
   deliveryCapabilityInstruction,
+  mcpInboxWaitRefusal,
   resolveDeliveryCapability,
   resolveJoinDelivery,
   type TribeDeliveryCapability,
@@ -669,6 +670,21 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => {
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const { name, arguments: toolArgs } = req.params
   const a = (toolArgs ?? {}) as Record<string, unknown>
+
+  if (name === "inbox.wait" && DELIVERY_CAPABILITY.idleStrategy !== "mcp-inbox.wait") {
+    const session = typeof a.session === "string" && a.session.trim() ? a.session.trim() : myName
+    const refusal = mcpInboxWaitRefusal(DELIVERY_CAPABILITY, session)
+    if (!refusal) throw new Error("inbox.wait refusal missing for non-MCP delivery")
+    return {
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: refusal,
+        },
+      ],
+    }
+  }
 
   try {
     // Degraded: an earlier connect failed. Before reporting either managed

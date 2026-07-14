@@ -88,3 +88,18 @@ export function deliveryCapabilityInstruction(capability: TribeDeliveryCapabilit
   }
   return `Delivery capability: ${capability.summary}. Use one max-window MCP inbox.wait only when the host honors the requested timeout; it wakes on actionable inbox activity (type=request/query/assign/verdict), not notify/status/response. Do not simulate long-polling with repeated short waits.`
 }
+
+export function mcpInboxWaitRefusal(capability: TribeDeliveryCapability, session: string): string | null {
+  if (capability.idleStrategy === "mcp-inbox.wait") return null
+
+  const prefix =
+    "TRIBE_WAIT_TRANSPORT_MISMATCH: MCP inbox.wait is disabled because this host cannot honor a long-running MCP wait. An MCP timeout/error is a transport failure, not an inbox result; it does not mean unread_count is 0. Retrying creates a busy loop and wastes model tokens. Do not retry MCP inbox.wait."
+
+  if (capability.idleStrategy === "cli-inbox-wait") {
+    return `${prefix} Run exactly one wait outside MCP: tribe inbox-wait --session ${session} --timeout 5m --json. If it returns unread_count > 0, drain once with MCP inbox.fetch and act. If it returns timed_out: true with unread_count: 0, end the turn without fetching, reporting status, or re-arming. Use a role-specific wrapper only when that role's SOP explicitly names one.`
+  }
+  if (capability.idleStrategy === "host-stream") {
+    return `${prefix} Wait on the advertised host Tribe stream. When it reports actionable unread input, drain once with MCP inbox.fetch and act; otherwise let the host end or resume the turn.`
+  }
+  return `${prefix} Wait for advertised channel delivery. When actionable input arrives, drain once with MCP inbox.fetch and act; do not add a polling fallback.`
+}
