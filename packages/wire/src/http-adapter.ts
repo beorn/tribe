@@ -41,11 +41,15 @@ export type StartTribeHttpMcpServerOptions = {
   readonly projectName?: string
   readonly projectId?: string
   readonly requireJoin?: boolean
+  /** Caller-minted host launch identity. Blank values preserve legacy registration. */
+  readonly launchId?: string
 }
 
 export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptions = {}): Promise<TribeHttpMcpServer> {
   const socketPath = resolveSocketPath(opts.socketPath)
   const requireJoin = opts.requireJoin !== false
+  const initialName = opts.name?.trim() || undefined
+  const launchId = opts.launchId?.trim() || undefined
   const deliveryCapability = resolveDeliveryCapability({
     delivery: opts.delivery ?? "pull",
     channel: false,
@@ -63,8 +67,9 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
     socketPath,
     maxAttempts: 30,
     async onConnect(client) {
+      const registerName = myName !== "pending" ? myName : !requireJoin ? initialName : undefined
       const reg = (await client.call("register", {
-        ...(opts.name && !requireJoin ? { name: opts.name } : {}),
+        ...(registerName !== undefined ? { name: registerName } : {}),
         role: myRole,
         domains: [...(opts.domains ?? [])],
         project: opts.project ?? process.cwd(),
@@ -74,6 +79,7 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
         peerSocket: null,
         pid: process.pid,
         identityToken,
+        ...(launchId !== undefined ? { launchId, launchParentPid: process.pid } : {}),
         delivery: requireJoin ? "pull" : deliveryCapability.delivery,
       })) as { name?: string; role?: string }
       if (reg.name) myName = reg.name

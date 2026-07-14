@@ -293,8 +293,9 @@ function requiredMcpTransportFailureResult(): {
   }
 }
 
-function registerParamsForConnection(): typeof baseRegisterParams & { takeover?: true } {
-  return TAKEOVER && !hasRegistered ? { ...baseRegisterParams, takeover: true } : baseRegisterParams
+function registerParamsForConnection(): typeof baseRegisterParams & { name?: string; takeover?: true } {
+  const params = hasRegistered && myName !== "pending" ? { ...baseRegisterParams, name: myName } : baseRegisterParams
+  return TAKEOVER && !hasRegistered ? { ...params, takeover: true } : params
 }
 
 function isExplicitTribePersonaName(name: string): boolean {

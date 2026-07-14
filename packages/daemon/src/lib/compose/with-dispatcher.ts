@@ -419,23 +419,31 @@ export function withDispatcher<
             // adoption-by-identityToken removal note in resolve-name.ts).
             const clientPid = Number(p.pid ?? 0)
             const clientCwd = String(p.project ?? "")
-            const pidCwdAdopted = adoptByPidCwd(db, clientPid, clientCwd, isActive)
+            const requestedLaunchName =
+              launchIdentity && typeof p.name === "string" && p.name.trim().length > 0 ? p.name.trim() : null
+            // A named launch carries a stronger persisted key than (pid, cwd).
+            // This matters for in-process multiplexers such as the HTTP MCP
+            // bridge, where several logical members intentionally share one
+            // process and cwd. Unnamed stdio registrations retain the legacy
+            // pid/cwd recovery until they have an explicit resolved name.
+            const pidCwdAdopted =
+              requestedLaunchName === null ? adoptByPidCwd(db, clientPid, clientCwd, isActive) : null
             const launchPersisted =
-              launchIdentity && typeof p.name === "string"
+              launchIdentity && requestedLaunchName !== null
                 ? (db
                     .prepare(
                       `SELECT id, name, role FROM sessions
                        WHERE name = ? AND launch_id = ? AND launch_parent_pid = ?
                        LIMIT 1`,
                     )
-                    .get(p.name, launchIdentity.id, launchIdentity.parentPid) as PriorSession | null)
+                    .get(requestedLaunchName, launchIdentity.id, launchIdentity.parentPid) as PriorSession | null)
                 : null
             const launchAdopted = launchPersisted && !isActive(launchPersisted.id) ? launchPersisted : null
             // A validated launch identity is stronger than the legacy weak
             // identity token. Never let a new launch with different provenance
             // adopt a dead member merely because cwd/role hashed the same.
             let adopted: PriorSession | null = launchIdentity
-              ? (pidCwdAdopted ?? launchAdopted)
+              ? (launchAdopted ?? pidCwdAdopted)
               : (pidCwdAdopted ?? adoptIdentity(db, identityToken, isActive))
 
             if (!p.role && adopted?.role) {
@@ -515,7 +523,11 @@ export function withDispatcher<
                 daemon: { pid: process.pid, uptime: Math.floor((Date.now() - socket.startedAt) / 1000) },
               })
             }
-            const samePidHolder = findSamePidNameHolder(resolvedName, clientPid, connId)
+            // Launch-aware registrations must never use the legacy same-PID
+            // replacement path: an in-process multiplexer can host distinct
+            // logical members under one OS pid. Same-launch fan-in above is
+            // the only silent reuse path; a different launch stays fail-loud.
+            const samePidHolder = launchIdentity ? null : findSamePidNameHolder(resolvedName, clientPid, connId)
             if (samePidHolder) {
               adopted = { id: samePidHolder.ctx.sessionId, name: samePidHolder.name, role: samePidHolder.role }
               if (!p.role && (samePidHolder.role === "member" || samePidHolder.role === "watch")) {

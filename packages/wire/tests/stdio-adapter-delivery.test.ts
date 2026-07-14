@@ -26,6 +26,7 @@ function spawnFakeDaemon(
     registerError?: { code: number; message: string; data?: unknown }
     registerErrorAfter?: number
     registerErrorUntil?: number
+    registerName?: string
   } = {},
 ): Promise<FakeDaemon> {
   const clients: Socket[] = []
@@ -49,7 +50,14 @@ function spawnFakeDaemon(
             )
             return
           }
-          socket.write(makeResponse(msg.id, { sessionId: "daemon-s1", name: "@agent/test", role: "member", chief: "" }))
+          socket.write(
+            makeResponse(msg.id, {
+              sessionId: "daemon-s1",
+              name: opts.registerName ?? "@agent/test",
+              role: "member",
+              chief: "",
+            }),
+          )
           return
         }
         if (msg.method === "tribe.members") {
@@ -445,7 +453,7 @@ describe("stdio adapter delivery modes", () => {
 
   it("21049: takeover is a launch capability and is not replayed after reconnect", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
-    daemon = await spawnFakeDaemon(socketPath)
+    daemon = await spawnFakeDaemon(socketPath, { registerName: "@chief" })
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@chief"], {
       cwd: tmpDir,
       env: {
@@ -478,6 +486,45 @@ describe("stdio adapter delivery modes", () => {
     }>
     expect(registrations[0]?.params).toMatchObject({ name: "@chief", takeover: true })
     expect(registrations[1]?.params?.name).toBe("@chief")
+    expect(registrations[1]?.params && "takeover" in registrations[1].params).toBe(false)
+  })
+
+  it("21111: reconnects a named launch with its latest resolved member name", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath, { registerName: "@chief" })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@chief"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "pull",
+        TRIBE_TAKEOVER: "1",
+        TRIBE_LAUNCH_ID: "provider-launch-a",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, toolsListPayload(2), (line) => line.id === 2)
+    await writeJsonAndWaitForLine(child, callToolPayload(3, "join", { name: "@agent/test" }), (line) => line.id === 3)
+
+    daemon.clients.at(-1)?.destroy()
+    await waitForCondition(
+      () => daemon!.requests.filter((msg) => msg.method === "register").length >= 2,
+      "adapter reconnect registration",
+    )
+
+    const registrations = daemon.requests.filter((msg) => msg.method === "register") as Array<{
+      params?: { name?: string; takeover?: boolean; launchId?: string }
+    }>
+    expect(registrations[0]?.params).toMatchObject({
+      name: "@chief",
+      takeover: true,
+      launchId: "provider-launch-a",
+    })
+    expect(registrations[1]?.params?.name).toBe("@agent/test")
     expect(registrations[1]?.params && "takeover" in registrations[1].params).toBe(false)
   })
 

@@ -243,6 +243,93 @@ describe("dispatcher explicit-persona takeover (@ag/tribe/20703)", () => {
   })
 })
 
+describe("same-process launch identity multiplexing", () => {
+  it("keeps distinct named bridges separate across a daemon restart", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const shared = {
+      pid: 9100,
+      project: "/tmp/km-wt9-http",
+      launchId: "silver-app-launch",
+      launchParentPid: 9000,
+    }
+
+    harness.addPendingClient("bridge-a")
+    const firstA = parseResult<RegisterResult>(await harness.register("bridge-a", { ...shared, name: "@agent/http-a" }))
+    harness.addPendingClient("bridge-b")
+    const firstB = parseResult<RegisterResult>(await harness.register("bridge-b", { ...shared, name: "@agent/http-b" }))
+
+    harness.simulateDaemonRestart()
+    harness.addPendingClient("bridge-a-reconnected")
+    const reconnectedA = parseResult<RegisterResult>(
+      await harness.register("bridge-a-reconnected", { ...shared, name: "@agent/http-a" }),
+    )
+    harness.addPendingClient("bridge-b-reconnected")
+    const reconnectedB = parseResult<RegisterResult>(
+      await harness.register("bridge-b-reconnected", { ...shared, name: "@agent/http-b" }),
+    )
+
+    expect(reconnectedA).toMatchObject({ name: "@agent/http-a", sessionId: firstA.sessionId })
+    expect(reconnectedB).toMatchObject({ name: "@agent/http-b", sessionId: firstB.sessionId })
+  })
+
+  it("fans in duplicate transports only when name and launch identity both match", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const shared = {
+      name: "@agent/http-fan-in",
+      pid: 9200,
+      project: "/tmp/km-wt9-http",
+      launchId: "silver-app-launch",
+      launchParentPid: 9000,
+    }
+
+    harness.addPendingClient("transport-a")
+    const first = parseResult<RegisterResult>(await harness.register("transport-a", shared))
+    harness.addPendingClient("transport-b")
+    const second = parseResult<RegisterResult>(await harness.register("transport-b", shared))
+
+    expect(second).toMatchObject({ name: first.name, sessionId: first.sessionId })
+  })
+
+  it("retains pid/cwd recovery for an unnamed launch registration", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const unnamed = {
+      pid: 9250,
+      project: "/tmp/km-wt9-http",
+      launchId: "unnamed-provider-launch",
+      launchParentPid: 9000,
+    }
+
+    harness.addPendingClient("unnamed-first")
+    const first = parseResult<RegisterResult>(await harness.register("unnamed-first", unnamed))
+    harness.simulateDaemonRestart()
+    harness.addPendingClient("unnamed-reconnected")
+    const reconnected = parseResult<RegisterResult>(await harness.register("unnamed-reconnected", unnamed))
+
+    expect(reconnected).toMatchObject({ name: first.name, sessionId: first.sessionId })
+  })
+
+  it("rejects a same-process name collision from a different launch", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const shared = {
+      name: "@agent/http-collision",
+      pid: 9300,
+      project: "/tmp/km-wt9-http",
+      launchParentPid: 9000,
+    }
+
+    harness.addPendingClient("launch-a")
+    parseResult<RegisterResult>(await harness.register("launch-a", { ...shared, launchId: "silver-app-launch-a" }))
+    harness.addPendingClient("launch-b")
+    const collision = parseError(await harness.register("launch-b", { ...shared, launchId: "silver-app-launch-b" }))
+
+    expect(collision.message).toBe('Name "@agent/http-collision" is already taken by live pid 9300')
+  })
+})
+
 describe("asymmetric identity displacement (@ag/tribe/21052)", () => {
   // The 19442 agent/4 adapter-death class: a token-less carrier (CLI drains
   // register with no identityToken) grabs a persona name across a daemon
@@ -487,6 +574,10 @@ function createDispatcherHarness() {
       })
       socketToClient.set(socket, connId)
       return socket
+    },
+    simulateDaemonRestart(): void {
+      clients.clear()
+      socketToClient.clear()
     },
     db: db as Database,
     async dispose() {
