@@ -32,6 +32,13 @@ describe("turn-start inbox instruction (km 19442 context-flood guard)", () => {
     expect((src.match(/\$\{turnStartInboxCheck\}/g) ?? []).length).toBe(3)
   })
 
+  it("makes the attention projection the shared turn-start view", () => {
+    expect((src.match(/const attentionProjectionInstruction\b/g) ?? []).length).toBe(1)
+    expect(src).toContain("attention.actionable_unread")
+    expect(src).toContain("attention.pending_balls")
+    expect((src.match(/\$\{attentionProjectionInstruction\}/g) ?? []).length).toBe(3)
+  })
+
   it("no longer tells sessions to replay a 50-event window every turn", () => {
     expect(src).not.toContain("At the start of each user turn, call tribe.fetch({ limit: 50 })")
     expect(src).not.toMatch(/tribe\.fetch\(\{ limit: 50 \}\)/)

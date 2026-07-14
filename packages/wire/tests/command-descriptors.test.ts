@@ -142,6 +142,14 @@ describe("Tribe command descriptors", () => {
   test("keeps MCP fetch explicitly hidden from CLI so it is not confused with log", () => {
     const fetch = commandDescriptorByMcpName("fetch")
     expect(fetch).toBeDefined()
+    expect(fetch!.mcp.outputSchema.properties?.attention).toMatchObject({
+      type: "object",
+      required: ["actionable_unread", "pending_balls"],
+      properties: {
+        actionable_unread: { type: "array" },
+        pending_balls: { type: "array" },
+      },
+    })
     const cli = hiddenCliProjection(fetch!)
     expect(cli.reason).toMatch(/log/i)
     expect(cli.reason).toMatch(/snapshot/i)

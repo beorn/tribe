@@ -22,6 +22,10 @@ function spawnFakeDaemon(
   socketPath: string,
   opts: {
     fetchEvents?: Array<Record<string, unknown>>
+    fetchAttention?: {
+      actionable_unread?: Array<Record<string, unknown>>
+      pending_balls?: Array<Record<string, unknown>>
+    }
     inboxWaitResult?: Record<string, unknown>
     registerError?: { code: number; message: string; data?: unknown }
     registerErrorAfter?: number
@@ -78,7 +82,12 @@ function spawnFakeDaemon(
         if (msg.method === "tribe.fetch") {
           socket.write(
             makeResponse(msg.id, {
-              content: [{ type: "text", text: JSON.stringify({ events: opts.fetchEvents ?? [] }) }],
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({ attention: opts.fetchAttention, events: opts.fetchEvents ?? [] }),
+                },
+              ],
             }),
           )
           return
@@ -902,5 +911,112 @@ describe("stdio adapter delivery modes", () => {
       | { params?: { limit?: number } }
       | undefined
     expect(fetchRequest?.params?.limit).toBe(500)
+  })
+
+  it("forwards attention actionables before capped ambient replay", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const recentTs = new Date().toISOString()
+    const fetchEvents = Array.from({ length: MAX_REPLAY_EVENTS + 5 }, (_, i) => ({
+      id: `ambient-${i}`,
+      type: "status",
+      from: "daemon",
+      content: `ambient-${i}`,
+      ts: recentTs,
+    }))
+    daemon = await spawnFakeDaemon(socketPath, {
+      fetchEvents,
+      fetchAttention: {
+        actionable_unread: [
+          {
+            id: "late-verdict",
+            type: "verdict",
+            from: "@ci",
+            content: "REVISE before continuing ordinary work",
+            ts: recentTs,
+          },
+        ],
+        pending_balls: [],
+      },
+    })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+    daemon.clients[0]?.write(makeNotification("wakeup", {}))
+
+    await waitForStdout(child, stdout, () =>
+      stdout.some((line) => JSON.stringify(line).includes("REVISE before continuing ordinary work")),
+    )
+
+    const channels = stdout.filter((line) => line.method === "notifications/claude/channel")
+    const verdict = channels.find((line) => JSON.stringify(line).includes("late-verdict"))
+    expect(verdict).toBeDefined()
+    expect(channels.indexOf(verdict!)).toBe(0)
+  })
+
+  it("forwards a pending-only ball when its original actionable was already read", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath, {
+      fetchAttention: {
+        actionable_unread: [],
+        pending_balls: [
+          {
+            request_id: "review-r3",
+            sender: "@chief",
+            message_id: "original-review-request",
+            fanout: "first",
+          },
+        ],
+      },
+    })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+    daemon.clients[0]?.write(makeNotification("wakeup", {}))
+
+    await waitForStdout(child, stdout, () =>
+      stdout.some((line) => JSON.stringify(line).includes("Pending tracked request review-r3")),
+    )
+
+    const pending = stdout
+      .filter((line) => line.method === "notifications/claude/channel")
+      .find((line) => JSON.stringify(line).includes("original-review-request"))
+    expect(pending).toBeDefined()
+    expect(JSON.stringify(pending)).toContain('"type":"request"')
+
+    const fetchesBeforeSecondWake = daemon.requests.filter((request) => request.method === "tribe.fetch").length
+    daemon.clients[0]?.write(makeNotification("wakeup", {}))
+    await waitForCondition(
+      () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > fetchesBeforeSecondWake,
+      "second pending-ball fetch",
+    )
+    expect(
+      stdout
+        .filter((line) => line.method === "notifications/claude/channel")
+        .filter((line) => JSON.stringify(line).includes("Pending tracked request review-r3")),
+    ).toHaveLength(1)
   })
 })

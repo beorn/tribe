@@ -576,6 +576,35 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   })
 }
 
+type PendingBallRow = {
+  request_id: string
+  sender: string
+  opened_at: number
+  message_id: string
+  fanout: string
+}
+
+type PendingBall = {
+  request_id: string
+  sender: string
+  opened_at: string
+  age_ms: number
+  message_id: string
+  fanout: string
+}
+
+function pendingBallsForOwner(ctx: TribeContext, owner: string, now: number): PendingBall[] {
+  const rows = ctx.stmts.selectPendingForRecipient.all({ $recipient: owner }) as PendingBallRow[]
+  return rows.map((row) => ({
+    request_id: row.request_id,
+    sender: row.sender,
+    opened_at: new Date(row.opened_at).toISOString(),
+    age_ms: now - row.opened_at,
+    message_id: row.message_id,
+    fanout: row.fanout,
+  }))
+}
+
 function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): ToolResult {
   // Ball-tracker pending-query (@km/tribe/message-ball-tracker Phase 2a):
   // return open requests addressed to the given recipient (the "owner" of
@@ -604,22 +633,8 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
     return jsonResult({ owner, request_id: closeId, closed: res.changes ?? 0 })
   }
 
-  const rows = ctx.stmts.selectPendingForRecipient.all({ $recipient: owner }) as Array<{
-    request_id: string
-    sender: string
-    opened_at: number
-    message_id: string
-    fanout: string
-  }>
-  const filtered = staleMs === null ? rows : rows.filter((r) => now - r.opened_at >= staleMs)
-  const pending = filtered.map((r) => ({
-    request_id: r.request_id,
-    sender: r.sender,
-    opened_at: new Date(r.opened_at).toISOString(),
-    age_ms: now - r.opened_at,
-    message_id: r.message_id,
-    fanout: r.fanout,
-  }))
+  const rows = pendingBallsForOwner(ctx, owner, now)
+  const pending = staleMs === null ? rows : rows.filter((row) => row.age_ms >= staleMs)
   return jsonResult({ owner, pending, count: pending.length })
 }
 
@@ -1015,9 +1030,10 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
 				SELECT m.recipient, COUNT(*) as count FROM messages m
 				WHERE m.recipient != '*'
 				AND m.kind = 'direct'
+				AND m.sender != m.recipient
 				AND m.type IN ('request', 'query', 'verdict', 'assign')
 				AND m.rowid > COALESCE(
-					(SELECT s.last_inbox_pull_seq FROM sessions s WHERE s.name = m.recipient),
+					(SELECT c.last_actionable_seq FROM mailbox_cursors c WHERE c.recipient = m.recipient),
 					0
 				)
 				GROUP BY m.recipient
@@ -1197,6 +1213,40 @@ type FetchRow = {
   summary: string | null
 }
 
+type FetchEvent = {
+  id: string
+  rowid: number
+  type: string
+  from: string
+  to: string
+  content: string
+  bead: string | null
+  ref: string | null
+  ts: string
+  delivery: string
+  topic: string | null
+  room_id: string | null
+  summary: string | null
+}
+
+function fetchEvent(row: FetchRow): FetchEvent {
+  return {
+    id: row.id,
+    rowid: row.rowid,
+    type: row.type,
+    from: row.sender,
+    to: row.recipient,
+    content: row.content,
+    bead: row.bead_id,
+    ref: row.ref,
+    ts: new Date(row.ts).toISOString(),
+    delivery: row.delivery,
+    topic: row.topic,
+    room_id: row.room_id,
+    summary: row.summary,
+  }
+}
+
 type SnapshotFilters = {
   currentName: string
   limit: number
@@ -1289,6 +1339,8 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
   const cursor = ctx.stmts.getInboxCursor.get({ $id: ctx.sessionId }) as { last_inbox_pull_seq: number } | null
   const currentName = ctx.getName()
   let rows: FetchRow[]
+  let attentionActionableRows: FetchRow[] = []
+  let attention: { actionable_unread: FetchEvent[]; pending_balls: PendingBall[] } | null = null
   let shouldAdvance = false
   let cursorBase = cursor?.last_inbox_pull_seq ?? 0
   const since = typeof a.since === "number" ? a.since : null
@@ -1324,6 +1376,16 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
     rows = querySnapshotRows(ctx, { ...snapshotFilters, limit })
     shouldAdvance = !topicsAreSnapshot && since !== null && a.advance === true
   } else {
+    if (!topicsAreSnapshot) {
+      attentionActionableRows = filterRowsByTrust(
+        ctx,
+        ctx.stmts.selectActionableAttention.all({ $name: currentName }) as FetchRow[],
+      )
+      attention = {
+        actionable_unread: attentionActionableRows.map(fetchEvent),
+        pending_balls: pendingBallsForOwner(ctx, currentName, Date.now()),
+      }
+    }
     // 19442 — inject unacknowledged actionable directs (the durable mailbox)
     // ahead of the ambient window. Recovery rows are bounded to rowid <=
     // cursorBase, so they can never duplicate a window row, and the ambient
@@ -1370,7 +1432,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
   // "unseen" — it never blocks the cursor.
   if (shouldAdvance) {
     let lastActionable = 0
-    for (const r of filtered) {
+    for (const r of [...attentionActionableRows, ...filtered]) {
       if (r.recipient === currentName && r.sender !== currentName && ACTIONABLE_TYPES_SET.has(r.type)) {
         lastActionable = Math.max(lastActionable, r.rowid)
       }
@@ -1380,22 +1442,8 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
     }
   }
 
-  const events = filtered.map((r) => ({
-    id: r.id,
-    rowid: r.rowid,
-    type: r.type,
-    from: r.sender,
-    to: r.recipient,
-    content: r.content,
-    bead: r.bead_id,
-    ref: r.ref,
-    ts: new Date(r.ts).toISOString(),
-    delivery: r.delivery,
-    topic: r.topic,
-    room_id: r.room_id,
-    summary: r.summary,
-  }))
-  return jsonResult({ events, cursor: outputCursor })
+  const events = filtered.map(fetchEvent)
+  return jsonResult(attention === null ? { events, cursor: outputCursor } : { attention, events, cursor: outputCursor })
 }
 
 function normalizeStringArray(value: unknown): string[] | null {

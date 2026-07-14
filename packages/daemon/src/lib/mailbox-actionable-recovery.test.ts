@@ -30,7 +30,20 @@ const NAME = "@agent/3"
 
 type ToolJson = Record<string, unknown>
 type FetchEvent = { id: string; rowid: number; type: string; from: string; content: string }
-type FetchJson = ToolJson & { events?: FetchEvent[]; cursor?: number }
+type AttentionBall = {
+  request_id: string
+  sender: string
+  message_id: string
+  fanout: string
+}
+type FetchJson = ToolJson & {
+  attention?: {
+    actionable_unread?: FetchEvent[]
+    pending_balls?: AttentionBall[]
+  }
+  events?: FetchEvent[]
+  cursor?: number
+}
 
 function makeContext(db: Database, stmts: TribeStatements, sessionId: string, initialName: string): TribeContext {
   return createTribeContext({
@@ -122,6 +135,16 @@ function fetchEvents(ctx: TribeContext, opts: HandlerOpts, args: Record<string, 
   return out.events ?? []
 }
 
+function fetchJson(
+  ctx: TribeContext,
+  opts: HandlerOpts,
+  args: Record<string, unknown> = {},
+): { json: FetchJson; raw: string } {
+  const result = handleToolCall(ctx, "tribe.fetch", { limit: 50, ...args }, opts)
+  const raw = (result as { content: Array<{ text: string }> }).content[0]?.text ?? "{}"
+  return { json: JSON.parse(raw) as FetchJson, raw }
+}
+
 describe("19442 mailbox-cursor actionable recovery", () => {
   let tmpDir: string
   let db: Database
@@ -192,6 +215,89 @@ describe("19442 mailbox-cursor actionable recovery", () => {
 
     // Acked: the second default drain is empty.
     expect(fetchEvents(b, opts)).toEqual([])
+  })
+
+  it("projects a later actionable plus owed ball ahead of a full ambient page", () => {
+    const live = connectAs("sess-live", NAME)
+
+    // Literal 17199 recurrence shape: the actor performs one bounded default
+    // drain while enough ambient health traffic precedes a critical verdict to
+    // keep the verdict outside that chronological page.
+    for (let i = 0; i < 75; i++) {
+      insertRow(stmts, {
+        id: `ambient-health-${i}`,
+        type: "health:daemon:warn",
+        sender: "daemon",
+        recipient: "*",
+        kind: "broadcast",
+        content: `ambient health ${i}`,
+        ts: now + i,
+      })
+    }
+    const verdictRowid = insertRow(stmts, {
+      id: "critical-revise",
+      type: "verdict",
+      sender: "@ci",
+      recipient: NAME,
+      kind: "direct",
+      content: "REVISE exact candidate before continuing composition",
+      ts: now + 100,
+    })
+    stmts.openPendingRequest.run({
+      $request_id: "review-r3",
+      $recipient: NAME,
+      $sender: "@ci",
+      $opened_at: now + 100,
+      $message_id: "critical-revise",
+      $fanout: "first",
+    })
+
+    const filteredSnapshot = fetchJson(live, opts, { from: "@ci" }).json
+    expect(filteredSnapshot.attention).toBeUndefined()
+    expect(filteredSnapshot.events?.map((event) => event.id)).toEqual(["critical-revise"])
+
+    const { json, raw } = fetchJson(live, opts)
+
+    expect(json.events).toHaveLength(50)
+    expect(json.events?.some((event) => event.id === "critical-revise")).toBe(false)
+    expect(json.attention?.actionable_unread).toEqual([
+      expect.objectContaining({
+        id: "critical-revise",
+        rowid: verdictRowid,
+        type: "verdict",
+        from: "@ci",
+      }),
+    ])
+    expect(json.attention?.pending_balls).toEqual([
+      expect.objectContaining({
+        request_id: "review-r3",
+        sender: "@ci",
+        message_id: "critical-revise",
+        fanout: "first",
+      }),
+    ])
+    expect(json.attention?.actionable_unread?.some((event) => event.type.startsWith("health:"))).toBe(false)
+    expect(raw.indexOf('"attention"')).toBeLessThan(raw.indexOf('"events"'))
+
+    // The actionable mailbox is the single unread authority. Projecting and
+    // acknowledging the verdict must re-arm inbox.wait immediately even though
+    // the chronological ambient cursor has not paged through all 75 health rows.
+    const unreadAfterAttention = stmts.getUnreadDms.get({ $name: NAME }) as {
+      count: number
+      oldest_ts: number
+    }
+    expect(unreadAfterAttention.count).toBe(0)
+    const healthAfterAttention = parseToolJson(handleToolCall(live, "tribe.health", {}, opts)) as {
+      unread?: Array<{ recipient: string; count: number }>
+    }
+    expect(healthAfterAttention.unread?.some((row) => row.recipient === NAME)).toBe(false)
+
+    const afterDelivery = fetchJson(live, opts).json
+    expect(afterDelivery.attention?.actionable_unread).toEqual([])
+    expect(afterDelivery.events?.some((event) => event.id === "critical-revise")).toBe(false)
+    expect(afterDelivery.attention?.pending_balls).toEqual([
+      expect.objectContaining({ request_id: "review-r3", message_id: "critical-revise" }),
+    ])
   })
 
   it("reports the recovered count on the join result and never a rewound cursor", () => {
@@ -322,7 +428,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(fetchEvents(b, opts).map((e) => e.id)).toEqual(["old-request"])
   })
 
-  it("partial drains stay lossless — limit cuts the recovery batch, the ack follows only what was returned", () => {
+  it("a bounded event page stays lossless because attention returns every actionable before acknowledgement", () => {
     const a = connectAs("sess-a", NAME)
     disconnect("sess-a")
     void a
@@ -338,8 +444,9 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       })
     }
     const b = connectAs("sess-b", NAME)
-    expect(fetchEvents(b, opts, { limit: 2 }).map((e) => e.id)).toEqual(["p1", "p2"])
-    expect(fetchEvents(b, opts).map((e) => e.id)).toEqual(["p3"])
+    const first = fetchJson(b, opts, { limit: 2 }).json
+    expect(first.events?.map((event) => event.id)).toEqual(["p1", "p2"])
+    expect(first.attention?.actionable_unread?.map((event) => event.id)).toEqual(["p1", "p2", "p3"])
     expect(fetchEvents(b, opts)).toEqual([])
   })
 
@@ -387,6 +494,11 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     })
     const b = connectAs("sess-b", NAME)
     expect(fetchEvents(b, opts)).toEqual([])
+    expect((stmts.getUnreadDms.get({ $name: NAME }) as { count: number }).count).toBe(0)
+    const health = parseToolJson(handleToolCall(b, "tribe.health", {}, opts)) as {
+      unread?: Array<{ recipient: string; count: number }>
+    }
+    expect(health.unread?.some((row) => row.recipient === NAME)).toBe(false)
   })
 
   it("non-actionable directs (notify/status) are ambient — never recovered on claim", () => {

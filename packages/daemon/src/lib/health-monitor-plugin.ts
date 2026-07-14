@@ -761,7 +761,8 @@ export function checkChiefSilent(
     message:
       `STOP-THE-LINE: @chief has ${unread.count} actionable DM${unread.count === 1 ? "" : "s"} unread ` +
       `for ${Math.round(ageMin)}min. Relay-pattern likely; chief should ` +
-      `tribe.fetch({from:"@agent/*"}) BEFORE the next tool call.`,
+      `tribe.fetch({limit:10}) and inspect attention.actionable_unread plus ` +
+      `attention.pending_balls BEFORE the next tool call.`,
     metrics: {},
     topOffenders: [],
   }

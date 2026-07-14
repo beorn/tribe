@@ -346,12 +346,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     id: "tribe.fetch",
     title: "Fetch Messages",
     description:
-      "Read tribe messages. Default drains this session's pending queue and advances its cursor. ids/with/from/to reads are snapshots. since scans the journal and advances only with advance:true.",
+      "Read tribe messages. Default returns attention (unread actionables plus self-owned pending balls), drains the bounded chronological event window, and advances its cursor. ids/with/from/to reads are snapshots. since scans the journal and advances only with advance:true.",
     lifetime: "live-session",
     mcp: {
       name: "fetch",
       description:
-        "Read tribe messages. Default drains this session's pending queue and advances its cursor. ids/with/from/to reads are snapshots. since scans the journal and advances only with advance:true.",
+        "Read tribe messages. Default returns attention (unread actionables plus self-owned pending balls), drains the bounded chronological event window, and advances its cursor. ids/with/from/to reads are snapshots. since scans the journal and advances only with advance:true.",
       inputSchema: {
         type: "object",
         properties: {
@@ -369,7 +369,10 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           with: { type: "string", description: "Bilateral history with this session name." },
           from: { type: "string", description: "One-sided history from this sender." },
           to: { type: "string", description: "One-sided history to this recipient." },
-          limit: { type: "number", description: "Max rows to return (default 50, max 500)." },
+          limit: {
+            type: "number",
+            description: "Max chronological event rows to return (default 50, max 500).",
+          },
           advance: {
             type: "boolean",
             description: "Advance the session cursor after a since/default scan. Default: true only for default drain.",
@@ -378,6 +381,26 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
       },
       outputSchema: OBJ(
         {
+          attention: {
+            type: "object",
+            description:
+              "Default-drain attention projection over existing mailbox and ball-tracker state. Returned before ambient events; absent on snapshot reads.",
+            required: ["actionable_unread", "pending_balls"],
+            properties: {
+              actionable_unread: {
+                type: "array",
+                description:
+                  "All unacknowledged direct request/query/verdict/assign messages for this recipient, independent of the event limit.",
+                items: { type: "object", additionalProperties: true },
+              },
+              pending_balls: {
+                type: "array",
+                description:
+                  "Open tracked requests this recipient owns: request_id, sender, opened_at, age_ms, message_id, fanout.",
+                items: { type: "object", additionalProperties: true },
+              },
+            },
+          },
           events: {
             type: "array",
             description:
@@ -387,7 +410,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           cursor: { type: "number", description: "Highest rowid returned (or unchanged when no rows matched)." },
           ...ERROR_SHAPE,
         },
-        "Fetch result: { events, cursor } on success, { error } on argument validation failure.",
+        "Default fetch result: { attention, events, cursor }; snapshot result: { events, cursor }; { error } on validation failure.",
       ),
     },
     cli: hidden(

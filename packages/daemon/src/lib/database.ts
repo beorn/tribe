@@ -909,10 +909,11 @@ export function createStatements(db: Database) {
     // Atomic dedup: INSERT OR IGNORE — first session to claim a key wins, others get changes=0
     claimDedup: db.prepare("INSERT OR IGNORE INTO dedup (key, session_id, ts) VALUES ($key, $session_id, $ts)"),
 
-    // Chief-silent watchdog: count actionable DMs the recipient hasn't drained via
-    // tribe.fetch (rowid > last_inbox_pull_seq). Push delivery does NOT advance the
-    // pull cursor — only an explicit fetch does — so a lagging pull cursor is the
-    // relay-pattern signal. See @km/all/silent-errors-enforcement/chief-silent-watchdog-relay-pattern-detection.
+    // Chief-silent watchdog / inbox.wait: count actionables the recipient has
+    // not acknowledged through the canonical recipient mailbox. Ambient pull
+    // progress is deliberately irrelevant: attention can deliver a later
+    // verdict ahead of a health/status page, and that delivery must re-arm the
+    // actionable wait without draining the ambient tail.
     getUnreadDms: db.prepare(`
       SELECT
         COUNT(*) AS count,
@@ -920,8 +921,9 @@ export function createStatements(db: Database) {
       FROM messages
       WHERE recipient = $name
         AND kind = 'direct'
+        AND sender != $name
         AND type IN (${ACTIONABLE_TYPES_SQL})
-        AND rowid > COALESCE((SELECT last_inbox_pull_seq FROM sessions WHERE name = $name), 0)
+        AND rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
     `),
 
     // Cleanup old dedup entries (called by retention)
@@ -971,6 +973,15 @@ export function createStatements(db: Database) {
 			AND (recipient = $name OR recipient = '*')
 			AND kind != 'event'
 			AND sender != $name
+			AND NOT (
+				recipient = $name
+				AND kind = 'direct'
+				AND type IN (${ACTIONABLE_TYPES_SQL})
+				AND rowid <= COALESCE(
+					(SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name),
+					0
+				)
+			)
 		ORDER BY rowid ASC
 		LIMIT $limit
 	`),
@@ -1029,6 +1040,25 @@ export function createStatements(db: Database) {
         AND rowid <= $upto
       ORDER BY rowid ASC
       LIMIT $limit
+    `),
+
+    /**
+     * Read-only turn-attention view (17199): every unacknowledged actionable
+     * direct for the recipient, independent of the ambient inbox window. The
+     * normal fetch limit still bounds chronological `events`; this projection
+     * prevents a later verdict/request from sitting behind that ambient page.
+     * It reuses the recipient mailbox cursor and canonical actionable types —
+     * no second queue, cursor, or store.
+     */
+    selectActionableAttention: db.prepare(`
+      SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary
+      FROM messages
+      WHERE recipient = $name
+        AND kind = 'direct'
+        AND sender != $name
+        AND type IN (${ACTIONABLE_TYPES_SQL})
+        AND rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+      ORDER BY rowid ASC
     `),
 
     /** Count-only form of the recovery view — join/rename recovery reporting. */

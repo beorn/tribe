@@ -190,6 +190,25 @@ function markedType(type: string): string {
 }
 
 type TribeFetchResult = {
+  attention?: {
+    actionable_unread?: Array<{
+      id?: string
+      type?: string
+      from?: string
+      content?: string
+      bead?: string | null
+      topic?: string | null
+      ts?: string
+    }>
+    pending_balls?: Array<{
+      request_id?: string
+      sender?: string
+      opened_at?: string
+      age_ms?: number
+      message_id?: string
+      fanout?: string
+    }>
+  }
   events?: Array<{
     id?: string
     type?: string
@@ -499,6 +518,8 @@ armDegradeNotice(daemonReady)
 
 const joinInstruction = `If you receive a stdio-adapter auto-identify message, just call tribe.join with a short name for your focus area. Omit the role parameter — the daemon registers every session as a plain "member"; it does NOT assign "chief" by connect order. "chief" is a bead-lease hat (claimed via /up / the bead lease system), not a daemon-assigned role. No need to call tribe.members or tribe.fetch afterward — just join silently and continue.`
 const deliveryInstruction = deliveryCapabilityInstruction(DELIVERY_CAPABILITY)
+const attentionProjectionInstruction =
+  "- Default fetch exposes `attention.actionable_unread` and `attention.pending_balls` ahead of ambient events; both are facts projected from the existing mailbox and ball tracker, not another queue."
 
 // Shared turn-start inbox guidance for every role variant. Kept deliberately
 // SMALL: the turn-start call is a small catch-up drain, NOT a full replay. The
@@ -508,6 +529,7 @@ function turnStartInboxCheckForDelivery(capability: TribeDeliveryCapability): st
   if (capability.idleStrategy === "channel") {
     return `Turn-start inbox check:
 - New messages also arrive inline as <channel> envelopes — read those first; you do not need to fetch to receive them.
+${attentionProjectionInstruction}
 - For turn-start catch-up keep the drain SMALL: tribe.fetch({ limit: 10 }). Do NOT pull a large window every turn — replaying ~50 events re-surfaces already-seen ambient traffic and floods context.
 - For a specific peer's latest, use the snapshot filter: tribe.fetch({ with: <your session name>, limit: 10 }) or tribe.fetch({ from: <peer>, limit: 10 }) — these return the newest matching messages; use them to find a thread, not to replay the whole channel.
 - Surface only actionable items: direct messages, requests, blockers, assignments, chief verdicts, CI alerts, or user-relevant coordination.
@@ -516,6 +538,7 @@ function turnStartInboxCheckForDelivery(capability: TribeDeliveryCapability): st
   if (capability.idleStrategy === "host-stream") {
     return `Turn-start inbox check:
 - Host-provided Tribe stream events may already be visible — handle actionable streamed messages first.
+${attentionProjectionInstruction}
 - For turn-start catch-up keep the drain SMALL: tribe.fetch({ limit: 10 }). Do NOT pull a large window every turn — replaying ~50 events re-surfaces already-seen ambient traffic and floods context.
 - For a specific peer's latest, use the snapshot filter: tribe.fetch({ with: <your session name>, limit: 10 }) or tribe.fetch({ from: <peer>, limit: 10 }) — these return the newest matching messages; use them to find a thread, not to replay the whole channel.
 - Surface only actionable items: direct messages, requests, blockers, assignments, chief verdicts, CI alerts, or user-relevant coordination.
@@ -523,6 +546,7 @@ function turnStartInboxCheckForDelivery(capability: TribeDeliveryCapability): st
   }
   return `Turn-start inbox check:
 - This session is pull-delivery; tribe messages do not arrive as channel envelopes. Use the advertised inbox-wait/host cadence for idle waits, then do a small catch-up drain.
+${attentionProjectionInstruction}
 - For turn-start catch-up keep the drain SMALL: tribe.fetch({ limit: 10 }). Do NOT pull a large window every turn — replaying ~50 events re-surfaces already-seen ambient traffic and floods context.
 - For a specific peer's latest, use the snapshot filter: tribe.fetch({ with: <your session name>, limit: 10 }) or tribe.fetch({ from: <peer>, limit: 10 }) — these return the newest matching messages; use them to find a thread, not to replay the whole channel.
 - Surface only actionable items: direct messages, requests, blockers, assignments, chief verdicts, CI alerts, or user-relevant coordination.
@@ -872,8 +896,30 @@ function forwardFetchedEvent(event: NonNullable<TribeFetchResult["events"]>[numb
   })
 }
 
+function forwardPendingBall(
+  ball: NonNullable<NonNullable<TribeFetchResult["attention"]>["pending_balls"]>[number],
+): void {
+  const requestId = String(ball.request_id ?? "unknown")
+  const sender = String(ball.sender ?? "unknown")
+  const messageId = String(ball.message_id ?? "unknown")
+  const fanout = String(ball.fanout ?? "first")
+  sendChannel(
+    `Pending tracked request ${requestId} from ${sender} remains open (message ${messageId}; fanout ${fanout}).`,
+    {
+      from: sender,
+      type: "request",
+      message_id: messageId,
+      request_id: requestId,
+    },
+  )
+}
+
 let drainInFlight = false
 let drainAgain = false
+// Presentation-only dedupe. The ball tracker remains authoritative; this set
+// merely prevents one still-open ball from being re-injected on every ambient
+// wakeup. A closed/disappeared id is removed and can surface again if reopened.
+const surfacedPendingBallIds = new Set<string>()
 
 function drainDaemonInbox(): void {
   if (drainInFlight) {
@@ -893,12 +939,29 @@ function drainDaemonInbox(): void {
         // may reach the model as <channel> envelopes. Excess rows are still
         // drained (the cursor moves past them) — just not replayed.
         const result = parseToolText<TribeFetchResult>(await daemon?.call("tribe.fetch", { limit: 500 }))
-        const events = result?.events ?? []
+        const attentionEvents = result?.attention?.actionable_unread ?? []
+        const attentionIds = new Set(attentionEvents.map((event) => event.id).filter(Boolean))
+        for (const event of attentionEvents) forwardFetchedEvent(event)
+        const currentPendingBalls = result?.attention?.pending_balls ?? []
+        const currentPendingIds = new Set(
+          currentPendingBalls.map((ball) => ball.request_id).filter((id): id is string => id !== undefined),
+        )
+        for (const requestId of surfacedPendingBallIds) {
+          if (!currentPendingIds.has(requestId)) surfacedPendingBallIds.delete(requestId)
+        }
+        const pendingBalls = currentPendingBalls.filter(
+          (ball) =>
+            (!ball.message_id || !attentionIds.has(ball.message_id)) &&
+            (!ball.request_id || !surfacedPendingBallIds.has(ball.request_id)),
+        )
+        for (const ball of pendingBalls) forwardPendingBall(ball)
+        for (const requestId of currentPendingIds) surfacedPendingBallIds.add(requestId)
+        const events = (result?.events ?? []).filter((event) => !event.id || !attentionIds.has(event.id))
         const { forward, skippedOld, capped } = selectReplayEvents(events, { now: Date.now() })
         for (const event of forward) forwardFetchedEvent(event)
         if (skippedOld > 0 || capped > 0) {
           log.warn?.(
-            `tribe drain: surfaced ${forward.length}/${events.length} event(s) (skipped ${skippedOld} older than 1d, ${capped} over cap ${MAX_REPLAY_EVENTS}); rest drained but not replayed`,
+            `tribe drain: surfaced ${attentionEvents.length} actionable + ${pendingBalls.length} pending + ${forward.length}/${events.length} event(s) (skipped ${skippedOld} older than 1d, ${capped} over cap ${MAX_REPLAY_EVENTS}); rest drained but not replayed`,
           )
         }
       } while (drainAgain)
