@@ -154,4 +154,33 @@ describe("Tribe command descriptors", () => {
     expect(cli.reason).toMatch(/log/i)
     expect(cli.reason).toMatch(/snapshot/i)
   })
+
+  test("pins semantic actionable ownership without inventing a delivery-ack surface", () => {
+    const send = commandDescriptorByMcpName("send")!
+    expect(send.mcp.inputSchema.properties?.request).toMatchObject({
+      oneOf: expect.arrayContaining([{ type: "boolean" }, { type: "string" }]),
+    })
+    expect(JSON.stringify(send.mcp.inputSchema.properties?.request)).toMatch(/automatically open/i)
+
+    const pending = commandDescriptorByMcpName("pending")!
+    expect(pending.mcp.inputSchema.properties?.all).toMatchObject({ type: "boolean" })
+    expect(pending.mcp.outputSchema.properties).toMatchObject({
+      all: { type: "boolean" },
+      owners: { type: "array" },
+      owner_count: { type: "number" },
+      oldest_age_ms: { type: "number" },
+    })
+    expect(visibleCliProjection(pending).options?.map((option) => option.name)).toEqual(
+      expect.arrayContaining(["all", "json"]),
+    )
+
+    const health = commandDescriptorByMcpName("health")!
+    expect(health.mcp.outputSchema.properties).toMatchObject({
+      pending_balls: { type: "object" },
+      issues: { type: "array" },
+    })
+    const fetch = commandDescriptorByMcpName("fetch")!
+    expect(fetch.mcp.outputSchema.properties).not.toHaveProperty("delivery_ack")
+    expect(fetch.mcp.outputSchema.properties).not.toHaveProperty("ack_id")
+  })
 })

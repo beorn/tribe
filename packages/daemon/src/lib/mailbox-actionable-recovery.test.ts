@@ -300,6 +300,60 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     ])
   })
 
+  it("delivery acknowledgement cannot erase a verdict's semantic response obligation", () => {
+    const author = connectAs("sess-author", NAME)
+    const reviewer = connectAs("sess-reviewer", "@ci")
+    const review = parseToolJson(
+      handleToolCall(author, "tribe.send", { to: "@ci", message: "review immutable candidate", type: "request" }, opts),
+    )
+
+    for (let i = 0; i < 75; i++) {
+      insertRow(stmts, {
+        id: `verdict-flood-${i}`,
+        type: "health:daemon:warn",
+        sender: "daemon",
+        recipient: "*",
+        kind: "broadcast",
+        content: `ambient health ${i}`,
+        ts: now + i,
+      })
+    }
+    const verdict = parseToolJson(
+      handleToolCall(
+        reviewer,
+        "tribe.send",
+        {
+          to: NAME,
+          message: "REVISE exact candidate before the next execute step",
+          type: "verdict",
+          reply: review.id,
+        },
+        opts,
+      ),
+    )
+
+    const first = fetchJson(author, opts).json
+    expect(first.events).toHaveLength(50)
+    expect(first.events?.some((event) => event.id === verdict.id)).toBe(false)
+    expect(first.attention?.actionable_unread).toEqual([
+      expect.objectContaining({ id: verdict.id, type: "verdict", from: "@ci" }),
+    ])
+
+    const afterDeliveryAck = fetchJson(author, opts).json
+    expect(afterDeliveryAck.attention?.actionable_unread).toEqual([])
+    expect(afterDeliveryAck.attention?.pending_balls).toEqual([
+      expect.objectContaining({
+        request_id: verdict.id,
+        sender: "@ci",
+        message_id: verdict.id,
+      }),
+    ])
+    const reviewerPending = parseToolJson(handleToolCall(reviewer, "tribe.pending", {}, opts)) as {
+      count?: number
+    }
+    expect(reviewerPending.count).toBe(0)
+  })
+
   it("reports the recovered count on the join result and never a rewound cursor", () => {
     const a = connectAs("sess-a", NAME)
     disconnect("sess-a")

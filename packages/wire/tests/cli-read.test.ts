@@ -67,11 +67,11 @@ describe("registerReadCommands", () => {
     expect(optionFlags(cmd!)).toEqual(expect.arrayContaining(["--all"]))
   })
 
-  test("pending verb accepts --owner, --stale, and --close", () => {
+  test("pending verb accepts --all, --json, --owner, --stale, and --close", () => {
     const cmd = findCmd(buildProgram(), "pending")
     expect(cmd).toBeDefined()
     const flags = optionFlags(cmd!)
-    expect(flags).toEqual(expect.arrayContaining(["--owner", "--stale", "--close"]))
+    expect(flags).toEqual(expect.arrayContaining(["--all", "--json", "--owner", "--stale", "--close"]))
   })
 
   test("log verb accepts --limit and --follow", () => {

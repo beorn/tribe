@@ -4,6 +4,7 @@
 
 import { randomUUID } from "node:crypto"
 import type { TribeContext } from "./context.ts"
+import { ACTIONABLE_TYPES_SET } from "./database.ts"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -93,12 +94,14 @@ export function deriveSummary(content: string, max = 80): string {
 }
 
 /**
- * Ball-tracker fields — see @km/tribe/message-ball-tracker. A message with
- * `request` opens a tracked request; a message with `reply` closes one.
- * Both fields are optional and orthogonal to `type` (the message's
- * free-form metadata label). This lower-level writer handles one durable
- * recipient string; `handleSend` resolves explicit multi-target lists and
- * broadcast snapshots into per-recipient pending rows.
+ * Ball-tracker fields — see @km/tribe/message-ball-tracker. Every typed direct
+ * actionable (`request` / `query` / `assign` / `verdict`) automatically opens
+ * a recipient-owned request; an explicit `request` overrides its id, and a
+ * message with `reply` closes the referenced request. This lower-level writer
+ * owns the invariant so plugin and adapter call sites cannot accidentally
+ * create an acknowledged actionable with no durable response obligation.
+ * `handleSend` resolves explicit multi-target lists and broadcast snapshots
+ * into per-recipient pending rows.
  */
 export type BallTracker = {
   /**
@@ -107,7 +110,7 @@ export type BallTracker = {
    * and copies it here). Recipient(s) own the ball until a message with
    * `reply=<id>` arrives.
    */
-  request?: string
+  request?: string | true
   /**
    * If set, this message CLOSES the request with the given id. The ball is
    * released from the recipient(s).
@@ -182,64 +185,73 @@ export function sendMessage(
   // never delivered, so delivery is irrelevant — keep the column populated for
   // schema invariants.
   const delivery: Delivery = classification.delivery ?? "push"
-  // Ball-tracker: if request is set, treat it as the message-id-as-request-id
-  // convention by default (per @km/tribe/message-ball-tracker bead). Callers
-  // can pass an explicit `request` id to bind to an existing tracker, but the
-  // most common case is `request: true` semantics which we model as
-  // `request === id` post-send.
-  const requestId = ballTracker.request ?? null
+  // Typed direct actionables always own a semantic response ball. The mailbox
+  // cursor may acknowledge DELIVERY as soon as attention is projected; the
+  // tracker survives that acknowledgement until the recipient explicitly
+  // replies/defer-closes it. This is not a transport ACK and introduces no new
+  // queue: it reuses the existing pending_request authority. Self-directed and
+  // broadcast actionables remain untracked because neither has a peer owner.
+  const autoTrackActionable = resolvedKind === "direct" && sender !== recipient && ACTIONABLE_TYPES_SET.has(type)
+  const requestId = ballTracker.request === true ? id : (ballTracker.request ?? (autoTrackActionable ? id : null))
   const replyId = ballTracker.reply ?? null
-  let tracker = replyId ? { request_id: replyId, closed: 0 } : undefined
-  const result = ctx.stmts.insertMessage.run({
-    $id: id,
-    $type: type,
-    $sender: sender,
-    $recipient: recipient,
-    $kind: resolvedKind,
-    $content: content,
-    $bead_id: bead_id ?? null,
-    $ref: ref ?? null,
-    $ts: ts,
-    $delivery: delivery,
-    $topic: classification.topic ?? null,
-    $room_id: classification.roomId ?? null,
-    $request: requestId,
-    $reply: replyId,
-    $summary: classification.summary ?? null,
-  })
-  const rowid = Number(result.lastInsertRowid)
-  // Ball-tracker side-effects: open or close pending_request rows.
-  // sendMessage only knows about one durable recipient string. Multi-target
-  // and broadcast recipient snapshots are resolved by handleSend, which opens
-  // additional pending_request rows after the message row exists.
-  if (resolvedKind === "direct") {
-    if (requestId) {
-      ctx.stmts.openPendingRequest.run({
-        $request_id: requestId,
-        $recipient: recipient,
-        $sender: sender,
-        $opened_at: ts,
-        $message_id: id,
-        $fanout: ballTracker.fanout ?? "first",
-      })
-    }
-    if (replyId) {
-      const row = ctx.stmts.selectPendingForRequestRecipient.get({
-        $request_id: replyId,
-        $recipient: sender,
-      }) as { fanout: string } | null
-      if (row?.fanout === "first") {
-        const closed = ctx.stmts.closePendingRequestAll.run({ $request_id: replyId })
-        tracker = { request_id: replyId, closed: closed.changes ?? 0 }
-      } else {
-        const closed = ctx.stmts.closePendingRequest.run({
+  // Message persistence and semantic tracker ownership are one commit. A
+  // crash/error may leave neither fact, never a delivered message whose
+  // mandatory response ball failed to open. The fanout callback runs only
+  // after this transaction commits.
+  const persist = ctx.db.transaction(() => {
+    let tracker = replyId ? { request_id: replyId, closed: 0 } : undefined
+    const result = ctx.stmts.insertMessage.run({
+      $id: id,
+      $type: type,
+      $sender: sender,
+      $recipient: recipient,
+      $kind: resolvedKind,
+      $content: content,
+      $bead_id: bead_id ?? null,
+      $ref: ref ?? null,
+      $ts: ts,
+      $delivery: delivery,
+      $topic: classification.topic ?? null,
+      $room_id: classification.roomId ?? null,
+      $request: requestId,
+      $reply: replyId,
+      $summary: classification.summary ?? null,
+    })
+    const rowid = Number(result.lastInsertRowid)
+    // sendMessage knows one durable recipient string. Explicit broadcast
+    // snapshots remain handleSend's responsibility; direct rows are complete
+    // before this transaction returns.
+    if (resolvedKind === "direct") {
+      if (requestId) {
+        ctx.stmts.openPendingRequest.run({
+          $request_id: requestId,
+          $recipient: recipient,
+          $sender: sender,
+          $opened_at: ts,
+          $message_id: id,
+          $fanout: ballTracker.fanout ?? "first",
+        })
+      }
+      if (replyId) {
+        const row = ctx.stmts.selectPendingForRequestRecipient.get({
           $request_id: replyId,
           $recipient: sender,
-        })
-        tracker = { request_id: replyId, closed: closed.changes ?? 0 }
+        }) as { fanout: string } | null
+        if (row?.fanout === "first") {
+          const closed = ctx.stmts.closePendingRequestAll.run({ $request_id: replyId })
+          tracker = { request_id: replyId, closed: closed.changes ?? 0 }
+        } else {
+          const closed = ctx.stmts.closePendingRequest.run({
+            $request_id: replyId,
+            $recipient: sender,
+          })
+          tracker = { request_id: replyId, closed: closed.changes ?? 0 }
+        }
       }
     }
-  }
+    return { rowid, tracker }
+  })
+  const { rowid, tracker } = persist()
   ctx.onMessageInserted?.({
     id,
     ts,

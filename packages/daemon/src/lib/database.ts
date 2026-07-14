@@ -808,10 +808,6 @@ export function createStatements(db: Database) {
 			$delivery, $topic, $room_id, $request, $reply, $summary)
 	`),
 
-    setMessageRequest: db.prepare(`
-		UPDATE messages SET request = $request WHERE id = $id
-	`),
-
     /** Ball-tracker insert: opens a new pending request (one row per recipient).
      *  See @km/tribe/message-ball-tracker Phase 2. */
     openPendingRequest: db.prepare(`
@@ -845,10 +841,25 @@ export function createStatements(db: Database) {
     /** Ball-tracker query: open requests addressed to a particular recipient (the "owner"
      *  of the open ball). Sorted oldest-first so callers can act on the longest-pending. */
     selectPendingForRecipient: db.prepare(`
-		SELECT request_id, sender, opened_at, message_id, fanout
-		FROM pending_request
-		WHERE recipient = $recipient
-		ORDER BY opened_at ASC
+		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.message_id, p.fanout,
+			COALESCE(m.summary, a.summary) AS summary
+		FROM pending_request p
+		LEFT JOIN messages m ON m.id = p.message_id
+		LEFT JOIN messages_archive a ON a.id = p.message_id
+		WHERE p.recipient = $recipient
+		ORDER BY p.opened_at ASC
+	`),
+
+    /** Fleet attention projection: every open request grouped by its current
+     *  recipient owner. This reads the existing tracker; it is not a second
+     *  queue or ownership store. */
+    selectAllPendingRequests: db.prepare(`
+		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.message_id, p.fanout,
+			COALESCE(m.summary, a.summary) AS summary
+		FROM pending_request p
+		LEFT JOIN messages m ON m.id = p.message_id
+		LEFT JOIN messages_archive a ON a.id = p.message_id
+		ORDER BY p.recipient ASC, p.opened_at ASC
 	`),
 
     /** Ball-tracker GC (@km/tribe/20008): delete pending rows opened before a

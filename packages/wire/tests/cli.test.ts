@@ -103,6 +103,107 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     expect(stderr).toMatch(/--close requires --owner/)
   })
 
+  it("pending --help exposes the fleet-wide all-owner attention projection", () => {
+    const { stdout, code } = runCli(["pending", "--help"])
+    expect(code).toBe(0)
+    expect(stdout).toMatch(/--all/)
+    expect(stdout).toMatch(/--json/)
+    expect(stdout).toMatch(/all owners/i)
+  })
+
+  it("pending --all renders every owner and --json preserves the typed snapshot", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-pending-all-"))
+    const socketPath = join(dir, "tribe.sock")
+    const calls: Array<{ method: string; params?: Record<string, unknown> }> = []
+    const snapshot = {
+      all: true,
+      count: 2,
+      owner_count: 2,
+      oldest_age_ms: 10_800_000,
+      pending: [],
+      owners: [
+        {
+          owner: "@agent/2",
+          count: 1,
+          oldest_age_ms: 10_800_000,
+          pending: [
+            {
+              request_id: "req-agent-2",
+              recipient: "@agent/2",
+              sender: "@chief",
+              summary: "review immutable carrier",
+              opened_at: "2026-07-14T08:00:00.000Z",
+              age_ms: 10_800_000,
+              message_id: "msg-agent-2",
+              fanout: "first",
+            },
+          ],
+        },
+        {
+          owner: "@ci",
+          count: 1,
+          oldest_age_ms: 60_000,
+          pending: [
+            {
+              request_id: "req-ci",
+              recipient: "@ci",
+              sender: "@chief",
+              summary: "run focused gate",
+              opened_at: "2026-07-14T10:59:00.000Z",
+              age_ms: 60_000,
+              message_id: "msg-ci",
+              fanout: "first",
+            },
+          ],
+        },
+      ],
+    }
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as { id: number; method: string; params?: Record<string, unknown> }
+          calls.push({ method: request.method, params: request.params })
+          socket.write(
+            `${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { structuredContent: snapshot } })}\n`,
+          )
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const env = { ...process.env, TRIBE_SOCKET: socketPath, TRIBE_NO_AUTOSTART: "1" }
+      const human = await runCliAsync(["pending", "--all"], env)
+      const json = await runCliAsync(["pending", "--all", "--json"], env)
+
+      expect(human).toMatchObject({ code: 0, stderr: "" })
+      expect(human.stdout).toContain("2 pending request(s) across 2 owner(s)")
+      expect(human.stdout).toContain("@agent/2: 1 (oldest 180m ago)")
+      expect(human.stdout).toContain("req-agent-2  from @chief  to @agent/2  review immutable carrier")
+      expect(JSON.parse(json.stdout)).toEqual(snapshot)
+      expect(calls).toEqual([
+        { method: "tribe.pending", params: { all: true } },
+        { method: "tribe.pending", params: { all: true } },
+      ])
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it("21049: read-only diagnostics never register an inherited managed persona", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-diagnostics-"))
     const socketPath = join(dir, "tribe.sock")

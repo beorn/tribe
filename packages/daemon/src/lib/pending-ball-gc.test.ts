@@ -19,6 +19,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createTribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { handleToolCall, type HandlerOpts } from "./handlers.ts"
+import { sendMessage } from "./messaging.ts"
 import { cleanupOldData } from "./session.ts"
 
 const DAY = 24 * 60 * 60 * 1000
@@ -150,6 +151,142 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       expect(res).toMatchObject({ owner: "@chief", request_id: "done", closed: 1 })
       expect(openIds(stmts, "@chief")).toEqual(["keep"])
       expect(openIds(stmts, "@agent/2")).toEqual(["done"])
+    } finally {
+      db.close()
+    }
+  })
+
+  it("all-owner projection catches obligations that an empty caller sample misses", () => {
+    const { db, stmts } = setup()
+    try {
+      const ctx = createTribeContext({
+        db,
+        stmts,
+        sessionId: "sess-chief",
+        sessionRole: "member",
+        initialName: "@chief",
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+      })
+      const first = sendMessage(
+        ctx,
+        "@agent/2",
+        "Review the immutable carrier before execute resumes",
+        "notify",
+        undefined,
+        undefined,
+        "direct",
+        { summary: "review immutable carrier" },
+        { request: "req-agent-2" },
+      )
+      const second = sendMessage(
+        ctx,
+        "@ci",
+        "Run the focused acceptance gate",
+        "notify",
+        undefined,
+        undefined,
+        "direct",
+        { summary: "focused acceptance gate" },
+        { request: "req-ci" },
+      )
+      db.prepare("UPDATE pending_request SET opened_at = $opened_at WHERE request_id = $request_id").run({
+        $opened_at: Date.now() - 3 * 60 * 60 * 1000,
+        $request_id: "req-ci",
+      })
+
+      const caller = parseToolJson(handleToolCall(ctx, "tribe.pending", {}, makeOpts()))
+      const all = parseToolJson(handleToolCall(ctx, "tribe.pending", { all: true }, makeOpts())) as {
+        all?: boolean
+        count?: number
+        owner_count?: number
+        oldest_age_ms?: number
+        owners?: Array<{
+          owner: string
+          count: number
+          oldest_age_ms: number
+          pending: Array<{
+            request_id: string
+            recipient: string
+            sender: string
+            message_id: string
+            summary: string | null
+          }>
+        }>
+      }
+
+      expect(caller).toMatchObject({ owner: "@chief", pending: [], count: 0 })
+      expect(all.all).toBe(true)
+      expect(all.count).toBe(2)
+      expect(all.owner_count).toBe(2)
+      expect(all.oldest_age_ms).toBeGreaterThanOrEqual(3 * 60 * 60 * 1000)
+      expect(all.owners).toEqual([
+        {
+          owner: "@agent/2",
+          count: 1,
+          oldest_age_ms: expect.any(Number),
+          pending: [
+            expect.objectContaining({
+              request_id: "req-agent-2",
+              recipient: "@agent/2",
+              sender: "@chief",
+              message_id: first.id,
+              summary: "review immutable carrier",
+            }),
+          ],
+        },
+        {
+          owner: "@ci",
+          count: 1,
+          oldest_age_ms: expect.any(Number),
+          pending: [
+            expect.objectContaining({
+              request_id: "req-ci",
+              recipient: "@ci",
+              sender: "@chief",
+              message_id: second.id,
+              summary: "focused acceptance gate",
+            }),
+          ],
+        },
+      ])
+    } finally {
+      db.close()
+    }
+  })
+
+  it("tribe.health warns on every ball older than two hours with owner and exact request id", () => {
+    const { db, stmts } = setup()
+    try {
+      const ctx = createTribeContext({
+        db,
+        stmts,
+        sessionId: "sess-chief",
+        sessionRole: "member",
+        initialName: "@chief",
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+      })
+      openBall(stmts, {
+        id: "stale-agent-8",
+        recipient: "@agent/8",
+        openedAt: Date.now() - 2 * 60 * 60 * 1000 - 1,
+      })
+      openBall(stmts, { id: "fresh-ci", recipient: "@ci", openedAt: Date.now() - 60_000 })
+
+      const health = parseToolJson(handleToolCall(ctx, "tribe.health", {}, makeOpts())) as {
+        issues?: string[]
+        pending_balls?: { count: number; owner_count: number; stale: Array<{ request_id: string; recipient: string }> }
+      }
+
+      expect(health.pending_balls).toMatchObject({ count: 2, owner_count: 2 })
+      expect(health.pending_balls?.stale).toEqual([
+        expect.objectContaining({ request_id: "stale-agent-8", recipient: "@agent/8" }),
+      ])
+      expect(health.issues).toEqual([expect.stringMatching(/stale-agent-8.*@agent\/8|@agent\/8.*stale-agent-8/)])
+      expect(health.issues?.some((warning) => warning.includes("fresh-ci"))).toBe(false)
     } finally {
       db.close()
     }

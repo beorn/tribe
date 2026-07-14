@@ -123,7 +123,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           request: {
             oneOf: [{ type: "string" }, { type: "boolean" }],
             description:
-              "Ball-tracker: open a tracked request. Pass `true` for the convention `request_id == message_id` (most common), or a string to bind to an existing request id. Recipient(s) own the ball until a message with `reply=<id>` arrives. See @km/tribe/message-ball-tracker.",
+              "Typed direct request/query/assign/verdict messages automatically open a semantic recipient-owned ball using the message id. Pass `true` to request the same convention for another message type, or a string to override the request id. Recipient(s) own the ball until `reply=<id>` arrives; this is not a transport delivery ACK. See @km/tribe/message-ball-tracker.",
           },
           reply: {
             type: "string",
@@ -198,7 +198,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "request",
           flags: "--request [request_id]",
-          description: "Ball-tracker: open a tracked request; omit request_id to use the sent message id",
+          description:
+            "Explicitly open a semantic ball for a non-actionable type or override its id; typed direct actionables are tracked automatically",
         },
         {
           name: "fanout",
@@ -223,6 +224,10 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
       inputSchema: {
         type: "object",
         properties: {
+          all: {
+            type: "boolean",
+            description: "List every open request grouped by recipient owner (fleet-wide read-only attention).",
+          },
           owner: {
             type: "string",
             description: "Session name that owns the open ball. Defaults to the caller's own session.",
@@ -241,12 +246,21 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
       outputSchema: OBJ(
         {
           owner: { type: "string", description: "The session whose open requests are listed." },
+          scope: { type: "string", description: "`all` for a fleet-wide projection." },
+          all: { type: "boolean", description: "True for a fleet-wide projection." },
           pending: {
             type: "array",
             description:
-              "Open requests owned by this session. Each: { request_id, sender, opened_at (ISO), age_ms, message_id, fanout }.",
+              "Open requests. Each includes request_id, recipient, sender, summary, opened_at, age_ms, message_id, and fanout.",
             items: { type: "object", additionalProperties: true },
           },
+          owners: {
+            type: "array",
+            description: "Fleet-wide groups: { owner, count, oldest_age_ms, pending }.",
+            items: { type: "object", additionalProperties: true },
+          },
+          owner_count: { type: "number", description: "Number of recipient owners with open requests." },
+          oldest_age_ms: { type: "number", description: "Age of the oldest returned request." },
           count: { type: "number", description: "Number of open requests in the pending list." },
           request_id: { type: "string", description: "Request id closed when `close` is used." },
           closed: { type: "number", description: "Number of pending rows closed when `close` is used." },
@@ -262,6 +276,16 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
       lifetime: "one-shot",
       mapsToMcp: "pending",
       options: [
+        {
+          name: "all",
+          flags: "-a, --all",
+          description: "List open requests across all owners, grouped by recipient",
+        },
+        {
+          name: "json",
+          flags: "--json",
+          description: "Print the typed snapshot as JSON",
+        },
         { name: "owner", flags: "-o, --owner <name>", description: "Owner session name (default: caller)" },
         {
           name: "stale",
@@ -499,6 +523,17 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             type: "array",
             description: "Actionable direct-message counts per recipient not yet drained.",
             items: { type: "object", additionalProperties: true },
+          },
+          pending_balls: {
+            type: "object",
+            description: "All-owner pending snapshot with count, owner_count, oldest_age_ms, owners, and stale rows.",
+            additionalProperties: true,
+          },
+          issues: {
+            type: "array",
+            description:
+              "Diagnostic warnings, including every pending ball older than two hours with owner and request id.",
+            items: { type: "string" },
           },
           reconciler: {
             type: "object",

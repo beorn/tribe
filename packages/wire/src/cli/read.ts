@@ -358,32 +358,60 @@ function parseDurationMs(spec: string): number | undefined {
  */
 async function cmdPending(
   owner: string | undefined,
+  all: boolean,
+  json: boolean,
   staleMs: number | undefined,
   close: string | undefined,
 ): Promise<void> {
   const args: Record<string, unknown> = {}
+  if (all) args.all = true
   if (owner) args.owner = owner
   if (staleMs !== undefined) args.stale_ms = staleMs
   if (close) args.close = close
   const result = (await callDaemon("tribe.pending", args)) as {
+    content?: Array<{ type?: string; text?: string }>
     structuredContent?: {
+      all?: boolean
       owner?: string
       request_id?: string
       closed?: number
       pending?: Array<{
         request_id: string
+        recipient: string
         sender: string
         opened_at: string
         age_ms: number
         message_id: string
         fanout: string
+        summary: string | null
       }>
+      owners?: Array<{
+        owner: string
+        count: number
+        oldest_age_ms: number
+        pending: Array<{
+          request_id: string
+          recipient: string
+          sender: string
+          opened_at: string
+          age_ms: number
+          message_id: string
+          fanout: string
+          summary: string | null
+        }>
+      }>
+      owner_count?: number
+      oldest_age_ms?: number
       count?: number
     }
   }
-  const payload = result.structuredContent
+  const payload = result.structuredContent ?? (mcpJsonContent(result) as NonNullable<typeof result.structuredContent>)
   if (!payload) {
     console.log("No structured result returned.")
+    return
+  }
+  if (json) {
+    console.log(JSON.stringify(payload, null, 2))
     return
   }
   if (close) {
@@ -393,6 +421,24 @@ async function cmdPending(
     return
   }
   const count = payload.count ?? 0
+  if (all) {
+    if (count === 0) {
+      console.log("No pending requests across all owners.")
+      return
+    }
+    const groups = payload.owners ?? []
+    console.log(`${count} pending request(s) across ${payload.owner_count ?? groups.length} owner(s):`)
+    for (const group of groups) {
+      const oldestSec = Math.floor(group.oldest_age_ms / 1000)
+      const oldest = oldestSec >= 60 ? `${Math.floor(oldestSec / 60)}m` : `${oldestSec}s`
+      console.log(`  ${group.owner}: ${group.count} (oldest ${oldest} ago)`)
+      for (const p of group.pending) {
+        const summary = p.summary?.trim() || "(no summary)"
+        console.log(`    ${p.request_id}  from ${p.sender}  to ${p.recipient}  ${summary}  (msg ${p.message_id})`)
+      }
+    }
+    return
+  }
   const displayOwner = payload.owner ?? owner ?? "(caller)"
   if (count === 0) {
     console.log(`No pending requests for ${displayOwner}.`)
@@ -765,15 +811,19 @@ export function registerReadCommands(program: Command): void {
     .action((opts: { all?: boolean }) => void cmdSessions(!!opts.all))
 
   const pendingOwner = cliOption(PENDING_CLI, "owner")
+  const pendingAll = cliOption(PENDING_CLI, "all")
+  const pendingJson = cliOption(PENDING_CLI, "json")
   const pendingStale = cliOption(PENDING_CLI, "stale")
   const pendingClose = cliOption(PENDING_CLI, "close")
   program
     .command(PENDING_CLI.name)
     .description(PENDING_CLI.description)
+    .option(pendingAll.flags, pendingAll.description)
+    .option(pendingJson.flags, pendingJson.description)
     .option(pendingOwner.flags, pendingOwner.description)
     .option(pendingStale.flags, pendingStale.description)
     .option(pendingClose.flags, pendingClose.description)
-    .action((opts: { owner?: string; stale?: string; close?: string }) => {
+    .action((opts: { all?: boolean; json?: boolean; owner?: string; stale?: string; close?: string }) => {
       const stale = opts.stale ? parseStaleMs(opts.stale) : undefined
       if (opts.stale && stale === undefined) {
         console.error(`tribe pending: bad --stale '${opts.stale}' (expected NNs|NNm|NNh)`)
@@ -785,7 +835,15 @@ export function registerReadCommands(program: Command): void {
         )
         process.exit(2)
       }
-      void cmdPending(opts.owner, stale, opts.close)
+      if (opts.all && opts.owner) {
+        console.error("tribe pending: --all and --owner are mutually exclusive")
+        process.exit(2)
+      }
+      if (opts.all && opts.close) {
+        console.error("tribe pending: --all is read-only; --close requires --owner")
+        process.exit(2)
+      }
+      void cmdPending(opts.owner, !!opts.all, !!opts.json, stale, opts.close)
     })
 
   program

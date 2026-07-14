@@ -140,10 +140,10 @@ export type TribeCoordMethod = (typeof TRIBE_COORD_METHODS)[keyof typeof TRIBE_C
  *   2. `assign` / `query` / `request` / `verdict` typed messages are the
  *      ACTIONABLE channel. Direct `notify` / `status` / `response` rows are
  *      inbox-visible, but they do not wake `inbox.wait`.
- *   3. When an actionable message needs no response and no comment, reply with
- *      ONLY `<ack/>` (or `<ack id="<msgid>"/>` to correlate) — silvercode
- *      suppresses bare-ack replies from the chat bubble, so a quiet
- *      acknowledgement is invisible while a real reply renders normally.
+ *   3. Every non-self direct actionable automatically opens one semantic
+ *      response ball. Answer or explicitly defer it with
+ *      `reply=<request-id>`; a transport/read acknowledgement is neither
+ *      required nor sufficient to release that ownership.
  *
  * Bead: `@km/code/15654` (Part 1).
  */
@@ -152,11 +152,10 @@ export const TRIBE_JOIN_PRIMER =
   'session events, health) and broadcasts (`to: "*"`) are AMBIENT awareness ' +
   "only — surface in `tribe.fetch` reads but DO NOT act on them. Direct " +
   "`type: assign`/`query`/`request`/`verdict` messages are the actionable " +
-  "channel and wake `inbox.wait`. Direct `notify`/`status`/`response` rows are " +
-  "inbox-visible, but not wakeable. " +
-  "When an actionable message needs no response and no comment, reply with " +
-  '`<ack/>` (or `<ack id="<msgid>"/>` to correlate) and nothing else — ' +
-  "silvercode suppresses bare-ack replies from the chat bubble."
+  "channel, wake `inbox.wait`, and automatically open a semantic response ball. " +
+  "Direct `notify`/`status`/`response` rows are inbox-visible, but not wakeable. " +
+  "Answer or explicitly defer each actionable with `reply=<request-id>` so its " +
+  "semantic ball closes; no transport or exact-id delivery ACK is required."
 
 const REMOVED_TRIBE_METHODS = new Set([
   "tribe.broadcast",
@@ -435,18 +434,13 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   }
   const msgType = (a.type as string) ?? "notify"
   const sanitized = sanitizeMessage(a.message as string)
-  // Ball-tracker fields (@km/tribe/message-ball-tracker Phase 2a):
-  // both optional, orthogonal to `type`. `request: true` is the
-  // shorthand for "this message IS its own request id" — we resolve it
-  // post-send by passing the message id through. Explicit string forms
-  // bind to an existing request id.
+  // Ball-tracker fields (@km/tribe/message-ball-tracker Phase 2a): typed
+  // non-self direct actionables auto-open a semantic ball in sendMessage.
+  // `request:true` explicitly applies message-id ownership to another type;
+  // a string overrides the id. `reply` closes the referenced semantic ball.
   const requestArg = a.request
   const replyArg = a.reply
   const fanoutArg = a.fanout as "first" | "all" | undefined
-  // For `request: true`, the request id IS the message id. sendMessage
-  // generates the message id internally, so for the truthy-shorthand case
-  // we open the pending row AFTER the insert. For string-form, we open
-  // immediately with the supplied id.
   const requestFlag = requestArg === true
   const requestId = typeof requestArg === "string" ? requestArg : null
   const replyId = typeof replyArg === "string" ? replyArg : null
@@ -523,28 +517,12 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     "direct",
     { summary },
     {
-      request: requestFlag ? undefined : (requestId ?? undefined),
+      request: requestFlag ? true : (requestId ?? undefined),
       reply: replyId ?? undefined,
       fanout: fanoutArg,
     },
     attribution,
   )
-  // Truthy-shorthand fixup: the canonical convention is request_id == message_id.
-  // sendMessage already wrote the message; we now open the pending row using
-  // the freshly-assigned id (no second SQL insert path — same statement).
-  if (requestFlag) {
-    ctx.stmts.setMessageRequest.run({ $id: result.id, $request: result.id })
-  }
-  if (requestFlag && recipients !== "*") {
-    ctx.stmts.openPendingRequest.run({
-      $request_id: result.id,
-      $recipient: recipients,
-      $sender: sender,
-      $opened_at: result.ts,
-      $message_id: result.id,
-      $fanout: fanoutArg ?? "first",
-    })
-  }
   if ((requestFlag || requestId) && recipients === "*") {
     openPendingRows(
       ctx,
@@ -578,30 +556,60 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
 
 type PendingBallRow = {
   request_id: string
+  recipient: string
   sender: string
   opened_at: number
   message_id: string
   fanout: string
+  summary: string | null
 }
 
 type PendingBall = {
   request_id: string
+  recipient: string
   sender: string
   opened_at: string
   age_ms: number
   message_id: string
   fanout: string
+  summary: string | null
 }
 
-function pendingBallsForOwner(ctx: TribeContext, owner: string, now: number): PendingBall[] {
-  const rows = ctx.stmts.selectPendingForRecipient.all({ $recipient: owner }) as PendingBallRow[]
-  return rows.map((row) => ({
+function pendingBall(row: PendingBallRow, now: number): PendingBall {
+  return {
     request_id: row.request_id,
+    recipient: row.recipient,
     sender: row.sender,
     opened_at: new Date(row.opened_at).toISOString(),
     age_ms: now - row.opened_at,
     message_id: row.message_id,
     fanout: row.fanout,
+    summary: row.summary,
+  }
+}
+
+function pendingBallsForOwner(ctx: TribeContext, owner: string, now: number): PendingBall[] {
+  const rows = ctx.stmts.selectPendingForRecipient.all({ $recipient: owner }) as PendingBallRow[]
+  return rows.map((row) => pendingBall(row, now))
+}
+
+function allPendingBalls(ctx: TribeContext, now: number): PendingBall[] {
+  const rows = ctx.stmts.selectAllPendingRequests.all() as PendingBallRow[]
+  return rows.map((row) => pendingBall(row, now))
+}
+
+function pendingOwnerGroups(pending: readonly PendingBall[]) {
+  const byOwner = new Map<string, PendingBall[]>()
+  for (const ball of pending) {
+    const rows = byOwner.get(ball.recipient) ?? []
+    rows.push(ball)
+    byOwner.set(ball.recipient, rows)
+  }
+  return [...byOwner.entries()].map(([owner, rows]) => ({
+    owner,
+    count: rows.length,
+    oldest_age_ms: rows[0]?.age_ms ?? 0,
+    pending: rows,
   }))
 }
 
@@ -611,8 +619,16 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
   // the open ball). Default recipient is the caller's own session name.
   // Optional `stale_ms` filters to requests older than that threshold.
   const owner = (a.owner as string) ?? ctx.getName()
+  const all = a.all === true
   const staleMs = typeof a.stale_ms === "number" ? a.stale_ms : null
   const now = Date.now()
+
+  if (all && typeof a.owner === "string") {
+    return jsonResult({ error: "tribe.pending: all and owner are mutually exclusive." })
+  }
+  if (all && (a.close !== undefined || a.prune === true)) {
+    return jsonResult({ error: "tribe.pending: all is read-only; close/prune require one explicit owner." })
+  }
 
   // Explicit repair path (@km/tribe/20008): prune stale balls for `owner`. Safe
   // to run during chief recovery — it REQUIRES a stale_ms threshold so it can
@@ -631,6 +647,21 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
   if (closeId) {
     const res = ctx.stmts.closePendingRequest.run({ $request_id: closeId, $recipient: owner })
     return jsonResult({ owner, request_id: closeId, closed: res.changes ?? 0 })
+  }
+
+  if (all) {
+    const rows = allPendingBalls(ctx, now)
+    const pending = staleMs === null ? rows : rows.filter((row) => row.age_ms >= staleMs)
+    const owners = pendingOwnerGroups(pending)
+    return jsonResult({
+      all: true,
+      scope: "all",
+      pending,
+      owners,
+      owner_count: owners.length,
+      oldest_age_ms: pending.reduce((oldest, row) => Math.max(oldest, row.age_ms), 0),
+      count: pending.length,
+    })
   }
 
   const rows = pendingBallsForOwner(ctx, owner, now)
@@ -963,7 +994,8 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
 }
 
 function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
-  const silentThreshold = Date.now() - 300_000 // 5 minutes
+  const now = Date.now()
+  const silentThreshold = now - 300_000 // 5 minutes
 
   // Liveness comes from the daemon's in-memory clients Map. Dead sessions
   // are simply absent from activeSessionInfo — no DB pruning required.
@@ -988,7 +1020,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
       .prepare("SELECT ts FROM messages WHERE sender = $name ORDER BY ts DESC LIMIT 1")
       .get({ $name: s.name }) as { ts: number } | null
 
-    const lastMsgAge = lastMsg ? Date.now() - lastMsg.ts : null
+    const lastMsgAge = lastMsg ? now - lastMsg.ts : null
     const warnings: string[] = []
     if (alive && lastMsgAge && lastMsgAge > silentThreshold) {
       warnings.push(`no message in ${Math.round(lastMsgAge / 60_000)} min`)
@@ -1047,6 +1079,17 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
         ?.n ?? 0,
   }
 
+  // 20876 / 17199: fleet-wide open-ball attention is derived from the one
+  // existing pending_request authority. A per-owner sample can be empty while
+  // another role is blocked, so health carries the all-owner projection and a
+  // loud >2h warning with the exact owner + semantic request id.
+  const pending = allPendingBalls(ctx, now)
+  const pendingOwners = pendingOwnerGroups(pending)
+  const stalePending = pending.filter((ball) => ball.age_ms >= 2 * 60 * 60 * 1000)
+  const pendingIssues = stalePending.map(
+    (ball) => `pending ball ${ball.request_id} owned by ${ball.recipient} is ${Math.floor(ball.age_ms / 60_000)}m old`,
+  )
+
   // Stale-code detector (@km/tribe/20033): surface whether the running daemon
   // is provably older than the on-disk / superproject-pinned tribe code, so a
   // stale daemon serving old handlers is observable (not silent) to any
@@ -1054,6 +1097,14 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
   const result: Record<string, unknown> = {
     members,
     unread,
+    pending_balls: {
+      count: pending.length,
+      owner_count: pendingOwners.length,
+      oldest_age_ms: pending.reduce((oldest, ball) => Math.max(oldest, ball.age_ms), 0),
+      owners: pendingOwners,
+      stale: stalePending,
+    },
+    issues: pendingIssues,
     stats,
     code_pin: gatherCodePin(),
     checked_at: new Date().toISOString(),
