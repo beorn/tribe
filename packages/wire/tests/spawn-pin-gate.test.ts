@@ -12,7 +12,8 @@
 import { execFileSync } from "node:child_process"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 import { afterAll, beforeAll, describe, expect, test } from "vitest"
 import {
   evaluateSpawnSource,
@@ -20,7 +21,13 @@ import {
   pinSidecarPath,
   readPinSidecar,
   writePinSidecar,
-} from "./spawn-pin-gate.ts"
+} from "../src/lib/spawn-pin-gate.ts"
+
+const tribeRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..")
+
+function cleanGitEnv(): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")))
+}
 
 describe("evaluateSpawnSource — pure decision table", () => {
   const A = "a".repeat(40)
@@ -134,6 +141,16 @@ describe("evaluateSpawnSourceForScript — the observed race, against real git t
       encoding: "utf8",
     }).trim()
 
+  const pollutedGitEnv = (fakeRepo: string): NodeJS.ProcessEnv => {
+    return {
+      ...cleanGitEnv(),
+      GIT_DIR: join(fakeRepo, ".git"),
+      GIT_WORK_TREE: fakeRepo,
+      GIT_INDEX_FILE: join(fakeRepo, ".git", "index"),
+      GIT_OBJECT_DIRECTORY: join(fakeRepo, ".git", "objects"),
+    }
+  }
+
   beforeAll(() => {
     root = mkdtempSync(join(tmpdir(), "tribe-spawn-gate-"))
     currentTree = join(root, "current")
@@ -164,6 +181,22 @@ describe("evaluateSpawnSourceForScript — the observed race, against real git t
 
     const current = evaluateSpawnSourceForScript(join(currentTree, "daemon.ts"), sock)
     expect(current).toEqual({ allow: true, reason: null })
+  })
+
+  test("caller GIT_* pollution cannot make a stale source match a newer sidecar pin", () => {
+    const sock = join(root, "tribe-polluted.sock")
+    writePinSidecar(sock, pinB, 4444)
+
+    const script = `import { evaluateSpawnSourceForScript } from "./packages/wire/src/lib/spawn-pin-gate.ts"; process.stdout.write(JSON.stringify(evaluateSpawnSourceForScript(${JSON.stringify(join(staleTree, "daemon.ts"))}, ${JSON.stringify(sock)})))`
+    const stale = JSON.parse(
+      execFileSync("bun", ["-e", script], {
+        cwd: tribeRoot,
+        encoding: "utf8",
+        env: pollutedGitEnv(currentTree),
+      }),
+    ) as ReturnType<typeof evaluateSpawnSourceForScript>
+    expect(stale.allow).toBe(false)
+    expect(stale.reason).toMatch(/21052/)
   })
 
   test("stale tree that HAS fetched the newer pin is still refused (proven ancestor)", () => {

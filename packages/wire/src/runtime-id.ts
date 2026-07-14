@@ -22,6 +22,11 @@ function moduleDir(): string {
   return dirname(fileURLToPath(import.meta.url))
 }
 
+/** Source identity belongs to this checkout, never to a caller-selected git context. */
+function gitProbeEnv(): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")))
+}
+
 /** `<version>+<sha>`; sha → `unknown` when git is unavailable (never fabricated). */
 export function formatRuntimeId(version: string, sha: string | null): string {
   return `${version}+${sha ?? "unknown"}`
@@ -32,6 +37,7 @@ export function gitShortHead(dir: string = moduleDir()): string | null {
   try {
     const out = execFileSync("git", ["-C", dir, "rev-parse", "--short", "HEAD"], {
       encoding: "utf8",
+      env: gitProbeEnv(),
       stdio: ["ignore", "pipe", "ignore"],
     }).trim()
     return out.length > 0 ? out : null

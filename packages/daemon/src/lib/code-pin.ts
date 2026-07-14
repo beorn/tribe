@@ -29,6 +29,11 @@ import { createLogger } from "loggily"
 
 const log = createLogger("tribe:code-pin")
 
+/** Source identity belongs to the probed checkout, never to a caller-selected git context. */
+function gitProbeEnv(): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")))
+}
+
 export interface CodePinEval {
   /** True when the running process is provably not the on-disk / pinned code. */
   stale: boolean
@@ -85,6 +90,7 @@ function git(dir: string, args: string[]): string | null {
   try {
     const out = execFileSync("git", ["-C", dir, ...args], {
       encoding: "utf8",
+      env: gitProbeEnv(),
       stdio: ["ignore", "pipe", "ignore"],
     }).trim()
     return out.length > 0 ? out : null

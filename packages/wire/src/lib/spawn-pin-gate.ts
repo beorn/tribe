@@ -50,6 +50,11 @@ import { createLogger } from "loggily"
 
 const log = createLogger("tribe:spawn-pin-gate")
 
+/** Source identity belongs to the probed checkout, never to a caller-selected git context. */
+function gitProbeEnv(): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")))
+}
+
 export interface SpawnSourceDecision {
   allow: boolean
   /** Operator-facing explanation; null only for the silent equal/fresh case. */
@@ -143,7 +148,11 @@ export function writePinSidecar(socketPath: string, pin: string | null, pid: num
 
 function git(cwd: string, args: string[]): { status: number; stdout: string } {
   try {
-    const stdout = execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
+    const stdout = execFileSync("git", ["-C", cwd, ...args], {
+      encoding: "utf8",
+      env: gitProbeEnv(),
+      stdio: ["ignore", "pipe", "ignore"],
+    })
     return { status: 0, stdout: stdout.trim() }
   } catch (err) {
     const status = (err as { status?: number }).status

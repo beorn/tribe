@@ -10,10 +10,29 @@
 import { execFileSync } from "node:child_process"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join, relative, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { evaluateCodePin, gatherCodePin } from "./code-pin.ts"
+
+const tribeRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..")
+
+function cleanGitEnv(): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")))
+}
+
+function cleanGit(cwd: string, ...args: string[]): string | null {
+  try {
+    return execFileSync("git", ["-C", cwd, ...args], {
+      encoding: "utf8",
+      env: cleanGitEnv(),
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim()
+  } catch {
+    return null
+  }
+}
 
 describe("evaluateCodePin (pure decision)", () => {
   it("reports STALE when the running code differs from the on-disk checkout", () => {
@@ -45,22 +64,41 @@ describe("evaluateCodePin (pure decision)", () => {
 
 describe("gatherCodePin (real git path, temp repo)", () => {
   let repo: string
+  let fakeRepo: string
   function gitc(args: string[]): string {
     return execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim()
+  }
+  function fakeGit(args: string[]): string {
+    return execFileSync("git", ["-C", fakeRepo, ...args], { encoding: "utf8" }).trim()
   }
   function commit(msg: string): string {
     gitc(["commit", "--allow-empty", "-m", msg])
     return gitc(["rev-parse", "HEAD"])
   }
 
+  function pollutedGitEnv(): NodeJS.ProcessEnv {
+    return {
+      ...cleanGitEnv(),
+      GIT_DIR: join(fakeRepo, ".git"),
+      GIT_WORK_TREE: fakeRepo,
+      GIT_INDEX_FILE: join(fakeRepo, ".git", "index"),
+      GIT_OBJECT_DIRECTORY: join(fakeRepo, ".git", "objects"),
+    }
+  }
+
   beforeEach(() => {
     repo = mkdtempSync(join(tmpdir(), "code-pin-"))
+    fakeRepo = mkdtempSync(join(tmpdir(), "code-pin-pollution-"))
     execFileSync("git", ["-C", repo, "init", "-q"], { encoding: "utf8" })
     gitc(["config", "user.email", "t@example.com"])
     gitc(["config", "user.name", "t"])
+    execFileSync("git", ["-C", fakeRepo, "init", "-q"], { encoding: "utf8" })
+    fakeGit(["config", "user.email", "t@example.com"])
+    fakeGit(["config", "user.name", "t"])
   })
   afterEach(() => {
     rmSync(repo, { recursive: true, force: true })
+    rmSync(fakeRepo, { recursive: true, force: true })
   })
 
   it("reproduces the stale-code class: process loaded A, checkout advanced to B", () => {
@@ -83,5 +121,43 @@ describe("gatherCodePin (real git path, temp repo)", () => {
     // Standalone temp repo: no superproject, so superproject_pin is null (visible, not masked).
     expect(status.superproject_pin).toBeNull()
     expect(status.stale).toBe(false)
+  })
+
+  it("reports the requested checkout rather than a caller-selected GIT_* repository", () => {
+    const sourceSha = commit("actual daemon source")
+    fakeGit(["commit", "--allow-empty", "-m", "caller-selected fake source"])
+    const fakeSha = fakeGit(["rev-parse", "HEAD"])
+    expect(fakeSha).not.toBe(sourceSha)
+
+    const expectedLiveSha = cleanGit(tribeRoot, "rev-parse", "HEAD")
+    const superproject = cleanGit(tribeRoot, "rev-parse", "--show-superproject-working-tree")
+    const top = cleanGit(tribeRoot, "rev-parse", "--show-toplevel")
+    const expectedPin =
+      superproject && top ? cleanGit(superproject, "rev-parse", `HEAD:${relative(superproject, top)}`) : null
+    const script = `import { STARTUP_SHA, gatherCodePin } from "./packages/daemon/src/lib/code-pin.ts"; process.stdout.write(JSON.stringify({ startup: STARTUP_SHA, live: gatherCodePin(), requested: gatherCodePin(${JSON.stringify(repo)}, ${JSON.stringify(sourceSha)}) }))`
+    const result = JSON.parse(
+      execFileSync("bun", ["-e", script], {
+        cwd: tribeRoot,
+        encoding: "utf8",
+        env: pollutedGitEnv(),
+      }),
+    ) as {
+      startup: string | null
+      live: ReturnType<typeof gatherCodePin>
+      requested: ReturnType<typeof gatherCodePin>
+    }
+
+    expect(result.startup).toBe(expectedLiveSha)
+    expect(result.live.running).toBe(expectedLiveSha)
+    expect(result.live.on_disk).toBe(expectedLiveSha)
+    expect(result.live.superproject_pin).toBe(expectedPin)
+    expect(result.live.stale).toBe(Boolean(expectedLiveSha && expectedPin && expectedLiveSha !== expectedPin))
+
+    const status = result.requested
+    expect(status.running).toBe(sourceSha)
+    expect(status.on_disk).toBe(sourceSha)
+    expect(status.superproject_pin).toBeNull()
+    expect(status.stale).toBe(false)
+    expect(status.reason).toBeNull()
   })
 })
