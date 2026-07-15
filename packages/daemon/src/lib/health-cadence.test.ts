@@ -235,7 +235,7 @@ describe("20876 Tribe health cadence", () => {
       db,
       stmts,
       sessionId: "sess-chief",
-      sessionRole: "chief",
+      sessionRole: "member",
       initialName: "@chief",
       domains: [],
       claudeSessionId: null,
