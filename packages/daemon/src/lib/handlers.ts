@@ -15,6 +15,7 @@ import { sendMessage, deriveSummary, logEvent, countUnackedActionables, type Sen
 import { ACTIONABLE_TYPES_SET } from "./database.ts"
 import { isPidAlive as pidStillAlive, registerSession } from "./session.ts"
 import { gatherCodePin } from "./code-pin.ts"
+import { parseDbGrowthWarningBytes, projectHealthCadence } from "./health-cadence.ts"
 import { senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
 import type { LifecycleStore, LifecycleSnapshotRecord } from "./lifecycle-store.ts"
 
@@ -1089,6 +1090,11 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
   const pendingIssues = stalePending.map(
     (ball) => `pending ball ${ball.request_id} owned by ${ball.recipient} is ${Math.floor(ball.age_ms / 60_000)}m old`,
   )
+  const cadence = projectHealthCadence(ctx.db, {
+    now,
+    liveSessionNames: liveSessions.map((session) => session.name),
+    dbGrowthWarningBytes: parseDbGrowthWarningBytes(process.env.TRIBE_HEALTH_DB_GROWTH_WARN_BYTES),
+  })
 
   // Stale-code detector (@km/tribe/20033): surface whether the running daemon
   // is provably older than the on-disk / superproject-pinned tribe code, so a
@@ -1104,7 +1110,8 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
       owners: pendingOwners,
       stale: stalePending,
     },
-    issues: pendingIssues,
+    issues: [...pendingIssues, ...cadence.warnings],
+    cadence,
     stats,
     code_pin: gatherCodePin(),
     checked_at: new Date().toISOString(),
