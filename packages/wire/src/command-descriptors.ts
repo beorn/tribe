@@ -529,10 +529,16 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             description: "All-owner pending snapshot with count, owner_count, oldest_age_ms, owners, and stale rows.",
             additionalProperties: true,
           },
+          cadence: {
+            type: "object",
+            description:
+              "Read-only 24h response latency, open-ball, live-session cursor lag, and database growth projection with evidence-bearing threshold warnings.",
+            additionalProperties: true,
+          },
           issues: {
             type: "array",
             description:
-              "Diagnostic warnings, including every pending ball older than two hours with owner and request id.",
+              "Diagnostic warnings, including stale balls plus response latency, live-session cursor lag, and configured database-growth breaches.",
             items: { type: "string" },
           },
           reconciler: {
@@ -542,7 +548,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             additionalProperties: true,
           },
         },
-        "Health snapshot - members + counts + optional reconciler snapshot.",
+        "Health snapshot - members + counts + cadence + optional reconciler snapshot.",
       ),
     },
     cli: hidden(
