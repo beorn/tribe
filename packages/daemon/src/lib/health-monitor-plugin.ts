@@ -86,6 +86,7 @@ export interface HealthAlert {
     | "fd-count"
     | "gh-rate-limit"
     | "reaper"
+    | "chief-absent"
     | "chief-silent"
   severity: "warning" | "critical"
   message: string
@@ -133,7 +134,7 @@ export interface HealthThresholds {
   /**
    * Chief-silent watchdog: minimum age (in minutes) of the oldest unread DM
    * to @chief before broadcasting STOP-THE-LINE. Default 10. Set to 0 to
-   * disable the watchdog entirely.
+   * disable the online-silence warning; absent-Chief escalation stays enabled.
    */
   chiefSilentMinUnreadAgeMin: number
 }
@@ -724,11 +725,11 @@ export function formatStaleLockMessage(lock: GitLockInfo, sessionName: string | 
 }
 
 /**
- * Chief-silent watchdog: detect "DMs to @chief unread + chief still emitting
- * tool calls" (the relay-pattern bug). When @chief is online but has
- * actionable DMs aged beyond `minUnreadAgeMin`, broadcast STOP-THE-LINE so
- * chief sees it on the next tribe.fetch (or push delivery) and drains the
- * inbox before continuing.
+ * Chief-liveness watchdog: fail loud immediately when actionable DMs have no
+ * live @chief recipient, and detect "DMs to @chief unread + chief still
+ * emitting tool calls" (the relay-pattern bug). Online silence retains the
+ * configured age threshold; absence broadcasts a critical escalation to the
+ * live fleet on the next sample.
  *
  * Returns null when no alert should fire. Side-effects on `state.firedAlerts`
  * so each silence-episode only emits once: the key is cleared when the unread
@@ -743,18 +744,37 @@ export function checkChiefSilent(
   thresholds: HealthThresholds,
   now: number,
 ): HealthAlert | null {
-  const KEY = "chief-silent:warning"
-  // No silence to report when chief is offline (no one to derail) or watchdog
-  // is disabled. Clear any prior firing so the next online+silent episode
-  // alerts cleanly.
-  if (!chiefOnline || thresholds.chiefSilentMinUnreadAgeMin <= 0 || unread.count === 0) {
-    state.firedAlerts.delete(KEY)
+  const silentKey = "chief-silent:warning"
+  const absentKey = "chief-absent:critical"
+  if (unread.count === 0) {
+    state.firedAlerts.delete(silentKey)
+    state.firedAlerts.delete(absentKey)
+    return null
+  }
+  if (!chiefOnline) {
+    state.firedAlerts.delete(silentKey)
+    if (state.firedAlerts.has(absentKey)) return null
+    state.firedAlerts.add(absentKey)
+    return {
+      type: "chief-absent",
+      severity: "critical",
+      message:
+        `STOP-THE-LINE: @chief is absent with ${unread.count} actionable DM${unread.count === 1 ? "" : "s"} ` +
+        `waiting. Delivery has no live authority; a live @cto or @fleet must assume authority, ` +
+        `or notify the user, then reconcile @chief attention before work continues.`,
+      metrics: {},
+      topOffenders: [],
+    }
+  }
+  state.firedAlerts.delete(absentKey)
+  if (thresholds.chiefSilentMinUnreadAgeMin <= 0) {
+    state.firedAlerts.delete(silentKey)
     return null
   }
   const ageMin = (now - unread.oldestTs) / 60_000
   if (ageMin < thresholds.chiefSilentMinUnreadAgeMin) return null
-  if (state.firedAlerts.has(KEY)) return null
-  state.firedAlerts.add(KEY)
+  if (state.firedAlerts.has(silentKey)) return null
+  state.firedAlerts.add(silentKey)
   return {
     type: "chief-silent",
     severity: "warning",
@@ -1384,11 +1404,11 @@ export const healthMonitorPlugin: TribePluginApi = {
           deliverHealthAlert(api, alert, msg, attributedSessions, sessionLoad.has("unattributed"))
         }
 
-        // --- Chief-silent watchdog (every 3rd sample — ~30s) ---
+        // --- Chief-liveness watchdog (every 3rd sample — ~30s) ---
         // @km/all/silent-errors-enforcement/chief-silent-watchdog-relay-pattern-detection.
-        // Detects "DMs to @chief unread + chief still emitting tool calls" — the
-        // relay-pattern bug where push delivery succeeds but chief never drains
-        // via tribe.fetch, so messages sit invisible-to-action for hours.
+        // Fails loud when no live @chief owns actionable delivery, and detects
+        // the relay-pattern bug where push succeeds but an online chief never
+        // drains via tribe.fetch.
         chiefSilentSampleCount++
         if (chiefSilentSampleCount % 3 === 0) {
           try {

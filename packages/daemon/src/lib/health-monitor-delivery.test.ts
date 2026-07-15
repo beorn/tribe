@@ -24,6 +24,22 @@ function metrics(loadAvg1m: number, timestamp: number): HealthMetrics {
 }
 
 describe("health alert delivery", () => {
+  test("absent chief with actionable unread escalates immediately to a live authority", () => {
+    const state = createAlertState()
+    const thresholds = { ...defaultThresholds(), chiefSilentMinUnreadAgeMin: 0 }
+    const check = (chiefOnline: boolean) =>
+      checkChiefSilent({ count: 1, oldestTs: BASE_TIME_MS }, chiefOnline, state, thresholds, BASE_TIME_MS)
+
+    expect(check(false)).toMatchObject({
+      type: "chief-absent",
+      severity: "critical",
+      message: expect.stringMatching(/@chief is absent.*live @cto or @fleet.*user/iu),
+    })
+    expect(check(false)).toBeNull()
+    expect(check(true)).toBeNull()
+    expect(check(false)?.type).toBe("chief-absent")
+  })
+
   test("chief-silent recovery directs the canonical attention projection instead of a sender-filtered snapshot", () => {
     const alert = checkChiefSilent(
       { count: 2, oldestTs: BASE_TIME_MS - 10 * 60_000 },
