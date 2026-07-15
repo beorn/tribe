@@ -5,6 +5,7 @@ const HOUR = 60 * MINUTE
 const DAY = 24 * HOUR
 const RESPONSE_WARNING_MS = 30 * MINUTE
 const CURSOR_WARNING_MS = 30 * MINUTE
+const CHIEF_ACTIONABLE_RESPONSE_TARGET_MS = MINUTE
 const ACTIONABLE_TYPES_SQL = "'request', 'query', 'verdict', 'assign'"
 
 export type HealthCadenceOptions = {
@@ -26,6 +27,19 @@ type ResponseLatencyGroup = LatencySummary & {
 }
 
 export type HealthCadenceProjection = {
+  chief_actionable_response: {
+    target_ms: number
+    status: "ok" | "breached"
+    completed: LatencySummary & {
+      within_target: number
+      missed_target: number
+    }
+    open: {
+      count: number
+      oldest_age_ms: number
+      over_target_count: number
+    }
+  }
   response_latency: LatencySummary & {
     window_ms: number
     by_role_and_type: ResponseLatencyGroup[]
@@ -97,6 +111,7 @@ function responseLatencyProjection(
   now: number,
 ): {
   summary: HealthCadenceProjection["response_latency"]
+  chiefCompleted: HealthCadenceProjection["chief_actionable_response"]["completed"]
   warnings: string[]
 } {
   const rows = db
@@ -143,12 +158,78 @@ function responseLatencyProjection(
       (group) =>
         `response latency role=${group.role} type=${group.message_type} p95=${Math.floor(group.p95_ms! / MINUTE)}m exceeds 30m (n=${group.count})`,
     )
+  const chiefLatencies = rows.filter((row) => row.role === "chief").map((row) => row.latency_ms)
 
   return {
     summary: {
       window_ms: DAY,
       ...summarizeLatencies(rows.map((row) => row.latency_ms)),
       by_role_and_type: byRoleAndType,
+    },
+    chiefCompleted: {
+      ...summarizeLatencies(chiefLatencies),
+      within_target: chiefLatencies.filter((latency) => latency < CHIEF_ACTIONABLE_RESPONSE_TARGET_MS).length,
+      missed_target: chiefLatencies.filter((latency) => latency >= CHIEF_ACTIONABLE_RESPONSE_TARGET_MS).length,
+    },
+    warnings,
+  }
+}
+
+function chiefOpenActionableProjection(
+  db: Database,
+  now: number,
+): HealthCadenceProjection["chief_actionable_response"]["open"] {
+  const row = db
+    .prepare(`
+      SELECT
+        COUNT(*) AS count,
+        MIN(opened_at) AS oldest_opened_at,
+        COALESCE(SUM(
+          CASE WHEN $now - opened_at >= $target THEN 1 ELSE 0 END
+        ), 0) AS over_target_count
+      FROM pending_request
+      WHERE recipient = '@chief'
+    `)
+    .get({ $now: now, $target: CHIEF_ACTIONABLE_RESPONSE_TARGET_MS }) as {
+    count: number
+    oldest_opened_at: number | null
+    over_target_count: number
+  }
+  return {
+    count: row.count,
+    oldest_age_ms: ageFrom(now, row.oldest_opened_at),
+    over_target_count: row.over_target_count,
+  }
+}
+
+function chiefActionableResponseProjection(
+  db: Database,
+  now: number,
+  completed: HealthCadenceProjection["chief_actionable_response"]["completed"],
+): {
+  projection: HealthCadenceProjection["chief_actionable_response"]
+  warnings: string[]
+} {
+  const open = chiefOpenActionableProjection(db, now)
+  const warnings: string[] = []
+  if (completed.missed_target > 0) {
+    warnings.push(
+      `Chief actionable response completed p95=${durationLabel(completed.p95_ms ?? 0)}; ` +
+        `target <60s missed=${completed.missed_target}/${completed.count}`,
+    )
+  }
+  if (open.over_target_count > 0) {
+    warnings.push(
+      `Chief actionable response open oldest=${durationLabel(open.oldest_age_ms)}; ` +
+        `target <60s overdue=${open.over_target_count}/${open.count}`,
+    )
+  }
+  return {
+    projection: {
+      target_ms: CHIEF_ACTIONABLE_RESPONSE_TARGET_MS,
+      status: warnings.length === 0 ? "ok" : "breached",
+      completed,
+      open,
     },
     warnings,
   }
@@ -310,13 +391,20 @@ export function parseDbGrowthWarningBytes(raw: string | undefined): number | nul
 
 export function projectHealthCadence(db: Database, options: HealthCadenceOptions): HealthCadenceProjection {
   const responseLatency = responseLatencyProjection(db, options.now)
+  const chiefActionableResponse = chiefActionableResponseProjection(db, options.now, responseLatency.chiefCompleted)
   const inboxLag = inboxLagProjection(db, options.now, options.liveSessionNames)
   const database = databaseProjection(db, options.now, options.dbGrowthWarningBytes ?? null)
   return {
+    chief_actionable_response: chiefActionableResponse.projection,
     response_latency: responseLatency.summary,
     open_balls: openBallProjection(db, options.now),
     inbox_lag: inboxLag.rows,
     database: database.projection,
-    warnings: [...responseLatency.warnings, ...inboxLag.warnings, ...database.warnings],
+    warnings: [
+      ...responseLatency.warnings,
+      ...chiefActionableResponse.warnings,
+      ...inboxLag.warnings,
+      ...database.warnings,
+    ],
   }
 }

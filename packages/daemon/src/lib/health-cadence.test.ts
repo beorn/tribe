@@ -225,9 +225,55 @@ describe("20876 Tribe health cadence", () => {
     expect(first.database.growth_7d.estimated_bytes).toBeGreaterThan(1)
     expect(first.warnings).toEqual([
       expect.stringMatching(/member.*request.*p95.*60m/i),
+      expect.stringMatching(/Chief actionable response.*completed.*2m.*target.*60s/i),
       expect.stringMatching(/@agent\/5.*6.*8d/i),
       expect.stringMatching(/7d.*growth.*archive\/GC/i),
     ])
+  })
+
+  it("enforces a sub-minute Chief actionable-response target for completed and open work", () => {
+    insertResponsePair(db, {
+      id: "query-chief-fast",
+      type: "query",
+      sender: "@agent/5",
+      recipient: "@chief",
+      requestAt: now - 10 * MINUTE,
+      latencyMs: 30_000,
+    })
+    stmts.openPendingRequest.run({
+      $request_id: "query-chief-open",
+      $recipient: "@chief",
+      $sender: "@agent/5",
+      $opened_at: now - 2 * MINUTE,
+      $message_id: "query-chief-open",
+      $fanout: "first",
+    })
+
+    const cadence = projectHealthCadence(db, { now, liveSessionNames: ["@chief", "@agent/5"] })
+
+    expect(cadence.chief_actionable_response).toEqual({
+      target_ms: MINUTE,
+      status: "breached",
+      completed: {
+        count: 2,
+        p50_ms: 30_000,
+        p95_ms: 2 * MINUTE,
+        max_ms: 2 * MINUTE,
+        within_target: 1,
+        missed_target: 1,
+      },
+      open: {
+        count: 1,
+        oldest_age_ms: 2 * MINUTE,
+        over_target_count: 1,
+      },
+    })
+    expect(cadence.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/Chief actionable response.*completed.*2m.*target.*60s/i),
+        expect.stringMatching(/Chief actionable response.*open.*2m.*target.*60s/i),
+      ]),
+    )
   })
 
   it("surfaces the cadence projection and evidence-bearing warnings through tribe.health", () => {
