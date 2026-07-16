@@ -279,17 +279,56 @@ describe("dispatcher bounded mailbox drain", () => {
         ),
       ),
     ).toMatchObject({ code: -32001 })
+
+    harness.addPendingClient("conn-name-only")
+    await harness.register("conn-name-only", {
+      name: "@chief",
+      pid: otherLivePid,
+      project: "/tmp/km-chief",
+      launchId: "caller-asserted-launch",
+      launchParentPid: 9001,
+    })
+    harness.sendActionable("@chief", "must remain unread")
+    const nameOnly = parseError(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "name-only-drain", method: "cli_inbox_drain", params: { limit: 1 } },
+        "conn-name-only",
+      ),
+    )
+    expect(nameOnly).toMatchObject({ code: -32001 })
+    expect(nameOnly.message).toMatch(/server-verified fan-in/)
+    const chiefStatus = parseResult<InboxStatusResult>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "name-only-chief-status",
+          method: "cli_inbox_status",
+          params: { session: "@chief" },
+        },
+        "conn-name-only",
+      ),
+    )
+    expect(chiefStatus.unread_count).toBe(1)
   })
 
   it("validates the bound before mutation and preserves fetch trust and attention eligibility", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
 
-    harness.addPendingClient("conn-drain")
-    await harness.register("conn-drain", {
+    const launch = { launchId: "launch-agent-3", launchParentPid: 4242 }
+    harness.addPendingClient("conn-holder")
+    await harness.register("conn-holder", {
       name: "@agent/3",
       pid: liveHolderPid,
       project: "/tmp/km-wt3",
+      ...launch,
+    })
+    harness.addPendingClient("conn-drain")
+    await harness.register("conn-drain", {
+      name: "@agent/3",
+      pid: otherLivePid,
+      project: "/tmp/km-wt3",
+      ...launch,
     })
     harness.sendActionable("@agent/3", "forged daemon request", {
       sender: "unregistered-sender",

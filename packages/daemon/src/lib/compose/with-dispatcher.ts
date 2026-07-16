@@ -842,6 +842,25 @@ export function withDispatcher<
             ) {
               return makeError(id, -32001, "cli_inbox_drain requires an authenticated current member session")
             }
+            const hasLiveLaunchPeer =
+              client.launchId !== null &&
+              client.launchParentPid !== null &&
+              Array.from(clients.entries()).some(
+                ([peerConnId, peer]) =>
+                  peerConnId !== connId &&
+                  peer.role === "member" &&
+                  peer.ctx.sessionId === client.ctx.sessionId &&
+                  peer.name === client.name &&
+                  peer.launchId === client.launchId &&
+                  peer.launchParentPid === client.launchParentPid,
+              )
+            if (!hasLiveLaunchPeer) {
+              return makeError(
+                id,
+                -32001,
+                "cli_inbox_drain requires server-verified fan-in to the current managed launch",
+              )
+            }
             const limit = p.limit ?? 10
             if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
               return makeError(id, -32602, "cli_inbox_drain limit must be an integer from 1 through 100")
