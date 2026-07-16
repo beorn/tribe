@@ -102,6 +102,7 @@ export function registerSession(
   provider?: string | null,
   launchId?: string | null,
   launchParentPid?: number | null,
+  attach = false,
 ): void {
   const desiredName = ctx.getName()
   const now = Date.now()
@@ -194,7 +195,17 @@ export function registerSession(
   // changing this invariant. Format mirrors migration v10's backfill.
   joinDefaultRoom(ctx, projectId ?? null, ctx.sessionRole, now)
 
-  logEvent(ctx, "session.joined", undefined, {
+  // Durable identity (Goal 1) — every registration bumps the connection epoch
+  // (fresh install row default 0 → 1; each same-name re-attach N → N+1). This
+  // records reconnect churn on the ONE persistent member row.
+  ctx.stmts.bumpConnectionEpoch.run({ $id: ctx.sessionId, $now: now })
+
+  // A same-name re-attach is NOT a join: it must not fire `session.joined`
+  // (which downstream renders as a channel "X joined" announcement). A quiet
+  // `session.attached` event records the transition for durable history without
+  // the join/leave broadcast spam that CLI-churn sessions produced. A genuinely
+  // new member still fires `session.joined`.
+  logEvent(ctx, attach ? "session.attached" : "session.joined", undefined, {
     name: ctx.getName(),
     role: ctx.sessionRole,
     domains: ctx.domains,

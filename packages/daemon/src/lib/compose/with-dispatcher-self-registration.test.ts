@@ -11,6 +11,7 @@ import { openDatabase, createStatements } from "../database.ts"
 import { sendMessage } from "../messaging.ts"
 import type { ClientSession } from "./with-client-registry.ts"
 import { withDispatcher } from "./with-dispatcher.ts"
+import { TRIBE_COORD_METHODS } from "../handlers.ts"
 
 type TestSocket = NetSocket & {
   destroyedByDispatcher: boolean
@@ -232,7 +233,12 @@ describe("dispatcher bounded mailbox drain", () => {
 })
 
 describe("dispatcher session announcement recovery (@ag/tribe/21052/19442)", () => {
-  it("coalesces a reconnecting name without losing durable join events", async () => {
+  it("re-attaches a reconnecting name to ONE durable member without join spam", async () => {
+    // Durable identity (Goal 1) supersedes the old time-window join coalescing:
+    // a name that reconnects re-ATTACHES to its existing member (one identity,
+    // one row) instead of re-joining. The first join announces; every re-attach
+    // is silent. Durable history stays lossless — the initial `session.joined`
+    // plus one `session.attached` per reconnect — so nothing is dropped.
     const suppressWindowMs = 10_000
     let now = 100_000
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now)
@@ -244,32 +250,39 @@ describe("dispatcher session announcement recovery (@ag/tribe/21052/19442)", () 
       cleanup = harness.dispose
 
       // The daemon-start window has elapsed, so this exercises live adapter
-      // churn rather than startup suppression. Every suppressed attempt must
-      // re-arm the per-name window, while another name remains independent.
+      // churn rather than startup suppression.
       const first = harness.connectClient()
-      await registerMember(harness, first.connId, "@agent/6")
+      const r1 = await registerMember(harness, first.connId, "@agent/6")
       now += 5_000
       first.socket.emitClose()
 
       now += 5_000
       const second = harness.connectClient()
-      await registerMember(harness, second.connId, "@agent/6")
+      const r2 = await registerMember(harness, second.connId, "@agent/6")
       now += 5_000
       second.socket.emitClose()
 
-      // The boundary itself is outside the window; callers must not need an
-      // undocumented extra millisecond before the next stable announcement.
       now += 10_000
       const stable = harness.connectClient()
-      await registerMember(harness, stable.connId, "@agent/6")
+      const r3 = await registerMember(harness, stable.connId, "@agent/6")
       const independent = harness.connectClient()
       await registerMember(harness, independent.connId, "@agent/7")
 
+      // ONE durable member: all three registrations resolve the SAME sessionId
+      // and there is exactly one row for the name.
+      expect(r2.sessionId).toBe(r1.sessionId)
+      expect(r3.sessionId).toBe(r1.sessionId)
+      expect(harness.memberRowCount("@agent/6")).toBe(1)
+
+      // Only the first join announces; the two re-attaches are silent.
       const announcements = harness.sessionAnnouncements("@agent/6")
-      expect(announcements).toHaveLength(2)
+      expect(announcements).toHaveLength(1)
       expect(announcements.every((content) => content.includes("@agent/6 joined (member)"))).toBe(true)
       expect(harness.sessionAnnouncements("@agent/7")).toHaveLength(1)
-      expect(harness.sessionJoinEvents("@agent/6")).toHaveLength(3)
+
+      // Durable history is lossless: one join + one attach per reconnect.
+      expect(harness.sessionJoinEvents("@agent/6")).toHaveLength(1)
+      expect(harness.sessionAttachedEvents("@agent/6")).toHaveLength(2)
       expect(harness.sessionJoinEvents("@agent/7")).toHaveLength(1)
       expect(harness.sessionLeftEvents("@agent/6")).toHaveLength(2)
     } finally {
@@ -369,6 +382,123 @@ describe("dispatcher inbox-wait parsing", () => {
     expect(result.unread_count).toBe(0)
     expect(result.timed_out).toBe(true)
     expect(result.aborted).toBe(false)
+  })
+})
+
+describe("durable member identity (Goal 1)", () => {
+  it("keeps the member row across disconnect so fetch/pending still resolve the owner", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const first = harness.connectClient()
+    const r1 = parseResult<RegisterResult>(
+      await harness.register(first.connId, { name: "@cli-chief", pid: 7001, project: "/tmp/km-wt6" }),
+    )
+
+    // An actionable lands for the member — opens its durable, name-keyed mailbox.
+    harness.sendActionable("@cli-chief", "please verify")
+
+    // Disconnect DETACHES; the durable row must persist (not be deleted).
+    first.socket.emitClose()
+    expect(harness.memberRowCount("@cli-chief")).toBe(1)
+
+    // The owner still resolves while detached: the mailbox is name-keyed.
+    const status = parseResult<{ unread_count: number }>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "s", method: "cli_inbox_status", params: { session: "@cli-chief" } },
+        "conn-probe",
+      ),
+    )
+    expect(status.unread_count).toBeGreaterThanOrEqual(1)
+
+    // Reconnecting (fresh pid = true CLI churn) re-attaches to the SAME member.
+    const second = harness.connectClient()
+    const r2 = parseResult<RegisterResult>(
+      await harness.register(second.connId, { name: "@cli-chief", pid: 7002, project: "/tmp/km-wt6" }),
+    )
+    expect(r2.sessionId).toBe(r1.sessionId)
+    expect(harness.memberRowCount("@cli-chief")).toBe(1)
+  })
+
+  it("attributes 3 CLI connect-send-disconnect cycles to ONE member with zero join/left broadcasts", async () => {
+    // suppressWindowMs 0 turns OFF the time-window coalescer, so the ONLY thing
+    // that can silence a re-attach is the durable-identity attach path itself.
+    const harness = createDispatcherHarness({ suppressWindowMs: 0 })
+    cleanup = harness.dispose
+
+    // Establish the durable member (a genuine first join is allowed to announce).
+    const est = harness.connectClient()
+    const established = parseResult<RegisterResult>(
+      await harness.register(est.connId, { name: "@cli-chief", pid: 8000, project: "/tmp/km-wt6" }),
+    )
+    est.socket.emitClose()
+    const baselineAnnouncements = harness.sessionAnnouncements("@cli-chief").length
+
+    // 3 CLI-style cycles, a FRESH pid each (no pid+cwd adoption → attach-by-name).
+    for (let i = 0; i < 3; i++) {
+      const c = harness.connectClient()
+      const res = parseResult<RegisterResult>(
+        await harness.register(c.connId, { name: "@cli-chief", pid: 8100 + i, project: "/tmp/km-wt6" }),
+      )
+      expect(res.sessionId).toBe(established.sessionId)
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: `send-${i}`,
+          method: TRIBE_COORD_METHODS.send,
+          params: { to: "*", message: `cycle ${i}`, type: "status" },
+        },
+        c.connId,
+      )
+      c.socket.emitClose()
+    }
+
+    // ONE member row, and the 3 cycles added ZERO join/left broadcasts.
+    expect(harness.memberRowCount("@cli-chief")).toBe(1)
+    expect(harness.sessionAnnouncements("@cli-chief").length).toBe(baselineAnnouncements)
+  })
+
+  it("removes the member on explicit leave", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const c = harness.connectClient()
+    await harness.register(c.connId, { name: "@cli-chief", pid: 9001, project: "/tmp/km-wt6" })
+    c.socket.emitClose()
+    expect(harness.memberRowCount("@cli-chief")).toBe(1)
+
+    const left = parseResult<{ left: boolean; removed: number; name: string }>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "leave", method: "cli_leave", params: { session: "@cli-chief" } },
+        "conn-leave",
+      ),
+    )
+    expect(left.left).toBe(true)
+    expect(left.removed).toBe(1)
+    expect(harness.memberRowCount("@cli-chief")).toBe(0)
+  })
+
+  it("distinguishes attached from detached members in the sessions view", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const liveClient = harness.connectClient()
+    await harness.register(liveClient.connId, { name: "@cli-worker", pid: 9101, project: "/tmp/km-wt6" })
+    const gone = harness.connectClient()
+    await harness.register(gone.connId, { name: "@cli-chief", pid: 9102, project: "/tmp/km-wt6" })
+    gone.socket.emitClose()
+
+    const status = parseResult<{ sessions: Array<{ name: string; attached: boolean; epoch: number }> }>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "st", method: "cli_status", params: {} },
+        liveClient.connId,
+      ),
+    )
+    const worker = status.sessions.find((s) => s.name === "@cli-worker")
+    const chief = status.sessions.find((s) => s.name === "@cli-chief")
+    expect(worker?.attached).toBe(true)
+    expect(chief?.attached).toBe(false)
+    expect(chief?.epoch ?? 0).toBeGreaterThanOrEqual(1)
   })
 })
 
@@ -533,6 +663,17 @@ function createDispatcherHarness(options: { suppressWindowMs?: number; socketSta
         .prepare("SELECT content FROM messages WHERE type = 'event.session.left' ORDER BY ts ASC, id ASC")
         .all() as Array<{ content: string }>
       return rows.map((row) => JSON.parse(row.content) as { name: string }).filter((event) => event.name === name)
+    },
+    sessionAttachedEvents(name: string): Array<{ name: string }> {
+      const rows = db
+        .prepare("SELECT content FROM messages WHERE type = 'event.session.attached' ORDER BY ts ASC, id ASC")
+        .all() as Array<{ content: string }>
+      return rows.map((row) => JSON.parse(row.content) as { name: string }).filter((event) => event.name === name)
+    },
+    /** Count of durable `sessions` rows currently holding this exact name. */
+    memberRowCount(name: string): number {
+      return (db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE name = $name").get({ $name: name }) as { n: number })
+        .n
     },
     addPendingClient(connId: string): TestSocket {
       const socket = createTestSocket()

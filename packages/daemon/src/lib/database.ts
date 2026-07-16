@@ -36,7 +36,8 @@ export function openDatabase(path: string): Database {
 		filter_mute TEXT,
 		delivery     TEXT NOT NULL DEFAULT 'push',
 		account    TEXT,
-		provider   TEXT
+		provider   TEXT,
+		connection_epoch INTEGER NOT NULL DEFAULT 0
 	)`)
 
   // Migrations table — tracks schema version so we can evolve the DB without
@@ -768,6 +769,24 @@ const MIGRATIONS: readonly Migration[] = [
       db.run("CREATE INDEX IF NOT EXISTS idx_sessions_launch_identity ON sessions(name, launch_id, launch_parent_pid)")
     },
   },
+  {
+    version: 20,
+    name: "session-connection-epoch",
+    up(db) {
+      // Durable member identity — a named member persists across connections.
+      // `connection_epoch` counts how many times a member has been attached (an
+      // initial join is epoch 1; each same-name re-attach bumps it). It records
+      // reconnect churn without minting a fresh identity or re-announcing a
+      // join. Fresh installs get the column from the CREATE TABLE block; existing
+      // databases get it here (default 0, bumped to 1 on the next registration).
+      const cols = new Set(
+        (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>).map((row) => row.name),
+      )
+      if (!cols.has("connection_epoch")) {
+        db.run("ALTER TABLE sessions ADD COLUMN connection_epoch INTEGER NOT NULL DEFAULT 0")
+      }
+    },
+  },
 ]
 
 // ---------------------------------------------------------------------------
@@ -900,6 +919,38 @@ export function createStatements(db: Database) {
 	`),
 
     checkNameTaken: db.prepare("SELECT id FROM sessions WHERE name = $name AND id != $session_id"),
+
+    /**
+     * Durable-member attach lookup (Goal 1 — durable identity): the row that
+     * already owns this exact name, if any. Registration reuses this row's id so
+     * a reconnecting member re-attaches to its durable identity (same sessionId,
+     * same recipient mailbox) instead of minting a fresh one. The caller runs
+     * this only AFTER the live-holder conflict path, so any hit is a DETACHED
+     * durable member reconnecting — never a live collision.
+     */
+    getDurableSessionByName: db.prepare("SELECT id, role, connection_epoch FROM sessions WHERE name = $name LIMIT 1"),
+
+    /** Advance-only connection-epoch counter — bumped once per (re-)attach. */
+    bumpConnectionEpoch: db.prepare(
+      "UPDATE sessions SET connection_epoch = connection_epoch + 1, updated_at = $now WHERE id = $id",
+    ),
+
+    /**
+     * Explicit-leave removal: delete the durable member row by name. Disconnect
+     * only DETACHES (the row persists); this is the one path that actually
+     * retires a member. Keyed by name so an operator/CLI can retire a member
+     * with no live connection.
+     */
+    deleteSessionByName: db.prepare("DELETE FROM sessions WHERE name = $name"),
+
+    /**
+     * Full session roster for the `tribe sessions` surface, including the
+     * connection epoch. Liveness (attached vs detached) is derived by the caller
+     * from the live clients map; this statement supplies the durable rows.
+     */
+    listSessionsWithEpoch: db.prepare(
+      "SELECT id, name, role, pid, cwd, connection_epoch, started_at, updated_at FROM sessions",
+    ),
 
     renameSession: db.prepare("UPDATE sessions SET name = $new_name, updated_at = $now WHERE id = $session_id"),
 
