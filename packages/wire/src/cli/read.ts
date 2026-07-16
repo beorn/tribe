@@ -22,7 +22,7 @@
  *   - log           (line ~610)
  *   - health        (line ~617)
  *   - inbox-status  (line ~622)
- *   - inbox-drain   (bounded actionable drain without transient registration)
+ *   - inbox-drain   (bounded actionable drain for the authenticated current session)
  *   - reload        (MCP/RPC tribe.reload hot-reload parity)
  *   - repair        (operator-bounded state repair)
  *   - activity      (line ~674)
@@ -35,7 +35,8 @@
 import { Command, int } from "@silvery/commander"
 import { cliOption, visibleCliProjectionForMcp } from "../command-descriptors.ts"
 import { DEFAULT_INBOX_WAIT_SESSION, resolveInboxWaitOptions } from "../lib/inbox-wait-options.ts"
-import { connectToDaemon, resolveSocketPath } from "../lib/socket.ts"
+import { createSessionIdentityToken, resolveRuntimeSessionIdentity } from "../lib/session-identity.ts"
+import { connectToDaemon, resolveSocketPath, TRIBE_PROTOCOL_VERSION } from "../lib/socket.ts"
 import { watchActivity } from "../lib/activity-watch.ts"
 import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-exempt.ts"
 
@@ -636,9 +637,95 @@ async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promi
   )
 }
 
-async function cmdInboxDrain(opts: { session?: string; limit?: number; json?: boolean }): Promise<void> {
-  const session = opts.session ?? DEFAULT_INBOX_WAIT_SESSION
-  const result = (await callDaemon("cli_inbox_drain", { session, limit: opts.limit ?? 10 })) as InboxDrainResult
+function requireInboxDrainIdentity(): {
+  name: string
+  launchId: string
+  role: "member"
+  identityToken: string
+} {
+  const name = process.env.TRIBE_SESSION_NAME?.trim() || process.env.TRIBE_NAME?.trim() || ""
+  const launchId = process.env.TRIBE_LAUNCH_ID?.trim() ?? ""
+  const role = process.env.TRIBE_ROLE?.trim() || "member"
+  const runtimeSessionIdentity = resolveRuntimeSessionIdentity()
+  if (!name || !launchId || !runtimeSessionIdentity) {
+    console.error(
+      "tribe-wire inbox-drain: authenticated managed session required " +
+        "(TRIBE_NAME, TRIBE_LAUNCH_ID, and CLAUDE_SESSION_ID or CODEX_THREAD_ID)",
+    )
+    process.exit(2)
+  }
+  if (role !== "member") {
+    console.error(`tribe-wire inbox-drain: current session role must be member (received ${role})`)
+    process.exit(2)
+  }
+  return {
+    name,
+    launchId,
+    role,
+    identityToken: createSessionIdentityToken({
+      runtimeSessionIdentity,
+      project: process.cwd(),
+      role,
+    }),
+  }
+}
+
+function parseInboxDrainLimit(value: string | number | undefined): number {
+  const text = String(value ?? "10")
+  if (!/^[0-9]+$/.test(text)) {
+    console.error(`tribe-wire inbox-drain: --limit must be an integer from 1 through 100 (received ${text})`)
+    process.exit(2)
+  }
+  const limit = Number(text)
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+    console.error(`tribe-wire inbox-drain: --limit must be an integer from 1 through 100 (received ${text})`)
+    process.exit(2)
+  }
+  return limit
+}
+
+async function callAuthenticatedInboxDrain(limit: number): Promise<InboxDrainResult> {
+  const { name, launchId, role, identityToken } = requireInboxDrainIdentity()
+  const socketPath = resolveSocketPath()
+  try {
+    const client = await connectToDaemon(socketPath)
+    try {
+      const cwd = process.cwd()
+      const registered = (await client.call("register", {
+        name,
+        role,
+        domains: [],
+        delivery: "pull",
+        project: cwd,
+        projectName: cwd.split("/").filter(Boolean).at(-1) ?? "unknown",
+        pid: process.pid,
+        protocolVersion: TRIBE_PROTOCOL_VERSION,
+        identityToken,
+        launchId,
+        launchParentPid: process.ppid,
+      })) as { name?: string; role?: string }
+      if (registered.name !== name || registered.role !== role) {
+        throw new Error(
+          `Authenticated inbox-drain registration mismatch: expected ${name}/${role}, received ${registered.name ?? "unknown"}/${registered.role ?? "unknown"}`,
+        )
+      }
+      return (await client.call("cli_inbox_drain", { limit })) as InboxDrainResult
+    } finally {
+      client.close()
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === "ECONNREFUSED" || code === "ENOENT") {
+      console.error(`No daemon running (socket: ${socketPath})`)
+      console.error(`Start one with: bun tribe-daemon (package tribe-daemon), or let a host autostart it`)
+      process.exit(1)
+    }
+    throw err
+  }
+}
+
+async function cmdInboxDrain(opts: { limit?: string | number; json?: boolean }): Promise<void> {
+  const result = await callAuthenticatedInboxDrain(parseInboxDrainLimit(opts.limit))
   if (opts.json) {
     console.log(JSON.stringify(result))
     return
@@ -648,7 +735,7 @@ async function cmdInboxDrain(opts: { session?: string; limit?: number; json?: bo
     console.log(event.content)
   }
   console.log(
-    `${session}: drained ${result.drained_count} actionable DM${result.drained_count === 1 ? "" : "s"}; ` +
+    `${result.session}: drained ${result.drained_count} actionable DM${result.drained_count === 1 ? "" : "s"}; ` +
       `${result.unread_count} remaining.`,
   )
 }
@@ -897,11 +984,10 @@ export function registerReadCommands(program: Command): void {
 
   program
     .command("inbox-drain")
-    .description("Drain a bounded actionable mailbox page without registering a transient session")
-    .option("--session <name>", "Role mailbox to drain (default: @chief)", DEFAULT_INBOX_WAIT_SESSION)
-    .option("--limit <n>", "Maximum actionable DMs to return and acknowledge (max 100)", int, 10)
+    .description("Drain the authenticated current session's bounded actionable mailbox page")
+    .option("--limit <n>", "Maximum actionable DMs to return and acknowledge (1-100)", "10")
     .option("--json", "Emit machine-readable JSON")
-    .action((opts: { session?: string; limit?: number; json?: boolean }) => void cmdInboxDrain(opts))
+    .action((opts: { limit?: string; json?: boolean }) => void cmdInboxDrain(opts))
 
   program
     .command("inbox-status")

@@ -27,8 +27,9 @@ import {
 import { resolveSocketPath, createReconnectingClient, TRIBE_PROTOCOL_VERSION, type DaemonClient } from "./lib/socket.ts"
 import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
 import { spawn } from "node:child_process"
-import { createHash, randomUUID } from "node:crypto"
+import { randomUUID } from "node:crypto"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
+import { createSessionIdentityToken, resolveRuntimeSessionIdentity } from "./lib/session-identity.ts"
 import { createLogger, setSuppressConsole } from "loggily"
 import { createTimers } from "./timers.ts"
 import { defangModelInput } from "./lib/defang.ts"
@@ -234,15 +235,15 @@ function parseToolText<T>(result: unknown): T | null {
 // Daemon connection
 // ---------------------------------------------------------------------------
 
-// Identity token — stable across Claude Code restarts in the same project
-// with the same role hint. Hash of (claude_session_id, project_path, role_hint)
-// → first 16 hex chars of sha256. When claude_session_id is null (some
-// environments), the token still matches on project+role — weaker but safe
-// (no cross-project or cross-role leakage). See km-tribe.session-identity.
-const identityToken = createHash("sha256")
-  .update(`${CLAUDE_SESSION_ID ?? ""}|${process.cwd()}|${args.role ?? "member"}`)
-  .digest("hex")
-  .slice(0, 16)
+// Stable private proof for reconnect adoption and authenticated launch fan-in.
+// Codex exposes CODEX_THREAD_ID rather than CLAUDE_SESSION_ID; retain the
+// historical empty-session fallback for non-drain transports, while the drain
+// CLI itself fails closed unless one of the private runtime identities exists.
+const identityToken = createSessionIdentityToken({
+  runtimeSessionIdentity: resolveRuntimeSessionIdentity() ?? CLAUDE_SESSION_ID ?? "",
+  project: process.cwd(),
+  role: args.role ?? "member",
+})
 
 const baseRegisterParams = {
   ...(REGISTER_WITH_LAUNCH_NAME ? { name: LAUNCH_NAME } : {}),
