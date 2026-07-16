@@ -280,11 +280,14 @@ describe("dispatcher session announcement recovery (@ag/tribe/21052/19442)", () 
       expect(announcements.every((content) => content.includes("@agent/6 joined (member)"))).toBe(true)
       expect(harness.sessionAnnouncements("@agent/7")).toHaveLength(1)
 
-      // Durable history is lossless: one join + one attach per reconnect.
+      // Durable history is lossless: one join + one attach per reconnect, and
+      // each disconnect records a DETACHED transition (successor r2), never a
+      // `session.left`. Only an explicit authorized leave emits `left`.
       expect(harness.sessionJoinEvents("@agent/6")).toHaveLength(1)
       expect(harness.sessionAttachedEvents("@agent/6")).toHaveLength(2)
       expect(harness.sessionJoinEvents("@agent/7")).toHaveLength(1)
-      expect(harness.sessionLeftEvents("@agent/6")).toHaveLength(2)
+      expect(harness.sessionDetachedEvents("@agent/6")).toHaveLength(2)
+      expect(harness.sessionLeftEvents("@agent/6")).toHaveLength(0)
     } finally {
       nowSpy.mockRestore()
     }
@@ -307,7 +310,9 @@ describe("dispatcher session announcement recovery (@ag/tribe/21052/19442)", () 
 
       expect(harness.sessionAnnouncements("@agent/6")).toEqual([])
       expect(harness.sessionJoinEvents("@agent/6")).toHaveLength(1)
-      expect(harness.sessionLeftEvents("@agent/6")).toHaveLength(1)
+      // Disconnect records a DETACHED transition (successor r2), not `left`.
+      expect(harness.sessionDetachedEvents("@agent/6")).toHaveLength(1)
+      expect(harness.sessionLeftEvents("@agent/6")).toHaveLength(0)
     } finally {
       nowSpy.mockRestore()
     }
@@ -458,23 +463,69 @@ describe("durable member identity (Goal 1)", () => {
     expect(harness.sessionAnnouncements("@cli-chief").length).toBe(baselineAnnouncements)
   })
 
-  it("removes the member on explicit leave", async () => {
-    const harness = createDispatcherHarness()
+  it("authorizes explicit leave: self and operator may leave, an arbitrary connection is denied (successor r2)", async () => {
+    const OPERATOR = "op-secret-xyz"
+    const harness = createDispatcherHarness({ operatorToken: OPERATOR })
     cleanup = harness.dispose
 
+    // Self-leave: the LIVE holder connection leaves itself → authorized.
+    const holder = harness.connectClient()
+    await harness.register(holder.connId, { name: "@cli-worker", pid: 9001, project: "/tmp/km-wt6" })
+    const selfLeave = parseResult<{ left: boolean; removed: number }>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "self-leave", method: "cli_leave", params: { session: "@cli-worker" } },
+        holder.connId,
+      ),
+    )
+    expect(selfLeave.left).toBe(true)
+    expect(harness.memberRowCount("@cli-worker")).toBe(0)
+
+    // A detached member to reap.
     const c = harness.connectClient()
-    await harness.register(c.connId, { name: "@cli-chief", pid: 9001, project: "/tmp/km-wt6" })
+    await harness.register(c.connId, { name: "@cli-chief", pid: 9002, project: "/tmp/km-wt6" })
     c.socket.emitClose()
     expect(harness.memberRowCount("@cli-chief")).toBe(1)
 
-    const left = parseResult<{ left: boolean; removed: number; name: string }>(
+    // Unauthorized: an arbitrary connection (not the holder, no operator token)
+    // is DENIED and the durable row survives — the r1 unowned-destruction hole.
+    const denied = parseError(
       await harness.dispatcher.handleRequest(
-        { jsonrpc: "2.0", id: "leave", method: "cli_leave", params: { session: "@cli-chief" } },
-        "conn-leave",
+        { jsonrpc: "2.0", id: "bad-leave", method: "cli_leave", params: { session: "@cli-chief" } },
+        "conn-attacker",
       ),
     )
-    expect(left.left).toBe(true)
-    expect(left.removed).toBe(1)
+    expect(denied.code).toBe(-32001)
+    expect(harness.memberRowCount("@cli-chief")).toBe(1)
+
+    // A wrong operator token is likewise denied.
+    const wrongOp = parseError(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "wrong-op",
+          method: "cli_leave",
+          params: { session: "@cli-chief", operatorToken: "not-the-secret" },
+        },
+        "conn-attacker",
+      ),
+    )
+    expect(wrongOp.code).toBe(-32001)
+    expect(harness.memberRowCount("@cli-chief")).toBe(1)
+
+    // Operator authority reaps the detached member.
+    const opLeave = parseResult<{ left: boolean; removed: number }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "op-leave",
+          method: "cli_leave",
+          params: { session: "@cli-chief", operatorToken: OPERATOR },
+        },
+        "conn-operator",
+      ),
+    )
+    expect(opLeave.left).toBe(true)
+    expect(opLeave.removed).toBe(1)
     expect(harness.memberRowCount("@cli-chief")).toBe(0)
   })
 
@@ -502,7 +553,256 @@ describe("durable member identity (Goal 1)", () => {
   })
 })
 
-function createDispatcherHarness(options: { suppressWindowMs?: number; socketStartedAt?: number } = {}) {
+describe("secure durable identity (successor r2)", () => {
+  it("denies a token-less claim of a launch-bound detached name and leaves the victim intact", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    // A managed member binds @agent/5 with a launch identity, opens its mailbox,
+    // then detaches (the durable row persists).
+    const managed = harness.connectClient()
+    const r1 = parseResult<RegisterResult>(
+      await harness.register(managed.connId, {
+        name: "@agent/5",
+        pid: 5000,
+        project: "/tmp/km-wt5",
+        launchId: "launch-abc",
+        launchParentPid: 4242,
+      }),
+    )
+    harness.sendActionable("@agent/5", "verify the build")
+    managed.socket.emitClose()
+    expect(harness.memberRowCount("@agent/5")).toBe(1)
+
+    // A token-less connection tries to inherit @agent/5 by NAME only → REJECTED.
+    const attacker = harness.connectClient()
+    const denied = parseError(await harness.register(attacker.connId, { name: "@agent/5", pid: 9999, project: "/tmp/evil" }))
+    expect(denied.code).toBe(-32001)
+    expect(denied.message).toContain("bound to a stored identity")
+
+    // The victim's durable row + sessionId + launch binding survive untouched,
+    // and the denial is journaled.
+    expect(harness.memberRowCount("@agent/5")).toBe(1)
+    expect(
+      harness.db.prepare("SELECT id, launch_id, launch_parent_pid FROM sessions WHERE name = ?").get("@agent/5"),
+    ).toMatchObject({ id: r1.sessionId, launch_id: "launch-abc", launch_parent_pid: 4242 })
+    expect(harness.sessionAttachDeniedEvents("@agent/5")).toHaveLength(1)
+
+    // The legitimate managed relaunch (matching launch identity) reclaims it.
+    const relaunch = harness.connectClient()
+    const r2 = parseResult<RegisterResult>(
+      await harness.register(relaunch.connId, {
+        name: "@agent/5",
+        pid: 5001,
+        project: "/tmp/km-wt5",
+        launchId: "launch-abc",
+        launchParentPid: 4242,
+      }),
+    )
+    expect(r2.sessionId).toBe(r1.sessionId)
+  })
+
+  it("never nulls stored provenance when a dual-bound member reattaches via one credential", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    // A member bound by BOTH an identity token AND a launch identity.
+    const first = harness.connectClient()
+    const r1 = parseResult<RegisterResult>(
+      await harness.register(first.connId, {
+        name: "@agent/8",
+        pid: 8001,
+        project: "/tmp/km-wt8",
+        identityToken: "tok-agent8",
+        launchId: "launch-8",
+        launchParentPid: 88,
+      }),
+    )
+    first.socket.emitClose()
+    expect(
+      harness.db.prepare("SELECT identity_token, launch_id, launch_parent_pid FROM sessions WHERE name = ?").get("@agent/8"),
+    ).toMatchObject({ identity_token: "tok-agent8", launch_id: "launch-8", launch_parent_pid: 88 })
+
+    // Reattach via the LAUNCH identity only (no token on this register). The
+    // launch match authorizes it — and the stored TOKEN must survive (the
+    // COALESCE guard: never overwrite a non-null stored credential with null).
+    const second = harness.connectClient()
+    const r2 = parseResult<RegisterResult>(
+      await harness.register(second.connId, {
+        name: "@agent/8",
+        pid: 8002,
+        project: "/tmp/km-wt8",
+        launchId: "launch-8",
+        launchParentPid: 88,
+      }),
+    )
+    expect(r2.sessionId).toBe(r1.sessionId)
+    expect(
+      harness.db.prepare("SELECT identity_token, launch_id, launch_parent_pid FROM sessions WHERE name = ?").get("@agent/8"),
+    ).toMatchObject({ identity_token: "tok-agent8", launch_id: "launch-8", launch_parent_pid: 88 })
+  })
+
+  it("preserves the mailbox cursor across reattach: a DM sent while detached delivers after reattach", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const first = harness.connectClient()
+    const r1 = parseResult<RegisterResult>(
+      await harness.register(first.connId, { name: "@cli-chief", pid: 7001, project: "/tmp/km-wt6" }),
+    )
+    const cursorAfterJoin = harness.inboxCursor(r1.sessionId)
+
+    // Detach, then two ordinary DMs land while the member is offline.
+    first.socket.emitClose()
+    harness.sendDirect("@cli-chief", "offline DM one")
+    harness.sendDirect("@cli-chief", "offline DM two")
+
+    // Reattach (fresh pid = CLI churn → attach-by-name on the unbound row).
+    const second = harness.connectClient()
+    const r2 = parseResult<RegisterResult>(
+      await harness.register(second.connId, { name: "@cli-chief", pid: 7002, project: "/tmp/km-wt6" }),
+    )
+    expect(r2.sessionId).toBe(r1.sessionId)
+
+    // The cursor was NOT advanced to the new tail — reset was skipped on reattach.
+    expect(harness.inboxCursor(r2.sessionId)).toBe(cursorAfterJoin)
+    // Both detached-period DMs remain deliverable past that preserved cursor.
+    expect(harness.inboxRowContents("@cli-chief", cursorAfterJoin)).toEqual(["offline DM one", "offline DM two"])
+  })
+
+  it("keeps a member's pending balls across detach/rejoin (name-keyed ownership survives)", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const first = harness.connectClient()
+    const r1 = parseResult<RegisterResult>(
+      await harness.register(first.connId, { name: "@cli-chief", pid: 7101, project: "/tmp/km-wt6" }),
+    )
+    const asker = harness.connectClient()
+    await harness.register(asker.connId, { name: "@asker", pid: 7200, project: "/tmp/km-wt7" })
+
+    // Someone opens a tracked ball owned by @cli-chief.
+    await harness.dispatcher.handleRequest(
+      {
+        jsonrpc: "2.0",
+        id: "ask",
+        method: TRIBE_COORD_METHODS.send,
+        params: { to: "@cli-chief", message: "please review", type: "request", request: true },
+      },
+      asker.connId,
+    )
+    expect(harness.pendingBallCount("@cli-chief")).toBe(1)
+
+    // Detach and reattach the owner.
+    first.socket.emitClose()
+    const second = harness.connectClient()
+    const r2 = parseResult<RegisterResult>(
+      await harness.register(second.connId, { name: "@cli-chief", pid: 7102, project: "/tmp/km-wt6" }),
+    )
+    expect(r2.sessionId).toBe(r1.sessionId)
+
+    // The ball still belongs to the reattached owner.
+    expect(harness.pendingBallCount("@cli-chief")).toBe(1)
+  })
+
+  it("fences a stale disconnect from a superseded epoch: it cannot mark the current holder detached", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    // connA owns @agent/3 (unbound, sessionId X, epoch 1).
+    const a = harness.connectClient()
+    const rA = parseResult<RegisterResult>(
+      await harness.register(a.connId, { name: "@agent/3", pid: 3001, project: "/tmp/km-wt3" }),
+    )
+    const staleClientA = harness.clients.get(a.connId)!
+    a.socket.emitClose() // connA detaches → detached #1 (epoch 1); row persists.
+    expect(harness.sessionDetachedEvents("@agent/3")).toHaveLength(1)
+
+    // connB re-owns @agent/3 under a DIFFERENT sessionId via launch-eviction (a
+    // launch identity is not a same-sessionId attach; registerSession evicts the
+    // unbound detached row and mints a fresh identity).
+    const b = harness.connectClient()
+    const rB = parseResult<RegisterResult>(
+      await harness.register(b.connId, {
+        name: "@agent/3",
+        pid: 3002,
+        project: "/tmp/km-wt3",
+        launchId: "launch-3",
+        launchParentPid: 33,
+      }),
+    )
+    expect(rB.sessionId).not.toBe(rA.sessionId)
+
+    // A late/duplicate close from the SUPERSEDED connA arrives (re-inject to model
+    // an in-flight close). The epoch fence must SUPPRESS it — no spurious detached
+    // for @agent/3, whose current holder is connB.
+    harness.clients.set(staleClientA.id, staleClientA)
+    harness.socketToClient.set(staleClientA.socket, staleClientA.id)
+    a.socket.emitClose()
+
+    // Still exactly ONE detached event (connA's legit epoch-1 detach); the stale
+    // replay added none, and connB (live) is not marked detached.
+    expect(harness.sessionDetachedEvents("@agent/3")).toHaveLength(1)
+    expect(harness.memberRowCount("@agent/3")).toBe(1)
+  })
+
+  it("denies an unauthorized inbox drain of a bound member; operator authority may drain", async () => {
+    const OPERATOR = "op-secret"
+    const harness = createDispatcherHarness({ operatorToken: OPERATOR })
+    cleanup = harness.dispose
+
+    // A launch-bound member with actionable backlog, then detached.
+    const managed = harness.connectClient()
+    await harness.register(managed.connId, {
+      name: "@agent/9",
+      pid: 9001,
+      project: "/tmp/km-wt9",
+      launchId: "launch-9",
+      launchParentPid: 900,
+    })
+    harness.sendActionable("@agent/9", "first ask")
+    harness.sendActionable("@agent/9", "second ask")
+    managed.socket.emitClose()
+
+    // An attacker (no holder connection, no operator token, no credentials) tries
+    // to drain @agent/9's actionable inbox → denied.
+    const denied = parseError(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "steal-drain", method: "cli_inbox_drain", params: { session: "@agent/9", limit: 10 } },
+        "conn-attacker",
+      ),
+    )
+    expect(denied.code).toBe(-32001)
+
+    // The victim's mailbox cursor is untouched — both actionables remain unread.
+    const status = parseResult<{ unread_count: number }>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "st", method: "cli_inbox_status", params: { session: "@agent/9" } },
+        "conn-probe",
+      ),
+    )
+    expect(status.unread_count).toBe(2)
+
+    // Operator authority (e.g. the chief harness holding the secret) may drain.
+    const drained = parseResult<InboxDrainResult>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "op-drain",
+          method: "cli_inbox_drain",
+          params: { session: "@agent/9", limit: 10, operatorToken: OPERATOR },
+        },
+        "conn-operator",
+      ),
+    )
+    expect(drained.drained_count).toBe(2)
+    expect(drained.unread_count).toBe(0)
+  })
+})
+
+function createDispatcherHarness(
+  options: { suppressWindowMs?: number; socketStartedAt?: number; operatorToken?: string } = {},
+) {
   const tempDir = mkdtempSync(join(tmpdir(), "tribe-dispatcher-"))
   const scope = createScope("dispatcher-self-registration-test")
   const db = openDatabase(join(tempDir, "tribe.sqlite"))
@@ -612,22 +912,37 @@ function createDispatcherHarness(options: { suppressWindowMs?: number; socketSta
       handedOff: false,
     },
   }
-  const daemon = withDispatcher({ suppressWindowMs: options.suppressWindowMs ?? Number.MAX_SAFE_INTEGER })(shape)
+  const daemon = withDispatcher({
+    suppressWindowMs: options.suppressWindowMs ?? Number.MAX_SAFE_INTEGER,
+    getOperatorToken: () => options.operatorToken ?? null,
+  })(shape)
 
   return {
     dispatcher: daemon.dispatcher,
-    register(connId: string, params: { name: string; pid: number; project: string }) {
+    register(
+      connId: string,
+      params: {
+        name: string
+        pid: number
+        project: string
+        identityToken?: string
+        launchId?: string
+        launchParentPid?: number
+        delivery?: "push" | "pull"
+      },
+    ) {
+      const { delivery, ...rest } = params
       const req: JsonRpcRequest = {
         jsonrpc: "2.0",
         id: `register-${connId}`,
         method: "register",
         params: {
-          ...params,
           role: "member",
           projectName: "km-wt9",
           projectId: "test-project",
-          delivery: "pull",
+          delivery: delivery ?? "pull",
           protocolVersion: TRIBE_PROTOCOL_VERSION,
+          ...rest,
         },
       }
       return daemon.dispatcher.handleRequest(req, connId)
@@ -669,6 +984,45 @@ function createDispatcherHarness(options: { suppressWindowMs?: number; socketSta
         .prepare("SELECT content FROM messages WHERE type = 'event.session.attached' ORDER BY ts ASC, id ASC")
         .all() as Array<{ content: string }>
       return rows.map((row) => JSON.parse(row.content) as { name: string }).filter((event) => event.name === name)
+    },
+    sessionDetachedEvents(name: string): Array<{ name: string; epoch?: number }> {
+      const rows = db
+        .prepare("SELECT content FROM messages WHERE type = 'event.session.detached' ORDER BY ts ASC, id ASC")
+        .all() as Array<{ content: string }>
+      return rows
+        .map((row) => JSON.parse(row.content) as { name: string; epoch?: number })
+        .filter((event) => event.name === name)
+    },
+    sessionAttachDeniedEvents(name: string): Array<{ name: string; reason: string }> {
+      const rows = db
+        .prepare("SELECT content FROM messages WHERE type = 'event.session.attach_denied' ORDER BY ts ASC, id ASC")
+        .all() as Array<{ content: string }>
+      return rows
+        .map((row) => JSON.parse(row.content) as { name: string; reason: string })
+        .filter((event) => event.name === name)
+    },
+    /** White-box access for stale-close / epoch-fence / cursor regressions. */
+    clients,
+    socketToClient,
+    db,
+    stmts,
+    /** Per-session ordinary-inbox pull cursor (last_inbox_pull_seq). */
+    inboxCursor(sessionId: string): number {
+      const row = stmts.getInboxCursor.get({ $id: sessionId }) as { last_inbox_pull_seq: number } | undefined
+      return row?.last_inbox_pull_seq ?? -1
+    },
+    /** Ordinary (non-actionable) inbox rows deliverable to a name past `since`. */
+    inboxRowContents(name: string, since: number): string[] {
+      const rows = stmts.getInboxRows.all({ $name: name, $since: since, $limit: 100 }) as Array<{ content: string }>
+      return rows.map((r) => r.content)
+    },
+    /** Open ball count for a recipient (name-keyed pending_request rows). */
+    pendingBallCount(recipient: string): number {
+      const rows = stmts.selectPendingForRecipient.all({ $recipient: recipient }) as unknown[]
+      return rows.length
+    },
+    sendDirect(recipient: string, content: string, type = "notify") {
+      sendMessage(daemonCtx, recipient, content, type, undefined, undefined, "direct")
     },
     /** Count of durable `sessions` rows currently holding this exact name. */
     memberRowCount(name: string): number {
