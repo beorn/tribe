@@ -23,6 +23,9 @@ type RegisterResult = {
   sessionId: string
   name: string
   role: TribeRole
+  // The server-minted capability, issued on this authenticated connection. The
+  // client persists it and presents it on every future attach/authority op.
+  capability: string
 }
 
 type CliStatusResult = {
@@ -189,24 +192,25 @@ describe("dispatcher bounded mailbox drain", () => {
     cleanup = harness.dispose
 
     const launch = { launchId: "launch-agent-3", launchParentPid: 4242 }
-    const identityToken = "private-runtime-agent-3"
     const holderSocket = harness.addPendingClient("conn-holder")
+    // The holder's first register mints the capability and returns it here.
     const holder = parseResult<RegisterResult>(
       await harness.register("conn-holder", {
         name: "@agent/3",
         pid: liveHolderPid,
         project: "/tmp/km-wt3",
-        identityToken,
         ...launch,
       }),
     )
+    expect(holder.capability).toMatch(/^[0-9a-f]{64}$/)
     harness.addPendingClient("conn-drain")
+    // The drain transport fans in by presenting the holder's capability.
     const drainTransport = parseResult<RegisterResult>(
       await harness.register("conn-drain", {
         name: "@agent/3",
         pid: otherLivePid,
         project: "/tmp/km-wt3",
-        identityToken,
+        capability: holder.capability,
         ...launch,
       }),
     )
@@ -252,29 +256,26 @@ describe("dispatcher bounded mailbox drain", () => {
     cleanup = harness.dispose
 
     const launch = { launchId: "public-launch-agent-3", launchParentPid: 4242 }
-    const victimIdentityToken = "private-runtime-agent-3"
     harness.addPendingClient("conn-victim")
     const victim = parseResult<RegisterResult>(
       await harness.register("conn-victim", {
         name: "@agent/3",
         pid: liveHolderPid,
         project: "/tmp/km-wt3",
-        identityToken: victimIdentityToken,
         ...launch,
       }),
     )
     harness.sendActionable("@agent/3", "victim request must remain unread")
 
     // The attacker knows the PUBLIC launch tuple (readable via tribe.debug) but
-    // NOT the victim's private token; replaying the tuple fails the live-holder
-    // name conflict (no fan-in without the token).
+    // NOT the victim's server-minted capability (never projected); replaying the
+    // tuple fails the live-holder name conflict (no fan-in without the capability).
     harness.addPendingClient("conn-attacker")
     const stolenTuple = parseError(
       await harness.register("conn-attacker", {
         name: "@agent/3",
         pid: otherLivePid,
         project: "/tmp/km-wt8",
-        identityToken: "private-runtime-agent-8",
         ...launch,
       }),
     )
@@ -301,14 +302,14 @@ describe("dispatcher bounded mailbox drain", () => {
     )
     expect(afterAttack.unread_count).toBe(1)
 
-    // The legitimate holder (matching private token) fans in and drains.
+    // The legitimate holder (presenting the victim's capability) fans in + drains.
     harness.addPendingClient("conn-legitimate-drain")
     const legitimate = parseResult<RegisterResult>(
       await harness.register("conn-legitimate-drain", {
         name: "@agent/3",
         pid: otherLivePid + 1,
         project: "/tmp/km-wt3",
-        identityToken: victimIdentityToken,
+        capability: victim.capability,
         ...launch,
       }),
     )
@@ -386,21 +387,21 @@ describe("dispatcher bounded mailbox drain", () => {
     cleanup = harness.dispose
 
     const launch = { launchId: "launch-agent-3", launchParentPid: 4242 }
-    const identityToken = "private-runtime-agent-3"
     harness.addPendingClient("conn-holder")
-    await harness.register("conn-holder", {
-      name: "@agent/3",
-      pid: liveHolderPid,
-      project: "/tmp/km-wt3",
-      identityToken,
-      ...launch,
-    })
+    const holder = parseResult<RegisterResult>(
+      await harness.register("conn-holder", {
+        name: "@agent/3",
+        pid: liveHolderPid,
+        project: "/tmp/km-wt3",
+        ...launch,
+      }),
+    )
     harness.addPendingClient("conn-drain")
     await harness.register("conn-drain", {
       name: "@agent/3",
       pid: otherLivePid,
       project: "/tmp/km-wt3",
-      identityToken,
+      capability: holder.capability,
       ...launch,
     })
     harness.sendActionable("@agent/3", "forged daemon request", {
@@ -457,21 +458,23 @@ describe("dispatcher session announcement recovery (@ag/tribe/21052/19442)", () 
       cleanup = harness.dispose
 
       // The daemon-start window has elapsed, so this exercises live adapter
-      // churn rather than startup suppression.
+      // churn rather than startup suppression. The first register mints the
+      // capability; each reconnect re-presents it (a durable-identity reattach).
       const first = harness.connectClient()
       const r1 = await registerMember(harness, first.connId, "@agent/6")
+      const cap6 = r1.capability
       now += 5_000
       first.socket.emitClose()
 
       now += 5_000
       const second = harness.connectClient()
-      const r2 = await registerMember(harness, second.connId, "@agent/6")
+      const r2 = await registerMember(harness, second.connId, "@agent/6", cap6)
       now += 5_000
       second.socket.emitClose()
 
       now += 10_000
       const stable = harness.connectClient()
-      const r3 = await registerMember(harness, stable.connId, "@agent/6")
+      const r3 = await registerMember(harness, stable.connId, "@agent/6", cap6)
       const independent = harness.connectClient()
       await registerMember(harness, independent.connId, "@agent/7")
 
@@ -623,10 +626,16 @@ describe("durable member identity (Goal 1)", () => {
     )
     expect(status.unread_count).toBeGreaterThanOrEqual(1)
 
-    // Reconnecting (fresh pid = true CLI churn) re-attaches to the SAME member.
+    // Reconnecting (fresh pid = true CLI churn) presents the capability and
+    // re-attaches to the SAME member.
     const second = harness.connectClient()
     const r2 = parseResult<RegisterResult>(
-      await harness.register(second.connId, { name: "@cli-chief", pid: 7002, project: "/tmp/km-wt6" }),
+      await harness.register(second.connId, {
+        name: "@cli-chief",
+        pid: 7002,
+        project: "/tmp/km-wt6",
+        capability: r1.capability,
+      }),
     )
     expect(r2.sessionId).toBe(r1.sessionId)
     expect(harness.memberRowCount("@cli-chief")).toBe(1)
@@ -646,11 +655,17 @@ describe("durable member identity (Goal 1)", () => {
     est.socket.emitClose()
     const baselineAnnouncements = harness.sessionAnnouncements("@cli-chief").length
 
-    // 3 CLI-style cycles, a FRESH pid each (no pid+cwd adoption → attach-by-name).
+    // 3 CLI-style cycles, a FRESH pid each (no pid+cwd adoption → attach-by-name);
+    // each presents the member's capability to re-attach.
     for (let i = 0; i < 3; i++) {
       const c = harness.connectClient()
       const res = parseResult<RegisterResult>(
-        await harness.register(c.connId, { name: "@cli-chief", pid: 8100 + i, project: "/tmp/km-wt6" }),
+        await harness.register(c.connId, {
+          name: "@cli-chief",
+          pid: 8100 + i,
+          project: "/tmp/km-wt6",
+          capability: established.capability,
+        }),
       )
       expect(res.sessionId).toBe(established.sessionId)
       await harness.dispatcher.handleRequest(
@@ -761,66 +776,81 @@ describe("durable member identity (Goal 1)", () => {
 })
 
 describe("secure durable identity (successor r2)", () => {
-  it("denies a token-less OR forged-tuple claim of a token-bound detached name and leaves the victim intact", async () => {
+  it("denies a capability-less / forged-hint / wrong-capability claim of a bound detached name; victim intact", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
 
-    // A managed member binds @agent/5 with its PRIVATE token (+ a public launch
-    // tuple), opens its mailbox, then detaches (the durable row persists).
+    // A managed member registers @agent/5 → the daemon MINTS its capability and
+    // returns it here. Then it opens its mailbox and detaches.
     const managed = harness.connectClient()
     const r1 = parseResult<RegisterResult>(
       await harness.register(managed.connId, {
         name: "@agent/5",
         pid: 5000,
         project: "/tmp/km-wt5",
-        identityToken: "private-runtime-agent-5",
         launchId: "launch-abc",
         launchParentPid: 4242,
       }),
     )
+    const cap = r1.capability
+    expect(cap).toMatch(/^[0-9a-f]{64}$/)
     harness.sendActionable("@agent/5", "verify the build")
     managed.socket.emitClose()
     expect(harness.memberRowCount("@agent/5")).toBe(1)
 
-    // A token-less connection tries to inherit @agent/5 by NAME only → REJECTED.
+    // A capability-less connection tries to inherit @agent/5 by NAME only → REJECTED.
     const attacker = harness.connectClient()
     const denied = parseError(
       await harness.register(attacker.connId, { name: "@agent/5", pid: 9999, project: "/tmp/evil" }),
     )
     expect(denied.code).toBe(-32001)
-    expect(denied.message).toContain("bound to a stored identity")
+    expect(denied.message).toContain("server-minted capability")
 
-    // A connection replaying the PUBLIC launch tuple but not the private token is
-    // ALSO rejected — the tuple is a locator (readable via tribe.debug), never an
-    // authenticator.
+    // Replaying the PUBLIC launch tuple + a harvested derived token but NOT the
+    // capability is ALSO rejected — those are locators, never authority.
     const tupleForger = harness.connectClient()
-    const tupleDenied = parseError(
-      await harness.register(tupleForger.connId, {
-        name: "@agent/5",
-        pid: 9998,
-        project: "/tmp/evil",
-        identityToken: "wrong-token",
-        launchId: "launch-abc",
-        launchParentPid: 4242,
-      }),
-    )
-    expect(tupleDenied.code).toBe(-32001)
-
-    // The victim's durable row + sessionId + token + launch binding survive.
-    expect(harness.memberRowCount("@agent/5")).toBe(1)
     expect(
-      harness.db.prepare("SELECT id, identity_token, launch_id FROM sessions WHERE name = ?").get("@agent/5"),
-    ).toMatchObject({ id: r1.sessionId, identity_token: "private-runtime-agent-5", launch_id: "launch-abc" })
-    expect(harness.sessionAttachDeniedEvents("@agent/5")).toHaveLength(2)
+      parseError(
+        await harness.register(tupleForger.connId, {
+          name: "@agent/5",
+          pid: 9998,
+          project: "/tmp/evil",
+          identityToken: "harvested-derived-token",
+          launchId: "launch-abc",
+          launchParentPid: 4242,
+        }),
+      ).code,
+    ).toBe(-32001)
 
-    // The legitimate managed relaunch (matching PRIVATE token) reclaims it.
+    // Presenting a WRONG capability is rejected too.
+    const wrongCap = harness.connectClient()
+    expect(
+      parseError(
+        await harness.register(wrongCap.connId, {
+          name: "@agent/5",
+          pid: 9997,
+          project: "/tmp/evil",
+          capability: "0".repeat(64),
+        }),
+      ).code,
+    ).toBe(-32001)
+
+    // The victim's durable row + sessionId + capability survive untouched.
+    expect(harness.memberRowCount("@agent/5")).toBe(1)
+    expect(harness.db.prepare("SELECT id, capability FROM sessions WHERE name = ?").get("@agent/5")).toMatchObject({
+      id: r1.sessionId,
+      capability: cap,
+    })
+    expect(harness.sessionAttachDeniedEvents("@agent/5")).toHaveLength(3)
+
+    // The legitimate relaunch (presenting the capability) reclaims it.
     const relaunch = harness.connectClient()
     const r2 = parseResult<RegisterResult>(
       await harness.register(relaunch.connId, {
         name: "@agent/5",
         pid: 5001,
         project: "/tmp/km-wt5",
-        identityToken: "private-runtime-agent-5",
+        capability: cap,
         launchId: "launch-abc",
         launchParentPid: 4242,
       }),
@@ -828,18 +858,17 @@ describe("secure durable identity (successor r2)", () => {
     expect(r2.sessionId).toBe(r1.sessionId)
   })
 
-  it("never nulls launch provenance when a dual-bound member reattaches via token only", async () => {
+  it("never nulls launch provenance when a member reattaches via capability only", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
 
-    // A member bound by BOTH its private token AND a launch identity.
+    // A managed member registers @agent/8 with a launch tuple → mints capability.
     const first = harness.connectClient()
     const r1 = parseResult<RegisterResult>(
       await harness.register(first.connId, {
         name: "@agent/8",
         pid: 8001,
         project: "/tmp/km-wt8",
-        identityToken: "tok-agent8",
         launchId: "launch-8",
         launchParentPid: 88,
       }),
@@ -847,29 +876,28 @@ describe("secure durable identity (successor r2)", () => {
     first.socket.emitClose()
     expect(
       harness.db
-        .prepare("SELECT identity_token, launch_id, launch_parent_pid FROM sessions WHERE name = ?")
+        .prepare("SELECT capability, launch_id, launch_parent_pid FROM sessions WHERE name = ?")
         .get("@agent/8"),
-    ).toMatchObject({ identity_token: "tok-agent8", launch_id: "launch-8", launch_parent_pid: 88 })
+    ).toMatchObject({ capability: r1.capability, launch_id: "launch-8", launch_parent_pid: 88 })
 
-    // Reattach as a pure-CLI connection: present the TOKEN (the authenticator) but
-    // NO launch tuple. Token match authorizes it, and the stored LAUNCH binding
-    // must survive (the COALESCE guard: never overwrite a non-null stored field
-    // with null).
+    // Reattach as a pure-CLI connection: present the CAPABILITY (the authenticator)
+    // but NO launch tuple. The stored LAUNCH binding + capability must survive (the
+    // COALESCE guard: never overwrite a non-null stored field with null).
     const second = harness.connectClient()
     const r2 = parseResult<RegisterResult>(
       await harness.register(second.connId, {
         name: "@agent/8",
         pid: 8002,
         project: "/tmp/km-wt8",
-        identityToken: "tok-agent8",
+        capability: r1.capability,
       }),
     )
     expect(r2.sessionId).toBe(r1.sessionId)
     expect(
       harness.db
-        .prepare("SELECT identity_token, launch_id, launch_parent_pid FROM sessions WHERE name = ?")
+        .prepare("SELECT capability, launch_id, launch_parent_pid FROM sessions WHERE name = ?")
         .get("@agent/8"),
-    ).toMatchObject({ identity_token: "tok-agent8", launch_id: "launch-8", launch_parent_pid: 88 })
+    ).toMatchObject({ capability: r1.capability, launch_id: "launch-8", launch_parent_pid: 88 })
   })
 
   it("preserves the mailbox cursor across reattach: a DM sent while detached delivers after reattach", async () => {
@@ -887,10 +915,15 @@ describe("secure durable identity (successor r2)", () => {
     harness.sendDirect("@cli-chief", "offline DM one")
     harness.sendDirect("@cli-chief", "offline DM two")
 
-    // Reattach (fresh pid = CLI churn → attach-by-name on the unbound row).
+    // Reattach (fresh pid = CLI churn) presenting the capability.
     const second = harness.connectClient()
     const r2 = parseResult<RegisterResult>(
-      await harness.register(second.connId, { name: "@cli-chief", pid: 7002, project: "/tmp/km-wt6" }),
+      await harness.register(second.connId, {
+        name: "@cli-chief",
+        pid: 7002,
+        project: "/tmp/km-wt6",
+        capability: r1.capability,
+      }),
     )
     expect(r2.sessionId).toBe(r1.sessionId)
 
@@ -923,11 +956,16 @@ describe("secure durable identity (successor r2)", () => {
     )
     expect(harness.pendingBallCount("@cli-chief")).toBe(1)
 
-    // Detach and reattach the owner.
+    // Detach and reattach the owner (presenting its capability).
     first.socket.emitClose()
     const second = harness.connectClient()
     const r2 = parseResult<RegisterResult>(
-      await harness.register(second.connId, { name: "@cli-chief", pid: 7102, project: "/tmp/km-wt6" }),
+      await harness.register(second.connId, {
+        name: "@cli-chief",
+        pid: 7102,
+        project: "/tmp/km-wt6",
+        capability: r1.capability,
+      }),
     )
     expect(r2.sessionId).toBe(r1.sessionId)
 
@@ -939,7 +977,7 @@ describe("secure durable identity (successor r2)", () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
 
-    // connA owns @agent/3 (unbound, sessionId X, epoch 1).
+    // connA owns @agent/3 (epoch 1, sessionId X); the daemon minted its capability.
     const a = harness.connectClient()
     const rA = parseResult<RegisterResult>(
       await harness.register(a.connId, { name: "@agent/3", pid: 3001, project: "/tmp/km-wt3" }),
@@ -948,31 +986,30 @@ describe("secure durable identity (successor r2)", () => {
     a.socket.emitClose() // connA detaches → detached #1 (epoch 1); row persists.
     expect(harness.sessionDetachedEvents("@agent/3")).toHaveLength(1)
 
-    // connB re-owns @agent/3 under a DIFFERENT sessionId via launch-eviction (a
-    // launch identity is not a same-sessionId attach; registerSession evicts the
-    // unbound detached row and mints a fresh identity).
+    // connB reattaches @agent/3 WITH the capability (epoch 2, SAME sessionId), then
+    // detaches → detached #2 (epoch 2). The durable row now carries epoch 2.
     const b = harness.connectClient()
     const rB = parseResult<RegisterResult>(
       await harness.register(b.connId, {
         name: "@agent/3",
         pid: 3002,
         project: "/tmp/km-wt3",
-        launchId: "launch-3",
-        launchParentPid: 33,
+        capability: rA.capability,
       }),
     )
-    expect(rB.sessionId).not.toBe(rA.sessionId)
+    expect(rB.sessionId).toBe(rA.sessionId)
+    b.socket.emitClose()
+    expect(harness.sessionDetachedEvents("@agent/3")).toHaveLength(2)
 
-    // A late/duplicate close from the SUPERSEDED connA arrives (re-inject to model
-    // an in-flight close). The epoch fence must SUPPRESS it — no spurious detached
-    // for @agent/3, whose current holder is connB.
+    // A late/duplicate close from the SUPERSEDED epoch-1 connA arrives (re-inject to
+    // model an in-flight close). The epoch fence must SUPPRESS it — the durable row
+    // carries epoch 2, so the stale epoch-1 close records NO further detached.
     harness.clients.set(staleClientA.id, staleClientA)
     harness.socketToClient.set(staleClientA.socket, staleClientA.id)
     a.socket.emitClose()
 
-    // Still exactly ONE detached event (connA's legit epoch-1 detach); the stale
-    // replay added none, and connB (live) is not marked detached.
-    expect(harness.sessionDetachedEvents("@agent/3")).toHaveLength(1)
+    // Still exactly TWO detached events (epoch 1 + epoch 2); the stale replay added none.
+    expect(harness.sessionDetachedEvents("@agent/3")).toHaveLength(2)
     expect(harness.memberRowCount("@agent/3")).toBe(1)
   })
 
@@ -1029,15 +1066,23 @@ describe("secure durable identity (successor r2)", () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
 
-    // connA is the epoch-1 holder of @cli-worker; capture it, then detach.
+    // connA is the epoch-1 holder of @cli-worker; capture it + its capability, detach.
     const a = harness.connectClient()
-    await harness.register(a.connId, { name: "@cli-worker", pid: 3001, project: "/tmp/km-wtw" })
+    const rA = parseResult<RegisterResult>(
+      await harness.register(a.connId, { name: "@cli-worker", pid: 3001, project: "/tmp/km-wtw" }),
+    )
     const staleA = harness.clients.get(a.connId)!
     a.socket.emitClose()
 
-    // connB reattaches @cli-worker (epoch 2, same member) — advancing the epoch.
+    // connB reattaches @cli-worker WITH the capability (epoch 2, same member) —
+    // advancing the epoch and demoting connA.
     const b = harness.connectClient()
-    await harness.register(b.connId, { name: "@cli-worker", pid: 3002, project: "/tmp/km-wtw" })
+    await harness.register(b.connId, {
+      name: "@cli-worker",
+      pid: 3002,
+      project: "/tmp/km-wtw",
+      capability: rA.capability,
+    })
 
     // Re-inject the stale epoch-1 connection; it no longer carries authority.
     harness.clients.set(staleA.id, staleA)
@@ -1067,6 +1112,168 @@ describe("secure durable identity (successor r2)", () => {
     )
     expect(bLeave.left).toBe(true)
     expect(harness.memberRowCount("@cli-worker")).toBe(0)
+  })
+
+  it("two forgers cannot both bootstrap an unbound name — the first is issued the secret, the rest are denied", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    // @legacy-chief is UNBOUND (no stored capability, no live holder) — the
+    // trust-on-first-use migration boundary. RESIDUAL LEGACY RISK (documented):
+    // the FIRST registrant wins and is issued the minted capability.
+    const forgerA = harness.connectClient()
+    const a = parseResult<RegisterResult>(
+      await harness.register(forgerA.connId, { name: "@legacy-chief", pid: 1001, project: "/tmp/km-wtA" }),
+    )
+    expect(a.capability).toMatch(/^[0-9a-f]{64}$/)
+
+    // A second forger cannot ALSO bootstrap: @legacy-chief now has a live holder.
+    const forgerB = harness.connectClient()
+    expect(
+      parseError(await harness.register(forgerB.connId, { name: "@legacy-chief", pid: 1002, project: "/tmp/km-wtB" }))
+        .code,
+    ).toBe(-32000)
+
+    // Even after forgerA detaches, a capability-less forger cannot claim the now-BOUND row.
+    forgerA.socket.emitClose()
+    const forgerB2 = harness.connectClient()
+    expect(
+      parseError(await harness.register(forgerB2.connId, { name: "@legacy-chief", pid: 1003, project: "/tmp/km-wtB" }))
+        .code,
+    ).toBe(-32001)
+
+    // Only the party the daemon issued the secret to can reattach.
+    const legit = harness.connectClient()
+    const r = parseResult<RegisterResult>(
+      await harness.register(legit.connId, {
+        name: "@legacy-chief",
+        pid: 1004,
+        project: "/tmp/km-wtA",
+        capability: a.capability,
+      }),
+    )
+    expect(r.sessionId).toBe(a.sessionId)
+  })
+
+  it("holder close with two competing fan-ins resolves to exactly one authorized successor", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const launch = { launchId: "launch-7", launchParentPid: 77 }
+    const holder = harness.connectClient()
+    const h = parseResult<RegisterResult>(
+      await harness.register(holder.connId, { name: "@agent/7", pid: 7001, project: "/tmp/km-wt7", ...launch }),
+    )
+
+    // Two transports race to fan in. T1 presents the CORRECT capability → fans into
+    // the holder's session. T2 presents a WRONG capability → no fan-in → conflict.
+    const t1 = harness.connectClient()
+    const r1 = parseResult<RegisterResult>(
+      await harness.register(t1.connId, {
+        name: "@agent/7",
+        pid: 7002,
+        project: "/tmp/km-wt7",
+        capability: h.capability,
+        ...launch,
+      }),
+    )
+    expect(r1.sessionId).toBe(h.sessionId)
+
+    const t2 = harness.connectClient()
+    expect(
+      parseError(
+        await harness.register(t2.connId, {
+          name: "@agent/7",
+          pid: 7003,
+          project: "/tmp/km-wt7",
+          capability: "f".repeat(64),
+          ...launch,
+        }),
+      ).code,
+    ).toBe(-32000)
+
+    // Exactly ONE session identity survived the race.
+    expect(harness.memberRowCount("@agent/7")).toBe(1)
+    expect(harness.sessionCount("@agent/7")).toBe(1)
+
+    // The holder closes; the ONE authorized successor (t1) still holds authority —
+    // it is the current-epoch holder and can self-leave.
+    holder.socket.emitClose()
+    expect(harness.memberRowCount("@agent/7")).toBe(1)
+    const t1Leave = parseResult<{ left: boolean }>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "t1-leave", method: "cli_leave", params: { session: "@agent/7" } },
+        t1.connId,
+      ),
+    )
+    expect(t1Leave.left).toBe(true)
+    expect(harness.memberRowCount("@agent/7")).toBe(0)
+  })
+
+  it("never projects the capability through members / status / debug surfaces", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const holder = harness.connectClient()
+    const h = parseResult<RegisterResult>(
+      await harness.register(holder.connId, { name: "@agent/1", pid: 1001, project: "/tmp/km-wt1" }),
+    )
+    const cap = h.capability
+    expect(cap).toMatch(/^[0-9a-f]{64}$/)
+
+    // The capability must appear in NO projected/broadcast surface.
+    for (const method of ["cli_status", "cli_health", TRIBE_COORD_METHODS.members, TRIBE_COORD_METHODS.debug]) {
+      const raw = await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: `proj-${method}`, method, params: {} },
+        holder.connId,
+      )
+      expect(raw).not.toContain(cap)
+    }
+    // Nor in any broadcast/journal row (session events, activity).
+    const journal = harness.db.prepare("SELECT content FROM messages").all() as Array<{ content: string }>
+    for (const row of journal) expect(row.content).not.toContain(cap)
+  })
+
+  it("denies a drain when the caller's durable row is missing (no unbound-target bypass)", async () => {
+    const harness = createDispatcherHarness({ operatorToken: "op-secret" })
+    cleanup = harness.dispose
+
+    const launch = { launchId: "launch-4", launchParentPid: 44 }
+    const holder = harness.connectClient()
+    const h = parseResult<RegisterResult>(
+      await harness.register(holder.connId, { name: "@agent/4", pid: 4001, project: "/tmp/km-wt4", ...launch }),
+    )
+    const drainer = harness.connectClient()
+    await harness.register(drainer.connId, {
+      name: "@agent/4",
+      pid: 4002,
+      project: "/tmp/km-wt4",
+      capability: h.capability,
+      ...launch,
+    })
+
+    // Operator reaps the durable row out from under the transports.
+    await harness.dispatcher.handleRequest(
+      {
+        jsonrpc: "2.0",
+        id: "op-leave",
+        method: "cli_leave",
+        params: { session: "@agent/4", operatorToken: "op-secret" },
+      },
+      "conn-op",
+    )
+    expect(harness.memberRowCount("@agent/4")).toBe(0)
+
+    // The drain now finds NO authenticated current holder → denied. The drain
+    // target derives SOLELY from the authenticated holder connection; there is no
+    // missing/unbound-target OK path.
+    const denied = parseError(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "drain-missing", method: "cli_inbox_drain", params: {} },
+        drainer.connId,
+      ),
+    )
+    expect(denied.code).toBe(-32001)
   })
 })
 
@@ -1199,6 +1406,7 @@ function createDispatcherHarness(
         identityToken?: string
         launchId?: string
         launchParentPid?: number
+        capability?: string
         delivery?: "push" | "pull"
       },
     ) {
@@ -1401,12 +1609,14 @@ async function registerMember(
   harness: ReturnType<typeof createDispatcherHarness>,
   connId: string,
   name: string,
+  capability?: string,
 ): Promise<RegisterResult> {
   return parseResult<RegisterResult>(
     await harness.register(connId, {
       name,
       pid: liveHolderPid,
       project: "/tmp/km-wt6",
+      ...(capability ? { capability } : {}),
     }),
   )
 }

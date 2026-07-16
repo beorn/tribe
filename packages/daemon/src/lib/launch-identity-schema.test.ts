@@ -67,9 +67,10 @@ describe("session launch identity schema (migration v19)", () => {
         db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_sessions_launch_identity'").get(),
       ).toEqual({ name: "idx_sessions_launch_identity" })
       // Latest schema version — advances as migrations are appended (v20 added
-      // the durable-identity connection_epoch column). Opening a v18 database
-      // runs every pending migration through the current head.
-      expect(db.prepare("SELECT value FROM _schema_meta WHERE key='version'").get()).toEqual({ value: "20" })
+      // the durable-identity connection_epoch column; v21 added the server-minted
+      // `capability`). Opening a v18 database runs every pending migration
+      // through the current head.
+      expect(db.prepare("SELECT value FROM _schema_meta WHERE key='version'").get()).toEqual({ value: "21" })
     } finally {
       db.close()
     }

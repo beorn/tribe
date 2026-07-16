@@ -103,6 +103,7 @@ export function registerSession(
   launchId?: string | null,
   launchParentPid?: number | null,
   attach = false,
+  capability?: string | null,
 ): void {
   const desiredName = ctx.getName()
   const now = Date.now()
@@ -179,6 +180,7 @@ export function registerSession(
       $identity_token: identityToken ?? null,
       $launch_id: launchId ?? null,
       $launch_parent_pid: launchParentPid ?? null,
+      $capability: capability ?? null,
       $now: now,
       $delivery: delivery ?? "push",
       $account: account ?? null,

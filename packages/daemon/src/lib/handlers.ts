@@ -1220,6 +1220,7 @@ function handleRepair(ctx: TribeContext, a: ToolArgs): ToolResult {
       $identity_token: null,
       $launch_id: null,
       $launch_parent_pid: null,
+      $capability: null,
       $now: now,
       $delivery: "pull",
       $account: null,

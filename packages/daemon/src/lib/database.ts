@@ -37,7 +37,8 @@ export function openDatabase(path: string): Database {
 		delivery     TEXT NOT NULL DEFAULT 'push',
 		account    TEXT,
 		provider   TEXT,
-		connection_epoch INTEGER NOT NULL DEFAULT 0
+		connection_epoch INTEGER NOT NULL DEFAULT 0,
+		capability TEXT
 	)`)
 
   // Migrations table — tracks schema version so we can evolve the DB without
@@ -787,6 +788,25 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 21,
+    name: "session-capability",
+    up(db) {
+      // Secure identity — the daemon mints a random opaque `capability` at
+      // register/launch (never derived, never projected) and requires it back on
+      // every authority-bearing op. This column stores it server-side. Existing
+      // rows get NULL: they are legacy/unbound and follow the trust-on-first-use
+      // migration path — the first reconnect with no live holder mints and is
+      // issued the capability. Fresh installs get the column from the CREATE
+      // TABLE block; existing databases get it here.
+      const cols = new Set(
+        (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>).map((row) => row.name),
+      )
+      if (!cols.has("capability")) {
+        db.run("ALTER TABLE sessions ADD COLUMN capability TEXT")
+      }
+    },
+  },
 ]
 
 // ---------------------------------------------------------------------------
@@ -808,8 +828,8 @@ export type TribeStatements = ReturnType<typeof createStatements>
 export function createStatements(db: Database) {
   return {
     upsertSession: db.prepare(`
-		INSERT INTO sessions (id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, identity_token, launch_id, launch_parent_pid, started_at, updated_at, delivery, account, provider)
-		VALUES ($id, $name, $role, $domains, $pid, $cwd, $project_id, $claude_session_id, $claude_session_name, $identity_token, $launch_id, $launch_parent_pid, $now, $now, COALESCE($delivery, 'push'), $account, $provider)
+		INSERT INTO sessions (id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, identity_token, launch_id, launch_parent_pid, capability, started_at, updated_at, delivery, account, provider)
+		VALUES ($id, $name, $role, $domains, $pid, $cwd, $project_id, $claude_session_id, $claude_session_name, $identity_token, $launch_id, $launch_parent_pid, $capability, $now, $now, COALESCE($delivery, 'push'), $account, $provider)
 		ON CONFLICT(id) DO UPDATE SET
 			name = $name, role = $role, domains = $domains,
 			pid = $pid, cwd = $cwd, project_id = $project_id, claude_session_id = $claude_session_id,
@@ -817,6 +837,7 @@ export function createStatements(db: Database) {
 			identity_token = COALESCE($identity_token, identity_token),
 			launch_id = COALESCE($launch_id, launch_id),
 			launch_parent_pid = COALESCE($launch_parent_pid, launch_parent_pid),
+			capability = COALESCE($capability, capability),
 			started_at = $now, updated_at = $now,
 			delivery = COALESCE($delivery, delivery, 'push'),
 			account = COALESCE($account, account),
@@ -938,8 +959,13 @@ export function createStatements(db: Database) {
      * attach path can only compare the claimed name — the r1 hole this closes.
      */
     getDurableSessionByName: db.prepare(
-      "SELECT id, role, connection_epoch, identity_token, launch_id, launch_parent_pid FROM sessions WHERE name = $name LIMIT 1",
+      "SELECT id, role, connection_epoch, capability, identity_token, launch_id, launch_parent_pid FROM sessions WHERE name = $name LIMIT 1",
     ),
+
+    /** Read a live/durable session's server-minted capability by sessionId — used
+     *  to authenticate a fan-in transport against the CURRENT holder's stored
+     *  secret before any ctx reuse. Never exposed through a projection. */
+    getSessionCapabilityById: db.prepare("SELECT capability FROM sessions WHERE id = $id LIMIT 1"),
 
     /** Advance-only connection-epoch counter — bumped once per (re-)attach. */
     bumpConnectionEpoch: db.prepare(
