@@ -62,10 +62,10 @@ describe("registerReadCommands", () => {
     expect(cmd!.description()).toMatch(/active sessions/i)
   })
 
-  test("sessions verb accepts --all", () => {
+  test("sessions verb accepts --all and --json (launch-identity roster)", () => {
     const cmd = findCmd(buildProgram(), "sessions")
     expect(cmd).toBeDefined()
-    expect(optionFlags(cmd!)).toEqual(expect.arrayContaining(["--all"]))
+    expect(optionFlags(cmd!)).toEqual(expect.arrayContaining(["--all", "--json"]))
   })
 
   test("pending verb accepts --all, --json, --owner, --stale, and --close", () => {

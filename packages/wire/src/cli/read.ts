@@ -28,8 +28,9 @@
  *   - activity      (line ~674)
  *
  * The legacy `tools/tribe-cli.ts` continues to ship these same verbs until
- * Phase C deletes it. There is no `members` verb in the source — it is
- * exposed via `tribe.members` MCP call only, not the CLI.
+ * Phase C deletes it. There is no `members` verb in the source — the
+ * `tribe.members` roster is reachable as `sessions --json` (launch identity
+ * included); the bare `sessions` table stays on `cli_status`.
  */
 
 import { Command, int } from "@silvery/commander"
@@ -241,7 +242,17 @@ async function cmdStatus(): Promise<void> {
   console.log(`\n  Daemon: pid=${daemon.pid}, uptime=${fmtDur(daemon.uptime * 1000)}, clients=${daemon.clients}`)
 }
 
-async function cmdSessions(showAll: boolean): Promise<void> {
+async function cmdSessions(showAll: boolean, json = false): Promise<void> {
+  if (json) {
+    // Machine-readable roster: the daemon's `tribe.members` reply, which
+    // carries the persisted launch identity (`launch_id` / `launch_parent_pid`)
+    // per session — the fields a launcher correlates a spawn's TRIBE_LAUNCH_ID
+    // against. The human table below stays on `cli_status` (ms-precision
+    // uptime, no launch identity).
+    const raw = await callDaemon("tribe.members", showAll ? { all: true } : {})
+    console.log(JSON.stringify(mcpJsonContent(raw), null, 2))
+    return
+  }
   const result = (await callDaemon("cli_status")) as {
     sessions: SessionInfo[]
     daemon: { pid: number; uptime: number; clients: number }
@@ -839,7 +850,8 @@ export function registerReadCommands(program: Command): void {
     .command("sessions")
     .description("List sessions")
     .option("-a, --all", "Include historical (disconnected) sessions")
-    .action((opts: { all?: boolean }) => void cmdSessions(!!opts.all))
+    .option("--json", "Emit machine-readable JSON (tribe.members roster incl. launch identity)")
+    .action((opts: { all?: boolean; json?: boolean }) => void cmdSessions(!!opts.all, !!opts.json))
 
   const pendingOwner = cliOption(PENDING_CLI, "owner")
   const pendingAll = cliOption(PENDING_CLI, "all")
