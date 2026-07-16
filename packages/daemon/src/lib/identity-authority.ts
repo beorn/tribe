@@ -13,54 +13,62 @@
  *
  * The r1 attach path authenticated by EXACT NAME ONLY. Name is a locator, not
  * an authenticator: a token-less connection could wait for a managed `@agent/N`
- * to detach, request that name, and inherit its mailbox/pending authority. This
- * module closes that hole.
+ * to detach, request that name, and inherit its mailbox/pending authority.
  *
- * ## Authority model (who may claim a detached durable row)
+ * ## What is (and is NOT) an authenticator
  *
- * A durable row is *bound* iff it carries an unforgeable stored credential:
- *   - `identity_token` — issued by the agent proxy/harness as a deterministic
- *     hash of (claude_session_id | cwd | role); re-sent on every register, so a
- *     reconnecting session re-presents the same token it first stored.
- *   - `launch_id` + `launch_parent_pid` — a daemon/supervisor-issued launch
- *     lineage minted when a managed backend is spawned; the managed relaunch
- *     re-presents the exact pair.
+ * Authority is DAEMON- / SUPERVISOR-ROOTED: issued when a session registers or
+ * a managed backend launches, and verified server-side against the STORED
+ * fields — never against a value the claimant merely echoes back.
  *
- * A claimant may take over a bound row iff it PRESENTS a matching credential
- * (token equal to the stored token, OR launch id+parent-pid equal to the stored
- * launch binding). Server-side comparison against the stored fields — the
- * claimed name is never trusted on its own.
+ * - `identity_token` — THE authenticator. The agent proxy/harness derives it
+ *   from a PRIVATE runtime proof (CLAUDE_SESSION_ID / CODEX_THREAD_ID) hashed
+ *   with project + role, and re-sends it on every register. It is never exposed
+ *   through Tribe's member / status / debug projections, so a peer agent cannot
+ *   learn it. A reconnecting session re-presents the same token it first stored.
  *
- * A row with NO stored credential (legacy / pure-CLI sessions that registered
- * without a token or launch identity) may be attached by name. This is the
- * documented migration path: pre-existing durable rows predate credential
- * capture, so name-only attach stays available for them. New managed launches
- * always carry a launch identity, so their rows are bound from birth.
+ * - launch tuple (`launch_id` + `launch_parent_pid`) — a PUBLIC LOCATOR, NOT an
+ *   authenticator. It is projected through `tribe.debug` (and derivable from the
+ *   OS process tree), so any peer can read and replay it. It groups the
+ *   transports of one managed launch for fan-in; it does not, on its own,
+ *   authorize a claim. Treating a matching launch tuple as authority was the
+ *   forgeable-tuple hole this model closes.
+ *
+ * A durable row is *bound* iff it carries a stored `identity_token`. A claim on
+ * a bound row is authorized only by presenting a token that matches the stored
+ * one (constant-time comparison). A row with NO stored token (legacy / pure-CLI
+ * sessions that predate token capture) may be attached by name — the documented
+ * migration path. New managed launches always carry a token, so their rows are
+ * bound from birth.
  */
 
 import { timingSafeEqual } from "node:crypto"
 
 /** Application-range JSON-RPC error code for an unauthorized identity claim
- *  (attach/leave/inbox-drain against a bound row without matching authority).
- *  Distinct from NameConflictError's -32000 so callers can branch on it. */
+ *  (attach against a bound row, or an authority-bearing op from a non-holder /
+ *  stale-epoch connection). Distinct from NameConflictError's -32000 so callers
+ *  can branch on it. */
 export const TRIBE_IDENTITY_UNAUTHORIZED = -32001
 
-/** Stored credential fields read back from a durable `sessions` row. */
+/** Stored credential fields read back from a durable `sessions` row. The launch
+ *  fields are retained for transport grouping/fan-in; only `identity_token`
+ *  authenticates a claim. */
 export type StoredIdentity = {
   identity_token: string | null
   launch_id: string | null
   launch_parent_pid: number | null
 }
 
-/** Credentials a registering/claiming connection presents. */
+/** The credential a registering/claiming connection presents for
+ *  authentication. Only the private token authenticates; the launch tuple is a
+ *  public locator handled separately by the fan-in path. */
 export type PresentedIdentity = {
   identityToken: string | null
-  launchIdentity: { id: string; parentPid: number } | null
 }
 
-/** Constant-time string equality. Guards the secret-bearing comparisons
- *  (identity token, launch id) against timing oracles. A length mismatch
- *  short-circuits — acceptable, since credential lengths are not secret. */
+/** Constant-time string equality. Guards the secret-bearing token comparison
+ *  against timing oracles. A length mismatch short-circuits — acceptable, since
+ *  token lengths are not secret. */
 export function constantTimeEqual(a: string, b: string): boolean {
   const ab = Buffer.from(a, "utf8")
   const bb = Buffer.from(b, "utf8")
@@ -69,64 +77,34 @@ export function constantTimeEqual(a: string, b: string): boolean {
 }
 
 /**
- * True iff the row carries any unforgeable stored credential. A row with none
- * is legacy/pure-CLI and may be attached by name (the migration path).
+ * True iff the row carries a stored authenticator (identity_token). A row with
+ * none is legacy/pure-CLI and may be attached by name (the migration path). A
+ * launch binding alone does NOT make a row bound — the launch tuple is public
+ * and forgeable, so it is not an authenticator.
  */
 export function rowHasStoredCredential(row: StoredIdentity): boolean {
-  return row.identity_token != null || row.launch_id != null
+  return row.identity_token != null
 }
 
 /**
- * Does the presented identity match the row's stored credential? Matches when
- * the presented token equals the stored token, OR the presented launch identity
- * (id + parent-pid lineage) equals the stored launch binding. Never true for a
- * row with no stored credential — callers gate that via `rowHasStoredCredential`.
+ * Does the presented token match the row's stored token? Never true for a row
+ * with no stored token — callers gate that via `rowHasStoredCredential`.
  */
 export function presentedMatchesStored(row: StoredIdentity, presented: PresentedIdentity): boolean {
-  if (
+  return (
     presented.identityToken != null &&
     row.identity_token != null &&
     constantTimeEqual(presented.identityToken, row.identity_token)
-  ) {
-    return true
-  }
-  if (
-    presented.launchIdentity != null &&
-    row.launch_id != null &&
-    row.launch_parent_pid != null &&
-    presented.launchIdentity.parentPid === row.launch_parent_pid &&
-    constantTimeEqual(presented.launchIdentity.id, row.launch_id)
-  ) {
-    return true
-  }
-  return false
+  )
 }
 
 /**
  * Attach/claim authority: may a claimant take over this detached durable row's
  * identity (its sessionId, mailbox, pending balls)? Unbound rows are claimable
- * by name (migration path); bound rows require a matching stored credential.
- * NAME ALONE IS NEVER AUTHORITY.
+ * by name (migration path); bound rows require a matching stored token. NAME AND
+ * THE PUBLIC LAUNCH TUPLE ARE NEVER AUTHORITY.
  */
 export function mayClaimDurableRow(row: StoredIdentity, presented: PresentedIdentity): boolean {
   if (!rowHasStoredCredential(row)) return true
   return presentedMatchesStored(row, presented)
-}
-
-/**
- * Extract the presented credentials from raw JSON-RPC params for an AUTHORITY
- * comparison (read side — cli_inbox_drain). Lenient by design: a partial or
- * invalid launch pair simply yields `launchIdentity: null` (no launch match).
- * This is NOT the register path's validation — register still rejects partial
- * launch pairs loudly; here we only compare against stored fields.
- */
-export function parsePresentedIdentity(p: Record<string, unknown>): PresentedIdentity {
-  const identityToken = typeof p.identityToken === "string" && p.identityToken.length > 0 ? p.identityToken : null
-  const launchIdRaw = typeof p.launchId === "string" ? p.launchId.trim() : ""
-  const launchParentPid = Number(p.launchParentPid ?? 0)
-  const launchIdentity =
-    launchIdRaw.length > 0 && Number.isSafeInteger(launchParentPid) && launchParentPid > 0
-      ? { id: launchIdRaw, parentPid: launchParentPid }
-      : null
-  return { identityToken, launchIdentity }
 }

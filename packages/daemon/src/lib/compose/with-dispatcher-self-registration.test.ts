@@ -42,6 +42,11 @@ type InboxDrainResult = {
   events: Array<{ content: string }>
 }
 
+type InboxStatusResult = {
+  session: string
+  unread_count: number
+}
+
 type InboxWaitResult = {
   session: string
   unread_count: number
@@ -173,62 +178,264 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
   })
 })
 
+// Inbox drain is bound to the AUTHENTICATED CURRENT session and requires a
+// server-verified live launch fan-in (Agent3's c7cecd84 semantics, re-expressed
+// on the unified current-epoch-holder authority model). Name is not authority;
+// the PUBLIC launch tuple is not authority — only the private token that the
+// fan-in transport shares with the live holder is.
 describe("dispatcher bounded mailbox drain", () => {
-  it("advances the durable role cursor without creating a transient registration", async () => {
+  it("binds acknowledgement to the managed launch's authenticated current session", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
 
-    harness.sendActionable("@chief", "first historical request")
-    harness.sendActionable("@chief", "second historical request")
-    harness.sendActionable("@chief", "third historical request")
+    const launch = { launchId: "launch-agent-3", launchParentPid: 4242 }
+    const identityToken = "private-runtime-agent-3"
+    const holderSocket = harness.addPendingClient("conn-holder")
+    const holder = parseResult<RegisterResult>(
+      await harness.register("conn-holder", {
+        name: "@agent/3",
+        pid: liveHolderPid,
+        project: "/tmp/km-wt3",
+        identityToken,
+        ...launch,
+      }),
+    )
+    harness.addPendingClient("conn-drain")
+    const drainTransport = parseResult<RegisterResult>(
+      await harness.register("conn-drain", {
+        name: "@agent/3",
+        pid: otherLivePid,
+        project: "/tmp/km-wt3",
+        identityToken,
+        ...launch,
+      }),
+    )
+    expect(drainTransport.sessionId).toBe(holder.sessionId)
+    expect(holderSocket.destroyedByDispatcher).toBe(false)
+    expect(harness.sessionCount("@agent/3")).toBe(1)
+
+    harness.sendActionable("@chief", "chief-only request")
+    harness.sendActionable("@agent/3", "agent request")
+
+    // A `session` override is forbidden — the drain is bound to the caller's own
+    // authenticated session, so it can never acknowledge a foreign mailbox.
+    const crossRole = parseError(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "cross-role-drain", method: "cli_inbox_drain", params: { session: "@chief", limit: 1 } },
+        "conn-drain",
+      ),
+    )
+    expect(crossRole).toMatchObject({ code: -32602 })
+    expect(crossRole.message).toMatch(/session override is forbidden/)
 
     const first = parseResult<InboxDrainResult>(
       await harness.dispatcher.handleRequest(
-        {
-          jsonrpc: "2.0",
-          id: "drain-1",
-          method: "cli_inbox_drain",
-          params: { session: "@chief", limit: 2 },
-        },
+        { jsonrpc: "2.0", id: "drain-1", method: "cli_inbox_drain", params: { limit: 1 } },
         "conn-drain",
       ),
     )
-    expect(first.events.map((event) => event.content)).toEqual([
-      "first historical request",
-      "second historical request",
-    ])
-    expect(first.drained_count).toBe(2)
-    expect(first.unread_count).toBe(1)
+    expect(first).toMatchObject({ session: "@agent/3", drained_count: 1, unread_count: 0 })
+    expect(first.events.map((event) => event.content)).toEqual(["agent request"])
 
-    const second = parseResult<InboxDrainResult>(
+    // @chief's mailbox is untouched by @agent/3's drain.
+    const chiefStatus = parseResult<InboxStatusResult>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "chief-status", method: "cli_inbox_status", params: { session: "@chief" } },
+        "conn-drain",
+      ),
+    )
+    expect(chiefStatus).toMatchObject({ session: "@chief", unread_count: 1 })
+  })
+
+  it("rejects a live foreign role replaying the public launch tuple without advancing the victim cursor", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const launch = { launchId: "public-launch-agent-3", launchParentPid: 4242 }
+    const victimIdentityToken = "private-runtime-agent-3"
+    harness.addPendingClient("conn-victim")
+    const victim = parseResult<RegisterResult>(
+      await harness.register("conn-victim", {
+        name: "@agent/3",
+        pid: liveHolderPid,
+        project: "/tmp/km-wt3",
+        identityToken: victimIdentityToken,
+        ...launch,
+      }),
+    )
+    harness.sendActionable("@agent/3", "victim request must remain unread")
+
+    // The attacker knows the PUBLIC launch tuple (readable via tribe.debug) but
+    // NOT the victim's private token; replaying the tuple fails the live-holder
+    // name conflict (no fan-in without the token).
+    harness.addPendingClient("conn-attacker")
+    const stolenTuple = parseError(
+      await harness.register("conn-attacker", {
+        name: "@agent/3",
+        pid: otherLivePid,
+        project: "/tmp/km-wt8",
+        identityToken: "private-runtime-agent-8",
+        ...launch,
+      }),
+    )
+    expect(stolenTuple).toMatchObject({ code: -32000 })
+
+    const attackDrain = parseError(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "attacker-drain", method: "cli_inbox_drain", params: { limit: 1 } },
+        "conn-attacker",
+      ),
+    )
+    expect(attackDrain).toMatchObject({ code: -32001 })
+
+    const afterAttack = parseResult<InboxStatusResult>(
       await harness.dispatcher.handleRequest(
         {
           jsonrpc: "2.0",
-          id: "drain-2",
-          method: "cli_inbox_drain",
-          params: { session: "@chief", limit: 2 },
+          id: "victim-status-after-attack",
+          method: "cli_inbox_status",
+          params: { session: "@agent/3" },
         },
-        "conn-drain",
+        "conn-attacker",
       ),
     )
-    expect(second.events.map((event) => event.content)).toEqual(["third historical request"])
-    expect(second.unread_count).toBe(0)
+    expect(afterAttack.unread_count).toBe(1)
 
-    const wait = parseResult<InboxWaitResult>(
+    // The legitimate holder (matching private token) fans in and drains.
+    harness.addPendingClient("conn-legitimate-drain")
+    const legitimate = parseResult<RegisterResult>(
+      await harness.register("conn-legitimate-drain", {
+        name: "@agent/3",
+        pid: otherLivePid + 1,
+        project: "/tmp/km-wt3",
+        identityToken: victimIdentityToken,
+        ...launch,
+      }),
+    )
+    expect(legitimate.sessionId).toBe(victim.sessionId)
+    const drained = parseResult<InboxDrainResult>(
       await harness.dispatcher.handleRequest(
-        {
-          jsonrpc: "2.0",
-          id: "wait-after-drain",
-          method: "cli_inbox_wait",
-          params: { session: "@chief", timeout_ms: 1 },
-        },
+        { jsonrpc: "2.0", id: "legitimate-drain", method: "cli_inbox_drain", params: { limit: 1 } },
+        "conn-legitimate-drain",
+      ),
+    )
+    expect(drained).toMatchObject({ session: "@agent/3", drained_count: 1, unread_count: 0 })
+    expect(drained.events.map((event) => event.content)).toEqual(["victim request must remain unread"])
+  })
+
+  it("rejects unregistered, non-member, and name-only (no server-verified fan-in) callers", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    harness.addPendingClient("conn-pending")
+    expect(
+      parseError(
+        await harness.dispatcher.handleRequest(
+          { jsonrpc: "2.0", id: "pending-drain", method: "cli_inbox_drain", params: {} },
+          "conn-pending",
+        ),
+      ),
+    ).toMatchObject({ code: -32001 })
+
+    harness.addPendingClient("conn-watch")
+    await harness.register("conn-watch", {
+      name: "watcher",
+      role: "watch",
+      pid: liveHolderPid,
+      project: "/tmp/km-watch",
+    })
+    expect(
+      parseError(
+        await harness.dispatcher.handleRequest(
+          { jsonrpc: "2.0", id: "watch-drain", method: "cli_inbox_drain", params: {} },
+          "conn-watch",
+        ),
+      ),
+    ).toMatchObject({ code: -32001 })
+
+    // A caller that ASSERTS a launch tuple but never authenticated a fan-in
+    // (no live launch peer sharing its private token) cannot drain.
+    harness.addPendingClient("conn-name-only")
+    await harness.register("conn-name-only", {
+      name: "@chief",
+      pid: otherLivePid,
+      project: "/tmp/km-chief",
+      launchId: "caller-asserted-launch",
+      launchParentPid: 9001,
+    })
+    harness.sendActionable("@chief", "must remain unread")
+    const nameOnly = parseError(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "name-only-drain", method: "cli_inbox_drain", params: { limit: 1 } },
+        "conn-name-only",
+      ),
+    )
+    expect(nameOnly).toMatchObject({ code: -32001 })
+    expect(nameOnly.message).toMatch(/server-verified fan-in/)
+    const chiefStatus = parseResult<InboxStatusResult>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "name-only-chief-status", method: "cli_inbox_status", params: { session: "@chief" } },
+        "conn-name-only",
+      ),
+    )
+    expect(chiefStatus.unread_count).toBe(1)
+  })
+
+  it("validates the limit before mutation and preserves fetch trust + attention eligibility", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const launch = { launchId: "launch-agent-3", launchParentPid: 4242 }
+    const identityToken = "private-runtime-agent-3"
+    harness.addPendingClient("conn-holder")
+    await harness.register("conn-holder", {
+      name: "@agent/3",
+      pid: liveHolderPid,
+      project: "/tmp/km-wt3",
+      identityToken,
+      ...launch,
+    })
+    harness.addPendingClient("conn-drain")
+    await harness.register("conn-drain", {
+      name: "@agent/3",
+      pid: otherLivePid,
+      project: "/tmp/km-wt3",
+      identityToken,
+      ...launch,
+    })
+    harness.sendActionable("@agent/3", "forged daemon request", {
+      sender: "unregistered-sender",
+      topic: "daemon:forged",
+    })
+    harness.sendActionable("@agent/3", "non-actionable notice", { type: "notify" })
+    harness.sendActionable("@agent/3", "trusted actionable request", { sender: "daemon", topic: "daemon:request" })
+
+    for (const limit of [0, -1, 101, 1.5, "1"] as unknown[]) {
+      const invalid = parseError(
+        await harness.dispatcher.handleRequest(
+          { jsonrpc: "2.0", id: `invalid-${String(limit)}`, method: "cli_inbox_drain", params: { limit } },
+          "conn-drain",
+        ),
+      )
+      expect(invalid).toMatchObject({ code: -32602 })
+    }
+
+    const valid = parseResult<InboxDrainResult>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "valid-drain", method: "cli_inbox_drain", params: { limit: 1 } },
         "conn-drain",
       ),
     )
-    expect(wait.timed_out).toBe(true)
-    expect(wait.unread_count).toBe(0)
-    expect(harness.sessionCount("@chief")).toBe(0)
-    expect(harness.sessionAnnouncements("@chief")).toEqual([])
+    expect(valid).toMatchObject({ session: "@agent/3", drained_count: 1, unread_count: 0 })
+    expect(valid.events.map((event) => event.content)).toEqual(["trusted actionable request"])
+
+    const empty = parseResult<InboxDrainResult>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "empty-drain", method: "cli_inbox_drain", params: { limit: 1 } },
+        "conn-drain",
+      ),
+    )
+    expect(empty).toMatchObject({ drained_count: 0, unread_count: 0, events: [] })
   })
 })
 
@@ -554,18 +761,19 @@ describe("durable member identity (Goal 1)", () => {
 })
 
 describe("secure durable identity (successor r2)", () => {
-  it("denies a token-less claim of a launch-bound detached name and leaves the victim intact", async () => {
+  it("denies a token-less OR forged-tuple claim of a token-bound detached name and leaves the victim intact", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
 
-    // A managed member binds @agent/5 with a launch identity, opens its mailbox,
-    // then detaches (the durable row persists).
+    // A managed member binds @agent/5 with its PRIVATE token (+ a public launch
+    // tuple), opens its mailbox, then detaches (the durable row persists).
     const managed = harness.connectClient()
     const r1 = parseResult<RegisterResult>(
       await harness.register(managed.connId, {
         name: "@agent/5",
         pid: 5000,
         project: "/tmp/km-wt5",
+        identityToken: "private-runtime-agent-5",
         launchId: "launch-abc",
         launchParentPid: 4242,
       }),
@@ -576,25 +784,43 @@ describe("secure durable identity (successor r2)", () => {
 
     // A token-less connection tries to inherit @agent/5 by NAME only → REJECTED.
     const attacker = harness.connectClient()
-    const denied = parseError(await harness.register(attacker.connId, { name: "@agent/5", pid: 9999, project: "/tmp/evil" }))
+    const denied = parseError(
+      await harness.register(attacker.connId, { name: "@agent/5", pid: 9999, project: "/tmp/evil" }),
+    )
     expect(denied.code).toBe(-32001)
     expect(denied.message).toContain("bound to a stored identity")
 
-    // The victim's durable row + sessionId + launch binding survive untouched,
-    // and the denial is journaled.
+    // A connection replaying the PUBLIC launch tuple but not the private token is
+    // ALSO rejected — the tuple is a locator (readable via tribe.debug), never an
+    // authenticator.
+    const tupleForger = harness.connectClient()
+    const tupleDenied = parseError(
+      await harness.register(tupleForger.connId, {
+        name: "@agent/5",
+        pid: 9998,
+        project: "/tmp/evil",
+        identityToken: "wrong-token",
+        launchId: "launch-abc",
+        launchParentPid: 4242,
+      }),
+    )
+    expect(tupleDenied.code).toBe(-32001)
+
+    // The victim's durable row + sessionId + token + launch binding survive.
     expect(harness.memberRowCount("@agent/5")).toBe(1)
     expect(
-      harness.db.prepare("SELECT id, launch_id, launch_parent_pid FROM sessions WHERE name = ?").get("@agent/5"),
-    ).toMatchObject({ id: r1.sessionId, launch_id: "launch-abc", launch_parent_pid: 4242 })
-    expect(harness.sessionAttachDeniedEvents("@agent/5")).toHaveLength(1)
+      harness.db.prepare("SELECT id, identity_token, launch_id FROM sessions WHERE name = ?").get("@agent/5"),
+    ).toMatchObject({ id: r1.sessionId, identity_token: "private-runtime-agent-5", launch_id: "launch-abc" })
+    expect(harness.sessionAttachDeniedEvents("@agent/5")).toHaveLength(2)
 
-    // The legitimate managed relaunch (matching launch identity) reclaims it.
+    // The legitimate managed relaunch (matching PRIVATE token) reclaims it.
     const relaunch = harness.connectClient()
     const r2 = parseResult<RegisterResult>(
       await harness.register(relaunch.connId, {
         name: "@agent/5",
         pid: 5001,
         project: "/tmp/km-wt5",
+        identityToken: "private-runtime-agent-5",
         launchId: "launch-abc",
         launchParentPid: 4242,
       }),
@@ -602,11 +828,11 @@ describe("secure durable identity (successor r2)", () => {
     expect(r2.sessionId).toBe(r1.sessionId)
   })
 
-  it("never nulls stored provenance when a dual-bound member reattaches via one credential", async () => {
+  it("never nulls launch provenance when a dual-bound member reattaches via token only", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
 
-    // A member bound by BOTH an identity token AND a launch identity.
+    // A member bound by BOTH its private token AND a launch identity.
     const first = harness.connectClient()
     const r1 = parseResult<RegisterResult>(
       await harness.register(first.connId, {
@@ -620,25 +846,29 @@ describe("secure durable identity (successor r2)", () => {
     )
     first.socket.emitClose()
     expect(
-      harness.db.prepare("SELECT identity_token, launch_id, launch_parent_pid FROM sessions WHERE name = ?").get("@agent/8"),
+      harness.db
+        .prepare("SELECT identity_token, launch_id, launch_parent_pid FROM sessions WHERE name = ?")
+        .get("@agent/8"),
     ).toMatchObject({ identity_token: "tok-agent8", launch_id: "launch-8", launch_parent_pid: 88 })
 
-    // Reattach via the LAUNCH identity only (no token on this register). The
-    // launch match authorizes it — and the stored TOKEN must survive (the
-    // COALESCE guard: never overwrite a non-null stored credential with null).
+    // Reattach as a pure-CLI connection: present the TOKEN (the authenticator) but
+    // NO launch tuple. Token match authorizes it, and the stored LAUNCH binding
+    // must survive (the COALESCE guard: never overwrite a non-null stored field
+    // with null).
     const second = harness.connectClient()
     const r2 = parseResult<RegisterResult>(
       await harness.register(second.connId, {
         name: "@agent/8",
         pid: 8002,
         project: "/tmp/km-wt8",
-        launchId: "launch-8",
-        launchParentPid: 88,
+        identityToken: "tok-agent8",
       }),
     )
     expect(r2.sessionId).toBe(r1.sessionId)
     expect(
-      harness.db.prepare("SELECT identity_token, launch_id, launch_parent_pid FROM sessions WHERE name = ?").get("@agent/8"),
+      harness.db
+        .prepare("SELECT identity_token, launch_id, launch_parent_pid FROM sessions WHERE name = ?")
+        .get("@agent/8"),
     ).toMatchObject({ identity_token: "tok-agent8", launch_id: "launch-8", launch_parent_pid: 88 })
   })
 
@@ -746,57 +976,96 @@ describe("secure durable identity (successor r2)", () => {
     expect(harness.memberRowCount("@agent/3")).toBe(1)
   })
 
-  it("denies an unauthorized inbox drain of a bound member; operator authority may drain", async () => {
-    const OPERATOR = "op-secret"
-    const harness = createDispatcherHarness({ operatorToken: OPERATOR })
+  it("hostile leave cannot delete authority: a denied leave leaves the victim byte-identical", async () => {
+    const harness = createDispatcherHarness()
     cleanup = harness.dispose
 
-    // A launch-bound member with actionable backlog, then detached.
-    const managed = harness.connectClient()
-    await harness.register(managed.connId, {
-      name: "@agent/9",
-      pid: 9001,
-      project: "/tmp/km-wt9",
-      launchId: "launch-9",
-      launchParentPid: 900,
+    // A token-bound member with unread mail + an open pending ball, then detached.
+    const holder = harness.connectClient()
+    await harness.register(holder.connId, {
+      name: "@agent/2",
+      pid: 2001,
+      project: "/tmp/km-wt2",
+      identityToken: "tok-agent2",
+      launchId: "launch-2",
+      launchParentPid: 22,
     })
-    harness.sendActionable("@agent/9", "first ask")
-    harness.sendActionable("@agent/9", "second ask")
-    managed.socket.emitClose()
+    const asker = harness.connectClient()
+    await harness.register(asker.connId, { name: "@asker", pid: 2100, project: "/tmp/km-wt-asker" })
+    await harness.dispatcher.handleRequest(
+      {
+        jsonrpc: "2.0",
+        id: "ask",
+        method: TRIBE_COORD_METHODS.send,
+        params: { to: "@agent/2", message: "review", type: "request", request: true },
+      },
+      asker.connId,
+    )
+    harness.sendActionable("@agent/2", "unread actionable")
+    holder.socket.emitClose()
 
-    // An attacker (no holder connection, no operator token, no credentials) tries
-    // to drain @agent/9's actionable inbox → denied.
+    // Snapshot the victim's full durable identity + mailbox + pending state.
+    const before = harness.fullSessionState("@agent/2")
+    expect(before.unread).toBeGreaterThanOrEqual(1)
+    expect(before.balls.length).toBeGreaterThanOrEqual(1)
+
+    // A hostile leave from an arbitrary connection (not the holder, no operator).
     const denied = parseError(
       await harness.dispatcher.handleRequest(
-        { jsonrpc: "2.0", id: "steal-drain", method: "cli_inbox_drain", params: { session: "@agent/9", limit: 10 } },
-        "conn-attacker",
+        { jsonrpc: "2.0", id: "hostile-leave", method: "cli_leave", params: { session: "@agent/2" } },
+        "conn-hostile",
       ),
     )
     expect(denied.code).toBe(-32001)
 
-    // The victim's mailbox cursor is untouched — both actionables remain unread.
-    const status = parseResult<{ unread_count: number }>(
-      await harness.dispatcher.handleRequest(
-        { jsonrpc: "2.0", id: "st", method: "cli_inbox_status", params: { session: "@agent/9" } },
-        "conn-probe",
-      ),
-    )
-    expect(status.unread_count).toBe(2)
+    // Byte-identical: durable row (identity fields + cursor), mailbox cursor,
+    // unread count, and pending balls are all exactly as before.
+    expect(harness.fullSessionState("@agent/2")).toEqual(before)
+    expect(harness.memberRowCount("@agent/2")).toBe(1)
+  })
 
-    // Operator authority (e.g. the chief harness holding the secret) may drain.
-    const drained = parseResult<InboxDrainResult>(
+  it("current-epoch authority: a stale-epoch holder cannot leave or drain, the current holder can", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    // connA is the epoch-1 holder of @cli-worker; capture it, then detach.
+    const a = harness.connectClient()
+    await harness.register(a.connId, { name: "@cli-worker", pid: 3001, project: "/tmp/km-wtw" })
+    const staleA = harness.clients.get(a.connId)!
+    a.socket.emitClose()
+
+    // connB reattaches @cli-worker (epoch 2, same member) — advancing the epoch.
+    const b = harness.connectClient()
+    await harness.register(b.connId, { name: "@cli-worker", pid: 3002, project: "/tmp/km-wtw" })
+
+    // Re-inject the stale epoch-1 connection; it no longer carries authority.
+    harness.clients.set(staleA.id, staleA)
+    harness.socketToClient.set(staleA.socket, staleA.id)
+    const staleLeave = parseError(
       await harness.dispatcher.handleRequest(
-        {
-          jsonrpc: "2.0",
-          id: "op-drain",
-          method: "cli_inbox_drain",
-          params: { session: "@agent/9", limit: 10, operatorToken: OPERATOR },
-        },
-        "conn-operator",
+        { jsonrpc: "2.0", id: "stale-leave", method: "cli_leave", params: { session: "@cli-worker" } },
+        staleA.id,
       ),
     )
-    expect(drained.drained_count).toBe(2)
-    expect(drained.unread_count).toBe(0)
+    expect(staleLeave.code).toBe(-32001)
+    const staleDrain = parseError(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "stale-drain", method: "cli_inbox_drain", params: {} },
+        staleA.id,
+      ),
+    )
+    expect(staleDrain.code).toBe(-32001)
+    expect(harness.memberRowCount("@cli-worker")).toBe(1)
+
+    // The CURRENT-epoch holder (connB) can self-leave.
+    const bLeave = parseResult<{ left: boolean }>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "b-leave", method: "cli_leave", params: { session: "@cli-worker" } },
+        b.connId,
+      ),
+    )
+    expect(bLeave.left).toBe(true)
+    expect(harness.memberRowCount("@cli-worker")).toBe(0)
   })
 })
 
@@ -925,19 +1194,20 @@ function createDispatcherHarness(
         name: string
         pid: number
         project: string
+        role?: TribeRole
         identityToken?: string
         launchId?: string
         launchParentPid?: number
         delivery?: "push" | "pull"
       },
     ) {
-      const { delivery, ...rest } = params
+      const { delivery, role, ...rest } = params
       const req: JsonRpcRequest = {
         jsonrpc: "2.0",
         id: `register-${connId}`,
         method: "register",
         params: {
-          role: "member",
+          role: role ?? "member",
           projectName: "km-wt9",
           projectId: "test-project",
           delivery: delivery ?? "pull",
@@ -947,8 +1217,23 @@ function createDispatcherHarness(
       }
       return daemon.dispatcher.handleRequest(req, connId)
     },
-    sendActionable(recipient: string, content: string = "wake inbox wait") {
-      sendMessage(daemonCtx, recipient, content, "request", undefined, undefined, "direct")
+    sendActionable(
+      recipient: string,
+      content: string = "wake inbox wait",
+      options: { sender?: string; topic?: string; type?: string } = {},
+    ) {
+      sendMessage(
+        daemonCtx,
+        recipient,
+        content,
+        options.type ?? "request",
+        undefined,
+        undefined,
+        "direct",
+        options.topic ? { topic: options.topic } : {},
+        {},
+        options.sender ? { sender: options.sender } : {},
+      )
     },
     connectClient(): { connId: string; socket: TestSocket } {
       const socket = createTestSocket()
@@ -1020,6 +1305,33 @@ function createDispatcherHarness(
     pendingBallCount(recipient: string): number {
       const rows = stmts.selectPendingForRecipient.all({ $recipient: recipient }) as unknown[]
       return rows.length
+    },
+    /** A stable, timestamp-free snapshot of a member's durable identity + mailbox
+     *  + pending state — for the hostile-leave byte-identical assertion. */
+    fullSessionState(name: string) {
+      return {
+        row:
+          db
+            .prepare(
+              "SELECT id, name, role, pid, identity_token, launch_id, launch_parent_pid, last_inbox_pull_seq, last_delivered_seq, connection_epoch FROM sessions WHERE name = ?",
+            )
+            .get(name) ?? null,
+        cursor:
+          db.prepare("SELECT recipient, last_actionable_seq FROM mailbox_cursors WHERE recipient = ?").get(name) ??
+          null,
+        balls: db
+          .prepare(
+            "SELECT request_id, recipient, sender, message_id, fanout FROM pending_request WHERE recipient = ? ORDER BY request_id",
+          )
+          .all(name),
+        unread: (
+          db
+            .prepare(
+              "SELECT COUNT(*) AS n FROM messages WHERE recipient = ? AND kind = 'direct' AND type IN ('request','query','verdict','assign')",
+            )
+            .get(name) as { n: number }
+        ).n,
+      }
     },
     sendDirect(recipient: string, content: string, type = "notify") {
       sendMessage(daemonCtx, recipient, content, type, undefined, undefined, "direct")
