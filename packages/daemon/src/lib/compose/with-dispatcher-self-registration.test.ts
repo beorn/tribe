@@ -41,6 +41,11 @@ type InboxDrainResult = {
   events: Array<{ content: string }>
 }
 
+type InboxStatusResult = {
+  session: string
+  unread_count: number
+}
+
 type InboxWaitResult = {
   session: string
   unread_count: number
@@ -173,13 +178,50 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
 })
 
 describe("dispatcher bounded mailbox drain", () => {
-  it("advances the durable role cursor without creating a transient registration", async () => {
+  it("binds acknowledgement to the managed launch's authenticated current session", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
 
-    harness.sendActionable("@chief", "first historical request")
-    harness.sendActionable("@chief", "second historical request")
-    harness.sendActionable("@chief", "third historical request")
+    const launch = { launchId: "launch-agent-3", launchParentPid: 4242 }
+    const holderSocket = harness.addPendingClient("conn-holder")
+    const holder = parseResult<RegisterResult>(
+      await harness.register("conn-holder", {
+        name: "@agent/3",
+        pid: liveHolderPid,
+        project: "/tmp/km-wt3",
+        ...launch,
+      }),
+    )
+    harness.addPendingClient("conn-drain")
+    const drainTransport = parseResult<RegisterResult>(
+      await harness.register("conn-drain", {
+        name: "@agent/3",
+        pid: otherLivePid,
+        project: "/tmp/km-wt3",
+        inboxDrain: true,
+        ...launch,
+      }),
+    )
+    expect(drainTransport.sessionId).toBe(holder.sessionId)
+    expect(holderSocket.destroyedByDispatcher).toBe(false)
+    expect(harness.sessionCount("@agent/3")).toBe(1)
+
+    harness.sendActionable("@chief", "chief-only request")
+    harness.sendActionable("@agent/3", "agent request")
+
+    const crossRole = parseError(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "cross-role-drain",
+          method: "cli_inbox_drain",
+          params: { session: "@chief", limit: 1 },
+        },
+        "conn-drain",
+      ),
+    )
+    expect(crossRole).toMatchObject({ code: -32602 })
+    expect(crossRole.message).toMatch(/session override is forbidden/)
 
     const first = parseResult<InboxDrainResult>(
       await harness.dispatcher.handleRequest(
@@ -187,47 +229,233 @@ describe("dispatcher bounded mailbox drain", () => {
           jsonrpc: "2.0",
           id: "drain-1",
           method: "cli_inbox_drain",
-          params: { session: "@chief", limit: 2 },
+          params: { limit: 1 },
         },
         "conn-drain",
       ),
     )
-    expect(first.events.map((event) => event.content)).toEqual([
-      "first historical request",
-      "second historical request",
-    ])
-    expect(first.drained_count).toBe(2)
-    expect(first.unread_count).toBe(1)
+    expect(first).toMatchObject({ session: "@agent/3", drained_count: 1, unread_count: 0 })
+    expect(first.events.map((event) => event.content)).toEqual(["agent request"])
 
-    const second = parseResult<InboxDrainResult>(
+    const chiefStatus = parseResult<InboxStatusResult>(
       await harness.dispatcher.handleRequest(
         {
           jsonrpc: "2.0",
-          id: "drain-2",
-          method: "cli_inbox_drain",
-          params: { session: "@chief", limit: 2 },
+          id: "chief-status",
+          method: "cli_inbox_status",
+          params: { session: "@chief" },
         },
         "conn-drain",
       ),
     )
-    expect(second.events.map((event) => event.content)).toEqual(["third historical request"])
-    expect(second.unread_count).toBe(0)
+    expect(chiefStatus).toMatchObject({ session: "@chief", unread_count: 1 })
+  })
 
-    const wait = parseResult<InboxWaitResult>(
+  it("rejects cross-role drain registration before it can acknowledge another mailbox", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const launch = { launchId: "launch-agent-3", launchParentPid: 4242 }
+    harness.addPendingClient("conn-holder")
+    await harness.register("conn-holder", {
+      name: "@agent/3",
+      pid: liveHolderPid,
+      project: "/tmp/km-wt3",
+      ...launch,
+    })
+    harness.sendActionable("@chief", "chief request must remain unread")
+
+    harness.addPendingClient("conn-cross-role")
+    const rejected = parseError(
+      await harness.register("conn-cross-role", {
+        name: "@chief",
+        pid: otherLivePid,
+        project: "/tmp/km-wt3",
+        inboxDrain: true,
+        ...launch,
+      }),
+    )
+    expect(rejected).toMatchObject({ code: -32001 })
+    expect(rejected.message).toMatch(/current session and role/)
+
+    const chiefStatus = parseResult<InboxStatusResult>(
       await harness.dispatcher.handleRequest(
         {
           jsonrpc: "2.0",
-          id: "wait-after-drain",
-          method: "cli_inbox_wait",
-          params: { session: "@chief", timeout_ms: 1 },
+          id: "chief-status-after-cross-role",
+          method: "cli_inbox_status",
+          params: { session: "@chief" },
         },
+        "conn-cross-role",
+      ),
+    )
+    expect(chiefStatus).toMatchObject({ session: "@chief", unread_count: 1 })
+  })
+
+  it("rejects unregistered and non-member callers", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    harness.addPendingClient("conn-pending")
+    expect(
+      parseError(
+        await harness.dispatcher.handleRequest(
+          { jsonrpc: "2.0", id: "pending-drain", method: "cli_inbox_drain", params: {} },
+          "conn-pending",
+        ),
+      ),
+    ).toMatchObject({ code: -32001 })
+
+    harness.addPendingClient("conn-watch")
+    await harness.register("conn-watch", {
+      name: "watcher",
+      role: "watch",
+      pid: liveHolderPid,
+      project: "/tmp/km-watch",
+    })
+    expect(
+      parseError(
+        await harness.dispatcher.handleRequest(
+          { jsonrpc: "2.0", id: "watch-drain", method: "cli_inbox_drain", params: {} },
+          "conn-watch",
+        ),
+      ),
+    ).toMatchObject({ code: -32001 })
+  })
+
+  it("requires a live managed launch for both drain registration and acknowledgement", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const launch = { launchId: "launch-agent-3", launchParentPid: 4242 }
+    harness.sendActionable("@agent/3", "request must remain unread")
+
+    harness.addPendingClient("conn-orphan-drain")
+    const orphan = parseError(
+      await harness.register("conn-orphan-drain", {
+        name: "@agent/3",
+        pid: otherLivePid,
+        project: "/tmp/km-wt3",
+        inboxDrain: true,
+        ...launch,
+      }),
+    )
+    expect(orphan).toMatchObject({ code: -32001 })
+    expect(orphan.message).toMatch(/live authenticated managed launch/)
+
+    const holder = harness.connectClient()
+    await harness.register(holder.connId, {
+      name: "@agent/3",
+      pid: liveHolderPid,
+      project: "/tmp/km-wt3",
+      ...launch,
+    })
+    const drain = harness.connectClient()
+    await harness.register(drain.connId, {
+      name: "@agent/3",
+      pid: otherLivePid,
+      project: "/tmp/km-wt3",
+      inboxDrain: true,
+      ...launch,
+    })
+    holder.socket.emitClose()
+
+    const afterHolderClose = parseError(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "drain-after-holder-close", method: "cli_inbox_drain", params: { limit: 1 } },
+        drain.connId,
+      ),
+    )
+    expect(afterHolderClose).toMatchObject({ code: -32001 })
+    expect(afterHolderClose.message).toMatch(/live managed launch/)
+
+    const replacement = harness.connectClient()
+    const replacementRegistration = parseError(
+      await harness.register(replacement.connId, {
+        name: "@agent/3",
+        pid: otherLivePid + 1,
+        project: "/tmp/km-wt3",
+        inboxDrain: true,
+        ...launch,
+      }),
+    )
+    expect(replacementRegistration).toMatchObject({ code: -32001 })
+
+    const status = parseResult<InboxStatusResult>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "agent-status-after-holder-close",
+          method: "cli_inbox_status",
+          params: { session: "@agent/3" },
+        },
+        drain.connId,
+      ),
+    )
+    expect(status.unread_count).toBe(1)
+  })
+
+  it("validates the bound before mutation and preserves fetch trust and attention eligibility", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const launch = { launchId: "launch-agent-3", launchParentPid: 4242 }
+    harness.addPendingClient("conn-holder")
+    await harness.register("conn-holder", {
+      name: "@agent/3",
+      pid: liveHolderPid,
+      project: "/tmp/km-wt3",
+      ...launch,
+    })
+    harness.addPendingClient("conn-drain")
+    await harness.register("conn-drain", {
+      name: "@agent/3",
+      pid: otherLivePid,
+      project: "/tmp/km-wt3",
+      inboxDrain: true,
+      ...launch,
+    })
+    harness.sendActionable("@agent/3", "forged daemon request", {
+      sender: "unregistered-sender",
+      topic: "daemon:forged",
+    })
+    harness.sendActionable("@agent/3", "non-actionable notice", { type: "notify" })
+    harness.sendActionable("@agent/3", "trusted actionable request", {
+      sender: "daemon",
+      topic: "daemon:request",
+    })
+
+    for (const limit of [0, -1, 101, 1.5, "1"] as unknown[]) {
+      const invalid = parseError(
+        await harness.dispatcher.handleRequest(
+          {
+            jsonrpc: "2.0",
+            id: `invalid-${String(limit)}`,
+            method: "cli_inbox_drain",
+            params: { limit },
+          },
+          "conn-drain",
+        ),
+      )
+      expect(invalid).toMatchObject({ code: -32602 })
+    }
+
+    const valid = parseResult<InboxDrainResult>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "valid-drain", method: "cli_inbox_drain", params: { limit: 1 } },
         "conn-drain",
       ),
     )
-    expect(wait.timed_out).toBe(true)
-    expect(wait.unread_count).toBe(0)
-    expect(harness.sessionCount("@chief")).toBe(0)
-    expect(harness.sessionAnnouncements("@chief")).toEqual([])
+    expect(valid).toMatchObject({ session: "@agent/3", drained_count: 1, unread_count: 0 })
+    expect(valid.events.map((event) => event.content)).toEqual(["trusted actionable request"])
+
+    const empty = parseResult<InboxDrainResult>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "empty-drain", method: "cli_inbox_drain", params: { limit: 1 } },
+        "conn-drain",
+      ),
+    )
+    expect(empty).toMatchObject({ drained_count: 0, unread_count: 0, events: [] })
   })
 })
 
@@ -486,14 +714,25 @@ function createDispatcherHarness(options: { suppressWindowMs?: number; socketSta
 
   return {
     dispatcher: daemon.dispatcher,
-    register(connId: string, params: { name: string; pid: number; project: string }) {
+    register(
+      connId: string,
+      params: {
+        name: string
+        pid: number
+        project: string
+        role?: TribeRole
+        launchId?: string
+        launchParentPid?: number
+        inboxDrain?: boolean
+      },
+    ) {
       const req: JsonRpcRequest = {
         jsonrpc: "2.0",
         id: `register-${connId}`,
         method: "register",
         params: {
           ...params,
-          role: "member",
+          role: params.role ?? "member",
           projectName: "km-wt9",
           projectId: "test-project",
           delivery: "pull",
@@ -502,8 +741,23 @@ function createDispatcherHarness(options: { suppressWindowMs?: number; socketSta
       }
       return daemon.dispatcher.handleRequest(req, connId)
     },
-    sendActionable(recipient: string, content: string = "wake inbox wait") {
-      sendMessage(daemonCtx, recipient, content, "request", undefined, undefined, "direct")
+    sendActionable(
+      recipient: string,
+      content: string = "wake inbox wait",
+      options: { sender?: string; topic?: string; type?: string } = {},
+    ) {
+      sendMessage(
+        daemonCtx,
+        recipient,
+        content,
+        options.type ?? "request",
+        undefined,
+        undefined,
+        "direct",
+        options.topic ? { topic: options.topic } : {},
+        {},
+        options.sender ? { sender: options.sender } : {},
+      )
     },
     connectClient(): { connId: string; socket: TestSocket } {
       const socket = createTestSocket()

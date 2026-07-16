@@ -43,12 +43,11 @@ import {
 import { detectRole, resolveProjectId, type TribeRole } from "tribe-wire/lib/config"
 import { createTribeContext, type MessageInsertedInfo, type TribeContext } from "../context.ts"
 import {
-  fetchEvent,
+  drainActionableInbox,
   handleToolCall,
   isRemovedTribeMethod,
   removedTribeMethodMessage,
   TRIBE_COORD_METHODS,
-  type FetchRow,
 } from "../handlers.ts"
 import { createLifecycleStore } from "../lifecycle-store.ts"
 import { createInboxWaitManager } from "../inbox-wait.ts"
@@ -372,6 +371,7 @@ export function withDispatcher<
         pid: number
         launchId: string | null
         launchParentPid: number | null
+        inboxDrainAuthorized?: boolean
         claudeSessionId: string | null
         peerSocket: string | null
         ctx: TribeContext
@@ -390,6 +390,7 @@ export function withDispatcher<
         pid: fields.pid,
         launchId: fields.launchId,
         launchParentPid: fields.launchParentPid,
+        inboxDrainAuthorized: fields.inboxDrainAuthorized === true,
         claudeSessionId: fields.claudeSessionId,
         peerSocket: fields.peerSocket,
         conn: relPath(socket.socketPath),
@@ -516,6 +517,72 @@ export function withDispatcher<
             const domains = (p.domains as string[]) ?? []
             const peerSocket = (p.peerSocket as string) ?? null
 
+            const inboxDrainRegistration = p.inboxDrain === true
+            if (p.inboxDrain !== undefined && !inboxDrainRegistration) {
+              return makeError(id, -32602, "register inboxDrain must be true when supplied")
+            }
+            if (inboxDrainRegistration) {
+              if (!launchIdentity || typeof p.name !== "string" || p.name.trim().length === 0 || role !== "member") {
+                return makeError(
+                  id,
+                  -32001,
+                  "inbox-drain registration requires the authenticated current managed member session",
+                )
+              }
+              const requestedName = p.name.trim()
+              const launchHolders = Array.from(clients.values()).filter(
+                (client) =>
+                  client.id !== connId &&
+                  client.role === "member" &&
+                  client.inboxDrainAuthorized !== true &&
+                  client.launchId === launchIdentity.id &&
+                  client.launchParentPid === launchIdentity.parentPid,
+              )
+              const holderSessionIds = new Set(launchHolders.map((client) => client.ctx.sessionId))
+              if (holderSessionIds.size !== 1) {
+                return makeError(id, -32001, "inbox-drain registration requires one live authenticated managed launch")
+              }
+              const holder = launchHolders[0]!
+              if (
+                holder.name !== requestedName ||
+                holder.role !== role ||
+                holder.ctx.getName() !== holder.name ||
+                holder.ctx.getRole() !== holder.role
+              ) {
+                return makeError(
+                  id,
+                  -32001,
+                  "inbox-drain registration must match the authenticated current session and role",
+                )
+              }
+              const client = applyClient(connId, {
+                name: holder.name,
+                role: holder.role,
+                domains: holder.domains,
+                project,
+                projectName,
+                projectId,
+                pid: clientPid,
+                launchId: launchIdentity.id,
+                launchParentPid: launchIdentity.parentPid,
+                inboxDrainAuthorized: true,
+                claudeSessionId: holder.claudeSessionId,
+                peerSocket,
+                ctx: holder.ctx,
+              })
+              const coordState = db
+                .prepare("SELECT key, value FROM coordination WHERE project_id = ?")
+                .all(projectId) as Array<{ key: string; value: string | null }>
+              return makeResponse(id, {
+                sessionId: client.ctx.sessionId,
+                name: client.name,
+                role: client.role,
+                protocolVersion: TRIBE_PROTOCOL_VERSION,
+                coordinationState: coordState,
+                daemon: { pid: process.pid, uptime: Math.floor((Date.now() - socket.startedAt) / 1000) },
+              })
+            }
+
             // Names currently held by live (connected) clients — flavor
             // auto-numbering picks the lowest free integer among these.
             // Counting connected sessions (not DB rows) means a disconnected
@@ -545,6 +612,7 @@ export function withDispatcher<
               ? (Array.from(clients.values()).find(
                   (client) =>
                     client.id !== connId &&
+                    client.inboxDrainAuthorized !== true &&
                     client.name === resolvedName &&
                     client.launchId === launch.id &&
                     client.launchParentPid === launch.parentPid,
@@ -825,31 +893,49 @@ export function withDispatcher<
             return makeResponse(id, readInboxStatus(sessionName))
           }
 
-          /**
-           * Bounded, name-keyed actionable drain for long-lived hosts whose
-           * current tool bridge cannot expose `tribe.fetch`. This advances the
-           * same durable mailbox cursor as fetch without registering, joining,
-           * renaming, or otherwise creating a transient session row.
-           */
+          /** Bounded actionable drain for the authenticated member context. */
           case "cli_inbox_drain": {
-            const sessionName = String(p.session ?? DEFAULT_INBOX_WAIT_SESSION)
-            const requestedLimit = Number(p.limit ?? 10)
-            const limit = Number.isFinite(requestedLimit) ? Math.min(100, Math.max(1, Math.trunc(requestedLimit))) : 10
-            const tail = stmts.getMessageTailSeq.get() as { seq: number } | null
-            const rows = stmts.selectUnackedActionables.all({
-              $name: sessionName,
-              $upto: tail?.seq ?? 0,
-              $limit: limit,
-            }) as FetchRow[]
-            const last = rows.at(-1)
-            if (last) {
-              stmts.advanceMailboxCursor.run({ $recipient: sessionName, $seq: last.rowid, $now: Date.now() })
+            if (Object.prototype.hasOwnProperty.call(p, "session")) {
+              return makeError(
+                id,
+                -32602,
+                "cli_inbox_drain is bound to the authenticated current session; session override is forbidden",
+              )
             }
-            return makeResponse(id, {
-              ...readInboxStatus(sessionName),
-              drained_count: rows.length,
-              events: rows.map(fetchEvent),
-            })
+            const client = clients.get(connId)
+            const hasLiveManagedPeer =
+              !!client &&
+              client.inboxDrainAuthorized === true &&
+              client.launchId !== null &&
+              client.launchParentPid !== null &&
+              Array.from(clients.entries()).some(
+                ([peerConnId, peer]) =>
+                  peerConnId !== connId &&
+                  peer.inboxDrainAuthorized !== true &&
+                  peer.role === client.role &&
+                  peer.ctx.sessionId === client.ctx.sessionId &&
+                  peer.name === client.name &&
+                  peer.launchId === client.launchId &&
+                  peer.launchParentPid === client.launchParentPid,
+              )
+            if (
+              !client ||
+              !hasLiveManagedPeer ||
+              client.role !== "member" ||
+              client.ctx.getRole() !== "member" ||
+              client.name !== client.ctx.getName()
+            ) {
+              return makeError(
+                id,
+                -32001,
+                "cli_inbox_drain requires an authenticated current member session with a live managed launch",
+              )
+            }
+            const limit = p.limit ?? 10
+            if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+              return makeError(id, -32602, "cli_inbox_drain limit must be an integer from 1 through 100")
+            }
+            return makeResponse(id, drainActionableInbox(client.ctx, limit))
           }
 
           case "cli_inbox_wait": {

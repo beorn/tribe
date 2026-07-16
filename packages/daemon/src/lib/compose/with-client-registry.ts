@@ -44,6 +44,8 @@ export type ClientSession = {
   launchId: string | null
   /** Launcher PID provenance; paired with launchId to reject stale inheritance. */
   launchParentPid: number | null
+  /** Dedicated CLI drain transport, admitted only by a live managed peer. */
+  inboxDrainAuthorized?: boolean
   claudeSessionId: string | null
   /** Peer socket path for direct proxy-to-proxy connections */
   peerSocket: string | null
