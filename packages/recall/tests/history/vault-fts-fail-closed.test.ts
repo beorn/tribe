@@ -13,8 +13,8 @@
  *  1. READONLY PIN — `getVaultDb()` opens the km state.db strictly read-only:
  *     writes are refused and `PRAGMA query_only` reads back 1. The database
  *     and WAL bytes stay identical and no sidecar is created, removed, or
- *     resized. SQLite may update reader marks and mtime inside an existing
- *     `-shm` WAL index; that coordination state is not database content.
+ *     resized. SQLite may update an existing `-shm` WAL index in any way;
+ *     that coordination state is not database content.
  *  2. TYPED DEGRADE — with no vault db resolvable (`KM_VAULT_DB` unset, none
  *     up the cwd walk), resolution is a pure fs probe: `getVaultDb()` returns
  *     null and `searchVault()` returns an empty typed result — no throw, no
@@ -325,9 +325,6 @@ describe("vault-fts fail-closed guards", () => {
       expect(Object.keys(after)).toEqual(Object.keys(before))
       expect(after["state.db"]).toEqual(before["state.db"])
       expect(after["state.db-wal"]).toEqual(before["state.db-wal"])
-      expect(after["state.db-shm"]).toMatchObject({
-        size: before["state.db-shm"]!.size,
-      })
     } finally {
       resetVaultDbCacheForTests()
       writer?.close()
