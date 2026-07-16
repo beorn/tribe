@@ -43,12 +43,11 @@ import {
 import { detectRole, resolveProjectId, type TribeRole } from "tribe-wire/lib/config"
 import { createTribeContext, type MessageInsertedInfo, type TribeContext } from "../context.ts"
 import {
-  fetchEvent,
+  drainActionableInbox,
   handleToolCall,
   isRemovedTribeMethod,
   removedTribeMethodMessage,
   TRIBE_COORD_METHODS,
-  type FetchRow,
 } from "../handlers.ts"
 import { createLifecycleStore } from "../lifecycle-store.ts"
 import { createInboxWaitManager } from "../inbox-wait.ts"
@@ -825,31 +824,29 @@ export function withDispatcher<
             return makeResponse(id, readInboxStatus(sessionName))
           }
 
-          /**
-           * Bounded, name-keyed actionable drain for long-lived hosts whose
-           * current tool bridge cannot expose `tribe.fetch`. This advances the
-           * same durable mailbox cursor as fetch without registering, joining,
-           * renaming, or otherwise creating a transient session row.
-           */
+          /** Bounded actionable drain for the authenticated member context. */
           case "cli_inbox_drain": {
-            const sessionName = String(p.session ?? DEFAULT_INBOX_WAIT_SESSION)
-            const requestedLimit = Number(p.limit ?? 10)
-            const limit = Number.isFinite(requestedLimit) ? Math.min(100, Math.max(1, Math.trunc(requestedLimit))) : 10
-            const tail = stmts.getMessageTailSeq.get() as { seq: number } | null
-            const rows = stmts.selectUnackedActionables.all({
-              $name: sessionName,
-              $upto: tail?.seq ?? 0,
-              $limit: limit,
-            }) as FetchRow[]
-            const last = rows.at(-1)
-            if (last) {
-              stmts.advanceMailboxCursor.run({ $recipient: sessionName, $seq: last.rowid, $now: Date.now() })
+            if (Object.prototype.hasOwnProperty.call(p, "session")) {
+              return makeError(
+                id,
+                -32602,
+                "cli_inbox_drain is bound to the authenticated current session; session override is forbidden",
+              )
             }
-            return makeResponse(id, {
-              ...readInboxStatus(sessionName),
-              drained_count: rows.length,
-              events: rows.map(fetchEvent),
-            })
+            const client = clients.get(connId)
+            if (
+              !client ||
+              client.role !== "member" ||
+              client.ctx.getRole() !== "member" ||
+              client.name !== client.ctx.getName()
+            ) {
+              return makeError(id, -32001, "cli_inbox_drain requires an authenticated current member session")
+            }
+            const limit = p.limit ?? 10
+            if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+              return makeError(id, -32602, "cli_inbox_drain limit must be an integer from 1 through 100")
+            }
+            return makeResponse(id, drainActionableInbox(client.ctx, limit))
           }
 
           case "cli_inbox_wait": {

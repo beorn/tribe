@@ -293,6 +293,106 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     }
   })
 
+  it("inbox-drain fans into the authenticated current launch before mutating its mailbox", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-drain-"))
+    const socketPath = join(dir, "tribe.sock")
+    const calls: Array<{ method: string; params?: Record<string, unknown> }> = []
+    const result = {
+      session: "@agent/3",
+      unread_count: 0,
+      oldest_unread_age_min: 0,
+      oldest_unread_ts: 0,
+      drained_count: 1,
+      events: [{ from: "@chief", type: "request", content: "review carrier r2" }],
+    }
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as { id: number; method: string; params?: Record<string, unknown> }
+          calls.push({ method: request.method, params: request.params })
+          const response =
+            request.method === "register"
+              ? { sessionId: "session-agent-3", name: "@agent/3", role: "member" }
+              : request.method === "cli_inbox_drain"
+                ? result
+                : { error: `unexpected method ${request.method}` }
+          socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: response })}\n`)
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        TRIBE_SOCKET: socketPath,
+        TRIBE_NAME: "@agent/3",
+        TRIBE_ROLE: "member",
+        TRIBE_LAUNCH_ID: "launch-agent-3",
+        TRIBE_NO_AUTOSTART: "1",
+      }
+      delete env.TRIBE_SESSION_NAME
+      const cli = await runCliAsync(["inbox-drain", "--limit", "1", "--json"], env)
+
+      expect(cli).toMatchObject({ code: 0, stderr: "" })
+      expect(JSON.parse(cli.stdout)).toEqual(result)
+      expect(calls).toHaveLength(2)
+      expect(calls[0]).toMatchObject({
+        method: "register",
+        params: {
+          name: "@agent/3",
+          role: "member",
+          delivery: "pull",
+          launchId: "launch-agent-3",
+          launchParentPid: process.pid,
+          pid: expect.any(Number),
+        },
+      })
+      expect(calls[1]).toEqual({ method: "cli_inbox_drain", params: { limit: 1 } })
+      expect(calls[1]?.params).not.toHaveProperty("session")
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("inbox-drain fails closed without managed identity or with a target override", async () => {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      TRIBE_SOCKET: join(tmpdir(), `tribe-wire-no-drain-${process.pid}.sock`),
+      TRIBE_NAME: "@agent/3",
+      TRIBE_LAUNCH_ID: "launch-agent-3",
+      TRIBE_NO_AUTOSTART: "1",
+    }
+    delete env.TRIBE_SESSION_NAME
+
+    const crossRole = await runCliAsync(["inbox-drain", "--session", "@chief"], env)
+    expect(crossRole.code).not.toBe(0)
+    expect(crossRole.stderr).toMatch(/unknown option.*--session/i)
+
+    const invalid = await runCliAsync(["inbox-drain", "--limit", "0"], env)
+    expect(invalid.code).toBe(2)
+    expect(invalid.stderr).toMatch(/--limit must be an integer from 1 through 100/)
+
+    delete env.TRIBE_LAUNCH_ID
+    const unauthenticated = await runCliAsync(["inbox-drain"], env)
+    expect(unauthenticated.code).toBe(2)
+    expect(unauthenticated.stderr).toMatch(/authenticated managed session required/)
+  })
+
   it("bare `help` prints help and exits 0", () => {
     const { stdout, code } = runCli(["help"])
     expect(code).toBe(0)

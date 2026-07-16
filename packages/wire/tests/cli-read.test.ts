@@ -95,11 +95,12 @@ describe("registerReadCommands", () => {
     expect(flags).toEqual(expect.arrayContaining(["--session", "--json"]))
   })
 
-  test("inbox-drain verb accepts --session, --limit, and --json", () => {
+  test("inbox-drain verb accepts only bounded output controls, not a target session", () => {
     const cmd = findCmd(buildProgram(), "inbox-drain")
     expect(cmd).toBeDefined()
     const flags = optionFlags(cmd!)
-    expect(flags).toEqual(expect.arrayContaining(["--session", "--limit", "--json"]))
+    expect(flags).toEqual(expect.arrayContaining(["--limit", "--json"]))
+    expect(flags).not.toContain("--session")
   })
 
   test("inbox-wait verb accepts --session, --timeout, and --json", () => {

@@ -1324,6 +1324,44 @@ function filterRowsByTrust(ctx: TribeContext, rows: FetchRow[]): FetchRow[] {
   return rows.filter((r) => senderMayUseRegisteredTrustTopic(r.topic, r.sender, roster))
 }
 
+function actionableAttentionRows(ctx: TribeContext): FetchRow[] {
+  return filterRowsByTrust(ctx, ctx.stmts.selectActionableAttention.all({ $name: ctx.getName() }) as FetchRow[])
+}
+
+export type ActionableInboxDrainResult = {
+  session: string
+  unread_count: number
+  oldest_unread_age_min: number
+  oldest_unread_ts: number
+  drained_count: number
+  events: FetchEvent[]
+}
+
+/**
+ * Drain one bounded page from the authenticated context's durable actionable
+ * mailbox. Eligibility and trust are intentionally the same projection used
+ * by default fetch attention; callers cannot supply a recipient key.
+ */
+export function drainActionableInbox(ctx: TribeContext, limit: number): ActionableInboxDrainResult {
+  const currentName = ctx.getName()
+  const drained = actionableAttentionRows(ctx).slice(0, limit)
+  const last = drained.at(-1)
+  if (last) {
+    ctx.stmts.advanceMailboxCursor.run({ $recipient: currentName, $seq: last.rowid, $now: Date.now() })
+  }
+
+  const remaining = actionableAttentionRows(ctx)
+  const oldestUnreadTs = remaining[0]?.ts ?? 0
+  return {
+    session: currentName,
+    unread_count: remaining.length,
+    oldest_unread_age_min: oldestUnreadTs > 0 ? Math.max(0, Math.floor((Date.now() - oldestUnreadTs) / 60_000)) : 0,
+    oldest_unread_ts: oldestUnreadTs,
+    drained_count: drained.length,
+    events: drained.map(fetchEvent),
+  }
+}
+
 function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRow[] {
   const conditions = ["kind != 'event'"]
   const params: Record<string, number | string> = { $limit: filters.limit }
@@ -1435,10 +1473,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
     shouldAdvance = !topicsAreSnapshot && since !== null && a.advance === true
   } else {
     if (!topicsAreSnapshot) {
-      attentionActionableRows = filterRowsByTrust(
-        ctx,
-        ctx.stmts.selectActionableAttention.all({ $name: currentName }) as FetchRow[],
-      )
+      attentionActionableRows = actionableAttentionRows(ctx)
       attention = {
         actionable_unread: attentionActionableRows.map(fetchEvent),
         pending_balls: pendingBallsForOwner(ctx, currentName, Date.now()),
