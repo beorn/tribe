@@ -395,6 +395,53 @@ describe("dispatcher bounded mailbox drain", () => {
     expect(status.unread_count).toBe(1)
   })
 
+  it("forbids a drain transport from shedding provenance and bootstrapping a successor", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const launch = { launchId: "launch-agent-3", launchParentPid: 4242 }
+    const holder = harness.connectClient()
+    await harness.register(holder.connId, {
+      name: "@agent/3",
+      pid: liveHolderPid,
+      project: "/tmp/km-wt3",
+      ...launch,
+    })
+    const drain = harness.connectClient()
+    await harness.register(drain.connId, {
+      name: "@agent/3",
+      pid: otherLivePid,
+      project: "/tmp/km-wt3",
+      inboxDrain: true,
+      ...launch,
+    })
+
+    const shed = parseError(
+      await harness.register(drain.connId, {
+        name: "@agent/3",
+        pid: otherLivePid,
+        project: "/tmp/km-wt3",
+        ...launch,
+      }),
+    )
+    expect(shed).toMatchObject({ code: -32001 })
+    expect(shed.message).toMatch(/provenance is immutable/)
+
+    holder.socket.emitClose()
+    const successor = harness.connectClient()
+    const bootstrapped = parseError(
+      await harness.register(successor.connId, {
+        name: "@agent/3",
+        pid: otherLivePid + 1,
+        project: "/tmp/km-wt3",
+        inboxDrain: true,
+        ...launch,
+      }),
+    )
+    expect(bootstrapped).toMatchObject({ code: -32001 })
+    expect(bootstrapped.message).toMatch(/live authenticated managed launch/)
+  })
+
   it("validates the bound before mutation and preserves fetch trust and attention eligibility", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
@@ -415,10 +462,14 @@ describe("dispatcher bounded mailbox drain", () => {
       inboxDrain: true,
       ...launch,
     })
-    harness.sendActionable("@agent/3", "forged daemon request", {
-      sender: "unregistered-sender",
-      topic: "daemon:forged",
-    })
+    // More than one scan page of forged trust topics must not hide the first
+    // eligible actionable or force the drain to materialize the whole mailbox.
+    for (let i = 0; i < 101; i += 1) {
+      harness.sendActionable("@agent/3", `forged daemon request ${i}`, {
+        sender: "unregistered-sender",
+        topic: "daemon:forged",
+      })
+    }
     harness.sendActionable("@agent/3", "non-actionable notice", { type: "notify" })
     harness.sendActionable("@agent/3", "trusted actionable request", {
       sender: "daemon",

@@ -390,7 +390,9 @@ export function withDispatcher<
         pid: fields.pid,
         launchId: fields.launchId,
         launchParentPid: fields.launchParentPid,
-        inboxDrainAuthorized: fields.inboxDrainAuthorized === true,
+        // Drain provenance is connection-local and monotonic. A drain transport
+        // must never become a launch holder by re-registering without the flag.
+        inboxDrainAuthorized: existing.inboxDrainAuthorized === true || fields.inboxDrainAuthorized === true,
         claudeSessionId: fields.claudeSessionId,
         peerSocket: fields.peerSocket,
         conn: relPath(socket.socketPath),
@@ -520,6 +522,9 @@ export function withDispatcher<
             const inboxDrainRegistration = p.inboxDrain === true
             if (p.inboxDrain !== undefined && !inboxDrainRegistration) {
               return makeError(id, -32602, "register inboxDrain must be true when supplied")
+            }
+            if (clients.get(connId)?.inboxDrainAuthorized === true && !inboxDrainRegistration) {
+              return makeError(id, -32001, "inbox-drain registration provenance is immutable for this connection")
             }
             if (inboxDrainRegistration) {
               if (!launchIdentity || typeof p.name !== "string" || p.name.trim().length === 0 || role !== "member") {

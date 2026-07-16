@@ -1325,7 +1325,45 @@ function filterRowsByTrust(ctx: TribeContext, rows: FetchRow[]): FetchRow[] {
 }
 
 function actionableAttentionRows(ctx: TribeContext): FetchRow[] {
-  return filterRowsByTrust(ctx, ctx.stmts.selectActionableAttention.all({ $name: ctx.getName() }) as FetchRow[])
+  return filterRowsByTrust(
+    ctx,
+    ctx.stmts.selectActionableAttention.all({ $name: ctx.getName(), $after: 0, $limit: -1 }) as FetchRow[],
+  )
+}
+
+const ACTIONABLE_DRAIN_SCAN_PAGE_SIZE = 100
+
+function actionableInboxProjection(
+  ctx: TribeContext,
+  limit: number,
+): { drained: FetchRow[]; unreadCount: number; oldestUnreadTs: number } {
+  const roster = sessionRoster(ctx)
+  const drained: FetchRow[] = []
+  let unreadCount = 0
+  let oldestUnreadTs = 0
+  let after = 0
+
+  while (true) {
+    const page = ctx.stmts.selectActionableAttention.all({
+      $name: ctx.getName(),
+      $after: after,
+      $limit: ACTIONABLE_DRAIN_SCAN_PAGE_SIZE,
+    }) as FetchRow[]
+    for (const row of page) {
+      if (!senderMayUseRegisteredTrustTopic(row.topic, row.sender, roster)) continue
+      if (drained.length < limit) {
+        drained.push(row)
+      } else {
+        unreadCount += 1
+        if (oldestUnreadTs === 0) oldestUnreadTs = row.ts
+      }
+    }
+    const last = page.at(-1)
+    if (!last || page.length < ACTIONABLE_DRAIN_SCAN_PAGE_SIZE) break
+    after = last.rowid
+  }
+
+  return { drained, unreadCount, oldestUnreadTs }
 }
 
 export type ActionableInboxDrainResult = {
@@ -1344,17 +1382,15 @@ export type ActionableInboxDrainResult = {
  */
 export function drainActionableInbox(ctx: TribeContext, limit: number): ActionableInboxDrainResult {
   const currentName = ctx.getName()
-  const drained = actionableAttentionRows(ctx).slice(0, limit)
+  const { drained, unreadCount, oldestUnreadTs } = actionableInboxProjection(ctx, limit)
   const last = drained.at(-1)
   if (last) {
     ctx.stmts.advanceMailboxCursor.run({ $recipient: currentName, $seq: last.rowid, $now: Date.now() })
   }
 
-  const remaining = actionableAttentionRows(ctx)
-  const oldestUnreadTs = remaining[0]?.ts ?? 0
   return {
     session: currentName,
-    unread_count: remaining.length,
+    unread_count: unreadCount,
     oldest_unread_age_min: oldestUnreadTs > 0 ? Math.max(0, Math.floor((Date.now() - oldestUnreadTs) / 60_000)) : 0,
     oldest_unread_ts: oldestUnreadTs,
     drained_count: drained.length,

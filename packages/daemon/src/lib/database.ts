@@ -1059,7 +1059,9 @@ export function createStatements(db: Database) {
      * normal fetch limit still bounds chronological `events`; this projection
      * prevents a later verdict/request from sitting behind that ambient page.
      * It reuses the recipient mailbox cursor and canonical actionable types —
-     * no second queue, cursor, or store.
+     * no second queue, cursor, or store. `$after` + `$limit` let explicit drain
+     * stream bounded pages; default fetch passes -1 to retain the complete
+     * turn-attention projection.
      */
     selectActionableAttention: db.prepare(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary
@@ -1069,7 +1071,9 @@ export function createStatements(db: Database) {
         AND sender != $name
         AND type IN (${ACTIONABLE_TYPES_SQL})
         AND rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+        AND rowid > $after
       ORDER BY rowid ASC
+      LIMIT $limit
     `),
 
     /** Count-only form of the recovery view — join/rename recovery reporting. */
