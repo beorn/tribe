@@ -128,16 +128,32 @@ export function evaluateGate(input: GateInput): GateDecision {
     }
   }
 
-  // (A-1) No manifest — envelope didn't run this turn. Degrade to allow
+  // (A-1a) Manifest exists but cannot be read/trusted (permission error,
+  // torn or corrupt content, wrong shape) — FAIL CLOSED. Aliasing this to
+  // "absent" would let anyone able to corrupt the file disarm the defense
+  // (@km/all/21206-atomicity-sweep/21207).
+  const manifestRead = readTurnManifest(input.session_id)
+  if (manifestRead.kind === "unreadable") {
+    return {
+      permissionDecision: "deny",
+      permissionDecisionReason:
+        `Blocked: this session's turn manifest exists but is unreadable (${manifestRead.reason}) — ` +
+        `failing closed on mutating tools. Re-submit the prompt to rewrite the manifest, ` +
+        `or clear it to return to no-envelope mode.`,
+      debug: { reasonCode: "manifest-unreadable" },
+    }
+  }
+
+  // (A-1b) No manifest — envelope didn't run this turn. Degrade to allow
   // rather than over-block.
-  const manifest = readTurnManifest(input.session_id)
-  if (!manifest) {
+  if (manifestRead.kind === "absent") {
     return {
       permissionDecision: "allow",
       permissionDecisionReason: "no turn manifest — envelope did not run",
       debug: { reasonCode: "no-manifest" },
     }
   }
+  const manifest = manifestRead.manifest
 
   // (A-2) Manifest with no injected spans — nothing to guard against.
   if (manifest.untrustedRecall.length === 0) {
