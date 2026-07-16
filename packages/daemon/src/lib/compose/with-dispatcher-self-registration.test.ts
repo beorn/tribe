@@ -183,12 +183,14 @@ describe("dispatcher bounded mailbox drain", () => {
     cleanup = harness.dispose
 
     const launch = { launchId: "launch-agent-3", launchParentPid: 4242 }
+    const identityToken = "private-runtime-agent-3"
     const holderSocket = harness.addPendingClient("conn-holder")
     const holder = parseResult<RegisterResult>(
       await harness.register("conn-holder", {
         name: "@agent/3",
         pid: liveHolderPid,
         project: "/tmp/km-wt3",
+        identityToken,
         ...launch,
       }),
     )
@@ -198,6 +200,7 @@ describe("dispatcher bounded mailbox drain", () => {
         name: "@agent/3",
         pid: otherLivePid,
         project: "/tmp/km-wt3",
+        identityToken,
         ...launch,
       }),
     )
@@ -248,6 +251,78 @@ describe("dispatcher bounded mailbox drain", () => {
       ),
     )
     expect(chiefStatus).toMatchObject({ session: "@chief", unread_count: 1 })
+  })
+
+  it("rejects a live foreign role replaying the public launch tuple without advancing the victim cursor", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const launch = { launchId: "public-launch-agent-3", launchParentPid: 4242 }
+    const victimIdentityToken = "private-runtime-agent-3"
+    harness.addPendingClient("conn-victim")
+    const victim = parseResult<RegisterResult>(
+      await harness.register("conn-victim", {
+        name: "@agent/3",
+        pid: liveHolderPid,
+        project: "/tmp/km-wt3",
+        identityToken: victimIdentityToken,
+        ...launch,
+      }),
+    )
+    harness.sendActionable("@agent/3", "victim request must remain unread")
+
+    harness.addPendingClient("conn-attacker")
+    const stolenTuple = parseError(
+      await harness.register("conn-attacker", {
+        name: "@agent/3",
+        pid: otherLivePid,
+        project: "/tmp/km-wt8",
+        identityToken: "private-runtime-agent-8",
+        ...launch,
+      }),
+    )
+    expect(stolenTuple).toMatchObject({ code: -32000 })
+
+    const attackDrain = parseError(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "attacker-drain", method: "cli_inbox_drain", params: { limit: 1 } },
+        "conn-attacker",
+      ),
+    )
+    expect(attackDrain).toMatchObject({ code: -32001 })
+
+    const afterAttack = parseResult<InboxStatusResult>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "victim-status-after-attack",
+          method: "cli_inbox_status",
+          params: { session: "@agent/3" },
+        },
+        "conn-attacker",
+      ),
+    )
+    expect(afterAttack.unread_count).toBe(1)
+
+    harness.addPendingClient("conn-legitimate-drain")
+    const legitimate = parseResult<RegisterResult>(
+      await harness.register("conn-legitimate-drain", {
+        name: "@agent/3",
+        pid: otherLivePid + 1,
+        project: "/tmp/km-wt3",
+        identityToken: victimIdentityToken,
+        ...launch,
+      }),
+    )
+    expect(legitimate.sessionId).toBe(victim.sessionId)
+    const drained = parseResult<InboxDrainResult>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "legitimate-drain", method: "cli_inbox_drain", params: { limit: 1 } },
+        "conn-legitimate-drain",
+      ),
+    )
+    expect(drained).toMatchObject({ session: "@agent/3", drained_count: 1, unread_count: 0 })
+    expect(drained.events.map((event) => event.content)).toEqual(["victim request must remain unread"])
   })
 
   it("rejects unregistered and non-member callers", async () => {
@@ -316,11 +391,13 @@ describe("dispatcher bounded mailbox drain", () => {
     cleanup = harness.dispose
 
     const launch = { launchId: "launch-agent-3", launchParentPid: 4242 }
+    const identityToken = "private-runtime-agent-3"
     harness.addPendingClient("conn-holder")
     await harness.register("conn-holder", {
       name: "@agent/3",
       pid: liveHolderPid,
       project: "/tmp/km-wt3",
+      identityToken,
       ...launch,
     })
     harness.addPendingClient("conn-drain")
@@ -328,6 +405,7 @@ describe("dispatcher bounded mailbox drain", () => {
       name: "@agent/3",
       pid: otherLivePid,
       project: "/tmp/km-wt3",
+      identityToken,
       ...launch,
     })
     harness.sendActionable("@agent/3", "forged daemon request", {

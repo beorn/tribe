@@ -44,6 +44,9 @@ export type ClientSession = {
   launchId: string | null
   /** Launcher PID provenance; paired with launchId to reject stale inheritance. */
   launchParentPid: number | null
+  /** True only after the daemon matched this transport's private runtime proof
+   *  to the live holder while performing launch fan-in. */
+  inboxDrainAuthorized?: boolean
   claudeSessionId: string | null
   /** Peer socket path for direct proxy-to-proxy connections */
   peerSocket: string | null

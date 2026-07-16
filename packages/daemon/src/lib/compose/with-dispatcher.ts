@@ -371,6 +371,7 @@ export function withDispatcher<
         pid: number
         launchId: string | null
         launchParentPid: number | null
+        inboxDrainAuthorized: boolean
         claudeSessionId: string | null
         peerSocket: string | null
         ctx: TribeContext
@@ -389,6 +390,7 @@ export function withDispatcher<
         pid: fields.pid,
         launchId: fields.launchId,
         launchParentPid: fields.launchParentPid,
+        inboxDrainAuthorized: fields.inboxDrainAuthorized,
         claudeSessionId: fields.claudeSessionId,
         peerSocket: fields.peerSocket,
         conn: relPath(socket.socketPath),
@@ -540,7 +542,7 @@ export function withDispatcher<
               clientPid,
             })
             const launch = launchIdentity
-            const sameLaunchHolder = launch
+            const launchHolder = launch
               ? (Array.from(clients.values()).find(
                   (client) =>
                     client.id !== connId &&
@@ -549,6 +551,15 @@ export function withDispatcher<
                     client.launchParentPid === launch.parentPid,
                 ) ?? null)
               : null
+            const launchHolderIdentity = launchHolder
+              ? (db.prepare("SELECT identity_token FROM sessions WHERE id = ?").get(launchHolder.ctx.sessionId) as {
+                  identity_token: string | null
+                } | null)
+              : null
+            const sameLaunchHolder =
+              launchHolder && identityToken && launchHolderIdentity?.identity_token === identityToken
+                ? launchHolder
+                : null
             if (sameLaunchHolder && launch) {
               const client = applyClient(connId, {
                 name: sameLaunchHolder.name,
@@ -560,6 +571,7 @@ export function withDispatcher<
                 pid: clientPid,
                 launchId: launch.id,
                 launchParentPid: launch.parentPid,
+                inboxDrainAuthorized: true,
                 claudeSessionId,
                 peerSocket,
                 ctx: sameLaunchHolder.ctx,
@@ -706,6 +718,7 @@ export function withDispatcher<
               pid,
               launchId: launchIdentity?.id ?? null,
               launchParentPid: launchIdentity?.parentPid ?? null,
+              inboxDrainAuthorized: false,
               claudeSessionId,
               peerSocket,
               ctx: clientCtx,
@@ -843,6 +856,7 @@ export function withDispatcher<
               return makeError(id, -32001, "cli_inbox_drain requires an authenticated current member session")
             }
             const hasLiveLaunchPeer =
+              client.inboxDrainAuthorized === true &&
               client.launchId !== null &&
               client.launchParentPid !== null &&
               Array.from(clients.entries()).some(
@@ -858,7 +872,7 @@ export function withDispatcher<
               return makeError(
                 id,
                 -32001,
-                "cli_inbox_drain requires server-verified fan-in to the current managed launch",
+                "cli_inbox_drain requires authenticated server-verified fan-in to the current managed launch",
               )
             }
             const limit = p.limit ?? 10

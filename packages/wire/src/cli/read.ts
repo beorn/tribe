@@ -35,6 +35,7 @@
 import { Command, int } from "@silvery/commander"
 import { cliOption, visibleCliProjectionForMcp } from "../command-descriptors.ts"
 import { DEFAULT_INBOX_WAIT_SESSION, resolveInboxWaitOptions } from "../lib/inbox-wait-options.ts"
+import { createSessionIdentityToken, resolveRuntimeSessionIdentity } from "../lib/session-identity.ts"
 import { connectToDaemon, resolveSocketPath, TRIBE_PROTOCOL_VERSION } from "../lib/socket.ts"
 import { watchActivity } from "../lib/activity-watch.ts"
 import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-exempt.ts"
@@ -636,19 +637,37 @@ async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promi
   )
 }
 
-function requireInboxDrainIdentity(): { name: string; launchId: string; role: "member" } {
+function requireInboxDrainIdentity(): {
+  name: string
+  launchId: string
+  role: "member"
+  identityToken: string
+} {
   const name = process.env.TRIBE_SESSION_NAME?.trim() || process.env.TRIBE_NAME?.trim() || ""
   const launchId = process.env.TRIBE_LAUNCH_ID?.trim() ?? ""
   const role = process.env.TRIBE_ROLE?.trim() || "member"
-  if (!name || !launchId) {
-    console.error("tribe-wire inbox-drain: authenticated managed session required (TRIBE_NAME and TRIBE_LAUNCH_ID)")
+  const runtimeSessionIdentity = resolveRuntimeSessionIdentity()
+  if (!name || !launchId || !runtimeSessionIdentity) {
+    console.error(
+      "tribe-wire inbox-drain: authenticated managed session required " +
+        "(TRIBE_NAME, TRIBE_LAUNCH_ID, and CLAUDE_SESSION_ID or CODEX_THREAD_ID)",
+    )
     process.exit(2)
   }
   if (role !== "member") {
     console.error(`tribe-wire inbox-drain: current session role must be member (received ${role})`)
     process.exit(2)
   }
-  return { name, launchId, role }
+  return {
+    name,
+    launchId,
+    role,
+    identityToken: createSessionIdentityToken({
+      runtimeSessionIdentity,
+      project: process.cwd(),
+      role,
+    }),
+  }
 }
 
 function parseInboxDrainLimit(value: string | number | undefined): number {
@@ -666,7 +685,7 @@ function parseInboxDrainLimit(value: string | number | undefined): number {
 }
 
 async function callAuthenticatedInboxDrain(limit: number): Promise<InboxDrainResult> {
-  const { name, launchId, role } = requireInboxDrainIdentity()
+  const { name, launchId, role, identityToken } = requireInboxDrainIdentity()
   const socketPath = resolveSocketPath()
   try {
     const client = await connectToDaemon(socketPath)
@@ -681,6 +700,7 @@ async function callAuthenticatedInboxDrain(limit: number): Promise<InboxDrainRes
         projectName: cwd.split("/").filter(Boolean).at(-1) ?? "unknown",
         pid: process.pid,
         protocolVersion: TRIBE_PROTOCOL_VERSION,
+        identityToken,
         launchId,
         launchParentPid: process.ppid,
       })) as { name?: string; role?: string }

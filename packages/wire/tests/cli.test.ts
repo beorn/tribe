@@ -338,6 +338,8 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       })
       const env: NodeJS.ProcessEnv = {
         ...process.env,
+        CLAUDE_SESSION_ID: "",
+        CODEX_THREAD_ID: "codex-thread-agent-3",
         TRIBE_SOCKET: socketPath,
         TRIBE_NAME: "@agent/3",
         TRIBE_ROLE: "member",
@@ -358,6 +360,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
           delivery: "pull",
           launchId: "launch-agent-3",
           launchParentPid: process.pid,
+          identityToken: expect.stringMatching(/^[0-9a-f]{64}$/),
           pid: expect.any(Number),
         },
       })
@@ -372,6 +375,8 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
   it("inbox-drain fails closed without managed identity or with a target override", async () => {
     const env: NodeJS.ProcessEnv = {
       ...process.env,
+      CLAUDE_SESSION_ID: "",
+      CODEX_THREAD_ID: "codex-thread-agent-3",
       TRIBE_SOCKET: join(tmpdir(), `tribe-wire-no-drain-${process.pid}.sock`),
       TRIBE_NAME: "@agent/3",
       TRIBE_LAUNCH_ID: "launch-agent-3",
@@ -391,6 +396,13 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     const unauthenticated = await runCliAsync(["inbox-drain"], env)
     expect(unauthenticated.code).toBe(2)
     expect(unauthenticated.stderr).toMatch(/authenticated managed session required/)
+
+    env.TRIBE_LAUNCH_ID = "launch-agent-3"
+    delete env.CODEX_THREAD_ID
+    delete env.CLAUDE_SESSION_ID
+    const noPrivateRuntimeIdentity = await runCliAsync(["inbox-drain"], env)
+    expect(noPrivateRuntimeIdentity.code).toBe(2)
+    expect(noPrivateRuntimeIdentity.stderr).toMatch(/CLAUDE_SESSION_ID or CODEX_THREAD_ID/)
   })
 
   it("bare `help` prints help and exits 0", () => {
