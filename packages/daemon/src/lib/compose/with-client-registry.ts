@@ -50,6 +50,13 @@ export type ClientSession = {
   /** Connection path (socket or db) */
   conn: string
   ctx: TribeContext
+  /** Durable connection epoch captured at registration (the `connection_epoch`
+   *  the row held immediately after this connection registered/attached). Used
+   *  to fence a stale disconnect: a newer attach advances the durable row's
+   *  epoch, so a late close carrying a lower epoch must not mark the current
+   *  holder detached. Absent (undefined) on placeholder/pending connections that
+   *  never registered. */
+  connectionEpoch?: number
   registeredAt: number
   /** Wall-clock ms at the last dispatched method from this client. Touched
    *  in `with-dispatcher.ts` for every inbound request; consumers compute

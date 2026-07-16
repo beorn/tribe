@@ -813,8 +813,11 @@ export function createStatements(db: Database) {
 		ON CONFLICT(id) DO UPDATE SET
 			name = $name, role = $role, domains = $domains,
 			pid = $pid, cwd = $cwd, project_id = $project_id, claude_session_id = $claude_session_id,
-			claude_session_name = $claude_session_name, identity_token = $identity_token,
-			launch_id = $launch_id, launch_parent_pid = $launch_parent_pid, started_at = $now, updated_at = $now,
+			claude_session_name = $claude_session_name,
+			identity_token = COALESCE($identity_token, identity_token),
+			launch_id = COALESCE($launch_id, launch_id),
+			launch_parent_pid = COALESCE($launch_parent_pid, launch_parent_pid),
+			started_at = $now, updated_at = $now,
 			delivery = COALESCE($delivery, delivery, 'push'),
 			account = COALESCE($account, account),
 			provider = COALESCE($provider, provider)
@@ -927,8 +930,16 @@ export function createStatements(db: Database) {
      * same recipient mailbox) instead of minting a fresh one. The caller runs
      * this only AFTER the live-holder conflict path, so any hit is a DETACHED
      * durable member reconnecting — never a live collision.
+     *
+     * Returns the STORED credentials (identity_token + launch binding) so the
+     * dispatcher can authorize the claim server-side (identity-authority.ts):
+     * name is a locator, not an authenticator, so a claim against a bound row
+     * must present a matching token or launch identity. Without these fields the
+     * attach path can only compare the claimed name — the r1 hole this closes.
      */
-    getDurableSessionByName: db.prepare("SELECT id, role, connection_epoch FROM sessions WHERE name = $name LIMIT 1"),
+    getDurableSessionByName: db.prepare(
+      "SELECT id, role, connection_epoch, identity_token, launch_id, launch_parent_pid FROM sessions WHERE name = $name LIMIT 1",
+    ),
 
     /** Advance-only connection-epoch counter — bumped once per (re-)attach. */
     bumpConnectionEpoch: db.prepare(
