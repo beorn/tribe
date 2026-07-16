@@ -98,14 +98,25 @@ const LAUNCH_ID_RAW = process.env.TRIBE_LAUNCH_ID?.trim() ?? ""
 // parent and therefore cannot fan into the old launch.
 const LAUNCH_IDENTITY = LAUNCH_ID_RAW.length > 0 ? { id: LAUNCH_ID_RAW, parentPid: process.ppid } : null
 // A managed launch's transports share ONE identity, so they must present ONE
-// capability to fan in. Since a daemon-minted capability reaches only the first
-// transport, the SUPERVISOR provisions a random launch capability that every
-// transport of the launch presents (TRIBE_LAUNCH_CAPABILITY). It is not derived
-// from any observable value. NOTE: env is same-user-observable (`ps eww`), a
-// weaker channel than the socket-delivered CLI mint — a follow-up should move
-// launch-capability propagation to an inherited fd. Absent it, siblings cannot
-// fan in and fall back to the takeover path.
-const LAUNCH_CAPABILITY = process.env.TRIBE_LAUNCH_CAPABILITY?.trim() || null
+// capability to fan in. A daemon mint reaches only the first transport, so the
+// SUPERVISOR provisions a random launch capability shared by every transport. It
+// travels over an INHERITED FILE DESCRIPTOR, never env: env is
+// `ps eww`/`/proc/pid/environ`-readable by a same-user peer (A3 S2 ruled the env
+// channel a STOP, not a residual). Only the fd NUMBER rides in
+// TRIBE_LAUNCH_CAPABILITY_FD (not secret); the capability CONTENT on the
+// anonymous pipe is invisible to same-user ps/env inspection.
+const LAUNCH_CAPABILITY = readLaunchCapabilityFromFd(process.env.TRIBE_LAUNCH_CAPABILITY_FD)
+
+function readLaunchCapabilityFromFd(fdRaw: string | undefined): string | null {
+  if (fdRaw === undefined) return null
+  const fd = Number(fdRaw)
+  if (!Number.isInteger(fd) || fd < 3) {
+    // A set-but-malformed fd is a supervisor provisioning bug — fail loud.
+    throw new Error(`TRIBE_LAUNCH_CAPABILITY_FD must be an inherited fd >= 3, got ${JSON.stringify(fdRaw)}`)
+  }
+  const value = readFileSync(fd, "utf8").trim()
+  return value.length > 0 ? value : null
+}
 
 // km 19442 — connect-time replay flood backstop. The wakeup→drain path is capped
 // by selectReplayEvents, but a stale/old daemon that still pushes message BODIES
@@ -860,7 +871,7 @@ if (CWD_EVAL.kind === "warn" || CWD_EVAL.kind === "refuse") {
 
 // Watch transcript file for /rename slug changes and auto-sync to tribe
 import { resolveTranscriptPath, readTranscriptSlug } from "./lib/transcript.ts"
-import { watch as fsWatch } from "node:fs"
+import { readFileSync, watch as fsWatch } from "node:fs"
 {
   const transcriptPath = resolveTranscriptPath(CLAUDE_SESSION_ID)
   if (transcriptPath) {

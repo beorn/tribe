@@ -79,47 +79,57 @@ afterEach(async () => {
 })
 
 describe("dispatcher self-registration collision handling (@ag/tribe/19594)", () => {
-  it("lets the same live PID re-register an explicit agent name", async () => {
+  it("lets a same-name reconnect fan in by presenting the capability (no forgeable same-pid supersede)", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
 
     const firstSocket = harness.addPendingClient("conn-first")
     const first = parseResult<RegisterResult>(
-      await harness.register("conn-first", {
-        name: "@agent/9",
-        pid: liveHolderPid,
-        project: "/tmp/km-wt9",
-      }),
+      await harness.register("conn-first", { name: "@agent/9", pid: liveHolderPid, project: "/tmp/km-wt9" }),
     )
 
+    // A second connection fans into the SAME member ONLY by presenting the
+    // capability — the forgeable same-pid supersede path is deleted (A3 S1).
     const secondSocket = harness.addPendingClient("conn-second")
     const second = parseResult<RegisterResult>(
       await harness.register("conn-second", {
         name: "@agent/9",
         pid: liveHolderPid,
         project: "/tmp/km-wt9",
+        capability: first.capability,
       }),
     )
-
     expect(second.name).toBe("@agent/9")
     expect(second.sessionId).toBe(first.sessionId)
-    expect(firstSocket.destroyedByDispatcher).toBe(true)
+    // Fan-in coexists — the first transport is NOT retired (no supersede).
+    expect(firstSocket.destroyedByDispatcher).toBe(false)
     expect(secondSocket.destroyedByDispatcher).toBe(false)
 
     const status = parseResult<CliStatusResult>(
       await harness.dispatcher.handleRequest(
-        {
-          jsonrpc: "2.0",
-          id: "status",
-          method: "cli_status",
-          params: {},
-        },
+        { jsonrpc: "2.0", id: "status", method: "cli_status", params: {} },
         "conn-second",
       ),
     )
     const agentSessions = status.sessions.filter((s) => s.name === "@agent/9")
     expect(agentSessions).toHaveLength(1)
     expect(agentSessions[0]?.pid).toBe(liveHolderPid)
+  })
+
+  it("denies a same-pid re-register that does NOT present the capability (S1 forgeable-supersede dead)", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    harness.addPendingClient("conn-first")
+    await harness.register("conn-first", { name: "@agent/9", pid: liveHolderPid, project: "/tmp/km-wt9" })
+
+    // Forging the victim's pid without the capability no longer supersedes the
+    // live holder — it fails loud on the name conflict.
+    harness.addPendingClient("conn-forge")
+    const denied = parseError(
+      await harness.register("conn-forge", { name: "@agent/9", pid: liveHolderPid, project: "/tmp/km-wt9" }),
+    )
+    expect(denied.message).toContain("already taken by live pid")
   })
 
   it("still rejects an explicit duplicate name from a different live PID", async () => {
@@ -204,13 +214,15 @@ describe("dispatcher bounded mailbox drain", () => {
     )
     expect(holder.capability).toMatch(/^[0-9a-f]{64}$/)
     harness.addPendingClient("conn-drain")
-    // The drain transport fans in by presenting the holder's capability.
+    // The drain HOST registers with inboxDrain:true, presenting the holder's
+    // capability — the only path that earns drain authority.
     const drainTransport = parseResult<RegisterResult>(
       await harness.register("conn-drain", {
         name: "@agent/3",
         pid: otherLivePid,
         project: "/tmp/km-wt3",
         capability: holder.capability,
+        inboxDrain: true,
         ...launch,
       }),
     )
@@ -302,7 +314,8 @@ describe("dispatcher bounded mailbox drain", () => {
     )
     expect(afterAttack.unread_count).toBe(1)
 
-    // The legitimate holder (presenting the victim's capability) fans in + drains.
+    // The legitimate drain host (presenting the victim's capability + inboxDrain)
+    // registers against the live primary and drains.
     harness.addPendingClient("conn-legitimate-drain")
     const legitimate = parseResult<RegisterResult>(
       await harness.register("conn-legitimate-drain", {
@@ -310,6 +323,7 @@ describe("dispatcher bounded mailbox drain", () => {
         pid: otherLivePid + 1,
         project: "/tmp/km-wt3",
         capability: victim.capability,
+        inboxDrain: true,
         ...launch,
       }),
     )
@@ -372,7 +386,7 @@ describe("dispatcher bounded mailbox drain", () => {
       ),
     )
     expect(nameOnly).toMatchObject({ code: -32001 })
-    expect(nameOnly.message).toMatch(/server-verified fan-in/)
+    expect(nameOnly.message).toMatch(/live managed launch/)
     const chiefStatus = parseResult<InboxStatusResult>(
       await harness.dispatcher.handleRequest(
         { jsonrpc: "2.0", id: "name-only-chief-status", method: "cli_inbox_status", params: { session: "@chief" } },
@@ -402,6 +416,7 @@ describe("dispatcher bounded mailbox drain", () => {
       pid: otherLivePid,
       project: "/tmp/km-wt3",
       capability: holder.capability,
+      inboxDrain: true,
       ...launch,
     })
     harness.sendActionable("@agent/3", "forged daemon request", {
@@ -1155,7 +1170,7 @@ describe("secure durable identity (successor r2)", () => {
     expect(r.sessionId).toBe(a.sessionId)
   })
 
-  it("holder close with two competing fan-ins resolves to exactly one authorized successor", async () => {
+  it("holder close with two competing fan-ins resolves to exactly one authorized successor (A3 S3)", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
 
@@ -1165,49 +1180,66 @@ describe("secure durable identity (successor r2)", () => {
       await harness.register(holder.connId, { name: "@agent/7", pid: 7001, project: "/tmp/km-wt7", ...launch }),
     )
 
-    // Two transports race to fan in. T1 presents the CORRECT capability → fans into
-    // the holder's session. T2 presents a WRONG capability → no fan-in → conflict.
-    const t1 = harness.connectClient()
+    // BOTH contenders present the VALID capability + inboxDrain. Exactly ONE wins
+    // drain authority; the second — though capability-valid — is typed-denied.
+    const d1 = harness.connectClient()
     const r1 = parseResult<RegisterResult>(
-      await harness.register(t1.connId, {
+      await harness.register(d1.connId, {
         name: "@agent/7",
         pid: 7002,
         project: "/tmp/km-wt7",
         capability: h.capability,
+        inboxDrain: true,
         ...launch,
       }),
     )
     expect(r1.sessionId).toBe(h.sessionId)
 
-    const t2 = harness.connectClient()
-    expect(
-      parseError(
-        await harness.register(t2.connId, {
-          name: "@agent/7",
-          pid: 7003,
-          project: "/tmp/km-wt7",
-          capability: "f".repeat(64),
-          ...launch,
-        }),
-      ).code,
-    ).toBe(-32000)
+    const d2 = harness.connectClient()
+    const d2Denied = parseError(
+      await harness.register(d2.connId, {
+        name: "@agent/7",
+        pid: 7003,
+        project: "/tmp/km-wt7",
+        capability: h.capability,
+        inboxDrain: true,
+        ...launch,
+      }),
+    )
+    expect(d2Denied.code).toBe(-32001)
+    expect(d2Denied.message).toMatch(/already has a live drain host/)
 
-    // Exactly ONE session identity survived the race.
-    expect(harness.memberRowCount("@agent/7")).toBe(1)
-    expect(harness.sessionCount("@agent/7")).toBe(1)
-
-    // The holder closes; the ONE authorized successor (t1) still holds authority —
-    // it is the current-epoch holder and can self-leave.
-    holder.socket.emitClose()
-    expect(harness.memberRowCount("@agent/7")).toBe(1)
-    const t1Leave = parseResult<{ left: boolean }>(
+    // The drain gate is NOT mutually satisfiable: d1 drains (the holder is its live
+    // NON-drain primary peer); the denied d2 cannot drain at all.
+    harness.sendActionable("@agent/7", "one actionable")
+    const drained = parseResult<InboxDrainResult>(
       await harness.dispatcher.handleRequest(
-        { jsonrpc: "2.0", id: "t1-leave", method: "cli_leave", params: { session: "@agent/7" } },
-        t1.connId,
+        { jsonrpc: "2.0", id: "d1-drain", method: "cli_inbox_drain", params: { limit: 1 } },
+        d1.connId,
       ),
     )
-    expect(t1Leave.left).toBe(true)
-    expect(harness.memberRowCount("@agent/7")).toBe(0)
+    expect(drained).toMatchObject({ session: "@agent/7", drained_count: 1 })
+    expect(
+      parseError(
+        await harness.dispatcher.handleRequest(
+          { jsonrpc: "2.0", id: "d2-drain", method: "cli_inbox_drain", params: { limit: 1 } },
+          d2.connId,
+        ),
+      ).code,
+    ).toBe(-32001)
+
+    // When the primary holder closes, the drainer can no longer drain (fail-closed:
+    // no live non-drain primary) — never a mutually-propped pair of siblings.
+    holder.socket.emitClose()
+    expect(
+      parseError(
+        await harness.dispatcher.handleRequest(
+          { jsonrpc: "2.0", id: "d1-drain-2", method: "cli_inbox_drain", params: { limit: 1 } },
+          d1.connId,
+        ),
+      ).code,
+    ).toBe(-32001)
+    expect(harness.memberRowCount("@agent/7")).toBe(1)
   })
 
   it("never projects the capability through members / status / debug surfaces", async () => {
@@ -1234,8 +1266,8 @@ describe("secure durable identity (successor r2)", () => {
     for (const row of journal) expect(row.content).not.toContain(cap)
   })
 
-  it("denies a drain when the caller's durable row is missing (no unbound-target bypass)", async () => {
-    const harness = createDispatcherHarness({ operatorToken: "op-secret" })
+  it("denies a drain when the caller's durable row is missing, while the caller is STILL ATTACHED (A3 S3)", async () => {
+    const harness = createDispatcherHarness()
     cleanup = harness.dispose
 
     const launch = { launchId: "launch-4", launchParentPid: 44 }
@@ -1249,24 +1281,18 @@ describe("secure durable identity (successor r2)", () => {
       pid: 4002,
       project: "/tmp/km-wt4",
       capability: h.capability,
+      inboxDrain: true,
       ...launch,
     })
 
-    // Operator reaps the durable row out from under the transports.
-    await harness.dispatcher.handleRequest(
-      {
-        jsonrpc: "2.0",
-        id: "op-leave",
-        method: "cli_leave",
-        params: { session: "@agent/4", operatorToken: "op-secret" },
-      },
-      "conn-op",
-    )
+    // Delete the durable row DIRECTLY — the drainer connection is NOT retired, it
+    // stays ATTACHED in the clients map. A fail-closed drain must STILL deny: the
+    // target derives from the durable holder row, which is now gone. (The r4 test
+    // retired the client first, so it never proved the attached-caller case.)
+    harness.db.prepare("DELETE FROM sessions WHERE name = ?").run("@agent/4")
     expect(harness.memberRowCount("@agent/4")).toBe(0)
+    expect(harness.clients.has(drainer.connId)).toBe(true)
 
-    // The drain now finds NO authenticated current holder → denied. The drain
-    // target derives SOLELY from the authenticated holder connection; there is no
-    // missing/unbound-target OK path.
     const denied = parseError(
       await harness.dispatcher.handleRequest(
         { jsonrpc: "2.0", id: "drain-missing", method: "cli_inbox_drain", params: {} },
@@ -1407,6 +1433,7 @@ function createDispatcherHarness(
         launchId?: string
         launchParentPid?: number
         capability?: string
+        inboxDrain?: boolean
         delivery?: "push" | "pull"
       },
     ) {

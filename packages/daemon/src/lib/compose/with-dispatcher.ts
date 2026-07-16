@@ -403,11 +403,6 @@ export function withDispatcher<
       throw new NameConflictError(name, connectedNames, holder.pid || null)
     }
 
-    function findSamePidNameHolder(name: string, clientPid: number, connId: string): ClientSession | null {
-      if (!clientPid || clientPid <= 0) return null
-      return Array.from(clients.values()).find((c) => c.id !== connId && c.name === name && c.pid === clientPid) ?? null
-    }
-
     function retireReplacedClient(client: ClientSession): void {
       broadcast.flushConnection(client.id)
       broadcast.discardConnection(client.id)
@@ -449,7 +444,10 @@ export function withDispatcher<
         pid: fields.pid,
         launchId: fields.launchId,
         launchParentPid: fields.launchParentPid,
-        inboxDrainAuthorized: fields.inboxDrainAuthorized,
+        // Drain-authorized provenance is sticky per connection: once a connection
+        // is admitted as a drain transport it cannot be laundered into a
+        // non-drain identity by a re-register (f5b8e5b immutability).
+        inboxDrainAuthorized: existing.inboxDrainAuthorized === true || fields.inboxDrainAuthorized === true,
         claudeSessionId: fields.claudeSessionId,
         peerSocket: fields.peerSocket,
         conn: relPath(socket.socketPath),
@@ -605,17 +603,143 @@ export function withDispatcher<
               takenNames,
               clientPid,
             })
-            // ── Capability-authenticated fan-in (successor r2, A3 model) ─────
+            // ── Dedicated inbox-drain host registration (A3 fail-closed r3 +
+            // r5 capability). A drain host is the ONLY connection that earns
+            // inboxDrainAuthorized. It is admitted ONLY when: it presents the
+            // managed launch's CAPABILITY, carries a launch identity + explicit
+            // name + member role, and EXACTLY ONE live non-drain primary holder of
+            // that launch exists whose stored capability matches. Provenance is
+            // immutable: a drain-authorized connection can never re-register as a
+            // non-drain identity. This is the sibling-exclusion successor — at
+            // most one drainer, and the drain gate below requires a non-drain
+            // primary peer, so two siblings can never mutually satisfy it.
+            const inboxDrainRegistration = p.inboxDrain === true
+            if (p.inboxDrain !== undefined && !inboxDrainRegistration) {
+              return makeError(id, -32602, "register inboxDrain must be true when supplied")
+            }
+            if (clients.get(connId)?.inboxDrainAuthorized === true && !inboxDrainRegistration) {
+              return makeError(id, -32001, "inbox-drain registration provenance is immutable for this connection")
+            }
+            if (inboxDrainRegistration) {
+              if (!launchIdentity || typeof p.name !== "string" || p.name.trim().length === 0 || role !== "member") {
+                return makeError(
+                  id,
+                  TRIBE_IDENTITY_UNAUTHORIZED,
+                  "inbox-drain registration requires the authenticated current managed member session",
+                )
+              }
+              const requestedName = p.name.trim()
+              const launchHolders = Array.from(clients.values()).filter(
+                (client) =>
+                  client.id !== connId &&
+                  client.role === "member" &&
+                  client.inboxDrainAuthorized !== true &&
+                  client.launchId === launchIdentity.id &&
+                  client.launchParentPid === launchIdentity.parentPid,
+              )
+              const holderSessionIds = new Set(launchHolders.map((client) => client.ctx.sessionId))
+              if (holderSessionIds.size !== 1) {
+                return makeError(
+                  id,
+                  TRIBE_IDENTITY_UNAUTHORIZED,
+                  "inbox-drain registration requires one live authenticated managed launch",
+                )
+              }
+              const holder = launchHolders[0]!
+              if (
+                holder.name !== requestedName ||
+                holder.role !== role ||
+                holder.ctx.getName() !== holder.name ||
+                holder.ctx.getRole() !== holder.role
+              ) {
+                return makeError(
+                  id,
+                  TRIBE_IDENTITY_UNAUTHORIZED,
+                  "inbox-drain registration must match the authenticated current session and role",
+                )
+              }
+              // r5 capability layer: the drain host must present the SAME
+              // server-minted capability as the primary holder — the launch tuple
+              // is a public locator and does not authorize the drain host.
+              const holderCapability = stmts.getSessionCapabilityById.get({ $id: holder.ctx.sessionId }) as {
+                capability: string | null
+              } | null
+              if (
+                !capabilityMatches(
+                  {
+                    capability: holderCapability?.capability ?? null,
+                    identity_token: null,
+                    launch_id: null,
+                    launch_parent_pid: null,
+                  },
+                  presentedCapability,
+                )
+              ) {
+                return makeError(
+                  id,
+                  TRIBE_IDENTITY_UNAUTHORIZED,
+                  "inbox-drain registration requires the managed launch's capability",
+                )
+              }
+              // EXACTLY-ONE drainer per session (A3 S3 sibling-exclusion): even a
+              // second capability-VALID drain host is typed-rejected while a live
+              // drain host already holds this session's drain authority. Combined
+              // with the non-drain-peer gate, holder-successor resolution is
+              // exactly-one and never mutually satisfiable.
+              const existingDrainer = Array.from(clients.values()).some(
+                (c) => c.id !== connId && c.inboxDrainAuthorized === true && c.ctx.sessionId === holder.ctx.sessionId,
+              )
+              if (existingDrainer) {
+                return makeError(
+                  id,
+                  TRIBE_IDENTITY_UNAUTHORIZED,
+                  "inbox-drain registration denied: this session already has a live drain host",
+                )
+              }
+              const client = applyClient(connId, {
+                name: holder.name,
+                role: holder.role,
+                domains: holder.domains,
+                project,
+                projectName,
+                projectId,
+                pid: clientPid,
+                launchId: launchIdentity.id,
+                launchParentPid: launchIdentity.parentPid,
+                inboxDrainAuthorized: true,
+                claudeSessionId,
+                peerSocket,
+                ctx: holder.ctx,
+              })
+              client.connectionEpoch = holder.connectionEpoch ?? 0
+              const coordState = db
+                .prepare("SELECT key, value FROM coordination WHERE project_id = ?")
+                .all(projectId) as Array<{ key: string; value: string | null }>
+              return makeResponse(id, {
+                sessionId: client.ctx.sessionId,
+                name: client.name,
+                role: client.role,
+                capability: presentedCapability,
+                protocolVersion: TRIBE_PROTOCOL_VERSION,
+                coordinationState: coordState,
+                daemon: { pid: process.pid, uptime: Math.floor((Date.now() - socket.startedAt) / 1000) },
+              })
+            }
+
+            // ── Capability-authenticated fan-in (successor r2/r5, A3 model) ──
             // A second transport joining a LIVE holder of this name must present
             // the holder's SERVER-MINTED capability. This runs BEFORE
             // deduplicateName and any ctx reuse, so joining a live name is gated
             // on the unforgeable capability — never the name and never the public
-            // launch tuple. A matching-capability transport fans into the holder's
-            // session and earns inbox-drain authority (inboxDrainAuthorized).
+            // launch tuple. A regular fan-in transport is a grouped transport, NOT
+            // a drainer (inboxDrainAuthorized stays false); it matches only a
+            // NON-drain primary holder so a drain transport can never be mistaken
+            // for the primary a drain gate requires (A3 S3 sibling-exclusion).
             const liveNameHolder =
               presentedCapability != null
                 ? (Array.from(clients.values()).find(
-                    (client) => client.id !== connId && client.name === resolvedName,
+                    (client) =>
+                      client.id !== connId && client.name === resolvedName && client.inboxDrainAuthorized !== true,
                   ) ?? null)
                 : null
             const liveHolderCapability = liveNameHolder
@@ -647,7 +771,7 @@ export function withDispatcher<
                 pid: clientPid,
                 launchId: launchIdentity?.id ?? null,
                 launchParentPid: launchIdentity?.parentPid ?? null,
-                inboxDrainAuthorized: true,
+                inboxDrainAuthorized: false,
                 claudeSessionId,
                 peerSocket,
                 ctx: fanInHolder.ctx,
@@ -670,91 +794,15 @@ export function withDispatcher<
                 daemon: { pid: process.pid, uptime: Math.floor((Date.now() - socket.startedAt) / 1000) },
               })
             }
-            // Live-holder conflict resolution (samePid self-replace, 20703
-            // takeover, 21052 displacement) predates the capability model and
-            // governs its own narrow, explicitly-flagged surface. When one of
-            // them retires a LIVE holder, the successor proceeds under that policy
-            // and the capability attach-gate below is not additionally applied —
-            // the gate protects the A3 attack surface (unforced fan-in + detached
-            // reattach), not these pre-existing supersession paths. Residual: a
-            // takeover=true / same-pid / token-displacement claim can still
-            // supersede a LIVE holder without the capability (documented boundary).
-            let supersededLiveHolder = false
-            const samePidHolder = findSamePidNameHolder(resolvedName, clientPid, connId)
-            if (samePidHolder) {
-              adopted = { id: samePidHolder.ctx.sessionId, name: samePidHolder.name, role: samePidHolder.role }
-              if (!p.role && (samePidHolder.role === "member" || samePidHolder.role === "watch")) {
-                role = samePidHolder.role
-              }
-              log.info?.(`Replacing live self-registration for ${resolvedName} pid=${clientPid}`)
-              retireReplacedClient(samePidHolder)
-              supersededLiveHolder = true
-            }
-
-            // 20703 — explicit-persona takeover. A managed respawn (adapter sends
-            // takeover=true only for explicit @persona launch names) supersedes a
-            // LIVE holder of the same name instead of failing loud: a stale MCP
-            // child from a replaced/ad-hoc parent session must not squat a numbered
-            // worker identity until a human kills it. The retired holder's socket is
-            // destroyed; when that stale child reconnects and re-registers, it hits
-            // the normal conflict path below and exits nonzero (c0b8caf) — the
-            // squatter dies cleanly. Non-takeover registrations keep fail-loud
-            // semantics via deduplicateName. Guarded on an explicit requested name
-            // so auto-named sessions can never steal.
-            if (p.takeover === true && typeof p.name === "string") {
-              const holders = Array.from(clients.values()).filter(
-                (client) => client.id !== connId && client.name === resolvedName,
-              )
-              const holder = holders[0]
-              if (holder) {
-                const oldPids = [...new Set(holders.map((client) => client.pid))]
-                log.warn?.(
-                  `takeover: superseding live holder of "${resolvedName}" (old pid ${holder.pid}, old pids ${oldPids.join(",")}, old session ${holder.ctx.sessionId}, new pid ${clientPid})`,
-                )
-                logEvent(holder.ctx, "session.superseded", undefined, {
-                  name: resolvedName,
-                  old_pid: holder.pid,
-                  old_pids: oldPids,
-                  new_pid: clientPid,
-                  reason: "explicit-persona takeover (20703)",
-                })
-                for (const replaced of holders) retireReplacedClient(replaced)
-                supersededLiveHolder = true
-              }
-            }
-
-            // 21052 — asymmetric identity displacement. A token-BEARING explicit-
-            // persona claim supersedes a token-LESS live holder WITHOUT takeover:
-            // unmanaged carriers (CLI drains register with no identityToken) can
-            // grab a persona name across a daemon restart and then the managed
-            // adapter's re-register conflict exit — 20703's squatter cleanup,
-            // correct for adapter-vs-adapter — permanently kills the wrong party
-            // (the 19442 agent/4 adapter death). One-directional by construction:
-            // a token-less claimant never displaces anyone, and token-vs-token
-            // keeps fail-loud semantics, so 21049's mutual-eviction loop stays
-            // impossible.
-            if (typeof p.name === "string" && identityToken) {
-              const holder = Array.from(clients.values()).find((c) => c.id !== connId && c.name === resolvedName)
-              if (holder) {
-                const holderRow = db
-                  .prepare("SELECT identity_token FROM sessions WHERE id = ?")
-                  .get(holder.ctx.sessionId) as { identity_token: string | null } | null
-                if (!holderRow?.identity_token) {
-                  log.warn?.(
-                    `identity displacement: superseding token-less holder of "${resolvedName}" (old pid ${holder.pid}, old session ${holder.ctx.sessionId}, new pid ${clientPid})`,
-                  )
-                  logEvent(holder.ctx, "session.superseded", undefined, {
-                    name: resolvedName,
-                    old_pid: holder.pid,
-                    new_pid: clientPid,
-                    reason: "identity displacement of token-less holder (21052)",
-                  })
-                  retireReplacedClient(holder)
-                  supersededLiveHolder = true
-                }
-              }
-            }
-
+            // ── Legacy live-holder supersede paths DELETED (successor r5, A3 S1)
+            // The samePid self-replace, 20703 takeover=true, and 21052
+            // identityToken displacement branches all superseded a LIVE holder on
+            // CALLER-SUPPLIED, FORGEABLE inputs (p.pid / p.takeover / p.identityToken)
+            // — the exact class the server-minted capability exists to kill. They
+            // are gone. A live name can now be taken over ONLY by presenting its
+            // capability (the fan-in path reuses the holder's ctx) or by operator
+            // authority (cli_leave). deduplicateName below fails loud on any other
+            // live collision.
             const name = deduplicateName(resolvedName)
 
             // ── Secure durable identity (successor r2, A3 capability model) ──
@@ -772,7 +820,7 @@ export function withDispatcher<
             const claimRow = isAutoGeneratedName(name)
               ? null
               : (stmts.getDurableSessionByName.get({ $name: name }) as DurableIdentityRow | null)
-            if (claimRow && !supersededLiveHolder && !mayClaimDurableRow(claimRow, presentedCapability)) {
+            if (claimRow && !mayClaimDurableRow(claimRow, presentedCapability)) {
               logEvent(daemonCtx, "session.attach_denied", undefined, {
                 name,
                 reason: "unauthorized-name-claim",
@@ -1145,28 +1193,32 @@ export function withDispatcher<
                 { reason: "unauthorized-inbox-drain" },
               )
             }
-            // Server-verified fan-in: this transport authenticated against the
-            // live holder's PRIVATE token during fan-in (inboxDrainAuthorized) AND
-            // a live launch peer still holds the same session under the same
-            // launch. A replayed public launch tuple never satisfies this.
-            const hasLiveLaunchPeer =
+            // Fail-closed drain gate (A3 r3 + r5): the caller must be THE
+            // drain-authorized transport AND a live NON-drain PRIMARY peer of the
+            // same session/launch must exist. Requiring `peer.inboxDrainAuthorized
+            // !== true` is the sibling-exclusion invariant — two drain transports
+            // can never be each other's peer, so the gate is not mutually
+            // satisfiable; a drainer only drains while a real primary holds the
+            // launch. isCurrentEpochHolder above already fenced stale epochs.
+            const hasLiveManagedPeer =
               client.inboxDrainAuthorized === true &&
               client.launchId !== null &&
               client.launchParentPid !== null &&
               Array.from(clients.entries()).some(
                 ([peerConnId, peer]) =>
                   peerConnId !== connId &&
-                  peer.role === "member" &&
+                  peer.inboxDrainAuthorized !== true &&
+                  peer.role === client.role &&
                   peer.ctx.sessionId === client.ctx.sessionId &&
                   peer.name === client.name &&
                   peer.launchId === client.launchId &&
                   peer.launchParentPid === client.launchParentPid,
               )
-            if (!hasLiveLaunchPeer) {
+            if (!hasLiveManagedPeer) {
               return makeError(
                 id,
                 TRIBE_IDENTITY_UNAUTHORIZED,
-                "cli_inbox_drain requires authenticated server-verified fan-in to the current managed launch",
+                "cli_inbox_drain requires an authenticated current member session with a live managed launch",
                 { reason: "unauthorized-inbox-drain" },
               )
             }

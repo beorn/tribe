@@ -32,10 +32,10 @@
  * exposed via `tribe.members` MCP call only, not the CLI.
  */
 
+import { readFileSync } from "node:fs"
 import { Command, int } from "@silvery/commander"
 import { cliOption, visibleCliProjectionForMcp } from "../command-descriptors.ts"
 import { DEFAULT_INBOX_WAIT_SESSION, resolveInboxWaitOptions } from "../lib/inbox-wait-options.ts"
-import { createSessionIdentityToken, resolveRuntimeSessionIdentity } from "../lib/session-identity.ts"
 import { connectToDaemon, resolveSocketPath, TRIBE_PROTOCOL_VERSION } from "../lib/socket.ts"
 import { watchActivity } from "../lib/activity-watch.ts"
 import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-exempt.ts"
@@ -637,37 +637,36 @@ async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promi
   )
 }
 
-function requireInboxDrainIdentity(): {
-  name: string
-  launchId: string
-  role: "member"
-  identityToken: string
-} {
+// The drain host presents the managed launch's capability, read from an
+// INHERITED FILE DESCRIPTOR (never env — env is same-user-observable, A3 S2).
+// Only the fd number rides in TRIBE_LAUNCH_CAPABILITY_FD; the content on the
+// anonymous pipe is invisible to same-user ps/env inspection.
+function readInboxDrainCapabilityFromFd(fdRaw: string | undefined): string | null {
+  if (fdRaw === undefined) return null
+  const fd = Number(fdRaw)
+  if (!Number.isInteger(fd) || fd < 3) return null
+  const value = readFileSync(fd, "utf8").trim()
+  return value.length > 0 ? value : null
+}
+
+function requireInboxDrainIdentity(): { name: string; launchId: string; role: "member"; capability: string } {
   const name = process.env.TRIBE_SESSION_NAME?.trim() || process.env.TRIBE_NAME?.trim() || ""
   const launchId = process.env.TRIBE_LAUNCH_ID?.trim() ?? ""
   const role = process.env.TRIBE_ROLE?.trim() || "member"
-  const runtimeSessionIdentity = resolveRuntimeSessionIdentity()
-  if (!name || !launchId || !runtimeSessionIdentity) {
-    console.error(
-      "tribe-wire inbox-drain: authenticated managed session required " +
-        "(TRIBE_NAME, TRIBE_LAUNCH_ID, and CLAUDE_SESSION_ID or CODEX_THREAD_ID)",
-    )
+  const capability = readInboxDrainCapabilityFromFd(process.env.TRIBE_LAUNCH_CAPABILITY_FD)
+  if (!name || !launchId) {
+    console.error("tribe-wire inbox-drain: authenticated managed session required (TRIBE_NAME and TRIBE_LAUNCH_ID)")
     process.exit(2)
   }
   if (role !== "member") {
     console.error(`tribe-wire inbox-drain: current session role must be member (received ${role})`)
     process.exit(2)
   }
-  return {
-    name,
-    launchId,
-    role,
-    identityToken: createSessionIdentityToken({
-      runtimeSessionIdentity,
-      project: process.cwd(),
-      role,
-    }),
+  if (!capability) {
+    console.error("tribe-wire inbox-drain: the managed launch capability (TRIBE_LAUNCH_CAPABILITY_FD) is required")
+    process.exit(2)
   }
+  return { name, launchId, role, capability }
 }
 
 function parseInboxDrainLimit(value: string | number | undefined): number {
@@ -685,7 +684,7 @@ function parseInboxDrainLimit(value: string | number | undefined): number {
 }
 
 async function callAuthenticatedInboxDrain(limit: number): Promise<InboxDrainResult> {
-  const { name, launchId, role, identityToken } = requireInboxDrainIdentity()
+  const { name, launchId, role, capability } = requireInboxDrainIdentity()
   const socketPath = resolveSocketPath()
   try {
     const client = await connectToDaemon(socketPath)
@@ -700,9 +699,10 @@ async function callAuthenticatedInboxDrain(limit: number): Promise<InboxDrainRes
         projectName: cwd.split("/").filter(Boolean).at(-1) ?? "unknown",
         pid: process.pid,
         protocolVersion: TRIBE_PROTOCOL_VERSION,
-        identityToken,
         launchId,
         launchParentPid: process.ppid,
+        capability,
+        inboxDrain: true,
       })) as { name?: string; role?: string }
       if (registered.name !== name || registered.role !== role) {
         throw new Error(

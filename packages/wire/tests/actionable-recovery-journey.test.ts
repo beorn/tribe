@@ -26,7 +26,7 @@
  *   exit-2 path. This journey adds no standalone gate surface.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -183,6 +183,21 @@ function toolResult(lines: Record<string, unknown>[], id: number): unknown {
   }
 }
 
+// Hermeticity: strip the test RUNNER's own agent-session identity before it can
+// leak into a spawned adapter/CLI/daemon. When this suite runs inside a live
+// Claude/Codex session, an inherited CLAUDE_SESSION_ID / CODEX_THREAD_ID / BD_ACTOR
+// makes every managed transport register as that session — flipping the daemon's
+// llmSender gate (summary-required) and polluting identity-token derivation. A
+// real-daemon integration test must exercise a NATIVE provider launch whose only
+// authenticator is the fd-provisioned capability, not whatever session started
+// vitest. See memory phantom-baseline-reds-from-inherited-node-env for the class.
+const SESSION_IDENTITY_ENV_KEYS = ["CLAUDE_SESSION_ID", "CLAUDE_SESSION_NAME", "BD_ACTOR", "CODEX_THREAD_ID"] as const
+function hermeticBaseEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env }
+  for (const key of SESSION_IDENTITY_ENV_KEYS) delete env[key]
+  return env
+}
+
 describe("19442 actionable-recovery journey (real daemon + real adapter)", () => {
   let tmpDir: string
   let daemonProc: ChildProcessWithoutNullStreams | undefined
@@ -204,7 +219,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const proc = spawn(BUN_BIN, [DAEMON, "--socket", socketPath, "--db", dbPath, "--foreground", "--no-lore"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...hermeticBaseEnv(),
         TRIBE_NO_PLUGINS: "1",
         TRIBE_ACTIVITY_LOG: join(tmpDir, "activity.jsonl"),
         DEBUG: "tribe:*",
@@ -223,7 +238,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...hermeticBaseEnv(),
         TRIBE_DELIVERY: "push",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, logName),
@@ -250,24 +265,37 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
   ): Promise<{ child: ChildProcessWithoutNullStreams; stdout: Record<string, unknown>[]; logPath: string }> {
     const logPath = join(tmpDir, logName)
     const adapterCommand = [BUN_BIN, ADAPTER, "--socket", socketPath, "--name", NAME]
+    // S2: the supervisor provisions ONE random capability per launch INSTANCE,
+    // shared by every transport of that launch so siblings fan in. It travels
+    // over an INHERITED FILE DESCRIPTOR — never an env var (env is same-user
+    // observable via ps eww / /proc/pid/environ). Only the fd NUMBER rides in
+    // TRIBE_LAUNCH_CAPABILITY_FD; the capability CONTENT lives on the fd. A
+    // different launch instance (even reusing a stale launch id) gets a different
+    // capability, so it cannot adopt the prior instance's identity.
+    const stdio: Array<"pipe" | number> = ["pipe", "pipe", "pipe"]
+    const launchCapabilityEnv: Record<string, string> = {}
+    let capFd: number | undefined
+    if (opts.launchCapability !== undefined) {
+      const capPath = join(tmpDir, `${logName}.cap`)
+      writeFileSync(capPath, opts.launchCapability, { mode: 0o600 })
+      capFd = openSync(capPath, "r")
+      stdio.push(capFd)
+      launchCapabilityEnv.TRIBE_LAUNCH_CAPABILITY_FD = String(stdio.length - 1)
+    }
     const child = spawn(
       BUN_BIN,
       opts.distinctProviderParent ? ["-e", PROVIDER_PARENT_WRAPPER] : adapterCommand.slice(1),
       {
         cwd: tmpDir,
         env: {
-          ...process.env,
+          ...hermeticBaseEnv(),
           TRIBE_DELIVERY: "pull",
           TRIBE_PULL_TRANSPORT: "mcp",
           TRIBE_NO_AUTOSTART: "1",
           TRIBE_REQUIRE_JOIN: "0",
           TRIBE_TAKEOVER: opts.takeover === false ? "0" : "1",
           ...(launchId === undefined ? {} : { TRIBE_LAUNCH_ID: launchId }),
-          // The supervisor provisions ONE random capability per launch INSTANCE,
-          // shared by every transport of that launch so siblings fan in. A
-          // different launch instance (even reusing a stale launch id) gets a
-          // different capability, so it cannot adopt the prior instance's identity.
-          ...(opts.launchCapability ? { TRIBE_LAUNCH_CAPABILITY: opts.launchCapability } : {}),
+          ...launchCapabilityEnv,
           ...(opts.distinctProviderParent
             ? {
                 // Hostile/unsanitized nested launch: both identity inputs are
@@ -279,9 +307,13 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
           DEBUG: "tribe:*",
           DEBUG_LOG: logPath,
         },
-        stdio: ["pipe", "pipe", "pipe"],
+        // stdio[0..2] are always "pipe" (an optional capability fd may follow at
+        // index 3), so the streams are non-null; the widened array element type
+        // hides that from spawn's overloads, hence the assertion.
+        stdio,
       },
-    )
+    ) as ChildProcessWithoutNullStreams
+    if (capFd !== undefined) closeSync(capFd) // child holds its own dup after spawn
     adapters.push(child)
     const stdout = collectStdoutJson(child)
     writeJson(child, initializePayload(1))
@@ -440,7 +472,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const cli = spawn(BUN_BIN, [CLI, "send", NAME, "one-shot same-name query", "--type", "query"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...hermeticBaseEnv(),
         TRIBE_SOCKET: socketPath,
         TRIBE_NAME: NAME,
         TRIBE_TAKEOVER: "1",
@@ -514,38 +546,45 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       })
     }
 
-    // A different provider launch must fail loud without takeover.
-    const refused = await spawnLaunchAdapter(socketPath, "launch-b-refused.log", "provider-launch-b", {
-      takeover: false,
-    })
-    writeJson(refused.child, callToolPayload(40, "members", {}))
-    await waitForCondition(() => refused.child.exitCode !== null, "different launch refusal exit")
-    expect(refused.child.exitCode).toBe(2)
-    expect(readFileSync(refused.logPath, "utf8")).toContain(`Name "${NAME}" is already taken by live pid`)
+    // ── A3 S1: a different provider launch cannot supersede a LIVE holder ──
+    // The legacy live-holder supersede path is DELETED. `takeover` is a
+    // caller-supplied, FORGEABLE input; it no longer displaces a live member.
+    // A different launch (different launch id, and — critically — WITHOUT the
+    // incumbent's server-minted capability) fails loud whether or not it sets
+    // the takeover flag. Only the capability (fan-in) or operator authority
+    // (cli_leave) may take over a live name; a forged flag earns nothing.
+    for (const [logName, opts] of [
+      ["launch-b-refused.log", { takeover: false }],
+      // Default opts => TRIBE_TAKEOVER=1: the forged takeover flag is now inert.
+      ["launch-b-takeover-denied.log", {}],
+    ] as const) {
+      const refused = await spawnLaunchAdapter(socketPath, logName, "provider-launch-b", opts)
+      writeJson(refused.child, callToolPayload(40, "members", {}))
+      await waitForCondition(() => refused.child.exitCode !== null, `different launch (${logName}) refusal exit`)
+      expect(refused.child.exitCode, logName).toBe(2)
+      expect(readFileSync(refused.logPath, "utf8")).toContain(`Name "${NAME}" is already taken by live pid`)
+    }
 
-    // A deliberate new launch with takeover supersedes the whole old launch
-    // as one set, leaving no suffixed or -dead- session rows.
-    const successor = await spawnLaunchAdapter(socketPath, "launch-b-successor.log", "provider-launch-b")
-    const successorMembers = (await callLaunchTool(successor, 41, "members", {})) as {
+    // The incumbent launch-a member is untouched: all three transports remain
+    // alive, the member id is unchanged, no suffixed/-dead- rows appear, and no
+    // supersede was logged (the branch that would emit it is gone).
+    expect(launchAdapters.every(({ child }) => child.exitCode === null)).toBe(true)
+    const afterDenied = (await callLaunchTool(launchAdapters[0]!, 41, "members", {})) as {
       sessions?: Array<{ name?: string; member_id?: string; launch_id?: string; transport_pids?: number[] }>
     }
-    await waitForCondition(
-      () => launchAdapters.every(({ child }) => child.exitCode !== null),
-      "superseded launch adapters to exit",
-    )
-    expect(successorMembers.sessions?.filter((session) => session.name === NAME)).toEqual([
+    expect(afterDenied.sessions?.filter((session) => session.name === NAME)).toEqual([
       expect.objectContaining({
-        launch_id: "provider-launch-b",
-        transport_pids: [successor.child.pid],
+        member_id: initialMemberId,
+        launch_id: launchId,
+        transport_pids: expect.arrayContaining(launchAdapters.map(({ child }) => child.pid!)),
       }),
     ])
-    expect(successorMembers.sessions?.find((session) => session.name === NAME)?.member_id).not.toBe(initialMemberId)
     const db = openDatabase(dbPath)
     const rows = db.prepare("SELECT name FROM sessions ORDER BY name").all() as Array<{ name: string }>
     db.close()
     expect(rows).toEqual([{ name: NAME }])
     const finalDaemonLog = readFileSync(join(tmpDir, "daemon.log"), "utf8")
-    expect(finalDaemonLog.match(/takeover: superseding live holder/g)).toHaveLength(1)
+    expect(finalDaemonLog.match(/takeover: superseding live holder/g)).toBeNull()
   }, 30_000)
 
   it("does not adopt a dead launch when a new provider inherits its stale launch id", async () => {

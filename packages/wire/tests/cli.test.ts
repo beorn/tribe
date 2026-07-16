@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from "vitest"
 import { spawn, spawnSync } from "node:child_process"
-import { mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { resolve, dirname, join } from "node:path"
@@ -43,14 +43,37 @@ function runCli(args: string[], opts: { timeoutMs?: number } = {}): { stdout: st
 function runCliAsync(
   args: string[],
   env: NodeJS.ProcessEnv,
+  opts: { launchCapability?: string } = {},
 ): Promise<{ stdout: string; stderr: string; code: number | null }> {
   return new Promise((resolveRun) => {
-    const child = spawn(BUN_BIN, [CLI, ...args], { env, stdio: ["ignore", "pipe", "pipe"] })
+    // S2: the launch capability travels over an INHERITED FILE DESCRIPTOR, never
+    // an env var (env is same-user-readable via ps eww / /proc/pid/environ). The
+    // supervisor writes the capability to a private fd and passes its NUMBER in
+    // TRIBE_LAUNCH_CAPABILITY_FD; only the fd content is the secret. We emulate
+    // that here with a 0600 temp file opened read-only and inherited at fd 3.
+    const stdio: Array<"ignore" | "pipe" | number> = ["ignore", "pipe", "pipe"]
+    let capFd: number | undefined
+    let capPath: string | undefined
+    const childEnv = { ...env }
+    if (opts.launchCapability !== undefined) {
+      capPath = join(mkdtempSync(join(tmpdir(), "tribe-cap-")), "cap")
+      writeFileSync(capPath, opts.launchCapability, { mode: 0o600 })
+      capFd = openSync(capPath, "r")
+      stdio.push(capFd)
+      childEnv.TRIBE_LAUNCH_CAPABILITY_FD = String(stdio.length - 1)
+    }
+    const child = spawn(BUN_BIN, [CLI, ...args], { env: childEnv, stdio })
+    if (capFd !== undefined) closeSync(capFd) // child holds its own dup after spawn
     let stdout = ""
     let stderr = ""
-    child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
-    child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
-    child.on("close", (code) => resolveRun({ stdout: stripAnsi(stdout), stderr: stripAnsi(stderr), code }))
+    // stdio index 1/2 are always "pipe"; the widened stdio element type hides
+    // that from spawn's overloads, so assert the non-null pipe streams.
+    child.stdout!.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+    child.stderr!.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+    child.on("close", (code) => {
+      if (capPath !== undefined) rmSync(dirname(capPath), { recursive: true, force: true })
+      resolveRun({ stdout: stripAnsi(stdout), stderr: stripAnsi(stderr), code })
+    })
   })
 }
 
@@ -338,8 +361,6 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       })
       const env: NodeJS.ProcessEnv = {
         ...process.env,
-        CLAUDE_SESSION_ID: "",
-        CODEX_THREAD_ID: "codex-thread-agent-3",
         TRIBE_SOCKET: socketPath,
         TRIBE_NAME: "@agent/3",
         TRIBE_ROLE: "member",
@@ -347,7 +368,9 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         TRIBE_NO_AUTOSTART: "1",
       }
       delete env.TRIBE_SESSION_NAME
-      const cli = await runCliAsync(["inbox-drain", "--limit", "1", "--json"], env)
+      const cli = await runCliAsync(["inbox-drain", "--limit", "1", "--json"], env, {
+        launchCapability: "cap-agent-3-secret",
+      })
 
       expect(cli).toMatchObject({ code: 0, stderr: "" })
       expect(JSON.parse(cli.stdout)).toEqual(result)
@@ -360,7 +383,10 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
           delivery: "pull",
           launchId: "launch-agent-3",
           launchParentPid: process.pid,
-          identityToken: expect.stringMatching(/^[0-9a-f]{64}$/),
+          inboxDrain: true,
+          // S2: the capability arrives over the inherited fd, not env, and the CLI
+          // forwards it in the register payload so the daemon can authenticate it.
+          capability: "cap-agent-3-secret",
           pid: expect.any(Number),
         },
       })
@@ -375,8 +401,6 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
   it("inbox-drain fails closed without managed identity or with a target override", async () => {
     const env: NodeJS.ProcessEnv = {
       ...process.env,
-      CLAUDE_SESSION_ID: "",
-      CODEX_THREAD_ID: "codex-thread-agent-3",
       TRIBE_SOCKET: join(tmpdir(), `tribe-wire-no-drain-${process.pid}.sock`),
       TRIBE_NAME: "@agent/3",
       TRIBE_LAUNCH_ID: "launch-agent-3",
@@ -396,13 +420,6 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     const unauthenticated = await runCliAsync(["inbox-drain"], env)
     expect(unauthenticated.code).toBe(2)
     expect(unauthenticated.stderr).toMatch(/authenticated managed session required/)
-
-    env.TRIBE_LAUNCH_ID = "launch-agent-3"
-    delete env.CODEX_THREAD_ID
-    delete env.CLAUDE_SESSION_ID
-    const noPrivateRuntimeIdentity = await runCliAsync(["inbox-drain"], env)
-    expect(noPrivateRuntimeIdentity.code).toBe(2)
-    expect(noPrivateRuntimeIdentity.stderr).toMatch(/CLAUDE_SESSION_ID or CODEX_THREAD_ID/)
   })
 
   it("bare `help` prints help and exits 0", () => {

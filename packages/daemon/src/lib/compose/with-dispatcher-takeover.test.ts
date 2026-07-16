@@ -153,7 +153,7 @@ describe("dispatcher explicit-persona takeover (@ag/tribe/20703)", () => {
     expect(harness.supersededEvents("@agent/77")).toHaveLength(0)
   })
 
-  it("(b) takeover: explicit takeover:true supersedes the live holder and journals session.superseded", async () => {
+  it("(b) takeover:true NO LONGER supersedes a live holder — forgeable supersede deleted (A3 S1)", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
 
@@ -162,50 +162,21 @@ describe("dispatcher explicit-persona takeover (@ag/tribe/20703)", () => {
       await harness.register("conn-holder", { name: "@agent/78", pid: 4001, project: "/tmp/km-wt9-b" }),
     )
 
+    // takeover:true is a caller-supplied, FORGEABLE flag; its supersede branch is
+    // deleted (A3 S1). The claimant fails loud on the live-holder conflict, the
+    // holder survives, and nothing is journaled as superseded.
     harness.addPendingClient("conn-taker")
-    // The takeover branch logs a loud recovery line via log.warn (routes to
-    // console.warn through loggily) — some runners (e.g. the hh vendor-project
-    // vitest setup) fail any test that produces console output, so the spy
-    // both captures the line for assertion and suppresses it from stdout.
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
-    try {
-      const taker = parseResult<RegisterResult>(
-        await harness.register("conn-taker", {
-          name: "@agent/78",
-          pid: 4002,
-          project: "/tmp/km-wt9-b",
-          takeover: true,
-        }),
-      )
-      expect(taker.name).toBe("@agent/78")
+    const denied = parseError(
+      await harness.register("conn-taker", { name: "@agent/78", pid: 4002, project: "/tmp/km-wt9-b", takeover: true }),
+    )
+    expect(denied.message).toBe('Name "@agent/78" is already taken by live pid 4001')
+    expect(holderSocket.destroyedByDispatcher).toBe(false)
 
-      expect(holderSocket.destroyedByDispatcher).toBe(true)
-
-      const status = parseResult<CliStatusResult>(await harness.cliStatus())
-      const agentSessions = status.sessions.filter((s) => s.name === "@agent/78")
-      expect(agentSessions).toHaveLength(1)
-      expect(agentSessions[0]?.pid).toBe(4002)
-
-      const events = harness.supersededEvents("@agent/78")
-      expect(events).toHaveLength(1)
-      expect(events[0]).toMatchObject({
-        name: "@agent/78",
-        old_pid: 4001,
-        new_pid: 4002,
-        reason: "explicit-persona takeover (20703)",
-      })
-
-      // Loud-recovery evidence: the warn line names the superseded name and
-      // both pids, so a human scanning logs can see the takeover happened
-      // without querying the journal.
-      const warnLines = warnSpy.mock.calls.map((call) => call.join(" "))
-      const takeoverLine = warnLines.find((line) => /takeover: superseding live holder of "@agent\/78"/.test(line))
-      expect(takeoverLine).toBeDefined()
-      expect(takeoverLine).toContain("old pid 4001")
-      expect(takeoverLine).toContain("new pid 4002")
-    } finally {
-      warnSpy.mockRestore()
-    }
+    const status = parseResult<CliStatusResult>(await harness.cliStatus())
+    const agentSessions = status.sessions.filter((s) => s.name === "@agent/78")
+    expect(agentSessions).toHaveLength(1)
+    expect(agentSessions[0]?.pid).toBe(4001)
+    expect(harness.supersededEvents("@agent/78")).toHaveLength(0)
   })
 
   it("(c) takeover requires an explicit name: takeover:true without `name` never supersedes, even on a resolved-name collision", async () => {
@@ -252,7 +223,7 @@ describe("asymmetric identity displacement (@ag/tribe/21052)", () => {
   // token-LESS live holder WITHOUT takeover. One-directional by construction:
   // token-less claimants never displace, and token-vs-token keeps fail-loud
   // semantics so 21049's mutual-eviction loop stays impossible.
-  it("(a) token-bearing explicit claim supersedes a token-less live holder without takeover", async () => {
+  it("(a) a token-bearing claim NO LONGER displaces a token-less live holder — displacement deleted (A3 S1)", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
 
@@ -261,36 +232,26 @@ describe("asymmetric identity displacement (@ag/tribe/21052)", () => {
       await harness.register("conn-cli-holder", { name: "@agent/81", pid: 6001, project: "/tmp/km-wt9-d" }),
     )
 
+    // identity_token is a caller-supplied, harvestable hint — never authority. The
+    // 21052 displacement branch is deleted (A3 S1). The claimant fails loud; the
+    // token-less holder survives; nothing is journaled as superseded.
     harness.addPendingClient("conn-adapter")
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
-    try {
-      const claimant = parseResult<RegisterResult>(
-        await harness.register("conn-adapter", {
-          name: "@agent/81",
-          pid: 6002,
-          project: "/tmp/km-wt9-d",
-          identityToken: "tok-agent81",
-        }),
-      )
-      expect(claimant.name).toBe("@agent/81")
-      expect(holderSocket.destroyedByDispatcher).toBe(true)
-
-      const status = parseResult<CliStatusResult>(await harness.cliStatus())
-      const agentSessions = status.sessions.filter((s) => s.name === "@agent/81")
-      expect(agentSessions).toHaveLength(1)
-      expect(agentSessions[0]?.pid).toBe(6002)
-
-      const events = harness.supersededEvents("@agent/81")
-      expect(events).toHaveLength(1)
-      expect(events[0]).toMatchObject({
+    const denied = parseError(
+      await harness.register("conn-adapter", {
         name: "@agent/81",
-        old_pid: 6001,
-        new_pid: 6002,
-        reason: "identity displacement of token-less holder (21052)",
-      })
-    } finally {
-      warnSpy.mockRestore()
-    }
+        pid: 6002,
+        project: "/tmp/km-wt9-d",
+        identityToken: "tok-agent81",
+      }),
+    )
+    expect(denied.message).toBe('Name "@agent/81" is already taken by live pid 6001')
+    expect(holderSocket.destroyedByDispatcher).toBe(false)
+
+    const status = parseResult<CliStatusResult>(await harness.cliStatus())
+    const agentSessions = status.sessions.filter((s) => s.name === "@agent/81")
+    expect(agentSessions).toHaveLength(1)
+    expect(agentSessions[0]?.pid).toBe(6001)
+    expect(harness.supersededEvents("@agent/81")).toHaveLength(0)
   })
 
   it("(b) loop-proof pin: token-bearing vs token-bearing still fails loud (21049 unchanged)", async () => {

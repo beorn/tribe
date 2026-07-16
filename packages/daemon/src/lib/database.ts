@@ -1157,7 +1157,9 @@ export function createStatements(db: Database) {
         AND sender != $name
         AND type IN (${ACTIONABLE_TYPES_SQL})
         AND rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+        AND rowid > $after
       ORDER BY rowid ASC
+      LIMIT $limit
     `),
 
     /** Count-only form of the recovery view — join/rename recovery reporting. */
