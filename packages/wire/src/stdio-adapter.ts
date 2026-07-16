@@ -97,6 +97,15 @@ const LAUNCH_ID_RAW = process.env.TRIBE_LAUNCH_ID?.trim() ?? ""
 // provider may inherit a stale launch id, but its adapter has a different OS
 // parent and therefore cannot fan into the old launch.
 const LAUNCH_IDENTITY = LAUNCH_ID_RAW.length > 0 ? { id: LAUNCH_ID_RAW, parentPid: process.ppid } : null
+// A managed launch's transports share ONE identity, so they must present ONE
+// capability to fan in. Since a daemon-minted capability reaches only the first
+// transport, the SUPERVISOR provisions a random launch capability that every
+// transport of the launch presents (TRIBE_LAUNCH_CAPABILITY). It is not derived
+// from any observable value. NOTE: env is same-user-observable (`ps eww`), a
+// weaker channel than the socket-delivered CLI mint — a follow-up should move
+// launch-capability propagation to an inherited fd. Absent it, siblings cannot
+// fan in and fall back to the takeover path.
+const LAUNCH_CAPABILITY = process.env.TRIBE_LAUNCH_CAPABILITY?.trim() || null
 
 // km 19442 — connect-time replay flood backstop. The wakeup→drain path is capped
 // by selectReplayEvents, but a stale/old daemon that still pushes message BODIES
@@ -261,6 +270,9 @@ const baseRegisterParams = {
   pid: process.pid,
   claudeSessionId: CLAUDE_SESSION_ID,
   claudeSessionName: CLAUDE_SESSION_NAME,
+  // identityToken is now only a LEGACY LOCATION HINT — the daemon derives no
+  // authority from it. Authority is the server-minted `capability` the daemon
+  // issues on the first register (captured below) and we present thereafter.
   identityToken,
   ...(LAUNCH_IDENTITY ? { launchId: LAUNCH_IDENTITY.id, launchParentPid: LAUNCH_IDENTITY.parentPid } : {}),
   delivery: REQUIRE_EXPLICIT_JOIN ? "pull" : DELIVERY,
@@ -272,6 +284,11 @@ const baseRegisterParams = {
   ...(args.provider ? { provider: args.provider } : {}),
 }
 let hasRegistered = false
+// The server-minted opaque capability, issued by the daemon on the first
+// register and persisted here in-memory for the adapter process lifetime. It is
+// re-presented on every reconnect so the daemon can authenticate the reattach
+// (the durable-identity authority), and is never derived or logged.
+let mintedCapability: string | null = null
 
 type RequiredMcpTransportStatus = "advertised" | "live" | "closed"
 
@@ -313,8 +330,15 @@ function requiredMcpTransportFailureResult(): {
   }
 }
 
-function registerParamsForConnection(): typeof baseRegisterParams & { takeover?: true } {
-  return TAKEOVER && !hasRegistered ? { ...baseRegisterParams, takeover: true } : baseRegisterParams
+function registerParamsForConnection(): typeof baseRegisterParams & { takeover?: true; capability?: string } {
+  // Present a capability so the daemon authenticates the attach/fan-in: the
+  // supervisor-provisioned launch capability (shared across a launch's
+  // transports) takes priority so siblings fan in; otherwise the persisted
+  // daemon mint from this connection's first register (a durable-identity CLI
+  // reconnect).
+  const capability = LAUNCH_CAPABILITY ?? mintedCapability
+  const withCapability = capability ? { ...baseRegisterParams, capability } : baseRegisterParams
+  return TAKEOVER && !hasRegistered ? { ...withCapability, takeover: true } : withCapability
 }
 
 function isExplicitTribePersonaName(name: string): boolean {
@@ -336,6 +360,14 @@ function isPersonaNameConflictError(err: unknown): boolean {
 
 function isManagedPersonaRegistrationConflict(err: unknown): boolean {
   return REGISTER_WITH_LAUNCH_NAME && isPersonaNameConflictError(err)
+}
+
+// A managed launch whose attach the daemon REJECTED with the identity-authority
+// code (-32001) is claiming a name bound to a DIFFERENT identity's capability
+// (e.g. a distinct provider inheriting a stale launch id). Retrying can never
+// succeed, so fail loud instead of looping forever.
+function isIdentityAuthorizationDenied(err: unknown): boolean {
+  return (err as { code?: unknown }).code === -32001
 }
 
 function failManagedPersonaRegistration(err: unknown): never {
@@ -367,10 +399,15 @@ function startDaemonConnection(): Promise<DaemonClient> {
         role: string
         chief: string
         protocolVersion?: number
+        capability?: string
       }
       try {
         reg = (await client.call("register", registerParamsForConnection())) as typeof reg
       } catch (err) {
+        // A managed launch denied by the identity-authority gate is claiming a
+        // capability-bound name that belongs to a different identity — retrying
+        // is futile, so fail loud immediately.
+        if (LAUNCH_IDENTITY && isIdentityAuthorizationDenied(err)) failManagedPersonaRegistration(err)
         // Legacy adapters launched without a logical launch id cannot tell a
         // transient reconnect race from another adapter in the same provider
         // launch. Closing their provider-owned stdio leaves native Codex with
@@ -387,6 +424,10 @@ function startDaemonConnection(): Promise<DaemonClient> {
         throw err
       }
       hasRegistered = true
+      // Persist the server-minted capability from the FIRST register so every
+      // reconnect re-presents it (COALESCE on the daemon keeps the stored one, so
+      // a later response echoing it back is harmless). Never logged.
+      if (typeof reg.capability === "string" && reg.capability.length > 0) mintedCapability = reg.capability
       managedRegistrationConflicts = 0
       setRequiredMcpTransportHealth("live", "registered with tribe daemon")
       daemonDegradedReason = null

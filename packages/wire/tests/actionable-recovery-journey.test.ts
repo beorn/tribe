@@ -32,6 +32,7 @@ import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { once } from "node:events"
+import { randomUUID } from "node:crypto"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createStatements, openDatabase } from "../../daemon/src/lib/database.ts"
 
@@ -245,7 +246,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     socketPath: string,
     logName: string,
     launchId: string | undefined,
-    opts: { takeover?: boolean; distinctProviderParent?: boolean } = {},
+    opts: { takeover?: boolean; distinctProviderParent?: boolean; launchCapability?: string } = {},
   ): Promise<{ child: ChildProcessWithoutNullStreams; stdout: Record<string, unknown>[]; logPath: string }> {
     const logPath = join(tmpDir, logName)
     const adapterCommand = [BUN_BIN, ADAPTER, "--socket", socketPath, "--name", NAME]
@@ -262,6 +263,11 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
           TRIBE_REQUIRE_JOIN: "0",
           TRIBE_TAKEOVER: opts.takeover === false ? "0" : "1",
           ...(launchId === undefined ? {} : { TRIBE_LAUNCH_ID: launchId }),
+          // The supervisor provisions ONE random capability per launch INSTANCE,
+          // shared by every transport of that launch so siblings fan in. A
+          // different launch instance (even reusing a stale launch id) gets a
+          // different capability, so it cannot adopt the prior instance's identity.
+          ...(opts.launchCapability ? { TRIBE_LAUNCH_CAPABILITY: opts.launchCapability } : {}),
           ...(opts.distinctProviderParent
             ? {
                 // Hostile/unsanitized nested launch: both identity inputs are
@@ -341,10 +347,13 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     await waitForCondition(() => existsSync(socketPath), "daemon socket")
 
     const launchId = "provider-launch-a"
+    // One launch instance → one supervisor-provisioned capability shared by all
+    // three transports, so they authenticate the fan-in (not the public tuple).
+    const launchCapability = `cap-${randomUUID()}`
     const launchAdapters = await Promise.all([
-      spawnLaunchAdapter(socketPath, "launch-adapter-1.log", launchId),
-      spawnLaunchAdapter(socketPath, "launch-adapter-2.log", launchId),
-      spawnLaunchAdapter(socketPath, "launch-adapter-3.log", launchId),
+      spawnLaunchAdapter(socketPath, "launch-adapter-1.log", launchId, { launchCapability }),
+      spawnLaunchAdapter(socketPath, "launch-adapter-2.log", launchId, { launchCapability }),
+      spawnLaunchAdapter(socketPath, "launch-adapter-3.log", launchId, { launchCapability }),
     ])
 
     // Force every transport through daemon registration, then give displaced
@@ -465,7 +474,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     // logical member and restores the three-transport diagnostic set.
     launchAdapters[1]!.child.kill("SIGTERM")
     await once(launchAdapters[1]!.child, "exit")
-    const replacement = await spawnLaunchAdapter(socketPath, "launch-adapter-2b.log", launchId)
+    const replacement = await spawnLaunchAdapter(socketPath, "launch-adapter-2b.log", launchId, { launchCapability })
     launchAdapters[1] = replacement
     const afterReconnect = (await callLaunchTool(replacement, 24, "members", {})) as {
       sessions?: Array<{ name?: string; member_id?: string; launch_id?: string; transport_pids?: number[] }>
@@ -558,12 +567,12 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const inherited = await spawnLaunchAdapter(socketPath, "stale-launch-2.log", staleLaunchId, {
       distinctProviderParent: true,
     })
-    const inheritedMembers = (await callLaunchTool(inherited, 51, "members", {})) as {
-      sessions?: Array<{ name?: string; member_id?: string; launch_id?: string }>
-    }
-    const inheritedMember = inheritedMembers.sessions?.find((session) => session.name === NAME)
-    expect(inheritedMember).toMatchObject({ launch_id: staleLaunchId })
-    expect(inheritedMember?.member_id).toEqual(expect.any(String))
-    expect(inheritedMember?.member_id).not.toBe(firstMemberId)
+    // Capability model: @NAME is bound to the DEAD first launch's server-minted
+    // capability, which the inheritor (a distinct provider replaying only the
+    // stale launch id) does not hold. The daemon denies the attach (-32001) and
+    // the managed adapter fails loud rather than stealing the dead launch's
+    // identity — a STRONGER guarantee than the pre-capability "fresh member id".
+    await waitForCondition(() => inherited.child.exitCode !== null, "inheritor denied + fail-loud exit")
+    expect(inherited.child.exitCode).toBe(2)
   }, 30_000)
 })
