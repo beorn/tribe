@@ -41,10 +41,26 @@ export function createInboxWaitManager(readStatus: (session: string) => InboxSta
   }
 
   function onMessageInserted(info: MessageInsertedInfo): void {
+    // Cheap structural pre-filter: only a direct actionable addressed to a
+    // waiting session could ever create new unread work. Ambient/broadcast/event
+    // rows and non-actionable directs never wake a waiter, so skip the status
+    // read for them.
     if (info.kind !== "direct") return
     if (!ACTIONABLE_TYPES.has(info.type)) return
     for (const waiter of Array.from(waiters)) {
-      if (waiter.session === info.recipient) settle(waiter, { timedOut: false, aborted: false })
+      if (waiter.session !== info.recipient) continue
+      // Settle only when the mailbox genuinely holds an unread actionable past
+      // the drain cursor. `readStatus` IS the (drain-cursor × actionable-class)
+      // predicate — the SAME one the initial snapshot in `wait()` uses — so the
+      // wake and the snapshot can never disagree. A structural (kind, type,
+      // recipient) match is necessary but not sufficient: a self-directed
+      // actionable (sender == recipient) or one already acknowledged by the
+      // cursor reads as 0 here and must NOT wake the waiter — otherwise the wait
+      // returns early with nothing to do, the busy-loop the chief hit. No second
+      // cursor: the recipient mailbox cursor (Agent3's) is the single authority.
+      if (readStatus(waiter.session).unread_count > 0) {
+        settle(waiter, { timedOut: false, aborted: false })
+      }
     }
   }
 
