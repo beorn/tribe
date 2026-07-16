@@ -1,14 +1,20 @@
 /**
  * Fail-closed guards for the vault FTS adapter (recall → km vault read path).
  *
+ * @failure Recall vault reads can mutate database content or reach km startup through unparsed module edges.
+ * @level l2
+ * @consumer tribe-recall vault history adapter
+ *
  * The recall/injection pipeline may merge matches from the km vault
  * (`.km/state.db`) into its results. These guards pin that this integration
  * can NEVER autostart km vault parsing or the km server, and never mutates
- * the user's vault. Three invariants:
+ * vault data or sidecar topology. Three invariants:
  *
  *  1. READONLY PIN — `getVaultDb()` opens the km state.db strictly read-only:
- *     writes are refused and `PRAGMA query_only` reads back 1. No branch of
- *     the recall path may promote itself to a writer of the vault.
+ *     writes are refused and `PRAGMA query_only` reads back 1. The database
+ *     and WAL bytes stay identical and no sidecar is created, removed, or
+ *     resized. SQLite may update reader marks and mtime inside an existing
+ *     `-shm` WAL index; that coordination state is not database content.
  *  2. TYPED DEGRADE — with no vault db resolvable (`KM_VAULT_DB` unset, none
  *     up the cwd walk), resolution is a pure fs probe: `getVaultDb()` returns
  *     null and `searchVault()` returns an empty typed result — no throw, no
@@ -25,10 +31,12 @@
  */
 
 import { describe, test, expect, afterEach, vi } from "vitest"
+import ts from "typescript"
 import { Database } from "bun:sqlite"
-import { mkdtempSync, mkdirSync, rmSync, readFileSync, readdirSync } from "node:fs"
+import { createHash } from "node:crypto"
+import { existsSync, mkdtempSync, mkdirSync, rmSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join, resolve, dirname } from "node:path"
+import { join, resolve, dirname, extname, relative } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import { getVaultDb, getVaultDbPath, searchVault, resetVaultDbCacheForTests } from "../../src/history/vault-fts.ts"
@@ -42,8 +50,7 @@ const VAULT_FTS_SRC = resolve(HERE, "../../src/history/vault-fts.ts")
 // plus the external-content `nodes_fts` FTS5 index, exactly as km declares it
 // (km/packages/km-storage/src/db/schema.ts). Default (delete) journal mode so
 // the read-only open needs no sidecar -wal/-shm files.
-function makeKmVaultDb(dbPath: string): void {
-  const db = new Database(dbPath)
+function seedKmVaultDb(db: Database): void {
   db.exec(`
     CREATE TABLE nodes (
       rowid INTEGER PRIMARY KEY,
@@ -83,7 +90,36 @@ function makeKmVaultDb(dbPath: string): void {
     "Architecture",
     "The recall pipeline merges vault matches into its result list.",
   )
+}
+
+function makeKmVaultDb(dbPath: string): void {
+  const db = new Database(dbPath)
+  seedKmVaultDb(db)
   db.close()
+}
+
+function makeWalKmVaultDb(dbPath: string): Database {
+  const db = new Database(dbPath)
+  const row = db.query("PRAGMA journal_mode = WAL").get() as { journal_mode: string }
+  if (row.journal_mode.toLowerCase() !== "wal") {
+    db.close()
+    throw new Error(`expected WAL journal mode, got ${row.journal_mode}`)
+  }
+  seedKmVaultDb(db)
+  return db
+}
+
+function snapshotVaultFiles(dir: string): Record<string, { size: number; mtimeMs: number; sha256: string }> {
+  return Object.fromEntries(
+    readdirSync(dir)
+      .sort()
+      .map((name) => {
+        const path = join(dir, name)
+        const stat = statSync(path)
+        const sha256 = createHash("sha256").update(readFileSync(path)).digest("hex")
+        return [name, { size: stat.size, mtimeMs: stat.mtimeMs, sha256 }]
+      }),
+  )
 }
 
 function listTsSources(dir: string): string[] {
@@ -100,35 +136,137 @@ function listTsSources(dir: string): string[] {
   return out
 }
 
-// Strip block + line comments so bead references (`@km/tribe/20033`) that live
-// only in comments cannot masquerade as import edges. Aggressive line-comment
-// cutting is safe here: it can only shorten a line at a `//`, which never
-// creates or destroys a real `from "spec"` specifier.
-function stripComments(src: string): string {
-  const noBlock = src.replace(/\/\*[\s\S]*?\*\//g, "")
-  return noBlock
-    .split("\n")
-    .map((line) => {
-      const idx = line.indexOf("//")
-      return idx === -1 ? line : line.slice(0, idx)
-    })
-    .join("\n")
+function sourceFile(src: string, fileName = "module.ts"): ts.SourceFile {
+  return ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
 }
 
-// Extract the module specifiers of every `import`/`export … from "spec"` and
-// bare `import "spec"` statement in comment-stripped source.
-function importSpecifiers(src: string): string[] {
-  const cleaned = stripComments(src)
+// Parse static imports/exports, bare imports, dynamic import(), and legacy
+// require() without matching comments or string contents.
+function importSpecifiers(src: string, fileName = "module.ts"): string[] {
   const specs: string[] = []
-  const fromRe = /\b(?:import|export)\b[\s\S]*?\bfrom\s*['"]([^'"]+)['"]/g
-  const bareRe = /\bimport\s*['"]([^'"]+)['"]/g
-  for (const m of cleaned.matchAll(fromRe)) specs.push(m[1]!)
-  for (const m of cleaned.matchAll(bareRe)) specs.push(m[1]!)
+  const visit = (node: ts.Node): void => {
+    if (
+      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+      node.moduleSpecifier &&
+      ts.isStringLiteral(node.moduleSpecifier)
+    ) {
+      specs.push(node.moduleSpecifier.text)
+    } else if (
+      ts.isCallExpression(node) &&
+      node.arguments.length === 1 &&
+      ts.isStringLiteral(node.arguments[0]!) &&
+      (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+        (ts.isIdentifier(node.expression) && node.expression.text === "require"))
+    ) {
+      specs.push(node.arguments[0]!.text)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sourceFile(src, fileName))
   return specs
 }
 
 function isBannedSpecifier(spec: string): boolean {
-  return spec.includes("daemon-client") || spec.includes("server-routing") || spec === "@km" || spec.startsWith("@km/")
+  const normalized = spec.replaceAll("\\", "/")
+  return (
+    normalized.includes("daemon-client") ||
+    normalized.includes("server-routing") ||
+    normalized === "@km" ||
+    normalized.startsWith("@km/") ||
+    /(^|\/)km\/packages\//.test(normalized)
+  )
+}
+
+function isSpawnSpecifier(spec: string): boolean {
+  return spec === "child_process" || spec === "node:child_process" || spec === "execa" || spec === "zx"
+}
+
+function spawnPrimitives(src: string, fileName: string): string[] {
+  const found = new Set<string>()
+  const dottedName = (node: ts.Expression): string | null => {
+    if (ts.isIdentifier(node)) return node.text
+    if (ts.isPropertyAccessExpression(node)) {
+      const owner = dottedName(node.expression)
+      return owner ? `${owner}.${node.name.text}` : null
+    }
+    return null
+  }
+  const recordExpression = (node: ts.Expression): void => {
+    const name = dottedName(node)
+    if (name === "Bun.spawn" || name === "Bun.spawnSync" || name === "Bun.$" || name === "Deno.Command") {
+      found.add(name)
+    }
+    if (name === "ensureServer") found.add(name)
+  }
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) || ts.isNewExpression(node)) recordExpression(node.expression)
+    if (ts.isTaggedTemplateExpression(node)) recordExpression(node.tag)
+    if (ts.isStringLiteral(node) && node.text.includes("km daemon")) found.add("km daemon")
+    ts.forEachChild(node, visit)
+  }
+  visit(sourceFile(src, fileName))
+  return [...found]
+}
+
+function resolveRelativeModule(importer: string, spec: string): string | null {
+  if (!spec.startsWith(".")) return null
+  const raw = resolve(dirname(importer), spec)
+  const extension = extname(raw)
+  const withoutJsExtension = /\.[cm]?jsx?$/.test(extension) ? raw.slice(0, -extension.length) : raw
+  const candidates = extension
+    ? [
+        raw,
+        `${withoutJsExtension}.ts`,
+        `${withoutJsExtension}.tsx`,
+        `${withoutJsExtension}.mts`,
+        `${withoutJsExtension}.cts`,
+      ]
+    : [raw, `${raw}.ts`, `${raw}.tsx`, `${raw}.mts`, `${raw}.cts`, join(raw, "index.ts"), join(raw, "index.tsx")]
+  return candidates.find((candidate) => existsSync(candidate) && statSync(candidate).isFile()) ?? null
+}
+
+function displayPath(path: string, repoRoot: string): string {
+  const rel = relative(repoRoot, path)
+  return rel.startsWith("..") ? path : rel
+}
+
+function auditSourceImports(file: string, repoRoot: string, rejectSpawnImports = false): string[] {
+  const src = readFileSync(file, "utf8")
+  const shown = displayPath(file, repoRoot)
+  const violations: string[] = []
+  for (const spec of importSpecifiers(src, file)) {
+    if (isBannedSpecifier(spec) || (rejectSpawnImports && isSpawnSpecifier(spec))) {
+      violations.push(`${shown} imports "${spec}"`)
+    }
+    if (spec.startsWith(".")) {
+      const resolved = resolveRelativeModule(file, spec)
+      if (resolved && relative(repoRoot, resolved).startsWith("..")) {
+        violations.push(`${shown} imports outside repo "${spec}"`)
+      }
+    }
+  }
+  return violations
+}
+
+function auditModuleGraph(entryPath: string, repoRoot: string): string[] {
+  const violations: string[] = []
+  const visited = new Set<string>()
+  const visit = (file: string): void => {
+    if (visited.has(file)) return
+    visited.add(file)
+    const src = readFileSync(file, "utf8")
+    const shown = displayPath(file, repoRoot)
+    violations.push(...auditSourceImports(file, repoRoot, true))
+    for (const primitive of spawnPrimitives(src, file)) {
+      violations.push(`${shown} uses "${primitive}"`)
+    }
+    for (const spec of importSpecifiers(src, file)) {
+      const resolved = resolveRelativeModule(file, spec)
+      if (resolved && !relative(repoRoot, resolved).startsWith("..")) visit(resolved)
+    }
+  }
+  visit(entryPath)
+  return violations
 }
 
 describe("vault-fts fail-closed guards", () => {
@@ -169,6 +307,34 @@ describe("vault-fts fail-closed guards", () => {
     }
   })
 
+  test("READONLY PIN: live WAL data and sidecar topology are unchanged after recall reads", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-vault-guard-wal-"))
+    const dbPath = join(dir, "state.db")
+    let writer: Database | null = null
+    try {
+      writer = makeWalKmVaultDb(dbPath)
+      const before = snapshotVaultFiles(dir)
+      expect(Object.keys(before)).toEqual(expect.arrayContaining(["state.db", "state.db-wal", "state.db-shm"]))
+
+      process.env.KM_VAULT_DB = dbPath
+      resetVaultDbCacheForTests()
+      expect(searchVault("termless", 5)).toHaveLength(1)
+      resetVaultDbCacheForTests()
+
+      const after = snapshotVaultFiles(dir)
+      expect(Object.keys(after)).toEqual(Object.keys(before))
+      expect(after["state.db"]).toEqual(before["state.db"])
+      expect(after["state.db-wal"]).toEqual(before["state.db-wal"])
+      expect(after["state.db-shm"]).toMatchObject({
+        size: before["state.db-shm"]!.size,
+      })
+    } finally {
+      resetVaultDbCacheForTests()
+      writer?.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test("TYPED DEGRADE: no vault db → null handle + empty typed result, no throw", () => {
     delete process.env.KM_VAULT_DB
     resetVaultDbCacheForTests()
@@ -191,22 +357,24 @@ describe("vault-fts fail-closed guards", () => {
     }
   })
 
-  test("TYPED DEGRADE: vault resolution is a pure fs probe — no process-spawn primitives in vault-fts.ts", () => {
-    const src = readFileSync(VAULT_FTS_SRC, "utf8")
-    // `.exec(` is a sqlite call, not a process spawn — never scan for bare
-    // "exec". These are the ways this module could shell out or start km.
-    const spawnPrimitives = [
-      "child_process",
-      "Bun.spawn",
-      "Bun.spawnSync",
-      "execSync",
-      "execFile",
-      "spawnSync",
-      "ensureServer",
-      "km daemon",
-    ]
-    const found = spawnPrimitives.filter((p) => src.includes(p))
-    expect(found).toEqual([])
+  test("TYPED DEGRADE: the reachable vault-history graph cannot start km", () => {
+    expect(auditModuleGraph(VAULT_FTS_SRC, REPO_ROOT)).toEqual([])
+  })
+
+  test("IMPORT-EDGE PIN: scanner recognizes dynamic imports", () => {
+    expect(importSpecifiers('async function load() { return import("@km/commands") }')).toContain("@km/commands")
+  })
+
+  test("IMPORT-EDGE PIN: reachable helpers cannot hide process startup", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-vault-guard-graph-"))
+    try {
+      const entryPath = join(dir, "entry.ts")
+      writeFileSync(entryPath, 'import { start } from "./helper.ts"\nexport const run = start\n')
+      writeFileSync(join(dir, "helper.ts"), 'export const start = () => Bun.spawn(["km", "daemon"])\n')
+      expect(auditModuleGraph(entryPath, dir)).toContain('helper.ts uses "Bun.spawn"')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   test("IMPORT-EDGE PIN: no daemon/recall source imports km-cli server plumbing or @km/* runtime", () => {
@@ -214,12 +382,7 @@ describe("vault-fts fail-closed guards", () => {
     const offenders: string[] = []
     for (const root of roots) {
       for (const file of listTsSources(root)) {
-        const src = readFileSync(file, "utf8")
-        for (const spec of importSpecifiers(src)) {
-          if (isBannedSpecifier(spec)) {
-            offenders.push(`${file.slice(REPO_ROOT.length + 1)} imports "${spec}"`)
-          }
-        }
+        offenders.push(...auditSourceImports(file, REPO_ROOT))
       }
     }
     expect(offenders).toEqual([])
