@@ -26,7 +26,7 @@
  *   exit-2 path. This journey adds no standalone gate surface.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -34,6 +34,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { once } from "node:events"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createStatements, openDatabase } from "../../daemon/src/lib/database.ts"
+import { connectToDaemon, type DaemonClient } from "../src/client.ts"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ADAPTER = resolve(HERE, "../src/stdio-adapter.ts")
@@ -186,6 +187,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
   let tmpDir: string
   let daemonProc: ChildProcessWithoutNullStreams | undefined
   const adapters: ChildProcessWithoutNullStreams[] = []
+  const detachedDaemonPids: number[] = []
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "tribe-recovery-journey-"))
@@ -196,8 +198,38 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     adapters.length = 0
     daemonProc?.kill("SIGTERM")
     daemonProc = undefined
+    for (const pid of detachedDaemonPids) {
+      try {
+        process.kill(pid, "SIGTERM")
+      } catch {
+        /* already exited during hot reload */
+      }
+    }
+    detachedDaemonPids.length = 0
     rmSync(tmpDir, { recursive: true, force: true })
   })
+
+  async function connectToDaemonPid(
+    socketPath: string,
+    predicate: (pid: number) => boolean = () => true,
+  ): Promise<{ client: DaemonClient; pid: number }> {
+    let lastError: unknown
+    const deadline = Date.now() + 12_000
+    while (Date.now() < deadline) {
+      let client: DaemonClient | undefined
+      try {
+        client = await connectToDaemon(socketPath, { callTimeoutMs: 1_000 })
+        const status = (await client.call("cli_daemon")) as { pid: number }
+        if (predicate(status.pid)) return { client, pid: status.pid }
+        client.close()
+      } catch (error) {
+        lastError = error
+        client?.close()
+      }
+      await new Promise((resolveTick) => setTimeout(resolveTick, 50))
+    }
+    throw new Error(`timed out connecting to expected daemon pid: ${String(lastError)}`)
+  }
 
   function spawnDaemon(socketPath: string, dbPath: string): ChildProcessWithoutNullStreams {
     const proc = spawn(BUN_BIN, [DAEMON, "--socket", socketPath, "--db", dbPath, "--foreground", "--no-lore"], {
@@ -301,6 +333,68 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     }
     return toolResult(adapter.stdout, id)
   }
+
+  it("preserves inherited operator authority through adapter autostart and daemon hot reload", async () => {
+    const socketPath = join(tmpDir, "operator-lifecycle.sock")
+    const dbPath = join(tmpDir, "operator-lifecycle.db")
+    const capability = "operator-lifecycle-secret"
+    const capabilityPath = join(tmpDir, "operator-capability")
+    writeFileSync(capabilityPath, capability, { mode: 0o600 })
+    const capabilityFd = openSync(capabilityPath, "r")
+    const child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/operator-test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DAEMON_SCRIPT: DAEMON,
+        TRIBE_DB: dbPath,
+        TRIBE_DELIVERY: "pull",
+        TRIBE_PULL_TRANSPORT: "mcp",
+        TRIBE_REQUIRE_JOIN: "0",
+        TRIBE_NO_PLUGINS: "1",
+        TRIBE_NO_AUTORELOAD: "1",
+        TRIBE_OPERATOR_CAPABILITY: "must-not-cross-the-spawn-boundary",
+        TRIBE_OPERATOR_CAPABILITY_FD: "3",
+        DEBUG_LOG: join(tmpDir, "operator-adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe", capabilityFd],
+    }) as ChildProcessWithoutNullStreams
+    closeSync(capabilityFd)
+    adapters.push(child)
+    const stdout = collectStdoutJson(child)
+    writeJson(child, initializePayload(1))
+    await waitForCondition(() => stdout.some((line) => line.id === 1), "operator adapter initialize")
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+
+    const first = await connectToDaemonPid(socketPath)
+    detachedDaemonPids.push(first.pid)
+    await expect(
+      first.client.call("cli_inbox_drain", {
+        session: "@chief",
+        limit: 1,
+        operator_capability: capability,
+      }),
+    ).resolves.toMatchObject({ session: "@chief", drained_count: 0 })
+    await expect(
+      first.client.call("cli_inbox_drain", {
+        session: "@chief",
+        limit: 1,
+        operator_capability: "must-not-cross-the-spawn-boundary",
+      }),
+    ).rejects.toThrow(/authenticated current session or the configured operator capability/i)
+
+    await first.client.call("tribe.reload", { reason: "operator capability lifecycle test" })
+    first.client.close()
+    const successor = await connectToDaemonPid(socketPath, (pid) => pid !== first.pid)
+    detachedDaemonPids.push(successor.pid)
+    await expect(
+      successor.client.call("cli_inbox_drain", {
+        session: "@chief",
+        limit: 1,
+        operator_capability: capability,
+      }),
+    ).resolves.toMatchObject({ session: "@chief", drained_count: 0 })
+    successor.client.close()
+  }, 30_000)
 
   it("claiming the loaded name forwards EXACTLY the one actionable; a reconnect forwards none", async () => {
     const socketPath = join(tmpDir, "tribe.sock")

@@ -125,12 +125,12 @@ export type BallTracker = {
    * Ignored if `request` is not set.
    */
   fanout?: "first" | "all"
-  /** Time from message commit until escalation. Defaults to 30 minutes for
+  /** Time from message commit until escalation. Defaults to 10 minutes for
    * newly tracked balls; legacy rows remain unbounded with NULL expires_at. */
   expiresInMs?: number
 }
 
-export const DEFAULT_BALL_TTL_MS = 30 * 60_000
+export const DEFAULT_BALL_TTL_MS = 10 * 60_000
 export const MAX_BALL_TTL_MS = 24 * 60 * 60_000
 
 /**

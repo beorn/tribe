@@ -711,6 +711,10 @@ describe("stdio adapter delivery modes", () => {
         waited_ms: 17,
         timed_out: false,
         aborted: false,
+        attention: {
+          actionable_unread: [{ id: "request-1", content: "review this" }],
+          pending_balls: [{ request_id: "request-1", recipient: "@agent/test" }],
+        },
       },
     })
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
@@ -750,6 +754,10 @@ describe("stdio adapter delivery modes", () => {
       waited_ms?: number
       timed_out?: boolean
       aborted?: boolean
+      attention?: {
+        actionable_unread?: Array<{ id?: string }>
+        pending_balls?: Array<{ request_id?: string }>
+      }
     }
     expect(parsed).toMatchObject({
       session: "@agent/test",
@@ -757,6 +765,10 @@ describe("stdio adapter delivery modes", () => {
       waited_ms: 17,
       timed_out: false,
       aborted: false,
+      attention: {
+        actionable_unread: [{ id: "request-1" }],
+        pending_balls: [{ request_id: "request-1" }],
+      },
     })
 
     const daemonRequest = daemon.requests.find((msg) => msg.method === "tribe.inbox.wait") as

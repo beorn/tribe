@@ -46,6 +46,7 @@ import {
   fetchEvent,
   handleToolCall,
   isRemovedTribeMethod,
+  readAttentionProjection,
   removedTribeMethodMessage,
   TRIBE_COORD_METHODS,
   type FetchRow,
@@ -884,7 +885,11 @@ export function withDispatcher<
             const { session: sessionName, timeoutMs } = resolveInboxWaitOptions(p, {
               defaultSession: DEFAULT_INBOX_WAIT_SESSION,
             })
-            return makeResponse(id, await inboxWait.wait(sessionName, connId, timeoutMs))
+            const result = await inboxWait.wait(sessionName, connId, timeoutMs)
+            return makeResponse(id, {
+              ...result,
+              attention: readAttentionProjection(daemonCtx, sessionName).attention,
+            })
           }
 
           case "tribe.inbox.wait": {
@@ -892,7 +897,11 @@ export function withDispatcher<
             const { session: sessionName, timeoutMs } = resolveInboxWaitOptions(p, {
               defaultSession: client?.name ?? DEFAULT_INBOX_WAIT_SESSION,
             })
-            return makeResponse(id, await inboxWait.wait(sessionName, connId, timeoutMs))
+            const result = await inboxWait.wait(sessionName, connId, timeoutMs)
+            return makeResponse(id, {
+              ...result,
+              attention: readAttentionProjection(daemonCtx, sessionName).attention,
+            })
           }
 
           /**

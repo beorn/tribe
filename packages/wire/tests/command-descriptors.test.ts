@@ -117,6 +117,9 @@ describe("Tribe command descriptors", () => {
     expect(inboxWait.options?.find((option) => option.name === "timeout")?.mapsTo).toBe("timeout_ms")
     expect(inboxWait.options?.find((option) => option.name === "timeout")?.transform).toBe("duration-ms")
     expect(inboxWait.options?.find((option) => option.name === "timeout")?.default).toBe("30s")
+    expect(commandDescriptorByMcpName("inbox.wait")?.mcp.outputSchema.properties?.attention).toMatchObject({
+      type: "object",
+    })
   })
 
   test("matches descriptor-backed CLI projections to the actual Commander program", () => {

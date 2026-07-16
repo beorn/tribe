@@ -190,6 +190,43 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     expect(recipients).toEqual(["@agent/1", "@agent/2"])
   })
 
+  it("uses one implicit request id for multi-target fanout:first so the first reply settles every owner", () => {
+    const sent = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        {
+          to: "@agent/1,@agent/2",
+          message: "either of you can accept",
+          type: "request",
+          fanout: "first",
+        },
+        makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+      ),
+    )
+    const requestId = sent.request_id as string
+
+    expect(requestId).toEqual(expect.any(String))
+    expect(pendingRecipients(db, requestId)).toEqual(["@agent/1", "@agent/2"])
+    expect(
+      (
+        db.prepare("SELECT DISTINCT request FROM messages WHERE id IN (?, ?)").all(...(sent.ids as string[])) as Array<{
+          request: string
+        }>
+      ).map((row) => row.request),
+    ).toEqual([requestId])
+
+    parseToolJson(
+      handleToolCall(
+        agent1,
+        "tribe.send",
+        { to: "@chief", message: "accepted", type: "response", reply: requestId },
+        makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+      ),
+    )
+    expect(pendingRecipients(db, requestId)).toEqual([])
+  })
+
   it("applies one sender-declared TTL to every resolved recipient", () => {
     const res = parseToolJson(
       handleToolCall(

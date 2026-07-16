@@ -47,6 +47,10 @@ type InboxWaitResult = {
   waited_ms: number
   timed_out: boolean
   aborted: boolean
+  attention: {
+    actionable_unread: Array<{ content: string }>
+    pending_balls: Array<{ request_id: string; recipient: string }>
+  }
 }
 
 type JsonRpcResponse<T> = {
@@ -256,6 +260,8 @@ describe("dispatcher bounded mailbox drain", () => {
     )
     expect(wait.timed_out).toBe(true)
     expect(wait.unread_count).toBe(0)
+    expect(wait.attention.actionable_unread).toEqual([])
+    expect(wait.attention.pending_balls).toHaveLength(3)
     expect(harness.sessionCount("@chief")).toBe(0)
     expect(harness.sessionAnnouncements("@chief")).toEqual([])
   })
@@ -471,6 +477,8 @@ describe("dispatcher inbox-wait parsing", () => {
     expect(result.unread_count).toBe(1)
     expect(result.timed_out).toBe(false)
     expect(result.aborted).toBe(false)
+    expect(result.attention.actionable_unread).toEqual([expect.objectContaining({ content: "wake inbox wait" })])
+    expect(result.attention.pending_balls).toEqual([expect.objectContaining({ recipient: "@agent/wait" })])
   })
 
   it("uses the same timeoutMs fallback accepted by the MCP handler", async () => {
@@ -495,6 +503,7 @@ describe("dispatcher inbox-wait parsing", () => {
     expect(result.unread_count).toBe(0)
     expect(result.timed_out).toBe(true)
     expect(result.aborted).toBe(false)
+    expect(result.attention).toEqual({ actionable_unread: [], pending_balls: [] })
   })
 })
 

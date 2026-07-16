@@ -101,8 +101,11 @@ export function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0)
     return true
-  } catch {
-    return false
+  } catch (error) {
+    // kill(2) proves death only with ESRCH. EPERM means the process exists but
+    // this caller cannot signal it; unfamiliar probe failures are likewise
+    // inconclusive and must not evict or reroute a live owner's state.
+    return (error as NodeJS.ErrnoException).code !== "ESRCH"
   }
 }
 

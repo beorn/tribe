@@ -115,7 +115,7 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
     })
   })
 
-  it("assigns a 30m default TTL and honors an explicit sender TTL", () => {
+  it("assigns a 10m default TTL and honors an explicit sender TTL", () => {
     const chief = makeContext(db, stmts, "@chief")
     const defaultTtl = sendMessage(chief, "@agent/8", "default deadline", "request")
     const explicitTtl = sendMessage(
@@ -134,7 +134,7 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
       .prepare("SELECT message_id, opened_at, expires_at FROM pending_request ORDER BY opened_at, request_id")
       .all() as Array<{ message_id: string; opened_at: number; expires_at: number | null }>
     expect(rows.find((row) => row.message_id === defaultTtl.id)?.expires_at).toBe(
-      rows.find((row) => row.message_id === defaultTtl.id)!.opened_at + 30 * 60_000,
+      rows.find((row) => row.message_id === defaultTtl.id)!.opened_at + 10 * 60_000,
     )
     expect(rows.find((row) => row.message_id === explicitTtl.id)?.expires_at).toBe(
       rows.find((row) => row.message_id === explicitTtl.id)!.opened_at + 5 * 60_000,

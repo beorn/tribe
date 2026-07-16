@@ -77,19 +77,6 @@ type SessionFilter = {
   filter_mute: string | null
 }
 
-function isNotificationDietEvent(type: string, topic: string | null): boolean {
-  return (
-    type === "session" ||
-    type === "status" ||
-    type === "delta" ||
-    type.startsWith("chief:") ||
-    type.startsWith("github:") ||
-    type === "git:commit" ||
-    topic?.startsWith("github:") === true ||
-    topic === "git:commit"
-  )
-}
-
 export function shouldDeliver(
   info: { kind: MessageKind; type: string; replyHint: ReplyHint; topic: string | null },
   filter: SessionFilter | undefined,
@@ -98,9 +85,11 @@ export function shouldDeliver(
   const mode = filter.filter_mode || "normal"
   if (mode === "ambient") return true
   if (mode === "focus") {
-    if (ACTIONABLE_TYPES_SET.has(info.type)) return true
-    if (isNotificationDietEvent(info.type, info.topic)) return false
-    return info.replyHint === "yes"
+    // Focus is an opt-in push diet, not a durability filter: every row stays
+    // fetchable, but only the four actionable classes wake the seat. Plain
+    // direct notify/response traffic is informational even though its legacy
+    // reply hint is "yes".
+    return ACTIONABLE_TYPES_SET.has(info.type)
   }
   if (info.kind === "direct") return true
   // mode === 'normal' — apply the time-bounded mute when active

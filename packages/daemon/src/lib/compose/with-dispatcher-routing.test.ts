@@ -29,6 +29,10 @@ describe("focus-mode notification diet", () => {
     expect(shouldDeliver({ kind: "direct", type, topic: null, replyHint: "yes" }, focus)).toBe(true)
   })
 
+  it.each(["notify", "response"])("keeps plain direct %s pull-only while focus mode is active", (type) => {
+    expect(shouldDeliver({ kind: "direct", type, topic: null, replyHint: "yes" }, focus)).toBe(false)
+  })
+
   it("leaves direct notification delivery unchanged until a seat opts in", () => {
     expect(
       shouldDeliver(

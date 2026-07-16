@@ -28,6 +28,7 @@ import { createHash } from "node:crypto"
 import { dirname as pathDirname, resolve as pathResolve } from "node:path"
 import { createLogger } from "loggily"
 import type { BaseTribe } from "./base.ts"
+import type { WithConfig } from "./with-config.ts"
 import type { WithSocketServer } from "./with-socket-server.ts"
 
 const log = createLogger("tribe:hot-reload")
@@ -86,7 +87,7 @@ function computeSourceHash(files: string[]): string {
   return hash.digest("hex").slice(0, 12)
 }
 
-export function withHotReload<T extends BaseTribe & WithSocketServer>(
+export function withHotReload<T extends BaseTribe & WithConfig & WithSocketServer>(
   opts: HotReloadOpts,
 ): (t: T) => T & WithHotReload {
   return (t) => {
@@ -132,12 +133,27 @@ export function withHotReload<T extends BaseTribe & WithSocketServer>(
       }
 
       const argv = process.argv.slice(1).filter((a) => !a.startsWith("--fd"))
-
+      const operatorCapability = t.config.operatorCapability?.trim() || null
+      const childEnv = { ...process.env }
+      delete childEnv.TRIBE_OPERATOR_CAPABILITY_FD
+      delete childEnv.TRIBE_OPERATOR_CAPABILITY
+      if (operatorCapability) childEnv.TRIBE_OPERATOR_CAPABILITY_FD = "3"
       const child = spawn(process.execPath, argv, {
-        stdio: "ignore",
+        stdio: operatorCapability ? ["ignore", "ignore", "ignore", "pipe"] : "ignore",
         detached: true,
-        env: process.env,
+        env: childEnv,
       })
+      if (operatorCapability) {
+        const capabilityPipe = child.stdio[3]
+        if (!capabilityPipe || !("end" in capabilityPipe)) {
+          child.kill()
+          throw new Error("Hot-reload spawn did not expose the operator capability pipe")
+        }
+        capabilityPipe.on("error", (err) => {
+          log.info?.(`Hot-reload operator capability pipe failed: ${err.message}`)
+        })
+        capabilityPipe.end(operatorCapability)
+      }
       child.unref()
 
       child.on("error", (err) => {

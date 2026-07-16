@@ -23,11 +23,11 @@ import { Database } from "bun:sqlite"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { createTribeContext, type TribeContext } from "./context.ts"
-import { registerSession, sweepDeadSessionRows } from "./session.ts"
+import { isPidAlive, registerSession, sweepDeadSessionRows } from "./session.ts"
 import { handleToolCall, type HandlerOpts } from "./handlers.ts"
 
 const PROJECT_ID = "acct-provider-proj"
@@ -138,6 +138,32 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
           .get() as { count: number }
       ).count,
     ).toBe(0)
+  })
+
+  it("treats EPERM as alive/unknown and only ESRCH as positive death during generated-session GC", () => {
+    const now = Date.now()
+    const ctx = makeContext(db, stmts, "s-eperm-generated", "unknown-eperm")
+    registerSession(ctx, PROJECT_ID, () => false, null, 494949, "pull", "/repo", null, null)
+    db.prepare("UPDATE sessions SET updated_at = ? WHERE id = 's-eperm-generated'").run(now - 8 * 24 * 3600 * 1000)
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+      throw Object.assign(new Error("operation not permitted"), { code: "EPERM" })
+    })
+    try {
+      expect(isPidAlive(494949)).toBe(true)
+      expect(sweepDeadSessionRows(db, 7 * 24 * 3600 * 1000, now)).toBe(0)
+      expect(db.prepare("SELECT name FROM sessions WHERE id = 's-eperm-generated'").get()).toEqual({
+        name: "unknown-eperm",
+      })
+
+      kill.mockImplementation(() => {
+        throw Object.assign(new Error("no such process"), { code: "ESRCH" })
+      })
+      expect(isPidAlive(494949)).toBe(false)
+      expect(sweepDeadSessionRows(db, 7 * 24 * 3600 * 1000, now)).toBe(1)
+      expect(db.prepare("SELECT name FROM sessions WHERE id = 's-eperm-generated'").get()).toBeNull()
+    } finally {
+      kill.mockRestore()
+    }
   })
 
   it("a join without a prior self-row records the connected client's real pid, not 0 (21052)", () => {

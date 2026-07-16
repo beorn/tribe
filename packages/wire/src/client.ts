@@ -14,7 +14,7 @@
  *     replaying registered notification handlers.
  */
 
-import { existsSync, mkdirSync, unlinkSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs"
 import { createConnection, type Socket } from "node:net"
 import { spawn } from "node:child_process"
 import { dirname } from "node:path"
@@ -154,6 +154,58 @@ export type ConnectOrStartOpts = {
   connectFn?: (path: string, o?: ConnectToDaemonOpts) => Promise<DaemonClient>
 }
 
+const OPERATOR_CAPABILITY_FD_ENV = "TRIBE_OPERATOR_CAPABILITY_FD"
+
+function createOperatorCapabilityReader(): () => string | null {
+  let read = false
+  let capability: string | null = null
+  return () => {
+    if (read) return capability
+    const raw = process.env[OPERATOR_CAPABILITY_FD_ENV]
+    if (raw === undefined) {
+      read = true
+      return null
+    }
+    const fd = Number(raw)
+    if (!Number.isSafeInteger(fd) || fd < 3) {
+      throw new Error(`${OPERATOR_CAPABILITY_FD_ENV} must name an inherited fd >= 3, received ${JSON.stringify(raw)}`)
+    }
+    const loaded = readFileSync(fd, "utf8").trim()
+    if (!loaded) throw new Error(`${OPERATOR_CAPABILITY_FD_ENV} contained an empty operator capability`)
+    capability = loaded
+    read = true
+    return capability
+  }
+}
+
+function spawnDaemonWithOperatorCapability(
+  script: string,
+  args: string[],
+  readOperatorCapability: () => string | null,
+): ReturnType<typeof spawn> {
+  const capability = readOperatorCapability()
+  const env = { ...process.env }
+  delete env[OPERATOR_CAPABILITY_FD_ENV]
+  delete env.TRIBE_OPERATOR_CAPABILITY
+  if (capability) env[OPERATOR_CAPABILITY_FD_ENV] = "3"
+  const child = spawn(process.execPath, [script, ...args], {
+    detached: true,
+    stdio: capability ? ["ignore", "ignore", "ignore", "pipe"] : "ignore",
+    env,
+  })
+  if (capability) {
+    const capabilityPipe = child.stdio[3]
+    if (!capabilityPipe || !("end" in capabilityPipe)) {
+      child.kill()
+      throw new Error("daemon spawn did not expose the operator capability pipe")
+    }
+    capabilityPipe.on("error", (error) => log.warn?.(`operator capability pipe failed: ${error.message}`))
+    capabilityPipe.end(capability)
+  }
+  child.unref()
+  return child
+}
+
 /**
  * Connect to an *existing* daemon, retrying on a transient ECONNREFUSED.
  *
@@ -204,7 +256,11 @@ export async function connectExisting(
   return null
 }
 
-export async function connectOrStart(socketPath: string, opts?: ConnectOrStartOpts): Promise<DaemonClient> {
+async function connectOrStartWithCapability(
+  socketPath: string,
+  opts: ConnectOrStartOpts | undefined,
+  readOperatorCapability: () => string | null,
+): Promise<DaemonClient> {
   // Connect to an existing daemon, retrying transient refusals so we never
   // mistake a live-but-busy daemon for a dead one (see `connectExisting`).
   const existing = await connectExisting(socketPath, {
@@ -268,12 +324,7 @@ export async function connectOrStart(socketPath: string, opts?: ConnectOrStartOp
   if (pinGate.reason) log.warn?.(pinGate.reason)
 
   const args = ["--socket", socketPath, ...(opts?.daemonArgs ?? [])]
-  const child = spawn(process.execPath, [script, ...args], {
-    detached: true,
-    stdio: "ignore",
-    env: process.env,
-  })
-  child.unref()
+  spawnDaemonWithOperatorCapability(script, args, readOperatorCapability)
 
   const maxAttempts = opts?.maxStartupAttempts ?? 10
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -287,6 +338,10 @@ export async function connectOrStart(socketPath: string, opts?: ConnectOrStartOp
   }
 
   throw new Error(`Failed to connect to daemon at ${socketPath} after starting it`)
+}
+
+export function connectOrStart(socketPath: string, opts?: ConnectOrStartOpts): Promise<DaemonClient> {
+  return connectOrStartWithCapability(socketPath, opts, createOperatorCapabilityReader())
 }
 
 // ---------------------------------------------------------------------------
@@ -331,7 +386,12 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
     maxStartupAttempts,
   } = opts
   const startOpts: ConnectOrStartOpts = { callTimeoutMs, daemonScript, daemonArgs, maxStartupAttempts }
-  let current = await connectOrStart(socketPath, startOpts)
+  // Read the inherited descriptor at most once, then carry the capability in
+  // this reconnecting client's closure. Every later daemon spawn gets a fresh
+  // anonymous pipe, so a consumed/closed launch fd cannot silently strip
+  // operator authority after a crash or restart.
+  const readOperatorCapability = createOperatorCapabilityReader()
+  let current = await connectOrStartWithCapability(socketPath, startOpts, readOperatorCapability)
   if (onConnect) await onConnect(current)
   let closed = false
   let reconnectAc: AbortController | null = null
@@ -356,7 +416,7 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
           }
           if (closed) return
           try {
-            current = await connectOrStart(socketPath, startOpts)
+            current = await connectOrStartWithCapability(socketPath, startOpts, readOperatorCapability)
             if (onConnect) await onConnect(current)
             for (const h of notificationHandlers) current.onNotification(h)
             setupReconnect()

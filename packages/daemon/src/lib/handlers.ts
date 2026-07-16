@@ -503,7 +503,8 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   const attribution = sendAttribution(ctx, a)
   const sender = attribution.sender ?? ctx.getName()
   if (Array.isArray(recipients)) {
-    const sharedRequestId = requestFlag ? randomUUID() : requestId
+    const implicitlyTracked = AUTO_TRACK_TYPES_SET.has(msgType) && recipients.some((recipient) => recipient !== sender)
+    const sharedRequestId = requestFlag ? randomUUID() : (requestId ?? (implicitlyTracked ? randomUUID() : null))
     const results = recipients.map((recipient) =>
       sendMessage(
         ctx,
@@ -515,7 +516,10 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
         "direct",
         { summary },
         {
-          request: sharedRequestId ?? undefined,
+          // Implicit tracking still excludes self-directed rows. Explicit
+          // request:true/string retains its existing ability to name any
+          // direct recipient, including the sender.
+          request: requestArg === undefined && recipient === sender ? undefined : (sharedRequestId ?? undefined),
           reply: replyId ?? undefined,
           fanout: fanoutArg,
           expiresInMs,
@@ -622,6 +626,11 @@ type PendingBall = {
   message_id: string
   fanout: string
   summary: string | null
+}
+
+export type AttentionProjection = {
+  actionable_unread: FetchEvent[]
+  pending_balls: PendingBall[]
 }
 
 function pendingBall(row: PendingBallRow, now: number): PendingBall {
@@ -1373,6 +1382,22 @@ function filterRowsByTrust(ctx: TribeContext, rows: FetchRow[]): FetchRow[] {
   return rows.filter((r) => senderMayUseRegisteredTrustTopic(r.topic, r.sender, roster))
 }
 
+/** One canonical attention projection for fetch and inbox-wait carriage. */
+export function readAttentionProjection(
+  ctx: TribeContext,
+  owner: string,
+  now = Date.now(),
+): { actionableRows: FetchRow[]; attention: AttentionProjection } {
+  const actionableRows = filterRowsByTrust(ctx, ctx.stmts.selectActionableAttention.all({ $name: owner }) as FetchRow[])
+  return {
+    actionableRows,
+    attention: {
+      actionable_unread: actionableRows.map(fetchEvent),
+      pending_balls: pendingBallsForOwner(ctx, owner, now),
+    },
+  }
+}
+
 function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRow[] {
   const conditions = ["kind != 'event'"]
   const params: Record<string, number | string> = { $limit: filters.limit }
@@ -1447,7 +1472,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
   const currentName = ctx.getName()
   let rows: FetchRow[]
   let attentionActionableRows: FetchRow[] = []
-  let attention: { actionable_unread: FetchEvent[]; pending_balls: PendingBall[] } | null = null
+  let attention: AttentionProjection | null = null
   let shouldAdvance = false
   let cursorBase = cursor?.last_inbox_pull_seq ?? 0
   const since = typeof a.since === "number" ? a.since : null
@@ -1484,14 +1509,9 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
     shouldAdvance = !topicsAreSnapshot && since !== null && a.advance === true
   } else {
     if (!topicsAreSnapshot) {
-      attentionActionableRows = filterRowsByTrust(
-        ctx,
-        ctx.stmts.selectActionableAttention.all({ $name: currentName }) as FetchRow[],
-      )
-      attention = {
-        actionable_unread: attentionActionableRows.map(fetchEvent),
-        pending_balls: pendingBallsForOwner(ctx, currentName, Date.now()),
-      }
+      const projected = readAttentionProjection(ctx, currentName)
+      attentionActionableRows = projected.actionableRows
+      attention = projected.attention
     }
     // 19442 — inject unacknowledged actionable directs (the durable mailbox)
     // ahead of the ambient window. Recovery rows are bounded to rowid <=

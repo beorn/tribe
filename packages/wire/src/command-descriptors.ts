@@ -76,6 +76,26 @@ const OBJ = (properties: JsonObject, description: string): JsonSchemaObject => (
   additionalProperties: true,
 })
 
+const ATTENTION_SCHEMA = {
+  type: "object",
+  description: "Current unread actionables and open response balls for the addressed persona.",
+  required: ["actionable_unread", "pending_balls"],
+  properties: {
+    actionable_unread: {
+      type: "array",
+      description:
+        "All unacknowledged direct request/query/verdict/assign messages for this recipient, independent of the event limit.",
+      items: { type: "object", additionalProperties: true },
+    },
+    pending_balls: {
+      type: "array",
+      description:
+        "Open tracked requests this recipient owns: request_id, sender, opened_at, age_ms, message_id, fanout.",
+      items: { type: "object", additionalProperties: true },
+    },
+  },
+} as const
+
 const hidden = (reason: string, cliName?: string): TribeCliProjection => ({
   kind: "hidden",
   reason,
@@ -141,7 +161,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             minimum: 1,
             maximum: 24 * 60 * 60_000,
             description:
-              "Sender-declared tracked-ball TTL in milliseconds. Defaults to 30 minutes; must be a positive integer no greater than one day.",
+              "Sender-declared tracked-ball TTL in milliseconds. Defaults to 10 minutes; must be a positive integer no greater than one day.",
           },
         },
         required: ["to", "message"],
@@ -227,7 +247,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "expires-in-ms",
           flags: "--expires-in-ms <milliseconds>",
-          description: "Tracked-ball TTL in milliseconds (default 30m, maximum 1d)",
+          description: "Tracked-ball TTL in milliseconds (default 10m, maximum 1d)",
           mapsTo: "expires_in_ms",
         },
       ],
@@ -329,12 +349,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     id: "tribe.inbox.wait",
     title: "Inbox Wait",
     description:
-      "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
+      "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Every result carries current attention; direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
     lifetime: "live-session",
     mcp: {
       name: "inbox.wait",
       description:
-        "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
+        "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Every result carries current attention; direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
       inputSchema: {
         type: "object",
         properties: {
@@ -358,6 +378,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           waited_ms: { type: "number", description: "How long the wait lasted." },
           timed_out: { type: "boolean", description: "True when the timeout elapsed before a DM arrived." },
           aborted: { type: "boolean", description: "True when the connection closed before a DM arrived." },
+          attention: ATTENTION_SCHEMA,
           ...ERROR_SHAPE,
         },
         "Inbox wait result.",
@@ -366,7 +387,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     cli: available({
       name: "inbox-wait",
       description:
-        "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
+        "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Every result carries current attention; direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
       lifetime: "one-shot",
       mapsToMcp: "inbox.wait",
       options: [
@@ -427,26 +448,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
       },
       outputSchema: OBJ(
         {
-          attention: {
-            type: "object",
-            description:
-              "Default-drain attention projection over existing mailbox and ball-tracker state. Returned before ambient events; absent on snapshot reads.",
-            required: ["actionable_unread", "pending_balls"],
-            properties: {
-              actionable_unread: {
-                type: "array",
-                description:
-                  "All unacknowledged direct request/query/verdict/assign messages for this recipient, independent of the event limit.",
-                items: { type: "object", additionalProperties: true },
-              },
-              pending_balls: {
-                type: "array",
-                description:
-                  "Open tracked requests this recipient owns: request_id, sender, opened_at, age_ms, message_id, fanout.",
-                items: { type: "object", additionalProperties: true },
-              },
-            },
-          },
+          attention: ATTENTION_SCHEMA,
           events: {
             type: "array",
             description:
