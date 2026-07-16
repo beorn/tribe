@@ -27,7 +27,8 @@ import { addWriter, createLogger } from "loggily"
 import { type MessageInsertedInfo, type TribeContext } from "../context.ts"
 import { activityFromMessage, writeActivity } from "../activity-log.ts"
 import { createCoalescer, type PendingBroadcast } from "../broadcast-coalescer.ts"
-import { deriveReplyHint, sendMessage, type ReplyHint } from "../messaging.ts"
+import { ACTIONABLE_TYPES_SET } from "../database.ts"
+import { deriveReplyHint, sendMessage, type MessageKind, type ReplyHint } from "../messaging.ts"
 import { makeNotification } from "tribe-wire/lib/socket"
 import { hasInjectionTrigger, rewriteViaHaiku, scrubInjectionShape } from "../broadcast-scrubber.ts"
 import type { BaseTribe } from "./base.ts"
@@ -76,16 +77,32 @@ type SessionFilter = {
   filter_mute: string | null
 }
 
-function shouldDeliver(
-  info: { replyHint: ReplyHint; topic: string | null },
+function isNotificationDietEvent(type: string, topic: string | null): boolean {
+  return (
+    type === "session" ||
+    type === "status" ||
+    type === "delta" ||
+    type.startsWith("chief:") ||
+    type.startsWith("github:") ||
+    type === "git:commit" ||
+    topic?.startsWith("github:") === true ||
+    topic === "git:commit"
+  )
+}
+
+export function shouldDeliver(
+  info: { kind: MessageKind; type: string; replyHint: ReplyHint; topic: string | null },
   filter: SessionFilter | undefined,
 ): boolean {
   if (!filter) return true // No session row yet — default-allow
   const mode = filter.filter_mode || "normal"
   if (mode === "ambient") return true
   if (mode === "focus") {
+    if (ACTIONABLE_TYPES_SET.has(info.type)) return true
+    if (isNotificationDietEvent(info.type, info.topic)) return false
     return info.replyHint === "yes"
   }
+  if (info.kind === "direct") return true
   // mode === 'normal' — apply the time-bounded mute when active
   const now = Date.now()
   if (!filter.filter_until || filter.filter_until <= now) return true
@@ -283,12 +300,13 @@ export function withBroadcast<T extends BaseTribe & WithDatabase & WithDaemonCon
           if (recipientDelivery?.delivery === "pull") continue
         }
 
-        // km-tribe.filter-collapse: per-session unified filter
-        // (mode + time-bounded mute + per-topic globs). Direct messages bypass
-        // the mute/until dimensions — only `mode: focus` filters DMs.
-        if (info.kind !== "direct" && !isWatch) {
+        // km-tribe.filter-collapse: per-session unified filter. Direct messages
+        // bypass normal mute/until; opted-in focus seats keep actionable DMs
+        // while notification-only topics remain durable pull history.
+        if (!isWatch) {
           const sessionFilter = stmts.getSessionFilter.get({ $id: client.ctx.sessionId }) as SessionFilter | undefined
-          if (!shouldDeliver({ replyHint, topic: info.topic }, sessionFilter)) continue
+          if (!shouldDeliver({ kind: info.kind, type: info.type, replyHint, topic: info.topic }, sessionFilter))
+            continue
         }
 
         // Direct messages bypass coalescing — they're time-sensitive.

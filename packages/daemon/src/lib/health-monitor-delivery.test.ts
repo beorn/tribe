@@ -93,6 +93,26 @@ describe("health alert delivery", () => {
     expect(sends).toEqual([])
   })
 
+  test("re-resolves a sampled generated name to the live canonical name immediately before direct delivery", () => {
+    const sends: string[] = []
+    const api = {
+      broadcast: () => undefined,
+      send: (recipient: string) => sends.push(recipient),
+      getActiveSessions: () => [{ name: "@agent/7", pid: 7007, role: "member" }],
+    } as unknown as TribeClientApi
+
+    deliverHealthAlert(
+      api,
+      { type: "cpu", severity: "warning" },
+      "CPU warning sample",
+      new Set(["silvercode-ghost"]),
+      false,
+      [{ name: "silvercode-ghost", pid: 7007, role: "member" }],
+    )
+
+    expect(sends).toEqual(["@agent/7"])
+  })
+
   test("rate-limits a repeated CPU episode after a brief below-threshold sample", () => {
     const thresholds = { ...defaultThresholds(), cpuCriticalMultiplier: 2, sustainedSamples: 1 }
     const state = createAlertState()

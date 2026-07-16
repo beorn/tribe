@@ -162,6 +162,91 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     ])
   })
 
+  it("splits a comma-delimited recipient string before persisting per-recipient balls", () => {
+    const res = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        {
+          to: "@agent/1, @agent/2",
+          message: "both of you ack",
+          type: "request",
+          request: "req-composite",
+          fanout: "all",
+        },
+        makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+      ),
+    )
+
+    expect(res.sent).toBe(true)
+    expect(pendingRecipients(db, "req-composite")).toEqual(["@agent/1", "@agent/2"])
+    const recipients = (
+      db
+        .prepare("SELECT recipient FROM messages WHERE request = ? ORDER BY recipient ASC")
+        .all("req-composite") as Array<{
+        recipient: string
+      }>
+    ).map((row) => row.recipient)
+    expect(recipients).toEqual(["@agent/1", "@agent/2"])
+  })
+
+  it("applies one sender-declared TTL to every resolved recipient", () => {
+    const res = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        {
+          to: "@agent/1,@agent/2",
+          message: "deadline shared across both owners",
+          type: "request",
+          request: "req-expiring-fanout",
+          fanout: "all",
+          expires_in_ms: 10 * 60_000,
+        },
+        makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+      ),
+    )
+
+    expect(res.sent).toBe(true)
+    const rows = db
+      .prepare(
+        "SELECT recipient, expires_at - opened_at AS ttl_ms FROM pending_request WHERE request_id = ? ORDER BY recipient",
+      )
+      .all("req-expiring-fanout") as Array<{ recipient: string; ttl_ms: number }>
+    expect(rows).toEqual([
+      { recipient: "@agent/1", ttl_ms: 10 * 60_000 },
+      { recipient: "@agent/2", ttl_ms: 10 * 60_000 },
+    ])
+  })
+
+  it("rejects empty comma segments, broadcast mixtures, and blank request ids", () => {
+    const messageCountBefore = (db.prepare("SELECT COUNT(*) AS count FROM messages").get() as { count: number }).count
+    for (const args of [
+      { to: "@agent/1, ,@agent/2", request: "req-empty-segment" },
+      { to: "*,@agent/1", request: "req-broadcast-mix" },
+      { to: "@agent/1", request: "   " },
+      { to: "@agent/1", request: "req-zero-ttl", expires_in_ms: 0 },
+      { to: "@agent/1", request: "req-string-ttl", expires_in_ms: "60000" },
+      { to: "@agent/1", request: "req-too-long-ttl", expires_in_ms: 24 * 60 * 60 * 1_000 + 1 },
+      { to: "*", expires_in_ms: 60_000 },
+    ]) {
+      const res = parseToolJson(
+        handleToolCall(
+          chief,
+          "tribe.send",
+          { ...args, message: "must reject", type: "request" },
+          makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+        ),
+      )
+      expect(res.error).toEqual(expect.any(String))
+    }
+
+    expect((db.prepare("SELECT COUNT(*) AS count FROM messages").get() as { count: number }).count).toBe(
+      messageCountBefore,
+    )
+    expect((db.prepare("SELECT COUNT(*) AS count FROM pending_request").get() as { count: number }).count).toBe(0)
+  })
+
   it("fanout='first' closes every pending recipient row on the first valid reply", () => {
     parseToolJson(
       handleToolCall(

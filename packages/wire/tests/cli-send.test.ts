@@ -52,7 +52,7 @@ describe("registerSendCommands", () => {
     // --summary lets a sender author the channel one-liner (20316 #3); LLM
     // senders must provide it, while non-LLM callers may still omit it.
     expect(optionFlags(cmd!)).toEqual(
-      expect.arrayContaining(["--type", "--summary", "--reply", "--request", "--fanout"]),
+      expect.arrayContaining(["--type", "--summary", "--reply", "--request", "--fanout", "--expires-in-ms"]),
     )
     const summaryOpt = cmd!.options.find((o) => o.long === "--summary")
     expect(summaryOpt?.description).toMatch(/required for llm senders/i)
@@ -90,6 +90,7 @@ describe("registerSendCommands", () => {
         type: "request",
         request: true,
         fanout: "all",
+        expiresInMs: 600_000,
       }),
     ).toEqual({
       to: "@agent/8",
@@ -97,6 +98,7 @@ describe("registerSendCommands", () => {
       type: "request",
       request: true,
       fanout: "all",
+      expires_in_ms: 600_000,
     })
 
     expect(

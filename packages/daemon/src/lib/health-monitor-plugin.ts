@@ -167,6 +167,7 @@ export function defaultThresholds(): HealthThresholds {
 // ---------------------------------------------------------------------------
 
 export type HealthAlertDeliveryPlan = { kind: "broadcast" } | { kind: "direct"; recipients: readonly string[] }
+type HealthSession = { name: string; pid: number; role: string }
 
 /** Choose one fleet broadcast or one DM per unique responsible session. */
 export function planHealthAlertDelivery(args: {
@@ -182,13 +183,32 @@ export function planHealthAlertDelivery(args: {
   }
 }
 
+/** Resolve sampled attribution through stable live PIDs immediately before a
+ * direct send, so a session renamed after metrics collection receives the
+ * alert under its current canonical name. */
+export function resolveLiveHealthRecipients(
+  attributedSessions: ReadonlySet<string>,
+  sampledSessions: readonly HealthSession[],
+  liveSessions: readonly HealthSession[],
+): Set<string> {
+  const resolved = new Set<string>()
+  for (const attributedName of attributedSessions) {
+    const sampled = sampledSessions.find((session) => session.name === attributedName)
+    const byPid = sampled && sampled.pid > 0 ? liveSessions.find((session) => session.pid === sampled.pid) : undefined
+    const live = byPid ?? liveSessions.find((session) => session.name === attributedName)
+    if (live) resolved.add(live.name)
+  }
+  return resolved
+}
+
 /** Execute the delivery plan without per-client fleet fanout. */
 export function deliverHealthAlert(
-  api: Pick<TribeClientApi, "send" | "broadcast">,
+  api: Pick<TribeClientApi, "send" | "broadcast" | "getActiveSessions">,
   alert: Pick<HealthAlert, "type" | "severity">,
   message: string,
   attributedSessions: Set<string>,
   hasUnattributed: boolean,
+  sampledSessions?: readonly HealthSession[],
 ): HealthAlertDeliveryPlan {
   const delivery = planHealthAlertDelivery({
     severity: alert.severity,
@@ -203,10 +223,14 @@ export function deliverHealthAlert(
     })
     return delivery
   }
-  for (const recipient of delivery.recipients) {
+  const liveSessions = api.getActiveSessions()
+  const recipients = [
+    ...resolveLiveHealthRecipients(attributedSessions, sampledSessions ?? liveSessions, liveSessions),
+  ].sort((left, right) => left.localeCompare(right, undefined, { numeric: true }))
+  for (const recipient of recipients) {
     api.send(recipient, message, topic, undefined, { delivery: "push", topic })
   }
-  return delivery
+  return { kind: "direct", recipients }
 }
 
 // ---------------------------------------------------------------------------
@@ -1370,6 +1394,12 @@ export const healthMonitorPlugin: TribePluginApi = {
       try {
         const { metrics, pidToParent } = await collectFullMetrics()
         const sessions = api.getActiveSessions()
+        const deadlines = api.processPendingBallDeadlines?.()
+        if (deadlines && deadlines.nudged + deadlines.expired + deadlines.rerouted + deadlines.deadOwnerWarnings > 0) {
+          log.info?.(
+            `pending-ball deadlines: nudged=${deadlines.nudged} expired=${deadlines.expired} rerouted=${deadlines.rerouted} dead-owner-warnings=${deadlines.deadOwnerWarnings}`,
+          )
+        }
         // Pass active-agent count so process-count threshold scales with the
         // number of connected sessions; alarms tuned for solo dev shouldn't
         // fire on a healthy 4-agent baseline.
@@ -1401,7 +1431,7 @@ export const healthMonitorPlugin: TribePluginApi = {
           for (const [name] of sessionLoad) {
             if (name !== "unattributed") attributedSessions.add(name)
           }
-          deliverHealthAlert(api, alert, msg, attributedSessions, sessionLoad.has("unattributed"))
+          deliverHealthAlert(api, alert, msg, attributedSessions, sessionLoad.has("unattributed"), sessions)
         }
 
         // --- Chief-liveness watchdog (every 3rd sample — ~30s) ---
@@ -1485,10 +1515,16 @@ export const healthMonitorPlugin: TribePluginApi = {
             // attributed to the lock still gets a DM so the holder can act —
             // the channel envelope's reply hint is derived at delivery time.
             if (sessionName) {
-              api.send(sessionName, lockMsg, "health:git-lock:warning", undefined, {
-                delivery: "push",
-                topic: "health:git-lock:warning",
-              })
+              for (const recipient of resolveLiveHealthRecipients(
+                new Set([sessionName]),
+                sessions,
+                api.getActiveSessions(),
+              )) {
+                api.send(recipient, lockMsg, "health:git-lock:warning", undefined, {
+                  delivery: "push",
+                  topic: "health:git-lock:warning",
+                })
+              }
             }
             api.broadcast(lockMsg, "health:git-lock:warning", undefined, {
               delivery: "pull",

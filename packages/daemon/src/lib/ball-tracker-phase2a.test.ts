@@ -67,7 +67,8 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
   })
 
   it("startup primer teaches semantic ownership and reply, never an exact-id delivery ack", () => {
-    expect(TRIBE_JOIN_PRIMER).toMatch(/automatically open(?:s)? a semantic response ball/i)
+    expect(TRIBE_JOIN_PRIMER).toMatch(/assign.*query.*request.*automatically open(?:s)? a semantic response ball/i)
+    expect(TRIBE_JOIN_PRIMER).toMatch(/verdict.*actionable.*does not automatically open/i)
     expect(TRIBE_JOIN_PRIMER).toContain("reply=<request-id>")
     expect(TRIBE_JOIN_PRIMER).not.toMatch(/<ack(?:\s+id=)?/i)
   })
@@ -112,6 +113,32 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
       message_id: result.id,
       fanout: "first",
     })
+  })
+
+  it("assigns a 30m default TTL and honors an explicit sender TTL", () => {
+    const chief = makeContext(db, stmts, "@chief")
+    const defaultTtl = sendMessage(chief, "@agent/8", "default deadline", "request")
+    const explicitTtl = sendMessage(
+      chief,
+      "@agent/8",
+      "short deadline",
+      "notify",
+      undefined,
+      undefined,
+      "direct",
+      {},
+      { request: "short-deadline", expiresInMs: 5 * 60_000 },
+    )
+
+    const rows = db
+      .prepare("SELECT message_id, opened_at, expires_at FROM pending_request ORDER BY opened_at, request_id")
+      .all() as Array<{ message_id: string; opened_at: number; expires_at: number | null }>
+    expect(rows.find((row) => row.message_id === defaultTtl.id)?.expires_at).toBe(
+      rows.find((row) => row.message_id === defaultTtl.id)!.opened_at + 30 * 60_000,
+    )
+    expect(rows.find((row) => row.message_id === explicitTtl.id)?.expires_at).toBe(
+      rows.find((row) => row.message_id === explicitTtl.id)!.opened_at + 5 * 60_000,
+    )
   })
 
   it("reply: closes the matching pending_request row", () => {
@@ -258,10 +285,10 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
     expect(count).toBe(0)
   })
 
-  it("every typed direct actionable owns a durable recipient ball even when request is omitted", () => {
+  it("request, query, and assign own a durable recipient ball when request is omitted", () => {
     const chief = makeContext(db, stmts, "@chief")
 
-    for (const type of ["request", "query", "assign", "verdict"] as const) {
+    for (const type of ["request", "query", "assign"] as const) {
       const result = sendMessage(chief, "@agent/8", `${type} payload`, type)
       const message = db.prepare("SELECT request FROM messages WHERE id = ?").get(result.id) as {
         request: string | null
@@ -285,7 +312,46 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
     }
   })
 
-  it("an actionable reply closes the prior ball and opens its own recipient obligation", () => {
+  it("verdict stays actionable without auto-minting, while explicit tracking works for any direct type", () => {
+    const chief = makeContext(db, stmts, "@chief")
+    const implicitVerdict = sendMessage(chief, "@agent/8", "REVISE", "verdict")
+    const explicitVerdict = sendMessage(
+      chief,
+      "@agent/8",
+      "REVISE and acknowledge",
+      "verdict",
+      undefined,
+      undefined,
+      "direct",
+      {},
+      { request: true },
+    )
+    const explicitNotify = sendMessage(
+      chief,
+      "@agent/8",
+      "informational but tracked",
+      "notify",
+      undefined,
+      undefined,
+      "direct",
+      {},
+      { request: "tracked-notify" },
+    )
+
+    const verdictMessage = db.prepare("SELECT request FROM messages WHERE id = ?").get(implicitVerdict.id) as {
+      request: string | null
+    }
+    expect(verdictMessage.request).toBeNull()
+    expect(db.prepare("SELECT request_id FROM pending_request WHERE message_id = ?").get(implicitVerdict.id)).toBeNull()
+    expect(db.prepare("SELECT request_id FROM pending_request WHERE message_id = ?").get(explicitVerdict.id)).toEqual({
+      request_id: explicitVerdict.id,
+    })
+    expect(db.prepare("SELECT request_id FROM pending_request WHERE message_id = ?").get(explicitNotify.id)).toEqual({
+      request_id: "tracked-notify",
+    })
+  })
+
+  it("a verdict reply closes the prior ball without opening a new recipient obligation", () => {
     const author = makeContext(db, stmts, "@agent/8")
     const reviewer = makeContext(db, stmts, "@ci")
     const review = sendMessage(author, "@ci", "review this candidate", "request")
@@ -306,7 +372,7 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
       .prepare("SELECT request_id, recipient, sender FROM pending_request ORDER BY opened_at ASC")
       .all() as Array<{ request_id: string; recipient: string; sender: string }>
     expect(verdict.tracker).toEqual({ request_id: review.id, closed: 1 })
-    expect(pending).toEqual([{ request_id: verdict.id, recipient: "@agent/8", sender: "@ci" }])
+    expect(pending).toEqual([])
   })
 
   it("rolls the message back when opening its mandatory actionable ball fails", () => {
@@ -323,14 +389,14 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
       delivered = true
     })
 
-    expect(() => sendMessage(chief, "@agent/8", "must be atomic", "verdict")).toThrow("tracker unavailable")
+    expect(() => sendMessage(chief, "@agent/8", "must be atomic", "assign")).toThrow("tracker unavailable")
     expect((db.prepare("SELECT COUNT(*) AS count FROM messages").get() as { count: number }).count).toBe(0)
     expect(delivered).toBe(false)
   })
 
   it("implicit tracking excludes non-actionables, self-send, and broadcasts", () => {
     const chief = makeContext(db, stmts, "@chief")
-    for (const type of ["notify", "status", "response"] as const) {
+    for (const type of ["notify", "status", "response", "verdict"] as const) {
       sendMessage(chief, "@agent/8", `${type} payload`, type)
     }
     sendMessage(chief, "@chief", "self query", "query")

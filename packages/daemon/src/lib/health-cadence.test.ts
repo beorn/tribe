@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createTribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { projectHealthCadence } from "./health-cadence.ts"
+import { processPendingBallDeadlines } from "./pending-ball-deadlines.ts"
 import { handleToolCall, type ActiveSessionInfo, type HandlerOpts } from "./handlers.ts"
 
 const MINUTE = 60_000
@@ -150,6 +151,7 @@ describe("20876 Tribe health cadence", () => {
       $recipient: "@agent/5",
       $sender: "@chief",
       $opened_at: now - 3 * HOUR,
+      $expires_at: null,
       $message_id: "request-2",
       $fanout: "first",
     })
@@ -245,6 +247,7 @@ describe("20876 Tribe health cadence", () => {
       $recipient: "@chief",
       $sender: "@agent/5",
       $opened_at: now - 2 * MINUTE,
+      $expires_at: null,
       $message_id: "query-chief-open",
       $fanout: "first",
     })
@@ -309,5 +312,285 @@ describe("20876 Tribe health cadence", () => {
         expect.stringMatching(/@agent\/5.*inbox lag|inbox lag.*@agent\/5/i),
       ]),
     )
+  })
+
+  it("nudges at half-life and escalates once at expiry across repeated and restarted cadence ticks", () => {
+    stmts.openPendingRequest.run({
+      $request_id: "deadline-review",
+      $recipient: "@agent/5",
+      $sender: "@chief",
+      $opened_at: now - 10 * MINUTE,
+      $expires_at: now + 10 * MINUTE,
+      $message_id: "deadline-review-message",
+      $fanout: "first",
+    })
+    const sent: Array<{ recipient: string; type: string }> = []
+    const send = (recipient: string, _content: string, type: string) => sent.push({ recipient, type })
+
+    processPendingBallDeadlines({
+      db,
+      stmts,
+      now,
+      liveSessionNames: new Set(["@agent/5"]),
+      escalationTarget: "@ops",
+      send,
+    })
+    expect(sent).toEqual([{ recipient: "@agent/5", type: "ball:nudge" }])
+
+    const restartedDb = openDatabase(join(tmpDir, "tribe.db"))
+    try {
+      processPendingBallDeadlines({
+        db: restartedDb,
+        stmts: createStatements(restartedDb),
+        now,
+        liveSessionNames: new Set(["@agent/5"]),
+        escalationTarget: "@ops",
+        send,
+      })
+    } finally {
+      restartedDb.close()
+    }
+    expect(sent).toHaveLength(1)
+
+    processPendingBallDeadlines({
+      db,
+      stmts,
+      now: now + 10 * MINUTE,
+      liveSessionNames: new Set(["@agent/5"]),
+      escalationTarget: "@ops",
+      send,
+    })
+    processPendingBallDeadlines({
+      db,
+      stmts,
+      now: now + 10 * MINUTE,
+      liveSessionNames: new Set(["@agent/5"]),
+      escalationTarget: "@ops",
+      send,
+    })
+
+    expect(sent).toEqual([
+      { recipient: "@agent/5", type: "ball:nudge" },
+      { recipient: "@chief", type: "ball:expired" },
+      { recipient: "@ops", type: "ball:expired" },
+    ])
+    expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'deadline-review'").get()).toEqual({
+      recipient: "@agent/5",
+    })
+    db.prepare("UPDATE dedup SET ts = 0 WHERE key LIKE 'ball-deadline:%'").run()
+    stmts.cleanupDedup.run({ $cutoff: now })
+    expect(
+      (db.prepare("SELECT COUNT(*) AS count FROM dedup WHERE key LIKE 'ball-deadline:%'").get() as { count: number })
+        .count,
+    ).toBe(2)
+    db.prepare("DELETE FROM pending_request WHERE request_id = 'deadline-review'").run()
+    stmts.cleanupDedup.run({ $cutoff: now })
+    expect(
+      (db.prepare("SELECT COUNT(*) AS count FROM dedup WHERE key LIKE 'ball-deadline:%'").get() as { count: number })
+        .count,
+    ).toBe(0)
+  })
+
+  it("warns the sender that expiry retains ownership when no escalation target is configured", () => {
+    stmts.openPendingRequest.run({
+      $request_id: "deadline-no-policy",
+      $recipient: "@agent/6",
+      $sender: "@author",
+      $opened_at: now - 30 * MINUTE,
+      $expires_at: now,
+      $message_id: "deadline-no-policy-message",
+      $fanout: "first",
+    })
+    const sent: Array<{ recipient: string; content: string; type: string }> = []
+
+    processPendingBallDeadlines({
+      db,
+      stmts,
+      now,
+      liveSessionNames: new Set(["@agent/5", "@agent/6"]),
+      escalationTarget: null,
+      send: (recipient, content, type) => sent.push({ recipient, content, type }),
+    })
+
+    expect(sent).toEqual([
+      {
+        recipient: "@author",
+        content: expect.stringMatching(/no escalation target is configured.*ownership remains with @agent\/6/i),
+        type: "ball:expired",
+      },
+    ])
+    expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'deadline-no-policy'").get()).toEqual({
+      recipient: "@agent/6",
+    })
+  })
+
+  it("reroutes a dead owner and reports an already-reached deadline in the same cadence tick", () => {
+    db.prepare("DELETE FROM pending_request WHERE request_id = 'open-agent-5'").run()
+    insertSession(db, { id: "sess-dead-expired", name: "@agent/dead-expired", role: "member", now })
+    db.prepare("UPDATE sessions SET pid = 454545 WHERE name = '@agent/dead-expired'").run()
+    stmts.openPendingRequest.run({
+      $request_id: "dead-and-expired",
+      $recipient: "@agent/dead-expired",
+      $sender: "@author",
+      $opened_at: now - 30 * MINUTE,
+      $expires_at: now,
+      $message_id: "dead-and-expired-message",
+      $fanout: "first",
+    })
+    const sent: Array<{ recipient: string; type: string }> = []
+
+    processPendingBallDeadlines({
+      db,
+      stmts,
+      now,
+      liveSessionNames: new Set(),
+      escalationTarget: "@ops",
+      isPidAlive: () => false,
+      send: (recipient, _content, type) => sent.push({ recipient, type }),
+    })
+    processPendingBallDeadlines({
+      db,
+      stmts,
+      now,
+      liveSessionNames: new Set(),
+      escalationTarget: "@ops",
+      isPidAlive: () => false,
+      send: (recipient, _content, type) => sent.push({ recipient, type }),
+    })
+
+    expect(sent).toEqual([
+      { recipient: "@author", type: "ball:rerouted" },
+      { recipient: "@ops", type: "ball:rerouted" },
+      { recipient: "@author", type: "ball:expired" },
+      { recipient: "@ops", type: "ball:expired" },
+    ])
+    expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'dead-and-expired'").get()).toEqual({
+      recipient: "@ops",
+    })
+  })
+
+  it("keeps expiry dedup attached to the surviving row when reroute collides with an existing owner", () => {
+    db.prepare("DELETE FROM pending_request WHERE request_id = 'open-agent-5'").run()
+    insertSession(db, { id: "sess-dead-collision", name: "@agent/dead-collision", role: "member", now })
+    db.prepare("UPDATE sessions SET pid = 464646 WHERE name = '@agent/dead-collision'").run()
+    stmts.openPendingRequest.run({
+      $request_id: "reroute-collision",
+      $recipient: "@agent/dead-collision",
+      $sender: "@author",
+      $opened_at: now - 31 * MINUTE,
+      $expires_at: now,
+      $message_id: "reroute-collision-source",
+      $fanout: "all",
+    })
+    stmts.openPendingRequest.run({
+      $request_id: "reroute-collision",
+      $recipient: "@ops",
+      $sender: "@author",
+      $opened_at: now - 30 * MINUTE,
+      $expires_at: now,
+      $message_id: "reroute-collision-target",
+      $fanout: "all",
+    })
+    const sent: Array<{ recipient: string; type: string }> = []
+    const tick = () =>
+      processPendingBallDeadlines({
+        db,
+        stmts,
+        now,
+        liveSessionNames: new Set(["@ops"]),
+        escalationTarget: "@ops",
+        isPidAlive: () => false,
+        send: (recipient, _content, type) => sent.push({ recipient, type }),
+      })
+
+    tick()
+    expect(sent).toEqual([
+      { recipient: "@author", type: "ball:rerouted" },
+      { recipient: "@ops", type: "ball:rerouted" },
+      { recipient: "@author", type: "ball:expired" },
+      { recipient: "@ops", type: "ball:expired" },
+    ])
+    expect(
+      db.prepare("SELECT recipient, message_id FROM pending_request WHERE request_id = 'reroute-collision'").all(),
+    ).toEqual([{ recipient: "@ops", message_id: "reroute-collision-target" }])
+
+    db.prepare("UPDATE dedup SET ts = 0 WHERE key LIKE 'ball-deadline:%'").run()
+    stmts.cleanupDedup.run({ $cutoff: now })
+    expect(
+      (db.prepare("SELECT COUNT(*) AS count FROM dedup WHERE key LIKE '%:expired:%'").get() as { count: number }).count,
+    ).toBe(1)
+    tick()
+    expect(sent).toHaveLength(4)
+  })
+
+  it("reroutes only positively-dead owners and degrades to a sender warning without configured policy", () => {
+    db.prepare("DELETE FROM pending_request WHERE request_id = 'open-agent-5'").run()
+    db.prepare("UPDATE sessions SET pid = 424242 WHERE name = '@agent/5'").run()
+    stmts.openPendingRequest.run({
+      $request_id: "dead-owner",
+      $recipient: "@agent/5",
+      $sender: "@chief",
+      $opened_at: now,
+      $expires_at: now + 30 * MINUTE,
+      $message_id: "dead-owner-message",
+      $fanout: "first",
+    })
+    const sent: Array<{ recipient: string; type: string }> = []
+    const send = (recipient: string, _content: string, type: string) => sent.push({ recipient, type })
+
+    processPendingBallDeadlines({
+      db,
+      stmts,
+      now,
+      liveSessionNames: new Set(),
+      escalationTarget: "@ops",
+      isPidAlive: () => false,
+      send,
+    })
+
+    insertSession(db, { id: "sess-dead-no-policy", name: "@agent/dead", role: "member", now })
+    db.prepare("UPDATE sessions SET pid = 434343 WHERE name = '@agent/dead'").run()
+    stmts.openPendingRequest.run({
+      $request_id: "dead-without-policy",
+      $recipient: "@agent/dead",
+      $sender: "@author",
+      $opened_at: now,
+      $expires_at: now + 30 * MINUTE,
+      $message_id: "dead-without-policy-message",
+      $fanout: "first",
+    })
+    stmts.openPendingRequest.run({
+      $request_id: "unknown-owner",
+      $recipient: "@agent/unknown",
+      $sender: "@author",
+      $opened_at: now,
+      $expires_at: now + 30 * MINUTE,
+      $message_id: "unknown-owner-message",
+      $fanout: "first",
+    })
+    processPendingBallDeadlines({
+      db,
+      stmts,
+      now,
+      liveSessionNames: new Set(),
+      escalationTarget: null,
+      isPidAlive: () => false,
+      send,
+    })
+
+    expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'dead-owner'").get()).toEqual({
+      recipient: "@ops",
+    })
+    expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'dead-without-policy'").get()).toEqual({
+      recipient: "@agent/dead",
+    })
+    expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'unknown-owner'").get()).toEqual({
+      recipient: "@agent/unknown",
+    })
+    expect(sent).toEqual([
+      { recipient: "@chief", type: "ball:rerouted" },
+      { recipient: "@ops", type: "ball:rerouted" },
+      { recipient: "@author", type: "ball:owner-dead" },
+    ])
   })
 })

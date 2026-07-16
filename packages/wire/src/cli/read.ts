@@ -32,6 +32,7 @@
  * exposed via `tribe.members` MCP call only, not the CLI.
  */
 
+import { readFileSync } from "node:fs"
 import { Command, int } from "@silvery/commander"
 import { cliOption, visibleCliProjectionForMcp } from "../command-descriptors.ts"
 import { DEFAULT_INBOX_WAIT_SESSION, resolveInboxWaitOptions } from "../lib/inbox-wait-options.ts"
@@ -655,9 +656,26 @@ async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promi
   )
 }
 
+function readOperatorCapabilityFromInheritedFd(fdRaw: string | undefined): string | undefined {
+  if (fdRaw === undefined) return undefined
+  const fd = Number(fdRaw)
+  if (!Number.isSafeInteger(fd) || fd < 3) {
+    throw new Error(`TRIBE_OPERATOR_CAPABILITY_FD must name an inherited fd >= 3, received ${JSON.stringify(fdRaw)}`)
+  }
+  const capability = readFileSync(fd, "utf8").trim()
+  if (!capability) throw new Error("TRIBE_OPERATOR_CAPABILITY_FD contained an empty operator capability")
+  return capability
+}
+
 async function cmdInboxDrain(opts: { session?: string; limit?: number; json?: boolean }): Promise<void> {
   const session = opts.session ?? DEFAULT_INBOX_WAIT_SESSION
-  const result = (await callDaemon("cli_inbox_drain", { session, limit: opts.limit ?? 10 })) as InboxDrainResult
+  const result = (await callDaemon("cli_inbox_drain", {
+    session,
+    limit: opts.limit ?? 10,
+    // The fd number is public process metadata; the capability content never
+    // enters env/argv, where another same-user process could inspect it.
+    operator_capability: readOperatorCapabilityFromInheritedFd(process.env.TRIBE_OPERATOR_CAPABILITY_FD),
+  })) as InboxDrainResult
   if (opts.json) {
     console.log(JSON.stringify(result))
     return
@@ -922,8 +940,12 @@ export function registerReadCommands(program: Command): void {
 
   program
     .command("inbox-drain")
-    .description("Drain a bounded actionable mailbox page without registering a transient session")
-    .option("--session <name>", "Role mailbox to drain (default: @chief)", DEFAULT_INBOX_WAIT_SESSION)
+    .description("Operator-capability drain of a bounded actionable mailbox page")
+    .option(
+      "--session <name>",
+      "Role mailbox to drain with the inherited TRIBE_OPERATOR_CAPABILITY_FD capability",
+      DEFAULT_INBOX_WAIT_SESSION,
+    )
     .option("--limit <n>", "Maximum actionable DMs to return and acknowledge (max 100)", int, 10)
     .option("--json", "Emit machine-readable JSON")
     .action((opts: { session?: string; limit?: number; json?: boolean }) => void cmdInboxDrain(opts))

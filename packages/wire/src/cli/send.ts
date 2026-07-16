@@ -105,6 +105,7 @@ type SendPayloadInput = {
   request?: boolean | string
   reply?: string
   fanout?: Fanout
+  expiresInMs?: number
 }
 
 type SendPayload = {
@@ -115,6 +116,7 @@ type SendPayload = {
   request?: true | string
   reply?: string
   fanout?: Fanout
+  expires_in_ms?: number
   sender?: string
 }
 
@@ -128,6 +130,7 @@ export function buildSendPayload(input: SendPayloadInput, sender?: string | null
   if (input.request !== undefined && input.request !== false) payload.request = input.request
   if (input.reply) payload.reply = input.reply
   if (input.fanout) payload.fanout = input.fanout
+  if (input.expiresInMs !== undefined) payload.expires_in_ms = input.expiresInMs
   if (sender) payload.sender = sender
   return payload
 }
@@ -391,6 +394,7 @@ export function registerSendCommands(program: Command): void {
   const sendReply = cliOption(SEND_CLI, "reply")
   const sendRequest = cliOption(SEND_CLI, "request")
   const sendFanout = cliOption(SEND_CLI, "fanout")
+  const sendExpiresInMs = cliOption(SEND_CLI, "expires-in-ms")
   program
     .command(SEND_CLI.name)
     .description(SEND_CLI.description)
@@ -401,11 +405,19 @@ export function registerSendCommands(program: Command): void {
     .option(sendReply.flags, sendReply.description)
     .option(sendRequest.flags, sendRequest.description)
     .option(sendFanout.flags, sendFanout.description)
+    .option(sendExpiresInMs.flags, sendExpiresInMs.description)
     .action(
       (
         to: string,
         message: string[],
-        opts: { type?: string; summary?: string; request?: boolean | string; reply?: string; fanout?: string },
+        opts: {
+          type?: string
+          summary?: string
+          request?: boolean | string
+          reply?: string
+          fanout?: string
+          expiresInMs?: string
+        },
       ) => {
         const type = opts.type ?? "notify"
         if (!(TRIBE_MESSAGE_TYPES as readonly string[]).includes(type)) {
@@ -420,6 +432,11 @@ export function registerSendCommands(program: Command): void {
           )
           process.exit(2)
         }
+        const expiresInMs = opts.expiresInMs === undefined ? undefined : Number(opts.expiresInMs)
+        if (expiresInMs !== undefined && !Number.isSafeInteger(expiresInMs)) {
+          console.error(`tribe-wire send: invalid --expires-in-ms '${opts.expiresInMs}' — expected an integer`)
+          process.exit(2)
+        }
         void cmdSend({
           to,
           message: message.join(" "),
@@ -428,6 +445,7 @@ export function registerSendCommands(program: Command): void {
           request: opts.request === false ? undefined : opts.request,
           reply: opts.reply,
           fanout: opts.fanout as Fanout | undefined,
+          expiresInMs,
         })
       },
     )

@@ -115,6 +115,7 @@ export function openDatabase(path: string): Database {
 		recipient  TEXT NOT NULL,
 		sender     TEXT NOT NULL,
 		opened_at  INTEGER NOT NULL,
+		expires_at INTEGER,
 		message_id TEXT NOT NULL,
 		fanout     TEXT NOT NULL DEFAULT 'first',
 		PRIMARY KEY (request_id, recipient)
@@ -768,6 +769,21 @@ const MIGRATIONS: readonly Migration[] = [
       db.run("CREATE INDEX IF NOT EXISTS idx_sessions_launch_identity ON sessions(name, launch_id, launch_parent_pid)")
     },
   },
+  {
+    version: 20,
+    name: "pending-request-expiry",
+    up(db) {
+      const table = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='pending_request'")
+        .get() as { name: string } | null
+      if (!table) return
+      const cols = new Set(
+        (db.prepare("PRAGMA table_info(pending_request)").all() as Array<{ name: string }>).map((row) => row.name),
+      )
+      if (!cols.has("expires_at")) db.run("ALTER TABLE pending_request ADD COLUMN expires_at INTEGER")
+      db.run("CREATE INDEX IF NOT EXISTS idx_pending_expiry ON pending_request(expires_at)")
+    },
+  },
 ]
 
 // ---------------------------------------------------------------------------
@@ -782,6 +798,11 @@ const MIGRATIONS: readonly Migration[] = [
  */
 export const ACTIONABLE_TYPES = ["request", "query", "verdict", "assign"] as const
 export const ACTIONABLE_TYPES_SET: ReadonlySet<string> = new Set(ACTIONABLE_TYPES)
+/** Direct types that implicitly open a semantic response ball. Verdict remains
+ * wakeable/actionable, but reviewing a request does not manufacture a second
+ * obligation unless the sender explicitly supplies `request`. */
+export const AUTO_TRACK_TYPES = ["request", "query", "assign"] as const
+export const AUTO_TRACK_TYPES_SET: ReadonlySet<string> = new Set(AUTO_TRACK_TYPES)
 const ACTIONABLE_TYPES_SQL = ACTIONABLE_TYPES.map((t) => `'${t}'`).join(", ")
 
 export type TribeStatements = ReturnType<typeof createStatements>
@@ -811,8 +832,8 @@ export function createStatements(db: Database) {
     /** Ball-tracker insert: opens a new pending request (one row per recipient).
      *  See @km/tribe/message-ball-tracker Phase 2. */
     openPendingRequest: db.prepare(`
-		INSERT INTO pending_request (request_id, recipient, sender, opened_at, message_id, fanout)
-		VALUES ($request_id, $recipient, $sender, $opened_at, $message_id, $fanout)
+		INSERT INTO pending_request (request_id, recipient, sender, opened_at, expires_at, message_id, fanout)
+		VALUES ($request_id, $recipient, $sender, $opened_at, $expires_at, $message_id, $fanout)
 		ON CONFLICT(request_id, recipient) DO NOTHING
 	`),
 
@@ -841,7 +862,7 @@ export function createStatements(db: Database) {
     /** Ball-tracker query: open requests addressed to a particular recipient (the "owner"
      *  of the open ball). Sorted oldest-first so callers can act on the longest-pending. */
     selectPendingForRecipient: db.prepare(`
-		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.message_id, p.fanout,
+		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
 			COALESCE(m.summary, a.summary) AS summary
 		FROM pending_request p
 		LEFT JOIN messages m ON m.id = p.message_id
@@ -854,7 +875,7 @@ export function createStatements(db: Database) {
      *  recipient owner. This reads the existing tracker; it is not a second
      *  queue or ownership store. */
     selectAllPendingRequests: db.prepare(`
-		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.message_id, p.fanout,
+		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
 			COALESCE(m.summary, a.summary) AS summary
 		FROM pending_request p
 		LEFT JOIN messages m ON m.id = p.message_id
@@ -937,8 +958,17 @@ export function createStatements(db: Database) {
         AND rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
     `),
 
-    // Cleanup old dedup entries (called by retention)
-    cleanupDedup: db.prepare("DELETE FROM dedup WHERE ts < $cutoff"),
+    // Cleanup old dedup entries. Deadline-stage claims remain durable while
+    // their source message still owns an open ball; after closure they age out
+    // through the same one-day cleanup as ordinary plugin claims.
+    cleanupDedup: db.prepare(`
+      DELETE FROM dedup
+      WHERE ts < $cutoff
+        AND (
+          key NOT LIKE 'ball-deadline:%'
+          OR session_id NOT IN (SELECT message_id FROM pending_request)
+        )
+    `),
 
     archiveExpiredMessages: db.prepare(`
 		INSERT OR IGNORE INTO messages_archive (

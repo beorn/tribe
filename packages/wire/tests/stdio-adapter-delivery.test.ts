@@ -965,7 +965,7 @@ describe("stdio adapter delivery modes", () => {
     expect(channels.indexOf(verdict!)).toBe(0)
   })
 
-  it("forwards a pending-only ball when its original actionable was already read", async () => {
+  it("forwards one compact pending-ball summary on every wakeup", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath, {
       fetchAttention: {
@@ -976,6 +976,32 @@ describe("stdio adapter delivery modes", () => {
             sender: "@chief",
             message_id: "original-review-request",
             fanout: "first",
+            age_ms: 2 * 60 * 60 * 1_000,
+            summary: "Review the architecture revision",
+          },
+          {
+            request_id: "query-r4",
+            sender: "@agent/4",
+            message_id: "second-query",
+            fanout: "first",
+            age_ms: 70 * 60 * 1_000,
+            summary: "Confirm the migration invariant",
+          },
+          {
+            request_id: "assign-r5",
+            sender: "@chief",
+            message_id: "third-assignment",
+            fanout: "first",
+            age_ms: 30 * 60 * 1_000,
+            summary: "Run the focused verification",
+          },
+          {
+            request_id: "request-r6",
+            sender: "@agent/6",
+            message_id: "fourth-request",
+            fanout: "first",
+            age_ms: 10 * 60 * 1_000,
+            summary: "This fourth summary must be omitted",
           },
         ],
       },
@@ -997,15 +1023,16 @@ describe("stdio adapter delivery modes", () => {
     await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
     daemon.clients[0]?.write(makeNotification("wakeup", {}))
 
-    await waitForStdout(child, stdout, () =>
-      stdout.some((line) => JSON.stringify(line).includes("Pending tracked request review-r3")),
-    )
+    const summaryText =
+      "You own 4 balls, oldest 2h. Top: Review the architecture revision | Confirm the migration invariant | Run the focused verification"
+    await waitForStdout(child, stdout, () => stdout.some((line) => JSON.stringify(line).includes(summaryText)))
 
-    const pending = stdout
-      .filter((line) => line.method === "notifications/claude/channel")
-      .find((line) => JSON.stringify(line).includes("original-review-request"))
-    expect(pending).toBeDefined()
-    expect(JSON.stringify(pending)).toContain('"type":"request"')
+    const pending = stdout.filter(
+      (line) => line.method === "notifications/claude/channel" && JSON.stringify(line).includes(summaryText),
+    )
+    expect(pending).toHaveLength(1)
+    expect(JSON.stringify(pending[0])).toContain('"type":"attention:pending-balls"')
+    expect(JSON.stringify(pending[0])).not.toContain("This fourth summary must be omitted")
 
     const fetchesBeforeSecondWake = daemon.requests.filter((request) => request.method === "tribe.fetch").length
     daemon.clients[0]?.write(makeNotification("wakeup", {}))
@@ -1013,10 +1040,13 @@ describe("stdio adapter delivery modes", () => {
       () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > fetchesBeforeSecondWake,
       "second pending-ball fetch",
     )
-    expect(
-      stdout
-        .filter((line) => line.method === "notifications/claude/channel")
-        .filter((line) => JSON.stringify(line).includes("Pending tracked request review-r3")),
-    ).toHaveLength(1)
+    await waitForStdout(
+      child,
+      stdout,
+      () =>
+        stdout.filter(
+          (line) => line.method === "notifications/claude/channel" && JSON.stringify(line).includes(summaryText),
+        ).length === 2,
+    )
   })
 })

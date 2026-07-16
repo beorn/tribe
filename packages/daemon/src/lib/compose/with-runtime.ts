@@ -27,11 +27,13 @@
 import { createLogger } from "loggily"
 import { sendMessage } from "../messaging.ts"
 import { cleanupOldData, backfillDefaultRoomMembers } from "../session.ts"
+import { processPendingBallDeadlines } from "../pending-ball-deadlines.ts"
 import { loadPlugins } from "../plugin-loader.ts"
 import type { TribeClientApi, TribePluginApi } from "../plugin-api.ts"
 import type { BaseTribe } from "./base.ts"
 import type { WithBroadcast } from "./with-broadcast.ts"
 import type { WithClientRegistry } from "./with-client-registry.ts"
+import type { WithConfig } from "./with-config.ts"
 import type { WithDaemonContext } from "./with-daemon-context.ts"
 import type { WithDatabase } from "./with-database.ts"
 import type { WithRecall } from "./with-recall.ts"
@@ -40,6 +42,7 @@ import type { WithSocketServer } from "./with-socket-server.ts"
 const log = createLogger("tribe:runtime")
 
 type RuntimeShape = BaseTribe &
+  WithConfig &
   WithDatabase &
   WithDaemonContext &
   WithRecall &
@@ -116,6 +119,25 @@ function defaultBuildPluginApi<T extends RuntimeShape>(t: T): TribeClientApi {
         count: row?.count ?? 0,
         oldestTs: row?.oldest_ts ?? 0,
       }
+    },
+    processPendingBallDeadlines() {
+      return processPendingBallDeadlines({
+        db: t.db,
+        stmts,
+        now: Date.now(),
+        liveSessionNames: new Set(
+          Array.from(clients.values())
+            .filter((client) => client.role !== "watch" && client.role !== "pending")
+            .map((client) => client.name),
+        ),
+        escalationTarget: t.config.ballEscalationTarget ?? null,
+        send(recipient, content, type) {
+          sendMessage(daemonCtx, recipient, content, type, undefined, undefined, "direct", {
+            delivery: "push",
+            topic: type,
+          })
+        },
+      })
     },
   }
 }

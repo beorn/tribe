@@ -1,9 +1,7 @@
 /**
  * Version-skew guard (km @km/silvercode/19851 slice 3): when the daemon's
- * register response carries a different protocolVersion, the adapter warns
- * ONCE (log) and keeps working — never blocks, never spams per reconnect.
- * With the daemon embedded in host binaries, two host versions sharing one
- * daemon is a normal Tuesday, not an error.
+ * register response carries a different protocolVersion, the adapter fails
+ * loud instead of continuing with an incompatible payload contract.
  */
 
 import { mkdtempSync, readFileSync, rmSync } from "node:fs"
@@ -80,7 +78,7 @@ describe("stdio adapter — protocol version skew", () => {
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  it("warns once on mismatch and keeps the session registered + functional", async () => {
+  it("fails loud on mismatch instead of serving tools across incompatible payload contracts", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const logPath = join(tmpDir, "adapter.log")
     daemon = await spawnSkewedDaemon(socketPath)
@@ -93,20 +91,16 @@ describe("stdio adapter — protocol version skew", () => {
     await waitFor(
       () => {
         try {
-          return readFileSync(logPath, "utf8").includes("protocol version skew")
+          return readFileSync(logPath, "utf8").includes("protocol version mismatch")
         } catch {
           return false
         }
       },
       8_000,
-      "skew warning in adapter log",
+      "skew failure in adapter log",
     )
 
-    // Warn-once, not warn-per-anything; adapter still alive.
-    const warns = readFileSync(logPath, "utf8")
-      .split("\n")
-      .filter((l) => l.includes("protocol version skew"))
-    expect(warns.length).toBe(1)
-    expect(child.exitCode).toBeNull()
+    await waitFor(() => child?.exitCode !== null, 8_000, "adapter exit")
+    expect(child.exitCode).toBe(2)
   }, 20_000)
 })

@@ -97,7 +97,7 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
     expect(corrected).toMatchObject({ account: "d@delei.org", provider: "codex" })
   })
 
-  it("sweepDeadSessionRows GCs only -dead- tombstones older than the max age (21052)", () => {
+  it("sweepDeadSessionRows GCs old tombstones and generated ghosts without touching fresh, canonical, or active rows", () => {
     const now = Date.now()
     const mk = (sid: string, name: string) => {
       const c = makeContext(db, stmts, sid, name)
@@ -106,13 +106,38 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
     mk("s-old-dead", "@agent/5-dead-aaaa1111")
     mk("s-fresh-dead", "@agent/5-dead-bbbb2222")
     mk("s-live", "@agent/5")
-    db.prepare("UPDATE sessions SET updated_at = ? WHERE id = 's-old-dead'").run(now - 8 * 24 * 3600 * 1000)
+    mk("s-old-silvercode", "silvercode-12345")
+    mk("s-old-unknown", "unknown-a1b2c")
+    mk("s-old-cli", "cli-join-123-456")
+    mk("s-fresh-unknown", "unknown-fresh")
+    mk("s-active-generated", "silvercode-active")
+    mk("s-live-pid-generated", "unknown-live-pid")
+    const old = now - 8 * 24 * 3600 * 1000
+    db.prepare(
+      "UPDATE sessions SET updated_at = ? WHERE id IN ('s-old-dead', 's-old-silvercode', 's-old-unknown', 's-old-cli', 's-live', 's-active-generated', 's-live-pid-generated')",
+    ).run(old)
+    db.prepare("UPDATE sessions SET pid = ? WHERE id = 's-live-pid-generated'").run(process.pid)
 
-    const swept = sweepDeadSessionRows(db, 7 * 24 * 3600 * 1000, now)
+    const swept = sweepDeadSessionRows(db, 7 * 24 * 3600 * 1000, now, new Set(["s-active-generated"]))
 
-    expect(swept).toBe(1)
+    expect(swept).toBe(4)
     const names = (db.prepare("SELECT name FROM sessions").all() as Array<{ name: string }>).map((r) => r.name).sort()
-    expect(names).toEqual(["@agent/5", "@agent/5-dead-bbbb2222"])
+    expect(names).toEqual([
+      "@agent/5",
+      "@agent/5-dead-bbbb2222",
+      "silvercode-active",
+      "unknown-fresh",
+      "unknown-live-pid",
+    ])
+    expect(
+      (
+        db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM room_members WHERE session_id IN ('s-old-dead', 's-old-silvercode', 's-old-unknown', 's-old-cli')",
+          )
+          .get() as { count: number }
+      ).count,
+    ).toBe(0)
   })
 
   it("a join without a prior self-row records the connected client's real pid, not 0 (21052)", () => {

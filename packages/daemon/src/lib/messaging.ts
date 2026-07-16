@@ -4,7 +4,7 @@
 
 import { randomUUID } from "node:crypto"
 import type { TribeContext } from "./context.ts"
-import { ACTIONABLE_TYPES_SET } from "./database.ts"
+import { AUTO_TRACK_TYPES_SET } from "./database.ts"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -95,8 +95,9 @@ export function deriveSummary(content: string, max = 80): string {
 
 /**
  * Ball-tracker fields — see @km/tribe/message-ball-tracker. Every typed direct
- * actionable (`request` / `query` / `assign` / `verdict`) automatically opens
- * a recipient-owned request; an explicit `request` overrides its id, and a
+ * request/query/assign automatically open a recipient-owned request; verdict
+ * remains wakeable but does not implicitly create a second obligation. An
+ * explicit `request` tracks any direct type and overrides its id, while a
  * message with `reply` closes the referenced request. This lower-level writer
  * owns the invariant so plugin and adapter call sites cannot accidentally
  * create an acknowledged actionable with no durable response obligation.
@@ -124,7 +125,13 @@ export type BallTracker = {
    * Ignored if `request` is not set.
    */
   fanout?: "first" | "all"
+  /** Time from message commit until escalation. Defaults to 30 minutes for
+   * newly tracked balls; legacy rows remain unbounded with NULL expires_at. */
+  expiresInMs?: number
 }
+
+export const DEFAULT_BALL_TTL_MS = 30 * 60_000
+export const MAX_BALL_TTL_MS = 24 * 60 * 60_000
 
 /**
  * Derive the channel-envelope reply hint from the durable message metadata.
@@ -185,15 +192,23 @@ export function sendMessage(
   // never delivered, so delivery is irrelevant — keep the column populated for
   // schema invariants.
   const delivery: Delivery = classification.delivery ?? "push"
-  // Typed direct actionables always own a semantic response ball. The mailbox
+  // Selected direct types own a semantic response ball. The mailbox
   // cursor may acknowledge DELIVERY as soon as attention is projected; the
   // tracker survives that acknowledgement until the recipient explicitly
   // replies/defer-closes it. This is not a transport ACK and introduces no new
   // queue: it reuses the existing pending_request authority. Self-directed and
   // broadcast actionables remain untracked because neither has a peer owner.
-  const autoTrackActionable = resolvedKind === "direct" && sender !== recipient && ACTIONABLE_TYPES_SET.has(type)
-  const requestId = ballTracker.request === true ? id : (ballTracker.request ?? (autoTrackActionable ? id : null))
+  const autoTrackActionable = resolvedKind === "direct" && sender !== recipient && AUTO_TRACK_TYPES_SET.has(type)
+  const explicitRequest = typeof ballTracker.request === "string" ? ballTracker.request.trim() : ballTracker.request
+  if (typeof explicitRequest === "string" && explicitRequest.length === 0) {
+    throw new Error("tracked request id must be non-empty")
+  }
+  const requestId = explicitRequest === true ? id : (explicitRequest ?? (autoTrackActionable ? id : null))
   const replyId = ballTracker.reply ?? null
+  const expiresInMs = ballTracker.expiresInMs ?? DEFAULT_BALL_TTL_MS
+  if (requestId && (!Number.isSafeInteger(expiresInMs) || expiresInMs <= 0 || expiresInMs > MAX_BALL_TTL_MS)) {
+    throw new Error(`tracked request TTL must be a positive integer no greater than ${MAX_BALL_TTL_MS}ms`)
+  }
   // Message persistence and semantic tracker ownership are one commit. A
   // crash/error may leave neither fact, never a delivered message whose
   // mandatory response ball failed to open. The fanout callback runs only
@@ -228,6 +243,7 @@ export function sendMessage(
           $recipient: recipient,
           $sender: sender,
           $opened_at: ts,
+          $expires_at: ts + expiresInMs,
           $message_id: id,
           $fanout: ballTracker.fanout ?? "first",
         })

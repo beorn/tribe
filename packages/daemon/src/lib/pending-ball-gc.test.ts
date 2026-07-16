@@ -65,6 +65,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       $recipient: o.recipient,
       $sender: o.sender ?? "@chief",
       $opened_at: o.openedAt,
+      $expires_at: null,
       $message_id: `${o.id}-msg`,
       $fanout: "first",
     })

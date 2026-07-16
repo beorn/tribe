@@ -123,7 +123,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           request: {
             oneOf: [{ type: "string" }, { type: "boolean" }],
             description:
-              "Typed direct request/query/assign/verdict messages automatically open a semantic recipient-owned ball using the message id. Pass `true` to request the same convention for another message type, or a string to override the request id. Recipient(s) own the ball until `reply=<id>` arrives; this is not a transport delivery ACK. See @km/tribe/message-ball-tracker.",
+              "Direct request/query/assign messages automatically open a semantic recipient-owned ball using the message id. Verdict stays wakeable but does not auto-mint. Pass `true` to track any direct message type, or a non-empty string to override the request id. Recipient(s) own the ball until `reply=<id>` arrives; this is not a transport delivery ACK. See @km/tribe/message-ball-tracker.",
           },
           reply: {
             type: "string",
@@ -136,6 +136,13 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
               "Multi-recipient ball routing: 'first' (default, AMQP competing-consumers) or 'all' (per-recipient ball). Broadcast and explicit multi-target requests snapshot recipients at send time.",
             default: "first",
           },
+          expires_in_ms: {
+            type: "integer",
+            minimum: 1,
+            maximum: 24 * 60 * 60_000,
+            description:
+              "Sender-declared tracked-ball TTL in milliseconds. Defaults to 30 minutes; must be a positive integer no greater than one day.",
+          },
         },
         required: ["to", "message"],
       },
@@ -143,6 +150,15 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           sent: { type: "boolean", description: "True on successful send." },
           id: { type: "string", description: "Message id assigned by the daemon." },
+          ids: {
+            type: "array",
+            items: { type: "string" },
+            description: "Per-recipient message ids for a multi-recipient send.",
+          },
+          request_id: {
+            type: "string",
+            description: "Shared explicit request id for a multi-recipient tracked send.",
+          },
           tracker: {
             type: "object",
             properties: {
@@ -199,7 +215,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           name: "request",
           flags: "--request [request_id]",
           description:
-            "Explicitly open a semantic ball for a non-actionable type or override its id; typed direct actionables are tracked automatically",
+            "Explicitly track any direct type or override its id; direct request/query/assign auto-track, verdict does not",
         },
         {
           name: "fanout",
@@ -207,6 +223,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           description: `Ball-tracker fanout mode: ${TRIBE_FANOUTS.join("|")} (default: first)`,
           enum: TRIBE_FANOUTS,
           default: "first",
+        },
+        {
+          name: "expires-in-ms",
+          flags: "--expires-in-ms <milliseconds>",
+          description: "Tracked-ball TTL in milliseconds (default 30m, maximum 1d)",
+          mapsTo: "expires_in_ms",
         },
       ],
     }),

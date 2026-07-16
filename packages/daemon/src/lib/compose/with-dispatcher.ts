@@ -27,7 +27,7 @@
  * via `server.on("connection", handler)`.
  */
 
-import { randomUUID } from "node:crypto"
+import { randomUUID, timingSafeEqual } from "node:crypto"
 import { type Socket as NetSocket } from "node:net"
 import { createLogger } from "loggily"
 import { DEFAULT_INBOX_WAIT_SESSION, resolveInboxWaitOptions } from "tribe-wire"
@@ -186,6 +186,13 @@ export function withDispatcher<
         oldest_unread_age_min,
         oldest_unread_ts: oldest_ts,
       }
+    }
+
+    function hasOperatorCapability(value: unknown): boolean {
+      const configured = t.config.operatorCapability?.trim()
+      const supplied = typeof value === "string" ? value : ""
+      if (!configured || supplied.length !== configured.length) return false
+      return timingSafeEqual(Buffer.from(supplied), Buffer.from(configured))
     }
 
     const inboxWait = createInboxWaitManager(readInboxStatus)
@@ -441,6 +448,14 @@ export function withDispatcher<
       try {
         switch (method) {
           case "register": {
+            const clientProtocolVersion = p.protocolVersion === undefined ? undefined : Number(p.protocolVersion)
+            if (clientProtocolVersion !== undefined && clientProtocolVersion !== TRIBE_PROTOCOL_VERSION) {
+              return makeError(
+                id,
+                -32006,
+                `Protocol version mismatch: client=${clientProtocolVersion}, daemon=${TRIBE_PROTOCOL_VERSION}`,
+              )
+            }
             const claudeSessionName = (p.claudeSessionName as string) ?? null
             const claudeSessionId = (p.claudeSessionId as string) ?? null
             const identityToken = (p.identityToken as string) ?? null
@@ -655,13 +670,6 @@ export function withDispatcher<
             const name = deduplicateName(resolvedName)
             const pid = Number(p.pid ?? 0)
 
-            const clientProtocolVersion = p.protocolVersion ? Number(p.protocolVersion) : undefined
-            if (clientProtocolVersion !== undefined && clientProtocolVersion !== TRIBE_PROTOCOL_VERSION) {
-              log.info?.(
-                `Protocol version mismatch: client=${clientProtocolVersion}, daemon=${TRIBE_PROTOCOL_VERSION} (session=${name})`,
-              )
-            }
-
             const clientCtx = createTribeContext({
               db,
               stmts,
@@ -826,13 +834,33 @@ export function withDispatcher<
           }
 
           /**
-           * Bounded, name-keyed actionable drain for long-lived hosts whose
-           * current tool bridge cannot expose `tribe.fetch`. This advances the
-           * same durable mailbox cursor as fetch without registering, joining,
-           * renaming, or otherwise creating a transient session row.
+           * Bounded actionable drain. An authenticated client may mutate only
+           * its own mailbox and may not self-assert a `session` target. A
+           * separately configured operator capability may select a mailbox for
+           * watchdog/recovery automation. Both paths fail closed.
            */
           case "cli_inbox_drain": {
-            const sessionName = String(p.session ?? DEFAULT_INBOX_WAIT_SESSION)
+            const client = clients.get(connId)
+            const authenticatedName =
+              client && client.role !== "pending" && client.role !== "watch" ? client.name : null
+            const operatorAuthorized = hasOperatorCapability(p.operator_capability)
+            if (!operatorAuthorized && !authenticatedName) {
+              return makeError(
+                id,
+                -32003,
+                "Inbox drain requires an authenticated current session or the configured operator capability",
+              )
+            }
+            if (!operatorAuthorized && Object.prototype.hasOwnProperty.call(p, "session")) {
+              return makeError(
+                id,
+                -32003,
+                `Inbox drain is bound to the authenticated current session ${authenticatedName}; session override is forbidden`,
+              )
+            }
+            const sessionName = operatorAuthorized
+              ? String(p.session ?? DEFAULT_INBOX_WAIT_SESSION)
+              : authenticatedName!
             const requestedLimit = Number(p.limit ?? 10)
             const limit = Number.isFinite(requestedLimit) ? Math.min(100, Math.max(1, Math.trunc(requestedLimit))) : 10
             const tail = stmts.getMessageTailSeq.get() as { seq: number } | null

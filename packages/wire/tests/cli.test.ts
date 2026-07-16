@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from "vitest"
 import { spawn, spawnSync } from "node:child_process"
-import { mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { resolve, dirname, join } from "node:path"
@@ -43,14 +43,31 @@ function runCli(args: string[], opts: { timeoutMs?: number } = {}): { stdout: st
 function runCliAsync(
   args: string[],
   env: NodeJS.ProcessEnv,
+  opts: { operatorCapability?: string } = {},
 ): Promise<{ stdout: string; stderr: string; code: number | null }> {
   return new Promise((resolveRun) => {
-    const child = spawn(BUN_BIN, [CLI, ...args], { env, stdio: ["ignore", "pipe", "pipe"] })
+    const stdio: Array<"ignore" | "pipe" | number> = ["ignore", "pipe", "pipe"]
+    let capabilityFd: number | undefined
+    let capabilityDir: string | undefined
+    const childEnv = { ...env }
+    if (opts.operatorCapability !== undefined) {
+      capabilityDir = mkdtempSync(join(tmpdir(), "tribe-operator-capability-"))
+      const capabilityPath = join(capabilityDir, "capability")
+      writeFileSync(capabilityPath, opts.operatorCapability, { mode: 0o600 })
+      capabilityFd = openSync(capabilityPath, "r")
+      stdio.push(capabilityFd)
+      childEnv.TRIBE_OPERATOR_CAPABILITY_FD = String(stdio.length - 1)
+    }
+    const child = spawn(BUN_BIN, [CLI, ...args], { env: childEnv, stdio })
+    if (capabilityFd !== undefined) closeSync(capabilityFd)
     let stdout = ""
     let stderr = ""
-    child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
-    child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
-    child.on("close", (code) => resolveRun({ stdout: stripAnsi(stdout), stderr: stripAnsi(stderr), code }))
+    child.stdout!.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+    child.stderr!.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+    child.on("close", (code) => {
+      if (capabilityDir !== undefined) rmSync(capabilityDir, { recursive: true, force: true })
+      resolveRun({ stdout: stripAnsi(stdout), stderr: stripAnsi(stderr), code })
+    })
   })
 }
 
@@ -287,6 +304,68 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
 
       expect(methods).toEqual(["tribe.health", "cli_health", "cli_status", "cli_log"])
       expect(methods).not.toContain("register")
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("inbox-drain forwards an inherited-fd operator capability and ignores env secret text", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-drain-"))
+    const socketPath = join(dir, "tribe.sock")
+    const calls: Array<{ method: string; params?: Record<string, unknown> }> = []
+    const result = {
+      session: "@chief",
+      unread_count: 0,
+      oldest_unread_age_min: 0,
+      oldest_unread_ts: 0,
+      drained_count: 1,
+      events: [{ from: "@agent/7", type: "request", content: "review carrier" }],
+    }
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as { id: number; method: string; params?: Record<string, unknown> }
+          calls.push({ method: request.method, params: request.params })
+          socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`)
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const cli = await runCliAsync(
+        ["inbox-drain", "--session", "@chief", "--limit", "1", "--json"],
+        {
+          ...process.env,
+          TRIBE_SOCKET: socketPath,
+          TRIBE_NO_AUTOSTART: "1",
+          TRIBE_OPERATOR_CAPABILITY: "must-not-cross-the-wire",
+        },
+        { operatorCapability: "fd-only-operator-secret" },
+      )
+
+      expect(cli).toMatchObject({ code: 0, stderr: "" })
+      expect(JSON.parse(cli.stdout)).toEqual(result)
+      expect(calls).toEqual([
+        {
+          method: "cli_inbox_drain",
+          params: { session: "@chief", limit: 1, operator_capability: "fd-only-operator-secret" },
+        },
+      ])
     } finally {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
       rmSync(dir, { recursive: true, force: true })

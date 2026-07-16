@@ -7,6 +7,7 @@
  * a fully-formed `TribeConfig`.
  */
 
+import { readFileSync } from "node:fs"
 import { parseArgs } from "node:util"
 import { resolveSocketPath } from "tribe-wire/lib/socket"
 import { parseTribeArgs, resolveDbPath } from "tribe-wire/lib/config"
@@ -26,6 +27,10 @@ export interface TribeConfig {
   readonly summaryPollMs: number
   readonly summarizerMode: SummarizerMode
   readonly recallEnabled: boolean
+  /** Optional L2 escalation/reroute destination. No implicit role default. */
+  readonly ballEscalationTarget?: string | null
+  /** Optional capability for unauthenticated operator-only mutating RPCs. */
+  readonly operatorCapability?: string | null
 }
 
 export interface WithConfig {
@@ -37,6 +42,17 @@ export interface ConfigOpts {
   override?: TribeConfig
   /** Argv to parse (defaults to process.argv.slice(2)). */
   argv?: string[]
+}
+
+function readOperatorCapabilityFromInheritedFd(fdRaw: string | undefined): string | null {
+  if (fdRaw === undefined) return null
+  const fd = Number(fdRaw)
+  if (!Number.isSafeInteger(fd) || fd < 3) {
+    throw new Error(`TRIBE_OPERATOR_CAPABILITY_FD must name an inherited fd >= 3, received ${JSON.stringify(fdRaw)}`)
+  }
+  const capability = readFileSync(fd, "utf8").trim()
+  if (!capability) throw new Error("TRIBE_OPERATOR_CAPABILITY_FD contained an empty operator capability")
+  return capability
 }
 
 export function withConfig<T extends BaseTribe>(opts: ConfigOpts = {}): (t: T) => T & WithConfig {
@@ -73,6 +89,8 @@ export function withConfig<T extends BaseTribe>(opts: ConfigOpts = {}): (t: T) =
       summaryPollMs: Math.max(500, parseInt(String(daemonArgs["summary-poll-ms"]), 10) || 120_000),
       summarizerMode: resolveSummarizerMode(String(daemonArgs["summarizer-model"])),
       recallEnabled: !daemonArgs["no-lore"],
+      ballEscalationTarget: process.env.TRIBE_BALL_ESCALATION_TARGET?.trim() || null,
+      operatorCapability: readOperatorCapabilityFromInheritedFd(process.env.TRIBE_OPERATOR_CAPABILITY_FD),
     }
 
     return { ...t, config }

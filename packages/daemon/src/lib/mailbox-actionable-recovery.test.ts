@@ -248,6 +248,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       $recipient: NAME,
       $sender: "@ci",
       $opened_at: now + 100,
+      $expires_at: null,
       $message_id: "critical-revise",
       $fanout: "first",
     })
@@ -300,7 +301,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     ])
   })
 
-  it("delivery acknowledgement cannot erase a verdict's semantic response obligation", () => {
+  it("delivery acknowledgement cannot erase an explicitly tracked verdict obligation", () => {
     const author = connectAs("sess-author", NAME)
     const reviewer = connectAs("sess-reviewer", "@ci")
     const review = parseToolJson(
@@ -327,6 +328,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
           message: "REVISE exact candidate before the next execute step",
           type: "verdict",
           reply: review.id,
+          request: true,
         },
         opts,
       ),

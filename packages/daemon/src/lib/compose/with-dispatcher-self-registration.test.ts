@@ -139,6 +139,36 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
     expect(duplicate.message).toBe(`Name "@agent/9" is already taken by live pid ${liveHolderPid}`)
   })
 
+  it("rejects a registered client with an incompatible wire protocol before creating session state", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-skew")
+
+    const error = parseError(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "register-skew",
+          method: "register",
+          params: {
+            name: "@agent/skew",
+            role: "member",
+            pid: liveHolderPid,
+            project: "/tmp/km-wt9",
+            projectName: "km-wt9",
+            projectId: "test-project",
+            delivery: "pull",
+            protocolVersion: TRIBE_PROTOCOL_VERSION - 1,
+          },
+        },
+        "conn-skew",
+      ),
+    )
+
+    expect(error.message).toMatch(/protocol version mismatch/i)
+    expect(harness.sessionCount("@agent/skew")).toBe(0)
+  })
+
   it("projects launch fan-in as one canonical session and omits pending probes", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
@@ -174,7 +204,7 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
 
 describe("dispatcher bounded mailbox drain", () => {
   it("advances the durable role cursor without creating a transient registration", async () => {
-    const harness = createDispatcherHarness()
+    const harness = createDispatcherHarness({ operatorCapability: "operator-test-secret" })
     cleanup = harness.dispose
 
     harness.sendActionable("@chief", "first historical request")
@@ -187,7 +217,7 @@ describe("dispatcher bounded mailbox drain", () => {
           jsonrpc: "2.0",
           id: "drain-1",
           method: "cli_inbox_drain",
-          params: { session: "@chief", limit: 2 },
+          params: { session: "@chief", limit: 2, operator_capability: "operator-test-secret" },
         },
         "conn-drain",
       ),
@@ -205,7 +235,7 @@ describe("dispatcher bounded mailbox drain", () => {
           jsonrpc: "2.0",
           id: "drain-2",
           method: "cli_inbox_drain",
-          params: { session: "@chief", limit: 2 },
+          params: { session: "@chief", limit: 2, operator_capability: "operator-test-secret" },
         },
         "conn-drain",
       ),
@@ -228,6 +258,102 @@ describe("dispatcher bounded mailbox drain", () => {
     expect(wait.unread_count).toBe(0)
     expect(harness.sessionCount("@chief")).toBe(0)
     expect(harness.sessionAnnouncements("@chief")).toEqual([])
+  })
+
+  it("denies a registered role that tries to acknowledge another role's mailbox", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-agent-7")
+    await harness.register("conn-agent-7", {
+      name: "@agent/7",
+      pid: liveHolderPid,
+      project: "/tmp/km-wt7",
+    })
+    harness.sendActionable("@chief", "chief-only request")
+    harness.sendActionable("@agent/7", "agent-owned request")
+
+    const denied = parseError(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "cross-role-drain",
+          method: "cli_inbox_drain",
+          params: { session: "@chief", limit: 10 },
+        },
+        "conn-agent-7",
+      ),
+    )
+    expect(denied.message).toMatch(/bound to the authenticated current session.*session override/i)
+
+    const selfAsserted = parseError(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "self-asserted-drain",
+          method: "cli_inbox_drain",
+          params: { session: "@agent/7", limit: 10 },
+        },
+        "conn-agent-7",
+      ),
+    )
+    expect(selfAsserted.message).toMatch(/bound to the authenticated current session.*session override/i)
+
+    const own = parseResult<InboxDrainResult>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "own-role-drain",
+          method: "cli_inbox_drain",
+          params: { limit: 10 },
+        },
+        "conn-agent-7",
+      ),
+    )
+    expect(own.events.map((event) => event.content)).toEqual(["agent-owned request"])
+    const chiefStatus = parseResult<{ unread_count: number }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "chief-status",
+          method: "cli_inbox_status",
+          params: { session: "@chief" },
+        },
+        "conn-agent-7",
+      ),
+    )
+    expect(chiefStatus.unread_count).toBe(1)
+  })
+
+  it("fails closed for an unregistered caller without the configured operator capability", async () => {
+    const harness = createDispatcherHarness({ operatorCapability: "operator-test-secret" })
+    cleanup = harness.dispose
+    harness.sendActionable("@chief", "must remain unread")
+
+    const denied = parseError(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "untrusted-drain",
+          method: "cli_inbox_drain",
+          params: { session: "@chief", limit: 10, operator_capability: "wrong-secret" },
+        },
+        "conn-untrusted",
+      ),
+    )
+    expect(denied.message).toMatch(/authenticated current session or the configured operator capability/i)
+
+    const status = parseResult<{ unread_count: number }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "chief-status-after-denial",
+          method: "cli_inbox_status",
+          params: { session: "@chief" },
+        },
+        "conn-untrusted",
+      ),
+    )
+    expect(status.unread_count).toBe(1)
   })
 })
 
@@ -372,7 +498,9 @@ describe("dispatcher inbox-wait parsing", () => {
   })
 })
 
-function createDispatcherHarness(options: { suppressWindowMs?: number; socketStartedAt?: number } = {}) {
+function createDispatcherHarness(
+  options: { suppressWindowMs?: number; socketStartedAt?: number; operatorCapability?: string } = {},
+) {
   const tempDir = mkdtempSync(join(tmpdir(), "tribe-dispatcher-"))
   const scope = createScope("dispatcher-self-registration-test")
   const db = openDatabase(join(tempDir, "tribe.sqlite"))
@@ -411,6 +539,7 @@ function createDispatcherHarness(options: { suppressWindowMs?: number; socketSta
       summaryPollMs: 120_000,
       summarizerMode: "off" as const,
       recallEnabled: false,
+      operatorCapability: options.operatorCapability ?? null,
     },
     db,
     stmts,

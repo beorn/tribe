@@ -91,6 +91,12 @@ describe("Tribe command descriptors", () => {
     expect(send.options?.find((option) => option.name === "type")?.default).toBe("notify")
     expect(send.options?.find((option) => option.name === "fanout")?.enum).toEqual(["first", "all"])
     expect(send.options?.find((option) => option.name === "fanout")?.default).toBe("first")
+    expect(send.options?.find((option) => option.name === "expires-in-ms")?.mapsTo).toBe("expires_in_ms")
+    expect(sendDescriptor.mcp.inputSchema.properties?.expires_in_ms).toMatchObject({
+      type: "integer",
+      minimum: 1,
+      maximum: 86_400_000,
+    })
 
     const join = visibleCliProjection(commandDescriptorByMcpName("join")!)
     expect(join.arguments?.map((arg) => arg.name)).toEqual(["name"])

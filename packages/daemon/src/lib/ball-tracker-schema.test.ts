@@ -64,13 +64,55 @@ describe("ball-tracker schema (migration v16)", () => {
       }>
       const names = cols.map((r) => r.name)
       expect(names).toEqual(
-        expect.arrayContaining(["request_id", "recipient", "sender", "opened_at", "message_id", "fanout"]),
+        expect.arrayContaining([
+          "request_id",
+          "recipient",
+          "sender",
+          "opened_at",
+          "expires_at",
+          "message_id",
+          "fanout",
+        ]),
       )
       const pkCols = cols
         .filter((r) => r.pk > 0)
         .map((r) => r.name)
         .sort()
       expect(pkCols).toEqual(["recipient", "request_id"])
+    } finally {
+      db.close()
+    }
+  })
+
+  it("upgrade from v19 adds nullable expiry without retroactively expiring legacy balls", () => {
+    const dbPath = join(tmpDir, "tribe-v19.db")
+    const seedDb = new Database(dbPath, { create: true })
+    seedDb.run("CREATE TABLE _schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    seedDb.run("INSERT INTO _schema_meta (key, value) VALUES ('version', '19')")
+    seedDb.run(`CREATE TABLE pending_request (
+      request_id TEXT NOT NULL,
+      recipient TEXT NOT NULL,
+      sender TEXT NOT NULL,
+      opened_at INTEGER NOT NULL,
+      message_id TEXT NOT NULL,
+      fanout TEXT NOT NULL DEFAULT 'first',
+      PRIMARY KEY (request_id, recipient)
+    )`)
+    seedDb.run("INSERT INTO pending_request VALUES ('legacy', '@agent/8', '@chief', 1000, 'legacy-message', 'first')")
+    seedDb.close()
+
+    const db = openDatabase(dbPath)
+    try {
+      const cols = (db.prepare("PRAGMA table_info(pending_request)").all() as Array<{ name: string }>).map(
+        (row) => row.name,
+      )
+      expect(cols).toContain("expires_at")
+      expect(db.prepare("SELECT expires_at FROM pending_request WHERE request_id = 'legacy'").get()).toEqual({
+        expires_at: null,
+      })
+      expect(
+        Number((db.prepare("SELECT value FROM _schema_meta WHERE key = 'version'").get() as { value: string }).value),
+      ).toBeGreaterThanOrEqual(20)
     } finally {
       db.close()
     }

@@ -109,4 +109,13 @@ export interface TribeClientApi {
    * cursor is the relay-pattern signal we want to catch.
    */
   getUnreadDms(sessionName: string): { count: number; oldestTs: number }
+
+  /** Run one idempotent pending-ball deadline cycle. The health monitor calls
+   * this on its existing wake; no second timer or ownership store is created. */
+  processPendingBallDeadlines?(): {
+    nudged: number
+    expired: number
+    rerouted: number
+    deadOwnerWarnings: number
+  }
 }

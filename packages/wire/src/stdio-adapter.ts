@@ -143,9 +143,6 @@ let daemonReady: Promise<DaemonClient>
 // MCP handshake answered, every tribe tool returns ONE clear sentence, and the
 // degrade is announced exactly once (log + channel), never once per call.
 let daemonDegradedReason: string | null = null
-// Version-skew guard (km 19851): warn exactly once per process, not on
-// every reconnect.
-let versionSkewWarned = false
 
 /**
  * Forward a channel notification to Claude Code.
@@ -207,6 +204,7 @@ type TribeFetchResult = {
       age_ms?: number
       message_id?: string
       fanout?: string
+      summary?: string
     }>
   }
   events?: Array<{
@@ -346,6 +344,14 @@ function failManagedPersonaRegistration(err: unknown): never {
   process.exit()
 }
 
+function failProtocolVersion(reason: string): never {
+  log.warn?.(`tribe protocol version mismatch: ${reason}`)
+  daemon?.close()
+  proxyAc.abort()
+  process.exitCode = 2
+  process.exit()
+}
+
 // NON-BLOCKING: the daemon connect runs in the background. We do NOT await
 // it here — module evaluation continues straight through to `mcp.connect()`
 // so the MCP `initialize` handshake is answered immediately. Without this, a
@@ -370,6 +376,9 @@ function startDaemonConnection(): Promise<DaemonClient> {
       try {
         reg = (await client.call("register", registerParamsForConnection())) as typeof reg
       } catch (err) {
+        if (/protocol version mismatch/i.test(errorMessage(err))) {
+          failProtocolVersion(errorMessage(err))
+        }
         // Legacy adapters launched without a logical launch id cannot tell a
         // transient reconnect race from another adapter in the same provider
         // launch. Closing their provider-owned stdio leaves native Codex with
@@ -392,21 +401,8 @@ function startDaemonConnection(): Promise<DaemonClient> {
       myName = reg.name
       myRole = reg.role
       log.info?.(`Registered as ${myName} (${myRole})`)
-      // Version-skew guard (km 19851): with the daemon embedded in host
-      // binaries, two host versions can share one daemon — the first-started
-      // binary's daemon serves the rest. Skew is warn-once, never a block:
-      // the daemon already tolerates older clients, and a hard fail would
-      // break exactly the zero-config flow the embedding exists for.
-      if (
-        !versionSkewWarned &&
-        typeof reg.protocolVersion === "number" &&
-        reg.protocolVersion !== TRIBE_PROTOCOL_VERSION
-      ) {
-        versionSkewWarned = true
-        log.warn?.(
-          `tribe protocol version skew: this session speaks v${TRIBE_PROTOCOL_VERSION}, daemon speaks v${reg.protocolVersion}. ` +
-            `Coordination continues; restart the daemon (or the older sessions) to align.`,
-        )
+      if (typeof reg.protocolVersion === "number" && reg.protocolVersion !== TRIBE_PROTOCOL_VERSION) {
+        failProtocolVersion(`session=${TRIBE_PROTOCOL_VERSION}, daemon=${reg.protocolVersion}`)
       }
       void client.call("subscribe").catch(() => {})
 
@@ -896,30 +892,34 @@ function forwardFetchedEvent(event: NonNullable<TribeFetchResult["events"]>[numb
   })
 }
 
-function forwardPendingBall(
-  ball: NonNullable<NonNullable<TribeFetchResult["attention"]>["pending_balls"]>[number],
+function formatPendingBallAge(ageMs: number): string {
+  const minutes = Math.max(0, Math.floor(ageMs / 60_000))
+  if (minutes < 1) return "<1m"
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h`
+  return `${Math.floor(hours / 24)}d`
+}
+
+function forwardPendingBallSummary(
+  balls: NonNullable<NonNullable<TribeFetchResult["attention"]>["pending_balls"]>,
 ): void {
-  const requestId = String(ball.request_id ?? "unknown")
-  const sender = String(ball.sender ?? "unknown")
-  const messageId = String(ball.message_id ?? "unknown")
-  const fanout = String(ball.fanout ?? "first")
-  sendChannel(
-    `Pending tracked request ${requestId} from ${sender} remains open (message ${messageId}; fanout ${fanout}).`,
-    {
-      from: sender,
-      type: "request",
-      message_id: messageId,
-      request_id: requestId,
-    },
-  )
+  if (balls.length === 0) return
+  const ordered = [...balls].sort((left, right) => (right.age_ms ?? 0) - (left.age_ms ?? 0))
+  const oldest = formatPendingBallAge(ordered[0]?.age_ms ?? 0)
+  const top = ordered
+    .map((ball) => ball.summary?.trim())
+    .filter((summary): summary is string => Boolean(summary))
+    .slice(0, 3)
+  const topText = top.length > 0 ? ` Top: ${top.join(" | ")}` : ""
+  sendChannel(`You own ${balls.length} ${balls.length === 1 ? "ball" : "balls"}, oldest ${oldest}.${topText}`, {
+    from: "tribe",
+    type: "attention:pending-balls",
+  })
 }
 
 let drainInFlight = false
 let drainAgain = false
-// Presentation-only dedupe. The ball tracker remains authoritative; this set
-// merely prevents one still-open ball from being re-injected on every ambient
-// wakeup. A closed/disappeared id is removed and can surface again if reopened.
-const surfacedPendingBallIds = new Set<string>()
 
 function drainDaemonInbox(): void {
   if (drainInFlight) {
@@ -943,25 +943,13 @@ function drainDaemonInbox(): void {
         const attentionIds = new Set(attentionEvents.map((event) => event.id).filter(Boolean))
         for (const event of attentionEvents) forwardFetchedEvent(event)
         const currentPendingBalls = result?.attention?.pending_balls ?? []
-        const currentPendingIds = new Set(
-          currentPendingBalls.map((ball) => ball.request_id).filter((id): id is string => id !== undefined),
-        )
-        for (const requestId of surfacedPendingBallIds) {
-          if (!currentPendingIds.has(requestId)) surfacedPendingBallIds.delete(requestId)
-        }
-        const pendingBalls = currentPendingBalls.filter(
-          (ball) =>
-            (!ball.message_id || !attentionIds.has(ball.message_id)) &&
-            (!ball.request_id || !surfacedPendingBallIds.has(ball.request_id)),
-        )
-        for (const ball of pendingBalls) forwardPendingBall(ball)
-        for (const requestId of currentPendingIds) surfacedPendingBallIds.add(requestId)
+        forwardPendingBallSummary(currentPendingBalls)
         const events = (result?.events ?? []).filter((event) => !event.id || !attentionIds.has(event.id))
         const { forward, skippedOld, capped } = selectReplayEvents(events, { now: Date.now() })
         for (const event of forward) forwardFetchedEvent(event)
         if (skippedOld > 0 || capped > 0) {
           log.warn?.(
-            `tribe drain: surfaced ${attentionEvents.length} actionable + ${pendingBalls.length} pending + ${forward.length}/${events.length} event(s) (skipped ${skippedOld} older than 1d, ${capped} over cap ${MAX_REPLAY_EVENTS}); rest drained but not replayed`,
+            `tribe drain: surfaced ${attentionEvents.length} actionable + ${currentPendingBalls.length} pending + ${forward.length}/${events.length} event(s) (skipped ${skippedOld} older than 1d, ${capped} over cap ${MAX_REPLAY_EVENTS}); rest drained but not replayed`,
           )
         }
       } while (drainAgain)

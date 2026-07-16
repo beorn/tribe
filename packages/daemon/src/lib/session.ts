@@ -43,15 +43,50 @@ function listSessionNames(ctx: TribeContext, isActive?: (sessionId: string) => b
     .sort()
 }
 
-/** 21052 — GC takeover tombstones at daemon startup. Rename-on-takeover leaves
- *  `<name>-dead-<id8>` rows behind forever (452 accumulated by 2026-07-10);
- *  they are forensic breadcrumbs, not routable identities, so rows older than
- *  `maxAgeMs` are swept. Returns the number of rows deleted. Never touches
- *  live-named rows — the GLOB is anchored to the tombstone convention. */
-export function sweepDeadSessionRows(db: import("bun:sqlite").Database, maxAgeMs: number, nowMs = Date.now()): number {
+/** GC old takeover tombstones and generated placeholder identities. They are
+ * forensic breadcrumbs, not durable routable names. Canonical names and any
+ * session explicitly reported active by the live registry are preserved. */
+export function sweepDeadSessionRows(
+  db: import("bun:sqlite").Database,
+  maxAgeMs: number,
+  nowMs = Date.now(),
+  activeSessionIds: ReadonlySet<string> = new Set(),
+): number {
   const cutoff = nowMs - maxAgeMs
-  const res = db.prepare("DELETE FROM sessions WHERE name GLOB '*-dead-*' AND updated_at < ?").run(cutoff)
-  return Number(res.changes ?? 0)
+  const activeIds = [...activeSessionIds]
+  const activeClause = activeIds.length > 0 ? ` AND id NOT IN (${activeIds.map(() => "?").join(", ")})` : ""
+  const candidates = (
+    db
+      .prepare(
+        `SELECT id, name, pid FROM sessions
+       WHERE updated_at < ?
+         AND (
+           name GLOB '*-dead-*'
+           OR name GLOB 'silvercode-*'
+           OR name GLOB 'unknown-*'
+           OR name GLOB 'cli-join-*'
+         )${activeClause}`,
+      )
+      .all(cutoff, ...activeIds) as Array<{ id: string; name: string; pid: number }>
+  ).filter((candidate) => {
+    const generated =
+      candidate.name.startsWith("silvercode-") ||
+      candidate.name.startsWith("unknown-") ||
+      candidate.name.startsWith("cli-join-")
+    // A generated name is a ghost only with positive disconnection evidence.
+    // Daemon restart temporarily empties the registry while its provider
+    // process remains alive; preserve that durable row for reconnect adoption.
+    return !generated || candidate.pid <= 0 || !isPidAlive(candidate.pid)
+  })
+  if (candidates.length === 0) return 0
+
+  const ids = candidates.map((candidate) => candidate.id)
+  const placeholders = ids.map(() => "?").join(", ")
+  return db.transaction(() => {
+    db.prepare(`DELETE FROM room_members WHERE session_id IN (${placeholders})`).run(...ids)
+    const res = db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...ids)
+    return Number(res.changes ?? 0)
+  })()
 }
 
 /** True iff the given OS PID exists and we have permission to signal it.

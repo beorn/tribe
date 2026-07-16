@@ -11,8 +11,16 @@ import type { TribeRole } from "tribe-wire/lib/config"
 const log = createLogger("tribe:handlers")
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { validateName, sanitizeMessage } from "./validation.ts"
-import { sendMessage, deriveSummary, logEvent, countUnackedActionables, type SenderAttribution } from "./messaging.ts"
-import { ACTIONABLE_TYPES_SET } from "./database.ts"
+import {
+  sendMessage,
+  deriveSummary,
+  logEvent,
+  countUnackedActionables,
+  DEFAULT_BALL_TTL_MS,
+  MAX_BALL_TTL_MS,
+  type SenderAttribution,
+} from "./messaging.ts"
+import { ACTIONABLE_TYPES_SET, AUTO_TRACK_TYPES_SET } from "./database.ts"
 import { isPidAlive as pidStillAlive, registerSession } from "./session.ts"
 import { gatherCodePin } from "./code-pin.ts"
 import { parseDbGrowthWarningBytes, projectHealthCadence } from "./health-cadence.ts"
@@ -141,10 +149,11 @@ export type TribeCoordMethod = (typeof TRIBE_COORD_METHODS)[keyof typeof TRIBE_C
  *   2. `assign` / `query` / `request` / `verdict` typed messages are the
  *      ACTIONABLE channel. Direct `notify` / `status` / `response` rows are
  *      inbox-visible, but they do not wake `inbox.wait`.
- *   3. Every non-self direct actionable automatically opens one semantic
- *      response ball. Answer or explicitly defer it with
- *      `reply=<request-id>`; a transport/read acknowledgement is neither
- *      required nor sufficient to release that ownership.
+ *   3. Every non-self direct assign/query/request automatically opens one
+ *      semantic response ball. Verdict stays actionable and wakeable without
+ *      automatically minting another obligation. Answer or explicitly defer
+ *      tracked work with `reply=<request-id>`; a transport/read acknowledgement
+ *      is neither required nor sufficient to release that ownership.
  *
  * Bead: `@km/code/15654` (Part 1).
  */
@@ -152,8 +161,9 @@ export const TRIBE_JOIN_PRIMER =
   "Tribe notification semantics: messages from `from: daemon` (github:push, " +
   'session events, health) and broadcasts (`to: "*"`) are AMBIENT awareness ' +
   "only — surface in `tribe.fetch` reads but DO NOT act on them. Direct " +
-  "`type: assign`/`query`/`request`/`verdict` messages are the actionable " +
-  "channel, wake `inbox.wait`, and automatically open a semantic response ball. " +
+  "`type: assign`/`query`/`request` messages are actionable, wake `inbox.wait`, " +
+  "and automatically open a semantic response ball. Direct `type: verdict` is " +
+  "also actionable and wakeable, but does not automatically open another ball. " +
   "Direct `notify`/`status`/`response` rows are inbox-visible, but not wakeable. " +
   "Answer or explicitly defer each actionable with `reply=<request-id>` so its " +
   "semantic ball closes; no transport or exact-id delivery ACK is required."
@@ -371,11 +381,18 @@ function parseDomains(value: string): string[] {
 }
 
 function normalizeRecipients(value: unknown): string | string[] | null {
-  if (typeof value === "string" && value.length > 0) return value
-  if (Array.isArray(value) && value.length > 0 && value.every((v) => typeof v === "string" && v.length > 0)) {
-    return [...new Set(value as string[])]
+  const raw = typeof value === "string" ? [value] : Array.isArray(value) ? value : null
+  if (!raw || raw.length === 0 || raw.some((recipient) => typeof recipient !== "string")) return null
+
+  const recipients: string[] = []
+  for (const recipient of raw as string[]) {
+    const segments = recipient.split(",").map((segment) => segment.trim())
+    if (segments.some((segment) => segment.length === 0)) return null
+    recipients.push(...segments)
   }
-  return null
+  const unique = [...new Set(recipients)]
+  if (unique.includes("*") && unique.length > 1) return null
+  return unique.length === 1 ? unique[0]! : unique
 }
 
 function activeBroadcastRecipients(ctx: TribeContext, opts: HandlerOpts): string[] {
@@ -402,6 +419,7 @@ function openPendingRows(
   requestId: string,
   messageId: string,
   openedAt: number,
+  expiresAt: number,
   fanout: "first" | "all" | undefined,
   sender: string,
 ): void {
@@ -411,6 +429,7 @@ function openPendingRows(
       $recipient: recipient,
       $sender: sender,
       $opened_at: openedAt,
+      $expires_at: expiresAt,
       $message_id: messageId,
       $fanout: fanout ?? "first",
     })
@@ -442,9 +461,33 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   const requestArg = a.request
   const replyArg = a.reply
   const fanoutArg = a.fanout as "first" | "all" | undefined
+  if (requestArg !== undefined && requestArg !== true && typeof requestArg !== "string") {
+    return jsonResult({ error: "tribe.send: `request` must be true or a non-empty string when supplied." })
+  }
+  if (typeof requestArg === "string" && requestArg.trim().length === 0) {
+    return jsonResult({ error: "tribe.send: `request` must be true or a non-empty string when supplied." })
+  }
   const requestFlag = requestArg === true
-  const requestId = typeof requestArg === "string" ? requestArg : null
+  const requestId = typeof requestArg === "string" ? requestArg.trim() : null
   const replyId = typeof replyArg === "string" ? replyArg : null
+  let expiresInMs = DEFAULT_BALL_TTL_MS
+  if (a.expires_in_ms !== undefined) {
+    if (
+      typeof a.expires_in_ms !== "number" ||
+      !Number.isSafeInteger(a.expires_in_ms) ||
+      a.expires_in_ms <= 0 ||
+      a.expires_in_ms > MAX_BALL_TTL_MS
+    ) {
+      return jsonResult({
+        error: `tribe.send: \`expires_in_ms\` must be a positive integer no greater than ${MAX_BALL_TTL_MS}.`,
+      })
+    }
+    expiresInMs = a.expires_in_ms
+  }
+  const willTrack = requestFlag || requestId !== null || (recipients !== "*" && AUTO_TRACK_TYPES_SET.has(msgType))
+  if (a.expires_in_ms !== undefined && !willTrack) {
+    return jsonResult({ error: "tribe.send: `expires_in_ms` requires a tracked request." })
+  }
   const summaryArg = typeof a.summary === "string" ? a.summary.trim() : ""
   const llmSender = ctx.claudeSessionId !== null || ctx.claudeSessionName !== null
   if (llmSender && summaryArg.length === 0) {
@@ -475,6 +518,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
           request: sharedRequestId ?? undefined,
           reply: replyId ?? undefined,
           fanout: fanoutArg,
+          expiresInMs,
         },
         attribution,
       ),
@@ -521,6 +565,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       request: requestFlag ? true : (requestId ?? undefined),
       reply: replyId ?? undefined,
       fanout: fanoutArg,
+      expiresInMs,
     },
     attribution,
   )
@@ -531,6 +576,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       requestFlag ? result.id : requestId!,
       result.id,
       result.ts,
+      result.ts + expiresInMs,
       fanoutArg,
       sender,
     )
@@ -560,6 +606,7 @@ type PendingBallRow = {
   recipient: string
   sender: string
   opened_at: number
+  expires_at: number | null
   message_id: string
   fanout: string
   summary: string | null
@@ -570,6 +617,7 @@ type PendingBall = {
   recipient: string
   sender: string
   opened_at: string
+  expires_at: string | null
   age_ms: number
   message_id: string
   fanout: string
@@ -582,6 +630,7 @@ function pendingBall(row: PendingBallRow, now: number): PendingBall {
     recipient: row.recipient,
     sender: row.sender,
     opened_at: new Date(row.opened_at).toISOString(),
+    expires_at: row.expires_at === null ? null : new Date(row.expires_at).toISOString(),
     age_ms: now - row.opened_at,
     message_id: row.message_id,
     fanout: row.fanout,
