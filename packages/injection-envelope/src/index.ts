@@ -28,7 +28,7 @@ export {
   turnManifestPathForSession,
   sessionsDir,
 } from "./manifest.ts"
-export type { TurnManifest, InjectedSpan } from "./manifest.ts"
+export type { TurnManifest, InjectedSpan, TurnManifestReadResult } from "./manifest.ts"
 
 export { evaluateGate } from "./gate.ts"
 export type { GateInput, GateDecision, Permission } from "./gate.ts"

@@ -19,7 +19,7 @@
  * `~/.claude/bearly-sessions/`). One file per session.
  */
 
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -86,35 +86,67 @@ export function turnManifestPathForSession(sessionId: string): string {
 
 /**
  * Persist the manifest for a session. Overwrites any prior manifest —
- * the "current" turn is always the most recent write. Best-effort:
- * failures do not throw (never block a user prompt).
+ * the "current" turn is always the most recent write, replaced ATOMICALLY
+ * via temp+rename so a concurrent gate read (the PreToolUse hook is a
+ * separate process) sees the old manifest or the new one, never a torn
+ * write (@km/all/21206-atomicity-sweep/21207). Best-effort: failures do
+ * not throw (never block a user prompt) — with the tri-state reader an
+ * intact prior manifest keeps gating and a missing one reads absent.
  */
 export function writeTurnManifest(sessionId: string, manifest: TurnManifest): void {
   try {
     mkdirSync(sessionsDir(), { recursive: true })
     const p = turnManifestPathForSession(sessionId)
-    writeFileSync(p, JSON.stringify(manifest), { mode: 0o600 })
+    const tmp = `${p}.tmp-${process.pid}-${Date.now().toString(36)}`
+    try {
+      writeFileSync(tmp, JSON.stringify(manifest), { mode: 0o600 })
+      renameSync(tmp, p)
+    } catch (err) {
+      rmSync(tmp, { force: true })
+      throw err
+    }
   } catch {
-    // Never block the hook over manifest IO. Gate will degrade to
-    // no-manifest mode (conservative: block mutating tools when unsure).
+    // Never block the hook over manifest IO — see docstring for how the
+    // reader degrades.
   }
 }
 
-/** Read the manifest for a session, or null if missing / malformed. */
-export function readTurnManifest(sessionId: string): TurnManifest | null {
+/**
+ * Result of reading a session's manifest. ABSENCE and UNREADABILITY are
+ * different security states (@km/all/21206-atomicity-sweep/21207):
+ * absent = the envelope did not run this turn (gate may degrade open by
+ * design); unreadable = a manifest EXISTS but cannot be trusted
+ * (permission error, IO error, torn/corrupt content, wrong shape) — the
+ * gate must fail CLOSED, because aliasing this to "absent" lets anyone
+ * who can corrupt the file disarm the injection defense.
+ */
+export type TurnManifestReadResult =
+  | { kind: "ok"; manifest: TurnManifest }
+  | { kind: "absent" }
+  | { kind: "unreadable"; reason: string }
+
+/** Read the manifest for a session — see {@link TurnManifestReadResult}. */
+export function readTurnManifest(sessionId: string): TurnManifestReadResult {
+  const p = turnManifestPathForSession(sessionId)
+  let raw: string
   try {
-    const p = turnManifestPathForSession(sessionId)
-    const raw = readFileSync(p, "utf8")
-    const parsed = JSON.parse(raw) as TurnManifest
-    if (typeof parsed !== "object" || parsed === null) return null
-    if (typeof parsed.typedUserText !== "string") return null
-    if (!Array.isArray(parsed.typedEntities)) return null
-    if (!Array.isArray(parsed.typedShingles)) return null
-    if (!Array.isArray(parsed.untrustedRecall)) return null
-    return parsed
-  } catch {
-    return null
+    raw = readFileSync(p, "utf8")
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" }
+    return { kind: "unreadable", reason: `read failed: ${err instanceof Error ? err.message : String(err)}` }
   }
+  let parsed: TurnManifest
+  try {
+    parsed = JSON.parse(raw) as TurnManifest
+  } catch (err) {
+    return { kind: "unreadable", reason: `parse failed: ${err instanceof Error ? err.message : String(err)}` }
+  }
+  if (typeof parsed !== "object" || parsed === null) return { kind: "unreadable", reason: "manifest is not an object" }
+  if (typeof parsed.typedUserText !== "string") return { kind: "unreadable", reason: "typedUserText is not a string" }
+  if (!Array.isArray(parsed.typedEntities)) return { kind: "unreadable", reason: "typedEntities is not an array" }
+  if (!Array.isArray(parsed.typedShingles)) return { kind: "unreadable", reason: "typedShingles is not an array" }
+  if (!Array.isArray(parsed.untrustedRecall)) return { kind: "unreadable", reason: "untrustedRecall is not an array" }
+  return { kind: "ok", manifest: parsed }
 }
 
 /** Remove the manifest for a session. No-op if absent. */

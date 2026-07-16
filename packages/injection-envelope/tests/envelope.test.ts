@@ -12,7 +12,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest"
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -496,13 +496,68 @@ describe("TurnManifest", () => {
       ts: 1_700_000_000_000,
     })
     const read = readTurnManifest(SESSION_ID)
-    expect(read).not.toBeNull()
-    expect(read?.typedUserText).toBe("please summarize the notes")
-    expect(read?.untrustedRecall[0]?.entities).toContain("Gerd")
+    expect(read.kind).toBe("ok")
+    if (read.kind !== "ok") throw new Error("unreachable")
+    expect(read.manifest.typedUserText).toBe("please summarize the notes")
+    expect(read.manifest.untrustedRecall[0]?.entities).toContain("Gerd")
   })
 
-  test("readTurnManifest returns null when no manifest exists", () => {
-    expect(readTurnManifest("nonexistent-session")).toBeNull()
+  test("readTurnManifest reads ABSENT only for a genuinely missing manifest (ENOENT)", () => {
+    expect(readTurnManifest("nonexistent-session")).toEqual({ kind: "absent" })
+  })
+
+  test("a corrupt manifest reads UNREADABLE, never absent — corruption must not alias envelope-didn't-run (21207)", () => {
+    writeFileSync(turnManifestPathForSession(SESSION_ID), "{ definitely not json", { mode: 0o600 })
+    const read = readTurnManifest(SESSION_ID)
+    expect(read.kind).toBe("unreadable")
+    if (read.kind !== "unreadable") throw new Error("unreachable")
+    expect(read.reason).toContain("parse")
+  })
+
+  test("a wrong-shape manifest reads UNREADABLE (21207)", () => {
+    writeFileSync(
+      turnManifestPathForSession(SESSION_ID),
+      JSON.stringify({ typedUserText: 42, typedEntities: [], typedShingles: [], untrustedRecall: [] }),
+      { mode: 0o600 },
+    )
+    expect(readTurnManifest(SESSION_ID).kind).toBe("unreadable")
+  })
+
+  test("a permission-denied manifest reads UNREADABLE (21207)", () => {
+    writeTurnManifest(SESSION_ID, {
+      typedUserText: "x",
+      typedEntities: [],
+      typedShingles: [],
+      explicitWriteAuth: false,
+      untrustedRecall: [],
+      ts: 0,
+    })
+    const p = turnManifestPathForSession(SESSION_ID)
+    chmodSync(p, 0o000)
+    try {
+      expect(readTurnManifest(SESSION_ID).kind).toBe("unreadable")
+    } finally {
+      chmodSync(p, 0o600)
+    }
+  })
+
+  test("writeTurnManifest replaces atomically via temp+rename — no residue, whole-file content, 0600 (21207)", () => {
+    const base = {
+      typedEntities: [],
+      typedShingles: [],
+      explicitWriteAuth: false,
+      untrustedRecall: [],
+      ts: 1,
+    }
+    writeTurnManifest(SESSION_ID, { ...base, typedUserText: "first" })
+    writeTurnManifest(SESSION_ID, { ...base, typedUserText: "second" })
+    // No temp residue: the sessions dir holds exactly the manifest file.
+    expect(readdirSync(tmpDir)).toEqual([`turn-manifest-${SESSION_ID}.json`])
+    const read = readTurnManifest(SESSION_ID)
+    expect(read.kind).toBe("ok")
+    if (read.kind !== "ok") throw new Error("unreachable")
+    expect(read.manifest.typedUserText).toBe("second")
+    expect(statSync(turnManifestPathForSession(SESSION_ID)).mode & 0o777).toBe(0o600)
   })
 
   test("clearTurnManifest removes the file", () => {
@@ -536,12 +591,13 @@ describe("TurnManifest", () => {
     // The envelope is still emitted
     expect(out).toContain("<injected_context")
     // A manifest now exists for this session
-    const manifest = readTurnManifest(SESSION_ID)
-    expect(manifest).not.toBeNull()
-    expect(manifest?.typedUserText).toBe("what's the status of the board?")
-    expect(manifest?.untrustedRecall.length).toBeGreaterThan(0)
+    const read = readTurnManifest(SESSION_ID)
+    expect(read.kind).toBe("ok")
+    if (read.kind !== "ok") throw new Error("unreachable")
+    expect(read.manifest.typedUserText).toBe("what's the status of the board?")
+    expect(read.manifest.untrustedRecall.length).toBeGreaterThan(0)
     // Entity extraction should catch the file path
-    const entities = manifest?.untrustedRecall[0]?.entities ?? []
+    const entities = read.manifest.untrustedRecall[0]?.entities ?? []
     expect(entities.some((e) => e.includes("advisor-takes"))).toBe(true)
   })
 })

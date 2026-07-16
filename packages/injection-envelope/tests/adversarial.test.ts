@@ -22,7 +22,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -34,6 +34,7 @@ import {
   looksLikeExplicitWriteAuth,
   CONTEXT_PROTOCOL_FOOTER,
   evaluateGate,
+  turnManifestPathForSession,
   type InjectedItem,
   type TurnManifest,
   type GateInput,
@@ -531,5 +532,42 @@ describe("emitter coverage", () => {
     // We can't spawn from vitest reliably, so this is left as a
     // documentation of intent; the real enforcement is in the lint.
     expect(true).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 21207 — the gate FAILS CLOSED on an unreadable manifest
+// ---------------------------------------------------------------------------
+
+describe("gate fails CLOSED on unreadable manifest (21207)", () => {
+  test("a corrupt manifest DENIES a mutating tool — corruption must not alias envelope-didn't-run", () => {
+    writeFileSync(turnManifestPathForSession("torn-session"), "{ torn write", { mode: 0o600 })
+    const decision = evaluateGate({
+      session_id: "torn-session",
+      tool_name: "Write",
+      tool_input: { file_path: "/tmp/x.md", content: "hello world" },
+    })
+    expect(decision.permissionDecision).toBe("deny")
+    expect(decision.debug?.reasonCode).toBe("manifest-unreadable")
+  })
+
+  test("a genuinely missing manifest still allows — the envelope is optional by design", () => {
+    const decision = evaluateGate({
+      session_id: "session-with-no-manifest",
+      tool_name: "Write",
+      tool_input: { file_path: "/tmp/x.md", content: "hello world" },
+    })
+    expect(decision.permissionDecision).toBe("allow")
+    expect(decision.debug?.reasonCode).toBe("no-manifest")
+  })
+
+  test("an unreadable manifest does NOT block non-mutating tools", () => {
+    writeFileSync(turnManifestPathForSession("torn-session-2"), "{ torn", { mode: 0o600 })
+    const decision = evaluateGate({
+      session_id: "torn-session-2",
+      tool_name: "Read",
+      tool_input: { file_path: "/tmp/x.md" },
+    })
+    expect(decision.permissionDecision).toBe("allow")
   })
 })
