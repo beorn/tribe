@@ -595,6 +595,15 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
 
     const staleLaunchId = "stale-dead-provider-launch"
     const first = await spawnLaunchAdapter(socketPath, "stale-launch-1.log", staleLaunchId)
+    // spawnLaunchAdapter only awaits the MCP `initialize` handshake, which races
+    // the tribe DAEMON registration. Calling a member tool before registration
+    // completes returns the adapter's transient "awaiting daemon registration"
+    // failure. Wait for the registration log line first (same signal the daemon
+    // -restart section polls) so the members call is deterministic under load.
+    await waitForCondition(
+      () => existsSync(first.logPath) && readFileSync(first.logPath, "utf8").includes("Registered as"),
+      "first stale-launch adapter to register with the daemon",
+    )
     const firstMembers = (await callLaunchTool(first, 50, "members", {})) as {
       sessions?: Array<{ name?: string; member_id?: string }>
     }
