@@ -1255,7 +1255,7 @@ function handleInboxWait(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Too
 // km-tribe.event-classification handlers
 // ---------------------------------------------------------------------------
 
-type FetchRow = {
+export type FetchRow = {
   id: string
   rowid: number
   type: string
@@ -1271,7 +1271,7 @@ type FetchRow = {
   summary: string | null
 }
 
-type FetchEvent = {
+export type FetchEvent = {
   id: string
   rowid: number
   type: string
@@ -1287,7 +1287,7 @@ type FetchEvent = {
   summary: string | null
 }
 
-function fetchEvent(row: FetchRow): FetchEvent {
+export function fetchEvent(row: FetchRow): FetchEvent {
   return {
     id: row.id,
     rowid: row.rowid,

@@ -46,6 +46,7 @@ describe("registerReadCommands", () => {
         "pending",
         "log",
         "health",
+        "inbox-drain",
         "inbox-status",
         "inbox-wait",
         "reload",
@@ -92,6 +93,13 @@ describe("registerReadCommands", () => {
     expect(cmd).toBeDefined()
     const flags = optionFlags(cmd!)
     expect(flags).toEqual(expect.arrayContaining(["--session", "--json"]))
+  })
+
+  test("inbox-drain verb accepts --session, --limit, and --json", () => {
+    const cmd = findCmd(buildProgram(), "inbox-drain")
+    expect(cmd).toBeDefined()
+    const flags = optionFlags(cmd!)
+    expect(flags).toEqual(expect.arrayContaining(["--session", "--limit", "--json"]))
   })
 
   test("inbox-wait verb accepts --session, --timeout, and --json", () => {

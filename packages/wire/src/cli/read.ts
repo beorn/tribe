@@ -22,6 +22,7 @@
  *   - log           (line ~610)
  *   - health        (line ~617)
  *   - inbox-status  (line ~622)
+ *   - inbox-drain   (bounded actionable drain without transient registration)
  *   - reload        (MCP/RPC tribe.reload hot-reload parity)
  *   - repair        (operator-bounded state repair)
  *   - activity      (line ~674)
@@ -183,6 +184,19 @@ export type InboxWaitResult = {
   waited_ms: number
   timed_out: boolean
   aborted: boolean
+}
+
+type InboxDrainResult = {
+  session: string
+  unread_count: number
+  oldest_unread_age_min: number
+  oldest_unread_ts: number
+  drained_count: number
+  events: Array<{
+    type: string
+    from: string
+    content: string
+  }>
 }
 
 type InboxWaitCall = (args: { session: string; timeoutMs: number }) => Promise<InboxWaitResult>
@@ -622,6 +636,23 @@ async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promi
   )
 }
 
+async function cmdInboxDrain(opts: { session?: string; limit?: number; json?: boolean }): Promise<void> {
+  const session = opts.session ?? DEFAULT_INBOX_WAIT_SESSION
+  const result = (await callDaemon("cli_inbox_drain", { session, limit: opts.limit ?? 10 })) as InboxDrainResult
+  if (opts.json) {
+    console.log(JSON.stringify(result))
+    return
+  }
+  for (const event of result.events) {
+    console.log(`${event.from} [${event.type}]`)
+    console.log(event.content)
+  }
+  console.log(
+    `${session}: drained ${result.drained_count} actionable DM${result.drained_count === 1 ? "" : "s"}; ` +
+      `${result.unread_count} remaining.`,
+  )
+}
+
 type InboxWaitErrorKind = "transport-close" | "daemon-unavailable" | null
 
 function inboxWaitErrorKind(err: unknown): InboxWaitErrorKind {
@@ -863,6 +894,14 @@ export function registerReadCommands(program: Command): void {
     .description("Check whether the running daemon is serving stale code (@km/tribe/20033)")
     .option("--fix", "Print the operator-gated remedy for a stale daemon (does not auto-restart)")
     .action((opts: { fix?: boolean }) => void cmdDoctor(opts))
+
+  program
+    .command("inbox-drain")
+    .description("Drain a bounded actionable mailbox page without registering a transient session")
+    .option("--session <name>", "Role mailbox to drain (default: @chief)", DEFAULT_INBOX_WAIT_SESSION)
+    .option("--limit <n>", "Maximum actionable DMs to return and acknowledge (max 100)", int, 10)
+    .option("--json", "Emit machine-readable JSON")
+    .action((opts: { session?: string; limit?: number; json?: boolean }) => void cmdInboxDrain(opts))
 
   program
     .command("inbox-status")

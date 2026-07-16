@@ -42,7 +42,14 @@ import {
 } from "tribe-wire/lib/socket"
 import { detectRole, resolveProjectId, type TribeRole } from "tribe-wire/lib/config"
 import { createTribeContext, type MessageInsertedInfo, type TribeContext } from "../context.ts"
-import { handleToolCall, isRemovedTribeMethod, removedTribeMethodMessage, TRIBE_COORD_METHODS } from "../handlers.ts"
+import {
+  fetchEvent,
+  handleToolCall,
+  isRemovedTribeMethod,
+  removedTribeMethodMessage,
+  TRIBE_COORD_METHODS,
+  type FetchRow,
+} from "../handlers.ts"
 import { createLifecycleStore } from "../lifecycle-store.ts"
 import { createInboxWaitManager } from "../inbox-wait.ts"
 import { logEvent, sendMessage } from "../messaging.ts"
@@ -195,6 +202,64 @@ export function withDispatcher<
      *  callers (smoke harness, tests) can opt out by omitting the
      *  accessor. See `@km/infra/15630-stuck-agent-observability` § S4. */
     const lifecycleStore = createLifecycleStore()
+
+    /**
+     * Project participating sessions, not transport sockets. One managed
+     * provider launch can hold several MCP transports that intentionally fan
+     * into the same durable session id; exposing each socket as a session made
+     * those healthy transports look like duplicate/stale role registrations.
+     */
+    function canonicalSessionRows(now: number) {
+      const members = registry.getActiveSessionInfo()
+      const transportsBySession = new Map<string, ClientSession[]>()
+      for (const client of clients.values()) {
+        if (client.role !== "member") continue
+        const id = client.ctx.sessionId
+        const transports = transportsBySession.get(id)
+        if (transports) transports.push(client)
+        else transportsBySession.set(id, [client])
+      }
+
+      const parentMap = new Map<string, string>()
+      for (const member of members) {
+        if (member.claudeSessionId && !parentMap.has(member.claudeSessionId)) {
+          parentMap.set(member.claudeSessionId, member.name)
+        }
+      }
+
+      return members.map((member) => {
+        const transports = transportsBySession.get(member.id) ?? []
+        const representative = transports.find((client) => client.pid === member.pid) ?? transports[0]
+        const lastActivityAt = transports.reduce(
+          (latest, client) => Math.max(latest, client.lastActivityAt),
+          member.registeredAt,
+        )
+        const parent = member.claudeSessionId ? parentMap.get(member.claudeSessionId) : undefined
+        return {
+          id: member.id,
+          name: member.name,
+          role: member.role,
+          domains: [...new Set(transports.flatMap((client) => client.domains))],
+          pid: member.pid,
+          transportPids: member.transportPids,
+          transportCount: member.transportPids.length,
+          project: member.cwd,
+          projectName: representative?.projectName,
+          projectId: representative?.projectId,
+          claudeSessionId: member.claudeSessionId,
+          peerSocket: representative?.peerSocket ?? null,
+          connectedAt: member.registeredAt,
+          uptimeMs: now - member.registeredAt,
+          idleMs: now - lastActivityAt,
+          cwd: member.cwd,
+          source: "daemon" as const,
+          conn: representative?.conn,
+          resources: [] as string[],
+          parent: parent && parent !== member.name ? parent : undefined,
+          lifecycle: lifecycleStore.get(member.name) ?? null,
+        }
+      })
+    }
 
     /**
      * Actionable-recovery nudge (19442) — when handleJoin / handleRename
@@ -691,40 +756,7 @@ export function withDispatcher<
 
           case "cli_status": {
             const now = Date.now()
-            const parentMap = new Map<string, string>()
-            for (const [, c] of clients) {
-              if (c.claudeSessionId && !parentMap.has(c.claudeSessionId)) {
-                parentMap.set(c.claudeSessionId, c.name)
-              }
-            }
-            const sessions = Array.from(clients.values()).map((c) => {
-              const parent = c.claudeSessionId ? parentMap.get(c.claudeSessionId) : undefined
-              return {
-                id: c.id,
-                name: c.name,
-                role: c.role,
-                domains: c.domains,
-                pid: c.pid,
-                project: c.project,
-                projectName: c.projectName,
-                projectId: c.projectId,
-                claudeSessionId: c.claudeSessionId,
-                peerSocket: c.peerSocket,
-                connectedAt: c.registeredAt,
-                uptimeMs: now - c.registeredAt,
-                /** Wall-clock ms since this client's last inbound request.
-                 *  15588 — drives the idle column. */
-                idleMs: now - c.lastActivityAt,
-                /** Working directory the session registered from. The
-                 *  daemon already tracks this as `project`; surfaced here
-                 *  under the `cwd` alias to match the bead's vocabulary. */
-                cwd: c.project,
-                source: "daemon" as const,
-                conn: c.conn,
-                resources: [] as string[],
-                parent: parent && parent !== c.name ? parent : undefined,
-              }
-            })
+            const sessions = canonicalSessionRows(now)
             return makeResponse(id, {
               sessions,
               daemon: {
@@ -754,13 +786,15 @@ export function withDispatcher<
             // fields (peerSocket, conn, projectId, etc.) that aren't
             // useful in a health overview.
             const nowH = Date.now()
-            const roster = Array.from(clients.values()).map((c) => ({
-              name: c.name,
-              role: c.role,
-              pid: c.pid,
-              cwd: c.project,
-              uptimeMs: nowH - c.registeredAt,
-              idleMs: nowH - c.lastActivityAt,
+            const roster = canonicalSessionRows(nowH).map((session) => ({
+              name: session.name,
+              role: session.role,
+              pid: session.pid,
+              transportPids: session.transportPids,
+              cwd: session.cwd,
+              uptimeMs: session.uptimeMs,
+              idleMs: session.idleMs,
+              lifecycle: session.lifecycle,
             }))
             return makeResponse(id, {
               ...health,
@@ -789,6 +823,33 @@ export function withDispatcher<
           case "cli_inbox_status": {
             const sessionName = String(p.session ?? "@chief")
             return makeResponse(id, readInboxStatus(sessionName))
+          }
+
+          /**
+           * Bounded, name-keyed actionable drain for long-lived hosts whose
+           * current tool bridge cannot expose `tribe.fetch`. This advances the
+           * same durable mailbox cursor as fetch without registering, joining,
+           * renaming, or otherwise creating a transient session row.
+           */
+          case "cli_inbox_drain": {
+            const sessionName = String(p.session ?? DEFAULT_INBOX_WAIT_SESSION)
+            const requestedLimit = Number(p.limit ?? 10)
+            const limit = Number.isFinite(requestedLimit) ? Math.min(100, Math.max(1, Math.trunc(requestedLimit))) : 10
+            const tail = stmts.getMessageTailSeq.get() as { seq: number } | null
+            const rows = stmts.selectUnackedActionables.all({
+              $name: sessionName,
+              $upto: tail?.seq ?? 0,
+              $limit: limit,
+            }) as FetchRow[]
+            const last = rows.at(-1)
+            if (last) {
+              stmts.advanceMailboxCursor.run({ $recipient: sessionName, $seq: last.rowid, $now: Date.now() })
+            }
+            return makeResponse(id, {
+              ...readInboxStatus(sessionName),
+              drained_count: rows.length,
+              events: rows.map(fetchEvent),
+            })
           }
 
           case "cli_inbox_wait": {

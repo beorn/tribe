@@ -26,10 +26,19 @@ type RegisterResult = {
 
 type CliStatusResult = {
   sessions: Array<{
+    id: string
     name: string
     pid: number
     role: TribeRole
+    transportPids: number[]
   }>
+}
+
+type InboxDrainResult = {
+  session: string
+  unread_count: number
+  drained_count: number
+  events: Array<{ content: string }>
 }
 
 type InboxWaitResult = {
@@ -128,6 +137,97 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
     )
 
     expect(duplicate.message).toBe(`Name "@agent/9" is already taken by live pid ${liveHolderPid}`)
+  })
+
+  it("projects launch fan-in as one canonical session and omits pending probes", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    harness.addPendingClient("conn-agent")
+    const registered = parseResult<RegisterResult>(
+      await harness.register("conn-agent", {
+        name: "@agent/5",
+        pid: liveHolderPid,
+        project: "/tmp/km-wt5",
+      }),
+    )
+    harness.addTransport("conn-mcp", "conn-agent", liveHolderPid + 2)
+    harness.addPendingClient("conn-status-probe")
+
+    const status = parseResult<CliStatusResult>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "status", method: "cli_status", params: {} },
+        "conn-status-probe",
+      ),
+    )
+
+    expect(status.sessions).toHaveLength(1)
+    expect(status.sessions[0]).toMatchObject({
+      id: registered.sessionId,
+      name: "@agent/5",
+      pid: liveHolderPid,
+      transportPids: [liveHolderPid, liveHolderPid + 2],
+    })
+    expect(status.sessions.some((session) => session.name.startsWith("pending-"))).toBe(false)
+  })
+})
+
+describe("dispatcher bounded mailbox drain", () => {
+  it("advances the durable role cursor without creating a transient registration", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    harness.sendActionable("@chief", "first historical request")
+    harness.sendActionable("@chief", "second historical request")
+    harness.sendActionable("@chief", "third historical request")
+
+    const first = parseResult<InboxDrainResult>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "drain-1",
+          method: "cli_inbox_drain",
+          params: { session: "@chief", limit: 2 },
+        },
+        "conn-drain",
+      ),
+    )
+    expect(first.events.map((event) => event.content)).toEqual([
+      "first historical request",
+      "second historical request",
+    ])
+    expect(first.drained_count).toBe(2)
+    expect(first.unread_count).toBe(1)
+
+    const second = parseResult<InboxDrainResult>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "drain-2",
+          method: "cli_inbox_drain",
+          params: { session: "@chief", limit: 2 },
+        },
+        "conn-drain",
+      ),
+    )
+    expect(second.events.map((event) => event.content)).toEqual(["third historical request"])
+    expect(second.unread_count).toBe(0)
+
+    const wait = parseResult<InboxWaitResult>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "wait-after-drain",
+          method: "cli_inbox_wait",
+          params: { session: "@chief", timeout_ms: 1 },
+        },
+        "conn-drain",
+      ),
+    )
+    expect(wait.timed_out).toBe(true)
+    expect(wait.unread_count).toBe(0)
+    expect(harness.sessionCount("@chief")).toBe(0)
+    expect(harness.sessionAnnouncements("@chief")).toEqual([])
   })
 })
 
@@ -323,18 +423,44 @@ function createDispatcherHarness(options: { suppressWindowMs?: number; socketSta
         return new Set(Array.from(clients.values(), (c) => c.ctx.sessionId))
       },
       getActiveSessionInfo() {
-        return Array.from(clients.values()).map((c) => ({
-          id: c.ctx.sessionId,
-          name: c.name,
-          pid: c.pid,
-          cwd: c.project,
-          role: c.role,
-          claudeSessionId: c.claudeSessionId,
-          registeredAt: c.registeredAt,
-          launchId: c.launchId,
-          launchParentPid: c.launchParentPid,
-          transportPids: c.pid > 0 ? [c.pid] : [],
-        }))
+        const members = new Map<
+          string,
+          {
+            id: string
+            name: string
+            pid: number
+            cwd: string
+            role: TribeRole
+            claudeSessionId: string | null
+            registeredAt: number
+            launchId: string | null
+            launchParentPid: number | null
+            transportPids: number[]
+          }
+        >()
+        for (const client of clients.values()) {
+          if (client.role !== "member") continue
+          const id = client.ctx.sessionId
+          const member = members.get(id)
+          if (member) {
+            if (client.pid > 0 && !member.transportPids.includes(client.pid)) member.transportPids.push(client.pid)
+            member.registeredAt = Math.min(member.registeredAt, client.registeredAt)
+            continue
+          }
+          members.set(id, {
+            id,
+            name: client.name,
+            pid: client.pid,
+            cwd: client.project,
+            role: client.role,
+            claudeSessionId: client.claudeSessionId,
+            registeredAt: client.registeredAt,
+            launchId: client.launchId,
+            launchParentPid: client.launchParentPid,
+            transportPids: client.pid > 0 ? [client.pid] : [],
+          })
+        }
+        return Array.from(members.values())
       },
     },
     broadcast: {
@@ -376,8 +502,8 @@ function createDispatcherHarness(options: { suppressWindowMs?: number; socketSta
       }
       return daemon.dispatcher.handleRequest(req, connId)
     },
-    sendActionable(recipient: string) {
-      sendMessage(daemonCtx, recipient, "wake inbox wait", "request", undefined, undefined, "direct")
+    sendActionable(recipient: string, content: string = "wake inbox wait") {
+      sendMessage(daemonCtx, recipient, content, "request", undefined, undefined, "direct")
     },
     connectClient(): { connId: string; socket: TestSocket } {
       const socket = createTestSocket()
@@ -391,6 +517,10 @@ function createDispatcherHarness(options: { suppressWindowMs?: number; socketSta
         .prepare("SELECT content FROM messages WHERE type = 'session' ORDER BY ts ASC, id ASC")
         .all() as Array<{ content: string }>
       return rows.map((row) => row.content).filter((content) => content.includes(name))
+    },
+    sessionCount(name: string): number {
+      const row = db.prepare("SELECT COUNT(*) AS count FROM sessions WHERE name = ?").get(name) as { count: number }
+      return row.count
     },
     sessionJoinEvents(name: string): Array<{ name: string }> {
       const rows = db
@@ -425,6 +555,21 @@ function createDispatcherHarness(options: { suppressWindowMs?: number; socketSta
         registeredAt: Date.now(),
         lastActivityAt: Date.now(),
         recall: { sessionId: null, claudePid: null },
+      })
+      socketToClient.set(socket, connId)
+      return socket
+    },
+    addTransport(connId: string, canonicalConnId: string, pid: number): TestSocket {
+      const canonical = clients.get(canonicalConnId)
+      if (!canonical) throw new Error(`canonical client ${canonicalConnId} not found`)
+      const socket = createTestSocket()
+      clients.set(connId, {
+        ...canonical,
+        socket,
+        id: connId,
+        pid,
+        registeredAt: canonical.registeredAt + 1,
+        lastActivityAt: canonical.lastActivityAt + 1,
       })
       socketToClient.set(socket, connId)
       return socket
