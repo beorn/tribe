@@ -1004,9 +1004,10 @@ describe("secure durable identity (successor r2)", () => {
     harness.sendActionable("@agent/2", "unread actionable")
     holder.socket.emitClose()
 
-    // Snapshot the victim's full durable identity + mailbox + pending state.
+    // Snapshot the victim's full durable identity + mailbox cursor + mailbox
+    // contents + pending state.
     const before = harness.fullSessionState("@agent/2")
-    expect(before.unread).toBeGreaterThanOrEqual(1)
+    expect(before.mailbox.length).toBeGreaterThanOrEqual(1)
     expect(before.balls.length).toBeGreaterThanOrEqual(1)
 
     // A hostile leave from an arbitrary connection (not the holder, no operator).
@@ -1018,8 +1019,8 @@ describe("secure durable identity (successor r2)", () => {
     )
     expect(denied.code).toBe(-32001)
 
-    // Byte-identical: durable row (identity fields + cursor), mailbox cursor,
-    // unread count, and pending balls are all exactly as before.
+    // Byte-identical (deep-equal): durable row + identity fields, mailbox cursor,
+    // mailbox contents, and pending balls are all exactly as before.
     expect(harness.fullSessionState("@agent/2")).toEqual(before)
     expect(harness.memberRowCount("@agent/2")).toBe(1)
   })
@@ -1306,8 +1307,9 @@ function createDispatcherHarness(
       const rows = stmts.selectPendingForRecipient.all({ $recipient: recipient }) as unknown[]
       return rows.length
     },
-    /** A stable, timestamp-free snapshot of a member's durable identity + mailbox
-     *  + pending state — for the hostile-leave byte-identical assertion. */
+    /** A stable, timestamp-free snapshot of a member's durable identity, mailbox
+     *  CURSOR, mailbox CONTENTS, and pending balls — for the hostile-leave
+     *  byte-identical assertion (deep-equal before/after). */
     fullSessionState(name: string) {
       return {
         row:
@@ -1324,13 +1326,14 @@ function createDispatcherHarness(
             "SELECT request_id, recipient, sender, message_id, fanout FROM pending_request WHERE recipient = ? ORDER BY request_id",
           )
           .all(name),
-        unread: (
-          db
-            .prepare(
-              "SELECT COUNT(*) AS n FROM messages WHERE recipient = ? AND kind = 'direct' AND type IN ('request','query','verdict','assign')",
-            )
-            .get(name) as { n: number }
-        ).n,
+        // Actual mailbox CONTENTS (the durable direct actionables addressed to
+        // this member), not just a count — proves the leave neither dropped nor
+        // acknowledged any mail.
+        mailbox: db
+          .prepare(
+            "SELECT rowid, id, sender, type, content FROM messages WHERE recipient = ? AND kind = 'direct' AND type IN ('request','query','verdict','assign') ORDER BY rowid",
+          )
+          .all(name),
       }
     },
     sendDirect(recipient: string, content: string, type = "notify") {
