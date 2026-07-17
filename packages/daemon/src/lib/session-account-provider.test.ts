@@ -101,7 +101,11 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
     const now = Date.now()
     const mk = (sid: string, name: string) => {
       const c = makeContext(db, stmts, sid, name)
-      registerSession(c, PROJECT_ID, () => false, null, 1234, "pull", "/repo", null, null)
+      // A pid beyond every platform's pid_max (Linux default 4194304, macOS ~99999):
+      // kill() always reports ESRCH, so "this ghost's process is dead" is a fact,
+      // not a bet — on busy CI runners a small literal pid like 1234 is
+      // intermittently a live process, which made the sweep count nondeterministic.
+      registerSession(c, PROJECT_ID, () => false, null, 999_999_999, "pull", "/repo", null, null)
     }
     mk("s-old-dead", "@agent/5-dead-aaaa1111")
     mk("s-fresh-dead", "@agent/5-dead-bbbb2222")
