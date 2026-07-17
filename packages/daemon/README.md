@@ -8,20 +8,19 @@ daemon plugins.
 
 ## Status
 
-This package is staged and private during the bearly-to-tribe cutover. The
-published daemon/plugin path still lives in `github.com/beorn/bearly`; this
-package becomes runnable after the daemon runtime's recall/LLM dependencies are
-extracted or replaced.
+Functional; ships with this repository (not published to npm). The Claude Code
+plugin autostarts it, or run it directly from a clone.
 
-## Future Run
+## Run
 
 ```bash
-tribe-daemon --socket ~/.local/share/tribe/tribe.sock
+bun packages/daemon/src/daemon.ts                                    # auto-discovers socket path
+bun packages/daemon/src/daemon.ts --socket ~/.local/share/tribe/tribe.sock
 ```
 
-After cutover, host plugins may autostart this daemon for their runtime. The
-wire package does not silently own daemon lifecycle; a missing daemon should be
-visible and actionable to callers.
+Host plugins may autostart this daemon for their runtime. The wire package does
+not silently own daemon lifecycle; a missing daemon should be visible and
+actionable to callers. Lifecycle details: [docs/daemon.md](../../docs/daemon.md).
 
 ## Boundary
 

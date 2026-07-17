@@ -1,4 +1,4 @@
-# @bearly/bg-recall
+# tribe-bg-recall
 
 Background just-in-time recall — async daemon that watches active Claude Code
 sessions, runs entity-driven recall queries based on tool calls, and injects
@@ -67,7 +67,7 @@ within N tool calls, otherwise it ages into "ignored".
 ## Usage (programmatic)
 
 ```ts
-import { createBgRecallDaemon } from "@bearly/bg-recall"
+import { createBgRecallDaemon } from "tribe-bg-recall"
 
 const daemon = createBgRecallDaemon({
   sources: {
