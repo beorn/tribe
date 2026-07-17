@@ -404,6 +404,117 @@ describe("20876 Tribe health cadence", () => {
     ).toBe(0)
   })
 
+  it("does not alias a transport-wedged but recently-active owner to 'not currently active' (21449)", () => {
+    // The 2026-07-17 specimen: a seat's MCP bridge wedged after a daemon
+    // restart (transport gone → not in liveSessionNames) while the seat kept
+    // working all night via the CLI rail — its sends attribute to the session
+    // name in the messages table. That positive evidence must beat the
+    // absence-of-transport default.
+    insertSession(db, { id: "wedged-a0", name: "@agent/0", role: "member", now: now - 6 * HOUR })
+    insertMessage(db, {
+      id: "wedged-a0-cli-send",
+      type: "notify",
+      sender: "@agent/0",
+      recipient: "@chief",
+      ts: now - 2 * MINUTE,
+    })
+    stmts.openPendingRequest.run({
+      $request_id: "wedged-owner-ball",
+      $recipient: "@agent/0",
+      $sender: "@chief",
+      $opened_at: now - MINUTE,
+      $expires_at: null,
+      $message_id: "wedged-owner-ball-message",
+      $fanout: "first",
+    })
+    const sent: Array<{ recipient: string; content: string; type: string }> = []
+    processPendingBallDeadlines({
+      db,
+      stmts,
+      now,
+      liveSessionNames: new Set(),
+      escalationTarget: null,
+      isPidAlive: () => true,
+      send: (recipient, content, type) => sent.push({ recipient, content, type }),
+    })
+    // Scoped to this ball — the suite's beforeEach seeds unrelated open balls.
+    expect(sent.filter((message) => message.content.includes("wedged-owner-ball"))).toEqual([])
+  })
+
+  it("still reports owner-unresolved for a silent owner outside the activity window", () => {
+    insertSession(db, { id: "silent-a9", name: "@agent/9", role: "member", now: now - 6 * HOUR })
+    insertMessage(db, {
+      id: "silent-a9-old-send",
+      type: "notify",
+      sender: "@agent/9",
+      recipient: "@chief",
+      ts: now - 2 * HOUR,
+    })
+    stmts.openPendingRequest.run({
+      $request_id: "silent-owner-ball",
+      $recipient: "@agent/9",
+      $sender: "@chief",
+      $opened_at: now - MINUTE,
+      $expires_at: null,
+      $message_id: "silent-owner-ball-message",
+      $fanout: "first",
+    })
+    const sent: Array<{ recipient: string; content: string; type: string }> = []
+    processPendingBallDeadlines({
+      db,
+      stmts,
+      now,
+      liveSessionNames: new Set(),
+      escalationTarget: null,
+      isPidAlive: () => true,
+      send: (recipient, content, type) => sent.push({ recipient, content, type }),
+    })
+    expect(sent.filter((message) => message.content.includes("silent-owner-ball"))).toEqual([
+      {
+        recipient: "@chief",
+        content: expect.stringMatching(/not currently active.*ownership is retained/i),
+        type: "ball:owner-unresolved",
+      },
+    ])
+  })
+
+  it("recent activity never masks positive pid-death evidence", () => {
+    insertSession(db, { id: "dead-a3", name: "@agent/3", role: "member", now: now - 6 * HOUR })
+    insertMessage(db, {
+      id: "dead-a3-last-send",
+      type: "notify",
+      sender: "@agent/3",
+      recipient: "@chief",
+      ts: now - MINUTE,
+    })
+    stmts.openPendingRequest.run({
+      $request_id: "dead-owner-ball",
+      $recipient: "@agent/3",
+      $sender: "@chief",
+      $opened_at: now - MINUTE,
+      $expires_at: null,
+      $message_id: "dead-owner-ball-message",
+      $fanout: "first",
+    })
+    const sent: Array<{ recipient: string; content: string; type: string }> = []
+    processPendingBallDeadlines({
+      db,
+      stmts,
+      now,
+      liveSessionNames: new Set(),
+      escalationTarget: null,
+      isPidAlive: () => false,
+      send: (recipient, content, type) => sent.push({ recipient, content, type }),
+    })
+    expect(sent.filter((message) => message.content.includes("dead-owner-ball"))).toEqual([
+      {
+        recipient: "@chief",
+        content: expect.stringMatching(/dead owner @agent\/3/i),
+        type: "ball:owner-dead",
+      },
+    ])
+  })
+
   it("reminds the sender once for a fanout:first ball with multiple owners", () => {
     for (const [recipient, messageId] of [
       ["@agent/5", "fanout-first-agent-5"],

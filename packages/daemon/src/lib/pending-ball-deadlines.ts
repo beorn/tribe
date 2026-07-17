@@ -26,7 +26,14 @@ export type PendingBallDeadlineOptions = {
   escalationTarget: string | null
   isPidAlive?: (pid: number) => boolean
   send: (recipient: string, content: string, type: string) => void
+  /** How recent other-rail evidence (messages sent, session updates) must be to count as positive liveness (default 30m). */
+  activityWindowMs?: number
 }
+
+/** Positive-liveness window: a transport-wedged seat working via the CLI rail
+ * sends roughly once per worker cycle (~25m tonight's specimens) — 30m covers
+ * a full cycle without keeping a genuinely silent seat "active" for long. */
+const DEFAULT_ACTIVITY_WINDOW_MS = 30 * 60_000
 
 function stageKey(row: PendingDeadlineRow, stage: string, scope = row.recipient): string {
   return `ball-deadline:${stage}:${encodeURIComponent(row.request_id)}:${encodeURIComponent(scope)}`
@@ -59,15 +66,30 @@ function runClaimedStage<T>(
   })()
 }
 
-type OwnerLiveness = "live" | "dead" | "unknown"
+type OwnerLiveness = "live" | "recently-active" | "dead" | "unknown"
 
+/**
+ * Absence of a push transport is NOT evidence of an inactive seat (21449,
+ * absence-aliases-a-state): after a daemon restart a session's MCP bridge can
+ * wedge in "reconnecting" while the seat keeps working via the CLI rail —
+ * whose sends attribute the session name in the messages table. Precedence:
+ * live transport > positive death evidence (pid dead) > recent sends on any
+ * rail > unknown. Only messages count as positive activity — a session row's
+ * updated_at is registration, not work, and an undeterminable pid probe
+ * (EPERM) must keep reading unresolved when the seat has not spoken.
+ */
 function ownerLiveness(opts: PendingBallDeadlineOptions, owner: string): OwnerLiveness {
   if (opts.liveSessionNames.has(owner)) return "live"
   const row = opts.db
     .prepare("SELECT pid FROM sessions WHERE name = ? ORDER BY updated_at DESC LIMIT 1")
     .get(owner) as { pid: number } | null
-  if (!row || row.pid <= 0) return "unknown"
-  return (opts.isPidAlive ?? defaultIsPidAlive)(row.pid) ? "unknown" : "dead"
+  if (row && row.pid > 0 && !(opts.isPidAlive ?? defaultIsPidAlive)(row.pid)) return "dead"
+  const cutoff = opts.now - (opts.activityWindowMs ?? DEFAULT_ACTIVITY_WINDOW_MS)
+  const lastSend = opts.db.prepare("SELECT MAX(ts) AS ts FROM messages WHERE sender = ?").get(owner) as {
+    ts: number | null
+  } | null
+  if ((lastSend?.ts ?? 0) >= cutoff) return "recently-active"
+  return "unknown"
 }
 
 function deadOwnerContent(row: PendingDeadlineRow, target: string | null, targetIsDeadOwner: boolean): string {
