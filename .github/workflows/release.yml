@@ -5,7 +5,7 @@ on:
     tags:
       - "tribe-wire-v*"
       - "tribe-daemon-v*"
-      - "beorn-tribe-v*"
+      - "tribe-claude-plugin-v*"
 
 jobs:
   publish:
@@ -30,9 +30,60 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           case "$TAG" in
-            tribe-wire-v*)   PKG_DIR="packages/wire" ;;
-            tribe-daemon-v*) PKG_DIR="packages/daemon" ;;
-            beorn-tribe-v*)  PKG_DIR="plugins/claude" ;;
+            tribe-wire-v*)          PKG_DIR="packages/wire" ;;
+            tribe-daemon-v*)        PKG_DIR="packages/daemon" ;;
+            tribe-claude-plugin-v*) PKG_DIR="plugins/claude" ;;
             *) echo "Unknown tag pattern: $TAG"; exit 1 ;;
           esac
+
+          echo "== publint: $PKG_DIR =="
+          (cd "$PKG_DIR" && npx --yes publint .)
+
+          echo "== pack-install-import smoke: $PKG_DIR =="
+          PACK_DIR="$(mktemp -d)"
+          SCRATCH_DIR="$(mktemp -d)"
+          PKG_NAME="$(node -p "require('./$PKG_DIR/package.json').name")"
+          # `npm pack` does NOT apply the publishConfig.exports override (it ships
+          # the raw dev `exports`, pointing at src/*.ts that isn't even in the
+          # tarball) — only `pnpm pack`/`pnpm publish` perform that swap. Packing
+          # with npm here would make every subpath "fail" every time.
+          # pnpm pack's last stdout line is the full tarball path (unlike npm
+          # pack, which prints just the filename) when --pack-destination is
+          # absolute, as it is here.
+          TARBALL_PATH="$(cd "$PKG_DIR" && pnpm pack --pack-destination "$PACK_DIR" | tail -1)"
+          test -f "$TARBALL_PATH"
+          (cd "$SCRATCH_DIR" && npm init -y >/dev/null && npm install "$TARBALL_PATH")
+
+          node -e "
+            const pkg = require('./$PKG_DIR/package.json');
+            for (const key of Object.keys((pkg.publishConfig || {}).exports || {})) console.log(key);
+          " > "$PACK_DIR/subpaths.txt"
+
+          FAILED=0
+          while IFS= read -r SUBPATH; do
+            [ -z "$SUBPATH" ] && continue
+            if [ "$SUBPATH" = "." ]; then SPEC="$PKG_NAME"; else SPEC="$PKG_NAME/${SUBPATH#./}"; fi
+            # Run under bun (already installed above), not node: some subpaths
+            # (e.g. the CLI) are Bun-only by design (bun:sqlite/bun:ffi natives)
+            # and are meant to run via `bunx`, not plain node. Only a rejected
+            # import() — a genuinely missing/broken export — counts as a
+            # failure; a bounded timeout guards CLI/adapter entry points that
+            # legitimately block on stdio/sockets once they've already resolved.
+            # `|| true`: a subpath that resolves fine can still exit nonzero
+            # afterward (e.g. the CLI's own Commander instance exits 1 on no
+            # args, or a stdio adapter blocks until the timeout kills it) —
+            # only the IMPORT_FAILED marker below means the import itself
+            # failed. Without `|| true`, set -e would abort this whole step
+            # on that expected nonzero exit before the grep check ever runs.
+            OUTPUT="$(cd "$SCRATCH_DIR" && timeout 20 bun -e "import('$SPEC').catch((e) => { console.error('IMPORT_FAILED: ' + (e && e.code || e && e.message || e)); process.exitCode = 1 })" 2>&1 || true)"
+            if echo "$OUTPUT" | grep -q "IMPORT_FAILED"; then
+              echo "-- import FAILED: $SPEC"
+              echo "$OUTPUT"
+              FAILED=1
+            else
+              echo "-- import OK: $SPEC"
+            fi
+          done < "$PACK_DIR/subpaths.txt"
+          [ "$FAILED" -eq 0 ] || { echo "One or more publishConfig.exports subpaths failed to import from the packed tarball"; exit 1; }
+
           cd "$PKG_DIR" && pnpm publish --access public --no-git-checks
