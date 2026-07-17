@@ -226,14 +226,21 @@ function flock(fd: number, operation: number): number {
 }
 
 function loadFlock(): Flock {
-  const path = process.platform === "darwin" ? "libc.dylib" : `libc.${suffix}`
-  try {
-    return dlopen(path, {
-      flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
-    }).symbols as unknown as Flock
-  } catch (cause) {
-    throw new Error(`tribe: failed to load POSIX flock from ${path}`, { cause })
+  // glibc ships no loadable bare "libc.so" (that name is a linker script, and
+  // absent entirely on typical CI runners) — the runtime soname is libc.so.6.
+  // Keep the unversioned name as a fallback for musl.
+  const candidates = process.platform === "darwin" ? ["libc.dylib"] : ["libc.so.6", `libc.${suffix}`]
+  let firstCause: unknown
+  for (const path of candidates) {
+    try {
+      return dlopen(path, {
+        flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+      }).symbols as unknown as Flock
+    } catch (cause) {
+      firstCause ??= cause
+    }
   }
+  throw new Error(`tribe: failed to load POSIX flock from ${candidates.join(", ")}`, { cause: firstCause })
 }
 
 /**
