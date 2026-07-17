@@ -8,14 +8,21 @@
  *   bun tribe-daemon.ts --quit-timeout 0   # Quit immediately when last client disconnects
  *   bun tribe-daemon.ts --fd 3             # Inherit socket fd (for hot-reload re-exec)
  *
+ * Setup automation (dispatch-and-exit, never boots the daemon pipe below):
+ *   bun tribe-daemon.ts install [--dry-run] [--autostart daemon|library|never]
+ *   bun tribe-daemon.ts uninstall [--dry-run]
+ *   bun tribe-daemon.ts doctor              # is the Claude Code integration wired up?
+ *
  * The boot sequence reads top-down through the pipe(...) call below — that IS
  * the architecture. Each `withX` factory adds one capability to the daemon
  * value; cleanup registers on the root scope. See hub/composition.md for the
  * full strategy.
  */
 
+import { parseArgs } from "node:util"
 import { createLogger } from "loggily"
 import { pipe, withTool, withTools, createScope, formatRuntimeId } from "tribe-wire"
+import type { TribeAutostart } from "./lib/autostart-config.ts"
 import { gitPlugin } from "./lib/git-plugin.ts"
 import { beadsPlugin } from "./lib/beads-plugin.ts"
 import { githubPlugin } from "./lib/github-plugin.ts"
@@ -64,6 +71,76 @@ if (process.argv[2] === "hook") {
   const { dispatchHook } = await import("./lib/hook-dispatch.ts")
   await dispatchHook(event)
   process.exit(0)
+}
+
+// ---------------------------------------------------------------------------
+// `daemon.ts install|uninstall|doctor` — Claude Code setup automation. Wires
+// the hooks `daemon.ts hook <event>` command into `~/.claude/settings.json`,
+// the `tribe` MCP server into the project's `.mcp.json`, and the autostart
+// mode file — see lib/install.ts for the plan/apply/doctor split (pure plan,
+// then a separate write step so `--dry-run` is trivial). Same shape as the
+// `hook` block above: dispatch and exit before the daemon pipe boots.
+//
+// This is a distinct diagnostic from `tribe-wire doctor` (which checks
+// whether a RUNNING daemon's code is stale vs on-disk/pin). `doctor` here
+// checks whether the Claude Code integration (hooks, MCP entry, autostart
+// config) is wired up correctly — a different question, answered by
+// lib/install.ts's doctorReport, that nothing else in this repo answers.
+// ---------------------------------------------------------------------------
+
+if (process.argv[2] === "install" || process.argv[2] === "uninstall" || process.argv[2] === "doctor") {
+  const sub = process.argv[2]
+  const { values: installArgs } = parseArgs({
+    args: process.argv.slice(3),
+    options: {
+      "dry-run": { type: "boolean", default: false },
+      autostart: { type: "string" },
+    },
+    strict: false,
+  })
+
+  const {
+    defaultInstallEnv,
+    planInstall,
+    applyInstall,
+    formatInstallPlan,
+    planUninstall,
+    applyUninstall,
+    formatUninstallPlan,
+    doctorReport,
+    formatDoctorReport,
+  } = await import("./lib/install.ts")
+  const { VALID_AUTOSTART_MODES } = await import("./lib/autostart-config.ts")
+
+  const env = defaultInstallEnv()
+  const dryRun = Boolean(installArgs["dry-run"])
+
+  if (sub === "install") {
+    const autostartRaw = installArgs.autostart as string | undefined
+    if (autostartRaw !== undefined && !VALID_AUTOSTART_MODES.includes(autostartRaw as TribeAutostart)) {
+      process.stderr.write(
+        `tribe-daemon install: --autostart must be one of ${VALID_AUTOSTART_MODES.join("|")}, got "${autostartRaw}"\n`,
+      )
+      process.exit(2)
+    }
+    const plan = planInstall(env, { autostart: autostartRaw as TribeAutostart | undefined })
+    console.log(formatInstallPlan(plan, dryRun))
+    if (!dryRun) applyInstall(plan)
+    process.exit(0)
+  }
+
+  if (sub === "uninstall") {
+    const plan = planUninstall(env)
+    console.log(formatUninstallPlan(plan, dryRun))
+    if (!dryRun) applyUninstall(plan)
+    process.exit(0)
+  }
+
+  // doctor — read-only, exits non-zero when any check fails (loud by design;
+  // scriptable in CI/health checks without parsing stdout).
+  const report = await doctorReport(env)
+  console.log(formatDoctorReport(report))
+  process.exit(report.hasFailures ? 1 : 0)
 }
 
 const log = createLogger("tribe:daemon")

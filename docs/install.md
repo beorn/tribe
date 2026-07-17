@@ -160,7 +160,7 @@ SHA comparison). `doctor --fix` prints the manual remedy (update the pin,
 kill the stale pid, let autostart respawn) — it does not restart anything
 for you.
 
-## Autostart config — currently hand-edited
+## Autostart config — `tribe-daemon install` / `uninstall` / `doctor`
 
 There is a documented autostart config file,
 `~/.claude/tribe/config.json`, read by `resolveAutostart()`:
@@ -174,11 +174,25 @@ There is a documented autostart config file,
 - `"library"` — never spawn; equivalent to setting `TRIBE_NO_DAEMON=1`.
 - `"never"` — skip the daemon entirely, even if one is running.
 
-**There is currently no CLI command that writes this file.** The
-plan/apply/doctor logic for it (`planInstall` / `applyInstall` /
-`doctorReport` in `packages/daemon/src/lib/install.ts`) is fully implemented
-and unit-tested, but nothing in this repo's shipped binaries (`tribe-wire`,
-`tribe-daemon`) calls it — it's reachable only by importing the module
-directly (as its own test file does). If you need `"library"` or `"never"`
-mode, hand-write the JSON file above; `TRIBE_NO_DAEMON=1` is the reliable
-env-var equivalent for a single process.
+The `tribe-daemon` binary (`packages/daemon/src/daemon.ts`) wires the
+plan/apply/doctor logic in `packages/daemon/src/lib/install.ts` into three
+subcommands — dispatch-and-exit, same shape as `daemon.ts hook <event>`,
+never boots the daemon pipe:
+
+```bash
+bun packages/daemon/src/daemon.ts install --dry-run   # preview hooks/mcp/autostart changes
+bun packages/daemon/src/daemon.ts install              # write them
+bun packages/daemon/src/daemon.ts install --autostart library
+bun packages/daemon/src/daemon.ts uninstall [--dry-run]
+bun packages/daemon/src/daemon.ts doctor               # is the integration wired up?
+```
+
+`install` writes the four Claude Code hooks into `~/.claude/settings.json`,
+adds the `tribe` MCP server to `.mcp.json` in `cwd` (skipped if no
+`.mcp.json` exists there), and writes the autostart mode above. `doctor`
+here is a different check from `tribe-wire doctor` — this one verifies the
+Claude Code _integration_ (hooks present and pointing at a real file, MCP
+entry present, autostart mode readable), not whether a running daemon's code
+is stale. If you'd still rather hand-write the JSON file, that keeps
+working; `TRIBE_NO_DAEMON=1` remains the reliable env-var equivalent for a
+single process.
