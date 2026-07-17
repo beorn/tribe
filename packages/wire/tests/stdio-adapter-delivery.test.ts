@@ -424,6 +424,31 @@ describe("stdio adapter delivery modes", () => {
     expect(register?.params).toMatchObject({ name: "@fleet", delivery: "push", filterMode: "focus" })
   })
 
+  it("fails loudly on an invalid launch notification filter", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@fleet"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_FILTER_MODE: "everything",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stderr = new Promise<string>((resolveStderr) => {
+      let output = ""
+      child!.stderr.on("data", (chunk: Buffer | string) => {
+        output += chunk.toString()
+      })
+      child!.stderr.on("close", () => resolveStderr(output))
+    })
+
+    const [exit, errorText] = await Promise.all([waitForExit(child), stderr])
+    expect(exit.code).not.toBe(0)
+    expect(errorText).toContain('Invalid TRIBE_FILTER_MODE="everything"; expected focus|normal|ambient')
+  })
+
   it("21049: explicit persona registration carries launch identity with takeover", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath)

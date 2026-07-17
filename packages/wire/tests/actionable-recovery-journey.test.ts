@@ -35,6 +35,7 @@ import { once } from "node:events"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createStatements, openDatabase } from "../../daemon/src/lib/database.ts"
 import { connectToDaemon, type DaemonClient } from "../src/client.ts"
+import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ADAPTER = resolve(HERE, "../src/stdio-adapter.ts")
@@ -190,6 +191,23 @@ function toolResult(lines: Record<string, unknown>[], id: number): unknown {
     return JSON.parse(text)
   } catch {
     throw new Error(text)
+  }
+}
+
+function sessionDeliveryOffsets(
+  dbPath: string,
+  name: string,
+): { last_delivered_seq: number; last_inbox_pull_seq: number } {
+  const db = openDatabase(dbPath)
+  try {
+    const row = db.prepare("SELECT last_delivered_seq, last_inbox_pull_seq FROM sessions WHERE name = ?").get(name) as {
+      last_delivered_seq: number
+      last_inbox_pull_seq: number
+    } | null
+    if (!row) throw new Error(`session ${name} not found in ${dbPath}`)
+    return row
+  } finally {
+    db.close()
   }
 }
 
@@ -408,38 +426,62 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       filterMode: "focus",
     })
     await callLaunchTool(fleet, 2, "members", {})
+    const beforeAmbient = sessionDeliveryOffsets(dbPath, "@fleet")
 
-    const senderEnv = {
-      ...process.env,
-      TRIBE_SOCKET: socketPath,
-      TRIBE_NAME: "@chief",
-      TRIBE_SESSION_NAME: "@chief",
-      TRIBE_LAUNCH_ID: "",
-      TRIBE_NO_AUTOSTART: "1",
+    const sender = await connectToDaemon(socketPath)
+    try {
+      await sender.call("register", {
+        name: "@chief",
+        role: "member",
+        domains: ["test"],
+        project: tmpDir,
+        projectName: "test",
+        protocolVersion: TRIBE_PROTOCOL_VERSION,
+        pid: process.pid,
+        delivery: "pull",
+      })
+
+      const ambientCases = [
+        { type: "notify", content: "notification-only diet row" },
+        { type: "github:push", content: "github ambient diet row" },
+      ]
+      for (const ambientCase of ambientCases) {
+        await sender.call("tribe.send", {
+          to: "@fleet",
+          message: ambientCase.content,
+          type: ambientCase.type,
+          summary: ambientCase.content,
+        })
+      }
+      const afterAmbient = sessionDeliveryOffsets(dbPath, "@fleet")
+      expect(afterAmbient).toEqual(beforeAmbient)
+      for (const ambientCase of ambientCases) {
+        expect(
+          channelNotifications(fleet.stdout).some((line) => JSON.stringify(line).includes(ambientCase.content)),
+        ).toBe(false)
+      }
+
+      writeJson(fleet.child, callToolPayload(3, "fetch", {}))
+      await waitForCondition(() => fleet.stdout.some((line) => line.id === 3), "fleet fetch response")
+      const fetched = toolResult(fleet.stdout, 3) as { events?: Array<{ content?: string }> }
+      for (const ambientCase of ambientCases) {
+        expect(fetched.events?.some((event) => event.content === ambientCase.content)).toBe(true)
+      }
+
+      for (const type of ["request", "query", "assign", "verdict"]) {
+        const content = `${type} actionable diet row`
+        await sender.call("tribe.send", { to: "@fleet", message: content, type, summary: content })
+        await waitForCondition(
+          () => channelNotifications(fleet.stdout).some((line) => JSON.stringify(line).includes(content)),
+          `${type} fleet wake`,
+        )
+      }
+      expect(sessionDeliveryOffsets(dbPath, "@fleet").last_delivered_seq).toBeGreaterThan(
+        afterAmbient.last_delivered_seq,
+      )
+    } finally {
+      sender.close()
     }
-    const ambient = await runCli(
-      ["send", "@fleet", "ambient diet row", "--type", "notify", "--summary", "ambient diet row"],
-      senderEnv,
-    )
-    expect(ambient.exitCode, ambient.stderr).toBe(0)
-
-    writeJson(fleet.child, callToolPayload(3, "fetch", {}))
-    await waitForCondition(() => fleet.stdout.some((line) => line.id === 3), "fleet fetch response")
-    const fetched = toolResult(fleet.stdout, 3) as { events?: Array<{ content?: string }> }
-    expect(fetched.events?.some((event) => event.content === "ambient diet row")).toBe(true)
-    expect(channelNotifications(fleet.stdout).some((line) => JSON.stringify(line).includes("ambient diet row"))).toBe(
-      false,
-    )
-
-    const actionable = await runCli(
-      ["send", "@fleet", "actionable diet row", "--type", "request", "--summary", "actionable diet row"],
-      senderEnv,
-    )
-    expect(actionable.exitCode, actionable.stderr).toBe(0)
-    await waitForCondition(
-      () => channelNotifications(fleet.stdout).some((line) => JSON.stringify(line).includes("actionable diet row")),
-      "actionable fleet wake",
-    )
   }, 30_000)
 
   it("preserves inherited operator authority through adapter autostart and daemon hot reload", async () => {

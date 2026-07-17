@@ -86,10 +86,10 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
       filterMode: "focus",
     })
 
-    expect(harness.sessionFilter("@fleet")).toBe("focus")
+    expect(harness.sessionFilter("@fleet")).toEqual({ mode: "focus", until: null, mute: null })
   })
 
-  it("applies a launch-declared notification filter when another transport fans in", async () => {
+  it("preserves or overrides the stored notification filter when another transport fans in", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
     harness.addPendingClient("conn-fleet-primary")
@@ -103,7 +103,12 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
         launchParentPid: process.pid,
       }),
     )
-    expect(harness.sessionFilter("@fleet")).toBe("normal")
+    const staleFilter = {
+      mode: "focus",
+      until: Date.now() + 60_000,
+      mute: JSON.stringify(["github:*"]),
+    }
+    harness.setSessionFilter("@fleet", staleFilter)
 
     harness.addPendingClient("conn-fleet-secondary")
     const secondary = parseResult<RegisterResult>(
@@ -113,12 +118,40 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
         project: "/tmp/km",
         launchId: "fleet-filter-launch",
         launchParentPid: process.pid,
-        filterMode: "focus",
       }),
     )
 
     expect(secondary.sessionId).toBe(primary.sessionId)
-    expect(harness.sessionFilter("@fleet")).toBe("focus")
+    expect(harness.sessionFilter("@fleet")).toEqual(staleFilter)
+
+    harness.addPendingClient("conn-fleet-override")
+    const overridden = parseResult<RegisterResult>(
+      await harness.register("conn-fleet-override", {
+        name: "@fleet",
+        pid: otherLivePid,
+        project: "/tmp/km",
+        launchId: "fleet-filter-launch",
+        launchParentPid: process.pid,
+        filterMode: "normal",
+      }),
+    )
+
+    expect(overridden.sessionId).toBe(primary.sessionId)
+    expect(harness.sessionFilter("@fleet")).toEqual({ mode: "normal", until: null, mute: null })
+
+    harness.addPendingClient("conn-fleet-invalid")
+    const invalid = parseError(
+      await harness.register("conn-fleet-invalid", {
+        name: "@fleet",
+        pid: otherLivePid,
+        project: "/tmp/km",
+        launchId: "fleet-filter-launch",
+        launchParentPid: process.pid,
+        filterMode: "everything",
+      }),
+    )
+    expect(invalid).toMatchObject({ code: -32602, message: expect.stringContaining("focus|normal|ambient") })
+    expect(harness.sessionFilter("@fleet")).toEqual({ mode: "normal", until: null, mute: null })
   })
 
   it("lets the same live PID re-register an explicit agent name", async () => {
@@ -815,11 +848,16 @@ function createDispatcherHarness(
       const row = db.prepare("SELECT COUNT(*) AS count FROM sessions WHERE name = ?").get(name) as { count: number }
       return row.count
     },
-    sessionFilter(name: string): string | undefined {
-      const row = db.prepare("SELECT filter_mode FROM sessions WHERE name = ?").get(name) as {
-        filter_mode: string
-      } | null
-      return row?.filter_mode
+    sessionFilter(name: string): { mode: string; until: number | null; mute: string | null } | undefined {
+      const row = db
+        .prepare("SELECT filter_mode, filter_until, filter_mute FROM sessions WHERE name = ?")
+        .get(name) as { filter_mode: string; filter_until: number | null; filter_mute: string | null } | null
+      return row ? { mode: row.filter_mode, until: row.filter_until, mute: row.filter_mute } : undefined
+    },
+    setSessionFilter(name: string, filter: { mode: string; until: number | null; mute: string | null }): void {
+      db.prepare(
+        "UPDATE sessions SET filter_mode = $mode, filter_until = $until, filter_mute = $mute WHERE name = $name",
+      ).run({ $name: name, $mode: filter.mode, $until: filter.until, $mute: filter.mute })
     },
     sessionJoinEvents(name: string): Array<{ name: string }> {
       const rows = db

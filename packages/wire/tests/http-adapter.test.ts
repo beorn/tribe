@@ -50,6 +50,27 @@ async function waitForRegistrationCount(daemon: FakeDaemon, count: number): Prom
 }
 
 describe("HTTP MCP adapter", () => {
+  it("declares the launch notification filter during registration", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "tribe-http-adapter-filter-"))
+    const socketPath = join(tempDir, "tribe.sock")
+    const daemon = await spawnFakeDaemon(socketPath)
+    const previousFilterMode = process.env.TRIBE_FILTER_MODE
+    let bridge: TribeHttpMcpServer | undefined
+    try {
+      process.env.TRIBE_FILTER_MODE = "focus"
+      bridge = await startTribeHttpMcpServer({ socketPath })
+      const register = daemon.requests.find((request) => request.method === "register")
+      expect(register?.params).toMatchObject({ filterMode: "focus" })
+    } finally {
+      if (previousFilterMode === undefined) delete process.env.TRIBE_FILTER_MODE
+      else process.env.TRIBE_FILTER_MODE = previousFilterMode
+      bridge?.close()
+      for (const client of daemon.clients) client.destroy()
+      await new Promise<void>((resolve) => daemon.server.close(() => resolve()))
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it("registers the launcher identity used to join its roster row", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "tribe-http-adapter-"))
     const socketPath = join(tempDir, "tribe.sock")
