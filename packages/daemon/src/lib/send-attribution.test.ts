@@ -1,11 +1,11 @@
 /**
- * @failure @km/tribe/20988-send-identity
+ * @failure @km/tribe/20988-send-identity, @pm/infra/20925-ci-pending-ball-triage
  * @level unit
  * @consumer tribe CLI one-shot peer sends
  *
  * One-shot `tribe send` calls connect through the daemon context, but their
- * authored message must retain the caller identity from TRIBE_NAME /
- * TRIBE_SESSION_NAME. Daemon-origin journal rows remain ambient.
+ * authored message must retain both the caller identity and the explicit
+ * per-message delivery class. Daemon-origin journal rows remain ambient.
  */
 
 import type { Database } from "bun:sqlite"
@@ -55,7 +55,7 @@ function parseToolJson(result: ReturnType<typeof handleToolCall>): Record<string
   return JSON.parse(text) as Record<string, unknown>
 }
 
-describe("tribe.send attribution", () => {
+describe("tribe.send attribution and delivery", () => {
   let tmpDir: string
   let db: Database
   let stmts: TribeStatements
@@ -157,5 +157,54 @@ describe("tribe.send attribution", () => {
     expect(res.sent).toBe(true)
     const row = db.prepare("SELECT sender FROM messages WHERE id = ?").get(res.id as string) as { sender: string }
     expect(row.sender).toBe("@agent/8")
+  })
+
+  it.each([
+    { route: "single", to: "@ci", recipients: ["@ci"] },
+    { route: "multi", to: ["@ci", "@cto"], recipients: ["@ci", "@cto"] },
+  ])("persists an explicit pull classification for $route recipients without opening a ball", ({ to, recipients }) => {
+    const inserted: MessageInsertedInfo[] = []
+    const daemon = makeContext(db, stmts, "daemon", "sess-daemon", "daemon", (info) => inserted.push(info))
+
+    const res = parseToolJson(
+      handleToolCall(
+        daemon,
+        "tribe.send",
+        {
+          to,
+          message: "R656 failed; evidence is in the journal",
+          type: "notify",
+          delivery: "pull",
+          sender: "yrd",
+        },
+        makeOpts(),
+      ),
+    )
+
+    expect(res.sent).toBe(true)
+    const rows = db
+      .prepare("SELECT recipient, delivery, request FROM messages WHERE kind = 'direct' ORDER BY recipient")
+      .all()
+    expect(rows).toEqual(recipients.map((recipient) => ({ recipient, delivery: "pull", request: null })))
+    expect(inserted.filter((info) => info.kind === "direct")).toEqual(
+      recipients.map((recipient) => expect.objectContaining({ recipient, delivery: "pull" })),
+    )
+    expect(db.prepare("SELECT COUNT(*) AS count FROM pending_request").get()).toEqual({ count: 0 })
+  })
+
+  it("rejects an invalid per-message delivery classification instead of silently pushing", () => {
+    const daemon = makeContext(db, stmts, "daemon", "sess-daemon", "daemon")
+
+    const res = parseToolJson(
+      handleToolCall(
+        daemon,
+        "tribe.send",
+        { to: "@ci", message: "evidence", type: "notify", delivery: "later", sender: "yrd" },
+        makeOpts(),
+      ),
+    )
+
+    expect(res.error).toMatch(/delivery.*push.*pull/i)
+    expect(db.prepare("SELECT COUNT(*) AS count FROM messages").get()).toEqual({ count: 0 })
   })
 })
