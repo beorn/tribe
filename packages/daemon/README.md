@@ -25,8 +25,8 @@ actionable to callers. Lifecycle details: [docs/daemon.md](../../docs/daemon.md)
 ## Boundary
 
 This package is reusable infrastructure. It should not encode project-specific
-workflow concepts such as `@chief`, `@agent/N`, bead queues, worktree slots, or
-integration authority.
+workflow concepts such as coordinator roles, worker numbering, task queues,
+branch assignments, or merge authority.
 
 ## Pending-ball deadline facts
 

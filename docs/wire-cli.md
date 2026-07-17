@@ -71,7 +71,7 @@ whose sender-declared deadline passed (read-only; not combinable with
 reply — requires `--owner`. Example:
 
 ```bash
-tribe-wire pending --owner @chief --stale 15m
+tribe-wire pending --owner @alice --stale 15m
 ```
 
 ### `log`
@@ -91,7 +91,7 @@ other and with `--all` (a follow is a live stream, not a bounded snapshot).
 tribe-wire health
 ```
 
-Diagnostics: issues list (silent members, stale beads, etc.), a live
+Diagnostics: issues list (silent members, stale issue entries, etc.), a live
 roster table (from the dispatcher's in-memory client map, not the DB), and
 daemon pid/uptime/clients. No options.
 
@@ -204,7 +204,7 @@ request/query/assign auto-track already; this overrides the id or opts in a
 on a multi-target send instead of the default first-reply-wins.
 
 ```bash
-tribe-wire send '@chief' 'task X done' --type=notify
+tribe-wire send '@alice' 'task X done' --type=notify
 tribe-wire send '@ci' 'R656 failed; see journal evidence' --type=notify --delivery=pull
 ```
 

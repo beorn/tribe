@@ -15,10 +15,11 @@ job; LLM features are opt-in and degrade loudly when unconfigured.
 
 > **Scope.** This repo is _reusable infrastructure only_: wire protocol,
 > broker daemon, recall engine, prompt-injection defense, and host plugins.
-> Project workflow conventions — `@chief`, `@agent/N`, bead queues, worktree
-> slots, integration authority — are **not** part of Tribe. They belong to a
-> "tent/SOP" layer in the consuming project. Tribe transports messages and
-> indexes history; it does not decide who is allowed to make a decision.
+> Team workflow policy — named coordinator roles, worker numbering schemes,
+> task queues, branch assignments, merge authority — is **not** part of Tribe.
+> Those conventions belong to the consuming project's own workflow layer.
+> Tribe transports messages and indexes history; it does not decide who is
+> allowed to make a decision.
 
 ---
 
@@ -220,14 +221,14 @@ package below.
 
 ## Components
 
-| Component          | Package                    | Binary         | npm           | Owns                                                                                                                                                                                      |
-| ------------------ | -------------------------- | -------------- | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Wire client        | `tribe-wire`               | `tribe-wire`   | ✅ published  | Unix-socket JSON-RPC client, reconnecting transport, MCP stdio + HTTP adapters, protocol CLI                                                                                              |
-| Daemon             | `tribe-daemon`             | `tribe-daemon` | ships in repo | Broker process: Unix socket server, SQLite state, session registry, message journal, delivery modes, pending-ball tracker, health cadence, daemon plugins (git / github / health / beads) |
-| Recall engine      | `tribe-recall`             | recall CLI     | ships in repo | FTS5 session-history search, LLM planner/agent, file recovery, summaries, hook handlers                                                                                                   |
-| Background recall  | `tribe-bg-recall`          | `bg-recall`    | ships in repo | Non-blocking just-in-time recall: watches tool calls, runs entity-driven queries, injects high-relevance hints through the tribe channel                                                  |
-| Injection envelope | `tribe-injection-envelope` | n/a            | ships in repo | Prompt-injection defense: envelope framing, imperative-mood rewrite, sanitizer, turn-manifest authority gate                                                                              |
-| Claude Code plugin | `plugins/claude`           | n/a            | marketplace   | `tribe@tribe`: MCP registration + host-managed daemon lifecycle                                                                                                                           |
+| Component          | Package                    | Binary         | npm           | Owns                                                                                                                                                                                                               |
+| ------------------ | -------------------------- | -------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Wire client        | `tribe-wire`               | `tribe-wire`   | ✅ published  | Unix-socket JSON-RPC client, reconnecting transport, MCP stdio + HTTP adapters, protocol CLI                                                                                                                       |
+| Daemon             | `tribe-daemon`             | `tribe-daemon` | ships in repo | Broker process: Unix socket server, SQLite state, session registry, message journal, delivery modes, pending-ball tracker, health cadence, daemon plugins (git / github / health / `beads` issue-tracker observer) |
+| Recall engine      | `tribe-recall`             | recall CLI     | ships in repo | FTS5 session-history search, LLM planner/agent, file recovery, summaries, hook handlers                                                                                                                            |
+| Background recall  | `tribe-bg-recall`          | `bg-recall`    | ships in repo | Non-blocking just-in-time recall: watches tool calls, runs entity-driven queries, injects high-relevance hints through the tribe channel                                                                           |
+| Injection envelope | `tribe-injection-envelope` | n/a            | ships in repo | Prompt-injection defense: envelope framing, imperative-mood rewrite, sanitizer, turn-manifest authority gate                                                                                                       |
+| Claude Code plugin | `plugins/claude`           | n/a            | marketplace   | `tribe@tribe`: MCP registration + host-managed daemon lifecycle                                                                                                                                                    |
 
 Only `tribe-wire` is published to npm — a standalone client should not have to
 pull in the daemon, recall wiring, or host hooks just to talk to a tribe. The
@@ -249,7 +250,7 @@ tribe-wire  ──────────────►  MCP stdio adapter  (`
 tribe-daemon  ── broker ──►  SQLite state · session registry · message journal
    │                          pending-ball tracker · delivery modes · health cadence
    │
-   ├── daemon plugins  (git, github, health-monitor, beads event emitters)
+   ├── daemon plugins  (git, github, health-monitor, issue-tracker event emitters)
    └── recall RPC surface  ──►  tribe-recall engine (FTS5 + optional LLM)
 ```
 
@@ -365,7 +366,16 @@ bun run fmt:check   # oxfmt --check
 ## Documentation
 
 - [docs/architecture.md](docs/architecture.md) — the three reusable layers, the
-  tent-workflow non-goal, and the dependency rule.
+  workflow-policy non-goal, and the dependency rule.
+- [docs/install.md](docs/install.md) — both install paths in detail, plus
+  verifying the daemon.
+- [docs/loops.md](docs/loops.md) — keeping sessions responsive: message loops
+  for Claude Code (push) and Codex / MCP-only hosts (pull).
+- [docs/recall.md](docs/recall.md) — recall's CLI, index, hooks, and the
+  injection-envelope defense.
+- [docs/wire-cli.md](docs/wire-cli.md) — full `tribe-wire` verb reference.
+- [docs/daemon.md](docs/daemon.md) — daemon lifecycle: autostart, election,
+  hot-reload, troubleshooting.
 - [packages/wire/README.md](packages/wire/README.md) — the full `tribe-wire` CLI
   verb reference and library exports.
 - [packages/recall/README.md](packages/recall/README.md) — recall modes, index

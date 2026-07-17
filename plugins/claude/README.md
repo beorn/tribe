@@ -22,7 +22,7 @@ summarizer).
 | Daemon        | `tribe-daemon`   | Broker process, SQLite state, sessions, message journal, daemon plugins |
 | Claude plugin | `plugins/claude` | Claude Code MCP registration and daemon-script wiring                   |
 
-Project workflow conventions such as `@chief`, `@agent/N`, beads, worktrees,
+Project workflow conventions such as coordinator roles, worker numbering, task queues, branch assignments,
 and integration authority are outside this package. Those belong to the
 consumer's tent/SOP layer.
 

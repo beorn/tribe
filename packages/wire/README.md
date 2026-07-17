@@ -36,10 +36,10 @@ to participate in a tribe without bundling the daemon itself.
 ```bash
 tribe-wire --help                                 # full Commander help + addHelpText MCP-adapter hint
 tribe-wire status                                 # active sessions with uptime + last-seen
-tribe-wire send '@chief' 'task X done' --type=notify
+tribe-wire send '@alice' 'task X done' --type=notify
 tribe-wire send '@ci' 'R656 failed; see journal evidence' --type=notify --delivery=pull
 tribe-wire retro --since 2h --format markdown
-tribe-wire mcp --name '@agent/3' --role member    # argv-forwarded; what .mcp.json invokes
+tribe-wire mcp --name '@bob' --role member    # argv-forwarded; what .mcp.json invokes
 ```
 
 `send --delivery push|pull` classifies one message independently of the
@@ -69,7 +69,7 @@ The protocol verbs above are sufficient for any external agent that wants to
 participate in a tribe; daemon lifecycle, install, and hook integration move
 to daemon/plugin surfaces.
 
-See [`@km/bearly/19231-tribe-cli-unify-phase-a2-verbs`](https://github.com/beorn/km/blob/main/%40km/bearly/19231-tribe-cli-unify-phase-a2-verbs.md) for the architectural decision (chief verdict 2026-05-26 — "Q3 approved").
+The read/send/descriptor verb split follows an internal May 2026 CLI-unification decision; `command-descriptors.ts` keeps the CLI and MCP tool list in lockstep.
 
 ## License
 

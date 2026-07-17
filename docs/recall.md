@@ -13,7 +13,7 @@ adopters most often miss).
 Session transcripts (Claude Code JSONL) are scanned and written into a
 SQLite FTS5 database — messages, tool calls, and file contents are all
 searchable. `recall index --project-root <path>` additionally indexes
-project sources (beads, docs, memory) when a project root is given; without
+project sources (issue notes, docs, memory) when a project root is given; without
 it, indexing is transcript-only.
 
 ## The CLI — explicit, on-demand search

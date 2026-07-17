@@ -42,12 +42,12 @@ Broadcast this message to all members:
 Sync check: report your current status.
 
 1. Your session name (/rename) and Claude session ID (echo $CLAUDE_SESSION_ID)
-2. What you're working on — beads/tasks created, updated, closed this session
+2. What you're working on — tasks/issues created, updated, closed this session
 3. BLOCKERS: anything you're blocked on, what's blocking, and what would unblock
 4. NEEDS: anything another member could help with (review, info, shared resources)
 5. INFRASTRUCTURE: active worktrees, in-flight refactors, running test suites, unpublished packages, or shared config changes
 
-Reply to chief with your summary.
+Reply to the requesting coordinator with your summary.
 ```
 
 After responses come in:
@@ -63,7 +63,7 @@ After responses come in:
 Broadcast this message:
 
 ```
-Roll call: please report your current session name (/rename), what you're working on, and your status (idle/busy/blocked). Reply with tribe.send to chief.
+Roll call: please report your current session name (/rename), what you're working on, and your status (idle/busy/blocked). Reply with tribe.send to the coordinator who asked.
 ```
 
 Collect responses and present as a table.
