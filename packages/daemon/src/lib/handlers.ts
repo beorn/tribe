@@ -1258,7 +1258,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
         ]
   const cadence = projectHealthCadence(ctx.db, {
     now,
-    liveSessionNames: liveSessions.map((session) => session.name),
+    connectedSessionNames: liveSessions.map((session) => session.name),
     dbGrowthWarningBytes: parseDbGrowthWarningBytes(process.env.TRIBE_HEALTH_DB_GROWTH_WARN_BYTES),
   })
 

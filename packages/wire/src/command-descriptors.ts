@@ -602,13 +602,13 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           cadence: {
             type: "object",
             description:
-              "Read-only 24h response latency, open-ball, live-session cursor lag, and database growth projection with evidence-bearing threshold warnings.",
+              "Read-only 24h response latency, open-ball, connected-session cursor lag, and database growth projection. Every subprojection carries as_of_ms; inbox lag is explicitly projection-only and excludes pane/turn seat-liveness verdicts.",
             additionalProperties: true,
           },
           issues: {
             type: "array",
             description:
-              "Diagnostic warnings, including stale balls plus response latency, live-session cursor lag, and configured database-growth breaches.",
+              "Diagnostic warnings, including stale balls plus response latency, as-of-stamped connected-session cursor projections, and configured database-growth breaches. Cursor projections never assert seat liveness.",
             items: { type: "string" },
           },
           reconciler: {

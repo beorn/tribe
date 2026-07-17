@@ -7,11 +7,21 @@ const DAY = 24 * HOUR
 const RESPONSE_WARNING_MS = 30 * MINUTE
 const CURSOR_WARNING_MS = 30 * MINUTE
 const CHIEF_ACTIONABLE_RESPONSE_TARGET_MS = MINUTE
+const INBOX_LAG_EVIDENCE = {
+  source: "tribe-mailbox-cursors",
+  scope: "connected-session cursor backlog",
+  excludes: ["pane", "turn", "seat-liveness"],
+  verdict: "projection-only",
+} as const
 
 export type HealthCadenceOptions = {
   now: number
-  liveSessionNames: string[]
+  connectedSessionNames: string[]
   dbGrowthWarningBytes?: number | null
+}
+
+type ProjectionStamp = {
+  as_of_ms: number
 }
 
 type LatencySummary = {
@@ -26,8 +36,8 @@ type ResponseLatencyGroup = LatencySummary & {
   message_type: string
 }
 
-export type HealthCadenceProjection = {
-  chief_actionable_response: {
+export type HealthCadenceProjection = ProjectionStamp & {
+  chief_actionable_response: ProjectionStamp & {
     target_ms: number
     status: "ok" | "breached"
     completed: LatencySummary & {
@@ -40,22 +50,26 @@ export type HealthCadenceProjection = {
       over_target_count: number
     }
   }
-  response_latency: LatencySummary & {
-    window_ms: number
-    by_role_and_type: ResponseLatencyGroup[]
-  }
-  open_balls: {
+  response_latency: ProjectionStamp &
+    LatencySummary & {
+      window_ms: number
+      by_role_and_type: ResponseLatencyGroup[]
+    }
+  open_balls: ProjectionStamp & {
     count: number
     oldest_age_ms: number
   }
-  inbox_lag: Array<{
-    session: string
-    rows: number
-    oldest_age_ms: number
-    actionable_rows: number
-    actionable_oldest_age_ms: number
-  }>
-  database: {
+  inbox_lag: Array<
+    ProjectionStamp & {
+      session: string
+      rows: number
+      oldest_age_ms: number
+      actionable_rows: number
+      actionable_oldest_age_ms: number
+      evidence: typeof INBOX_LAG_EVIDENCE
+    }
+  >
+  database: ProjectionStamp & {
     bytes: number
     message_rows: number
     archive_rows: number
@@ -162,6 +176,7 @@ function responseLatencyProjection(
 
   return {
     summary: {
+      as_of_ms: now,
       window_ms: DAY,
       ...summarizeLatencies(rows.map((row) => row.latency_ms)),
       by_role_and_type: byRoleAndType,
@@ -226,6 +241,7 @@ function chiefActionableResponseProjection(
   }
   return {
     projection: {
+      as_of_ms: now,
       target_ms: CHIEF_ACTIONABLE_RESPONSE_TARGET_MS,
       status: warnings.length === 0 ? "ok" : "breached",
       completed,
@@ -246,6 +262,7 @@ function openBallProjection(db: Database, now: number): HealthCadenceProjection[
     oldest_opened_at: number | null
   }
   return {
+    as_of_ms: now,
     count: row.count,
     oldest_age_ms: ageFrom(now, row.oldest_opened_at),
   }
@@ -254,7 +271,7 @@ function openBallProjection(db: Database, now: number): HealthCadenceProjection[
 function inboxLagProjection(
   db: Database,
   now: number,
-  liveSessionNames: string[],
+  connectedSessionNames: string[],
 ): {
   rows: HealthCadenceProjection["inbox_lag"]
   warnings: string[]
@@ -293,16 +310,18 @@ function inboxLagProjection(
       AND type IN (${ACTIONABLE_TYPES_SQL})
   `)
 
-  const rows = [...new Set(liveSessionNames)].sort().map((session) => {
+  const rows = [...new Set(connectedSessionNames)].sort().map((session) => {
     const cursor = cursorQuery.get({ $session: session }) as { last_inbox_pull_seq: number } | null
     const lag = lagQuery.get({ $cursor: cursor?.last_inbox_pull_seq ?? 0, $session: session }) as LagRow
     const actionableLag = actionableLagQuery.get({ $session: session }) as LagRow
     return {
+      as_of_ms: now,
       session,
       rows: lag.rows,
       oldest_age_ms: ageFrom(now, lag.oldest_ts),
       actionable_rows: actionableLag.rows,
       actionable_oldest_age_ms: ageFrom(now, actionableLag.oldest_ts),
+      evidence: INBOX_LAG_EVIDENCE,
     }
   })
   const warnings = rows
@@ -313,8 +332,10 @@ function inboxLagProjection(
     )
     .map(
       (row) =>
-        `inbox lag ${row.session}: ${row.rows} row(s), oldest ${durationLabel(row.oldest_age_ms)}; ` +
-        `${row.actionable_rows} actionable row(s), oldest ${durationLabel(row.actionable_oldest_age_ms)} exceeds 30m`,
+        `inbox cursor projection ${row.session} as-of ${new Date(row.as_of_ms).toISOString()}: ` +
+        `${row.rows} row(s), oldest ${durationLabel(row.oldest_age_ms)}; ` +
+        `${row.actionable_rows} actionable row(s), oldest ${durationLabel(row.actionable_oldest_age_ms)}; ` +
+        `projection-only, pane/turn liveness excluded (threshold 30m)`,
     )
   return { rows, warnings }
 }
@@ -368,6 +389,7 @@ function databaseProjection(
     estimated_bytes: number
   }
   const projection = {
+    as_of_ms: now,
     bytes: pageCount * pageSize,
     message_rows: counts.message_rows,
     archive_rows: counts.archive_rows,
@@ -397,9 +419,10 @@ export function parseDbGrowthWarningBytes(raw: string | undefined): number | nul
 export function projectHealthCadence(db: Database, options: HealthCadenceOptions): HealthCadenceProjection {
   const responseLatency = responseLatencyProjection(db, options.now)
   const chiefActionableResponse = chiefActionableResponseProjection(db, options.now, responseLatency.chiefCompleted)
-  const inboxLag = inboxLagProjection(db, options.now, options.liveSessionNames)
+  const inboxLag = inboxLagProjection(db, options.now, options.connectedSessionNames)
   const database = databaseProjection(db, options.now, options.dbGrowthWarningBytes ?? null)
   return {
+    as_of_ms: options.now,
     chief_actionable_response: chiefActionableResponse.projection,
     response_latency: responseLatency.summary,
     open_balls: openBallProjection(db, options.now),

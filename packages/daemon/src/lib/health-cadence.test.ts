@@ -173,7 +173,7 @@ describe("20876 Tribe health cadence", () => {
   it("projects deterministic latency, lag, ball, and growth evidence from existing tables", () => {
     const options = {
       now,
-      liveSessionNames: ["@agent/5"],
+      connectedSessionNames: ["@agent/5"],
       dbGrowthWarningBytes: 1,
     }
 
@@ -181,7 +181,9 @@ describe("20876 Tribe health cadence", () => {
     const second = projectHealthCadence(db, options)
 
     expect(JSON.stringify(second)).toBe(JSON.stringify(first))
+    expect(first.as_of_ms).toBe(now)
     expect(first.response_latency).toEqual({
+      as_of_ms: now,
       window_ms: DAY,
       count: 5,
       p50_ms: 10 * MINUTE,
@@ -206,17 +208,25 @@ describe("20876 Tribe health cadence", () => {
         },
       ],
     })
-    expect(first.open_balls).toEqual({ count: 1, oldest_age_ms: 3 * HOUR })
+    expect(first.open_balls).toEqual({ as_of_ms: now, count: 1, oldest_age_ms: 3 * HOUR })
     expect(first.inbox_lag).toEqual([
       {
+        as_of_ms: now,
         session: "@agent/5",
         rows: 6,
         oldest_age_ms: 8 * DAY,
         actionable_rows: 4,
         actionable_oldest_age_ms: 23 * HOUR,
+        evidence: {
+          source: "tribe-mailbox-cursors",
+          scope: "connected-session cursor backlog",
+          excludes: ["pane", "turn", "seat-liveness"],
+          verdict: "projection-only",
+        },
       },
     ])
     expect(first.database).toMatchObject({
+      as_of_ms: now,
       message_rows: 10,
       archive_rows: 1,
       growth_7d: { message_rows: 10, archive_rows: 1 },
@@ -251,9 +261,10 @@ describe("20876 Tribe health cadence", () => {
       $fanout: "first",
     })
 
-    const cadence = projectHealthCadence(db, { now, liveSessionNames: ["@chief", "@agent/5"] })
+    const cadence = projectHealthCadence(db, { now, connectedSessionNames: ["@chief", "@agent/5"] })
 
     expect(cadence.chief_actionable_response).toEqual({
+      as_of_ms: now,
       target_ms: MINUTE,
       status: "breached",
       completed: {
@@ -278,6 +289,33 @@ describe("20876 Tribe health cadence", () => {
     )
   })
 
+  it("age-stamps a stale inbox projection and never turns it into a seat-liveness verdict", () => {
+    const beforeDrain = projectHealthCadence(db, { now, connectedSessionNames: ["@agent/5"] })
+    const oldWarning = beforeDrain.warnings.find((warning) => warning.includes("@agent/5"))
+
+    expect(beforeDrain.inbox_lag[0]).toMatchObject({
+      as_of_ms: now,
+      evidence: {
+        source: "tribe-mailbox-cursors",
+        scope: "connected-session cursor backlog",
+        excludes: ["pane", "turn", "seat-liveness"],
+        verdict: "projection-only",
+      },
+    })
+    expect(oldWarning).toContain(`as-of ${new Date(now).toISOString()}`)
+    expect(oldWarning).toMatch(/projection-only.*pane\/turn liveness excluded/i)
+    expect(oldWarning).not.toMatch(/\b(?:idle|dead|alive)\b/i)
+
+    const afterDrain = projectHealthCadence(db, {
+      now: now + MINUTE,
+      connectedSessionNames: [],
+    })
+
+    expect(afterDrain.as_of_ms).toBe(now + MINUTE)
+    expect(afterDrain.inbox_lag).toEqual([])
+    expect(afterDrain.warnings.join("\n")).not.toContain("@agent/5")
+  })
+
   it("surfaces the cadence projection and evidence-bearing warnings through tribe.health", () => {
     const ctx = createTribeContext({
       db,
@@ -298,17 +336,18 @@ describe("20876 Tribe health cadence", () => {
     }
 
     const health = parseToolResult(handleToolCall(ctx, "tribe.health", {}, opts)) as {
-      cadence?: { response_latency?: { count?: number }; inbox_lag?: Array<{ session?: string }> }
+      cadence?: { as_of_ms?: number; response_latency?: { count?: number }; inbox_lag?: Array<{ session?: string }> }
       issues?: string[]
     }
 
+    expect(health.cadence?.as_of_ms).toBeTypeOf("number")
     expect(health.cadence?.response_latency?.count).toBe(5)
     expect(health.cadence?.inbox_lag).toEqual([expect.objectContaining({ session: "@agent/5" })])
     expect(health.issues).toEqual(
       expect.arrayContaining([
         expect.stringMatching(/1 stale pending ball.*1 owner/i),
         expect.stringMatching(/member.*request.*p95/i),
-        expect.stringMatching(/@agent\/5.*inbox lag|inbox lag.*@agent\/5/i),
+        expect.stringMatching(/inbox cursor projection.*@agent\/5.*as-of.*projection-only.*liveness excluded/i),
       ]),
     )
   })
