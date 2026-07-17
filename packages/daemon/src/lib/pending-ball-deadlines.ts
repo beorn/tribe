@@ -50,9 +50,9 @@ function runClaimedStage<T>(
 ): { claimed: false } | { claimed: true; value: T } {
   return opts.db.transaction(() => {
     if (!claimStage(opts, row, stage)) return { claimed: false as const }
-    // The claim, any ownership mutation, and every durable notification row
-    // are one commit. A thrown delivery leaves the stage retryable after a
-    // restart instead of preserving a claim for work that never completed.
+    // The claim and its durable notification row are one commit. A thrown
+    // delivery leaves the stage retryable after a restart instead of
+    // preserving a claim for work that never completed.
     return { claimed: true as const, value: actuate() }
   })()
 }
@@ -97,12 +97,14 @@ export function processPendingBallDeadlines(opts: PendingBallDeadlineOptions): P
         ? `Pending ball ${row.request_id} still targets dead owner ${row.recipient}. Ownership is retained; ${target} must use LLM judgment before any reassignment or closure.`
         : `Pending ball ${row.request_id} still targets dead owner ${row.recipient}; no escalation target is configured, so ownership is retained.`
       const senderStage = runClaimedStage(opts, row, "owner-dead:sender", () => {
-        opts.send(row.sender, content, "ball:owner-dead")
+        opts.send(row.sender, content, target === row.sender ? "verdict" : "ball:owner-dead")
       })
       if (senderStage.claimed) result.deadOwnerWarnings += 1
       if (target && target !== row.sender) {
         const escalationStage = runClaimedStage(opts, row, `owner-dead:escalation:${target}`, () => {
-          opts.send(target, content, "ball:owner-dead")
+          // `verdict` is wakeable but deliberately excluded from AUTO_TRACK_TYPES:
+          // an LLM judge sees the escalation without manufacturing another ball.
+          opts.send(target, content, "verdict")
         })
         if (escalationStage.claimed) result.deadOwnerWarnings += 1
       }
@@ -118,9 +120,8 @@ export function processPendingBallDeadlines(opts: PendingBallDeadlineOptions): P
         const content = target
           ? `Pending ball ${row.request_id} owned by ${row.recipient} reached its sender-declared deadline. ${actions}`
           : `Pending ball ${row.request_id} reached its sender-declared deadline; no escalation target is configured, so ownership remains with ${row.recipient}. ${actions}`
-        const recipients = new Set([row.sender])
-        if (target) recipients.add(target)
-        for (const recipient of recipients) opts.send(recipient, content, "ball:expired")
+        opts.send(row.sender, content, target === row.sender ? "verdict" : "ball:expired")
+        if (target && target !== row.sender) opts.send(target, content, "verdict")
       })
       if (expiryStage.claimed) result.expired += 1
       continue

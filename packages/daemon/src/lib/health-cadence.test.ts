@@ -380,7 +380,7 @@ describe("20876 Tribe health cadence", () => {
       {
         recipient: "@ops",
         content: expect.stringMatching(/re-ping.*ask.*decide.*mark.*moot/i),
-        type: "ball:expired",
+        type: "verdict",
       },
     ])
     expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'deadline-review'").get()).toEqual({
@@ -548,7 +548,10 @@ describe("20876 Tribe health cadence", () => {
     expect(
       (db.prepare("SELECT COUNT(*) AS count FROM messages WHERE type = 'ball:owner-dead'").get() as { count: number })
         .count,
-    ).toBe(2)
+    ).toBe(1)
+    expect(
+      (db.prepare("SELECT COUNT(*) AS count FROM messages WHERE type = 'verdict'").get() as { count: number }).count,
+    ).toBe(1)
   })
 
   it("lets only one reentrant cadence invocation actuate a deadline stage", () => {
@@ -653,9 +656,9 @@ describe("20876 Tribe health cadence", () => {
 
     expect(sent).toEqual([
       { recipient: "@author", type: "ball:owner-dead" },
-      { recipient: "@ops", type: "ball:owner-dead" },
+      { recipient: "@ops", type: "verdict" },
       { recipient: "@author", type: "ball:expired" },
-      { recipient: "@ops", type: "ball:expired" },
+      { recipient: "@ops", type: "verdict" },
     ])
     expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'dead-and-expired'").get()).toEqual({
       recipient: "@agent/dead-expired",
@@ -699,9 +702,9 @@ describe("20876 Tribe health cadence", () => {
 
     expect(sent).toEqual([
       { recipient: "@author", type: "ball:expired" },
-      { recipient: "@ops", type: "ball:expired" },
+      { recipient: "@ops", type: "verdict" },
       { recipient: "@author", type: "ball:owner-dead" },
-      { recipient: "@ops", type: "ball:owner-dead" },
+      { recipient: "@ops", type: "verdict" },
     ])
   })
 
@@ -732,7 +735,7 @@ describe("20876 Tribe health cadence", () => {
 
     expect(sent).toEqual([
       { recipient: "@author", type: "ball:owner-dead" },
-      { recipient: "@ops", type: "ball:owner-dead" },
+      { recipient: "@ops", type: "verdict" },
     ])
   })
 
@@ -773,11 +776,11 @@ describe("20876 Tribe health cadence", () => {
     tick()
     expect(sent).toEqual([
       { recipient: "@author", type: "ball:owner-dead" },
-      { recipient: "@ops", type: "ball:owner-dead" },
+      { recipient: "@ops", type: "verdict" },
       { recipient: "@author", type: "ball:expired" },
-      { recipient: "@ops", type: "ball:expired" },
+      { recipient: "@ops", type: "verdict" },
       { recipient: "@author", type: "ball:expired" },
-      { recipient: "@ops", type: "ball:expired" },
+      { recipient: "@ops", type: "verdict" },
     ])
     expect(
       db
@@ -797,6 +800,38 @@ describe("20876 Tribe health cadence", () => {
     ).toBe(2)
     tick()
     expect(sent).toHaveLength(6)
+  })
+
+  it("sends one wakeable verdict when the sender is also the configured LLM judge", () => {
+    db.prepare("DELETE FROM pending_request WHERE request_id = 'open-agent-5'").run()
+    db.prepare("UPDATE sessions SET pid = 424242 WHERE name = '@agent/5'").run()
+    stmts.openPendingRequest.run({
+      $request_id: "dead-owner-sender-judge",
+      $recipient: "@agent/5",
+      $sender: "@ops",
+      $opened_at: now,
+      $expires_at: now + 30 * MINUTE,
+      $message_id: "dead-owner-sender-judge-message",
+      $fanout: "first",
+    })
+    const sent: Array<{ recipient: string; type: string }> = []
+
+    processPendingBallDeadlines({
+      db,
+      stmts,
+      now,
+      liveSessionNames: new Set(),
+      escalationTarget: "@ops",
+      isPidAlive: () => false,
+      send: (recipient, _content, type) => sent.push({ recipient, type }),
+    })
+
+    expect(sent).toEqual([{ recipient: "@ops", type: "verdict" }])
+    expect(
+      db.prepare("SELECT recipient FROM pending_request WHERE request_id = ?").get("dead-owner-sender-judge"),
+    ).toEqual({
+      recipient: "@agent/5",
+    })
   })
 
   it("detects positively-dead owners, escalates for LLM judgment, and retains ownership", () => {
@@ -865,7 +900,7 @@ describe("20876 Tribe health cadence", () => {
     })
     expect(sent).toEqual([
       { recipient: "@chief", type: "ball:owner-dead" },
-      { recipient: "@ops", type: "ball:owner-dead" },
+      { recipient: "@ops", type: "verdict" },
       { recipient: "@author", type: "ball:owner-dead" },
       { recipient: "@author", type: "ball:owner-unresolved" },
     ])
