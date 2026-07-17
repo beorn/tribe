@@ -1,6 +1,6 @@
 {
   "name": "tribe-wire",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "Tribe wire client — Unix-socket IPC, JSON-RPC protocol, reconnecting client, MCP stdio adapter, and the `tribe-wire` protocol CLI",
   "keywords": [
     "claude-code",
@@ -89,6 +89,14 @@
       "./lib/defang": {
         "types": "./dist/lib/defang.d.mts",
         "import": "./dist/lib/defang.mjs"
+      },
+      "./lib/spawn-pin-gate": {
+        "types": "./dist/lib/spawn-pin-gate.d.mts",
+        "import": "./dist/lib/spawn-pin-gate.mjs"
+      },
+      "./http": {
+        "types": "./dist/http-adapter.d.mts",
+        "import": "./dist/http-adapter.mjs"
       }
     }
   },
@@ -119,7 +127,9 @@
       "src/lib/cwd-guardrail.ts",
       "src/lib/hot-reload.ts",
       "src/lib/transcript.ts",
-      "src/lib/defang.ts"
+      "src/lib/defang.ts",
+      "src/lib/spawn-pin-gate.ts",
+      "src/http-adapter.ts"
     ],
     "format": "esm"
   },
