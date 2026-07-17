@@ -267,18 +267,22 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     id: "tribe.pending",
     title: "Pending Requests",
     description:
-      "Ball-tracker query: list open requests where the given owner is responsible for replying. Default owner is the caller's session. See @km/tribe/message-ball-tracker.",
+      "Ball-tracker query: list active requests where the given owner is responsible for replying, or explicitly inspect expired rows awaiting settlement. Default owner is the caller's session. See @km/tribe/message-ball-tracker.",
     lifetime: "live-session",
     mcp: {
       name: "pending",
       description:
-        "Ball-tracker query: list open requests where the given owner is responsible for replying. Default owner is the caller's session. See @km/tribe/message-ball-tracker.",
+        "Ball-tracker query: list active requests where the given owner is responsible for replying, or explicitly inspect expired rows awaiting settlement. Default owner is the caller's session. See @km/tribe/message-ball-tracker.",
       inputSchema: {
         type: "object",
         properties: {
           all: {
             type: "boolean",
-            description: "List every open request grouped by recipient owner (fleet-wide read-only attention).",
+            description: "List every active request grouped by recipient owner (fleet-wide read-only attention).",
+          },
+          expired: {
+            type: "boolean",
+            description: "Show expired rows awaiting the periodic settlement sweep instead of active requests.",
           },
           owner: {
             type: "string",
@@ -304,10 +308,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           owner: { type: "string", description: "The session whose open requests are listed." },
           scope: { type: "string", description: "`all` for a fleet-wide projection." },
           all: { type: "boolean", description: "True for a fleet-wide projection." },
+          expired: { type: "boolean", description: "True when the explicit expired diagnostic view was requested." },
           pending: {
             type: "array",
             description:
-              "Open requests. Each includes request_id, recipient, sender, summary, opened_at, age_ms, message_id, and fanout.",
+              "Active requests, or expired rows for the explicit diagnostic view. Each includes request_id, recipient, sender, summary, opened_at, age_ms, message_id, and fanout.",
             items: { type: "object", additionalProperties: true },
           },
           owners: {
@@ -317,7 +322,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           },
           owner_count: { type: "number", description: "Number of recipient owners with open requests." },
           oldest_age_ms: { type: "number", description: "Age of the oldest returned request." },
-          count: { type: "number", description: "Number of open requests in the pending list." },
+          count: { type: "number", description: "Number of requests in the selected pending view." },
           request_id: { type: "string", description: "Request id closed when `close` is used." },
           closed: { type: "number", description: "Number of pending rows closed when `close` is used." },
           ...ERROR_SHAPE,
@@ -328,7 +333,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     cli: available({
       name: "pending",
       description:
-        "Ball-tracker query: list open requests where the given owner is responsible for replying. Default owner is the caller's session. See @km/tribe/message-ball-tracker.",
+        "Ball-tracker query: list active requests where the given owner is responsible for replying, or explicitly inspect expired rows awaiting settlement. Default owner is the caller's session. See @km/tribe/message-ball-tracker.",
       lifetime: "one-shot",
       mapsToMcp: "pending",
       options: [
@@ -341,6 +346,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           name: "json",
           flags: "--json",
           description: "Print the typed snapshot as JSON",
+        },
+        {
+          name: "expired",
+          flags: "--expired",
+          description: "Show expired requests awaiting the periodic settlement sweep",
         },
         { name: "owner", flags: "-o, --owner <name>", description: "Owner session name (default: caller)" },
         {
@@ -564,7 +574,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           },
           pending_balls: {
             type: "object",
-            description: "All-owner pending snapshot with count, owner_count, oldest_age_ms, owners, and stale rows.",
+            description:
+              "Bounded active-ball summary with counts, oldest ages, per-owner aggregates, and a stale aggregate.",
             additionalProperties: true,
           },
           cadence: {

@@ -124,6 +124,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     const { stdout, code } = runCli(["pending", "--help"])
     expect(code).toBe(0)
     expect(stdout).toMatch(/--all/)
+    expect(stdout).toMatch(/--expired/)
     expect(stdout).toMatch(/--json/)
     expect(stdout).toMatch(/all owners/i)
   })
@@ -205,15 +206,18 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       const env = { ...process.env, TRIBE_SOCKET: socketPath, TRIBE_NO_AUTOSTART: "1" }
       const human = await runCliAsync(["pending", "--all"], env)
       const json = await runCliAsync(["pending", "--all", "--json"], env)
+      const expiredJson = await runCliAsync(["pending", "--all", "--expired", "--json"], env)
 
       expect(human).toMatchObject({ code: 0, stderr: "" })
       expect(human.stdout).toContain("2 pending request(s) across 2 owner(s)")
       expect(human.stdout).toContain("@agent/2: 1 (oldest 180m ago)")
       expect(human.stdout).toContain("req-agent-2  from @chief  to @agent/2  review immutable carrier")
       expect(JSON.parse(json.stdout)).toEqual(snapshot)
+      expect(JSON.parse(expiredJson.stdout)).toEqual(snapshot)
       expect(calls).toEqual([
         { method: "tribe.pending", params: { all: true } },
         { method: "tribe.pending", params: { all: true } },
+        { method: "tribe.pending", params: { all: true, expired: true } },
       ])
     } finally {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()))

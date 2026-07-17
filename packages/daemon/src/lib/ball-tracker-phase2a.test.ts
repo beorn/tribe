@@ -204,6 +204,53 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
     expect(close?.type).toBe("response")
   })
 
+  it("journals a late reply without erasing the expired ball before typed settlement", () => {
+    const chief = makeContext(db, stmts, "@chief")
+    const agent = makeContext(db, stmts, "@agent/8")
+    sendMessage(
+      chief,
+      "@agent/8",
+      "deadline-bound review",
+      "query",
+      undefined,
+      undefined,
+      "direct",
+      {},
+      { request: "expired-before-reply" },
+    )
+    db.prepare("UPDATE pending_request SET expires_at = 0 WHERE request_id = ?").run("expired-before-reply")
+
+    const reply = sendMessage(
+      agent,
+      "@chief",
+      "late defer: I still need more time",
+      "response",
+      undefined,
+      undefined,
+      "direct",
+      {},
+      { reply: "expired-before-reply" },
+    )
+
+    expect(reply.tracker).toEqual({ request_id: "expired-before-reply", closed: 0 })
+    expect(
+      (
+        db
+          .prepare("SELECT COUNT(*) AS count FROM pending_request WHERE request_id = ?")
+          .get("expired-before-reply") as {
+          count: number
+        }
+      ).count,
+    ).toBe(1)
+    expect(
+      (
+        db.prepare("SELECT COUNT(*) AS count FROM messages WHERE reply = ?").get("expired-before-reply") as {
+          count: number
+        }
+      ).count,
+    ).toBe(1)
+  })
+
   it("reply: accepts the opening message id and records the canonical request id", () => {
     const chief = makeContext(db, stmts, "@chief")
     const agent = makeContext(db, stmts, "@agent/8")

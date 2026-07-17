@@ -850,10 +850,10 @@ export function createStatements(db: Database) {
 	`),
 
     /** Ball-tracker lookup: used when a reply arrives to decide whether this
-     *  recipient's row is fanout='first' (close all) or fanout='all'
-     *  (close only the replying recipient). */
+     *  recipient's row is still active and whether fanout='first' closes all
+     *  or fanout='all' closes only the replying recipient. */
     selectPendingForReplyRecipient: db.prepare(`
-			SELECT request_id, fanout
+			SELECT request_id, fanout, expires_at
 			FROM pending_request
 			WHERE recipient = $recipient
 				AND (request_id = $reply_id OR message_id = $reply_id)

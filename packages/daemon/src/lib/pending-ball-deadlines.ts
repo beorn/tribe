@@ -80,19 +80,24 @@ function deadOwnerContent(row: PendingDeadlineRow, target: string | null, target
 
 function expiredBallContent(row: PendingDeadlineRow, target: string | null, targetIsDeadOwner: boolean): string {
   if (target) {
-    return `Pending ball ${row.request_id} owned by ${row.recipient} reached its sender-declared deadline. Sender options: re-ping ${row.recipient}; ask ${target} to decide whether to reassign or close; or mark the ball moot with the pending-close operation.`
+    return `Pending ball ${row.request_id} owned by ${row.recipient} expired unanswered and was dropped from active responsibility. This typed exception was sent to the sender, and ${target} receives the configured escalation verdict.`
   }
   if (targetIsDeadOwner) {
-    return `Pending ball ${row.request_id} reached its sender-declared deadline; the configured escalation target is the dead owner, so no viable escalation target is available and ownership remains with ${row.recipient}. Sender options: configure a viable escalation target other than the dead owner; or mark the ball moot with the pending-close operation.`
+    return `Pending ball ${row.request_id} owned by ${row.recipient} expired unanswered and was dropped from active responsibility. The configured escalation target is that same dead owner, so no viable escalation delivery was possible.`
   }
-  return `Pending ball ${row.request_id} reached its sender-declared deadline; no escalation target is configured, so ownership remains with ${row.recipient}. Sender options: re-ping ${row.recipient}; configure an escalation target for LLM judgment; or mark the ball moot with the pending-close operation.`
+  return `Pending ball ${row.request_id} owned by ${row.recipient} expired unanswered and was dropped from active responsibility. No escalation target is configured; this typed sender exception is the terminal audit event.`
 }
 
 /** Actuate pending-ball deadlines from the existing health-monitor cadence.
- * The tracker row remains the sole ownership authority; dedup claims provide
- * durable restart/concurrency idempotency without another queue. */
+ * The tracker row remains the sole active-ownership authority until all
+ * required typed notifications commit; dedup claims provide durable
+ * restart/concurrency idempotency without another queue. */
 export function processPendingBallDeadlines(opts: PendingBallDeadlineOptions): PendingBallDeadlineResult {
   const result: PendingBallDeadlineResult = { nudged: 0, expired: 0, deadOwnerWarnings: 0 }
+  // A delivery callback can synchronously re-enter the cadence on the same
+  // connection. The outer stage transaction owns that work; a nested sweep
+  // must not observe its uncommitted dedup claim and settle the row early.
+  if (opts.db.inTransaction) return result
   const rows = opts.db
     .prepare(
       "SELECT request_id, recipient, sender, opened_at, expires_at, message_id FROM pending_request ORDER BY opened_at, request_id, recipient",
@@ -133,17 +138,19 @@ export function processPendingBallDeadlines(opts: PendingBallDeadlineOptions): P
     if (row.expires_at === null) continue
     if (opts.now >= row.expires_at) {
       const content = expiredBallContent(row, target, targetIsDeadOwner)
-      const senderStage = runClaimedStage(opts, row, "expired:sender", () => {
-        opts.send(row.sender, content, target === row.sender ? "verdict" : "ball:expired")
+      runClaimedStage(opts, row, "expired:sender", () => {
+        opts.send(row.sender, content, "ball:expired")
       })
-      let escalationClaimed = false
-      if (target && target !== row.sender) {
-        const escalationStage = runClaimedStage(opts, row, `expired:escalation:${target}`, () => {
+      if (target) {
+        runClaimedStage(opts, row, `expired:escalation:${target}`, () => {
           opts.send(target, content, "verdict")
         })
-        escalationClaimed = escalationStage.claimed
       }
-      if (senderStage.claimed || escalationClaimed) result.expired += 1
+      const settled = opts.stmts.closePendingRequest.run({
+        $request_id: row.request_id,
+        $recipient: row.recipient,
+      })
+      result.expired += Number(settled.changes ?? 0)
       continue
     }
 

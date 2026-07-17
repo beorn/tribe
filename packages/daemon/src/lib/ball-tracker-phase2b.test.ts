@@ -355,4 +355,29 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     expect(reply.warning).toContain(opened.id)
     expect(pendingRecipients(db, "actual-request")).toEqual(["@agent/1"])
   })
+
+  it("warns that a late reply left the expired ball for typed settlement", () => {
+    parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        { to: "@agent/1", message: "deadline review", type: "request", request: "late-request" },
+        makeOpts(["sess-chief", "sess-agent-1"]),
+      ),
+    )
+    db.prepare("UPDATE pending_request SET expires_at = 0 WHERE request_id = ?").run("late-request")
+
+    const reply = parseToolJson(
+      handleToolCall(
+        agent1,
+        "tribe.send",
+        { to: "@chief", message: "late defer", type: "response", reply: "late-request" },
+        makeOpts(["sess-chief", "sess-agent-1"]),
+      ),
+    )
+
+    expect(reply.tracker).toEqual({ request_id: "late-request", closed: 0 })
+    expect(reply.warning).toMatch(/late-request.*expired.*awaiting.*settlement/i)
+    expect(pendingRecipients(db, "late-request")).toEqual(["@agent/1"])
+  })
 })

@@ -393,12 +393,14 @@ function parseDurationMs(spec: string): number | undefined {
 async function cmdPending(
   owner: string | undefined,
   all: boolean,
+  expired: boolean,
   json: boolean,
   staleMs: number | undefined,
   close: string | undefined,
 ): Promise<void> {
   const args: Record<string, unknown> = {}
   if (all) args.all = true
+  if (expired) args.expired = true
   if (owner) args.owner = owner
   if (staleMs !== undefined) args.stale_ms = staleMs
   if (close) args.close = close
@@ -457,11 +459,13 @@ async function cmdPending(
   const count = payload.count ?? 0
   if (all) {
     if (count === 0) {
-      console.log("No pending requests across all owners.")
+      console.log(`No ${expired ? "expired" : "pending"} requests across all owners.`)
       return
     }
     const groups = payload.owners ?? []
-    console.log(`${count} pending request(s) across ${payload.owner_count ?? groups.length} owner(s):`)
+    console.log(
+      `${count} ${expired ? "expired" : "pending"} request(s) across ${payload.owner_count ?? groups.length} owner(s):`,
+    )
     for (const group of groups) {
       const oldestSec = Math.floor(group.oldest_age_ms / 1000)
       const oldest = oldestSec >= 60 ? `${Math.floor(oldestSec / 60)}m` : `${oldestSec}s`
@@ -475,10 +479,10 @@ async function cmdPending(
   }
   const displayOwner = payload.owner ?? owner ?? "(caller)"
   if (count === 0) {
-    console.log(`No pending requests for ${displayOwner}.`)
+    console.log(`No ${expired ? "expired" : "pending"} requests for ${displayOwner}.`)
     return
   }
-  console.log(`${count} pending request(s) for ${displayOwner}:`)
+  console.log(`${count} ${expired ? "expired" : "pending"} request(s) for ${displayOwner}:`)
   for (const p of payload.pending ?? []) {
     const ageSec = Math.floor(p.age_ms / 1000)
     const age = ageSec >= 60 ? `${Math.floor(ageSec / 60)}m` : `${ageSec}s`
@@ -887,6 +891,7 @@ export function registerReadCommands(program: Command): void {
   const pendingOwner = cliOption(PENDING_CLI, "owner")
   const pendingAll = cliOption(PENDING_CLI, "all")
   const pendingJson = cliOption(PENDING_CLI, "json")
+  const pendingExpired = cliOption(PENDING_CLI, "expired")
   const pendingStale = cliOption(PENDING_CLI, "stale")
   const pendingClose = cliOption(PENDING_CLI, "close")
   program
@@ -894,31 +899,38 @@ export function registerReadCommands(program: Command): void {
     .description(PENDING_CLI.description)
     .option(pendingAll.flags, pendingAll.description)
     .option(pendingJson.flags, pendingJson.description)
+    .option(pendingExpired.flags, pendingExpired.description)
     .option(pendingOwner.flags, pendingOwner.description)
     .option(pendingStale.flags, pendingStale.description)
     .option(pendingClose.flags, pendingClose.description)
-    .action((opts: { all?: boolean; json?: boolean; owner?: string; stale?: string; close?: string }) => {
-      const stale = opts.stale ? parseStaleMs(opts.stale) : undefined
-      if (opts.stale && stale === undefined) {
-        console.error(`tribe pending: bad --stale '${opts.stale}' (expected NNs|NNm|NNh)`)
-        process.exit(2)
-      }
-      if (opts.close && pendingClose.requires?.includes("owner") && !opts.owner) {
-        console.error(
-          "tribe pending: --close requires --owner because one-shot CLI callers are not a registered session",
-        )
-        process.exit(2)
-      }
-      if (opts.all && opts.owner) {
-        console.error("tribe pending: --all and --owner are mutually exclusive")
-        process.exit(2)
-      }
-      if (opts.all && opts.close) {
-        console.error("tribe pending: --all is read-only; --close requires --owner")
-        process.exit(2)
-      }
-      void cmdPending(opts.owner, !!opts.all, !!opts.json, stale, opts.close)
-    })
+    .action(
+      (opts: { all?: boolean; expired?: boolean; json?: boolean; owner?: string; stale?: string; close?: string }) => {
+        const stale = opts.stale ? parseStaleMs(opts.stale) : undefined
+        if (opts.stale && stale === undefined) {
+          console.error(`tribe pending: bad --stale '${opts.stale}' (expected NNs|NNm|NNh)`)
+          process.exit(2)
+        }
+        if (opts.close && pendingClose.requires?.includes("owner") && !opts.owner) {
+          console.error(
+            "tribe pending: --close requires --owner because one-shot CLI callers are not a registered session",
+          )
+          process.exit(2)
+        }
+        if (opts.all && opts.owner) {
+          console.error("tribe pending: --all and --owner are mutually exclusive")
+          process.exit(2)
+        }
+        if (opts.all && opts.close) {
+          console.error("tribe pending: --all is read-only; --close requires --owner")
+          process.exit(2)
+        }
+        if (opts.expired && opts.close) {
+          console.error("tribe pending: --expired is read-only; --close is not allowed")
+          process.exit(2)
+        }
+        void cmdPending(opts.owner, !!opts.all, !!opts.expired, !!opts.json, stale, opts.close)
+      },
+    )
 
   program
     .command("log")
