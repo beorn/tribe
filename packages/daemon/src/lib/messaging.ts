@@ -29,8 +29,8 @@ export type MessageKind = "direct" | "broadcast" | "event"
 /**
  * `Delivery` is the km-tribe.event-classification routing class:
  *
- *   - `push` — actionable: fanned out down the MCP channel + lands in inbox
- *   - `pull` — ambient: lands in inbox only; the agent reads it when it asks
+ *   - `push` — eligible for per-session channel admission + lands in inbox
+ *   - `pull` — inbox only; the agent reads it when it asks
  *
  * Default for back-compat is `push` (existing call sites unchanged).
  */
@@ -42,7 +42,7 @@ export type Delivery = "push" | "pull"
  * is no longer persisted on the row (the column was dropped by migration
  * v11) and is no longer surfaced on the channel envelope. The type is
  * exported only because the broadcast pipeline still uses it as a return
- * shape (and `tribe.filter` mode `focus` still gates on it).
+ * shape. Focus admission uses the canonical actionable type set instead.
  *
  *   - `yes`      — direct DM from a peer member → reply via tribe.send
  *   - `optional` — broadcast / system / daemon push → agent decides

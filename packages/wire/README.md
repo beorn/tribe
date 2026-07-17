@@ -49,8 +49,8 @@ wakeup. Delivery classification is orthogonal to semantic ball tracking: only
 the message type and `--request` decide whether a pending ball opens.
 
 Launch controllers can set `TRIBE_FILTER_MODE=focus|normal|ambient` on the MCP
-adapter. The preference is persisted during registration, before the session
-becomes eligible for push fanout. `focus` keeps every message fetchable but
+stdio or loopback-HTTP adapter. The preference is persisted during registration,
+before the session becomes eligible for push fanout. `focus` keeps every message fetchable but
 only wakes for the canonical actionable types: `request`, `query`, `assign`,
 and `verdict`. This is a generic session preference; role policy belongs to the
 launch controller, not the Tribe daemon.

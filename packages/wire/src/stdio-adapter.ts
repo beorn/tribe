@@ -29,6 +29,7 @@ import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
 import { spawn } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
+import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
 import { createLogger, setSuppressConsole } from "loggily"
 import { createTimers } from "./timers.ts"
 import { defangModelInput } from "./lib/defang.ts"
@@ -76,14 +77,6 @@ const DELIVERY_CAPABILITY = resolveDeliveryCapability({
   pullTransport: process.env.TRIBE_PULL_TRANSPORT ?? process.env.TRIBE_WAIT_TRANSPORT,
 })
 const TRIBE_TOOLS_LIST = toolListForDeliveryCapability(DELIVERY_CAPABILITY)
-type InitialFilterMode = "focus" | "normal" | "ambient"
-
-function initialFilterModeFromEnv(raw: string | undefined): InitialFilterMode | undefined {
-  const mode = raw?.trim()
-  if (!mode) return undefined
-  if (mode === "focus" || mode === "normal" || mode === "ambient") return mode
-  throw new Error(`Invalid TRIBE_FILTER_MODE=${JSON.stringify(raw)}; expected focus|normal|ambient`)
-}
 
 // A launch controller may declare one existing daemon filter as session
 // configuration. The adapter forwards it on register so the session is never
