@@ -917,6 +917,43 @@ describe("20876 Tribe health cadence", () => {
     })
   })
 
+  it("never escalates a dead owner's ball back to that same dead owner", () => {
+    db.prepare("DELETE FROM pending_request WHERE request_id = 'open-agent-5'").run()
+    db.prepare("UPDATE sessions SET pid = 424242 WHERE name = '@chief'").run()
+    stmts.openPendingRequest.run({
+      $request_id: "dead-owner-is-judge",
+      $recipient: "@chief",
+      $sender: "@author",
+      $opened_at: now,
+      $expires_at: now + 30 * MINUTE,
+      $message_id: "dead-owner-is-judge-message",
+      $fanout: "first",
+    })
+    const sent: Array<{ recipient: string; content: string; type: string }> = []
+
+    const result = processPendingBallDeadlines({
+      db,
+      stmts,
+      now,
+      liveSessionNames: new Set(),
+      escalationTarget: "@chief",
+      isPidAlive: () => false,
+      send: (recipient, content, type) => sent.push({ recipient, content, type }),
+    })
+
+    expect(sent).toEqual([
+      {
+        recipient: "@author",
+        content: expect.stringMatching(/no viable escalation target/i),
+        type: "ball:owner-dead",
+      },
+    ])
+    expect(result.deadOwnerWarnings).toBe(1)
+    expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = ?").get("dead-owner-is-judge")).toEqual(
+      { recipient: "@chief" },
+    )
+  })
+
   it("detects positively-dead owners, escalates for LLM judgment, and retains ownership", () => {
     db.prepare("DELETE FROM pending_request WHERE request_id = 'open-agent-5'").run()
     db.prepare("UPDATE sessions SET pid = 424242 WHERE name = '@agent/5'").run()

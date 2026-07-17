@@ -68,6 +68,26 @@ function ownerLiveness(opts: PendingBallDeadlineOptions, owner: string): OwnerLi
   return (opts.isPidAlive ?? defaultIsPidAlive)(row.pid) ? "unknown" : "dead"
 }
 
+function deadOwnerContent(row: PendingDeadlineRow, target: string | null, targetIsDeadOwner: boolean): string {
+  if (target) {
+    return `Pending ball ${row.request_id} still targets dead owner ${row.recipient}. Ownership is retained; ${target} must use LLM judgment before any reassignment or closure.`
+  }
+  if (targetIsDeadOwner) {
+    return `Pending ball ${row.request_id} still targets dead owner ${row.recipient}; the configured escalation target is that same dead owner, so no viable escalation target is available and ownership is retained.`
+  }
+  return `Pending ball ${row.request_id} still targets dead owner ${row.recipient}; no escalation target is configured, so ownership is retained.`
+}
+
+function expiredBallContent(row: PendingDeadlineRow, target: string | null, targetIsDeadOwner: boolean): string {
+  if (target) {
+    return `Pending ball ${row.request_id} owned by ${row.recipient} reached its sender-declared deadline. Sender options: re-ping ${row.recipient}; ask ${target} to decide whether to reassign or close; or mark the ball moot with the pending-close operation.`
+  }
+  if (targetIsDeadOwner) {
+    return `Pending ball ${row.request_id} reached its sender-declared deadline; the configured escalation target is the dead owner, so no viable escalation target is available and ownership remains with ${row.recipient}. Sender options: configure a viable escalation target other than the dead owner; or mark the ball moot with the pending-close operation.`
+  }
+  return `Pending ball ${row.request_id} reached its sender-declared deadline; no escalation target is configured, so ownership remains with ${row.recipient}. Sender options: re-ping ${row.recipient}; configure an escalation target for LLM judgment; or mark the ball moot with the pending-close operation.`
+}
+
 /** Actuate pending-ball deadlines from the existing health-monitor cadence.
  * The tracker row remains the sole ownership authority; dedup claims provide
  * durable restart/concurrency idempotency without another queue. */
@@ -81,6 +101,9 @@ export function processPendingBallDeadlines(opts: PendingBallDeadlineOptions): P
 
   for (const row of rows) {
     const liveness = ownerLiveness(opts, row.recipient)
+    const configuredTarget = opts.escalationTarget?.trim() || null
+    const targetIsDeadOwner = liveness === "dead" && configuredTarget === row.recipient
+    const target = targetIsDeadOwner ? null : configuredTarget
     if (liveness === "unknown") {
       const unresolvedStage = runClaimedStage(opts, row, "owner-unresolved", () => {
         opts.send(
@@ -92,10 +115,7 @@ export function processPendingBallDeadlines(opts: PendingBallDeadlineOptions): P
       if (unresolvedStage.claimed) result.deadOwnerWarnings += 1
     }
     if (liveness === "dead") {
-      const target = opts.escalationTarget?.trim() || null
-      const content = target
-        ? `Pending ball ${row.request_id} still targets dead owner ${row.recipient}. Ownership is retained; ${target} must use LLM judgment before any reassignment or closure.`
-        : `Pending ball ${row.request_id} still targets dead owner ${row.recipient}; no escalation target is configured, so ownership is retained.`
+      const content = deadOwnerContent(row, target, targetIsDeadOwner)
       const senderStage = runClaimedStage(opts, row, "owner-dead:sender", () => {
         opts.send(row.sender, content, target === row.sender ? "verdict" : "ball:owner-dead")
       })
@@ -112,13 +132,7 @@ export function processPendingBallDeadlines(opts: PendingBallDeadlineOptions): P
 
     if (row.expires_at === null) continue
     if (opts.now >= row.expires_at) {
-      const target = opts.escalationTarget?.trim() || null
-      const actions = target
-        ? `Sender options: re-ping ${row.recipient}; ask ${target} to decide whether to reassign or close; or mark the ball moot with the pending-close operation.`
-        : `Sender options: re-ping ${row.recipient}; configure an escalation target for LLM judgment; or mark the ball moot with the pending-close operation.`
-      const content = target
-        ? `Pending ball ${row.request_id} owned by ${row.recipient} reached its sender-declared deadline. ${actions}`
-        : `Pending ball ${row.request_id} reached its sender-declared deadline; no escalation target is configured, so ownership remains with ${row.recipient}. ${actions}`
+      const content = expiredBallContent(row, target, targetIsDeadOwner)
       const senderStage = runClaimedStage(opts, row, "expired:sender", () => {
         opts.send(row.sender, content, target === row.sender ? "verdict" : "ball:expired")
       })
