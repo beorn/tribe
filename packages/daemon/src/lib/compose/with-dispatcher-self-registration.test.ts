@@ -532,7 +532,11 @@ describe("dispatcher inbox-wait parsing", () => {
     expect(result.unread_count).toBe(0)
     expect(result.timed_out).toBe(true)
     expect(result.aborted).toBe(false)
-    expect(result.attention).toEqual({ actionable_unread: [], pending_balls: [] })
+    expect(result.attention).toEqual({
+      actionable_unread: [],
+      pending_balls: [],
+      pending_balls_summary: { total: 0, oldest_age_ms: 0 },
+    })
   })
 })
 

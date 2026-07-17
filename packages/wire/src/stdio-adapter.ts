@@ -206,6 +206,10 @@ type TribeFetchResult = {
       fanout?: string
       summary?: string
     }>
+    pending_balls_summary?: {
+      total?: number
+      oldest_age_ms?: number
+    }
   }
   events?: Array<{
     id?: string
@@ -546,7 +550,7 @@ armDegradeNotice(daemonReady)
 const joinInstruction = `If you receive a stdio-adapter auto-identify message, just call tribe.join with a short name for your focus area. Omit the role parameter — the daemon registers every session as a plain "member"; it does NOT assign "chief" by connect order. "chief" is a bead-lease hat (claimed via /up / the bead lease system), not a daemon-assigned role. No need to call tribe.members or tribe.fetch afterward — just join silently and continue.`
 const deliveryInstruction = deliveryCapabilityInstruction(DELIVERY_CAPABILITY)
 const attentionProjectionInstruction =
-  "- Default fetch exposes `attention.actionable_unread` and `attention.pending_balls` ahead of ambient events; both are facts projected from the existing mailbox and ball tracker, not another queue."
+  "- Default fetch exposes `attention.actionable_unread` and the 10 oldest `attention.pending_balls` ahead of ambient events; `attention.pending_balls_summary` reports the full total/oldest age and `tribe.pending` returns the full pile. These are facts projected from the existing mailbox and ball tracker, not another queue."
 
 // Shared turn-start inbox guidance for every role variant. Kept deliberately
 // SMALL: the turn-start call is a small catch-up drain, NOT a full replay. The
@@ -934,16 +938,18 @@ function formatPendingBallAge(ageMs: number): string {
 
 function forwardPendingBallSummary(
   balls: NonNullable<NonNullable<TribeFetchResult["attention"]>["pending_balls"]>,
+  summary?: NonNullable<TribeFetchResult["attention"]>["pending_balls_summary"],
 ): void {
-  if (balls.length === 0) return
+  const total = summary?.total ?? balls.length
+  if (total === 0) return
   const ordered = [...balls].sort((left, right) => (right.age_ms ?? 0) - (left.age_ms ?? 0))
-  const oldest = formatPendingBallAge(ordered[0]?.age_ms ?? 0)
+  const oldest = formatPendingBallAge(summary?.oldest_age_ms ?? ordered[0]?.age_ms ?? 0)
   const top = ordered
     .map((ball) => ball.summary?.trim())
     .filter((summary): summary is string => Boolean(summary))
     .slice(0, 3)
   const topText = top.length > 0 ? ` Top: ${top.join(" | ")}` : ""
-  sendChannel(`You own ${balls.length} ${balls.length === 1 ? "ball" : "balls"}, oldest ${oldest}.${topText}`, {
+  sendChannel(`You own ${total} ${total === 1 ? "ball" : "balls"}, oldest ${oldest}.${topText}`, {
     from: "tribe",
     type: "attention:pending-balls",
   })
@@ -974,13 +980,15 @@ function drainDaemonInbox(): void {
         const attentionIds = new Set(attentionEvents.map((event) => event.id).filter(Boolean))
         for (const event of attentionEvents) forwardFetchedEvent(event)
         const currentPendingBalls = result?.attention?.pending_balls ?? []
-        forwardPendingBallSummary(currentPendingBalls)
+        const currentPendingBallSummary = result?.attention?.pending_balls_summary
+        const currentPendingBallTotal = currentPendingBallSummary?.total ?? currentPendingBalls.length
+        forwardPendingBallSummary(currentPendingBalls, currentPendingBallSummary)
         const events = (result?.events ?? []).filter((event) => !event.id || !attentionIds.has(event.id))
         const { forward, skippedOld, capped } = selectReplayEvents(events, { now: Date.now() })
         for (const event of forward) forwardFetchedEvent(event)
         if (skippedOld > 0 || capped > 0) {
           log.warn?.(
-            `tribe drain: surfaced ${attentionEvents.length} actionable + ${currentPendingBalls.length} pending + ${forward.length}/${events.length} event(s) (skipped ${skippedOld} older than 1d, ${capped} over cap ${MAX_REPLAY_EVENTS}); rest drained but not replayed`,
+            `tribe drain: surfaced ${attentionEvents.length} actionable + ${currentPendingBalls.length}/${currentPendingBallTotal} pending + ${forward.length}/${events.length} event(s) (skipped ${skippedOld} older than 1d, ${capped} over cap ${MAX_REPLAY_EVENTS}); rest drained but not replayed`,
           )
         }
       } while (drainAgain)

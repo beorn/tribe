@@ -40,6 +40,7 @@ type FetchJson = ToolJson & {
   attention?: {
     actionable_unread?: FetchEvent[]
     pending_balls?: AttentionBall[]
+    pending_balls_summary?: { total: number; oldest_age_ms: number }
   }
   events?: FetchEvent[]
   cursor?: number
@@ -299,6 +300,41 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(afterDelivery.attention?.pending_balls).toEqual([
       expect.objectContaining({ request_id: "review-r3", message_id: "critical-revise" }),
     ])
+  })
+
+  it("caps pending-ball attention to the oldest 10 with a lossless summary while explicit pending stays complete", () => {
+    const live = connectAs("sess-cap", NAME)
+    const total = 320
+
+    for (let i = 0; i < total; i++) {
+      stmts.openPendingRequest.run({
+        $request_id: `cap-${i}`,
+        $recipient: NAME,
+        $sender: "@chief",
+        $opened_at: now - (total - i) * 1_000,
+        $expires_at: null,
+        $message_id: `cap-message-${i}`,
+        $fanout: "first",
+      })
+    }
+
+    const fetched = fetchJson(live, opts).json
+    expect(fetched.attention?.pending_balls?.map((ball) => ball.request_id)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `cap-${i}`),
+    )
+    expect(fetched.attention?.pending_balls_summary).toEqual({
+      total,
+      oldest_age_ms: expect.any(Number),
+    })
+    expect(fetched.attention?.pending_balls_summary?.oldest_age_ms).toBeGreaterThanOrEqual(total * 1_000)
+    expect(new TextEncoder().encode(JSON.stringify(fetched.attention)).byteLength).toBeLessThan(4_096)
+
+    const explicit = parseToolJson(handleToolCall(live, "tribe.pending", {}, opts)) as {
+      count?: number
+      pending?: AttentionBall[]
+    }
+    expect(explicit.count).toBe(total)
+    expect(explicit.pending).toHaveLength(total)
   })
 
   it("delivery acknowledgement cannot erase an explicitly tracked verdict obligation", () => {

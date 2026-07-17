@@ -645,9 +645,17 @@ type PendingBall = {
   summary: string | null
 }
 
+type PendingBallSummary = {
+  total: number
+  oldest_age_ms: number
+}
+
+const ATTENTION_PENDING_BALL_LIMIT = 10
+
 export type AttentionProjection = {
   actionable_unread: FetchEvent[]
   pending_balls: PendingBall[]
+  pending_balls_summary: PendingBallSummary
 }
 
 function pendingBall(row: PendingBallRow, now: number): PendingBall {
@@ -1440,11 +1448,16 @@ export function readAttentionProjection(
   now = Date.now(),
 ): { actionableRows: FetchRow[]; attention: AttentionProjection } {
   const actionableRows = filterRowsByTrust(ctx, ctx.stmts.selectActionableAttention.all({ $name: owner }) as FetchRow[])
+  const pendingBalls = pendingBallsForOwner(ctx, owner, now)
   return {
     actionableRows,
     attention: {
       actionable_unread: actionableRows.map(fetchEvent),
-      pending_balls: pendingBallsForOwner(ctx, owner, now),
+      pending_balls: pendingBalls.slice(0, ATTENTION_PENDING_BALL_LIMIT),
+      pending_balls_summary: {
+        total: pendingBalls.length,
+        oldest_age_ms: pendingBalls[0]?.age_ms ?? 0,
+      },
     },
   }
 }

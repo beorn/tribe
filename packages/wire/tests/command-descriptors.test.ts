@@ -153,10 +153,18 @@ describe("Tribe command descriptors", () => {
     expect(fetch).toBeDefined()
     expect(fetch!.mcp.outputSchema.properties?.attention).toMatchObject({
       type: "object",
-      required: ["actionable_unread", "pending_balls"],
+      required: ["actionable_unread", "pending_balls", "pending_balls_summary"],
       properties: {
         actionable_unread: { type: "array" },
         pending_balls: { type: "array" },
+        pending_balls_summary: {
+          type: "object",
+          required: ["total", "oldest_age_ms"],
+          properties: {
+            total: { type: "number" },
+            oldest_age_ms: { type: "number" },
+          },
+        },
       },
     })
     const cli = hiddenCliProjection(fetch!)

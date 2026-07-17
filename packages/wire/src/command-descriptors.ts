@@ -79,7 +79,7 @@ const OBJ = (properties: JsonObject, description: string): JsonSchemaObject => (
 const ATTENTION_SCHEMA = {
   type: "object",
   description: "Current unread actionables and open response balls for the addressed persona.",
-  required: ["actionable_unread", "pending_balls"],
+  required: ["actionable_unread", "pending_balls", "pending_balls_summary"],
   properties: {
     actionable_unread: {
       type: "array",
@@ -90,8 +90,18 @@ const ATTENTION_SCHEMA = {
     pending_balls: {
       type: "array",
       description:
-        "Open tracked requests this recipient owns: request_id, sender, opened_at, age_ms, message_id, fanout.",
+        "The 10 oldest open tracked requests this recipient owns: request_id, sender, opened_at, age_ms, message_id, fanout.",
       items: { type: "object", additionalProperties: true },
+    },
+    pending_balls_summary: {
+      type: "object",
+      description: "Lossless size and oldest-age summary for the full pending-ball set.",
+      required: ["total", "oldest_age_ms"],
+      properties: {
+        total: { type: "number", description: "Total open tracked requests this recipient owns." },
+        oldest_age_ms: { type: "number", description: "Age of the oldest open tracked request in milliseconds." },
+      },
+      additionalProperties: false,
     },
   },
 } as const
