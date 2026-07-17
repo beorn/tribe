@@ -168,6 +168,33 @@ describe("createInboxWaitManager", () => {
     })
   })
 
+  it("wakes the sender on a pending-ball reminder", async () => {
+    vi.useFakeTimers()
+    let unread = 0
+    const manager = createInboxWaitManager((session) => status(session, unread))
+    const wait = manager.wait("@author", "conn-1", 1_000)
+
+    unread = 1
+    manager.onMessageInserted(
+      message({
+        type: "ball:reminder",
+        kind: "direct",
+        recipient: "@author",
+        sender: "daemon",
+        content: "Pending ball needs a sender decision",
+      }),
+    )
+    await Promise.resolve()
+    vi.advanceTimersByTime(1_000)
+
+    await expect(wait).resolves.toMatchObject({
+      session: "@author",
+      unread_count: 1,
+      timed_out: false,
+      aborted: false,
+    })
+  })
+
   it("times out when no actionable message arrives", async () => {
     vi.useFakeTimers()
     const manager = createInboxWaitManager((session) => status(session, 0))

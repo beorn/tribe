@@ -22,7 +22,7 @@ import { AUTO_TRACK_TYPES_SET } from "./database.ts"
  * below. The two axes are independent: a broadcast can be `push`
  * (channel-delivered) or `pull` (ambient inbox-only), and a direct message
  * defaults to `push`. `inbox.wait` actionability is a narrower type-level
- * contract (`request` / `query` / `assign` / `verdict`).
+ * contract (`request` / `query` / `assign` / `verdict` / `ball:reminder`).
  */
 export type MessageKind = "direct" | "broadcast" | "event"
 
@@ -315,7 +315,8 @@ export function sendMessage(
  * The reframe: recovery never touches the ambient session cursor. A durable
  * `mailbox_cursors` row keyed by the RECIPIENT NAME tracks the highest
  * acknowledged actionable rowid; `handleFetch`'s default drain injects the
- * unacknowledged actionable directs (request / query / verdict / assign —
+ * unacknowledged actionable directs (request / query / verdict / assign /
+ * ball:reminder —
  * `ACTIONABLE_TYPES` in database.ts) ahead of the ambient window and
  * acknowledges exactly what it returns. Join/rename/takeover only need to
  * COUNT the outstanding actionables (below) and nudge the client to drain.

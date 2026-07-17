@@ -9,6 +9,7 @@ type PendingDeadlineRow = {
   opened_at: number
   expires_at: number | null
   message_id: string
+  fanout: string
 }
 
 export type PendingBallDeadlineResult = {
@@ -27,13 +28,13 @@ export type PendingBallDeadlineOptions = {
   send: (recipient: string, content: string, type: string) => void
 }
 
-function stageKey(row: PendingDeadlineRow, stage: string): string {
-  return `ball-deadline:${stage}:${encodeURIComponent(row.request_id)}:${encodeURIComponent(row.recipient)}`
+function stageKey(row: PendingDeadlineRow, stage: string, scope = row.recipient): string {
+  return `ball-deadline:${stage}:${encodeURIComponent(row.request_id)}:${encodeURIComponent(scope)}`
 }
 
-function claimStage(opts: PendingBallDeadlineOptions, row: PendingDeadlineRow, stage: string): boolean {
+function claimStage(opts: PendingBallDeadlineOptions, row: PendingDeadlineRow, stage: string, scope?: string): boolean {
   const claim = opts.stmts.claimDedup.run({
-    $key: stageKey(row, stage),
+    $key: stageKey(row, stage, scope),
     // Keep deadline claims tied to the source message while its ball remains
     // open; cleanupOldData retains these keys until the ball closes.
     $session_id: row.message_id,
@@ -47,9 +48,10 @@ function runClaimedStage<T>(
   row: PendingDeadlineRow,
   stage: string,
   actuate: () => T,
+  scope?: string,
 ): { claimed: false } | { claimed: true; value: T } {
   return opts.db.transaction(() => {
-    if (!claimStage(opts, row, stage)) return { claimed: false as const }
+    if (!claimStage(opts, row, stage, scope)) return { claimed: false as const }
     // The claim and its durable notification row are one commit. A thrown
     // delivery leaves the stage retryable after a restart instead of
     // preserving a claim for work that never completed.
@@ -100,7 +102,7 @@ export function processPendingBallDeadlines(opts: PendingBallDeadlineOptions): P
   if (opts.db.inTransaction) return result
   const rows = opts.db
     .prepare(
-      "SELECT request_id, recipient, sender, opened_at, expires_at, message_id FROM pending_request ORDER BY opened_at, request_id, recipient",
+      "SELECT request_id, recipient, sender, opened_at, expires_at, message_id, fanout FROM pending_request ORDER BY opened_at, request_id, recipient",
     )
     .all() as PendingDeadlineRow[]
 
@@ -166,8 +168,40 @@ export function processPendingBallDeadlines(opts: PendingBallDeadlineOptions): P
         )
       })
       if (halfwayStage.claimed) result.nudged += 1
+      runClaimedStage(
+        opts,
+        row,
+        "halfway:sender",
+        () => {
+          const owners = senderReminderOwners(opts.db, row)
+          opts.send(row.sender, senderReminderContent(row, owners, opts.now, target), "ball:reminder")
+        },
+        row.fanout === "first" ? "fanout:first" : row.recipient,
+      )
     }
   }
 
   return result
+}
+
+function senderReminderOwners(db: Database, row: PendingDeadlineRow): string[] {
+  if (row.fanout !== "first") return [row.recipient]
+  return (
+    db
+      .prepare("SELECT recipient FROM pending_request WHERE request_id = ? AND fanout = 'first' ORDER BY recipient")
+      .all(row.request_id) as Array<{ recipient: string }>
+  ).map(({ recipient }) => recipient)
+}
+
+function senderReminderContent(
+  row: PendingDeadlineRow,
+  owners: readonly string[],
+  now: number,
+  target: string | null,
+): string {
+  const ageMs = Math.max(0, now - row.opened_at)
+  const age = ageMs >= 60_000 ? `${Math.floor(ageMs / 60_000)}m` : `${Math.floor(ageMs / 1_000)}s`
+  const ownerList = owners.join(", ")
+  const reroute = target ? `reroute through ${target}` : "reroute after configuring an escalation target"
+  return `Pending ball ${row.request_id} to ${ownerList} has been open ${age}. Sender options: re-ping ${ownerList}; ${reroute}; or mark it moot with the pending-close operation.`
 }

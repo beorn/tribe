@@ -28,3 +28,14 @@ visible and actionable to callers.
 This package is reusable infrastructure. It should not encode project-specific
 workflow concepts such as `@chief`, `@agent/N`, bead queues, worktree slots, or
 integration authority.
+
+## Pending-ball deadlines
+
+Direct `request`, `query`, and `assign` messages open one recipient-owned ball;
+other message types open one only when explicitly requested. The same
+`pending_request` row drives its age, deadline, owner nudge, sender reminder,
+and terminal expiry—there is no paired sender row or reminder queue. At half of
+the sender-declared TTL, the owner is nudged and the sender receives options to
+re-ping, reroute, or mark the ball moot. A `fanout:first` request shares one
+logical sender reminder across its recipient rows while retaining per-recipient
+owner nudges.

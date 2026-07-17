@@ -315,13 +315,13 @@ describe("20876 Tribe health cadence", () => {
     )
   })
 
-  it("nudges at half-life and escalates once at expiry across repeated and restarted cadence ticks", () => {
+  it("nudges the owner and reminds the sender at half-life, then escalates once at expiry", () => {
     stmts.openPendingRequest.run({
       $request_id: "deadline-review",
       $recipient: "@agent/5",
       $sender: "@chief",
-      $opened_at: now - 10 * MINUTE,
-      $expires_at: now + 10 * MINUTE,
+      $opened_at: now - 5 * MINUTE,
+      $expires_at: now + 5 * MINUTE,
       $message_id: "deadline-review-message",
       $fanout: "first",
     })
@@ -336,7 +336,14 @@ describe("20876 Tribe health cadence", () => {
       escalationTarget: "@ops",
       send,
     })
-    expect(sent).toEqual([{ recipient: "@agent/5", content: expect.any(String), type: "ball:nudge" }])
+    expect(sent).toEqual([
+      { recipient: "@agent/5", content: expect.any(String), type: "ball:nudge" },
+      {
+        recipient: "@chief",
+        content: expect.stringMatching(/re-ping.*reroute.*mark.*moot/i),
+        type: "ball:reminder",
+      },
+    ])
 
     const restartedDb = openDatabase(join(tmpDir, "tribe.db"))
     try {
@@ -351,7 +358,7 @@ describe("20876 Tribe health cadence", () => {
     } finally {
       restartedDb.close()
     }
-    expect(sent).toHaveLength(1)
+    expect(sent).toHaveLength(2)
 
     processPendingBallDeadlines({
       db,
@@ -374,6 +381,11 @@ describe("20876 Tribe health cadence", () => {
       { recipient: "@agent/5", content: expect.any(String), type: "ball:nudge" },
       {
         recipient: "@chief",
+        content: expect.stringMatching(/re-ping.*reroute.*mark.*moot/i),
+        type: "ball:reminder",
+      },
+      {
+        recipient: "@chief",
         content: expect.stringMatching(/expired.*unanswered.*dropped/i),
         type: "ball:expired",
       },
@@ -390,6 +402,56 @@ describe("20876 Tribe health cadence", () => {
       (db.prepare("SELECT COUNT(*) AS count FROM dedup WHERE key LIKE 'ball-deadline:%'").get() as { count: number })
         .count,
     ).toBe(0)
+  })
+
+  it("reminds the sender once for a fanout:first ball with multiple owners", () => {
+    for (const [recipient, messageId] of [
+      ["@agent/5", "fanout-first-agent-5"],
+      ["@agent/6", "fanout-first-agent-6"],
+    ] as const) {
+      stmts.openPendingRequest.run({
+        $request_id: "fanout-first-reminder",
+        $recipient: recipient,
+        $sender: "@author",
+        $opened_at: now - 5 * MINUTE,
+        $expires_at: now + 5 * MINUTE,
+        $message_id: messageId,
+        $fanout: "first",
+      })
+    }
+    const sent: Array<{ recipient: string; content: string; type: string }> = []
+    const send = (recipient: string, content: string, type: string) => sent.push({ recipient, content, type })
+    const tick = (cadenceDb: OpenDatabase) =>
+      processPendingBallDeadlines({
+        db: cadenceDb,
+        stmts: createStatements(cadenceDb),
+        now,
+        liveSessionNames: new Set(["@agent/5", "@agent/6"]),
+        escalationTarget: "@ops",
+        send,
+      })
+
+    tick(db)
+    const senderReminders = sent.filter(({ recipient }) => recipient === "@author")
+    expect(senderReminders).toEqual([
+      {
+        recipient: "@author",
+        content: expect.stringMatching(/@agent\/5.*@agent\/6.*re-ping.*reroute.*mark.*moot/i),
+        type: "ball:reminder",
+      },
+    ])
+    expect(sent.filter(({ type }) => type === "ball:nudge").map(({ recipient }) => recipient)).toEqual([
+      "@agent/5",
+      "@agent/6",
+    ])
+
+    const restartedDb = openDatabase(join(tmpDir, "tribe.db"))
+    try {
+      tick(restartedDb)
+    } finally {
+      restartedDb.close()
+    }
+    expect(sent.filter(({ recipient }) => recipient === "@author")).toHaveLength(1)
   })
 
   it("drops an expired ball after sending the typed exception when no escalation target is configured", () => {

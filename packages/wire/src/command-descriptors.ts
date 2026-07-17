@@ -373,12 +373,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     id: "tribe.inbox.wait",
     title: "Inbox Wait",
     description:
-      "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Every result carries current attention; direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
+      "Long-poll the actionable inbox for a session until a request/query/assign/verdict/ball:reminder direct message arrives or the timeout elapses. Every result carries current attention; direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
     lifetime: "live-session",
     mcp: {
       name: "inbox.wait",
       description:
-        "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Every result carries current attention; direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
+        "Long-poll the actionable inbox for a session until a request/query/assign/verdict/ball:reminder direct message arrives or the timeout elapses. Every result carries current attention; direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
       inputSchema: {
         type: "object",
         properties: {
@@ -411,7 +411,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     cli: available({
       name: "inbox-wait",
       description:
-        "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Every result carries current attention; direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
+        "Long-poll the actionable inbox for a session until a request/query/assign/verdict/ball:reminder direct message arrives or the timeout elapses. Every result carries current attention; direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
       lifetime: "one-shot",
       mapsToMcp: "inbox.wait",
       options: [

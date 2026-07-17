@@ -25,7 +25,7 @@ describe("focus-mode notification diet", () => {
     expect(shouldDeliver({ kind: "direct", type, topic, replyHint: "yes" }, focus)).toBe(false)
   })
 
-  it.each(["request", "query", "assign", "verdict"])("still pushes direct %s actionables", (type) => {
+  it.each(["request", "query", "assign", "verdict", "ball:reminder"])("still pushes direct %s actionables", (type) => {
     expect(shouldDeliver({ kind: "direct", type, topic: null, replyHint: "yes" }, focus)).toBe(true)
   })
 

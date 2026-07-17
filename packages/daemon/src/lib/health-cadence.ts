@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite"
+import { ACTIONABLE_TYPES_SQL } from "./database.ts"
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
@@ -6,7 +7,6 @@ const DAY = 24 * HOUR
 const RESPONSE_WARNING_MS = 30 * MINUTE
 const CURSOR_WARNING_MS = 30 * MINUTE
 const CHIEF_ACTIONABLE_RESPONSE_TARGET_MS = MINUTE
-const ACTIONABLE_TYPES_SQL = "'request', 'query', 'verdict', 'assign'"
 
 export type HealthCadenceOptions = {
   now: number

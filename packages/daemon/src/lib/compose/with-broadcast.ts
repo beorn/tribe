@@ -86,7 +86,7 @@ export function shouldDeliver(
   if (mode === "ambient") return true
   if (mode === "focus") {
     // Focus is an opt-in push diet, not a durability filter: every row stays
-    // fetchable, but only the four actionable classes wake the seat. Plain
+    // fetchable, but only the canonical actionable classes wake the seat. Plain
     // direct notify/response traffic is informational even though its legacy
     // reply hint is "yes".
     return ACTIONABLE_TYPES_SET.has(info.type)

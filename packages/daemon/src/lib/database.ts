@@ -793,17 +793,19 @@ const MIGRATIONS: readonly Migration[] = [
 /**
  * The actionable message types — the ONE canonical set (19442). A DIRECT
  * message of one of these types addressed to a name is "actionable": it opens
- * work the recipient owes a response on. `inbox.wait` gates on it, the
- * chief-silent watchdog counts it, and the mailbox recovery view selects it.
+ * work the recipient must act on. `inbox.wait` gates on it, the chief-silent
+ * watchdog counts it, and the mailbox recovery view selects it. Sender
+ * reminders are wakeable closure duties but remain outside AUTO_TRACK_TYPES,
+ * so reminding a minter cannot manufacture a second ball.
  */
-export const ACTIONABLE_TYPES = ["request", "query", "verdict", "assign"] as const
+export const ACTIONABLE_TYPES = ["request", "query", "verdict", "assign", "ball:reminder"] as const
 export const ACTIONABLE_TYPES_SET: ReadonlySet<string> = new Set(ACTIONABLE_TYPES)
-/** Direct types that implicitly open a semantic response ball. Verdict remains
- * wakeable/actionable, but reviewing a request does not manufacture a second
- * obligation unless the sender explicitly supplies `request`. */
+/** Direct types that implicitly open a semantic response ball. Verdict and
+ * sender reminders remain wakeable/actionable, but neither manufactures a
+ * second obligation unless the sender explicitly supplies `request`. */
 export const AUTO_TRACK_TYPES = ["request", "query", "assign"] as const
 export const AUTO_TRACK_TYPES_SET: ReadonlySet<string> = new Set(AUTO_TRACK_TYPES)
-const ACTIONABLE_TYPES_SQL = ACTIONABLE_TYPES.map((t) => `'${t}'`).join(", ")
+export const ACTIONABLE_TYPES_SQL = ACTIONABLE_TYPES.map((t) => `'${t}'`).join(", ")
 
 export type TribeStatements = ReturnType<typeof createStatements>
 

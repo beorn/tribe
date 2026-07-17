@@ -477,9 +477,9 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
     expect(delivered).toBe(false)
   })
 
-  it("implicit tracking excludes non-actionables, self-send, and broadcasts", () => {
+  it("implicit tracking excludes informational and wake-only types, self-send, and broadcasts", () => {
     const chief = makeContext(db, stmts, "@chief")
-    for (const type of ["notify", "status", "response", "verdict"] as const) {
+    for (const type of ["notify", "status", "response", "verdict", "ball:reminder"] as const) {
       sendMessage(chief, "@agent/8", `${type} payload`, type)
     }
     sendMessage(chief, "@chief", "self query", "query")

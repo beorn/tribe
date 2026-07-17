@@ -20,7 +20,7 @@ import {
   MAX_BALL_TTL_MS,
   type SenderAttribution,
 } from "./messaging.ts"
-import { ACTIONABLE_TYPES_SET, AUTO_TRACK_TYPES_SET } from "./database.ts"
+import { ACTIONABLE_TYPES_SET, ACTIONABLE_TYPES_SQL, AUTO_TRACK_TYPES_SET } from "./database.ts"
 import { isPidAlive as pidStillAlive, registerSession } from "./session.ts"
 import { gatherCodePin } from "./code-pin.ts"
 import { parseDbGrowthWarningBytes, projectHealthCadence } from "./health-cadence.ts"
@@ -146,14 +146,16 @@ export type TribeCoordMethod = (typeof TRIBE_COORD_METHODS)[keyof typeof TRIBE_C
  *
  *   1. Notifications (`from: daemon`, broadcasts `to: "*"`) are AMBIENT —
  *      surface them in fetch reads but never act on them.
- *   2. `assign` / `query` / `request` / `verdict` typed messages are the
- *      ACTIONABLE channel. Direct `notify` / `status` / `response` rows are
- *      inbox-visible, but they do not wake `inbox.wait`.
+ *   2. `assign` / `query` / `request` / `verdict` and daemon
+ *      `ball:reminder` messages are the ACTIONABLE channel. Direct `notify` /
+ *      `status` / `response` rows are inbox-visible, but they do not wake
+ *      `inbox.wait`.
  *   3. Every non-self direct assign/query/request automatically opens one
- *      semantic response ball. Verdict stays actionable and wakeable without
- *      automatically minting another obligation. Answer or explicitly defer
- *      tracked work with `reply=<request-id>`; a transport/read acknowledgement
- *      is neither required nor sufficient to release that ownership.
+ *      semantic response ball. Verdict and sender reminders stay actionable
+ *      and wakeable without automatically minting another obligation. Answer
+ *      or explicitly defer tracked work with `reply=<request-id>`; a
+ *      transport/read acknowledgement is neither required nor sufficient to
+ *      release that ownership.
  *
  * Bead: `@km/code/15654` (Part 1).
  */
@@ -164,6 +166,7 @@ export const TRIBE_JOIN_PRIMER =
   "`type: assign`/`query`/`request` messages are actionable, wake `inbox.wait`, " +
   "and automatically open a semantic response ball. Direct `type: verdict` is " +
   "also actionable and wakeable, but does not automatically open another ball. " +
+  "Daemon `type: ball:reminder` is likewise actionable and wakeable without minting. " +
   "Direct `notify`/`status`/`response` rows are inbox-visible, but not wakeable. " +
   "Answer or explicitly defer each actionable with `reply=<request-id>` so its " +
   "semantic ball closes; no transport or exact-id delivery ACK is required."
@@ -1208,7 +1211,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
 				WHERE m.recipient != '*'
 				AND m.kind = 'direct'
 				AND m.sender != m.recipient
-				AND m.type IN ('request', 'query', 'verdict', 'assign')
+				AND m.type IN (${ACTIONABLE_TYPES_SQL})
 				AND m.rowid > COALESCE(
 					(SELECT c.last_actionable_seq FROM mailbox_cursors c WHERE c.recipient = m.recipient),
 					0
