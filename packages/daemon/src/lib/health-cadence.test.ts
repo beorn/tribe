@@ -308,7 +308,7 @@ describe("20876 Tribe health cadence", () => {
     expect(health.cadence?.inbox_lag).toEqual([expect.objectContaining({ session: "@agent/5" })])
     expect(health.issues).toEqual(
       expect.arrayContaining([
-        expect.stringMatching(/open-agent-5.*@agent\/5|@agent\/5.*open-agent-5/),
+        expect.stringMatching(/1 stale pending ball.*1 owner/i),
         expect.stringMatching(/member.*request.*p95/i),
         expect.stringMatching(/@agent\/5.*inbox lag|inbox lag.*@agent\/5/i),
       ]),
@@ -374,25 +374,17 @@ describe("20876 Tribe health cadence", () => {
       { recipient: "@agent/5", content: expect.any(String), type: "ball:nudge" },
       {
         recipient: "@chief",
-        content: expect.stringMatching(/re-ping.*ask.*decide.*mark.*moot/i),
+        content: expect.stringMatching(/expired.*unanswered.*dropped/i),
         type: "ball:expired",
       },
       {
         recipient: "@ops",
-        content: expect.stringMatching(/re-ping.*ask.*decide.*mark.*moot/i),
+        content: expect.stringMatching(/expired.*unanswered.*dropped/i),
         type: "verdict",
       },
     ])
-    expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'deadline-review'").get()).toEqual({
-      recipient: "@agent/5",
-    })
+    expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'deadline-review'").get()).toBeNull()
     db.prepare("UPDATE dedup SET ts = 0 WHERE key LIKE 'ball-deadline:%'").run()
-    stmts.cleanupDedup.run({ $cutoff: now })
-    expect(
-      (db.prepare("SELECT COUNT(*) AS count FROM dedup WHERE key LIKE 'ball-deadline:%'").get() as { count: number })
-        .count,
-    ).toBe(3)
-    db.prepare("DELETE FROM pending_request WHERE request_id = 'deadline-review'").run()
     stmts.cleanupDedup.run({ $cutoff: now })
     expect(
       (db.prepare("SELECT COUNT(*) AS count FROM dedup WHERE key LIKE 'ball-deadline:%'").get() as { count: number })
@@ -400,7 +392,7 @@ describe("20876 Tribe health cadence", () => {
     ).toBe(0)
   })
 
-  it("warns the sender that expiry retains ownership when no escalation target is configured", () => {
+  it("drops an expired ball after sending the typed exception when no escalation target is configured", () => {
     stmts.openPendingRequest.run({
       $request_id: "deadline-no-policy",
       $recipient: "@agent/6",
@@ -424,13 +416,42 @@ describe("20876 Tribe health cadence", () => {
     expect(sent).toEqual([
       {
         recipient: "@author",
-        content: expect.stringMatching(/no escalation target is configured.*ownership remains with @agent\/6/i),
+        content: expect.stringMatching(/expired.*unanswered.*dropped|dropped.*expired.*unanswered/i),
         type: "ball:expired",
       },
     ])
-    expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'deadline-no-policy'").get()).toEqual({
-      recipient: "@agent/6",
+    expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'deadline-no-policy'").get()).toBeNull()
+  })
+
+  it("keeps the expiry audit type when the sender is also the configured escalation target", () => {
+    stmts.openPendingRequest.run({
+      $request_id: "deadline-sender-judge",
+      $recipient: "@agent/6",
+      $sender: "@ops",
+      $opened_at: now - 30 * MINUTE,
+      $expires_at: now,
+      $message_id: "deadline-sender-judge-message",
+      $fanout: "first",
     })
+    const sent: Array<{ recipient: string; type: string }> = []
+
+    const result = processPendingBallDeadlines({
+      db,
+      stmts,
+      now,
+      liveSessionNames: new Set(["@agent/5", "@agent/6", "@ops"]),
+      escalationTarget: "@ops",
+      send: (recipient, _content, type) => sent.push({ recipient, type }),
+    })
+
+    expect(sent).toEqual([
+      { recipient: "@ops", type: "ball:expired" },
+      { recipient: "@ops", type: "verdict" },
+    ])
+    expect(result.expired).toBe(1)
+    expect(
+      db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'deadline-sender-judge'").get(),
+    ).toBeNull()
   })
 
   it("retries an expiry after a failed send without stranding a durable stage claim", () => {
@@ -477,9 +498,10 @@ describe("20876 Tribe health cadence", () => {
       restartedDb.close()
     }
     expect(sent).toEqual(["ball:expired"])
+    expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'deadline-retry'").get()).toBeNull()
   })
 
-  it("retains a delivered expiry warning while retrying a failed LLM escalation", () => {
+  it("retains an expired row while retrying a failed LLM escalation, then settles it", () => {
     stmts.openPendingRequest.run({
       $request_id: "deadline-split-retry",
       $recipient: "@agent/6",
@@ -530,6 +552,11 @@ describe("20876 Tribe health cadence", () => {
         }
       ).count,
     ).toBe(1)
+    expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'deadline-split-retry'").get()).toEqual(
+      {
+        recipient: "@agent/6",
+      },
+    )
 
     const result = processPendingBallDeadlines({
       db,
@@ -555,11 +582,9 @@ describe("20876 Tribe health cadence", () => {
     expect(
       (db.prepare("SELECT COUNT(*) AS count FROM messages WHERE type = 'verdict'").get() as { count: number }).count,
     ).toBe(1)
-    expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'deadline-split-retry'").get()).toEqual(
-      {
-        recipient: "@agent/6",
-      },
-    )
+    expect(
+      db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'deadline-split-retry'").get(),
+    ).toBeNull()
   })
 
   it("retains a delivered sender warning while retrying a failed LLM escalation", () => {
@@ -664,6 +689,7 @@ describe("20876 Tribe health cadence", () => {
     expect(processPendingBallDeadlines(options).expired).toBe(1)
     expect(nestedExpired).toBe(0)
     expect(sends).toBe(1)
+    expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'deadline-reentrant'").get()).toBeNull()
   })
 
   it("treats a permission-denied owner probe as unresolved and retains ownership", () => {
@@ -743,9 +769,7 @@ describe("20876 Tribe health cadence", () => {
       { recipient: "@author", type: "ball:expired" },
       { recipient: "@ops", type: "verdict" },
     ])
-    expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'dead-and-expired'").get()).toEqual({
-      recipient: "@agent/dead-expired",
-    })
+    expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'dead-and-expired'").get()).toBeNull()
   })
 
   it("does not repeat an already-actuated expiry when its owner is later detected dead", () => {
@@ -786,8 +810,6 @@ describe("20876 Tribe health cadence", () => {
     expect(sent).toEqual([
       { recipient: "@author", type: "ball:expired" },
       { recipient: "@ops", type: "verdict" },
-      { recipient: "@author", type: "ball:owner-dead" },
-      { recipient: "@ops", type: "verdict" },
     ])
   })
 
@@ -822,7 +844,7 @@ describe("20876 Tribe health cadence", () => {
     ])
   })
 
-  it("preserves every owner row when the escalation target already owns the same request", () => {
+  it("settles every recipient row when the escalation target also owns the same request", () => {
     db.prepare("DELETE FROM pending_request WHERE request_id = 'open-agent-5'").run()
     insertSession(db, { id: "sess-dead-collision", name: "@agent/dead-collision", role: "member", now })
     db.prepare("UPDATE sessions SET pid = 464646 WHERE name = '@agent/dead-collision'").run()
@@ -871,16 +893,13 @@ describe("20876 Tribe health cadence", () => {
           "SELECT recipient, message_id FROM pending_request WHERE request_id = 'retained-collision' ORDER BY recipient",
         )
         .all(),
-    ).toEqual([
-      { recipient: "@agent/dead-collision", message_id: "retained-collision-source" },
-      { recipient: "@ops", message_id: "retained-collision-target" },
-    ])
+    ).toEqual([])
 
     db.prepare("UPDATE dedup SET ts = 0 WHERE key LIKE 'ball-deadline:%'").run()
     stmts.cleanupDedup.run({ $cutoff: now })
     expect(
       (db.prepare("SELECT COUNT(*) AS count FROM dedup WHERE key LIKE '%:expired:%'").get() as { count: number }).count,
-    ).toBe(4)
+    ).toBe(0)
     tick()
     expect(sent).toHaveLength(6)
   })

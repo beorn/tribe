@@ -106,6 +106,7 @@ describe("Tribe command descriptors", () => {
     const pending = visibleCliProjection(commandDescriptorByMcpName("pending")!)
     expect(pending.options?.find((option) => option.name === "stale")?.mapsTo).toBe("stale_ms")
     expect(pending.options?.find((option) => option.name === "stale")?.transform).toBe("duration-ms")
+    expect(pending.options?.find((option) => option.name === "expired")?.flags).toBe("--expired")
     expect(pending.options?.find((option) => option.name === "close")?.requires).toEqual(["owner"])
 
     const repair = visibleCliProjection(commandDescriptorByMcpName("repair")!)
@@ -173,6 +174,10 @@ describe("Tribe command descriptors", () => {
 
     const pending = commandDescriptorByMcpName("pending")!
     expect(pending.mcp.inputSchema.properties?.all).toMatchObject({ type: "boolean" })
+    expect(pending.mcp.inputSchema.properties?.expired).toMatchObject({
+      type: "boolean",
+      description: expect.stringMatching(/expired/i),
+    })
     expect(pending.mcp.inputSchema.properties?.prune).toMatchObject({
       type: "boolean",
       description: expect.stringMatching(/stale_ms/i),
@@ -184,7 +189,7 @@ describe("Tribe command descriptors", () => {
       oldest_age_ms: { type: "number" },
     })
     expect(visibleCliProjection(pending).options?.map((option) => option.name)).toEqual(
-      expect.arrayContaining(["all", "json"]),
+      expect.arrayContaining(["all", "expired", "json"]),
     )
 
     const health = commandDescriptorByMcpName("health")!

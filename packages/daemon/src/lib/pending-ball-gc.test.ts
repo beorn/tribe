@@ -18,7 +18,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createTribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
-import { handleToolCall, type HandlerOpts } from "./handlers.ts"
+import { handleToolCall, readAttentionProjection, type HandlerOpts } from "./handlers.ts"
 import { sendMessage } from "./messaging.ts"
 import { cleanupOldData } from "./session.ts"
 
@@ -58,14 +58,14 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
 
   function openBall(
     stmts: TribeStatements,
-    o: { id: string; recipient: string; openedAt: number; sender?: string },
+    o: { id: string; recipient: string; openedAt: number; expiresAt?: number | null; sender?: string },
   ): void {
     stmts.openPendingRequest.run({
       $request_id: o.id,
       $recipient: o.recipient,
       $sender: o.sender ?? "@chief",
       $opened_at: o.openedAt,
-      $expires_at: null,
+      $expires_at: o.expiresAt ?? null,
       $message_id: `${o.id}-msg`,
       $fanout: "first",
     })
@@ -285,7 +285,62 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
     }
   })
 
-  it("tribe.health warns on every ball older than two hours with owner and exact request id", () => {
+  it("excludes expired balls from default pending, attention, and health while exposing the diagnostic view", () => {
+    const { db, stmts } = setup()
+    try {
+      const now = Date.now()
+      const ctx = createTribeContext({
+        db,
+        stmts,
+        sessionId: "sess-chief",
+        sessionRole: "member",
+        initialName: "@chief",
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+      })
+      openBall(stmts, {
+        id: "expired-review",
+        recipient: "@chief",
+        openedAt: now - 11 * 60_000,
+        expiresAt: now - 1,
+      })
+      openBall(stmts, {
+        id: "active-review",
+        recipient: "@chief",
+        openedAt: now - 60_000,
+        expiresAt: now + 9 * 60_000,
+      })
+
+      const pending = parseToolJson(handleToolCall(ctx, "tribe.pending", {}, makeOpts())) as {
+        pending: Array<{ request_id: string }>
+      }
+      const expired = parseToolJson(handleToolCall(ctx, "tribe.pending", { expired: true }, makeOpts())) as {
+        expired: boolean
+        pending: Array<{ request_id: string }>
+      }
+      const attention = readAttentionProjection(ctx, "@chief", now).attention
+      const health = parseToolJson(handleToolCall(ctx, "tribe.health", {}, makeOpts())) as {
+        pending_balls?: { count: number }
+        cadence?: {
+          open_balls: { count: number }
+          chief_actionable_response: { open: { count: number } }
+        }
+      }
+
+      expect(pending.pending.map((ball) => ball.request_id)).toEqual(["active-review"])
+      expect(expired.expired).toBe(true)
+      expect(expired.pending.map((ball) => ball.request_id)).toEqual(["expired-review"])
+      expect(attention.pending_balls.map((ball) => ball.request_id)).toEqual(["active-review"])
+      expect(health.pending_balls?.count).toBe(1)
+      expect(health.cadence?.open_balls.count).toBe(1)
+      expect(health.cadence?.chief_actionable_response.open.count).toBe(1)
+    } finally {
+      db.close()
+    }
+  })
+
+  it("tribe.health reports bounded owner and stale aggregates instead of the full ball pile", () => {
     const { db, stmts } = setup()
     try {
       const ctx = createTribeContext({
@@ -304,18 +359,36 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         openedAt: Date.now() - 2 * 60 * 60 * 1000 - 1,
       })
       openBall(stmts, { id: "fresh-ci", recipient: "@ci", openedAt: Date.now() - 60_000 })
+      for (let index = 0; index < 200; index += 1) {
+        openBall(stmts, {
+          id: `bulk-${String(index).padStart(3, "0")}`,
+          recipient: "@agent/8",
+          openedAt: Date.now() - 60_000,
+        })
+      }
 
       const health = parseToolJson(handleToolCall(ctx, "tribe.health", {}, makeOpts())) as {
         issues?: string[]
-        pending_balls?: { count: number; owner_count: number; stale: Array<{ request_id: string; recipient: string }> }
+        pending_balls?: {
+          count: number
+          owner_count: number
+          owners: Array<{ owner: string; count: number; oldest_age_ms: number; pending?: unknown }>
+          stale: { count: number; owner_count: number; oldest_age_ms: number }
+        }
       }
 
-      expect(health.pending_balls).toMatchObject({ count: 2, owner_count: 2 })
-      expect(health.pending_balls?.stale).toEqual([
-        expect.objectContaining({ request_id: "stale-agent-8", recipient: "@agent/8" }),
+      expect(health.pending_balls).toMatchObject({
+        count: 202,
+        owner_count: 2,
+        stale: { count: 1, owner_count: 1, oldest_age_ms: expect.any(Number) },
+      })
+      expect(health.pending_balls?.owners).toEqual([
+        { owner: "@agent/8", count: 201, oldest_age_ms: expect.any(Number) },
+        { owner: "@ci", count: 1, oldest_age_ms: expect.any(Number) },
       ])
-      expect(health.issues).toEqual([expect.stringMatching(/stale-agent-8.*@agent\/8|@agent\/8.*stale-agent-8/)])
-      expect(health.issues?.some((warning) => warning.includes("fresh-ci"))).toBe(false)
+      expect(health.pending_balls?.owners.every((owner) => owner.pending === undefined)).toBe(true)
+      expect(health.issues).toEqual([expect.stringMatching(/1 stale pending ball.*1 owner/i)])
+      expect(JSON.stringify(health.pending_balls).length).toBeLessThan(2_048)
     } finally {
       db.close()
     }

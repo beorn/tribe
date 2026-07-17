@@ -189,6 +189,7 @@ function chiefOpenActionableProjection(
         ), 0) AS over_target_count
       FROM pending_request
       WHERE recipient = '@chief'
+        AND (expires_at IS NULL OR expires_at > $now)
     `)
     .get({ $now: now, $target: CHIEF_ACTIONABLE_RESPONSE_TARGET_MS }) as {
     count: number
@@ -236,7 +237,13 @@ function chiefActionableResponseProjection(
 }
 
 function openBallProjection(db: Database, now: number): HealthCadenceProjection["open_balls"] {
-  const row = db.prepare("SELECT COUNT(*) AS count, MIN(opened_at) AS oldest_opened_at FROM pending_request").get() as {
+  const row = db
+    .prepare(`
+      SELECT COUNT(*) AS count, MIN(opened_at) AS oldest_opened_at
+      FROM pending_request
+      WHERE expires_at IS NULL OR expires_at > $now
+    `)
+    .get({ $now: now }) as {
     count: number
     oldest_opened_at: number | null
   }

@@ -664,9 +664,21 @@ function pendingBall(row: PendingBallRow, now: number): PendingBall {
   }
 }
 
-function pendingBallsForOwner(ctx: TribeContext, owner: string, now: number): PendingBall[] {
+type PendingBallView = "active" | "expired"
+
+function pendingRowMatchesView(row: PendingBallRow, now: number, view: PendingBallView): boolean {
+  const expired = row.expires_at !== null && row.expires_at <= now
+  return view === "expired" ? expired : !expired
+}
+
+function pendingBallsForOwner(
+  ctx: TribeContext,
+  owner: string,
+  now: number,
+  view: PendingBallView = "active",
+): PendingBall[] {
   const rows = ctx.stmts.selectPendingForRecipient.all({ $recipient: owner }) as PendingBallRow[]
-  return rows.map((row) => pendingBall(row, now))
+  return rows.filter((row) => pendingRowMatchesView(row, now, view)).map((row) => pendingBall(row, now))
 }
 
 function pendingCloseMissWarning(
@@ -676,14 +688,19 @@ function pendingCloseMissWarning(
   attemptedId: string,
 ): string | undefined {
   const peerSet = peers ? new Set(peers) : null
-  const pending = pendingBallsForOwner(ctx, owner, Date.now()).filter(
-    (ball) => peerSet === null || peerSet.has(ball.sender),
-  )
-  if (pending.length === 0) return undefined
-  const listing = pending
-    .map((ball) => `${ball.request_id} (message ${ball.message_id}, from ${ball.sender})`)
-    .join(", ")
-  return `reply/close ${attemptedId} closed 0 rows; open balls owned by ${owner}: ${listing}`
+  const now = Date.now()
+  const fromRelevantPeer = (ball: PendingBall) => peerSet === null || peerSet.has(ball.sender)
+  const active = pendingBallsForOwner(ctx, owner, now).filter(fromRelevantPeer)
+  const expired = pendingBallsForOwner(ctx, owner, now, "expired").filter(fromRelevantPeer)
+  if (active.length + expired.length === 0) return undefined
+  const listing = [
+    ...active.map((ball) => `${ball.request_id} (message ${ball.message_id}, from ${ball.sender})`),
+    ...expired.map(
+      (ball) =>
+        `${ball.request_id} (message ${ball.message_id}, from ${ball.sender}; expired and awaiting typed settlement)`,
+    ),
+  ].join(", ")
+  return `reply/close ${attemptedId} closed 0 rows; balls owned by ${owner}: ${listing}`
 }
 
 function trackerMissWarning(
@@ -696,9 +713,9 @@ function trackerMissWarning(
   return pendingCloseMissWarning(ctx, owner, peers, tracker.request_id)
 }
 
-function allPendingBalls(ctx: TribeContext, now: number): PendingBall[] {
+function allPendingBalls(ctx: TribeContext, now: number, view: PendingBallView = "active"): PendingBall[] {
   const rows = ctx.stmts.selectAllPendingRequests.all() as PendingBallRow[]
-  return rows.map((row) => pendingBall(row, now))
+  return rows.filter((row) => pendingRowMatchesView(row, now, view)).map((row) => pendingBall(row, now))
 }
 
 function pendingOwnerGroups(pending: readonly PendingBall[]) {
@@ -716,6 +733,10 @@ function pendingOwnerGroups(pending: readonly PendingBall[]) {
   }))
 }
 
+function pendingOwnerSummaries(pending: readonly PendingBall[]) {
+  return pendingOwnerGroups(pending).map(({ pending: _pending, ...summary }) => summary)
+}
+
 function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): ToolResult {
   // Ball-tracker pending-query (@km/tribe/message-ball-tracker Phase 2a):
   // return open requests addressed to the given recipient (the "owner" of
@@ -723,6 +744,8 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
   // Optional `stale_ms` filters to requests older than that threshold.
   const owner = (a.owner as string) ?? ctx.getName()
   const all = a.all === true
+  const expired = a.expired === true
+  const view: PendingBallView = expired ? "expired" : "active"
   const staleMs = typeof a.stale_ms === "number" ? a.stale_ms : null
   const now = Date.now()
 
@@ -731,6 +754,9 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
   }
   if (all && (a.close !== undefined || a.prune === true)) {
     return jsonResult({ error: "tribe.pending: all is read-only; close/prune require one explicit owner." })
+  }
+  if (expired && (a.close !== undefined || a.prune === true)) {
+    return jsonResult({ error: "tribe.pending: expired is a read-only diagnostic view." })
   }
 
   // Explicit repair path (@km/tribe/20008): prune stale balls for `owner`. Safe
@@ -760,11 +786,12 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
   }
 
   if (all) {
-    const rows = allPendingBalls(ctx, now)
+    const rows = allPendingBalls(ctx, now, view)
     const pending = staleMs === null ? rows : rows.filter((row) => row.age_ms >= staleMs)
     const owners = pendingOwnerGroups(pending)
     return jsonResult({
       all: true,
+      expired,
       scope: "all",
       pending,
       owners,
@@ -774,9 +801,9 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
     })
   }
 
-  const rows = pendingBallsForOwner(ctx, owner, now)
+  const rows = pendingBallsForOwner(ctx, owner, now, view)
   const pending = staleMs === null ? rows : rows.filter((row) => row.age_ms >= staleMs)
-  return jsonResult({ owner, pending, count: pending.length })
+  return jsonResult({ owner, expired, pending, count: pending.length })
 }
 
 function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
@@ -1192,13 +1219,18 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
   // 20876 / 17199: fleet-wide open-ball attention is derived from the one
   // existing pending_request authority. A per-owner sample can be empty while
   // another role is blocked, so health carries the all-owner projection and a
-  // loud >2h warning with the exact owner + semantic request id.
+  // bounded aggregate warning for active rows older than two hours.
   const pending = allPendingBalls(ctx, now)
-  const pendingOwners = pendingOwnerGroups(pending)
+  const pendingOwners = pendingOwnerSummaries(pending)
   const stalePending = pending.filter((ball) => ball.age_ms >= 2 * 60 * 60 * 1000)
-  const pendingIssues = stalePending.map(
-    (ball) => `pending ball ${ball.request_id} owned by ${ball.recipient} is ${Math.floor(ball.age_ms / 60_000)}m old`,
-  )
+  const staleOwnerCount = new Set(stalePending.map((ball) => ball.recipient)).size
+  const oldestStaleAgeMs = stalePending.reduce((oldest, ball) => Math.max(oldest, ball.age_ms), 0)
+  const pendingIssues =
+    stalePending.length === 0
+      ? []
+      : [
+          `${stalePending.length} stale pending ${stalePending.length === 1 ? "ball" : "balls"} across ${staleOwnerCount} ${staleOwnerCount === 1 ? "owner" : "owners"}; oldest is ${Math.floor(oldestStaleAgeMs / 60_000)}m old`,
+        ]
   const cadence = projectHealthCadence(ctx.db, {
     now,
     liveSessionNames: liveSessions.map((session) => session.name),
@@ -1217,7 +1249,11 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
       owner_count: pendingOwners.length,
       oldest_age_ms: pending.reduce((oldest, ball) => Math.max(oldest, ball.age_ms), 0),
       owners: pendingOwners,
-      stale: stalePending,
+      stale: {
+        count: stalePending.length,
+        owner_count: staleOwnerCount,
+        oldest_age_ms: oldestStaleAgeMs,
+      },
     },
     issues: [...pendingIssues, ...cadence.warnings],
     cadence,

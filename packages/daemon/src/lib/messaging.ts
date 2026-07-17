@@ -219,9 +219,12 @@ export function sendMessage(
         ? (ctx.stmts.selectPendingForReplyRecipient.get({
             $reply_id: replyId,
             $recipient: sender,
-          }) as { request_id: string; fanout: string } | null)
+          }) as { request_id: string; fanout: string; expires_at: number | null } | null)
         : null
     const canonicalReplyId = pendingReply?.request_id ?? replyId
+    const pendingReplyExpiresAt = pendingReply?.expires_at
+    const pendingReplyExpired =
+      pendingReplyExpiresAt !== null && pendingReplyExpiresAt !== undefined && pendingReplyExpiresAt <= ts
     let tracker = canonicalReplyId ? { request_id: canonicalReplyId, closed: 0 } : undefined
     const result = ctx.stmts.insertMessage.run({
       $id: id,
@@ -256,7 +259,11 @@ export function sendMessage(
           $fanout: ballTracker.fanout ?? "first",
         })
       }
-      if (canonicalReplyId) {
+      // A reply/defer is an answer only while the SLA lease is active. Once
+      // expires_at is reached, preserve the row for the deadline sweep so the
+      // typed ball:expired exception and configured escalation cannot be
+      // silently erased in the cadence gap. The late reply is still journaled.
+      if (canonicalReplyId && !pendingReplyExpired) {
         if (pendingReply?.fanout === "first") {
           const closed = ctx.stmts.closePendingRequestAll.run({ $request_id: canonicalReplyId })
           tracker = { request_id: canonicalReplyId, closed: closed.changes ?? 0 }
