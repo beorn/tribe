@@ -529,8 +529,8 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const foreign = await spawnLaunchAdapter(socketPath, "managed-cli-foreign.log", "managed-cli-foreign-launch", {
       name: foreignName,
     })
-    await callLaunchTool(own, 60, "members", {})
-    await callLaunchTool(foreign, 61, "members", {})
+    await callLaunchToolWhenRegistered(own, 60, "members", {})
+    await callLaunchToolWhenRegistered(foreign, 61, "members", {})
     await callLaunchTool(own, 62, "rename", { new_name: runtimeName })
 
     // Simulate the reported recovery state: the managed launch remains in the
@@ -694,7 +694,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       expect(result.sessions?.filter((session) => session.name === NAME && session.alive)).toHaveLength(1)
     }
 
-    const members = (await callLaunchTool(launchAdapters[0]!, 20, "members", {})) as {
+    const members = (await callLaunchToolWhenRegistered(launchAdapters[0]!, 20, "members", {})) as {
       sessions?: Array<{
         name?: string
         member_id?: string
@@ -710,7 +710,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(member?.transport_pids?.toSorted((a, b) => a - b)).toEqual(
       launchAdapters.map(({ child }) => child.pid!).toSorted((a, b) => a - b),
     )
-    const health = (await callLaunchTool(launchAdapters[1]!, 19, "health", {})) as {
+    const health = (await callLaunchToolWhenRegistered(launchAdapters[1]!, 19, "health", {})) as {
       members?: Array<{
         name?: string
         member_id?: string
@@ -735,7 +735,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(sent.id).toEqual(expect.any(String))
     const [pending, fetched] = (await Promise.all([
       callLaunchTool(launchAdapters[1]!, 22, "pending", { owner: NAME }),
-      callLaunchTool(launchAdapters[2]!, 23, "fetch", { ids: [sent.id], limit: 50 }),
+      callLaunchToolWhenRegistered(launchAdapters[2]!, 23, "fetch", { ids: [sent.id], limit: 50 }),
     ])) as [{ pending?: Array<{ request_id?: string }> }, { events?: Array<{ id?: string; content?: string }> }]
     expect(pending.pending?.some((request) => request.request_id === sent.id)).toBe(true)
     expect(
@@ -766,7 +766,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(cli.exitCode, cliStderr).toBe(0)
     expect(launchAdapters.map(({ child }) => child.exitCode)).toEqual([null, null, null])
     const afterCli = await Promise.all(
-      launchAdapters.map((adapter, index) => callLaunchTool(adapter, 50 + index, "members", {})),
+      launchAdapters.map((adapter, index) => callLaunchToolWhenRegistered(adapter, 50 + index, "members", {})),
     )
     for (const result of afterCli as Array<{
       sessions?: Array<{ name?: string; member_id?: string; launch_id?: string; transport_pids?: number[] }>
@@ -785,7 +785,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     await once(launchAdapters[1]!.child, "exit")
     const replacement = await spawnLaunchAdapter(socketPath, "launch-adapter-2b.log", launchId)
     launchAdapters[1] = replacement
-    const afterReconnect = (await callLaunchTool(replacement, 24, "members", {})) as {
+    const afterReconnect = (await callLaunchToolWhenRegistered(replacement, 24, "members", {})) as {
       sessions?: Array<{ name?: string; member_id?: string; launch_id?: string; transport_pids?: number[] }>
     }
     expect(afterReconnect.sessions?.find((session) => session.name === NAME)).toMatchObject({
@@ -822,7 +822,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     )
     for (const [index, adapter] of reexeced.entries()) launchAdapters[index] = adapter
     const afterDaemonRestart = await Promise.all(
-      launchAdapters.map((adapter, index) => callLaunchTool(adapter, 30 + index, "members", {})),
+      launchAdapters.map((adapter, index) => callLaunchToolWhenRegistered(adapter, 30 + index, "members", {})),
     )
     for (const result of afterDaemonRestart as Array<{
       sessions?: Array<{ name?: string; member_id?: string; launch_id?: string; transport_pids?: number[] }>
@@ -847,7 +847,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     // A deliberate new launch with takeover supersedes the whole old launch
     // as one set, leaving no suffixed or -dead- session rows.
     const successor = await spawnLaunchAdapter(socketPath, "launch-b-successor.log", "provider-launch-b")
-    const successorMembers = (await callLaunchTool(successor, 41, "members", {})) as {
+    const successorMembers = (await callLaunchToolWhenRegistered(successor, 41, "members", {})) as {
       sessions?: Array<{ name?: string; member_id?: string; launch_id?: string; transport_pids?: number[] }>
     }
     await waitForCondition(
