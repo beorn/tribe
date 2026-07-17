@@ -852,12 +852,14 @@ export function createStatements(db: Database) {
     /** Ball-tracker lookup: used when a reply arrives to decide whether this
      *  recipient's row is fanout='first' (close all) or fanout='all'
      *  (close only the replying recipient). */
-    selectPendingForRequestRecipient: db.prepare(`
-		SELECT fanout
-		FROM pending_request
-		WHERE request_id = $request_id AND recipient = $recipient
-		LIMIT 1
-	`),
+    selectPendingForReplyRecipient: db.prepare(`
+			SELECT request_id, fanout
+			FROM pending_request
+			WHERE recipient = $recipient
+				AND (request_id = $reply_id OR message_id = $reply_id)
+			ORDER BY CASE WHEN request_id = $reply_id THEN 0 ELSE 1 END
+			LIMIT 1
+		`),
 
     /** Ball-tracker query: open requests addressed to a particular recipient (the "owner"
      *  of the open ball). Sorted oldest-first so callers can act on the longest-pending. */

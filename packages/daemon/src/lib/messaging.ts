@@ -214,7 +214,15 @@ export function sendMessage(
   // mandatory response ball failed to open. The fanout callback runs only
   // after this transaction commits.
   const persist = ctx.db.transaction(() => {
-    let tracker = replyId ? { request_id: replyId, closed: 0 } : undefined
+    const pendingReply =
+      replyId && resolvedKind === "direct"
+        ? (ctx.stmts.selectPendingForReplyRecipient.get({
+            $reply_id: replyId,
+            $recipient: sender,
+          }) as { request_id: string; fanout: string } | null)
+        : null
+    const canonicalReplyId = pendingReply?.request_id ?? replyId
+    let tracker = canonicalReplyId ? { request_id: canonicalReplyId, closed: 0 } : undefined
     const result = ctx.stmts.insertMessage.run({
       $id: id,
       $type: type,
@@ -229,7 +237,7 @@ export function sendMessage(
       $topic: classification.topic ?? null,
       $room_id: classification.roomId ?? null,
       $request: requestId,
-      $reply: replyId,
+      $reply: canonicalReplyId,
       $summary: classification.summary ?? null,
     })
     const rowid = Number(result.lastInsertRowid)
@@ -248,20 +256,16 @@ export function sendMessage(
           $fanout: ballTracker.fanout ?? "first",
         })
       }
-      if (replyId) {
-        const row = ctx.stmts.selectPendingForRequestRecipient.get({
-          $request_id: replyId,
-          $recipient: sender,
-        }) as { fanout: string } | null
-        if (row?.fanout === "first") {
-          const closed = ctx.stmts.closePendingRequestAll.run({ $request_id: replyId })
-          tracker = { request_id: replyId, closed: closed.changes ?? 0 }
+      if (canonicalReplyId) {
+        if (pendingReply?.fanout === "first") {
+          const closed = ctx.stmts.closePendingRequestAll.run({ $request_id: canonicalReplyId })
+          tracker = { request_id: canonicalReplyId, closed: closed.changes ?? 0 }
         } else {
           const closed = ctx.stmts.closePendingRequest.run({
-            $request_id: replyId,
+            $request_id: canonicalReplyId,
             $recipient: sender,
           })
-          tracker = { request_id: replyId, closed: closed.changes ?? 0 }
+          tracker = { request_id: canonicalReplyId, closed: closed.changes ?? 0 }
         }
       }
     }

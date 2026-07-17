@@ -196,7 +196,7 @@ describe("registerSendCommands", () => {
                   text: JSON.stringify({
                     owner: "@chief",
                     count: pendingOpen ? 1 : 0,
-                    pending: pendingOpen ? [{ request_id: "req-123", sender: "@agent/3" }] : [],
+                    pending: pendingOpen ? [{ request_id: "req-123", message_id: "msg-123", sender: "@agent/3" }] : [],
                   }),
                 },
               ],
@@ -215,7 +215,7 @@ describe("registerSendCommands", () => {
                     sent: true,
                     tracker: {
                       request_id: "req-123",
-                      closed: message === "done" ? 1 : message === "malformed" ? 1.5 : 0,
+                      closed: message === "done" || message === "by-message" ? 1 : message === "malformed" ? 1.5 : 0,
                     },
                   }
           } else {
@@ -250,8 +250,14 @@ describe("registerSendCommands", () => {
           child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
           child.on("close", (code) => resolveProc({ code, stdout, stderr }))
         })
-      const runReply = (message: string) =>
-        runCli(["send", "@agent/3", message, "--type", "response", "--reply", "req-123"])
+      const runReply = (message: string, reply = "req-123") =>
+        runCli(["send", "@agent/3", message, "--type", "response", "--reply", reply])
+
+      const byMessage = await runReply("by-message", "msg-123")
+      expect(byMessage).toMatchObject({ code: 0, stderr: "" })
+      expect(byMessage.stdout).toContain("Closed 1 pending request row(s) for @chief: req-123")
+
+      pendingOpen = true
 
       const res = await runReply("done")
 
@@ -290,7 +296,7 @@ describe("registerSendCommands", () => {
 
       const closes = calls.filter((call) => call.method === "tribe.pending" && call.params.close !== undefined)
       expect(closes).toEqual([{ method: "tribe.pending", params: { owner: "@chief", close: "req-123" } }])
-      expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(4)
+      expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(5)
     } finally {
       server.close()
       rmSync(tmp, { recursive: true, force: true })

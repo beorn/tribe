@@ -13,8 +13,9 @@ import { createServer, type Server, type Socket } from "node:net"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createLineParser } from "../src/parser.ts"
 import { isRequest, makeResponse } from "../src/rpc.ts"
+import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
 
-const ADAPTER = resolve(dirname(fileURLToPath(import.meta.url)), "../src/stdio-adapter.ts")
+const PLUGIN_SERVER = resolve(dirname(fileURLToPath(import.meta.url)), "../../../plugins/claude/server.ts")
 const BUN_BIN = process.versions.bun ? process.execPath : "bun"
 
 function spawnSkewedDaemon(socketPath: string): Promise<{ server: Server; clients: Socket[] }> {
@@ -51,6 +52,58 @@ function spawnSkewedDaemon(socketPath: string): Promise<{ server: Server; client
   })
 }
 
+function spawnGenerationDaemon(socketPath: string): Promise<{
+  server: Server
+  clients: Socket[]
+  registrations: number[]
+  setPid(pid: number): void
+}> {
+  const clients: Socket[] = []
+  const registrations: number[] = []
+  let daemonPid = 1001
+  return new Promise((resolveServer) => {
+    const server = createServer((socket) => {
+      clients.push(socket)
+      const parse = createLineParser((msg) => {
+        if (!isRequest(msg)) return
+        if (msg.method === "register") {
+          registrations.push(daemonPid)
+          socket.write(
+            makeResponse(msg.id, {
+              sessionId: `generation-${daemonPid}`,
+              name: "generation-test",
+              role: "member",
+              chief: "",
+              protocolVersion: TRIBE_PROTOCOL_VERSION,
+              daemon: { pid: daemonPid, uptime: 0 },
+            }),
+          )
+          return
+        }
+        if (msg.method === "tribe.members") {
+          socket.write(makeResponse(msg.id, { content: [{ type: "text", text: JSON.stringify({ sessions: [] }) }] }))
+          return
+        }
+        socket.write(makeResponse(msg.id, { ok: true }))
+      })
+      socket.on("data", parse)
+      socket.on("error", () => {
+        /* test teardown */
+      })
+    })
+    server.listen(socketPath, () =>
+      resolveServer({
+        server,
+        clients,
+        registrations,
+        setPid(pid: number) {
+          daemonPid = pid
+        },
+      }),
+    )
+  })
+}
+
 async function waitFor(predicate: () => boolean, timeoutMs = 5_000, label = "condition"): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -82,11 +135,15 @@ describe("stdio adapter — protocol version skew", () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const logPath = join(tmpDir, "adapter.log")
     daemon = await spawnSkewedDaemon(socketPath)
-    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "skew-test"], {
+    child = spawn(BUN_BIN, [PLUGIN_SERVER, "--socket", socketPath, "--name", "skew-test"], {
       cwd: tmpDir,
       env: { ...process.env, TRIBE_DELIVERY: "pull", DEBUG_LOG: logPath, LOG_LEVEL: "warn" },
       stdio: ["pipe", "pipe", "pipe"],
     }) as ChildProcessWithoutNullStreams
+    let stderr = ""
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk)
+    })
 
     await waitFor(
       () => {
@@ -102,5 +159,25 @@ describe("stdio adapter — protocol version skew", () => {
 
     await waitFor(() => child?.exitCode !== null, 8_000, "adapter exit")
     expect(child.exitCode).toBe(2)
+    expect(stderr).toContain("restart the host session or reinstall the Tribe plugin")
+  }, 20_000)
+
+  it("re-execs current disk code when a reconnect observes a new daemon pid", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const generationDaemon = await spawnGenerationDaemon(socketPath)
+    daemon = generationDaemon
+    child = spawn(BUN_BIN, [PLUGIN_SERVER, "--socket", socketPath, "--name", "generation-test"], {
+      cwd: tmpDir,
+      env: { ...process.env, TRIBE_DELIVERY: "pull", LOG_LEVEL: "silent" },
+      stdio: ["pipe", "pipe", "pipe"],
+    }) as ChildProcessWithoutNullStreams
+
+    await waitFor(() => generationDaemon.registrations.length >= 1, 8_000, "initial registration")
+    generationDaemon.setPid(2002)
+    for (const socket of generationDaemon.clients.splice(0)) socket.destroy()
+
+    await waitFor(() => generationDaemon.registrations.length >= 3, 12_000, "replacement registration")
+    expect(generationDaemon.registrations).toEqual([1001, 2002, 2002])
+    expect(child.exitCode).toBeNull()
   }, 20_000)
 })

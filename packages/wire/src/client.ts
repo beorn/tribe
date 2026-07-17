@@ -356,6 +356,8 @@ export type ReconnectingClientOpts = {
   onDisconnect?: () => void
   /** Called on successful reconnect */
   onReconnect?: () => void
+  /** Called once after the bounded reconnect loop exhausts every attempt. */
+  onReconnectExhausted?: (error: unknown, attempts: number) => void
   /** Max reconnect attempts (default: 30) */
   maxAttempts?: number
   /** Forwarded to connectOrStart on each (re)connect */
@@ -379,6 +381,7 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
     onConnect,
     onDisconnect,
     onReconnect,
+    onReconnectExhausted,
     maxAttempts = 30,
     callTimeoutMs,
     daemonScript,
@@ -406,6 +409,7 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
       reconnectAc = new AbortController()
       const timers = createTimers(reconnectAc.signal)
       void (async () => {
+        let lastError: unknown = new Error("Reconnect exhausted without an attempt")
         for (let attempt = 0; attempt < maxAttempts; attempt++) {
           if (closed) return
           const ms = Math.min(500 * 2 ** attempt, 10_000)
@@ -422,11 +426,13 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
             setupReconnect()
             onReconnect?.()
             return
-          } catch {
+          } catch (error) {
+            lastError = error
             log.debug?.(`Reconnect attempt ${attempt + 1} failed`)
           }
         }
-        log.error?.(`Failed to reconnect after ${maxAttempts} attempts`)
+        if (onReconnectExhausted) onReconnectExhausted(lastError, maxAttempts)
+        else log.error?.(`Failed to reconnect after ${maxAttempts} attempts`)
       })()
     })
   }

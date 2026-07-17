@@ -527,12 +527,11 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
         attribution,
       ),
     )
-    const tracker = replyId
-      ? {
-          request_id: replyId,
-          closed: results.reduce((total, item) => total + (item.tracker?.closed ?? 0), 0),
-        }
-      : undefined
+    const tracker = aggregateReplyTracker(results, replyId)
+    const warning = combineWarnings(
+      maybeDerivedSummaryWarning(summaryDerived),
+      trackerMissWarning(ctx, sender, recipients, tracker),
+    )
     logEvent(ctx, `message.sent.${msgType}`, a.bead as string | undefined, {
       to: recipients,
       message_ids: results.map((r) => r.id),
@@ -546,13 +545,8 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       ...(sharedRequestId ? { request_id: sharedRequestId } : {}),
       ...(tracker ? { tracker } : {}),
       summary,
-      ...(summaryDerived
-        ? {
-            summary_derived: true,
-            warning:
-              "no `summary` provided — derived a one-liner from the message; pass an authored `summary` for the channel one-liner.",
-          }
-        : {}),
+      ...(summaryDerived ? { summary_derived: true } : {}),
+      ...(warning ? { warning } : {}),
     })
   }
 
@@ -590,19 +584,42 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     message_id: result.id,
     ...(summaryDerived ? { summary_derived: true } : {}),
   })
+  const warning = combineWarnings(
+    maybeDerivedSummaryWarning(summaryDerived),
+    trackerMissWarning(ctx, sender, [recipients], result.tracker),
+  )
   return jsonResult({
     sent: true,
     id: result.id,
     ...(result.tracker ? { tracker: result.tracker } : {}),
     summary,
-    ...(summaryDerived
-      ? {
-          summary_derived: true,
-          warning:
-            "no `summary` provided — derived a one-liner from the message; pass an authored `summary` for the channel one-liner.",
-        }
-      : {}),
+    ...(summaryDerived ? { summary_derived: true } : {}),
+    ...(warning ? { warning } : {}),
   })
+}
+
+function derivedSummaryWarning(): string {
+  return "no `summary` provided — derived a one-liner from the message; pass an authored `summary` for the channel one-liner."
+}
+
+function maybeDerivedSummaryWarning(summaryDerived: boolean): string | undefined {
+  return summaryDerived ? derivedSummaryWarning() : undefined
+}
+
+type Tracker = { request_id: string; closed: number }
+
+function aggregateReplyTracker(results: readonly { tracker?: Tracker }[], replyId: string | null): Tracker | undefined {
+  if (replyId === null) return undefined
+  const trackers = results.flatMap((item) => (item.tracker ? [item.tracker] : []))
+  return {
+    request_id: trackers.find((item) => item.closed > 0)?.request_id ?? trackers[0]?.request_id ?? replyId,
+    closed: trackers.reduce((total, item) => total + item.closed, 0),
+  }
+}
+
+function combineWarnings(...warnings: Array<string | undefined>): string | undefined {
+  const present = warnings.filter((warning): warning is string => warning !== undefined)
+  return present.length > 0 ? present.join(" ") : undefined
 }
 
 type PendingBallRow = {
@@ -650,6 +667,33 @@ function pendingBall(row: PendingBallRow, now: number): PendingBall {
 function pendingBallsForOwner(ctx: TribeContext, owner: string, now: number): PendingBall[] {
   const rows = ctx.stmts.selectPendingForRecipient.all({ $recipient: owner }) as PendingBallRow[]
   return rows.map((row) => pendingBall(row, now))
+}
+
+function pendingCloseMissWarning(
+  ctx: TribeContext,
+  owner: string,
+  peers: readonly string[] | undefined,
+  attemptedId: string,
+): string | undefined {
+  const peerSet = peers ? new Set(peers) : null
+  const pending = pendingBallsForOwner(ctx, owner, Date.now()).filter(
+    (ball) => peerSet === null || peerSet.has(ball.sender),
+  )
+  if (pending.length === 0) return undefined
+  const listing = pending
+    .map((ball) => `${ball.request_id} (message ${ball.message_id}, from ${ball.sender})`)
+    .join(", ")
+  return `reply/close ${attemptedId} closed 0 rows; open balls owned by ${owner}: ${listing}`
+}
+
+function trackerMissWarning(
+  ctx: TribeContext,
+  owner: string,
+  peers: readonly string[],
+  tracker: Tracker | undefined,
+): string | undefined {
+  if (tracker?.closed !== 0) return undefined
+  return pendingCloseMissWarning(ctx, owner, peers, tracker.request_id)
 }
 
 function allPendingBalls(ctx: TribeContext, now: number): PendingBall[] {
@@ -704,8 +748,15 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
 
   const closeId = typeof a.close === "string" && a.close.length > 0 ? a.close : null
   if (closeId) {
-    const res = ctx.stmts.closePendingRequest.run({ $request_id: closeId, $recipient: owner })
-    return jsonResult({ owner, request_id: closeId, closed: res.changes ?? 0 })
+    const pending = ctx.stmts.selectPendingForReplyRecipient.get({
+      $reply_id: closeId,
+      $recipient: owner,
+    }) as { request_id: string } | null
+    const requestId = pending?.request_id ?? closeId
+    const res = ctx.stmts.closePendingRequest.run({ $request_id: requestId, $recipient: owner })
+    const closed = res.changes ?? 0
+    const warning = closed === 0 ? pendingCloseMissWarning(ctx, owner, undefined, closeId) : undefined
+    return jsonResult({ owner, request_id: requestId, closed, ...(warning ? { warning } : {}) })
   }
 
   if (all) {

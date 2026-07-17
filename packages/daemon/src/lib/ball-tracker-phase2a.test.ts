@@ -204,6 +204,42 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
     expect(close?.type).toBe("response")
   })
 
+  it("reply: accepts the opening message id and records the canonical request id", () => {
+    const chief = makeContext(db, stmts, "@chief")
+    const agent = makeContext(db, stmts, "@agent/8")
+    const request = sendMessage(
+      chief,
+      "@agent/8",
+      "verdict needed",
+      "query",
+      undefined,
+      undefined,
+      "direct",
+      {},
+      { request: "semantic-request-id" },
+    )
+
+    const reply = sendMessage(
+      agent,
+      "@chief",
+      "approved",
+      "response",
+      undefined,
+      undefined,
+      "direct",
+      {},
+      { reply: request.id },
+    )
+
+    expect(reply.tracker).toEqual({ request_id: "semantic-request-id", closed: 1 })
+    expect(db.prepare("SELECT reply FROM messages WHERE id = ?").get(reply.id)).toEqual({
+      reply: "semantic-request-id",
+    })
+    expect(
+      db.prepare("SELECT request_id FROM pending_request WHERE request_id = ?").get("semantic-request-id"),
+    ).toBeNull()
+  })
+
   it("fanout='all' is recorded but Phase 2a still uses per-recipient close semantics", () => {
     const chief = makeContext(db, stmts, "@chief")
     sendMessage(

@@ -278,6 +278,10 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             type: "number",
             description: "Filter to requests opened more than this many milliseconds ago (stale-detection).",
           },
+          prune: {
+            type: "boolean",
+            description: "Delete this owner's pending requests older than stale_ms; stale_ms is required.",
+          },
           close: {
             type: "string",
             description:

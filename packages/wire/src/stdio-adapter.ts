@@ -278,6 +278,7 @@ interface RequiredMcpTransportHealth {
 }
 
 let managedRegistrationConflicts = 0
+let registeredDaemonPid: number | null = null
 let requiredMcpTransportHealth: RequiredMcpTransportHealth = {
   status: "advertised",
   reason: "awaiting daemon registration",
@@ -346,8 +347,23 @@ function failManagedPersonaRegistration(err: unknown): never {
 
 function failProtocolVersion(reason: string): never {
   log.warn?.(`tribe protocol version mismatch: ${reason}`)
+  requestPluginReexec(`protocol version mismatch: ${reason}`)
+}
+
+const PLUGIN_RECONNECT_ATTEMPTS = 3
+
+function requestPluginReexec(reason: string): never {
   daemon?.close()
   proxyAc.abort()
+  const supervisedExitCode = Number(process.env.TRIBE_PLUGIN_REEXEC_EXIT_CODE)
+  if (Number.isSafeInteger(supervisedExitCode) && supervisedExitCode > 0 && supervisedExitCode <= 255) {
+    log.warn?.(`tribe plugin requesting current-disk re-exec: ${reason}`)
+    process.exitCode = supervisedExitCode
+    process.exit()
+  }
+  process.stderr.write(
+    `tribe plugin reconnect failed: ${reason}; restart the host session or reinstall the Tribe plugin.\n`,
+  )
   process.exitCode = 2
   process.exit()
 }
@@ -372,6 +388,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
         role: string
         chief: string
         protocolVersion?: number
+        daemon?: { pid?: number }
       }
       try {
         reg = (await client.call("register", registerParamsForConnection())) as typeof reg
@@ -394,6 +411,16 @@ function startDaemonConnection(): Promise<DaemonClient> {
         }
         throw err
       }
+      const nextDaemonPid = typeof reg.daemon?.pid === "number" ? reg.daemon.pid : null
+      if (
+        hasRegistered &&
+        registeredDaemonPid !== null &&
+        nextDaemonPid !== null &&
+        nextDaemonPid !== registeredDaemonPid
+      ) {
+        requestPluginReexec(`daemon generation changed from pid ${registeredDaemonPid} to ${nextDaemonPid}`)
+      }
+      registeredDaemonPid = nextDaemonPid
       hasRegistered = true
       managedRegistrationConflicts = 0
       setRequiredMcpTransportHealth("live", "registered with tribe daemon")
@@ -438,6 +465,10 @@ function startDaemonConnection(): Promise<DaemonClient> {
       log.info?.(`Reconnected to daemon`)
       // km 19442 — a reconnect can replay the daemon's pending body-push burst; rebound it.
       connectReplayGate.reset(Date.now())
+    },
+    maxAttempts: PLUGIN_RECONNECT_ATTEMPTS,
+    onReconnectExhausted(error, attempts) {
+      requestPluginReexec(`daemon reconnect exhausted after ${attempts} attempts: ${errorMessage(error)}`)
     },
   }).then((client) => {
     daemon = client

@@ -83,6 +83,7 @@ export type ReconnectingClientOpts = {
   onConnect: (client: DaemonClient) => Promise<void>
   onDisconnect?: () => void
   onReconnect?: () => void
+  onReconnectExhausted?: (error: unknown, attempts: number) => void
   maxAttempts?: number
   callTimeoutMs?: number
   dbPath?: string
@@ -113,6 +114,7 @@ export function createReconnectingClient(opts: ReconnectingClientOpts): Promise<
     onConnect: opts.onConnect,
     onDisconnect: opts.onDisconnect,
     onReconnect: opts.onReconnect,
+    onReconnectExhausted: opts.onReconnectExhausted,
     maxAttempts: opts.maxAttempts,
     callTimeoutMs: opts.callTimeoutMs,
     daemonScript: defaultDaemonScript(),

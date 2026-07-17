@@ -334,6 +334,31 @@ describe("createReconnectingClient transport recovery", () => {
     }
   })
 
+  it("reports bounded reconnect exhaustion with the final error", async () => {
+    const sock = join(tmpDir, "exhausted.sock")
+    const { server, clients } = await spawnFakeDaemon(sock)
+    let exhausted: { error: unknown; attempts: number } | undefined
+    const client = await createReconnectingClient({
+      socketPath: sock,
+      maxAttempts: 1,
+      maxStartupAttempts: 1,
+      onReconnectExhausted: (error, attempts) => {
+        exhausted = { error, attempts }
+      },
+    })
+
+    for (const socket of clients) socket.destroy()
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    try {
+      await vi.waitFor(() => {
+        expect(exhausted?.attempts).toBe(1)
+        expect(exhausted?.error).toBeInstanceOf(Error)
+      })
+    } finally {
+      client.close()
+    }
+  })
+
   it("elects one daemon across four simultaneous adapter starters and reconnects them to one successor", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
     const sock = join(tmpDir, "startup-election.sock")

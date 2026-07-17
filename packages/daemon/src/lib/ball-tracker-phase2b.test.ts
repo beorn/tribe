@@ -329,4 +329,30 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
 
     expect(pendingRecipients(db, "req-all")).toEqual(["@agent/2"])
   })
+
+  it("warns with the peer's open balls when a reply closes zero rows", () => {
+    const opened = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        { to: "@agent/1", message: "review this", type: "request", request: "actual-request" },
+        makeOpts(["sess-chief", "sess-agent-1"]),
+      ),
+    )
+
+    const reply = parseToolJson(
+      handleToolCall(
+        agent1,
+        "tribe.send",
+        { to: "@chief", message: "reviewed", type: "response", reply: "mistyped-request" },
+        makeOpts(["sess-chief", "sess-agent-1"]),
+      ),
+    )
+
+    expect(reply.tracker).toEqual({ request_id: "mistyped-request", closed: 0 })
+    expect(reply.warning).toContain("closed 0")
+    expect(reply.warning).toContain("actual-request")
+    expect(reply.warning).toContain(opened.id)
+    expect(pendingRecipients(db, "actual-request")).toEqual(["@agent/1"])
+  })
 })

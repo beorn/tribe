@@ -137,7 +137,7 @@ export function buildSendPayload(input: SendPayloadInput, sender?: string | null
 
 type PendingListResult = {
   error?: string
-  pending?: Array<{ request_id?: string }>
+  pending?: Array<{ request_id?: string; message_id?: string }>
 }
 
 function replyOwnerFromEnv(env: NodeJS.ProcessEnv = process.env): string | null {
@@ -167,7 +167,7 @@ async function verifyPendingReplyOwner(owner: string, reply: string): Promise<vo
     console.error(`Not sending response. Check with: tribe pending --owner ${owner}`)
     process.exit(1)
   }
-  const hasRequest = (pending.pending ?? []).some((p) => p.request_id === reply)
+  const hasRequest = (pending.pending ?? []).some((p) => p.request_id === reply || p.message_id === reply)
   if (!hasRequest) {
     console.error(`tribe-wire send: no pending request ${reply} is owned by ${owner}; not sending response.`)
     console.error(`Check the owner with: tribe pending --owner ${owner}`)
@@ -186,20 +186,29 @@ function reportCommittedReplyTracker(
     process.exit(1)
   }
   const closed = tracker.closed
-  if (tracker.request_id !== reply || typeof closed !== "number" || !Number.isSafeInteger(closed) || closed < 0) {
+  const canonicalRequestId = tracker.request_id
+  if (
+    typeof canonicalRequestId !== "string" ||
+    canonicalRequestId.length === 0 ||
+    typeof closed !== "number" ||
+    !Number.isSafeInteger(closed) ||
+    closed < 0
+  ) {
     console.error(
       `tribe-wire send: response sent, but the daemon returned malformed committed tracker proof for ${reply} ` +
-        `(expected request_id=${reply} and a non-negative integer closed count).`,
+        `(expected a canonical request_id and a non-negative integer closed count).`,
     )
     console.error(`Verify current state with: tribe pending --owner ${owner}`)
     process.exit(1)
   }
   if (closed < 1) {
-    console.error(`tribe-wire send: response sent, but its committed tracker result closed 0 rows for ${reply}.`)
+    console.error(
+      `tribe-wire send: response sent, but its committed tracker result closed 0 rows for ${canonicalRequestId}.`,
+    )
     console.error(`Verify current state with: tribe pending --owner ${owner}`)
     process.exit(1)
   }
-  console.log(`Closed ${closed} pending request row(s) for ${owner}: ${reply}`)
+  console.log(`Closed ${closed} pending request row(s) for ${owner}: ${canonicalRequestId}`)
 }
 
 function collectDomain(value: string, previous: string[]): string[] {

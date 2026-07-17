@@ -173,6 +173,10 @@ describe("Tribe command descriptors", () => {
 
     const pending = commandDescriptorByMcpName("pending")!
     expect(pending.mcp.inputSchema.properties?.all).toMatchObject({ type: "boolean" })
+    expect(pending.mcp.inputSchema.properties?.prune).toMatchObject({
+      type: "boolean",
+      description: expect.stringMatching(/stale_ms/i),
+    })
     expect(pending.mcp.outputSchema.properties).toMatchObject({
       all: { type: "boolean" },
       owners: { type: "array" },

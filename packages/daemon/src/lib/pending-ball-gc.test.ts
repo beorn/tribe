@@ -147,11 +147,39 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         claudeSessionName: null,
       })
 
-      const res = parseToolJson(handleToolCall(ctx, "tribe.pending", { close: "done" }, makeOpts()))
+      const res = parseToolJson(handleToolCall(ctx, "tribe.pending", { close: "done-msg" }, makeOpts()))
 
       expect(res).toMatchObject({ owner: "@chief", request_id: "done", closed: 1 })
       expect(openIds(stmts, "@chief")).toEqual(["keep"])
       expect(openIds(stmts, "@agent/2")).toEqual(["done"])
+    } finally {
+      db.close()
+    }
+  })
+
+  it("explicit close miss warns with every open ball owned by the target", () => {
+    const { db, stmts } = setup()
+    try {
+      const now = Date.now()
+      openBall(stmts, { id: "still-open", recipient: "@chief", openedAt: now, sender: "@agent/2" })
+      const ctx = createTribeContext({
+        db,
+        stmts,
+        sessionId: "sess-chief",
+        sessionRole: "member",
+        initialName: "@chief",
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+      })
+
+      const res = parseToolJson(handleToolCall(ctx, "tribe.pending", { close: "missing" }, makeOpts()))
+
+      expect(res).toMatchObject({ owner: "@chief", request_id: "missing", closed: 0 })
+      expect(res.warning).toContain("closed 0")
+      expect(res.warning).toContain("still-open")
+      expect(res.warning).toContain("still-open-msg")
+      expect(openIds(stmts, "@chief")).toEqual(["still-open"])
     } finally {
       db.close()
     }
