@@ -304,6 +304,54 @@ describe("createReconnectingClient transport recovery", () => {
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
+  it("closes an initial candidate when registration rejects", async () => {
+    const sock = join(tmpDir, "initial-registration-reject.sock")
+    const { server, clients } = await spawnFakeDaemon(sock)
+    try {
+      await expect(
+        createReconnectingClient({
+          socketPath: sock,
+          maxStartupAttempts: 1,
+          onConnect: async () => {
+            throw new Error("registration refused")
+          },
+        }),
+      ).rejects.toThrow("registration refused")
+      await vi.waitFor(() => expect(clients[0]?.destroyed).toBe(true))
+    } finally {
+      for (const socket of clients) socket.destroy()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  it("closes each reconnect candidate whose registration rejects", async () => {
+    const sock = join(tmpDir, "reconnect-registration-reject.sock")
+    const { server, clients } = await spawnFakeDaemon(sock)
+    let registrations = 0
+    let exhausted = false
+    const client = await createReconnectingClient({
+      socketPath: sock,
+      maxAttempts: 1,
+      maxStartupAttempts: 1,
+      onConnect: async () => {
+        registrations += 1
+        if (registrations > 1) throw new Error("reconnect registration refused")
+      },
+      onReconnectExhausted: () => {
+        exhausted = true
+      },
+    })
+    try {
+      clients[0]?.destroy()
+      await vi.waitFor(() => expect(exhausted).toBe(true))
+      await vi.waitFor(() => expect(clients[1]?.destroyed).toBe(true))
+    } finally {
+      client.close()
+      for (const socket of clients) socket.destroy()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
   it("re-arms callbacks and notifications after one client transport closes while the daemon stays healthy", async () => {
     const sock = join(tmpDir, "d.sock")
     const { server, clients } = await spawnFakeDaemon(sock)

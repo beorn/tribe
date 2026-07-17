@@ -24,9 +24,15 @@ import {
   resolveProjectName,
   resolveProjectId,
 } from "./lib/config.ts"
-import { resolveSocketPath, createReconnectingClient, TRIBE_PROTOCOL_VERSION, type DaemonClient } from "./lib/socket.ts"
+import {
+  resolveSocketPath,
+  connectToDaemon,
+  createReconnectingClient,
+  TRIBE_PROTOCOL_VERSION,
+  type DaemonClient,
+} from "./lib/socket.ts"
 import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
-import { spawn } from "node:child_process"
+import { createReconnectWatchdog } from "./lib/reconnect-watchdog.ts"
 import { createHash, randomUUID } from "node:crypto"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { createLogger, setSuppressConsole } from "loggily"
@@ -368,6 +374,30 @@ function requestPluginReexec(reason: string): never {
   process.exit()
 }
 
+const reconnectWatchdog = createReconnectWatchdog({
+  timers,
+  thresholdMs: 60_000,
+  retryMs: 5_000,
+  now: () => Date.now(),
+  async probeDaemon() {
+    let probe: DaemonClient | undefined
+    try {
+      probe = await connectToDaemon(SOCKET_PATH, { callTimeoutMs: 1_000 })
+      await probe.call("cli_daemon")
+      return true
+    } catch {
+      return false
+    } finally {
+      probe?.close()
+    }
+  },
+  onStuck({ reconnectingMs }) {
+    requestPluginReexec(
+      `primary transport remained reconnecting for ${reconnectingMs}ms while the daemon answered a fresh connection`,
+    )
+  },
+})
+
 // NON-BLOCKING: the daemon connect runs in the background. We do NOT await
 // it here — module evaluation continues straight through to `mcp.connect()`
 // so the MCP `initialize` handshake is answered immediately. Without this, a
@@ -424,6 +454,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
       hasRegistered = true
       managedRegistrationConflicts = 0
       setRequiredMcpTransportHealth("live", "registered with tribe daemon")
+      reconnectWatchdog.markConnected()
       daemonDegradedReason = null
       myName = reg.name
       myRole = reg.role
@@ -437,9 +468,15 @@ function startDaemonConnection(): Promise<DaemonClient> {
       try {
         const membersResult = (await client.call("tribe.members", {})) as { content: Array<{ text: string }> }
         const membersData = JSON.parse(membersResult.content?.[0]?.text ?? "{}") as {
-          sessions?: Array<{ name: string; role: string; alive: boolean; uptime_min: number; delivery?: string }>
+          sessions?: Array<{
+            name: string
+            role: string
+            transport_state: "connected" | "disconnected"
+            uptime_min: number
+            delivery?: string
+          }>
         }
-        const sessions = (membersData.sessions ?? []).filter((s: { alive: boolean }) => s.alive)
+        const sessions = (membersData.sessions ?? []).filter((session) => session.transport_state === "connected")
         const chief = reg.chief || sessions.find((s: { role: string }) => s.role === "chief")?.name || "(none)"
         const peers =
           sessions
@@ -456,6 +493,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
       }
     },
     onDisconnect() {
+      reconnectWatchdog.markReconnecting()
       if (REGISTER_WITH_LAUNCH_NAME) {
         setRequiredMcpTransportHealth("advertised", "daemon connection closed; reconnecting")
       }
@@ -807,10 +845,7 @@ using _reload = setupHotReload({
   logActivity: (type, content) => {
     daemon?.call("log_event", { type, content }).catch(() => {})
   },
-  onReload: () => {
-    proxyAc.abort()
-    daemon?.close()
-  },
+  replaceProcess: (reason) => requestPluginReexec(reason),
 })
 
 const shutdown = () => {
@@ -820,6 +855,8 @@ const shutdown = () => {
 }
 process.on("SIGINT", shutdown)
 process.on("SIGTERM", shutdown)
+process.stdin.once("end", shutdown)
+process.stdin.once("close", shutdown)
 
 // Connect MCP to Claude Code
 await mcp.connect(new StdioServerTransport())
@@ -1034,11 +1071,7 @@ void daemonReady
       } else if (method === "reload") {
         log.info?.(`Daemon requests reload: ${params?.reason}`)
         timers.setTimeout(() => {
-          d.close()
-          spawn(process.execPath, process.argv.slice(1), { stdio: "inherit", env: process.env }).on(
-            "exit",
-            (code: number | null) => process.exit(code ?? 0),
-          )
+          requestPluginReexec(`daemon requested reload: ${String(params?.reason ?? "unspecified")}`)
         }, 500)
       }
     }),

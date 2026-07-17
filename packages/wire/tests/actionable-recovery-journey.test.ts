@@ -120,7 +120,7 @@ async function waitForCondition(
   message: string,
   opts: { timeoutMs?: number; intervalMs?: number } = {},
 ): Promise<void> {
-  const deadline = Date.now() + (opts.timeoutMs ?? 8_000)
+  const deadline = Date.now() + (opts.timeoutMs ?? 15_000)
   while (Date.now() < deadline) {
     if (predicate()) return
     await new Promise((resolveTick) => setTimeout(resolveTick, opts.intervalMs ?? 25))
@@ -409,6 +409,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     await waitForCondition(
       () => channelNotifications(first.stdout).length >= 1,
       "recovered actionable channel notification",
+      { timeoutMs: 15_000 },
     )
     // Settle: give any (wrong) ambient replay a chance to arrive, then assert
     // the recovered actionable is ALONE.
@@ -570,21 +571,28 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       transport_pids: expect.arrayContaining(launchAdapters.map(({ child }) => child.pid!)),
     })
 
-    // A daemon restart drops every socket simultaneously. All three native
-    // adapters must reconnect and re-fan into the persisted logical member.
+    // A daemon restart drops every socket simultaneously. These fixtures are
+    // deliberately UNSUPERVISED direct adapters, so a generation change must
+    // fail loud instead of pretending their provider-owned stdio can be
+    // replaced in place. The Claude plugin wrapper's automatic replacement is
+    // pinned separately in plugin-daemon-restart.test.ts. Relaunching the host
+    // transports must still re-fan into the persisted logical member.
     daemonProc.kill("SIGTERM")
     await once(daemonProc, "exit")
     await waitForCondition(() => !existsSync(socketPath), "old daemon socket removal")
     daemonProc = spawnDaemon(socketPath, dbPath)
     await waitForCondition(() => existsSync(socketPath), "restarted daemon socket")
     await waitForCondition(
-      () =>
-        launchAdapters.every(({ logPath }) => {
-          if (!existsSync(logPath)) return false
-          return (readFileSync(logPath, "utf8").match(/Registered as/g) ?? []).length >= 2
-        }),
-      "all launch adapters to register after daemon restart",
+      () => launchAdapters.every(({ child }) => child.exitCode !== null),
+      "unsupervised launch adapters to fail loud after daemon generation change",
     )
+    expect(launchAdapters.map(({ child }) => child.exitCode)).toEqual([2, 2, 2])
+    const relaunched = await Promise.all([
+      spawnLaunchAdapter(socketPath, "launch-adapter-1-relaunched.log", launchId),
+      spawnLaunchAdapter(socketPath, "launch-adapter-2-relaunched.log", launchId),
+      spawnLaunchAdapter(socketPath, "launch-adapter-3-relaunched.log", launchId),
+    ])
+    launchAdapters.splice(0, launchAdapters.length, ...relaunched)
     const afterDaemonRestart = await Promise.all(
       launchAdapters.map((adapter, index) => callLaunchTool(adapter, 30 + index, "members", {})),
     )

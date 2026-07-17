@@ -18,6 +18,7 @@
  * Verbs in this family:
  *   - status        (line ~570 in tools/tribe-cli.ts)
  *   - sessions      (line ~575)
+ *   - members       (machine-readable tribe.members projection)
  *   - pending       (line ~596)
  *   - log           (line ~610)
  *   - health        (line ~617)
@@ -28,8 +29,7 @@
  *   - activity      (line ~674)
  *
  * The legacy `tools/tribe-cli.ts` continues to ship these same verbs until
- * Phase C deletes it. There is no `members` verb in the source — it is
- * exposed via `tribe.members` MCP call only, not the CLI.
+ * Phase C deletes it.
  */
 
 import { readFileSync } from "node:fs"
@@ -167,6 +167,45 @@ interface SessionInfo {
   conn?: string
 }
 
+type MemberSessionRow = {
+  member_id?: string
+  name?: string
+  role?: string
+  domains?: string[]
+  pid?: number
+  cwd?: string
+  claude_session_id?: string | null
+  transport_state?: "connected" | "disconnected"
+  alive?: boolean
+  uptime_min?: number
+  last_seen_sec?: number
+}
+
+export function projectMemberSessions(rows: readonly MemberSessionRow[], now = Date.now()): SessionInfo[] {
+  return rows.flatMap((row) => {
+    if (typeof row.name !== "string" || row.name.length === 0) return []
+    const uptimeMs = Math.max(0, (row.uptime_min ?? 0) * 60_000)
+    return [
+      {
+        id: row.member_id ?? row.name,
+        name: row.name,
+        role: row.role ?? "member",
+        domains: row.domains ?? [],
+        pid: row.pid ?? 0,
+        claudeSessionId: row.claude_session_id ?? null,
+        connectedAt: now - uptimeMs,
+        uptimeMs,
+        ...(typeof row.last_seen_sec === "number" ? { idleMs: Math.max(0, row.last_seen_sec * 1000) } : {}),
+        ...(row.cwd !== undefined ? { cwd: row.cwd } : {}),
+        source:
+          row.transport_state === "connected" || (row.transport_state === undefined && row.alive === true)
+            ? "daemon"
+            : "db",
+      },
+    ]
+  })
+}
+
 interface Msg {
   id: string
   type: string
@@ -243,14 +282,17 @@ async function cmdStatus(): Promise<void> {
 }
 
 async function cmdSessions(showAll: boolean): Promise<void> {
-  const result = (await callDaemon("cli_status")) as {
-    sessions: SessionInfo[]
-    daemon: { pid: number; uptime: number; clients: number }
-  }
-  let sessions = result.sessions
-
-  if (!showAll) {
-    sessions = sessions.filter((s) => s.source === "daemon")
+  let sessions: SessionInfo[]
+  if (showAll) {
+    const result = mcpJsonContent(await callDaemon("tribe.members", { all: true }))
+    if (result === null || typeof result !== "object" || !Array.isArray((result as { sessions?: unknown }).sessions)) {
+      throw new Error(`tribe sessions --all: daemon returned an unexpected members reply: ${JSON.stringify(result)}`)
+    }
+    sessions = projectMemberSessions((result as { sessions: MemberSessionRow[] }).sessions)
+  } else {
+    sessions = ((await callDaemon("cli_status")) as { sessions: SessionInfo[] }).sessions.filter(
+      (session) => session.source === "daemon",
+    )
   }
 
   if (!sessions.length) {
@@ -281,7 +323,7 @@ async function cmdSessions(showAll: boolean): Promise<void> {
  * one JSON object: `{"sessions":[...]}`. Unlike the human `sessions` verb
  * (cli_status text table), every row carries `launch_id` — the 21049
  * supervisor-issued launch identity the session's environment advertised via
- * TRIBE_LAUNCH_ID at registration — plus `alive`, so a supervisor can match a
+ * TRIBE_LAUNCH_ID at registration — plus daemon-authoritative transport and owner verdicts, so a supervisor can match a
  * spawn's epoch against the JOIN EVIDENCE ITSELF instead of inferring from
  * name/row counts (tent bootstrap-epoch, @ag/super/21075 blocker 3).
  */
@@ -880,8 +922,8 @@ export function registerReadCommands(program: Command): void {
 
   program
     .command("members")
-    .description("List member sessions as JSON (tribe.members reply: includes launch_id + alive per row)")
-    .option("-a, --all", "Include historical (disconnected) sessions")
+    .description("List member sessions as JSON with transport and owner verdicts")
+    .option("-a, --all", "Include disconnected durable session rows")
     .action((opts: { all?: boolean }) => void cmdMembers(!!opts.all))
 
   const pendingOwner = cliOption(PENDING_CLI, "owner")

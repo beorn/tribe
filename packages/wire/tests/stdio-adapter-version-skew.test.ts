@@ -176,8 +176,8 @@ describe("stdio adapter — protocol version skew", () => {
     generationDaemon.setPid(2002)
     for (const socket of generationDaemon.clients.splice(0)) socket.destroy()
 
-    await waitFor(() => generationDaemon.registrations.length >= 3, 12_000, "replacement registration")
+    await waitFor(() => generationDaemon.registrations.length >= 3, 20_000, "replacement registration")
     expect(generationDaemon.registrations).toEqual([1001, 2002, 2002])
     expect(child.exitCode).toBeNull()
-  }, 20_000)
+  }, 30_000)
 })

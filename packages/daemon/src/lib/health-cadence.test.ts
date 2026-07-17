@@ -624,7 +624,7 @@ describe("20876 Tribe health cadence", () => {
       isPidAlive: () => false,
       send: (recipient, content, type) => sendMessage(daemonCtx, recipient, content, type),
     })
-    expect(result.deadOwnerWarnings).toBe(1)
+    expect(result.ownerStateWarnings).toBe(1)
     expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'dead-atomic'").get()).toEqual({
       recipient: "@agent/dead-atomic",
     })
@@ -682,7 +682,7 @@ describe("20876 Tribe health cadence", () => {
     const kill = vi.spyOn(process, "kill").mockImplementation(() => {
       throw Object.assign(new Error("operation not permitted"), { code: "EPERM" })
     })
-    const sent: string[] = []
+    const sent: Array<{ type: string; content: string }> = []
     try {
       const result = processPendingBallDeadlines({
         db,
@@ -690,14 +690,21 @@ describe("20876 Tribe health cadence", () => {
         now,
         liveSessionNames: new Set(),
         escalationTarget: "@ops",
-        send: (_recipient, _content, type) => sent.push(type),
+        send: (_recipient, content, type) => sent.push({ type, content }),
       })
-      expect(result.deadOwnerWarnings).toBe(1)
+      expect(result.ownerStateWarnings).toBe(1)
     } finally {
       kill.mockRestore()
     }
 
-    expect(sent).toEqual(["ball:owner-unresolved"])
+    expect(sent).toEqual([
+      {
+        type: "ball:owner-unresolved",
+        content: expect.stringContaining(
+          "transport_state=disconnected owner_state=live reason=owner-live-no-transport",
+        ),
+      },
+    ])
     expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'owner-eperm'").get()).toEqual({
       recipient: "@agent/eperm",
     })
@@ -948,7 +955,7 @@ describe("20876 Tribe health cadence", () => {
         type: "ball:owner-dead",
       },
     ])
-    expect(result.deadOwnerWarnings).toBe(1)
+    expect(result.ownerStateWarnings).toBe(1)
     expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = ?").get("dead-owner-is-judge")).toEqual(
       { recipient: "@chief" },
     )

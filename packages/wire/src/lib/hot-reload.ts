@@ -22,6 +22,8 @@ export type HotReloadOpts = {
   extraDirs?: string[]
   /** Callback before re-exec (cleanup) */
   onReload?: () => void
+  /** Delegate replacement to an existing stable process supervisor. */
+  replaceProcess?: (reason: string) => void
   /** Broadcast activity to tribe (for watch/daemon visibility) */
   logActivity?: (type: string, content: string) => void
   /** Debounce ms (default: 500) */
@@ -34,7 +36,15 @@ export type HotReloadOpts = {
  * Returns null if not running from source (bundled).
  */
 export function setupHotReload(opts: HotReloadOpts): Disposable | null {
-  const { importMetaUrl, extraFiles = [], extraDirs = [], onReload, logActivity, debounceMs = 500 } = opts
+  const {
+    importMetaUrl,
+    extraFiles = [],
+    extraDirs = [],
+    onReload,
+    replaceProcess,
+    logActivity,
+    debounceMs = 500,
+  } = opts
 
   // Only activate for source runs (file:// URLs in the repo)
   if (!importMetaUrl.startsWith("file://")) return null
@@ -95,6 +105,7 @@ export function setupHotReload(opts: HotReloadOpts): Disposable | null {
     debounceTimer = setTimeout(() => {
       const newHash = computeHash()
       if (newHash === currentHash) return
+      const reason = `source changed (${currentHash} → ${newHash})`
       log.info?.(`Source changed (${currentHash} → ${newHash}), re-execing`)
       logActivity?.("reload", `${reloadScriptName} reloading (${currentHash} → ${newHash})`)
 
@@ -103,6 +114,11 @@ export function setupHotReload(opts: HotReloadOpts): Disposable | null {
       watchers.length = 0
 
       onReload?.()
+
+      if (replaceProcess) {
+        replaceProcess(reason)
+        return
+      }
 
       // Spawn replacement then exit immediately
       const child = spawn(process.execPath, process.argv.slice(1), {

@@ -134,4 +134,19 @@ describe("stdio adapter — daemon-unavailable degrade", () => {
     const notices = log.split("\n").filter((l) => l.includes("running solo"))
     expect(notices.length).toBe(1)
   }, 20_000)
+
+  it("owns host stdin EOF and exits instead of orphaning the bridge", async () => {
+    const socketPath = join(tmpDir, "eof-absent.sock")
+    const env = { ...process.env, TRIBE_DELIVERY: "pull", TRIBE_NO_AUTOSTART: "1", LOG_LEVEL: "silent" }
+    delete (env as Record<string, string | undefined>).TRIBE_DAEMON_SCRIPT
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "eof-test"], {
+      cwd: tmpDir,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    }) as ChildProcessWithoutNullStreams
+
+    child.stdin.end()
+    await waitFor(() => child?.exitCode !== null, 5_000, "adapter exit after host stdin EOF")
+    expect(child.exitCode).toBe(0)
+  })
 })

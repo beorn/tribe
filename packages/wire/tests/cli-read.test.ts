@@ -13,6 +13,7 @@ import { describe, expect, test } from "vitest"
 import { Command } from "@silvery/commander"
 import {
   formatReloadResult,
+  projectMemberSessions,
   registerReadCommands,
   waitForInboxWithReconnect,
   type InboxWaitResult,
@@ -43,6 +44,7 @@ describe("registerReadCommands", () => {
       expect.arrayContaining([
         "status",
         "sessions",
+        "members",
         "pending",
         "log",
         "health",
@@ -66,6 +68,39 @@ describe("registerReadCommands", () => {
     const cmd = findCmd(buildProgram(), "sessions")
     expect(cmd).toBeDefined()
     expect(optionFlags(cmd!)).toEqual(expect.arrayContaining(["--all"]))
+  })
+
+  test("members verb accepts --all and documents transport verdicts", () => {
+    const cmd = findCmd(buildProgram(), "members")
+    expect(cmd).toBeDefined()
+    expect(optionFlags(cmd!)).toContain("--all")
+    expect(cmd!.description()).toMatch(/transport|owner/i)
+  })
+
+  test("projects disconnected member rows into the human sessions --all table", () => {
+    expect(
+      projectMemberSessions([
+        {
+          member_id: "member-9",
+          name: "@agent/9",
+          role: "member",
+          domains: ["tooling"],
+          pid: 999,
+          cwd: "/repo/wt9",
+          transport_state: "disconnected",
+          uptime_min: 12,
+          last_seen_sec: 45,
+        },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: "member-9",
+        name: "@agent/9",
+        source: "db",
+        uptimeMs: 720_000,
+        idleMs: 45_000,
+      }),
+    ])
   })
 
   test("pending verb accepts --all, --json, --owner, --stale, and --close", () => {

@@ -26,6 +26,7 @@ import { gatherCodePin } from "./code-pin.ts"
 import { parseDbGrowthWarningBytes, projectHealthCadence } from "./health-cadence.ts"
 import { senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
 import type { LifecycleStore, LifecycleSnapshotRecord } from "./lifecycle-store.ts"
+import { projectSessionTransportState } from "./session-transport-state.ts"
 
 // ---------------------------------------------------------------------------
 // Reconciler snapshot — read-only view into chief-reconciler output, surfaced
@@ -836,6 +837,10 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
   const sessions = visibleRows.map((r) => {
     const parent = r.claude_session_id ? parentMap.get(r.claude_session_id) : undefined
     const active = activeInfo.find((session) => session.id === r.id)
+    const transport = projectSessionTransportState({
+      transportConnected: activeIds.has(r.id),
+      ownerPid: active?.pid ?? r.pid,
+    })
     return {
       member_id: r.id,
       name: r.name,
@@ -848,7 +853,10 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
       cwd: r.cwd,
       claude_session_id: r.claude_session_id,
       claude_session_name: r.claude_session_name,
-      alive: activeIds.has(r.id),
+      ...transport,
+      // Compatibility alias for existing clients. `transport_state` is the
+      // authority; never derive either fact on a separate code path.
+      alive: transport.transport_state === "connected",
       uptime_min: Math.round((Date.now() - r.started_at) / 60_000),
       last_seen_sec: Math.round((Date.now() - r.updated_at) / 1000),
       parent: parent && parent !== r.name ? parent : undefined,
@@ -1111,6 +1119,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
   // are simply absent from activeSessionInfo — no DB pruning required.
   const activeInfo = opts.getActiveSessionInfo()
   const byId = new Map(activeInfo.map((s) => [s.id, s]))
+  const activeNames = new Set(activeInfo.map((session) => session.name))
   const rows = ctx.stmts.allSessions.all() as Array<{
     id: string
     name: string
@@ -1121,10 +1130,34 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     updated_at: number
   }>
   const liveSessions = rows.filter((r) => byId.has(r.id))
+  const latestDisconnectedByName = new Map<string, (typeof rows)[number]>()
+  for (const session of rows) {
+    if (byId.has(session.id) || activeNames.has(session.name)) continue
+    const previous = latestDisconnectedByName.get(session.name)
+    if (previous === undefined || session.updated_at > previous.updated_at) {
+      latestDisconnectedByName.set(session.name, session)
+    }
+  }
+  const transportWedges = [...latestDisconnectedByName.values()].flatMap((session) => {
+    const transport = projectSessionTransportState({
+      transportConnected: false,
+      ownerPid: session.pid,
+    })
+    return transport.owner_state === "live"
+      ? [
+          {
+            member_id: session.id,
+            name: session.name,
+            pid: session.pid,
+            ...transport,
+          },
+        ]
+      : []
+  })
 
   const members = liveSessions.map((s) => {
     const active = byId.get(s.id)!
-    const alive = true // by definition — only connected sessions reported
+    const transport = projectSessionTransportState({ transportConnected: true, ownerPid: active.pid })
     // Find last message from this member
     const lastMsg = ctx.db
       .prepare("SELECT ts FROM messages WHERE sender = $name ORDER BY ts DESC LIMIT 1")
@@ -1132,7 +1165,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
 
     const lastMsgAge = lastMsg ? now - lastMsg.ts : null
     const warnings: string[] = []
-    if (alive && lastMsgAge && lastMsgAge > silentThreshold) {
+    if (lastMsgAge && lastMsgAge > silentThreshold) {
       warnings.push(`no message in ${Math.round(lastMsgAge / 60_000)} min`)
     }
     if (!lastMsg) warnings.push("never sent a message")
@@ -1157,7 +1190,8 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
       launch_id: active.launchId,
       launch_parent_pid: active.launchParentPid,
       transport_pids: transportPids,
-      alive,
+      ...transport,
+      alive: transport.transport_state === "connected",
       pid_alive: pidAlive,
       last_message: lastMsgAge ? `${Math.round(lastMsgAge / 60_000)} min ago` : "never",
       warnings,
@@ -1219,7 +1253,15 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
       owners: pendingOwners,
       stale: stalePending,
     },
-    issues: [...pendingIssues, ...cadence.warnings],
+    transport_wedges: transportWedges,
+    issues: [
+      ...transportWedges.map(
+        (wedge) =>
+          `transport wedge ${wedge.name}: transport_state=${wedge.transport_state} owner_state=${wedge.owner_state} reason=${wedge.transport_reason}`,
+      ),
+      ...pendingIssues,
+      ...cadence.warnings,
+    ],
     cadence,
     stats,
     code_pin: gatherCodePin(),

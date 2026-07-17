@@ -44,6 +44,21 @@ For a local project-level MCP config without plugin channels:
 That direct `tribe-wire` route expects an existing or forwarded daemon socket.
 The plugin route owns daemon-script wiring through `tribe-daemon`.
 
+## Daemon-restart recovery
+
+The plugin entry point is a stable stdio supervisor. Its adapter child owns the
+daemon socket and asks the supervisor for a current-disk replacement when it
+observes a new daemon generation, exhausts bounded reconnect, or remains
+reconnecting for 60 seconds while a fresh daemon RPC succeeds. Source changes
+and daemon reload notifications use that same wrapper-owned replacement path;
+adapters never spawn adapters. The wrapper—and therefore Claude Code's stdio
+channel—stays in place while the child changes.
+
+Updating the plugin on disk does not rewrite code already evaluated inside a
+running pre-supervisor process. Such sessions still require `/mcp` reconnect or
+a host-session restart once; newly launched/current-code plugin processes then
+self-heal through the supervisor.
+
 ## Boundary
 
 Reusable protocol code belongs in `tribe-wire`; broker code belongs in

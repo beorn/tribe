@@ -114,8 +114,10 @@ export function withHotReload<T extends BaseTribe & WithConfig & WithSocketServe
       // replacement DETACHED (its own session via `detached:true` + `unref()`,
       // so it survives this process's exit) with a FRESH bind — no `--fd`.
       // The child binds the now-free socket path. There is a sub-second
-      // window with no listener; adapters reconnect transparently via
-      // `createReconnectingClient`'s backoff. Crucially the daemon SURVIVES
+      // window with no listener; current supervised adapters reconnect or ask
+      // their stable wrapper for current-disk re-exec. Processes launched
+      // before that supervisor was pinned still require one host MCP reconnect.
+      // Crucially the daemon SURVIVES
       // a reload — `detached` severs it from the dying parent's lifecycle.
       // Mark the socket as handed off BEFORE closing so the scope-cleanup
       // defer in withSocketServer skips its own unlink (it would otherwise

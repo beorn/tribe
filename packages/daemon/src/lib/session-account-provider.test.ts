@@ -55,10 +55,22 @@ function makeOpts(activeIds: Set<string>): HandlerOpts {
   }
 }
 
-type MembersSession = { name: string; pid: number; cwd: string; account?: string; provider?: string }
+type MembersSession = {
+  name: string
+  pid: number
+  cwd: string
+  alive: boolean
+  transport_state: "connected" | "disconnected"
+  owner_state: "live" | "dead" | "unknown"
+  transport_reason: string
+  account?: string
+  provider?: string
+}
 
-function membersFor(ctx: TribeContext, opts: HandlerOpts, name: string): MembersSession | undefined {
-  const result = handleToolCall(ctx, "tribe.members", {}, opts) as { content: Array<{ text: string }> }
+function membersFor(ctx: TribeContext, opts: HandlerOpts, name: string, all = false): MembersSession | undefined {
+  const result = handleToolCall(ctx, "tribe.members", all ? { all: true } : {}, opts) as {
+    content: Array<{ text: string }>
+  }
   const data = JSON.parse(result.content[0]?.text ?? "{}") as { sessions?: MembersSession[] }
   return (data.sessions ?? []).find((s) => s.name === name)
 }
@@ -95,6 +107,52 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
 
     const corrected = membersFor(ctx, opts, "@chief")
     expect(corrected).toMatchObject({ account: "d@delei.org", provider: "codex" })
+  })
+
+  it("projects one daemon-authoritative transport state separately from a live owner process", () => {
+    const sessionId = "sess-live-owner-dead-transport"
+    const ctx = makeContext(db, stmts, sessionId, "@agent/9")
+    registerSession(ctx, PROJECT_ID, () => true, null, process.pid, "push", "/repo/wt9", null, "claude")
+
+    const disconnected = membersFor(ctx, makeOpts(new Set()), "@agent/9", true)
+    expect(disconnected).toMatchObject({
+      alive: false,
+      transport_state: "disconnected",
+      owner_state: "live",
+      transport_reason: "owner-live-no-transport",
+    })
+
+    const connected = membersFor(ctx, makeOpts(new Set([sessionId])), "@agent/9", true)
+    expect(connected).toMatchObject({
+      alive: true,
+      transport_state: "connected",
+      owner_state: "live",
+      transport_reason: "registered-transport",
+    })
+    expect(connected?.alive).toBe(connected?.transport_state === "connected")
+  })
+
+  it("surfaces an owner-live transport wedge through tribe.health diagnostics", () => {
+    const sessionId = "sess-health-wedge"
+    const ctx = makeContext(db, stmts, sessionId, "@agent/9")
+    registerSession(ctx, PROJECT_ID, () => true, null, process.pid, "push", "/repo/wt9", null, "claude")
+
+    const result = handleToolCall(ctx, "tribe.health", {}, makeOpts(new Set())) as {
+      content: Array<{ text: string }>
+    }
+    const health = JSON.parse(result.content[0]?.text ?? "{}") as {
+      transport_wedges?: Array<Record<string, unknown>>
+      issues?: string[]
+    }
+    expect(health.transport_wedges).toContainEqual(
+      expect.objectContaining({
+        name: "@agent/9",
+        transport_state: "disconnected",
+        owner_state: "live",
+        transport_reason: "owner-live-no-transport",
+      }),
+    )
+    expect(health.issues).toContainEqual(expect.stringContaining("@agent/9"))
   })
 
   it("sweepDeadSessionRows GCs old tombstones and generated ghosts without touching fresh, canonical, or active rows", () => {

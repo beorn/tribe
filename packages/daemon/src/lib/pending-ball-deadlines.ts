@@ -1,6 +1,10 @@
 import type { Database } from "bun:sqlite"
 import type { TribeStatements } from "./database.ts"
-import { isPidAlive as defaultIsPidAlive } from "./session.ts"
+import {
+  projectSessionTransportState,
+  type OwnerState,
+  type SessionTransportProjection,
+} from "./session-transport-state.ts"
 
 type PendingDeadlineRow = {
   request_id: string
@@ -14,7 +18,7 @@ type PendingDeadlineRow = {
 export type PendingBallDeadlineResult = {
   nudged: number
   expired: number
-  deadOwnerWarnings: number
+  ownerStateWarnings: number
 }
 
 export type PendingBallDeadlineOptions = {
@@ -59,13 +63,25 @@ function runClaimedStage<T>(
 
 type OwnerLiveness = "live" | "dead" | "unknown"
 
-function ownerLiveness(opts: PendingBallDeadlineOptions, owner: string): OwnerLiveness {
-  if (opts.liveSessionNames.has(owner)) return "live"
+function ownerTransport(opts: PendingBallDeadlineOptions, owner: string): SessionTransportProjection | null {
   const row = opts.db
     .prepare("SELECT pid FROM sessions WHERE name = ? ORDER BY updated_at DESC LIMIT 1")
     .get(owner) as { pid: number } | null
-  if (!row || row.pid <= 0) return "unknown"
-  return (opts.isPidAlive ?? defaultIsPidAlive)(row.pid) ? "unknown" : "dead"
+  if (!row && !opts.liveSessionNames.has(owner)) return null
+  const probeOwner = opts.isPidAlive
+    ? (pid: number): OwnerState => (opts.isPidAlive!(pid) ? "live" : "dead")
+    : undefined
+  return projectSessionTransportState({
+    transportConnected: opts.liveSessionNames.has(owner),
+    ownerPid: row?.pid ?? 0,
+    probeOwner,
+  })
+}
+
+function ownerLiveness(transport: SessionTransportProjection | null): OwnerLiveness {
+  if (transport?.transport_state === "connected") return "live"
+  if (transport?.owner_state === "dead") return "dead"
+  return "unknown"
 }
 
 function deadOwnerContent(row: PendingDeadlineRow, target: string | null, targetIsDeadOwner: boolean): string {
@@ -92,7 +108,7 @@ function expiredBallContent(row: PendingDeadlineRow, target: string | null, targ
  * The tracker row remains the sole ownership authority; dedup claims provide
  * durable restart/concurrency idempotency without another queue. */
 export function processPendingBallDeadlines(opts: PendingBallDeadlineOptions): PendingBallDeadlineResult {
-  const result: PendingBallDeadlineResult = { nudged: 0, expired: 0, deadOwnerWarnings: 0 }
+  const result: PendingBallDeadlineResult = { nudged: 0, expired: 0, ownerStateWarnings: 0 }
   const rows = opts.db
     .prepare(
       "SELECT request_id, recipient, sender, opened_at, expires_at, message_id FROM pending_request ORDER BY opened_at, request_id, recipient",
@@ -100,33 +116,37 @@ export function processPendingBallDeadlines(opts: PendingBallDeadlineOptions): P
     .all() as PendingDeadlineRow[]
 
   for (const row of rows) {
-    const liveness = ownerLiveness(opts, row.recipient)
+    const transport = ownerTransport(opts, row.recipient)
+    const liveness = ownerLiveness(transport)
     const configuredTarget = opts.escalationTarget?.trim() || null
     const targetIsDeadOwner = liveness === "dead" && configuredTarget === row.recipient
     const target = targetIsDeadOwner ? null : configuredTarget
     if (liveness === "unknown") {
       const unresolvedStage = runClaimedStage(opts, row, "owner-unresolved", () => {
+        const evidence = transport
+          ? ` transport_state=${transport.transport_state} owner_state=${transport.owner_state} reason=${transport.transport_reason};`
+          : ""
         opts.send(
           row.sender,
-          `Pending ball ${row.request_id} targets owner ${row.recipient}, who is not currently active; no positive death evidence exists, so ownership is retained.`,
+          `Pending ball ${row.request_id} targets owner ${row.recipient}, who is not currently active;${evidence} no positive death evidence exists, so ownership is retained.`,
           "ball:owner-unresolved",
         )
       })
-      if (unresolvedStage.claimed) result.deadOwnerWarnings += 1
+      if (unresolvedStage.claimed) result.ownerStateWarnings += 1
     }
     if (liveness === "dead") {
       const content = deadOwnerContent(row, target, targetIsDeadOwner)
       const senderStage = runClaimedStage(opts, row, "owner-dead:sender", () => {
         opts.send(row.sender, content, target === row.sender ? "verdict" : "ball:owner-dead")
       })
-      if (senderStage.claimed) result.deadOwnerWarnings += 1
+      if (senderStage.claimed) result.ownerStateWarnings += 1
       if (target && target !== row.sender) {
         const escalationStage = runClaimedStage(opts, row, `owner-dead:escalation:${target}`, () => {
           // `verdict` is wakeable but deliberately excluded from AUTO_TRACK_TYPES:
           // an LLM judge sees the escalation without manufacturing another ball.
           opts.send(target, content, "verdict")
         })
-        if (escalationStage.claimed) result.deadOwnerWarnings += 1
+        if (escalationStage.claimed) result.ownerStateWarnings += 1
       }
     }
 

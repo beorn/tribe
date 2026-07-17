@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Added
+
+- **Daemon-authoritative transport verdicts.** `tribe.members({ all: true })`
+  now separates `transport_state` (`connected` / `disconnected`) from
+  `owner_state` (`live` / `dead` / `unknown`) and includes a diagnostic
+  `transport_reason`. The legacy `alive` field remains a derived compatibility
+  alias; `last_seen_sec` remains activity age, not liveness.
+- **Stuck-reconnect watchdog.** A supervised Claude adapter that remains in
+  reconnecting state for 60 seconds while the daemon answers a fresh RPC asks
+  its stable wrapper to reload current disk code.
+
+### Fixed
+
+- Pin the real daemon close/unlink/fresh-bind journey: the host stdio channel
+  remains open, the adapter child is replaced, the persisted logical member
+  rejoins, and post-restart tool calls succeed without human keystrokes.
+- Route daemon generation changes, reconnect exhaustion/watchdog trips, source
+  changes, and reload notifications through the one stable plugin supervisor;
+  bound repeated slow replacements instead of respawning once per minute.
+- Close connected candidates when registration rejects, and terminate an
+  adapter when its host stdin closes, preventing stranded sockets/processes.
+
 ## 0.1.4 — 2026-05-27
 
 ### Fixed
