@@ -178,7 +178,15 @@ describe("Tribe command descriptors", () => {
     expect(send.mcp.inputSchema.properties?.request).toMatchObject({
       oneOf: expect.arrayContaining([{ type: "boolean" }, { type: "string" }]),
     })
+    expect(send.mcp.inputSchema.properties?.delivery).toMatchObject({
+      type: "string",
+      enum: ["push", "pull"],
+    })
     expect(JSON.stringify(send.mcp.inputSchema.properties?.request)).toMatch(/automatically open/i)
+    expect(visibleCliProjection(send).options?.find((option) => option.name === "delivery")?.enum).toEqual([
+      "push",
+      "pull",
+    ])
 
     const pending = commandDescriptorByMcpName("pending")!
     expect(pending.mcp.inputSchema.properties?.all).toMatchObject({ type: "boolean" })
