@@ -440,8 +440,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "session",
           flags: "--session <name>",
-          description: "Session to inspect (default: @chief)",
-          default: "@chief",
+          description: "Explicit session to inspect; managed CLI defaults to the daemon-resolved launch identity",
         },
         {
           name: "timeout",

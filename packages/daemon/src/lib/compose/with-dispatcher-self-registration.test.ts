@@ -207,6 +207,56 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
 })
 
 describe("dispatcher bounded mailbox drain", () => {
+  it("validates daemon-derived launch targets and fails closed on conflicting authorities", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    for (const [label, params, code] of [
+      ["missing launch id", {}, -32602],
+      ["empty launch id", { launch_id: "" }, -32602],
+      ["session override", { launch_id: "managed-launch", session: "@chief" }, -32602],
+      ["caller parent override", { launch_id: "managed-launch", launch_parent_pid: process.pid }, -32602],
+      ["unknown launch", { launch_id: "missing-launch" }, -32003],
+    ] as const) {
+      const error = parseError(
+        await harness.dispatcher.handleRequest(
+          { jsonrpc: "2.0", id: `invalid-${label}`, method: "cli_inbox_status_by_launch_v1", params },
+          "conn-status",
+        ),
+      )
+      expect(error.code, label).toBe(code)
+    }
+
+    for (const [connId, name, pid, project, launchParentPid] of [
+      ["conn-outer", "@agent/outer", process.pid, "/tmp/km-outer", process.pid],
+      ["conn-inner", "@agent/inner", process.ppid, "/tmp/km-inner", process.ppid],
+    ] as const) {
+      harness.addPendingClient(connId)
+      await harness.register(connId, {
+        name,
+        pid,
+        project,
+        launchId: "shared-inherited-launch",
+        launchParentPid,
+      })
+    }
+
+    const ambiguous = parseError(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "ambiguous-launch-inbox",
+          method: "cli_inbox_status_by_launch_v1",
+          params: { launch_id: "shared-inherited-launch" },
+        },
+        "conn-status",
+      ),
+    )
+
+    expect(ambiguous.code).toBe(-32003)
+    expect(ambiguous.message).toMatch(/resolved to 2 sessions|ambiguous/i)
+  })
+
   it("advances the durable role cursor without creating a transient registration", async () => {
     const harness = createDispatcherHarness({ operatorCapability: "operator-test-secret" })
     cleanup = harness.dispose
@@ -666,7 +716,10 @@ function createDispatcherHarness(
 
   return {
     dispatcher: daemon.dispatcher,
-    register(connId: string, params: { name: string; pid: number; project: string }) {
+    register(
+      connId: string,
+      params: { name: string; pid: number; project: string; launchId?: string; launchParentPid?: number },
+    ) {
       const req: JsonRpcRequest = {
         jsonrpc: "2.0",
         id: `register-${connId}`,

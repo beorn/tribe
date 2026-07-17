@@ -196,6 +196,76 @@ export function withDispatcher<
       return timingSafeEqual(Buffer.from(supplied), Buffer.from(configured))
     }
 
+    type InboxTargetResolution = { sessionName: string } | { errorCode: number; errorMessage: string }
+
+    /**
+     * Resolve an inbox target from durable daemon authority. Session names are
+     * accepted only as explicit operator/read targets; a managed one-shot CLI
+     * supplies its launch-scoped correlation id, never mutable name hints from
+     * env. The daemon derives the parent-pid half of the authoritative
+     * tuple from its own persisted session row and fails closed on ambiguity.
+     */
+    function resolveInboxTarget(
+      params: Record<string, unknown>,
+      opts: { mode: "launch" } | { mode: "explicit"; defaultSession?: string },
+    ): InboxTargetResolution {
+      const hasSession = Object.prototype.hasOwnProperty.call(params, "session")
+      const hasLaunchId = Object.prototype.hasOwnProperty.call(params, "launch_id")
+      const hasLaunchParentPid = Object.prototype.hasOwnProperty.call(params, "launch_parent_pid")
+      const hasLaunchParentPids = Object.prototype.hasOwnProperty.call(params, "launch_parent_pids")
+      if (opts.mode === "explicit") {
+        if (hasLaunchId || hasLaunchParentPid || hasLaunchParentPids) {
+          return { errorCode: -32602, errorMessage: "Explicit inbox request accepts session, not launch identity" }
+        }
+        if (hasSession) return { sessionName: String(params.session) }
+        if (opts.defaultSession !== undefined) return { sessionName: opts.defaultSession }
+        return { errorCode: -32602, errorMessage: "Explicit inbox request requires session" }
+      }
+
+      if (hasSession || hasLaunchParentPid || hasLaunchParentPids) {
+        return {
+          errorCode: -32602,
+          errorMessage: "Managed inbox request accepts only launch_id; parent identity is daemon-derived",
+        }
+      }
+      if (!hasLaunchId) {
+        return { errorCode: -32602, errorMessage: "Managed inbox request requires a non-empty launch_id" }
+      }
+
+      const launchId = String(params.launch_id ?? "").trim()
+      if (launchId.length === 0) {
+        return {
+          errorCode: -32602,
+          errorMessage: "Managed inbox request requires a non-empty launch_id",
+        }
+      }
+      const launchSessions = stmts.getSessionsByLaunchId.all({ $launch_id: launchId }) as Array<{
+        name: string
+        launch_parent_pid: number | null
+      }>
+      const launchSession = launchSessions[0]
+      if (launchSessions.length !== 1 || launchSession === undefined) {
+        return {
+          errorCode: -32003,
+          errorMessage: `Inbox launch identity resolved to ${launchSessions.length} sessions; exactly one is required`,
+        }
+      }
+      if (!Number.isSafeInteger(launchSession.launch_parent_pid) || Number(launchSession.launch_parent_pid) <= 0) {
+        return { errorCode: -32003, errorMessage: "Inbox launch identity has no authoritative parent pid" }
+      }
+      const persistedRename = stmts.getLaunchRename.get({
+        $launch_id: launchId,
+        $launch_parent_pid: launchSession.launch_parent_pid,
+      }) as { name: string } | null
+      if (persistedRename && persistedRename.name !== launchSession.name) {
+        return {
+          errorCode: -32003,
+          errorMessage: "Inbox launch authorities disagree; refusing ambiguous mailbox",
+        }
+      }
+      return { sessionName: launchSession.name }
+    }
+
     const inboxWait = createInboxWaitManager(readInboxStatus)
     const previousOnMessageInserted = daemonCtx.onMessageInserted
     const onMessageInserted = (info: MessageInsertedInfo) => {
@@ -883,18 +953,28 @@ export function withDispatcher<
            * the session hasn't drained via tribe.fetch.
            * See @km/all/silent-errors-enforcement/chief-silent-watchdog-relay-pattern-detection.
            */
-          case "cli_inbox_status": {
-            const sessionName = String(p.session ?? "@chief")
-            return makeResponse(id, readInboxStatus(sessionName))
+          case "cli_inbox_status":
+          case "cli_inbox_status_by_launch_v1": {
+            const target = resolveInboxTarget(
+              p,
+              method === "cli_inbox_status_by_launch_v1"
+                ? { mode: "launch" }
+                : { mode: "explicit", defaultSession: "@chief" },
+            )
+            if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage)
+            return makeResponse(id, readInboxStatus(target.sessionName))
           }
 
           /**
            * Bounded actionable drain. An authenticated client may mutate only
            * its own mailbox and may not self-assert a `session` target. A
-           * separately configured operator capability may select a mailbox for
-           * watchdog/recovery automation. Both paths fail closed.
+           * separately configured operator capability may either select a
+           * mailbox explicitly or correlate a one-shot CLI to the daemon's
+           * persisted launch authority. Correlation never authenticates the
+           * caller by itself, and the CLI never registers a transient member.
            */
-          case "cli_inbox_drain": {
+          case "cli_inbox_drain":
+          case "cli_inbox_drain_by_launch_v1": {
             const client = clients.get(connId)
             const authenticatedName =
               client && client.role !== "pending" && client.role !== "watch" ? client.name : null
@@ -906,16 +986,29 @@ export function withDispatcher<
                 "Inbox drain requires an authenticated current session or the configured operator capability",
               )
             }
-            if (!operatorAuthorized && Object.prototype.hasOwnProperty.call(p, "session")) {
+            if (
+              !operatorAuthorized &&
+              ["session", "launch_id", "launch_parent_pid", "launch_parent_pids"].some((key) =>
+                Object.prototype.hasOwnProperty.call(p, key),
+              )
+            ) {
               return makeError(
                 id,
                 -32003,
-                `Inbox drain is bound to the authenticated current session ${authenticatedName}; session override is forbidden`,
+                `Inbox drain is bound to the authenticated current session ${authenticatedName}; session override or launch target override is forbidden`,
               )
             }
-            const sessionName = operatorAuthorized
-              ? String(p.session ?? DEFAULT_INBOX_WAIT_SESSION)
-              : authenticatedName!
+            let sessionName = authenticatedName ?? ""
+            if (operatorAuthorized) {
+              const target = resolveInboxTarget(
+                p,
+                method === "cli_inbox_drain_by_launch_v1"
+                  ? { mode: "launch" }
+                  : { mode: "explicit", defaultSession: DEFAULT_INBOX_WAIT_SESSION },
+              )
+              if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage)
+              sessionName = target.sessionName
+            }
             const requestedLimit = Number(p.limit ?? 10)
             const limit = Number.isFinite(requestedLimit) ? Math.min(100, Math.max(1, Math.trunc(requestedLimit))) : 10
             const tail = stmts.getMessageTailSeq.get() as { seq: number } | null
@@ -935,10 +1028,17 @@ export function withDispatcher<
             })
           }
 
-          case "cli_inbox_wait": {
-            const { session: sessionName, timeoutMs } = resolveInboxWaitOptions(p, {
-              defaultSession: DEFAULT_INBOX_WAIT_SESSION,
-            })
+          case "cli_inbox_wait":
+          case "cli_inbox_wait_by_launch_v1": {
+            const target = resolveInboxTarget(
+              p,
+              method === "cli_inbox_wait_by_launch_v1"
+                ? { mode: "launch" }
+                : { mode: "explicit", defaultSession: DEFAULT_INBOX_WAIT_SESSION },
+            )
+            if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage)
+            const { timeoutMs } = resolveInboxWaitOptions(p)
+            const sessionName = target.sessionName
             const result = await inboxWait.wait(sessionName, connId, timeoutMs)
             return makeResponse(id, {
               ...result,

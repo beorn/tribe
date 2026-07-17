@@ -47,6 +47,16 @@ const child = Bun.spawn(command, { stdin: "inherit", stdout: "inherit", stderr: 
 for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => child.kill(signal))
 process.exit(await child.exited)
 `
+const CLI_PARENT_WRAPPER = `
+const { spawn } = await import("node:child_process")
+const command = JSON.parse(process.env.TRIBE_TEST_CHILD_COMMAND)
+const stdio = process.env.TRIBE_OPERATOR_CAPABILITY_FD === "3"
+  ? ["inherit", "inherit", "inherit", 3]
+  : ["inherit", "inherit", "inherit"]
+const child = spawn(command[0], command.slice(1), { env: process.env, stdio })
+for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => child.kill(signal))
+process.exitCode = await new Promise((resolveExit) => child.once("exit", (code) => resolveExit(code ?? 1)))
+`
 
 const NAME = "@agent/3"
 
@@ -231,20 +241,28 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     throw new Error(`timed out connecting to expected daemon pid: ${String(lastError)}`)
   }
 
-  function spawnDaemon(socketPath: string, dbPath: string): ChildProcessWithoutNullStreams {
+  function spawnDaemon(
+    socketPath: string,
+    dbPath: string,
+    opts: { operatorCapabilityFd?: number } = {},
+  ): ChildProcessWithoutNullStreams {
     const proc = spawn(BUN_BIN, [DAEMON, "--socket", socketPath, "--db", dbPath, "--foreground", "--no-lore"], {
       cwd: tmpDir,
       env: {
         ...process.env,
         TRIBE_NO_PLUGINS: "1",
+        ...(opts.operatorCapabilityFd === undefined ? {} : { TRIBE_OPERATOR_CAPABILITY_FD: "3" }),
         TRIBE_ACTIVITY_LOG: join(tmpDir, "activity.jsonl"),
         DEBUG: "tribe:*",
         DEBUG_LOG: join(tmpDir, "daemon.log"),
         LOG_FILE: join(tmpDir, "daemon.log"),
       },
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio:
+        opts.operatorCapabilityFd === undefined
+          ? ["pipe", "pipe", "pipe"]
+          : ["pipe", "pipe", "pipe", opts.operatorCapabilityFd],
     })
-    return proc
+    return proc as ChildProcessWithoutNullStreams
   }
 
   async function spawnAdapterAndJoin(
@@ -255,6 +273,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       cwd: tmpDir,
       env: {
         ...process.env,
+        TRIBE_LAUNCH_ID: "",
+        TRIBE_NAME: "",
+        TRIBE_SESSION_NAME: "",
         TRIBE_DELIVERY: "push",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, logName),
@@ -277,10 +298,11 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     socketPath: string,
     logName: string,
     launchId: string | undefined,
-    opts: { takeover?: boolean; distinctProviderParent?: boolean } = {},
+    opts: { name?: string; takeover?: boolean; distinctProviderParent?: boolean } = {},
   ): Promise<{ child: ChildProcessWithoutNullStreams; stdout: Record<string, unknown>[]; logPath: string }> {
     const logPath = join(tmpDir, logName)
-    const adapterCommand = [BUN_BIN, ADAPTER, "--socket", socketPath, "--name", NAME]
+    const name = opts.name ?? NAME
+    const adapterCommand = [BUN_BIN, ADAPTER, "--socket", socketPath, "--name", name]
     const child = spawn(
       BUN_BIN,
       opts.distinctProviderParent ? ["-e", PROVIDER_PARENT_WRAPPER] : adapterCommand.slice(1),
@@ -288,17 +310,19 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         cwd: tmpDir,
         env: {
           ...process.env,
+          TRIBE_LAUNCH_ID: launchId ?? "",
+          TRIBE_NAME: "",
+          TRIBE_SESSION_NAME: "",
           TRIBE_DELIVERY: "pull",
           TRIBE_PULL_TRANSPORT: "mcp",
           TRIBE_NO_AUTOSTART: "1",
           TRIBE_REQUIRE_JOIN: "0",
           TRIBE_TAKEOVER: opts.takeover === false ? "0" : "1",
-          ...(launchId === undefined ? {} : { TRIBE_LAUNCH_ID: launchId }),
           ...(opts.distinctProviderParent
             ? {
                 // Hostile/unsanitized nested launch: both identity inputs are
                 // inherited unchanged; only real OS-parent provenance differs.
-                TRIBE_NAME: NAME,
+                TRIBE_NAME: name,
                 TRIBE_TEST_CHILD_COMMAND: JSON.stringify(adapterCommand),
               }
             : {}),
@@ -332,6 +356,37 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       )
     }
     return toolResult(adapter.stdout, id)
+  }
+
+  async function runCli(
+    args: string[],
+    env: NodeJS.ProcessEnv,
+    opts: { operatorCapabilityPath?: string; throughParent?: boolean } = {},
+  ): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+    const capabilityFd =
+      opts.operatorCapabilityPath === undefined ? undefined : openSync(opts.operatorCapabilityPath, "r")
+    const command = [BUN_BIN, CLI, ...args]
+    const child = spawn(BUN_BIN, opts.throughParent ? ["-e", CLI_PARENT_WRAPPER] : command.slice(1), {
+      cwd: tmpDir,
+      env: {
+        ...env,
+        ...(opts.throughParent ? { TRIBE_TEST_CHILD_COMMAND: JSON.stringify(command) } : {}),
+        ...(capabilityFd === undefined ? {} : { TRIBE_OPERATOR_CAPABILITY_FD: "3" }),
+      },
+      stdio: capabilityFd === undefined ? ["ignore", "pipe", "pipe"] : ["ignore", "pipe", "pipe", capabilityFd],
+    })
+    if (capabilityFd !== undefined) closeSync(capabilityFd)
+    if (!child.stdout || !child.stderr) throw new Error("CLI test child did not expose piped output")
+    let stdout = ""
+    let stderr = ""
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      stdout += chunk.toString()
+    })
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      stderr += chunk.toString()
+    })
+    await once(child, "exit")
+    return { exitCode: child.exitCode, stdout, stderr }
   }
 
   it("preserves inherited operator authority through adapter autostart and daemon hot reload", async () => {
@@ -394,6 +449,125 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       }),
     ).resolves.toMatchObject({ session: "@chief", drained_count: 0 })
     successor.client.close()
+  }, 30_000)
+
+  it("drains the managed launch mailbox instead of a foreign environment identity when MCP is unavailable", async () => {
+    const socketPath = join(tmpDir, "managed-cli-inbox.sock")
+    const dbPath = join(tmpDir, "managed-cli-inbox.db")
+    const capability = "managed-cli-inbox-secret"
+    const capabilityPath = join(tmpDir, "managed-cli-inbox-capability")
+    const ownLaunchId = "managed-cli-own-launch"
+    const spawnTimeName = "@agent/3-spawn"
+    const runtimeName = "@agent/3-runtime"
+    const foreignName = "@agent/foreign"
+
+    writeFileSync(capabilityPath, capability, { mode: 0o600 })
+    const daemonCapabilityFd = openSync(capabilityPath, "r")
+    daemonProc = spawnDaemon(socketPath, dbPath, { operatorCapabilityFd: daemonCapabilityFd })
+    closeSync(daemonCapabilityFd)
+    await waitForCondition(() => existsSync(socketPath), "daemon socket")
+
+    // This test process stands in for one long-lived provider parent. The MCP
+    // adapter is its direct child, while the recovery CLI intentionally runs
+    // through an extra package/shim parent. Its ppid therefore cannot be the
+    // launch key: the daemon must derive the authoritative parent pid from its
+    // persisted launch row. A second launch supplies the hostile environment
+    // identity to ignore.
+    const own = await spawnLaunchAdapter(socketPath, "managed-cli-own.log", ownLaunchId, {
+      name: spawnTimeName,
+    })
+    const foreign = await spawnLaunchAdapter(socketPath, "managed-cli-foreign.log", "managed-cli-foreign-launch", {
+      name: foreignName,
+    })
+    await callLaunchTool(own, 60, "members", {})
+    await callLaunchTool(foreign, 61, "members", {})
+    await callLaunchTool(own, 62, "rename", { new_name: runtimeName })
+
+    // Simulate the reported recovery state: the managed launch remains in the
+    // daemon's durable authority store, but its MCP transport is unavailable.
+    own.child.kill("SIGTERM")
+    await once(own.child, "exit")
+
+    const fixtureDb = openDatabase(dbPath)
+    const fixtureStatements = createStatements(fixtureDb)
+    const now = Date.now()
+    for (const [id, recipient, content] of [
+      ["managed-cli-own-request", runtimeName, "own launch request"],
+      ["managed-cli-foreign-request", foreignName, "foreign launch request"],
+    ] as const) {
+      fixtureStatements.insertMessage.run({
+        $id: id,
+        $type: "request",
+        $sender: "@chief",
+        $recipient: recipient,
+        $kind: "direct",
+        $content: content,
+        $bead_id: null,
+        $ref: null,
+        $ts: now,
+        $delivery: "pull",
+        $topic: null,
+        $room_id: null,
+        $request: id,
+        $reply: null,
+        $summary: null,
+      })
+    }
+    fixtureDb.close()
+
+    const cliEnv = {
+      ...process.env,
+      TRIBE_SOCKET: socketPath,
+      TRIBE_LAUNCH_ID: ownLaunchId,
+      // Neither mutable identity hint may select the mailbox.
+      TRIBE_NAME: foreignName,
+      TRIBE_SESSION_NAME: foreignName,
+      TRIBE_NO_AUTOSTART: "1",
+    }
+    const statusRun = await runCli(["inbox-status", "--json"], cliEnv, { throughParent: true })
+    expect(statusRun.exitCode, statusRun.stderr).toBe(0)
+    expect(JSON.parse(statusRun.stdout)).toMatchObject({ session: runtimeName, unread_count: 1 })
+
+    const waitRun = await runCli(["inbox-wait", "--timeout", "0s", "--json"], cliEnv, { throughParent: true })
+    expect(waitRun.exitCode, waitRun.stderr).toBe(0)
+    expect(JSON.parse(waitRun.stdout)).toMatchObject({ session: runtimeName, unread_count: 1, timed_out: false })
+
+    const drainRun = await runCli(["inbox-drain", "--json"], cliEnv, {
+      operatorCapabilityPath: capabilityPath,
+      throughParent: true,
+    })
+    expect(drainRun.exitCode, drainRun.stderr).toBe(0)
+
+    const drained = JSON.parse(drainRun.stdout) as {
+      session: string
+      drained_count: number
+      unread_count: number
+      events: Array<{ content: string }>
+    }
+    expect(drained).toMatchObject({
+      session: runtimeName,
+      drained_count: 1,
+      unread_count: 0,
+      events: [{ content: "own launch request" }],
+    })
+
+    const observer = await connectToDaemon(socketPath)
+    await expect(observer.call("cli_inbox_status", { session: foreignName })).resolves.toMatchObject({
+      session: foreignName,
+      unread_count: 1,
+    })
+    observer.close()
+
+    const membershipDb = openDatabase(dbPath)
+    const sessions = membershipDb.prepare("SELECT name, launch_id FROM sessions ORDER BY name").all() as Array<{
+      name: string
+      launch_id: string | null
+    }>
+    membershipDb.close()
+    expect(sessions).toEqual([
+      { name: runtimeName, launch_id: ownLaunchId },
+      { name: foreignName, launch_id: "managed-cli-foreign-launch" },
+    ])
   }, 30_000)
 
   it("claiming the loaded name forwards EXACTLY the one actionable; a reconnect forwards none", async () => {

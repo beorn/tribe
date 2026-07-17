@@ -963,6 +963,9 @@ export function createStatements(db: Database) {
     getLaunchRename: db.prepare(
       "SELECT name FROM launch_renames WHERE launch_id = $launch_id AND launch_parent_pid = $launch_parent_pid",
     ),
+    getSessionsByLaunchId: db.prepare(
+      "SELECT name, launch_parent_pid FROM sessions WHERE launch_id = $launch_id ORDER BY id",
+    ),
     gcOldLaunchRenames: db.prepare("DELETE FROM launch_renames WHERE renamed_at < $cutoff"),
 
     updateSessionMeta: db.prepare(`

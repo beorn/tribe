@@ -401,7 +401,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     }
   })
 
-  it("inbox-drain forwards an inherited-fd operator capability and ignores env secret text", async () => {
+  it("keeps explicit inbox targeting compatible and makes managed targeting reject stale daemons", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-drain-"))
     const socketPath = join(dir, "tribe.sock")
     const calls: Array<{ method: string; params?: Record<string, unknown> }> = []
@@ -410,6 +410,9 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       unread_count: 0,
       oldest_unread_age_min: 0,
       oldest_unread_ts: 0,
+      waited_ms: 0,
+      timed_out: false,
+      aborted: false,
       drained_count: 1,
       events: [{ from: "@agent/7", type: "request", content: "review carrier" }],
     }
@@ -425,7 +428,14 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
           if (!line.trim()) continue
           const request = JSON.parse(line) as { id: number; method: string; params?: Record<string, unknown> }
           calls.push({ method: request.method, params: request.params })
-          socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`)
+          const response = request.method.endsWith("_by_launch_v1")
+            ? {
+                jsonrpc: "2.0",
+                id: request.id,
+                error: { code: -32601, message: `Method not found: ${request.method}` },
+              }
+            : { jsonrpc: "2.0", id: request.id, result }
+          socket.write(`${JSON.stringify(response)}\n`)
         }
       })
     })
@@ -438,23 +448,61 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
           resolveListen()
         })
       })
-      const cli = await runCliAsync(
-        ["inbox-drain", "--session", "@chief", "--limit", "1", "--json"],
-        {
-          ...process.env,
-          TRIBE_SOCKET: socketPath,
-          TRIBE_NO_AUTOSTART: "1",
-          TRIBE_OPERATOR_CAPABILITY: "must-not-cross-the-wire",
-        },
-        { operatorCapability: "fd-only-operator-secret" },
-      )
+      const explicitEnv = {
+        ...process.env,
+        TRIBE_SOCKET: socketPath,
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_OPERATOR_CAPABILITY: "must-not-cross-the-wire",
+      }
+      const status = await runCliAsync(["inbox-status", "--session", "@chief", "--json"], explicitEnv)
+      const wait = await runCliAsync(["inbox-wait", "--session", "@chief", "--timeout", "0s", "--json"], explicitEnv)
+      const drain = await runCliAsync(["inbox-drain", "--session", "@chief", "--limit", "1", "--json"], explicitEnv, {
+        operatorCapability: "fd-only-operator-secret",
+      })
 
-      expect(cli).toMatchObject({ code: 0, stderr: "" })
-      expect(JSON.parse(cli.stdout)).toEqual(result)
+      for (const cli of [status, wait, drain]) {
+        expect(cli).toMatchObject({ code: 0, stderr: "" })
+        expect(JSON.parse(cli.stdout)).toMatchObject({ ...result, waited_ms: expect.any(Number) })
+      }
+
+      const managedEnv = {
+        ...process.env,
+        TRIBE_SOCKET: socketPath,
+        TRIBE_LAUNCH_ID: "managed-stale-daemon-launch",
+        TRIBE_NO_AUTOSTART: "1",
+      }
+      const managedStatus = await runCliAsync(["inbox-status", "--json"], managedEnv)
+      const managedWait = await runCliAsync(["inbox-wait", "--timeout", "0s", "--json"], managedEnv)
+      const managedDrain = await runCliAsync(["inbox-drain", "--json"], managedEnv, {
+        operatorCapability: "fd-only-operator-secret",
+      })
+      for (const cli of [managedStatus, managedWait, managedDrain]) {
+        expect(cli.code).not.toBe(0)
+        expect(cli.stderr).toMatch(/stale.*reload/i)
+      }
+
       expect(calls).toEqual([
+        { method: "cli_inbox_status", params: { session: "@chief" } },
+        { method: "cli_inbox_wait", params: { session: "@chief", timeout_ms: 0 } },
         {
           method: "cli_inbox_drain",
           params: { session: "@chief", limit: 1, operator_capability: "fd-only-operator-secret" },
+        },
+        {
+          method: "cli_inbox_status_by_launch_v1",
+          params: { launch_id: "managed-stale-daemon-launch" },
+        },
+        {
+          method: "cli_inbox_wait_by_launch_v1",
+          params: { launch_id: "managed-stale-daemon-launch", timeout_ms: 0 },
+        },
+        {
+          method: "cli_inbox_drain_by_launch_v1",
+          params: {
+            launch_id: "managed-stale-daemon-launch",
+            limit: 10,
+            operator_capability: "fd-only-operator-secret",
+          },
         },
       ])
     } finally {

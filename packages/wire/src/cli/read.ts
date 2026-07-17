@@ -35,7 +35,7 @@
 import { readFileSync } from "node:fs"
 import { Command, int } from "@silvery/commander"
 import { cliOption, visibleCliProjectionForMcp } from "../command-descriptors.ts"
-import { DEFAULT_INBOX_WAIT_SESSION, resolveInboxWaitOptions } from "../lib/inbox-wait-options.ts"
+import { parseInboxWaitTimeoutMs } from "../lib/inbox-wait-options.ts"
 import { connectToDaemon, resolveSocketPath } from "../lib/socket.ts"
 import { watchActivity } from "../lib/activity-watch.ts"
 import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-exempt.ts"
@@ -43,6 +43,9 @@ import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-
 const PENDING_CLI = visibleCliProjectionForMcp("pending")
 const INBOX_WAIT_CLI = visibleCliProjectionForMcp("inbox.wait")
 const REPAIR_CLI = visibleCliProjectionForMcp("repair")
+
+const STALE_MANAGED_INBOX_DAEMON_ERROR =
+  "Running Tribe daemon is stale and cannot resolve this managed inbox; update/reload the daemon before retrying. Use --session only for an explicit operator target."
 
 // ---------------------------------------------------------------------------
 // Daemon connection
@@ -59,7 +62,10 @@ async function callDaemon(method: string, params?: Record<string, unknown>): Pro
       client.close()
     }
   } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code
+    const code = (err as { code?: string | number }).code
+    if (code === -32601 && method.endsWith("_by_launch_v1")) {
+      throw new Error(STALE_MANAGED_INBOX_DAEMON_ERROR)
+    }
     if (code === "ECONNREFUSED" || code === "ENOENT") {
       console.error(`No daemon running (socket: ${socketPath})`)
       console.error(`Start one with: bun tribe-daemon (package tribe-daemon), or let a host autostart it`)
@@ -67,6 +73,17 @@ async function callDaemon(method: string, params?: Record<string, unknown>): Pro
     }
     throw err
   }
+}
+
+function cliInboxTargetParams(session: string | undefined): Record<string, unknown> {
+  if (session !== undefined) return { session }
+  const launchId = process.env.TRIBE_LAUNCH_ID?.trim()
+  if (launchId) return { launch_id: launchId }
+  throw new Error("Managed inbox request requires TRIBE_LAUNCH_ID; use --session for an explicit operator target")
+}
+
+function cliInboxMethod(base: "status" | "wait" | "drain", session: string | undefined): string {
+  return session === undefined ? `cli_inbox_${base}_by_launch_v1` : `cli_inbox_${base}`
 }
 
 /**
@@ -203,7 +220,7 @@ type InboxDrainResult = {
   }>
 }
 
-type InboxWaitCall = (args: { session: string; timeoutMs: number }) => Promise<InboxWaitResult>
+type InboxWaitCall = (args: { session?: string; timeoutMs: number }) => Promise<InboxWaitResult>
 
 const INBOX_WAIT_CHUNK_MS = 30_000
 const INBOX_WAIT_RETRY_DELAY_MS = 250
@@ -673,8 +690,7 @@ async function cmdDoctor(opts: { fix?: boolean }): Promise<void> {
  * Spec: @km/all/silent-errors-enforcement/chief-silent-watchdog-relay-pattern-detection (Layer 2).
  */
 async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promise<void> {
-  const session = opts.session ?? "@chief"
-  const result = (await callDaemon("cli_inbox_status", { session })) as {
+  const result = (await callDaemon(cliInboxMethod("status", opts.session), cliInboxTargetParams(opts.session))) as {
     session: string
     unread_count: number
     oldest_unread_age_min: number
@@ -686,11 +702,12 @@ async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promi
   }
   const n = result.unread_count
   if (n === 0) {
-    console.log(`${session}: inbox drained (0 unread actionable DMs).`)
+    console.log(`${result.session}: inbox drained (0 unread actionable DMs).`)
     return
   }
   console.log(
-    `${session}: ${n} unread actionable DM${n === 1 ? "" : "s"}, ` + `oldest ${result.oldest_unread_age_min}min ago.`,
+    `${result.session}: ${n} unread actionable DM${n === 1 ? "" : "s"}, ` +
+      `oldest ${result.oldest_unread_age_min}min ago.`,
   )
 }
 
@@ -706,9 +723,8 @@ function readOperatorCapabilityFromInheritedFd(fdRaw: string | undefined): strin
 }
 
 async function cmdInboxDrain(opts: { session?: string; limit?: number; json?: boolean }): Promise<void> {
-  const session = opts.session ?? DEFAULT_INBOX_WAIT_SESSION
-  const result = (await callDaemon("cli_inbox_drain", {
-    session,
+  const result = (await callDaemon(cliInboxMethod("drain", opts.session), {
+    ...cliInboxTargetParams(opts.session),
     limit: opts.limit ?? 10,
     // The fd number is public process metadata; the capability content never
     // enters env/argv, where another same-user process could inspect it.
@@ -723,7 +739,7 @@ async function cmdInboxDrain(opts: { session?: string; limit?: number; json?: bo
     console.log(event.content)
   }
   console.log(
-    `${session}: drained ${result.drained_count} actionable DM${result.drained_count === 1 ? "" : "s"}; ` +
+    `${result.session}: drained ${result.drained_count} actionable DM${result.drained_count === 1 ? "" : "s"}; ` +
       `${result.unread_count} remaining.`,
   )
 }
@@ -750,7 +766,8 @@ function totalWaited(result: InboxWaitResult, startedAt: number, now: () => numb
   return { ...result, waited_ms: Math.max(result.waited_ms, Math.max(0, now() - startedAt)) }
 }
 
-function timeoutInboxWaitResult(session: string, startedAt: number, now: () => number): InboxWaitResult {
+function timeoutInboxWaitResult(session: string | undefined, startedAt: number, now: () => number): InboxWaitResult {
+  if (session === undefined) throw new Error("Inbox wait ended before the daemon resolved the managed launch mailbox")
   return {
     session,
     unread_count: 0,
@@ -763,7 +780,7 @@ function timeoutInboxWaitResult(session: string, startedAt: number, now: () => n
 }
 
 export async function waitForInboxWithReconnect(opts: {
-  session: string
+  session?: string
   timeoutMs: number
   call: InboxWaitCall
   now?: () => number
@@ -779,16 +796,20 @@ export async function waitForInboxWithReconnect(opts: {
   const unavailableGraceMs = opts.unavailableGraceMs ?? INBOX_WAIT_UNAVAILABLE_GRACE_MS
   const startedAt = now()
   const deadline = startedAt + Math.max(0, opts.timeoutMs)
+  let resolvedSession = opts.session
+  let attempted = false
 
   while (true) {
     const remainingMs = Math.max(0, deadline - now())
-    if (remainingMs <= 0) return timeoutInboxWaitResult(opts.session, startedAt, now)
+    if (attempted && remainingMs <= 0) return timeoutInboxWaitResult(resolvedSession, startedAt, now)
 
     try {
+      attempted = true
       const result = await opts.call({ session: opts.session, timeoutMs: Math.min(maxChunkMs, remainingMs) })
+      resolvedSession = result.session
       if (result.unread_count > 0) return totalWaited(result, startedAt, now)
       if (result.aborted || result.timed_out) {
-        if (now() >= deadline) return timeoutInboxWaitResult(opts.session, startedAt, now)
+        if (now() >= deadline) return timeoutInboxWaitResult(resolvedSession, startedAt, now)
         continue
       }
       return totalWaited(result, startedAt, now)
@@ -797,49 +818,57 @@ export async function waitForInboxWithReconnect(opts: {
       if (!kind) throw err
       if (kind === "daemon-unavailable" && now() - startedAt >= unavailableGraceMs) throw err
       const afterErrorRemainingMs = Math.max(0, deadline - now())
-      if (afterErrorRemainingMs <= 0) return timeoutInboxWaitResult(opts.session, startedAt, now)
+      if (afterErrorRemainingMs <= 0) return timeoutInboxWaitResult(resolvedSession, startedAt, now)
       const pauseMs = Math.min(retryDelayMs, afterErrorRemainingMs)
       if (pauseMs > 0) await sleep(pauseMs)
     }
   }
 }
 
-async function callInboxWaitChunk(session: string, timeoutMs: number): Promise<InboxWaitResult> {
+async function callInboxWaitChunk(
+  method: string,
+  target: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<InboxWaitResult> {
   const socketPath = resolveSocketPath()
   const client = await connectToDaemon(socketPath, { callTimeoutMs: Math.max(10_000, timeoutMs + 5_000) })
   try {
-    return (await client.call("cli_inbox_wait", { session, timeout_ms: timeoutMs })) as InboxWaitResult
+    return (await client.call(method, { ...target, timeout_ms: timeoutMs })) as InboxWaitResult
+  } catch (err) {
+    if ((err as { code?: unknown }).code === -32601 && method.endsWith("_by_launch_v1")) {
+      throw new Error(STALE_MANAGED_INBOX_DAEMON_ERROR)
+    }
+    throw err
   } finally {
     client.close()
   }
 }
 
 async function cmdInboxWait(opts: { session?: string; timeoutMs?: number; json?: boolean }): Promise<void> {
-  const { session, timeoutMs } = resolveInboxWaitOptions(
-    { session: opts.session, timeoutMs: opts.timeoutMs },
-    { defaultSession: DEFAULT_INBOX_WAIT_SESSION },
-  )
+  const timeoutMs = parseInboxWaitTimeoutMs(opts.timeoutMs)
+  const target = cliInboxTargetParams(opts.session)
   const result = await waitForInboxWithReconnect({
-    session,
+    session: opts.session,
     timeoutMs,
-    call: ({ session: chunkSession, timeoutMs: chunkTimeoutMs }) => callInboxWaitChunk(chunkSession, chunkTimeoutMs),
+    call: ({ timeoutMs: chunkTimeoutMs }) =>
+      callInboxWaitChunk(cliInboxMethod("wait", opts.session), target, chunkTimeoutMs),
   })
   if (opts.json) {
     console.log(JSON.stringify(result))
     return
   }
   if (result.aborted) {
-    console.log(`${session}: inbox wait aborted.`)
+    console.log(`${result.session}: inbox wait aborted.`)
     return
   }
   if (result.timed_out || result.unread_count === 0) {
-    console.log(`${session}: no actionable DMs within ${Math.round(timeoutMs / 1000)}s.`)
+    console.log(`${result.session}: no actionable DMs within ${Math.round(timeoutMs / 1000)}s.`)
     process.exitCode = 64
     return
   }
   const n = result.unread_count
   console.log(
-    `${session}: ${n} unread actionable DM${n === 1 ? "" : "s"}, ` +
+    `${result.session}: ${n} unread actionable DM${n === 1 ? "" : "s"}, ` +
       `oldest ${result.oldest_unread_age_min}min ago (waited ${Math.round(result.waited_ms / 1000)}s).`,
   )
 }
@@ -999,11 +1028,10 @@ export function registerReadCommands(program: Command): void {
 
   program
     .command("inbox-drain")
-    .description("Operator-capability drain of a bounded actionable mailbox page")
+    .description("Drain a managed or explicit mailbox with the inherited operator capability")
     .option(
       "--session <name>",
-      "Role mailbox to drain with the inherited TRIBE_OPERATOR_CAPABILITY_FD capability",
-      DEFAULT_INBOX_WAIT_SESSION,
+      "Explicit role mailbox to drain with the inherited TRIBE_OPERATOR_CAPABILITY_FD capability",
     )
     .option("--limit <n>", "Maximum actionable DMs to return and acknowledge (max 100)", int, 10)
     .option("--json", "Emit machine-readable JSON")
@@ -1011,8 +1039,8 @@ export function registerReadCommands(program: Command): void {
 
   program
     .command("inbox-status")
-    .description("Show actionable DMs the target session hasn't drained yet (chief-silent watchdog Layer 2)")
-    .option("--session <name>", "Session to inspect (default: @chief)", "@chief")
+    .description("Show actionable DMs for the current managed launch or an explicit session")
+    .option("--session <name>", "Explicit session to inspect")
     .option("--json", "Emit machine-readable JSON (for hooks)")
     .action((opts: { session?: string; json?: boolean }) => void cmdInboxStatus(opts))
 
