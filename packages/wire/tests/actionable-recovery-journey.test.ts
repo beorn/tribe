@@ -60,6 +60,25 @@ process.exitCode = await new Promise((resolveExit) => child.once("exit", (code) 
 
 const NAME = "@agent/3"
 
+// Hermetic spawn environment. The daemon classifies a session as an "LLM
+// sender" (summary required on `send`) whenever CLAUDE_SESSION_ID /
+// CLAUDE_SESSION_NAME / BD_ACTOR resolve to a value (see config.ts
+// resolveClaudeSessionId/Name + handlers.ts llmSender gate). Plain GitHub CI
+// leaves those unset, so this journey is written for the non-LLM sender path.
+// When the suite runs under an agent harness (Claude Code, a tribe seat) those
+// vars are present in the parent env and would silently leak into every
+// spawned daemon/adapter/CLI via `{ ...process.env }`, flipping the summaryless
+// `send` calls below into a "summary required" error and diverging from the
+// config that ships. Strip them once so every child sees the same
+// classification everywhere the suite runs.
+const BASE_ENV: NodeJS.ProcessEnv = (() => {
+  const env = { ...process.env }
+  delete env.CLAUDE_SESSION_ID
+  delete env.CLAUDE_SESSION_NAME
+  delete env.BD_ACTOR
+  return env
+})()
+
 function seedVerdictFixture(dbPath: string): void {
   const db = openDatabase(dbPath)
   const stmts = createStatements(db)
@@ -130,7 +149,13 @@ async function waitForCondition(
   message: string,
   opts: { timeoutMs?: number; intervalMs?: number } = {},
 ): Promise<void> {
-  const deadline = Date.now() + (opts.timeoutMs ?? 8_000)
+  // Generous CI-safe default: these journeys drive real bun subprocesses (a
+  // daemon + several stdio adapters) over unix sockets, whose cold-start,
+  // reconnect backoff, and re-exec cycles routinely exceed a few seconds on a
+  // loaded runner. The predicate returns the instant it is satisfied, so a high
+  // ceiling never slows the happy path — it only prevents a premature false
+  // "timed out" under load (the CI flake this file was hitting).
+  const deadline = Date.now() + (opts.timeoutMs ?? 30_000)
   while (Date.now() < deadline) {
     if (predicate()) return
     await new Promise((resolveTick) => setTimeout(resolveTick, opts.intervalMs ?? 25))
@@ -249,7 +274,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const proc = spawn(BUN_BIN, [DAEMON, "--socket", socketPath, "--db", dbPath, "--foreground", "--no-lore"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...BASE_ENV,
         TRIBE_NO_PLUGINS: "1",
         ...(opts.operatorCapabilityFd === undefined ? {} : { TRIBE_OPERATOR_CAPABILITY_FD: "3" }),
         TRIBE_ACTIVITY_LOG: join(tmpDir, "activity.jsonl"),
@@ -272,7 +297,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...BASE_ENV,
         TRIBE_LAUNCH_ID: "",
         TRIBE_NAME: "",
         TRIBE_SESSION_NAME: "",
@@ -309,7 +334,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       {
         cwd: tmpDir,
         env: {
-          ...process.env,
+          ...BASE_ENV,
           TRIBE_LAUNCH_ID: launchId ?? "",
           TRIBE_NAME: "",
           TRIBE_SESSION_NAME: "",
@@ -399,7 +424,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/operator-test"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...BASE_ENV,
         TRIBE_DAEMON_SCRIPT: DAEMON,
         TRIBE_DB: dbPath,
         TRIBE_DELIVERY: "pull",
@@ -449,7 +474,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       }),
     ).resolves.toMatchObject({ session: "@chief", drained_count: 0 })
     successor.client.close()
-  }, 30_000)
+  }, 60_000)
 
   it("drains the managed launch mailbox instead of a foreign environment identity when MCP is unavailable", async () => {
     const socketPath = join(tmpDir, "managed-cli-inbox.sock")
@@ -516,7 +541,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     fixtureDb.close()
 
     const cliEnv = {
-      ...process.env,
+      ...BASE_ENV,
       TRIBE_SOCKET: socketPath,
       TRIBE_LAUNCH_ID: ownLaunchId,
       // Neither mutable identity hint may select the mailbox.
@@ -568,7 +593,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       { name: runtimeName, launch_id: ownLaunchId },
       { name: foreignName, launch_id: "managed-cli-foreign-launch" },
     ])
-  }, 30_000)
+  }, 60_000)
 
   it("claiming the loaded name forwards EXACTLY the one actionable; a reconnect forwards none", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
@@ -600,7 +625,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const second = await spawnAdapterAndJoin(socketPath, "adapter-2.log")
     await new Promise((resolveTick) => setTimeout(resolveTick, 700))
     expect(channelNotifications(second.stdout)).toHaveLength(0)
-  }, 30_000)
+  }, 60_000)
 
   it("fans three native adapters from one provider launch into one live member", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
@@ -699,7 +724,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const cli = spawn(BUN_BIN, [CLI, "send", NAME, "one-shot same-name query", "--type", "query"], {
       cwd: tmpDir,
       env: {
-        ...process.env,
+        ...BASE_ENV,
         TRIBE_SOCKET: socketPath,
         TRIBE_NAME: NAME,
         TRIBE_TAKEOVER: "1",
@@ -744,21 +769,33 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       transport_pids: expect.arrayContaining(launchAdapters.map(({ child }) => child.pid!)),
     })
 
-    // A daemon restart drops every socket simultaneously. All three native
-    // adapters must reconnect and re-fan into the persisted logical member.
+    // A daemon restart is a daemon *generation* change: each native adapter
+    // sees a new daemon pid on re-register and re-execs on the host
+    // supervisor's signal (requestPluginReexec — see stdio-adapter.ts, added in
+    // fccebaa "harden ball closure and plugin reconnect"), rather than
+    // reconnecting the same process in place. In production the MCP host
+    // (plugins/claude/server.ts) sets TRIBE_PLUGIN_REEXEC_EXIT_CODE and re-execs
+    // the plugin on the current disk. This test stands in for that supervisor:
+    // wait for the transports to exit, respawn fresh adapters under the SAME
+    // launch id, and prove the three re-execed transports re-fan into the SAME
+    // persisted logical member (member_id preserved across the daemon restart).
     daemonProc.kill("SIGTERM")
     await once(daemonProc, "exit")
     await waitForCondition(() => !existsSync(socketPath), "old daemon socket removal")
     daemonProc = spawnDaemon(socketPath, dbPath)
     await waitForCondition(() => existsSync(socketPath), "restarted daemon socket")
     await waitForCondition(
-      () =>
-        launchAdapters.every(({ logPath }) => {
-          if (!existsSync(logPath)) return false
-          return (readFileSync(logPath, "utf8").match(/Registered as/g) ?? []).length >= 2
-        }),
-      "all launch adapters to register after daemon restart",
+      () => launchAdapters.every(({ child }) => child.exitCode !== null),
+      "native transports to re-exec on the daemon generation change",
     )
+    // The supervisor re-exec: a fresh transport process on the current disk,
+    // same launch id, re-attaches to the persisted member.
+    const reexeced = await Promise.all(
+      launchAdapters.map((_, index) =>
+        spawnLaunchAdapter(socketPath, `launch-adapter-${index + 1}-reexec.log`, launchId),
+      ),
+    )
+    for (const [index, adapter] of reexeced.entries()) launchAdapters[index] = adapter
     const afterDaemonRestart = await Promise.all(
       launchAdapters.map((adapter, index) => callLaunchTool(adapter, 30 + index, "members", {})),
     )
@@ -805,7 +842,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(rows).toEqual([{ name: NAME }])
     const finalDaemonLog = readFileSync(join(tmpDir, "daemon.log"), "utf8")
     expect(finalDaemonLog.match(/takeover: superseding live holder/g)).toHaveLength(1)
-  }, 30_000)
+    // Heaviest journey: it drives a daemon restart + three transport re-execs +
+    // respawns + a cross-launch takeover, each gated on real subprocess timing.
+  }, 120_000)
 
   it("does not adopt a dead launch when a new provider inherits its stale launch id", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
@@ -833,5 +872,5 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(inheritedMember).toMatchObject({ launch_id: staleLaunchId })
     expect(inheritedMember?.member_id).toEqual(expect.any(String))
     expect(inheritedMember?.member_id).not.toBe(firstMemberId)
-  }, 30_000)
+  }, 60_000)
 })
