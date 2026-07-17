@@ -17,6 +17,7 @@
   "scripts": {
     "build": "bun run --filter '*' build",
     "typecheck": "tsc --noEmit",
+    "recall": "bun packages/recall/src/cli.ts",
     "test": "bunx --bun vitest run",
     "fmt": "oxfmt --write .",
     "fmt:check": "oxfmt --check ."

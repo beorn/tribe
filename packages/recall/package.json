@@ -9,6 +9,9 @@
     "url": "git+https://github.com/beorn/tribe.git",
     "directory": "packages/recall"
   },
+  "bin": {
+    "recall": "./src/cli.ts"
+  },
   "files": [
     "src",
     "README.md"
