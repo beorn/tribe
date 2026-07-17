@@ -49,6 +49,14 @@ const log = createLogger("tribe:hook-dispatch")
 
 // Typed off the REAL in-repo modules (`typeof import` is type-only; runtime
 // loading stays lazy + dynamic below so the hook process starts light).
+//
+// Deliberately excludes `cmdRemember`: it can make a real synchronous LLM
+// call + `git log` spawn + retro-bead creation with no per-day lock, so it
+// stays manual-only (`recall remember` / `recall summarize`) rather than
+// hook-dispatched. See the docstring on `cmdRemember`
+// (packages/recall/src/lib/hooks.ts) and docs/recall.md § "Automatic
+// injection" before adding it here — this exclusion is pinned by
+// hook-dispatch.test.ts.
 type HookEngine = {
   cmdSessionStart: (typeof import("../../../recall/src/lib/hooks.ts"))["cmdSessionStart"]
   cmdSessionEnd: (typeof import("../../../recall/src/lib/hooks.ts"))["cmdSessionEnd"]

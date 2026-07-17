@@ -14,8 +14,12 @@
  *   recall files [pattern]            # List/search file writes
  *   recall files --restore <file>     # Recover file content
  *
- * Internal (hook system):
- *   recall remember                   # SessionEnd (stdin JSON)
+ * Internal/manual (hook-shaped, but NOT hook-dispatched):
+ *   recall remember                   # daily summarization, stdin-JSON shaped
+ *                                      # like SessionEnd, but dispatchHook()
+ *                                      # never calls it — manual-only by
+ *                                      # design (see hooks.ts docstring on
+ *                                      # cmdRemember + docs/recall.md).
  *
  * Note: SessionStart, UserPromptSubmit, and SessionEnd hooks are dispatched
  * via `tribe hook <event>` — not recall CLI — as of @bearly/tribe 0.10.0.
@@ -137,7 +141,7 @@ program
 // ── remember (internal) ─────────────────────────────────────────────────
 program
   .command("remember", { hidden: true })
-  .description("SessionEnd hook (reads stdin JSON)")
+  .description("Manual daily summarization, SessionEnd-stdin-JSON-shaped but NOT hook-dispatched (see docs/recall.md)")
   .option("--json", "Output as JSON")
   .action(async (opts: { json?: boolean }) => {
     await cmdRemember(opts)
