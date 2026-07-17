@@ -374,12 +374,12 @@ describe("20876 Tribe health cadence", () => {
       { recipient: "@agent/5", content: expect.any(String), type: "ball:nudge" },
       {
         recipient: "@chief",
-        content: expect.stringMatching(/re-ping.*escalat.*mark.*moot/i),
+        content: expect.stringMatching(/re-ping.*ask.*decide.*mark.*moot/i),
         type: "ball:expired",
       },
       {
         recipient: "@ops",
-        content: expect.stringMatching(/re-ping.*escalat.*mark.*moot/i),
+        content: expect.stringMatching(/re-ping.*ask.*decide.*mark.*moot/i),
         type: "ball:expired",
       },
     ])
@@ -479,7 +479,7 @@ describe("20876 Tribe health cadence", () => {
     expect(sent).toEqual(["ball:expired"])
   })
 
-  it("rolls back a reroute, its claim, and partial durable notifications when delivery fails", () => {
+  it("retains a delivered sender warning while retrying a failed LLM escalation", () => {
     db.prepare("DELETE FROM pending_request WHERE request_id = 'open-agent-5'").run()
     insertSession(db, { id: "sess-dead-atomic", name: "@agent/dead-atomic", role: "member", now })
     db.prepare("UPDATE sessions SET pid = 474747 WHERE name = '@agent/dead-atomic'").run()
@@ -524,13 +524,13 @@ describe("20876 Tribe health cadence", () => {
       recipient: "@agent/dead-atomic",
     })
     expect(
-      (db.prepare("SELECT COUNT(*) AS count FROM messages WHERE type = 'ball:rerouted'").get() as { count: number })
+      (db.prepare("SELECT COUNT(*) AS count FROM messages WHERE type = 'ball:owner-dead'").get() as { count: number })
         .count,
-    ).toBe(0)
+    ).toBe(1)
     expect(
       (db.prepare("SELECT COUNT(*) AS count FROM dedup WHERE key LIKE '%dead-atomic%'").get() as { count: number })
         .count,
-    ).toBe(0)
+    ).toBe(1)
 
     const result = processPendingBallDeadlines({
       db,
@@ -541,12 +541,12 @@ describe("20876 Tribe health cadence", () => {
       isPidAlive: () => false,
       send: (recipient, content, type) => sendMessage(daemonCtx, recipient, content, type),
     })
-    expect(result.rerouted).toBe(1)
+    expect(result.deadOwnerWarnings).toBe(1)
     expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'dead-atomic'").get()).toEqual({
-      recipient: "@ops",
+      recipient: "@agent/dead-atomic",
     })
     expect(
-      (db.prepare("SELECT COUNT(*) AS count FROM messages WHERE type = 'ball:rerouted'").get() as { count: number })
+      (db.prepare("SELECT COUNT(*) AS count FROM messages WHERE type = 'ball:owner-dead'").get() as { count: number })
         .count,
     ).toBe(2)
   })
@@ -580,7 +580,7 @@ describe("20876 Tribe health cadence", () => {
     expect(sends).toBe(1)
   })
 
-  it("does not reroute an owner when pid probing is permission-denied", () => {
+  it("treats a permission-denied owner probe as unresolved and retains ownership", () => {
     db.prepare("DELETE FROM pending_request WHERE request_id = 'open-agent-5'").run()
     insertSession(db, { id: "sess-eperm", name: "@agent/eperm", role: "member", now })
     db.prepare("UPDATE sessions SET pid = 484848 WHERE name = '@agent/eperm'").run()
@@ -606,7 +606,7 @@ describe("20876 Tribe health cadence", () => {
         escalationTarget: "@ops",
         send: (_recipient, _content, type) => sent.push(type),
       })
-      expect(result.rerouted).toBe(0)
+      expect(result.deadOwnerWarnings).toBe(1)
     } finally {
       kill.mockRestore()
     }
@@ -617,7 +617,7 @@ describe("20876 Tribe health cadence", () => {
     })
   })
 
-  it("reroutes a dead owner and reports an already-reached deadline in the same cadence tick", () => {
+  it("escalates a dead owner and reports an already-reached deadline without reassigning", () => {
     db.prepare("DELETE FROM pending_request WHERE request_id = 'open-agent-5'").run()
     insertSession(db, { id: "sess-dead-expired", name: "@agent/dead-expired", role: "member", now })
     db.prepare("UPDATE sessions SET pid = 454545 WHERE name = '@agent/dead-expired'").run()
@@ -652,27 +652,27 @@ describe("20876 Tribe health cadence", () => {
     })
 
     expect(sent).toEqual([
-      { recipient: "@author", type: "ball:rerouted" },
-      { recipient: "@ops", type: "ball:rerouted" },
+      { recipient: "@author", type: "ball:owner-dead" },
+      { recipient: "@ops", type: "ball:owner-dead" },
       { recipient: "@author", type: "ball:expired" },
       { recipient: "@ops", type: "ball:expired" },
     ])
     expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'dead-and-expired'").get()).toEqual({
-      recipient: "@ops",
+      recipient: "@agent/dead-expired",
     })
   })
 
-  it("does not repeat an already-actuated expiry after its owner is later rerouted", () => {
+  it("does not repeat an already-actuated expiry when its owner is later detected dead", () => {
     db.prepare("DELETE FROM pending_request WHERE request_id = 'open-agent-5'").run()
     insertSession(db, { id: "sess-late-dead", name: "@agent/late-dead", role: "member", now })
     db.prepare("UPDATE sessions SET pid = 505050 WHERE name = '@agent/late-dead'").run()
     stmts.openPendingRequest.run({
-      $request_id: "expired-before-reroute",
+      $request_id: "expired-before-death",
       $recipient: "@agent/late-dead",
       $sender: "@author",
       $opened_at: now - 20 * MINUTE,
       $expires_at: now,
-      $message_id: "expired-before-reroute-message",
+      $message_id: "expired-before-death-message",
       $fanout: "first",
     })
     const sent: Array<{ recipient: string; type: string }> = []
@@ -700,12 +700,12 @@ describe("20876 Tribe health cadence", () => {
     expect(sent).toEqual([
       { recipient: "@author", type: "ball:expired" },
       { recipient: "@ops", type: "ball:expired" },
-      { recipient: "@author", type: "ball:rerouted" },
-      { recipient: "@ops", type: "ball:rerouted" },
+      { recipient: "@author", type: "ball:owner-dead" },
+      { recipient: "@ops", type: "ball:owner-dead" },
     ])
   })
 
-  it("nudges the current owner rather than the dead owner after a same-tick reroute", () => {
+  it("escalates a dead owner without sending it a halfway nudge", () => {
     db.prepare("DELETE FROM pending_request WHERE request_id = 'open-agent-5'").run()
     insertSession(db, { id: "sess-dead-halfway", name: "@agent/dead-halfway", role: "member", now })
     db.prepare("UPDATE sessions SET pid = 515151 WHERE name = '@agent/dead-halfway'").run()
@@ -731,32 +731,31 @@ describe("20876 Tribe health cadence", () => {
     })
 
     expect(sent).toEqual([
-      { recipient: "@author", type: "ball:rerouted" },
-      { recipient: "@ops", type: "ball:rerouted" },
-      { recipient: "@ops", type: "ball:nudge" },
+      { recipient: "@author", type: "ball:owner-dead" },
+      { recipient: "@ops", type: "ball:owner-dead" },
     ])
   })
 
-  it("keeps expiry dedup attached to the surviving row when reroute collides with an existing owner", () => {
+  it("preserves every owner row when the escalation target already owns the same request", () => {
     db.prepare("DELETE FROM pending_request WHERE request_id = 'open-agent-5'").run()
     insertSession(db, { id: "sess-dead-collision", name: "@agent/dead-collision", role: "member", now })
     db.prepare("UPDATE sessions SET pid = 464646 WHERE name = '@agent/dead-collision'").run()
     stmts.openPendingRequest.run({
-      $request_id: "reroute-collision",
+      $request_id: "retained-collision",
       $recipient: "@agent/dead-collision",
       $sender: "@author",
       $opened_at: now - 31 * MINUTE,
       $expires_at: now,
-      $message_id: "reroute-collision-source",
+      $message_id: "retained-collision-source",
       $fanout: "all",
     })
     stmts.openPendingRequest.run({
-      $request_id: "reroute-collision",
+      $request_id: "retained-collision",
       $recipient: "@ops",
       $sender: "@author",
       $opened_at: now - 30 * MINUTE,
       $expires_at: now,
-      $message_id: "reroute-collision-target",
+      $message_id: "retained-collision-target",
       $fanout: "all",
     })
     const sent: Array<{ recipient: string; type: string }> = []
@@ -773,25 +772,34 @@ describe("20876 Tribe health cadence", () => {
 
     tick()
     expect(sent).toEqual([
-      { recipient: "@author", type: "ball:rerouted" },
-      { recipient: "@ops", type: "ball:rerouted" },
+      { recipient: "@author", type: "ball:owner-dead" },
+      { recipient: "@ops", type: "ball:owner-dead" },
+      { recipient: "@author", type: "ball:expired" },
+      { recipient: "@ops", type: "ball:expired" },
       { recipient: "@author", type: "ball:expired" },
       { recipient: "@ops", type: "ball:expired" },
     ])
     expect(
-      db.prepare("SELECT recipient, message_id FROM pending_request WHERE request_id = 'reroute-collision'").all(),
-    ).toEqual([{ recipient: "@ops", message_id: "reroute-collision-target" }])
+      db
+        .prepare(
+          "SELECT recipient, message_id FROM pending_request WHERE request_id = 'retained-collision' ORDER BY recipient",
+        )
+        .all(),
+    ).toEqual([
+      { recipient: "@agent/dead-collision", message_id: "retained-collision-source" },
+      { recipient: "@ops", message_id: "retained-collision-target" },
+    ])
 
     db.prepare("UPDATE dedup SET ts = 0 WHERE key LIKE 'ball-deadline:%'").run()
     stmts.cleanupDedup.run({ $cutoff: now })
     expect(
       (db.prepare("SELECT COUNT(*) AS count FROM dedup WHERE key LIKE '%:expired:%'").get() as { count: number }).count,
-    ).toBe(1)
+    ).toBe(2)
     tick()
-    expect(sent).toHaveLength(4)
+    expect(sent).toHaveLength(6)
   })
 
-  it("reroutes only positively-dead owners and degrades to a sender warning without configured policy", () => {
+  it("detects positively-dead owners, escalates for LLM judgment, and retains ownership", () => {
     db.prepare("DELETE FROM pending_request WHERE request_id = 'open-agent-5'").run()
     db.prepare("UPDATE sessions SET pid = 424242 WHERE name = '@agent/5'").run()
     stmts.openPendingRequest.run({
@@ -847,7 +855,7 @@ describe("20876 Tribe health cadence", () => {
     })
 
     expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'dead-owner'").get()).toEqual({
-      recipient: "@ops",
+      recipient: "@agent/5",
     })
     expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'dead-without-policy'").get()).toEqual({
       recipient: "@agent/dead",
@@ -856,8 +864,8 @@ describe("20876 Tribe health cadence", () => {
       recipient: "@agent/unknown",
     })
     expect(sent).toEqual([
-      { recipient: "@chief", type: "ball:rerouted" },
-      { recipient: "@ops", type: "ball:rerouted" },
+      { recipient: "@chief", type: "ball:owner-dead" },
+      { recipient: "@ops", type: "ball:owner-dead" },
       { recipient: "@author", type: "ball:owner-dead" },
       { recipient: "@author", type: "ball:owner-unresolved" },
     ])

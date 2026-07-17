@@ -27,7 +27,7 @@ export interface TribeConfig {
   readonly summaryPollMs: number
   readonly summarizerMode: SummarizerMode
   readonly recallEnabled: boolean
-  /** Optional L2 escalation/reroute destination. No implicit role default. */
+  /** Optional L2 escalation destination for LLM judgment. No implicit role default. */
   readonly ballEscalationTarget?: string | null
   /** Optional capability for unauthenticated operator-only mutating RPCs. */
   readonly operatorCapability?: string | null

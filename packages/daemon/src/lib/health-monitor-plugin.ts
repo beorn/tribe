@@ -1395,9 +1395,9 @@ export const healthMonitorPlugin: TribePluginApi = {
         const { metrics, pidToParent } = await collectFullMetrics()
         const sessions = api.getActiveSessions()
         const deadlines = api.processPendingBallDeadlines?.()
-        if (deadlines && deadlines.nudged + deadlines.expired + deadlines.rerouted + deadlines.deadOwnerWarnings > 0) {
+        if (deadlines && deadlines.nudged + deadlines.expired + deadlines.deadOwnerWarnings > 0) {
           log.info?.(
-            `pending-ball deadlines: nudged=${deadlines.nudged} expired=${deadlines.expired} rerouted=${deadlines.rerouted} dead-owner-warnings=${deadlines.deadOwnerWarnings}`,
+            `pending-ball deadlines: nudged=${deadlines.nudged} expired=${deadlines.expired} dead-owner-warnings=${deadlines.deadOwnerWarnings}`,
           )
         }
         // Pass active-agent count so process-count threshold scales with the

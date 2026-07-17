@@ -115,7 +115,6 @@ export interface TribeClientApi {
   processPendingBallDeadlines?(): {
     nudged: number
     expired: number
-    rerouted: number
     deadOwnerWarnings: number
   }
 }
