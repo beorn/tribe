@@ -37,9 +37,16 @@ to participate in a tribe without bundling the daemon itself.
 tribe-wire --help                                 # full Commander help + addHelpText MCP-adapter hint
 tribe-wire status                                 # active sessions with uptime + last-seen
 tribe-wire send '@chief' 'task X done' --type=notify
+tribe-wire send '@ci' 'R656 failed; see journal evidence' --type=notify --delivery=pull
 tribe-wire retro --since 2h --format markdown
 tribe-wire mcp --name '@agent/3' --role member    # argv-forwarded; what .mcp.json invokes
 ```
+
+`send --delivery push|pull` classifies one message independently of the
+recipient session's delivery mode. `push` is the default and permits live
+channel fanout; `pull` persists the message for inbox reads without a channel
+wakeup. Delivery classification is orthogonal to semantic ball tracking: only
+the message type and `--request` decide whether a pending ball opens.
 
 ### Library exports
 

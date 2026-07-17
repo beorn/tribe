@@ -18,6 +18,7 @@ import {
   countUnackedActionables,
   DEFAULT_BALL_TTL_MS,
   MAX_BALL_TTL_MS,
+  type Delivery,
   type SenderAttribution,
 } from "./messaging.ts"
 import { ACTIONABLE_TYPES_SET, AUTO_TRACK_TYPES_SET } from "./database.ts"
@@ -454,6 +455,12 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   }
   const msgType = (a.type as string) ?? "notify"
   const sanitized = sanitizeMessage(a.message as string)
+  const deliveryArg = a.delivery
+  let delivery: Delivery | undefined
+  if (deliveryArg === "push" || deliveryArg === "pull") delivery = deliveryArg
+  else if (deliveryArg !== undefined) {
+    return jsonResult({ error: "tribe.send: `delivery` must be 'push' or 'pull' when supplied." })
+  }
   // Ball-tracker fields (@km/tribe/message-ball-tracker Phase 2a): typed
   // non-self direct actionables auto-open a semantic ball in sendMessage.
   // `request:true` explicitly applies message-id ownership to another type;
@@ -500,6 +507,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   // ergonomic.
   const summaryDerived = summaryArg.length === 0
   const summary = summaryDerived ? deriveSummary(sanitized) : summaryArg
+  const classification = { summary, ...(delivery ? { delivery } : {}) }
   const attribution = sendAttribution(ctx, a)
   const sender = attribution.sender ?? ctx.getName()
   if (Array.isArray(recipients)) {
@@ -514,7 +522,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
         a.bead as string | undefined,
         a.ref as string | undefined,
         "direct",
-        { summary },
+        classification,
         {
           // Implicit tracking still excludes self-directed rows. Explicit
           // request:true/string retains its existing ability to name any
@@ -558,7 +566,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     a.bead as string | undefined,
     a.ref as string | undefined,
     "direct",
-    { summary },
+    classification,
     {
       request: requestFlag ? true : (requestId ?? undefined),
       reply: replyId ?? undefined,

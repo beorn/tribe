@@ -138,6 +138,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             enum: TRIBE_MESSAGE_TYPES,
             default: "notify",
           },
+          delivery: {
+            type: "string",
+            enum: TRIBE_DELIVERY_MODES,
+            description:
+              "Per-message delivery class. 'push' fans the durable row out to live channels; 'pull' keeps it inbox-only. Defaults to push.",
+          },
           bead: { type: "string", description: "Associated bead ID (optional)" },
           ref: { type: "string", description: "Reference to a previous message ID (optional)" },
           request: {
@@ -225,6 +231,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           flags: "-s, --summary <summary>",
           description:
             "Authored one-line summary shown by default in the channel UI (required for LLM senders; derived for non-LLM callers if omitted)",
+        },
+        {
+          name: "delivery",
+          flags: "--delivery <mode>",
+          description: `Per-message delivery class: ${TRIBE_DELIVERY_MODES.join("|")} (default: push)`,
+          enum: TRIBE_DELIVERY_MODES,
         },
         {
           name: "reply",
