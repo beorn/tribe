@@ -400,6 +400,30 @@ describe("stdio adapter delivery modes", () => {
     expect(register?.params?.delivery).toBe("pull")
   })
 
+  it("declares a configured notification filter during initial registration", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath)
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@fleet"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_FILTER_MODE: "focus",
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_REQUIRE_JOIN: "0",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+
+    const register = daemon.requests.find((msg) => msg.method === "register") as
+      | { params?: { name?: string; delivery?: string; filterMode?: string } }
+      | undefined
+    expect(register?.params).toMatchObject({ name: "@fleet", delivery: "push", filterMode: "focus" })
+  })
+
   it("21049: explicit persona registration carries launch identity with takeover", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath)

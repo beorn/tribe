@@ -298,7 +298,13 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     socketPath: string,
     logName: string,
     launchId: string | undefined,
-    opts: { name?: string; takeover?: boolean; distinctProviderParent?: boolean } = {},
+    opts: {
+      name?: string
+      takeover?: boolean
+      distinctProviderParent?: boolean
+      delivery?: "push" | "pull"
+      filterMode?: "focus" | "normal" | "ambient"
+    } = {},
   ): Promise<{ child: ChildProcessWithoutNullStreams; stdout: Record<string, unknown>[]; logPath: string }> {
     const logPath = join(tmpDir, logName)
     const name = opts.name ?? NAME
@@ -313,7 +319,8 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
           TRIBE_LAUNCH_ID: launchId ?? "",
           TRIBE_NAME: "",
           TRIBE_SESSION_NAME: "",
-          TRIBE_DELIVERY: "pull",
+          TRIBE_DELIVERY: opts.delivery ?? "pull",
+          ...(opts.filterMode === undefined ? {} : { TRIBE_FILTER_MODE: opts.filterMode }),
           TRIBE_PULL_TRANSPORT: "mcp",
           TRIBE_NO_AUTOSTART: "1",
           TRIBE_REQUIRE_JOIN: "0",
@@ -388,6 +395,52 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     await once(child, "exit")
     return { exitCode: child.exitCode, stdout, stderr }
   }
+
+  it("keeps ambient supervisor traffic fetchable without waking and still wakes actionables", async () => {
+    const socketPath = join(tmpDir, "notification-diet.sock")
+    const dbPath = join(tmpDir, "notification-diet.db")
+    daemonProc = spawnDaemon(socketPath, dbPath)
+    await waitForCondition(() => existsSync(socketPath), "daemon socket")
+
+    const fleet = await spawnLaunchAdapter(socketPath, "notification-diet-fleet.log", "notification-diet-launch", {
+      name: "@fleet",
+      delivery: "push",
+      filterMode: "focus",
+    })
+    await callLaunchTool(fleet, 2, "members", {})
+
+    const senderEnv = {
+      ...process.env,
+      TRIBE_SOCKET: socketPath,
+      TRIBE_NAME: "@chief",
+      TRIBE_SESSION_NAME: "@chief",
+      TRIBE_LAUNCH_ID: "",
+      TRIBE_NO_AUTOSTART: "1",
+    }
+    const ambient = await runCli(
+      ["send", "@fleet", "ambient diet row", "--type", "notify", "--summary", "ambient diet row"],
+      senderEnv,
+    )
+    expect(ambient.exitCode, ambient.stderr).toBe(0)
+
+    writeJson(fleet.child, callToolPayload(3, "fetch", {}))
+    await waitForCondition(() => fleet.stdout.some((line) => line.id === 3), "fleet fetch response")
+    const fetched = toolResult(fleet.stdout, 3) as { events?: Array<{ content?: string }> }
+    expect(fetched.events?.some((event) => event.content === "ambient diet row")).toBe(true)
+    expect(channelNotifications(fleet.stdout).some((line) => JSON.stringify(line).includes("ambient diet row"))).toBe(
+      false,
+    )
+
+    const actionable = await runCli(
+      ["send", "@fleet", "actionable diet row", "--type", "request", "--summary", "actionable diet row"],
+      senderEnv,
+    )
+    expect(actionable.exitCode, actionable.stderr).toBe(0)
+    await waitForCondition(
+      () => channelNotifications(fleet.stdout).some((line) => JSON.stringify(line).includes("actionable diet row")),
+      "actionable fleet wake",
+    )
+  }, 30_000)
 
   it("preserves inherited operator authority through adapter autostart and daemon hot reload", async () => {
     const socketPath = join(tmpDir, "operator-lifecycle.sock")

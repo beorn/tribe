@@ -74,6 +74,53 @@ afterEach(async () => {
 })
 
 describe("dispatcher self-registration collision handling (@ag/tribe/19594)", () => {
+  it("persists a startup notification filter before the session becomes connected", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-fleet")
+
+    await harness.register("conn-fleet", {
+      name: "@fleet",
+      pid: liveHolderPid,
+      project: "/tmp/km",
+      filterMode: "focus",
+    })
+
+    expect(harness.sessionFilter("@fleet")).toBe("focus")
+  })
+
+  it("applies a launch-declared notification filter when another transport fans in", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-fleet-primary")
+
+    const primary = parseResult<RegisterResult>(
+      await harness.register("conn-fleet-primary", {
+        name: "@fleet",
+        pid: liveHolderPid,
+        project: "/tmp/km",
+        launchId: "fleet-filter-launch",
+        launchParentPid: process.pid,
+      }),
+    )
+    expect(harness.sessionFilter("@fleet")).toBe("normal")
+
+    harness.addPendingClient("conn-fleet-secondary")
+    const secondary = parseResult<RegisterResult>(
+      await harness.register("conn-fleet-secondary", {
+        name: "@fleet",
+        pid: otherLivePid,
+        project: "/tmp/km",
+        launchId: "fleet-filter-launch",
+        launchParentPid: process.pid,
+        filterMode: "focus",
+      }),
+    )
+
+    expect(secondary.sessionId).toBe(primary.sessionId)
+    expect(harness.sessionFilter("@fleet")).toBe("focus")
+  })
+
   it("lets the same live PID re-register an explicit agent name", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
@@ -718,7 +765,14 @@ function createDispatcherHarness(
     dispatcher: daemon.dispatcher,
     register(
       connId: string,
-      params: { name: string; pid: number; project: string; launchId?: string; launchParentPid?: number },
+      params: {
+        name: string
+        pid: number
+        project: string
+        launchId?: string
+        launchParentPid?: number
+        filterMode?: string
+      },
     ) {
       const req: JsonRpcRequest = {
         jsonrpc: "2.0",
@@ -760,6 +814,12 @@ function createDispatcherHarness(
     sessionCount(name: string): number {
       const row = db.prepare("SELECT COUNT(*) AS count FROM sessions WHERE name = ?").get(name) as { count: number }
       return row.count
+    },
+    sessionFilter(name: string): string | undefined {
+      const row = db.prepare("SELECT filter_mode FROM sessions WHERE name = ?").get(name) as {
+        filter_mode: string
+      } | null
+      return row?.filter_mode
     },
     sessionJoinEvents(name: string): Array<{ name: string }> {
       const rows = db

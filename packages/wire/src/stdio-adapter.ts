@@ -76,6 +76,19 @@ const DELIVERY_CAPABILITY = resolveDeliveryCapability({
   pullTransport: process.env.TRIBE_PULL_TRANSPORT ?? process.env.TRIBE_WAIT_TRANSPORT,
 })
 const TRIBE_TOOLS_LIST = toolListForDeliveryCapability(DELIVERY_CAPABILITY)
+type InitialFilterMode = "focus" | "normal" | "ambient"
+
+function initialFilterModeFromEnv(raw: string | undefined): InitialFilterMode | undefined {
+  const mode = raw?.trim()
+  if (!mode) return undefined
+  if (mode === "focus" || mode === "normal" || mode === "ambient") return mode
+  throw new Error(`Invalid TRIBE_FILTER_MODE=${JSON.stringify(raw)}; expected focus|normal|ambient`)
+}
+
+// A launch controller may declare one existing daemon filter as session
+// configuration. The adapter forwards it on register so the session is never
+// push-eligible under the default mode, even for one event-loop turn.
+const INITIAL_FILTER_MODE = initialFilterModeFromEnv(process.env.TRIBE_FILTER_MODE)
 // c6071f3: a connected MCP adapter is NOT a push-delivered tribe member until
 // the model explicitly calls tribe.join. Keep pre-join delivery pull-only, but
 // seed explicit @personas at register time so configured Codex identities
@@ -265,6 +278,7 @@ const baseRegisterParams = {
   identityToken,
   ...(LAUNCH_IDENTITY ? { launchId: LAUNCH_IDENTITY.id, launchParentPid: LAUNCH_IDENTITY.parentPid } : {}),
   delivery: REQUIRE_EXPLICIT_JOIN ? "pull" : DELIVERY,
+  ...(INITIAL_FILTER_MODE === undefined ? {} : { filterMode: INITIAL_FILTER_MODE }),
   // @km/infra/15641 Phase 1 — per-session account/provider label sourced
   // from `ag` via TRIBE_ACCOUNT / TRIBE_PROVIDER env vars (which ag sets
   // at backend-launch time). Tribe stores them; quota visibility lives in

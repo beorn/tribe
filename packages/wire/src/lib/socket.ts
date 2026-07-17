@@ -25,7 +25,9 @@ import {
 
 /**
  * Wire-protocol version. Bump on any payload-shape change a client cares about.
- * v6 (current) adds sender-declared tracked-ball expiry and inbox-wait
+ * v7 (current) adds the optional register-time `filterMode`, allowing a launch
+ * controller to persist push-admission before a session becomes connected.
+ * v6 added sender-declared tracked-ball expiry and inbox-wait
  * attention carriage; the per-event reply hint is derived at delivery time,
  * not pushed on the wire.
  * RPCs: `tribe.send` / `tribe.fetch` / `tribe.members` / `tribe.inbox.wait` /
@@ -39,7 +41,7 @@ import {
  * `reissue_count`. Purely additive: pre-0.14 clients ignore them. No protocol
  * bump then (v4 unchanged). See km-tribe.task-assignment-stale-snapshot.
  */
-export const TRIBE_PROTOCOL_VERSION = 6
+export const TRIBE_PROTOCOL_VERSION = 7
 
 // ---------------------------------------------------------------------------
 // Re-exports from the surrounding tribe-client package
