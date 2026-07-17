@@ -383,6 +383,31 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     return toolResult(adapter.stdout, id)
   }
 
+  /** First tool call after a spawn can race the adapter's asynchronous daemon
+   * registration on a loaded runner — retry (fresh id each round, so stale
+   * response lines can't satisfy the wait) while the required-MCP gate still
+   * reports "awaiting daemon registration". Tests that assert the not-ready
+   * state itself must keep using callLaunchTool directly. */
+  async function callLaunchToolWhenRegistered(
+    adapter: { child: ChildProcessWithoutNullStreams; stdout: Record<string, unknown>[]; logPath: string },
+    firstId: number,
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<unknown> {
+    const deadline = Date.now() + 30_000
+    let id = firstId
+    for (;;) {
+      try {
+        return await callLaunchTool(adapter, id, name, args)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (!message.includes("awaiting daemon registration") || Date.now() >= deadline) throw error
+        id += 1_000
+        await Bun.sleep(250)
+      }
+    }
+  }
+
   async function runCli(
     args: string[],
     env: NodeJS.ProcessEnv,
@@ -854,7 +879,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
 
     const staleLaunchId = "stale-dead-provider-launch"
     const first = await spawnLaunchAdapter(socketPath, "stale-launch-1.log", staleLaunchId)
-    const firstMembers = (await callLaunchTool(first, 50, "members", {})) as {
+    const firstMembers = (await callLaunchToolWhenRegistered(first, 50, "members", {})) as {
       sessions?: Array<{ name?: string; member_id?: string }>
     }
     const firstMemberId = firstMembers.sessions?.find((session) => session.name === NAME)?.member_id
@@ -865,7 +890,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const inherited = await spawnLaunchAdapter(socketPath, "stale-launch-2.log", staleLaunchId, {
       distinctProviderParent: true,
     })
-    const inheritedMembers = (await callLaunchTool(inherited, 51, "members", {})) as {
+    const inheritedMembers = (await callLaunchToolWhenRegistered(inherited, 51, "members", {})) as {
       sessions?: Array<{ name?: string; member_id?: string; launch_id?: string }>
     }
     const inheritedMember = inheritedMembers.sessions?.find((session) => session.name === NAME)
