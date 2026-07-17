@@ -106,12 +106,19 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     expect(stdout).toMatch(/--reply <request_id>/)
     expect(stdout).toMatch(/--request \[request_id\]/)
     expect(stdout).toMatch(/--fanout <mode>/)
+    expect(stdout).toMatch(/--delivery <mode>/)
   })
 
   it("send rejects invalid fanout before daemon connection", () => {
     const { stderr, code } = runCli(["send", "@chief", "hello", "--fanout", "many"])
     expect(code).toBe(2)
     expect(stderr).toMatch(/invalid --fanout 'many'/)
+  })
+
+  it("send rejects invalid delivery before daemon connection", () => {
+    const { stderr, code } = runCli(["send", "@chief", "hello", "--delivery", "later"])
+    expect(code).toBe(2)
+    expect(stderr).toMatch(/invalid --delivery 'later'/)
   })
 
   it("pending --close requires an explicit owner for one-shot CLI identity", () => {

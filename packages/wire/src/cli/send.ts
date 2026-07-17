@@ -34,6 +34,7 @@ import {
   TRIBE_FANOUTS,
   TRIBE_MESSAGE_TYPES,
   visibleCliProjectionForMcp,
+  type TribeDeliveryMode as Delivery,
   type TribeFanout as Fanout,
   type TribeMessageType as MessageType,
 } from "../command-descriptors.ts"
@@ -102,6 +103,7 @@ type SendPayloadInput = {
   message: string
   type?: MessageType
   summary?: string
+  delivery?: Delivery
   request?: boolean | string
   reply?: string
   fanout?: Fanout
@@ -113,6 +115,7 @@ type SendPayload = {
   message: string
   type: MessageType
   summary?: string
+  delivery?: Delivery
   request?: true | string
   reply?: string
   fanout?: Fanout
@@ -127,6 +130,7 @@ export function buildSendPayload(input: SendPayloadInput, sender?: string | null
     type: input.type ?? "notify",
   }
   if (input.summary) payload.summary = input.summary
+  if (input.delivery) payload.delivery = input.delivery
   if (input.request !== undefined && input.request !== false) payload.request = input.request
   if (input.reply) payload.reply = input.reply
   if (input.fanout) payload.fanout = input.fanout
@@ -400,6 +404,7 @@ export function registerSendCommands(program: Command): void {
   const sendMessage = cliArgument(SEND_CLI, "message")
   const sendType = cliOption(SEND_CLI, "type")
   const sendSummary = cliOption(SEND_CLI, "summary")
+  const sendDelivery = cliOption(SEND_CLI, "delivery")
   const sendReply = cliOption(SEND_CLI, "reply")
   const sendRequest = cliOption(SEND_CLI, "request")
   const sendFanout = cliOption(SEND_CLI, "fanout")
@@ -411,6 +416,7 @@ export function registerSendCommands(program: Command): void {
     .argument(`<${sendMessage.name}...>`, sendMessage.description)
     .option(sendType.flags, sendType.description)
     .option(sendSummary.flags, sendSummary.description)
+    .option(sendDelivery.flags, sendDelivery.description)
     .option(sendReply.flags, sendReply.description)
     .option(sendRequest.flags, sendRequest.description)
     .option(sendFanout.flags, sendFanout.description)
@@ -422,6 +428,7 @@ export function registerSendCommands(program: Command): void {
         opts: {
           type?: string
           summary?: string
+          delivery?: string
           request?: boolean | string
           reply?: string
           fanout?: string
@@ -432,6 +439,12 @@ export function registerSendCommands(program: Command): void {
         if (!(TRIBE_MESSAGE_TYPES as readonly string[]).includes(type)) {
           console.error(
             `tribe-wire send: invalid --type '${type}' — expected one of: ${TRIBE_MESSAGE_TYPES.join(", ")}`,
+          )
+          process.exit(2)
+        }
+        if (opts.delivery !== undefined && !(TRIBE_DELIVERY_MODES as readonly string[]).includes(opts.delivery)) {
+          console.error(
+            `tribe-wire send: invalid --delivery '${opts.delivery}' — expected one of: ${TRIBE_DELIVERY_MODES.join(", ")}`,
           )
           process.exit(2)
         }
@@ -451,6 +464,7 @@ export function registerSendCommands(program: Command): void {
           message: message.join(" "),
           type: type as MessageType,
           summary: opts.summary,
+          delivery: opts.delivery as Delivery | undefined,
           request: opts.request === false ? undefined : opts.request,
           reply: opts.reply,
           fanout: opts.fanout as Fanout | undefined,
