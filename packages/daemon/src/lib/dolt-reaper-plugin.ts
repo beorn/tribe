@@ -126,33 +126,135 @@ export function isOrphan(info: DoltServerInfo): boolean {
   return false
 }
 
+/** Single-pid identity probes used to re-verify a process immediately before
+ *  signaling it. Injectable for tests; the default shells out like the scan. */
+export interface DoltIncarnationProbe {
+  /** Full argv of the process (`ps -p <pid> -o command=`); null when gone. */
+  command(pid: number): string | null
+  /** Fresh single-pid rescan of the lsof cwd row; null when uninspectable. */
+  cwd(pid: number): DoltServerInfo | null
+}
+
+const liveProbe: DoltIncarnationProbe = {
+  command(pid) {
+    try {
+      const out = execSync(`ps -p ${pid} -o command=`, { encoding: "utf8" }).toString().trim()
+      return out.length > 0 ? out : null
+    } catch {
+      // silent-fallback-allow: ps exits non-zero when the pid is gone — that is the fact being probed.
+      return null
+    }
+  },
+  cwd(pid) {
+    try {
+      const out = execSync(`lsof -p ${pid} -a -d cwd 2>/dev/null`, { encoding: "utf8" }).toString()
+      return parseLsofCwd(pid, out)
+    } catch {
+      // silent-fallback-allow: lsof exits non-zero when the pid is gone/uninspectable — the caller treats null as "refuse to signal".
+      return null
+    }
+  },
+}
+
+export type IncarnationVerdict =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly gone: boolean; readonly reason: string }
+
+/**
+ * Incarnation re-verification before each signal (21441). Between the
+ * pgrep/lsof scan and the SIGTERM — and again across the 1.5s SIGKILL grace —
+ * the OS can recycle a reaped pid onto an unrelated process. Re-check that the
+ * pid still runs a `dolt sql-server` with the same, still-orphaned cwd
+ * immediately before signaling; refuse on any mismatch. Exported for testing.
+ */
+export function verifyOrphanIncarnation(
+  expected: DoltServerInfo,
+  probe: DoltIncarnationProbe = liveProbe,
+): IncarnationVerdict {
+  const command = probe.command(expected.pid)
+  if (command === null) return { ok: false, gone: true, reason: `pid ${expected.pid} is gone` }
+  if (!command.includes("dolt sql-server")) {
+    return { ok: false, gone: false, reason: `pid ${expected.pid} was recycled to '${command}' — refusing to signal` }
+  }
+  const fresh = probe.cwd(expected.pid)
+  if (fresh === null || fresh.cwd === null) {
+    return { ok: false, gone: false, reason: `pid ${expected.pid} cwd is no longer inspectable — refusing to signal` }
+  }
+  if (fresh.cwd !== expected.cwd) {
+    return {
+      ok: false,
+      gone: false,
+      reason: `pid ${expected.pid} cwd moved ${expected.cwd} -> ${fresh.cwd} — refusing to signal`,
+    }
+  }
+  if (!isOrphan(fresh)) {
+    return { ok: false, gone: false, reason: `pid ${expected.pid} cwd ${fresh.cwd} exists again — no longer an orphan` }
+  }
+  return { ok: true }
+}
+
 export interface ReapResult {
   scanned: number
   orphans: number
   killed: number
+  /** Orphans NOT signaled because the pre-signal re-verification refused. */
+  skipped: number
 }
 
-export function reapOrphanDoltServers(): ReapResult {
-  const servers = inspectDoltServers()
+/** Injectable process effects; production callers pass nothing. */
+export interface ReaperDeps {
+  readonly probe?: DoltIncarnationProbe
+  readonly inspect?: () => DoltServerInfo[]
+  readonly kill?: (pid: number, signal: NodeJS.Signals) => void
+  readonly scheduleEscalation?: (fn: () => void, delayMs: number) => void
+}
+
+export function reapOrphanDoltServers(deps: ReaperDeps = {}): ReapResult {
+  const probe = deps.probe ?? liveProbe
+  const inspect = deps.inspect ?? inspectDoltServers
+  const kill = deps.kill ?? ((pid: number, signal: NodeJS.Signals) => process.kill(pid, signal))
+  const scheduleEscalation =
+    deps.scheduleEscalation ??
+    ((fn: () => void, delayMs: number) => {
+      globalThis.setTimeout(fn, delayMs)
+    })
+
+  const servers = inspect()
   const orphans = servers.filter(isOrphan)
 
+  const termed: DoltServerInfo[] = []
+  let skipped = 0
   for (const o of orphans) {
+    const verdict = verifyOrphanIncarnation(o, probe)
+    if (!verdict.ok) {
+      skipped++
+      if (verdict.gone) log.info?.(`orphan dolt pid=${o.pid} exited before SIGTERM`)
+      else log.warn?.(`skip reap: ${verdict.reason}`)
+      continue
+    }
     try {
-      process.kill(o.pid, "SIGTERM")
+      kill(o.pid, "SIGTERM")
+      termed.push(o)
       log.info?.(`reaped orphan dolt pid=${o.pid} cwd=${o.cwd} deleted=${o.cwdDeletedMarker}`)
     } catch {
       // already gone / permission — ignore
     }
   }
 
-  if (orphans.length > 0) {
+  if (termed.length > 0) {
     // Schedule the SIGKILL escalation for 1.5s later — we don't need it
     // in the same tick and a synchronous sleep would block the daemon.
-    globalThis.setTimeout(() => {
-      for (const o of orphans) {
+    scheduleEscalation(() => {
+      for (const o of termed) {
+        const verdict = verifyOrphanIncarnation(o, probe)
+        if (!verdict.ok) {
+          // gone = SIGTERM did its job; anything else is a recycled/changed
+          // pid — either way SIGKILL must not fire.
+          if (!verdict.gone) log.warn?.(`skip SIGKILL: ${verdict.reason}`)
+          continue
+        }
         try {
-          process.kill(o.pid, 0) // probe; throws if dead
-          process.kill(o.pid, "SIGKILL")
+          kill(o.pid, "SIGKILL")
           log.warn?.(`SIGKILL dolt that survived SIGTERM pid=${o.pid}`)
         } catch {
           // already dead — good
@@ -161,7 +263,7 @@ export function reapOrphanDoltServers(): ReapResult {
     }, TERM_GRACE_MS)
   }
 
-  return { scanned: servers.length, orphans: orphans.length, killed: orphans.length }
+  return { scanned: servers.length, orphans: orphans.length, killed: termed.length, skipped }
 }
 
 export const doltReaperPlugin: TribePluginApi = {
