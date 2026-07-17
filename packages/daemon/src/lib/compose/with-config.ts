@@ -18,6 +18,8 @@ import type { BaseTribe } from "./base.ts"
 export interface TribeConfig {
   readonly socketPath: string
   readonly dbPath: string
+  /** True only for the default XDG path, whose legacy migration precedes open. */
+  readonly migrateLegacyDb?: boolean
   readonly recallDbPath: string
   /** Quit timeout in seconds. -1 disables auto-quit, 0 quits immediately on idle. */
   readonly quitTimeoutSec: number
@@ -78,10 +80,12 @@ export function withConfig<T extends BaseTribe>(opts: ConfigOpts = {}): (t: T) =
 
     const tribeArgs = parseTribeArgs()
     if (daemonArgs.db) tribeArgs.db = daemonArgs.db as string
+    const migrateLegacyDb = tribeArgs.db === undefined
 
     const config: TribeConfig = {
       socketPath: resolveSocketPath(daemonArgs.socket as string | undefined),
-      dbPath: String(resolveDbPath(tribeArgs)),
+      dbPath: String(resolveDbPath(tribeArgs, { migrateLegacy: false })),
+      migrateLegacyDb,
       recallDbPath: resolveRecallDbPath(daemonArgs["recall-db"] as string | undefined),
       quitTimeoutSec: parseInt(String(daemonArgs["quit-timeout"]), 10),
       inheritFd: daemonArgs.fd ? parseInt(String(daemonArgs.fd), 10) : null,

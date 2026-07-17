@@ -8,6 +8,7 @@
 
 import type { Database } from "bun:sqlite"
 import { createLogger } from "loggily"
+import { migrateLegacyTribeDbIfNeeded, withDbPathLock } from "tribe-wire/lib/config"
 import { openDatabase, createStatements, type TribeStatements } from "../database.ts"
 import { sweepDeadSessionRows } from "../session.ts"
 import type { BaseTribe } from "./base.ts"
@@ -25,7 +26,13 @@ export interface WithDatabase {
 
 export function withDatabase<T extends BaseTribe & WithConfig>(): (t: T) => T & WithDatabase {
   return (t) => {
-    const db = openDatabase(t.config.dbPath)
+    const db =
+      t.config.migrateLegacyDb === true
+        ? withDbPathLock(t.config.dbPath, () => {
+            migrateLegacyTribeDbIfNeeded(t.config.dbPath)
+            return openDatabase(t.config.dbPath)
+          })
+        : openDatabase(t.config.dbPath)
     const swept = sweepDeadSessionRows(db, DEAD_SESSION_ROW_MAX_AGE_MS)
     if (swept > 0) log.info?.(`startup GC: swept ${swept} tombstone/generated session row(s) older than 7d`)
     const stmts = createStatements(db)

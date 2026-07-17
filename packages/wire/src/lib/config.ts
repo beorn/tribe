@@ -3,8 +3,18 @@
  */
 
 import type { Database } from "bun:sqlite"
+import { dlopen, FFIType, suffix } from "bun:ffi"
 import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs"
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs"
 import { basename, dirname, resolve } from "node:path"
 import { parseArgs } from "node:util"
 
@@ -67,6 +77,17 @@ export type TribeArgs = {
   /** Companion to `account` — the provider (claude, codex, etc.). */
   provider?: string
 }
+
+export type ResolveDbPathOptions = {
+  /** Defer legacy migration so a caller can hold the lock through DB creation. */
+  migrateLegacy?: boolean
+}
+
+type Flock = { flock(fd: number, operation: number): number }
+
+const LOCK_EX = 2
+const LOCK_UN = 8
+let libc: Flock | undefined
 
 // ---------------------------------------------------------------------------
 // Exports
@@ -149,7 +170,7 @@ export function resolveProjectName(cwd?: string): string {
  * `--db > TRIBE_DB > .beads/tribe.db > XDG`, which conflated tribe with bd:
  * a repo couldn't delete `.beads/` without taking tribe down with it.
  */
-export function resolveDbPath(args: TribeArgs): string {
+export function resolveDbPath(args: TribeArgs, options: ResolveDbPathOptions = {}): string {
   if (args.db) return String(args.db)
   if (process.env.TRIBE_DB) return process.env.TRIBE_DB
 
@@ -157,23 +178,62 @@ export function resolveDbPath(args: TribeArgs): string {
   const tribeDir = resolve(xdgData, "tribe")
   const xdgDbPath = resolve(tribeDir, "tribe.db")
 
-  // Migration: if an XDG DB doesn't exist yet but a legacy `.beads/tribe.db`
-  // does, move it forward. This is a one-time copy — subsequent startups find
-  // the XDG path and skip.
-  if (!existsSync(xdgDbPath)) {
-    const beadsDir = findBeadsDir()
-    if (beadsDir) {
-      const legacyDb = resolve(beadsDir, "tribe.db")
-      if (existsSync(legacyDb)) {
-        mkdirSync(tribeDir, { recursive: true })
-        migrateLegacyTribeDb(legacyDb, xdgDbPath)
-        return xdgDbPath
-      }
-    }
-  }
-
   mkdirSync(tribeDir, { recursive: true })
+  if (options.migrateLegacy !== false) {
+    return withDbPathLock(xdgDbPath, () => {
+      migrateLegacyTribeDbIfNeeded(xdgDbPath)
+      return xdgDbPath
+    })
+  }
   return xdgDbPath
+}
+
+/**
+ * Hold the process-shared migration lock for one DB-path operation.
+ *
+ * The daemon uses this around both migration and `new Database(create:true)`.
+ * A resolver that sees a legacy DB therefore cannot rename over a fresh DB
+ * created by another startup between the existence check and rename.
+ */
+export function withDbPathLock<Result>(dbPath: string, operation: () => Result): Result {
+  mkdirSync(dirname(dbPath), { recursive: true })
+  const lockPath = `${dbPath}.migration.lock`
+  const fd = openSync(lockPath, "a+")
+  let locked = false
+  try {
+    if (flock(fd, LOCK_EX) !== 0) throw new Error(`tribe: failed to lock database migration at ${lockPath}`)
+    locked = true
+    return operation()
+  } finally {
+    if (locked) flock(fd, LOCK_UN)
+    closeSync(fd)
+  }
+}
+
+/** Re-check and migrate the legacy DB while the caller holds the DB-path lock. */
+export function migrateLegacyTribeDbIfNeeded(xdgDbPath: string, from?: string): void {
+  if (existsSync(xdgDbPath)) return
+  const beadsDir = findBeadsDir(from)
+  if (!beadsDir) return
+  const legacyDb = resolve(beadsDir, "tribe.db")
+  if (!existsSync(legacyDb)) return
+  migrateLegacyTribeDb(legacyDb, xdgDbPath)
+}
+
+function flock(fd: number, operation: number): number {
+  libc ??= loadFlock()
+  return libc.flock(fd, operation)
+}
+
+function loadFlock(): Flock {
+  const path = process.platform === "darwin" ? "libc.dylib" : `libc.${suffix}`
+  try {
+    return dlopen(path, {
+      flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+    }).symbols as unknown as Flock
+  } catch (cause) {
+    throw new Error(`tribe: failed to load POSIX flock from ${path}`, { cause })
+  }
 }
 
 /**
