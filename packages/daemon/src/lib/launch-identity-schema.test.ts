@@ -1,8 +1,9 @@
 /**
  * 21049 — launch-scoped MCP fan-in schema compatibility.
  *
- * A daemon upgrade must add launch identity to an existing v18 sessions
- * table without losing the durable member row used for reconnect adoption.
+ * A daemon upgrade must run the v19 launch-identity migration on an existing
+ * v18 database before advancing through later schema versions, without losing
+ * the durable member row used for reconnect adoption.
  */
 
 import { Database } from "bun:sqlite"
@@ -12,7 +13,7 @@ import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { openDatabase } from "./database.ts"
 
-describe("session launch identity schema (migration v19)", () => {
+describe("session launch identity schema (migration chain from v18)", () => {
   let tmpDir: string
 
   beforeEach(() => {
@@ -66,7 +67,7 @@ describe("session launch identity schema (migration v19)", () => {
       expect(
         db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_sessions_launch_identity'").get(),
       ).toEqual({ name: "idx_sessions_launch_identity" })
-      expect(db.prepare("SELECT value FROM _schema_meta WHERE key='version'").get()).toEqual({ value: "19" })
+      expect(db.prepare("SELECT value FROM _schema_meta WHERE key='version'").get()).toEqual({ value: "20" })
     } finally {
       db.close()
     }

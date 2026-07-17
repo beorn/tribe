@@ -391,7 +391,7 @@ describe("20876 Tribe health cadence", () => {
     expect(
       (db.prepare("SELECT COUNT(*) AS count FROM dedup WHERE key LIKE 'ball-deadline:%'").get() as { count: number })
         .count,
-    ).toBe(2)
+    ).toBe(3)
     db.prepare("DELETE FROM pending_request WHERE request_id = 'deadline-review'").run()
     stmts.cleanupDedup.run({ $cutoff: now })
     expect(
@@ -477,6 +477,89 @@ describe("20876 Tribe health cadence", () => {
       restartedDb.close()
     }
     expect(sent).toEqual(["ball:expired"])
+  })
+
+  it("retains a delivered expiry warning while retrying a failed LLM escalation", () => {
+    stmts.openPendingRequest.run({
+      $request_id: "deadline-split-retry",
+      $recipient: "@agent/6",
+      $sender: "@author",
+      $opened_at: now - 10 * MINUTE,
+      $expires_at: now,
+      $message_id: "deadline-split-retry-message",
+      $fanout: "first",
+    })
+    const daemonCtx = createTribeContext({
+      db,
+      stmts,
+      sessionId: "daemon-deadline-test",
+      sessionRole: "daemon",
+      initialName: "daemon",
+      domains: [],
+      claudeSessionId: null,
+      claudeSessionName: null,
+    })
+    const pushed: Array<{ recipient: string; type: string }> = []
+    let delivery = 0
+
+    expect(() =>
+      processPendingBallDeadlines({
+        db,
+        stmts,
+        now,
+        liveSessionNames: new Set(["@agent/5", "@agent/6"]),
+        escalationTarget: "@ops",
+        send(recipient, content, type) {
+          delivery += 1
+          if (delivery === 2) throw new Error("LLM escalation failed")
+          pushed.push({ recipient, type })
+          sendMessage(daemonCtx, recipient, content, type)
+        },
+      }),
+    ).toThrow("LLM escalation failed")
+
+    expect(pushed).toEqual([{ recipient: "@author", type: "ball:expired" }])
+    expect(
+      (db.prepare("SELECT COUNT(*) AS count FROM messages WHERE type = 'ball:expired'").get() as { count: number })
+        .count,
+    ).toBe(1)
+    expect(
+      (
+        db.prepare("SELECT COUNT(*) AS count FROM dedup WHERE key LIKE '%deadline-split-retry%'").get() as {
+          count: number
+        }
+      ).count,
+    ).toBe(1)
+
+    const result = processPendingBallDeadlines({
+      db,
+      stmts,
+      now,
+      liveSessionNames: new Set(["@agent/5", "@agent/6"]),
+      escalationTarget: "@ops",
+      send(recipient, content, type) {
+        pushed.push({ recipient, type })
+        sendMessage(daemonCtx, recipient, content, type)
+      },
+    })
+
+    expect(result.expired).toBe(1)
+    expect(pushed).toEqual([
+      { recipient: "@author", type: "ball:expired" },
+      { recipient: "@ops", type: "verdict" },
+    ])
+    expect(
+      (db.prepare("SELECT COUNT(*) AS count FROM messages WHERE type = 'ball:expired'").get() as { count: number })
+        .count,
+    ).toBe(1)
+    expect(
+      (db.prepare("SELECT COUNT(*) AS count FROM messages WHERE type = 'verdict'").get() as { count: number }).count,
+    ).toBe(1)
+    expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'deadline-split-retry'").get()).toEqual(
+      {
+        recipient: "@agent/6",
+      },
+    )
   })
 
   it("retains a delivered sender warning while retrying a failed LLM escalation", () => {
@@ -797,7 +880,7 @@ describe("20876 Tribe health cadence", () => {
     stmts.cleanupDedup.run({ $cutoff: now })
     expect(
       (db.prepare("SELECT COUNT(*) AS count FROM dedup WHERE key LIKE '%:expired:%'").get() as { count: number }).count,
-    ).toBe(2)
+    ).toBe(4)
     tick()
     expect(sent).toHaveLength(6)
   })

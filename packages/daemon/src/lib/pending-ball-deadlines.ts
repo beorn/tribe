@@ -112,18 +112,24 @@ export function processPendingBallDeadlines(opts: PendingBallDeadlineOptions): P
 
     if (row.expires_at === null) continue
     if (opts.now >= row.expires_at) {
-      const expiryStage = runClaimedStage(opts, row, "expired", () => {
-        const target = opts.escalationTarget?.trim()
-        const actions = target
-          ? `Sender options: re-ping ${row.recipient}; ask ${target} to decide whether to reassign or close; or mark the ball moot with the pending-close operation.`
-          : `Sender options: re-ping ${row.recipient}; configure an escalation target for LLM judgment; or mark the ball moot with the pending-close operation.`
-        const content = target
-          ? `Pending ball ${row.request_id} owned by ${row.recipient} reached its sender-declared deadline. ${actions}`
-          : `Pending ball ${row.request_id} reached its sender-declared deadline; no escalation target is configured, so ownership remains with ${row.recipient}. ${actions}`
+      const target = opts.escalationTarget?.trim() || null
+      const actions = target
+        ? `Sender options: re-ping ${row.recipient}; ask ${target} to decide whether to reassign or close; or mark the ball moot with the pending-close operation.`
+        : `Sender options: re-ping ${row.recipient}; configure an escalation target for LLM judgment; or mark the ball moot with the pending-close operation.`
+      const content = target
+        ? `Pending ball ${row.request_id} owned by ${row.recipient} reached its sender-declared deadline. ${actions}`
+        : `Pending ball ${row.request_id} reached its sender-declared deadline; no escalation target is configured, so ownership remains with ${row.recipient}. ${actions}`
+      const senderStage = runClaimedStage(opts, row, "expired:sender", () => {
         opts.send(row.sender, content, target === row.sender ? "verdict" : "ball:expired")
-        if (target && target !== row.sender) opts.send(target, content, "verdict")
       })
-      if (expiryStage.claimed) result.expired += 1
+      let escalationClaimed = false
+      if (target && target !== row.sender) {
+        const escalationStage = runClaimedStage(opts, row, `expired:escalation:${target}`, () => {
+          opts.send(target, content, "verdict")
+        })
+        escalationClaimed = escalationStage.claimed
+      }
+      if (senderStage.claimed || escalationClaimed) result.expired += 1
       continue
     }
 
