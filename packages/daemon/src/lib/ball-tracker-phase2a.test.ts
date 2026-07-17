@@ -115,7 +115,7 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
     })
   })
 
-  it("assigns a 10m default TTL and honors an explicit sender TTL", () => {
+  it("leaves implicit tracked balls unbounded and preserves an explicit sender deadline as data", () => {
     const chief = makeContext(db, stmts, "@chief")
     const defaultTtl = sendMessage(chief, "@agent/8", "default deadline", "request")
     const explicitTtl = sendMessage(
@@ -133,9 +133,7 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
     const rows = db
       .prepare("SELECT message_id, opened_at, expires_at FROM pending_request ORDER BY opened_at, request_id")
       .all() as Array<{ message_id: string; opened_at: number; expires_at: number | null }>
-    expect(rows.find((row) => row.message_id === defaultTtl.id)?.expires_at).toBe(
-      rows.find((row) => row.message_id === defaultTtl.id)!.opened_at + 10 * 60_000,
-    )
+    expect(rows.find((row) => row.message_id === defaultTtl.id)?.expires_at).toBeNull()
     expect(rows.find((row) => row.message_id === explicitTtl.id)?.expires_at).toBe(
       rows.find((row) => row.message_id === explicitTtl.id)!.opened_at + 5 * 60_000,
     )
@@ -204,7 +202,7 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
     expect(close?.type).toBe("response")
   })
 
-  it("journals a late reply without erasing the expired ball before typed settlement", () => {
+  it("a reply closes its open ball even after a sender-declared deadline has passed", () => {
     const chief = makeContext(db, stmts, "@chief")
     const agent = makeContext(db, stmts, "@agent/8")
     sendMessage(
@@ -232,7 +230,7 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
       { reply: "expired-before-reply" },
     )
 
-    expect(reply.tracker).toEqual({ request_id: "expired-before-reply", closed: 0 })
+    expect(reply.tracker).toEqual({ request_id: "expired-before-reply", closed: 1 })
     expect(
       (
         db
@@ -241,7 +239,7 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
           count: number
         }
       ).count,
-    ).toBe(1)
+    ).toBe(0)
     expect(
       (
         db.prepare("SELECT COUNT(*) AS count FROM messages WHERE reply = ?").get("expired-before-reply") as {
@@ -479,7 +477,7 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
 
   it("implicit tracking excludes informational and wake-only types, self-send, and broadcasts", () => {
     const chief = makeContext(db, stmts, "@chief")
-    for (const type of ["notify", "status", "response", "verdict", "ball:reminder"] as const) {
+    for (const type of ["notify", "status", "response", "verdict"] as const) {
       sendMessage(chief, "@agent/8", `${type} payload`, type)
     }
     sendMessage(chief, "@chief", "self query", "query")

@@ -2,7 +2,7 @@
  * 19442 undead reframe — durable per-recipient actionable mailbox.
  *
  * Name-claim recovery must select the EXACT missed actionable directs
- * (request / query / verdict / assign / ball:reminder addressed to the name) without
+ * (request / query / verdict / assign addressed to the name) without
  * traversing unrelated history. The old mechanism — rewinding the session's
  * `last_inbox_pull_seq` — replayed every intervening ambient broadcast into
  * the model transcript (the 97-row flood: 49 joins + 48 health + 1 direct).

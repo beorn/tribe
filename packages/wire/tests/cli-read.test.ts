@@ -75,11 +75,11 @@ describe("registerReadCommands", () => {
     expect(flags).toEqual(expect.arrayContaining(["--all", "--json", "--owner", "--stale", "--close"]))
   })
 
-  test("log verb accepts --limit and --follow", () => {
+  test("log verb accepts --limit, --all, --follow, --json, and --ref-prefix", () => {
     const cmd = findCmd(buildProgram(), "log")
     expect(cmd).toBeDefined()
     const flags = optionFlags(cmd!)
-    expect(flags).toEqual(expect.arrayContaining(["--limit", "--follow"]))
+    expect(flags).toEqual(expect.arrayContaining(["--limit", "--all", "--follow", "--json", "--ref-prefix"]))
   })
 
   test("health verb is registered with description", () => {

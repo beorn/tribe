@@ -16,7 +16,6 @@ import {
   deriveSummary,
   logEvent,
   countUnackedActionables,
-  DEFAULT_BALL_TTL_MS,
   MAX_BALL_TTL_MS,
   type Delivery,
   type SenderAttribution,
@@ -147,13 +146,12 @@ export type TribeCoordMethod = (typeof TRIBE_COORD_METHODS)[keyof typeof TRIBE_C
  *
  *   1. Notifications (`from: daemon`, broadcasts `to: "*"`) are AMBIENT —
  *      surface them in fetch reads but never act on them.
- *   2. `assign` / `query` / `request` / `verdict` and daemon
- *      `ball:reminder` messages are the ACTIONABLE channel. Direct `notify` /
- *      `status` / `response` rows are inbox-visible, but they do not wake
- *      `inbox.wait`.
+ *   2. `assign` / `query` / `request` / `verdict` messages are the ACTIONABLE
+ *      channel. Direct `notify` / `status` / `response` rows are inbox-visible,
+ *      but they do not wake `inbox.wait`.
  *   3. Every non-self direct assign/query/request automatically opens one
- *      semantic response ball. Verdict and sender reminders stay actionable
- *      and wakeable without automatically minting another obligation. Answer
+ *      semantic response ball. Verdict stays actionable and wakeable without
+ *      automatically minting another obligation. Answer
  *      or explicitly defer tracked work with `reply=<request-id>`; a
  *      transport/read acknowledgement is neither required nor sufficient to
  *      release that ownership.
@@ -167,7 +165,6 @@ export const TRIBE_JOIN_PRIMER =
   "`type: assign`/`query`/`request` messages are actionable, wake `inbox.wait`, " +
   "and automatically open a semantic response ball. Direct `type: verdict` is " +
   "also actionable and wakeable, but does not automatically open another ball. " +
-  "Daemon `type: ball:reminder` is likewise actionable and wakeable without minting. " +
   "Direct `notify`/`status`/`response` rows are inbox-visible, but not wakeable. " +
   "Answer or explicitly defer each actionable with `reply=<request-id>` so its " +
   "semantic ball closes; no transport or exact-id delivery ACK is required."
@@ -423,7 +420,7 @@ function openPendingRows(
   requestId: string,
   messageId: string,
   openedAt: number,
-  expiresAt: number,
+  expiresAt: number | null,
   fanout: "first" | "all" | undefined,
   sender: string,
 ): void {
@@ -480,7 +477,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   const requestFlag = requestArg === true
   const requestId = typeof requestArg === "string" ? requestArg.trim() : null
   const replyId = typeof replyArg === "string" ? replyArg : null
-  let expiresInMs = DEFAULT_BALL_TTL_MS
+  let expiresInMs: number | undefined
   if (a.expires_in_ms !== undefined) {
     if (
       typeof a.expires_in_ms !== "number" ||
@@ -585,7 +582,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       requestFlag ? result.id : requestId!,
       result.id,
       result.ts,
-      result.ts + expiresInMs,
+      expiresInMs === undefined ? null : result.ts + expiresInMs,
       fanoutArg,
       sender,
     )
@@ -687,7 +684,10 @@ type PendingBallView = "active" | "expired"
 
 function pendingRowMatchesView(row: PendingBallRow, now: number, view: PendingBallView): boolean {
   const expired = row.expires_at !== null && row.expires_at <= now
-  return view === "expired" ? expired : !expired
+  // Passing a declared deadline never settles ownership. The default/open
+  // view therefore includes every pending row; --expired is a narrower fact
+  // projection for consumers that need deadline-passed rows specifically.
+  return view === "expired" ? expired : true
 }
 
 function pendingBallsForOwner(
@@ -709,16 +709,15 @@ function pendingCloseMissWarning(
   const peerSet = peers ? new Set(peers) : null
   const now = Date.now()
   const fromRelevantPeer = (ball: PendingBall) => peerSet === null || peerSet.has(ball.sender)
-  const active = pendingBallsForOwner(ctx, owner, now).filter(fromRelevantPeer)
-  const expired = pendingBallsForOwner(ctx, owner, now, "expired").filter(fromRelevantPeer)
-  if (active.length + expired.length === 0) return undefined
-  const listing = [
-    ...active.map((ball) => `${ball.request_id} (message ${ball.message_id}, from ${ball.sender})`),
-    ...expired.map(
-      (ball) =>
-        `${ball.request_id} (message ${ball.message_id}, from ${ball.sender}; expired and awaiting typed settlement)`,
-    ),
-  ].join(", ")
+  const pending = pendingBallsForOwner(ctx, owner, now).filter(fromRelevantPeer)
+  if (pending.length === 0) return undefined
+  const listing = pending
+    .map((ball) => {
+      const deadlinePassed = ball.expires_at !== null && Date.parse(ball.expires_at) <= now
+      const deadline = deadlinePassed ? "; declared deadline passed, still open" : ""
+      return `${ball.request_id} (message ${ball.message_id}, from ${ball.sender}${deadline})`
+    })
+    .join(", ")
   return `reply/close ${attemptedId} closed 0 rows; balls owned by ${owner}: ${listing}`
 }
 

@@ -227,7 +227,7 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     expect(pendingRecipients(db, requestId)).toEqual([])
   })
 
-  it("applies one sender-declared TTL to every resolved recipient", () => {
+  it("applies one sender-declared deadline fact to every resolved recipient", () => {
     const res = parseToolJson(
       handleToolCall(
         chief,
@@ -356,7 +356,7 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     expect(pendingRecipients(db, "actual-request")).toEqual(["@agent/1"])
   })
 
-  it("warns that a late reply left the expired ball for typed settlement", () => {
+  it("settles a reply after its declared deadline without a daemon-policy warning", () => {
     parseToolJson(
       handleToolCall(
         chief,
@@ -371,13 +371,39 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       handleToolCall(
         agent1,
         "tribe.send",
-        { to: "@chief", message: "late defer", type: "response", reply: "late-request" },
+        { to: "@chief", message: "late defer", summary: "late defer", type: "response", reply: "late-request" },
         makeOpts(["sess-chief", "sess-agent-1"]),
       ),
     )
 
-    expect(reply.tracker).toEqual({ request_id: "late-request", closed: 0 })
-    expect(reply.warning).toMatch(/late-request.*expired.*awaiting.*settlement/i)
-    expect(pendingRecipients(db, "late-request")).toEqual(["@agent/1"])
+    expect(reply.tracker).toEqual({ request_id: "late-request", closed: 1 })
+    expect(reply.warning).toBeUndefined()
+    expect(pendingRecipients(db, "late-request")).toEqual([])
+  })
+
+  it("keeps a deadline-passed row in the default open-ball projection until a reply closes it", () => {
+    parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        {
+          to: "@agent/1",
+          message: "deadline is a fact, not ownership settlement",
+          type: "request",
+          request: "deadline-passed-open",
+          expires_in_ms: 60_000,
+        },
+        makeOpts(["sess-chief", "sess-agent-1"]),
+      ),
+    )
+    db.prepare("UPDATE pending_request SET expires_at = 0 WHERE request_id = ?").run("deadline-passed-open")
+
+    const active = parseToolJson(handleToolCall(agent1, "tribe.pending", {}, makeOpts(["sess-chief", "sess-agent-1"])))
+    const expired = parseToolJson(
+      handleToolCall(agent1, "tribe.pending", { expired: true }, makeOpts(["sess-chief", "sess-agent-1"])),
+    )
+
+    expect(active.pending).toEqual([expect.objectContaining({ request_id: "deadline-passed-open" })])
+    expect(expired.pending).toEqual([expect.objectContaining({ request_id: "deadline-passed-open" })])
   })
 })

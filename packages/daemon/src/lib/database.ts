@@ -128,7 +128,7 @@ export function openDatabase(path: string): Database {
 
   // 19442 undead reframe — durable per-RECIPIENT actionable mailbox. One row
   // per mailbox name; `last_actionable_seq` is the highest actionable rowid
-  // (direct request/query/verdict/assign/ball:reminder) acknowledged for that name. Keyed by
+  // (direct request/query/verdict/assign) acknowledged for that name. Keyed by
   // recipient — NOT session — so rename/rejoin/takeover retain the mailbox and
   // recovery never needs to rewind a session's ambient pull cursor.
   db.run(`CREATE TABLE IF NOT EXISTS mailbox_cursors (
@@ -823,15 +823,13 @@ const MIGRATIONS: readonly Migration[] = [
  * The actionable message types — the ONE canonical set (19442). A DIRECT
  * message of one of these types addressed to a name is "actionable": it opens
  * work the recipient must act on. `inbox.wait` gates on it, the chief-silent
- * watchdog counts it, and the mailbox recovery view selects it. Sender
- * reminders are wakeable closure duties but remain outside AUTO_TRACK_TYPES,
- * so reminding a minter cannot manufacture a second ball.
+ * watchdog counts it, and the mailbox recovery view selects it.
  */
-export const ACTIONABLE_TYPES = ["request", "query", "verdict", "assign", "ball:reminder"] as const
+export const ACTIONABLE_TYPES = ["request", "query", "verdict", "assign"] as const
 export const ACTIONABLE_TYPES_SET: ReadonlySet<string> = new Set(ACTIONABLE_TYPES)
-/** Direct types that implicitly open a semantic response ball. Verdict and
- * sender reminders remain wakeable/actionable, but neither manufactures a
- * second obligation unless the sender explicitly supplies `request`. */
+/** Direct types that implicitly open a semantic response ball. Verdict remains
+ * wakeable/actionable but does not manufacture a second obligation unless the
+ * sender explicitly supplies `request`. */
 export const AUTO_TRACK_TYPES = ["request", "query", "assign"] as const
 export const AUTO_TRACK_TYPES_SET: ReadonlySet<string> = new Set(AUTO_TRACK_TYPES)
 export const ACTIONABLE_TYPES_SQL = ACTIONABLE_TYPES.map((t) => `'${t}'`).join(", ")
@@ -1001,17 +999,9 @@ export function createStatements(db: Database) {
         AND rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
     `),
 
-    // Cleanup old dedup entries. Deadline-stage claims remain durable while
-    // their source message still owns an open ball; after closure they age out
-    // through the same one-day cleanup as ordinary plugin claims.
-    cleanupDedup: db.prepare(`
-      DELETE FROM dedup
-      WHERE ts < $cutoff
-        AND (
-          key NOT LIKE 'ball-deadline:%'
-          OR session_id NOT IN (SELECT message_id FROM pending_request)
-        )
-    `),
+    // Cleanup old dedup entries. Ball-deadline actuation left the daemon; its
+    // legacy claim keys now age out through the same generic one-day rule.
+    cleanupDedup: db.prepare("DELETE FROM dedup WHERE ts < $cutoff"),
 
     archiveExpiredMessages: db.prepare(`
 		INSERT OR IGNORE INTO messages_archive (

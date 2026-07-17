@@ -185,6 +185,61 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
     }
   })
 
+  it("a deadline-passed ball appears once in a close-miss warning", () => {
+    const { db, stmts } = setup()
+    try {
+      const now = Date.now()
+      openBall(stmts, {
+        id: "deadline-passed",
+        recipient: "@chief",
+        openedAt: now - 60_000,
+        expiresAt: now - 1,
+        sender: "@agent/2",
+      })
+      const ctx = createTribeContext({
+        db,
+        stmts,
+        sessionId: "sess-chief",
+        sessionRole: "member",
+        initialName: "@chief",
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+      })
+
+      const res = parseToolJson(handleToolCall(ctx, "tribe.pending", { close: "missing" }, makeOpts()))
+      const warning = String(res.warning)
+
+      expect(warning.match(/\(message/gu)).toHaveLength(1)
+      expect(warning).toContain("declared deadline passed, still open")
+    } finally {
+      db.close()
+    }
+  })
+
+  it("legacy deadline-stage dedup claims age out even while their source ball is open", () => {
+    const { db, stmts } = setup()
+    try {
+      const now = Date.now()
+      openBall(stmts, { id: "still-open", recipient: "@chief", openedAt: now })
+      stmts.claimDedup.run({
+        $key: "ball-deadline:still-open:expired",
+        $session_id: "still-open-msg",
+        $ts: now - 2 * DAY,
+      })
+
+      cleanupOldData({ stmts } as unknown as Parameters<typeof cleanupOldData>[0])
+
+      const row = db.prepare("SELECT COUNT(*) AS count FROM dedup WHERE key LIKE 'ball-deadline:%'").get() as {
+        count: number
+      }
+      expect(row.count).toBe(0)
+      expect(openIds(stmts, "@chief")).toEqual(["still-open"])
+    } finally {
+      db.close()
+    }
+  })
+
   it("all-owner projection catches obligations that an empty caller sample misses", () => {
     const { db, stmts } = setup()
     try {
@@ -285,7 +340,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
     }
   })
 
-  it("excludes expired balls from default pending, attention, and health while exposing the diagnostic view", () => {
+  it("keeps deadline-passed balls open across pending, attention, and health while exposing the filtered view", () => {
     const { db, stmts } = setup()
     try {
       const now = Date.now()
@@ -328,13 +383,13 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         }
       }
 
-      expect(pending.pending.map((ball) => ball.request_id)).toEqual(["active-review"])
+      expect(pending.pending.map((ball) => ball.request_id)).toEqual(["expired-review", "active-review"])
       expect(expired.expired).toBe(true)
       expect(expired.pending.map((ball) => ball.request_id)).toEqual(["expired-review"])
-      expect(attention.pending_balls.map((ball) => ball.request_id)).toEqual(["active-review"])
-      expect(health.pending_balls?.count).toBe(1)
-      expect(health.cadence?.open_balls.count).toBe(1)
-      expect(health.cadence?.chief_actionable_response.open.count).toBe(1)
+      expect(attention.pending_balls.map((ball) => ball.request_id)).toEqual(["expired-review", "active-review"])
+      expect(health.pending_balls?.count).toBe(2)
+      expect(health.cadence?.open_balls.count).toBe(2)
+      expect(health.cadence?.chief_actionable_response.open.count).toBe(2)
     } finally {
       db.close()
     }

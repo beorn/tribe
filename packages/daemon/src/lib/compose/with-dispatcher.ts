@@ -577,8 +577,7 @@ export function withDispatcher<
                 const differentLaunchHolder =
                   liveHolder !== undefined &&
                   !(
-                    liveHolder.launchId === launchIdentity.id &&
-                    liveHolder.launchParentPid === launchIdentity.parentPid
+                    liveHolder.launchId === launchIdentity.id && liveHolder.launchParentPid === launchIdentity.parentPid
                   )
                 if (differentLaunchHolder) {
                   log.warn?.(
@@ -855,8 +854,27 @@ export function withDispatcher<
 
           case "cli_log": {
             const limit = Number(p.limit ?? 20)
-            const rows = db.prepare("SELECT * FROM messages ORDER BY ts DESC LIMIT ?").all(limit)
-            return makeResponse(id, { messages: (rows as unknown[]).reverse() })
+            const all = p.all === true
+            const refPrefix = typeof p.ref_prefix === "string" && p.ref_prefix.length > 0 ? p.ref_prefix : null
+            const replyPrefix = typeof p.reply_prefix === "string" && p.reply_prefix.length > 0 ? p.reply_prefix : null
+            const filters: string[] = []
+            const values: Array<string | number> = []
+            if (refPrefix) {
+              filters.push("substr(ref, 1, length(?)) = ?")
+              values.push(refPrefix, refPrefix)
+            }
+            if (replyPrefix) {
+              filters.push("substr(reply, 1, length(?)) = ?")
+              values.push(replyPrefix, replyPrefix)
+            }
+            const where = filters.length > 0 ? ` WHERE ${filters.join(" OR ")}` : ""
+            const limitSql = all ? "" : " LIMIT ?"
+            if (!all) values.push(limit)
+            const rows = db.prepare(`SELECT * FROM messages${where} ORDER BY ts DESC${limitSql}`).all(...values)
+            return makeResponse(id, {
+              messages: (rows as unknown[]).reverse(),
+              query: { all, ref_prefix: refPrefix, reply_prefix: replyPrefix },
+            })
           }
 
           /**

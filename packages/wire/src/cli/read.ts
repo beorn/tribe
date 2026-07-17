@@ -174,6 +174,9 @@ interface Msg {
   recipient: string
   content: string
   bead_id: string | null
+  ref: string | null
+  request: string | null
+  reply: string | null
   ts: number
 }
 
@@ -301,9 +304,35 @@ function fmtMsg(m: Msg): void {
   console.log(`  ${fmtTime(m.ts)}  ${pad(`${m.sender} → ${to}`, 28)}  [${m.type}]${bead} "${txt}"`)
 }
 
-async function cmdLog(limit: number, follow: boolean): Promise<void> {
-  const result = (await callDaemon("cli_log", { limit })) as { messages: Msg[] }
+async function cmdLog(
+  limit: number,
+  all: boolean,
+  follow: boolean,
+  json: boolean,
+  refPrefix?: string,
+  replyPrefix?: string,
+): Promise<void> {
+  if (follow && json) {
+    console.error("tribe log: --follow and --json are mutually exclusive; omit --follow for one JSON snapshot")
+    process.exit(2)
+  }
+  if (follow && all) {
+    console.error("tribe log: --follow and --all are mutually exclusive; omit --all for a bounded follow snapshot")
+    process.exit(2)
+  }
+  const params: Record<string, unknown> = all ? { all: true } : { limit }
+  if (refPrefix) params.ref_prefix = refPrefix
+  if (replyPrefix) params.reply_prefix = replyPrefix
+  const result = (await callDaemon("cli_log", params)) as {
+    messages: Msg[]
+    query?: { all: boolean; ref_prefix: string | null; reply_prefix: string | null }
+  }
   const rows = result.messages
+
+  if (json) {
+    console.log(JSON.stringify({ messages: rows, query: result.query }))
+    return
+  }
 
   if (!follow) {
     if (!rows.length) {
@@ -346,7 +375,10 @@ async function cmdLog(limit: number, follow: boolean): Promise<void> {
   let lastTs = rows.length ? Math.max(...rows.map((m) => m.ts)) : Date.now()
   setInterval(async () => {
     try {
-      const newResult = (await client.call("cli_log", { limit: 50 })) as { messages: Msg[] }
+      const pollParams: Record<string, unknown> = { limit: 50 }
+      if (refPrefix) pollParams.ref_prefix = refPrefix
+      if (replyPrefix) pollParams.reply_prefix = replyPrefix
+      const newResult = (await client.call("cli_log", pollParams)) as { messages: Msg[] }
       const newMsgs = newResult.messages.filter((m) => m.ts > lastTs)
       for (const m of newMsgs) {
         fmtMsg(m)
@@ -411,6 +443,7 @@ async function cmdPending(
       owner?: string
       request_id?: string
       closed?: number
+      warning?: string
       pending?: Array<{
         request_id: string
         recipient: string
@@ -454,6 +487,7 @@ async function cmdPending(
     console.log(
       `Closed ${payload.closed ?? 0} pending request(s) for ${payload.owner ?? owner ?? "(caller)"}: ${payload.request_id ?? close}`,
     )
+    if (payload.warning) console.warn(`Warning: ${payload.warning}`)
     return
   }
   const count = payload.count ?? 0
@@ -936,8 +970,21 @@ export function registerReadCommands(program: Command): void {
     .command("log")
     .description("Show recent messages")
     .option("-n, --limit <n>", "Number of messages", int, 20)
+    .option("-a, --all", "Return every message in the selected correlation-prefix scope")
     .option("-f, --follow", "Follow live — stream new messages")
-    .action((opts: { limit?: number; follow?: boolean }) => void cmdLog(opts.limit ?? 20, !!opts.follow))
+    .option("--json", "Print one machine-readable JSON snapshot")
+    .option("--ref-prefix <prefix>", "Only messages whose durable ref starts with this literal prefix")
+    .option("--reply-prefix <prefix>", "Also include messages whose tracked reply id starts with this literal prefix")
+    .action(
+      (opts: {
+        limit?: number
+        all?: boolean
+        follow?: boolean
+        json?: boolean
+        refPrefix?: string
+        replyPrefix?: string
+      }) => void cmdLog(opts.limit ?? 20, !!opts.all, !!opts.follow, !!opts.json, opts.refPrefix, opts.replyPrefix),
+    )
 
   program
     .command("health")

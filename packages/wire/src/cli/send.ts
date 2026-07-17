@@ -104,6 +104,7 @@ type SendPayloadInput = {
   type?: MessageType
   summary?: string
   delivery?: Delivery
+  ref?: string
   request?: boolean | string
   reply?: string
   fanout?: Fanout
@@ -116,6 +117,7 @@ type SendPayload = {
   type: MessageType
   summary?: string
   delivery?: Delivery
+  ref?: string
   request?: true | string
   reply?: string
   fanout?: Fanout
@@ -131,6 +133,7 @@ export function buildSendPayload(input: SendPayloadInput, sender?: string | null
   }
   if (input.summary) payload.summary = input.summary
   if (input.delivery) payload.delivery = input.delivery
+  if (input.ref) payload.ref = input.ref
   if (input.request !== undefined && input.request !== false) payload.request = input.request
   if (input.reply) payload.reply = input.reply
   if (input.fanout) payload.fanout = input.fanout
@@ -405,6 +408,7 @@ export function registerSendCommands(program: Command): void {
   const sendType = cliOption(SEND_CLI, "type")
   const sendSummary = cliOption(SEND_CLI, "summary")
   const sendDelivery = cliOption(SEND_CLI, "delivery")
+  const sendRef = cliOption(SEND_CLI, "ref")
   const sendReply = cliOption(SEND_CLI, "reply")
   const sendRequest = cliOption(SEND_CLI, "request")
   const sendFanout = cliOption(SEND_CLI, "fanout")
@@ -417,6 +421,7 @@ export function registerSendCommands(program: Command): void {
     .option(sendType.flags, sendType.description)
     .option(sendSummary.flags, sendSummary.description)
     .option(sendDelivery.flags, sendDelivery.description)
+    .option(sendRef.flags, sendRef.description)
     .option(sendReply.flags, sendReply.description)
     .option(sendRequest.flags, sendRequest.description)
     .option(sendFanout.flags, sendFanout.description)
@@ -429,6 +434,7 @@ export function registerSendCommands(program: Command): void {
           type?: string
           summary?: string
           delivery?: string
+          ref?: string
           request?: boolean | string
           reply?: string
           fanout?: string
@@ -465,6 +471,7 @@ export function registerSendCommands(program: Command): void {
           type: type as MessageType,
           summary: opts.summary,
           delivery: opts.delivery as Delivery | undefined,
+          ref: opts.ref,
           request: opts.request === false ? undefined : opts.request,
           reply: opts.reply,
           fanout: opts.fanout as Fanout | undefined,

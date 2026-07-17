@@ -25,13 +25,16 @@ describe("focus-mode notification diet", () => {
     expect(shouldDeliver({ kind: "direct", type, topic, replyHint: "yes" }, focus)).toBe(false)
   })
 
-  it.each(["request", "query", "assign", "verdict", "ball:reminder"])("still pushes direct %s actionables", (type) => {
+  it.each(["request", "query", "assign", "verdict"])("still pushes direct %s actionables", (type) => {
     expect(shouldDeliver({ kind: "direct", type, topic: null, replyHint: "yes" }, focus)).toBe(true)
   })
 
-  it.each(["notify", "response"])("keeps plain direct %s pull-only while focus mode is active", (type) => {
-    expect(shouldDeliver({ kind: "direct", type, topic: null, replyHint: "yes" }, focus)).toBe(false)
-  })
+  it.each(["notify", "response", "ball:reminder"])(
+    "keeps plain or retired direct %s pull-only while focus mode is active",
+    (type) => {
+      expect(shouldDeliver({ kind: "direct", type, topic: null, replyHint: "yes" }, focus)).toBe(false)
+    },
+  )
 
   it("leaves direct notification delivery unchanged until a seat opts in", () => {
     expect(

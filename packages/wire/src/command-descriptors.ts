@@ -84,7 +84,7 @@ const ATTENTION_SCHEMA = {
     actionable_unread: {
       type: "array",
       description:
-        "All unacknowledged direct request/query/verdict/assign/ball:reminder messages for this recipient, independent of the event limit.",
+        "All unacknowledged direct request/query/verdict/assign messages for this recipient, independent of the event limit.",
       items: { type: "object", additionalProperties: true },
     },
     pending_balls: {
@@ -155,7 +155,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
               "Per-message delivery class. 'push' fans the durable row out to live channels; 'pull' keeps it inbox-only. Defaults to push.",
           },
           bead: { type: "string", description: "Associated bead ID (optional)" },
-          ref: { type: "string", description: "Reference to a previous message ID (optional)" },
+          ref: { type: "string", description: "Durable correlation reference stored with the message (optional)" },
           request: {
             oneOf: [{ type: "string" }, { type: "boolean" }],
             description:
@@ -177,7 +177,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             minimum: 1,
             maximum: 24 * 60 * 60_000,
             description:
-              "Sender-declared tracked-ball TTL in milliseconds. Defaults to 10 minutes; must be a positive integer no greater than one day.",
+              "Optional sender-declared deadline offset in milliseconds. No default: Tribe stores the resulting deadline as a fact but never settles ownership from it. Must be no greater than one day.",
           },
         },
         required: ["to", "message"],
@@ -249,6 +249,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           enum: TRIBE_DELIVERY_MODES,
         },
         {
+          name: "ref",
+          flags: "--ref <reference>",
+          description: "Durable correlation reference stored with the message",
+        },
+        {
           name: "reply",
           flags: "--reply <request_id>",
           description: "Ball-tracker: close the tracked request with this id",
@@ -269,7 +274,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "expires-in-ms",
           flags: "--expires-in-ms <milliseconds>",
-          description: "Tracked-ball TTL in milliseconds (default 10m, maximum 1d)",
+          description: "Optional tracked-ball deadline offset in milliseconds (no default, maximum 1d)",
           mapsTo: "expires_in_ms",
         },
       ],
@@ -279,22 +284,22 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     id: "tribe.pending",
     title: "Pending Requests",
     description:
-      "Ball-tracker query: list active requests where the given owner is responsible for replying, or explicitly inspect expired rows awaiting settlement. Default owner is the caller's session. See @km/tribe/message-ball-tracker.",
+      "Ball-tracker query: list every open request where the given owner is responsible for replying, or filter to rows whose declared deadline passed. A passed deadline never settles ownership. Default owner is the caller's session. See @km/tribe/message-ball-tracker.",
     lifetime: "live-session",
     mcp: {
       name: "pending",
       description:
-        "Ball-tracker query: list active requests where the given owner is responsible for replying, or explicitly inspect expired rows awaiting settlement. Default owner is the caller's session. See @km/tribe/message-ball-tracker.",
+        "Ball-tracker query: list every open request where the given owner is responsible for replying, or filter to rows whose declared deadline passed. A passed deadline never settles ownership. Default owner is the caller's session. See @km/tribe/message-ball-tracker.",
       inputSchema: {
         type: "object",
         properties: {
           all: {
             type: "boolean",
-            description: "List every active request grouped by recipient owner (fleet-wide read-only attention).",
+            description: "List every open request grouped by recipient owner (fleet-wide read-only attention).",
           },
           expired: {
             type: "boolean",
-            description: "Show expired rows awaiting the periodic settlement sweep instead of active requests.",
+            description: "Filter to open rows whose optional sender-declared deadline has passed.",
           },
           owner: {
             type: "string",
@@ -324,7 +329,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           pending: {
             type: "array",
             description:
-              "Active requests, or expired rows for the explicit diagnostic view. Each includes request_id, recipient, sender, summary, opened_at, age_ms, message_id, and fanout.",
+              "Open requests, optionally filtered to deadline-passed rows. Each includes request_id, recipient, sender, summary, opened_at, expires_at, age_ms, message_id, and fanout.",
             items: { type: "object", additionalProperties: true },
           },
           owners: {
@@ -337,6 +342,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           count: { type: "number", description: "Number of requests in the selected pending view." },
           request_id: { type: "string", description: "Request id closed when `close` is used." },
           closed: { type: "number", description: "Number of pending rows closed when `close` is used." },
+          warning: {
+            type: "string",
+            description:
+              "Loud diagnostic when close matched 0 rows while the owner still has other matching balls; names the surviving request/message ids.",
+          },
           ...ERROR_SHAPE,
         },
         "Pending requests for owner.",
@@ -345,7 +355,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     cli: available({
       name: "pending",
       description:
-        "Ball-tracker query: list active requests where the given owner is responsible for replying, or explicitly inspect expired rows awaiting settlement. Default owner is the caller's session. See @km/tribe/message-ball-tracker.",
+        "Ball-tracker query: list every open request where the given owner is responsible for replying, or filter to rows whose declared deadline passed. A passed deadline never settles ownership. Default owner is the caller's session. See @km/tribe/message-ball-tracker.",
       lifetime: "one-shot",
       mapsToMcp: "pending",
       options: [
@@ -362,7 +372,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "expired",
           flags: "--expired",
-          description: "Show expired requests awaiting the periodic settlement sweep",
+          description: "Filter to open requests whose declared deadline passed",
         },
         { name: "owner", flags: "-o, --owner <name>", description: "Owner session name (default: caller)" },
         {
@@ -385,12 +395,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     id: "tribe.inbox.wait",
     title: "Inbox Wait",
     description:
-      "Long-poll the actionable inbox for a session until a request/query/assign/verdict/ball:reminder direct message arrives or the timeout elapses. Every result carries current attention; direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
+      "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Every result carries current attention; direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
     lifetime: "live-session",
     mcp: {
       name: "inbox.wait",
       description:
-        "Long-poll the actionable inbox for a session until a request/query/assign/verdict/ball:reminder direct message arrives or the timeout elapses. Every result carries current attention; direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
+        "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Every result carries current attention; direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
       inputSchema: {
         type: "object",
         properties: {
@@ -423,7 +433,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     cli: available({
       name: "inbox-wait",
       description:
-        "Long-poll the actionable inbox for a session until a request/query/assign/verdict/ball:reminder direct message arrives or the timeout elapses. Every result carries current attention; direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
+        "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Every result carries current attention; direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
       lifetime: "one-shot",
       mapsToMcp: "inbox.wait",
       options: [

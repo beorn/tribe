@@ -168,7 +168,7 @@ describe("createInboxWaitManager", () => {
     })
   })
 
-  it("wakes the sender on a pending-ball reminder", async () => {
+  it("does not wake on the retired daemon-only ball reminder type", async () => {
     vi.useFakeTimers()
     let unread = 0
     const manager = createInboxWaitManager((session) => status(session, unread))
@@ -190,7 +190,7 @@ describe("createInboxWaitManager", () => {
     await expect(wait).resolves.toMatchObject({
       session: "@author",
       unread_count: 1,
-      timed_out: false,
+      timed_out: true,
       aborted: false,
     })
   })

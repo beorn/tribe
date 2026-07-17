@@ -9,7 +9,6 @@ import type { TribeRole } from "tribe-wire/lib/config"
 import { createTribeContext } from "../context.ts"
 import { openDatabase, createStatements } from "../database.ts"
 import { sendMessage } from "../messaging.ts"
-import { processPendingBallDeadlines } from "../pending-ball-deadlines.ts"
 import type { ClientSession } from "./with-client-registry.ts"
 import { withDispatcher } from "./with-dispatcher.ts"
 
@@ -364,6 +363,44 @@ describe("dispatcher bounded mailbox drain", () => {
   })
 })
 
+describe("dispatcher durable log projection", () => {
+  it("filters correlation refs and reply ids by literal prefix without deriving controller policy", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    harness.sendWithRef("ball-controller:v1:owner-epoch:@agent/6:launch-1")
+    harness.sendWithRef("ball-controller:v1:answer-sla:req-2")
+    harness.sendWithRef("another-controller:v1:owner-epoch:@agent/7:launch-2")
+    harness.sendReply("ball-rescue:v1:%40agent%2F6:launch-1")
+    harness.sendReply("another-controller:v1:request-2")
+
+    const result = parseResult<{
+      messages: Array<{ ref: string | null; reply: string | null }>
+      query: { all: boolean; ref_prefix: string | null; reply_prefix: string | null }
+    }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "controller-journal",
+          method: "cli_log",
+          params: { all: true, ref_prefix: "ball-controller:v1:", reply_prefix: "ball-rescue:v1:" },
+        },
+        "conn-log",
+      ),
+    )
+
+    expect(result.messages.map(({ ref, reply }) => ({ ref, reply }))).toEqual([
+      { ref: "ball-controller:v1:owner-epoch:@agent/6:launch-1", reply: null },
+      { ref: "ball-controller:v1:answer-sla:req-2", reply: null },
+      { ref: null, reply: "ball-rescue:v1:%40agent%2F6:launch-1" },
+    ])
+    expect(result.query).toEqual({
+      all: true,
+      ref_prefix: "ball-controller:v1:",
+      reply_prefix: "ball-rescue:v1:",
+    })
+  })
+})
+
 describe("dispatcher session announcement recovery (@ag/tribe/21052/19442)", () => {
   it("coalesces a reconnecting name without losing durable join events", async () => {
     const suppressWindowMs = 10_000
@@ -480,34 +517,6 @@ describe("dispatcher inbox-wait parsing", () => {
     expect(result.aborted).toBe(false)
     expect(result.attention.actionable_unread).toEqual([expect.objectContaining({ content: "wake inbox wait" })])
     expect(result.attention.pending_balls).toEqual([expect.objectContaining({ recipient: "@agent/wait" })])
-  })
-
-  it("wakes a pull LLM judge for dead-owner escalation without minting another ball", async () => {
-    const harness = createDispatcherHarness()
-    cleanup = harness.dispose
-
-    const wait = harness.dispatcher.handleRequest(
-      {
-        jsonrpc: "2.0",
-        id: "wait-dead-owner-judge",
-        method: "tribe.inbox.wait",
-        params: { session: "@agent/judge", timeoutMs: 250 },
-      },
-      "conn-judge",
-    )
-
-    await new Promise((resolveWait) => setTimeout(resolveWait, 20))
-    expect(harness.escalateDeadOwner("@agent/judge")).toBe("@agent/dead-owner")
-
-    const result = parseResult<InboxWaitResult>(await wait)
-    expect(result.timed_out).toBe(false)
-    expect(result.attention.actionable_unread).toEqual([
-      expect.objectContaining({
-        type: "verdict",
-        content: expect.stringMatching(/ownership is retained.*LLM judgment/i),
-      }),
-    ])
-    expect(result.attention.pending_balls).toEqual([])
   })
 
   it("uses the same timeoutMs fallback accepted by the MCP handler", async () => {
@@ -676,34 +685,11 @@ function createDispatcherHarness(
     sendActionable(recipient: string, content: string = "wake inbox wait") {
       sendMessage(daemonCtx, recipient, content, "request", undefined, undefined, "direct")
     },
-    escalateDeadOwner(escalationTarget: string): string {
-      const now = Date.now()
-      db.prepare(`
-        INSERT INTO sessions (id, name, role, domains, pid, started_at, updated_at)
-        VALUES ('sess-dead-owner', '@agent/dead-owner', 'member', '[]', 424242, $now, $now)
-      `).run({ $now: now })
-      stmts.openPendingRequest.run({
-        $request_id: "dead-owner-escalation",
-        $recipient: "@agent/dead-owner",
-        $sender: "@agent/sender",
-        $opened_at: now,
-        $expires_at: now + 10 * 60_000,
-        $message_id: "dead-owner-source",
-        $fanout: "first",
-      })
-      processPendingBallDeadlines({
-        db,
-        stmts,
-        now,
-        liveSessionNames: new Set(),
-        escalationTarget,
-        isPidAlive: () => false,
-        send: (recipient, content, type) => sendMessage(daemonCtx, recipient, content, type),
-      })
-      const pending = db
-        .prepare("SELECT recipient FROM pending_request WHERE request_id = 'dead-owner-escalation'")
-        .get() as { recipient: string }
-      return pending.recipient
+    sendWithRef(ref: string) {
+      sendMessage(daemonCtx, "@fleet", `effect ${ref}`, "notify", undefined, ref, "direct")
+    },
+    sendReply(reply: string) {
+      sendMessage(daemonCtx, "@controller", `reply ${reply}`, "verdict", undefined, undefined, "direct", {}, { reply })
     },
     connectClient(): { connId: string; socket: TestSocket } {
       const socket = createTestSocket()

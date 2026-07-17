@@ -29,13 +29,12 @@ This package is reusable infrastructure. It should not encode project-specific
 workflow concepts such as `@chief`, `@agent/N`, bead queues, worktree slots, or
 integration authority.
 
-## Pending-ball deadlines
+## Pending-ball deadline facts
 
 Direct `request`, `query`, and `assign` messages open one recipient-owned ball;
-other message types open one only when explicitly requested. The same
-`pending_request` row drives its age, deadline, owner nudge, sender reminder,
-and terminal expiry—there is no paired sender row or reminder queue. At half of
-the sender-declared TTL, the owner is nudged and the sender receives options to
-re-ping, reroute, or mark the ball moot. A `fanout:first` request shares one
-logical sender reminder across its recipient rows while retaining per-recipient
-owner nudges.
+other message types open one only when explicitly requested. The
+`pending_request` row stores ownership, age, fanout, and an optional
+sender-declared deadline. Tribe supplies those facts without a default and does
+not interpret a passed deadline as a reminder, page, transfer, or settlement;
+replies still close the original ownership row. Habitat policy and actuation
+belong to the consuming L3 controller.

@@ -321,6 +321,86 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     }
   })
 
+  it("projects durable message refs as filtered JSON for level-triggered controllers", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-log-ref-"))
+    const socketPath = join(dir, "tribe.sock")
+    const calls: Array<{ method: string; params?: Record<string, unknown> }> = []
+    const message = {
+      id: "page-message",
+      type: "request",
+      sender: "@agent/8",
+      recipient: "@fleet",
+      content: "inspect vanished owner",
+      bead_id: null,
+      ref: "ball-controller:v1:owner-epoch:@agent/6:launch-1",
+      request: "ball-rescue:v1:%40agent%2F6:launch-1",
+      reply: null,
+      ts: 123,
+    }
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as { id: number; method: string; params?: Record<string, unknown> }
+          calls.push({ method: request.method, params: request.params })
+          socket.write(
+            `${JSON.stringify({
+              jsonrpc: "2.0",
+              id: request.id,
+              result: {
+                messages: [message],
+                query: {
+                  all: true,
+                  ref_prefix: "ball-controller:v1:",
+                  reply_prefix: "ball-rescue:v1:",
+                },
+              },
+            })}\n`,
+          )
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const result = await runCliAsync(
+        ["log", "--json", "--ref-prefix", "ball-controller:v1:", "--reply-prefix", "ball-rescue:v1:", "--all"],
+        {
+          ...process.env,
+          TRIBE_SOCKET: socketPath,
+          TRIBE_NO_AUTOSTART: "1",
+        },
+      )
+
+      expect(result, result.stderr).toMatchObject({ code: 0, stderr: "" })
+      expect(JSON.parse(result.stdout)).toEqual({
+        messages: [message],
+        query: { all: true, ref_prefix: "ball-controller:v1:", reply_prefix: "ball-rescue:v1:" },
+      })
+      expect(calls).toEqual([
+        {
+          method: "cli_log",
+          params: { all: true, ref_prefix: "ball-controller:v1:", reply_prefix: "ball-rescue:v1:" },
+        },
+      ])
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it("inbox-drain forwards an inherited-fd operator capability and ignores env secret text", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-drain-"))
     const socketPath = join(dir, "tribe.sock")

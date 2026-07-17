@@ -56,6 +56,7 @@ describe("registerSendCommands", () => {
         "--type",
         "--summary",
         "--delivery",
+        "--ref",
         "--reply",
         "--request",
         "--fanout",
@@ -97,6 +98,7 @@ describe("registerSendCommands", () => {
         message: "please handle",
         type: "request",
         delivery: "pull",
+        ref: "ball-controller:v1:rescue-page:@agent%2F8:epoch-1",
         request: true,
         fanout: "all",
         expiresInMs: 600_000,
@@ -106,6 +108,7 @@ describe("registerSendCommands", () => {
       message: "please handle",
       type: "request",
       delivery: "pull",
+      ref: "ball-controller:v1:rescue-page:@agent%2F8:epoch-1",
       request: true,
       fanout: "all",
       expires_in_ms: 600_000,
@@ -214,7 +217,19 @@ describe("registerSendCommands", () => {
           } else if (request.method === "tribe.pending" && request.params?.close === "req-123") {
             const closed = pendingOpen ? 1 : 0
             pendingOpen = false
-            result = { structuredContent: { owner: "@chief", request_id: "req-123", closed } }
+            result = {
+              structuredContent: {
+                owner: "@chief",
+                request_id: "req-123",
+                closed,
+                ...(closed === 0
+                  ? {
+                      warning:
+                        "reply/close req-123 closed 0 rows; balls owned by @chief: req-other (message msg-other, from @agent/4)",
+                    }
+                  : {}),
+              },
+            }
           } else if (request.method === "tribe.send") {
             pendingOpen = false
             const message = request.params?.message
@@ -280,8 +295,11 @@ describe("registerSendCommands", () => {
       // A later explicit/manual close therefore returns 0; that must not make
       // the earlier reply CLI retroactively print a false failure.
       const manualClose = await runCli(["pending", "--owner", "@chief", "--close", "req-123"])
-      expect(manualClose).toMatchObject({ code: 0, stderr: "" })
+      expect(manualClose.code).toBe(0)
       expect(manualClose.stdout).toContain("Closed 0 pending request(s) for @chief: req-123")
+      expect(manualClose.stderr).toContain(
+        "reply/close req-123 closed 0 rows; balls owned by @chief: req-other (message msg-other, from @agent/4)",
+      )
 
       pendingOpen = true
       const unproven = await runReply("unproven")

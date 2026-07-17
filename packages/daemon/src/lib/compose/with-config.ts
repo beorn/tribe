@@ -29,8 +29,6 @@ export interface TribeConfig {
   readonly summaryPollMs: number
   readonly summarizerMode: SummarizerMode
   readonly recallEnabled: boolean
-  /** Optional L2 escalation destination for LLM judgment. No implicit role default. */
-  readonly ballEscalationTarget?: string | null
   /** Optional capability for unauthenticated operator-only mutating RPCs. */
   readonly operatorCapability?: string | null
 }
@@ -93,7 +91,6 @@ export function withConfig<T extends BaseTribe>(opts: ConfigOpts = {}): (t: T) =
       summaryPollMs: Math.max(500, parseInt(String(daemonArgs["summary-poll-ms"]), 10) || 120_000),
       summarizerMode: resolveSummarizerMode(String(daemonArgs["summarizer-model"])),
       recallEnabled: !daemonArgs["no-lore"],
-      ballEscalationTarget: process.env.TRIBE_BALL_ESCALATION_TARGET?.trim() || null,
       operatorCapability: readOperatorCapabilityFromInheritedFd(process.env.TRIBE_OPERATOR_CAPABILITY_FD),
     }
 

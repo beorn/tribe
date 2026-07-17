@@ -97,9 +97,7 @@ describe("runtime rename persists across reconnect/restart (@ag/tribe/21454)", (
     expect(reg1.name).toBe("@chief/next")
 
     // Runtime rename — the successor handoff's release step.
-    const renamed = parseToolJson<{ renamed: boolean; new_name: string }>(
-      await daemon1.rename("conn-gen1", "@chief"),
-    )
+    const renamed = parseToolJson<{ renamed: boolean; new_name: string }>(await daemon1.rename("conn-gen1", "@chief"))
     expect(renamed).toMatchObject({ renamed: true, new_name: "@chief" })
 
     // Daemon restarts (pin landing). Old process gone; same sqlite file. The
@@ -207,9 +205,9 @@ describe("runtime rename persists across reconnect/restart (@ag/tribe/21454)", (
     )
     expect(regA2.name).toBe("@chief/next")
     // And the successor is untouched.
-    const bRow = daemon.db
-      .prepare("SELECT name FROM sessions WHERE launch_id = 'launch-new-chief'")
-      .get() as { name: string } | null
+    const bRow = daemon.db.prepare("SELECT name FROM sessions WHERE launch_id = 'launch-new-chief'").get() as {
+      name: string
+    } | null
     expect(bRow?.name).toBe("@chief")
     // The refusal is LOUD — the guard names the launch and the kept name.
     expect(warnSpy.mock.calls.map((call) => call.join(" ")).join("\n")).toContain(
@@ -241,7 +239,9 @@ describe("runtime rename persists across reconnect/restart (@ag/tribe/21454)", (
       await daemon1.register("conn-legacy", { name: "roving-cli", pid: 5502, project: "/repo/hh" }),
     )
     parseToolJson<{ renamed: boolean }>(await daemon1.rename("conn-legacy", "roving-cli-2"))
-    const persisted = daemon1.db.prepare("SELECT launch_id, name FROM launch_renames ORDER BY launch_id").all() as Array<{
+    const persisted = daemon1.db
+      .prepare("SELECT launch_id, name FROM launch_renames ORDER BY launch_id")
+      .all() as Array<{
       launch_id: string
       name: string
     }>

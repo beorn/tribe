@@ -192,7 +192,7 @@ describe("Tribe command descriptors", () => {
     expect(pending.mcp.inputSchema.properties?.all).toMatchObject({ type: "boolean" })
     expect(pending.mcp.inputSchema.properties?.expired).toMatchObject({
       type: "boolean",
-      description: expect.stringMatching(/expired/i),
+      description: expect.stringMatching(/deadline.*passed/i),
     })
     expect(pending.mcp.inputSchema.properties?.prune).toMatchObject({
       type: "boolean",
@@ -203,6 +203,7 @@ describe("Tribe command descriptors", () => {
       owners: { type: "array" },
       owner_count: { type: "number" },
       oldest_age_ms: { type: "number" },
+      warning: { type: "string", description: expect.stringMatching(/closed 0|matching.*ball/i) },
     })
     expect(visibleCliProjection(pending).options?.map((option) => option.name)).toEqual(
       expect.arrayContaining(["all", "expired", "json"]),

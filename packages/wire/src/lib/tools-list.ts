@@ -16,7 +16,7 @@ import {
 
 function inboxWaitDescription(capability: TribeDeliveryCapability): string {
   const base =
-    "Long-poll the actionable inbox for a session until a request/query/assign/verdict/ball:reminder direct message arrives or the timeout elapses. Direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session."
+    "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session."
   if (capability.idleStrategy === "cli-inbox-wait") {
     return `${deliveryCapabilityInstruction(capability)} ${base} This MCP tool remains callable for short diagnostic waits, but the advertised idle wait primitive is CLI because this host may cap long-running MCP calls.`
   }

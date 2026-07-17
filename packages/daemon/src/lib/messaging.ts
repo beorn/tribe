@@ -22,7 +22,7 @@ import { AUTO_TRACK_TYPES_SET } from "./database.ts"
  * below. The two axes are independent: a broadcast can be `push`
  * (channel-delivered) or `pull` (ambient inbox-only), and a direct message
  * defaults to `push`. `inbox.wait` actionability is a narrower type-level
- * contract (`request` / `query` / `assign` / `verdict` / `ball:reminder`).
+ * contract (`request` / `query` / `assign` / `verdict`).
  */
 export type MessageKind = "direct" | "broadcast" | "event"
 
@@ -125,12 +125,11 @@ export type BallTracker = {
    * Ignored if `request` is not set.
    */
   fanout?: "first" | "all"
-  /** Time from message commit until escalation. Defaults to 10 minutes for
-   * newly tracked balls; legacy rows remain unbounded with NULL expires_at. */
+  /** Optional sender-declared deadline fact. Tribe stores it but does not
+   * interpret it as escalation, reassignment, or ownership settlement. */
   expiresInMs?: number
 }
 
-export const DEFAULT_BALL_TTL_MS = 10 * 60_000
 export const MAX_BALL_TTL_MS = 24 * 60 * 60_000
 
 /**
@@ -205,8 +204,12 @@ export function sendMessage(
   }
   const requestId = explicitRequest === true ? id : (explicitRequest ?? (autoTrackActionable ? id : null))
   const replyId = ballTracker.reply ?? null
-  const expiresInMs = ballTracker.expiresInMs ?? DEFAULT_BALL_TTL_MS
-  if (requestId && (!Number.isSafeInteger(expiresInMs) || expiresInMs <= 0 || expiresInMs > MAX_BALL_TTL_MS)) {
+  const expiresInMs = ballTracker.expiresInMs
+  if (
+    requestId &&
+    expiresInMs !== undefined &&
+    (!Number.isSafeInteger(expiresInMs) || expiresInMs <= 0 || expiresInMs > MAX_BALL_TTL_MS)
+  ) {
     throw new Error(`tracked request TTL must be a positive integer no greater than ${MAX_BALL_TTL_MS}ms`)
   }
   // Message persistence and semantic tracker ownership are one commit. A
@@ -222,9 +225,6 @@ export function sendMessage(
           }) as { request_id: string; fanout: string; expires_at: number | null } | null)
         : null
     const canonicalReplyId = pendingReply?.request_id ?? replyId
-    const pendingReplyExpiresAt = pendingReply?.expires_at
-    const pendingReplyExpired =
-      pendingReplyExpiresAt !== null && pendingReplyExpiresAt !== undefined && pendingReplyExpiresAt <= ts
     let tracker = canonicalReplyId ? { request_id: canonicalReplyId, closed: 0 } : undefined
     const result = ctx.stmts.insertMessage.run({
       $id: id,
@@ -254,16 +254,15 @@ export function sendMessage(
           $recipient: recipient,
           $sender: sender,
           $opened_at: ts,
-          $expires_at: ts + expiresInMs,
+          $expires_at: expiresInMs === undefined ? null : ts + expiresInMs,
           $message_id: id,
           $fanout: ballTracker.fanout ?? "first",
         })
       }
-      // A reply/defer is an answer only while the SLA lease is active. Once
-      // expires_at is reached, preserve the row for the deadline sweep so the
-      // typed ball:expired exception and configured escalation cannot be
-      // silently erased in the cadence gap. The late reply is still journaled.
-      if (canonicalReplyId && !pendingReplyExpired) {
+      // Deadlines are facts, not daemon-owned lifecycle policy. Any explicit
+      // reply settles the open ownership row even when its declared deadline
+      // has passed; L3 controllers may already have journaled an exception.
+      if (canonicalReplyId) {
         if (pendingReply?.fanout === "first") {
           const closed = ctx.stmts.closePendingRequestAll.run({ $request_id: canonicalReplyId })
           tracker = { request_id: canonicalReplyId, closed: closed.changes ?? 0 }
@@ -315,8 +314,7 @@ export function sendMessage(
  * The reframe: recovery never touches the ambient session cursor. A durable
  * `mailbox_cursors` row keyed by the RECIPIENT NAME tracks the highest
  * acknowledged actionable rowid; `handleFetch`'s default drain injects the
- * unacknowledged actionable directs (request / query / verdict / assign /
- * ball:reminder —
+ * unacknowledged actionable directs (request / query / verdict / assign —
  * `ACTIONABLE_TYPES` in database.ts) ahead of the ambient window and
  * acknowledges exactly what it returns. Join/rename/takeover only need to
  * COUNT the outstanding actionables (below) and nudge the client to drain.

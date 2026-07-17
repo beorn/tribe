@@ -1394,12 +1394,6 @@ export const healthMonitorPlugin: TribePluginApi = {
       try {
         const { metrics, pidToParent } = await collectFullMetrics()
         const sessions = api.getActiveSessions()
-        const deadlines = api.processPendingBallDeadlines?.()
-        if (deadlines && deadlines.nudged + deadlines.expired + deadlines.deadOwnerWarnings > 0) {
-          log.info?.(
-            `pending-ball deadlines: nudged=${deadlines.nudged} expired=${deadlines.expired} dead-owner-warnings=${deadlines.deadOwnerWarnings}`,
-          )
-        }
         // Pass active-agent count so process-count threshold scales with the
         // number of connected sessions; alarms tuned for solo dev shouldn't
         // fire on a healthy 4-agent baseline.

@@ -84,7 +84,7 @@ export function deliveryCapabilityInstruction(capability: TribeDeliveryCapabilit
     return `Delivery capability: ${capability.summary}. Use the host stream for idle delivery; use MCP tools for join, send, fetch snapshots, pending, health, and lifecycle.`
   }
   if (capability.idleStrategy === "cli-inbox-wait") {
-    return `Delivery capability: ${capability.summary}. Use one max-window CLI wait and let it return on actionable inbox activity (type=request/query/assign/verdict/ball:reminder) or timeout; do not simulate long-polling with repeated short waits. MCP remains the authority for join, fetch, send, pending, health, and lifecycle.`
+    return `Delivery capability: ${capability.summary}. Use one max-window CLI wait and let it return on actionable inbox activity (type=request/query/assign/verdict) or timeout; do not simulate long-polling with repeated short waits. MCP remains the authority for join, fetch, send, pending, health, and lifecycle.`
   }
-  return `Delivery capability: ${capability.summary}. Use one max-window MCP inbox.wait only when the host honors the requested timeout; it wakes on actionable inbox activity (type=request/query/assign/verdict/ball:reminder), not notify/status/response. Do not simulate long-polling with repeated short waits.`
+  return `Delivery capability: ${capability.summary}. Use one max-window MCP inbox.wait only when the host honors the requested timeout; it wakes on actionable inbox activity (type=request/query/assign/verdict), not notify/status/response. Do not simulate long-polling with repeated short waits.`
 }

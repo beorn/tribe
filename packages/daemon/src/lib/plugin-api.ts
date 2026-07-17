@@ -100,7 +100,7 @@ export interface TribeClientApi {
   /**
    * Count + oldest-timestamp of actionable DMs addressed to `sessionName` that
    * the session has NOT drained via `tribe.fetch` yet (rowid > last_inbox_pull_seq).
-   * Actionable = `type IN (request, query, verdict, assign, ball:reminder)` and
+   * Actionable = `type IN (request, query, verdict, assign)` and
    * `kind='direct'`.
    * Returns `{count: 0, oldestTs: 0}` when no unread or the session is unknown.
    *
@@ -110,12 +110,4 @@ export interface TribeClientApi {
    * cursor is the relay-pattern signal we want to catch.
    */
   getUnreadDms(sessionName: string): { count: number; oldestTs: number }
-
-  /** Run one idempotent pending-ball deadline cycle. The health monitor calls
-   * this on its existing wake; no second timer or ownership store is created. */
-  processPendingBallDeadlines?(): {
-    nudged: number
-    expired: number
-    deadOwnerWarnings: number
-  }
 }
