@@ -100,7 +100,8 @@ export interface TribeClientApi {
   /**
    * Count + oldest-timestamp of actionable DMs addressed to `sessionName` that
    * the session has NOT drained via `tribe.fetch` yet (rowid > last_inbox_pull_seq).
-   * Actionable = `type IN (request, query, verdict, assign)` and `kind='direct'`.
+   * Actionable = `type IN (request, query, verdict, assign, ball:reminder)` and
+   * `kind='direct'`.
    * Returns `{count: 0, oldestTs: 0}` when no unread or the session is unknown.
    *
    * Used by the chief-silent watchdog (chief-silent-watchdog-relay-pattern-detection):

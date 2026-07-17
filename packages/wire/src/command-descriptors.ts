@@ -84,7 +84,7 @@ const ATTENTION_SCHEMA = {
     actionable_unread: {
       type: "array",
       description:
-        "All unacknowledged direct request/query/verdict/assign messages for this recipient, independent of the event limit.",
+        "All unacknowledged direct request/query/verdict/assign/ball:reminder messages for this recipient, independent of the event limit.",
       items: { type: "object", additionalProperties: true },
     },
     pending_balls: {

@@ -128,7 +128,7 @@ export function openDatabase(path: string): Database {
 
   // 19442 undead reframe — durable per-RECIPIENT actionable mailbox. One row
   // per mailbox name; `last_actionable_seq` is the highest actionable rowid
-  // (direct request/query/verdict/assign) acknowledged for that name. Keyed by
+  // (direct request/query/verdict/assign/ball:reminder) acknowledged for that name. Keyed by
   // recipient — NOT session — so rename/rejoin/takeover retain the mailbox and
   // recovery never needs to rewind a session's ambient pull cursor.
   db.run(`CREATE TABLE IF NOT EXISTS mailbox_cursors (
