@@ -159,7 +159,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           request: {
             oneOf: [{ type: "string" }, { type: "boolean" }],
             description:
-              "Direct request/query/assign messages automatically open a semantic recipient-owned ball using the message id. Verdict stays wakeable but does not auto-mint. Pass `true` to track any direct message type, or a non-empty string to override the request id. Recipient(s) own the ball until `reply=<id>` arrives; this is not a transport delivery ACK. See @km/tribe/message-ball-tracker.",
+              "Direct request/query/assign messages automatically open a semantic recipient-owned ball using the message id. Verdict stays wakeable but does not auto-mint. Pass `true` to track any direct message type, or a non-empty string to override the request id. Recipient(s) own the ball until `reply=<id>` arrives; this is not a transport delivery ACK.",
           },
           reply: {
             type: "string",
@@ -284,12 +284,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     id: "tribe.pending",
     title: "Pending Requests",
     description:
-      "Ball-tracker query: list every open request where the given owner is responsible for replying, or filter to rows whose declared deadline passed. A passed deadline never settles ownership. Default owner is the caller's session. See @km/tribe/message-ball-tracker.",
+      "Ball-tracker query: list every open request where the given owner is responsible for replying, or filter to rows whose declared deadline passed. A passed deadline never settles ownership. Default owner is the caller's session.",
     lifetime: "live-session",
     mcp: {
       name: "pending",
       description:
-        "Ball-tracker query: list every open request where the given owner is responsible for replying, or filter to rows whose declared deadline passed. A passed deadline never settles ownership. Default owner is the caller's session. See @km/tribe/message-ball-tracker.",
+        "Ball-tracker query: list every open request where the given owner is responsible for replying, or filter to rows whose declared deadline passed. A passed deadline never settles ownership. Default owner is the caller's session.",
       inputSchema: {
         type: "object",
         properties: {
@@ -355,7 +355,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     cli: available({
       name: "pending",
       description:
-        "Ball-tracker query: list every open request where the given owner is responsible for replying, or filter to rows whose declared deadline passed. A passed deadline never settles ownership. Default owner is the caller's session. See @km/tribe/message-ball-tracker.",
+        "Ball-tracker query: list every open request where the given owner is responsible for replying, or filter to rows whose declared deadline passed. A passed deadline never settles ownership. Default owner is the caller's session.",
       lifetime: "one-shot",
       mapsToMcp: "pending",
       options: [
@@ -613,8 +613,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           },
           reconciler: {
             type: "object",
-            description:
-              "Optional chief-reconciler snapshot (opt-in via TRIBE_RECONCILER_SNAPSHOT env var). Field shape mirrors @km/tribe/stable-coordination L4.",
+            description: "Optional chief-reconciler snapshot (opt-in via TRIBE_RECONCILER_SNAPSHOT env var).",
             additionalProperties: true,
           },
         },
@@ -959,12 +958,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     id: "tribe.lifecycle",
     title: "Lifecycle",
     description:
-      "Read the latest tool-call-lifecycle snapshot for a session (or all sessions). Diagnostic surface for chief / observers - see @km/infra/15630-stuck-agent-observability S4.",
+      "Read the latest tool-call-lifecycle snapshot for a session (or all sessions). Diagnostic surface for chief / observers",
     lifetime: "diagnostic",
     mcp: {
       name: "lifecycle",
       description:
-        "Read the latest tool-call-lifecycle snapshot for a session (or all sessions). Diagnostic surface for chief / observers - see @km/infra/15630-stuck-agent-observability S4.",
+        "Read the latest tool-call-lifecycle snapshot for a session (or all sessions). Diagnostic surface for chief / observers",
       inputSchema: {
         type: "object",
         properties: {

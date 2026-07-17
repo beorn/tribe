@@ -187,7 +187,7 @@ const REMOVED_TRIBE_METHODS = new Set([
   "tribe.claim-chief",
   "tribe.release-chief",
 ])
-const REMOVED_TRIBE_METHOD_HINT = "use send/fetch/filter — see hub/bearly/design/tribe-message-bus.md"
+const REMOVED_TRIBE_METHOD_HINT = "use send/fetch/filter — see docs/architecture.md"
 
 export function isRemovedTribeMethod(name: string): boolean {
   return REMOVED_TRIBE_METHODS.has(name)
