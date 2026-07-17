@@ -342,6 +342,10 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
 
   it("keeps deadline-passed balls open across pending, attention, and health while exposing the filtered view", () => {
     const { db, stmts } = setup()
+    // The actionable-response SLA projection is opt-in via TRIBE_SLA_ROLE; name
+    // @chief so tribe.health() surfaces the @chief open-ball count below.
+    const savedSlaRole = process.env.TRIBE_SLA_ROLE
+    process.env.TRIBE_SLA_ROLE = "@chief"
     try {
       const now = Date.now()
       const ctx = createTribeContext({
@@ -379,7 +383,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         pending_balls?: { count: number }
         cadence?: {
           open_balls: { count: number }
-          chief_actionable_response: { open: { count: number } }
+          role_actionable_response: { open: { count: number } }
         }
       }
 
@@ -389,9 +393,11 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       expect(attention.pending_balls.map((ball) => ball.request_id)).toEqual(["expired-review", "active-review"])
       expect(health.pending_balls?.count).toBe(2)
       expect(health.cadence?.open_balls.count).toBe(2)
-      expect(health.cadence?.chief_actionable_response.open.count).toBe(2)
+      expect(health.cadence?.role_actionable_response.open.count).toBe(2)
     } finally {
       db.close()
+      if (savedSlaRole === undefined) delete process.env.TRIBE_SLA_ROLE
+      else process.env.TRIBE_SLA_ROLE = savedSlaRole
     }
   })
 

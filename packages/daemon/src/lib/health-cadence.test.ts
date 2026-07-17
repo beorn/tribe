@@ -116,8 +116,17 @@ describe("20876 Tribe health cadence", () => {
   let db: OpenDatabase
   let stmts: TribeStatements
   let now: number
+  let savedSlaRole: string | undefined
+  let savedSlaSeconds: string | undefined
 
   beforeEach(() => {
+    // The actionable-response SLA is opt-in via TRIBE_SLA_ROLE; neutralize any
+    // ambient env so env-reading paths (tribe.health handler) stay deterministic.
+    savedSlaRole = process.env.TRIBE_SLA_ROLE
+    savedSlaSeconds = process.env.TRIBE_SLA_SECONDS
+    delete process.env.TRIBE_SLA_ROLE
+    delete process.env.TRIBE_SLA_SECONDS
+
     tmpDir = mkdtempSync(join(tmpdir(), "tribe-health-cadence-"))
     db = openDatabase(join(tmpDir, "tribe.db"))
     stmts = createStatements(db)
@@ -168,6 +177,10 @@ describe("20876 Tribe health cadence", () => {
   afterEach(() => {
     db.close()
     rmSync(tmpDir, { recursive: true, force: true })
+    if (savedSlaRole === undefined) delete process.env.TRIBE_SLA_ROLE
+    else process.env.TRIBE_SLA_ROLE = savedSlaRole
+    if (savedSlaSeconds === undefined) delete process.env.TRIBE_SLA_SECONDS
+    else process.env.TRIBE_SLA_SECONDS = savedSlaSeconds
   })
 
   it("projects deterministic latency, lag, ball, and growth evidence from existing tables", () => {
@@ -175,6 +188,7 @@ describe("20876 Tribe health cadence", () => {
       now,
       liveSessionNames: ["@agent/5"],
       dbGrowthWarningBytes: 1,
+      slaRole: "@chief",
     }
 
     const first = projectHealthCadence(db, options)
@@ -226,7 +240,7 @@ describe("20876 Tribe health cadence", () => {
     expect(first.database.growth_7d.estimated_bytes).toBeGreaterThan(1)
     expect(first.warnings).toEqual([
       expect.stringMatching(/member.*request.*p95.*60m/i),
-      expect.stringMatching(/Chief actionable response.*completed.*2m.*target.*60s/i),
+      expect.stringMatching(/@chief actionable response.*completed.*2m.*target.*60s/i),
       expect.stringMatching(/@agent\/5.*6.*8d/i),
       expect.stringMatching(/7d.*growth.*archive\/GC/i),
     ])
@@ -251,9 +265,10 @@ describe("20876 Tribe health cadence", () => {
       $fanout: "first",
     })
 
-    const cadence = projectHealthCadence(db, { now, liveSessionNames: ["@chief", "@agent/5"] })
+    const cadence = projectHealthCadence(db, { now, liveSessionNames: ["@chief", "@agent/5"], slaRole: "@chief" })
 
-    expect(cadence.chief_actionable_response).toEqual({
+    expect(cadence.role_actionable_response).toEqual({
+      role: "@chief",
       target_ms: MINUTE,
       status: "breached",
       completed: {
@@ -272,8 +287,8 @@ describe("20876 Tribe health cadence", () => {
     })
     expect(cadence.warnings).toEqual(
       expect.arrayContaining([
-        expect.stringMatching(/Chief actionable response.*completed.*2m.*target.*60s/i),
-        expect.stringMatching(/Chief actionable response.*open.*2m.*target.*60s/i),
+        expect.stringMatching(/@chief actionable response.*completed.*2m.*target.*60s/i),
+        expect.stringMatching(/@chief actionable response.*open.*2m.*target.*60s/i),
       ]),
     )
   })
@@ -311,5 +326,64 @@ describe("20876 Tribe health cadence", () => {
         expect.stringMatching(/@agent\/5.*inbox lag|inbox lag.*@agent\/5/i),
       ]),
     )
+  })
+
+  it("omits the actionable-response SLA projection and its warnings when no role is configured", () => {
+    const cadence = projectHealthCadence(db, {
+      now,
+      liveSessionNames: ["@chief", "@agent/5"],
+      dbGrowthWarningBytes: 1,
+      slaRole: null,
+    })
+
+    // Standalone purity: the daemon carries no @chief/SLA concept unless opted in.
+    expect(cadence.role_actionable_response).toBeUndefined()
+    expect(cadence.warnings.some((warning) => /actionable response/i.test(warning))).toBe(false)
+    // The generic (host-agnostic) projections still report.
+    expect(cadence.response_latency.count).toBe(5)
+    expect(cadence.open_balls).toEqual({ count: 1, oldest_age_ms: 3 * HOUR })
+  })
+
+  it("projects the actionable-response SLA against a custom role with a custom target when opted in", () => {
+    // @agent/5 sent the four request replies (5m/10m/40m/60m) and owns the one
+    // open ball; a 30m target splits them 2 within / 2 missed.
+    const cadence = projectHealthCadence(db, {
+      now,
+      liveSessionNames: ["@agent/5"],
+      slaRole: "@agent/5",
+      slaTargetMs: 30 * MINUTE,
+    })
+
+    expect(cadence.role_actionable_response).toEqual({
+      role: "@agent/5",
+      target_ms: 30 * MINUTE,
+      status: "breached",
+      completed: {
+        count: 4,
+        p50_ms: 10 * MINUTE,
+        p95_ms: 60 * MINUTE,
+        max_ms: 60 * MINUTE,
+        within_target: 2,
+        missed_target: 2,
+      },
+      open: {
+        count: 1,
+        oldest_age_ms: 3 * HOUR,
+        over_target_count: 1,
+      },
+    })
+    expect(cadence.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/@agent\/5 actionable response.*completed.*1h.*target.*1800s.*missed=2\/4/i),
+        expect.stringMatching(/@agent\/5 actionable response.*open.*3h.*target.*1800s.*overdue=1\/1/i),
+      ]),
+    )
+  })
+
+  it("reads TRIBE_SLA_ROLE from the environment when no explicit option is passed", () => {
+    process.env.TRIBE_SLA_ROLE = "@chief"
+    const cadence = projectHealthCadence(db, { now, liveSessionNames: ["@chief", "@agent/5"] })
+    expect(cadence.role_actionable_response?.role).toBe("@chief")
+    expect(cadence.role_actionable_response?.target_ms).toBe(MINUTE)
   })
 })

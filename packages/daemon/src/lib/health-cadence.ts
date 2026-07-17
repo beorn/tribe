@@ -6,12 +6,35 @@ const HOUR = 60 * MINUTE
 const DAY = 24 * HOUR
 const RESPONSE_WARNING_MS = 30 * MINUTE
 const CURSOR_WARNING_MS = 30 * MINUTE
-const CHIEF_ACTIONABLE_RESPONSE_TARGET_MS = MINUTE
+const DEFAULT_SLA_TARGET_MS = MINUTE
+
+// ---------------------------------------------------------------------------
+// Actionable-response SLA — OPT-IN, host-agnostic.
+//
+// A coordination fleet (e.g. hh's chief/agent tribe) can track how promptly a
+// specific coordinator seat answers actionable work by naming that seat in the
+// `TRIBE_SLA_ROLE` env var (value is a session NAME, e.g. `@chief`). When it is
+// unset the whole `role_actionable_response` projection — and its threshold
+// warnings — are ABSENT from tribe.health(), so the daemon stays free of any
+// project-specific workflow concept (matches packages/daemon/README.md §
+// Boundary and the `TRIBE_RECONCILER_SNAPSHOT` opt-in precedent).
+//
+// `TRIBE_SLA_SECONDS` optionally overrides the default 60s target.
+// ---------------------------------------------------------------------------
 
 export type HealthCadenceOptions = {
   now: number
   liveSessionNames: string[]
   dbGrowthWarningBytes?: number | null
+  /**
+   * Session NAME whose actionable-response SLA to project (e.g. `@chief`).
+   * `undefined` → fall back to `process.env.TRIBE_SLA_ROLE`; `null`/empty →
+   * feature off. This is the injection seam that keeps tests deterministic
+   * without touching the process environment.
+   */
+  slaRole?: string | null
+  /** Explicit SLA target in ms; `undefined` → `TRIBE_SLA_SECONDS` or the 60s default. */
+  slaTargetMs?: number | null
 }
 
 type LatencySummary = {
@@ -26,20 +49,28 @@ type ResponseLatencyGroup = LatencySummary & {
   message_type: string
 }
 
+type ActionableCompletedSummary = LatencySummary & {
+  within_target: number
+  missed_target: number
+}
+
+type ActionableOpenSummary = {
+  count: number
+  oldest_age_ms: number
+  over_target_count: number
+}
+
+export type RoleActionableResponseProjection = {
+  role: string
+  target_ms: number
+  status: "ok" | "breached"
+  completed: ActionableCompletedSummary
+  open: ActionableOpenSummary
+}
+
 export type HealthCadenceProjection = {
-  chief_actionable_response: {
-    target_ms: number
-    status: "ok" | "breached"
-    completed: LatencySummary & {
-      within_target: number
-      missed_target: number
-    }
-    open: {
-      count: number
-      oldest_age_ms: number
-      over_target_count: number
-    }
-  }
+  /** Present only when an actionable-response SLA role is configured (opt-in). */
+  role_actionable_response?: RoleActionableResponseProjection
   response_latency: LatencySummary & {
     window_ms: number
     by_role_and_type: ResponseLatencyGroup[]
@@ -71,6 +102,7 @@ export type HealthCadenceProjection = {
 
 type ResponseLatencyRow = {
   role: string
+  sender: string
   message_type: string
   latency_ms: number
 }
@@ -102,6 +134,11 @@ function durationLabel(ms: number): string {
   return `${Math.floor(ms / 1_000)}s`
 }
 
+/** SLA targets are naturally sub-minute, so render them in whole seconds. */
+function targetLabel(ms: number): string {
+  return `${Math.round(ms / 1_000)}s`
+}
+
 function ageFrom(now: number, oldestTs: number | null): number {
   return oldestTs === null ? 0 : Math.max(0, now - oldestTs)
 }
@@ -111,7 +148,7 @@ function responseLatencyProjection(
   now: number,
 ): {
   summary: HealthCadenceProjection["response_latency"]
-  chiefCompleted: HealthCadenceProjection["chief_actionable_response"]["completed"]
+  rows: ResponseLatencyRow[]
   warnings: string[]
 } {
   const rows = db
@@ -123,6 +160,7 @@ function responseLatencyProjection(
       )
       SELECT
         COALESCE(s.role, 'unknown') AS role,
+        response_message.sender AS sender,
         request_message.type AS message_type,
         response_message.ts - request_message.ts AS latency_ms
       FROM journal response_message
@@ -158,7 +196,6 @@ function responseLatencyProjection(
       (group) =>
         `response latency role=${group.role} type=${group.message_type} p95=${Math.floor(group.p95_ms! / MINUTE)}m exceeds 30m (n=${group.count})`,
     )
-  const chiefLatencies = rows.filter((row) => row.role === "chief").map((row) => row.latency_ms)
 
   return {
     summary: {
@@ -166,19 +203,36 @@ function responseLatencyProjection(
       ...summarizeLatencies(rows.map((row) => row.latency_ms)),
       by_role_and_type: byRoleAndType,
     },
-    chiefCompleted: {
-      ...summarizeLatencies(chiefLatencies),
-      within_target: chiefLatencies.filter((latency) => latency < CHIEF_ACTIONABLE_RESPONSE_TARGET_MS).length,
-      missed_target: chiefLatencies.filter((latency) => latency >= CHIEF_ACTIONABLE_RESPONSE_TARGET_MS).length,
-    },
+    rows,
     warnings,
   }
 }
 
-function chiefOpenActionableProjection(
-  db: Database,
-  now: number,
-): HealthCadenceProjection["chief_actionable_response"]["open"] {
+/**
+ * Completed actionable responses SENT BY the SLA role in the 24h window.
+ *
+ * Keyed on the responder's session NAME (`row.sender === role`) so the completed
+ * and open halves both pivot on the single `TRIBE_SLA_ROLE` name — the open half
+ * matches `recipient = role`. (The pre-parameterization code keyed completed on
+ * the `sessions.role` column string `"chief"` while open matched the recipient
+ * name `"@chief"`; those two encodings can't be driven by one env var, so they
+ * are reconciled onto the name. For `@chief` this yields identical numbers,
+ * since the chief seat both is named `@chief` and holds role `chief`.)
+ */
+function actionableCompletedSummary(
+  rows: ResponseLatencyRow[],
+  role: string,
+  targetMs: number,
+): ActionableCompletedSummary {
+  const latencies = rows.filter((row) => row.sender === role).map((row) => row.latency_ms)
+  return {
+    ...summarizeLatencies(latencies),
+    within_target: latencies.filter((latency) => latency < targetMs).length,
+    missed_target: latencies.filter((latency) => latency >= targetMs).length,
+  }
+}
+
+function actionableOpenSummary(db: Database, now: number, role: string, targetMs: number): ActionableOpenSummary {
   const row = db
     .prepare(`
       SELECT
@@ -188,9 +242,9 @@ function chiefOpenActionableProjection(
           CASE WHEN $now - opened_at >= $target THEN 1 ELSE 0 END
         ), 0) AS over_target_count
       FROM pending_request
-      WHERE recipient = '@chief'
+      WHERE recipient = $role
     `)
-    .get({ $now: now, $target: CHIEF_ACTIONABLE_RESPONSE_TARGET_MS }) as {
+    .get({ $now: now, $target: targetMs, $role: role }) as {
     count: number
     oldest_opened_at: number | null
     over_target_count: number
@@ -202,31 +256,36 @@ function chiefOpenActionableProjection(
   }
 }
 
-function chiefActionableResponseProjection(
+function roleActionableResponseProjection(
   db: Database,
   now: number,
-  completed: HealthCadenceProjection["chief_actionable_response"]["completed"],
+  rows: ResponseLatencyRow[],
+  role: string,
+  targetMs: number,
 ): {
-  projection: HealthCadenceProjection["chief_actionable_response"]
+  projection: RoleActionableResponseProjection
   warnings: string[]
 } {
-  const open = chiefOpenActionableProjection(db, now)
+  const completed = actionableCompletedSummary(rows, role, targetMs)
+  const open = actionableOpenSummary(db, now, role, targetMs)
   const warnings: string[] = []
+  const target = targetLabel(targetMs)
   if (completed.missed_target > 0) {
     warnings.push(
-      `Chief actionable response completed p95=${durationLabel(completed.p95_ms ?? 0)}; ` +
-        `target <60s missed=${completed.missed_target}/${completed.count}`,
+      `${role} actionable response completed p95=${durationLabel(completed.p95_ms ?? 0)}; ` +
+        `target <${target} missed=${completed.missed_target}/${completed.count}`,
     )
   }
   if (open.over_target_count > 0) {
     warnings.push(
-      `Chief actionable response open oldest=${durationLabel(open.oldest_age_ms)}; ` +
-        `target <60s overdue=${open.over_target_count}/${open.count}`,
+      `${role} actionable response open oldest=${durationLabel(open.oldest_age_ms)}; ` +
+        `target <${target} overdue=${open.over_target_count}/${open.count}`,
     )
   }
   return {
     projection: {
-      target_ms: CHIEF_ACTIONABLE_RESPONSE_TARGET_MS,
+      role,
+      target_ms: targetMs,
       status: warnings.length === 0 ? "ok" : "breached",
       completed,
       open,
@@ -394,22 +453,54 @@ export function parseDbGrowthWarningBytes(raw: string | undefined): number | nul
   return Number.isFinite(value) && value >= 0 ? Math.floor(value) : null
 }
 
+/** Parse the opt-in `TRIBE_SLA_ROLE` env value into a session name or null. */
+export function parseSlaRole(raw: string | undefined): string | null {
+  if (raw === undefined) return null
+  const trimmed = raw.trim()
+  return trimmed === "" ? null : trimmed
+}
+
+/** Parse the optional `TRIBE_SLA_SECONDS` override into a positive ms target, else null. */
+export function parseSlaTargetMs(raw: string | undefined): number | null {
+  if (raw === undefined || raw.trim() === "") return null
+  const seconds = Number(raw)
+  return Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds * 1_000) : null
+}
+
+function resolveSlaRole(option: string | null | undefined): string | null {
+  if (option !== undefined) return parseSlaRole(option ?? undefined)
+  return parseSlaRole(process.env.TRIBE_SLA_ROLE)
+}
+
+function resolveSlaTargetMs(option: number | null | undefined): number {
+  if (option !== undefined && option !== null) return option
+  return parseSlaTargetMs(process.env.TRIBE_SLA_SECONDS) ?? DEFAULT_SLA_TARGET_MS
+}
+
 export function projectHealthCadence(db: Database, options: HealthCadenceOptions): HealthCadenceProjection {
-  const responseLatency = responseLatencyProjection(db, options.now)
-  const chiefActionableResponse = chiefActionableResponseProjection(db, options.now, responseLatency.chiefCompleted)
-  const inboxLag = inboxLagProjection(db, options.now, options.liveSessionNames)
-  const database = databaseProjection(db, options.now, options.dbGrowthWarningBytes ?? null)
+  const { now } = options
+  const responseLatency = responseLatencyProjection(db, now)
+  const inboxLag = inboxLagProjection(db, now, options.liveSessionNames)
+  const database = databaseProjection(db, now, options.dbGrowthWarningBytes ?? null)
+
+  const slaRole = resolveSlaRole(options.slaRole)
+  const sla =
+    slaRole === null
+      ? null
+      : roleActionableResponseProjection(
+          db,
+          now,
+          responseLatency.rows,
+          slaRole,
+          resolveSlaTargetMs(options.slaTargetMs),
+        )
+
   return {
-    chief_actionable_response: chiefActionableResponse.projection,
+    ...(sla ? { role_actionable_response: sla.projection } : {}),
     response_latency: responseLatency.summary,
-    open_balls: openBallProjection(db, options.now),
+    open_balls: openBallProjection(db, now),
     inbox_lag: inboxLag.rows,
     database: database.projection,
-    warnings: [
-      ...responseLatency.warnings,
-      ...chiefActionableResponse.warnings,
-      ...inboxLag.warnings,
-      ...database.warnings,
-    ],
+    warnings: [...responseLatency.warnings, ...(sla ? sla.warnings : []), ...inboxLag.warnings, ...database.warnings],
   }
 }
