@@ -329,6 +329,37 @@ export function tryInitialRename(ctx: TribeContext, transcriptPath: string | nul
 }
 
 // ---------------------------------------------------------------------------
+// Runtime-rename persistence (@ag/tribe/21454)
+// ---------------------------------------------------------------------------
+
+/**
+ * Write an explicitly chosen session name through to the persisted rename
+ * authority (`launch_renames`), keyed by the session's launch identity. Called
+ * on every successful tribe.rename / explicit tribe.join, so registration can
+ * re-apply the name after a daemon restart or transport reconnect — the
+ * adapter's register params carry the frozen SPAWN-TIME name, and without this
+ * record every re-register silently reverted a runtime rename (the three
+ * chief-rename losses of 2026-07-17).
+ *
+ * A session without a launch identity (legacy transports, ad hoc CLI drains)
+ * has no durable key to re-apply against — nothing is persisted, and its
+ * renames stay connection-scoped exactly as before. That is the contract, not
+ * a fallback.
+ */
+export function persistRuntimeRename(ctx: TribeContext, name: string): void {
+  const row = ctx.db
+    .prepare("SELECT launch_id, launch_parent_pid FROM sessions WHERE id = $id")
+    .get({ $id: ctx.sessionId }) as { launch_id: string | null; launch_parent_pid: number | null } | null
+  if (!row?.launch_id || !row.launch_parent_pid) return
+  ctx.stmts.upsertLaunchRename.run({
+    $launch_id: row.launch_id,
+    $launch_parent_pid: row.launch_parent_pid,
+    $name: name,
+    $now: Date.now(),
+  })
+}
+
+// ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
 
@@ -350,6 +381,10 @@ export function cleanupOldData(ctx: TribeContext): void {
   // opened it. Fresh request/reply balls (well within 7d) are untouched; only the
   // ball-tracker row is removed, never message history.
   const pendingDel = ctx.stmts.gcStalePendingRequests.run({ $cutoff: cutoff })
+  // Runtime-rename authority GC (21454): a launch id is minted per seat launch
+  // and never reused, so records for long-dead launches are inert. 30 days
+  // comfortably outlives any seat; the table stays a handful of rows.
+  ctx.stmts.gcOldLaunchRenames.run({ $cutoff: now_ms - 30 * 24 * 60 * 60 * 1000 })
 
   if ((msgsDel.changes ?? 0) > 0 || (pendingDel.changes ?? 0) > 0) {
     log.info?.(

@@ -137,6 +137,18 @@ export function openDatabase(path: string): Database {
 		updated_at          INTEGER NOT NULL
 	)`)
 
+  // 21454 — persisted runtime-rename authority. An explicit tribe.rename /
+  // tribe.join writes the session's chosen name here keyed by launch identity;
+  // registration re-applies it so a reconnect/daemon-restart re-register (which
+  // carries the frozen spawn-time name) cannot silently revert the identity.
+  db.run(`CREATE TABLE IF NOT EXISTS launch_renames (
+		launch_id         TEXT NOT NULL,
+		launch_parent_pid INTEGER NOT NULL,
+		name              TEXT NOT NULL,
+		renamed_at        INTEGER NOT NULL,
+		PRIMARY KEY (launch_id, launch_parent_pid)
+	)`)
+
   db.run(`CREATE TABLE IF NOT EXISTS retros (
 		id          TEXT PRIMARY KEY,
 		tribe_start INTEGER NOT NULL,
@@ -784,6 +796,23 @@ const MIGRATIONS: readonly Migration[] = [
       db.run("CREATE INDEX IF NOT EXISTS idx_pending_expiry ON pending_request(expires_at)")
     },
   },
+  {
+    version: 21,
+    name: "launch-renames",
+    up(db) {
+      // 21454 — persisted runtime-rename authority keyed by launch identity.
+      // The CREATE TABLE in openDatabase covers fresh installs; existing
+      // databases get the table here. No backfill: a missing row reads as
+      // "no runtime rename ever happened for this launch".
+      db.run(`CREATE TABLE IF NOT EXISTS launch_renames (
+				launch_id         TEXT NOT NULL,
+				launch_parent_pid INTEGER NOT NULL,
+				name              TEXT NOT NULL,
+				renamed_at        INTEGER NOT NULL,
+				PRIMARY KEY (launch_id, launch_parent_pid)
+			)`)
+    },
+  },
 ]
 
 // ---------------------------------------------------------------------------
@@ -927,6 +956,16 @@ export function createStatements(db: Database) {
     checkNameTaken: db.prepare("SELECT id FROM sessions WHERE name = $name AND id != $session_id"),
 
     renameSession: db.prepare("UPDATE sessions SET name = $new_name, updated_at = $now WHERE id = $session_id"),
+
+    // 21454 — runtime-rename write-through + register-time re-application.
+    upsertLaunchRename: db.prepare(
+      "INSERT INTO launch_renames (launch_id, launch_parent_pid, name, renamed_at) VALUES ($launch_id, $launch_parent_pid, $name, $now) " +
+        "ON CONFLICT(launch_id, launch_parent_pid) DO UPDATE SET name = $name, renamed_at = $now",
+    ),
+    getLaunchRename: db.prepare(
+      "SELECT name FROM launch_renames WHERE launch_id = $launch_id AND launch_parent_pid = $launch_parent_pid",
+    ),
+    gcOldLaunchRenames: db.prepare("DELETE FROM launch_renames WHERE renamed_at < $cutoff"),
 
     updateSessionMeta: db.prepare(`
 		UPDATE sessions SET name = $name, role = $role, domains = $domains,

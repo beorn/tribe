@@ -544,7 +544,7 @@ export function withDispatcher<
             // identityToken still stands — only the strictly-stable (pid,
             // cwd) form gets to override the name).
             const pForResolve = pidCwdAdopted ? { ...p, name: pidCwdAdopted.name } : p
-            const resolvedName = resolveName({
+            let resolvedName = resolveName({
               db,
               p: pForResolve,
               adopted,
@@ -556,6 +556,42 @@ export function withDispatcher<
               takenNames,
               clientPid,
             })
+            // 21454 — re-apply a persisted runtime rename. tribe.rename /
+            // explicit tribe.join wrote the session's chosen name through to
+            // `launch_renames` keyed by launch identity; the adapter's register
+            // params still carry the frozen SPAWN-TIME name, so without this a
+            // reconnect or daemon-restart re-register silently reverts the
+            // identity (three chief-rename losses, 2026-07-17). Guard: never
+            // adopt a name held by a LIVE session of a DIFFERENT launch — a
+            // demoted predecessor reconnecting must not displace the current
+            // legitimate holder.
+            if (launchIdentity) {
+              const persistedRename = stmts.getLaunchRename.get({
+                $launch_id: launchIdentity.id,
+                $launch_parent_pid: launchIdentity.parentPid,
+              }) as { name: string } | null
+              if (persistedRename && persistedRename.name !== resolvedName) {
+                const liveHolder = Array.from(clients.values()).find(
+                  (client) => client.id !== connId && client.name === persistedRename.name,
+                )
+                const differentLaunchHolder =
+                  liveHolder !== undefined &&
+                  !(
+                    liveHolder.launchId === launchIdentity.id &&
+                    liveHolder.launchParentPid === launchIdentity.parentPid
+                  )
+                if (differentLaunchHolder) {
+                  log.warn?.(
+                    `persisted rename "${persistedRename.name}" for launch ${launchIdentity.id} is held by a live different-launch session; registering as "${resolvedName}"`,
+                  )
+                } else {
+                  log.info?.(
+                    `re-applied persisted runtime rename: ${resolvedName} → ${persistedRename.name} (launch ${launchIdentity.id})`,
+                  )
+                  resolvedName = persistedRename.name
+                }
+              }
+            }
             const launch = launchIdentity
             const sameLaunchHolder = launch
               ? (Array.from(clients.values()).find(

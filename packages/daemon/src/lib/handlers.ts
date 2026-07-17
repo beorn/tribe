@@ -22,7 +22,7 @@ import {
   type SenderAttribution,
 } from "./messaging.ts"
 import { ACTIONABLE_TYPES_SET, ACTIONABLE_TYPES_SQL, AUTO_TRACK_TYPES_SET } from "./database.ts"
-import { isPidAlive as pidStillAlive, registerSession } from "./session.ts"
+import { isPidAlive as pidStillAlive, persistRuntimeRename, registerSession } from "./session.ts"
 import { gatherCodePin } from "./code-pin.ts"
 import { parseDbGrowthWarningBytes, projectHealthCadence } from "./health-cadence.ts"
 import { senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
@@ -964,6 +964,10 @@ function handleRename(
   ctx.stmts.renameSession.run({ $new_name: newName, $session_id: ctx.sessionId, $now: Date.now() })
   ctx.setName(newName)
   opts.setUserRenamed(true) // Explicit rename — name is now sticky, won't be overridden
+  // 21454 — write the rename through to the persisted authority record so a
+  // reconnect/daemon-restart re-register (which carries the frozen spawn-time
+  // name) re-applies it instead of silently reverting the identity.
+  persistRuntimeRename(ctx, newName)
   // Actionable-mailbox recovery (19442): the mailbox travels with the NAME.
   // Any unacknowledged actionable directs addressed to `newName` surface on
   // the next default `tribe.fetch` (injected ahead of the ambient window) —
@@ -1095,6 +1099,9 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   })
   ctx.setName(joinName)
   ctx.setRole(joinRole as TribeRole)
+  // 21454 — tribe.join is an explicit identity assertion (the /up hat-claim
+  // shape); persist it exactly like tribe.rename so reconnects re-apply it.
+  persistRuntimeRename(ctx, joinName)
 
   // km-bearly.tribe-dm-delivery-gap: declare delivery mode. `push` (default)
   // means the daemon fans events out on the MCP channel; `pull` queues them
