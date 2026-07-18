@@ -30,6 +30,8 @@ import type { TribePluginApi, TribeClientApi } from "./plugin-api.ts"
 
 const log = createLogger("tribe:health")
 const CPU_ALERT_COOLDOWN_MS = 5 * 60_000
+const CPU_OFFENDER_MIN_PERCENT = 3
+const HEALTH_ALERT_ARGV_MAX_CHARS = 160
 
 // ---------------------------------------------------------------------------
 // Types
@@ -92,6 +94,15 @@ export interface HealthAlert {
   message: string
   metrics: Partial<HealthMetrics>
   topOffenders: Array<{ pid: number; cpu: number; mem: number; command: string }>
+}
+
+export interface HealthProcess {
+  pid: number
+  ppid: number
+  pgid: number
+  cpu: number
+  mem: number
+  command: string
 }
 
 export interface ReaperSuspect {
@@ -324,38 +335,68 @@ export function parseVmStat(output: string): {
   }
 }
 
-/** Parse `ps aux` output to extract top processes. */
-export function parseProcessList(psOutput: string): Array<{ pid: number; cpu: number; mem: number; command: string }> {
-  const lines = psOutput.trim().split("\n")
-  // Skip header
-  const results: Array<{ pid: number; cpu: number; mem: number; command: string }> = []
-  for (let i = 1; i < lines.length; i++) {
-    const parts = lines[i]!.trim().split(/\s+/)
-    // ps aux columns: USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND...
-    if (parts.length < 11) continue
-    const pid = parseInt(parts[1]!, 10)
-    const cpu = parseFloat(parts[2]!)
-    const mem = parseFloat(parts[3]!)
-    const command = parts.slice(10).join(" ")
-    if (!isNaN(pid) && !isNaN(cpu) && !isNaN(mem)) {
-      results.push({ pid, cpu, mem, command })
-    }
+/** Parse one atomic process snapshot from
+ * `ps -axo pid=,ppid=,pgid=,%cpu=,%mem=,command=`. */
+export function parseProcessSnapshot(psOutput: string): HealthProcess[] {
+  const processes: HealthProcess[] = []
+  for (const line of psOutput.trim().split("\n")) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+(.+)$/u)
+    if (!match) continue
+    const [, pidRaw, ppidRaw, pgidRaw, cpuRaw, memRaw, command] = match
+    const pid = Number.parseInt(pidRaw!, 10)
+    const ppid = Number.parseInt(ppidRaw!, 10)
+    const pgid = Number.parseInt(pgidRaw!, 10)
+    const cpu = Number.parseFloat(cpuRaw!)
+    const mem = Number.parseFloat(memRaw!)
+    if (![pid, ppid, pgid, cpu, mem].every(Number.isFinite)) continue
+    processes.push({ pid, ppid, pgid, cpu, mem, command: command! })
   }
-  return results
+  return processes
 }
 
-/** Build a PID → parent PID map from `ps -eo pid,ppid` output */
-export function buildPidToParent(psOutput: string): Map<number, number> {
-  const map = new Map<number, number>()
-  for (const line of psOutput.trim().split("\n").slice(1)) {
-    const parts = line.trim().split(/\s+/)
-    if (parts.length >= 2) {
-      const pid = parseInt(parts[0]!, 10)
-      const ppid = parseInt(parts[1]!, 10)
-      if (!isNaN(pid) && !isNaN(ppid)) map.set(pid, ppid)
-    }
+function isDescendantOf(pid: number, ancestorPid: number, pidToParent: ReadonlyMap<number, number>): boolean {
+  let current = pid
+  const visited = new Set<number>()
+  while (current > 1 && !visited.has(current)) {
+    if (current === ancestorPid) return true
+    visited.add(current)
+    const parent = pidToParent.get(current)
+    if (parent === undefined) return false
+    current = parent
   }
-  return map
+  return false
+}
+
+/**
+ * Derive CPU/process-count inputs from one coherent process snapshot. The
+ * monitor's own process group is excluded in addition to its descendant tree:
+ * probe children inherit the group, while a descendant may start a new group.
+ */
+export function deriveProcessMetricsFromSnapshot(
+  psOutput: string,
+  supervisorPid: number,
+): {
+  topProcesses: HealthMetrics["cpu"]["topProcesses"]
+  bunProcesses: number
+  pidToParent: Map<number, number>
+} {
+  const snapshot = parseProcessSnapshot(psOutput)
+  const pidToParent = new Map(snapshot.map((process) => [process.pid, process.ppid]))
+  const supervisorPgid = snapshot.find((process) => process.pid === supervisorPid)?.pgid
+  const observed = snapshot.filter(
+    (process) =>
+      process.pid !== supervisorPid &&
+      (supervisorPgid === undefined || process.pgid !== supervisorPgid) &&
+      !isDescendantOf(process.pid, supervisorPid, pidToParent),
+  )
+
+  return {
+    // Match the operator survey's definition of a real CPU offender. A quiet
+    // process must never become a blame target merely because it filled slot 5.
+    topProcesses: topCpuConsumers(observed.filter((process) => process.cpu > CPU_OFFENDER_MIN_PERCENT)),
+    bunProcesses: countBunNodeProcesses(observed),
+    pidToParent,
+  }
 }
 
 /**
@@ -414,8 +455,38 @@ export function topCpuConsumers(
       pid: p.pid,
       cpu: p.cpu,
       mem: p.mem,
-      command: p.command.slice(0, 80),
+      command: p.command.slice(0, HEALTH_ALERT_ARGV_MAX_CHARS),
     }))
+}
+
+export function formatHealthAlertForDelivery(
+  alert: Pick<HealthAlert, "type" | "message" | "topOffenders">,
+  pidToParent: Map<number, number>,
+  sessions: Array<{ name: string; pid: number; role: string }>,
+): { message: string; attributedSessions: Set<string>; hasUnattributed: boolean } {
+  const sessionLoad = new Map<string, string[]>()
+  for (const process of alert.topOffenders) {
+    const session = attributeToSession(process.pid, pidToParent, sessions)
+    const key = session ?? "unattributed"
+    const offenders = sessionLoad.get(key) ?? []
+    const argv = process.command.slice(0, HEALTH_ALERT_ARGV_MAX_CHARS)
+    offenders.push(`pid=${process.pid} cpu=${process.cpu}% argv=${argv}`)
+    sessionLoad.set(key, offenders)
+  }
+
+  const attribution = [...sessionLoad].map(([name, offenders]) => `${name}: ${offenders.join(", ")}`).join(" | ")
+  const attributedSessions = new Set([...sessionLoad.keys()].filter((name) => name !== "unattributed"))
+
+  return {
+    message:
+      attribution !== ""
+        ? `${alert.message}. ${attribution}`
+        : alert.type === "cpu"
+          ? `${alert.message}. offenders=none above ${CPU_OFFENDER_MIN_PERCENT}% after supervisor exclusion`
+          : alert.message,
+    attributedSessions,
+    hasUnattributed: sessionLoad.has("unattributed"),
+  }
 }
 
 /** Parse `df -g .` output to extract disk usage (macOS format). */
@@ -1263,25 +1334,27 @@ async function collectFullMetrics(): Promise<{ metrics: HealthMetrics; pidToPare
   let fdCount: HealthMetrics["fdCount"]
 
   try {
-    // Run ps aux, ps -eo pid,ppid, df -g ., git worktree list, lsof count, and ulimit in parallel
-    const psAuxProc = Bun.spawn(["ps", "aux"], { stdout: "pipe", stderr: "ignore" })
-    const psPpidProc = Bun.spawn(["ps", "-eo", "pid,ppid"], { stdout: "pipe", stderr: "ignore" })
+    // One PID/PPID/PGID snapshot is the truth source for both ranking and
+    // attribution. Separate ps calls race short-lived probe children.
+    const psProc = Bun.spawn(["ps", "-axo", "pid=,ppid=,pgid=,%cpu=,%mem=,command="], {
+      stdout: "pipe",
+      stderr: "ignore",
+    })
     const dfProc = Bun.spawn(["df", "-g", "."], { stdout: "pipe", stderr: "ignore" })
     const wtProc = Bun.spawn(["git", "worktree", "list"], { stdout: "pipe", stderr: "ignore" })
     const fdCountProc = Bun.spawn(["sh", "-c", "lsof -n 2>/dev/null | wc -l"], { stdout: "pipe", stderr: "ignore" })
     const ulimitProc = Bun.spawn(["sh", "-c", "ulimit -n"], { stdout: "pipe", stderr: "ignore" })
-    const [psAuxOutput, psPpidOutput, dfOutput, wtOutput, fdCountOutput, ulimitOutput] = await Promise.all([
-      new Response(psAuxProc.stdout).text(),
-      new Response(psPpidProc.stdout).text(),
+    const [psOutput, dfOutput, wtOutput, fdCountOutput, ulimitOutput] = await Promise.all([
+      new Response(psProc.stdout).text(),
       new Response(dfProc.stdout).text().catch(() => ""),
       new Response(wtProc.stdout).text().catch(() => ""),
       new Response(fdCountProc.stdout).text().catch(() => "0"),
       new Response(ulimitProc.stdout).text().catch(() => "0"),
     ])
-    const allProcesses = parseProcessList(psAuxOutput)
-    topProcesses = topCpuConsumers(allProcesses)
-    bunProcesses = countBunNodeProcesses(allProcesses)
-    pidToParent = buildPidToParent(psPpidOutput)
+    const processMetrics = deriveProcessMetricsFromSnapshot(psOutput, process.pid)
+    topProcesses = processMetrics.topProcesses
+    bunProcesses = processMetrics.bunProcesses
+    pidToParent = processMetrics.pidToParent
     disk = parseDfOutput(dfOutput) ?? undefined
     worktrees = parseWorktreeList(wtOutput)
 
@@ -1401,31 +1474,16 @@ export const healthMonitorPlugin: TribePluginApi = {
         const alerts = evaluateAlerts(metrics, thresholds, alertState, activeAgentCount)
 
         for (const alert of alerts) {
-          // Group offenders by session
-          const sessionLoad = new Map<string, { total: number; procs: string[] }>()
-          for (const p of alert.topOffenders) {
-            const session = attributeToSession(p.pid, pidToParent, sessions)
-            const key = session ?? "unattributed"
-            const entry = sessionLoad.get(key) ?? { total: 0, procs: [] }
-            entry.total += p.cpu
-            entry.procs.push(`${p.cpu}% ${p.command.slice(0, 30)}`)
-            sessionLoad.set(key, entry)
-          }
-
-          // Format: "km-3: 45% bun vitest | unattributed: 8% mds_stores"
-          const parts: string[] = []
-          for (const [name, load] of sessionLoad) {
-            parts.push(`${name}: ${load.procs.join(", ")}`)
-          }
-          const attribution = parts.length > 0 ? `. ${parts.join(" | ")}` : ""
-          const msg = `${alert.message}${attribution}`
-          log.info?.(`alert: ${msg}`)
-
-          const attributedSessions = new Set<string>()
-          for (const [name] of sessionLoad) {
-            if (name !== "unattributed") attributedSessions.add(name)
-          }
-          deliverHealthAlert(api, alert, msg, attributedSessions, sessionLoad.has("unattributed"), sessions)
+          const formatted = formatHealthAlertForDelivery(alert, pidToParent, sessions)
+          log.info?.(`alert: ${formatted.message}`)
+          deliverHealthAlert(
+            api,
+            alert,
+            formatted.message,
+            formatted.attributedSessions,
+            formatted.hasUnattributed,
+            sessions,
+          )
         }
 
         // --- Chief-liveness watchdog (every 3rd sample — ~30s) ---
