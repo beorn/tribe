@@ -427,7 +427,7 @@ const MIGRATIONS: readonly Migration[] = [
     name: "event-classification",
     up(db) {
       // km-tribe.event-classification: tag every event with a delivery class
-      // (push = actionable channel-delivered, pull = ambient inbox-only) and a
+      // (push = eligible for session fanout, pull = inbox-only) and a
       // response_expected hint (yes / no / optional). Adds rooms primitives
       // (Matrix-shape) plus per-session inbox cursor / mode / snooze and a
       // dismissals audit table. See vendor/tribe/CHANGELOG.md 0.12.0.

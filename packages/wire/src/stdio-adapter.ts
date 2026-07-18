@@ -29,6 +29,7 @@ import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
 import { spawn } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
+import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
 import { createLogger, setSuppressConsole } from "loggily"
 import { createTimers } from "./timers.ts"
 import { defangModelInput } from "./lib/defang.ts"
@@ -76,6 +77,11 @@ const DELIVERY_CAPABILITY = resolveDeliveryCapability({
   pullTransport: process.env.TRIBE_PULL_TRANSPORT ?? process.env.TRIBE_WAIT_TRANSPORT,
 })
 const TRIBE_TOOLS_LIST = toolListForDeliveryCapability(DELIVERY_CAPABILITY)
+
+// A launch controller may declare one existing daemon filter as session
+// configuration. The adapter forwards it on register so the session is never
+// push-eligible under the default mode, even for one event-loop turn.
+const INITIAL_FILTER_MODE = initialFilterModeFromEnv(process.env.TRIBE_FILTER_MODE)
 // c6071f3: a connected MCP adapter is NOT a push-delivered tribe member until
 // the model explicitly calls tribe.join. Keep pre-join delivery pull-only, but
 // seed explicit @personas at register time so configured Codex identities
@@ -90,12 +96,27 @@ const REGISTER_WITH_LAUNCH_NAME =
 // displaced adapters evict each other forever (21049).
 const TAKEOVER = REGISTER_WITH_LAUNCH_NAME && process.env.TRIBE_TAKEOVER === "1"
 const LAUNCH_ID_RAW = process.env.TRIBE_LAUNCH_ID?.trim() ?? ""
+const PLUGIN_ADAPTER_CHILD = process.env.TRIBE_PLUGIN_ADAPTER_CHILD === "1"
+const PLUGIN_PROVIDER_PARENT_PID_RAW = process.env.TRIBE_PLUGIN_PROVIDER_PARENT_PID?.trim() ?? ""
+
+function resolveLaunchParentPid(): number {
+  if (!PLUGIN_ADAPTER_CHILD) return process.ppid
+  const providerParentPid = Number(PLUGIN_PROVIDER_PARENT_PID_RAW)
+  if (!/^[1-9]\d*$/u.test(PLUGIN_PROVIDER_PARENT_PID_RAW) || !Number.isSafeInteger(providerParentPid)) {
+    throw new Error(
+      "tribe plugin adapter child is missing valid provider-parent provenance; restart the host session or reinstall the Tribe plugin",
+    )
+  }
+  return providerParentPid
+}
+
 // 21049 — adapters forward a complete launcher-minted identity or nothing.
-// They never mint/default the id themselves. Parent provenance comes from the
-// actual process tree, NOT another inherited env var: an unsanitized nested
-// provider may inherit a stale launch id, but its adapter has a different OS
-// parent and therefore cannot fan into the old launch.
-const LAUNCH_IDENTITY = LAUNCH_ID_RAW.length > 0 ? { id: LAUNCH_ID_RAW, parentPid: process.ppid } : null
+// They never mint/default the id themselves. A direct adapter uses its actual
+// OS parent. A plugin-supervised adapter uses the provider parent recomputed
+// and overwritten by its wrapper, never arbitrary inherited provider env.
+// Thus sibling wrappers from one host fan in while a nested provider still
+// resolves a distinct parent and cannot adopt the old launch.
+const LAUNCH_IDENTITY = LAUNCH_ID_RAW.length > 0 ? { id: LAUNCH_ID_RAW, parentPid: resolveLaunchParentPid() } : null
 
 // km 19442 — connect-time replay flood backstop. The wakeup→drain path is capped
 // by selectReplayEvents, but a stale/old daemon that still pushes message BODIES
@@ -265,6 +286,7 @@ const baseRegisterParams = {
   identityToken,
   ...(LAUNCH_IDENTITY ? { launchId: LAUNCH_IDENTITY.id, launchParentPid: LAUNCH_IDENTITY.parentPid } : {}),
   delivery: REQUIRE_EXPLICIT_JOIN ? "pull" : DELIVERY,
+  ...(INITIAL_FILTER_MODE === undefined ? {} : { filterMode: INITIAL_FILTER_MODE }),
   // @km/infra/15641 Phase 1 — per-session account/provider label sourced
   // from `ag` via TRIBE_ACCOUNT / TRIBE_PROVIDER env vars (which ag sets
   // at backend-launch time). Tribe stores them; quota visibility lives in
@@ -308,7 +330,8 @@ function requiredMcpTransportFailureResult(): {
         text:
           `required MCP tribe status=${requiredMcpTransportHealth.status}; ` +
           `stop_reason=${requiredMcpTransportHealth.reason}; ` +
-          `launch_id=${launchId}; launch_parent_pid=${process.ppid}; transport_pid=${process.pid}; ${recovery}`,
+          `launch_id=${launchId}; launch_parent_pid=${LAUNCH_IDENTITY?.parentPid ?? process.ppid}; ` +
+          `transport_pid=${process.pid}; ${recovery}`,
       },
     ],
     isError: true,

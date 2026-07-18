@@ -58,7 +58,7 @@ export interface TribePluginHandle {
  * `(kind, recipient, senderRole)`.
  */
 export type EventClassification = {
-  /** push = actionable channel-delivered; pull = ambient inbox-only */
+  /** push = eligible for per-session channel admission; pull = inbox-only */
   delivery?: "push" | "pull"
   /** Stable event topic (e.g. `git:commit`); used by tribe.filter mute globs. */
   topic?: string

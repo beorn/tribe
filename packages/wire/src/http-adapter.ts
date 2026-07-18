@@ -13,6 +13,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { createHash, randomUUID } from "node:crypto"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
+import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
 import { resolveSocketPath, createReconnectingClient, TRIBE_PROTOCOL_VERSION, type DaemonClient } from "./lib/socket.ts"
 import {
   deliveryCapabilityInstruction,
@@ -47,6 +48,7 @@ export type StartTribeHttpMcpServerOptions = {
 
 export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptions = {}): Promise<TribeHttpMcpServer> {
   const socketPath = resolveSocketPath(opts.socketPath)
+  const initialFilterMode = initialFilterModeFromEnv(process.env.TRIBE_FILTER_MODE)
   const requireJoin = opts.requireJoin !== false
   const initialName = opts.name?.trim() || undefined
   const launchId = opts.launchId?.trim() || undefined
@@ -81,6 +83,7 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
         identityToken,
         ...(launchId !== undefined ? { launchId, launchParentPid: process.pid } : {}),
         delivery: requireJoin ? "pull" : deliveryCapability.delivery,
+        ...(initialFilterMode === undefined ? {} : { filterMode: initialFilterMode }),
       })) as { name?: string; role?: string }
       if (reg.name) myName = reg.name
       if (reg.role) myRole = reg.role

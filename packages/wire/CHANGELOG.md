@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+
+- **Register launch-declared notification filters atomically.** MCP adapters
+  accept `TRIBE_FILTER_MODE=focus|normal|ambient` and declare it in protocol v7
+  registration, so a focus-mode session cannot receive an ambient wake before
+  its durable preference is applied. Suppressed rows remain fetchable.
+
 ## 0.1.4 — 2026-05-27
 
 ### Fixed

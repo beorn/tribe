@@ -35,9 +35,11 @@ import { once } from "node:events"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createStatements, openDatabase } from "../../daemon/src/lib/database.ts"
 import { connectToDaemon, type DaemonClient } from "../src/client.ts"
+import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ADAPTER = resolve(HERE, "../src/stdio-adapter.ts")
+const PLUGIN_SERVER = resolve(HERE, "../../../plugins/claude/server.ts")
 const CLI = resolve(HERE, "../src/cli.ts")
 const DAEMON = resolve(HERE, "../../daemon/src/daemon.ts")
 const BUN_BIN = process.versions.bun ? process.execPath : "bun"
@@ -218,6 +220,23 @@ function toolResult(lines: Record<string, unknown>[], id: number): unknown {
   }
 }
 
+function sessionDeliveryOffsets(
+  dbPath: string,
+  name: string,
+): { last_delivered_seq: number; last_inbox_pull_seq: number } {
+  const db = openDatabase(dbPath)
+  try {
+    const row = db.prepare("SELECT last_delivered_seq, last_inbox_pull_seq FROM sessions WHERE name = ?").get(name) as {
+      last_delivered_seq: number
+      last_inbox_pull_seq: number
+    } | null
+    if (!row) throw new Error(`session ${name} not found in ${dbPath}`)
+    return row
+  } finally {
+    db.close()
+  }
+}
+
 describe("19442 actionable-recovery journey (real daemon + real adapter)", () => {
   let tmpDir: string
   let daemonProc: ChildProcessWithoutNullStreams | undefined
@@ -323,11 +342,25 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     socketPath: string,
     logName: string,
     launchId: string | undefined,
-    opts: { name?: string; takeover?: boolean; distinctProviderParent?: boolean } = {},
+    opts: {
+      name?: string
+      takeover?: boolean
+      distinctProviderParent?: boolean
+      throughPluginSupervisor?: boolean
+      delivery?: "push" | "pull"
+      filterMode?: "focus" | "normal" | "ambient"
+    } = {},
   ): Promise<{ child: ChildProcessWithoutNullStreams; stdout: Record<string, unknown>[]; logPath: string }> {
     const logPath = join(tmpDir, logName)
     const name = opts.name ?? NAME
-    const adapterCommand = [BUN_BIN, ADAPTER, "--socket", socketPath, "--name", name]
+    const adapterCommand = [
+      BUN_BIN,
+      opts.throughPluginSupervisor ? PLUGIN_SERVER : ADAPTER,
+      "--socket",
+      socketPath,
+      "--name",
+      name,
+    ]
     const child = spawn(
       BUN_BIN,
       opts.distinctProviderParent ? ["-e", PROVIDER_PARENT_WRAPPER] : adapterCommand.slice(1),
@@ -338,11 +371,16 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
           TRIBE_LAUNCH_ID: launchId ?? "",
           TRIBE_NAME: "",
           TRIBE_SESSION_NAME: "",
-          TRIBE_DELIVERY: "pull",
+          TRIBE_DELIVERY: opts.delivery ?? "pull",
+          ...(opts.filterMode === undefined ? {} : { TRIBE_FILTER_MODE: opts.filterMode }),
           TRIBE_PULL_TRANSPORT: "mcp",
           TRIBE_NO_AUTOSTART: "1",
           TRIBE_REQUIRE_JOIN: "0",
           TRIBE_TAKEOVER: opts.takeover === false ? "0" : "1",
+          TRIBE_PLUGIN_ADAPTER_CHILD: "",
+          // The plugin wrapper must overwrite stale inherited provenance;
+          // direct adapters must ignore it without the private child marker.
+          TRIBE_PLUGIN_PROVIDER_PARENT_PID: "1",
           ...(opts.distinctProviderParent
             ? {
                 // Hostile/unsanitized nested launch: both identity inputs are
@@ -438,6 +476,76 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     await once(child, "exit")
     return { exitCode: child.exitCode, stdout, stderr }
   }
+
+  it("keeps ambient supervisor traffic fetchable without waking and still wakes actionables", async () => {
+    const socketPath = join(tmpDir, "notification-diet.sock")
+    const dbPath = join(tmpDir, "notification-diet.db")
+    daemonProc = spawnDaemon(socketPath, dbPath)
+    await waitForCondition(() => existsSync(socketPath), "daemon socket")
+
+    const fleet = await spawnLaunchAdapter(socketPath, "notification-diet-fleet.log", "notification-diet-launch", {
+      name: "@fleet",
+      delivery: "push",
+      filterMode: "focus",
+    })
+    await callLaunchTool(fleet, 2, "members", {})
+    const beforeAmbient = sessionDeliveryOffsets(dbPath, "@fleet")
+
+    const sender = await connectToDaemon(socketPath)
+    try {
+      await sender.call("register", {
+        name: "@chief",
+        role: "member",
+        domains: ["test"],
+        project: tmpDir,
+        projectName: "test",
+        protocolVersion: TRIBE_PROTOCOL_VERSION,
+        pid: process.pid,
+        delivery: "pull",
+      })
+
+      const ambientCases = [
+        { type: "notify", content: "notification-only diet row" },
+        { type: "github:push", content: "github ambient diet row" },
+      ]
+      for (const ambientCase of ambientCases) {
+        await sender.call("tribe.send", {
+          to: "@fleet",
+          message: ambientCase.content,
+          type: ambientCase.type,
+          summary: ambientCase.content,
+        })
+      }
+      const afterAmbient = sessionDeliveryOffsets(dbPath, "@fleet")
+      expect(afterAmbient).toEqual(beforeAmbient)
+      for (const ambientCase of ambientCases) {
+        expect(
+          channelNotifications(fleet.stdout).some((line) => JSON.stringify(line).includes(ambientCase.content)),
+        ).toBe(false)
+      }
+
+      writeJson(fleet.child, callToolPayload(3, "fetch", {}))
+      await waitForCondition(() => fleet.stdout.some((line) => line.id === 3), "fleet fetch response")
+      const fetched = toolResult(fleet.stdout, 3) as { events?: Array<{ content?: string }> }
+      for (const ambientCase of ambientCases) {
+        expect(fetched.events?.some((event) => event.content === ambientCase.content)).toBe(true)
+      }
+
+      for (const type of ["request", "query", "assign", "verdict"]) {
+        const content = `${type} actionable diet row`
+        await sender.call("tribe.send", { to: "@fleet", message: content, type, summary: content })
+        await waitForCondition(
+          () => channelNotifications(fleet.stdout).some((line) => JSON.stringify(line).includes(content)),
+          `${type} fleet wake`,
+        )
+      }
+      expect(sessionDeliveryOffsets(dbPath, "@fleet").last_delivered_seq).toBeGreaterThan(
+        afterAmbient.last_delivered_seq,
+      )
+    } finally {
+      sender.close()
+    }
+  }, 30_000)
 
   it("preserves inherited operator authority through adapter autostart and daemon hot reload", async () => {
     const socketPath = join(tmpDir, "operator-lifecycle.sock")
@@ -870,6 +978,57 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     // Heaviest journey: it drives a daemon restart + three transport re-execs +
     // respawns + a cross-launch takeover, each gated on real subprocess timing.
   }, 120_000)
+
+  it("fans three plugin-supervised MCP transports from one native provider without closing stdio", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const dbPath = join(tmpDir, "tribe.db")
+    daemonProc = spawnDaemon(socketPath, dbPath)
+    await waitForCondition(() => existsSync(socketPath), "daemon socket")
+
+    const launchId = "plugin-supervised-provider-launch"
+    const first = await spawnLaunchAdapter(socketPath, "plugin-adapter-1.log", launchId, {
+      throughPluginSupervisor: true,
+    })
+    await callLaunchTool(first, 2, "members", {})
+    const second = await spawnLaunchAdapter(socketPath, "plugin-adapter-2.log", launchId, {
+      throughPluginSupervisor: true,
+    })
+    await callLaunchTool(second, 3, "members", {})
+    const third = await spawnLaunchAdapter(socketPath, "plugin-adapter-3.log", launchId, {
+      throughPluginSupervisor: true,
+    })
+    const members = (await callLaunchTool(third, 4, "members", {})) as {
+      sessions?: Array<{
+        name?: string
+        launch_id?: string
+        launch_parent_pid?: number
+        transport_pids?: number[]
+      }>
+    }
+    const member = members.sessions?.find((session) => session.name === NAME)
+
+    // This is the production topology that direct-adapter coverage misses:
+    // three host-spawned plugin wrappers must stay callable as transports of
+    // one launch, even though each wrapper has its own ephemeral PID.
+    await waitForCondition(
+      () => first.child.exitCode !== null || second.child.exitCode !== null || member?.transport_pids?.length === 3,
+      "three supervised transports or a closed predecessor",
+    )
+    const logs = [first, second, third]
+      .map(({ logPath }) => (existsSync(logPath) ? readFileSync(logPath, "utf8") : ""))
+      .join("\n--- plugin adapter ---\n")
+    expect([first.child.exitCode, second.child.exitCode, third.child.exitCode], logs).toEqual([null, null, null])
+    expect(member).toMatchObject({
+      launch_id: launchId,
+      launch_parent_pid: process.pid,
+    })
+    expect(member?.transport_pids).toHaveLength(3)
+    expect(readFileSync(join(tmpDir, "daemon.log"), "utf8")).not.toContain(
+      `takeover: superseding live holder of "${NAME}"`,
+    )
+
+    await Promise.all([callLaunchTool(first, 5, "members", {}), callLaunchTool(second, 6, "members", {})])
+  }, 30_000)
 
   it("does not adopt a dead launch when a new provider inherits its stale launch id", async () => {
     const socketPath = join(tmpDir, "tribe.sock")

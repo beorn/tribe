@@ -527,6 +527,10 @@ export function withDispatcher<
                 `Protocol version mismatch: client=${clientProtocolVersion}, daemon=${TRIBE_PROTOCOL_VERSION}`,
               )
             }
+            const filterMode = p.filterMode
+            if (filterMode !== undefined && !isSessionFilterMode(filterMode)) {
+              return makeError(id, -32602, "register filterMode must be one of focus|normal|ambient")
+            }
             const claudeSessionName = (p.claudeSessionName as string) ?? null
             const claudeSessionId = (p.claudeSessionId as string) ?? null
             const identityToken = (p.identityToken as string) ?? null
@@ -672,6 +676,7 @@ export function withDispatcher<
                 ) ?? null)
               : null
             if (sameLaunchHolder && launch) {
+              if (filterMode !== undefined) applyLaunchDeclaredFilter(sameLaunchHolder.ctx, filterMode)
               const client = applyClient(connId, {
                 name: sameLaunchHolder.name,
                 role: sameLaunchHolder.role,
@@ -810,6 +815,11 @@ export function withDispatcher<
               launchIdentity?.id ?? null,
               launchIdentity?.parentPid ?? null,
             )
+            // Apply launch-declared admission before applyClient makes this
+            // session visible to the broadcast fanout. Omission preserves a
+            // reconnecting session's stored preference; an explicit mode is
+            // authoritative and clears stale time/topic dimensions.
+            if (filterMode !== undefined) applyLaunchDeclaredFilter(clientCtx, filterMode)
 
             const client = applyClient(connId, {
               name,
@@ -1331,4 +1341,20 @@ export function withDispatcher<
       dispatcher: { handleConnection, handleRequest, register },
     }
   }
+}
+
+type SessionFilterMode = "focus" | "normal" | "ambient"
+
+function isSessionFilterMode(value: unknown): value is SessionFilterMode {
+  return value === "focus" || value === "normal" || value === "ambient"
+}
+
+function applyLaunchDeclaredFilter(ctx: TribeContext, mode: SessionFilterMode): void {
+  ctx.stmts.setSessionFilter.run({
+    $id: ctx.sessionId,
+    $mode: mode,
+    $until: null,
+    $mute: null,
+    $now: Date.now(),
+  })
 }
