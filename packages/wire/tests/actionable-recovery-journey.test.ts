@@ -39,6 +39,7 @@ import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ADAPTER = resolve(HERE, "../src/stdio-adapter.ts")
+const PLUGIN_SERVER = resolve(HERE, "../../../plugins/claude/server.ts")
 const CLI = resolve(HERE, "../src/cli.ts")
 const DAEMON = resolve(HERE, "../../daemon/src/daemon.ts")
 const BUN_BIN = process.versions.bun ? process.execPath : "bun"
@@ -320,13 +321,21 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       name?: string
       takeover?: boolean
       distinctProviderParent?: boolean
+      throughPluginSupervisor?: boolean
       delivery?: "push" | "pull"
       filterMode?: "focus" | "normal" | "ambient"
     } = {},
   ): Promise<{ child: ChildProcessWithoutNullStreams; stdout: Record<string, unknown>[]; logPath: string }> {
     const logPath = join(tmpDir, logName)
     const name = opts.name ?? NAME
-    const adapterCommand = [BUN_BIN, ADAPTER, "--socket", socketPath, "--name", name]
+    const adapterCommand = [
+      BUN_BIN,
+      opts.throughPluginSupervisor ? PLUGIN_SERVER : ADAPTER,
+      "--socket",
+      socketPath,
+      "--name",
+      name,
+    ]
     const child = spawn(
       BUN_BIN,
       opts.distinctProviderParent ? ["-e", PROVIDER_PARENT_WRAPPER] : adapterCommand.slice(1),
@@ -343,6 +352,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
           TRIBE_NO_AUTOSTART: "1",
           TRIBE_REQUIRE_JOIN: "0",
           TRIBE_TAKEOVER: opts.takeover === false ? "0" : "1",
+          TRIBE_PLUGIN_ADAPTER_CHILD: "",
           ...(opts.distinctProviderParent
             ? {
                 // Hostile/unsanitized nested launch: both identity inputs are
@@ -900,6 +910,57 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(rows).toEqual([{ name: NAME }])
     const finalDaemonLog = readFileSync(join(tmpDir, "daemon.log"), "utf8")
     expect(finalDaemonLog.match(/takeover: superseding live holder/g)).toHaveLength(1)
+  }, 30_000)
+
+  it.fails("fans three plugin-supervised MCP transports from one native provider without closing stdio", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const dbPath = join(tmpDir, "tribe.db")
+    daemonProc = spawnDaemon(socketPath, dbPath)
+    await waitForCondition(() => existsSync(socketPath), "daemon socket")
+
+    const launchId = "plugin-supervised-provider-launch"
+    const first = await spawnLaunchAdapter(socketPath, "plugin-adapter-1.log", launchId, {
+      throughPluginSupervisor: true,
+    })
+    await callLaunchTool(first, 2, "members", {})
+    const second = await spawnLaunchAdapter(socketPath, "plugin-adapter-2.log", launchId, {
+      throughPluginSupervisor: true,
+    })
+    await callLaunchTool(second, 3, "members", {})
+    const third = await spawnLaunchAdapter(socketPath, "plugin-adapter-3.log", launchId, {
+      throughPluginSupervisor: true,
+    })
+    const members = (await callLaunchTool(third, 4, "members", {})) as {
+      sessions?: Array<{
+        name?: string
+        launch_id?: string
+        launch_parent_pid?: number
+        transport_pids?: number[]
+      }>
+    }
+    const member = members.sessions?.find((session) => session.name === NAME)
+
+    // This is the production topology that direct-adapter coverage misses:
+    // three host-spawned plugin wrappers must stay callable as transports of
+    // one launch, even though each wrapper has its own ephemeral PID.
+    await waitForCondition(
+      () => first.child.exitCode !== null || second.child.exitCode !== null || member?.transport_pids?.length === 3,
+      "three supervised transports or a closed predecessor",
+    )
+    const logs = [first, second, third]
+      .map(({ logPath }) => (existsSync(logPath) ? readFileSync(logPath, "utf8") : ""))
+      .join("\n--- plugin adapter ---\n")
+    expect([first.child.exitCode, second.child.exitCode, third.child.exitCode], logs).toEqual([null, null, null])
+    expect(member).toMatchObject({
+      launch_id: launchId,
+      launch_parent_pid: process.pid,
+    })
+    expect(member?.transport_pids).toHaveLength(3)
+    expect(readFileSync(join(tmpDir, "daemon.log"), "utf8")).not.toContain(
+      `takeover: superseding live holder of "${NAME}"`,
+    )
+
+    await Promise.all([callLaunchTool(first, 5, "members", {}), callLaunchTool(second, 6, "members", {})])
   }, 30_000)
 
   it("does not adopt a dead launch when a new provider inherits its stale launch id", async () => {
