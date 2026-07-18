@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url"
 process.env.TRIBE_DAEMON_SCRIPT ??= fileURLToPath(import.meta.resolve("tribe-daemon"))
 
 const PLUGIN_CHILD = "TRIBE_PLUGIN_ADAPTER_CHILD"
+const PLUGIN_PROVIDER_PARENT_PID = "TRIBE_PLUGIN_PROVIDER_PARENT_PID"
 const REEXEC_EXIT_CODE = 75
 const STABLE_CHILD_MS = 30_000
 const REMEDY =
@@ -32,6 +33,10 @@ function waitForExit(child: ChildProcess): Promise<{ code: number | null; error?
 }
 
 async function superviseAdapter(): Promise<void> {
+  // The wrapper is an implementation detail between the provider host and
+  // the adapter. Capture the provider boundary once so every supervised
+  // child/re-exec from this wrapper reports the same logical launch owner.
+  const providerParentPid = process.ppid
   let active: ChildProcess | null = null
   let stopping = false
   let consecutiveReexecs = 0
@@ -49,6 +54,7 @@ async function superviseAdapter(): Promise<void> {
       env: {
         ...process.env,
         [PLUGIN_CHILD]: "1",
+        [PLUGIN_PROVIDER_PARENT_PID]: String(providerParentPid),
         TRIBE_PLUGIN_REEXEC_EXIT_CODE: String(REEXEC_EXIT_CODE),
       },
     })

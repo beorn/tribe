@@ -353,6 +353,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
           TRIBE_REQUIRE_JOIN: "0",
           TRIBE_TAKEOVER: opts.takeover === false ? "0" : "1",
           TRIBE_PLUGIN_ADAPTER_CHILD: "",
+          // The plugin wrapper must overwrite stale inherited provenance;
+          // direct adapters must ignore it without the private child marker.
+          TRIBE_PLUGIN_PROVIDER_PARENT_PID: "1",
           ...(opts.distinctProviderParent
             ? {
                 // Hostile/unsanitized nested launch: both identity inputs are
@@ -912,7 +915,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(finalDaemonLog.match(/takeover: superseding live holder/g)).toHaveLength(1)
   }, 30_000)
 
-  it.fails("fans three plugin-supervised MCP transports from one native provider without closing stdio", async () => {
+  it("fans three plugin-supervised MCP transports from one native provider without closing stdio", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const dbPath = join(tmpDir, "tribe.db")
     daemonProc = spawnDaemon(socketPath, dbPath)

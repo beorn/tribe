@@ -96,12 +96,27 @@ const REGISTER_WITH_LAUNCH_NAME =
 // displaced adapters evict each other forever (21049).
 const TAKEOVER = REGISTER_WITH_LAUNCH_NAME && process.env.TRIBE_TAKEOVER === "1"
 const LAUNCH_ID_RAW = process.env.TRIBE_LAUNCH_ID?.trim() ?? ""
+const PLUGIN_ADAPTER_CHILD = process.env.TRIBE_PLUGIN_ADAPTER_CHILD === "1"
+const PLUGIN_PROVIDER_PARENT_PID_RAW = process.env.TRIBE_PLUGIN_PROVIDER_PARENT_PID?.trim() ?? ""
+
+function resolveLaunchParentPid(): number {
+  if (!PLUGIN_ADAPTER_CHILD) return process.ppid
+  const providerParentPid = Number(PLUGIN_PROVIDER_PARENT_PID_RAW)
+  if (!/^[1-9]\d*$/u.test(PLUGIN_PROVIDER_PARENT_PID_RAW) || !Number.isSafeInteger(providerParentPid)) {
+    throw new Error(
+      "tribe plugin adapter child is missing valid provider-parent provenance; restart the host session or reinstall the Tribe plugin",
+    )
+  }
+  return providerParentPid
+}
+
 // 21049 — adapters forward a complete launcher-minted identity or nothing.
-// They never mint/default the id themselves. Parent provenance comes from the
-// actual process tree, NOT another inherited env var: an unsanitized nested
-// provider may inherit a stale launch id, but its adapter has a different OS
-// parent and therefore cannot fan into the old launch.
-const LAUNCH_IDENTITY = LAUNCH_ID_RAW.length > 0 ? { id: LAUNCH_ID_RAW, parentPid: process.ppid } : null
+// They never mint/default the id themselves. A direct adapter uses its actual
+// OS parent. A plugin-supervised adapter uses the provider parent recomputed
+// and overwritten by its wrapper, never arbitrary inherited provider env.
+// Thus sibling wrappers from one host fan in while a nested provider still
+// resolves a distinct parent and cannot adopt the old launch.
+const LAUNCH_IDENTITY = LAUNCH_ID_RAW.length > 0 ? { id: LAUNCH_ID_RAW, parentPid: resolveLaunchParentPid() } : null
 
 // km 19442 — connect-time replay flood backstop. The wakeup→drain path is capped
 // by selectReplayEvents, but a stale/old daemon that still pushes message BODIES
@@ -315,7 +330,8 @@ function requiredMcpTransportFailureResult(): {
         text:
           `required MCP tribe status=${requiredMcpTransportHealth.status}; ` +
           `stop_reason=${requiredMcpTransportHealth.reason}; ` +
-          `launch_id=${launchId}; launch_parent_pid=${process.ppid}; transport_pid=${process.pid}; ${recovery}`,
+          `launch_id=${launchId}; launch_parent_pid=${LAUNCH_IDENTITY?.parentPid ?? process.ppid}; ` +
+          `transport_pid=${process.pid}; ${recovery}`,
       },
     ],
     isError: true,
