@@ -69,7 +69,9 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
   it("startup primer teaches semantic ownership and reply, never an exact-id delivery ack", () => {
     expect(TRIBE_JOIN_PRIMER).toMatch(/assign.*query.*request.*automatically open(?:s)? a semantic response ball/i)
     expect(TRIBE_JOIN_PRIMER).toMatch(/verdict.*actionable.*does not automatically open/i)
-    expect(TRIBE_JOIN_PRIMER).toContain("reply=<request-id>")
+    expect(TRIBE_JOIN_PRIMER).toContain('MCP `reply: "<request-id>"` field')
+    expect(TRIBE_JOIN_PRIMER).toContain("CLI: `--reply <request-id>`")
+    expect(TRIBE_JOIN_PRIMER).toContain("never a prose `reply=...` marker")
     expect(TRIBE_JOIN_PRIMER).not.toMatch(/<ack(?:\s+id=)?/i)
   })
 

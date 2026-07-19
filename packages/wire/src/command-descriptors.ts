@@ -159,7 +159,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           request: {
             oneOf: [{ type: "string" }, { type: "boolean" }],
             description:
-              "Direct request/query/assign messages automatically open a semantic recipient-owned ball using the message id. Verdict stays wakeable but does not auto-mint. Pass `true` to track any direct message type, or a non-empty string to override the request id. Recipient(s) own the ball until `reply=<id>` arrives; this is not a transport delivery ACK.",
+              "Direct request/query/assign messages automatically open a semantic recipient-owned ball using the message id. Verdict stays wakeable but does not auto-mint. Pass `true` to track any direct message type, or a non-empty string to override the request id. Recipient(s) own the ball until a send carries the structured MCP `reply` field (CLI: `--reply`); content never closes it. This is not a transport delivery ACK.",
           },
           reply: {
             type: "string",

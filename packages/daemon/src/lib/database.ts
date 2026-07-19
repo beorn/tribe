@@ -108,7 +108,8 @@ export function openDatabase(path: string): Database {
   // Ball-tracker: per-(request_id, recipient) row for every open request.
   // See @km/tribe/message-ball-tracker. Sender opens a tracked request by
   // sending a message with `request=<id>`; recipient closes it by replying
-  // with `reply=<id>`. Multi-target (`to: [...]`) and broadcast (`to: "*"`)
+  // with the structured `reply` field (CLI: `--reply`). Multi-target
+  // (`to: [...]`) and broadcast (`to: "*"`)
   // both produce one row per resolved recipient.
   db.run(`CREATE TABLE IF NOT EXISTS pending_request (
 		request_id TEXT NOT NULL,

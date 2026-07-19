@@ -1,28 +1,22 @@
 /**
  * Send/messaging verbs for the unified `tribe-wire` CLI.
  *
- * Family 2 of Phase A.2 verb-port — see
- * `@km/bearly/19231-tribe-cli-unify-phase-a2-verbs`. Each verb mirrors the
- * implementation in `vendor/tribe/tools/tribe-cli.ts` (which stays canonical
- * until the Phase C atomic-delete). The handlers here are pure ports — same
- * RPCs, same flags, same output shape — with the only changes being:
+ * This is the shipping implementation for the send/messaging command family.
+ * The unified dispatcher (`cli.ts`) registers these handlers on its shared
+ * `Command` instance.
  *
  *   - Import paths are intra-package (`../lib/...`) instead of
  *     `tribe-wire/lib/...` (to avoid self-import).
  *   - The `retro.ts` module was copied into `../lib/retro.ts` so this module
  *     has no `tools/` dependency. It still uses DB-direct access (read-only
  *     `bun:sqlite`) — straddles client/daemon boundary; Phase C may revisit.
- *   - The verbs are registered on a caller-supplied `Command` rather than
- *     created on a fresh `program` — the main dispatcher (`cli.ts`) calls
- *     `registerSendCommands(program)` to wire them up.
- *
  * Verbs in this family:
- *   - send          (line ~581 in tools/tribe-cli.ts)
+ *   - send
  *   - join          one-shot CLI join/rejoin checkpoint
- *   - alarm <reason>(line ~629)
- *   - alarm-status  (line ~635)
- *   - alarm-ack     (line ~641)
- *   - retro         (line ~646)
+ *   - alarm <reason>
+ *   - alarm-status
+ *   - alarm-ack
+ *   - retro
  */
 
 import { existsSync } from "node:fs"
@@ -94,8 +88,7 @@ function resolveDbPathFromCli(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Message-type contract — shared with the daemon validator (kept in lockstep
-// with the legacy `tools/tribe-cli.ts` definition; do not drift).
+// Message-type contract — shared with the daemon validator; do not drift.
 // ---------------------------------------------------------------------------
 
 type SendPayloadInput = {
@@ -152,13 +145,43 @@ function replyOwnerFromEnv(env: NodeJS.ProcessEnv = process.env): string | null 
   return name.length > 0 ? name : null
 }
 
-function sendCallerFromEnv(env: NodeJS.ProcessEnv = process.env): string | null {
-  return replyOwnerFromEnv(env)
+function rejectUnstructuredMessageIntent(input: SendPayloadInput): void {
+  const intent = /^\s*(reply|ref)=(\S+)/u.exec(input.message)
+  if (intent === null) return
+  const field = intent[1] === "reply" ? "reply" : "ref"
+  const value = intent[2] ?? ""
+
+  console.error(
+    `tribe-wire send: message content begins with ${field}=${value}; structured intent must not be encoded as prose.`,
+  )
+  console.error(`Use --${field} ${value} and remove ${field}=${value} from the message content.`)
+  process.exit(2)
 }
 
-function requireReplyOwner(reply: string): string {
+async function resolveSendCaller(reply?: string): Promise<string | null> {
+  const launchId = process.env.TRIBE_LAUNCH_ID?.trim()
+  if (launchId) {
+    try {
+      const status = mcpJsonContent(await callDaemon("cli_inbox_status_by_launch_v1", { launch_id: launchId })) as {
+        session?: unknown
+      }
+      if (typeof status.session === "string" && status.session.length > 0) return status.session
+      console.error(
+        `tribe-wire send: daemon launch authority returned no current session${reply ? ` for --reply ${reply}` : ""}; not sending.`,
+      )
+    } catch (error) {
+      console.error(
+        `tribe-wire send: cannot resolve current launch identity${reply ? ` for --reply ${reply}` : ""}; not sending: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+    }
+    process.exit(1)
+  }
+
   const owner = replyOwnerFromEnv()
   if (owner) return owner
+  if (!reply) return null
   console.error(
     `tribe-wire send: --reply ${reply} requires TRIBE_NAME or TRIBE_SESSION_NAME so the one-shot CLI can close the pending owner.`,
   )
@@ -230,14 +253,15 @@ function parseDomains(values: string[] | undefined): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// Command implementations (ported verbatim from tools/tribe-cli.ts)
+// Command implementations
 // ---------------------------------------------------------------------------
 
 async function cmdSend(input: SendPayloadInput): Promise<void> {
-  const replyOwner = input.reply ? requireReplyOwner(input.reply) : null
-  if (input.reply && replyOwner) await verifyPendingReplyOwner(replyOwner, input.reply)
+  rejectUnstructuredMessageIntent(input)
+  const caller = await resolveSendCaller(input.reply)
+  if (input.reply && caller) await verifyPendingReplyOwner(caller, input.reply)
 
-  const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input, sendCallerFromEnv()))) as {
+  const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input, caller))) as {
     error?: string
     summary?: string
     summary_derived?: boolean
@@ -248,7 +272,7 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     console.error(`tribe-wire send: ${result.error}`)
     process.exit(1)
   }
-  if (input.reply && replyOwner) reportCommittedReplyTracker(replyOwner, input.reply, result.tracker)
+  if (input.reply && caller) reportCommittedReplyTracker(caller, input.reply, result.tracker)
   console.log(`Sent message to ${input.to}`)
   // Derive-not-reject: surface (no-silent) when the daemon derived a one-liner
   // because none was authored, so the sender learns to pass `--summary`.
@@ -397,8 +421,7 @@ async function cmdRetro(opts: { since?: string; format: string; db?: string }): 
 // ---------------------------------------------------------------------------
 
 /**
- * Register send/messaging verbs (Family 2 of Phase A.2 verb-port).
- * Each verb mirrors the implementation in `vendor/tribe/tools/tribe-cli.ts`.
+ * Register the shipping send/messaging verbs on the unified dispatcher.
  *
  * Bead: @km/bearly/19231-tribe-cli-unify-phase-a2-verbs
  */

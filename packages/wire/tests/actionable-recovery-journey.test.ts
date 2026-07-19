@@ -728,6 +728,94 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     ])
   }, 60_000)
 
+  it("successor takeover closes the base role ball through daemon-derived launch ownership", async () => {
+    const socketPath = join(tmpDir, "successor-reply.sock")
+    const dbPath = join(tmpDir, "successor-reply.db")
+    const launchId = "successor-reply-launch"
+    const requestId = "successor-reply-request"
+
+    daemonProc = spawnDaemon(socketPath, dbPath)
+    await waitForCondition(() => existsSync(socketPath), "daemon socket")
+
+    const successor = await spawnLaunchAdapter(socketPath, "successor-reply.log", launchId, {
+      name: "@chief/next",
+    })
+    await callLaunchToolWhenRegistered(successor, 70, "members", {})
+    await callLaunchTool(successor, 71, "rename", { new_name: "@chief" })
+
+    const requester = await connectToDaemon(socketPath)
+    await requester.call("register", {
+      name: "@agent/3",
+      role: "member",
+      domains: ["test"],
+      project: tmpDir,
+      projectName: "test",
+      protocolVersion: TRIBE_PROTOCOL_VERSION,
+      pid: process.pid,
+      delivery: "pull",
+    })
+    await requester.call("tribe.send", {
+      to: "@chief",
+      message: "please answer after takeover",
+      type: "request",
+      summary: "successor takeover request",
+      request: requestId,
+    })
+    requester.close()
+
+    const reply = await runCli(
+      [
+        "send",
+        "@agent/3",
+        "answered after takeover",
+        "--type",
+        "response",
+        "--summary",
+        "successor takeover answer",
+        "--reply",
+        requestId,
+      ],
+      {
+        ...BASE_ENV,
+        TRIBE_SOCKET: socketPath,
+        TRIBE_LAUNCH_ID: launchId,
+        // Both spawn-time hints are intentionally stale after takeover.
+        TRIBE_NAME: "@chief/next",
+        TRIBE_SESSION_NAME: "@chief/next",
+        TRIBE_NO_AUTOSTART: "1",
+      },
+      { throughParent: true },
+    )
+
+    expect(reply.exitCode, reply.stderr).toBe(0)
+    expect(reply.stdout).toContain(`Closed 1 pending request row(s) for @chief: ${requestId}`)
+
+    const notify = await runCli(
+      ["send", "@agent/3", "post-takeover checkpoint", "--type", "notify", "--summary", "post-takeover checkpoint"],
+      {
+        ...BASE_ENV,
+        TRIBE_SOCKET: socketPath,
+        TRIBE_LAUNCH_ID: launchId,
+        TRIBE_NAME: "@chief/next",
+        TRIBE_SESSION_NAME: "@chief/next",
+        TRIBE_NO_AUTOSTART: "1",
+      },
+      { throughParent: true },
+    )
+    expect(notify.exitCode, notify.stderr).toBe(0)
+
+    const db = openDatabase(dbPath)
+    const remaining = db
+      .prepare("SELECT COUNT(*) AS count FROM pending_request WHERE recipient = ? AND request_id = ?")
+      .get("@chief", requestId) as { count: number }
+    const attributed = db.prepare("SELECT sender FROM messages WHERE content = ?").get("post-takeover checkpoint") as {
+      sender: string
+    }
+    db.close()
+    expect(remaining.count).toBe(0)
+    expect(attributed.sender).toBe("@chief")
+  }, 60_000)
+
   it("claiming the loaded name forwards EXACTLY the one actionable; a reconnect forwards none", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const dbPath = join(tmpDir, "tribe.db")

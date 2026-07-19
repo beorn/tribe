@@ -152,9 +152,10 @@ export type TribeCoordMethod = (typeof TRIBE_COORD_METHODS)[keyof typeof TRIBE_C
  *   3. Every non-self direct assign/query/request automatically opens one
  *      semantic response ball. Verdict stays actionable and wakeable without
  *      automatically minting another obligation. Answer
- *      or explicitly defer tracked work with `reply=<request-id>`; a
- *      transport/read acknowledgement is neither required nor sufficient to
- *      release that ownership.
+ *      or explicitly defer tracked work with the structured MCP
+ *      `reply: "<request-id>"` field (CLI: `--reply <request-id>`), never a
+ *      prose `reply=...` marker; a transport/read acknowledgement is neither
+ *      required nor sufficient to release that ownership.
  *
  * Bead: `@km/code/15654` (Part 1).
  */
@@ -166,8 +167,10 @@ export const TRIBE_JOIN_PRIMER =
   "and automatically open a semantic response ball. Direct `type: verdict` is " +
   "also actionable and wakeable, but does not automatically open another ball. " +
   "Direct `notify`/`status`/`response` rows are inbox-visible, but not wakeable. " +
-  "Answer or explicitly defer each actionable with `reply=<request-id>` so its " +
-  "semantic ball closes; no transport or exact-id delivery ACK is required."
+  "Answer or explicitly defer each actionable with the structured MCP " +
+  '`reply: "<request-id>"` field (CLI: `--reply <request-id>`), never a prose ' +
+  "`reply=...` marker, so its semantic ball closes; no transport or exact-id " +
+  "delivery ACK is required."
 
 const REMOVED_TRIBE_METHODS = new Set([
   "tribe.broadcast",

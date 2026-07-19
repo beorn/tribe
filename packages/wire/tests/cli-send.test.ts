@@ -3,10 +3,8 @@
  *
  * Bead: @km/bearly/19231-tribe-cli-unify-phase-a2-verbs
  *
- * These tests verify that each send/messaging verb is registered on the
- * program and accepts its expected flag surface. End-to-end daemon behavior
- * is covered by the legacy tribe-cli integration tests; the focus here is
- * wiring + Commander definitions only.
+ * These tests verify registration, flag shape, and spawned CLI behavior. The
+ * real-daemon takeover journey lives in actionable-recovery-journey.test.ts.
  */
 
 import { describe, expect, test } from "vitest"
@@ -266,6 +264,7 @@ describe("registerSendCommands", () => {
               ...process.env,
               TRIBE_SOCKET: socketPath,
               TRIBE_SESSION_NAME: "@chief",
+              TRIBE_LAUNCH_ID: "",
             },
             stdio: ["ignore", "pipe", "pipe"],
           })
@@ -335,6 +334,7 @@ describe("registerSendCommands", () => {
     const env: NodeJS.ProcessEnv = { ...process.env, TRIBE_SOCKET: "/tmp/tribe-wire-no-owner.sock" }
     delete env.TRIBE_NAME
     delete env.TRIBE_SESSION_NAME
+    delete env.TRIBE_LAUNCH_ID
 
     const res = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProc) => {
       const child = spawn(BUN_BIN, [CLI, "send", "@agent/3", "done", "--type", "response", "--reply", "req-123"], {
@@ -352,6 +352,55 @@ describe("registerSendCommands", () => {
     expect(res.stdout).toBe("")
     expect(res.stderr).toContain("--reply req-123 requires TRIBE_NAME or TRIBE_SESSION_NAME")
     expect(res.stderr).toContain("Inspect ownership first: tribe pending --owner <owner>")
+  })
+
+  test("send rejects prose-shaped reply/ref intent before daemon I/O and teaches the structured flag", async () => {
+    const socketPath = join(tmpdir(), `tribe-wire-intent-guard-${process.pid}.sock`)
+    const runSend = (message: string, flags: string[] = []) =>
+      new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProc) => {
+        const child = spawn(BUN_BIN, [CLI, "send", "@agent/3", message, ...flags], {
+          env: {
+            ...process.env,
+            TRIBE_SOCKET: socketPath,
+            TRIBE_NAME: "@chief",
+            TRIBE_LAUNCH_ID: "",
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+        let stdout = ""
+        let stderr = ""
+        child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+        child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+        child.on("close", (code) => resolveProc({ code, stdout, stderr }))
+      })
+
+    const reply = await runSend("  reply=req-123 answered")
+    expect(reply).toMatchObject({ code: 2, stdout: "" })
+    expect(reply.stderr).toContain("message content begins with reply=req-123")
+    expect(reply.stderr).toContain("Use --reply req-123")
+    expect(reply.stderr).not.toContain("No daemon running")
+
+    const ref = await runSend("ref=incident-7 checkpoint")
+    expect(ref).toMatchObject({ code: 2, stdout: "" })
+    expect(ref.stderr).toContain("message content begins with ref=incident-7")
+    expect(ref.stderr).toContain("Use --ref incident-7")
+    expect(ref.stderr).not.toContain("No daemon running")
+
+    const prose = await runSend("checkpoint mentions reply=req-123 in ordinary prose")
+    expect(prose.code).toBe(1)
+    expect(prose.stderr).toContain("No daemon running")
+    expect(prose.stderr).not.toContain("message content begins with")
+
+    const structured = await runSend("answered", ["--type", "response", "--reply", "req-123"])
+    expect(structured.code).toBe(1)
+    expect(structured.stderr).toContain("No daemon running")
+    expect(structured.stderr).not.toContain("message content begins with")
+
+    const mismatched = await runSend("reply=req-A answered", ["--type", "response", "--reply", "req-B"])
+    expect(mismatched).toMatchObject({ code: 2, stdout: "" })
+    expect(mismatched.stderr).toContain("message content begins with reply=req-A")
+    expect(mismatched.stderr).toContain("remove reply=req-A from the message content")
+    expect(mismatched.stderr).not.toContain("No daemon running")
   })
 
   test("send forwards TRIBE_NAME as one-shot caller identity", async () => {
@@ -396,6 +445,7 @@ describe("registerSendCommands", () => {
               ...process.env,
               TRIBE_SOCKET: socketPath,
               TRIBE_NAME: "@chief",
+              TRIBE_LAUNCH_ID: "",
             },
             stdio: ["ignore", "pipe", "pipe"],
           },

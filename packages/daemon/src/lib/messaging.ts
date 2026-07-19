@@ -108,8 +108,8 @@ export type BallTracker = {
   /**
    * If set, this message OPENS a tracked request with this id. Convention:
    * the message id IS its own request id (the daemon stamps the message id
-   * and copies it here). Recipient(s) own the ball until a message with
-   * `reply=<id>` arrives.
+   * and copies it here). Recipient(s) own the ball until a send carries the
+   * structured `reply` field (CLI: `--reply`).
    */
   request?: string | true
   /**
