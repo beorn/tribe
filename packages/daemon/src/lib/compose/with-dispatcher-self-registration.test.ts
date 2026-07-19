@@ -337,6 +337,75 @@ describe("dispatcher bounded mailbox drain", () => {
     expect(ambiguous.message).toMatch(/resolved to 2 sessions|ambiguous/i)
   })
 
+  it("resolves a launch to its sole routable session when connected tombstones share the launch id", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const launchId = "retained-dead-launch"
+
+    for (const index of [1, 2, 3]) {
+      const { connId } = harness.connectClient()
+      await harness.register(connId, {
+        name: `@chief-dead-${String(index).padStart(8, "0")}`,
+        pid: liveHolderPid + index,
+        project: "/tmp/hh",
+        launchId,
+        launchParentPid: process.pid,
+      })
+    }
+
+    const { connId: liveConnId } = harness.connectClient()
+    await harness.register(liveConnId, {
+      name: "@chief",
+      pid: liveHolderPid,
+      project: "/tmp/hh",
+      launchId,
+      launchParentPid: process.pid,
+    })
+
+    const status = parseResult<{ session: string; unread_count: number }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "retained-dead-launch-inbox",
+          method: "cli_inbox_status_by_launch_v1",
+          params: { launch_id: launchId },
+        },
+        "conn-status",
+      ),
+    )
+
+    expect(status).toMatchObject({ session: "@chief", unread_count: 0 })
+  })
+
+  it("keeps legal names containing the tombstone marker routable", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const launchId = "legal-dead-marker-launch"
+    const name = "@agent/foo-dead-letter"
+    const { connId } = harness.connectClient()
+    await harness.register(connId, {
+      name,
+      pid: liveHolderPid,
+      project: "/tmp/hh",
+      launchId,
+      launchParentPid: process.pid,
+    })
+
+    const status = parseResult<{ session: string }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "legal-dead-marker-inbox",
+          method: "cli_inbox_status_by_launch_v1",
+          params: { launch_id: launchId },
+        },
+        "conn-status",
+      ),
+    )
+
+    expect(status.session).toBe(name)
+  })
+
   it("advances the durable role cursor without creating a transient registration", async () => {
     const harness = createDispatcherHarness({ operatorCapability: "operator-test-secret" })
     cleanup = harness.dispose

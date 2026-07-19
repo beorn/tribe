@@ -55,7 +55,13 @@ import { createLifecycleStore } from "../lifecycle-store.ts"
 import { createInboxWaitManager } from "../inbox-wait.ts"
 import { logEvent, sendMessage } from "../messaging.ts"
 import { registerSession, NameConflictError } from "../session.ts"
-import { adoptByPidCwd, adoptIdentity, resolveName, type PriorSession } from "../resolve-name.ts"
+import {
+  adoptByPidCwd,
+  adoptIdentity,
+  isTombstonedSessionName,
+  resolveName,
+  type PriorSession,
+} from "../resolve-name.ts"
 import { type RecallConnState } from "../recall-handlers.ts"
 import type { BaseTribe } from "./base.ts"
 import type { WithBroadcast } from "./with-broadcast.ts"
@@ -243,11 +249,14 @@ export function withDispatcher<
         name: string
         launch_parent_pid: number | null
       }>
-      const launchSession = launchSessions[0]
-      if (launchSessions.length !== 1 || launchSession === undefined) {
+      // Tombstones retain journal addressability but no longer own routing.
+      // A disconnected canonical row remains valid for managed CLI recovery.
+      const routableLaunchSessions = launchSessions.filter((session) => !isTombstonedSessionName(session.name))
+      const launchSession = routableLaunchSessions[0]
+      if (routableLaunchSessions.length !== 1 || launchSession === undefined) {
         return {
           errorCode: -32003,
-          errorMessage: `Inbox launch identity resolved to ${launchSessions.length} sessions; exactly one is required`,
+          errorMessage: `Inbox launch identity resolved to ${routableLaunchSessions.length} sessions (${launchSessions.length} stored); exactly one routable session is required`,
         }
       }
       if (!Number.isSafeInteger(launchSession.launch_parent_pid) || Number(launchSession.launch_parent_pid) <= 0) {

@@ -149,6 +149,11 @@ export function assignUnknownName(taken: ReadonlySet<string>): string {
 // Adoption helpers (project-and-role + identity-token reuse)
 // ---------------------------------------------------------------------------
 
+/** True when a retained session row has the takeover tombstone suffix. */
+export function isTombstonedSessionName(name: string): boolean {
+  return /-dead-[0-9a-f]{8}$/u.test(name)
+}
+
 /**
  * True if a session name looks auto-generated (daemon fallback) and should NOT
  * be adopted by later sessions. Covers: member-<digits>, km-<digits>,
