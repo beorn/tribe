@@ -35,7 +35,12 @@
 import { readFileSync } from "node:fs"
 import { Command, int } from "@silvery/commander"
 import { cliOption, visibleCliProjectionForMcp } from "../command-descriptors.ts"
-import { parseInboxWaitTimeoutMs } from "../lib/inbox-wait-options.ts"
+import {
+  deriveInboxWaitCallTimeoutMs,
+  parseInboxWaitResult,
+  resolveInboxWaitControls,
+  type InboxWaitResult,
+} from "../lib/inbox-wait-options.ts"
 import { connectToDaemon, resolveSocketPath } from "../lib/socket.ts"
 import { watchActivity } from "../lib/activity-watch.ts"
 import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-exempt.ts"
@@ -197,15 +202,7 @@ interface Msg {
   ts: number
 }
 
-export type InboxWaitResult = {
-  session: string
-  unread_count: number
-  oldest_unread_age_min: number
-  oldest_unread_ts: number
-  waited_ms: number
-  timed_out: boolean
-  aborted: boolean
-}
+export type { InboxWaitResult } from "../lib/inbox-wait-options.ts"
 
 type InboxDrainResult = {
   session: string
@@ -220,7 +217,11 @@ type InboxDrainResult = {
   }>
 }
 
-type InboxWaitCall = (args: { session?: string; timeoutMs: number }) => Promise<InboxWaitResult>
+type InboxWaitCall = (args: {
+  session?: string
+  timeoutMs: number
+  wakeOnCorrelatedReply: boolean
+}) => Promise<InboxWaitResult>
 
 const INBOX_WAIT_CHUNK_MS = 30_000
 const INBOX_WAIT_RETRY_DELAY_MS = 250
@@ -762,21 +763,40 @@ export function isRetryableInboxWaitError(err: unknown): boolean {
   return inboxWaitErrorKind(err) !== null
 }
 
-function totalWaited(result: InboxWaitResult, startedAt: number, now: () => number): InboxWaitResult {
-  return { ...result, waited_ms: Math.max(result.waited_ms, Math.max(0, now() - startedAt)) }
+function totalWaited(
+  result: InboxWaitResult,
+  startedAt: number,
+  now: () => number,
+  effectiveTimeoutMs: number,
+): InboxWaitResult {
+  return {
+    ...result,
+    waited_ms: Math.max(result.waited_ms, Math.max(0, now() - startedAt)),
+    effective_timeout_ms: effectiveTimeoutMs,
+  }
 }
 
-function timeoutInboxWaitResult(session: string | undefined, startedAt: number, now: () => number): InboxWaitResult {
-  if (session === undefined) throw new Error("Inbox wait ended before the daemon resolved the managed launch mailbox")
-  return {
-    session,
-    unread_count: 0,
-    oldest_unread_age_min: 0,
-    oldest_unread_ts: 0,
-    waited_ms: Math.max(0, now() - startedAt),
-    timed_out: true,
-    aborted: false,
+function logicalTimeoutInboxWaitResult(
+  latest: InboxWaitResult | undefined,
+  lastRetryableError: unknown,
+  startedAt: number,
+  now: () => number,
+  effectiveTimeoutMs: number,
+): InboxWaitResult {
+  if (latest === undefined) {
+    if (lastRetryableError !== undefined) throw lastRetryableError
+    throw new Error("Inbox wait ended without an authoritative daemon result")
   }
+  return totalWaited(
+    {
+      ...latest,
+      timed_out: true,
+      aborted: false,
+    },
+    startedAt,
+    now,
+    effectiveTimeoutMs,
+  )
 }
 
 export async function waitForInboxWithReconnect(opts: {
@@ -788,37 +808,58 @@ export async function waitForInboxWithReconnect(opts: {
   maxChunkMs?: number
   retryDelayMs?: number
   unavailableGraceMs?: number
+  wakeOnCorrelatedReply?: boolean
 }): Promise<InboxWaitResult> {
   const now = opts.now ?? Date.now
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
   const maxChunkMs = opts.maxChunkMs ?? INBOX_WAIT_CHUNK_MS
   const retryDelayMs = opts.retryDelayMs ?? INBOX_WAIT_RETRY_DELAY_MS
   const unavailableGraceMs = opts.unavailableGraceMs ?? INBOX_WAIT_UNAVAILABLE_GRACE_MS
+  const controls = resolveInboxWaitControls({
+    timeout_ms: opts.timeoutMs,
+    wake_on_correlated_reply: opts.wakeOnCorrelatedReply,
+  })
   const startedAt = now()
-  const deadline = startedAt + Math.max(0, opts.timeoutMs)
-  let resolvedSession = opts.session
+  const deadline = startedAt + controls.timeoutMs
+  let latestResult: InboxWaitResult | undefined
+  let lastRetryableError: unknown
   let attempted = false
 
   while (true) {
     const remainingMs = Math.max(0, deadline - now())
-    if (attempted && remainingMs <= 0) return timeoutInboxWaitResult(resolvedSession, startedAt, now)
+    if (attempted && remainingMs <= 0) {
+      return logicalTimeoutInboxWaitResult(latestResult, lastRetryableError, startedAt, now, controls.timeoutMs)
+    }
 
     try {
       attempted = true
-      const result = await opts.call({ session: opts.session, timeoutMs: Math.min(maxChunkMs, remainingMs) })
-      resolvedSession = result.session
-      if (result.unread_count > 0) return totalWaited(result, startedAt, now)
+      const result = await opts.call({
+        session: opts.session,
+        timeoutMs: Math.min(maxChunkMs, remainingMs),
+        wakeOnCorrelatedReply: controls.wakeOnCorrelatedReply,
+      })
+      latestResult = result
+      lastRetryableError = undefined
+      if (result.unread_count > 0 || (!result.timed_out && !result.aborted)) {
+        return totalWaited(result, startedAt, now, controls.timeoutMs)
+      }
       if (result.aborted || result.timed_out) {
-        if (now() >= deadline) return timeoutInboxWaitResult(resolvedSession, startedAt, now)
+        if (now() >= deadline) {
+          return logicalTimeoutInboxWaitResult(result, lastRetryableError, startedAt, now, controls.timeoutMs)
+        }
         continue
       }
-      return totalWaited(result, startedAt, now)
     } catch (err) {
       const kind = inboxWaitErrorKind(err)
       if (!kind) throw err
-      if (kind === "daemon-unavailable" && now() - startedAt >= unavailableGraceMs) throw err
+      lastRetryableError = err
+      if (kind === "daemon-unavailable" && latestResult === undefined && now() - startedAt >= unavailableGraceMs) {
+        throw err
+      }
       const afterErrorRemainingMs = Math.max(0, deadline - now())
-      if (afterErrorRemainingMs <= 0) return timeoutInboxWaitResult(resolvedSession, startedAt, now)
+      if (afterErrorRemainingMs <= 0) {
+        return logicalTimeoutInboxWaitResult(latestResult, lastRetryableError, startedAt, now, controls.timeoutMs)
+      }
       const pauseMs = Math.min(retryDelayMs, afterErrorRemainingMs)
       if (pauseMs > 0) await sleep(pauseMs)
     }
@@ -829,11 +870,23 @@ async function callInboxWaitChunk(
   method: string,
   target: Record<string, unknown>,
   timeoutMs: number,
+  wakeOnCorrelatedReply: boolean,
 ): Promise<InboxWaitResult> {
   const socketPath = resolveSocketPath()
-  const client = await connectToDaemon(socketPath, { callTimeoutMs: Math.max(10_000, timeoutMs + 5_000) })
+  const callTimeoutMs = deriveInboxWaitCallTimeoutMs(timeoutMs)
+  const client = await connectToDaemon(socketPath, { callTimeoutMs })
   try {
-    return (await client.call(method, { ...target, timeout_ms: timeoutMs })) as InboxWaitResult
+    return parseInboxWaitResult(
+      await client.call(
+        method,
+        {
+          ...target,
+          timeout_ms: timeoutMs,
+          ...(wakeOnCorrelatedReply ? { wake_on_correlated_reply: true } : {}),
+        },
+        { timeoutMs: callTimeoutMs },
+      ),
+    )
   } catch (err) {
     if ((err as { code?: unknown }).code === -32601 && method.endsWith("_by_launch_v1")) {
       throw new Error(STALE_MANAGED_INBOX_DAEMON_ERROR)
@@ -844,14 +897,23 @@ async function callInboxWaitChunk(
   }
 }
 
-async function cmdInboxWait(opts: { session?: string; timeoutMs?: number; json?: boolean }): Promise<void> {
-  const timeoutMs = parseInboxWaitTimeoutMs(opts.timeoutMs)
+async function cmdInboxWait(opts: {
+  session?: string
+  timeoutMs?: number
+  wakeOnCorrelatedReply?: boolean
+  json?: boolean
+}): Promise<void> {
+  const controls = resolveInboxWaitControls({
+    timeout_ms: opts.timeoutMs,
+    wake_on_correlated_reply: opts.wakeOnCorrelatedReply,
+  })
   const target = cliInboxTargetParams(opts.session)
   const result = await waitForInboxWithReconnect({
     session: opts.session,
-    timeoutMs,
-    call: ({ timeoutMs: chunkTimeoutMs }) =>
-      callInboxWaitChunk(cliInboxMethod("wait", opts.session), target, chunkTimeoutMs),
+    timeoutMs: controls.timeoutMs,
+    wakeOnCorrelatedReply: controls.wakeOnCorrelatedReply,
+    call: ({ timeoutMs: chunkTimeoutMs, wakeOnCorrelatedReply }) =>
+      callInboxWaitChunk(cliInboxMethod("wait", opts.session), target, chunkTimeoutMs, wakeOnCorrelatedReply),
   })
   if (opts.json) {
     console.log(JSON.stringify(result))
@@ -861,9 +923,13 @@ async function cmdInboxWait(opts: { session?: string; timeoutMs?: number; json?:
     console.log(`${result.session}: inbox wait aborted.`)
     return
   }
-  if (result.timed_out || result.unread_count === 0) {
-    console.log(`${result.session}: no actionable DMs within ${Math.round(timeoutMs / 1000)}s.`)
+  if (result.timed_out) {
+    console.log(`${result.session}: no actionable DMs within ${Math.round(controls.timeoutMs / 1000)}s.`)
     process.exitCode = 64
+    return
+  }
+  if (result.unread_count === 0) {
+    console.log(`${result.session}: correlated tracked-request reply arrived.`)
     return
   }
   const n = result.unread_count
@@ -1046,20 +1112,27 @@ export function registerReadCommands(program: Command): void {
 
   const inboxWaitSession = cliOption(INBOX_WAIT_CLI, "session")
   const inboxWaitTimeout = cliOption(INBOX_WAIT_CLI, "timeout")
+  const inboxWaitWakeOnCorrelatedReply = cliOption(INBOX_WAIT_CLI, "wake-on-correlated-reply")
   const inboxWaitJson = cliOption(INBOX_WAIT_CLI, "json")
   program
     .command(INBOX_WAIT_CLI.name)
     .description(INBOX_WAIT_CLI.description)
     .option(inboxWaitSession.flags, inboxWaitSession.description, inboxWaitSession.default)
     .option(inboxWaitTimeout.flags, inboxWaitTimeout.description, inboxWaitTimeout.default)
+    .option(inboxWaitWakeOnCorrelatedReply.flags, inboxWaitWakeOnCorrelatedReply.description)
     .option(inboxWaitJson.flags, inboxWaitJson.description)
-    .action((opts: { session?: string; timeout?: string; json?: boolean }) => {
+    .action((opts: { session?: string; timeout?: string; wakeOnCorrelatedReply?: boolean; json?: boolean }) => {
       const timeoutMs = opts.timeout ? parseDurationMs(opts.timeout) : undefined
       if (opts.timeout && timeoutMs === undefined) {
         console.error(`tribe inbox-wait: bad --timeout '${opts.timeout}' (expected NNs|NNm|NNh)`)
         process.exit(2)
       }
-      void cmdInboxWait({ session: opts.session, timeoutMs, json: opts.json })
+      void cmdInboxWait({
+        session: opts.session,
+        timeoutMs,
+        wakeOnCorrelatedReply: opts.wakeOnCorrelatedReply,
+        json: opts.json,
+      })
     })
 
   const repairSession = cliOption(REPAIR_CLI, "session")

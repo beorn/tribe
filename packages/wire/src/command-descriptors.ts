@@ -395,12 +395,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     id: "tribe.inbox.wait",
     title: "Inbox Wait",
     description:
-      "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Every result carries current attention; direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
+      "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Every result carries current attention and the effective timeout cap. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the caller's session.",
     lifetime: "live-session",
     mcp: {
       name: "inbox.wait",
       description:
-        "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Every result carries current attention; direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
+        "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Every result carries current attention and the effective timeout cap. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the caller's session.",
       inputSchema: {
         type: "object",
         properties: {
@@ -411,7 +411,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           timeout_ms: {
             type: "number",
             description:
-              "Wait limit in milliseconds. Defaults to 30000. Effective duration may be capped by the MCP host.",
+              "Wait limit in milliseconds. Defaults to 30000 and caps at 1800000; effective_timeout_ms reports the applied cap.",
+          },
+          wake_on_correlated_reply: {
+            type: "boolean",
+            description:
+              "Also wake when a response or status closes one of this session's validated tracked requests. Defaults to false.",
           },
         },
       },
@@ -422,6 +427,10 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           oldest_unread_age_min: { type: "number", description: "Age of the oldest actionable unread DM, in minutes." },
           oldest_unread_ts: { type: "number", description: "Oldest actionable unread DM timestamp (unix ms)." },
           waited_ms: { type: "number", description: "How long the wait lasted." },
+          effective_timeout_ms: {
+            type: "number",
+            description: "The applied timeout after Tribe's maximum-window cap.",
+          },
           timed_out: { type: "boolean", description: "True when the timeout elapsed before a DM arrived." },
           aborted: { type: "boolean", description: "True when the connection closed before a DM arrived." },
           attention: ATTENTION_SCHEMA,
@@ -433,7 +442,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     cli: available({
       name: "inbox-wait",
       description:
-        "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Every result carries current attention; direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session.",
+        "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Every result carries current attention and the effective timeout cap. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the caller's session.",
       lifetime: "one-shot",
       mapsToMcp: "inbox.wait",
       options: [
@@ -449,6 +458,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           default: "30s",
           mapsTo: "timeout_ms",
           transform: "duration-ms",
+        },
+        {
+          name: "wake-on-correlated-reply",
+          flags: "--wake-on-correlated-reply",
+          description: "Also wake on a validated reply to one of this session's tracked requests",
+          mapsTo: "wake_on_correlated_reply",
         },
         { name: "json", flags: "--json", description: "Emit machine-readable JSON (for hooks)" },
       ],

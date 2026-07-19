@@ -29,6 +29,7 @@ import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
 import { spawn } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
+import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
 import { createLogger, setSuppressConsole } from "loggily"
 import { createTimers } from "./timers.ts"
@@ -783,8 +784,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             ...(a.provider === undefined && args.provider ? { provider: args.provider } : {}),
           }
         : a
-    // Tool names are bare verbs ("send", "fetch"); daemon wire methods use "tribe." prefix
-    const daemonMethod = `tribe.${name}`
     // Still degraded after the retry → one clear sentence per call, never the
     // raw connect error (km 19851 loud-but-soft).
     if (daemonDegradedReason !== null && daemon === undefined) {
@@ -800,7 +799,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     // A tool call may arrive before the background daemon connect resolves
     // (the daemon block is non-blocking) — await `daemonReady` in that case.
     const d = daemon ?? (await daemonReady)
-    const result = await d.call(daemonMethod, payload)
+    const result = await callTribeTool(d, name, payload)
     // Update local name/role after join/rename
     if (name === "join") joined = true
     if (name === "join" || name === "rename") {

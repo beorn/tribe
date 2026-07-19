@@ -405,14 +405,23 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-drain-"))
     const socketPath = join(dir, "tribe.sock")
     const calls: Array<{ method: string; params?: Record<string, unknown> }> = []
-    const result = {
+    const waitResult = {
       session: "@chief",
       unread_count: 0,
       oldest_unread_age_min: 0,
       oldest_unread_ts: 0,
       waited_ms: 0,
+      effective_timeout_ms: 0,
       timed_out: false,
       aborted: false,
+      attention: {
+        actionable_unread: [],
+        pending_balls: [],
+        pending_balls_summary: { total: 0, oldest_age_ms: 0 },
+      },
+    }
+    const result = {
+      ...waitResult,
       drained_count: 1,
       events: [{ from: "@agent/7", type: "request", content: "review carrier" }],
     }
@@ -460,10 +469,12 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         operatorCapability: "fd-only-operator-secret",
       })
 
-      for (const cli of [status, wait, drain]) {
+      for (const cli of [status, drain]) {
         expect(cli).toMatchObject({ code: 0, stderr: "" })
         expect(JSON.parse(cli.stdout)).toMatchObject({ ...result, waited_ms: expect.any(Number) })
       }
+      expect(wait).toMatchObject({ code: 0, stderr: "" })
+      expect(JSON.parse(wait.stdout)).toEqual({ ...waitResult, waited_ms: expect.any(Number) })
 
       const managedEnv = {
         ...process.env,

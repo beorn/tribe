@@ -4,6 +4,11 @@
 
 ### Added
 
+- **Honor one full bounded inbox-wait window across every transport.** Protocol
+  v8 caps logical waits at 30 minutes, reports `effective_timeout_ms`, preserves
+  that deadline through CLI reconnects plus stdio/HTTP MCP forwarding, and lets
+  callers opt into validated `response` / `status` replies to their own tracked
+  requests without changing the default actionable-only wake policy.
 - **Register launch-declared notification filters atomically.** MCP adapters
   accept `TRIBE_FILTER_MODE=focus|normal|ambient` and declare it in protocol v7
   registration, so a focus-mode session cannot receive an ambient wake before

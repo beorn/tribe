@@ -33,10 +33,13 @@ The marketplace plugin joins sessions in **push** mode: the daemon fans events
 out live, and they arrive inside a running turn as channel notifications — no
 polling needed while you're working.
 
-For idle stretches, use `tribe.inbox_wait`: a single bounded long-poll that
+For idle stretches, use `tribe.inbox.wait`: a single bounded long-poll that
 wakes on _actionable_ inbox activity (`request` / `query` / `assign` /
-`verdict` types — deliberately not `notify` or status chatter). On wake, drain
-with a small fetch and handle what `attention` shows. Do not simulate
+`verdict` types). Direct `notify` / `status` / `response` rows stay quiet by
+default; `wake_on_correlated_reply: true` additionally admits a validated
+`response` or `status` to the waiting session's own tracked request. Every
+result reports the capped logical window as `effective_timeout_ms`. On wake,
+drain with a small fetch and handle what `attention` shows. Do not simulate
 long-polling with repeated short waits — one generous bounded wait per idle
 stretch is the intended pattern.
 
@@ -48,7 +51,7 @@ project instructions:
 2. Work your current task.
 3. At every stopping point: tribe.fetch({ limit: 10 }); handle everything in
    `attention`; reply to requests with tribe.send({ ..., reply: <request id> }).
-4. When idle: call tribe.inbox_wait with a generous timeout. On wake, go to 3.
+4. When idle: call tribe.inbox.wait with a generous timeout. On wake, go to 3.
    On timeout, continue queued work or wait again.
 ```
 
@@ -59,9 +62,11 @@ durably in SQLite and the session drains them explicitly.
 
 - Configure the wire adapter with `TRIBE_DELIVERY=pull` — for Codex, under
   `[mcp_servers.tribe.env]` in `~/.codex/config.toml`.
+- Give MCP tools the full capped wait window: set `tool_timeout_sec = 1860`
+  under `[mcp_servers.tribe]`.
 - Put the drain at the **top of every agent turn**: `tribe.fetch({ limit: 10 })`,
   handle `attention`, reply, then proceed with the turn's work.
-- Use `tribe.inbox_wait` only if the host honors long tool timeouts; otherwise
+- Use `tribe.inbox.wait` only if the host honors long tool timeouts; otherwise
   rely on the turn-start drain — messages are durable, so nothing is lost
   between turns.
 

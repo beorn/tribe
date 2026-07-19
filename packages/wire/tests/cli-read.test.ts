@@ -11,13 +11,12 @@
 
 import { describe, expect, test } from "vitest"
 import { Command } from "@silvery/commander"
+import { formatReloadResult, registerReadCommands, waitForInboxWithReconnect } from "../src/cli/read.ts"
 import {
-  formatReloadResult,
-  registerReadCommands,
-  waitForInboxWithReconnect,
-  type InboxWaitResult,
-} from "../src/cli/read.ts"
-import { resolveInboxWaitOptions } from "../src/lib/inbox-wait-options.ts"
+  deriveInboxWaitCallTimeoutMs,
+  MAX_INBOX_WAIT_TIMEOUT_MS,
+  resolveInboxWaitOptions,
+} from "../src/lib/inbox-wait-options.ts"
 
 function buildProgram(): Command {
   const program = new Command("tribe-test")
@@ -163,29 +162,39 @@ describe("resolveInboxWaitOptions", () => {
     expect(resolveInboxWaitOptions({}, { defaultSession: "@agent/5" })).toEqual({
       session: "@agent/5",
       timeoutMs: 30_000,
+      wakeOnCorrelatedReply: false,
     })
-    expect(resolveInboxWaitOptions({ session: "@ci", timeout_ms: "120000" })).toEqual({
+    expect(
+      resolveInboxWaitOptions({
+        session: "@ci",
+        timeout_ms: "120000",
+        wake_on_correlated_reply: true,
+      }),
+    ).toEqual({
       session: "@ci",
       timeoutMs: 120_000,
+      wakeOnCorrelatedReply: true,
     })
     expect(resolveInboxWaitOptions({ timeoutMs: 0 }, { defaultSession: "@agent/5" })).toEqual({
       session: "@agent/5",
       timeoutMs: 0,
+      wakeOnCorrelatedReply: false,
     })
+  })
+
+  test("caps one logical wait and sizes its daemon RPC beyond that full window", () => {
+    const resolved = resolveInboxWaitOptions({ timeout_ms: 24 * 60 * 60_000 })
+    expect(resolved.timeoutMs).toBe(MAX_INBOX_WAIT_TIMEOUT_MS)
+    expect(deriveInboxWaitCallTimeoutMs(resolved.timeoutMs)).toBe(MAX_INBOX_WAIT_TIMEOUT_MS + 5_000)
+    expect(deriveInboxWaitCallTimeoutMs(24 * 60 * 60_000)).toBe(MAX_INBOX_WAIT_TIMEOUT_MS + 5_000)
   })
 })
 
 describe("waitForInboxWithReconnect", () => {
-  function timeoutResult(session: string, waitedMs: number): InboxWaitResult {
-    return {
-      session,
-      unread_count: 0,
-      oldest_unread_age_min: 0,
-      oldest_unread_ts: 0,
-      waited_ms: waitedMs,
-      timed_out: true,
-      aborted: false,
-    }
+  const EMPTY_ATTENTION = {
+    actionable_unread: [],
+    pending_balls: [],
+    pending_balls_summary: { total: 0, oldest_age_ms: 0 },
   }
 
   test("retries retryable transport close without losing the original absolute deadline", async () => {
@@ -213,8 +222,10 @@ describe("waitForInboxWithReconnect", () => {
           oldest_unread_age_min: 0,
           oldest_unread_ts: now,
           waited_ms: 5_000,
+          effective_timeout_ms: timeoutMs,
           timed_out: false,
           aborted: false,
+          attention: EMPTY_ATTENTION,
         }
       },
     })
@@ -225,10 +236,10 @@ describe("waitForInboxWithReconnect", () => {
     expect(result.timed_out).toBe(false)
   })
 
-  test("clamps the last retry to remaining time and returns timeout for reload churn at deadline", async () => {
+  test("clamps the last retry and keeps reload churn loud without an authoritative daemon result", async () => {
     let now = 0
     const chunkCalls: number[] = []
-    const result = await waitForInboxWithReconnect({
+    const wait = waitForInboxWithReconnect({
       session: "@ci",
       timeoutMs: 35_000,
       maxChunkMs: 30_000,
@@ -244,8 +255,29 @@ describe("waitForInboxWithReconnect", () => {
       },
     })
 
+    await expect(wait).rejects.toMatchObject({ code: "ECONNRESET" })
     expect(chunkCalls).toEqual([30_000, 5_000])
-    expect(result).toEqual(timeoutResult("@ci", 35_000))
+  })
+
+  test("does not fabricate empty attention when the daemon is unavailable for the whole short window", async () => {
+    let now = 0
+    const missing = Object.assign(new Error("connect ENOENT /tmp/tribe.sock"), { code: "ENOENT" })
+
+    await expect(
+      waitForInboxWithReconnect({
+        session: "@ci",
+        timeoutMs: 100,
+        retryDelayMs: 100,
+        unavailableGraceMs: 2_000,
+        now: () => now,
+        sleep: async (ms) => {
+          now += ms
+        },
+        call: async () => {
+          throw missing
+        },
+      }),
+    ).rejects.toBe(missing)
   })
 
   test("retries lost wait RPC timeouts caused by daemon reload", async () => {
@@ -273,8 +305,10 @@ describe("waitForInboxWithReconnect", () => {
           oldest_unread_age_min: 0,
           oldest_unread_ts: now,
           waited_ms: 500,
+          effective_timeout_ms: timeoutMs,
           timed_out: false,
           aborted: false,
+          attention: EMPTY_ATTENTION,
         }
       },
     })
@@ -335,8 +369,10 @@ describe("waitForInboxWithReconnect", () => {
           oldest_unread_age_min: 0,
           oldest_unread_ts: now,
           waited_ms: 250,
+          effective_timeout_ms: timeoutMs,
           timed_out: false,
           aborted: false,
+          attention: EMPTY_ATTENTION,
         }
       },
     })
@@ -344,5 +380,90 @@ describe("waitForInboxWithReconnect", () => {
     expect(chunkCalls).toEqual([30_000, 30_000])
     expect(result.unread_count).toBe(1)
     expect(result.waited_ms).toBe(750)
+  })
+
+  test("preserves the daemon attention projection when the logical window times out", async () => {
+    let now = 0
+    const attention = {
+      actionable_unread: [{ id: "request-visible" }],
+      pending_balls: [{ request_id: "request-visible" }],
+      pending_balls_summary: { total: 1, oldest_age_ms: 500 },
+    }
+    const result = await waitForInboxWithReconnect({
+      session: "@ci",
+      timeoutMs: 35_000,
+      maxChunkMs: 30_000,
+      now: () => now,
+      call: async ({ timeoutMs }) => {
+        now += timeoutMs
+        return {
+          session: "@ci",
+          unread_count: 0,
+          oldest_unread_age_min: 0,
+          oldest_unread_ts: 0,
+          waited_ms: timeoutMs,
+          effective_timeout_ms: timeoutMs,
+          timed_out: true,
+          aborted: false,
+          attention,
+        }
+      },
+    })
+
+    expect(result).toMatchObject({
+      waited_ms: 35_000,
+      effective_timeout_ms: 35_000,
+      timed_out: true,
+      aborted: false,
+      attention,
+    })
+  })
+
+  test("preserves the last authoritative attention when the daemon becomes unavailable", async () => {
+    let now = 0
+    let calls = 0
+    const attention = {
+      actionable_unread: [{ id: "request-before-reload" }],
+      pending_balls: [{ request_id: "request-before-reload" }],
+      pending_balls_summary: { total: 1, oldest_age_ms: 750 },
+    }
+    const result = await waitForInboxWithReconnect({
+      session: "@ci",
+      timeoutMs: 35_000,
+      maxChunkMs: 30_000,
+      retryDelayMs: 5_000,
+      unavailableGraceMs: 2_000,
+      now: () => now,
+      sleep: async (ms) => {
+        now += ms
+      },
+      call: async ({ timeoutMs }) => {
+        calls += 1
+        if (calls > 1) {
+          throw Object.assign(new Error("connect ENOENT /tmp/tribe.sock"), { code: "ENOENT" })
+        }
+        now += timeoutMs
+        return {
+          session: "@ci",
+          unread_count: 0,
+          oldest_unread_age_min: 0,
+          oldest_unread_ts: 0,
+          waited_ms: timeoutMs,
+          effective_timeout_ms: timeoutMs,
+          timed_out: true,
+          aborted: false,
+          attention,
+        }
+      },
+    })
+
+    expect(calls).toBe(2)
+    expect(result).toMatchObject({
+      waited_ms: 35_000,
+      effective_timeout_ms: 35_000,
+      timed_out: true,
+      aborted: false,
+      attention,
+    })
   })
 })

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Server, Socket as NetSocket } from "node:net"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { createScope } from "tribe-wire"
+import { createScope, type InboxWaitResult } from "tribe-wire"
 import { TRIBE_PROTOCOL_VERSION, type JsonRpcRequest } from "tribe-wire/lib/socket"
 import type { TribeRole } from "tribe-wire/lib/config"
 import { createTribeContext } from "../context.ts"
@@ -39,18 +39,6 @@ type InboxDrainResult = {
   unread_count: number
   drained_count: number
   events: Array<{ content: string }>
-}
-
-type InboxWaitResult = {
-  session: string
-  unread_count: number
-  waited_ms: number
-  timed_out: boolean
-  aborted: boolean
-  attention: {
-    actionable_unread: Array<{ content: string; type: string }>
-    pending_balls: Array<{ request_id: string; recipient: string }>
-  }
 }
 
 type JsonRpcResponse<T> = {
@@ -647,6 +635,75 @@ describe("dispatcher inbox-wait parsing", () => {
     expect(result.aborted).toBe(false)
     expect(result.attention.actionable_unread).toEqual([expect.objectContaining({ content: "wake inbox wait" })])
     expect(result.attention.pending_balls).toEqual([expect.objectContaining({ recipient: "@agent/wait" })])
+  })
+
+  it("caps the full MCP window and wakes only an opted-in requester on its validated reply", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    for (const [connId, name] of [
+      ["conn-requester", "@requester"],
+      ["conn-responder", "@responder"],
+    ] as const) {
+      harness.addPendingClient(connId)
+      await registerMember(harness, connId, name)
+    }
+
+    parseResult(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "request",
+          method: "tribe.send",
+          params: {
+            to: "@responder",
+            message: "please respond",
+            type: "request",
+            request: "req-correlated",
+          },
+        },
+        "conn-requester",
+      ),
+    )
+
+    const wait = harness.dispatcher.handleRequest(
+      {
+        jsonrpc: "2.0",
+        id: "wait-correlated",
+        method: "tribe.inbox.wait",
+        params: {
+          session: "@requester",
+          timeout_ms: 24 * 60 * 60_000,
+          wake_on_correlated_reply: true,
+        },
+      },
+      "conn-requester",
+    )
+
+    parseResult(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "reply",
+          method: "tribe.send",
+          params: {
+            to: "@requester",
+            message: "correlated reply",
+            type: "response",
+            reply: "req-correlated",
+          },
+        },
+        "conn-responder",
+      ),
+    )
+
+    await expect(wait.then(parseResult<InboxWaitResult>)).resolves.toMatchObject({
+      session: "@requester",
+      unread_count: 0,
+      effective_timeout_ms: 30 * 60_000,
+      timed_out: false,
+      aborted: false,
+    })
   })
 
   it("uses the same timeoutMs fallback accepted by the MCP handler", async () => {
