@@ -43,8 +43,8 @@ function runCli(args: string[], opts: { timeoutMs?: number } = {}): { stdout: st
 function runCliAsync(
   args: string[],
   env: NodeJS.ProcessEnv,
-  opts: { operatorCapability?: string } = {},
-): Promise<{ stdout: string; stderr: string; code: number | null }> {
+  opts: { operatorCapability?: string; timeoutMs?: number } = {},
+): Promise<{ stdout: string; stderr: string; code: number | null; signal: NodeJS.Signals | null }> {
   return new Promise((resolveRun) => {
     const stdio: Array<"ignore" | "pipe" | number> = ["ignore", "pipe", "pipe"]
     let capabilityFd: number | undefined
@@ -58,15 +58,15 @@ function runCliAsync(
       stdio.push(capabilityFd)
       childEnv.TRIBE_OPERATOR_CAPABILITY_FD = String(stdio.length - 1)
     }
-    const child = spawn(BUN_BIN, [CLI, ...args], { env: childEnv, stdio })
+    const child = spawn(BUN_BIN, [CLI, ...args], { env: childEnv, stdio, timeout: opts.timeoutMs })
     if (capabilityFd !== undefined) closeSync(capabilityFd)
     let stdout = ""
     let stderr = ""
     child.stdout!.on("data", (chunk) => (stdout += chunk.toString("utf8")))
     child.stderr!.on("data", (chunk) => (stderr += chunk.toString("utf8")))
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       if (capabilityDir !== undefined) rmSync(capabilityDir, { recursive: true, force: true })
-      resolveRun({ stdout: stripAnsi(stdout), stderr: stripAnsi(stderr), code })
+      resolveRun({ stdout: stripAnsi(stdout), stderr: stripAnsi(stderr), code, signal })
     })
   })
 }
@@ -597,4 +597,41 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     expect(res.stderr ?? "").toContain('"name":"tribe:stdio-adapter"')
     expect(res.stderr ?? "").toContain("Connecting to daemon at /tmp/no-tribe.sock")
   })
+
+  it("fails loudly by the client deadline when the inbox-wait daemon stays silent", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-wait-silent-"))
+    const socketPath = join(dir, "tribe.sock")
+    const server = createServer((socket) => {
+      socket.on("data", () => undefined)
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const startedAt = Date.now()
+      const result = await runCliAsync(
+        ["inbox-wait", "--session", "@chief", "--timeout", "0s", "--json"],
+        {
+          ...process.env,
+          TRIBE_SOCKET: socketPath,
+          TRIBE_NO_AUTOSTART: "1",
+        },
+        { timeoutMs: 15_000 },
+      )
+
+      expect(result.signal).toBeNull()
+      expect(result.code).not.toBe(0)
+      expect(result.stderr).toMatch(/Request cli_inbox_wait timed out/)
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(9_000)
+      expect(Date.now() - startedAt).toBeLessThan(15_000)
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 20_000)
 })
