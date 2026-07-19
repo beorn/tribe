@@ -5,6 +5,7 @@
 import { createLogger } from "loggily"
 import { readTranscriptSlug } from "tribe-wire/lib/transcript"
 import type { TribeContext } from "./context.ts"
+import { probeOwnerState } from "./session-transport-state.ts"
 
 const log = createLogger("tribe:session")
 import { sendMessage, logEvent } from "./messaging.ts"
@@ -97,16 +98,10 @@ export function sweepDeadSessionRows(
  *  and treat it as alive so we don't accidentally evict a legitimate
  *  holder whose pid we just don't know about. */
 export function isPidAlive(pid: number): boolean {
-  if (!pid || pid <= 0) return true
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    // kill(2) proves death only with ESRCH. EPERM means the process exists but
-    // this caller cannot signal it; unfamiliar probe failures are likewise
-    // inconclusive and must not evict or reroute a live owner's state.
-    return (error as NodeJS.ErrnoException).code !== "ESRCH"
-  }
+  // Existing callers use a conservative boolean gate: only positive ESRCH
+  // evidence permits eviction. The richer owner state is projected separately
+  // for diagnostics and transport policy.
+  return probeOwnerState(pid) !== "dead"
 }
 
 // ---------------------------------------------------------------------------

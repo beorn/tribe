@@ -15,13 +15,13 @@
 
 import { spawn, type ChildProcess } from "node:child_process"
 import { fileURLToPath } from "node:url"
+import { evaluateAdapterReexec } from "./supervisor-policy.ts"
 
 process.env.TRIBE_DAEMON_SCRIPT ??= fileURLToPath(import.meta.resolve("tribe-daemon"))
 
 const PLUGIN_CHILD = "TRIBE_PLUGIN_ADAPTER_CHILD"
 const PLUGIN_PROVIDER_PARENT_PID = "TRIBE_PLUGIN_PROVIDER_PARENT_PID"
 const REEXEC_EXIT_CODE = 75
-const STABLE_CHILD_MS = 30_000
 const REMEDY =
   "tribe plugin reconnect failed after current-disk re-exec; restart the host session or reinstall the Tribe plugin."
 
@@ -71,9 +71,9 @@ async function superviseAdapter(): Promise<void> {
       return
     }
 
-    if (Date.now() - startedAt >= STABLE_CHILD_MS) consecutiveReexecs = 0
-    consecutiveReexecs += 1
-    if (consecutiveReexecs > 1) {
+    const decision = evaluateAdapterReexec(consecutiveReexecs, Date.now() - startedAt)
+    consecutiveReexecs = decision.consecutiveReexecs
+    if (!decision.retry) {
       process.stderr.write(`${REMEDY}\n`)
       process.exitCode = 2
       return

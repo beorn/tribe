@@ -301,7 +301,8 @@ async function cmdSessions(showAll: boolean): Promise<void> {
  * one JSON object: `{"sessions":[...]}`. Unlike the human `sessions` verb
  * (cli_status text table), every row carries `launch_id` — the 21049
  * supervisor-issued launch identity the session's environment advertised via
- * TRIBE_LAUNCH_ID at registration — plus `alive`, so a supervisor can match a
+ * TRIBE_LAUNCH_ID at registration — plus daemon-authoritative transport and
+ * owner verdicts, so a supervisor can match a
  * spawn's epoch against the JOIN EVIDENCE ITSELF instead of inferring from
  * name/row counts (tent bootstrap-epoch, @ag/super/21075 blocker 3).
  */
@@ -947,8 +948,8 @@ export function registerReadCommands(program: Command): void {
 
   program
     .command("members")
-    .description("List member sessions as JSON (tribe.members reply: includes launch_id + alive per row)")
-    .option("-a, --all", "Include historical (disconnected) sessions")
+    .description("List member sessions as JSON with transport and owner verdicts")
+    .option("-a, --all", "Include disconnected durable session rows")
     .action((opts: { all?: boolean }) => void cmdMembers(!!opts.all))
 
   const pendingOwner = cliOption(PENDING_CLI, "owner")

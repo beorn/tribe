@@ -521,24 +521,34 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
       description: "List active tribe sessions with their domains",
       inputSchema: {
         type: "object",
-        properties: { all: { type: "boolean", description: "Include dead sessions (default: false)" } },
+        properties: { all: { type: "boolean", description: "Include disconnected session rows (default: false)" } },
       },
       outputSchema: OBJ(
         {
           sessions: {
             type: "array",
             description:
-              "Per-session rows: { name, role, domains, pid, cwd, claude_session_id?, claude_session_name?, alive, uptime_min, last_seen_sec, parent? }.",
+              "Per-session rows include daemon-authoritative transport_state (connected|disconnected), separate owner_state (live|dead|unknown), transport_reason, legacy alive, transport_pids, uptime_min, and activity-only last_seen_sec.",
             items: { type: "object", additionalProperties: true },
           },
         },
         "Members list - array of session records under `sessions`.",
       ),
     },
-    cli: hidden(
-      "Not in the first descriptor-backed CLI slice; legacy CLI status/sessions are daemon diagnostics, not exact MCP members projection.",
-      "sessions",
-    ),
+    cli: available({
+      name: "members",
+      description: "List member sessions as JSON with transport and owner verdicts",
+      lifetime: "one-shot",
+      mapsToMcp: "members",
+      options: [
+        {
+          name: "all",
+          flags: "-a, --all",
+          description: "Include disconnected durable session rows",
+          default: false,
+        },
+      ],
+    }),
   },
   {
     id: "tribe.rename",
@@ -584,7 +594,14 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           members: {
             type: "array",
-            description: "Per-member diagnostic: { name, role, domains, pid, alive, warnings: string[], ... }.",
+            description:
+              "Connected-member diagnostics include transport_state, owner_state, transport_reason, legacy alive, and warnings.",
+            items: { type: "object", additionalProperties: true },
+          },
+          transport_wedges: {
+            type: "array",
+            description:
+              "Disconnected durable rows whose owner process is still live, derived by the same daemon transport projector as tribe.members.",
             items: { type: "object", additionalProperties: true },
           },
           stale_beads: { type: "number", description: "Count of beads claimed but idle past threshold." },

@@ -55,10 +55,22 @@ function makeOpts(activeIds: Set<string>): HandlerOpts {
   }
 }
 
-type MembersSession = { name: string; pid: number; cwd: string; account?: string; provider?: string }
+type MembersSession = {
+  name: string
+  pid: number
+  cwd: string
+  alive: boolean
+  transport_state: "connected" | "disconnected"
+  owner_state: "live" | "dead" | "unknown"
+  transport_reason: string
+  account?: string
+  provider?: string
+}
 
-function membersFor(ctx: TribeContext, opts: HandlerOpts, name: string): MembersSession | undefined {
-  const result = handleToolCall(ctx, "tribe.members", {}, opts) as { content: Array<{ text: string }> }
+function membersFor(ctx: TribeContext, opts: HandlerOpts, name: string, all = false): MembersSession | undefined {
+  const result = handleToolCall(ctx, "tribe.members", all ? { all: true } : {}, opts) as {
+    content: Array<{ text: string }>
+  }
   const data = JSON.parse(result.content[0]?.text ?? "{}") as { sessions?: MembersSession[] }
   return (data.sessions ?? []).find((s) => s.name === name)
 }
@@ -95,6 +107,26 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
 
     const corrected = membersFor(ctx, opts, "@chief")
     expect(corrected).toMatchObject({ account: "d@delei.org", provider: "codex" })
+  })
+
+  it("projects daemon transport absence separately from a live owner process", () => {
+    const sessionId = "sess-wedged"
+    const ctx = makeContext(db, stmts, sessionId, "@agent/wedged")
+    registerSession(ctx, PROJECT_ID, () => true, null, process.pid, "push", "/repo", null, "claude")
+
+    expect(membersFor(ctx, makeOpts(new Set()), "@agent/wedged", true)).toMatchObject({
+      alive: false,
+      transport_state: "disconnected",
+      owner_state: "live",
+      transport_reason: "owner-live-no-transport",
+    })
+
+    expect(membersFor(ctx, makeOpts(new Set([sessionId])), "@agent/wedged")).toMatchObject({
+      alive: true,
+      transport_state: "connected",
+      owner_state: "live",
+      transport_reason: "registered-transport",
+    })
   })
 
   it("sweepDeadSessionRows GCs old tombstones and generated ghosts without touching fresh, canonical, or active rows", () => {

@@ -1,0 +1,284 @@
+/**
+ * 21416 — literal host-plugin recovery across the daemon's real
+ * close/unlink/fresh-bind SIGHUP path.
+ *
+ * Production safety: every process is pointed at a temporary socket/database,
+ * plugins are disabled, and no production daemon is signalled.
+ */
+
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { dirname, join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
+import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { connectToDaemon, type DaemonClient } from "../src/client.ts"
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const DAEMON = resolve(HERE, "../../daemon/src/daemon.ts")
+const PLUGIN_SERVER = resolve(HERE, "../../../plugins/claude/server.ts")
+const BUN_BIN = process.versions.bun ? process.execPath : "bun"
+const PERSONA = "@agent/restart-test"
+
+type JsonObject = Record<string, unknown>
+type Member = {
+  member_id?: string
+  name?: string
+  launch_id?: string
+  launch_parent_pid?: number
+  transport_pids?: number[]
+  transport_state?: "connected" | "disconnected"
+  owner_state?: "live" | "dead" | "unknown"
+}
+
+async function waitFor(predicate: () => boolean | Promise<boolean>, label: string, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await predicate()) return
+    await new Promise((resolveTick) => setTimeout(resolveTick, 25))
+  }
+  throw new Error(`timed out waiting for ${label}`)
+}
+
+function collectJsonLines(child: ChildProcessWithoutNullStreams): JsonObject[] {
+  const lines: JsonObject[] = []
+  let carry = ""
+  child.stdout.on("data", (chunk: Buffer | string) => {
+    const parts = (carry + chunk.toString()).split(/\r?\n/u)
+    carry = parts.pop() ?? ""
+    for (const line of parts) {
+      try {
+        lines.push(JSON.parse(line) as JsonObject)
+      } catch {
+        /* diagnostics never count as MCP frames */
+      }
+    }
+  })
+  return lines
+}
+
+function writeJson(child: ChildProcessWithoutNullStreams, payload: JsonObject): void {
+  child.stdin.write(`${JSON.stringify(payload)}\n`)
+}
+
+function initializePayload(id: number): JsonObject {
+  return {
+    jsonrpc: "2.0",
+    id,
+    method: "initialize",
+    params: {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "tribe-restart-test", version: "0" },
+    },
+  }
+}
+
+function callToolPayload(id: number, name: string, args: JsonObject): JsonObject {
+  return { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }
+}
+
+function parseToolJson(result: unknown): { sessions?: Member[] } {
+  const content = (result as { content?: Array<{ text?: string }> } | undefined)?.content
+  const text = content?.[0]?.text
+  return typeof text === "string" ? (JSON.parse(text) as { sessions?: Member[] }) : {}
+}
+
+function mcpToolJson(lines: JsonObject[], id: number): { sessions?: Member[] } {
+  return parseToolJson(lines.find((line) => line.id === id)?.result)
+}
+
+async function connectToGeneration(
+  socketPath: string,
+  predicate: (pid: number) => boolean = () => true,
+): Promise<{ client: DaemonClient; pid: number }> {
+  let lastError: unknown
+  const deadline = Date.now() + 15_000
+  while (Date.now() < deadline) {
+    let client: DaemonClient | undefined
+    try {
+      client = await connectToDaemon(socketPath, { callTimeoutMs: 1_000 })
+      const status = (await client.call("cli_daemon")) as { pid: number }
+      if (predicate(status.pid)) return { client, pid: status.pid }
+      client.close()
+    } catch (error) {
+      lastError = error
+      client?.close()
+    }
+    await new Promise((resolveTick) => setTimeout(resolveTick, 50))
+  }
+  throw new Error(`timed out connecting to expected daemon generation: ${String(lastError)}`)
+}
+
+function pidExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH"
+  }
+}
+
+async function terminateTestProcess(pid: number): Promise<void> {
+  if (!pidExists(pid)) return
+  try {
+    process.kill(pid, "SIGTERM")
+  } catch {
+    return
+  }
+  try {
+    await waitFor(() => !pidExists(pid), `test process ${pid} exit`, 2_000)
+    return
+  } catch {
+    if (!pidExists(pid)) return
+  }
+  process.kill(pid, "SIGKILL")
+  await waitFor(() => !pidExists(pid), `test process ${pid} forced exit`, 2_000)
+}
+
+describe("Claude plugin daemon-restart self-heal", () => {
+  let tmpDir: string
+  let socketPath: string
+  let plugin: ChildProcessWithoutNullStreams | undefined
+  const daemonPids = new Set<number>()
+  const adapterPids = new Set<number>()
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "tribe-plugin-restart-"))
+    socketPath = join(tmpDir, "tribe.sock")
+  })
+
+  afterEach(async () => {
+    if (existsSync(socketPath)) {
+      try {
+        const current = await connectToDaemon(socketPath, { callTimeoutMs: 500 })
+        const status = (await current.call("cli_daemon")) as { pid?: number }
+        if (typeof status.pid === "number") daemonPids.add(status.pid)
+        current.close()
+      } catch {
+        /* no reachable daemon remains */
+      }
+    }
+    const pluginPid = plugin?.pid
+    plugin?.kill("SIGTERM")
+    if (pluginPid) await terminateTestProcess(pluginPid)
+    for (const pid of adapterPids) await terminateTestProcess(pid)
+    for (const pid of daemonPids) await terminateTestProcess(pid)
+    adapterPids.clear()
+    daemonPids.clear()
+    plugin = undefined
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it("keeps host stdio, re-execs the adapter, and rejoins the same member after close/unlink/fresh-bind", async () => {
+    const dbPath = join(tmpDir, "tribe.db")
+    const daemonLog = join(tmpDir, "daemon.log")
+    const adapterLog = join(tmpDir, "adapter.log")
+    const daemon = spawn(BUN_BIN, [DAEMON, "--socket", socketPath, "--db", dbPath, "--foreground", "--no-lore"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_NO_PLUGINS: "1",
+        TRIBE_NO_AUTORELOAD: "1",
+        DEBUG_LOG: daemonLog,
+        LOG_FILE: daemonLog,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    }) as ChildProcessWithoutNullStreams
+    daemon.stdout.resume()
+    daemon.stderr.resume()
+    if (daemon.pid) daemonPids.add(daemon.pid)
+    await waitFor(() => existsSync(socketPath), "initial daemon socket")
+    const firstDaemon = await connectToGeneration(socketPath)
+    daemonPids.add(firstDaemon.pid)
+
+    plugin = spawn(BUN_BIN, [PLUGIN_SERVER, "--socket", socketPath, "--name", PERSONA], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DAEMON_SCRIPT: DAEMON,
+        TRIBE_DB: dbPath,
+        TRIBE_DELIVERY: "pull",
+        TRIBE_PULL_TRANSPORT: "mcp",
+        TRIBE_REQUIRE_JOIN: "0",
+        TRIBE_TAKEOVER: "1",
+        TRIBE_LAUNCH_ID: "restart-journey-launch",
+        TRIBE_NO_PLUGINS: "1",
+        TRIBE_NO_AUTORELOAD: "1",
+        DEBUG_LOG: adapterLog,
+        LOG_FILE: adapterLog,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    }) as ChildProcessWithoutNullStreams
+    let pluginStderr = ""
+    plugin.stderr.on("data", (chunk: Buffer | string) => {
+      pluginStderr += chunk.toString()
+    })
+    const stdout = collectJsonLines(plugin)
+    writeJson(plugin, initializePayload(1))
+    await waitFor(() => stdout.some((line) => line.id === 1), "plugin initialize")
+    writeJson(plugin, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await waitFor(async () => {
+      const roster = parseToolJson(await firstDaemon.client.call("tribe.members", { all: true }))
+      return (
+        roster.sessions?.some((session) => session.name === PERSONA && session.transport_state === "connected") ?? false
+      )
+    }, "initial daemon-side membership")
+    writeJson(plugin, callToolPayload(2, "members", { all: true }))
+    await waitFor(() => stdout.some((line) => line.id === 2), "initial members tool call")
+
+    const firstMember = mcpToolJson(stdout, 2).sessions?.find((session) => session.name === PERSONA)
+    expect(firstMember).toMatchObject({
+      member_id: expect.any(String),
+      launch_id: "restart-journey-launch",
+      launch_parent_pid: expect.any(Number),
+      transport_state: "connected",
+      owner_state: "live",
+      transport_pids: [expect.any(Number)],
+    })
+    const firstLaunchParentPid = firstMember!.launch_parent_pid
+    const firstTransportPid = firstMember!.transport_pids![0]!
+    adapterPids.add(firstTransportPid)
+
+    await firstDaemon.client.call("tribe.reload", { reason: "21416 restart acceptance" })
+    firstDaemon.client.close()
+    const successor = await connectToGeneration(socketPath, (pid) => pid !== firstDaemon.pid)
+    daemonPids.add(successor.pid)
+
+    let rejoined: Member | undefined
+    await waitFor(async () => {
+      const result = await successor.client.call("tribe.members", { all: true })
+      const candidate = parseToolJson(result).sessions?.find((session) => session.name === PERSONA)
+      if (
+        candidate?.transport_state === "connected" &&
+        candidate.transport_pids?.length === 1 &&
+        candidate.transport_pids[0] !== firstTransportPid
+      ) {
+        rejoined = candidate
+      }
+      return rejoined !== undefined
+    }, "supervised adapter rejoin")
+
+    expect(rejoined).toMatchObject({
+      member_id: firstMember?.member_id,
+      launch_id: "restart-journey-launch",
+      launch_parent_pid: firstLaunchParentPid,
+      transport_state: "connected",
+      owner_state: "live",
+    })
+    for (const pid of rejoined?.transport_pids ?? []) adapterPids.add(pid)
+    expect(rejoined?.transport_pids).not.toContain(firstTransportPid)
+    await waitFor(() => !pidExists(firstTransportPid), "replaced adapter process exit")
+    expect(plugin.exitCode, pluginStderr).toBeNull()
+
+    writeJson(plugin, callToolPayload(3, "members", { all: true }))
+    await waitFor(() => stdout.some((line) => line.id === 3), "post-restart tool call")
+    expect(mcpToolJson(stdout, 3).sessions?.find((session) => session.name === PERSONA)).toMatchObject({
+      member_id: firstMember?.member_id,
+      transport_state: "connected",
+      transport_pids: rejoined?.transport_pids,
+    })
+    expect(readFileSync(adapterLog, "utf8")).toContain("daemon generation changed")
+    successor.client.close()
+  }, 35_000)
+})

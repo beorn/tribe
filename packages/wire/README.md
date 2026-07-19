@@ -36,6 +36,7 @@ to participate in a tribe without bundling the daemon itself.
 ```bash
 tribe-wire --help                                 # full Commander help + addHelpText MCP-adapter hint
 tribe-wire status                                 # active sessions with uptime + last-seen
+tribe-wire members --all                          # JSON transport + owner verdicts, including disconnected rows
 tribe-wire send '@alice' 'task X done' --type=notify
 tribe-wire send '@ci' 'R656 failed; see journal evidence' --type=notify --delivery=pull
 tribe-wire retro --since 2h --format markdown
@@ -63,6 +64,12 @@ import { TRIBE_PROTOCOL_VERSION } from "tribe-wire/lib/socket"
 ```
 
 JSON-RPC client, reconnecting client, line parser, composition primitives (pipe / Scope / Tool registry). See `src/lib/socket.ts`.
+
+`members --all` is the daemon-side rejoin verdict. `transport_state` is derived
+from the authenticated socket registry; `owner_state` is separate process
+evidence. `last_seen_sec` reports activity age only. A host MCP dialog may say
+connected while the daemon reports the member disconnected, so host UI state is
+not a substitute for this projection.
 
 ## Surface delineation — protocol vs dev tooling
 

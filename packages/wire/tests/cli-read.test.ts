@@ -43,6 +43,7 @@ describe("registerReadCommands", () => {
       expect.arrayContaining([
         "status",
         "sessions",
+        "members",
         "pending",
         "log",
         "health",
@@ -66,6 +67,13 @@ describe("registerReadCommands", () => {
     const cmd = findCmd(buildProgram(), "sessions")
     expect(cmd).toBeDefined()
     expect(optionFlags(cmd!)).toEqual(expect.arrayContaining(["--all"]))
+  })
+
+  test("members verb accepts --all and documents transport verdicts", () => {
+    const cmd = findCmd(buildProgram(), "members")
+    expect(cmd).toBeDefined()
+    expect(optionFlags(cmd!)).toContain("--all")
+    expect(cmd!.description()).toMatch(/transport|owner/i)
   })
 
   test("pending verb accepts --all, --json, --owner, --stale, and --close", () => {

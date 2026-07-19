@@ -395,7 +395,12 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
   // operator authority after a crash or restart.
   const readOperatorCapability = createOperatorCapabilityReader()
   let current = await connectOrStartWithCapability(socketPath, startOpts, readOperatorCapability)
-  if (onConnect) await onConnect(current)
+  try {
+    if (onConnect) await onConnect(current)
+  } catch (error) {
+    current.close()
+    throw error
+  }
   let closed = false
   let reconnectAc: AbortController | null = null
   // Persistent notification handlers — replayed onto each new connection
@@ -420,9 +425,15 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
           }
           if (closed) return
           try {
-            current = await connectOrStartWithCapability(socketPath, startOpts, readOperatorCapability)
-            if (onConnect) await onConnect(current)
-            for (const h of notificationHandlers) current.onNotification(h)
+            const candidate = await connectOrStartWithCapability(socketPath, startOpts, readOperatorCapability)
+            try {
+              if (onConnect) await onConnect(candidate)
+            } catch (error) {
+              candidate.close()
+              throw error
+            }
+            current = candidate
+            for (const h of notificationHandlers) candidate.onNotification(h)
             setupReconnect()
             onReconnect?.()
             return

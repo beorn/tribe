@@ -6,6 +6,12 @@ Broker daemon for Tribe.
 server, SQLite state, session registry, message journal, delivery modes, and
 daemon plugins.
 
+The in-memory authenticated session registry is the transport-liveness
+authority. `tribe.members({ all: true })` joins that registry to durable session
+rows and reports `transport_state` separately from `owner_state`; database
+timestamps are activity evidence and never determine whether push delivery is
+connected.
+
 ## Status
 
 Functional; ships with this repository (not published to npm). The Claude Code
