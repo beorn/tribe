@@ -348,7 +348,7 @@ async function cmdJoin(
  * Andon-pull alarm — `tribe alarm <reason>` sets a project-wide stop-the-line
  * flag. The chief-drain-check.sh PreToolUse hook reads it and HARD-BLOCKS
  * chief's tool calls until `tribe alarm-ack` clears it.
- * Spec: @km/all/silent-errors-enforcement/chief-silent-watchdog-relay-pattern-detection (Layer 3).
+ * Delivery-attention lineage: @ag/tribe/21626-per-seat-inbox-staleness-alarm.
  */
 async function cmdAlarmSet(reason: string, opts: { by?: string }): Promise<void> {
   const by = opts.by ?? process.env.USER ?? "anonymous"

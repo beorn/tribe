@@ -688,7 +688,7 @@ async function cmdDoctor(opts: { fix?: boolean }): Promise<void> {
  * Inbox status — count + age of actionable DMs the target session hasn't
  * drained via `tribe.fetch` yet. JSON when `--json` is set; otherwise a
  * human-readable summary. Used by `.claude/hooks/chief-drain-check.sh`.
- * Spec: @km/all/silent-errors-enforcement/chief-silent-watchdog-relay-pattern-detection (Layer 2).
+ * Delivery-attention lineage: @ag/tribe/21626-per-seat-inbox-staleness-alarm.
  */
 async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promise<void> {
   const result = (await callDaemon(cliInboxMethod("status", opts.session), cliInboxTargetParams(opts.session))) as {

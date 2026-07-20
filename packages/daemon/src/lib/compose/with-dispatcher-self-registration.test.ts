@@ -951,9 +951,9 @@ function createDispatcherHarness(
       return row.count
     },
     mailboxAttentionReadAt(name: string): number | null {
-      const row = db
-        .prepare("SELECT last_attention_read_at FROM mailbox_cursors WHERE recipient = ?")
-        .get(name) as { last_attention_read_at: number | null } | null
+      const row = db.prepare("SELECT last_attention_read_at FROM mailbox_cursors WHERE recipient = ?").get(name) as {
+        last_attention_read_at: number | null
+      } | null
       return row?.last_attention_read_at ?? null
     },
     sessionFilter(name: string): { mode: string; until: number | null; mute: string | null } | undefined {

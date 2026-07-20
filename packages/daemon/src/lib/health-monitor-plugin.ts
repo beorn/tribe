@@ -89,7 +89,6 @@ export interface HealthAlert {
     | "gh-rate-limit"
     | "reaper"
     | "chief-absent"
-    | "chief-silent"
   severity: "warning" | "critical"
   message: string
   metrics: Partial<HealthMetrics>
@@ -142,12 +141,6 @@ export interface HealthThresholds {
   reaperAgeMinutes: number
   /** Reaper: samples to wait after asking before killing (default: 6, i.e. 60s at 10s interval) */
   reaperGraceSamples: number
-  /**
-   * Chief-silent watchdog: minimum age (in minutes) of the oldest unread DM
-   * to @chief before broadcasting STOP-THE-LINE. Default 10. Set to 0 to
-   * disable the online-silence warning; absent-Chief escalation stays enabled.
-   */
-  chiefSilentMinUnreadAgeMin: number
 }
 
 export function defaultThresholds(): HealthThresholds {
@@ -169,7 +162,6 @@ export function defaultThresholds(): HealthThresholds {
     reaperCpuThreshold: parseInt(process.env.HEALTH_REAPER_CPU_THRESHOLD ?? "80", 10),
     reaperAgeMinutes: parseInt(process.env.HEALTH_REAPER_AGE_MINUTES ?? "30", 10),
     reaperGraceSamples: parseInt(process.env.HEALTH_REAPER_GRACE_SAMPLES ?? "6", 10),
-    chiefSilentMinUnreadAgeMin: parseInt(process.env.HEALTH_CHIEF_SILENT_MIN ?? "10", 10),
   }
 }
 
@@ -820,34 +812,28 @@ export function formatStaleLockMessage(lock: GitLockInfo, sessionName: string | 
 }
 
 /**
- * Chief-liveness watchdog: fail loud immediately when actionable DMs have no
- * live @chief recipient, and detect "DMs to @chief unread + chief still
- * emitting tool calls" (the relay-pattern bug). Online silence retains the
- * configured age threshold; absence broadcasts a critical escalation to the
- * live fleet on the next sample.
+ * Chief-authority watchdog: fail loud immediately when actionable DMs have no
+ * live @chief recipient. Online inbox staleness is deliberately absent here:
+ * the generic Tribe cadence facts + Hab policy + WATCH reducer own it for
+ * every managed seat, including @chief.
  *
  * Returns null when no alert should fire. Side-effects on `state.firedAlerts`
- * so each silence-episode only emits once: the key is cleared when the unread
- * count drops to 0 (chief drained).
+ * so each absence episode only emits once: the key is cleared when the unread
+ * count drops to 0 or a live chief returns.
  *
- * Spec: @km/all/silent-errors-enforcement/chief-silent-watchdog-relay-pattern-detection (Layer 1).
+ * Generic staleness owner: @ag/tribe/21626-per-seat-inbox-staleness-alarm.
  */
-export function checkChiefSilent(
+export function checkChiefAbsent(
   unread: { count: number; oldestTs: number },
   chiefOnline: boolean,
   state: AlertState,
-  thresholds: HealthThresholds,
-  now: number,
 ): HealthAlert | null {
-  const silentKey = "chief-silent:warning"
   const absentKey = "chief-absent:critical"
   if (unread.count === 0) {
-    state.firedAlerts.delete(silentKey)
     state.firedAlerts.delete(absentKey)
     return null
   }
   if (!chiefOnline) {
-    state.firedAlerts.delete(silentKey)
     if (state.firedAlerts.has(absentKey)) return null
     state.firedAlerts.add(absentKey)
     return {
@@ -862,25 +848,7 @@ export function checkChiefSilent(
     }
   }
   state.firedAlerts.delete(absentKey)
-  if (thresholds.chiefSilentMinUnreadAgeMin <= 0) {
-    state.firedAlerts.delete(silentKey)
-    return null
-  }
-  const ageMin = (now - unread.oldestTs) / 60_000
-  if (ageMin < thresholds.chiefSilentMinUnreadAgeMin) return null
-  if (state.firedAlerts.has(silentKey)) return null
-  state.firedAlerts.add(silentKey)
-  return {
-    type: "chief-silent",
-    severity: "warning",
-    message:
-      `STOP-THE-LINE: @chief has ${unread.count} actionable DM${unread.count === 1 ? "" : "s"} unread ` +
-      `for ${Math.round(ageMin)}min. Relay-pattern likely; chief should ` +
-      `tribe.fetch({limit:10}) and inspect attention.actionable_unread plus ` +
-      `attention.pending_balls BEFORE the next tool call.`,
-    metrics: {},
-    topOffenders: [],
-  }
+  return null
 }
 
 /**
@@ -1457,7 +1425,7 @@ export const healthMonitorPlugin: TribePluginApi = {
 
     let ghRateSampleCount = 0
     let ioSampleCount = 0
-    let chiefSilentSampleCount = 0
+    let chiefPresenceSampleCount = 0
 
     log.info?.(
       `starting: poll=${pollIntervalSec}s, cpu warn=${thresholds.cpuWarningMultiplier}x crit=${thresholds.cpuCriticalMultiplier}x, mem warn=${thresholds.memWarningPercent}% crit=${thresholds.memCriticalPercent}%`,
@@ -1486,17 +1454,15 @@ export const healthMonitorPlugin: TribePluginApi = {
           )
         }
 
-        // --- Chief-liveness watchdog (every 3rd sample — ~30s) ---
-        // @km/all/silent-errors-enforcement/chief-silent-watchdog-relay-pattern-detection.
-        // Fails loud when no live @chief owns actionable delivery, and detects
-        // the relay-pattern bug where push succeeds but an online chief never
-        // drains via tribe.fetch.
-        chiefSilentSampleCount++
-        if (chiefSilentSampleCount % 3 === 0) {
+        // --- Chief-authority watchdog (every 3rd sample — ~30s) ---
+        // Only the no-live-authority stop-line remains here. Generic online
+        // inbox staleness is projected by health cadence and consumed by WATCH.
+        chiefPresenceSampleCount++
+        if (chiefPresenceSampleCount % 3 === 0) {
           try {
             const unread = api.getUnreadDms("@chief")
             const chiefOnline = sessions.some((s) => s.name === "@chief")
-            const chiefAlert = checkChiefSilent(unread, chiefOnline, alertState, thresholds, Date.now())
+            const chiefAlert = checkChiefAbsent(unread, chiefOnline, alertState)
             if (chiefAlert) {
               log.info?.(`alert: ${chiefAlert.message}`)
               api.broadcast(chiefAlert.message, `health:${chiefAlert.type}:${chiefAlert.severity}`, undefined, {
@@ -1505,7 +1471,7 @@ export const healthMonitorPlugin: TribePluginApi = {
               })
             }
           } catch (err) {
-            log.error?.(`chief-silent check failed: ${err instanceof Error ? err.message : err}`)
+            log.error?.(`chief-absence check failed: ${err instanceof Error ? err.message : err}`)
           }
         }
 

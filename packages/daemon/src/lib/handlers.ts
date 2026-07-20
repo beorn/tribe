@@ -1254,7 +1254,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
   })
 
   // Actionable unread direct-message count per recipient. This intentionally
-  // mirrors getUnreadDms/chief-silent semantics: ambient notify/status/response
+  // mirrors actionable-attention semantics: ambient notify/status/response
   // DMs should not surface as stop-line backlog when pending(owner) is empty.
   const unread = ctx.db
     .prepare(`

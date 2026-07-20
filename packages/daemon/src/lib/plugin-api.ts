@@ -104,10 +104,8 @@ export interface TribeClientApi {
    * `kind='direct'`.
    * Returns `{count: 0, oldestTs: 0}` when no unread or the session is unknown.
    *
-   * Used by the chief-silent watchdog (chief-silent-watchdog-relay-pattern-detection):
-   * push delivery puts a message in the session's MCP context but does NOT advance
-   * the pull cursor — only an explicit `tribe.fetch` does. A long-lagging pull
-   * cursor is the relay-pattern signal we want to catch.
+   * Used by the no-live-chief authority watchdog. Generic online inbox
+   * staleness consumes the richer `health.cadence.inbox_lag` projection.
    */
   getUnreadDms(sessionName: string): { count: number; oldestTs: number }
 }

@@ -836,7 +836,7 @@ const MIGRATIONS: readonly Migration[] = [
 /**
  * The actionable message types — the ONE canonical set (19442). A DIRECT
  * message of one of these types addressed to a name is "actionable": it opens
- * work the recipient must act on. `inbox.wait` gates on it, the chief-silent
+ * work the recipient must act on. `inbox.wait` gates on it, the chief-absence
  * watchdog counts it, and the mailbox recovery view selects it.
  */
 export const ACTIONABLE_TYPES = ["request", "query", "verdict", "assign"] as const

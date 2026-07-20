@@ -967,10 +967,10 @@ export function withDispatcher<
           }
 
           /**
-           * Chief-silent watchdog Layer 2 — inbox status for any session
-           * (default `@chief`). Returns the count + age of actionable DMs
-           * the session hasn't drained via tribe.fetch.
-           * See @km/all/silent-errors-enforcement/chief-silent-watchdog-relay-pattern-detection.
+           * Delivery-attention status for any session (default `@chief`).
+           * Returns the count + age of actionable DMs the session hasn't
+           * drained via tribe.fetch. See
+           * @ag/tribe/21626-per-seat-inbox-staleness-alarm.
            */
           case "cli_inbox_status":
           case "cli_inbox_status_by_launch_v1": {

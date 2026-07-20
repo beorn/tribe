@@ -399,9 +399,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     try {
       const filtered = fetchJson(live, opts, { from: "@chief" }).json
       expect(filtered.attention).toBeUndefined()
-      expect(
-        db.prepare("SELECT last_attention_read_at FROM mailbox_cursors WHERE recipient = ?").get(NAME),
-      ).toBeNull()
+      expect(db.prepare("SELECT last_attention_read_at FROM mailbox_cursors WHERE recipient = ?").get(NAME)).toBeNull()
 
       const canonical = fetchJson(live, opts, { advance: false }).json
       expect(canonical.attention?.actionable_unread).toEqual([])
