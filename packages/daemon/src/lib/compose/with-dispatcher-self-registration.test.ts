@@ -779,6 +779,55 @@ describe("dispatcher inbox-wait parsing", () => {
       nowSpy.mockRestore()
     }
   })
+
+  it("records a launch-correlated CLI wait receipt but never an explicit operator wait receipt", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const launchId = "managed-inbox-reader"
+    const name = "@agent/launch-reader"
+    const { connId } = harness.connectClient()
+    await harness.register(connId, {
+      name,
+      pid: liveHolderPid,
+      project: "/tmp/km-wt-launch-reader",
+      launchId,
+      launchParentPid: process.pid,
+    })
+
+    const receiptAt = Date.now() + 5_000
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(receiptAt)
+    try {
+      const explicit = parseResult<InboxWaitResult>(
+        await harness.dispatcher.handleRequest(
+          {
+            jsonrpc: "2.0",
+            id: "wait-explicit-operator",
+            method: "cli_inbox_wait",
+            params: { session: name, timeoutMs: 0 },
+          },
+          "conn-cli",
+        ),
+      )
+      expect(explicit.timed_out).toBe(true)
+      expect(harness.mailboxAttentionReadAt(name)).toBeNull()
+
+      const correlated = parseResult<InboxWaitResult>(
+        await harness.dispatcher.handleRequest(
+          {
+            jsonrpc: "2.0",
+            id: "wait-launch-correlated",
+            method: "cli_inbox_wait_by_launch_v1",
+            params: { launch_id: launchId, timeoutMs: 0 },
+          },
+          "conn-cli",
+        ),
+      )
+      expect(correlated.timed_out).toBe(true)
+      expect(harness.mailboxAttentionReadAt(name)).toBe(receiptAt)
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
 })
 
 function createDispatcherHarness(
