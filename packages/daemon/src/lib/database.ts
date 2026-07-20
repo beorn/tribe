@@ -54,21 +54,23 @@ export function openDatabase(path: string): Database {
     if (migration.version <= currentVersion) continue
     migration.up(db)
   }
-  if (MIGRATIONS.length > 0 && MIGRATIONS[MIGRATIONS.length - 1]!.version > currentVersion) {
-    const latest = MIGRATIONS[MIGRATIONS.length - 1]!.version
+  const latestMigration = MIGRATIONS.at(-1)
+  if (latestMigration !== undefined && latestMigration.version > currentVersion) {
+    const latest = latestMigration.version
     db.run("INSERT INTO _schema_meta (key, value) VALUES ('version', $v) ON CONFLICT(key) DO UPDATE SET value = $v", {
       $v: String(latest),
     } as never)
-  } else if (versionRow === null && MIGRATIONS.length > 0) {
+  } else if (versionRow === null && latestMigration !== undefined) {
     // Fresh install — stamp the current version so future migrations start from here.
-    const latest = MIGRATIONS[MIGRATIONS.length - 1]!.version
+    const latest = latestMigration.version
     db.run("INSERT OR IGNORE INTO _schema_meta (key, value) VALUES ('version', $v)", {
       $v: String(latest),
     } as never)
   }
 
   db.run(`CREATE TABLE IF NOT EXISTS messages (
-		id         TEXT PRIMARY KEY,
+		rowid      INTEGER PRIMARY KEY AUTOINCREMENT,
+		id         TEXT NOT NULL UNIQUE,
 		type       TEXT NOT NULL,
 		sender     TEXT NOT NULL,
 		recipient  TEXT NOT NULL,
@@ -149,6 +151,22 @@ export function openDatabase(path: string): Database {
 		name              TEXT NOT NULL,
 		renamed_at        INTEGER NOT NULL,
 		PRIMARY KEY (launch_id, launch_parent_pid)
+	)`)
+
+  // 21576 S3 — daemon-authenticated provider turn-start receipts. Identity is
+  // stamped from the registered connection; callers cannot self-assert the
+  // launch/session columns. Provider turns are idempotent within one launch.
+  db.run(`CREATE TABLE IF NOT EXISTS turn_start_receipts (
+		receipt_seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+		session              TEXT NOT NULL,
+		launch_id            TEXT NOT NULL,
+		launch_parent_pid    INTEGER NOT NULL,
+		controller_session_id TEXT NOT NULL,
+		provider_session_id  TEXT NOT NULL,
+		provider_turn_id     TEXT NOT NULL,
+		started_at           INTEGER NOT NULL,
+		received_at          INTEGER NOT NULL,
+		UNIQUE (launch_id, launch_parent_pid, provider_session_id, provider_turn_id)
 	)`)
 
   db.run(`CREATE TABLE IF NOT EXISTS retros (
@@ -234,6 +252,30 @@ export function openDatabase(path: string): Database {
 // ---------------------------------------------------------------------------
 
 type Migration = { version: number; name: string; up(db: Database): void }
+
+/** Read a non-negative cursor high-water mark from an optional legacy table.
+ * Migrations must tolerate partially-created databases left by older daemons,
+ * but a present cursor with an invalid numeric shape is corruption and must
+ * fail loud rather than silently reusing message sequence numbers. */
+function optionalCursorMax(db: Database, table: string, column: string): number {
+  const exists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?").get(table) as {
+    name: string
+  } | null
+  if (exists === null) return 0
+
+  const columns = new Set(
+    (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name),
+  )
+  if (!columns.has(column)) return 0
+
+  const row = db.prepare(`SELECT COALESCE(MAX(${column}), 0) AS value FROM ${table}`).get() as {
+    value: number
+  }
+  if (!Number.isSafeInteger(row.value) || row.value < 0) {
+    throw new Error(`invalid ${table}.${column} cursor high-water mark: ${String(row.value)}`)
+  }
+  return row.value
+}
 
 const MIGRATIONS: readonly Migration[] = [
   {
@@ -827,6 +869,108 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 22,
+    name: "durable-message-sequence",
+    up(db) {
+      // Delivery and mailbox cursors use messages.rowid as their monotonic
+      // sequence. SQLite may reuse an implicit rowid after retention empties a
+      // table, which can strand fresh mail below a retained cursor. Rebuild
+      // existing journals with an explicit AUTOINCREMENT `rowid` INTEGER
+      // PRIMARY KEY. Naming the alias `rowid` preserves every existing cursor
+      // query while sqlite_sequence prevents reuse; external payload queries
+      // continue to list their public columns explicitly.
+      const table = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='messages'").get() as {
+        name: string
+      } | null
+      if (!table) return
+
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>).map((row) => row.name),
+      )
+      if (columns.has("rowid")) return
+
+      // The hot journal may already be empty when this migration runs. Recover
+      // its former sequence ceiling from every durable cursor/archive that can
+      // outlive retention; otherwise AUTOINCREMENT would restart at 1 and new
+      // mail could remain forever below a retained consumer cursor.
+      const durableHighWater = Math.max(
+        optionalCursorMax(db, "messages_archive", "seq"),
+        optionalCursorMax(db, "sessions", "last_delivered_seq"),
+        optionalCursorMax(db, "sessions", "last_inbox_pull_seq"),
+        optionalCursorMax(db, "mailbox_cursors", "last_actionable_seq"),
+      )
+
+      db.run("BEGIN IMMEDIATE")
+      try {
+        db.run(`CREATE TABLE messages_v22 (
+			rowid      INTEGER PRIMARY KEY AUTOINCREMENT,
+			id         TEXT NOT NULL UNIQUE,
+			type       TEXT NOT NULL,
+			sender     TEXT NOT NULL,
+			recipient  TEXT NOT NULL,
+			kind       TEXT NOT NULL DEFAULT 'direct',
+			content    TEXT NOT NULL,
+			bead_id    TEXT,
+			ref        TEXT,
+			ts         INTEGER NOT NULL,
+			delivery   TEXT NOT NULL DEFAULT 'push',
+			topic      TEXT,
+			room_id    TEXT,
+			request    TEXT,
+			reply      TEXT,
+			summary    TEXT
+		)`)
+        db.run(`INSERT INTO messages_v22 (
+			rowid, id, type, sender, recipient, kind, content, bead_id, ref, ts,
+			delivery, topic, room_id, request, reply, summary
+		)
+		SELECT
+			rowid, id, type, sender, recipient, kind, content, bead_id, ref, ts,
+			delivery, topic, room_id, request, reply, summary
+        FROM messages
+        ORDER BY rowid`)
+        db.run("DROP TABLE messages")
+        db.run("ALTER TABLE messages_v22 RENAME TO messages")
+        const currentSequence = db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'messages'").get() as {
+          seq: number
+        } | null
+        if (durableHighWater > (currentSequence?.seq ?? 0)) {
+          if (currentSequence === null) {
+            db.run("INSERT INTO sqlite_sequence (name, seq) VALUES ('messages', $seq)", {
+              $seq: durableHighWater,
+            } as never)
+          } else {
+            db.run("UPDATE sqlite_sequence SET seq = $seq WHERE name = 'messages'", {
+              $seq: durableHighWater,
+            } as never)
+          }
+        }
+        db.run("COMMIT")
+      } catch (error) {
+        db.run("ROLLBACK")
+        throw error
+      }
+    },
+  },
+  {
+    version: 23,
+    name: "turn-start-receipts",
+    up(db) {
+      db.run(`CREATE TABLE IF NOT EXISTS turn_start_receipts (
+			receipt_seq           INTEGER PRIMARY KEY AUTOINCREMENT,
+			session               TEXT NOT NULL,
+			launch_id             TEXT NOT NULL,
+			launch_parent_pid     INTEGER NOT NULL,
+			controller_session_id TEXT NOT NULL,
+			provider_session_id   TEXT NOT NULL,
+			provider_turn_id      TEXT NOT NULL,
+			started_at            INTEGER NOT NULL,
+			received_at           INTEGER NOT NULL,
+			UNIQUE (launch_id, launch_parent_pid, provider_session_id, provider_turn_id)
+		)`)
+    },
+  },
 ]
 
 // ---------------------------------------------------------------------------
@@ -980,6 +1124,26 @@ export function createStatements(db: Database) {
     getSessionsByLaunchId: db.prepare(
       "SELECT name, launch_parent_pid FROM sessions WHERE launch_id = $launch_id ORDER BY id",
     ),
+    insertTurnStartReceipt: db.prepare(`
+      INSERT OR IGNORE INTO turn_start_receipts (
+        session, launch_id, launch_parent_pid, controller_session_id,
+        provider_session_id, provider_turn_id, started_at, received_at
+      ) VALUES (
+        $session, $launch_id, $launch_parent_pid, $controller_session_id,
+        $provider_session_id, $provider_turn_id, $started_at, $received_at
+      )
+    `),
+    getLatestTurnStartReceipt: db.prepare(`
+      SELECT receipt_seq, session, launch_id, launch_parent_pid,
+             controller_session_id, provider_session_id, provider_turn_id,
+             started_at, received_at
+      FROM turn_start_receipts
+      WHERE session = $session
+        AND launch_id = $launch_id
+        AND launch_parent_pid = $launch_parent_pid
+      ORDER BY receipt_seq DESC
+      LIMIT 1
+    `),
     gcOldLaunchRenames: db.prepare("DELETE FROM launch_renames WHERE renamed_at < $cutoff"),
 
     updateSessionMeta: db.prepare(`
@@ -1014,6 +1178,39 @@ export function createStatements(db: Database) {
         AND sender != $name
         AND type IN (${ACTIONABLE_TYPES_SQL})
         AND rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+    `),
+
+    /** Structural tail of the same actionable-mailbox projection. Await
+     * supervisors use this cursor/id/type tuple to plan delivery without
+     * copying message content across the control plane. */
+    getLatestActionableAttention: db.prepare(`
+      SELECT rowid, id, type
+      FROM messages
+      WHERE recipient = $name
+        AND kind = 'direct'
+        AND sender != $name
+        AND type IN (${ACTIONABLE_TYPES_SQL})
+        AND rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+      ORDER BY rowid DESC
+      LIMIT 1
+    `),
+
+    /** Exact OOB delivery envelope selected by the structural cursor. This is
+     * read-only and remains launch/session constrained in the dispatcher; the
+     * caller must present both cursor and message id so a racing tail cannot
+     * substitute a different payload. */
+    getActionableAttentionDelivery: db.prepare(`
+      SELECT rowid AS seq, id, type, sender, content, bead_id, ref,
+             request, reply, ts
+      FROM messages
+      WHERE recipient = $name
+        AND kind = 'direct'
+        AND sender != $name
+        AND type IN (${ACTIONABLE_TYPES_SQL})
+        AND rowid = $seq
+        AND id = $id
+        AND rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+      LIMIT 1
     `),
 
     // Cleanup old dedup entries. Ball-deadline actuation left the daemon; its

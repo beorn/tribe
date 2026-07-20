@@ -182,8 +182,14 @@ export function withDispatcher<
       unread_count: number
       oldest_unread_age_min: number
       oldest_unread_ts: number
+      latest_actionable_seq: number | null
+      latest_message_id: string | null
+      latest_type: string | null
     } {
       const row = stmts.getUnreadDms.get({ $name: sessionName }) as { count: number; oldest_ts: number } | undefined
+      const latest = stmts.getLatestActionableAttention.get({ $name: sessionName }) as
+        | { rowid: number; id: string; type: string }
+        | undefined
       const unread_count = row?.count ?? 0
       const oldest_ts = row?.oldest_ts ?? 0
       const oldest_unread_age_min = oldest_ts > 0 ? Math.floor((Date.now() - oldest_ts) / 60_000) : 0
@@ -192,6 +198,9 @@ export function withDispatcher<
         unread_count,
         oldest_unread_age_min,
         oldest_unread_ts: oldest_ts,
+        latest_actionable_seq: latest?.rowid ?? null,
+        latest_message_id: latest?.id ?? null,
+        latest_type: latest?.type ?? null,
       }
     }
 
@@ -202,7 +211,13 @@ export function withDispatcher<
       return timingSafeEqual(Buffer.from(supplied), Buffer.from(configured))
     }
 
-    type InboxTargetResolution = { sessionName: string } | { errorCode: number; errorMessage: string }
+    function requiredNonEmptyString(value: unknown): string | null {
+      return typeof value === "string" && value.trim().length > 0 ? value.trim() : null
+    }
+
+    type InboxTargetResolution =
+      | { sessionName: string; launchId?: string; launchParentPid?: number }
+      | { errorCode: number; errorMessage: string }
 
     /**
      * Resolve an inbox target from durable daemon authority. Session names are
@@ -272,7 +287,11 @@ export function withDispatcher<
           errorMessage: "Inbox launch authorities disagree; refusing ambiguous mailbox",
         }
       }
-      return { sessionName: launchSession.name }
+      return {
+        sessionName: launchSession.name,
+        launchId,
+        launchParentPid: Number(launchSession.launch_parent_pid),
+      }
     }
 
     const inboxWait = createInboxWaitManager(readInboxStatus)
@@ -464,7 +483,8 @@ export function withDispatcher<
         ctx: TribeContext
       },
     ): ClientSession {
-      const existing = clients.get(connId)!
+      const existing = clients.get(connId)
+      if (existing === undefined) throw new Error(`cannot apply unknown client ${connId}`)
       const client: ClientSession = {
         socket: existing.socket,
         id: connId,
@@ -862,6 +882,78 @@ export function withDispatcher<
             })
           }
 
+          case "host_turn_started_v1": {
+            const client = clients.get(connId)
+            if (client?.role !== "member" || client.launchId === null || client.launchParentPid === null) {
+              return makeError(id, -32003, "Turn-start receipt requires a launch-authenticated member connection")
+            }
+            if (
+              Object.prototype.hasOwnProperty.call(p, "session") ||
+              Object.prototype.hasOwnProperty.call(p, "session_name") ||
+              Object.prototype.hasOwnProperty.call(p, "launch_id") ||
+              Object.prototype.hasOwnProperty.call(p, "launch_parent_pid")
+            ) {
+              return makeError(id, -32602, "Turn-start receipt session and launch identity are daemon-derived")
+            }
+            const controllerSessionId = requiredNonEmptyString(p.controller_session_id)
+            const providerSessionId = requiredNonEmptyString(p.provider_session_id)
+            const providerTurnId = requiredNonEmptyString(p.provider_turn_id)
+            const startedAt = p.started_at
+            if (controllerSessionId === null || providerSessionId === null || providerTurnId === null) {
+              return makeError(
+                id,
+                -32602,
+                "Turn-start receipt requires non-empty controller_session_id, provider_session_id, and provider_turn_id",
+              )
+            }
+            if (!Number.isSafeInteger(startedAt) || Number(startedAt) < 0) {
+              return makeError(id, -32602, "Turn-start receipt started_at must be a non-negative safe integer")
+            }
+            const receivedAt = Date.now()
+            const inserted = stmts.insertTurnStartReceipt.run({
+              $session: client.name,
+              $launch_id: client.launchId,
+              $launch_parent_pid: client.launchParentPid,
+              $controller_session_id: controllerSessionId,
+              $provider_session_id: providerSessionId,
+              $provider_turn_id: providerTurnId,
+              $started_at: Number(startedAt),
+              $received_at: receivedAt,
+            })
+            return makeResponse(id, {
+              recorded: true,
+              duplicate: inserted.changes === 0,
+              session: client.name,
+              launch_id: client.launchId,
+              launch_parent_pid: client.launchParentPid,
+              received_at: receivedAt,
+            })
+          }
+
+          case "cli_turn_start_receipt_by_launch_v1": {
+            const target = resolveInboxTarget(p, { mode: "launch" })
+            if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage)
+            if (target.launchId === undefined || target.launchParentPid === undefined) {
+              return makeError(id, -32003, "Turn-start receipt launch authority is incomplete")
+            }
+            const receipt = stmts.getLatestTurnStartReceipt.get({
+              $session: target.sessionName,
+              $launch_id: target.launchId,
+              $launch_parent_pid: target.launchParentPid,
+            }) as Record<string, unknown> | null
+            return makeResponse(id, {
+              session: target.sessionName,
+              launch_id: target.launchId,
+              launch_parent_pid: target.launchParentPid,
+              receipt_seq: receipt?.receipt_seq ?? null,
+              controller_session_id: receipt?.controller_session_id ?? null,
+              provider_session_id: receipt?.provider_session_id ?? null,
+              provider_turn_id: receipt?.provider_turn_id ?? null,
+              started_at: receipt?.started_at ?? null,
+              received_at: receipt?.received_at ?? null,
+            })
+          }
+
           case TRIBE_COORD_METHODS.send:
           case TRIBE_COORD_METHODS.fetch:
           case TRIBE_COORD_METHODS.members:
@@ -959,7 +1051,17 @@ export function withDispatcher<
             const where = filters.length > 0 ? ` WHERE ${filters.join(" OR ")}` : ""
             const limitSql = all ? "" : " LIMIT ?"
             if (!all) values.push(limit)
-            const rows = db.prepare(`SELECT * FROM messages${where} ORDER BY ts DESC${limitSql}`).all(...values)
+            // Keep the established cli_log payload stable now that `rowid` is
+            // an explicit AUTOINCREMENT column rather than SQLite's hidden
+            // alias. The monotonic cursor is exposed only through the bounded
+            // structural status API above, not as an accidental log field.
+            const rows = db
+              .prepare(
+                `SELECT id, type, sender, recipient, kind, content, bead_id, ref,
+                        ts, delivery, topic, room_id, request, reply, summary
+                 FROM messages${where} ORDER BY ts DESC${limitSql}`,
+              )
+              .all(...values)
             return makeResponse(id, {
               messages: (rows as unknown[]).reverse(),
               query: { all, ref_prefix: refPrefix, reply_prefix: replyPrefix },
@@ -982,6 +1084,38 @@ export function withDispatcher<
             )
             if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage)
             return makeResponse(id, readInboxStatus(target.sessionName))
+          }
+
+          /**
+           * OOB payload half of the declared-await delivery adapter. Status
+           * remains structural; only a caller that presents the exact
+           * launch-resolved sequence/id pair receives the corresponding
+           * still-actionable envelope. This raw daemon method is deliberately
+           * absent from MCP tools so a wedged MCP transport is not load-bearing.
+           */
+          case "cli_inbox_delivery_by_launch_v1": {
+            const target = resolveInboxTarget(p, { mode: "launch" })
+            if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage)
+            const messageSeq = p.message_seq
+            const messageId = requiredNonEmptyString(p.message_id)
+            if (!Number.isSafeInteger(messageSeq) || Number(messageSeq) <= 0 || messageId === null) {
+              return makeError(
+                id,
+                -32602,
+                "Inbox delivery requires a positive safe message_seq and non-empty message_id",
+              )
+            }
+            const message = stmts.getActionableAttentionDelivery.get({
+              $name: target.sessionName,
+              $seq: Number(messageSeq),
+              $id: messageId,
+            }) as Record<string, unknown> | null
+            return makeResponse(id, {
+              session: target.sessionName,
+              launch_id: target.launchId,
+              launch_parent_pid: target.launchParentPid,
+              message,
+            })
           }
 
           /**
@@ -1110,7 +1244,7 @@ export function withDispatcher<
             const row = db
               .prepare("SELECT value FROM coordination WHERE project_id = ? AND key = ?")
               .get("", "alarm.active") as { value: string | null } | undefined
-            if (!row || !row.value) {
+            if (!row?.value) {
               return makeResponse(id, { active: false })
             }
             try {

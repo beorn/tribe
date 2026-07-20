@@ -287,6 +287,84 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
 })
 
 describe("dispatcher bounded mailbox drain", () => {
+  it("accepts turn-start receipts only from a launch-authenticated member and deduplicates provider turns", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const params = {
+      controller_session_id: "s1",
+      provider_session_id: "provider-session-1",
+      provider_turn_id: "provider-turn-1",
+      started_at: 1_234,
+    }
+
+    harness.addPendingClient("conn-untrusted")
+    const untrusted = parseError(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "untrusted-receipt", method: "host_turn_started_v1", params },
+        "conn-untrusted",
+      ),
+    )
+    expect(untrusted.code).toBe(-32003)
+
+    const { connId } = harness.connectClient()
+    await harness.register(connId, {
+      name: "@agent/0",
+      pid: liveHolderPid,
+      project: "/tmp/hh",
+      launchId: "launch-a",
+      launchParentPid: process.pid,
+    })
+
+    const spoofed = parseError(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "spoofed-receipt",
+          method: "host_turn_started_v1",
+          params: { ...params, session: "@agent/9", launch_id: "launch-spoofed" },
+        },
+        connId,
+      ),
+    )
+    expect(spoofed.code).toBe(-32602)
+
+    const first = parseResult<Record<string, unknown>>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "receipt-1", method: "host_turn_started_v1", params },
+        connId,
+      ),
+    )
+    const duplicate = parseResult<Record<string, unknown>>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "receipt-2", method: "host_turn_started_v1", params },
+        connId,
+      ),
+    )
+    expect(first).toMatchObject({ recorded: true, duplicate: false, session: "@agent/0", launch_id: "launch-a" })
+    expect(duplicate).toMatchObject({ recorded: true, duplicate: true })
+
+    const latest = parseResult<Record<string, unknown>>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "latest-receipt",
+          method: "cli_turn_start_receipt_by_launch_v1",
+          params: { launch_id: "launch-a" },
+        },
+        "conn-status",
+      ),
+    )
+    expect(latest).toMatchObject({
+      session: "@agent/0",
+      launch_id: "launch-a",
+      launch_parent_pid: process.pid,
+      controller_session_id: "s1",
+      provider_session_id: "provider-session-1",
+      provider_turn_id: "provider-turn-1",
+      started_at: 1_234,
+    })
+  })
+
   it("validates daemon-derived launch targets and fails closed on conflicting authorities", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
@@ -375,6 +453,74 @@ describe("dispatcher bounded mailbox drain", () => {
     )
 
     expect(status).toMatchObject({ session: "@chief", unread_count: 0 })
+  })
+
+  it("projects the latest actionable cursor structurally without exposing message content", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const launchId = "await-shadow-launch"
+    const { connId } = harness.connectClient()
+    await harness.register(connId, {
+      name: "@agent/0",
+      pid: liveHolderPid,
+      project: "/tmp/hh",
+      launchId,
+      launchParentPid: process.pid,
+    })
+    harness.sendActionable("@agent/0", "older private body")
+    const latest = harness.sendActionable("@agent/0", "newer private body")
+
+    const status = parseResult<Record<string, unknown>>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "await-shadow-inbox",
+          method: "cli_inbox_status_by_launch_v1",
+          params: { launch_id: launchId },
+        },
+        "conn-status",
+      ),
+    )
+
+    expect(status).toMatchObject({
+      session: "@agent/0",
+      unread_count: 2,
+      latest_actionable_seq: latest.rowid,
+      latest_message_id: latest.id,
+      latest_type: "request",
+    })
+    expect(status).not.toHaveProperty("content")
+
+    const delivery = parseResult<Record<string, unknown>>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "await-shadow-delivery",
+          method: "cli_inbox_delivery_by_launch_v1",
+          params: { launch_id: launchId, message_seq: latest.rowid, message_id: latest.id },
+        },
+        "conn-status",
+      ),
+    )
+    expect(delivery).toMatchObject({
+      session: "@agent/0",
+      launch_id: launchId,
+      message: {
+        seq: latest.rowid,
+        id: latest.id,
+        type: "request",
+        sender: "daemon",
+        content: "newer private body",
+      },
+    })
+
+    const log = parseResult<{ messages: Array<Record<string, unknown>> }>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "await-shadow-log", method: "cli_log", params: { all: true } },
+        "conn-status",
+      ),
+    )
+    expect(log.messages.at(-1)).not.toHaveProperty("rowid")
   })
 
   it("keeps legal names containing the tombstone marker routable", async () => {
@@ -974,7 +1120,7 @@ function createDispatcherHarness(
       return daemon.dispatcher.handleRequest(req, connId)
     },
     sendActionable(recipient: string, content: string = "wake inbox wait") {
-      sendMessage(daemonCtx, recipient, content, "request", undefined, undefined, "direct")
+      return sendMessage(daemonCtx, recipient, content, "request", undefined, undefined, "direct")
     },
     sendWithRef(ref: string) {
       sendMessage(daemonCtx, "@fleet", `effect ${ref}`, "notify", undefined, ref, "direct")
