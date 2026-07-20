@@ -746,6 +746,39 @@ describe("dispatcher inbox-wait parsing", () => {
       pending_balls_summary: { total: 0, oldest_age_ms: 0 },
     })
   })
+
+  it("records an inbox-wait attention receipt for the authenticated caller, never an explicit target", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    harness.addPendingClient("conn-reader")
+    await harness.register("conn-reader", {
+      name: "@agent/reader",
+      pid: liveHolderPid,
+      project: "/tmp/km-wt-reader",
+    })
+
+    const receiptAt = Date.now() + 5_000
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(receiptAt)
+    try {
+      const result = parseResult<InboxWaitResult>(
+        await harness.dispatcher.handleRequest(
+          {
+            jsonrpc: "2.0",
+            id: "wait-explicit-target",
+            method: "tribe.inbox.wait",
+            params: { session: "@agent/other", timeoutMs: 0 },
+          },
+          "conn-reader",
+        ),
+      )
+      expect(result.timed_out).toBe(true)
+      expect(harness.mailboxAttentionReadAt("@agent/reader")).toBe(receiptAt)
+      expect(harness.mailboxAttentionReadAt("@agent/other")).toBeNull()
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
 })
 
 function createDispatcherHarness(
@@ -916,6 +949,12 @@ function createDispatcherHarness(
     sessionCount(name: string): number {
       const row = db.prepare("SELECT COUNT(*) AS count FROM sessions WHERE name = ?").get(name) as { count: number }
       return row.count
+    },
+    mailboxAttentionReadAt(name: string): number | null {
+      const row = db
+        .prepare("SELECT last_attention_read_at FROM mailbox_cursors WHERE recipient = ?")
+        .get(name) as { last_attention_read_at: number | null } | null
+      return row?.last_attention_read_at ?? null
     },
     sessionFilter(name: string): { mode: string; until: number | null; mute: string | null } | undefined {
       const row = db

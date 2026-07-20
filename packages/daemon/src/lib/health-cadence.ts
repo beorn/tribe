@@ -97,6 +97,19 @@ export type HealthCadenceProjection = ProjectionStamp & {
       oldest_age_ms: number
       actionable_rows: number
       actionable_oldest_age_ms: number
+      /** When this connected seat began being observable for read silence. */
+      tracking_since_ms: number
+      /** Null until the seat receives a canonical fetch/inbox-wait attention projection. */
+      last_attention_read_at_ms: number | null
+      last_attention_read_age_ms: number | null
+      /** Bounded literal identity of the oldest unread actionable, never a log parse. */
+      oldest_actionable: {
+        id: string
+        type: string
+        sender: string
+        summary: string | null
+        ts_ms: number
+      } | null
       evidence: typeof INBOX_LAG_EVIDENCE
     }
   >
@@ -335,8 +348,15 @@ function inboxLagProjection(
   rows: HealthCadenceProjection["inbox_lag"]
   warnings: string[]
 } {
-  const cursorQuery = db.prepare(
-    "SELECT last_inbox_pull_seq FROM sessions WHERE name = $session ORDER BY updated_at DESC LIMIT 1",
+  const cursorQuery = db.prepare(`
+    SELECT last_inbox_pull_seq, started_at
+    FROM sessions
+    WHERE name = $session
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `)
+  const attentionReceiptQuery = db.prepare(
+    "SELECT last_attention_read_at FROM mailbox_cursors WHERE recipient = $session",
   )
   const lagQuery = db.prepare(`
     WITH journal AS (
@@ -368,11 +388,44 @@ function inboxLagProjection(
       AND sender != $session
       AND type IN (${ACTIONABLE_TYPES_SQL})
   `)
+  const oldestActionableQuery = db.prepare(`
+    WITH journal AS (
+      SELECT rowid AS seq, id, type, sender, recipient, kind, ts, summary FROM messages
+      UNION ALL
+      SELECT seq, id, type, sender, recipient, kind, ts, summary FROM messages_archive
+    )
+    SELECT id, type, sender, summary, ts
+    FROM journal
+    WHERE seq > COALESCE(
+      (SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $session),
+      0
+    )
+      AND recipient = $session
+      AND kind = 'direct'
+      AND sender != $session
+      AND type IN (${ACTIONABLE_TYPES_SQL})
+    ORDER BY seq ASC
+    LIMIT 1
+  `)
 
   const rows = [...new Set(connectedSessionNames)].sort().map((session) => {
-    const cursor = cursorQuery.get({ $session: session }) as { last_inbox_pull_seq: number } | null
+    const cursor = cursorQuery.get({ $session: session }) as {
+      last_inbox_pull_seq: number
+      started_at: number
+    } | null
+    const receipt = attentionReceiptQuery.get({ $session: session }) as {
+      last_attention_read_at: number | null
+    } | null
     const lag = lagQuery.get({ $cursor: cursor?.last_inbox_pull_seq ?? 0, $session: session }) as LagRow
     const actionableLag = actionableLagQuery.get({ $session: session }) as LagRow
+    const oldestActionable = oldestActionableQuery.get({ $session: session }) as {
+      id: string
+      type: string
+      sender: string
+      summary: string | null
+      ts: number
+    } | null
+    const lastAttentionReadAt = receipt?.last_attention_read_at ?? null
     return {
       as_of_ms: now,
       session,
@@ -380,6 +433,19 @@ function inboxLagProjection(
       oldest_age_ms: ageFrom(now, lag.oldest_ts),
       actionable_rows: actionableLag.rows,
       actionable_oldest_age_ms: ageFrom(now, actionableLag.oldest_ts),
+      tracking_since_ms: cursor?.started_at ?? now,
+      last_attention_read_at_ms: lastAttentionReadAt,
+      last_attention_read_age_ms: lastAttentionReadAt === null ? null : Math.max(0, now - lastAttentionReadAt),
+      oldest_actionable:
+        oldestActionable === null
+          ? null
+          : {
+              id: oldestActionable.id,
+              type: oldestActionable.type,
+              sender: oldestActionable.sender,
+              summary: oldestActionable.summary,
+              ts_ms: oldestActionable.ts,
+            },
       evidence: INBOX_LAG_EVIDENCE,
     }
   })

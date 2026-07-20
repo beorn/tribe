@@ -1059,6 +1059,12 @@ export function withDispatcher<
             const { timeoutMs } = resolveInboxWaitOptions(p)
             const sessionName = target.sessionName
             const result = await inboxWait.wait(sessionName, connId, timeoutMs)
+            // The launch-correlated form proves which managed mailbox is
+            // reading. The explicit operator form observes another mailbox
+            // and must never forge that seat's receipt.
+            if (method === "cli_inbox_wait_by_launch_v1") {
+              stmts.touchMailboxAttentionRead.run({ $recipient: sessionName, $now: Date.now() })
+            }
             return makeResponse(id, {
               ...result,
               attention: readAttentionProjection(daemonCtx, sessionName).attention,
@@ -1071,6 +1077,11 @@ export function withDispatcher<
               defaultSession: client?.name ?? DEFAULT_INBOX_WAIT_SESSION,
             })
             const result = await inboxWait.wait(sessionName, connId, timeoutMs)
+            if (client?.role === "member") {
+              // Attribute the read to the authenticated caller, never to an
+              // explicit target supplied in params.
+              stmts.touchMailboxAttentionRead.run({ $recipient: client.name, $now: Date.now() })
+            }
             return makeResponse(id, {
               ...result,
               attention: readAttentionProjection(daemonCtx, sessionName).attention,

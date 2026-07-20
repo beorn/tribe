@@ -20,7 +20,7 @@ import { Database } from "bun:sqlite"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
@@ -390,6 +390,29 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       count?: number
     }
     expect(reviewerPending.count).toBe(0)
+  })
+
+  it("records an empty canonical attention read without advancing the actionable cursor", () => {
+    const live = connectAs("sess-attention-read", NAME)
+    const receiptAt = now + 5_000
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(receiptAt)
+    try {
+      const filtered = fetchJson(live, opts, { from: "@chief" }).json
+      expect(filtered.attention).toBeUndefined()
+      expect(
+        db.prepare("SELECT last_attention_read_at FROM mailbox_cursors WHERE recipient = ?").get(NAME),
+      ).toBeNull()
+
+      const canonical = fetchJson(live, opts, { advance: false }).json
+      expect(canonical.attention?.actionable_unread).toEqual([])
+      expect(
+        db
+          .prepare("SELECT last_actionable_seq, last_attention_read_at FROM mailbox_cursors WHERE recipient = ?")
+          .get(NAME),
+      ).toEqual({ last_actionable_seq: 0, last_attention_read_at: receiptAt })
+    } finally {
+      nowSpy.mockRestore()
+    }
   })
 
   it("reports the recovered count on the join result and never a rewound cursor", () => {

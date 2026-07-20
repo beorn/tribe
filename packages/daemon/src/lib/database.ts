@@ -135,7 +135,8 @@ export function openDatabase(path: string): Database {
   db.run(`CREATE TABLE IF NOT EXISTS mailbox_cursors (
 		recipient           TEXT PRIMARY KEY,
 		last_actionable_seq INTEGER NOT NULL DEFAULT 0,
-		updated_at          INTEGER NOT NULL
+		updated_at          INTEGER NOT NULL,
+		last_attention_read_at INTEGER
 	)`)
 
   // 21454 — persisted runtime-rename authority. An explicit tribe.rename /
@@ -811,7 +812,19 @@ const MIGRATIONS: readonly Migration[] = [
 				name              TEXT NOT NULL,
 				renamed_at        INTEGER NOT NULL,
 				PRIMARY KEY (launch_id, launch_parent_pid)
-			)`)
+      )`)
+    },
+  },
+  {
+    version: 22,
+    name: "mailbox-attention-read-receipts",
+    up(db) {
+      const cols = new Set(
+        (db.prepare("PRAGMA table_info(mailbox_cursors)").all() as Array<{ name: string }>).map((row) => row.name),
+      )
+      if (!cols.has("last_attention_read_at")) {
+        db.run("ALTER TABLE mailbox_cursors ADD COLUMN last_attention_read_at INTEGER")
+      }
     },
   },
 ]
@@ -1097,6 +1110,16 @@ export function createStatements(db: Database) {
       ON CONFLICT(recipient) DO UPDATE SET
         last_actionable_seq = MAX(last_actionable_seq, $seq),
         updated_at = $now
+    `),
+
+    /** Record that the named mailbox owner received the canonical attention
+     * projection. This receipt is independent of actionable acknowledgement:
+     * empty reads and advance:false reads count, but never move the cursor. */
+    touchMailboxAttentionRead: db.prepare(`
+      INSERT INTO mailbox_cursors (recipient, last_actionable_seq, updated_at, last_attention_read_at)
+      VALUES ($recipient, 0, $now, $now)
+      ON CONFLICT(recipient) DO UPDATE SET
+        last_attention_read_at = MAX(COALESCE(last_attention_read_at, 0), $now)
     `),
 
     /**

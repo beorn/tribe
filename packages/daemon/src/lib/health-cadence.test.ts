@@ -231,6 +231,16 @@ describe("20876 Tribe health cadence", () => {
         oldest_age_ms: 8 * DAY,
         actionable_rows: 4,
         actionable_oldest_age_ms: 23 * HOUR,
+        tracking_since_ms: now,
+        last_attention_read_at_ms: null,
+        last_attention_read_age_ms: null,
+        oldest_actionable: {
+          id: "request-1",
+          type: "request",
+          sender: "@chief",
+          summary: "request-1",
+          ts_ms: now - 23 * HOUR,
+        },
         evidence: {
           source: "tribe-mailbox-cursors",
           scope: "connected-session cursor backlog",
@@ -333,6 +343,27 @@ describe("20876 Tribe health cadence", () => {
     expect(afterDrain.as_of_ms).toBe(now + MINUTE)
     expect(afterDrain.inbox_lag).toEqual([])
     expect(afterDrain.warnings.join("\n")).not.toContain("@agent/5")
+  })
+
+  it("projects literal attention-read and oldest-actionable facts for WATCH policy", () => {
+    db.prepare(
+      "INSERT INTO mailbox_cursors (recipient, last_actionable_seq, updated_at, last_attention_read_at) VALUES (?, 0, ?, ?)",
+    ).run("@agent/5", now - 12 * MINUTE, now - 12 * MINUTE)
+
+    const row = projectHealthCadence(db, { now, connectedSessionNames: ["@agent/5"] }).inbox_lag[0]
+    expect(row).toMatchObject({
+      session: "@agent/5",
+      actionable_rows: 4,
+      actionable_oldest_age_ms: 23 * HOUR,
+      last_attention_read_at_ms: now - 12 * MINUTE,
+      last_attention_read_age_ms: 12 * MINUTE,
+      oldest_actionable: {
+        id: "request-1",
+        type: "request",
+        sender: "@chief",
+        summary: "request-1",
+      },
+    })
   })
 
   it("surfaces the cadence projection and evidence-bearing warnings through tribe.health", () => {

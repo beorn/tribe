@@ -1731,6 +1731,13 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
     }
   }
 
+  // 21626 — only the canonical, identity-bound attention projection is a
+  // mailbox-read receipt. Filtered/snapshot fetches omit attention and do not
+  // let a narrow history query masquerade as checking the owned inbox.
+  if (attention !== null) {
+    ctx.stmts.touchMailboxAttentionRead.run({ $recipient: currentName, $now: Date.now() })
+  }
+
   const events = filtered.map(fetchEvent)
   return jsonResult(attention === null ? { events, cursor: outputCursor } : { attention, events, cursor: outputCursor })
 }
