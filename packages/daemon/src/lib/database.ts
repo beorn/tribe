@@ -861,6 +861,16 @@ const MIGRATIONS: readonly Migration[] = [
     version: 22,
     name: "mailbox-attention-read-receipts",
     up(db) {
+      // Versioned fixtures and repaired databases may truthfully carry a
+      // later schema stamp while lacking this independent table. Recreate the
+      // v18 substrate before extending it so the receipt migration remains
+      // idempotent across partial-but-supported upgrade shapes.
+      db.run(`CREATE TABLE IF NOT EXISTS mailbox_cursors (
+			recipient           TEXT PRIMARY KEY,
+			last_actionable_seq INTEGER NOT NULL DEFAULT 0,
+			updated_at          INTEGER NOT NULL,
+			last_attention_read_at INTEGER
+		)`)
       const cols = new Set(
         (db.prepare("PRAGMA table_info(mailbox_cursors)").all() as Array<{ name: string }>).map((row) => row.name),
       )
@@ -870,7 +880,7 @@ const MIGRATIONS: readonly Migration[] = [
     },
   },
   {
-    version: 22,
+    version: 23,
     name: "durable-message-sequence",
     up(db) {
       // Delivery and mailbox cursors use messages.rowid as their monotonic
