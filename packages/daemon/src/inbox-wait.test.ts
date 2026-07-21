@@ -77,6 +77,14 @@ describe("createInboxWaitManager", () => {
     })
   })
 
+  it("reports the effective timeout window even when actionable work returns immediately", async () => {
+    const manager = createInboxWaitManager((session) => status(session, 1))
+
+    const result = await manager.wait("@ci", "conn-1", 30_000)
+
+    expect(result).toMatchObject({ effective_timeout_ms: 30_000 })
+  })
+
   it("ignores ambient traffic and wakes on actionable direct messages", async () => {
     vi.useFakeTimers()
     let unread = 0
