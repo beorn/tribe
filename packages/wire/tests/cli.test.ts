@@ -11,7 +11,7 @@
 import { describe, expect, it } from "vitest"
 import { spawn, spawnSync } from "node:child_process"
 import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { createServer } from "node:net"
+import { createServer, type Socket } from "node:net"
 import { tmpdir } from "node:os"
 import { resolve, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -64,14 +64,80 @@ function runCliAsync(
     let stderr = ""
     child.stdout!.on("data", (chunk) => (stdout += chunk.toString("utf8")))
     child.stderr!.on("data", (chunk) => (stderr += chunk.toString("utf8")))
-    child.on("close", (code, signal) => {
+    let settled = false
+    const finish = (code: number | null, signal: NodeJS.Signals | null, spawnError?: Error): void => {
+      if (settled) return
+      settled = true
       if (capabilityDir !== undefined) rmSync(capabilityDir, { recursive: true, force: true })
-      resolveRun({ stdout: stripAnsi(stdout), stderr: stripAnsi(stderr), code, signal })
-    })
+      resolveRun({
+        stdout: stripAnsi(stdout),
+        stderr: stripAnsi(spawnError ? `${stderr}${spawnError.message}` : stderr),
+        code,
+        signal,
+      })
+    }
+    child.on("error", (error) => finish(null, null, error))
+    child.on("close", (code, signal) => finish(code, signal))
   })
 }
 
 describe("tribe-wire CLI — Commander dispatcher", () => {
+  it("fails loudly by the client deadline when the inbox-wait daemon stays silent", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-wait-silent-"))
+    const socketPath = join(dir, "tribe.sock")
+    const sockets = new Set<Socket>()
+    let resolveConnected!: (timestamp: number) => void
+    const connected = new Promise<number>((resolve) => {
+      resolveConnected = resolve
+    })
+    const server = createServer((socket) => {
+      sockets.add(socket)
+      resolveConnected(Date.now())
+      socket.on("close", () => sockets.delete(socket))
+      socket.on("data", () => undefined)
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const childRun = runCliAsync(
+        ["inbox-wait", "--session", "@chief", "--timeout", "0s", "--json"],
+        {
+          ...process.env,
+          BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(dir, "bun-transpiler-cache"),
+          TRIBE_SOCKET: socketPath,
+          TRIBE_NO_AUTOSTART: "1",
+        },
+        { timeoutMs: 30_000 },
+      )
+      const readiness = await Promise.race([
+        connected.then((connectedAt) => ({ kind: "connected" as const, connectedAt })),
+        childRun.then((result) => ({ kind: "exited" as const, result })),
+      ])
+      if (readiness.kind === "exited") {
+        throw new Error(`inbox-wait child exited before connecting: ${readiness.result.stderr}`)
+      }
+      const { connectedAt } = readiness
+      const result = await childRun
+      const deadlineElapsedMs = Date.now() - connectedAt
+
+      expect(result.signal).toBeNull()
+      expect(result.code).not.toBe(0)
+      expect(result.stderr).toMatch(/Request cli_inbox_wait timed out/)
+      expect(deadlineElapsedMs).toBeGreaterThanOrEqual(9_000)
+      expect(deadlineElapsedMs).toBeLessThan(15_000)
+    } finally {
+      for (const socket of sockets) socket.destroy()
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 40_000)
+
   it("--help prints the Commands list + MCP-adapter hint and exits 0", () => {
     const { stdout, code } = runCli(["--help"])
     expect(code).toBe(0)
@@ -597,41 +663,4 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     expect(res.stderr ?? "").toContain('"name":"tribe:stdio-adapter"')
     expect(res.stderr ?? "").toContain("Connecting to daemon at /tmp/no-tribe.sock")
   })
-
-  it("fails loudly by the client deadline when the inbox-wait daemon stays silent", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-wait-silent-"))
-    const socketPath = join(dir, "tribe.sock")
-    const server = createServer((socket) => {
-      socket.on("data", () => undefined)
-    })
-
-    try {
-      await new Promise<void>((resolveListen, rejectListen) => {
-        server.once("error", rejectListen)
-        server.listen(socketPath, () => {
-          server.off("error", rejectListen)
-          resolveListen()
-        })
-      })
-      const startedAt = Date.now()
-      const result = await runCliAsync(
-        ["inbox-wait", "--session", "@chief", "--timeout", "0s", "--json"],
-        {
-          ...process.env,
-          TRIBE_SOCKET: socketPath,
-          TRIBE_NO_AUTOSTART: "1",
-        },
-        { timeoutMs: 15_000 },
-      )
-
-      expect(result.signal).toBeNull()
-      expect(result.code).not.toBe(0)
-      expect(result.stderr).toMatch(/Request cli_inbox_wait timed out/)
-      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(9_000)
-      expect(Date.now() - startedAt).toBeLessThan(15_000)
-    } finally {
-      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
-      rmSync(dir, { recursive: true, force: true })
-    }
-  }, 20_000)
 })
