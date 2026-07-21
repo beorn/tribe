@@ -2,10 +2,15 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createServer, type Server, type Socket } from "node:net"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { startTribeHttpMcpServer, type TribeHttpMcpServer } from "../src/http-adapter.ts"
 import { createLineParser } from "../src/parser.ts"
 import { isRequest, makeResponse } from "../src/rpc.ts"
+
+type HttpFetch = (
+  request: Request,
+  server: { timeout(request: Request, seconds: number): void },
+) => Response | Promise<Response>
 
 type FakeDaemon = {
   readonly server: Server
@@ -14,7 +19,13 @@ type FakeDaemon = {
   disconnectClients(): void
 }
 
-function spawnFakeDaemon(socketPath: string): Promise<FakeDaemon> {
+function spawnFakeDaemon(
+  socketPath: string,
+  respond: (request: FakeDaemon["requests"][number]) => unknown | Promise<unknown> = () => ({
+    name: "@agent/http",
+    role: "member",
+  }),
+): Promise<FakeDaemon> {
   const clients: Socket[] = []
   const requests: FakeDaemon["requests"] = []
   return new Promise((resolveServer) => {
@@ -23,7 +34,9 @@ function spawnFakeDaemon(socketPath: string): Promise<FakeDaemon> {
       const parse = createLineParser((message) => {
         if (!isRequest(message)) return
         requests.push(message)
-        socket.write(makeResponse(message.id, { name: "@agent/http", role: "member" }))
+        void Promise.resolve(respond(message)).then((result) => {
+          if (!socket.destroyed) socket.write(makeResponse(message.id, result))
+        })
       })
       socket.on("data", parse)
       socket.on("error", () => undefined)
@@ -50,6 +63,86 @@ async function waitForRegistrationCount(daemon: FakeDaemon, count: number): Prom
 }
 
 describe("HTTP MCP adapter", () => {
+  it("disables Bun's request timeout while forwarding the public HTTP MCP wait contract", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "tribe-http-adapter-wait-"))
+    const socketPath = join(tempDir, "tribe.sock")
+    const daemon = await spawnFakeDaemon(socketPath, async (request) => {
+      if (request.method !== "tribe.inbox.wait") return { name: "@agent/http", role: "member" }
+      return {
+        session: "@agent/http",
+        unread_count: 0,
+        oldest_unread_age_min: 0,
+        oldest_unread_ts: 0,
+        waited_ms: 7,
+        effective_timeout_ms: 30 * 60_000,
+        timed_out: true,
+        aborted: false,
+        attention: {
+          actionable_unread: [],
+          pending_balls: [],
+          pending_balls_summary: { total: 0, oldest_age_ms: 0 },
+        },
+      }
+    })
+    let bridge: TribeHttpMcpServer | undefined
+    let handleFetch: HttpFetch | undefined
+    const timeout = vi.fn()
+    const stop = vi.fn()
+    const originalServe = Bun.serve
+    try {
+      const fakeServe = ((options: { fetch: HttpFetch }) => {
+        handleFetch = options.fetch
+        return { port: 41_729, stop }
+      }) as unknown as typeof Bun.serve
+      if (!Reflect.set(Bun, "serve", fakeServe)) throw new Error("could not replace Bun.serve for HTTP adapter test")
+      bridge = await startTribeHttpMcpServer({ socketPath, name: "@agent/http", requireJoin: false })
+      if (!Reflect.set(Bun, "serve", originalServe))
+        throw new Error("could not restore Bun.serve after HTTP adapter test")
+      if (!handleFetch) throw new Error("HTTP adapter did not register a fetch handler")
+      const request = new Request(bridge.url, {
+        method: "POST",
+        headers: {
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "inbox.wait",
+            arguments: {
+              timeout_ms: 24 * 60 * 60_000,
+              wake_on_correlated_reply: true,
+            },
+          },
+        }),
+      })
+      const response = await handleFetch(request, { timeout })
+      const payload = (await response.json()) as {
+        result?: { content?: Array<{ text?: string }>; structuredContent?: Record<string, unknown> }
+      }
+      const result = JSON.parse(payload.result?.content?.[0]?.text ?? "{}") as {
+        effective_timeout_ms?: number
+      }
+
+      expect(response.status).toBe(200)
+      expect(timeout).toHaveBeenCalledWith(request, 0)
+      expect(result.effective_timeout_ms).toBe(30 * 60_000)
+      expect(payload.result?.structuredContent).toMatchObject(result)
+      expect(daemon.requests.find((request) => request.method === "tribe.inbox.wait")?.params).toEqual({
+        timeout_ms: 30 * 60_000,
+        wake_on_correlated_reply: true,
+      })
+    } finally {
+      Reflect.set(Bun, "serve", originalServe)
+      bridge?.close()
+      for (const client of daemon.clients) client.destroy()
+      await new Promise<void>((resolve) => daemon.server.close(() => resolve()))
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it("declares the launch notification filter during registration", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "tribe-http-adapter-filter-"))
     const socketPath = join(tempDir, "tribe.sock")

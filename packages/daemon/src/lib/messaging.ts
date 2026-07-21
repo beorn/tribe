@@ -222,9 +222,10 @@ export function sendMessage(
         ? (ctx.stmts.selectPendingForReplyRecipient.get({
             $reply_id: replyId,
             $recipient: sender,
-          }) as { request_id: string; fanout: string; expires_at: number | null } | null)
+          }) as { request_id: string; fanout: string; expires_at: number | null; sender: string } | null)
         : null
     const canonicalReplyId = pendingReply?.request_id ?? replyId
+    const correlatedReply = pendingReply ? { requestId: pendingReply.request_id, requester: pendingReply.sender } : null
     let tracker = canonicalReplyId ? { request_id: canonicalReplyId, closed: 0 } : undefined
     const result = ctx.stmts.insertMessage.run({
       $id: id,
@@ -275,9 +276,9 @@ export function sendMessage(
         }
       }
     }
-    return { rowid, tracker }
+    return { rowid, tracker, correlatedReply }
   })
-  const { rowid, tracker } = persist()
+  const { rowid, tracker, correlatedReply } = persist()
   ctx.onMessageInserted?.({
     id,
     ts,
@@ -292,6 +293,7 @@ export function sendMessage(
     delivery,
     topic: classification.topic ?? null,
     roomId: classification.roomId ?? null,
+    correlatedReply,
   })
   return { id, ts, rowid, ...(tracker ? { tracker } : {}) }
 }

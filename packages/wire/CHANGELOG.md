@@ -4,6 +4,11 @@
 
 ### Added
 
+- **Honor one full bounded inbox-wait window across every transport.** Protocol
+  v8 caps logical waits at 30 minutes, reports `effective_timeout_ms`, preserves
+  that deadline through CLI reconnects plus stdio/HTTP MCP forwarding, and lets
+  callers opt into validated `response` / `status` replies to their own tracked
+  requests without changing the default actionable-only wake policy.
 - **Daemon-authoritative transport verdicts.** `tribe.members({ all: true })`
   now separates `transport_state` (`connected` / `disconnected`) from
   `owner_state` (`live` / `dead` / `unknown`) and includes a diagnostic
@@ -23,8 +28,6 @@
   bound repeated slow replacements instead of respawning once per minute.
 - Close connected candidates when registration rejects, and terminate an
   adapter when its host stdin closes, preventing stranded sockets/processes.
-
-### Added
 
 - **Register launch-declared notification filters atomically.** MCP adapters
   accept `TRIBE_FILTER_MODE=focus|normal|ambient` and declare it in protocol v7

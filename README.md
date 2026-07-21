@@ -82,9 +82,19 @@ Register it as a plain project-level MCP server without plugin channels:
 }
 ```
 
-Codex reads the same env-driven delivery mode — add `TRIBE_DELIVERY = "pull"`
-under `[mcp_servers.tribe.env]` in `~/.codex/config.toml` for MCP-only clients
-without a notification channel.
+Codex reads the same env-driven delivery mode. Its MCP host deadline must also
+cover Tribe's full bounded wait:
+
+```toml
+[mcp_servers.tribe]
+tool_timeout_sec = 1860
+
+[mcp_servers.tribe.env]
+TRIBE_DELIVERY = "pull"
+```
+
+Use that shape in `~/.codex/config.toml` for MCP-only clients without a
+notification channel.
 
 ### Running the daemon standalone (no plugin)
 

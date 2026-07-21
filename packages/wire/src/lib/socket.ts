@@ -25,8 +25,10 @@ import {
 
 /**
  * Wire-protocol version. Bump on any payload-shape change a client cares about.
- * v7 (current) adds the optional register-time `filterMode`, allowing a launch
- * controller to persist push-admission before a session becomes connected.
+ * v8 (current) adds the effective inbox-wait timeout and optional correlated-
+ * reply wake control.
+ * v7 added the optional register-time `filterMode`, allowing a launch controller
+ * to persist push-admission before a session becomes connected.
  * v6 added sender-declared tracked-ball expiry and inbox-wait
  * attention carriage; the per-event reply hint is derived at delivery time,
  * not pushed on the wire.
@@ -41,7 +43,7 @@ import {
  * `reissue_count`. Purely additive: pre-0.14 clients ignore them. No protocol
  * bump then (v4 unchanged). See km-tribe.task-assignment-stale-snapshot.
  */
-export const TRIBE_PROTOCOL_VERSION = 7
+export const TRIBE_PROTOCOL_VERSION = 8
 
 // ---------------------------------------------------------------------------
 // Re-exports from the surrounding tribe-client package
@@ -60,7 +62,7 @@ export {
 } from "../rpc.ts"
 export { resolvePeerSocketPath, resolveSocketPath } from "../paths.ts"
 
-export type { DaemonClient } from "../client.ts"
+export type { DaemonCallOpts, DaemonClient } from "../client.ts"
 export type { JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse } from "../rpc.ts"
 
 // ---------------------------------------------------------------------------

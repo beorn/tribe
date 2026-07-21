@@ -1050,7 +1050,7 @@ export function createStatements(db: Database) {
      *  recipient's row is still active and whether fanout='first' closes all
      *  or fanout='all' closes only the replying recipient. */
     selectPendingForReplyRecipient: db.prepare(`
-			SELECT request_id, fanout, expires_at
+			SELECT request_id, fanout, expires_at, sender
 			FROM pending_request
 			WHERE recipient = $recipient
 				AND (request_id = $reply_id OR message_id = $reply_id)

@@ -14,6 +14,7 @@ import {
 } from "../src/client.ts"
 import { createLineParser } from "../src/parser.ts"
 import { isRequest, makeNotification, makeResponse } from "../src/rpc.ts"
+import { callTribeTool } from "../src/lib/tool-daemon-call.ts"
 
 /** errno-tagged error, like the ones node:net throws on connect failures. */
 function errno(code: string): Error {
@@ -42,6 +43,11 @@ function spawnFakeDaemon(socketPath: string): Promise<{ server: Server; clients:
         if (isRequest(msg)) {
           if (msg.method === "echo") {
             socket.write(makeResponse(msg.id, { echoed: msg.params }))
+          } else if (msg.method === "slow") {
+            setTimeout(() => socket.write(makeResponse(msg.id, { delayed: true })), 30)
+          } else if (msg.method === "never") {
+            // Intentionally leave the request pending so the client deadline
+            // owns the outcome.
           } else if (msg.method === "ping") {
             socket.write(makeResponse(msg.id, { pong: true }))
             socket.write(makeNotification("pushed", { from: "ping" }))
@@ -118,9 +124,106 @@ describe("connectToDaemon", () => {
     }
   })
 
+  it("lets an explicit long-poll deadline outlive the generic call timeout", async () => {
+    const sock = join(tmpDir, "d.sock")
+    const { server } = await spawnFakeDaemon(sock)
+    let client: DaemonClient | undefined
+    try {
+      client = await connectToDaemon(sock, { callTimeoutMs: 5 })
+      await expect(client.call("slow", {}, { timeoutMs: 100 })).resolves.toEqual({ delayed: true })
+    } finally {
+      client?.close()
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  })
+
+  it("releases an explicit long-poll deadline as soon as the response arrives", async () => {
+    const sock = join(tmpDir, "d.sock")
+    const { server } = await spawnFakeDaemon(sock)
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout")
+    let client: DaemonClient | undefined
+    try {
+      client = await connectToDaemon(sock)
+      clearTimeoutSpy.mockClear()
+      await expect(client.call("echo", { early: true }, { timeoutMs: 30 * 60_000 })).resolves.toEqual({
+        echoed: { early: true },
+      })
+      expect(clearTimeoutSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      client?.close()
+      await new Promise<void>((r) => server.close(() => r()))
+      clearTimeoutSpy.mockRestore()
+    }
+  })
+
+  it("does not classify explicit long-poll expiry as three daemon failures", async () => {
+    const sock = join(tmpDir, "d.sock")
+    const { server } = await spawnFakeDaemon(sock)
+    let client: DaemonClient | undefined
+    try {
+      client = await connectToDaemon(sock, { callTimeoutMs: 100 })
+      for (let i = 0; i < 3; i++) {
+        await expect(client.call("never", {}, { timeoutMs: 5 })).rejects.toThrow("timed out")
+      }
+      await expect(client.call("echo", { still: "connected" })).resolves.toEqual({
+        echoed: { still: "connected" },
+      })
+    } finally {
+      client?.close()
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  })
+
   it("rejects with ENOENT when the socket file does not exist", async () => {
     const missing = join(tmpDir, "nope.sock")
     await expect(connectToDaemon(missing)).rejects.toMatchObject({ code: "ENOENT" })
+  })
+})
+
+describe("callTribeTool", () => {
+  const canonicalInboxWaitResult = {
+    session: "@agent/test",
+    unread_count: 0,
+    oldest_unread_age_min: 0,
+    oldest_unread_ts: 0,
+    waited_ms: 30_000,
+    effective_timeout_ms: 30 * 60_000,
+    timed_out: true,
+    aborted: false,
+    attention: {
+      actionable_unread: [],
+      pending_balls: [],
+      pending_balls_summary: { total: 0, oldest_age_ms: 0 },
+    },
+  }
+
+  it("caps inbox waits and gives the daemon call the full effective window plus transport margin", async () => {
+    const call = vi.fn(async () => canonicalInboxWaitResult)
+    const client = { call } as unknown as DaemonClient
+
+    const result = await callTribeTool(client, "inbox.wait", {
+      timeout_ms: 24 * 60 * 60_000,
+      wake_on_correlated_reply: true,
+    })
+
+    expect(call).toHaveBeenCalledWith(
+      "tribe.inbox.wait",
+      {
+        timeout_ms: 30 * 60_000,
+        wake_on_correlated_reply: true,
+      },
+      { timeoutMs: 30 * 60_000 + 5_000 },
+    )
+    expect(result).toMatchObject({ structuredContent: canonicalInboxWaitResult })
+  })
+
+  it.each([
+    { label: "incomplete raw object", value: { ok: true } },
+    { label: "legacy wrapped content", value: { content: [{ type: "text", text: "{}" }] } },
+  ])("rejects a noncanonical inbox-wait result: $label", async ({ value }) => {
+    const client = { call: vi.fn(async () => value) } as unknown as DaemonClient
+
+    await expect(callTribeTool(client, "inbox.wait", {})).rejects.toThrow("invalid canonical InboxWaitResult")
   })
 })
 

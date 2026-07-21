@@ -13,6 +13,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { createHash, randomUUID } from "node:crypto"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
+import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
 import { resolveSocketPath, createReconnectingClient, TRIBE_PROTOCOL_VERSION, type DaemonClient } from "./lib/socket.ts"
 import {
@@ -93,10 +94,15 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
   const http = Bun.serve({
     hostname: "127.0.0.1",
     port: opts.port ?? 0,
-    async fetch(req) {
+    async fetch(req, server) {
       const url = new URL(req.url)
       if (url.pathname === "/health") return Response.json({ ok: true, name: myName })
       if (url.pathname !== "/mcp") return new Response("not found", { status: 404 })
+
+      // MCP inbox.wait owns a bounded logical deadline of up to 30 minutes.
+      // Disable Bun's generic per-request idle timeout for this long-poll;
+      // Tribe's own capped timer remains the single completion authority.
+      server.timeout(req, 0)
 
       const mcp = createMcpServer({
         daemon,
@@ -172,7 +178,7 @@ function createMcpServer(opts: {
           }
         : a
     try {
-      const result = await opts.daemon.call(`tribe.${name}`, payload)
+      const result = await callTribeTool(opts.daemon, name, payload)
       if (name === "join" || name === "rename") {
         const r = result as { content?: Array<{ text?: string }> }
         try {

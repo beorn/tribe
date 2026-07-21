@@ -294,7 +294,10 @@ export function withDispatcher<
       }
     }
 
-    const inboxWait = createInboxWaitManager(readInboxStatus)
+    const inboxWait = createInboxWaitManager(
+      readInboxStatus,
+      (sessionName) => readAttentionProjection(daemonCtx, sessionName).attention,
+    )
     const previousOnMessageInserted = daemonCtx.onMessageInserted
     const onMessageInserted = (info: MessageInsertedInfo) => {
       previousOnMessageInserted?.(info)
@@ -971,7 +974,7 @@ export function withDispatcher<
           case TRIBE_COORD_METHODS.pending: {
             const client = clients.get(connId)
             const ctx = client?.ctx ?? daemonCtx
-            const result = await handleToolCall(ctx, method, p, DAEMON_HANDLER_OPTS)
+            const result = await handleToolCall(ctx, method, p, DAEMON_HANDLER_OPTS, connId)
             if ((method === TRIBE_COORD_METHODS.join || method === TRIBE_COORD_METHODS.rename) && client) {
               client.name = ctx.getName()
               client.role = ctx.getRole()
@@ -1190,36 +1193,34 @@ export function withDispatcher<
                 : { mode: "explicit", defaultSession: DEFAULT_INBOX_WAIT_SESSION },
             )
             if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage)
-            const { timeoutMs } = resolveInboxWaitOptions(p)
+            const { timeoutMs, wakeOnCorrelatedReply } = resolveInboxWaitOptions(p)
             const sessionName = target.sessionName
-            const result = await inboxWait.wait(sessionName, connId, timeoutMs)
+            const result = await inboxWait.wait(sessionName, connId, timeoutMs, { wakeOnCorrelatedReply })
             // The launch-correlated form proves which managed mailbox is
             // reading. The explicit operator form observes another mailbox
             // and must never forge that seat's receipt.
             if (method === "cli_inbox_wait_by_launch_v1") {
               stmts.touchMailboxAttentionRead.run({ $recipient: sessionName, $now: Date.now() })
             }
-            return makeResponse(id, {
-              ...result,
-              attention: readAttentionProjection(daemonCtx, sessionName).attention,
-            })
+            return makeResponse(id, result)
           }
 
           case "tribe.inbox.wait": {
             const client = clients.get(connId)
-            const { session: sessionName, timeoutMs } = resolveInboxWaitOptions(p, {
+            const {
+              session: sessionName,
+              timeoutMs,
+              wakeOnCorrelatedReply,
+            } = resolveInboxWaitOptions(p, {
               defaultSession: client?.name ?? DEFAULT_INBOX_WAIT_SESSION,
             })
-            const result = await inboxWait.wait(sessionName, connId, timeoutMs)
+            const result = await inboxWait.wait(sessionName, connId, timeoutMs, { wakeOnCorrelatedReply })
             if (client?.role === "member") {
               // Attribute the read to the authenticated caller, never to an
               // explicit target supplied in params.
               stmts.touchMailboxAttentionRead.run({ $recipient: client.name, $now: Date.now() })
             }
-            return makeResponse(id, {
-              ...result,
-              attention: readAttentionProjection(daemonCtx, sessionName).attention,
-            })
+            return makeResponse(id, result)
           }
 
           /**

@@ -7,6 +7,7 @@ import { createServer, type Server, type Socket } from "node:net"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createLineParser } from "../src/parser.ts"
 import { isRequest, makeError, makeNotification, makeResponse } from "../src/rpc.ts"
+import { MAX_INBOX_WAIT_TIMEOUT_MS } from "../src/lib/inbox-wait-options.ts"
 import { MAX_REPLAY_EVENTS } from "../src/lib/replay-cap.ts"
 
 const ADAPTER = resolve(dirname(fileURLToPath(import.meta.url)), "../src/stdio-adapter.ts")
@@ -95,24 +96,24 @@ function spawnFakeDaemon(
         }
         if (msg.method === "tribe.inbox.wait") {
           socket.write(
-            makeResponse(msg.id, {
-              content: [
-                {
-                  type: "text",
-                  text: JSON.stringify(
-                    opts.inboxWaitResult ?? {
-                      session: "@agent/test",
-                      unread_count: 0,
-                      oldest_unread_age_min: 0,
-                      oldest_unread_ts: 0,
-                      waited_ms: 0,
-                      timed_out: true,
-                      aborted: false,
-                    },
-                  ),
+            makeResponse(
+              msg.id,
+              opts.inboxWaitResult ?? {
+                session: "@agent/test",
+                unread_count: 0,
+                oldest_unread_age_min: 0,
+                oldest_unread_ts: 0,
+                waited_ms: 0,
+                effective_timeout_ms: 30_000,
+                timed_out: true,
+                aborted: false,
+                attention: {
+                  actionable_unread: [],
+                  pending_balls: [],
+                  pending_balls_summary: { total: 0, oldest_age_ms: 0 },
                 },
-              ],
-            }),
+              },
+            ),
           )
           return
         }
@@ -759,11 +760,13 @@ describe("stdio adapter delivery modes", () => {
         oldest_unread_age_min: 1,
         oldest_unread_ts: 123,
         waited_ms: 17,
+        effective_timeout_ms: MAX_INBOX_WAIT_TIMEOUT_MS,
         timed_out: false,
         aborted: false,
         attention: {
           actionable_unread: [{ id: "request-1", content: "review this" }],
           pending_balls: [{ request_id: "request-1", recipient: "@agent/test" }],
+          pending_balls_summary: { total: 1, oldest_age_ms: 500 },
         },
       },
     })
@@ -793,7 +796,14 @@ describe("stdio adapter delivery modes", () => {
       pullTransport: "cli",
     })
 
-    writeJson(child, callToolPayload(3, "inbox.wait", { session: "@agent/test", timeout_ms: 17 }))
+    writeJson(
+      child,
+      callToolPayload(3, "inbox.wait", {
+        session: "@agent/test",
+        timeout_ms: 24 * 60 * 60_000,
+        wake_on_correlated_reply: true,
+      }),
+    )
     const call = await waitForLine(child, (line) => line.id === 3)
     const content = ((call.result as { content?: Array<{ text?: string }> } | undefined)?.content ?? []) as Array<{
       text?: string
@@ -802,29 +812,38 @@ describe("stdio adapter delivery modes", () => {
       session?: string
       unread_count?: number
       waited_ms?: number
+      effective_timeout_ms?: number
       timed_out?: boolean
       aborted?: boolean
       attention?: {
         actionable_unread?: Array<{ id?: string }>
         pending_balls?: Array<{ request_id?: string }>
+        pending_balls_summary?: { total?: number; oldest_age_ms?: number }
       }
     }
     expect(parsed).toMatchObject({
       session: "@agent/test",
       unread_count: 2,
       waited_ms: 17,
+      effective_timeout_ms: MAX_INBOX_WAIT_TIMEOUT_MS,
       timed_out: false,
       aborted: false,
       attention: {
         actionable_unread: [{ id: "request-1" }],
         pending_balls: [{ request_id: "request-1" }],
+        pending_balls_summary: { total: 1, oldest_age_ms: 500 },
       },
     })
+    expect((call.result as { structuredContent?: unknown }).structuredContent).toMatchObject(parsed)
 
     const daemonRequest = daemon.requests.find((msg) => msg.method === "tribe.inbox.wait") as
-      | { params?: { session?: string; timeout_ms?: number } }
+      | { params?: { session?: string; timeout_ms?: number; wake_on_correlated_reply?: boolean } }
       | undefined
-    expect(daemonRequest?.params).toMatchObject({ session: "@agent/test", timeout_ms: 17 })
+    expect(daemonRequest?.params).toMatchObject({
+      session: "@agent/test",
+      timeout_ms: MAX_INBOX_WAIT_TIMEOUT_MS,
+      wake_on_correlated_reply: true,
+    })
   })
 
   it("push delivery registers explicit persona as pull and suppresses channel notifications until tribe.join", async () => {
