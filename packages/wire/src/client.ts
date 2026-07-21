@@ -48,6 +48,18 @@ export type DaemonCallOpts = {
   timeoutMs?: number
 }
 
+class DaemonCallTimeoutError extends Error {
+  readonly code = "TRIBE_DAEMON_CALL_TIMEOUT" as const
+
+  constructor(
+    readonly method: string,
+    readonly timeoutMs: number,
+  ) {
+    super(`Request ${method} timed out after ${timeoutMs}ms; check Tribe daemon health before retrying`)
+    this.name = "DaemonCallTimeoutError"
+  }
+}
+
 export type ConnectToDaemonOpts = {
   /** Per-call request timeout. Default: 10000 ms. */
   callTimeoutMs?: number
@@ -120,7 +132,7 @@ export function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts):
             socket.write(makeRequest(id, method, params))
             pendingCall.timer = timers.setTimeout(() => {
               if (!pending.delete(id)) return
-              rej(new Error(`Request ${method} timed out`))
+              rej(new DaemonCallTimeoutError(method, requestTimeoutMs))
               // A caller-owned long-poll deadline is an expected outcome, not
               // evidence that the daemon connection is unhealthy.
               if (explicitTimeoutMs === undefined && ++timeouts >= 3) {

@@ -174,6 +174,24 @@ describe("connectToDaemon", () => {
     }
   })
 
+  it("rejects a silent daemon call with typed deadline context", async () => {
+    const sock = join(tmpDir, "d.sock")
+    const { server } = await spawnFakeDaemon(sock)
+    let client: DaemonClient | undefined
+    try {
+      client = await connectToDaemon(sock)
+      await expect(client.call("never", {}, { timeoutMs: 5 })).rejects.toMatchObject({
+        name: "DaemonCallTimeoutError",
+        code: "TRIBE_DAEMON_CALL_TIMEOUT",
+        method: "never",
+        timeoutMs: 5,
+      })
+    } finally {
+      client?.close()
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+    }
+  })
+
   it("rejects with ENOENT when the socket file does not exist", async () => {
     const missing = join(tmpDir, "nope.sock")
     await expect(connectToDaemon(missing)).rejects.toMatchObject({ code: "ENOENT" })
