@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import type { MessageInsertedInfo } from "./lib/context.ts"
 import { createTribeContext } from "./lib/context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./lib/database.ts"
-import { handleToolCall, type HandlerOpts } from "./lib/handlers.ts"
+import { messagingTools } from "./lib/compose/messaging-tools.ts"
+import type { HandlerOpts } from "./lib/handlers.ts"
 import { createInboxWaitManager, type InboxStatus } from "./lib/inbox-wait.ts"
+import { sendMessage } from "./lib/messaging.ts"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -15,6 +17,16 @@ function status(session: string, unread: number, oldestTs = Date.now() - 120_000
     oldest_unread_age_min: unread > 0 ? 2 : 0,
     oldest_unread_ts: unread > 0 ? oldestTs : 0,
   }
+}
+
+const EMPTY_ATTENTION = {
+  actionable_unread: [],
+  pending_balls: [],
+  pending_balls_summary: { total: 0, oldest_age_ms: 0 },
+}
+
+function createTestInboxWaitManager(readStatus: (session: string) => InboxStatus) {
+  return createInboxWaitManager(readStatus, () => EMPTY_ATTENTION)
 }
 
 function message(overrides: Partial<MessageInsertedInfo>): MessageInsertedInfo {
@@ -32,6 +44,7 @@ function message(overrides: Partial<MessageInsertedInfo>): MessageInsertedInfo {
     delivery: "pull",
     topic: null,
     roomId: null,
+    correlatedReply: null,
     ...overrides,
   }
 }
@@ -40,7 +53,13 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-function makeContext(db: ReturnType<typeof openDatabase>, stmts: TribeStatements, sessionId: string, name: string) {
+function makeContext(
+  db: ReturnType<typeof openDatabase>,
+  stmts: TribeStatements,
+  sessionId: string,
+  name: string,
+  onMessageInserted?: (info: MessageInsertedInfo) => void,
+) {
   return createTribeContext({
     db,
     stmts,
@@ -50,6 +69,7 @@ function makeContext(db: ReturnType<typeof openDatabase>, stmts: TribeStatements
     domains: [],
     claudeSessionId: null,
     claudeSessionName: null,
+    onMessageInserted,
   })
 }
 
@@ -65,8 +85,16 @@ function makeOpts(inboxWait?: HandlerOpts["inboxWait"]): HandlerOpts {
 }
 
 describe("createInboxWaitManager", () => {
-  it("returns immediately when actionable unread messages already exist", async () => {
-    const manager = createInboxWaitManager((session) => status(session, 3))
+  it("returns one canonical result with the current attention projection", async () => {
+    const attention = {
+      actionable_unread: [{ id: "actionable-1" }],
+      pending_balls: [{ request_id: "request-1" }],
+      pending_balls_summary: { total: 1, oldest_age_ms: 5_000 },
+    }
+    const manager = createInboxWaitManager(
+      (session) => status(session, 3),
+      () => attention,
+    )
     const result = await manager.wait("@ci", "conn-1", 30_000)
     expect(result).toMatchObject({
       session: "@ci",
@@ -74,21 +102,15 @@ describe("createInboxWaitManager", () => {
       timed_out: false,
       aborted: false,
       waited_ms: 0,
+      effective_timeout_ms: 30_000,
+      attention,
     })
-  })
-
-  it("reports the effective timeout window even when actionable work returns immediately", async () => {
-    const manager = createInboxWaitManager((session) => status(session, 1))
-
-    const result = await manager.wait("@ci", "conn-1", 30_000)
-
-    expect(result).toMatchObject({ effective_timeout_ms: 30_000 })
   })
 
   it("ignores ambient traffic and wakes on actionable direct messages", async () => {
     vi.useFakeTimers()
     let unread = 0
-    const manager = createInboxWaitManager((session) => status(session, unread))
+    const manager = createTestInboxWaitManager((session) => status(session, unread))
 
     const wait = manager.wait("@ci", "conn-1", 1_000)
     let settled = false
@@ -134,7 +156,7 @@ describe("createInboxWaitManager", () => {
   it("does not wake on direct notify messages", async () => {
     vi.useFakeTimers()
     let unread = 0
-    const manager = createInboxWaitManager((session) => status(session, unread))
+    const manager = createTestInboxWaitManager((session) => status(session, unread))
 
     const wait = manager.wait("@ci", "conn-1", 1_000)
     let settled = false
@@ -179,7 +201,7 @@ describe("createInboxWaitManager", () => {
   it("does not wake on the retired daemon-only ball reminder type", async () => {
     vi.useFakeTimers()
     let unread = 0
-    const manager = createInboxWaitManager((session) => status(session, unread))
+    const manager = createTestInboxWaitManager((session) => status(session, unread))
     const wait = manager.wait("@author", "conn-1", 1_000)
 
     unread = 1
@@ -203,9 +225,157 @@ describe("createInboxWaitManager", () => {
     })
   })
 
+  it("does not return early when a structural match is still drained by the mailbox cursor", async () => {
+    vi.useFakeTimers()
+    let unread = 0
+    const manager = createTestInboxWaitManager((session) => status(session, unread))
+    const wait = manager.wait("@chief", "conn-cursor", 1_000)
+    let settled = false
+    void wait.then(() => {
+      settled = true
+    })
+
+    manager.onMessageInserted(
+      message({
+        type: "request",
+        kind: "direct",
+        recipient: "@chief",
+        sender: "@chief",
+      }),
+    )
+    await vi.advanceTimersByTimeAsync(50)
+    expect(settled).toBe(false)
+
+    unread = 1
+    manager.onMessageInserted(
+      message({
+        type: "request",
+        kind: "direct",
+        recipient: "@chief",
+        sender: "@agent/2",
+      }),
+    )
+    await expect(wait).resolves.toMatchObject({ unread_count: 1, timed_out: false, aborted: false })
+  })
+
+  it("keeps replies quiet by default and opt-in wakes only on a validated tracked-request reply", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-reply-"))
+    const db = openDatabase(join(tmpDir, "tribe.db"))
+    const stmts = createStatements(db)
+    const manager = createTestInboxWaitManager((session) => status(session, 0))
+    const requester = makeContext(db, stmts, "requester", "@requester", manager.onMessageInserted)
+    const otherRequester = makeContext(db, stmts, "other-requester", "@other", manager.onMessageInserted)
+    const responder = makeContext(db, stmts, "responder", "@responder", manager.onMessageInserted)
+
+    const sendRequest = (requestId: string): void => {
+      sendMessage(
+        requester,
+        "@responder",
+        "please respond",
+        "request",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        {
+          request: requestId,
+        },
+      )
+    }
+    const sendReply = (type: "notify" | "response" | "status", reply: string): void => {
+      sendMessage(responder, "@requester", "correlated reply", type, undefined, undefined, "direct", {}, { reply })
+    }
+
+    try {
+      sendRequest("req-default")
+      const defaultWait = manager.wait("@requester", "conn-default", 1_000)
+      let defaultSettled = false
+      void defaultWait.then(() => {
+        defaultSettled = true
+      })
+      sendReply("response", "req-default")
+      await Promise.resolve()
+      expect(defaultSettled).toBe(false)
+      manager.cancelConnection("conn-default")
+      await defaultWait
+
+      sendRequest("req-notify")
+      const notifyWait = manager.wait("@requester", "conn-notify", 1_000, { wakeOnCorrelatedReply: true })
+      let notifySettled = false
+      void notifyWait.then(() => {
+        notifySettled = true
+      })
+      sendReply("notify", "req-notify")
+      await Promise.resolve()
+      expect(notifySettled).toBe(false)
+      manager.cancelConnection("conn-notify")
+      await notifyWait
+
+      for (const type of ["response", "status"] as const) {
+        const requestId = `req-${type}`
+        const connId = `conn-${type}`
+        sendRequest(requestId)
+        const wait = manager.wait("@requester", connId, 1_000, { wakeOnCorrelatedReply: true })
+        let result: Awaited<typeof wait> | undefined
+        void wait.then((value) => {
+          result = value
+        })
+
+        sendReply(type, `missing-${requestId}`)
+        await Promise.resolve()
+        expect(result).toBeUndefined()
+
+        sendReply(type, requestId)
+        await Promise.resolve()
+        const settled = result !== undefined
+        if (!settled) manager.cancelConnection(connId)
+        expect(settled).toBe(true)
+        expect(result).toMatchObject({ unread_count: 0, timed_out: false, aborted: false })
+        await wait
+      }
+
+      sendMessage(
+        otherRequester,
+        "@responder",
+        "other request",
+        "request",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        { request: "req-other" },
+      )
+      const unrelatedWait = manager.wait("@requester", "conn-unrelated", 1_000, {
+        wakeOnCorrelatedReply: true,
+      })
+      let unrelatedSettled = false
+      void unrelatedWait.then(() => {
+        unrelatedSettled = true
+      })
+      sendMessage(
+        responder,
+        "@requester",
+        "valid reply for another requester",
+        "response",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        { reply: "req-other" },
+      )
+      await Promise.resolve()
+      expect(unrelatedSettled).toBe(false)
+      manager.cancelConnection("conn-unrelated")
+      await unrelatedWait
+    } finally {
+      db.close()
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
   it("times out when no actionable message arrives", async () => {
     vi.useFakeTimers()
-    const manager = createInboxWaitManager((session) => status(session, 0))
+    const manager = createTestInboxWaitManager((session) => status(session, 0))
 
     const wait = manager.wait("@ci", "conn-1", 100)
     vi.advanceTimersByTime(100)
@@ -221,7 +391,7 @@ describe("createInboxWaitManager", () => {
 
   it("aborts pending waits when the connection closes", async () => {
     vi.useFakeTimers()
-    const manager = createInboxWaitManager((session) => status(session, 0))
+    const manager = createTestInboxWaitManager((session) => status(session, 0))
 
     const wait = manager.wait("@ci", "conn-1", 1_000)
     manager.cancelConnection("conn-1")
@@ -237,38 +407,70 @@ describe("createInboxWaitManager", () => {
 })
 
 describe("tribe.inbox.wait handler wiring", () => {
-  it("delegates to the shared inbox wait primitive", async () => {
+  it("delegates through the registry with the transport connection as cancellation owner", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-"))
     const db = openDatabase(join(tmpDir, "tribe.db"))
     const stmts = createStatements(db)
+    let observed:
+      | {
+          session: string
+          connId: string
+          timeoutMs: number
+          wakeOnCorrelatedReply: boolean | undefined
+        }
+      | undefined
     try {
-      const ctx = makeContext(db, stmts, "conn-1", "@ci")
-      const result = await handleToolCall(
-        ctx,
-        "tribe.inbox.wait",
-        { timeout_ms: 1234 },
-        makeOpts({
-          wait: async (session, _connId, timeoutMs) => ({
-            session,
-            unread_count: 7,
-            oldest_unread_age_min: 12,
-            oldest_unread_ts: 42,
-            waited_ms: timeoutMs,
-            timed_out: false,
-            aborted: false,
-          }),
-        }),
+      const ctx = makeContext(db, stmts, "session-1", "@ci")
+      const tool = messagingTools().find((candidate) => candidate.name === "tribe.inbox.wait")
+      if (!tool) throw new Error("tribe.inbox.wait registry tool is missing")
+      const result = await tool.handler(
+        { timeout_ms: 24 * 60 * 60_000, wake_on_correlated_reply: true },
+        {
+          connId: "transport-1",
+          extra: {
+            ctx,
+            opts: makeOpts({
+              wait: async (session, connId, timeoutMs, options) => {
+                observed = {
+                  session,
+                  connId,
+                  timeoutMs,
+                  wakeOnCorrelatedReply: options?.wakeOnCorrelatedReply,
+                }
+                return {
+                  session,
+                  unread_count: 7,
+                  oldest_unread_age_min: 12,
+                  oldest_unread_ts: 42,
+                  waited_ms: timeoutMs,
+                  effective_timeout_ms: timeoutMs,
+                  timed_out: false,
+                  aborted: false,
+                  attention: EMPTY_ATTENTION,
+                }
+              },
+            }),
+          },
+        },
       )
       const parsed = JSON.parse((result as { content: Array<{ text: string }> }).content[0]?.text ?? "{}") as {
         session?: string
         unread_count?: number
         waited_ms?: number
+        effective_timeout_ms?: number
         timed_out?: boolean
       }
       expect(parsed.session).toBe("@ci")
       expect(parsed.unread_count).toBe(7)
-      expect(parsed.waited_ms).toBe(1234)
+      expect(parsed.waited_ms).toBe(30 * 60_000)
+      expect(parsed.effective_timeout_ms).toBe(30 * 60_000)
       expect(parsed.timed_out).toBe(false)
+      expect(observed).toEqual({
+        session: "@ci",
+        connId: "transport-1",
+        timeoutMs: 30 * 60_000,
+        wakeOnCorrelatedReply: true,
+      })
     } finally {
       db.close()
       rmSync(tmpDir, { recursive: true, force: true })

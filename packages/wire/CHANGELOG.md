@@ -4,6 +4,11 @@
 
 ### Added
 
+- **Honor one full bounded inbox-wait window across every transport.** Protocol
+  v8 caps logical waits at 30 minutes, reports `effective_timeout_ms`, preserves
+  that deadline through CLI reconnects plus stdio/HTTP MCP forwarding, and lets
+  callers opt into validated `response` / `status` replies to their own tracked
+  requests without changing the default actionable-only wake policy.
 - **Daemon-authoritative transport verdicts.** `tribe.members({ all: true })`
   now separates `transport_state` (`connected` / `disconnected`) from
   `owner_state` (`live` / `dead` / `unknown`) and includes a diagnostic
@@ -13,7 +18,7 @@
   reconnecting state for 60 seconds while the daemon answers a fresh RPC asks
   its stable wrapper to reload current disk code.
 - **Bounded stale-transport repair.** `tribe repair
-  --reap-stale-transports` and the matching MCP mode remove only disconnected
+--reap-stale-transports` and the matching MCP mode remove only disconnected
   connection-scoped registrations after reconnect grace, with structured
   examined/reaped reason counts. Automatic cleanup uses the same classifier.
 
@@ -31,8 +36,6 @@
   disconnected registration's original owner is live. Unbound owners now
   report `unknown`; health keeps durable launch rows with missing transport
   loud while legacy connection-scoped litter is reaped safely.
-
-### Added
 
 - **Register launch-declared notification filters atomically.** MCP adapters
   accept `TRIBE_FILTER_MODE=focus|normal|ambient` and declare it in protocol v7

@@ -32,7 +32,7 @@ const log = createLogger("tribe-client:client")
 
 export type DaemonClient = {
   /** Send a JSON-RPC request and wait for response */
-  call(method: string, params?: Record<string, unknown>): Promise<unknown>
+  call(method: string, params?: Record<string, unknown>, opts?: DaemonCallOpts): Promise<unknown>
   /** Send a notification (no response expected) */
   notify(method: string, params?: Record<string, unknown>): void
   /** Register a handler for server-pushed notifications */
@@ -41,6 +41,23 @@ export type DaemonClient = {
   close(): void
   /** The raw socket */
   socket: Socket
+}
+
+export type DaemonCallOpts = {
+  /** Override the generic request deadline for this call. */
+  timeoutMs?: number
+}
+
+class DaemonCallTimeoutError extends Error {
+  readonly code = "TRIBE_DAEMON_CALL_TIMEOUT" as const
+
+  constructor(
+    readonly method: string,
+    readonly timeoutMs: number,
+  ) {
+    super(`Request ${method} timed out after ${timeoutMs}ms; check Tribe daemon health before retrying`)
+    this.name = "DaemonCallTimeoutError"
+  }
 }
 
 export type ConnectToDaemonOpts = {
@@ -52,7 +69,12 @@ export function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts):
   const callTimeoutMs = opts?.callTimeoutMs ?? 10_000
   return new Promise((resolvePromise, reject) => {
     const socket = createConnection(socketPath)
-    const pending = new Map<number | string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
+    type PendingCall = {
+      resolve: (value: unknown) => void
+      reject: (error: Error) => void
+      timer?: ReturnType<typeof globalThis.setTimeout>
+    }
+    const pending = new Map<number | string, PendingCall>()
     const notificationHandlers: Array<(method: string, params?: Record<string, unknown>) => void> = []
     let nextId = 1
 
@@ -60,7 +82,10 @@ export function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts):
     const timers = createTimers(ac.signal)
 
     function rejectPending(err: Error): void {
-      for (const [, p] of pending) p.reject(err)
+      for (const [, p] of pending) {
+        if (p.timer !== undefined) timers.clearTimeout(p.timer)
+        p.reject(err)
+      }
       pending.clear()
       ac.abort()
     }
@@ -70,6 +95,7 @@ export function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts):
         const p = pending.get(msg.id)
         if (p) {
           pending.delete(msg.id)
+          if (p.timer !== undefined) timers.clearTimeout(p.timer)
           if (msg.error)
             p.reject(Object.assign(new Error(msg.error.message), { code: msg.error.code, data: msg.error.data }))
           else p.resolve(msg.result)
@@ -93,19 +119,27 @@ export function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts):
 
       let timeouts = 0
       const client: DaemonClient = {
-        call(method, params) {
+        call(method, params, callOpts) {
           return new Promise((res, rej) => {
             const id = nextId++
-            pending.set(id, { resolve: res, reject: rej })
+            const explicitTimeoutMs = callOpts?.timeoutMs
+            const requestTimeoutMs =
+              explicitTimeoutMs !== undefined && Number.isFinite(explicitTimeoutMs)
+                ? Math.max(0, explicitTimeoutMs)
+                : callTimeoutMs
+            const pendingCall: PendingCall = { resolve: res, reject: rej }
+            pending.set(id, pendingCall)
             socket.write(makeRequest(id, method, params))
-            timers.setTimeout(() => {
+            pendingCall.timer = timers.setTimeout(() => {
               if (!pending.delete(id)) return
-              rej(new Error(`Request ${method} timed out`))
-              if (++timeouts >= 3) {
+              rej(new DaemonCallTimeoutError(method, requestTimeoutMs))
+              // A caller-owned long-poll deadline is an expected outcome, not
+              // evidence that the daemon connection is unhealthy.
+              if (explicitTimeoutMs === undefined && ++timeouts >= 3) {
                 log.warn?.(`${timeouts} consecutive timeouts, destroying connection`)
                 socket.destroy()
               }
-            }, callTimeoutMs)
+            }, requestTimeoutMs)
           }).then((v) => {
             timeouts = 0
             return v

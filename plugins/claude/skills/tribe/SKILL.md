@@ -88,6 +88,9 @@ Each session declares a delivery mode at join time. The daemon routes broadcasts
 **Codex example** (`~/.codex/config.toml`):
 
 ```toml
+[mcp_servers.tribe]
+tool_timeout_sec = 1860
+
 [mcp_servers.tribe.env]
 TRIBE_DELIVERY = "pull"
 ```

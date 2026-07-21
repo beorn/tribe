@@ -137,14 +137,18 @@ capability content never touches process-inspectable state).
 ### `inbox-wait`
 
 ```bash
-tribe-wire inbox-wait [--session <name>] [--timeout <30s|1m|5m>=30s] [--json]
+tribe-wire inbox-wait [--session <name>] [--timeout <30s|1m|5m>=30s] [--wake-on-correlated-reply] [--json]
 ```
 
 Long-polls the actionable inbox until a request/query/assign/verdict direct
 message arrives or the timeout elapses. Internally chunks the wait
 (30s per RPC call by default) and transparently retries across transient
 daemon disconnects/unavailability within the overall timeout, so a single
-logical wait survives a daemon hot-reload mid-poll.
+logical wait survives a daemon hot-reload mid-poll. The logical window caps at
+30 minutes; every result reports the applied value as `effective_timeout_ms`.
+By default only actionable messages wake the wait. Opt into a validated
+`response` or `status` for one of the waiting session's own tracked requests
+with `--wake-on-correlated-reply`.
 
 ### `repair`
 

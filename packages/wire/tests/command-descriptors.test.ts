@@ -125,6 +125,17 @@ describe("Tribe command descriptors", () => {
     expect(inboxWait.options?.find((option) => option.name === "timeout")?.mapsTo).toBe("timeout_ms")
     expect(inboxWait.options?.find((option) => option.name === "timeout")?.transform).toBe("duration-ms")
     expect(inboxWait.options?.find((option) => option.name === "timeout")?.default).toBe("30s")
+    expect(inboxWait.options?.find((option) => option.name === "wake-on-correlated-reply")?.mapsTo).toBe(
+      "wake_on_correlated_reply",
+    )
+    expect(commandDescriptorByMcpName("inbox.wait")?.mcp.inputSchema.properties?.wake_on_correlated_reply).toEqual({
+      type: "boolean",
+      description: expect.any(String),
+    })
+    expect(commandDescriptorByMcpName("inbox.wait")?.mcp.outputSchema.properties?.effective_timeout_ms).toEqual({
+      type: "number",
+      description: expect.any(String),
+    })
     expect(commandDescriptorByMcpName("inbox.wait")?.mcp.outputSchema.properties?.attention).toMatchObject({
       type: "object",
     })

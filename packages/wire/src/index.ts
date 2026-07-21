@@ -18,7 +18,13 @@ export { isNotification, isRequest, isResponse, makeError, makeNotification, mak
 export { createLineParser } from "./parser.ts"
 
 // Daemon client
-export type { ConnectOrStartOpts, ConnectToDaemonOpts, DaemonClient, ReconnectingClientOpts } from "./client.ts"
+export type {
+  ConnectOrStartOpts,
+  ConnectToDaemonOpts,
+  DaemonCallOpts,
+  DaemonClient,
+  ReconnectingClientOpts,
+} from "./client.ts"
 export { connectOrStart, connectToDaemon, createReconnectingClient, isSocketAlive } from "./client.ts"
 
 // Deadline-bounded call (hook-friendly)
@@ -62,10 +68,17 @@ export { startTribeHttpMcpServer } from "./http-adapter.ts"
 export { resolveJoinDelivery } from "./lib/delivery.ts"
 
 // Inbox-wait option parsing shared by CLI and MCP/raw daemon call paths.
-export type { InboxWaitOptions, InboxWaitOptionSource } from "./lib/inbox-wait-options.ts"
+export type {
+  InboxWaitAttention,
+  InboxWaitOptions,
+  InboxWaitOptionSource,
+  InboxWaitResult,
+} from "./lib/inbox-wait-options.ts"
 export {
   DEFAULT_INBOX_WAIT_SESSION,
   DEFAULT_INBOX_WAIT_TIMEOUT_MS,
+  MAX_INBOX_WAIT_TIMEOUT_MS,
+  deriveInboxWaitCallTimeoutMs,
   parseInboxWaitTimeoutMs,
   resolveInboxWaitOptions,
 } from "./lib/inbox-wait-options.ts"

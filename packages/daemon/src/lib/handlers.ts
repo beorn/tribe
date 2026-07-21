@@ -4,7 +4,7 @@
 
 import { createLogger } from "loggily"
 import { randomUUID } from "node:crypto"
-import { resolveInboxWaitOptions } from "tribe-wire"
+import { resolveInboxWaitOptions, type InboxWaitResult } from "tribe-wire"
 import type { TribeContext } from "./context.ts"
 import type { TribeRole } from "tribe-wire/lib/config"
 
@@ -155,7 +155,8 @@ export type TribeCoordMethod = (typeof TRIBE_COORD_METHODS)[keyof typeof TRIBE_C
  *      surface them in fetch reads but never act on them.
  *   2. `assign` / `query` / `request` / `verdict` messages are the ACTIONABLE
  *      channel. Direct `notify` / `status` / `response` rows are inbox-visible,
- *      but they do not wake `inbox.wait`.
+ *      but do not wake `inbox.wait` by default; callers may opt into validated
+ *      `status` / `response` replies to their own tracked requests.
  *   3. Every non-self direct assign/query/request automatically opens one
  *      semantic response ball. Verdict stays actionable and wakeable without
  *      automatically minting another obligation. Answer
@@ -173,7 +174,8 @@ export const TRIBE_JOIN_PRIMER =
   "`type: assign`/`query`/`request` messages are actionable, wake `inbox.wait`, " +
   "and automatically open a semantic response ball. Direct `type: verdict` is " +
   "also actionable and wakeable, but does not automatically open another ball. " +
-  "Direct `notify`/`status`/`response` rows are inbox-visible, but not wakeable. " +
+  "Direct `notify`/`status`/`response` rows are inbox-visible and not wakeable by default; " +
+  "a waiter may explicitly opt into validated `status`/`response` replies to its own tracked requests. " +
   "Answer or explicitly defer each actionable with the structured MCP " +
   '`reply: "<request-id>"` field (CLI: `--reply <request-id>`), never a prose ' +
   "`reply=...` marker, so its semantic ball closes; no transport or exact-id " +
@@ -303,7 +305,12 @@ export type HandlerOpts = {
   getLifecycleStore?: () => LifecycleStore
   /** Optional: inbox wait primitive shared by CLI and MCP. */
   inboxWait?: {
-    wait: (session: string, connId: string, timeoutMs: number) => Promise<unknown>
+    wait: (
+      session: string,
+      connId: string,
+      timeoutMs: number,
+      opts?: { readonly wakeOnCorrelatedReply?: boolean },
+    ) => Promise<InboxWaitResult>
   }
   /**
    * Optional: fire a JSON-RPC `wakeup` notification at the claiming session's
@@ -325,6 +332,7 @@ export function handleToolCall(
   name: string,
   a: ToolArgs,
   opts: HandlerOpts,
+  connId?: string,
 ): ToolResult | Promise<ToolResult> {
   // Presence heartbeat (@km/tribe/19784): ANY authenticated tool call
   // refreshes the caller's last_seen — presence = "spoke to the daemon
@@ -340,7 +348,7 @@ export function handleToolCall(
     case TRIBE_COORD_METHODS.members:
       return handleSessions(ctx, a, opts)
     case TRIBE_COORD_METHODS.inboxWait:
-      return handleInboxWait(ctx, a, opts)
+      return handleInboxWait(ctx, a, opts, connId)
     case TRIBE_COORD_METHODS.rename:
       return handleRename(ctx, a, opts)
     case TRIBE_COORD_METHODS.join:
@@ -1487,12 +1495,19 @@ function handleRepair(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
   })
 }
 
-function handleInboxWait(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult | Promise<ToolResult> {
-  const { session, timeoutMs } = resolveInboxWaitOptions(a, { defaultSession: ctx.getName() })
-  if (!opts.inboxWait) {
-    return jsonResult({ error: "inbox wait is unavailable in this handler context" })
+function handleInboxWait(
+  ctx: TribeContext,
+  a: ToolArgs,
+  opts: HandlerOpts,
+  connId: string | undefined,
+): ToolResult | Promise<ToolResult> {
+  const { session, timeoutMs, wakeOnCorrelatedReply } = resolveInboxWaitOptions(a, {
+    defaultSession: ctx.getName(),
+  })
+  if (!opts.inboxWait || connId === undefined) {
+    return jsonResult({ error: "inbox wait requires a connection-owned handler context" })
   }
-  return opts.inboxWait.wait(session, ctx.sessionId, timeoutMs).then((result) => jsonResult(result))
+  return opts.inboxWait.wait(session, connId, timeoutMs, { wakeOnCorrelatedReply }).then((result) => jsonResult(result))
 }
 
 // ---------------------------------------------------------------------------
