@@ -24,6 +24,10 @@ import type { TribeContext } from "../context.ts"
 import type { TribeRole } from "tribe-wire/lib/config"
 import type { BaseTribe } from "./base.ts"
 
+/** The default wire reconnect loop lasts about 4.5 minutes before exhaustion;
+ * five minutes covers that contract plus normal registration overhead. */
+export const DEFAULT_RECONNECT_GRACE_MS = 5 * 60 * 1000
+
 /** A session participates as a regular tribe member iff it is not the daemon
  *  itself, a read-only watcher, or a half-registered pending connection. */
 function isParticipant(c: { role: TribeRole }): boolean {
@@ -83,6 +87,19 @@ export interface ClientRegistry {
     launchParentPid: number | null
     transportPids: number[]
   }>
+  /** True for any authenticated, fully registered transport, including watch
+   * connections. This is broader than participating-member projection. */
+  hasActiveTransport(sessionId: string): boolean
+  /** Clear disconnect grace once any sibling transport registers. */
+  markTransportConnected(sessionId: string): void
+  /** Start a fresh grace window after the last sibling transport closes. */
+  markTransportDisconnected(sessionId: string, nowMs?: number): void
+  /** Protect startup adoption and bounded reconnect attempts from row reaping. */
+  isReconnectGraceProtected(sessionId: string, nowMs: number): boolean
+  /** Delay the first automatic reap until daemon-start adoption grace expires. */
+  startupReconnectGraceRemainingMs(nowMs: number): number
+  /** Forget transient grace entries once their durable rows are reaped. */
+  forgetTransportSessions(sessionIds: readonly string[]): void
 }
 
 export interface WithClientRegistry {
@@ -93,6 +110,7 @@ export function withClientRegistry<T extends BaseTribe>(): (t: T) => T & WithCli
   return (t) => {
     const clients = new Map<string, ClientSession>()
     const socketToClient = new Map<NetSocket, string>()
+    const disconnectedAtBySession = new Map<string, number>()
 
     const registry: ClientRegistry = {
       clients,
@@ -145,6 +163,28 @@ export function withClientRegistry<T extends BaseTribe>(): (t: T) => T & WithCli
         }
         return Array.from(members.values())
       },
+      hasActiveTransport(sessionId): boolean {
+        for (const client of clients.values()) {
+          if (client.role !== "pending" && client.ctx.sessionId === sessionId) return true
+        }
+        return false
+      },
+      markTransportConnected(sessionId): void {
+        disconnectedAtBySession.delete(sessionId)
+      },
+      markTransportDisconnected(sessionId, nowMs = Date.now()): void {
+        disconnectedAtBySession.set(sessionId, nowMs)
+      },
+      isReconnectGraceProtected(sessionId, nowMs): boolean {
+        const disconnectedAt = disconnectedAtBySession.get(sessionId) ?? t.startedAt
+        return nowMs < disconnectedAt + DEFAULT_RECONNECT_GRACE_MS
+      },
+      startupReconnectGraceRemainingMs(nowMs): number {
+        return Math.max(0, t.startedAt + DEFAULT_RECONNECT_GRACE_MS - nowMs)
+      },
+      forgetTransportSessions(sessionIds): void {
+        for (const sessionId of sessionIds) disconnectedAtBySession.delete(sessionId)
+      },
     }
 
     // Drop all client refs on shutdown so disposal doesn't leave dangling
@@ -152,6 +192,7 @@ export function withClientRegistry<T extends BaseTribe>(): (t: T) => T & WithCli
     t.scope.defer(() => {
       clients.clear()
       socketToClient.clear()
+      disconnectedAtBySession.clear()
     })
 
     return { ...t, registry }

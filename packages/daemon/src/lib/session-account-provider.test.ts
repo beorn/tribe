@@ -109,16 +109,19 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
     expect(corrected).toMatchObject({ account: "d@delei.org", provider: "codex" })
   })
 
-  it("projects daemon transport absence separately from a live owner process", () => {
+  it("does not bind a disconnected legacy registration to a recycled live PID", () => {
     const sessionId = "sess-wedged"
     const ctx = makeContext(db, stmts, sessionId, "@agent/wedged")
     registerSession(ctx, PROJECT_ID, () => true, null, process.pid, "push", "/repo", null, "claude")
 
+    // A no-launch row cannot prove that today's process at this numeric PID is
+    // the process that registered it. PID reuse must remain unknown instead of
+    // manufacturing an owner-live/no-transport wedge.
     expect(membersFor(ctx, makeOpts(new Set()), "@agent/wedged", true)).toMatchObject({
       alive: false,
       transport_state: "disconnected",
-      owner_state: "live",
-      transport_reason: "owner-live-no-transport",
+      owner_state: "unknown",
+      transport_reason: "owner-unknown-no-transport",
     })
 
     expect(membersFor(ctx, makeOpts(new Set([sessionId])), "@agent/wedged")).toMatchObject({
@@ -129,7 +132,7 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
     })
   })
 
-  it("sweepDeadSessionRows GCs old tombstones and generated ghosts without touching fresh, canonical, or active rows", () => {
+  it("sweepDeadSessionRows limits eager startup GC to old tombstones", () => {
     const now = Date.now()
     const mk = (sid: string, name: string) => {
       const c = makeContext(db, stmts, sid, name)
@@ -156,47 +159,50 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
 
     const swept = sweepDeadSessionRows(db, 7 * 24 * 3600 * 1000, now, new Set(["s-active-generated"]))
 
-    expect(swept).toBe(4)
+    // Generated/no-launch rows are connection-scoped, but startup must first
+    // give their transports a reconnect grace. The shared post-grace reaper
+    // owns them; only explicit tombstones remain safe for eager startup GC.
+    expect(swept).toBe(1)
     const names = (db.prepare("SELECT name FROM sessions").all() as Array<{ name: string }>).map((r) => r.name).sort()
     expect(names).toEqual([
       "@agent/5",
       "@agent/5-dead-bbbb2222",
+      "cli-join-123-456",
+      "silvercode-12345",
       "silvercode-active",
+      "unknown-a1b2c",
       "unknown-fresh",
       "unknown-live-pid",
     ])
     expect(
       (
+        db.prepare("SELECT COUNT(*) AS count FROM room_members WHERE session_id IN ('s-old-dead')").get() as {
+          count: number
+        }
+      ).count,
+    ).toBe(0)
+    expect(
+      (
         db
           .prepare(
-            "SELECT COUNT(*) AS count FROM room_members WHERE session_id IN ('s-old-dead', 's-old-silvercode', 's-old-unknown', 's-old-cli')",
+            "SELECT COUNT(*) AS count FROM room_members WHERE session_id IN ('s-old-silvercode', 's-old-unknown', 's-old-cli')",
           )
           .get() as { count: number }
       ).count,
-    ).toBe(0)
+    ).toBe(3)
   })
 
-  it("treats EPERM as alive/unknown and only ESRCH as positive death during generated-session GC", () => {
-    const now = Date.now()
-    const ctx = makeContext(db, stmts, "s-eperm-generated", "unknown-eperm")
-    registerSession(ctx, PROJECT_ID, () => false, null, 494949, "pull", "/repo", null, null)
-    db.prepare("UPDATE sessions SET updated_at = ? WHERE id = 's-eperm-generated'").run(now - 8 * 24 * 3600 * 1000)
+  it("treats EPERM as alive/unknown and only ESRCH as positive PID death", () => {
     const kill = vi.spyOn(process, "kill").mockImplementation(() => {
       throw Object.assign(new Error("operation not permitted"), { code: "EPERM" })
     })
     try {
       expect(isPidAlive(494949)).toBe(true)
-      expect(sweepDeadSessionRows(db, 7 * 24 * 3600 * 1000, now)).toBe(0)
-      expect(db.prepare("SELECT name FROM sessions WHERE id = 's-eperm-generated'").get()).toEqual({
-        name: "unknown-eperm",
-      })
 
       kill.mockImplementation(() => {
         throw Object.assign(new Error("no such process"), { code: "ESRCH" })
       })
       expect(isPidAlive(494949)).toBe(false)
-      expect(sweepDeadSessionRows(db, 7 * 24 * 3600 * 1000, now)).toBe(1)
-      expect(db.prepare("SELECT name FROM sessions WHERE id = 's-eperm-generated'").get()).toBeNull()
     } finally {
       kill.mockRestore()
     }

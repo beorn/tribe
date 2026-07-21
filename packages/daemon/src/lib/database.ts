@@ -1098,7 +1098,7 @@ export function createStatements(db: Database) {
     ),
 
     allSessions: db.prepare(
-      "SELECT id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, started_at, updated_at, filter_mode, filter_until, filter_mute, last_inbox_pull_seq, delivery FROM sessions",
+      "SELECT id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, launch_id, launch_parent_pid, started_at, updated_at, filter_mode, filter_until, filter_mute, last_inbox_pull_seq, delivery FROM sessions",
     ),
 
     /** Look up a connected session's delivery mode by id. Used by the broadcast

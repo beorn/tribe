@@ -26,7 +26,7 @@
 
 import { createLogger } from "loggily"
 import { sendMessage } from "../messaging.ts"
-import { cleanupOldData, backfillDefaultRoomMembers } from "../session.ts"
+import { cleanupOldData, backfillDefaultRoomMembers, reapStaleTransportRows } from "../session.ts"
 import { loadPlugins } from "../plugin-loader.ts"
 import type { TribeClientApi, TribePluginApi } from "../plugin-api.ts"
 import type { BaseTribe } from "./base.ts"
@@ -136,13 +136,39 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
     opts.publishActivePluginNames(activePluginNames)
     opts.publishStopPlugins(stopPlugins)
 
-    // Cleanup tick — registers on root scope so disposal stops it.
-    const cleanupInterval = setInterval(() => cleanupOldData(t.daemonCtx), cleanupIntervalMs) as unknown as {
+    const reapStaleTransports = () => {
+      const nowMs = Date.now()
+      const report = reapStaleTransportRows(t.db, {
+        nowMs,
+        hasActiveTransport: (sessionId) => t.registry.hasActiveTransport(sessionId),
+        isReconnectGraceProtected: (sessionId) => t.registry.isReconnectGraceProtected(sessionId, nowMs),
+      })
+      const reapedIds = report.reaped_sessions.map((session) => session.member_id)
+      t.registry.forgetTransportSessions(reapedIds)
+      if (report.reaped > 0) {
+        log.info?.(`cleanup: reaped ${report.reaped} disconnected connection-scoped session row(s)`)
+      }
+      return report
+    }
+
+    // Cleanup tick — registers on root scope so disposal stops it. The normal
+    // data-retention cleanup remains eager; stale transports wait for daemon
+    // startup reconnect grace, then share this existing six-hour cadence.
+    const cleanupInterval = setInterval(() => {
+      cleanupOldData(t.daemonCtx)
+      reapStaleTransports()
+    }, cleanupIntervalMs) as unknown as {
       unref?: () => void
     }
     cleanupInterval.unref?.()
     t.scope.defer(() => clearInterval(cleanupInterval as unknown as ReturnType<typeof setInterval>))
     cleanupOldData(t.daemonCtx)
+    const startupReapDelayMs = t.registry.startupReconnectGraceRemainingMs(Date.now())
+    const startupReapTimer = setTimeout(reapStaleTransports, startupReapDelayMs) as unknown as {
+      unref?: () => void
+    }
+    startupReapTimer.unref?.()
+    t.scope.defer(() => clearTimeout(startupReapTimer as unknown as ReturnType<typeof setTimeout>))
 
     // Matrix-shape invariant (km-tribe.matrix-shape): every row in `sessions`
     // must have a corresponding row in `room_members` for its project's

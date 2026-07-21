@@ -528,7 +528,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           sessions: {
             type: "array",
             description:
-              "Per-session rows include daemon-authoritative transport_state (connected|disconnected), separate owner_state (live|dead|unknown), transport_reason, legacy alive, transport_pids, uptime_min, and activity-only last_seen_sec.",
+              "Per-session rows include daemon-authoritative transport_state (connected|disconnected), separate owner_state (live|dead|unknown), transport_reason, legacy alive, transport_pids, uptime_min, and activity-only last_seen_sec. A disconnected numeric PID without identity-bound process evidence reports owner unknown.",
             items: { type: "object", additionalProperties: true },
           },
         },
@@ -544,7 +544,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "all",
           flags: "-a, --all",
-          description: "Include disconnected durable session rows",
+          description: "Include disconnected historical session rows",
           default: false,
         },
       ],
@@ -601,7 +601,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           transport_wedges: {
             type: "array",
             description:
-              "Disconnected durable rows whose owner process is still live, derived by the same daemon transport projector as tribe.members.",
+              "Disconnected complete-launch rows (plus malformed partial provenance) kept loud with wedge_reason. Connection-scoped no-launch litter is excluded and reapable after grace; bare PID existence does not prove owner liveness.",
             items: { type: "object", additionalProperties: true },
           },
           stale_beads: { type: "number", description: "Count of beads claimed but idle past threshold." },
@@ -799,7 +799,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     mcp: {
       name: "repair",
       description:
-        "Operator repair for bounded daemon state fixes. Currently supports advancing one session's inbox cursor to the message tail without deleting history.",
+        "Operator repair for bounded daemon state fixes: advance one inbox cursor or reap stale connection-scoped transport registrations without deleting history.",
       inputSchema: {
         type: "object",
         properties: {
@@ -807,10 +807,16 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           inbox_cursor: {
             type: "string",
             enum: ["tail"],
-            description: 'Repair mode. Use "tail" to advance the inbox cursor to the current journal tail.',
+            description: 'Use "tail" to advance the inbox cursor to the current journal tail.',
+          },
+          reap_stale_transports: {
+            type: "boolean",
+            const: true,
+            description:
+              "Reap disconnected connection-scoped registrations after reconnect grace. Durable launch rows, active siblings, messages, and pending balls are preserved.",
           },
         },
-        required: ["inbox_cursor"],
+        oneOf: [{ required: ["inbox_cursor"] }, { required: ["reap_stale_transports"] }],
       },
       outputSchema: OBJ(
         {
@@ -820,9 +826,13 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           cursor_before: { type: "number" },
           cursor_after: { type: "number" },
           tail: { type: "number" },
+          examined: { type: "number" },
+          reaped: { type: "number" },
+          reason_counts: { type: "object", additionalProperties: { type: "number" } },
+          reaped_sessions: { type: "array", items: { type: "object", additionalProperties: true } },
           ...ERROR_SHAPE,
         },
-        "Repair result: { repaired, session, repair, cursor_before, cursor_after, tail } or { error }.",
+        "Repair result: cursor fields for inbox repair, auditable examined/reaped/reason counts for stale transports, or { error }.",
       ),
     },
     cli: available({
@@ -843,7 +853,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           description: "Inbox cursor repair mode; currently only 'tail'",
           mapsTo: "inbox_cursor",
           enum: ["tail"],
-          default: "tail",
+        },
+        {
+          name: "reap-stale-transports",
+          flags: "--reap-stale-transports",
+          description: "Reap disconnected connection-scoped registrations after reconnect grace",
+          mapsTo: "reap_stale_transports",
         },
         { name: "json", flags: "--json", description: "Emit machine-readable JSON" },
       ],

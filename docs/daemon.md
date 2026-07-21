@@ -169,6 +169,24 @@ None of these are project-specific coordination policy (no coordinator
 roles, task queues, or branch-assignment concepts) — that boundary is intentional; see
 `docs/architecture.md`.
 
+## Stale transport-row cleanup
+
+Authenticated sockets are the only transport-connectedness authority. Complete
+`(launch_id, launch_parent_pid)` provenance declares a durable registration;
+complete absence declares a legacy connection-scoped registration. Numeric PID
+existence does not identify the original process after disconnect because PIDs
+are reusable.
+
+The daemon protects all rows during the wire client's bounded startup/reconnect
+window. When the last sibling transport closes, that session gets a fresh grace
+window. After grace, the first automatic pass and the existing six-hour cleanup
+cadence call the same synchronous classifier used by
+`tribe-wire repair --reap-stale-transports`. It checks the authenticated
+registry again immediately before one SQLite transaction deletes
+`room_members` and `sessions`. Complete launch provenance, partial/malformed
+provenance, and every active sibling remain. Messages and pending balls are
+never touched. Cleanup never signals a process and never restarts the daemon.
+
 ## Troubleshooting
 
 - **`No daemon running (socket: ...)`** from any `tribe-wire` verb → nothing

@@ -112,7 +112,14 @@ describe("Tribe command descriptors", () => {
     const repair = visibleCliProjection(commandDescriptorByMcpName("repair")!)
     expect(repair.options?.find((option) => option.name === "inbox-cursor")?.mapsTo).toBe("inbox_cursor")
     expect(repair.options?.find((option) => option.name === "inbox-cursor")?.enum).toEqual(["tail"])
-    expect(repair.options?.find((option) => option.name === "inbox-cursor")?.default).toBe("tail")
+    expect(repair.options?.find((option) => option.name === "inbox-cursor")?.default).toBeUndefined()
+    expect(repair.options?.find((option) => option.name === "reap-stale-transports")?.mapsTo).toBe(
+      "reap_stale_transports",
+    )
+    expect(commandDescriptorByMcpName("repair")?.mcp.inputSchema.oneOf).toEqual([
+      { required: ["inbox_cursor"] },
+      { required: ["reap_stale_transports"] },
+    ])
 
     const inboxWait = visibleCliProjection(commandDescriptorByMcpName("inbox.wait")!)
     expect(inboxWait.options?.find((option) => option.name === "timeout")?.mapsTo).toBe("timeout_ms")

@@ -54,7 +54,7 @@ import {
 import { createLifecycleStore } from "../lifecycle-store.ts"
 import { createInboxWaitManager } from "../inbox-wait.ts"
 import { logEvent, sendMessage } from "../messaging.ts"
-import { registerSession, NameConflictError } from "../session.ts"
+import { registerSession, NameConflictError, reapStaleTransportRows } from "../session.ts"
 import {
   adoptByPidCwd,
   adoptIdentity,
@@ -394,6 +394,17 @@ export function withDispatcher<
       })
     }
 
+    const reapStaleTransports = () => {
+      const nowMs = Date.now()
+      const report = reapStaleTransportRows(db, {
+        nowMs,
+        hasActiveTransport: (sessionId) => registry.hasActiveTransport(sessionId),
+        isReconnectGraceProtected: (sessionId) => registry.isReconnectGraceProtected(sessionId, nowMs),
+      })
+      registry.forgetTransportSessions(report.reaped_sessions.map((session) => session.member_id))
+      return report
+    }
+
     /** No-op handler opts for daemon-side tool calls. */
     const DAEMON_HANDLER_OPTS = {
       cleanup: () => {},
@@ -404,6 +415,7 @@ export function withDispatcher<
       getLifecycleStore: () => lifecycleStore,
       inboxWait,
       notifyWakeupForReplay,
+      reapStaleTransports,
       getDebugState: () => ({
         clients: Array.from(clients.values()).map((c) => ({
           member_id: c.ctx.sessionId,
@@ -443,10 +455,9 @@ export function withDispatcher<
       const holder = live.find((c) => c.name === name)
       if (!holder) return name
       // No silent fallback. Surface the conflict so the caller picks a fresh
-      // name explicitly. The list of taken names + the live PID of the holder
-      // go on the error so the caller doesn't need a separate
-      // tribe.sessions round-trip AND can verify the conflict is real
-      // (`isPidAlive(holder_pid)` on the caller side).
+      // name explicitly. The connected-clients map proves the conflict; the
+      // holder PID is diagnostic metadata only and must not be reused as
+      // disconnected-owner identity by callers.
       const connectedNames = live.map((c) => c.name).sort()
       throw new NameConflictError(name, connectedNames, holder.pid || null)
     }
@@ -720,6 +731,7 @@ export function withDispatcher<
                 peerSocket,
                 ctx: sameLaunchHolder.ctx,
               })
+              registry.markTransportConnected(client.ctx.sessionId)
               log.info?.(
                 `launch fan-in: ${resolvedName} member=${client.ctx.sessionId} transport pid=${clientPid} launch=${launch.id}`,
               )
@@ -864,6 +876,7 @@ export function withDispatcher<
               peerSocket,
               ctx: clientCtx,
             })
+            registry.markTransportConnected(client.ctx.sessionId)
 
             resetOffsetsToTail(client)
             announceJoin(client)
@@ -1472,6 +1485,9 @@ export function withDispatcher<
         inboxWait.cancelConnection(connId)
         clients.delete(connId)
         socketToClient.delete(sock)
+        if (client && client.role !== "pending" && !registry.hasActiveTransport(client.ctx.sessionId)) {
+          registry.markTransportDisconnected(client.ctx.sessionId)
+        }
         if (recallHandlers && client) recallHandlers.dropConn(client.recall.sessionId)
         if (clients.size === 0) onIdle()
       })

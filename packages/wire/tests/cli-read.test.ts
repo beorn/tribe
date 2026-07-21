@@ -14,6 +14,7 @@ import { Command } from "@silvery/commander"
 import {
   formatReloadResult,
   registerReadCommands,
+  resolveRepairOptions,
   waitForInboxWithReconnect,
   type InboxWaitResult,
 } from "../src/cli/read.ts"
@@ -117,11 +118,11 @@ describe("registerReadCommands", () => {
     expect(flags).toEqual(expect.arrayContaining(["--session", "--timeout", "--json"]))
   })
 
-  test("repair verb accepts --session, --inbox-cursor, and --json", () => {
+  test("repair verb accepts the cursor and stale-transport modes", () => {
     const cmd = findCmd(buildProgram(), "repair")
     expect(cmd).toBeDefined()
     const flags = optionFlags(cmd!)
-    expect(flags).toEqual(expect.arrayContaining(["--session", "--inbox-cursor", "--json"]))
+    expect(flags).toEqual(expect.arrayContaining(["--session", "--inbox-cursor", "--reap-stale-transports", "--json"]))
   })
 
   test("reload verb accepts --reason and --json", () => {
@@ -149,6 +150,23 @@ describe("registerReadCommands", () => {
       expect(typeof c.name()).toBe("string")
       expect(typeof c.description()).toBe("string")
     }
+  })
+})
+
+describe("resolveRepairOptions", () => {
+  test("preserves the no-flag cursor default without combining repair modes", () => {
+    expect(resolveRepairOptions({})).toEqual({
+      params: { session: "@chief", inbox_cursor: "tail" },
+    })
+    expect(resolveRepairOptions({ reapStaleTransports: true })).toEqual({
+      params: { reap_stale_transports: true },
+    })
+  })
+
+  test("rejects an explicit cursor combined with stale-transport reaping", () => {
+    expect(resolveRepairOptions({ inboxCursor: "tail", reapStaleTransports: true })).toEqual({
+      error: "--inbox-cursor and --reap-stale-transports are mutually exclusive",
+    })
   })
 })
 

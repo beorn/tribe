@@ -12,6 +12,10 @@
 - **Stuck-reconnect watchdog.** A supervised Claude adapter that remains in
   reconnecting state for 60 seconds while the daemon answers a fresh RPC asks
   its stable wrapper to reload current disk code.
+- **Bounded stale-transport repair.** `tribe repair
+  --reap-stale-transports` and the matching MCP mode remove only disconnected
+  connection-scoped registrations after reconnect grace, with structured
+  examined/reaped reason counts. Automatic cleanup uses the same classifier.
 
 ### Fixed
 
@@ -23,6 +27,10 @@
   bound repeated slow replacements instead of respawning once per minute.
 - Close connected candidates when registration rejects, and terminate an
   adapter when its host stdin closes, preventing stranded sockets/processes.
+- Stop treating existence of a recycled numeric PID as proof that a
+  disconnected registration's original owner is live. Unbound owners now
+  report `unknown`; health keeps durable launch rows with missing transport
+  loud while legacy connection-scoped litter is reaped safely.
 
 ### Added
 

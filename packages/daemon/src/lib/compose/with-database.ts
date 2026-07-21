@@ -16,7 +16,7 @@ import type { WithConfig } from "./with-config.ts"
 
 const log = createLogger("tribe:daemon:db")
 
-/** Tombstones and generated placeholder identities older than this are GC'd at startup. */
+/** Explicit takeover tombstones older than this are GC'd eagerly at startup. */
 const DEAD_SESSION_ROW_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 
 export interface WithDatabase {
@@ -34,7 +34,7 @@ export function withDatabase<T extends BaseTribe & WithConfig>(): (t: T) => T & 
           })
         : openDatabase(t.config.dbPath)
     const swept = sweepDeadSessionRows(db, DEAD_SESSION_ROW_MAX_AGE_MS)
-    if (swept > 0) log.info?.(`startup GC: swept ${swept} tombstone/generated session row(s) older than 7d`)
+    if (swept > 0) log.info?.(`startup GC: swept ${swept} takeover tombstone session row(s) older than 7d`)
     const stmts = createStatements(db)
     t.scope.defer(() => {
       try {

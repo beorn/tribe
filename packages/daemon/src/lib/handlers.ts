@@ -21,7 +21,13 @@ import {
   type SenderAttribution,
 } from "./messaging.ts"
 import { ACTIONABLE_TYPES_SET, ACTIONABLE_TYPES_SQL, AUTO_TRACK_TYPES_SET } from "./database.ts"
-import { isPidAlive as pidStillAlive, persistRuntimeRename, registerSession } from "./session.ts"
+import {
+  classifySessionRegistrationLifetime,
+  isPidAlive as pidStillAlive,
+  persistRuntimeRename,
+  registerSession,
+  type StaleTransportReapReport,
+} from "./session.ts"
 import { gatherCodePin } from "./code-pin.ts"
 import { parseDbGrowthWarningBytes, projectHealthCadence } from "./health-cadence.ts"
 import { senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
@@ -309,6 +315,9 @@ export type HandlerOpts = {
    * the mailbox injection in `handleFetch`.
    */
   notifyWakeupForReplay?: (sessionId: string, claimedName: string) => void
+  /** Daemon-owned bounded cleanup. Omitted in direct handler harnesses that do
+   * not compose the authenticated transport registry. */
+  reapStaleTransports?: () => StaleTransportReapReport
 }
 
 export function handleToolCall(
@@ -345,7 +354,7 @@ export function handleToolCall(
     case TRIBE_COORD_METHODS.debug:
       return handleDebug(ctx, a, opts)
     case TRIBE_COORD_METHODS.repair:
-      return handleRepair(ctx, a)
+      return handleRepair(ctx, a, opts)
     case TRIBE_COORD_METHODS.filter:
       return handleFilter(ctx, a)
     case TRIBE_COORD_METHODS.lifecyclePublish:
@@ -887,7 +896,6 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     const active = activeInfo.find((session) => session.id === r.id)
     const transport = projectSessionTransportState({
       transportConnected: activeIds.has(r.id),
-      ownerPid: active?.pid ?? r.pid,
     })
     return {
       member_id: r.id,
@@ -1183,6 +1191,8 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     pid: number
     started_at: number
     updated_at: number
+    launch_id: string | null
+    launch_parent_pid: number | null
   }>
   const liveSessions = rows.filter((r) => byId.has(r.id))
   const latestDisconnectedByName = new Map<string, (typeof rows)[number]>()
@@ -1194,25 +1204,31 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     }
   }
   const transportWedges = [...latestDisconnectedByName.values()].flatMap((session) => {
+    const lifetime = classifySessionRegistrationLifetime({
+      launchId: session.launch_id,
+      launchParentPid: session.launch_parent_pid,
+    })
+    if (lifetime === "connection-scoped") return []
     const transport = projectSessionTransportState({
       transportConnected: false,
-      ownerPid: session.pid,
     })
-    return transport.owner_state === "live"
-      ? [
-          {
-            member_id: session.id,
-            name: session.name,
-            pid: session.pid,
-            ...transport,
-          },
-        ]
-      : []
+    return [
+      {
+        member_id: session.id,
+        name: session.name,
+        pid: session.pid,
+        launch_id: session.launch_id,
+        launch_parent_pid: session.launch_parent_pid,
+        registration_lifetime: lifetime,
+        wedge_reason: lifetime === "durable-launch" ? "durable-launch-no-transport" : "malformed-launch-identity",
+        ...transport,
+      },
+    ]
   })
 
   const members = liveSessions.map((s) => {
     const active = byId.get(s.id)!
-    const transport = projectSessionTransportState({ transportConnected: true, ownerPid: active.pid })
+    const transport = projectSessionTransportState({ transportConnected: true })
     // Find last message from this member
     const lastMsg = ctx.db
       .prepare("SELECT ts FROM messages WHERE sender = $name ORDER BY ts DESC LIMIT 1")
@@ -1321,7 +1337,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     issues: [
       ...transportWedges.map(
         (wedge) =>
-          `transport wedge ${wedge.name}: transport_state=${wedge.transport_state} owner_state=${wedge.owner_state} reason=${wedge.transport_reason}`,
+          `transport wedge ${wedge.name}: transport_state=${wedge.transport_state} owner_state=${wedge.owner_state} reason=${wedge.wedge_reason}`,
       ),
       ...pendingIssues,
       ...cadence.warnings,
@@ -1407,13 +1423,26 @@ function handleDebug(_ctx: TribeContext, _a: ToolArgs, opts: HandlerOpts): ToolR
   return jsonResult(state)
 }
 
-function handleRepair(ctx: TribeContext, a: ToolArgs): ToolResult {
-  const sessionName = typeof a.session === "string" && a.session.length > 0 ? a.session : ctx.getName()
+function handleRepair(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
   const repairMode = (a.inbox_cursor ?? a.inboxCursor) as unknown
+  const reapMode = a.reap_stale_transports ?? a.reapStaleTransports
+  if (repairMode !== undefined && reapMode === true) {
+    return jsonResult({ error: "repair modes are mutually exclusive; choose inbox_cursor or reap_stale_transports" })
+  }
+  if (reapMode !== undefined && reapMode !== true) {
+    return jsonResult({ error: "reap_stale_transports must be true when selected" })
+  }
+  if (reapMode === true) {
+    if (!opts.reapStaleTransports) {
+      return jsonResult({ error: "stale transport repair is unavailable in this handler context" })
+    }
+    return jsonResult({ repaired: true, repair: "reap_stale_transports", ...opts.reapStaleTransports() })
+  }
   if (repairMode !== "tail") {
     return jsonResult({ error: 'repair requires inbox_cursor: "tail"' })
   }
 
+  const sessionName = typeof a.session === "string" && a.session.length > 0 ? a.session : ctx.getName()
   const tail = (ctx.stmts.getMessageTailSeq.get() as { seq: number } | null)?.seq ?? 0
   let createdSession = false
   let row = ctx.db

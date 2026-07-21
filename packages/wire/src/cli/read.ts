@@ -874,16 +874,42 @@ async function cmdInboxWait(opts: { session?: string; timeoutMs?: number; json?:
   )
 }
 
-async function cmdRepair(opts: { session?: string; inboxCursor?: string; json?: boolean }): Promise<void> {
-  const session = opts.session ?? "@chief"
+export type RepairCliOptions = {
+  session?: string
+  inboxCursor?: string
+  reapStaleTransports?: boolean
+  json?: boolean
+}
+
+export function resolveRepairOptions(
+  opts: RepairCliOptions,
+):
+  | { params: { session: string; inbox_cursor: string; reap_stale_transports?: never } }
+  | { params: { reap_stale_transports: true; session?: never; inbox_cursor?: never } }
+  | { error: string } {
+  if (opts.inboxCursor !== undefined && opts.reapStaleTransports === true) {
+    return { error: "--inbox-cursor and --reap-stale-transports are mutually exclusive" }
+  }
+  if (opts.reapStaleTransports === true) {
+    return { params: { reap_stale_transports: true } }
+  }
+
   const inboxCursor = opts.inboxCursor ?? "tail"
   const allowedInboxCursors = cliOption(REPAIR_CLI, "inbox-cursor").enum ?? []
   if (!allowedInboxCursors.includes(inboxCursor)) {
-    console.error(`tribe repair: bad --inbox-cursor '${inboxCursor}' (expected ${allowedInboxCursors.join("|")})`)
+    return { error: `bad --inbox-cursor '${inboxCursor}' (expected ${allowedInboxCursors.join("|")})` }
+  }
+  return { params: { session: opts.session ?? "@chief", inbox_cursor: inboxCursor } }
+}
+
+async function cmdRepair(opts: RepairCliOptions): Promise<void> {
+  const resolved = resolveRepairOptions(opts)
+  if ("error" in resolved) {
+    console.error(`tribe repair: ${resolved.error}`)
     process.exit(2)
   }
 
-  const result = mcpJsonContent(await callDaemon("tribe.repair", { session, inbox_cursor: inboxCursor })) as {
+  const result = mcpJsonContent(await callDaemon("tribe.repair", resolved.params)) as {
     error?: string
     repaired?: boolean
     session?: string
@@ -891,6 +917,9 @@ async function cmdRepair(opts: { session?: string; inboxCursor?: string; json?: 
     cursor_before?: number
     cursor_after?: number
     tail?: number
+    examined?: number
+    reaped?: number
+    reason_counts?: Record<string, number>
   }
 
   if (opts.json) {
@@ -902,8 +931,18 @@ async function cmdRepair(opts: { session?: string; inboxCursor?: string; json?: 
     process.exit(1)
   }
 
+  if (result.repair === "reap_stale_transports") {
+    const reasons = Object.entries(result.reason_counts ?? {})
+      .map(([reason, count]) => `${reason}=${count}`)
+      .join(" ")
+    console.log(
+      `Reaped ${result.reaped ?? 0}/${result.examined ?? 0} stale transport rows${reasons ? ` (${reasons})` : ""}.`,
+    )
+    return
+  }
+
   console.log(
-    `Repaired ${result.session ?? session}: inbox cursor ` +
+    `Repaired ${result.session ?? opts.session ?? "@chief"}: inbox cursor ` +
       `${result.cursor_before ?? "?"} -> ${result.cursor_after ?? "?"} (tail ${result.tail ?? "?"}).`,
   )
 }
@@ -1065,14 +1104,16 @@ export function registerReadCommands(program: Command): void {
 
   const repairSession = cliOption(REPAIR_CLI, "session")
   const repairInboxCursor = cliOption(REPAIR_CLI, "inbox-cursor")
+  const repairReapStaleTransports = cliOption(REPAIR_CLI, "reap-stale-transports")
   const repairJson = cliOption(REPAIR_CLI, "json")
   program
     .command(REPAIR_CLI.name)
     .description(REPAIR_CLI.description)
     .option(repairSession.flags, repairSession.description, repairSession.default)
-    .option(repairInboxCursor.flags, repairInboxCursor.description, repairInboxCursor.default)
+    .option(repairInboxCursor.flags, repairInboxCursor.description)
+    .option(repairReapStaleTransports.flags, repairReapStaleTransports.description)
     .option(repairJson.flags, repairJson.description)
-    .action((opts: { session?: string; inboxCursor?: string; json?: boolean }) => void cmdRepair(opts))
+    .action((opts: RepairCliOptions) => void cmdRepair(opts))
 
   program
     .command("reload")

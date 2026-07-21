@@ -3,9 +3,10 @@
  */
 
 import { createLogger } from "loggily"
+import type { Database } from "bun:sqlite"
 import { readTranscriptSlug } from "tribe-wire/lib/transcript"
 import type { TribeContext } from "./context.ts"
-import { probeOwnerState } from "./session-transport-state.ts"
+import { probeProcessState } from "./session-transport-state.ts"
 
 const log = createLogger("tribe:session")
 import { sendMessage, logEvent } from "./messaging.ts"
@@ -44,11 +45,150 @@ function listSessionNames(ctx: TribeContext, isActive?: (sessionId: string) => b
     .sort()
 }
 
-/** GC old takeover tombstones and generated placeholder identities. They are
- * forensic breadcrumbs, not durable routable names. Canonical names and any
- * session explicitly reported active by the live registry are preserved. */
+export type SessionRegistrationLifetime = "connection-scoped" | "durable-launch" | "malformed-launch-identity"
+
+export function classifySessionRegistrationLifetime(input: {
+  launchId: string | null
+  launchParentPid: number | null
+}): SessionRegistrationLifetime {
+  const hasLaunchId = typeof input.launchId === "string" && input.launchId.trim().length > 0
+  const hasLaunchParentPid =
+    typeof input.launchParentPid === "number" &&
+    Number.isSafeInteger(input.launchParentPid) &&
+    input.launchParentPid > 0
+  if (hasLaunchId && hasLaunchParentPid) return "durable-launch"
+  if (input.launchId === null && input.launchParentPid === null) return "connection-scoped"
+  return "malformed-launch-identity"
+}
+
+export type StaleTransportReapReasonCounts = {
+  active_transport: number
+  reconnect_grace: number
+  durable_launch: number
+  malformed_launch_identity: number
+  reaped_connection_scoped: number
+}
+
+export type StaleTransportReapReport = {
+  examined: number
+  reaped: number
+  reason_counts: StaleTransportReapReasonCounts
+  reaped_sessions: Array<{ member_id: string; name: string }>
+}
+
+export type StaleTransportReapOpts = {
+  nowMs?: number
+  hasActiveTransport: (sessionId: string) => boolean
+  isReconnectGraceProtected: (sessionId: string, nowMs: number) => boolean
+}
+
+/**
+ * Reap disconnected connection-scoped registrations without guessing from
+ * names, activity timestamps, or numeric PID existence. All classification is
+ * synchronous, and active transport is checked again immediately before the
+ * transaction deletes a row.
+ */
+export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpts): StaleTransportReapReport {
+  const nowMs = opts.nowMs ?? Date.now()
+  const rows = db.prepare("SELECT id, name, launch_id, launch_parent_pid FROM sessions ORDER BY id").all() as Array<{
+    id: string
+    name: string
+    launch_id: string | null
+    launch_parent_pid: number | null
+  }>
+  const reasonCounts: StaleTransportReapReasonCounts = {
+    active_transport: 0,
+    reconnect_grace: 0,
+    durable_launch: 0,
+    malformed_launch_identity: 0,
+    reaped_connection_scoped: 0,
+  }
+  const candidates: typeof rows = []
+
+  for (const row of rows) {
+    if (opts.hasActiveTransport(row.id)) {
+      reasonCounts.active_transport++
+      continue
+    }
+    const lifetime = classifySessionRegistrationLifetime({
+      launchId: row.launch_id,
+      launchParentPid: row.launch_parent_pid,
+    })
+    if (lifetime === "durable-launch") {
+      reasonCounts.durable_launch++
+      continue
+    }
+    if (lifetime === "malformed-launch-identity") {
+      reasonCounts.malformed_launch_identity++
+      continue
+    }
+    if (opts.isReconnectGraceProtected(row.id, nowMs)) {
+      reasonCounts.reconnect_grace++
+      continue
+    }
+    candidates.push(row)
+  }
+
+  const reapedSessions: Array<{ member_id: string; name: string }> = []
+  const getCurrent = db.prepare("SELECT id, name, launch_id, launch_parent_pid FROM sessions WHERE id = $id LIMIT 1")
+  const deleteRoomMembers = db.prepare("DELETE FROM room_members WHERE session_id = $id")
+  const deleteSession = db.prepare("DELETE FROM sessions WHERE id = $id")
+
+  db.transaction(() => {
+    for (const candidate of candidates) {
+      // The daemon dispatcher is single-threaded between awaits. This final
+      // no-await registry read is the race fence for a sibling that connected
+      // after the first classification pass.
+      if (opts.hasActiveTransport(candidate.id)) {
+        reasonCounts.active_transport++
+        continue
+      }
+      const current = getCurrent.get({ $id: candidate.id }) as {
+        id: string
+        name: string
+        launch_id: string | null
+        launch_parent_pid: number | null
+      } | null
+      if (!current) continue
+      const currentLifetime = classifySessionRegistrationLifetime({
+        launchId: current.launch_id,
+        launchParentPid: current.launch_parent_pid,
+      })
+      if (currentLifetime === "durable-launch") {
+        reasonCounts.durable_launch++
+        continue
+      }
+      if (currentLifetime === "malformed-launch-identity") {
+        reasonCounts.malformed_launch_identity++
+        continue
+      }
+      if (opts.isReconnectGraceProtected(current.id, nowMs)) {
+        reasonCounts.reconnect_grace++
+        continue
+      }
+      deleteRoomMembers.run({ $id: current.id })
+      const deleted = deleteSession.run({ $id: current.id })
+      if (Number(deleted.changes ?? 0) === 1) {
+        reasonCounts.reaped_connection_scoped++
+        reapedSessions.push({ member_id: current.id, name: current.name })
+      }
+    }
+  })()
+
+  return {
+    examined: rows.length,
+    reaped: reapedSessions.length,
+    reason_counts: reasonCounts,
+    reaped_sessions: reapedSessions,
+  }
+}
+
+/** GC explicit takeover tombstones. They are forensic breadcrumbs, not
+ * durable routable names. Generated transports are deliberately excluded:
+ * the post-startup stale-transport reaper must give them reconnect grace
+ * before applying connection-scoped lifetime semantics. */
 export function sweepDeadSessionRows(
-  db: import("bun:sqlite").Database,
+  db: Database,
   maxAgeMs: number,
   nowMs = Date.now(),
   activeSessionIds: ReadonlySet<string> = new Set(),
@@ -56,29 +196,13 @@ export function sweepDeadSessionRows(
   const cutoff = nowMs - maxAgeMs
   const activeIds = [...activeSessionIds]
   const activeClause = activeIds.length > 0 ? ` AND id NOT IN (${activeIds.map(() => "?").join(", ")})` : ""
-  const candidates = (
-    db
-      .prepare(
-        `SELECT id, name, pid FROM sessions
+  const candidates = db
+    .prepare(
+      `SELECT id, name FROM sessions
        WHERE updated_at < ?
-         AND (
-           name GLOB '*-dead-*'
-           OR name GLOB 'silvercode-*'
-           OR name GLOB 'unknown-*'
-           OR name GLOB 'cli-join-*'
-         )${activeClause}`,
-      )
-      .all(cutoff, ...activeIds) as Array<{ id: string; name: string; pid: number }>
-  ).filter((candidate) => {
-    const generated =
-      candidate.name.startsWith("silvercode-") ||
-      candidate.name.startsWith("unknown-") ||
-      candidate.name.startsWith("cli-join-")
-    // A generated name is a ghost only with positive disconnection evidence.
-    // Daemon restart temporarily empties the registry while its provider
-    // process remains alive; preserve that durable row for reconnect adoption.
-    return !generated || candidate.pid <= 0 || !isPidAlive(candidate.pid)
-  })
+         AND name GLOB '*-dead-*'${activeClause}`,
+    )
+    .all(cutoff, ...activeIds) as Array<{ id: string; name: string }>
   if (candidates.length === 0) return 0
 
   const ids = candidates.map((candidate) => candidate.id)
@@ -98,10 +222,10 @@ export function sweepDeadSessionRows(
  *  and treat it as alive so we don't accidentally evict a legitimate
  *  holder whose pid we just don't know about. */
 export function isPidAlive(pid: number): boolean {
-  // Existing callers use a conservative boolean gate: only positive ESRCH
-  // evidence permits eviction. The richer owner state is projected separately
-  // for diagnostics and transport policy.
-  return probeOwnerState(pid) !== "dead"
+  // Existing callers use a conservative name-conflict gate: only positive
+  // ESRCH evidence permits eviction. Process existence never enters the
+  // disconnected transport/owner projection because a numeric PID is reusable.
+  return probeProcessState(pid) !== "dead"
 }
 
 // ---------------------------------------------------------------------------
@@ -138,9 +262,10 @@ export function registerSession(
 ): void {
   const desiredName = ctx.getName()
   const now = Date.now()
-  // The client's OS PID is the source of truth for "is this session real?";
-  // process.pid here is the DAEMON's PID (we run inside the daemon process).
-  // Fall back to 0 (= unknown) if the caller didn't supply one.
+  // The authenticated socket is transport truth. The client's OS PID is only
+  // a negative fence while that socket is active; it never identifies the
+  // owner of a disconnected row because PIDs are reusable. process.pid here
+  // is the DAEMON's PID, so fall back to 0 if the caller supplied none.
   const pid = clientPid && clientPid > 0 ? clientPid : 0
 
   // If another row holds our desired name, drop it if either (a) its session

@@ -54,8 +54,11 @@ tribe-wire members [-a|--all]
 ```
 
 Machine-readable JSON (`{"sessions": [...]}`) — the same reply
-`tribe.members` returns over MCP, including `launch_id` and `alive` per row.
-This is the row-level counterpart to the human-formatted `sessions` table.
+`tribe.members` returns over MCP, including `launch_id`, `transport_state`, and
+`owner_state` per row. A disconnected row without process-identity binding
+reports owner `unknown`; bare numeric PID existence is never proof that the
+original registrant is alive. This is the row-level counterpart to the
+human-formatted `sessions` table.
 
 ### `pending`
 
@@ -91,9 +94,10 @@ other and with `--all` (a follow is a live stream, not a bounded snapshot).
 tribe-wire health
 ```
 
-Diagnostics: issues list (silent members, stale issue entries, etc.), a live
-roster table (from the dispatcher's in-memory client map, not the DB), and
-daemon pid/uptime/clients. No options.
+Diagnostics: issues list, a live roster table (from the dispatcher's in-memory
+client map, not the DB), durable-launch rows missing transport, and daemon
+pid/uptime/clients. Disconnected connection-scoped legacy rows are repairable
+litter, not process-live wedges. No options.
 
 ### `doctor`
 
@@ -145,12 +149,17 @@ logical wait survives a daemon hot-reload mid-poll.
 ### `repair`
 
 ```bash
-tribe-wire repair [--session <name>=@chief] [--inbox-cursor tail] [--json]
+tribe-wire repair [--session <name>=@chief] [--inbox-cursor tail | --reap-stale-transports] [--json]
 ```
 
-Operator-bounded state repair — currently the only supported repair is
-advancing a session's inbox cursor to the current journal tail (no history
-deleted).
+Operator-bounded state repair. With no mode flag, the CLI retains the existing
+`--inbox-cursor tail` default. `--reap-stale-transports` instead removes only
+disconnected registrations whose absent launch identity declares
+connection-scoped lifetime and whose reconnect grace has elapsed. Active
+sibling transports, complete launch identities, malformed partial provenance,
+messages, and pending balls are preserved. The JSON result reports examined and
+reaped totals, reason counts, and reaped member ids/names. The modes are
+mutually exclusive; neither repair signals a process or restarts the daemon.
 
 ### `reload`
 

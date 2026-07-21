@@ -394,6 +394,20 @@ function createDispatcherHarness() {
       getActiveSessionIds(): Set<string> {
         return new Set(Array.from(clients.values(), (c) => c.ctx.sessionId))
       },
+      hasActiveTransport(sessionId: string): boolean {
+        return Array.from(clients.values()).some(
+          (client) => client.role !== "pending" && client.ctx.sessionId === sessionId,
+        )
+      },
+      markTransportConnected() {},
+      markTransportDisconnected() {},
+      isReconnectGraceProtected(): boolean {
+        return false
+      },
+      startupReconnectGraceRemainingMs(): number {
+        return 0
+      },
+      forgetTransportSessions() {},
       getActiveSessionInfo() {
         return Array.from(clients.values()).map((c) => ({
           id: c.ctx.sessionId,

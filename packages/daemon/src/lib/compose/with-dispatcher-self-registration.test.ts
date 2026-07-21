@@ -154,6 +154,43 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
     expect(harness.sessionFilter("@fleet")).toEqual({ mode: "normal", until: null, mute: null })
   })
 
+  it("starts reconnect grace only after the last launch sibling transport closes", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const launch = { launchId: "shared-grace-launch", launchParentPid: process.pid }
+
+    const firstClient = harness.connectClient()
+    const first = parseResult<RegisterResult>(
+      await harness.register(firstClient.connId, {
+        name: "@agent/9",
+        pid: liveHolderPid,
+        project: "/tmp/km-wt9",
+        ...launch,
+      }),
+    )
+    const secondClient = harness.connectClient()
+    const second = parseResult<RegisterResult>(
+      await harness.register(secondClient.connId, {
+        name: "@agent/9",
+        pid: otherLivePid,
+        project: "/tmp/km-wt9",
+        ...launch,
+      }),
+    )
+
+    expect(second.sessionId).toBe(first.sessionId)
+    expect(harness.transportLifetimeEvents()).toEqual([
+      { type: "connected", sessionId: first.sessionId },
+      { type: "connected", sessionId: first.sessionId },
+    ])
+
+    firstClient.socket.emitClose()
+    expect(harness.transportLifetimeEvents().some((event) => event.type === "disconnected")).toBe(false)
+
+    secondClient.socket.emitClose()
+    expect(harness.transportLifetimeEvents().at(-1)).toEqual({ type: "disconnected", sessionId: first.sessionId })
+  })
+
   it("lets the same live PID re-register an explicit agent name", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
@@ -999,6 +1036,7 @@ function createDispatcherHarness(
   })
   const clients = new Map<string, ClientSession>()
   const socketToClient = new Map<NetSocket, string>()
+  const transportLifetimeEvents: Array<{ type: "connected" | "disconnected"; sessionId: string }> = []
   const fakeServer = createFakeServer()
 
   const shape = {
@@ -1029,6 +1067,24 @@ function createDispatcherHarness(
       getActiveSessionIds(): Set<string> {
         return new Set(Array.from(clients.values(), (c) => c.ctx.sessionId))
       },
+      hasActiveTransport(sessionId: string): boolean {
+        return Array.from(clients.values()).some(
+          (client) => client.role !== "pending" && client.ctx.sessionId === sessionId,
+        )
+      },
+      markTransportConnected(sessionId: string) {
+        transportLifetimeEvents.push({ type: "connected", sessionId })
+      },
+      markTransportDisconnected(sessionId: string) {
+        transportLifetimeEvents.push({ type: "disconnected", sessionId })
+      },
+      isReconnectGraceProtected(): boolean {
+        return false
+      },
+      startupReconnectGraceRemainingMs(): number {
+        return 0
+      },
+      forgetTransportSessions() {},
       getActiveSessionInfo() {
         const members = new Map<
           string,
@@ -1127,6 +1183,9 @@ function createDispatcherHarness(
     },
     sendReply(reply: string) {
       sendMessage(daemonCtx, "@controller", `reply ${reply}`, "verdict", undefined, undefined, "direct", {}, { reply })
+    },
+    transportLifetimeEvents() {
+      return [...transportLifetimeEvents]
     },
     connectClient(): { connId: string; socket: TestSocket } {
       const socket = createTestSocket()

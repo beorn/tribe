@@ -37,6 +37,7 @@ to participate in a tribe without bundling the daemon itself.
 tribe-wire --help                                 # full Commander help + addHelpText MCP-adapter hint
 tribe-wire status                                 # active sessions with uptime + last-seen
 tribe-wire members --all                          # JSON transport + owner verdicts, including disconnected rows
+tribe-wire repair --reap-stale-transports --json # bounded stale connection-row repair with reason counts
 tribe-wire send '@alice' 'task X done' --type=notify
 tribe-wire send '@ci' 'R656 failed; see journal evidence' --type=notify --delivery=pull
 tribe-wire retro --since 2h --format markdown
@@ -69,7 +70,11 @@ JSON-RPC client, reconnecting client, line parser, composition primitives (pipe 
 from the authenticated socket registry; `owner_state` is separate process
 evidence. `last_seen_sec` reports activity age only. A host MCP dialog may say
 connected while the daemon reports the member disconnected, so host UI state is
-not a substitute for this projection.
+not a substitute for this projection. After disconnect, a stored numeric PID
+without launch-bound process evidence reports owner `unknown` even if that PID
+currently exists: the OS may have recycled it. Health keeps complete-launch
+rows with no transport loud, while connection-scoped no-launch rows are reaped
+only after reconnect grace.
 
 ## Surface delineation — protocol vs dev tooling
 

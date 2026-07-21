@@ -1,10 +1,11 @@
 /**
- * One projection for daemon transport presence and adapter-process presence.
+ * Daemon transport projection plus a conservative process-existence probe.
  *
  * Transport truth comes only from the daemon's authenticated in-memory client
- * registry. PID state is separate evidence about the process that last owned
- * the durable session row. Nothing here reads `updated_at`: last-seen age is
- * activity evidence, not liveness.
+ * registry. A stored numeric PID is not owner identity and never influences a
+ * disconnected-row projection; the probe below is only a negative fence for
+ * active name-conflict handling. Nothing here reads `updated_at`: last-seen
+ * age is activity evidence, not liveness.
  */
 
 export type TransportState = "connected" | "disconnected"
@@ -13,17 +14,11 @@ export type OwnerState = "live" | "dead" | "unknown"
 export type SessionTransportProjection = {
   transport_state: TransportState
   owner_state: OwnerState
-  transport_reason:
-    | "registered-transport"
-    | "owner-live-no-transport"
-    | "owner-dead-no-transport"
-    | "owner-unknown-no-transport"
+  transport_reason: "registered-transport" | "owner-unknown-no-transport"
 }
 
-export type OwnerProbe = (pid: number) => OwnerState
-
 /** Probe OS process existence without turning an unfamiliar error into death. */
-export function probeOwnerState(pid: number): OwnerState {
+export function probeProcessState(pid: number): OwnerState {
   if (!Number.isSafeInteger(pid) || pid <= 0) return "unknown"
   try {
     process.kill(pid, 0)
@@ -36,11 +31,7 @@ export function probeOwnerState(pid: number): OwnerState {
   }
 }
 
-export function projectSessionTransportState(input: {
-  transportConnected: boolean
-  ownerPid: number
-  probeOwner?: OwnerProbe
-}): SessionTransportProjection {
+export function projectSessionTransportState(input: { transportConnected: boolean }): SessionTransportProjection {
   if (input.transportConnected) {
     return {
       transport_state: "connected",
@@ -49,15 +40,9 @@ export function projectSessionTransportState(input: {
     }
   }
 
-  const ownerState = (input.probeOwner ?? probeOwnerState)(input.ownerPid)
   return {
     transport_state: "disconnected",
-    owner_state: ownerState,
-    transport_reason:
-      ownerState === "live"
-        ? "owner-live-no-transport"
-        : ownerState === "dead"
-          ? "owner-dead-no-transport"
-          : "owner-unknown-no-transport",
+    owner_state: "unknown",
+    transport_reason: "owner-unknown-no-transport",
   }
 }
