@@ -164,3 +164,136 @@ describe("21714 Tribe retro response latency", () => {
     expect(md).toMatch(/Average response time: 3m/)
   })
 })
+
+describe("21753 Tribe retro ball-SLA breaches", () => {
+  const SLA = 10 * MINUTE
+  let tmpDir: string
+  let db: OpenDatabase
+  let now: number
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "tribe-retro-sla-"))
+    db = openDatabase(join(tmpDir, "tribe.db"))
+    now = Date.now()
+    insertSession(db, { name: "@chief", role: "chief", now })
+    insertSession(db, { name: "@agent/1", role: "member", now })
+    insertSession(db, { name: "@agent/2", role: "member", now })
+  })
+
+  afterEach(() => {
+    db.close()
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it("counts an unanswered ball aged past the threshold as open-stale, attributed to the owner", () => {
+    // @chief owes an open ball 30m old (> 10m SLA) → one open-stale breach for @chief.
+    insertMessage(db, {
+      id: "stale",
+      type: "request",
+      sender: "@agent/1",
+      recipient: "@chief",
+      ts: now - 30 * MINUTE,
+      request: "stale",
+    })
+    // A fresh open ball (2m old) is NOT stale — it stays under the threshold.
+    insertMessage(db, {
+      id: "fresh",
+      type: "request",
+      sender: "@agent/1",
+      recipient: "@agent/2",
+      ts: now - 2 * MINUTE,
+      request: "fresh",
+    })
+
+    const report = generateRetro(db, 6 * HOUR, SLA)
+
+    const chief = report.members.find((m) => m.name === "@chief")
+    const agent2 = report.members.find((m) => m.name === "@agent/2")
+    expect(chief?.sla_open_stale).toBe(1)
+    expect(chief?.sla_answered_late).toBe(0)
+    expect(chief?.sla_breaches).toBe(1)
+    expect(agent2?.sla_open_stale).toBe(0)
+    expect(report.coordination.sla_open_stale).toBe(1)
+    expect(report.coordination.sla_answered_late).toBe(0)
+    expect(report.coordination.sla_threshold_ms).toBe(SLA)
+  })
+
+  it("counts a ball answered slower than the threshold as answered-late, attributed to the responder", () => {
+    // @chief answers one ball in 15m (> 10m → late) and one in 4m (on time).
+    insertBall(db, { id: "slow", from: "@agent/1", to: "@chief", openedAt: now - 2 * HOUR, latencyMs: 15 * MINUTE })
+    insertBall(db, { id: "quick", from: "@agent/1", to: "@chief", openedAt: now - 1 * HOUR, latencyMs: 4 * MINUTE })
+
+    const report = generateRetro(db, 6 * HOUR, SLA)
+
+    const chief = report.members.find((m) => m.name === "@chief")
+    expect(chief?.sla_answered_late).toBe(1)
+    expect(chief?.sla_open_stale).toBe(0)
+    expect(chief?.sla_breaches).toBe(1)
+    expect(chief?.responses).toBe(2) // both still count as answered
+    expect(report.coordination.sla_answered_late).toBe(1)
+  })
+
+  it("counts a reply whose opener is outside the window as unmeasurable, never a breach or 0ms", () => {
+    // A reply to a ball whose opening request was never loaded (opener outside
+    // the window). It must not be timed against a fabricated start, must not
+    // count as a response, and must never be a breach.
+    insertMessage(db, {
+      id: "orphan-reply",
+      type: "response",
+      sender: "@chief",
+      recipient: "@agent/1",
+      ts: now - 20 * MINUTE,
+      reply: "opener-outside-window",
+    })
+
+    const report = generateRetro(db, 6 * HOUR, SLA)
+
+    const chief = report.members.find((m) => m.name === "@chief")
+    expect(report.coordination.sla_unmeasurable).toBe(1)
+    expect(report.coordination.sla_answered_late).toBe(0)
+    expect(report.coordination.sla_open_stale).toBe(0)
+    // The orphan reply is not scored as a 0ms response.
+    expect(chief?.responses ?? 0).toBe(0)
+    expect(chief?.avg_response ?? null).toBeNull()
+  })
+
+  it("is configurable: raising the threshold above the latency clears the answered-late breach", () => {
+    insertBall(db, { id: "b", from: "@agent/1", to: "@chief", openedAt: now - 1 * HOUR, latencyMs: 15 * MINUTE })
+
+    // 10m threshold → the 15m answer is late.
+    const strict = generateRetro(db, 6 * HOUR, 10 * MINUTE)
+    expect(strict.members.find((m) => m.name === "@chief")?.sla_answered_late).toBe(1)
+    expect(strict.coordination.sla_threshold_ms).toBe(10 * MINUTE)
+
+    // 20m threshold → the same 15m answer is on time.
+    const lax = generateRetro(db, 6 * HOUR, 20 * MINUTE)
+    expect(lax.members.find((m) => m.name === "@chief")?.sla_answered_late).toBe(0)
+    expect(lax.coordination.sla_answered_late).toBe(0)
+    expect(lax.coordination.sla_threshold_ms).toBe(20 * MINUTE)
+  })
+
+  it("renders a Breaches column and a Ball SLA breaches line, including the unmeasurable suffix", () => {
+    // One open-stale (@chief, 30m) + one unmeasurable reply.
+    insertMessage(db, {
+      id: "stale",
+      type: "request",
+      sender: "@agent/1",
+      recipient: "@chief",
+      ts: now - 30 * MINUTE,
+      request: "stale",
+    })
+    insertMessage(db, {
+      id: "orphan-reply",
+      type: "response",
+      sender: "@agent/2",
+      recipient: "@agent/1",
+      ts: now - 20 * MINUTE,
+      reply: "opener-outside-window",
+    })
+
+    const md = formatMarkdown(generateRetro(db, 6 * HOUR, SLA))
+
+    expect(md).toContain("| Breaches |")
+    expect(md).toMatch(/Ball SLA breaches: 1 open-stale, 0 answered-late \(threshold 10m\); 1 unmeasurable/)
+  })
+})

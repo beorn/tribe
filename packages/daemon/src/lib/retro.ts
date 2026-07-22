@@ -22,6 +22,34 @@ export function parseDuration(s: string): number {
   return parseFloat(match[1]!) * DURATION_MULTIPLIERS[match[2]!]!
 }
 
+/**
+ * Default ball-SLA threshold (@km/tribe/21753). A tracked ball breaches the SLA
+ * when it is answered slower than this (answered-late) or still open past this
+ * age (open-stale). 10 minutes — the same responsiveness bar the health monitor
+ * uses for a per-owner stale-ball warning.
+ */
+export const DEFAULT_BALL_SLA_MS = 10 * 60_000
+
+/**
+ * Parse the optional `TRIBE_BALL_SLA_MS` override into a positive ms threshold,
+ * else null. The empty/undefined case is the normal unset path; a
+ * present-but-unparseable value also returns null so the resolver falls back to
+ * the default rather than crashing the whole retro/health surface.
+ */
+export function parseBallSlaMs(raw: string | undefined): number | null {
+  if (raw === undefined || raw.trim() === "") return null
+  const value = Number(raw)
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : null
+}
+
+/**
+ * Resolve the ball-SLA threshold: `TRIBE_BALL_SLA_MS` when set to a positive
+ * integer, else `DEFAULT_BALL_SLA_MS` (10m).
+ */
+export function resolveBallSlaMs(env: Record<string, string | undefined> = process.env): number {
+  return parseBallSlaMs(env.TRIBE_BALL_SLA_MS) ?? DEFAULT_BALL_SLA_MS
+}
+
 function formatDuration(ms: number): string {
   if (ms < 1_000) return `${ms}ms`
   if (ms < 60_000) return `${Math.round(ms / 1_000)}s`
@@ -96,6 +124,12 @@ export interface RetroReport {
     avg_response: string | null
     response_p50: string | null
     response_p90: string | null
+    /** Balls this member OWES that are still open past the SLA threshold. */
+    sla_open_stale: number
+    /** Balls this member ANSWERED, but slower than the SLA threshold. */
+    sla_answered_late: number
+    /** sla_open_stale + sla_answered_late. */
+    sla_breaches: number
   }>
   timeline: Array<{ time: string; event: string }>
   coordination: {
@@ -106,6 +140,14 @@ export interface RetroReport {
     response_p90: string | null
     longest_response: string | null
     longest_response_member: string | null
+    /** The SLA threshold (ms) breaches were computed against. */
+    sla_threshold_ms: number
+    /** Fleet-wide count of unanswered balls aged past the threshold. */
+    sla_open_stale: number
+    /** Fleet-wide count of answered balls whose latency exceeded the threshold. */
+    sla_answered_late: number
+    /** Replies whose opener fell outside the window — never timed, never a breach. */
+    sla_unmeasurable: number
   }
 }
 
@@ -156,34 +198,55 @@ function computeResponseTimes(messages: Message[]): {
   latenciesByResponder: Map<string, number[]>
   answeredRequestIds: Set<string>
   openRequestIds: Set<string>
+  /** request id → opening ts (the ball's opened_at). */
+  openedAt: Map<string, number>
+  /** request id → the recipient who OWES the answer (the ball owner). */
+  ownerByRequestId: Map<string, string>
+  /** Replies whose opener fell outside the loaded window — timed against nothing. */
+  unmeasurableReplies: number
 } {
   const latenciesByResponder = new Map<string, number[]>()
   const answeredRequestIds = new Set<string>()
   const openRequestIds = new Set<string>()
   const openedAt = new Map<string, number>()
+  const ownerByRequestId = new Map<string, string>()
+  let unmeasurableReplies = 0
 
   for (const msg of messages) {
     if (msg.request) {
       openRequestIds.add(msg.request)
       // The opening send is authoritative; keep the earliest ts if duplicated.
       const prior = openedAt.get(msg.request)
-      if (prior === undefined || msg.ts < prior) openedAt.set(msg.request, msg.ts)
+      if (prior === undefined || msg.ts < prior) {
+        openedAt.set(msg.request, msg.ts)
+        // The recipient of the opening request owes the answer — the ball owner.
+        ownerByRequestId.set(msg.request, msg.recipient)
+      }
     }
   }
   for (const msg of messages) {
     if (!msg.reply) continue
     const openTs = openedAt.get(msg.reply)
-    if (openTs === undefined) continue // opener outside window — cannot time it
+    if (openTs === undefined) {
+      // Opener outside window — cannot time it. Counted as unmeasurable so it is
+      // surfaced explicitly, NEVER scored as a 0ms response or an SLA breach.
+      unmeasurableReplies += 1
+      continue
+    }
     if (msg.ts < openTs) continue // out-of-order / clock skew — never a negative latency
     answeredRequestIds.add(msg.reply)
     const arr = latenciesByResponder.get(msg.sender) ?? []
     arr.push(msg.ts - openTs)
     latenciesByResponder.set(msg.sender, arr)
   }
-  return { latenciesByResponder, answeredRequestIds, openRequestIds }
+  return { latenciesByResponder, answeredRequestIds, openRequestIds, openedAt, ownerByRequestId, unmeasurableReplies }
 }
 
-export function generateRetro(db: Database, sinceMs?: number): RetroReport {
+export function generateRetro(
+  db: Database,
+  sinceMs?: number,
+  slaThresholdMs: number = resolveBallSlaMs(),
+): RetroReport {
   const now = Date.now()
   const windowStart = sinceMs ? now - sinceMs : getEarliestTimestamp(db)
   const windowEnd = now
@@ -234,11 +297,37 @@ export function generateRetro(db: Database, sinceMs?: number): RetroReport {
   }
 
   // Response latencies (ball-tracker request→reply pairs)
-  const { latenciesByResponder, answeredRequestIds, openRequestIds } = computeResponseTimes(messages)
+  const { latenciesByResponder, answeredRequestIds, openRequestIds, openedAt, ownerByRequestId, unmeasurableReplies } =
+    computeResponseTimes(messages)
   for (const [name, latencies] of latenciesByResponder) {
     const member = memberMap.get(name)
     if (member) member.responseLatenciesMs = latencies
   }
+
+  // SLA breaches (@km/tribe/21753). Two shapes, one threshold:
+  //   answered-late — a ball answered slower than the threshold, attributed to
+  //                    the responder (reply.sender).
+  //   open-stale    — a ball still open past the threshold, attributed to the
+  //                    owner (recipient who owes the answer).
+  // A reply timed against an opener outside the window is unmeasurable — never a
+  // breach and never a fabricated 0ms latency (NO SILENT ERRORS).
+  const answeredLateByResponder = new Map<string, number>()
+  for (const [responder, latencies] of latenciesByResponder) {
+    const late = latencies.filter((ms) => ms > slaThresholdMs).length
+    if (late > 0) answeredLateByResponder.set(responder, late)
+  }
+  const openStaleByOwner = new Map<string, number>()
+  for (const requestId of openRequestIds) {
+    if (answeredRequestIds.has(requestId)) continue
+    const openTs = openedAt.get(requestId)
+    if (openTs === undefined) continue
+    if (now - openTs <= slaThresholdMs) continue
+    const owner = ownerByRequestId.get(requestId)
+    if (owner === undefined) continue
+    openStaleByOwner.set(owner, (openStaleByOwner.get(owner) ?? 0) + 1)
+  }
+  const totalOpenStale = [...openStaleByOwner.values()].reduce((a, b) => a + b, 0)
+  const totalAnsweredLate = [...answeredLateByResponder.values()].reduce((a, b) => a + b, 0)
 
   const unansweredQueries = [...openRequestIds].filter((id) => !answeredRequestIds.has(id)).length
   const allLatencies = [...latenciesByResponder.values()].flat().sort((a, b) => a - b)
@@ -296,6 +385,8 @@ export function generateRetro(db: Database, sinceMs?: number): RetroReport {
     .sort((a, b) => b.sent - a.sent)
     .map((m) => {
       const sorted = [...m.responseLatenciesMs].sort((a, b) => a - b)
+      const slaOpenStale = openStaleByOwner.get(m.name) ?? 0
+      const slaAnsweredLate = answeredLateByResponder.get(m.name) ?? 0
       return {
         name: m.name,
         role: m.role,
@@ -307,6 +398,9 @@ export function generateRetro(db: Database, sinceMs?: number): RetroReport {
         avg_response: durationOrNull(mean(sorted)),
         response_p50: durationOrNull(percentile(sorted, 0.5)),
         response_p90: durationOrNull(percentile(sorted, 0.9)),
+        sla_open_stale: slaOpenStale,
+        sla_answered_late: slaAnsweredLate,
+        sla_breaches: slaOpenStale + slaAnsweredLate,
       }
     })
 
@@ -329,6 +423,10 @@ export function generateRetro(db: Database, sinceMs?: number): RetroReport {
       response_p90: durationOrNull(percentile(allLatencies, 0.9)),
       longest_response: durationOrNull(longestResponse),
       longest_response_member: longestResponseMember,
+      sla_threshold_ms: slaThresholdMs,
+      sla_open_stale: totalOpenStale,
+      sla_answered_late: totalAnsweredLate,
+      sla_unmeasurable: unmeasurableReplies,
     },
   }
 }
@@ -357,11 +455,11 @@ export function formatMarkdown(report: RetroReport): string {
 
   if (report.members.length > 0) {
     lines.push("## Per-Member Activity")
-    lines.push("| Member | Sent | Received | Beads Mentioned | Responses | Avg Response | p50 | p90 |")
-    lines.push("|--------|------|----------|-----------------|-----------|--------------|-----|-----|")
+    lines.push("| Member | Sent | Received | Beads Mentioned | Responses | Avg Response | p50 | p90 | Breaches |")
+    lines.push("|--------|------|----------|-----------------|-----------|--------------|-----|-----|----------|")
     for (const m of report.members)
       lines.push(
-        `| ${m.name} | ${m.sent} | ${m.received} | ${m.beads_mentioned.length} | ${m.responses} | ${m.avg_response ?? "\u2014"} | ${m.response_p50 ?? "\u2014"} | ${m.response_p90 ?? "\u2014"} |`,
+        `| ${m.name} | ${m.sent} | ${m.received} | ${m.beads_mentioned.length} | ${m.responses} | ${m.avg_response ?? "\u2014"} | ${m.response_p50 ?? "\u2014"} | ${m.response_p90 ?? "\u2014"} | ${m.sla_breaches} |`,
       )
     lines.push("")
   }
@@ -383,6 +481,11 @@ export function formatMarkdown(report: RetroReport): string {
     lines.push(
       `- Longest response: ${report.coordination.longest_response} (${report.coordination.longest_response_member})`,
     )
+  const unmeasurableSuffix =
+    report.coordination.sla_unmeasurable > 0 ? `; ${report.coordination.sla_unmeasurable} unmeasurable` : ""
+  lines.push(
+    `- Ball SLA breaches: ${report.coordination.sla_open_stale} open-stale, ${report.coordination.sla_answered_late} answered-late (threshold ${formatDuration(report.coordination.sla_threshold_ms)})${unmeasurableSuffix}`,
+  )
   lines.push("")
   return lines.join("\n")
 }

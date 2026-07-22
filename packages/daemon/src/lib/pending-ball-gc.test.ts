@@ -401,7 +401,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
     }
   })
 
-  it("tribe.health reports bounded owner and stale aggregates instead of the full ball pile", () => {
+  it("tribe.health reports bounded owner and per-owner stale aggregates instead of the full ball pile", () => {
     const { db, stmts } = setup()
     try {
       const ctx = createTribeContext({
@@ -414,10 +414,16 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         claudeSessionId: null,
         claudeSessionName: null,
       })
+      // Two owners breach the 10m ball SLA (21753); @ci stays fresh at 1m.
       openBall(stmts, {
         id: "stale-agent-8",
         recipient: "@agent/8",
-        openedAt: Date.now() - 2 * 60 * 60 * 1000 - 1,
+        openedAt: Date.now() - 30 * 60_000,
+      })
+      openBall(stmts, {
+        id: "stale-agent-9",
+        recipient: "@agent/9",
+        openedAt: Date.now() - 15 * 60_000,
       })
       openBall(stmts, { id: "fresh-ci", recipient: "@ci", openedAt: Date.now() - 60_000 })
       for (let index = 0; index < 200; index += 1) {
@@ -434,21 +440,39 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
           count: number
           owner_count: number
           owners: Array<{ owner: string; count: number; oldest_age_ms: number; pending?: unknown }>
-          stale: { count: number; owner_count: number; oldest_age_ms: number }
+          stale: {
+            count: number
+            owner_count: number
+            oldest_age_ms: number
+            threshold_ms: number
+            owners: Array<{ owner: string; count: number; oldest_age_ms: number; pending?: unknown }>
+          }
         }
       }
 
       expect(health.pending_balls).toMatchObject({
-        count: 202,
-        owner_count: 2,
-        stale: { count: 1, owner_count: 1, oldest_age_ms: expect.any(Number) },
+        count: 203,
+        owner_count: 3,
+        // stale = the two owners past 10m (fresh 1m-old balls excluded).
+        stale: { count: 2, owner_count: 2, oldest_age_ms: expect.any(Number), threshold_ms: 10 * 60_000 },
       })
       expect(health.pending_balls?.owners).toEqual([
         { owner: "@agent/8", count: 201, oldest_age_ms: expect.any(Number) },
+        { owner: "@agent/9", count: 1, oldest_age_ms: expect.any(Number) },
         { owner: "@ci", count: 1, oldest_age_ms: expect.any(Number) },
       ])
+      // Per-owner stale breakdown carries only the two breaching owners.
+      expect(health.pending_balls?.stale.owners).toEqual([
+        { owner: "@agent/8", count: 1, oldest_age_ms: expect.any(Number) },
+        { owner: "@agent/9", count: 1, oldest_age_ms: expect.any(Number) },
+      ])
       expect(health.pending_balls?.owners.every((owner) => owner.pending === undefined)).toBe(true)
-      expect(health.issues).toEqual([expect.stringMatching(/1 stale pending ball.*1 owner/i)])
+      expect(health.pending_balls?.stale.owners.every((owner) => owner.pending === undefined)).toBe(true)
+      // One PER-OWNER warning each, at the 10m threshold.
+      expect(health.issues).toEqual([
+        expect.stringMatching(/stale ball SLA breach: @agent\/8 owes 1 open ball past 10m; oldest \d+m/),
+        expect.stringMatching(/stale ball SLA breach: @agent\/9 owes 1 open ball past 10m; oldest \d+m/),
+      ])
       expect(JSON.stringify(health.pending_balls).length).toBeLessThan(2_048)
     } finally {
       db.close()

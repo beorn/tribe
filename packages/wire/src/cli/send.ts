@@ -34,7 +34,7 @@ import {
 } from "../command-descriptors.ts"
 import { connectToDaemon, resolveSocketPath, TRIBE_PROTOCOL_VERSION } from "../lib/socket.ts"
 import { resolveDbPath } from "../lib/config.ts"
-import { formatMarkdown, generateRetro, parseDuration } from "../lib/retro.ts"
+import { formatMarkdown, generateRetro, parseDuration, resolveBallSlaMs } from "../lib/retro.ts"
 
 const SEND_CLI = visibleCliProjectionForMcp("send")
 const JOIN_CLI = visibleCliProjectionForMcp("join")
@@ -411,7 +411,7 @@ async function cmdRetro(opts: { since?: string; format: string; db?: string }): 
       process.exit(1)
     }
   }
-  const report = generateRetro(db, sinceMs)
+  const report = generateRetro(db, sinceMs, resolveBallSlaMs())
   console.log(opts.format === "json" ? JSON.stringify(report, null, 2) : formatMarkdown(report))
   db.close()
 }

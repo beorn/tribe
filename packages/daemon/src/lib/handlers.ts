@@ -24,6 +24,7 @@ import { ACTIONABLE_TYPES_SET, ACTIONABLE_TYPES_SQL, AUTO_TRACK_TYPES_SET } from
 import { isPidAlive as pidStillAlive, persistRuntimeRename, registerSession } from "./session.ts"
 import { gatherCodePin } from "./code-pin.ts"
 import { parseDbGrowthWarningBytes, projectHealthCadence } from "./health-cadence.ts"
+import { resolveBallSlaMs } from "./retro.ts"
 import { senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
 import type { LifecycleStore, LifecycleSnapshotRecord } from "./lifecycle-store.ts"
 import { projectSessionTransportState } from "./session-transport-state.ts"
@@ -1280,19 +1281,23 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
 
   // 20876 / 17199: fleet-wide open-ball attention is derived from the one
   // existing pending_request authority. A per-owner sample can be empty while
-  // another role is blocked, so health carries the all-owner projection and a
-  // bounded aggregate warning for active rows older than two hours.
+  // another role is blocked, so health carries the all-owner projection.
+  // 21753: staleness is the ball-SLA threshold (default 10m, overridable via
+  // TRIBE_BALL_SLA_MS — no longer a hardcoded 2h), and each owner past that
+  // threshold gets its OWN warning so chief sees exactly who owes what.
   const pending = allPendingBalls(ctx, now)
   const pendingOwners = pendingOwnerSummaries(pending)
-  const stalePending = pending.filter((ball) => ball.age_ms >= 2 * 60 * 60 * 1000)
-  const staleOwnerCount = new Set(stalePending.map((ball) => ball.recipient)).size
+  const slaThresholdMs = resolveBallSlaMs()
+  const staleThresholdMin = Math.floor(slaThresholdMs / 60_000)
+  const stalePending = pending.filter((ball) => ball.age_ms >= slaThresholdMs)
+  const staleOwnerGroups = pendingOwnerGroups(stalePending)
+  const staleOwnerCount = staleOwnerGroups.length
   const oldestStaleAgeMs = stalePending.reduce((oldest, ball) => Math.max(oldest, ball.age_ms), 0)
-  const pendingIssues =
-    stalePending.length === 0
-      ? []
-      : [
-          `${stalePending.length} stale pending ${stalePending.length === 1 ? "ball" : "balls"} across ${staleOwnerCount} ${staleOwnerCount === 1 ? "owner" : "owners"}; oldest is ${Math.floor(oldestStaleAgeMs / 60_000)}m old`,
-        ]
+  const staleOwnerSummaries = staleOwnerGroups.map(({ pending: _pending, ...summary }) => summary)
+  const pendingIssues = staleOwnerGroups.map(
+    ({ owner, count, oldest_age_ms }) =>
+      `stale ball SLA breach: ${owner} owes ${count} open ${count === 1 ? "ball" : "balls"} past ${staleThresholdMin}m; oldest ${Math.floor(oldest_age_ms / 60_000)}m`,
+  )
   const cadence = projectHealthCadence(ctx.db, {
     now,
     connectedSessionNames: liveSessions.map((session) => session.name),
@@ -1315,6 +1320,8 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
         count: stalePending.length,
         owner_count: staleOwnerCount,
         oldest_age_ms: oldestStaleAgeMs,
+        threshold_ms: slaThresholdMs,
+        owners: staleOwnerSummaries,
       },
     },
     transport_wedges: transportWedges,
@@ -1371,7 +1378,7 @@ function handleReload(ctx: TribeContext, a: ToolArgs, cleanup: () => void): Tool
 }
 
 async function handleRetro(ctx: TribeContext, a: ToolArgs): Promise<ToolResult> {
-  const { generateRetro, formatMarkdown, parseDuration } = await import("./retro.ts")
+  const { generateRetro, formatMarkdown, parseDuration, resolveBallSlaMs } = await import("./retro.ts")
   const sinceStr = a.since as string | undefined
   let sinceMs: number | undefined
   if (sinceStr) {
@@ -1382,7 +1389,7 @@ async function handleRetro(ctx: TribeContext, a: ToolArgs): Promise<ToolResult> 
     }
   }
   const fmt = (a.format as string) ?? "markdown"
-  const report = generateRetro(ctx.db, sinceMs)
+  const report = generateRetro(ctx.db, sinceMs, resolveBallSlaMs())
   // Retro is one of the two string-typed tool results (markdown vs json) —
   // we still emit `structuredContent: { text }` so the shape contract is
   // uniform; chat-surface shows the markdown / pretty JSON as-is.

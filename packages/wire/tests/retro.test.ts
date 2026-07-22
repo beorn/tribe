@@ -113,3 +113,62 @@ describe("21714 wire retro response latency", () => {
     expect(report.coordination.unanswered_queries).toBe(1)
   })
 })
+
+describe("21753 wire retro ball-SLA breaches", () => {
+  const SLA = 10 * MINUTE
+  let db: Database
+  let now: number
+
+  beforeEach(() => {
+    db = makeDb()
+    now = Date.now()
+    insertSession(db, "@chief", "chief", now)
+    insertSession(db, "@agent/1", "member", now)
+  })
+
+  afterEach(() => db.close())
+
+  it("counts an unanswered ball aged past the threshold as open-stale for the owner", () => {
+    insertMessage(db, {
+      id: "stale",
+      type: "request",
+      sender: "@agent/1",
+      recipient: "@chief",
+      ts: now - 30 * MINUTE,
+      request: "stale",
+    })
+
+    const report = generateRetro(db, 6 * HOUR, SLA)
+    const chief = report.members.find((m) => m.name === "@chief")
+    expect(chief?.sla_open_stale).toBe(1)
+    expect(chief?.sla_breaches).toBe(1)
+    expect(report.coordination.sla_open_stale).toBe(1)
+    expect(report.coordination.sla_threshold_ms).toBe(SLA)
+  })
+
+  it("counts a ball answered slower than the threshold as answered-late; a raised threshold clears it", () => {
+    insertBall(db, { id: "slow", from: "@agent/1", to: "@chief", openedAt: now - 1 * HOUR, latencyMs: 15 * MINUTE })
+
+    const strict = generateRetro(db, 6 * HOUR, 10 * MINUTE)
+    expect(strict.members.find((m) => m.name === "@chief")?.sla_answered_late).toBe(1)
+
+    const lax = generateRetro(db, 6 * HOUR, 20 * MINUTE)
+    expect(lax.members.find((m) => m.name === "@chief")?.sla_answered_late).toBe(0)
+    expect(lax.coordination.sla_answered_late).toBe(0)
+  })
+
+  it("renders a Breaches column and the Ball SLA breaches line in markdown", () => {
+    insertMessage(db, {
+      id: "stale",
+      type: "request",
+      sender: "@agent/1",
+      recipient: "@chief",
+      ts: now - 30 * MINUTE,
+      request: "stale",
+    })
+
+    const md = formatMarkdown(generateRetro(db, 6 * HOUR, SLA))
+    expect(md).toContain("| Breaches |")
+    expect(md).toMatch(/Ball SLA breaches: 1 open-stale, 0 answered-late \(threshold 10m\)/)
+  })
+})
