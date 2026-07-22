@@ -1099,7 +1099,18 @@ export function withDispatcher<
                 : { mode: "explicit", defaultSession: "@chief" },
             )
             if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage)
-            return makeResponse(id, readInboxStatus(target.sessionName))
+            // Round-trip the daemon-authoritative launch tuple so a managed
+            // one-shot CLI can register its send connection under the SAME
+            // (launch_id, launch_parent_pid) as the live seat and fan in to it
+            // (attributed, no takeover) instead of colliding on the persona
+            // name. Explicit-mode (`cli_inbox_status`) carries no launch
+            // identity, so these stay absent there. Mirrors
+            // cli_inbox_delivery_by_launch_v1's response shape.
+            return makeResponse(id, {
+              ...readInboxStatus(target.sessionName),
+              ...(target.launchId === undefined ? {} : { launch_id: target.launchId }),
+              ...(target.launchParentPid === undefined ? {} : { launch_parent_pid: target.launchParentPid }),
+            })
           }
 
           /**

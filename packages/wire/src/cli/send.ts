@@ -72,10 +72,19 @@ export function classifyIdentityGrant(
   return { ok: false, fatal: false, message: `${base} This message is attributed to ${who}.` }
 }
 
+/**
+ * The identity a one-shot CLI send registers under. `name` is the resolved
+ * session/persona; for a MANAGED launch, `launchId`/`launchParentPid` carry the
+ * daemon-authoritative launch tuple so the connection fans into the live seat
+ * of that launch instead of colliding on the name. A bare TRIBE_NAME caller
+ * omits the launch fields.
+ */
+type SendCaller = { name: string; launchId?: string; launchParentPid?: number }
+
 async function callDaemon(
   method: string,
   params?: Record<string, unknown>,
-  as?: string | null,
+  as?: SendCaller | null,
   requireIdentity = false,
 ): Promise<unknown> {
   const socketPath = resolveSocketPath()
@@ -85,10 +94,19 @@ async function callDaemon(
       // One-shot identity: register under the caller's session name BEFORE the
       // call so the daemon attributes the message (and can close ball-tracker
       // rows owned by that name) instead of an anonymous pending-* session.
+      //
+      // When the caller is a MANAGED launch, resolveSendCaller carries the
+      // daemon-authoritative (launch_id, launch_parent_pid) tuple; forwarding
+      // it lets the daemon fan this connection into the live seat of the same
+      // launch (attributed, no takeover) rather than colliding on the persona
+      // name. A one-shot cannot mint that tuple itself — the daemon minted it —
+      // so this never lets an unrelated caller steal a name. For a bare
+      // TRIBE_NAME caller (no launch), we omit it; the grant check below then
+      // decides between fail-loud abort (tracked reply) and attributed warn.
       if (as) {
         const registered = mcpJsonContent(
           await client.call("register", {
-            name: as,
+            name: as.name,
             role: "member",
             domains: [],
             delivery: "pull",
@@ -96,9 +114,12 @@ async function callDaemon(
             projectName: process.cwd().split("/").filter(Boolean).at(-1) ?? "unknown",
             pid: process.pid,
             protocolVersion: TRIBE_PROTOCOL_VERSION,
+            ...(as.launchId !== undefined && as.launchParentPid !== undefined
+              ? { launchId: as.launchId, launchParentPid: as.launchParentPid }
+              : {}),
           }),
         ) as { name?: string }
-        const grant = classifyIdentityGrant(as, registered?.name, requireIdentity)
+        const grant = classifyIdentityGrant(as.name, registered?.name, requireIdentity)
         if (!grant.ok) {
           if (grant.fatal) {
             console.error(grant.message)
@@ -215,14 +236,28 @@ function rejectUnstructuredMessageIntent(input: SendPayloadInput): void {
   process.exit(2)
 }
 
-async function resolveSendCaller(reply?: string): Promise<string | null> {
+async function resolveSendCaller(reply?: string): Promise<SendCaller | null> {
   const launchId = process.env.TRIBE_LAUNCH_ID?.trim()
   if (launchId) {
     try {
       const status = mcpJsonContent(await callDaemon("cli_inbox_status_by_launch_v1", { launch_id: launchId })) as {
         session?: unknown
+        launch_id?: unknown
+        launch_parent_pid?: unknown
       }
-      if (typeof status.session === "string" && status.session.length > 0) return status.session
+      if (typeof status.session === "string" && status.session.length > 0) {
+        const caller: SendCaller = { name: status.session }
+        // The daemon owns the (launch_id, launch_parent_pid) tuple; forward it
+        // verbatim so callDaemon can fan into the live seat of this launch.
+        if (typeof status.launch_id === "string" && status.launch_id.length > 0) caller.launchId = status.launch_id
+        if (
+          typeof status.launch_parent_pid === "number" &&
+          Number.isSafeInteger(status.launch_parent_pid) &&
+          status.launch_parent_pid > 0
+        )
+          caller.launchParentPid = status.launch_parent_pid
+        return caller
+      }
       console.error(
         `tribe-wire send: daemon launch authority returned no current session${reply ? ` for --reply ${reply}` : ""}; not sending.`,
       )
@@ -236,9 +271,15 @@ async function resolveSendCaller(reply?: string): Promise<string | null> {
     process.exit(1)
   }
 
-  const owner = replyOwnerFromEnv()
-  if (owner) return owner
+  // No launch authority. TRIBE_NAME / TRIBE_SESSION_NAME is a caller-authored
+  // hint, never validated provenance (21717), so a plain send must not forward
+  // it as identity — it stays an anonymous pending-* sender. Only --reply needs
+  // it, to name the ball owner the response must close; register there so the
+  // daemon can attribute the closure (a live holder still dedupes fail-loud, so
+  // a running seat is never stolen by a one-shot).
   if (!reply) return null
+  const owner = replyOwnerFromEnv()
+  if (owner) return { name: owner }
   console.error(
     `tribe-wire send: --reply ${reply} requires TRIBE_NAME or TRIBE_SESSION_NAME so the one-shot CLI can close the pending owner.`,
   )
@@ -316,7 +357,7 @@ function parseDomains(values: string[] | undefined): string[] {
 async function cmdSend(input: SendPayloadInput): Promise<void> {
   rejectUnstructuredMessageIntent(input)
   const caller = await resolveSendCaller(input.reply)
-  if (input.reply && caller) await verifyPendingReplyOwner(caller, input.reply)
+  if (input.reply && caller) await verifyPendingReplyOwner(caller.name, input.reply)
 
   const result = mcpJsonContent(
     await callDaemon("tribe.send", buildSendPayload(input), caller, Boolean(input.reply)),
@@ -331,7 +372,7 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     console.error(`tribe-wire send: ${result.error}`)
     process.exit(1)
   }
-  if (input.reply && caller) reportCommittedReplyTracker(caller, input.reply, result.tracker)
+  if (input.reply && caller) reportCommittedReplyTracker(caller.name, input.reply, result.tracker)
   console.log(`Sent message to ${input.to}`)
   // Derive-not-reject: surface (no-silent) when the daemon derived a one-liner
   // because none was authored, so the sender learns to pass `--summary`.
