@@ -20,7 +20,7 @@
  */
 
 import { describe, test, expect } from "vitest"
-import { sanitizeMessage, stripLoneSurrogates, truncateSurrogateSafe } from "./validation.ts"
+import { sanitizeMessage, stripLoneSurrogates, truncateSurrogateSafe, validateName } from "./validation.ts"
 
 // A lone high surrogate appears anywhere in a string iff this matches.
 const HAS_LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
@@ -117,5 +117,54 @@ describe("sanitizeMessage — lone-surrogate poison guard", () => {
       const out = sanitizeMessage(text)
       expect(HAS_LONE_SURROGATE.test(out)).toBe(false)
     }
+  })
+})
+
+/**
+ * @ag/tribe/21768 — join/rename must accept the successor personas the fleet
+ * launches with.
+ *
+ * `validateName` gates `tribe.join` and `tribe.rename` (handlers.ts). Before
+ * this bead its character class `[a-z0-9_./-]` carried no `@`, so a nested
+ * successor path like `@chief/@ci/next` was rejected at the second sigil — the
+ * same defect as the adapter's register-time pre-seed predicate. A seat
+ * launched under that persona could therefore neither be named at launch NOR
+ * name itself from inside: it sat as `unknown-<rand>` while everything
+ * addressed to its persona was silently dropped (pid 7440, 4m17s, 2026-07-22).
+ */
+describe("validateName — 21768 successor personas", () => {
+  const ACCEPTED = [
+    "@ci",
+    "@chief",
+    "@cto",
+    "@agent/7",
+    "@ci/next",
+    "@ci/prev",
+    "@chief/@ci/next",
+    "@chief/@ci/prev",
+    // Sigil-less forms the daemon has always accepted — unchanged by this fix.
+    "ci",
+    "agent/7",
+  ] as const
+
+  const REJECTED = [
+    ["", "empty"],
+    ["   ", "whitespace only"],
+    ["@Chief", "uppercase"],
+    ["@chief next", "embedded space"],
+    ["@chief;id", "shell metacharacter"],
+    ["@chief/", "trailing separator"],
+    ["@chief//next", "double separator"],
+    ["@@chief", "doubled sigil inside one segment"],
+    ["@ch@ief", "sigil mid-segment"],
+    [`@${"a".repeat(33)}`, "over the length bound"],
+  ] as const
+
+  test.each(ACCEPTED)("accepts %s", (name) => {
+    expect(validateName(name)).toBeNull()
+  })
+
+  test.each(REJECTED)("rejects %j (%s)", (name) => {
+    expect(validateName(name)).not.toBeNull()
   })
 })

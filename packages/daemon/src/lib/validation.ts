@@ -2,6 +2,8 @@
  * Tribe input validation — name format and message sanitization.
  */
 
+import { isTribeNameShape, TRIBE_NAME_SHAPE_ERROR } from "tribe-wire/lib/persona-name"
+
 // ---------------------------------------------------------------------------
 // Surrogate-safe string helpers
 // ---------------------------------------------------------------------------
@@ -54,11 +56,12 @@ export function truncateSurrogateSafe(text: string, maxCodeUnits: number): strin
 
 export function validateName(name: string): string | null {
   // Sigil-prefixed agent names (e.g. `@agent/2`) match slot-bead lease IDs.
-  // The `@` is optional and only meaningful at position 0; the `/` is allowed
-  // inside the body alongside dots/dashes/underscores.
-  if (!/^@?[a-z0-9][a-z0-9_./-]{0,31}$/.test(name)) {
-    return "Name must be 1-32 chars: lowercase letters, digits, hyphens, underscores, dots, slashes. Optional `@` prefix. Must start with letter or digit."
-  }
+  // 21768 — this shares ONE grammar with the adapter's register-time pre-seed:
+  // when the two disagreed, a successor persona the adapter refused to seed was
+  // also refused here, so the seat could not even rename itself into being
+  // addressable. The `@` is per-segment, so nested role paths like
+  // `@chief/@ci/next` resolve; `/` is a separator, not a body character.
+  if (!isTribeNameShape(name)) return TRIBE_NAME_SHAPE_ERROR
   return null
 }
 

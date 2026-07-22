@@ -401,6 +401,94 @@ describe("stdio adapter delivery modes", () => {
     expect(register?.params?.delivery).toBe("pull")
   })
 
+  it("21768: seeds a nested successor persona at initial register", async () => {
+    // Live 2026-07-22: `@chief/@ci/next` failed the pre-seed predicate at the
+    // SECOND sigil, so the seat registered unnamed and sat as `unknown-cmayz`
+    // for 4m17s while everything addressed to its persona was dropped.
+    // `$up @role/next` is a first-class launch surface, so every successor
+    // rotation carried that blind window.
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath)
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_NAME: "@chief/@ci/next",
+        TRIBE_REQUIRE_JOIN: "1",
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+
+    const register = daemon.requests.find((msg) => msg.method === "register") as
+      | { params?: { name?: string } }
+      | undefined
+    expect(register?.params?.name).toBe("@chief/@ci/next")
+  })
+
+  it("21768: a well-formed sigil-less launch name still registers unnamed, not fatally", async () => {
+    // The fail-loud line is MALFORMED vs. merely sigil-less. A bare name is a
+    // legitimate unidentified session (the daemon accepts `ci`, `agent/7`), so
+    // it must keep the old behaviour: not pre-seeded under require-join, joins
+    // from inside. Drawing the line at "not an @persona" instead broke the
+    // degrade and version-skew suites, which launch as `degrade-test` /
+    // `skew-test`.
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath)
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "degrade-test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_REQUIRE_JOIN: "1",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+
+    const register = daemon.requests.find((msg) => msg.method === "register") as
+      | { params?: { name?: string } }
+      | undefined
+    expect(register).toBeDefined()
+    expect(register?.params?.name).toBeUndefined()
+  })
+
+  it("21768: fails loudly when an explicitly requested launch name is malformed", async () => {
+    // A name that could never be a valid tribe name is an operator error: the
+    // daemon would reject it at register/join anyway, so degrading to an
+    // `unknown-<rand>` placeholder only converts a fixable startup error into
+    // minutes of silently dropped messages.
+    const socketPath = join(tmpDir, "tribe.sock")
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_NAME: "@Chief Next",
+        TRIBE_REQUIRE_JOIN: "1",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stderr = new Promise<string>((resolveStderr) => {
+      let output = ""
+      child!.stderr.on("data", (chunk: Buffer | string) => {
+        output += chunk.toString()
+      })
+      child!.stderr.on("close", () => resolveStderr(output))
+    })
+
+    const [exit, errorText] = await Promise.all([waitForExit(child), stderr])
+    expect(exit.code).not.toBe(0)
+    expect(errorText).toContain('Invalid TRIBE_NAME="@Chief Next"')
+  })
+
   it("declares a configured notification filter during initial registration", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath)

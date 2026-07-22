@@ -37,6 +37,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
+import { isExplicitTribePersonaName, isTribeNameShape, TRIBE_NAME_SHAPE_ERROR } from "./lib/persona-name.ts"
 import { createLogger, setSuppressConsole } from "loggily"
 import { createTimers } from "./timers.ts"
 import { defangModelInput } from "./lib/defang.ts"
@@ -95,6 +96,21 @@ const INITIAL_FILTER_MODE = initialFilterModeFromEnv(process.env.TRIBE_FILTER_MO
 // (`TRIBE_NAME=@chief`, `@agent/N`, etc.) never surface as unknown-*.
 const REQUIRE_EXPLICIT_JOIN = process.env.TRIBE_REQUIRE_JOIN !== "0"
 const LAUNCH_NAME = typeof args.name === "string" && args.name.trim().length > 0 ? args.name.trim() : undefined
+// 21768 — a MALFORMED launch name is an operator error, not a hint to fall back
+// on. The daemon would reject it at register/join anyway, so degrading to an
+// `unknown-<rand>` placeholder only converts a fixable startup error into
+// minutes of silently dropped messages. Fail at launch, naming the string.
+//
+// The line is malformed vs. merely sigil-less. A well-formed bare name
+// (`degrade-test`) is a legitimate unidentified session: it is still not
+// pre-seeded under require-join and still joins from inside, exactly as before.
+// Only a name that could never be a valid tribe name is fatal.
+if (LAUNCH_NAME !== undefined && !isTribeNameShape(LAUNCH_NAME)) {
+  throw new Error(
+    `Invalid TRIBE_NAME=${JSON.stringify(LAUNCH_NAME)}; ${TRIBE_NAME_SHAPE_ERROR} ` +
+      "Refusing to register under an unaddressable unknown-<rand> placeholder.",
+  )
+}
 const REGISTER_WITH_LAUNCH_NAME =
   LAUNCH_NAME !== undefined && (!REQUIRE_EXPLICIT_JOIN || isExplicitTribePersonaName(LAUNCH_NAME))
 // 20703 — managed spawns set TRIBE_TAKEOVER=1 so an explicit-persona
@@ -347,10 +363,6 @@ function requiredMcpTransportFailureResult(): {
 
 function registerParamsForConnection(): typeof baseRegisterParams & { takeover?: true } {
   return TAKEOVER && !hasRegistered ? { ...baseRegisterParams, takeover: true } : baseRegisterParams
-}
-
-function isExplicitTribePersonaName(name: string): boolean {
-  return /^@[a-z0-9][a-z0-9_./-]{0,31}$/.test(name)
 }
 
 function errorMessage(err: unknown): string {
