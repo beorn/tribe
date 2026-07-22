@@ -228,6 +228,10 @@ describe("registerSendCommands", () => {
                   : {}),
               },
             }
+          } else if (request.method === "register") {
+            // Mirror the real daemon's grant: the one-shot --reply register gets
+            // the requested name back (no live holder in this fixture).
+            result = { name: (request.params?.name as string) ?? "@chief", role: "member" }
           } else if (request.method === "tribe.send") {
             pendingOpen = false
             const message = request.params?.message
