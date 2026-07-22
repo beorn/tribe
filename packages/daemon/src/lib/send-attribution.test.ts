@@ -1,11 +1,10 @@
 /**
- * @failure @km/tribe/20988-send-identity, @pm/infra/20925-ci-pending-ball-triage
+ * @failure @ag/tribe/21717-identity-by-directory-not-claimed-field, @pm/infra/20925-ci-pending-ball-triage
  * @level unit
- * @consumer tribe CLI one-shot peer sends
+ * @consumer Tribe daemon socket senders
  *
- * One-shot `tribe send` calls connect through the daemon context, but their
- * authored message must retain both the caller identity and the explicit
- * per-message delivery class. Daemon-origin journal rows remain ambient.
+ * Sender identity comes from the connection context; a caller-provided field
+ * is never authoritative. Daemon-origin journal rows remain ambient.
  */
 
 import type { Database } from "bun:sqlite"
@@ -71,7 +70,7 @@ describe("tribe.send attribution and delivery", () => {
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  it("uses the CLI caller identity for peer sends but keeps daemon journal events ambient", () => {
+  it("ignores a claimed sender for daemon-context sends and keeps daemon journal events ambient", () => {
     const inserted: MessageInsertedInfo[] = []
     const daemon = makeContext(db, stmts, "daemon", "sess-daemon", "daemon", (info) => inserted.push(info))
 
@@ -99,7 +98,7 @@ describe("tribe.send attribution and delivery", () => {
       request: string | null
     }
     expect(message).toEqual({
-      sender: "@chief",
+      sender: "daemon",
       recipient: "@agent/7",
       kind: "direct",
       request: messageId,
@@ -114,14 +113,14 @@ describe("tribe.send attribution and delivery", () => {
       message_id: string
     }
     expect(pending).toEqual({
-      sender: "@chief",
+      sender: "daemon",
       recipient: "@agent/7",
       request_id: messageId,
       message_id: messageId,
     })
     expect(inserted[0]).toMatchObject({
-      sender: "@chief",
-      senderRole: "member",
+      sender: "daemon",
+      senderRole: "daemon",
       recipient: "@agent/7",
       kind: "direct",
     })

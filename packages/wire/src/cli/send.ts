@@ -115,10 +115,9 @@ type SendPayload = {
   reply?: string
   fanout?: Fanout
   expires_in_ms?: number
-  sender?: string
 }
 
-export function buildSendPayload(input: SendPayloadInput, sender?: string | null): SendPayload {
+export function buildSendPayload(input: SendPayloadInput): SendPayload {
   const payload: SendPayload = {
     to: input.to,
     message: input.message,
@@ -131,7 +130,6 @@ export function buildSendPayload(input: SendPayloadInput, sender?: string | null
   if (input.reply) payload.reply = input.reply
   if (input.fanout) payload.fanout = input.fanout
   if (input.expiresInMs !== undefined) payload.expires_in_ms = input.expiresInMs
-  if (sender) payload.sender = sender
   return payload
 }
 
@@ -258,10 +256,10 @@ function parseDomains(values: string[] | undefined): string[] {
 
 async function cmdSend(input: SendPayloadInput): Promise<void> {
   rejectUnstructuredMessageIntent(input)
-  const caller = await resolveSendCaller(input.reply)
+  const caller = input.reply ? await resolveSendCaller(input.reply) : null
   if (input.reply && caller) await verifyPendingReplyOwner(caller, input.reply)
 
-  const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input, caller))) as {
+  const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input))) as {
     error?: string
     summary?: string
     summary_derived?: boolean

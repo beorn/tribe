@@ -479,10 +479,22 @@ function createDispatcherHarness() {
     },
     addPendingClient(connId: string): TestSocket {
       const socket = createTestSocket()
+      const pendingName = `pending-${connId}`
+      const pendingCtx = createTribeContext({
+        db,
+        stmts,
+        sessionId: connId,
+        sessionRole: "pending",
+        initialName: pendingName,
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+        onMessageInserted: daemonCtx.onMessageInserted,
+      })
       clients.set(connId, {
         socket,
         id: connId,
-        name: `pending-${connId}`,
+        name: pendingName,
         role: "pending",
         domains: [],
         project: "/tmp/km-wt9",
@@ -494,7 +506,7 @@ function createDispatcherHarness() {
         claudeSessionId: null,
         peerSocket: null,
         conn: "test",
-        ctx: daemonCtx,
+        ctx: pendingCtx,
         registeredAt: Date.now(),
         lastActivityAt: Date.now(),
         recall: { sessionId: null, claudePid: null },

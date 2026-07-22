@@ -1417,12 +1417,24 @@ export function withDispatcher<
 
     function handleConnection(sock: NetSocket): void {
       const connId = randomUUID()
+      const pendingName = `pending-${connId}`
+      const pendingCtx = createTribeContext({
+        db,
+        stmts,
+        sessionId: connId,
+        sessionRole: "pending",
+        initialName: pendingName,
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+        onMessageInserted,
+      })
       log.info?.(`Client connected: ${connId.slice(0, 8)}`)
 
       const placeholder: ClientSession = {
         socket: sock,
         id: connId,
-        name: `pending-${connId.slice(0, 6)}`,
+        name: pendingName,
         role: "pending",
         domains: [],
         project: process.cwd(),
@@ -1434,7 +1446,7 @@ export function withDispatcher<
         claudeSessionId: null,
         peerSocket: null,
         conn: "",
-        ctx: daemonCtx,
+        ctx: pendingCtx,
         registeredAt: Date.now(),
         lastActivityAt: Date.now(),
         recall: { sessionId: null, claudePid: null },

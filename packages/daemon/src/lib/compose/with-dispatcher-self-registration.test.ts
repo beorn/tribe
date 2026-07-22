@@ -24,6 +24,11 @@ type RegisterResult = {
   role: TribeRole
 }
 
+type SendResult = {
+  id: string
+  sent: boolean
+}
+
 type CliStatusResult = {
   sessions: Array<{
     id: string
@@ -62,6 +67,33 @@ afterEach(async () => {
 })
 
 describe("dispatcher self-registration collision handling (@ag/tribe/19594)", () => {
+  it("attributes a pre-registration send to its socket instead of a claimed sender", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const client = harness.connectClient()
+
+    const sent = parseResult<{ structuredContent: SendResult }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "send-before-register",
+          method: "tribe.send",
+          params: {
+            to: "@agent/7",
+            message: "forged attribution attempt",
+            type: "notify",
+            sender: "@chief",
+          },
+        },
+        client.connId,
+      ),
+    ).structuredContent
+
+    expect(sent.sent).toBe(true)
+    expect(client.name).toMatch(/^pending-/u)
+    expect(harness.messageSender(sent.id)).toBe(client.name)
+  })
+
   it("persists a startup notification filter before the session becomes connected", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
@@ -1244,12 +1276,18 @@ function createDispatcherHarness(
     transportLifetimeEvents() {
       return [...transportLifetimeEvents]
     },
-    connectClient(): { connId: string; socket: TestSocket } {
+    connectClient(): { connId: string; name: string; socket: TestSocket } {
       const socket = createTestSocket()
       daemon.dispatcher.handleConnection(socket)
       const connId = socketToClient.get(socket)
       if (!connId) throw new Error("dispatcher did not register the connected socket")
-      return { connId, socket }
+      const name = clients.get(connId)?.name
+      if (!name) throw new Error("dispatcher did not name the connected socket")
+      return { connId, name, socket }
+    },
+    messageSender(id: string): string | null {
+      const row = db.prepare("SELECT sender FROM messages WHERE id = ?").get(id) as { sender: string } | null
+      return row?.sender ?? null
     },
     sessionAnnouncements(name: string): string[] {
       const rows = db
@@ -1292,10 +1330,22 @@ function createDispatcherHarness(
     },
     addPendingClient(connId: string): TestSocket {
       const socket = createTestSocket()
+      const pendingName = `pending-${connId}`
+      const pendingCtx = createTribeContext({
+        db,
+        stmts,
+        sessionId: connId,
+        sessionRole: "pending",
+        initialName: pendingName,
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+        onMessageInserted: daemonCtx.onMessageInserted,
+      })
       clients.set(connId, {
         socket,
         id: connId,
-        name: `pending-${connId}`,
+        name: pendingName,
         role: "pending",
         domains: [],
         project: "/tmp/km-wt9",
@@ -1307,7 +1357,7 @@ function createDispatcherHarness(
         claudeSessionId: null,
         peerSocket: null,
         conn: "test",
-        ctx: daemonCtx,
+        ctx: pendingCtx,
         registeredAt: Date.now(),
         lastActivityAt: Date.now(),
         recall: { sessionId: null, claudePid: null },

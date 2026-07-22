@@ -403,7 +403,7 @@ describe("registerSendCommands", () => {
     expect(mismatched.stderr).not.toContain("No daemon running")
   })
 
-  test("send forwards TRIBE_NAME as one-shot caller identity", async () => {
+  test("send does not forward TRIBE_NAME as a caller-authored identity", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-send-identity-"))
     const socketPath = join(tmp, "tribe.sock")
     const calls: Array<{ method: string; params: Record<string, unknown> }> = []
@@ -467,7 +467,6 @@ describe("registerSendCommands", () => {
             message: "please handle this",
             type: "request",
             request: true,
-            sender: "@chief",
           },
         },
       ])

@@ -938,9 +938,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       fetched.events?.some((event) => event.id === sent.id && event.content === "same-launch fan-in request"),
     ).toBe(true)
 
-    // A one-shot CLI inherits the managed launch environment in native Codex.
-    // It may attribute the message to the persona, but it is not a member
-    // transport: sending and then exiting must not claim, evict, or announce
+    // A one-shot CLI inherits the managed launch environment in native Codex,
+    // but it is not a member transport and cannot claim the persona as its
+    // sender. Sending and then exiting must not claim, evict, or announce
     // departure for the logical launch that owns the live MCP adapters.
     const cli = spawn(BUN_BIN, [CLI, "send", NAME, "one-shot same-name query", "--type", "query"], {
       cwd: tmpDir,

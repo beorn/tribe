@@ -18,7 +18,6 @@ import {
   countUnackedActionables,
   MAX_BALL_TTL_MS,
   type Delivery,
-  type SenderAttribution,
 } from "./messaging.ts"
 import { ACTIONABLE_TYPES_SET, ACTIONABLE_TYPES_SQL, AUTO_TRACK_TYPES_SET } from "./database.ts"
 import {
@@ -458,13 +457,6 @@ function openPendingRows(
   }
 }
 
-function sendAttribution(ctx: TribeContext, a: ToolArgs): SenderAttribution {
-  if (ctx.getRole() !== "daemon") return {}
-  const sender = typeof a.sender === "string" ? a.sender.trim() : ""
-  if (sender.length === 0 || sender === ctx.getName()) return {}
-  return { sender, senderRole: "member" }
-}
-
 function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
   // The tribe-wire daemon is role-agnostic (F12 of
   // @km/tribe/15496-coordination-drift): every message type is delivered to
@@ -529,8 +521,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   const summaryDerived = summaryArg.length === 0
   const summary = summaryDerived ? deriveSummary(sanitized) : summaryArg
   const classification = { summary, ...(delivery ? { delivery } : {}) }
-  const attribution = sendAttribution(ctx, a)
-  const sender = attribution.sender ?? ctx.getName()
+  const sender = ctx.getName()
   if (Array.isArray(recipients)) {
     const implicitlyTracked = AUTO_TRACK_TYPES_SET.has(msgType) && recipients.some((recipient) => recipient !== sender)
     const sharedRequestId = requestFlag ? randomUUID() : (requestId ?? (implicitlyTracked ? randomUUID() : null))
@@ -553,7 +544,6 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
           fanout: fanoutArg,
           expiresInMs,
         },
-        attribution,
       ),
     )
     const tracker = aggregateReplyTracker(results, replyId)
@@ -594,7 +584,6 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       fanout: fanoutArg,
       expiresInMs,
     },
-    attribution,
   )
   if ((requestFlag || requestId) && recipients === "*") {
     openPendingRows(

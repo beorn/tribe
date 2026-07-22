@@ -206,13 +206,15 @@ tribe-wire send <to> <message...> [-t, --type <type>] [-s, --summary <text>] [--
 `<to>` is a session name or `*` for broadcast. `--type` is one of `assign`,
 `status`, `query`, `response`, `notify` (default), `request`, `verdict` —
 the daemon delivers every type to every session; no type is role-gated.
-`--reply <request_id>` closes a tracked request. A managed one-shot CLI derives
-its current caller from daemon authority using `TRIBE_LAUNCH_ID`, so a runtime
-rename also changes send attribution and pending ownership; an unmanaged CLI
-falls back to `TRIBE_NAME`/`TRIBE_SESSION_NAME`. The command verifies ownership
-against `tribe.pending` before sending, and verifies the daemon's
-committed-closed count afterward; it will not report success on an unproven
-close.
+`--reply <request_id>` closes a tracked request. A one-shot CLI is not a
+registered member transport, so the daemon attributes its message to the
+connection's unique pending identity; `TRIBE_NAME`, `TRIBE_SESSION_NAME`, and
+`TRIBE_LAUNCH_ID` are never accepted as send attribution. For replies, a
+managed CLI resolves the current owner from daemon authority using
+`TRIBE_LAUNCH_ID`; an unmanaged CLI uses `TRIBE_NAME`/`TRIBE_SESSION_NAME` only
+for the ownership preflight. The command verifies ownership against
+`tribe.pending` before sending, and verifies the daemon's committed-closed count
+afterward; it will not report success on an unproven close.
 If the first non-whitespace message token looks like `reply=<id>` or
 `ref=<value>`, `send` always exits 2 before daemon I/O—even when a matching or
 different structured flag is also present—and prints the exact `--reply <id>`
