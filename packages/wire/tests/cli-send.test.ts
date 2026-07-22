@@ -407,6 +407,123 @@ describe("registerSendCommands", () => {
     expect(mismatched.stderr).not.toContain("No daemon running")
   })
 
+  // @ag/tribe/21921 — P0 REGRESSION PIN. The launch row can be ABSENT
+  // (getSessionsByLaunchId -> 0 rows), and every `ag code` seat carries
+  // TRIBE_LAUNCH_ID, so an unconditional exit on that path removes sending
+  // entirely. Eight seats went mute on 2026-07-22 while reads kept working,
+  // because reads resolve an explicit target and never need the caller's own
+  // identity. The daemon-side launch-tuple fix (f2f4cc02) repairs the case
+  // where a session IS returned; this pins the case where none is.
+  test("a NON-REPLY send survives an unresolvable launch identity (degrades to anonymous)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-send-stale-launch-"))
+    const socketPath = join(tmp, "tribe.sock")
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = []
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as { id: number; method: string; params?: Record<string, unknown> }
+          calls.push({ method: request.method, params: request.params ?? {} })
+          const result = request.method === "cli_inbox_status_by_launch_v1" ? {} : { sent: true }
+          socket.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\n")
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const res = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProc) => {
+        const child = spawn(BUN_BIN, [CLI, "send", "@agent/7", "still", "reachable"], {
+          env: {
+            ...process.env,
+            TRIBE_SOCKET: socketPath,
+            TRIBE_NAME: "@chief",
+            TRIBE_LAUNCH_ID: "launch-id-with-no-stored-session",
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+        let stdout = ""
+        let stderr = ""
+        child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+        child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+        child.on("close", (code) => resolveProc({ code, stdout, stderr }))
+      })
+
+      expect(res).toMatchObject({ code: 0 })
+      expect(res.stdout).toContain("Sent message to @agent/7")
+      expect(res.stderr).toContain("launch-id-with-no-stored-session")
+      // Degrading must not fall back to the env name (21717 anti-spoof).
+      expect(calls.some((c) => c.method === "register")).toBe(false)
+      expect(calls.some((c) => c.method === "tribe.send")).toBe(true)
+    } finally {
+      server.close()
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  test("a REPLY send still refuses an unresolvable launch identity", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-send-stale-launch-reply-"))
+    const socketPath = join(tmp, "tribe.sock")
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as { id: number; method: string }
+          const result = request.method === "cli_inbox_status_by_launch_v1" ? {} : { sent: true }
+          socket.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\n")
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const res = await new Promise<{ code: number | null; stderr: string }>((resolveProc) => {
+        const child = spawn(BUN_BIN, [CLI, "send", "@agent/7", "answered", "--type", "response", "--reply", "req-123"], {
+          env: {
+            ...process.env,
+            TRIBE_SOCKET: socketPath,
+            TRIBE_NAME: "@chief",
+            TRIBE_LAUNCH_ID: "launch-id-with-no-stored-session",
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+        let stderr = ""
+        child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+        child.on("close", (code) => resolveProc({ code, stderr }))
+      })
+
+      expect(res.code).toBe(1)
+      expect(res.stderr).toContain("req-123")
+    } finally {
+      server.close()
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
   test("send does not forward TRIBE_NAME as a caller-authored identity", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-send-identity-"))
     const socketPath = join(tmp, "tribe.sock")
