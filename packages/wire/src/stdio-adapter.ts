@@ -35,6 +35,7 @@ import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
 import { createReconnectWatchdog } from "./lib/reconnect-watchdog.ts"
 import { createHash, randomUUID } from "node:crypto"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
+import { isExplicitTribePersonaName, launchPersonaNameRefusal } from "./lib/launch-persona-name.ts"
 import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
 import { createLogger, setSuppressConsole } from "loggily"
@@ -97,6 +98,15 @@ const REQUIRE_EXPLICIT_JOIN = process.env.TRIBE_REQUIRE_JOIN !== "0"
 const LAUNCH_NAME = typeof args.name === "string" && args.name.trim().length > 0 ? args.name.trim() : undefined
 const REGISTER_WITH_LAUNCH_NAME =
   LAUNCH_NAME !== undefined && (!REQUIRE_EXPLICIT_JOIN || isExplicitTribePersonaName(LAUNCH_NAME))
+// 21919 — a launcher that passes an `@`-name declared a hat it expects to be
+// addressable. Registering it as `unknown-<rand>` instead makes the seat look
+// alive while nothing sent to the persona arrives, and says nothing about why.
+// Refuse at startup: an MCP server that fails to boot is visible, a seat that
+// cannot be addressed is not.
+{
+  const refusal = launchPersonaNameRefusal(REQUIRE_EXPLICIT_JOIN ? LAUNCH_NAME : undefined)
+  if (refusal !== null) throw new Error(refusal)
+}
 // 20703 — managed spawns set TRIBE_TAKEOVER=1 so an explicit-persona
 // respawn can supersede a stale live holder once. The capability is consumed
 // after the first successful registration; replaying it on reconnect lets two
@@ -347,10 +357,6 @@ function requiredMcpTransportFailureResult(): {
 
 function registerParamsForConnection(): typeof baseRegisterParams & { takeover?: true } {
   return TAKEOVER && !hasRegistered ? { ...baseRegisterParams, takeover: true } : baseRegisterParams
-}
-
-function isExplicitTribePersonaName(name: string): boolean {
-  return /^@[a-z0-9][a-z0-9_./-]{0,31}$/.test(name)
 }
 
 function errorMessage(err: unknown): string {
