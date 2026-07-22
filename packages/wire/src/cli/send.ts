@@ -44,11 +44,28 @@ const JOIN_CLI = visibleCliProjectionForMcp("join")
 // intra-module rule; Phase C may extract to ../lib/daemon-call.ts)
 // ---------------------------------------------------------------------------
 
-async function callDaemon(method: string, params?: Record<string, unknown>): Promise<unknown> {
+async function callDaemon(method: string, params?: Record<string, unknown>, as?: string | null): Promise<unknown> {
   const socketPath = resolveSocketPath()
   try {
     const client = await connectToDaemon(socketPath)
     try {
+      // One-shot identity: register under the caller's session name BEFORE the
+      // call so the daemon attributes the message (and can close ball-tracker
+      // rows owned by that name) instead of an anonymous pending-* session.
+      // A live holder of the name dedupes us fail-loud (tracker reports 0
+      // closed) — that is the collision-safe behavior, not a silent steal.
+      if (as) {
+        await client.call("register", {
+          name: as,
+          role: "member",
+          domains: [],
+          delivery: "pull",
+          project: process.cwd(),
+          projectName: process.cwd().split("/").filter(Boolean).at(-1) ?? "unknown",
+          pid: process.pid,
+          protocolVersion: TRIBE_PROTOCOL_VERSION,
+        })
+      }
       const result = await client.call(method, params)
       return result
     } finally {
@@ -256,10 +273,10 @@ function parseDomains(values: string[] | undefined): string[] {
 
 async function cmdSend(input: SendPayloadInput): Promise<void> {
   rejectUnstructuredMessageIntent(input)
-  const caller = input.reply ? await resolveSendCaller(input.reply) : null
+  const caller = await resolveSendCaller(input.reply)
   if (input.reply && caller) await verifyPendingReplyOwner(caller, input.reply)
 
-  const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input))) as {
+  const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input), caller)) as {
     error?: string
     summary?: string
     summary_derived?: boolean
