@@ -44,7 +44,40 @@ const JOIN_CLI = visibleCliProjectionForMcp("join")
 // intra-module rule; Phase C may extract to ../lib/daemon-call.ts)
 // ---------------------------------------------------------------------------
 
-async function callDaemon(method: string, params?: Record<string, unknown>, as?: string | null): Promise<unknown> {
+/**
+ * Decide what the one-shot CLI does when the daemon did not grant the identity
+ * it asked for. The daemon never lets a CLI steal a name held by a live session
+ * — it dedupes to a different one — so a tracked reply sent under the deduped
+ * identity DELIVERS the message but closes ZERO tracker rows. That silent
+ * half-success (peer sees the answer, ball stays open forever) is the failure
+ * this guards; a tracked reply must abort instead.
+ */
+export function classifyIdentityGrant(
+  requested: string,
+  assigned: string | undefined,
+  requireIdentity: boolean,
+): { ok: true } | { ok: false; fatal: boolean; message: string } {
+  if (assigned === requested) return { ok: true }
+  const who = assigned === undefined || assigned.length === 0 ? "an anonymous session" : `"${assigned}"`
+  const base = `tribe-wire: could not take the identity "${requested}" — the daemon assigned ${who}, because that name is held by a live session.`
+  if (requireIdentity) {
+    return {
+      ok: false,
+      fatal: true,
+      message:
+        `${base}\nA tracked reply must be sent BY the ball's owner, so nothing was sent and the ball is still open.\n` +
+        `Answer from that live session's own Tribe MCP (tribe.send with the reply field) instead of the one-shot CLI.`,
+    }
+  }
+  return { ok: false, fatal: false, message: `${base} This message is attributed to ${who}.` }
+}
+
+async function callDaemon(
+  method: string,
+  params?: Record<string, unknown>,
+  as?: string | null,
+  requireIdentity = false,
+): Promise<unknown> {
   const socketPath = resolveSocketPath()
   try {
     const client = await connectToDaemon(socketPath)
@@ -52,19 +85,28 @@ async function callDaemon(method: string, params?: Record<string, unknown>, as?:
       // One-shot identity: register under the caller's session name BEFORE the
       // call so the daemon attributes the message (and can close ball-tracker
       // rows owned by that name) instead of an anonymous pending-* session.
-      // A live holder of the name dedupes us fail-loud (tracker reports 0
-      // closed) — that is the collision-safe behavior, not a silent steal.
       if (as) {
-        await client.call("register", {
-          name: as,
-          role: "member",
-          domains: [],
-          delivery: "pull",
-          project: process.cwd(),
-          projectName: process.cwd().split("/").filter(Boolean).at(-1) ?? "unknown",
-          pid: process.pid,
-          protocolVersion: TRIBE_PROTOCOL_VERSION,
-        })
+        const registered = mcpJsonContent(
+          await client.call("register", {
+            name: as,
+            role: "member",
+            domains: [],
+            delivery: "pull",
+            project: process.cwd(),
+            projectName: process.cwd().split("/").filter(Boolean).at(-1) ?? "unknown",
+            pid: process.pid,
+            protocolVersion: TRIBE_PROTOCOL_VERSION,
+          }),
+        ) as { name?: string }
+        const grant = classifyIdentityGrant(as, registered?.name, requireIdentity)
+        if (!grant.ok) {
+          if (grant.fatal) {
+            console.error(grant.message)
+            client.close()
+            process.exit(1)
+          }
+          console.warn(grant.message)
+        }
       }
       const result = await client.call(method, params)
       return result
@@ -276,7 +318,9 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
   const caller = await resolveSendCaller(input.reply)
   if (input.reply && caller) await verifyPendingReplyOwner(caller, input.reply)
 
-  const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input), caller)) as {
+  const result = mcpJsonContent(
+    await callDaemon("tribe.send", buildSendPayload(input), caller, Boolean(input.reply)),
+  ) as {
     error?: string
     summary?: string
     summary_derived?: boolean
