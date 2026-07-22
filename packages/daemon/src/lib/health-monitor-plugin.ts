@@ -108,6 +108,8 @@ export interface ReaperSuspect {
   firstSeen: number
   samples: number
   asked: boolean
+  /** One-shot flag: unclaimed escalation broadcast already sent (kill arm off). */
+  escalated?: boolean
   command: string
   cpu: number
   etime: string
@@ -139,8 +141,16 @@ export interface HealthThresholds {
   reaperCpuThreshold: number
   /** Reaper: minimum process age in minutes before suspect (default: 30) */
   reaperAgeMinutes: number
-  /** Reaper: samples to wait after asking before killing (default: 6, i.e. 60s at 10s interval) */
+  /** Reaper: samples to wait after asking before escalating/killing (default: 6, i.e. 60s at 10s interval) */
   reaperGraceSamples: number
+  /**
+   * Reaper: whether the kill arm may fire (default: false). Detection and the
+   * claim query always run when reaperEnabled; actually killing an unclaimed
+   * process is an operator/LLM decision, never automatic. With the kill arm
+   * off, an unclaimed suspect gets ONE `health:reaper:unclaimed` escalation
+   * broadcast instead of a signal.
+   */
+  reaperKillEnabled: boolean
 }
 
 export function defaultThresholds(): HealthThresholds {
@@ -162,6 +172,7 @@ export function defaultThresholds(): HealthThresholds {
     reaperCpuThreshold: parseInt(process.env.HEALTH_REAPER_CPU_THRESHOLD ?? "80", 10),
     reaperAgeMinutes: parseInt(process.env.HEALTH_REAPER_AGE_MINUTES ?? "30", 10),
     reaperGraceSamples: parseInt(process.env.HEALTH_REAPER_GRACE_SAMPLES ?? "6", 10),
+    reaperKillEnabled: process.env.HEALTH_REAPER_KILL === "1",
   }
 }
 
@@ -1218,7 +1229,10 @@ export async function checkReaper(
     // After 3 samples: ask sessions to claim
     if (suspect.samples >= 3 && !suspect.asked) {
       suspect.asked = true
-      const msg = `health:reaper: PID ${pid} (${suspect.command}) at ${suspect.cpu}% CPU for ${suspect.etime}. Is this yours? Reply within 60s or it will be killed.`
+      const consequence = thresholds.reaperKillEnabled
+        ? "Reply within 60s or it will be killed."
+        : "Reply to claim it; unclaimed processes are escalated to the operator (never auto-killed)."
+      const msg = `health:reaper: PID ${pid} (${suspect.command}) at ${suspect.cpu}% CPU for ${suspect.etime}. Is this yours? ${consequence}`
       log.info?.(`reaper: asking about PID ${pid}`)
       api.broadcast(msg, "health:reaper:query", undefined, {
         delivery: "push",
@@ -1251,6 +1265,22 @@ export async function checkReaper(
 
       if (!stillAlive) {
         state.reaperSuspects.delete(pid)
+        continue
+      }
+
+      // Kill arm off (the default): intervention is an operator/LLM decision,
+      // never automatic. Escalate ONCE per suspect and keep tracking so a
+      // later claim or process exit still clears it — but never signal it.
+      if (!thresholds.reaperKillEnabled) {
+        if (!suspect.escalated) {
+          suspect.escalated = true
+          const escMsg = `health:reaper: PID ${pid} (${suspect.command}) unclaimed after ${thresholds.reaperGraceSamples * 10}s at ${suspect.cpu}% CPU for ${suspect.etime} — auto-kill is disabled; operator decision required (reply "reaper:claim PID ${pid}" to clear)`
+          log.info?.(`reaper: escalating unclaimed PID ${pid} (kill arm disabled)`)
+          api.broadcast(escMsg, "health:reaper:unclaimed", undefined, {
+            delivery: "push",
+            topic: "health:reaper:unclaimed",
+          })
+        }
         continue
       }
 
