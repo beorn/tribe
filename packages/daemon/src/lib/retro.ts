@@ -52,6 +52,10 @@ interface Message {
   content: string
   bead_id: string | null
   ref: string | null
+  /** Set when this message OPENS a tracked ball (== pending_request.request_id). */
+  request: string | null
+  /** Set when this message CLOSES a tracked ball; value is the request id it answers. */
+  reply: string | null
   ts: number
 }
 
@@ -72,7 +76,8 @@ interface MemberMetrics {
   received: number
   byType: Record<string, number>
   beads: Set<string>
-  avgResponseMs: number | null
+  /** Latencies (ms) of balls THIS member answered, i.e. reply.ts − request.ts. */
+  responseLatenciesMs: number[]
 }
 
 export interface RetroReport {
@@ -86,12 +91,19 @@ export interface RetroReport {
     sent: number
     received: number
     beads_mentioned: string[]
+    /** Number of balls this member answered (denominator of the averages). */
+    responses: number
     avg_response: string | null
+    response_p50: string | null
+    response_p90: string | null
   }>
   timeline: Array<{ time: string; event: string }>
   coordination: {
+    /** Balls opened in the window that never received a matching reply. */
     unanswered_queries: number
     avg_response_time: string | null
+    response_p50: string | null
+    response_p90: string | null
     longest_response: string | null
     longest_response_member: string | null
   }
@@ -102,8 +114,21 @@ export interface RetroReport {
 // ---------------------------------------------------------------------------
 
 function makeMember(name: string, role: string, domains: string[]): MemberMetrics {
-  return { name, role, domains, sent: 0, received: 0, byType: {}, beads: new Set(), avgResponseMs: null }
+  return { name, role, domains, sent: 0, received: 0, byType: {}, beads: new Set(), responseLatenciesMs: [] }
 }
+
+/** Nearest-rank percentile over an ascending-sorted array (matches health-cadence). */
+function percentile(sortedAsc: number[], fraction: number): number | null {
+  if (sortedAsc.length === 0) return null
+  return sortedAsc[Math.max(0, Math.ceil(sortedAsc.length * fraction) - 1)] ?? null
+}
+
+function mean(values: number[]): number | null {
+  if (values.length === 0) return null
+  return values.reduce((a, b) => a + b, 0) / values.length
+}
+
+const durationOrNull = (ms: number | null): string | null => (ms !== null ? formatDuration(ms) : null)
 
 function getOrCreateMember(map: Map<string, MemberMetrics>, name: string): MemberMetrics {
   let m = map.get(name)
@@ -114,45 +139,48 @@ function getOrCreateMember(map: Map<string, MemberMetrics>, name: string): Membe
   return m
 }
 
-/** Match queries to responses: first by explicit ref, then by proximity (next response from recipient) */
-function computeResponseTimes(messages: Message[]): { times: Map<string, number[]>; answeredIds: Set<string> } {
-  const times = new Map<string, number[]>()
-  const answeredIds = new Set<string>()
-  const queryMap = new Map<string, { sender: string; ts: number }>()
-  const pendingByRecipient = new Map<string, Array<{ id: string; ts: number }>>()
+/**
+ * Ball-tracker response latencies. A message with `request` set opens a tracked
+ * ball at its `ts` (== pending_request.opened_at); a later message whose `reply`
+ * equals that request id closes it, and that closer (reply.sender) is the
+ * responder. Latency = reply.ts − request.ts, attributed to the responder — the
+ * same request→reply join the health cadence uses (health-cadence.ts).
+ *
+ * NO SILENT ERRORS: an opened ball with no matching reply is returned in
+ * `openRequestIds` (minus `answeredRequestIds`) and counted as OPEN — never
+ * scored as a 0ms response. A reply whose opening request fell outside the
+ * loaded window has no known opened_at here, so it is skipped rather than timed
+ * against a fabricated start.
+ */
+function computeResponseTimes(messages: Message[]): {
+  latenciesByResponder: Map<string, number[]>
+  answeredRequestIds: Set<string>
+  openRequestIds: Set<string>
+} {
+  const latenciesByResponder = new Map<string, number[]>()
+  const answeredRequestIds = new Set<string>()
+  const openRequestIds = new Set<string>()
+  const openedAt = new Map<string, number>()
 
   for (const msg of messages) {
-    if (msg.type === "query") {
-      queryMap.set(msg.id, { sender: msg.sender, ts: msg.ts })
-      if (msg.recipient !== "*") {
-        const arr = pendingByRecipient.get(msg.recipient) ?? []
-        arr.push({ id: msg.id, ts: msg.ts })
-        pendingByRecipient.set(msg.recipient, arr)
-      }
-    }
-    if (msg.type === "response") {
-      let queryTs: number | undefined
-      // Match by ref
-      if (msg.ref && queryMap.has(msg.ref)) {
-        queryTs = queryMap.get(msg.ref)!.ts
-        answeredIds.add(msg.ref)
-      } else {
-        // Match by proximity
-        const pending = pendingByRecipient.get(msg.sender)
-        if (pending && pending.length > 0) {
-          const q = pending.shift()!
-          queryTs = q.ts
-          answeredIds.add(q.id)
-        }
-      }
-      if (queryTs !== undefined) {
-        const arr = times.get(msg.sender) ?? []
-        arr.push(msg.ts - queryTs)
-        times.set(msg.sender, arr)
-      }
+    if (msg.request) {
+      openRequestIds.add(msg.request)
+      // The opening send is authoritative; keep the earliest ts if duplicated.
+      const prior = openedAt.get(msg.request)
+      if (prior === undefined || msg.ts < prior) openedAt.set(msg.request, msg.ts)
     }
   }
-  return { times, answeredIds }
+  for (const msg of messages) {
+    if (!msg.reply) continue
+    const openTs = openedAt.get(msg.reply)
+    if (openTs === undefined) continue // opener outside window — cannot time it
+    if (msg.ts < openTs) continue // out-of-order / clock skew — never a negative latency
+    answeredRequestIds.add(msg.reply)
+    const arr = latenciesByResponder.get(msg.sender) ?? []
+    arr.push(msg.ts - openTs)
+    latenciesByResponder.set(msg.sender, arr)
+  }
+  return { latenciesByResponder, answeredRequestIds, openRequestIds }
 }
 
 export function generateRetro(db: Database, sinceMs?: number): RetroReport {
@@ -205,20 +233,20 @@ export function generateRetro(db: Database, sinceMs?: number): RetroReport {
     }
   }
 
-  // Response latencies
-  const { times: responseTimes, answeredIds } = computeResponseTimes(messages)
-  for (const [name, t] of responseTimes) {
+  // Response latencies (ball-tracker request→reply pairs)
+  const { latenciesByResponder, answeredRequestIds, openRequestIds } = computeResponseTimes(messages)
+  for (const [name, latencies] of latenciesByResponder) {
     const member = memberMap.get(name)
-    if (member && t.length > 0) member.avgResponseMs = t.reduce((a, b) => a + b, 0) / t.length
+    if (member) member.responseLatenciesMs = latencies
   }
 
-  const unansweredQueries = messages.filter((m) => m.type === "query" && !answeredIds.has(m.id)).length
-  const allTimes = [...responseTimes.values()].flat()
-  const avgResponseTime = allTimes.length > 0 ? allTimes.reduce((a, b) => a + b, 0) / allTimes.length : null
-  const longestResponse = allTimes.length > 0 ? Math.max(...allTimes) : null
+  const unansweredQueries = [...openRequestIds].filter((id) => !answeredRequestIds.has(id)).length
+  const allLatencies = [...latenciesByResponder.values()].flat().sort((a, b) => a - b)
+  const avgResponseTime = mean(allLatencies)
+  const longestResponse = allLatencies.length > 0 ? allLatencies.at(-1)! : null
   let longestResponseMember: string | null = null
   if (longestResponse !== null) {
-    for (const [name, t] of responseTimes)
+    for (const [name, t] of latenciesByResponder)
       if (t.includes(longestResponse)) {
         longestResponseMember = name
         break
@@ -266,15 +294,21 @@ export function generateRetro(db: Database, sinceMs?: number): RetroReport {
   const memberList = [...memberMap.values()]
     .filter((m) => m.sent > 0 || m.received > 0)
     .sort((a, b) => b.sent - a.sent)
-    .map((m) => ({
-      name: m.name,
-      role: m.role,
-      domains: m.domains,
-      sent: m.sent,
-      received: m.received,
-      beads_mentioned: [...m.beads].sort(),
-      avg_response: m.avgResponseMs !== null ? formatDuration(m.avgResponseMs) : null,
-    }))
+    .map((m) => {
+      const sorted = [...m.responseLatenciesMs].sort((a, b) => a - b)
+      return {
+        name: m.name,
+        role: m.role,
+        domains: m.domains,
+        sent: m.sent,
+        received: m.received,
+        beads_mentioned: [...m.beads].sort(),
+        responses: sorted.length,
+        avg_response: durationOrNull(mean(sorted)),
+        response_p50: durationOrNull(percentile(sorted, 0.5)),
+        response_p90: durationOrNull(percentile(sorted, 0.9)),
+      }
+    })
 
   const durationMs = windowEnd - windowStart
   return {
@@ -290,8 +324,10 @@ export function generateRetro(db: Database, sinceMs?: number): RetroReport {
     timeline: timeline.map(({ time, event }) => ({ time, event })),
     coordination: {
       unanswered_queries: unansweredQueries,
-      avg_response_time: avgResponseTime !== null ? formatDuration(avgResponseTime) : null,
-      longest_response: longestResponse !== null ? formatDuration(longestResponse) : null,
+      avg_response_time: durationOrNull(avgResponseTime),
+      response_p50: durationOrNull(percentile(allLatencies, 0.5)),
+      response_p90: durationOrNull(percentile(allLatencies, 0.9)),
+      longest_response: durationOrNull(longestResponse),
       longest_response_member: longestResponseMember,
     },
   }
@@ -321,11 +357,11 @@ export function formatMarkdown(report: RetroReport): string {
 
   if (report.members.length > 0) {
     lines.push("## Per-Member Activity")
-    lines.push("| Member | Sent | Received | Beads Mentioned | Avg Response |")
-    lines.push("|--------|------|----------|-----------------|--------------|")
+    lines.push("| Member | Sent | Received | Beads Mentioned | Responses | Avg Response | p50 | p90 |")
+    lines.push("|--------|------|----------|-----------------|-----------|--------------|-----|-----|")
     for (const m of report.members)
       lines.push(
-        `| ${m.name} | ${m.sent} | ${m.received} | ${m.beads_mentioned.length} | ${m.avg_response ?? "\u2014"} |`,
+        `| ${m.name} | ${m.sent} | ${m.received} | ${m.beads_mentioned.length} | ${m.responses} | ${m.avg_response ?? "\u2014"} | ${m.response_p50 ?? "\u2014"} | ${m.response_p90 ?? "\u2014"} |`,
       )
     lines.push("")
   }
@@ -339,6 +375,10 @@ export function formatMarkdown(report: RetroReport): string {
   lines.push("## Coordination Health")
   lines.push(`- Unanswered queries: ${report.coordination.unanswered_queries}`)
   lines.push(`- Average response time: ${report.coordination.avg_response_time ?? "\u2014"}`)
+  if (report.coordination.response_p50 || report.coordination.response_p90)
+    lines.push(
+      `- Response p50 / p90: ${report.coordination.response_p50 ?? "\u2014"} / ${report.coordination.response_p90 ?? "\u2014"}`,
+    )
   if (report.coordination.longest_response)
     lines.push(
       `- Longest response: ${report.coordination.longest_response} (${report.coordination.longest_response_member})`,
