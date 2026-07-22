@@ -26,6 +26,7 @@
 
 import { createLogger } from "loggily"
 import { sendMessage } from "../messaging.ts"
+import { resolveBallSlaMs } from "../retro.ts"
 import { cleanupOldData, backfillDefaultRoomMembers } from "../session.ts"
 import { loadPlugins } from "../plugin-loader.ts"
 import type { TribeClientApi, TribePluginApi } from "../plugin-api.ts"
@@ -75,7 +76,7 @@ export interface WithRuntime {
   run(): Promise<void>
 }
 
-function defaultBuildPluginApi<T extends RuntimeShape>(t: T): TribeClientApi {
+export function defaultBuildPluginApi<T extends RuntimeShape>(t: T): TribeClientApi {
   const { stmts, daemonCtx, daemonSessionId, registry } = t
   const { clients } = registry
   return {
@@ -118,6 +119,31 @@ function defaultBuildPluginApi<T extends RuntimeShape>(t: T): TribeClientApi {
         count: row?.count ?? 0,
         oldestTs: row?.oldest_ts ?? 0,
       }
+    },
+    getStaleBalls() {
+      // Read-only projection of the pending_request authority — NOT a second
+      // queue. Group open balls aged past the ball-SLA threshold (default 10m,
+      // TRIBE_BALL_SLA_MS) by owner (recipient). Mirrors the retro/health
+      // open-stale computation so every surface reports the same breach.
+      const now = Date.now()
+      const thresholdMs = resolveBallSlaMs()
+      const rows = stmts.selectAllPendingRequests.all() as Array<{ recipient: string; opened_at: number }>
+      const byOwner = new Map<string, { count: number; oldestAgeMs: number }>()
+      for (const row of rows) {
+        const ageMs = now - row.opened_at
+        if (ageMs < thresholdMs) continue
+        const prev = byOwner.get(row.recipient)
+        if (prev) {
+          prev.count += 1
+          if (ageMs > prev.oldestAgeMs) prev.oldestAgeMs = ageMs
+        } else {
+          byOwner.set(row.recipient, { count: 1, oldestAgeMs: ageMs })
+        }
+      }
+      const owners = [...byOwner.entries()]
+        .map(([owner, v]) => ({ owner, count: v.count, oldestAgeMs: v.oldestAgeMs }))
+        .sort((a, b) => (a.owner < b.owner ? -1 : a.owner > b.owner ? 1 : 0))
+      return { thresholdMs, owners }
     },
   }
 }

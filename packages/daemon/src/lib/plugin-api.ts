@@ -108,4 +108,17 @@ export interface TribeClientApi {
    * staleness consumes the richer `health.cadence.inbox_lag` projection.
    */
   getUnreadDms(sessionName: string): { count: number; oldestTs: number }
+
+  /**
+   * Owners of tracked balls open past the ball-SLA threshold (default 10m,
+   * `TRIBE_BALL_SLA_MS`), each with their open-ball count and the oldest such
+   * ball's age. Read-only projection of the `pending_request` authority — NOT a
+   * second queue. Used by the health monitor to raise a PASSIVE per-owner
+   * stale-ball broadcast so a blocked owner is visible on the ambient rail
+   * without a chief poll. Empty `owners` when nothing breaches.
+   */
+  getStaleBalls(): {
+    thresholdMs: number
+    owners: Array<{ owner: string; count: number; oldestAgeMs: number }>
+  }
 }

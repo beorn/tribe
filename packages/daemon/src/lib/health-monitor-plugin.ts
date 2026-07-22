@@ -1426,6 +1426,7 @@ export const healthMonitorPlugin: TribePluginApi = {
     let ghRateSampleCount = 0
     let ioSampleCount = 0
     let chiefPresenceSampleCount = 0
+    let staleBallSampleCount = 0
 
     log.info?.(
       `starting: poll=${pollIntervalSec}s, cpu warn=${thresholds.cpuWarningMultiplier}x crit=${thresholds.cpuCriticalMultiplier}x, mem warn=${thresholds.memWarningPercent}% crit=${thresholds.memCriticalPercent}%`,
@@ -1472,6 +1473,35 @@ export const healthMonitorPlugin: TribePluginApi = {
             }
           } catch (err) {
             log.error?.(`chief-absence check failed: ${err instanceof Error ? err.message : err}`)
+          }
+        }
+
+        // --- Stale-ball SLA watchdog (every 3rd sample — ~30s) ---
+        // PASSIVE observability (@km/tribe/21753): the ball-SLA breach is
+        // already surfaced in tribe.health()/retro, but a chief must POLL those.
+        // Here we push a per-owner warning onto the ambient `health:*` rail so a
+        // blocked owner is visible without a poll. Deduped on a per-owner content
+        // prefix (hasRecentMessage's ~5min window) so each owner alerts at most
+        // once per window and a healthy owner never alerts. Never blocks the
+        // sample loop — a DB read + broadcast, wrapped so a failure is logged,
+        // not fatal.
+        staleBallSampleCount++
+        if (staleBallSampleCount % 3 === 0) {
+          try {
+            const { thresholdMs, owners } = api.getStaleBalls()
+            const thresholdMin = Math.floor(thresholdMs / 60_000)
+            for (const { owner, count, oldestAgeMs } of owners) {
+              const dedupPrefix = `stale ball SLA breach: ${owner} `
+              if (api.hasRecentMessage(dedupPrefix)) continue
+              const message = `${dedupPrefix}owes ${count} open ${count === 1 ? "ball" : "balls"} past ${thresholdMin}m; oldest ${Math.floor(oldestAgeMs / 60_000)}m`
+              log.info?.(`alert: ${message}`)
+              api.broadcast(message, "health:stale-ball:warning", undefined, {
+                delivery: "push",
+                topic: "health:stale-ball:warning",
+              })
+            }
+          } catch (err) {
+            log.error?.(`stale-ball check failed: ${err instanceof Error ? err.message : err}`)
           }
         }
 
