@@ -173,30 +173,60 @@ function rejectUnstructuredMessageIntent(input: SendPayloadInput): void {
   process.exit(2)
 }
 
+/**
+ * The identity this send is attributed to, or null to send anonymously.
+ *
+ * Two rules, and the difference between them is whether the send CLAIMS
+ * anything (@ag/tribe/21921):
+ *
+ * - A **reply** must be sent BY the ball's owner — it closes a tracker row
+ *   someone else is waiting on. An unverifiable identity there is fatal.
+ * - A **non-reply** send claims no identity at all, so an unresolvable one
+ *   costs nothing. It degrades to anonymous.
+ *
+ * `1aa7741e8` collapsed the two: the launch-identity branch ran on every send
+ * and could only return a session or `exit(1)`. Every `ag code` seat carries
+ * `TRIBE_LAUNCH_ID`, so any seat whose launch row had gone stale lost sending
+ * entirely — eight seats mute, while reads kept working because they resolve
+ * an explicit target and never need the caller's own identity.
+ *
+ * Degrading NEVER falls back to `TRIBE_NAME`. An env var is caller-authored:
+ * trusting it would let any process send as any persona. `d561d0a`
+ * ("bind sender identity to socket context") established that property and it
+ * is pinned by the anti-spoof test below this one. Anonymous claims nothing,
+ * so it restores delivery without weakening it.
+ */
 async function resolveSendCaller(reply?: string): Promise<string | null> {
   const launchId = process.env.TRIBE_LAUNCH_ID?.trim()
   if (launchId) {
+    let failure: string
     try {
       const status = mcpJsonContent(await callDaemon("cli_inbox_status_by_launch_v1", { launch_id: launchId })) as {
         session?: unknown
       }
       if (typeof status.session === "string" && status.session.length > 0) return status.session
-      console.error(
-        `tribe-wire send: daemon launch authority returned no current session${reply ? ` for --reply ${reply}` : ""}; not sending.`,
-      )
+      failure = `daemon launch authority returned no current session for launch id ${launchId}`
     } catch (error) {
-      console.error(
-        `tribe-wire send: cannot resolve current launch identity${reply ? ` for --reply ${reply}` : ""}; not sending: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      )
+      failure = `cannot resolve launch identity ${launchId}: ${
+        error instanceof Error ? error.message : String(error)
+      }`
     }
-    process.exit(1)
+    if (reply) {
+      console.error(`tribe-wire send: ${failure}; not sending --reply ${reply}.`)
+      console.error(`A tracked reply must be sent by the ball's owner. Inspect with: tribe pending --owner <owner>`)
+      process.exit(1)
+    }
+    // Loud, not fatal: the send goes out, and the stale launch id is named so
+    // the identity problem is still visible.
+    console.error(`tribe-wire send: ${failure}; sending anonymously.`)
+    return null
   }
 
+  // No launch authority: only a reply may fall back to the env-declared owner,
+  // and only because it needs SOME owner to close the tracker row against.
+  if (!reply) return null
   const owner = replyOwnerFromEnv()
   if (owner) return owner
-  if (!reply) return null
   console.error(
     `tribe-wire send: --reply ${reply} requires TRIBE_NAME or TRIBE_SESSION_NAME so the one-shot CLI can close the pending owner.`,
   )
