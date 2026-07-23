@@ -279,6 +279,22 @@ function persistManifestFromWrap(opts: WrapOptions): void {
 }
 
 /**
+ * True when `prompt` is a harness-delivered system payload rather than
+ * user-typed text: a `[SYSTEM NOTIFICATION ...]` banner, or a turn carrying a
+ * `<task-notification>` block (a background-task completion the harness relays).
+ *
+ * These payloads are already delivered to the model verbatim by the harness, so
+ * echoing them back inside a `<user_prompt>` wrapper only duplicates multi-KB
+ * content — on every background-task completion, fleet-wide. `emitHookJson` uses
+ * this to skip the verbatim echo for such prompts while still framing any
+ * injected context. `trimStart` tolerates a leading newline/indent on the
+ * banner; the `<task-notification>` match is intentionally anywhere-in-prompt.
+ */
+export function isSystemNotificationPrompt(prompt: string): boolean {
+  return prompt.trimStart().startsWith("[SYSTEM NOTIFICATION") || prompt.includes("<task-notification>")
+}
+
+/**
  * Build a valid Claude Code hook-response JSON blob.
  *
  * - **UserPromptSubmit** with `additionalContext` → full envelope
@@ -295,7 +311,12 @@ function persistManifestFromWrap(opts: WrapOptions): void {
  *
  * When `additionalContext` is empty there is no envelope to disambiguate, so
  * no `<user_prompt>` is emitted (would be pure noise — the prompt is already
- * in the user-role turn verbatim from Claude Code).
+ * in the user-role turn verbatim from Claude Code). The same "nothing worth
+ * echoing" reasoning applies when the prompt is a harness-delivered system
+ * payload (`isSystemNotificationPrompt`): the harness already delivered that
+ * payload verbatim, so echoing it back would duplicate multi-KB content on
+ * every background-task completion. In that case the injected context is still
+ * framed, but the `<user_prompt>` echo is skipped.
  */
 export function emitHookJson(eventName: string, additionalContext?: string, userPrompt?: string): string {
   if (eventName === "UserPromptSubmit" && additionalContext !== undefined && additionalContext.length > 0) {
@@ -312,7 +333,7 @@ export function emitHookJson(eventName: string, additionalContext?: string, user
     // hallucination at the rate of channel broadcasts.
     const safeContext = defangModelInput(additionalContext)
     const finalContext =
-      userPrompt !== undefined && userPrompt.length > 0
+      userPrompt !== undefined && userPrompt.length > 0 && !isSystemNotificationPrompt(userPrompt)
         ? `<user_prompt>${escapeUserPromptBody(userPrompt)}</user_prompt>\n\n${safeContext}`
         : safeContext
     // Observability: record the injection into the unified tribe activity log

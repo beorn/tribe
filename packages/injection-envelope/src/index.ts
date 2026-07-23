@@ -10,7 +10,7 @@
  * See README.md for the full rationale and phase-0/1/2/3/5 plan.
  */
 
-export { wrapInjectedContext, emitHookJson, CONTEXT_PROTOCOL_FOOTER } from "./emit.ts"
+export { wrapInjectedContext, emitHookJson, isSystemNotificationPrompt, CONTEXT_PROTOCOL_FOOTER } from "./emit.ts"
 export type { WrapOptions, InjectedItem, EmitMode } from "./emit.ts"
 
 export { rewriteImperativeAsReported, sanitize } from "./sanitize.ts"

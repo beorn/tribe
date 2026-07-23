@@ -28,6 +28,8 @@ import {
   clearTurnManifest,
   writeTurnManifest,
   turnManifestPathForSession,
+  defangModelInput,
+  isSystemNotificationPrompt,
 } from "../src/index.ts"
 
 // ---------------------------------------------------------------------------
@@ -408,6 +410,101 @@ describe("emitHookJson — <user_prompt> wrapper", () => {
     // Exactly one real close tag (ours) — attacker's literal close-tag must be neutralized
     const closes = ctx.match(/<\/user_prompt>/g) ?? []
     expect(closes.length).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// isSystemNotificationPrompt — harness-delivered system payload predicate
+// ---------------------------------------------------------------------------
+
+describe("isSystemNotificationPrompt", () => {
+  test("true when the prompt starts with a [SYSTEM NOTIFICATION banner", () => {
+    expect(isSystemNotificationPrompt("[SYSTEM NOTIFICATION 2026-07-22 14:03] background task done")).toBe(true)
+  })
+
+  test("true when the prompt carries a <task-notification> block anywhere", () => {
+    expect(isSystemNotificationPrompt("preamble\n<task-notification>\n  <task/>\n</task-notification>")).toBe(true)
+  })
+
+  test("tolerates leading whitespace before the banner", () => {
+    expect(isSystemNotificationPrompt("\n  [SYSTEM NOTIFICATION] heads up")).toBe(true)
+  })
+
+  test("false for ordinary user-typed text", () => {
+    expect(isSystemNotificationPrompt("fix the auth bug")).toBe(false)
+  })
+
+  test("false when SYSTEM NOTIFICATION appears mid-prompt without the leading bracket or tag", () => {
+    // Guards against a naive .includes("SYSTEM NOTIFICATION") match on real text.
+    expect(isSystemNotificationPrompt("please update the SYSTEM NOTIFICATION docs")).toBe(false)
+  })
+
+  test("false for empty string", () => {
+    expect(isSystemNotificationPrompt("")).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// emitHookJson — system-notification prompts skip the verbatim <user_prompt>
+// echo (the harness already delivered the payload; echoing it duplicates
+// multi-KB content on every background-task completion, fleet-wide).
+// ---------------------------------------------------------------------------
+
+describe("emitHookJson — system-notification prompts skip the echo", () => {
+  test("no <user_prompt> echo for a [SYSTEM NOTIFICATION] banner, but context still frames", () => {
+    const sysPrompt = "[SYSTEM NOTIFICATION 2026-07-22 14:03] Your background task 'lint' completed."
+    const out = JSON.parse(emitHookJson("UserPromptSubmit", "<recall-memory>x</recall-memory>", sysPrompt)) as {
+      hookSpecificOutput?: { additionalContext?: string }
+    }
+    const ctx = out.hookSpecificOutput?.additionalContext ?? ""
+    expect(ctx).not.toContain("<user_prompt>")
+    // Injected context is still emitted framed.
+    expect(ctx).toContain("<recall-memory>x</recall-memory>")
+    // The verbatim system payload body is NOT duplicated back into the turn.
+    expect(ctx).not.toContain("background task 'lint' completed")
+  })
+
+  test("no <user_prompt> echo for a <task-notification> prompt, but context still frames", () => {
+    const taskPrompt = "<task-notification>\n  <task id=\"abc\">background work finished</task>\n</task-notification>"
+    const out = JSON.parse(emitHookJson("UserPromptSubmit", "<frame>ctx</frame>", taskPrompt)) as {
+      hookSpecificOutput?: { additionalContext?: string }
+    }
+    const ctx = out.hookSpecificOutput?.additionalContext ?? ""
+    expect(ctx).not.toContain("<user_prompt>")
+    expect(ctx).toContain("<frame>ctx</frame>")
+    expect(ctx).not.toContain("background work finished")
+  })
+
+  test("ordinary user text still gets its <user_prompt> echo (regression guard)", () => {
+    const out = JSON.parse(emitHookJson("UserPromptSubmit", "<frame>ctx</frame>", "fix the auth bug")) as {
+      hookSpecificOutput?: { additionalContext?: string }
+    }
+    const ctx = out.hookSpecificOutput?.additionalContext ?? ""
+    expect(ctx).toContain("<user_prompt>fix the auth bug</user_prompt>")
+  })
+
+  test("skipping the echo drops the duplicated payload bytes (specimen task-notification)", () => {
+    const specimen =
+      "<task-notification>" +
+      "\n  background task 'ci' finished with 0 failures — see the run log for details.".repeat(80) +
+      "\n</task-notification>"
+    const injected = "<recall-memory>prior note</recall-memory>"
+
+    // Old behavior echoed the full prompt verbatim inside <user_prompt>; the
+    // injected part is defanged the same way in both worlds.
+    const echoedBytes = `<user_prompt>${specimen}</user_prompt>\n\n${defangModelInput(injected)}`.length
+    const emittedBytes =
+      (
+        JSON.parse(emitHookJson("UserPromptSubmit", injected, specimen)) as {
+          hookSpecificOutput?: { additionalContext?: string }
+        }
+      ).hookSpecificOutput?.additionalContext?.length ?? 0
+
+    // The specimen is genuinely multi-KB, so the saving is large and real.
+    expect(specimen.length).toBeGreaterThan(1000)
+    // New behavior emits ONLY the framed injected context — nothing of the payload.
+    expect(emittedBytes).toBe(defangModelInput(injected).length)
+    expect(emittedBytes).toBeLessThan(echoedBytes)
   })
 })
 
