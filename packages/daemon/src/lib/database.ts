@@ -84,7 +84,8 @@ export function openDatabase(path: string): Database {
 		room_id    TEXT,
 		request    TEXT,
 		reply      TEXT,
-		summary    TEXT
+		summary    TEXT,
+		attention_required INTEGER NOT NULL DEFAULT 0
 	)`)
 
   db.run(`CREATE TABLE IF NOT EXISTS messages_archive (
@@ -129,11 +130,11 @@ export function openDatabase(path: string): Database {
   // lives on `sessions.last_delivered_seq`, and read-receipts were never
   // written by the post-event-bus code path. Fresh installs never create them.
 
-  // 19442 undead reframe — durable per-RECIPIENT actionable mailbox. One row
-  // per mailbox name; `last_actionable_seq` is the highest actionable rowid
-  // (direct request/query/verdict/assign) acknowledged for that name. Keyed by
-  // recipient — NOT session — so rename/rejoin/takeover retain the mailbox and
-  // recovery never needs to rewind a session's ambient pull cursor.
+  // 19442 undead reframe — durable per-RECIPIENT attention mailbox. One row
+  // per mailbox name; `last_actionable_seq` is the highest durable-attention
+  // rowid (direct request/query/verdict/assign/response) acknowledged for that
+  // name. Keyed by recipient — NOT session — so rename/rejoin/takeover retain
+  // the mailbox and recovery never needs to rewind a session's ambient cursor.
   db.run(`CREATE TABLE IF NOT EXISTS mailbox_cursors (
 		recipient           TEXT PRIMARY KEY,
 		last_actionable_seq INTEGER NOT NULL DEFAULT 0,
@@ -978,7 +979,28 @@ const MIGRATIONS: readonly Migration[] = [
 			started_at            INTEGER NOT NULL,
 			received_at           INTEGER NOT NULL,
 			UNIQUE (launch_id, launch_parent_pid, provider_session_id, provider_turn_id)
-		)`)
+      )`)
+    },
+  },
+  {
+    version: 24,
+    name: "response-attention-classification",
+    up(db) {
+      // Existing responses predate the surfaced-attention contract and may
+      // number in the hundreds above an old actionable cursor. Preserve them
+      // as ambient history rather than replaying that backlog on upgrade;
+      // every response inserted after this migration is classified atomically
+      // by insertMessage below.
+      const table = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='messages'").get() as {
+        name: string
+      } | null
+      if (!table) return
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>).map((row) => row.name),
+      )
+      if (!columns.has("attention_required")) {
+        db.run("ALTER TABLE messages ADD COLUMN attention_required INTEGER NOT NULL DEFAULT 0")
+      }
     },
   },
 ]
@@ -988,10 +1010,11 @@ const MIGRATIONS: readonly Migration[] = [
 // ---------------------------------------------------------------------------
 
 /**
- * The actionable message types — the ONE canonical set (19442). A DIRECT
- * message of one of these types addressed to a name is "actionable": it opens
- * work the recipient must act on. `inbox.wait` gates on it, the chief-absence
- * watchdog counts it, and the mailbox recovery view selects it.
+ * The default-wake/stop-line message types — the ONE canonical set (19442). A
+ * DIRECT message of one of these types addressed to a name is "actionable": it
+ * opens work the recipient must act on. `inbox.wait` gates on it and the
+ * chief-absence watchdog counts it. Durable attention additionally carries
+ * newly classified direct responses without making them default wakeups.
  */
 export const ACTIONABLE_TYPES = ["request", "query", "verdict", "assign"] as const
 export const ACTIONABLE_TYPES_SET: ReadonlySet<string> = new Set(ACTIONABLE_TYPES)
@@ -1001,6 +1024,9 @@ export const ACTIONABLE_TYPES_SET: ReadonlySet<string> = new Set(ACTIONABLE_TYPE
 export const AUTO_TRACK_TYPES = ["request", "query", "assign"] as const
 export const AUTO_TRACK_TYPES_SET: ReadonlySet<string> = new Set(AUTO_TRACK_TYPES)
 export const ACTIONABLE_TYPES_SQL = ACTIONABLE_TYPES.map((t) => `'${t}'`).join(", ")
+/** One canonical durable-attention classification: default-wake actionables
+ * plus rows atomically classified at insertion (currently direct responses). */
+export const ATTENTION_PREDICATE_SQL = `(type IN (${ACTIONABLE_TYPES_SQL}) OR attention_required = 1)`
 
 export type TribeStatements = ReturnType<typeof createStatements>
 
@@ -1021,9 +1047,10 @@ export function createStatements(db: Database) {
 
     insertMessage: db.prepare(`
 		INSERT INTO messages (id, type, sender, recipient, kind, content, bead_id, ref, ts,
-			delivery, topic, room_id, request, reply, summary)
+			delivery, topic, room_id, request, reply, summary, attention_required)
 		VALUES ($id, $type, $sender, $recipient, $kind, $content, $bead_id, $ref, $ts,
-			$delivery, $topic, $room_id, $request, $reply, $summary)
+			$delivery, $topic, $room_id, $request, $reply, $summary,
+			CASE WHEN $kind = 'direct' AND $sender != $recipient AND $type = 'response' THEN 1 ELSE 0 END)
 	`),
 
     /** Ball-tracker insert: opens a new pending request (one row per recipient).
@@ -1274,7 +1301,7 @@ export function createStatements(db: Database) {
 			AND NOT (
 				recipient = $name
 				AND kind = 'direct'
-				AND type IN (${ACTIONABLE_TYPES_SQL})
+				AND ${ATTENTION_PREDICATE_SQL}
 				AND rowid <= COALESCE(
 					(SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name),
 					0
@@ -1301,16 +1328,17 @@ export function createStatements(db: Database) {
     touchSessionPresence: db.prepare("UPDATE sessions SET updated_at = $now WHERE id = $id"),
 
     /**
-     * 19442 undead reframe — durable actionable mailbox, keyed by recipient
-     * NAME (not session). `last_actionable_seq` is the highest actionable
-     * rowid acknowledged for the mailbox. Rename/rejoin/takeover retain it,
-     * and recovery reads the actionable-only view below instead of rewinding
-     * any session's ambient pull cursor (the old rewind replayed every
-     * intervening ambient broadcast — the 97-row transcript flood).
+     * 19442 undead reframe — durable attention mailbox, keyed by recipient
+     * NAME (not session). `last_actionable_seq` is the compatibility name for
+     * the highest attention rowid acknowledged for the mailbox.
+     * Rename/rejoin/takeover retain it, and recovery reads the attention-only
+     * view below instead of rewinding any session's ambient pull cursor (the
+     * old rewind replayed every intervening ambient broadcast — the 97-row
+     * transcript flood).
      */
     getMailboxCursor: db.prepare("SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $recipient"),
 
-    /** Advance-only (MAX) upsert of a mailbox's acknowledged actionable seq. */
+    /** Advance-only (MAX) upsert of a mailbox's acknowledged attention seq. */
     advanceMailboxCursor: db.prepare(`
       INSERT INTO mailbox_cursors (recipient, last_actionable_seq, updated_at)
       VALUES ($recipient, $seq, $now)
@@ -1330,20 +1358,20 @@ export function createStatements(db: Database) {
     `),
 
     /**
-     * The actionable-only recovery view (19442): unacknowledged DIRECT
-     * actionables addressed to a mailbox, oldest first. `$upto` bounds the
+     * The attention-only recovery view (19442, 21757): unacknowledged DIRECT
+     * attention rows addressed to a mailbox, oldest first. `$upto` bounds the
      * scan to rows the ambient window will NOT return (rowid <= the session's
      * pull cursor) so default-drain injection never duplicates a window row.
      * NO age horizon — recovery is lossless by design; only a mailbox-cursor
      * acknowledgement retires a row from this view.
      */
-    selectUnackedActionables: db.prepare(`
+    selectUnackedAttention: db.prepare(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary
       FROM messages
       WHERE recipient = $name
         AND kind = 'direct'
         AND sender != $name
-        AND type IN (${ACTIONABLE_TYPES_SQL})
+        AND ${ATTENTION_PREDICATE_SQL}
         AND rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
         AND rowid <= $upto
       ORDER BY rowid ASC
@@ -1351,32 +1379,32 @@ export function createStatements(db: Database) {
     `),
 
     /**
-     * Read-only turn-attention view (17199): every unacknowledged actionable
-     * direct for the recipient, independent of the ambient inbox window. The
-     * normal fetch limit still bounds chronological `events`; this projection
-     * prevents a later verdict/request from sitting behind that ambient page.
-     * It reuses the recipient mailbox cursor and canonical actionable types —
-     * no second queue, cursor, or store.
+     * Read-only turn-attention view (17199, 21757): every unacknowledged
+     * actionable direct plus newly classified direct response for the
+     * recipient, independent of the ambient inbox window. The normal fetch
+     * limit still bounds chronological `events`; this projection prevents a
+     * later verdict/request/response from sitting behind that ambient page. It
+     * reuses the recipient mailbox cursor — no second queue, cursor, or store.
      */
-    selectActionableAttention: db.prepare(`
+    selectAttention: db.prepare(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary
       FROM messages
       WHERE recipient = $name
         AND kind = 'direct'
         AND sender != $name
-        AND type IN (${ACTIONABLE_TYPES_SQL})
+        AND ${ATTENTION_PREDICATE_SQL}
         AND rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
       ORDER BY rowid ASC
     `),
 
     /** Count-only form of the recovery view — join/rename recovery reporting. */
-    countUnackedActionables: db.prepare(`
+    countUnackedAttention: db.prepare(`
       SELECT COUNT(*) AS count
       FROM messages
       WHERE recipient = $name
         AND kind = 'direct'
         AND sender != $name
-        AND type IN (${ACTIONABLE_TYPES_SQL})
+        AND ${ATTENTION_PREDICATE_SQL}
         AND rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
     `),
 

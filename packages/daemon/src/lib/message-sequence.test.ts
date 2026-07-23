@@ -63,13 +63,17 @@ describe("durable message sequence", () => {
     )`)
     legacy.run(
       `INSERT INTO messages (rowid, id, type, sender, recipient, kind, content, ts)
-       VALUES (40, 'legacy-message', 'request', '@sender', '@receiver', 'direct', 'legacy', 1)`,
+       VALUES (40, 'legacy-message', 'response', '@sender', '@receiver', 'direct', 'legacy', 1)`,
     )
     legacy.close()
 
     const db = openDatabase(path)
     try {
-      expect(db.prepare("SELECT rowid, id FROM messages").get()).toEqual({ rowid: 40, id: "legacy-message" })
+      expect(db.prepare("SELECT rowid, id, attention_required FROM messages").get()).toEqual({
+        rowid: 40,
+        id: "legacy-message",
+        attention_required: 0,
+      })
       db.run("DELETE FROM messages")
       expect(insertMessage(db, "new-message", 2)).toBeGreaterThan(40)
     } finally {

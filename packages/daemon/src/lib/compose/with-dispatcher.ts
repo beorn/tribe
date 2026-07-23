@@ -404,12 +404,12 @@ export function withDispatcher<
     }
 
     /**
-     * Actionable-recovery nudge (19442) — when handleJoin / handleRename
-     * detects unacknowledged actionable directs waiting in the claimed name's
+     * Attention-recovery nudge (19442, 21757) — when handleJoin / handleRename
+     * detects unacknowledged attention directs waiting in the claimed name's
      * durable mailbox, fire an MCP `wakeup` notification at the claiming
      * session's live socket so push-mode clients drain immediately instead of
      * waiting for the next turn-start `tribe.fetch` (whose default drain
-     * injects + acknowledges the recovered actionables). Pull-mode clients
+     * injects + acknowledges the recovered attention). Pull-mode clients
      * pick them up on their next poll regardless — the wakeup is
      * opportunistic, not load-bearing.
      */
@@ -1234,7 +1234,7 @@ export function withDispatcher<
             const requestedLimit = Number(p.limit ?? 10)
             const limit = Number.isFinite(requestedLimit) ? Math.min(100, Math.max(1, Math.trunc(requestedLimit))) : 10
             const tail = stmts.getMessageTailSeq.get() as { seq: number } | null
-            const rows = stmts.selectUnackedActionables.all({
+            const rows = stmts.selectUnackedAttention.all({
               $name: sessionName,
               $upto: tail?.seq ?? 0,
               $limit: limit,

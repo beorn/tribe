@@ -95,7 +95,7 @@ tool_timeout_sec = 1860
 TRIBE_DELIVERY = "pull"
 ```
 
-**Draining in pull mode.** `tribe.fetch()` is the canonical "give me my events" call. Default drain returns a read-only `attention` projection first (`actionable_unread` from the existing mailbox plus the 10 oldest `pending_balls` and a lossless `pending_balls_summary` from the existing tracker), followed by the bounded chronological `events`, and advances the existing cursors. Use `tribe.pending` for the full ball pile. Filtered reads remain snapshots and omit `attention`.
+**Draining in pull mode.** `tribe.fetch()` is the canonical "give me my events" call. Default drain returns a read-only `attention` projection first (`actionable_unread` contains request/query/verdict/assign plus direct responses from the existing mailbox; responses remain quiet for default waits), plus the 10 oldest `pending_balls` and a lossless `pending_balls_summary` from the existing tracker, followed by the bounded chronological `events`, and advances the existing cursors. Use `tribe.pending` for the full ball pile. Filtered reads remain snapshots and omit `attention`.
 
 **Watch clients** (`tribe-watch`, `tribe-cli` log/events) always receive push regardless of the recipient's declared mode — the per-session toggle only gates _agent-bound_ fanout.
 

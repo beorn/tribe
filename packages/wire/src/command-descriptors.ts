@@ -78,13 +78,13 @@ const OBJ = (properties: JsonObject, description: string): JsonSchemaObject => (
 
 const ATTENTION_SCHEMA = {
   type: "object",
-  description: "Current unread actionables and open response balls for the addressed persona.",
+  description: "Current unread direct attention and open response balls for the addressed persona.",
   required: ["actionable_unread", "pending_balls", "pending_balls_summary"],
   properties: {
     actionable_unread: {
       type: "array",
       description:
-        "All unacknowledged direct request/query/verdict/assign messages for this recipient, independent of the event limit.",
+        "All unacknowledged direct request/query/verdict/assign/response messages for this recipient, independent of the event limit. Responses stay quiet for default inbox waits.",
       items: { type: "object", additionalProperties: true },
     },
     pending_balls: {

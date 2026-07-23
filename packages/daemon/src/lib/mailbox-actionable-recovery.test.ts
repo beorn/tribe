@@ -1,15 +1,15 @@
 /**
- * 19442 undead reframe — durable per-recipient actionable mailbox.
+ * 19442 / 21757 — durable per-recipient attention mailbox.
  *
- * Name-claim recovery must select the EXACT missed actionable directs
- * (request / query / verdict / assign addressed to the name) without
+ * Name-claim recovery must select the EXACT missed durable-attention directs
+ * (actionables plus newly classified responses addressed to the name) without
  * traversing unrelated history. The old mechanism — rewinding the session's
  * `last_inbox_pull_seq` — replayed every intervening ambient broadcast into
  * the model transcript (the 97-row flood: 49 joins + 48 health + 1 direct).
  *
  * The reframe: a `mailbox_cursors` row keyed by RECIPIENT (not session)
- * records the highest actionable rowid acknowledged for that mailbox. The
- * normal default-drain fetch injects unacked actionables ahead of the
+ * records the highest durable-attention rowid acknowledged for that mailbox.
+ * The normal default-drain fetch injects unacked attention ahead of the
  * ambient window and acknowledges what it returns. Rename / rejoin /
  * takeover retain the mailbox; the ambient session cursor is never rewound.
  *
@@ -159,7 +159,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
    * fresh-row branch registers the session AND resets its delivery offsets to
    * the journal tail — the same tail-reset a real connect performs — so the
    * ambient window starts empty and anything older is reachable only through
-   * the actionable mailbox.
+   * the attention mailbox.
    */
   function connectAs(sessionId: string, name: string): TribeContext {
     const ctx = makeContext(db, stmts, sessionId, `boot-${sessionId}`)
@@ -216,6 +216,102 @@ describe("19442 mailbox-cursor actionable recovery", () => {
 
     // Acked: the second default drain is empty.
     expect(fetchEvents(b, opts)).toEqual([])
+  })
+
+  it("recovers a response that closed its tracked ball while the requester was parked", () => {
+    const requester = connectAs("sess-requester", NAME)
+    const chief = connectAs("sess-chief", "@chief")
+    const request = parseToolJson(
+      handleToolCall(
+        requester,
+        "tribe.send",
+        {
+          to: "@chief",
+          message: "choose the implementation seam",
+          type: "request",
+          request: true,
+        },
+        opts,
+      ),
+    ) as { id: string }
+
+    disconnect("sess-requester")
+    const response = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        {
+          to: NAME,
+          message: "use the durable attention seam",
+          type: "response",
+          reply: request.id,
+        },
+        opts,
+      ),
+    ) as { id: string; tracker?: { request_id: string; closed: number } }
+
+    expect(response.tracker).toEqual({ request_id: request.id, closed: 1 })
+    expect(db.prepare("SELECT id, attention_required FROM messages WHERE id = ?").get(response.id)).toEqual({
+      id: response.id,
+      attention_required: 1,
+    })
+    expect(stmts.getUnreadDms.get({ $name: NAME })).toMatchObject({ count: 0 })
+
+    // A real reconnect resets the successor's chronological cursor to the
+    // journal tail. The semantic response must therefore ride durable
+    // attention/recovery even though it intentionally stays quiet for the
+    // default actionable-only inbox wait.
+    const successor = connectAs("sess-successor", NAME)
+    const first = fetchJson(successor, opts).json
+    expect(first.attention?.actionable_unread).toEqual([
+      expect.objectContaining({
+        id: response.id,
+        type: "response",
+        from: "@chief",
+        content: "use the durable attention seam",
+      }),
+    ])
+    expect(first.events?.map((event) => event.id)).toEqual([response.id])
+
+    const second = fetchJson(successor, opts).json
+    expect(second.attention?.actionable_unread).toEqual([])
+    expect(second.events).toEqual([])
+  })
+
+  it("projects a response ahead of a full ambient page without replaying it after acknowledgement", () => {
+    const live = connectAs("sess-live-response", NAME)
+    for (let i = 0; i < 75; i++) {
+      insertRow(stmts, {
+        id: `response-flood-${i}`,
+        type: "health:daemon:warn",
+        sender: "daemon",
+        recipient: "*",
+        kind: "broadcast",
+        content: `ambient health ${i}`,
+        ts: now + i,
+      })
+    }
+    const responseRowid = insertRow(stmts, {
+      id: "decision-response",
+      type: "response",
+      sender: "@chief",
+      recipient: NAME,
+      kind: "direct",
+      content: "take seam B",
+      ts: now + 100,
+    })
+
+    const first = fetchJson(live, opts).json
+    expect(first.events).toHaveLength(50)
+    expect(first.events?.some((event) => event.id === "decision-response")).toBe(false)
+    expect(first.attention?.actionable_unread).toEqual([
+      expect.objectContaining({ id: "decision-response", rowid: responseRowid, type: "response" }),
+    ])
+
+    const second = fetchJson(live, opts).json
+    expect(second.attention?.actionable_unread).toEqual([])
+    expect(second.events).toHaveLength(25)
+    expect(second.events?.some((event) => event.id === "decision-response")).toBe(false)
   })
 
   it("projects a later actionable plus owed ball ahead of a full ambient page", () => {

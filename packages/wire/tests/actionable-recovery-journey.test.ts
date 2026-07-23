@@ -5,13 +5,13 @@
  * asserted the wrong invariant (forward 100 arbitrary recent rows). This
  * journey crosses the actual channel boundary: a real tribe-daemon process on
  * a tmp socket with a real SQLite journal seeded with the transcript fixture
- * (49 join broadcasts + 48 health broadcasts + 1 direct actionable), and a
+ * (49 join broadcasts + 48 health broadcasts + direct attention rows), and a
  * real stdio adapter speaking MCP over stdio.
  *
- * Claiming the loaded name must surface EXACTLY the one actionable as a
- * channel notification — zero ambient replay — and a second fresh adapter
- * claiming the same name must surface NOTHING (the durable mailbox remembers
- * the acknowledgement).
+ * Claiming the loaded name must surface exactly the actionable and response
+ * attention rows as channel notifications — zero ambient replay — and a
+ * second fresh adapter claiming the same name must surface NOTHING (the
+ * durable mailbox remembers the acknowledgement).
  *
  * 21049 launch identity contract:
  * - The provider launcher mints a UUID-strength launch id once and overwrites
@@ -81,7 +81,7 @@ const BASE_ENV: NodeJS.ProcessEnv = (() => {
   return env
 })()
 
-function seedVerdictFixture(dbPath: string): void {
+function seedAttentionFixture(dbPath: string): void {
   const db = openDatabase(dbPath)
   const stmts = createStatements(db)
   const base = Date.now() - 30 * 60_000
@@ -142,6 +142,15 @@ function seedVerdictFixture(dbPath: string): void {
     kind: "direct",
     content: "please pick up the wrapper-r4 assembly",
     ts: base + 49 + 48,
+  })
+  insert({
+    id: "the-response",
+    type: "response",
+    sender: "@chief",
+    recipient: NAME,
+    kind: "direct",
+    content: "use the durable attention seam",
+    ts: base + 49 + 49,
   })
   db.close()
 }
@@ -816,29 +825,30 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(attributed.sender).toBe("@chief")
   }, 60_000)
 
-  it("claiming the loaded name forwards EXACTLY the one actionable; a reconnect forwards none", async () => {
+  it("claiming a parked name forwards actionable and response attention without ambient replay", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const dbPath = join(tmpDir, "tribe.db")
-    seedVerdictFixture(dbPath)
+    seedAttentionFixture(dbPath)
 
     daemonProc = spawnDaemon(socketPath, dbPath)
     await waitForCondition(() => existsSync(socketPath), "daemon socket")
 
-    // --- First adapter: the claim that must recover exactly one actionable.
+    // --- First adapter: the claim must recover both durable attention rows.
     const first = await spawnAdapterAndJoin(socketPath, "adapter-1.log")
     await waitForCondition(
-      () => channelNotifications(first.stdout).length >= 1,
-      "recovered actionable channel notification",
+      () => channelNotifications(first.stdout).length >= 2,
+      "recovered attention channel notifications",
     )
     // Settle: give any (wrong) ambient replay a chance to arrive, then assert
-    // the recovered actionable is ALONE.
+    // the recovered attention rows are alone.
     await new Promise((resolveTick) => setTimeout(resolveTick, 500))
     const forwarded = channelNotifications(first.stdout)
     const payloads = forwarded.map((line) => JSON.stringify(line))
     expect(payloads.some((p) => p.includes("please pick up the wrapper-r4 assembly"))).toBe(true)
+    expect(payloads.some((p) => p.includes("use the durable attention seam"))).toBe(true)
     expect(payloads.some((p) => p.includes("joined (member)"))).toBe(false)
     expect(payloads.some((p) => p.includes("log-redacted"))).toBe(false)
-    expect(forwarded).toHaveLength(1)
+    expect(forwarded).toHaveLength(2)
 
     // --- Second adapter (fresh process = reconnect/reclaim): mailbox is acked,
     // so NOTHING is forwarded.

@@ -15,11 +15,11 @@ import {
   sendMessage,
   deriveSummary,
   logEvent,
-  countUnackedActionables,
+  countUnackedAttention,
   MAX_BALL_TTL_MS,
   type Delivery,
 } from "./messaging.ts"
-import { ACTIONABLE_TYPES_SET, ACTIONABLE_TYPES_SQL, AUTO_TRACK_TYPES_SET } from "./database.ts"
+import { ACTIONABLE_TYPES_SQL, AUTO_TRACK_TYPES_SET } from "./database.ts"
 import {
   classifySessionRegistrationLifetime,
   isPidAlive as pidStillAlive,
@@ -313,11 +313,11 @@ export type HandlerOpts = {
   }
   /**
    * Optional: fire a JSON-RPC `wakeup` notification at the claiming session's
-   * live socket so push-mode clients drain recovered actionables immediately,
+   * live socket so push-mode clients drain recovered attention immediately,
    * without waiting for the next turn-start `tribe.fetch`. Daemon wires this
    * through the broadcast capability; tests / smoke harness omit it (the
    * mailbox state is durable in the DB regardless — the wakeup is an
-   * opportunistic nudge). See `countUnackedActionables` in messaging.ts and
+   * opportunistic nudge). See `countUnackedAttention` in messaging.ts and
    * the mailbox injection in `handleFetch`.
    */
   notifyWakeupForReplay?: (sessionId: string, claimedName: string) => void
@@ -983,13 +983,13 @@ function handleRename(
   // reconnect/daemon-restart re-register (which carries the frozen spawn-time
   // name) re-applies it instead of silently reverting the identity.
   persistRuntimeRename(ctx, newName)
-  // Actionable-mailbox recovery (19442): the mailbox travels with the NAME.
-  // Any unacknowledged actionable directs addressed to `newName` surface on
+  // Attention-mailbox recovery (19442, 21757): the mailbox travels with the
+  // NAME. Any unacknowledged attention directs addressed to `newName` surface on
   // the next default `tribe.fetch` (injected ahead of the ambient window) —
   // no cursor rewind, no ambient replay. Here we only count and nudge.
-  const recoveredActionables = countUnackedActionables(ctx, newName)
-  if (recoveredActionables > 0) {
-    log.info?.(`actionable-recovery: ${recoveredActionables} unacked actionable(s) await "${newName}" (rename)`)
+  const recoveredAttention = countUnackedAttention(ctx, newName)
+  if (recoveredAttention > 0) {
+    log.info?.(`attention-recovery: ${recoveredAttention} unacked row(s) await "${newName}" (rename)`)
     opts.notifyWakeupForReplay?.(ctx.sessionId, newName)
   }
   // Broadcast the rename
@@ -999,7 +999,7 @@ function handleRename(
     renamed: true,
     old_name: oldName,
     new_name: newName,
-    ...(recoveredActionables > 0 ? { recovered_actionables: recoveredActionables } : {}),
+    ...(recoveredAttention > 0 ? { recovered_actionables: recoveredAttention } : {}),
   })
 }
 
@@ -1139,14 +1139,14 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
             | undefined
         )?.delivery ?? "push")
 
-  // Actionable-mailbox recovery (19442): claiming a name inherits its durable
-  // mailbox — any unacknowledged actionable directs surface on the next
+  // Attention-mailbox recovery (19442, 21757): claiming a name inherits its
+  // durable mailbox — any unacknowledged attention directs surface on the next
   // default `tribe.fetch` without touching the ambient session cursor. A
   // same-name join is only a refresh, and the mailbox cursor already reflects
   // everything this session has acknowledged, so counting is claim-only.
-  const recoveredActionables = prevName === joinName ? 0 : countUnackedActionables(ctx, joinName)
-  if (recoveredActionables > 0) {
-    log.info?.(`actionable-recovery: ${recoveredActionables} unacked actionable(s) await "${joinName}" (join)`)
+  const recoveredAttention = prevName === joinName ? 0 : countUnackedAttention(ctx, joinName)
+  if (recoveredAttention > 0) {
+    log.info?.(`attention-recovery: ${recoveredAttention} unacked row(s) await "${joinName}" (join)`)
     opts.notifyWakeupForReplay?.(ctx.sessionId, joinName)
   }
 
@@ -1167,7 +1167,7 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     previous_name: joinName !== prevName ? prevName : undefined,
     // 15654 Part 1 — notification-semantics primer. See TRIBE_JOIN_PRIMER docstring.
     primer: TRIBE_JOIN_PRIMER,
-    ...(recoveredActionables > 0 ? { recovered_actionables: recoveredActionables } : {}),
+    ...(recoveredAttention > 0 ? { recovered_actionables: recoveredAttention } : {}),
   })
 }
 
@@ -1266,9 +1266,9 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     }
   })
 
-  // Actionable unread direct-message count per recipient. This intentionally
-  // mirrors actionable-attention semantics: ambient notify/status/response
-  // DMs should not surface as stop-line backlog when pending(owner) is empty.
+  // Default-wake/stop-line unread direct-message count per recipient. Direct
+  // responses can ride durable attention without becoming health backlog when
+  // pending(owner) is empty; ambient notify/status DMs remain awareness only.
   const unread = ctx.db
     .prepare(`
 				SELECT m.recipient, COUNT(*) as count FROM messages m
@@ -1577,13 +1577,13 @@ export function readAttentionProjection(
   ctx: TribeContext,
   owner: string,
   now = Date.now(),
-): { actionableRows: FetchRow[]; attention: AttentionProjection } {
-  const actionableRows = filterRowsByTrust(ctx, ctx.stmts.selectActionableAttention.all({ $name: owner }) as FetchRow[])
+): { attentionRows: FetchRow[]; attention: AttentionProjection } {
+  const attentionRows = filterRowsByTrust(ctx, ctx.stmts.selectAttention.all({ $name: owner }) as FetchRow[])
   const pendingBalls = pendingBallsForOwner(ctx, owner, now)
   return {
-    actionableRows,
+    attentionRows,
     attention: {
-      actionable_unread: actionableRows.map(fetchEvent),
+      actionable_unread: attentionRows.map(fetchEvent),
       pending_balls: pendingBalls.slice(0, ATTENTION_PENDING_BALL_LIMIT),
       pending_balls_summary: {
         total: pendingBalls.length,
@@ -1666,7 +1666,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
   const cursor = ctx.stmts.getInboxCursor.get({ $id: ctx.sessionId }) as { last_inbox_pull_seq: number } | null
   const currentName = ctx.getName()
   let rows: FetchRow[]
-  let attentionActionableRows: FetchRow[] = []
+  let attentionRows: FetchRow[] = []
   let attention: AttentionProjection | null = null
   let shouldAdvance = false
   let cursorBase = cursor?.last_inbox_pull_seq ?? 0
@@ -1705,15 +1705,15 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
   } else {
     if (!topicsAreSnapshot) {
       const projected = readAttentionProjection(ctx, currentName)
-      attentionActionableRows = projected.actionableRows
+      attentionRows = projected.attentionRows
       attention = projected.attention
     }
-    // 19442 — inject unacknowledged actionable directs (the durable mailbox)
+    // 19442 / 21757 — inject unacknowledged attention directs (the durable mailbox)
     // ahead of the ambient window. Recovery rows are bounded to rowid <=
     // cursorBase, so they can never duplicate a window row, and the ambient
     // session cursor is never rewound — a claim/rename floods nothing. See
-    // selectUnackedActionables in database.ts.
-    const recovered = ctx.stmts.selectUnackedActionables.all({
+    // selectUnackedAttention in database.ts.
+    const recovered = ctx.stmts.selectUnackedAttention.all({
       $name: currentName,
       $upto: cursorBase,
       $limit: limit,
@@ -1746,21 +1746,14 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
     }
   }
 
-  // 19442 — acknowledge returned actionables into the durable mailbox. The
-  // caller is about to see `filtered`; every actionable direct in it (typed
-  // per ACTIONABLE_TYPES, addressed to this name, not self-sent) advances the
-  // recipient-keyed mailbox cursor so no later claim of this name re-recovers
-  // it. Advance-only. A trust- or topic-excluded row is policy-excluded, not
-  // "unseen" — it never blocks the cursor.
+  // 19442 / 21757 — acknowledge the canonical attention rows this fetch
+  // returns. Reuse that exact projection instead of re-deriving attention from
+  // message types; its final row advances the recipient-keyed mailbox cursor
+  // so no later claim of this name re-recovers what the caller just received.
   if (shouldAdvance) {
-    let lastActionable = 0
-    for (const r of [...attentionActionableRows, ...filtered]) {
-      if (r.recipient === currentName && r.sender !== currentName && ACTIONABLE_TYPES_SET.has(r.type)) {
-        lastActionable = Math.max(lastActionable, r.rowid)
-      }
-    }
-    if (lastActionable > 0) {
-      ctx.stmts.advanceMailboxCursor.run({ $recipient: currentName, $seq: lastActionable, $now: Date.now() })
+    const lastAttention = attentionRows.at(-1)
+    if (lastAttention) {
+      ctx.stmts.advanceMailboxCursor.run({ $recipient: currentName, $seq: lastAttention.rowid, $now: Date.now() })
     }
   }
 

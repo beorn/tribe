@@ -315,14 +315,14 @@ export function sendMessage(
  *
  * The reframe: recovery never touches the ambient session cursor. A durable
  * `mailbox_cursors` row keyed by the RECIPIENT NAME tracks the highest
- * acknowledged actionable rowid; `handleFetch`'s default drain injects the
- * unacknowledged actionable directs (request / query / verdict / assign —
- * `ACTIONABLE_TYPES` in database.ts) ahead of the ambient window and
- * acknowledges exactly what it returns. Join/rename/takeover only need to
- * COUNT the outstanding actionables (below) and nudge the client to drain.
+ * acknowledged durable-attention rowid; `handleFetch`'s default drain injects
+ * unacknowledged actionables plus newly classified direct responses ahead of
+ * the ambient window and acknowledges exactly what it returns.
+ * Join/rename/takeover only need to COUNT the outstanding attention rows
+ * (below) and nudge the client to drain.
  */
-export function countUnackedActionables(ctx: TribeContext, recipient: string): number {
-  const row = ctx.stmts.countUnackedActionables.get({ $name: recipient }) as { count: number } | undefined
+export function countUnackedAttention(ctx: TribeContext, recipient: string): number {
+  const row = ctx.stmts.countUnackedAttention.get({ $name: recipient }) as { count: number } | undefined
   return row?.count ?? 0
 }
 
