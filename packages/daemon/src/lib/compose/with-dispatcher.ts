@@ -161,6 +161,67 @@ export function withDispatcher<
     const suppressWindowMs = hooks.suppressWindowMs ?? (process.env.TRIBE_NO_SUPPRESS ? 0 : 10_000)
     const sessionAnnounceGate = createSessionAnnounceGate(suppressWindowMs)
     const channelJoinAnnounced = new Set<string>()
+    const fanInAnnounced = new Set<string>()
+    const connectionObservations = new Map<string, ConnectionObservation>()
+
+    function identityLogFields(client: ClientSession): {
+      connection_id: string
+      member_id: string
+      name: string
+      role: TribeRole
+      pid: number
+      launch_id: string | null
+      launch_parent_pid: number | null
+    } {
+      return {
+        connection_id: client.id,
+        member_id: client.ctx.sessionId,
+        name: client.name,
+        role: client.role,
+        pid: client.pid,
+        launch_id: client.launchId,
+        launch_parent_pid: client.launchParentPid,
+      }
+    }
+
+    function connectionLogIdentity(
+      client: ClientSession | undefined,
+      connId: string,
+    ): ReturnType<typeof identityLogFields> | { connection_id: string } {
+      if (!client || client.role === "pending") return { connection_id: connId }
+      return identityLogFields(client)
+    }
+
+    function recordOperation(connId: string, operation: string): void {
+      const observation = connectionObservations.get(connId)
+      if (observation) {
+        observation.operations.set(operation, (observation.operations.get(operation) ?? 0) + 1)
+        observation.lastOperation = operation
+        observation.lastOperationAtMs = Date.now()
+      }
+    }
+
+    function operationCounts(observation: ConnectionObservation | undefined): Record<string, number> {
+      if (!observation) return {}
+      return Object.fromEntries([...observation.operations].sort(([left], [right]) => left.localeCompare(right)))
+    }
+
+    function operationSummary(observation: ConnectionObservation | undefined): {
+      operations: Record<string, number>
+      last_operation: string | null
+      last_operation_at_ms: number | null
+    } {
+      return {
+        operations: operationCounts(observation),
+        last_operation: observation?.lastOperation ?? null,
+        last_operation_at_ms: observation?.lastOperationAtMs ?? null,
+      }
+    }
+
+    function errorCode(error: Error): string {
+      const code = (error as NodeJS.ErrnoException).code
+      return typeof code === "string" && code.length > 0 ? code : "UNKNOWN"
+    }
 
     const methodHandlers = new Map<string, MethodHandler>()
     function register(method: string, handler: MethodHandler): void {
@@ -445,14 +506,6 @@ export function withDispatcher<
       }),
     } as const
 
-    /** Generate a unique member-<pid> name, with random suffix if taken */
-    function generateMemberName(pid: number, connId: string): string {
-      const pidName = `member-${pid || connId.slice(0, 6)}`
-      const taken = db.prepare("SELECT id FROM sessions WHERE name = ?").get(pidName)
-      return taken ? `member-${pid}-${Math.random().toString(36).slice(2, 5)}` : pidName
-    }
-    void generateMemberName // currently unused but kept for parity
-
     function deduplicateName(name: string): string {
       const live = Array.from(clients.values())
       const holder = live.find((c) => c.name === name)
@@ -470,12 +523,20 @@ export function withDispatcher<
       return Array.from(clients.values()).find((c) => c.id !== connId && c.name === name && c.pid === clientPid) ?? null
     }
 
-    function retireReplacedClient(client: ClientSession): void {
+    function retireReplacedClient(client: ClientSession, reason: ConnectionEndReason): void {
+      const observation = connectionObservations.get(client.id)
+      if (observation) observation.endReason = reason
+      log.debug?.("transport.retired", {
+        ...identityLogFields(client),
+        reason,
+        ...operationSummary(observation),
+      })
       broadcast.flushConnection(client.id)
       broadcast.discardConnection(client.id)
       channelJoinAnnounced.delete(client.id)
       clients.delete(client.id)
       socketToClient.delete(client.socket)
+      connectionObservations.delete(client.id)
       if (recallHandlers) recallHandlers.dropConn(client.recall.sessionId)
       client.socket.destroy()
     }
@@ -558,6 +619,14 @@ export function withDispatcher<
       // Spec: @km/tribe/15588-tribe-list-sessions.
       const liveClient = clients.get(connId)
       if (liveClient) liveClient.lastActivityAt = Date.now()
+      recordOperation(connId, method)
+      if (liveClient && liveClient.role !== "pending" && method !== "register") {
+        log.info?.("operation.received", {
+          ...identityLogFields(liveClient),
+          direction: "inbound",
+          operation: method,
+        })
+      }
 
       try {
         switch (method) {
@@ -735,9 +804,18 @@ export function withDispatcher<
                 ctx: sameLaunchHolder.ctx,
               })
               registry.markTransportConnected(client.ctx.sessionId)
-              log.info?.(
-                `launch fan-in: ${resolvedName} member=${client.ctx.sessionId} transport pid=${clientPid} launch=${launch.id}`,
-              )
+              const fanInFields = {
+                ...identityLogFields(client),
+                operation: "register",
+                transport_class: "same-launch-fan-in",
+                connected_at_ms: connectionObservations.get(connId)?.acceptedAtMs ?? Date.now(),
+              }
+              if (fanInAnnounced.has(client.ctx.sessionId)) {
+                log.debug?.("transport.attached", fanInFields)
+              } else {
+                fanInAnnounced.add(client.ctx.sessionId)
+                log.info?.("transport.fan-in", fanInFields)
+              }
               const coordState = db
                 .prepare("SELECT key, value FROM coordination WHERE project_id = ?")
                 .all(projectId) as Array<{ key: string; value: string | null }>
@@ -757,7 +835,7 @@ export function withDispatcher<
                 role = samePidHolder.role
               }
               log.info?.(`Replacing live self-registration for ${resolvedName} pid=${clientPid}`)
-              retireReplacedClient(samePidHolder)
+              retireReplacedClient(samePidHolder, "self-registration-replaced")
             }
 
             // 20703 — explicit-persona takeover. A managed respawn (adapter sends
@@ -787,7 +865,7 @@ export function withDispatcher<
                   new_pid: clientPid,
                   reason: "explicit-persona takeover (20703)",
                 })
-                for (const replaced of holders) retireReplacedClient(replaced)
+                for (const replaced of holders) retireReplacedClient(replaced, "explicit-takeover")
               }
             }
 
@@ -817,7 +895,7 @@ export function withDispatcher<
                     new_pid: clientPid,
                     reason: "identity displacement of token-less holder (21052)",
                   })
-                  retireReplacedClient(holder)
+                  retireReplacedClient(holder, "identity-displacement")
                 }
               }
             }
@@ -883,6 +961,12 @@ export function withDispatcher<
 
             resetOffsetsToTail(client)
             announceJoin(client)
+            fanInAnnounced.delete(client.ctx.sessionId)
+            log.info?.("session.identified", {
+              ...identityLogFields(client),
+              operation: "register",
+              connected_at_ms: connectionObservations.get(connId)?.acceptedAtMs ?? Date.now(),
+            })
 
             const coordState = db
               .prepare("SELECT key, value FROM coordination WHERE project_id = ?")
@@ -1421,7 +1505,13 @@ export function withDispatcher<
           })
         }
         const msg = err instanceof Error ? err.message : String(err)
-        log.info?.(`Error handling ${method}: ${msg}`)
+        const failedClient = clients.get(connId)
+        log.warn?.("operation.failed", {
+          ...connectionLogIdentity(failedClient, connId),
+          operation: method,
+          error_type: err instanceof Error ? err.name : "NonError",
+          error_code: err instanceof Error ? errorCode(err) : "UNKNOWN",
+        })
         return makeError(id, -32603, msg)
       }
     }
@@ -1440,7 +1530,15 @@ export function withDispatcher<
         claudeSessionName: null,
         onMessageInserted,
       })
-      log.info?.(`Client connected: ${connId.slice(0, 8)}`)
+      connectionObservations.set(connId, {
+        acceptedAtMs: Date.now(),
+        operations: new Map(),
+        lastOperation: null,
+        lastOperationAtMs: null,
+        endReason: null,
+        errorCode: null,
+      })
+      log.debug?.("connection.accepted", { connection_id: connId })
 
       const placeholder: ClientSession = {
         socket: sock,
@@ -1479,17 +1577,28 @@ export function withDispatcher<
 
       sock.on("data", parse)
 
-      sock.on("close", () => {
+      sock.on("close", (hadError = false) => {
         const client = clients.get(connId)
+        const observation = connectionObservations.get(connId)
+        if (observation && hadError && observation.endReason === null) observation.endReason = "socket-error"
+        const reason = observation?.endReason ?? (hadError ? "socket-error" : "peer-close")
+        const connectionFields = {
+          ...connectionLogIdentity(client, connId),
+          reason,
+          error_code: observation?.errorCode ?? null,
+          duration_ms: observation ? Math.max(0, Date.now() - observation.acceptedAtMs) : 0,
+          ...operationSummary(observation),
+        }
         if (client && client.role !== "pending") {
           const hadChannelJoin = channelJoinAnnounced.delete(connId)
           const siblingTransport = Array.from(clients.values()).some(
             (candidate) => candidate.id !== connId && candidate.ctx.sessionId === client.ctx.sessionId,
           )
           if (siblingTransport) {
-            log.debug?.(`Transport disconnected: ${client.name} pid=${client.pid}`)
+            log.debug?.("transport.disconnected", connectionFields)
           } else {
-            log.info?.(`Client disconnected: ${client.name}`)
+            fanInAnnounced.delete(client.ctx.sessionId)
+            log.info?.("session.disconnected", connectionFields)
             // Durable history stays lossless even when the channel projection
             // coalesces a churn storm or suppresses daemon-start noise.
             logEvent(client.ctx, "session.left", undefined, {
@@ -1503,12 +1612,15 @@ export function withDispatcher<
               logActivity("session", `${client.name} left`)
             }
           }
+        } else {
+          log.debug?.("connection.disconnected", connectionFields)
         }
         broadcast.flushConnection(connId)
         broadcast.discardConnection(connId)
         inboxWait.cancelConnection(connId)
         clients.delete(connId)
         socketToClient.delete(sock)
+        connectionObservations.delete(connId)
         if (client && client.role !== "pending" && !registry.hasActiveTransport(client.ctx.sessionId)) {
           registry.markTransportDisconnected(client.ctx.sessionId)
         }
@@ -1517,7 +1629,19 @@ export function withDispatcher<
       })
 
       sock.on("error", (err) => {
-        log.info?.(`Client error (${connId.slice(0, 8)}): ${err.message}`)
+        const observation = connectionObservations.get(connId)
+        const code = errorCode(err)
+        if (observation) {
+          observation.endReason = "socket-error"
+          observation.errorCode = code
+        }
+        const client = clients.get(connId)
+        log.warn?.("connection.error", {
+          ...connectionLogIdentity(client, connId),
+          reason: "socket-error",
+          error_code: code,
+          error_type: err.name,
+        })
         sock.destroy()
       })
     }
@@ -1535,6 +1659,22 @@ export function withDispatcher<
       dispatcher: { handleConnection, handleRequest, register },
     }
   }
+}
+
+type ConnectionEndReason =
+  | "peer-close"
+  | "socket-error"
+  | "self-registration-replaced"
+  | "explicit-takeover"
+  | "identity-displacement"
+
+type ConnectionObservation = {
+  acceptedAtMs: number
+  operations: Map<string, number>
+  lastOperation: string | null
+  lastOperationAtMs: number | null
+  endReason: ConnectionEndReason | null
+  errorCode: string | null
 }
 
 type SessionFilterMode = "focus" | "normal" | "ambient"

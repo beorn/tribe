@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Server, Socket as NetSocket } from "node:net"
+import { addWriter, getLogLevel, setLogLevel, setSuppressConsole, type LogEvent } from "loggily"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { createScope, type InboxWaitResult } from "tribe-wire"
 import { TRIBE_PROTOCOL_VERSION, type JsonRpcRequest } from "tribe-wire/lib/socket"
@@ -14,7 +15,8 @@ import { withDispatcher } from "./with-dispatcher.ts"
 
 type TestSocket = NetSocket & {
   destroyedByDispatcher: boolean
-  emitClose(): void
+  emitClose(hadError?: boolean): void
+  emitError(error: Error): void
   writes: string[]
 }
 
@@ -58,12 +60,15 @@ const liveHolderPid = process.pid
 const otherLivePid = process.pid + 1
 
 let cleanup: (() => Promise<void>) | null = null
+const logCleanups: Array<() => void> = []
 
 afterEach(async () => {
-  if (!cleanup) return
-  const dispose = cleanup
-  cleanup = null
-  await dispose()
+  while (logCleanups.length > 0) logCleanups.pop()?.()
+  if (cleanup) {
+    const dispose = cleanup
+    cleanup = null
+    await dispose()
+  }
 })
 
 describe("dispatcher self-registration collision handling (@ag/tribe/19594)", () => {
@@ -340,6 +345,220 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
       transportPids: [liveHolderPid, liveHolderPid + 2],
     })
     expect(status.sessions.some((session) => session.name.startsWith("pending-"))).toBe(false)
+  })
+})
+
+describe("dispatcher operational logging", () => {
+  it("binds a connection to its named seat and records operations and peer-close reason without payloads", async () => {
+    const logs = captureDispatcherLogs()
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const client = harness.connectClient()
+
+    expect(logs.filter((event) => event.level === "info")).toEqual([])
+
+    const registered = parseResult<RegisterResult>(
+      await harness.register(client.connId, {
+        name: "@agent/6",
+        pid: liveHolderPid,
+        project: "/tmp/km-wt6",
+        launchId: "launch-agent-6",
+        launchParentPid: 6006,
+      }),
+    )
+    const privatePayload = "message-payload-must-not-enter-logs"
+    parseResult<{ structuredContent: SendResult }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "send-after-identify",
+          method: "tribe.send",
+          params: {
+            to: "@agent/7",
+            message: privatePayload,
+            type: "notify",
+          },
+        },
+        client.connId,
+      ),
+    )
+    client.socket.emitClose()
+
+    const identified = logs.find((event) => event.level === "info" && event.message === "session.identified")
+    expect(identified?.props).toMatchObject({
+      connection_id: client.connId,
+      member_id: registered.sessionId,
+      name: "@agent/6",
+      operation: "register",
+      launch_id: "launch-agent-6",
+      launch_parent_pid: 6006,
+      connected_at_ms: expect.any(Number),
+    })
+    expect(identified?.time).toEqual(expect.any(Number))
+
+    const operation = logs.find(
+      (event) =>
+        event.level === "info" && event.message === "operation.received" && event.props?.operation === "tribe.send",
+    )
+    expect(operation?.props).toMatchObject({
+      connection_id: client.connId,
+      member_id: registered.sessionId,
+      name: "@agent/6",
+      direction: "inbound",
+      operation: "tribe.send",
+    })
+
+    const disconnected = logs.find((event) => event.level === "info" && event.message === "session.disconnected")
+    expect(disconnected?.props).toMatchObject({
+      connection_id: client.connId,
+      member_id: registered.sessionId,
+      name: "@agent/6",
+      reason: "peer-close",
+      operations: { register: 1, "tribe.send": 1 },
+      last_operation: "tribe.send",
+      last_operation_at_ms: expect.any(Number),
+    })
+    expect(JSON.stringify(logs)).not.toContain(privatePayload)
+    expect(logs.some((event) => event.level === "info" && event.message.startsWith("Client connected:"))).toBe(false)
+  })
+
+  it("keeps expected same-launch fan-in at debug and emits one canonical identity at info", async () => {
+    const logs = captureDispatcherLogs()
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const first = harness.connectClient()
+    const firstRegistration = parseResult<RegisterResult>(
+      await harness.register(first.connId, {
+        name: "@ci",
+        pid: liveHolderPid,
+        project: "/tmp/km-wt6",
+        launchId: "launch-ci",
+        launchParentPid: 7007,
+      }),
+    )
+    const second = harness.connectClient()
+    const secondRegistration = parseResult<RegisterResult>(
+      await harness.register(second.connId, {
+        name: "@ci",
+        pid: otherLivePid,
+        project: "/tmp/km-wt6",
+        launchId: "launch-ci",
+        launchParentPid: 7007,
+      }),
+    )
+    const third = harness.connectClient()
+    const thirdRegistration = parseResult<RegisterResult>(
+      await harness.register(third.connId, {
+        name: "@ci",
+        pid: otherLivePid + 1,
+        project: "/tmp/km-wt6",
+        launchId: "launch-ci",
+        launchParentPid: 7007,
+      }),
+    )
+
+    expect(secondRegistration.sessionId).toBe(firstRegistration.sessionId)
+    expect(thirdRegistration.sessionId).toBe(firstRegistration.sessionId)
+    expect(
+      logs.filter(
+        (event) => event.level === "info" && event.message === "session.identified" && event.props?.name === "@ci",
+      ),
+    ).toHaveLength(1)
+    expect(
+      logs.find(
+        (event) => event.level === "info" && event.message === "transport.fan-in" && event.props?.name === "@ci",
+      )?.props,
+    ).toMatchObject({
+      connection_id: second.connId,
+      member_id: firstRegistration.sessionId,
+      launch_id: "launch-ci",
+      transport_class: "same-launch-fan-in",
+      connected_at_ms: expect.any(Number),
+    })
+    expect(
+      logs.filter(
+        (event) => event.level === "info" && event.message === "transport.fan-in" && event.props?.name === "@ci",
+      ),
+    ).toHaveLength(1)
+    expect(
+      logs.find(
+        (event) => event.level === "debug" && event.message === "transport.attached" && event.props?.name === "@ci",
+      )?.props,
+    ).toMatchObject({
+      connection_id: third.connId,
+      member_id: firstRegistration.sessionId,
+      launch_id: "launch-ci",
+      transport_class: "same-launch-fan-in",
+    })
+    expect(logs.some((event) => event.level === "info" && event.message.startsWith("launch fan-in:"))).toBe(false)
+
+    first.socket.emitClose()
+    second.socket.emitClose()
+    third.socket.emitClose()
+
+    const reconnected = harness.connectClient()
+    await harness.register(reconnected.connId, {
+      name: "@ci",
+      pid: liveHolderPid,
+      project: "/tmp/km-wt6",
+      launchId: "launch-ci",
+      launchParentPid: 7007,
+    })
+    const reconnectedFanIn = harness.connectClient()
+    await harness.register(reconnectedFanIn.connId, {
+      name: "@ci",
+      pid: otherLivePid,
+      project: "/tmp/km-wt6",
+      launchId: "launch-ci",
+      launchParentPid: 7007,
+    })
+
+    expect(
+      logs.filter(
+        (event) => event.level === "info" && event.message === "transport.fan-in" && event.props?.name === "@ci",
+      ),
+    ).toHaveLength(2)
+  })
+
+  it("attributes an immediate socket error and disconnect to the resolved seat with a bounded reason", async () => {
+    const logs = captureDispatcherLogs()
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const client = harness.connectClient()
+    const registered = parseResult<RegisterResult>(
+      await harness.register(client.connId, {
+        name: "@agent/4",
+        pid: liveHolderPid,
+        project: "/tmp/km-wt4",
+        launchId: "launch-agent-4",
+        launchParentPid: 4004,
+      }),
+    )
+    const socketError = Object.assign(new Error("sensitive socket detail"), { code: "ECONNRESET" })
+
+    client.socket.emitError(socketError)
+    client.socket.emitClose(true)
+
+    expect(logs.find((event) => event.level === "warn" && event.message === "connection.error")?.props).toMatchObject({
+      connection_id: client.connId,
+      member_id: registered.sessionId,
+      name: "@agent/4",
+      reason: "socket-error",
+      error_code: "ECONNRESET",
+    })
+    expect(
+      logs.find((event) => event.level === "info" && event.message === "session.disconnected")?.props,
+    ).toMatchObject({
+      connection_id: client.connId,
+      member_id: registered.sessionId,
+      name: "@agent/4",
+      reason: "socket-error",
+      error_code: "ECONNRESET",
+      operations: { register: 1 },
+      last_operation: "register",
+      last_operation_at_ms: expect.any(Number),
+    })
+    expect(JSON.stringify(logs)).not.toContain(socketError.message)
   })
 })
 
@@ -1449,11 +1668,30 @@ function createTestSocket(): TestSocket {
       handlers.set(event, eventHandlers)
       return this
     },
-    emitClose() {
-      for (const handler of handlers.get("close") ?? []) handler()
+    emitClose(hadError = false) {
+      for (const handler of handlers.get("close") ?? []) handler(hadError)
+    },
+    emitError(error: Error) {
+      for (const handler of handlers.get("error") ?? []) handler(error)
     },
   }
   return socket as unknown as TestSocket
+}
+
+function captureDispatcherLogs(): LogEvent[] {
+  const events: LogEvent[] = []
+  const previousLogLevel = getLogLevel()
+  setLogLevel("debug")
+  setSuppressConsole(true)
+  const unsubscribe = addWriter({ ns: "tribe:dispatcher" }, (_formatted, _level, _namespace, event) => {
+    if (event.kind === "log") events.push(event)
+  })
+  logCleanups.push(() => {
+    unsubscribe()
+    setLogLevel(previousLogLevel)
+    setSuppressConsole(false)
+  })
+  return events
 }
 
 function createFakeServer(): Server {
