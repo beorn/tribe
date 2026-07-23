@@ -6,7 +6,9 @@ describe("tribe MCP tools list", () => {
   it("exposes inbox.wait as a callable tool", () => {
     const tool = TOOLS_LIST.find((entry) => entry.name === "inbox.wait")
     expect(tool).toBeTruthy()
-    expect(tool?.description).toContain("Long-poll the actionable inbox")
+    expect(tool?.description).toContain("short diagnostic wait")
+    expect(tool?.description).toContain("default is 5000ms")
+    expect(tool?.description).not.toContain("Long-poll the actionable inbox")
     expect(tool?.description).toContain("request/query/assign/verdict")
     expect(tool?.description).not.toContain("ball:reminder")
     expect(tool?.description).toContain("notify/status/response")

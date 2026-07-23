@@ -1,6 +1,6 @@
 export type TribeDelivery = "push" | "pull"
 export type TribePullTransport = "mcp" | "cli" | "host-stream"
-export type TribeIdleStrategy = "channel" | "host-stream" | "cli-inbox-wait" | "mcp-inbox.wait"
+export type TribeIdleStrategy = "channel" | "host-stream" | "cli-inbox-wait"
 
 export type TribeDeliveryCapability = {
   readonly delivery: TribeDelivery
@@ -84,8 +84,5 @@ export function deliveryCapabilityInstruction(capability: TribeDeliveryCapabilit
   if (capability.idleStrategy === "host-stream") {
     return `Delivery capability: ${capability.summary}. Use the host stream for idle delivery; use MCP tools for join, send, fetch snapshots, pending, health, and lifecycle.`
   }
-  if (capability.idleStrategy === "cli-inbox-wait") {
-    return `Delivery capability: ${capability.summary}. Use one max-window CLI wait and let it return on actionable inbox activity (type=request/query/assign/verdict), an explicitly enabled validated correlated response/status, or timeout; do not simulate long-polling with repeated short waits. MCP remains the authority for join, fetch, send, pending, health, and lifecycle.`
-  }
-  return `Delivery capability: ${capability.summary}. MCP inbox.wait is diagnostic-only and returns typed host_cut for requests above its measured host ceiling; follow advice=cli_wait instead of re-arming MCP. By default it wakes only on actionable inbox activity (type=request/query/assign/verdict), while wake_on_correlated_reply may also admit a validated response/status to this session's own tracked request. Do not simulate long-polling with repeated short waits.`
+  return `Delivery capability: ${capability.summary}. Use one max-window CLI wait and let it return on actionable inbox activity (type=request/query/assign/verdict), an explicitly enabled validated correlated response/status, or timeout; do not simulate long-polling with repeated short waits. MCP remains the authority for join, fetch, send, pending, health, and lifecycle.`
 }

@@ -15,16 +15,13 @@ import {
 } from "./delivery.ts"
 
 function inboxWaitDescription(base: string, capability: TribeDeliveryCapability): string {
-  if (capability.idleStrategy === "cli-inbox-wait") {
-    return `${deliveryCapabilityInstruction(capability)} ${base} This MCP tool remains callable for short diagnostic waits, but the advertised idle wait primitive is CLI because this host may cap long-running MCP calls.`
-  }
   if (capability.idleStrategy === "host-stream") {
     return `${deliveryCapabilityInstruction(capability)} ${base} This MCP tool remains callable for diagnostics, but the advertised idle wait primitive is the host Tribe stream.`
   }
   if (capability.idleStrategy === "channel") {
     return `${deliveryCapabilityInstruction(capability)} ${base} This MCP tool remains callable for diagnostics, but the advertised idle wait primitive is channel delivery.`
   }
-  return `${deliveryCapabilityInstruction(capability)} ${base}`
+  return `${deliveryCapabilityInstruction(capability)} ${base} This MCP tool remains callable for short diagnostic waits, but the advertised idle wait primitive is CLI because this host may cap long-running MCP calls.`
 }
 
 function projectMcpTool(tool: TribeMcpTool, capability: TribeDeliveryCapability): TribeMcpTool {

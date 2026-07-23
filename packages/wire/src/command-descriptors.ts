@@ -1,4 +1,4 @@
-import { MCP_INBOX_WAIT_HOST_CEILING_MS } from "./lib/inbox-wait-options.ts"
+import { DEFAULT_MCP_INBOX_WAIT_TIMEOUT_MS, MCP_INBOX_WAIT_HOST_CEILING_MS } from "./lib/inbox-wait-options.ts"
 
 export const TRIBE_MESSAGE_TYPES = ["assign", "status", "query", "response", "notify", "request", "verdict"] as const
 export type TribeMessageType = (typeof TRIBE_MESSAGE_TYPES)[number]
@@ -397,11 +397,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     id: "tribe.inbox.wait",
     title: "Inbox Wait",
     description:
-      "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. MCP requests above the measured host ceiling return host_cut immediately with advice=cli_wait; use the CLI for longer waits. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the caller's session.",
+      "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. MCP requests at or above the measured host ceiling return host_cut immediately with advice=cli_wait; use the CLI for longer waits. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the caller's session.",
     lifetime: "live-session",
     mcp: {
       name: "inbox.wait",
-      description: `Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. MCP requests above the measured ${MCP_INBOX_WAIT_HOST_CEILING_MS}ms host ceiling return host_cut immediately with advice=cli_wait; use the CLI for longer waits. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the caller's session.`,
+      description: `Run a short diagnostic wait for actionable inbox activity. The MCP default is ${DEFAULT_MCP_INBOX_WAIT_TIMEOUT_MS}ms; requests at or above the measured ${MCP_INBOX_WAIT_HOST_CEILING_MS}ms host ceiling return host_cut immediately with advice=cli_wait. Use tribe inbox-wait for steady-state or longer waits. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the caller's session.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -411,7 +411,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           },
           timeout_ms: {
             type: "number",
-            description: `Requested wait in milliseconds. The MCP default is 30000; requests above the measured ${MCP_INBOX_WAIT_HOST_CEILING_MS}ms host ceiling return host_cut immediately. Use tribe inbox-wait for longer waits.`,
+            default: DEFAULT_MCP_INBOX_WAIT_TIMEOUT_MS,
+            description: `Requested diagnostic wait in milliseconds. Requests at or above the measured ${MCP_INBOX_WAIT_HOST_CEILING_MS}ms host ceiling return host_cut immediately. Use tribe inbox-wait for longer waits.`,
           },
           wake_on_correlated_reply: {
             type: "boolean",
@@ -461,6 +462,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         ),
         oneOf: [
           {
+            properties: { status: { type: "string", enum: ["woken", "timeout", "aborted"] } },
             required: [
               "status",
               "session",
@@ -475,6 +477,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             ],
           },
           {
+            properties: { status: { type: "string", enum: ["host_cut"] } },
             required: ["status", "requested_ms", "ceiling_ms", "ceiling_source", "advice"],
           },
           { required: ["error"] },
@@ -484,7 +487,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     cli: available({
       name: "inbox-wait",
       description:
-        "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. MCP requests above the measured host ceiling return host_cut immediately with advice=cli_wait; use the CLI for longer waits. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the caller's session.",
+        "Long-poll the actionable inbox until a request/query/assign/verdict direct message arrives or the timeout elapses. This is the steady-state bounded-wait rail. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the daemon-resolved launch identity.",
       lifetime: "one-shot",
       mapsToMcp: "inbox.wait",
       options: [

@@ -6,8 +6,9 @@
 
 - **Typed MCP host-ceiling refusal and CLI/daemon version preflight.** Protocol
   v9 adds `status` to completed waits, returns `host_cut` before an MCP request
-  exceeds the measured 10,000ms native-host ceiling, and routes longer waits to
-  the CLI without model-driven chunk/re-arm polling. The one-shot CLI now probes
+  reaches the measured 10,000ms native-host ceiling, uses a host-safe 5,000ms
+  MCP default, and routes steady-state waits to the CLI without model-driven
+  chunk/re-arm polling. The one-shot CLI now probes
   `cli_protocol` and names the running, on-disk, and superproject pins before it
   can parse a stale daemon reply.
 - **Honor one full bounded inbox-wait window across every transport.** Protocol

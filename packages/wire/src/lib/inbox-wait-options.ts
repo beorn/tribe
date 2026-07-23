@@ -1,8 +1,10 @@
 export const DEFAULT_INBOX_WAIT_SESSION = "@chief"
 export const DEFAULT_INBOX_WAIT_TIMEOUT_MS = 30_000
+export const DEFAULT_MCP_INBOX_WAIT_TIMEOUT_MS = 5_000
 export const MAX_INBOX_WAIT_TIMEOUT_MS = 30 * 60_000
 export const MCP_INBOX_WAIT_HOST_CEILING_MS = 10_000
-export const MCP_INBOX_WAIT_HOST_CEILING_SOURCE = "measured" as const
+export type InboxWaitHostCeilingSource = "documented" | "measured"
+export const MCP_INBOX_WAIT_HOST_CEILING_SOURCE: InboxWaitHostCeilingSource = "measured"
 
 const MIN_INBOX_WAIT_CALL_TIMEOUT_MS = 10_000
 const INBOX_WAIT_CALL_TIMEOUT_MARGIN_MS = 5_000
@@ -52,7 +54,7 @@ export type InboxWaitHostCutResult = {
   readonly status: "host_cut"
   readonly requested_ms: number
   readonly ceiling_ms: number
-  readonly ceiling_source: typeof MCP_INBOX_WAIT_HOST_CEILING_SOURCE
+  readonly ceiling_source: InboxWaitHostCeilingSource
   readonly advice: "cli_wait"
 }
 

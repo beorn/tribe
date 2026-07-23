@@ -37,8 +37,8 @@ import {
  * RPCs: `tribe.send` / `tribe.fetch` / `tribe.members` / `tribe.inbox.wait` /
  * `tribe.filter` / `tribe.rename` / `tribe.health` / `tribe.join` /
  * `tribe.reload` / `tribe.retro` / `tribe.chief` / `tribe.claim-chief` /
- * `tribe.release-chief` / `tribe.debug`. See plugins/claude/CHANGELOG.md for
- * the full history.
+ * `tribe.release-chief` / `tribe.debug`. See ../CHANGELOG.md for the wire
+ * protocol history.
  *
  * 0.14.0 added two OPTIONAL fields on `assign`-typed channel envelopes —
  * `bead_state` (fresh snapshot from `.beads/backup/issues.jsonl`) and

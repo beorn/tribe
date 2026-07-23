@@ -216,43 +216,56 @@ describe("callTribeTool", () => {
     },
   }
 
-  it("refuses a wait beyond the measured MCP host ceiling before calling the daemon", async () => {
-    const call = vi.fn(async () => canonicalInboxWaitResult)
-    const client = { call } as unknown as DaemonClient
+  it.each([10_000, 10_001, 600_000])(
+    "refuses a wait at or beyond the measured MCP host ceiling before calling the daemon: %dms",
+    async (requestedMs) => {
+      const call = vi.fn(async () => canonicalInboxWaitResult)
+      const client = { call } as unknown as DaemonClient
 
-    const result = await callTribeTool(client, "inbox.wait", { timeout_ms: 600_000 })
-    const hostCut = {
-      status: "host_cut",
-      requested_ms: 600_000,
-      ceiling_ms: 10_000,
-      ceiling_source: "measured",
-      advice: "cli_wait",
-    }
+      const result = await callTribeTool(client, "inbox.wait", { timeout_ms: requestedMs })
+      const hostCut = {
+        status: "host_cut",
+        requested_ms: requestedMs,
+        ceiling_ms: 10_000,
+        ceiling_source: "measured",
+        advice: "cli_wait",
+      }
 
-    expect(call).not.toHaveBeenCalled()
-    expect(result).toEqual({
-      content: [{ type: "text", text: JSON.stringify(hostCut) }],
-      structuredContent: hostCut,
-    })
-  })
+      expect(call).not.toHaveBeenCalled()
+      expect(result).toEqual({
+        content: [{ type: "text", text: JSON.stringify(hostCut) }],
+        structuredContent: hostCut,
+      })
+    },
+  )
 
-  it("gives an allowed inbox wait the full requested window plus transport margin", async () => {
+  it("allows 9,999ms and gives it the full requested window plus transport margin", async () => {
     const call = vi.fn(async () => canonicalInboxWaitResult)
     const client = { call } as unknown as DaemonClient
 
     const result = await callTribeTool(client, "inbox.wait", {
-      timeout_ms: 5_000,
+      timeout_ms: 9_999,
       wake_on_correlated_reply: true,
     })
 
     expect(call).toHaveBeenCalledWith(
       "tribe.inbox.wait",
       {
-        timeout_ms: 5_000,
+        timeout_ms: 9_999,
         wake_on_correlated_reply: true,
       },
-      { timeoutMs: 10_000 },
+      { timeoutMs: 14_999 },
     )
+    expect(result).toMatchObject({ structuredContent: canonicalInboxWaitResult })
+  })
+
+  it("uses a host-safe diagnostic window when MCP omits timeout_ms", async () => {
+    const call = vi.fn(async () => canonicalInboxWaitResult)
+    const client = { call } as unknown as DaemonClient
+
+    const result = await callTribeTool(client, "inbox.wait", {})
+
+    expect(call).toHaveBeenCalledWith("tribe.inbox.wait", { timeout_ms: 5_000 }, { timeoutMs: 10_000 })
     expect(result).toMatchObject({ structuredContent: canonicalInboxWaitResult })
   })
 

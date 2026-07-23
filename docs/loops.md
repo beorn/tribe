@@ -42,8 +42,8 @@ Every completed wait has `status: "woken" | "timeout" | "aborted"` and reports
 the logical window as `effective_timeout_ms`. On wake, drain with a small fetch
 and handle what `attention` shows.
 
-MCP `inbox.wait` is diagnostic-only. The measured native-host ceiling is
-10,000ms; larger requests return immediately with
+MCP `inbox.wait` is diagnostic-only and defaults to a host-safe 5,000ms. The
+measured native-host ceiling is 10,000ms; requests at or above it return immediately with
 `{status:"host_cut", requested_ms, ceiling_ms:10000,
 ceiling_source:"measured", advice:"cli_wait"}` before a daemon wait starts.
 Follow that closed advice once. Never approximate a long wait by repeatedly
@@ -70,8 +70,8 @@ durably in SQLite and the session drains them explicitly.
   `[mcp_servers.tribe.env]` in `~/.codex/config.toml`.
 - Put the drain at the **top of every agent turn**: `tribe.fetch({ limit: 10 })`,
   handle `attention`, reply, then proceed with the turn's work.
-- Use the CLI `tribe inbox-wait` for bounded idle waits. MCP requests above the
-  measured 10,000ms ceiling return typed `host_cut` with `advice: "cli_wait"`;
+- Use the CLI `tribe inbox-wait` for bounded idle waits. MCP requests at or above
+  the measured 10,000ms ceiling return typed `host_cut` with `advice: "cli_wait"`;
   do not re-arm MCP. Messages remain durable between turns.
 
 Senders never need to know any of this: `tribe.send({ to, message })` is

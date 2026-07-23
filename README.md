@@ -92,8 +92,9 @@ TRIBE_DELIVERY = "pull"
 
 Use that shape in `~/.codex/config.toml` for MCP-only clients without a
 notification channel. MCP `inbox.wait` is limited by a measured 10,000ms host
-ceiling; larger requests return typed `host_cut` with `advice: "cli_wait"`
-before the daemon starts waiting. Run one `tribe inbox-wait --session <name>
+ceiling; it defaults to a host-safe 5,000ms diagnostic, while requests at or
+above the ceiling return typed `host_cut` with `advice: "cli_wait"` before the
+daemon starts waiting. Run one `tribe inbox-wait --session <name>
 --timeout <duration> --json` call for longer idle waits; never re-arm short MCP
 calls into a polling loop.
 

@@ -63,7 +63,8 @@ describe("Tribe command descriptors", () => {
       const cli = visibleCliProjection(descriptor!)
       expect(cli.name).toBe(cliName)
       expect(cli.mapsToMcp).toBe(mcpName)
-      expect(cli.description).toBe(descriptor!.description)
+      if (mcpName === "inbox.wait") expect(cli.description).not.toBe(descriptor!.description)
+      else expect(cli.description).toBe(descriptor!.description)
       expect(cli.lifetime).toBe("one-shot")
     }
   })
@@ -132,6 +133,10 @@ describe("Tribe command descriptors", () => {
       type: "boolean",
       description: expect.any(String),
     })
+    expect(commandDescriptorByMcpName("inbox.wait")?.mcp.inputSchema.properties?.timeout_ms).toMatchObject({
+      type: "number",
+      default: 5_000,
+    })
     expect(commandDescriptorByMcpName("inbox.wait")?.mcp.outputSchema.properties?.effective_timeout_ms).toEqual({
       type: "number",
       description: expect.any(String),
@@ -142,8 +147,27 @@ describe("Tribe command descriptors", () => {
       description: expect.any(String),
     })
     expect(commandDescriptorByMcpName("inbox.wait")?.mcp.outputSchema.oneOf).toContainEqual({
+      properties: { status: { type: "string", enum: ["woken", "timeout", "aborted"] } },
+      required: [
+        "status",
+        "session",
+        "unread_count",
+        "oldest_unread_age_min",
+        "oldest_unread_ts",
+        "waited_ms",
+        "effective_timeout_ms",
+        "timed_out",
+        "aborted",
+        "attention",
+      ],
+    })
+    expect(commandDescriptorByMcpName("inbox.wait")?.mcp.outputSchema.oneOf).toContainEqual({
+      properties: { status: { type: "string", enum: ["host_cut"] } },
       required: ["status", "requested_ms", "ceiling_ms", "ceiling_source", "advice"],
     })
+    expect(commandDescriptorByMcpName("inbox.wait")?.mcp.description).toContain("host_cut")
+    expect(inboxWait.description).not.toContain("host_cut")
+    expect(inboxWait.description).not.toContain("MCP")
     expect(commandDescriptorByMcpName("inbox.wait")?.mcp.outputSchema.properties?.attention).toMatchObject({
       type: "object",
     })
