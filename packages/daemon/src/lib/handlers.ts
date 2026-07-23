@@ -19,7 +19,7 @@ import {
   MAX_BALL_TTL_MS,
   type Delivery,
 } from "./messaging.ts"
-import { ACTIONABLE_TYPES_SQL, AUTO_TRACK_TYPES_SET } from "./database.ts"
+import { ACTIONABLE_TYPES_SET, ACTIONABLE_TYPES_SQL, AUTO_TRACK_TYPES_SET } from "./database.ts"
 import {
   classifySessionRegistrationLifetime,
   isPidAlive as pidStillAlive,
@@ -1517,6 +1517,7 @@ export type FetchRow = {
   topic: string | null
   room_id: string | null
   summary: string | null
+  attention_required: number
 }
 
 export type FetchEvent = {
@@ -1618,7 +1619,8 @@ function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRo
   const order = filters.since !== null ? "ASC" : "DESC"
   const rows = ctx.db
     .prepare(`
-      SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary
+      SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
+             attention_required
       FROM messages
       WHERE ${conditions.join("\n        AND ")}
       ORDER BY rowid ${order}
@@ -1686,7 +1688,8 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
     const placeholders = ids.map(() => "?").join(", ")
     rows = ctx.db
       .prepare(`
-        SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary
+        SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
+               attention_required
         FROM messages
         WHERE id IN (${placeholders})
           AND kind != 'event'
@@ -1746,14 +1749,23 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
     }
   }
 
-  // 19442 / 21757 — acknowledge the canonical attention rows this fetch
-  // returns. Reuse that exact projection instead of re-deriving attention from
-  // message types; its final row advances the recipient-keyed mailbox cursor
-  // so no later claim of this name re-recovers what the caller just received.
+  // 19442 / 21757 — acknowledge every canonical attention row this fetch
+  // returns. Default drains carry the full attention projection; explicit
+  // since+advance reads carry their returned rows. The persisted classifier
+  // keeps newly surfaced responses distinct from legacy ambient responses.
   if (shouldAdvance) {
-    const lastAttention = attentionRows.at(-1)
-    if (lastAttention) {
-      ctx.stmts.advanceMailboxCursor.run({ $recipient: currentName, $seq: lastAttention.rowid, $now: Date.now() })
+    let lastAttention = 0
+    for (const row of [...attentionRows, ...filtered]) {
+      if (
+        row.recipient === currentName &&
+        row.sender !== currentName &&
+        (ACTIONABLE_TYPES_SET.has(row.type) || row.attention_required === 1)
+      ) {
+        lastAttention = Math.max(lastAttention, row.rowid)
+      }
+    }
+    if (lastAttention > 0) {
+      ctx.stmts.advanceMailboxCursor.run({ $recipient: currentName, $seq: lastAttention, $now: Date.now() })
     }
   }
 

@@ -1292,7 +1292,7 @@ export function createStatements(db: Database) {
      *  exceeds the session's pull cursor and whose recipient matches. */
     getInboxRows: db.prepare(`
 		SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts,
-			delivery, topic, room_id, summary
+			delivery, topic, room_id, summary, attention_required
 		FROM messages
 		WHERE rowid > $since
 			AND (recipient = $name OR recipient = '*')
@@ -1366,7 +1366,8 @@ export function createStatements(db: Database) {
      * acknowledgement retires a row from this view.
      */
     selectUnackedAttention: db.prepare(`
-      SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary
+      SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
+             attention_required
       FROM messages
       WHERE recipient = $name
         AND kind = 'direct'
@@ -1387,7 +1388,8 @@ export function createStatements(db: Database) {
      * reuses the recipient mailbox cursor — no second queue, cursor, or store.
      */
     selectAttention: db.prepare(`
-      SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary
+      SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
+             attention_required
       FROM messages
       WHERE recipient = $name
         AND kind = 'direct'

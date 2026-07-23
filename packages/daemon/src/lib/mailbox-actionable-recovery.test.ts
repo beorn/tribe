@@ -278,6 +278,36 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(second.events).toEqual([])
   })
 
+  it("keeps a push-delivered response in attention until the parked seat fetches it", () => {
+    const requester = connectAs("sess-push-parked", NAME)
+    const chief = connectAs("sess-push-chief", "@chief")
+    const request = parseToolJson(
+      handleToolCall(requester, "tribe.send", { to: "@chief", message: "choose", type: "request" }, opts),
+    ) as { id: string }
+    const response = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        { to: NAME, message: "use seam B", type: "response", reply: request.id },
+        opts,
+      ),
+    ) as { id: string }
+    const persisted = db.prepare("SELECT rowid FROM messages WHERE id = ?").get(response.id) as { rowid: number }
+
+    // Socket fanout records transport delivery, not model surfacing. A parked
+    // provider has not acknowledged attention until its canonical fetch.
+    stmts.updateLastDelivered.run({ $id: "sess-push-parked", $ts: now, $seq: persisted.rowid })
+    expect(stmts.getLastDelivered.get({ $id: "sess-push-parked" })).toMatchObject({
+      last_delivered_seq: persisted.rowid,
+    })
+
+    const fetched = fetchJson(requester, opts).json
+    expect(fetched.attention?.actionable_unread).toEqual([
+      expect.objectContaining({ id: response.id, type: "response", content: "use seam B" }),
+    ])
+    expect(fetchJson(requester, opts).json.attention?.actionable_unread).toEqual([])
+  })
+
   it("projects a response ahead of a full ambient page without replaying it after acknowledgement", () => {
     const live = connectAs("sess-live-response", NAME)
     for (let i = 0; i < 75; i++) {
@@ -312,6 +342,38 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(second.attention?.actionable_unread).toEqual([])
     expect(second.events).toHaveLength(25)
     expect(second.events?.some((event) => event.id === "decision-response")).toBe(false)
+  })
+
+  it("acknowledges every attention row returned by an explicit advancing fetch", () => {
+    const live = connectAs("sess-explicit-advance", NAME)
+    const requestRowid = insertRow(stmts, {
+      id: "explicit-request",
+      type: "request",
+      sender: "@chief",
+      recipient: NAME,
+      kind: "direct",
+      content: "pick a seam",
+      ts: now + 1,
+    })
+    const responseRowid = insertRow(stmts, {
+      id: "explicit-response",
+      type: "response",
+      sender: "@chief",
+      recipient: NAME,
+      kind: "direct",
+      content: "use seam B",
+      ts: now + 2,
+    })
+
+    const explicit = fetchJson(live, opts, { since: requestRowid - 1, advance: true }).json
+    expect(explicit.attention).toBeUndefined()
+    expect(explicit.events?.map((event) => event.id)).toEqual(["explicit-request", "explicit-response"])
+    expect(db.prepare("SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = ?").get(NAME)).toEqual({
+      last_actionable_seq: responseRowid,
+    })
+
+    const canonical = fetchJson(live, opts).json
+    expect(canonical.attention?.actionable_unread).toEqual([])
   })
 
   it("projects a later actionable plus owed ball ahead of a full ambient page", () => {
