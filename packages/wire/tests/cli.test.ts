@@ -82,6 +82,106 @@ function runCliAsync(
 }
 
 describe("tribe-wire CLI — Commander dispatcher", () => {
+  it("refuses a legacy inbox-wait daemon before parsing its stale result and names the served pins", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-wait-skew-"))
+    const socketPath = join(dir, "tribe.sock")
+    const calls: string[] = []
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as { id: number; method: string }
+          calls.push(request.method)
+          if (request.method === "cli_protocol") {
+            socket.write(
+              `${JSON.stringify({
+                jsonrpc: "2.0",
+                id: request.id,
+                error: { code: -32601, message: "Method not found: cli_protocol" },
+              })}\n`,
+            )
+            continue
+          }
+          if (request.method === "tribe.health") {
+            socket.write(
+              `${JSON.stringify({
+                jsonrpc: "2.0",
+                id: request.id,
+                result: {
+                  content: [
+                    {
+                      type: "text",
+                      text: JSON.stringify({
+                        code_pin: {
+                          stale: true,
+                          reason: "running 665a2052c != on_disk 2056c81e2",
+                          running: "665a2052c",
+                          on_disk: "2056c81e2",
+                          superproject_pin: "2056c81e2",
+                        },
+                      }),
+                    },
+                  ],
+                },
+              })}\n`,
+            )
+            continue
+          }
+          socket.write(
+            `${JSON.stringify({
+              jsonrpc: "2.0",
+              id: request.id,
+              result: {
+                session: "@chief",
+                unread_count: 0,
+                oldest_unread_age_min: 0,
+                oldest_unread_ts: 0,
+                waited_ms: 0,
+                timed_out: true,
+                aborted: false,
+              },
+            })}\n`,
+          )
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const result = await runCliAsync(
+        ["inbox-wait", "--session", "@chief", "--timeout", "0s", "--json"],
+        {
+          ...process.env,
+          TRIBE_SOCKET: socketPath,
+          TRIBE_NO_AUTOSTART: "1",
+        },
+        { timeoutMs: 10_000 },
+      )
+
+      expect(result.code).not.toBe(0)
+      expect(result.stderr).toMatch(/inbox-wait protocol version mismatch/i)
+      expect(result.stderr).toContain("running=665a2052c")
+      expect(result.stderr).toContain("on_disk=2056c81e2")
+      expect(result.stderr).toContain("pin=2056c81e2")
+      expect(calls).toEqual(["cli_protocol", "tribe.health"])
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it("fails loudly by the client deadline when the inbox-wait daemon stays silent", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-wait-silent-"))
     const socketPath = join(dir, "tribe.sock")
