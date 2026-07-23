@@ -41,7 +41,7 @@ import {
   resolveInboxWaitControls,
   type InboxWaitResult,
 } from "../lib/inbox-wait-options.ts"
-import { connectToDaemon, resolveSocketPath } from "../lib/socket.ts"
+import { connectToDaemon, resolveSocketPath, TRIBE_PROTOCOL_VERSION, type DaemonClient } from "../lib/socket.ts"
 import { watchActivity } from "../lib/activity-watch.ts"
 import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-exempt.ts"
 
@@ -51,6 +51,7 @@ const REPAIR_CLI = visibleCliProjectionForMcp("repair")
 
 const STALE_MANAGED_INBOX_DAEMON_ERROR =
   "Running Tribe daemon is stale and cannot resolve this managed inbox; update/reload the daemon before retrying. Use --session only for an explicit operator target."
+const INBOX_WAIT_PROTOCOL_MISMATCH = "TRIBE_INBOX_WAIT_PROTOCOL_MISMATCH"
 
 // ---------------------------------------------------------------------------
 // Daemon connection
@@ -651,6 +652,44 @@ function parseDoctorHealth(raw: unknown): DoctorHealthShape {
   return (mcpJsonContent(raw) ?? {}) as DoctorHealthShape
 }
 
+function inboxWaitProtocolMismatchError(daemonProtocolVersion: number | null, health: DoctorHealthShape): Error {
+  const pins = health.code_pin
+  return Object.assign(
+    new Error(
+      "Inbox-wait protocol version mismatch: " +
+        `client=${TRIBE_PROTOCOL_VERSION} daemon=${daemonProtocolVersion ?? "unsupported"}; ` +
+        `running=${pins?.running ?? "?"} on_disk=${pins?.on_disk ?? "?"} pin=${pins?.superproject_pin ?? "?"}. ` +
+        "Materialize the pinned Tribe checkout and restart the daemon before retrying.",
+    ),
+    { code: INBOX_WAIT_PROTOCOL_MISMATCH },
+  )
+}
+
+async function assertInboxWaitProtocol(client: DaemonClient, timeoutMs: number): Promise<void> {
+  let daemonProtocolVersion: number | null = null
+  try {
+    const result = (await client.call("cli_protocol", undefined, { timeoutMs })) as {
+      protocol_version?: unknown
+    }
+    if (typeof result.protocol_version === "number") {
+      daemonProtocolVersion = result.protocol_version
+    }
+  } catch (err) {
+    if ((err as { code?: unknown }).code !== -32601) throw err
+  }
+
+  if (daemonProtocolVersion === TRIBE_PROTOCOL_VERSION) return
+
+  let health: DoctorHealthShape = {}
+  try {
+    health = parseDoctorHealth(await client.call("tribe.health", undefined, { timeoutMs }))
+  } catch {
+    // The protocol verdict is already authoritative. Health is best-effort
+    // diagnostic enrichment for daemons too old to expose code-pin details.
+  }
+  throw inboxWaitProtocolMismatchError(daemonProtocolVersion, health)
+}
+
 async function cmdDoctor(opts: { fix?: boolean }): Promise<void> {
   const health = parseDoctorHealth(await callDaemon("tribe.health"))
   const verdict = evaluateDoctor(health)
@@ -791,6 +830,7 @@ function logicalTimeoutInboxWaitResult(
   return totalWaited(
     {
       ...latest,
+      status: "timeout",
       timed_out: true,
       aborted: false,
     },
@@ -877,6 +917,7 @@ async function callInboxWaitChunk(
   const callTimeoutMs = deriveInboxWaitCallTimeoutMs(timeoutMs)
   const client = await connectToDaemon(socketPath, { callTimeoutMs })
   try {
+    await assertInboxWaitProtocol(client, deriveInboxWaitCallTimeoutMs(0))
     return parseInboxWaitResult(
       await client.call(
         method,
@@ -909,13 +950,21 @@ async function cmdInboxWait(opts: {
     wake_on_correlated_reply: opts.wakeOnCorrelatedReply,
   })
   const target = cliInboxTargetParams(opts.session)
-  const result = await waitForInboxWithReconnect({
-    session: opts.session,
-    timeoutMs: controls.timeoutMs,
-    wakeOnCorrelatedReply: controls.wakeOnCorrelatedReply,
-    call: ({ timeoutMs: chunkTimeoutMs, wakeOnCorrelatedReply }) =>
-      callInboxWaitChunk(cliInboxMethod("wait", opts.session), target, chunkTimeoutMs, wakeOnCorrelatedReply),
-  })
+  let result: InboxWaitResult
+  try {
+    result = await waitForInboxWithReconnect({
+      session: opts.session,
+      timeoutMs: controls.timeoutMs,
+      wakeOnCorrelatedReply: controls.wakeOnCorrelatedReply,
+      call: ({ timeoutMs: chunkTimeoutMs, wakeOnCorrelatedReply }) =>
+        callInboxWaitChunk(cliInboxMethod("wait", opts.session), target, chunkTimeoutMs, wakeOnCorrelatedReply),
+    })
+  } catch (err) {
+    if ((err as { code?: unknown }).code !== INBOX_WAIT_PROTOCOL_MISMATCH) throw err
+    console.error(`tribe inbox-wait: ${(err as Error).message}`)
+    process.exitCode = 1
+    return
+  }
   if (opts.json) {
     console.log(JSON.stringify(result))
     return

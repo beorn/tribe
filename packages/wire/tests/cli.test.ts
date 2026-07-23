@@ -15,6 +15,7 @@ import { createServer, type Socket } from "node:net"
 import { tmpdir } from "node:os"
 import { resolve, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
+import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "../src/cli.ts")
 const BUN_BIN = process.env.BUN_EXECUTABLE ?? "bun"
@@ -172,9 +173,12 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
 
       expect(result.code).not.toBe(0)
       expect(result.stderr).toMatch(/inbox-wait protocol version mismatch/i)
+      expect(result.stderr).toContain(`client=${TRIBE_PROTOCOL_VERSION}`)
+      expect(result.stderr).toContain("daemon=unsupported")
       expect(result.stderr).toContain("running=665a2052c")
       expect(result.stderr).toContain("on_disk=2056c81e2")
       expect(result.stderr).toContain("pin=2056c81e2")
+      expect(result.stderr).not.toMatch(/at assertInboxWaitProtocol/)
       expect(calls).toEqual(["cli_protocol", "tribe.health"])
     } finally {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
@@ -228,7 +232,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
 
       expect(result.signal).toBeNull()
       expect(result.code).not.toBe(0)
-      expect(result.stderr).toMatch(/Request cli_inbox_wait timed out/)
+      expect(result.stderr).toMatch(/Request cli_protocol timed out/)
       expect(deadlineElapsedMs).toBeGreaterThanOrEqual(9_000)
       expect(deadlineElapsedMs).toBeLessThan(15_000)
     } finally {
@@ -572,6 +576,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     const socketPath = join(dir, "tribe.sock")
     const calls: Array<{ method: string; params?: Record<string, unknown> }> = []
     const waitResult = {
+      status: "woken",
       session: "@chief",
       unread_count: 0,
       oldest_unread_age_min: 0,
@@ -603,13 +608,16 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
           if (!line.trim()) continue
           const request = JSON.parse(line) as { id: number; method: string; params?: Record<string, unknown> }
           calls.push({ method: request.method, params: request.params })
-          const response = request.method.endsWith("_by_launch_v1")
-            ? {
-                jsonrpc: "2.0",
-                id: request.id,
-                error: { code: -32601, message: `Method not found: ${request.method}` },
-              }
-            : { jsonrpc: "2.0", id: request.id, result }
+          const response =
+            request.method === "cli_protocol"
+              ? { jsonrpc: "2.0", id: request.id, result: { protocol_version: TRIBE_PROTOCOL_VERSION } }
+              : request.method.endsWith("_by_launch_v1")
+                ? {
+                    jsonrpc: "2.0",
+                    id: request.id,
+                    error: { code: -32601, message: `Method not found: ${request.method}` },
+                  }
+                : { jsonrpc: "2.0", id: request.id, result }
           socket.write(`${JSON.stringify(response)}\n`)
         }
       })
@@ -660,6 +668,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
 
       expect(calls).toEqual([
         { method: "cli_inbox_status", params: { session: "@chief" } },
+        { method: "cli_protocol", params: undefined },
         { method: "cli_inbox_wait", params: { session: "@chief", timeout_ms: 0 } },
         {
           method: "cli_inbox_drain",
@@ -669,6 +678,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
           method: "cli_inbox_status_by_launch_v1",
           params: { launch_id: "managed-stale-daemon-launch" },
         },
+        { method: "cli_protocol", params: undefined },
         {
           method: "cli_inbox_wait_by_launch_v1",
           params: { launch_id: "managed-stale-daemon-launch", timeout_ms: 0 },

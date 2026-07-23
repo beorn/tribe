@@ -331,6 +331,21 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
     expect(harness.sessionCount("@agent/skew")).toBe(0)
   })
 
+  it("exposes the current wire protocol without creating session state", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const result = parseResult<{ protocol_version: number }>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "protocol", method: "cli_protocol", params: {} },
+        "conn-protocol-probe",
+      ),
+    )
+
+    expect(result).toEqual({ protocol_version: TRIBE_PROTOCOL_VERSION })
+    expect(harness.sessionCount("@agent/protocol-probe")).toBe(0)
+  })
+
   it("projects launch fan-in as one canonical session and omits pending probes", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose

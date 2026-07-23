@@ -1,3 +1,5 @@
+import { MCP_INBOX_WAIT_HOST_CEILING_MS } from "./lib/inbox-wait-options.ts"
+
 export const TRIBE_MESSAGE_TYPES = ["assign", "status", "query", "response", "notify", "request", "verdict"] as const
 export type TribeMessageType = (typeof TRIBE_MESSAGE_TYPES)[number]
 
@@ -395,12 +397,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     id: "tribe.inbox.wait",
     title: "Inbox Wait",
     description:
-      "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Every result carries current attention and the effective timeout cap. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the caller's session.",
+      "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. MCP requests above the measured host ceiling return host_cut immediately with advice=cli_wait; use the CLI for longer waits. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the caller's session.",
     lifetime: "live-session",
     mcp: {
       name: "inbox.wait",
-      description:
-        "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Every result carries current attention and the effective timeout cap. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the caller's session.",
+      description: `Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. MCP requests above the measured ${MCP_INBOX_WAIT_HOST_CEILING_MS}ms host ceiling return host_cut immediately with advice=cli_wait; use the CLI for longer waits. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the caller's session.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -410,8 +411,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           },
           timeout_ms: {
             type: "number",
-            description:
-              "Wait limit in milliseconds. Defaults to 30000 and caps at 1800000; effective_timeout_ms reports the applied cap.",
+            description: `Requested wait in milliseconds. The MCP default is 30000; requests above the measured ${MCP_INBOX_WAIT_HOST_CEILING_MS}ms host ceiling return host_cut immediately. Use tribe inbox-wait for longer waits.`,
           },
           wake_on_correlated_reply: {
             type: "boolean",
@@ -420,29 +420,71 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           },
         },
       },
-      outputSchema: OBJ(
-        {
-          session: { type: "string", description: "The session that was waited on." },
-          unread_count: { type: "number", description: "Actionable unread direct-message count at return time." },
-          oldest_unread_age_min: { type: "number", description: "Age of the oldest actionable unread DM, in minutes." },
-          oldest_unread_ts: { type: "number", description: "Oldest actionable unread DM timestamp (unix ms)." },
-          waited_ms: { type: "number", description: "How long the wait lasted." },
-          effective_timeout_ms: {
-            type: "number",
-            description: "The applied timeout after Tribe's maximum-window cap.",
+      outputSchema: {
+        ...OBJ(
+          {
+            status: {
+              type: "string",
+              enum: ["woken", "timeout", "aborted", "host_cut"],
+              description: "Terminal reason for the MCP wait or its preflight refusal.",
+            },
+            session: { type: "string", description: "The session that was waited on." },
+            unread_count: { type: "number", description: "Actionable unread direct-message count at return time." },
+            oldest_unread_age_min: {
+              type: "number",
+              description: "Age of the oldest actionable unread DM, in minutes.",
+            },
+            oldest_unread_ts: { type: "number", description: "Oldest actionable unread DM timestamp (unix ms)." },
+            waited_ms: { type: "number", description: "How long the wait lasted." },
+            effective_timeout_ms: {
+              type: "number",
+              description: "The applied timeout after Tribe's maximum-window cap.",
+            },
+            timed_out: { type: "boolean", description: "True when the timeout elapsed before a DM arrived." },
+            aborted: { type: "boolean", description: "True when the connection closed before a DM arrived." },
+            attention: ATTENTION_SCHEMA,
+            requested_ms: { type: "number", description: "Requested MCP wait when status=host_cut." },
+            ceiling_ms: { type: "number", description: "Measured host-safe MCP wait ceiling." },
+            ceiling_source: {
+              type: "string",
+              enum: ["documented", "measured"],
+              description: "Provenance of ceiling_ms.",
+            },
+            advice: {
+              type: "string",
+              enum: ["cli_wait"],
+              description: "Closed routing advice for a refused MCP wait.",
+            },
+            ...ERROR_SHAPE,
           },
-          timed_out: { type: "boolean", description: "True when the timeout elapsed before a DM arrived." },
-          aborted: { type: "boolean", description: "True when the connection closed before a DM arrived." },
-          attention: ATTENTION_SCHEMA,
-          ...ERROR_SHAPE,
-        },
-        "Inbox wait result.",
-      ),
+          "Inbox wait result or typed MCP host-ceiling refusal.",
+        ),
+        oneOf: [
+          {
+            required: [
+              "status",
+              "session",
+              "unread_count",
+              "oldest_unread_age_min",
+              "oldest_unread_ts",
+              "waited_ms",
+              "effective_timeout_ms",
+              "timed_out",
+              "aborted",
+              "attention",
+            ],
+          },
+          {
+            required: ["status", "requested_ms", "ceiling_ms", "ceiling_source", "advice"],
+          },
+          { required: ["error"] },
+        ],
+      },
     },
     cli: available({
       name: "inbox-wait",
       description:
-        "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Every result carries current attention and the effective timeout cap. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the caller's session.",
+        "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. MCP requests above the measured host ceiling return host_cut immediately with advice=cli_wait; use the CLI for longer waits. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the caller's session.",
       lifetime: "one-shot",
       mapsToMcp: "inbox.wait",
       options: [

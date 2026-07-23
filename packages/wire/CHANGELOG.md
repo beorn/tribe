@@ -4,6 +4,12 @@
 
 ### Added
 
+- **Typed MCP host-ceiling refusal and CLI/daemon version preflight.** Protocol
+  v9 adds `status` to completed waits, returns `host_cut` before an MCP request
+  exceeds the measured 10,000ms native-host ceiling, and routes longer waits to
+  the CLI without model-driven chunk/re-arm polling. The one-shot CLI now probes
+  `cli_protocol` and names the running, on-disk, and superproject pins before it
+  can parse a stale daemon reply.
 - **Honor one full bounded inbox-wait window across every transport.** Protocol
   v8 caps logical waits at 30 minutes, reports `effective_timeout_ms`, preserves
   that deadline through CLI reconnects plus stdio/HTTP MCP forwarding, and lets

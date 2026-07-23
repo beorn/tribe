@@ -69,12 +69,13 @@ describe("HTTP MCP adapter", () => {
     const daemon = await spawnFakeDaemon(socketPath, async (request) => {
       if (request.method !== "tribe.inbox.wait") return { name: "@agent/http", role: "member" }
       return {
+        status: "timeout",
         session: "@agent/http",
         unread_count: 0,
         oldest_unread_age_min: 0,
         oldest_unread_ts: 0,
         waited_ms: 7,
-        effective_timeout_ms: 30 * 60_000,
+        effective_timeout_ms: 5_000,
         timed_out: true,
         aborted: false,
         attention: {
@@ -112,7 +113,7 @@ describe("HTTP MCP adapter", () => {
           params: {
             name: "inbox.wait",
             arguments: {
-              timeout_ms: 24 * 60 * 60_000,
+              timeout_ms: 5_000,
               wake_on_correlated_reply: true,
             },
           },
@@ -128,10 +129,10 @@ describe("HTTP MCP adapter", () => {
 
       expect(response.status).toBe(200)
       expect(timeout).toHaveBeenCalledWith(request, 0)
-      expect(result.effective_timeout_ms).toBe(30 * 60_000)
+      expect(result.effective_timeout_ms).toBe(5_000)
       expect(payload.result?.structuredContent).toMatchObject(result)
       expect(daemon.requests.find((request) => request.method === "tribe.inbox.wait")?.params).toEqual({
-        timeout_ms: 30 * 60_000,
+        timeout_ms: 5_000,
         wake_on_correlated_reply: true,
       })
     } finally {

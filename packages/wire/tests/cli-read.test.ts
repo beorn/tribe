@@ -248,6 +248,7 @@ describe("waitForInboxWithReconnect", () => {
         }
         now += 5_000
         return {
+          status: "woken",
           session: "@ci",
           unread_count: 1,
           oldest_unread_age_min: 0,
@@ -331,6 +332,7 @@ describe("waitForInboxWithReconnect", () => {
         }
         now += 500
         return {
+          status: "woken",
           session: "@ci",
           unread_count: 1,
           oldest_unread_age_min: 0,
@@ -395,6 +397,7 @@ describe("waitForInboxWithReconnect", () => {
         }
         now += 250
         return {
+          status: "woken",
           session: "@ci",
           unread_count: 1,
           oldest_unread_age_min: 0,
@@ -428,6 +431,7 @@ describe("waitForInboxWithReconnect", () => {
       call: async ({ timeoutMs }) => {
         now += timeoutMs
         return {
+          status: "timeout",
           session: "@ci",
           unread_count: 0,
           oldest_unread_age_min: 0,
@@ -475,6 +479,7 @@ describe("waitForInboxWithReconnect", () => {
         }
         now += timeoutMs
         return {
+          status: "timeout",
           session: "@ci",
           unread_count: 0,
           oldest_unread_age_min: 0,

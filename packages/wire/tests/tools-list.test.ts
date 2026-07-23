@@ -11,10 +11,12 @@ describe("tribe MCP tools list", () => {
     expect(tool?.description).not.toContain("ball:reminder")
     expect(tool?.description).toContain("notify/status/response")
     expect(tool?.description).toContain("pullTransport=mcp")
+    expect(tool?.description).toContain("host_cut")
+    expect(tool?.description).toContain("tribe inbox-wait")
     expect((tool as { _meta?: Record<string, unknown> })._meta?.["tribe.deliveryCapability"]).toMatchObject({
       delivery: "pull",
       pullTransport: "mcp",
-      idleStrategy: "mcp-inbox.wait",
+      idleStrategy: "cli-inbox-wait",
     })
   })
 

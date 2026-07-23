@@ -88,12 +88,14 @@ Each session declares a delivery mode at join time. The daemon routes broadcasts
 **Codex example** (`~/.codex/config.toml`):
 
 ```toml
-[mcp_servers.tribe]
-tool_timeout_sec = 1860
-
 [mcp_servers.tribe.env]
 TRIBE_DELIVERY = "pull"
 ```
+
+MCP `inbox.wait` is diagnostic-only: the measured native-host ceiling is
+10,000ms. Larger requests return typed `host_cut` with `advice: "cli_wait"`
+before the daemon wait starts. Use one bounded `tribe inbox-wait` CLI call for
+longer idle waits; never re-arm short MCP calls as a polling loop.
 
 **Draining in pull mode.** `tribe.fetch()` is the canonical "give me my events" call. Default drain returns a read-only `attention` projection first (`actionable_unread` contains request/query/verdict/assign plus direct responses from the existing mailbox; responses remain quiet for default waits), plus the 10 oldest `pending_balls` and a lossless `pending_balls_summary` from the existing tracker, followed by the bounded chronological `events`, and advances the existing cursors. Use `tribe.pending` for the full ball pile. Filtered reads remain snapshots and omit `attention`.
 

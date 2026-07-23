@@ -1,5 +1,12 @@
 import type { DaemonClient } from "../client.ts"
-import { deriveInboxWaitCallTimeoutMs, parseInboxWaitResult, resolveInboxWaitControls } from "./inbox-wait-options.ts"
+import {
+  deriveInboxWaitCallTimeoutMs,
+  inboxWaitHostCutResult,
+  MCP_INBOX_WAIT_HOST_CEILING_MS,
+  parseInboxWaitResult,
+  parseInboxWaitTimeoutMs,
+  resolveInboxWaitControls,
+} from "./inbox-wait-options.ts"
 
 /** Forward one MCP tool to the daemon, preserving the full inbox-wait window. */
 export async function callTribeTool(
@@ -9,6 +16,15 @@ export async function callTribeTool(
 ): Promise<unknown> {
   const method = `tribe.${name}`
   if (name !== "inbox.wait") return client.call(method, args)
+
+  const requestedMs = parseInboxWaitTimeoutMs(args.timeout_ms ?? args.timeoutMs)
+  if (requestedMs > MCP_INBOX_WAIT_HOST_CEILING_MS) {
+    const structuredContent = inboxWaitHostCutResult(requestedMs)
+    return {
+      content: [{ type: "text", text: JSON.stringify(structuredContent) }],
+      structuredContent,
+    }
+  }
 
   const controls = resolveInboxWaitControls(args)
   const payload: Record<string, unknown> = {

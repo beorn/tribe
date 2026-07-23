@@ -136,6 +136,14 @@ describe("Tribe command descriptors", () => {
       type: "number",
       description: expect.any(String),
     })
+    expect(commandDescriptorByMcpName("inbox.wait")?.mcp.outputSchema.properties?.status).toEqual({
+      type: "string",
+      enum: ["woken", "timeout", "aborted", "host_cut"],
+      description: expect.any(String),
+    })
+    expect(commandDescriptorByMcpName("inbox.wait")?.mcp.outputSchema.oneOf).toContainEqual({
+      required: ["status", "requested_ms", "ceiling_ms", "ceiling_source", "advice"],
+    })
     expect(commandDescriptorByMcpName("inbox.wait")?.mcp.outputSchema.properties?.attention).toMatchObject({
       type: "object",
     })

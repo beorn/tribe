@@ -1,6 +1,8 @@
 export const DEFAULT_INBOX_WAIT_SESSION = "@chief"
 export const DEFAULT_INBOX_WAIT_TIMEOUT_MS = 30_000
 export const MAX_INBOX_WAIT_TIMEOUT_MS = 30 * 60_000
+export const MCP_INBOX_WAIT_HOST_CEILING_MS = 10_000
+export const MCP_INBOX_WAIT_HOST_CEILING_SOURCE = "measured" as const
 
 const MIN_INBOX_WAIT_CALL_TIMEOUT_MS = 10_000
 const INBOX_WAIT_CALL_TIMEOUT_MARGIN_MS = 5_000
@@ -31,7 +33,10 @@ export type InboxWaitAttention = {
   }
 }
 
+export type InboxWaitTerminalStatus = "woken" | "timeout" | "aborted"
+
 export type InboxWaitResult = {
+  readonly status: InboxWaitTerminalStatus
   readonly session: string
   readonly unread_count: number
   readonly oldest_unread_age_min: number
@@ -41,6 +46,26 @@ export type InboxWaitResult = {
   readonly timed_out: boolean
   readonly aborted: boolean
   readonly attention: InboxWaitAttention
+}
+
+export type InboxWaitHostCutResult = {
+  readonly status: "host_cut"
+  readonly requested_ms: number
+  readonly ceiling_ms: number
+  readonly ceiling_source: typeof MCP_INBOX_WAIT_HOST_CEILING_SOURCE
+  readonly advice: "cli_wait"
+}
+
+export type InboxWaitToolResult = InboxWaitResult | InboxWaitHostCutResult
+
+export function inboxWaitHostCutResult(requestedMs: number): InboxWaitHostCutResult {
+  return {
+    status: "host_cut",
+    requested_ms: requestedMs,
+    ceiling_ms: MCP_INBOX_WAIT_HOST_CEILING_MS,
+    ceiling_source: MCP_INBOX_WAIT_HOST_CEILING_SOURCE,
+    advice: "cli_wait",
+  }
 }
 
 export function parseInboxWaitTimeoutMs(raw: unknown, fallback = DEFAULT_INBOX_WAIT_TIMEOUT_MS): number {
@@ -65,6 +90,7 @@ export function parseInboxWaitResult(value: unknown): InboxWaitResult {
   if (!isRecord(value)) throw invalidInboxWaitResult()
   const attention = value.attention
   if (
+    !isInboxWaitTerminalStatus(value.status) ||
     typeof value.session !== "string" ||
     !isFiniteNumber(value.unread_count) ||
     !isFiniteNumber(value.oldest_unread_age_min) ||
@@ -82,7 +108,11 @@ export function parseInboxWaitResult(value: unknown): InboxWaitResult {
   ) {
     throw invalidInboxWaitResult()
   }
+  if (!inboxWaitTerminalStatusMatchesFlags(value.status, value.timed_out, value.aborted)) {
+    throw invalidInboxWaitResult()
+  }
   return {
+    status: value.status,
     session: value.session,
     unread_count: value.unread_count,
     oldest_unread_age_min: value.oldest_unread_age_min,
@@ -123,6 +153,20 @@ function isRecordArray(value: unknown): value is readonly Record<string, unknown
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value)
+}
+
+function isInboxWaitTerminalStatus(value: unknown): value is InboxWaitTerminalStatus {
+  return value === "woken" || value === "timeout" || value === "aborted"
+}
+
+function inboxWaitTerminalStatusMatchesFlags(
+  status: InboxWaitTerminalStatus,
+  timedOut: boolean,
+  aborted: boolean,
+): boolean {
+  if (status === "timeout") return timedOut && !aborted
+  if (status === "aborted") return !timedOut && aborted
+  return !timedOut && !aborted
 }
 
 function invalidInboxWaitResult(): Error {

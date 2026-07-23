@@ -33,6 +33,7 @@ export function createInboxWaitManager(
     flags: { timedOut: boolean; aborted: boolean },
   ): WireInboxWaitResult {
     return {
+      status: flags.aborted ? "aborted" : flags.timedOut ? "timeout" : "woken",
       ...status,
       waited_ms: waitedMs,
       effective_timeout_ms: effectiveTimeoutMs,

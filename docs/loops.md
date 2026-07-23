@@ -33,15 +33,21 @@ The marketplace plugin joins sessions in **push** mode: the daemon fans events
 out live, and they arrive inside a running turn as channel notifications — no
 polling needed while you're working.
 
-For idle stretches, use `tribe.inbox.wait`: a single bounded long-poll that
-wakes on _actionable_ inbox activity (`request` / `query` / `assign` /
-`verdict` types). Direct `notify` / `status` / `response` rows stay quiet by
-default; `wake_on_correlated_reply: true` additionally admits a validated
-`response` or `status` to the waiting session's own tracked request. Every
-result reports the capped logical window as `effective_timeout_ms`. On wake,
-drain with a small fetch and handle what `attention` shows. Do not simulate
-long-polling with repeated short waits — one generous bounded wait per idle
-stretch is the intended pattern.
+Channel delivery handles live work. For an idle bounded wait, use the CLI
+`tribe inbox-wait`; it wakes on _actionable_ inbox activity (`request` /
+`query` / `assign` / `verdict` types). Direct `notify` / `status` / `response`
+rows stay quiet by default; `--wake-on-correlated-reply` additionally admits a
+validated `response` or `status` to the waiting session's own tracked request.
+Every completed wait has `status: "woken" | "timeout" | "aborted"` and reports
+the logical window as `effective_timeout_ms`. On wake, drain with a small fetch
+and handle what `attention` shows.
+
+MCP `inbox.wait` is diagnostic-only. The measured native-host ceiling is
+10,000ms; larger requests return immediately with
+`{status:"host_cut", requested_ms, ceiling_ms:10000,
+ceiling_source:"measured", advice:"cli_wait"}` before a daemon wait starts.
+Follow that closed advice once. Never approximate a long wait by repeatedly
+re-arming short MCP calls.
 
 A worker-loop instruction block you can drop into a session's system prompt or
 project instructions:
@@ -51,7 +57,7 @@ project instructions:
 2. Work your current task.
 3. At every stopping point: tribe.fetch({ limit: 10 }); handle everything in
    `attention`; reply to requests with tribe.send({ ..., reply: <request id> }).
-4. When idle: call tribe.inbox.wait with a generous timeout. On wake, go to 3.
+4. When idle: run one bounded `tribe inbox-wait` CLI call. On wake, go to 3.
    On timeout, continue queued work or wait again.
 ```
 
@@ -62,13 +68,11 @@ durably in SQLite and the session drains them explicitly.
 
 - Configure the wire adapter with `TRIBE_DELIVERY=pull` — for Codex, under
   `[mcp_servers.tribe.env]` in `~/.codex/config.toml`.
-- Give MCP tools the full capped wait window: set `tool_timeout_sec = 1860`
-  under `[mcp_servers.tribe]`.
 - Put the drain at the **top of every agent turn**: `tribe.fetch({ limit: 10 })`,
   handle `attention`, reply, then proceed with the turn's work.
-- Use `tribe.inbox.wait` only if the host honors long tool timeouts; otherwise
-  rely on the turn-start drain — messages are durable, so nothing is lost
-  between turns.
+- Use the CLI `tribe inbox-wait` for bounded idle waits. MCP requests above the
+  measured 10,000ms ceiling return typed `host_cut` with `advice: "cli_wait"`;
+  do not re-arm MCP. Messages remain durable between turns.
 
 Senders never need to know any of this: `tribe.send({ to, message })` is
 transport-blind, and delivery mode is a per-recipient concern. A sender can

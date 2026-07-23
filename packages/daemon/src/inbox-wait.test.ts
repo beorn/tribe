@@ -97,6 +97,7 @@ describe("createInboxWaitManager", () => {
     )
     const result = await manager.wait("@ci", "conn-1", 30_000)
     expect(result).toMatchObject({
+      status: "woken",
       session: "@ci",
       unread_count: 3,
       timed_out: false,
@@ -145,6 +146,7 @@ describe("createInboxWaitManager", () => {
 
     const result = await wait
     expect(result).toMatchObject({
+      status: "woken",
       session: "@ci",
       unread_count: 1,
       timed_out: false,
@@ -191,6 +193,7 @@ describe("createInboxWaitManager", () => {
 
     const result = await wait
     expect(result).toMatchObject({
+      status: "woken",
       session: "@ci",
       unread_count: 1,
       timed_out: false,
@@ -382,6 +385,7 @@ describe("createInboxWaitManager", () => {
 
     const result = await wait
     expect(result).toMatchObject({
+      status: "timeout",
       session: "@ci",
       unread_count: 0,
       timed_out: true,
@@ -398,6 +402,7 @@ describe("createInboxWaitManager", () => {
 
     const result = await wait
     expect(result).toMatchObject({
+      status: "aborted",
       session: "@ci",
       unread_count: 0,
       timed_out: false,
@@ -438,6 +443,7 @@ describe("tribe.inbox.wait handler wiring", () => {
                   wakeOnCorrelatedReply: options?.wakeOnCorrelatedReply,
                 }
                 return {
+                  status: "woken",
                   session,
                   unread_count: 7,
                   oldest_unread_age_min: 12,

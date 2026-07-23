@@ -99,9 +99,9 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
       if (url.pathname === "/health") return Response.json({ ok: true, name: myName })
       if (url.pathname !== "/mcp") return new Response("not found", { status: 404 })
 
-      // MCP inbox.wait owns a bounded logical deadline of up to 30 minutes.
-      // Disable Bun's generic per-request idle timeout for this long-poll;
-      // Tribe's own capped timer remains the single completion authority.
+      // Tribe preflights MCP inbox.wait against the measured host ceiling.
+      // Disable Bun's separate per-request idle timeout so it cannot create a
+      // second, ambiguous cutoff below the typed host_cut/wait contract.
       server.timeout(req, 0)
 
       const mcp = createMcpServer({

@@ -200,12 +200,13 @@ describe("connectToDaemon", () => {
 
 describe("callTribeTool", () => {
   const canonicalInboxWaitResult = {
+    status: "timeout",
     session: "@agent/test",
     unread_count: 0,
     oldest_unread_age_min: 0,
     oldest_unread_ts: 0,
-    waited_ms: 30_000,
-    effective_timeout_ms: 30 * 60_000,
+    waited_ms: 5_000,
+    effective_timeout_ms: 5_000,
     timed_out: true,
     aborted: false,
     attention: {
@@ -215,22 +216,42 @@ describe("callTribeTool", () => {
     },
   }
 
-  it("caps inbox waits and gives the daemon call the full effective window plus transport margin", async () => {
+  it("refuses a wait beyond the measured MCP host ceiling before calling the daemon", async () => {
+    const call = vi.fn(async () => canonicalInboxWaitResult)
+    const client = { call } as unknown as DaemonClient
+
+    const result = await callTribeTool(client, "inbox.wait", { timeout_ms: 600_000 })
+    const hostCut = {
+      status: "host_cut",
+      requested_ms: 600_000,
+      ceiling_ms: 10_000,
+      ceiling_source: "measured",
+      advice: "cli_wait",
+    }
+
+    expect(call).not.toHaveBeenCalled()
+    expect(result).toEqual({
+      content: [{ type: "text", text: JSON.stringify(hostCut) }],
+      structuredContent: hostCut,
+    })
+  })
+
+  it("gives an allowed inbox wait the full requested window plus transport margin", async () => {
     const call = vi.fn(async () => canonicalInboxWaitResult)
     const client = { call } as unknown as DaemonClient
 
     const result = await callTribeTool(client, "inbox.wait", {
-      timeout_ms: 24 * 60 * 60_000,
+      timeout_ms: 5_000,
       wake_on_correlated_reply: true,
     })
 
     expect(call).toHaveBeenCalledWith(
       "tribe.inbox.wait",
       {
-        timeout_ms: 30 * 60_000,
+        timeout_ms: 5_000,
         wake_on_correlated_reply: true,
       },
-      { timeoutMs: 30 * 60_000 + 5_000 },
+      { timeoutMs: 10_000 },
     )
     expect(result).toMatchObject({ structuredContent: canonicalInboxWaitResult })
   })
@@ -238,10 +259,13 @@ describe("callTribeTool", () => {
   it.each([
     { label: "incomplete raw object", value: { ok: true } },
     { label: "legacy wrapped content", value: { content: [{ type: "text", text: "{}" }] } },
+    { label: "inconsistent terminal discriminant", value: { ...canonicalInboxWaitResult, status: "woken" } },
   ])("rejects a noncanonical inbox-wait result: $label", async ({ value }) => {
     const client = { call: vi.fn(async () => value) } as unknown as DaemonClient
 
-    await expect(callTribeTool(client, "inbox.wait", {})).rejects.toThrow("invalid canonical InboxWaitResult")
+    await expect(callTribeTool(client, "inbox.wait", { timeout_ms: 1_000 })).rejects.toThrow(
+      "invalid canonical InboxWaitResult",
+    )
   })
 })
 

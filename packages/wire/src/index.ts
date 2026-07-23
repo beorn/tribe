@@ -70,15 +70,21 @@ export { resolveJoinDelivery } from "./lib/delivery.ts"
 // Inbox-wait option parsing shared by CLI and MCP/raw daemon call paths.
 export type {
   InboxWaitAttention,
+  InboxWaitHostCutResult,
   InboxWaitOptions,
   InboxWaitOptionSource,
   InboxWaitResult,
+  InboxWaitTerminalStatus,
+  InboxWaitToolResult,
 } from "./lib/inbox-wait-options.ts"
 export {
   DEFAULT_INBOX_WAIT_SESSION,
   DEFAULT_INBOX_WAIT_TIMEOUT_MS,
   MAX_INBOX_WAIT_TIMEOUT_MS,
+  MCP_INBOX_WAIT_HOST_CEILING_MS,
+  MCP_INBOX_WAIT_HOST_CEILING_SOURCE,
   deriveInboxWaitCallTimeoutMs,
+  inboxWaitHostCutResult,
   parseInboxWaitTimeoutMs,
   resolveInboxWaitOptions,
 } from "./lib/inbox-wait-options.ts"

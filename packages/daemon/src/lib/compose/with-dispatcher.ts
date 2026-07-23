@@ -1037,6 +1037,10 @@ export function withDispatcher<
             return makeResponse(id, result)
           }
 
+          case "cli_protocol": {
+            return makeResponse(id, { protocol_version: TRIBE_PROTOCOL_VERSION })
+          }
+
           case "cli_status": {
             const now = Date.now()
             const sessions = canonicalSessionRows(now)

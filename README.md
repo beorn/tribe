@@ -82,19 +82,20 @@ Register it as a plain project-level MCP server without plugin channels:
 }
 ```
 
-Codex reads the same env-driven delivery mode. Its MCP host deadline must also
-cover Tribe's full bounded wait:
+Codex reads the same env-driven delivery mode. Long bounded waits use the CLI
+rail, not MCP:
 
 ```toml
-[mcp_servers.tribe]
-tool_timeout_sec = 1860
-
 [mcp_servers.tribe.env]
 TRIBE_DELIVERY = "pull"
 ```
 
 Use that shape in `~/.codex/config.toml` for MCP-only clients without a
-notification channel.
+notification channel. MCP `inbox.wait` is limited by a measured 10,000ms host
+ceiling; larger requests return typed `host_cut` with `advice: "cli_wait"`
+before the daemon starts waiting. Run one `tribe inbox-wait --session <name>
+--timeout <duration> --json` call for longer idle waits; never re-arm short MCP
+calls into a polling loop.
 
 ### Running the daemon standalone (no plugin)
 

@@ -25,7 +25,9 @@ import {
 
 /**
  * Wire-protocol version. Bump on any payload-shape change a client cares about.
- * v8 (current) adds the effective inbox-wait timeout and optional correlated-
+ * v9 (current) adds the typed inbox-wait terminal status and MCP host-cut
+ * preflight result.
+ * v8 added the effective inbox-wait timeout and optional correlated-
  * reply wake control.
  * v7 added the optional register-time `filterMode`, allowing a launch controller
  * to persist push-admission before a session becomes connected.
@@ -43,7 +45,7 @@ import {
  * `reissue_count`. Purely additive: pre-0.14 clients ignore them. No protocol
  * bump then (v4 unchanged). See km-tribe.task-assignment-stale-snapshot.
  */
-export const TRIBE_PROTOCOL_VERSION = 8
+export const TRIBE_PROTOCOL_VERSION = 9
 
 // ---------------------------------------------------------------------------
 // Re-exports from the surrounding tribe-client package
