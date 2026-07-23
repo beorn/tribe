@@ -1,7 +1,8 @@
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { Server, Socket as NetSocket } from "node:net"
+import { createConnection, createServer, type Server, type Socket as NetSocket } from "node:net"
+import { addWriter, getLogLevel, setLogLevel, setSuppressConsole, type LogEvent } from "loggily"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { createScope, type InboxWaitResult } from "tribe-wire"
 import { TRIBE_PROTOCOL_VERSION, type JsonRpcRequest } from "tribe-wire/lib/socket"
@@ -14,7 +15,8 @@ import { withDispatcher } from "./with-dispatcher.ts"
 
 type TestSocket = NetSocket & {
   destroyedByDispatcher: boolean
-  emitClose(): void
+  emitClose(hadError?: boolean): void
+  emitError(error: Error): void
   writes: string[]
 }
 
@@ -58,12 +60,15 @@ const liveHolderPid = process.pid
 const otherLivePid = process.pid + 1
 
 let cleanup: (() => Promise<void>) | null = null
+const logCleanups: Array<() => void> = []
 
 afterEach(async () => {
-  if (!cleanup) return
-  const dispose = cleanup
-  cleanup = null
-  await dispose()
+  while (logCleanups.length > 0) logCleanups.pop()?.()
+  if (cleanup) {
+    const dispose = cleanup
+    cleanup = null
+    await dispose()
+  }
 })
 
 describe("dispatcher self-registration collision handling (@ag/tribe/19594)", () => {
@@ -212,21 +217,22 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
   })
 
   it("lets the same live PID re-register an explicit agent name", async () => {
+    const logs = captureDispatcherLogs()
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
 
-    const firstSocket = harness.addPendingClient("conn-first")
+    const firstClient = harness.connectClient()
     const first = parseResult<RegisterResult>(
-      await harness.register("conn-first", {
+      await harness.register(firstClient.connId, {
         name: "@agent/9",
         pid: liveHolderPid,
         project: "/tmp/km-wt9",
       }),
     )
 
-    const secondSocket = harness.addPendingClient("conn-second")
+    const secondClient = harness.connectClient()
     const second = parseResult<RegisterResult>(
-      await harness.register("conn-second", {
+      await harness.register(secondClient.connId, {
         name: "@agent/9",
         pid: liveHolderPid,
         project: "/tmp/km-wt9",
@@ -235,8 +241,23 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
 
     expect(second.name).toBe("@agent/9")
     expect(second.sessionId).toBe(first.sessionId)
-    expect(firstSocket.destroyedByDispatcher).toBe(true)
-    expect(secondSocket.destroyedByDispatcher).toBe(false)
+    expect(firstClient.socket.destroyedByDispatcher).toBe(true)
+    expect(secondClient.socket.destroyedByDispatcher).toBe(false)
+
+    firstClient.socket.emitClose()
+    expect(
+      logs.find(
+        (event) =>
+          event.level === "debug" &&
+          event.message === "transport.retired" &&
+          event.props?.connection_id === firstClient.connId,
+      )?.props,
+    ).toMatchObject({ name: "@agent/9", reason: "self-registration-replaced" })
+    expect(
+      logs.some(
+        (event) => event.message === "connection.disconnected" && event.props?.connection_id === firstClient.connId,
+      ),
+    ).toBe(false)
 
     const status = parseResult<CliStatusResult>(
       await harness.dispatcher.handleRequest(
@@ -340,6 +361,302 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
       transportPids: [liveHolderPid, liveHolderPid + 2],
     })
     expect(status.sessions.some((session) => session.name.startsWith("pending-"))).toBe(false)
+  })
+})
+
+describe("dispatcher operational logging", () => {
+  it("binds a connection to its named seat and records operations and peer-close reason without payloads", async () => {
+    const logs = captureDispatcherLogs()
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const client = harness.connectClient()
+
+    expect(logs.filter((event) => event.level === "info")).toEqual([])
+
+    const registered = parseResult<RegisterResult>(
+      await harness.register(client.connId, {
+        name: "@agent/6",
+        pid: liveHolderPid,
+        project: "/tmp/km-wt6",
+        launchId: "launch-agent-6",
+        launchParentPid: 6006,
+      }),
+    )
+    const privatePayload = "message-payload-must-not-enter-logs"
+    parseResult<{ structuredContent: SendResult }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "send-after-identify",
+          method: "tribe.send",
+          params: {
+            to: "@agent/7",
+            message: privatePayload,
+            type: "notify",
+          },
+        },
+        client.connId,
+      ),
+    )
+    const hostileOperation = `${privatePayload}\n${"x".repeat(128)}`
+    await harness.dispatcher.handleRequest(
+      {
+        jsonrpc: "2.0",
+        id: "hostile-operation-name",
+        method: hostileOperation,
+        params: {},
+      },
+      client.connId,
+    )
+    client.socket.emitClose()
+
+    const identified = logs.find((event) => event.level === "info" && event.message === "session.identified")
+    expect(identified?.props).toMatchObject({
+      connection_id: client.connId,
+      member_id: registered.sessionId,
+      name: "@agent/6",
+      operation: "register",
+      launch_id: "launch-agent-6",
+      launch_parent_pid: 6006,
+    })
+    expect(identified?.time).toEqual(expect.any(Number))
+
+    const operation = logs.find(
+      (event) =>
+        event.level === "info" && event.message === "operation.received" && event.props?.operation === "tribe.send",
+    )
+    expect(operation?.props).toMatchObject({
+      connection_id: client.connId,
+      member_id: registered.sessionId,
+      name: "@agent/6",
+      direction: "inbound",
+      operation: "tribe.send",
+    })
+    expect(
+      logs.find(
+        (event) =>
+          event.level === "info" && event.message === "operation.received" && event.props?.operation === "<invalid>",
+      ),
+    ).toBeDefined()
+
+    const disconnected = logs.find((event) => event.level === "info" && event.message === "session.disconnected")
+    expect(disconnected?.props).toMatchObject({
+      connection_id: client.connId,
+      member_id: registered.sessionId,
+      name: "@agent/6",
+      reason: "peer-close",
+    })
+    expect(disconnected?.props).not.toHaveProperty("operations")
+    expect(disconnected?.props).not.toHaveProperty("last_operation")
+    expect(JSON.stringify(logs)).not.toContain(privatePayload)
+    expect(logs.some((event) => event.level === "info" && event.message.startsWith("Client connected:"))).toBe(false)
+  })
+
+  it("keeps every same-launch fan-in at debug and emits one canonical identity at info", async () => {
+    const logs = captureDispatcherLogs()
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const first = harness.connectClient()
+    const firstRegistration = parseResult<RegisterResult>(
+      await harness.register(first.connId, {
+        name: "@ci",
+        pid: liveHolderPid,
+        project: "/tmp/km-wt6",
+        launchId: "launch-ci",
+        launchParentPid: 7007,
+      }),
+    )
+    const second = harness.connectClient()
+    const secondRegistration = parseResult<RegisterResult>(
+      await harness.register(second.connId, {
+        name: "@ci",
+        pid: otherLivePid,
+        project: "/tmp/km-wt6",
+        launchId: "launch-ci",
+        launchParentPid: 7007,
+      }),
+    )
+    const third = harness.connectClient()
+    const thirdRegistration = parseResult<RegisterResult>(
+      await harness.register(third.connId, {
+        name: "@ci",
+        pid: otherLivePid + 1,
+        project: "/tmp/km-wt6",
+        launchId: "launch-ci",
+        launchParentPid: 7007,
+      }),
+    )
+
+    expect(secondRegistration.sessionId).toBe(firstRegistration.sessionId)
+    expect(thirdRegistration.sessionId).toBe(firstRegistration.sessionId)
+    expect(
+      logs.filter(
+        (event) => event.level === "info" && event.message === "session.identified" && event.props?.name === "@ci",
+      ),
+    ).toHaveLength(1)
+    expect(logs.some((event) => event.level === "info" && event.message === "transport.fan-in")).toBe(false)
+    expect(
+      logs.find(
+        (event) =>
+          event.level === "debug" &&
+          event.message === "transport.attached" &&
+          event.props?.connection_id === second.connId,
+      )?.props,
+    ).toMatchObject({
+      connection_id: second.connId,
+      member_id: firstRegistration.sessionId,
+      launch_id: "launch-ci",
+      transport_class: "same-launch-fan-in",
+    })
+    expect(
+      logs.filter(
+        (event) => event.level === "debug" && event.message === "transport.attached" && event.props?.name === "@ci",
+      ),
+    ).toHaveLength(2)
+    expect(logs.some((event) => event.level === "info" && event.message.startsWith("launch fan-in:"))).toBe(false)
+
+    first.socket.emitClose()
+    second.socket.emitClose()
+    third.socket.emitClose()
+
+    const reconnected = harness.connectClient()
+    await harness.register(reconnected.connId, {
+      name: "@ci",
+      pid: liveHolderPid,
+      project: "/tmp/km-wt6",
+      launchId: "launch-ci",
+      launchParentPid: 7007,
+    })
+    const reconnectedFanIn = harness.connectClient()
+    await harness.register(reconnectedFanIn.connId, {
+      name: "@ci",
+      pid: otherLivePid,
+      project: "/tmp/km-wt6",
+      launchId: "launch-ci",
+      launchParentPid: 7007,
+    })
+
+    expect(
+      logs.filter(
+        (event) => event.level === "info" && event.message === "session.identified" && event.props?.name === "@ci",
+      ),
+    ).toHaveLength(2)
+    expect(
+      logs.filter(
+        (event) => event.level === "debug" && event.message === "transport.attached" && event.props?.name === "@ci",
+      ),
+    ).toHaveLength(3)
+    expect(logs.some((event) => event.level === "info" && event.message === "transport.fan-in")).toBe(false)
+  })
+
+  it("attributes an immediate socket error and disconnect to the resolved seat with a bounded reason", async () => {
+    const logs = captureDispatcherLogs()
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const client = harness.connectClient()
+    const registered = parseResult<RegisterResult>(
+      await harness.register(client.connId, {
+        name: "@agent/4",
+        pid: liveHolderPid,
+        project: "/tmp/km-wt4",
+        launchId: "launch-agent-4",
+        launchParentPid: 4004,
+      }),
+    )
+    const socketError = Object.assign(new Error("sensitive socket detail"), { code: "ECONNRESET" })
+
+    client.socket.emitError(socketError)
+    client.socket.emitClose(true)
+
+    expect(logs.find((event) => event.level === "warn" && event.message === "connection.error")?.props).toMatchObject({
+      connection_id: client.connId,
+      member_id: registered.sessionId,
+      name: "@agent/4",
+      reason: "socket-error",
+      error_code: "ECONNRESET",
+    })
+    expect(
+      logs.find((event) => event.level === "info" && event.message === "session.disconnected")?.props,
+    ).toMatchObject({
+      connection_id: client.connId,
+      member_id: registered.sessionId,
+      name: "@agent/4",
+      reason: "socket-error",
+    })
+    const disconnected = logs.find((event) => event.level === "info" && event.message === "session.disconnected")
+    expect(disconnected?.props).not.toHaveProperty("error_code")
+    expect(disconnected?.props).not.toHaveProperty("operations")
+    expect(JSON.stringify(logs)).not.toContain(socketError.message)
+  })
+
+  it("preserves the socket-error reason through a real Unix socket close", async () => {
+    const logs = captureDispatcherLogs()
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    let resolveAcceptedSocket!: (socket: NetSocket) => void
+    const acceptedSocket = new Promise<NetSocket>((resolve) => {
+      resolveAcceptedSocket = resolve
+    })
+    const server = createServer((socket) => {
+      resolveAcceptedSocket(socket)
+      harness.dispatcher.handleConnection(socket)
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject)
+      server.listen(harness.socketPath, resolve)
+    })
+    const client = createConnection(harness.socketPath)
+    client.on("error", () => {})
+
+    try {
+      await new Promise<void>((resolve) => client.once("connect", resolve))
+      const response = readSocketLine(client)
+      client.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id: "real-socket-register",
+          method: "register",
+          params: {
+            name: "@agent/4",
+            role: "member",
+            domains: [],
+            delivery: "pull",
+            project: "/tmp/km-wt4",
+            projectName: "km-wt4",
+            projectId: "test-project",
+            pid: liveHolderPid,
+            launchId: "launch-agent-4-real-socket",
+            launchParentPid: 4004,
+            protocolVersion: TRIBE_PROTOCOL_VERSION,
+          },
+        })}\n`,
+      )
+      const registered = parseResult<RegisterResult>(await response)
+      const serverSocket = await acceptedSocket
+      const closed = new Promise<void>((resolve) => serverSocket.once("close", () => resolve()))
+      serverSocket.destroy(Object.assign(new Error("sensitive real-socket detail"), { code: "ECONNRESET" }))
+      await closed
+
+      expect(logs.find((event) => event.level === "warn" && event.message === "connection.error")?.props).toMatchObject(
+        {
+          member_id: registered.sessionId,
+          name: "@agent/4",
+          reason: "socket-error",
+          error_code: "ECONNRESET",
+        },
+      )
+      expect(
+        logs.find((event) => event.level === "info" && event.message === "session.disconnected")?.props,
+      ).toMatchObject({
+        member_id: registered.sessionId,
+        name: "@agent/4",
+        reason: "socket-error",
+      })
+      expect(JSON.stringify(logs)).not.toContain("sensitive real-socket detail")
+    } finally {
+      client.destroy()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
   })
 })
 
@@ -1237,6 +1554,7 @@ function createDispatcherHarness(
   const daemon = withDispatcher({ suppressWindowMs: options.suppressWindowMs ?? Number.MAX_SAFE_INTEGER })(shape)
 
   return {
+    socketPath: shape.config.socketPath,
     dispatcher: daemon.dispatcher,
     register(
       connId: string,
@@ -1393,6 +1711,29 @@ function parseResult<T>(line: string): T {
   return response.result as T
 }
 
+function readSocketLine(socket: NetSocket): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let buffer = ""
+    const onData = (chunk: Buffer) => {
+      buffer += chunk.toString("utf8")
+      const newline = buffer.indexOf("\n")
+      if (newline < 0) return
+      cleanupListeners()
+      resolve(buffer.slice(0, newline))
+    }
+    const onError = (error: Error) => {
+      cleanupListeners()
+      reject(error)
+    }
+    const cleanupListeners = () => {
+      socket.off("data", onData)
+      socket.off("error", onError)
+    }
+    socket.on("data", onData)
+    socket.on("error", onError)
+  })
+}
+
 async function registerMember(
   harness: ReturnType<typeof createDispatcherHarness>,
   connId: string,
@@ -1449,11 +1790,30 @@ function createTestSocket(): TestSocket {
       handlers.set(event, eventHandlers)
       return this
     },
-    emitClose() {
-      for (const handler of handlers.get("close") ?? []) handler()
+    emitClose(hadError = false) {
+      for (const handler of handlers.get("close") ?? []) handler(hadError)
+    },
+    emitError(error: Error) {
+      for (const handler of handlers.get("error") ?? []) handler(error)
     },
   }
   return socket as unknown as TestSocket
+}
+
+function captureDispatcherLogs(): LogEvent[] {
+  const events: LogEvent[] = []
+  const previousLogLevel = getLogLevel()
+  setLogLevel("debug")
+  setSuppressConsole(true)
+  const unsubscribe = addWriter({ ns: "tribe:dispatcher" }, (_formatted, _level, _namespace, event) => {
+    if (event.kind === "log") events.push(event)
+  })
+  logCleanups.push(() => {
+    unsubscribe()
+    setLogLevel(previousLogLevel)
+    setSuppressConsole(false)
+  })
+  return events
 }
 
 function createFakeServer(): Server {
