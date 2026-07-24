@@ -447,6 +447,7 @@ export function withDispatcher<
       userRenamed: false,
       setUserRenamed: () => {},
       getActiveSessionIds: () => registry.getActiveSessionIds(),
+      hasActiveTransport: (sessionId: string) => registry.hasActiveTransport(sessionId),
       getActiveSessionInfo: () => registry.getActiveSessionInfo(),
       getLifecycleStore: () => lifecycleStore,
       inboxWait,
@@ -887,7 +888,7 @@ export function withDispatcher<
             registerSession(
               clientCtx,
               projectId,
-              (sid) => registry.getActiveSessionIds().has(sid),
+              (sid) => registry.hasActiveTransport(sid),
               identityToken,
               pid,
               delivery,

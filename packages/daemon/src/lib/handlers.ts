@@ -289,6 +289,12 @@ export type HandlerOpts = {
    * timer. Excludes daemon / watch / pending sessions.
    */
   getActiveSessionIds: () => Set<string>
+  /**
+   * Return whether any non-pending transport is connected for a session.
+   * Unlike getActiveSessionIds, this includes watch transports and is the
+   * authority for destructive reclaim decisions.
+   */
+  hasActiveTransport: (sessionId: string) => boolean
   /** Realtime snapshot of connected sessions (daemon clients Map). */
   getActiveSessionInfo: () => ActiveSessionInfo[]
   /** Optional: dump daemon internals for `tribe.debug`. Daemon-only (tests using
@@ -929,8 +935,10 @@ function handleRename(
   opts: {
     userRenamed: boolean
     setUserRenamed: (v: boolean) => void
-    /** Optional: when provided, allow reclaiming names held by non-active sessions. */
-    getActiveSessionIds?: () => Set<string>
+    /** Participating sessions, used only for user-facing member projections. */
+    getActiveSessionIds: () => Set<string>
+    /** All connected transports, used to authorize destructive name reclaim. */
+    hasActiveTransport: (sessionId: string) => boolean
     /** Optional: opportunistic socket wakeup after a name-claim replay rewind. */
     notifyWakeupForReplay?: (sessionId: string, claimedName: string) => void
   },
@@ -961,9 +969,8 @@ function handleRename(
     | { id: string }
     | undefined
   if (existing) {
-    const activeIds = opts.getActiveSessionIds?.()
-    const isActive = activeIds ? activeIds.has(existing.id) : true
-    if (isActive) {
+    if (opts.hasActiveTransport(existing.id)) {
+      const activeIds = opts.getActiveSessionIds()
       const existing_names = listActiveSessionNames(ctx, activeIds)
       return jsonResult({ error: `Name "${newName}" is already taken`, existing_names })
     }
@@ -1038,8 +1045,7 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       role: string
     } | null
     if (prior) {
-      const isActive = opts.getActiveSessionIds().has(prior.id)
-      if (!isActive) {
+      if (!opts.hasActiveTransport(prior.id)) {
         if (!a.name) joinName = prior.name
         if (!a.role) joinRole = prior.role
       }
@@ -1063,7 +1069,7 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     registerSession(
       ctx,
       undefined,
-      (sessionId) => opts.getActiveSessionIds().has(sessionId),
+      (sessionId) => opts.hasActiveTransport(sessionId),
       identityToken,
       selfInfo?.pid ?? 0,
       requestedDelivery,
@@ -1081,7 +1087,7 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     | { id: string }
     | undefined
   if (taken) {
-    const holderIsActive = opts.getActiveSessionIds().has(taken.id)
+    const holderIsActive = opts.hasActiveTransport(taken.id)
     if (!holderIsActive) {
       // Dead session — tombstone and reclaim.
       const tombstoneName = `${joinName}-dead-${taken.id.slice(0, 8)}`

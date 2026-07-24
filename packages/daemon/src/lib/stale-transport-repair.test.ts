@@ -135,6 +135,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       userRenamed: false,
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set<string>(),
+      hasActiveTransport: () => false,
       getActiveSessionInfo: () => [],
       reapStaleTransports,
     } as HandlerOpts
@@ -155,6 +156,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       userRenamed: false,
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set<string>(),
+      hasActiveTransport: () => false,
       getActiveSessionInfo: () => [],
       reapStaleTransports,
     } as HandlerOpts
@@ -176,6 +178,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       userRenamed: false,
       setUserRenamed: () => {},
       getActiveSessionIds: () => new Set<string>(),
+      hasActiveTransport: () => false,
       getActiveSessionInfo: () => [],
     } as HandlerOpts
 

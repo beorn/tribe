@@ -305,6 +305,46 @@ describe("runtime rename persists across reconnect/restart (@ag/tribe/21454)", (
     expect(daemon.db.prepare("SELECT name FROM sessions WHERE name LIKE '@ci-dead-%' ORDER BY name").all()).toEqual([])
   })
 
+  it("join and rename refuse a name holder while only a same-session watch transport remains connected", async () => {
+    const daemon = createDispatcherHarness(sharedDir())
+    cleanups.push(daemon.dispose)
+
+    daemon.addPendingClient("conn-holder-member")
+    const holder = parseResult<RegisterResult>(
+      await daemon.register("conn-holder-member", {
+        name: "@ci",
+        pid: 5651,
+        project: "/repo/hh",
+        launchId: "launch-ci-watch-holder",
+        launchParentPid: 905,
+      }),
+    )
+    daemon.addWatchTransport("conn-holder-watch", holder.sessionId)
+    daemon.dropClient("conn-holder-member")
+
+    daemon.addPendingClient("conn-claimant")
+    parseResult<RegisterResult>(
+      await daemon.register("conn-claimant", {
+        name: "@temp-ci",
+        pid: 5652,
+        project: "/repo/hh",
+        launchId: "launch-ci-watch-claimant",
+        launchParentPid: 906,
+      }),
+    )
+    const joined = parseToolJson<{ error?: string; name?: string }>(await daemon.join("conn-claimant", "@ci"))
+    const renamed = parseToolJson<{ error?: string; renamed?: boolean }>(await daemon.rename("conn-claimant", "@ci"))
+
+    expect(joined.error).toContain('Name "@ci" is already taken')
+    expect(joined.name).toBeUndefined()
+    expect(renamed.error).toContain('Name "@ci" is already taken')
+    expect(renamed.renamed).toBeUndefined()
+    expect(daemon.db.prepare("SELECT name FROM sessions WHERE id = $id").get({ $id: holder.sessionId })).toEqual({
+      name: "@ci",
+    })
+    expect(daemon.db.prepare("SELECT name FROM sessions WHERE name LIKE '@ci-dead-%' ORDER BY name").all()).toEqual([])
+  })
+
   it("rename-to-context-name repairs a tombstoned DB identity instead of falsely returning no-op", async () => {
     const daemon = createDispatcherHarness(sharedDir())
     cleanups.push(daemon.dispose)
@@ -391,7 +431,11 @@ function createDispatcherHarness(dir: string) {
       clients,
       socketToClient,
       getActiveSessionIds(): Set<string> {
-        return new Set(Array.from(clients.values(), (c) => c.ctx.sessionId))
+        return new Set(
+          Array.from(clients.values())
+            .filter((client) => client.role === "member")
+            .map((client) => client.ctx.sessionId),
+        )
       },
       hasActiveTransport(sessionId: string): boolean {
         return Array.from(clients.values()).some(
@@ -483,6 +527,24 @@ function createDispatcherHarness(dir: string) {
       const client = clients.get(connId)
       if (client) socketToClient.delete(client.socket)
       clients.delete(connId)
+    },
+    addWatchTransport(connId: string, sessionId: string): TestSocket {
+      const member = Array.from(clients.values()).find(
+        (client) => client.role === "member" && client.ctx.sessionId === sessionId,
+      )
+      if (!member) throw new Error(`cannot attach watch transport: member session ${sessionId} is not connected`)
+      const socket = createTestSocket()
+      clients.set(connId, {
+        ...member,
+        socket,
+        id: connId,
+        role: "watch",
+        conn: "test-watch",
+        registeredAt: Date.now(),
+        lastActivityAt: Date.now(),
+      })
+      socketToClient.set(socket, connId)
+      return socket
     },
     addPendingClient(connId: string): TestSocket {
       const socket = createTestSocket()

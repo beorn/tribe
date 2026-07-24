@@ -45,6 +45,7 @@ function makeOpts(activeIds: readonly string[] = []): HandlerOpts {
     userRenamed: false,
     setUserRenamed: () => undefined,
     getActiveSessionIds: () => new Set(activeIds),
+    hasActiveTransport: (sessionId) => activeIds.includes(sessionId),
     getActiveSessionInfo: () => [],
   }
 }

@@ -382,6 +382,7 @@ describe("20876 Tribe health cadence", () => {
       userRenamed: false,
       setUserRenamed: () => undefined,
       getActiveSessionIds: () => new Set(["sess-agent-5"]),
+      hasActiveTransport: (sessionId) => sessionId === "sess-agent-5",
       getActiveSessionInfo: () => [activeSession("sess-agent-5", "@agent/5", "member", tmpDir, now)],
     }
 

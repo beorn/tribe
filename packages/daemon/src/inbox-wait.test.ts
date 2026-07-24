@@ -79,6 +79,7 @@ function makeOpts(inboxWait?: HandlerOpts["inboxWait"]): HandlerOpts {
     userRenamed: false,
     setUserRenamed: () => {},
     getActiveSessionIds: () => new Set<string>(),
+    hasActiveTransport: () => false,
     getActiveSessionInfo: () => [],
     inboxWait,
   }
