@@ -265,6 +265,80 @@ describe("runtime rename persists across reconnect/restart (@ag/tribe/21454)", (
     )
     expect(reg2.name).toBe("@agent/7")
   })
+
+  it("join refuses a still-connected name holder even when its heartbeat is stale", async () => {
+    const daemon = createDispatcherHarness(sharedDir())
+    cleanups.push(daemon.dispose)
+
+    const holderSocket = daemon.addPendingClient("conn-holder")
+    const holder = parseResult<RegisterResult>(
+      await daemon.register("conn-holder", {
+        name: "@ci",
+        pid: 5601,
+        project: "/repo/hh",
+        launchId: "launch-ci-holder",
+        launchParentPid: 905,
+      }),
+    )
+    daemon.db
+      .prepare("UPDATE sessions SET updated_at = $updated_at WHERE id = $id")
+      .run({ $updated_at: Date.now() - 60 * 60_000, $id: holder.sessionId })
+
+    daemon.addPendingClient("conn-claimant")
+    parseResult<RegisterResult>(
+      await daemon.register("conn-claimant", {
+        name: "@temp-ci",
+        pid: 5602,
+        project: "/repo/hh",
+        launchId: "launch-ci-claimant",
+        launchParentPid: 906,
+      }),
+    )
+    const joined = parseToolJson<{ error?: string; name?: string }>(await daemon.join("conn-claimant", "@ci"))
+
+    expect(joined.error).toContain('Name "@ci" is already taken')
+    expect(joined.name).toBeUndefined()
+    expect(holderSocket.destroyedByDispatcher).toBe(false)
+    expect(daemon.db.prepare("SELECT name FROM sessions WHERE id = $id").get({ $id: holder.sessionId })).toEqual({
+      name: "@ci",
+    })
+    expect(daemon.db.prepare("SELECT name FROM sessions WHERE name LIKE '@ci-dead-%' ORDER BY name").all()).toEqual([])
+  })
+
+  it("rename-to-context-name repairs a tombstoned DB identity instead of falsely returning no-op", async () => {
+    const daemon = createDispatcherHarness(sharedDir())
+    cleanups.push(daemon.dispose)
+
+    daemon.addPendingClient("conn-corrupt")
+    const registered = parseResult<RegisterResult>(
+      await daemon.register("conn-corrupt", {
+        name: "@ci",
+        pid: 5701,
+        project: "/repo/hh",
+        launchId: "launch-ci-corrupt",
+        launchParentPid: 907,
+      }),
+    )
+    daemon.db
+      .prepare("UPDATE sessions SET name = $name WHERE id = $id")
+      .run({ $name: "@ci-dead-corrupt", $id: registered.sessionId })
+
+    const renamed = parseToolJson<{
+      renamed: boolean
+      old_name?: string
+      new_name?: string
+      name?: string
+    }>(await daemon.rename("conn-corrupt", "@ci"))
+
+    expect(renamed).toEqual({
+      renamed: true,
+      old_name: "@ci-dead-corrupt",
+      new_name: "@ci",
+    })
+    expect(daemon.db.prepare("SELECT name FROM sessions WHERE id = $id").get({ $id: registered.sessionId })).toEqual({
+      name: "@ci",
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------

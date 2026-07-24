@@ -936,10 +936,16 @@ function handleRename(
   },
 ): ToolResult {
   const newName = a.new_name as string
-  // Rename-to-self: silent no-op. Without this short-circuit, the rest of the
-  // handler still validates, broadcasts "Member X is now X", and emits a
-  // session.renamed event — pure noise.
-  if (newName === ctx.getName()) {
+  const contextName = ctx.getName()
+  const storedSession = ctx.db
+    .prepare("SELECT name FROM sessions WHERE id = $id LIMIT 1")
+    .get({ $id: ctx.sessionId }) as { name: string } | null
+  const storedName = storedSession?.name ?? contextName
+  // Rename-to-self is a no-op only when BOTH identity authorities agree. A
+  // prior buggy active-holder takeover could tombstone the DB row without
+  // retiring or renaming its live context; in that split-brain state an
+  // explicit rename back to the context name must repair the persisted row.
+  if (newName === contextName && newName === storedName) {
     return jsonResult({ renamed: false, name: newName })
   }
   // Validate name format
@@ -971,7 +977,7 @@ function handleRename(
       .run({ $tomb: tombstoneName, $now: Date.now(), $id: existing.id })
     log.info?.(`reclaimed name "${newName}" from dead session ${existing.id} (tombstoned as "${tombstoneName}")`)
   }
-  const oldName = ctx.getName()
+  const oldName = storedName
   // A rename is the same session (same pid, same socket, same ctx.sessionId).
   // The tribe-wire daemon is role-agnostic (F12) — there is no chief claim to
   // carry across the rename, so a rename can no longer flap a coordination
@@ -1084,17 +1090,12 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
         .run({ $tomb: tombstoneName, $now: Date.now(), $id: taken.id })
       log.info?.(`reclaimed name "${joinName}" from dead session ${taken.id} (tombstoned as "${tombstoneName}")`)
     } else {
-      // Active holder — tribe.join is an explicit identity assertion ("I am
-      // @agent/3"). The old holder is a stale adapter process from a previous
-      // session that Claude Code didn't kill. Tombstone and take over — the
-      // user's explicit name wins over a lingering socket.
-      const tombstoneName = `${joinName}-dead-${taken.id.slice(0, 8)}`
-      ctx.db
-        .prepare("UPDATE sessions SET name = $tomb, updated_at = $now WHERE id = $id")
-        .run({ $tomb: tombstoneName, $now: Date.now(), $id: taken.id })
-      log.info?.(
-        `tribe.join takeover: "${joinName}" reclaimed from active session ${taken.id} (tombstoned as "${tombstoneName}")`,
-      )
+      // A connected holder owns the name until the dispatcher performs an
+      // explicit whole-transport takeover. DB-only tombstoning leaves the old
+      // socket/context live under a different persisted name, producing
+      // `-dead-*` members that are still connected and cannot rename-repair.
+      const existing_names = listActiveSessionNames(ctx, opts.getActiveSessionIds())
+      return jsonResult({ error: `Name "${joinName}" is already taken`, existing_names })
     }
   }
 

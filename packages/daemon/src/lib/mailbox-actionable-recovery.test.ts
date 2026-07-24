@@ -645,9 +645,8 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(fetchEvents(b, opts).map((e) => e.id)).toEqual(["a1"])
   })
 
-  it("takeover of an ACTIVE holder retains the mailbox — an unacked actionable survives to the taker", () => {
+  it("an ACTIVE holder keeps both its name and mailbox when a second live session tries to join", () => {
     const b = connectAs("sess-b", NAME)
-    void b
     // Request lands while b holds the name but never fetches.
     insertRow(stmts, {
       id: "r-live",
@@ -658,9 +657,18 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       content: "unacked while held",
       ts: now - 60_000,
     })
-    // Explicit join takeover from a second live session (stale-adapter case).
-    const d = connectAs("sess-d", NAME)
-    expect(fetchEvents(d, opts).map((e) => e.id)).toEqual(["r-live"])
+    // A second connected session cannot DB-tombstone the holder behind its
+    // live context/socket. Explicit whole-transport takeover is a dispatcher
+    // operation; ordinary tribe.join fails loud and leaves the mailbox put.
+    const d = makeContext(db, stmts, "sess-d", "boot-sess-d")
+    active.add("sess-d")
+    const joined = parseToolJson(handleToolCall(d, "tribe.join", { name: NAME, delivery: "pull" }, opts))
+
+    expect(joined.error).toContain(`Name "${NAME}" is already taken`)
+    expect(fetchEvents(d, opts)).toEqual([])
+    expect(fetchEvents(b, opts).map((e) => e.id)).toEqual(["r-live"])
+    expect(db.prepare("SELECT name FROM sessions WHERE id = 'sess-b'").get()).toEqual({ name: NAME })
+    expect(db.prepare(`SELECT name FROM sessions WHERE name LIKE '${NAME}-dead-%'`).all()).toEqual([])
   })
 
   it("normal live fetch acknowledges in-window actionables so a successor does not re-recover them", () => {
