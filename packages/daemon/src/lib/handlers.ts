@@ -393,9 +393,9 @@ export function handleToolCall(
 /** Names of currently-active sessions, lexicographically sorted. Returned as
  *  `existing_names` on conflict errors so the caller can pick a non-colliding
  *  alternative without a separate `tribe.sessions` round-trip. */
-function listActiveSessionNames(ctx: TribeContext, activeIds?: Set<string>): string[] {
+function listActiveSessionNames(ctx: TribeContext, activeIds?: Set<string> | string[]): string[] {
   const rows = ctx.db.prepare("SELECT id, name FROM sessions").all() as Array<{ id: string; name: string }>
-  const active = activeIds ?? new Set(rows.map((r) => r.id))
+  const active = activeIds ? (Array.isArray(activeIds) ? new Set(activeIds) : activeIds) : new Set(rows.map((r) => r.id))
   return rows
     .filter((r) => active.has(r.id))
     .map((r) => r.name)
@@ -948,15 +948,13 @@ function handleRename(
   const storedSession = ctx.db
     .prepare("SELECT name FROM sessions WHERE id = $id LIMIT 1")
     .get({ $id: ctx.sessionId }) as { name: string } | null
-  const storedName = storedSession?.name ?? contextName
-  // Rename-to-self is a no-op only when BOTH identity authorities agree. A
-  // prior buggy active-holder takeover could tombstone the DB row without
-  // retiring or renaming its live context; in that split-brain state an
-  // explicit rename back to the context name must repair the persisted row.
-  if (newName === contextName && newName === storedName) {
-    return jsonResult({ renamed: false, name: newName })
+  const storedName = ctx.getName()
+  const dbRow = ctx.db.prepare("SELECT name FROM sessions WHERE id = $id").get({ $id: ctx.sessionId }) as { name: string } | null
+  const dbName = dbRow?.name ?? storedName
+
+  if (storedName === newName && dbName === newName) {
+    return jsonResult({ renamed: false, name: storedName })
   }
-  // Validate name format
   const nameError = validateName(newName)
   if (nameError) {
     return jsonResult({ error: nameError })
@@ -969,7 +967,17 @@ function handleRename(
     | { id: string }
     | undefined
   if (existing) {
-    if (opts.hasActiveTransport(existing.id)) {
+    const selfRow = ctx.db.prepare("SELECT pid FROM sessions WHERE id = $id").get({ $id: ctx.sessionId }) as { pid: number } | null
+    const selfPid = selfRow?.pid ?? 0
+    const existingRow = ctx.db.prepare("SELECT pid, updated_at FROM sessions WHERE id = $id").get({ $id: existing.id }) as { pid: number; updated_at: number } | null
+    const existingPid = existingRow?.pid ?? 0
+    const holderIsActive = opts.hasActiveTransport(existing.id)
+    const isDifferentLiveProcess = existingPid > 0 && (selfPid === 0 || existingPid !== selfPid) && pidStillAlive(existingPid)
+    const holderIsAlive =
+      holderIsActive ||
+      isDifferentLiveProcess ||
+      (opts.isReconnectGraceProtected ? opts.isReconnectGraceProtected(existing.id, Date.now()) : false)
+    if (holderIsAlive) {
       const activeIds = opts.getActiveSessionIds()
       const existing_names = listActiveSessionNames(ctx, activeIds)
       return jsonResult({ error: `Name "${newName}" is already taken`, existing_names })
@@ -984,7 +992,7 @@ function handleRename(
       .run({ $tomb: tombstoneName, $now: Date.now(), $id: existing.id })
     log.info?.(`reclaimed name "${newName}" from dead session ${existing.id} (tombstoned as "${tombstoneName}")`)
   }
-  const oldName = storedName
+  const oldName = dbName
   // A rename is the same session (same pid, same socket, same ctx.sessionId).
   // The tribe-wire daemon is role-agnostic (F12) — there is no chief claim to
   // carry across the rename, so a rename can no longer flap a coordination
@@ -1087,8 +1095,16 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     | { id: string }
     | undefined
   if (taken) {
+    const selfPid = selfInfo?.pid ?? (ctx.db.prepare("SELECT pid FROM sessions WHERE id = $id").get({ $id: ctx.sessionId }) as { pid: number } | null)?.pid ?? 0
+    const takenRow = ctx.db.prepare("SELECT pid, updated_at FROM sessions WHERE id = $id").get({ $id: taken.id }) as { pid: number; updated_at: number } | null
+    const takenPid = takenRow?.pid ?? 0
     const holderIsActive = opts.hasActiveTransport(taken.id)
-    if (!holderIsActive) {
+    const isDifferentLiveProcess = takenPid > 0 && (selfPid === 0 || takenPid !== selfPid) && pidStillAlive(takenPid)
+    const holderIsAlive =
+      holderIsActive ||
+      isDifferentLiveProcess ||
+      (opts.isReconnectGraceProtected ? opts.isReconnectGraceProtected(taken.id, Date.now()) : false)
+    if (!holderIsAlive) {
       // Dead session — tombstone and reclaim.
       const tombstoneName = `${joinName}-dead-${taken.id.slice(0, 8)}`
       ctx.db
