@@ -410,6 +410,151 @@ describe("createInboxWaitManager", () => {
       aborted: true,
     })
   })
+
+  /**
+   * CTO residual 2026-07-25 on @tent/tooling/21420: live @dev/3 sat in
+   * `tribe inbox-wait` while a type=assign addressed to it had already landed.
+   * Unit tests above mock unread_count and never send a real assign through
+   * the insert → unread SQL → wake path. This pins every default-wake type
+   * (request/query/verdict/assign) against the real getUnreadDms projection.
+   */
+  function realUnreadReader(stmts: TribeStatements): (session: string) => InboxStatus {
+    return (session: string): InboxStatus => {
+      const row = stmts.getUnreadDms.get({ $name: session }) as { count: number; oldest_ts: number } | undefined
+      const unread = row?.count ?? 0
+      const oldestTs = row?.oldest_ts ?? 0
+      return {
+        session,
+        unread_count: unread,
+        oldest_unread_age_min: oldestTs > 0 ? Math.floor((Date.now() - oldestTs) / 60_000) : 0,
+        oldest_unread_ts: oldestTs,
+      }
+    }
+  }
+
+  it("wakes on real DB assign (and every other actionable type) without a mock unread counter", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-assign-"))
+    const db = openDatabase(join(tmpDir, "tribe.db"))
+    const stmts = createStatements(db)
+    const readStatus = realUnreadReader(stmts)
+    const manager = createInboxWaitManager(readStatus, () => EMPTY_ATTENTION)
+    const chief = makeContext(db, stmts, "chief", "@chief", manager.onMessageInserted)
+
+    try {
+      for (const type of ["request", "query", "verdict", "assign"] as const) {
+        const recipient = `@seat-${type}`
+        const wait = manager.wait(recipient, `conn-${type}`, 2_000)
+        let settled: Awaited<typeof wait> | undefined
+        void wait.then((value) => {
+          settled = value
+        })
+
+        await Promise.resolve()
+        expect(settled).toBeUndefined()
+        expect(readStatus(recipient).unread_count).toBe(0)
+
+        sendMessage(chief, recipient, `wake via ${type}`, type, undefined, undefined, "direct")
+        await Promise.resolve()
+        await Promise.resolve()
+
+        expect(settled, `${type} must wake inbox.wait`).toBeDefined()
+        expect(settled).toMatchObject({
+          status: "woken",
+          session: recipient,
+          timed_out: false,
+          aborted: false,
+        })
+        expect(settled!.unread_count).toBeGreaterThan(0)
+        await wait
+      }
+    } finally {
+      db.close()
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("re-armed wait returns immediately when assign landed between chunks (reconnect gap)", async () => {
+    // CLI wait closes the socket after each chunk (callInboxWaitChunk finally
+    // client.close → cancelConnection). An assign that arrives in the gap
+    // between chunks must still wake the next wait via unread_count > 0, not
+    // require a second insert notification.
+    const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-gap-"))
+    const db = openDatabase(join(tmpDir, "tribe.db"))
+    const stmts = createStatements(db)
+    const readStatus = realUnreadReader(stmts)
+    const manager = createInboxWaitManager(readStatus, () => EMPTY_ATTENTION)
+    const chief = makeContext(db, stmts, "chief", "@chief", manager.onMessageInserted)
+    const seat = "@dev/3"
+
+    try {
+      const first = manager.wait(seat, "conn-chunk-1", 5_000)
+      manager.cancelConnection("conn-chunk-1") // simulate chunk socket close
+      await expect(first).resolves.toMatchObject({ aborted: true, unread_count: 0 })
+
+      // Assign lands while NO waiter is registered (inter-chunk gap).
+      sendMessage(chief, seat, "assign while between chunks", "assign", undefined, undefined, "direct")
+      expect(readStatus(seat).unread_count).toBeGreaterThan(0)
+
+      // Next chunk re-arms — must wake immediately from the durable unread.
+      const second = await manager.wait(seat, "conn-chunk-2", 5_000)
+      expect(second).toMatchObject({
+        status: "woken",
+        session: seat,
+        timed_out: false,
+        aborted: false,
+      })
+      expect(second.unread_count).toBeGreaterThan(0)
+      expect(second.waited_ms).toBe(0)
+    } finally {
+      db.close()
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("does not lose a live waiter when assign lands under a concurrent cursor advance race", async () => {
+    // If onMessageInserted fires while getUnreadDms still returns 0 (cursor
+    // lag / concurrent ack), the waiter must still wake from the message
+    // type alone — otherwise live assign is silent and the seat times out.
+    const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-race-"))
+    const db = openDatabase(join(tmpDir, "tribe.db"))
+    const stmts = createStatements(db)
+    let forceZeroUnread = false
+    const readStatus = (session: string): InboxStatus => {
+      if (forceZeroUnread) return status(session, 0)
+      return realUnreadReader(stmts)(session)
+    }
+    const manager = createInboxWaitManager(readStatus, () => EMPTY_ATTENTION)
+    const chief = makeContext(db, stmts, "chief", "@chief", manager.onMessageInserted)
+    const seat = "@dev/3"
+
+    try {
+      const wait = manager.wait(seat, "conn-race", 2_000)
+      let settled: Awaited<typeof wait> | undefined
+      void wait.then((value) => {
+        settled = value
+      })
+
+      forceZeroUnread = true // simulate unread lag at insert notification time
+      sendMessage(chief, seat, "assign during unread lag", "assign", undefined, undefined, "direct")
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // Capture wake state BEFORE any cancel — cancel would set settled via abort.
+      const wokenDespiteLag = settled !== undefined && settled.aborted !== true
+      forceZeroUnread = false
+      // Durable projection still sees the assign once lag ends.
+      expect(readStatus(seat).unread_count).toBeGreaterThan(0)
+      if (!wokenDespiteLag) manager.cancelConnection("conn-race")
+      await wait
+      expect(
+        wokenDespiteLag,
+        "assign must wake a live waiter even when getUnreadDms lags at insert time",
+      ).toBe(true)
+    } finally {
+      db.close()
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe("tribe.inbox.wait handler wiring", () => {

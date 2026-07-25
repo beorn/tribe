@@ -65,7 +65,13 @@ export function createInboxWaitManager(
         settle(waiter, { timedOut: false, aborted: false })
         continue
       }
-      if (ACTIONABLE_TYPES.has(info.type) && readStatus(waiter.session).unread_count > 0) {
+      // Default-wake on every actionable direct addressed to this waiter.
+      // Do NOT require readStatus().unread_count > 0 here: that projection can
+      // lag the insert (cursor race / concurrent ack) and swallow a live assign
+      // while the seat remains armed — CTO residual 2026-07-25 on 21420
+      // (@dev/3 sat in inbox-wait while type=assign had already landed).
+      // Self-sends are excluded (same filter as getUnreadDms: sender != name).
+      if (ACTIONABLE_TYPES.has(info.type) && info.sender !== waiter.session) {
         settle(waiter, { timedOut: false, aborted: false })
       }
     }
