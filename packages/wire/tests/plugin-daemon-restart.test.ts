@@ -139,7 +139,7 @@ async function terminateTestProcess(pid: number): Promise<void> {
 describe("Claude plugin daemon-restart self-heal", () => {
   let tmpDir: string
   let socketPath: string
-  let plugin: ChildProcessWithoutNullStreams | undefined
+  const plugins = new Set<ChildProcessWithoutNullStreams>()
   const daemonPids = new Set<number>()
   const adapterPids = new Set<number>()
 
@@ -159,14 +159,16 @@ describe("Claude plugin daemon-restart self-heal", () => {
         /* no reachable daemon remains */
       }
     }
-    const pluginPid = plugin?.pid
-    plugin?.kill("SIGTERM")
-    if (pluginPid) await terminateTestProcess(pluginPid)
+    for (const plugin of plugins) {
+      const pluginPid = plugin.pid
+      plugin.kill("SIGTERM")
+      if (pluginPid) await terminateTestProcess(pluginPid)
+    }
     for (const pid of adapterPids) await terminateTestProcess(pid)
     for (const pid of daemonPids) await terminateTestProcess(pid)
+    plugins.clear()
     adapterPids.clear()
     daemonPids.clear()
-    plugin = undefined
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
@@ -192,7 +194,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
     const firstDaemon = await connectToGeneration(socketPath)
     daemonPids.add(firstDaemon.pid)
 
-    plugin = spawn(BUN_BIN, [PLUGIN_SERVER, "--socket", socketPath, "--name", PERSONA], {
+    const plugin = spawn(BUN_BIN, [PLUGIN_SERVER, "--socket", socketPath, "--name", PERSONA], {
       cwd: tmpDir,
       env: {
         ...process.env,
@@ -210,6 +212,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
       },
       stdio: ["pipe", "pipe", "pipe"],
     }) as ChildProcessWithoutNullStreams
+    plugins.add(plugin)
     let pluginStderr = ""
     plugin.stderr.on("data", (chunk: Buffer | string) => {
       pluginStderr += chunk.toString()
@@ -267,6 +270,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
       owner_state: "live",
     })
     for (const pid of rejoined?.transport_pids ?? []) adapterPids.add(pid)
+    const firstRejoinedPid = rejoined!.transport_pids![0]!
     expect(rejoined?.transport_pids).not.toContain(firstTransportPid)
     await waitFor(() => !pidExists(firstTransportPid), "replaced adapter process exit")
     expect(plugin.exitCode, pluginStderr).toBeNull()
@@ -278,7 +282,48 @@ describe("Claude plugin daemon-restart self-heal", () => {
       transport_state: "connected",
       transport_pids: rejoined?.transport_pids,
     })
-    expect(readFileSync(adapterLog, "utf8")).toContain("daemon generation changed")
+
+    // Production incident 22322 restarted the daemon twice ten seconds apart.
+    // The first generation replacement succeeded, but the wrapper's one-reexec
+    // budget killed the bridge on the second legitimate generation change.
+    await successor.client.call("tribe.reload", { reason: "22322 rapid second restart acceptance" })
     successor.client.close()
-  }, 35_000)
+    const secondSuccessor = await connectToGeneration(socketPath, (pid) => pid !== successor.pid)
+    daemonPids.add(secondSuccessor.pid)
+
+    let secondRejoined: Member | undefined
+    await waitFor(async () => {
+      const result = await secondSuccessor.client.call("tribe.members", { all: true })
+      const candidate = parseToolJson(result).sessions?.find((session) => session.name === PERSONA)
+      if (
+        candidate?.transport_state === "connected" &&
+        candidate.transport_pids?.length === 1 &&
+        candidate.transport_pids[0] !== firstRejoinedPid
+      ) {
+        secondRejoined = candidate
+      }
+      return secondRejoined !== undefined
+    }, "supervised adapter rejoin after a rapid second daemon generation")
+
+    expect(secondRejoined).toMatchObject({
+      member_id: firstMember?.member_id,
+      launch_id: "restart-journey-launch",
+      launch_parent_pid: firstLaunchParentPid,
+      transport_state: "connected",
+      owner_state: "live",
+    })
+    for (const pid of secondRejoined?.transport_pids ?? []) adapterPids.add(pid)
+    await waitFor(() => !pidExists(firstRejoinedPid), "second replaced adapter process exit")
+    expect(plugin.exitCode, pluginStderr).toBeNull()
+
+    writeJson(plugin, callToolPayload(4, "members", { all: true }))
+    await waitFor(() => stdout.some((line) => line.id === 4), "post-second-restart tool call")
+    expect(mcpToolJson(stdout, 4).sessions?.find((session) => session.name === PERSONA)).toMatchObject({
+      member_id: firstMember?.member_id,
+      transport_state: "connected",
+      transport_pids: secondRejoined?.transport_pids,
+    })
+    expect(readFileSync(adapterLog, "utf8").match(/daemon generation changed/g)).toHaveLength(2)
+    secondSuccessor.client.close()
+  }, 45_000)
 })
