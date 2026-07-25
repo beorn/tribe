@@ -49,6 +49,7 @@ import {
   resolveJoinDelivery,
   type TribeDeliveryCapability,
 } from "./lib/delivery.ts"
+import { readTribeLaunchId } from "./launch-environment.ts"
 
 // stdout IS the MCP wire — a single non-JSON line (a loggily INFO banner)
 // poisons the host's JSON-RPC parser and the session silently loses its
@@ -118,7 +119,7 @@ const REGISTER_WITH_LAUNCH_NAME =
 // after the first successful registration; replaying it on reconnect lets two
 // displaced adapters evict each other forever (21049).
 const TAKEOVER = REGISTER_WITH_LAUNCH_NAME && process.env.TRIBE_TAKEOVER === "1"
-const LAUNCH_ID_RAW = process.env.TRIBE_LAUNCH_ID?.trim() ?? ""
+const LAUNCH_ID_RAW = readTribeLaunchId(process.env) ?? ""
 const PLUGIN_ADAPTER_CHILD = process.env.TRIBE_PLUGIN_ADAPTER_CHILD === "1"
 const PLUGIN_PROVIDER_PARENT_PID_RAW = process.env.TRIBE_PLUGIN_PROVIDER_PARENT_PID?.trim() ?? ""
 
