@@ -448,7 +448,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         return await callLaunchTool(adapter, id, name, args)
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        if (!message.includes("awaiting daemon registration") || Date.now() >= deadline) throw error
+        const registrationPending =
+          message.includes("awaiting daemon registration") || message.includes("daemon connection closed; reconnecting")
+        if (!registrationPending || Date.now() >= deadline) throw error
         id += 1_000
         await Bun.sleep(250)
       }
@@ -1000,36 +1002,18 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       transport_pids: expect.arrayContaining(launchAdapters.map(({ child }) => child.pid!)),
     })
 
-    // A daemon restart is a daemon *generation* change: each native adapter
-    // sees a new daemon pid on re-register and re-execs on the host
-    // supervisor's signal (requestPluginReexec — see stdio-adapter.ts, added in
-    // fccebaa "harden ball closure and plugin reconnect"), rather than
-    // reconnecting the same process in place. In production the MCP host
-    // (plugins/claude/server.ts) sets TRIBE_PLUGIN_REEXEC_EXIT_CODE and re-execs
-    // the plugin on the current disk. This test stands in for that supervisor:
-    // wait for the transports to exit, respawn fresh adapters under the SAME
-    // launch id, and prove the three re-execed transports re-fan into the SAME
-    // persisted logical member (member_id preserved across the daemon restart).
+    // A direct adapter has no host supervisor that can replace it. After the
+    // daemon generation changes, all three transports must re-register in
+    // process and preserve the persisted logical member.
     daemonProc.kill("SIGTERM")
     await once(daemonProc, "exit")
     await waitForCondition(() => !existsSync(socketPath), "old daemon socket removal")
     daemonProc = spawnDaemon(socketPath, dbPath)
     await waitForCondition(() => existsSync(socketPath), "restarted daemon socket")
-    await waitForCondition(
-      () => launchAdapters.every(({ child }) => child.exitCode !== null),
-      "native transports to re-exec on the daemon generation change",
-    )
-    // The supervisor re-exec: a fresh transport process on the current disk,
-    // same launch id, re-attaches to the persisted member.
-    const reexeced = await Promise.all(
-      launchAdapters.map((_, index) =>
-        spawnLaunchAdapter(socketPath, `launch-adapter-${index + 1}-reexec.log`, launchId),
-      ),
-    )
-    for (const [index, adapter] of reexeced.entries()) launchAdapters[index] = adapter
     const afterDaemonRestart = await Promise.all(
       launchAdapters.map((adapter, index) => callLaunchToolWhenRegistered(adapter, 30 + index, "members", {})),
     )
+    expect(launchAdapters.map(({ child }) => child.exitCode)).toEqual([null, null, null])
     for (const result of afterDaemonRestart as Array<{
       sessions?: Array<{ name?: string; member_id?: string; launch_id?: string; transport_pids?: number[] }>
     }>) {

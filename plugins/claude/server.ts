@@ -21,7 +21,11 @@ process.env.TRIBE_DAEMON_SCRIPT ??= fileURLToPath(import.meta.resolve("tribe-dae
 
 const PLUGIN_CHILD = "TRIBE_PLUGIN_ADAPTER_CHILD"
 const PLUGIN_PROVIDER_PARENT_PID = "TRIBE_PLUGIN_PROVIDER_PARENT_PID"
+const PLUGIN_RESUME_JOINED = "TRIBE_PLUGIN_RESUME_JOINED"
 const REEXEC_EXIT_CODE = 75
+const REEXEC_JOINED_OFFSET = 1
+const GENERATION_REEXEC_OFFSET = 2
+const LAST_REEXEC_EXIT_CODE = REEXEC_EXIT_CODE + GENERATION_REEXEC_OFFSET + REEXEC_JOINED_OFFSET
 const REMEDY =
   "tribe plugin reconnect failed after current-disk re-exec; restart the host session or reinstall the Tribe plugin."
 
@@ -44,6 +48,7 @@ async function superviseAdapter(): Promise<void> {
   let active: ChildProcess | null = null
   let stopping = false
   let consecutiveReexecs = 0
+  let resumeJoined = false
   const forward = (signal: NodeJS.Signals) => {
     stopping = true
     active?.kill(signal)
@@ -60,6 +65,7 @@ async function superviseAdapter(): Promise<void> {
         [PLUGIN_CHILD]: "1",
         [PLUGIN_PROVIDER_PARENT_PID]: String(providerParentPid),
         TRIBE_PLUGIN_REEXEC_EXIT_CODE: String(REEXEC_EXIT_CODE),
+        ...(resumeJoined ? { [PLUGIN_RESUME_JOINED]: "1" } : {}),
       },
     })
     const result = await waitForExit(active)
@@ -70,12 +76,16 @@ async function superviseAdapter(): Promise<void> {
       process.exitCode = 2
       return
     }
-    if (result.code !== REEXEC_EXIT_CODE) {
+    if (result.code === null || result.code < REEXEC_EXIT_CODE || result.code > LAST_REEXEC_EXIT_CODE) {
       process.exitCode = result.code ?? 1
       return
     }
 
-    const decision = evaluateAdapterReexec(consecutiveReexecs, Date.now() - startedAt)
+    const reexecOffset = result.code - REEXEC_EXIT_CODE
+    resumeJoined = reexecOffset % GENERATION_REEXEC_OFFSET === REEXEC_JOINED_OFFSET
+    const generationChange = reexecOffset >= GENERATION_REEXEC_OFFSET
+    const maxConsecutiveReexecs = generationChange ? undefined : 1
+    const decision = evaluateAdapterReexec(consecutiveReexecs, Date.now() - startedAt, maxConsecutiveReexecs)
     consecutiveReexecs = decision.consecutiveReexecs
     if (!decision.retry) {
       process.stderr.write(`${REMEDY}\n`)

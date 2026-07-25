@@ -7,10 +7,11 @@ const REEXEC_BACKOFF_MAX_MS = 4_000
 export function evaluateAdapterReexec(
   previousConsecutiveReexecs: number,
   childRuntimeMs: number,
+  maxConsecutiveReexecs = MAX_CONSECUTIVE_REEXECS,
 ): { consecutiveReexecs: number; retry: boolean; retryDelayMs: number } {
   const prior = childRuntimeMs >= ADAPTER_STABLE_MS ? 0 : previousConsecutiveReexecs
   const consecutiveReexecs = prior + 1
-  const retry = consecutiveReexecs <= MAX_CONSECUTIVE_REEXECS
+  const retry = consecutiveReexecs <= maxConsecutiveReexecs
   const retryDelayMs = retry
     ? Math.min(REEXEC_BACKOFF_BASE_MS * 2 ** (consecutiveReexecs - 1), REEXEC_BACKOFF_MAX_MS)
     : 0

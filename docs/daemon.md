@@ -157,9 +157,16 @@ Every stdio adapter re-registers after its reconnecting client reaches a new
 daemon generation. Hosts with the stable plugin wrapper additionally re-exec
 current-disk adapter code with a bounded five-attempt exponential backoff
 (250ms through 4s), so rapid restart bursts do not exhaust a one-replacement
-budget. Hosts that execute `tribe-wire mcp` directly have no process
+budget. Other re-exec reasons retain a one-retry fail-loud path, so a protocol
+mismatch does not spend the daemon-restart budget. Hosts that execute
+`tribe-wire mcp` directly have no process
 supervisor: after their successful re-registration they stay in-process rather
 than exiting to request a replacement that cannot be created.
+
+The wrapper also carries the adapter's explicit-join bit across a replacement.
+The replacement registers as push only when its predecessor had joined; an
+unjoined adapter remains pull-gated. Direct adapters retain the same bit
+in-process and recompute registration delivery on every daemon connection.
 
 This distinction explains the mixed recovery observed in 22322. A wrapped
 adapter spanning two quick generations used to die on its second re-exec,

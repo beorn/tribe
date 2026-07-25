@@ -37,11 +37,14 @@
 - Keep direct MCP adapters alive after they successfully re-register with a
   new daemon generation. An unsupervised Codex-style `tribe-wire mcp` process
   no longer exits merely to request a host replacement that does not exist.
+- Preserve explicit-join delivery across reconnects and supervised adapter
+  replacements: joined channel clients return as push, while never-joined
+  clients remain pull-gated.
 - Route daemon generation changes, reconnect exhaustion/watchdog trips, source
   changes, and reload notifications through the one stable plugin supervisor;
   allow rapid legitimate restart bursts with five bounded, exponentially
-  backed-off replacements instead of dying on the second generation or
-  respawning forever.
+  backed-off replacements instead of dying on the second generation, while
+  retaining the one-retry fail-loud path for other replacement reasons.
 - Close connected candidates when registration rejects, and terminate an
   adapter when its host stdin closes, preventing stranded sockets/processes.
 - Stop treating existence of a recycled numeric PID as proof that a

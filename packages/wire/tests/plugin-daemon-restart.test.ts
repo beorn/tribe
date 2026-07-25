@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url"
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { connectToDaemon, type DaemonClient } from "../src/client.ts"
+import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const DAEMON = resolve(HERE, "../../daemon/src/daemon.ts")
@@ -30,6 +31,14 @@ type Member = {
   transport_pids?: number[]
   transport_state?: "connected" | "disconnected"
   owner_state?: "live" | "dead" | "unknown"
+}
+type ToolJson = {
+  sessions?: Member[]
+  joined?: boolean
+  name?: string
+  delivery?: "push" | "pull"
+  id?: string
+  sent?: boolean
 }
 
 async function waitFor(predicate: () => boolean | Promise<boolean>, label: string, timeoutMs = 15_000): Promise<void> {
@@ -79,13 +88,13 @@ function callToolPayload(id: number, name: string, args: JsonObject): JsonObject
   return { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }
 }
 
-function parseToolJson(result: unknown): { sessions?: Member[] } {
+function parseToolJson(result: unknown): ToolJson {
   const content = (result as { content?: Array<{ text?: string }> } | undefined)?.content
   const text = content?.[0]?.text
-  return typeof text === "string" ? (JSON.parse(text) as { sessions?: Member[] }) : {}
+  return typeof text === "string" ? (JSON.parse(text) as ToolJson) : {}
 }
 
-function mcpToolJson(lines: JsonObject[], id: number): { sessions?: Member[] } {
+function mcpToolJson(lines: JsonObject[], id: number): ToolJson {
   return parseToolJson(lines.find((line) => line.id === id)?.result)
 }
 
@@ -144,6 +153,54 @@ describe("Claude plugin daemon-restart self-heal", () => {
   const daemonPids = new Set<number>()
   const adapterPids = new Set<number>()
 
+  function spawnTestDaemon(dbPath: string, logPath: string): ChildProcessWithoutNullStreams {
+    const child = spawn(BUN_BIN, [DAEMON, "--socket", socketPath, "--db", dbPath, "--foreground", "--no-lore"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_NO_PLUGINS: "1",
+        TRIBE_NO_AUTORELOAD: "1",
+        DEBUG_LOG: logPath,
+        LOG_FILE: logPath,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    }) as ChildProcessWithoutNullStreams
+    child.stdout.resume()
+    child.stderr.resume()
+    if (child.pid) daemonPids.add(child.pid)
+    return child
+  }
+
+  function spawnTestPlugin(opts: {
+    dbPath: string
+    logPath: string
+    name: string
+    launchId: string
+    delivery: "push" | "pull"
+    requireJoin: boolean
+  }): ChildProcessWithoutNullStreams {
+    const child = spawn(BUN_BIN, [PLUGIN_SERVER, "--socket", socketPath, "--name", opts.name], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DAEMON_SCRIPT: DAEMON,
+        TRIBE_DB: opts.dbPath,
+        TRIBE_DELIVERY: opts.delivery,
+        ...(opts.delivery === "pull" ? { TRIBE_PULL_TRANSPORT: "mcp" } : {}),
+        ...(opts.requireJoin ? {} : { TRIBE_REQUIRE_JOIN: "0" }),
+        TRIBE_TAKEOVER: "1",
+        TRIBE_LAUNCH_ID: opts.launchId,
+        TRIBE_NO_PLUGINS: "1",
+        TRIBE_NO_AUTORELOAD: "1",
+        DEBUG_LOG: opts.logPath,
+        LOG_FILE: opts.logPath,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    }) as ChildProcessWithoutNullStreams
+    plugins.add(child)
+    return child
+  }
+
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "tribe-plugin-restart-"))
     socketPath = join(tmpDir, "tribe.sock")
@@ -177,43 +234,19 @@ describe("Claude plugin daemon-restart self-heal", () => {
     const dbPath = join(tmpDir, "tribe.db")
     const daemonLog = join(tmpDir, "daemon.log")
     const adapterLog = join(tmpDir, "adapter.log")
-    const daemon = spawn(BUN_BIN, [DAEMON, "--socket", socketPath, "--db", dbPath, "--foreground", "--no-lore"], {
-      cwd: tmpDir,
-      env: {
-        ...process.env,
-        TRIBE_NO_PLUGINS: "1",
-        TRIBE_NO_AUTORELOAD: "1",
-        DEBUG_LOG: daemonLog,
-        LOG_FILE: daemonLog,
-      },
-      stdio: ["pipe", "pipe", "pipe"],
-    }) as ChildProcessWithoutNullStreams
-    daemon.stdout.resume()
-    daemon.stderr.resume()
-    if (daemon.pid) daemonPids.add(daemon.pid)
+    spawnTestDaemon(dbPath, daemonLog)
     await waitFor(() => existsSync(socketPath), "initial daemon socket")
     const firstDaemon = await connectToGeneration(socketPath)
     daemonPids.add(firstDaemon.pid)
 
-    const plugin = spawn(BUN_BIN, [PLUGIN_SERVER, "--socket", socketPath, "--name", PERSONA], {
-      cwd: tmpDir,
-      env: {
-        ...process.env,
-        TRIBE_DAEMON_SCRIPT: DAEMON,
-        TRIBE_DB: dbPath,
-        TRIBE_DELIVERY: "pull",
-        TRIBE_PULL_TRANSPORT: "mcp",
-        TRIBE_REQUIRE_JOIN: "0",
-        TRIBE_TAKEOVER: "1",
-        TRIBE_LAUNCH_ID: "restart-journey-launch",
-        TRIBE_NO_PLUGINS: "1",
-        TRIBE_NO_AUTORELOAD: "1",
-        DEBUG_LOG: adapterLog,
-        LOG_FILE: adapterLog,
-      },
-      stdio: ["pipe", "pipe", "pipe"],
-    }) as ChildProcessWithoutNullStreams
-    plugins.add(plugin)
+    const plugin = spawnTestPlugin({
+      dbPath,
+      logPath: adapterLog,
+      name: PERSONA,
+      launchId: "restart-journey-launch",
+      delivery: "push",
+      requireJoin: true,
+    })
     let pluginStderr = ""
     plugin.stderr.on("data", (chunk: Buffer | string) => {
       pluginStderr += chunk.toString()
@@ -228,6 +261,33 @@ describe("Claude plugin daemon-restart self-heal", () => {
         roster.sessions?.some((session) => session.name === PERSONA && session.transport_state === "connected") ?? false
       )
     }, "initial daemon-side membership")
+    writeJson(plugin, callToolPayload(10, "join", { name: PERSONA }))
+    await waitFor(() => stdout.some((line) => line.id === 10), "shipping-mode explicit join")
+    expect(mcpToolJson(stdout, 10)).toMatchObject({ joined: true, name: PERSONA, delivery: "push" })
+    await firstDaemon.client.call("register", {
+      name: "@agent/restart-sender",
+      role: "member",
+      domains: ["test"],
+      project: tmpDir,
+      projectName: "test",
+      protocolVersion: TRIBE_PROTOCOL_VERSION,
+      pid: process.pid,
+      delivery: "pull",
+    })
+    await firstDaemon.client.call("tribe.send", {
+      to: PERSONA,
+      message: "22322 channel before restart",
+      type: "request",
+    })
+    await waitFor(
+      () =>
+        stdout.some(
+          (line) =>
+            line.method === "notifications/claude/channel" &&
+            JSON.stringify(line).includes("22322 channel before restart"),
+        ),
+      "pre-restart push channel delivery",
+    )
     writeJson(plugin, callToolPayload(2, "members", { all: true }))
     await waitFor(() => stdout.some((line) => line.id === 2), "initial members tool call")
 
@@ -324,6 +384,30 @@ describe("Claude plugin daemon-restart self-heal", () => {
       transport_state: "connected",
       transport_pids: secondRejoined?.transport_pids,
     })
+    await secondSuccessor.client.call("register", {
+      name: "@agent/restart-sender",
+      role: "member",
+      domains: ["test"],
+      project: tmpDir,
+      projectName: "test",
+      protocolVersion: TRIBE_PROTOCOL_VERSION,
+      pid: process.pid,
+      delivery: "pull",
+    })
+    await secondSuccessor.client.call("tribe.send", {
+      to: PERSONA,
+      message: "22322 channel after two restarts",
+      type: "request",
+    })
+    await waitFor(
+      () =>
+        stdout.some(
+          (line) =>
+            line.method === "notifications/claude/channel" &&
+            JSON.stringify(line).includes("22322 channel after two restarts"),
+        ),
+      "post-restart push channel delivery",
+    )
     expect(readFileSync(adapterLog, "utf8").match(/daemon generation changed/g)).toHaveLength(2)
     secondSuccessor.client.close()
   }, 45_000)
@@ -332,20 +416,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
     const dbPath = join(tmpDir, "tribe-direct.db")
     const daemonLog = join(tmpDir, "daemon-direct.log")
     const adapterLog = join(tmpDir, "adapter-direct.log")
-    const daemon = spawn(BUN_BIN, [DAEMON, "--socket", socketPath, "--db", dbPath, "--foreground", "--no-lore"], {
-      cwd: tmpDir,
-      env: {
-        ...process.env,
-        TRIBE_NO_PLUGINS: "1",
-        TRIBE_NO_AUTORELOAD: "1",
-        DEBUG_LOG: daemonLog,
-        LOG_FILE: daemonLog,
-      },
-      stdio: ["pipe", "pipe", "pipe"],
-    }) as ChildProcessWithoutNullStreams
-    daemon.stdout.resume()
-    daemon.stderr.resume()
-    if (daemon.pid) daemonPids.add(daemon.pid)
+    spawnTestDaemon(dbPath, daemonLog)
     await waitFor(() => existsSync(socketPath), "direct-adapter initial daemon socket")
     const firstDaemon = await connectToGeneration(socketPath)
     daemonPids.add(firstDaemon.pid)
@@ -408,24 +479,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
   it("returns every registered seat across a rapid two-generation restart burst", async () => {
     const dbPath = join(tmpDir, "tribe-multi.db")
     const daemonLog = join(tmpDir, "daemon-multi.log")
-    const initialDaemonProcess = spawn(
-      BUN_BIN,
-      [DAEMON, "--socket", socketPath, "--db", dbPath, "--foreground", "--no-lore"],
-      {
-        cwd: tmpDir,
-        env: {
-          ...process.env,
-          TRIBE_NO_PLUGINS: "1",
-          TRIBE_NO_AUTORELOAD: "1",
-          DEBUG_LOG: daemonLog,
-          LOG_FILE: daemonLog,
-        },
-        stdio: ["pipe", "pipe", "pipe"],
-      },
-    ) as ChildProcessWithoutNullStreams
-    initialDaemonProcess.stdout.resume()
-    initialDaemonProcess.stderr.resume()
-    if (initialDaemonProcess.pid) daemonPids.add(initialDaemonProcess.pid)
+    spawnTestDaemon(dbPath, daemonLog)
     await waitFor(() => existsSync(socketPath), "multi-seat initial daemon socket")
     let generation = await connectToGeneration(socketPath)
     daemonPids.add(generation.pid)
@@ -433,25 +487,14 @@ describe("Claude plugin daemon-restart self-heal", () => {
     const personas = ["@agent/restart-a", "@agent/restart-b", "@agent/restart-c"]
     const harnesses = personas.map((persona, index) => {
       const adapterLog = join(tmpDir, `adapter-${index}.log`)
-      const child = spawn(BUN_BIN, [PLUGIN_SERVER, "--socket", socketPath, "--name", persona], {
-        cwd: tmpDir,
-        env: {
-          ...process.env,
-          TRIBE_DAEMON_SCRIPT: DAEMON,
-          TRIBE_DB: dbPath,
-          TRIBE_DELIVERY: "pull",
-          TRIBE_PULL_TRANSPORT: "mcp",
-          TRIBE_REQUIRE_JOIN: "0",
-          TRIBE_TAKEOVER: "1",
-          TRIBE_LAUNCH_ID: `restart-multi-${index}`,
-          TRIBE_NO_PLUGINS: "1",
-          TRIBE_NO_AUTORELOAD: "1",
-          DEBUG_LOG: adapterLog,
-          LOG_FILE: adapterLog,
-        },
-        stdio: ["pipe", "pipe", "pipe"],
-      }) as ChildProcessWithoutNullStreams
-      plugins.add(child)
+      const child = spawnTestPlugin({
+        dbPath,
+        logPath: adapterLog,
+        name: persona,
+        launchId: `restart-multi-${index}`,
+        delivery: "pull",
+        requireJoin: false,
+      })
       child.stderr.resume()
       const stdout = collectJsonLines(child)
       writeJson(child, initializePayload(index + 1))

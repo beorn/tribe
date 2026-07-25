@@ -10,6 +10,14 @@ describe("Claude plugin adapter re-exec budget", () => {
     })
   })
 
+  it("keeps non-generation re-exec failures on the one-retry fail-loud path", () => {
+    expect(evaluateAdapterReexec(1, 10_000, 1)).toEqual({
+      consecutiveReexecs: 2,
+      retry: false,
+      retryDelayMs: 0,
+    })
+  })
+
   it("still bounds a persistently re-executing adapter", () => {
     let consecutiveReexecs = 0
     for (let attempt = 1; attempt <= 5; attempt += 1) {

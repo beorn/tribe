@@ -114,6 +114,7 @@ if (LAUNCH_NAME !== undefined && !isTribeNameShape(LAUNCH_NAME)) {
 }
 const REGISTER_WITH_LAUNCH_NAME =
   LAUNCH_NAME !== undefined && (!REQUIRE_EXPLICIT_JOIN || isExplicitTribePersonaName(LAUNCH_NAME))
+let joined = !REQUIRE_EXPLICIT_JOIN || process.env.TRIBE_PLUGIN_RESUME_JOINED === "1"
 // 20703 — managed spawns set TRIBE_TAKEOVER=1 so an explicit-persona
 // respawn can supersede a stale live holder once. The capability is consumed
 // after the first successful registration; replaying it on reconnect lets two
@@ -309,7 +310,6 @@ const baseRegisterParams = {
   claudeSessionName: CLAUDE_SESSION_NAME,
   identityToken,
   ...(LAUNCH_IDENTITY ? { launchId: LAUNCH_IDENTITY.id, launchParentPid: LAUNCH_IDENTITY.parentPid } : {}),
-  delivery: REQUIRE_EXPLICIT_JOIN ? "pull" : DELIVERY,
   ...(INITIAL_FILTER_MODE === undefined ? {} : { filterMode: INITIAL_FILTER_MODE }),
   // @km/infra/15641 Phase 1 — per-session account/provider label sourced
   // from `ag` via TRIBE_ACCOUNT / TRIBE_PROVIDER env vars (which ag sets
@@ -362,8 +362,15 @@ function requiredMcpTransportFailureResult(): {
   }
 }
 
-function registerParamsForConnection(): typeof baseRegisterParams & { takeover?: true } {
-  return TAKEOVER && !hasRegistered ? { ...baseRegisterParams, takeover: true } : baseRegisterParams
+function registerParamsForConnection(): typeof baseRegisterParams & {
+  delivery: "push" | "pull"
+  takeover?: true
+} {
+  return {
+    ...baseRegisterParams,
+    delivery: joined ? DELIVERY : "pull",
+    ...(TAKEOVER && !hasRegistered ? { takeover: true as const } : {}),
+  }
 }
 
 function errorMessage(err: unknown): string {
@@ -401,16 +408,20 @@ const PLUGIN_RECONNECT_ATTEMPTS = 3
 
 function pluginReexecExitCode(): number | null {
   const supervisedExitCode = Number(process.env.TRIBE_PLUGIN_REEXEC_EXIT_CODE)
-  if (Number.isSafeInteger(supervisedExitCode) && supervisedExitCode > 0 && supervisedExitCode <= 255) {
+  if (Number.isSafeInteger(supervisedExitCode) && supervisedExitCode > 0 && supervisedExitCode <= 252) {
     return supervisedExitCode
   }
   return null
 }
 
-function requestPluginReexec(reason: string): never {
+function supervisedReexecExitCode(reasonOffset = 0): number | null {
+  const baseExitCode = pluginReexecExitCode()
+  return baseExitCode === null ? null : baseExitCode + reasonOffset + (joined ? 1 : 0)
+}
+
+function requestPluginReexec(reason: string, supervisedExitCode = supervisedReexecExitCode()): never {
   daemon?.close()
   proxyAc.abort()
-  const supervisedExitCode = pluginReexecExitCode()
   if (supervisedExitCode !== null) {
     log.warn?.(`tribe plugin requesting current-disk re-exec: ${reason}`)
     process.exitCode = supervisedExitCode
@@ -423,8 +434,9 @@ function requestPluginReexec(reason: string): never {
   process.exit()
 }
 
-function reexecAfterDaemonGenerationChange(reason: string): void {
-  if (pluginReexecExitCode() !== null) requestPluginReexec(reason)
+function handleDaemonGenerationChange(reason: string): void {
+  const supervisedExitCode = supervisedReexecExitCode(2)
+  if (supervisedExitCode !== null) requestPluginReexec(reason, supervisedExitCode)
   log.info?.(`tribe direct adapter re-registered without a host re-exec supervisor: ${reason}`)
 }
 
@@ -502,9 +514,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
         nextDaemonPid !== null &&
         nextDaemonPid !== registeredDaemonPid
       ) {
-        reexecAfterDaemonGenerationChange(
-          `daemon generation changed from pid ${registeredDaemonPid} to ${nextDaemonPid}`,
-        )
+        handleDaemonGenerationChange(`daemon generation changed from pid ${registeredDaemonPid} to ${nextDaemonPid}`)
       }
       registeredDaemonPid = nextDaemonPid
       hasRegistered = true
@@ -970,7 +980,6 @@ import { watch as fsWatch } from "node:fs"
 // Auto-rename: when this session claims a bead, rename to the bead scope
 // e.g., claiming "km-storage.foo" renames session to "km-storage"
 let autoRenamed = false
-let joined = !REQUIRE_EXPLICIT_JOIN
 function tryAutoRenameOnClaim(content: string): void {
   if (autoRenamed) return
   // Only auto-rename if session still has auto-generated name (km-N-XXX pattern)
