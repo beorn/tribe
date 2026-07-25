@@ -1449,6 +1449,16 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     if (!pidAlive) {
       warnings.push(`transport pids ${transportPids.join(",")} are dead — session is a zombie`)
     }
+    const agentPid = active.launchParentPid ?? active.pid
+    const agentPidAlive = agentPid ? pidStillAlive(agentPid) : pidAlive
+    const transportAlive = transport.transport_state === "connected"
+    const lastSeenSec = lastMsgAge ? Math.round(lastMsgAge / 1000) : Math.round((Date.now() - s.startedAt) / 1000)
+    const isSilent = lastSeenSec > 14400
+    if (isSilent) {
+      warnings.push(`silent for ${Math.round(lastSeenSec / 60)} min`)
+    }
+
+    const alive = transportAlive && pidAlive && agentPidAlive && !isSilent
 
     return {
       member_id: s.id,
@@ -1456,11 +1466,14 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
       role: s.role,
       domains: parseDomains(s.domains),
       pid: active.pid,
+      agent_pid: agentPid,
       launch_id: active.launchId,
       launch_parent_pid: active.launchParentPid,
       transport_pids: transportPids,
       ...transport,
-      alive: transport.transport_state === "connected",
+      transport_alive: transportAlive,
+      agent_alive: agentPidAlive,
+      alive,
       pid_alive: pidAlive,
       last_message: lastMsgAge ? `${Math.round(lastMsgAge / 60_000)} min ago` : "never",
       warnings,
