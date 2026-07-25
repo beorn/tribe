@@ -48,6 +48,22 @@ order:
 
 The daemon `chmod`s the socket to `0600` right after binding.
 
+### Optional delivery fallbacks
+
+`TRIBE_DELIVERY_FALLBACKS` accepts an ordered JSON array of generic
+`{"prefix":"...","to":"..."}` rows. When a direct recipient has no live
+transport, the first matching row persists the original mail, routes an
+attention-bearing `dead-letter` copy to `to`, and makes that fallback recipient
+own the original request id. Concrete rows are composition policy; Tribe never
+infers a parent from a name:
+
+```bash
+TRIBE_DELIVERY_FALLBACKS='[{"prefix":"@worker/","to":"@manager"}]' tribe-daemon
+```
+
+Empty fields, duplicate prefixes, unknown keys, malformed JSON, and a
+self-bounce fail loudly at startup/send time.
+
 ## SQLite state location
 
 Resolved by `resolveDbPath()` (`packages/wire/src/lib/config.ts`), priority

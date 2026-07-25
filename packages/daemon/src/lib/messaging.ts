@@ -58,6 +58,10 @@ export type Classification = {
   delivery?: Delivery
   topic?: string
   roomId?: string
+  /** Force this direct row into the durable attention projection. */
+  attentionRequired?: boolean
+  /** Persist an existing request id as correlation without opening another ball. */
+  correlationRequest?: string
   /**
    * Authored one-line summary of the message (the LLM-generated one-liner shown
    * by default in the channel UI; the body discloses the full markdown). When a
@@ -112,6 +116,12 @@ export type BallTracker = {
    * structured `reply` field (CLI: `--reply`).
    */
   request?: string | true
+  /**
+   * Semantic owner of the request. Defaults to the message recipient.
+   * Delivery resolvers use this to make a fallback recipient own the original
+   * request without changing its durable address or request id.
+   */
+  owner?: string
   /**
    * If set, this message CLOSES the request with the given id. The ball is
    * released from the recipient(s).
@@ -203,6 +213,11 @@ export function sendMessage(
     throw new Error("tracked request id must be non-empty")
   }
   const requestId = explicitRequest === true ? id : (explicitRequest ?? (autoTrackActionable ? id : null))
+  const correlationRequest = classification.correlationRequest?.trim()
+  if (classification.correlationRequest !== undefined && !correlationRequest) {
+    throw new Error("correlation request id must be non-empty")
+  }
+  const persistedRequest = correlationRequest ?? requestId
   const replyId = ballTracker.reply ?? null
   const expiresInMs = ballTracker.expiresInMs
   if (
@@ -240,9 +255,10 @@ export function sendMessage(
       $delivery: delivery,
       $topic: classification.topic ?? null,
       $room_id: classification.roomId ?? null,
-      $request: requestId,
+      $request: persistedRequest,
       $reply: canonicalReplyId,
       $summary: classification.summary ?? null,
+      $attention_required: classification.attentionRequired === true ? 1 : 0,
     })
     const rowid = Number(result.lastInsertRowid)
     // sendMessage knows one durable recipient string. Explicit broadcast
@@ -252,7 +268,7 @@ export function sendMessage(
       if (requestId) {
         ctx.stmts.openPendingRequest.run({
           $request_id: requestId,
-          $recipient: recipient,
+          $recipient: ballTracker.owner ?? recipient,
           $sender: sender,
           $opened_at: ts,
           $expires_at: expiresInMs === undefined ? null : ts + expiresInMs,

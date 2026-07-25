@@ -17,6 +17,7 @@ import {
   logEvent,
   countUnackedAttention,
   MAX_BALL_TTL_MS,
+  type Classification,
   type Delivery,
 } from "./messaging.ts"
 import { ACTIONABLE_TYPES_SET, ACTIONABLE_TYPES_SQL, AUTO_TRACK_TYPES_SET } from "./database.ts"
@@ -32,6 +33,7 @@ import { parseDbGrowthWarningBytes, projectHealthCadence } from "./health-cadenc
 import { senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
 import type { LifecycleStore, LifecycleSnapshotRecord } from "./lifecycle-store.ts"
 import { projectSessionTransportState } from "./session-transport-state.ts"
+import type { DirectDeliveryResolution, DirectDeliveryResolver } from "./delivery-resolution.ts"
 
 // ---------------------------------------------------------------------------
 // Reconciler snapshot — read-only view into chief-reconciler output, surfaced
@@ -330,6 +332,18 @@ export type HandlerOpts = {
   /** Daemon-owned bounded cleanup. Omitted in direct handler harnesses that do
    * not compose the authenticated transport registry. */
   reapStaleTransports?: () => StaleTransportReapReport
+  /**
+   * Optional host/project delivery policy. Tribe owns only the generic
+   * disposition; concrete parent/fallback routing is injected by composition.
+   */
+  resolveDelivery?: DirectDeliveryResolver
+}
+
+type AcceptedDirectDeliveryResolution = Extract<DirectDeliveryResolution, { readonly status: "accepted" }>
+
+interface ResolvedDirectRecipient {
+  readonly recipient: string
+  readonly resolution: AcceptedDirectDeliveryResolution
 }
 
 export function handleToolCall(
@@ -528,53 +542,36 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   const summary = summaryDerived ? deriveSummary(sanitized) : summaryArg
   const classification = { summary, ...(delivery ? { delivery } : {}) }
   const sender = ctx.getName()
+  const activeNames = new Set(opts.getActiveSessionInfo().map((session) => session.name))
+  const resolveRecipient = (recipient: string): DirectDeliveryResolution =>
+    resolveDirectDelivery(recipient, activeNames, opts.resolveDelivery)
   if (Array.isArray(recipients)) {
-    const implicitlyTracked = AUTO_TRACK_TYPES_SET.has(msgType) && recipients.some((recipient) => recipient !== sender)
-    const sharedRequestId = requestFlag ? randomUUID() : (requestId ?? (implicitlyTracked ? randomUUID() : null))
-    const results = recipients.map((recipient) =>
-      sendMessage(
-        ctx,
-        recipient,
-        sanitized,
-        msgType,
-        a.bead as string | undefined,
-        a.ref as string | undefined,
-        "direct",
-        classification,
-        {
-          // Implicit tracking still excludes self-directed rows. Explicit
-          // request:true/string retains its existing ability to name any
-          // direct recipient, including the sender.
-          request: requestArg === undefined && recipient === sender ? undefined : (sharedRequestId ?? undefined),
-          reply: replyId ?? undefined,
-          fanout: fanoutArg,
-          expiresInMs,
-        },
-      ),
-    )
-    const tracker = aggregateReplyTracker(results, replyId)
-    const warning = combineWarnings(
-      maybeDerivedSummaryWarning(summaryDerived),
-      trackerMissWarning(ctx, sender, recipients, tracker),
-    )
-    logEvent(ctx, `message.sent.${msgType}`, a.bead as string | undefined, {
-      to: recipients,
-      message_ids: results.map((r) => r.id),
-      ...(sharedRequestId ? { request_id: sharedRequestId } : {}),
-      ...(summaryDerived ? { summary_derived: true } : {}),
-    })
-    return jsonResult({
-      sent: true,
-      id: results[0]?.id ?? null,
-      ids: results.map((r) => r.id),
-      ...(sharedRequestId ? { request_id: sharedRequestId } : {}),
-      ...(tracker ? { tracker } : {}),
+    return handleMultiSend({
+      ctx,
+      args: a,
+      recipients,
+      msgType,
+      content: sanitized,
+      classification,
+      sender,
+      requestArg,
+      requestFlag,
+      requestId,
+      replyId,
+      fanout: fanoutArg,
+      expiresInMs,
       summary,
-      ...(summaryDerived ? { summary_derived: true } : {}),
-      ...(warning ? { warning } : {}),
+      summaryDerived,
+      resolveRecipient,
     })
   }
 
+  const resolution = resolveRecipient(recipients)
+  if (resolution.status !== "accepted") {
+    return jsonResult({
+      error: `tribe.send: ${resolution.status} recipient ${JSON.stringify(recipients)}: ${resolution.reason}`,
+    })
+  }
   const result = sendMessage(
     ctx,
     recipients,
@@ -586,11 +583,17 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     classification,
     {
       request: requestFlag ? true : (requestId ?? undefined),
+      owner: resolution.state === "bounced" ? resolution.to : undefined,
       reply: replyId ?? undefined,
       fanout: fanoutArg,
       expiresInMs,
     },
   )
+  const effectiveRequestId =
+    requestFlag || (requestId === null && AUTO_TRACK_TYPES_SET.has(msgType) && sender !== recipients)
+      ? result.id
+      : requestId
+  persistDeadLetter(ctx, resolution, sanitized, a, classification, effectiveRequestId)
   if ((requestFlag || requestId) && recipients === "*") {
     openPendingRows(
       ctx,
@@ -615,11 +618,165 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   return jsonResult({
     sent: true,
     id: result.id,
+    ...(effectiveRequestId ? { request_id: effectiveRequestId } : {}),
+    delivery: deliveryReport([{ recipient: recipients, resolution }])[0],
     ...(result.tracker ? { tracker: result.tracker } : {}),
     summary,
     ...(summaryDerived ? { summary_derived: true } : {}),
     ...(warning ? { warning } : {}),
   })
+}
+
+function handleMultiSend(input: {
+  ctx: TribeContext
+  args: ToolArgs
+  recipients: readonly string[]
+  msgType: string
+  content: string
+  classification: Classification
+  sender: string
+  requestArg: true | string | undefined
+  requestFlag: boolean
+  requestId: string | null
+  replyId: string | null
+  fanout: "first" | "all" | undefined
+  expiresInMs: number | undefined
+  summary: string
+  summaryDerived: boolean
+  resolveRecipient: (recipient: string) => DirectDeliveryResolution
+}): ToolResult {
+  const resolutions = resolveDirectRecipients(input.recipients, input.resolveRecipient)
+  if (resolutions instanceof Error) return jsonResult({ error: resolutions.message })
+  const implicitlyTracked =
+    AUTO_TRACK_TYPES_SET.has(input.msgType) && input.recipients.some((recipient) => recipient !== input.sender)
+  const sharedRequestId = input.requestFlag
+    ? randomUUID()
+    : (input.requestId ?? (implicitlyTracked ? randomUUID() : null))
+  const results = resolutions.map(({ recipient, resolution }) => {
+    const result = sendMessage(
+      input.ctx,
+      recipient,
+      input.content,
+      input.msgType,
+      input.args.bead as string | undefined,
+      input.args.ref as string | undefined,
+      "direct",
+      input.classification,
+      {
+        // Implicit tracking still excludes self-directed rows. Explicit
+        // request:true/string retains its existing ability to name any
+        // direct recipient, including the sender.
+        request:
+          input.requestArg === undefined && recipient === input.sender ? undefined : (sharedRequestId ?? undefined),
+        owner: resolution.state === "bounced" ? resolution.to : undefined,
+        reply: input.replyId ?? undefined,
+        fanout: input.fanout,
+        expiresInMs: input.expiresInMs,
+      },
+    )
+    persistDeadLetter(input.ctx, resolution, input.content, input.args, input.classification, sharedRequestId)
+    return { ...result, recipient, resolution }
+  })
+  const tracker = aggregateReplyTracker(results, input.replyId)
+  const warning = combineWarnings(
+    maybeDerivedSummaryWarning(input.summaryDerived),
+    trackerMissWarning(input.ctx, input.sender, input.recipients, tracker),
+  )
+  logEvent(input.ctx, `message.sent.${input.msgType}`, input.args.bead as string | undefined, {
+    to: input.recipients,
+    message_ids: results.map((result) => result.id),
+    ...(sharedRequestId ? { request_id: sharedRequestId } : {}),
+    deliveries: deliveryReport(results),
+    ...(input.summaryDerived ? { summary_derived: true } : {}),
+  })
+  return jsonResult({
+    sent: true,
+    id: results[0]?.id ?? null,
+    ids: results.map((result) => result.id),
+    ...(sharedRequestId ? { request_id: sharedRequestId } : {}),
+    ...(tracker ? { tracker } : {}),
+    deliveries: deliveryReport(results),
+    summary: input.summary,
+    ...(input.summaryDerived ? { summary_derived: true } : {}),
+    ...(warning ? { warning } : {}),
+  })
+}
+
+function resolveDirectDelivery(
+  recipient: string,
+  activeNames: ReadonlySet<string>,
+  resolver: DirectDeliveryResolver | undefined,
+): DirectDeliveryResolution {
+  return (
+    resolver?.({ recipient, activeNames }) ?? {
+      status: "accepted",
+      state: activeNames.has(recipient) ? "online" : "offline",
+    }
+  )
+}
+
+function resolveDirectRecipients(
+  recipients: readonly string[],
+  resolve: (recipient: string) => DirectDeliveryResolution,
+): ResolvedDirectRecipient[] | Error {
+  const resolved: ResolvedDirectRecipient[] = []
+  for (const recipient of recipients) {
+    const resolution = resolve(recipient)
+    if (resolution.status !== "accepted") {
+      return new Error(`tribe.send: ${resolution.status} recipient ${JSON.stringify(recipient)}: ${resolution.reason}`)
+    }
+    resolved.push({ recipient, resolution })
+  }
+  return resolved
+}
+
+function persistDeadLetter(
+  ctx: TribeContext,
+  resolution: AcceptedDirectDeliveryResolution,
+  content: string,
+  args: ToolArgs,
+  classification: Classification,
+  requestId: string | null,
+): void {
+  if (resolution.state !== "bounced") return
+  sendMessage(
+    ctx,
+    resolution.to,
+    content,
+    "dead-letter",
+    args.bead as string | undefined,
+    args.ref as string | undefined,
+    "direct",
+    {
+      ...classification,
+      attentionRequired: true,
+      ...(requestId ? { correlationRequest: requestId } : {}),
+    },
+  )
+}
+
+function deliveryReport(rows: readonly ResolvedDirectRecipient[]): Array<
+  | {
+      state: "bounced"
+      original_target: string
+      recipient: string
+      reason: string
+    }
+  | {
+      state: "online" | "offline" | "parked"
+      recipient: string
+    }
+> {
+  return rows.map(({ recipient, resolution }) =>
+    resolution.state === "bounced"
+      ? {
+          state: resolution.state,
+          original_target: recipient,
+          recipient: resolution.to,
+          reason: resolution.reason,
+        }
+      : { state: resolution.state, recipient },
+  )
 }
 
 function derivedSummaryWarning(): string {

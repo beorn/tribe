@@ -71,6 +71,7 @@ import type { WithDaemonContext } from "./with-daemon-context.ts"
 import type { WithDatabase } from "./with-database.ts"
 import type { WithRecall } from "./with-recall.ts"
 import type { WithSocketServer } from "./with-socket-server.ts"
+import type { DirectDeliveryResolver } from "../delivery-resolution.ts"
 
 const log = createLogger("tribe:dispatcher")
 
@@ -85,6 +86,8 @@ export interface DispatcherRuntimeHooks {
   getQuitTimeoutSec?: () => number
   /** Suppress-window for join/leave broadcasts. Default: 10000ms (0 disables). */
   suppressWindowMs?: number
+  /** Generic direct-message delivery policy supplied by the composing layer. */
+  resolveDelivery?: DirectDeliveryResolver
 }
 
 /**
@@ -453,6 +456,7 @@ export function withDispatcher<
       inboxWait,
       notifyWakeupForReplay,
       reapStaleTransports,
+      resolveDelivery: hooks.resolveDelivery,
       getDebugState: () => ({
         clients: Array.from(clients.values()).map((c) => ({
           member_id: c.ctx.sessionId,

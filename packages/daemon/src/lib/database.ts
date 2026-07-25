@@ -1050,7 +1050,11 @@ export function createStatements(db: Database) {
 			delivery, topic, room_id, request, reply, summary, attention_required)
 		VALUES ($id, $type, $sender, $recipient, $kind, $content, $bead_id, $ref, $ts,
 			$delivery, $topic, $room_id, $request, $reply, $summary,
-			CASE WHEN $kind = 'direct' AND $sender != $recipient AND $type = 'response' THEN 1 ELSE 0 END)
+			CASE
+				WHEN $attention_required = 1 THEN 1
+				WHEN $kind = 'direct' AND $sender != $recipient AND $type = 'response' THEN 1
+				ELSE 0
+			END)
 	`),
 
     /** Ball-tracker insert: opens a new pending request (one row per recipient).

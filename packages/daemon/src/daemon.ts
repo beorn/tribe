@@ -52,6 +52,7 @@ import {
 import { TOOLS_LIST } from "tribe-wire/lib/tools-list"
 import { pruneOldActivityLogs } from "./lib/activity-log.ts"
 import { gatherCodePin, STARTUP_SHA } from "./lib/code-pin.ts"
+import { prefixFallbackDeliveryResolver } from "./lib/delivery-resolution.ts"
 
 // ---------------------------------------------------------------------------
 // `daemon.ts hook <event>` — Claude Code hook entry point. This is the
@@ -240,6 +241,7 @@ const withDispatcherShape = withDispatcher<typeof withIdleQuitShape>({
   onIdle: () => withIdleQuitShape.idleQuit.markIdle(),
   getActivePluginNames: () => refs.activePluginNames,
   getQuitTimeoutSec: () => withSocketShape.config.quitTimeoutSec,
+  resolveDelivery: prefixFallbackDeliveryResolver(process.env.TRIBE_DELIVERY_FALLBACKS),
 })(withIdleQuitShape)
 // MCP-spec surface — reads the tool registry, registers initialize / tools/list
 // / tools/call on the dispatcher. tools/call routes through the dispatcher's
