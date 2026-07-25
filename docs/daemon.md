@@ -151,6 +151,22 @@ Net effect: the daemon costs nothing while idle (it exits itself) and comes
 back on the next connect attempt (via autostart) — no lifecycle ceremony
 either way, by design.
 
+### Host adapter recovery across daemon generations
+
+Every stdio adapter re-registers after its reconnecting client reaches a new
+daemon generation. Hosts with the stable plugin wrapper additionally re-exec
+current-disk adapter code with a bounded five-attempt exponential backoff
+(250ms through 4s), so rapid restart bursts do not exhaust a one-replacement
+budget. Hosts that execute `tribe-wire mcp` directly have no process
+supervisor: after their successful re-registration they stay in-process rather
+than exiting to request a replacement that cannot be created.
+
+This distinction explains the mixed recovery observed in 22322. A wrapped
+adapter spanning two quick generations used to die on its second re-exec,
+while a direct adapter rejoined the daemon and then closed its own MCP
+transport. Adapters launched after the first generation saw only one change
+and appeared to recover.
+
 ## Stop / restart
 
 There is no dedicated `stop` subcommand. In practice:

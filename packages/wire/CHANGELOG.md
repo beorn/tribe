@@ -34,9 +34,14 @@
 - Pin the real daemon close/unlink/fresh-bind journey: the host stdio channel
   remains open, the adapter child is replaced, the persisted logical member
   rejoins, and post-restart tool calls succeed without human keystrokes.
+- Keep direct MCP adapters alive after they successfully re-register with a
+  new daemon generation. An unsupervised Codex-style `tribe-wire mcp` process
+  no longer exits merely to request a host replacement that does not exist.
 - Route daemon generation changes, reconnect exhaustion/watchdog trips, source
   changes, and reload notifications through the one stable plugin supervisor;
-  bound repeated slow replacements instead of respawning once per minute.
+  allow rapid legitimate restart bursts with five bounded, exponentially
+  backed-off replacements instead of dying on the second generation or
+  respawning forever.
 - Close connected candidates when registration rejects, and terminate an
   adapter when its host stdin closes, preventing stranded sockets/processes.
 - Stop treating existence of a recycled numeric PID as proof that a

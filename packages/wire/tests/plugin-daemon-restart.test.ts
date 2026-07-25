@@ -17,6 +17,7 @@ import { connectToDaemon, type DaemonClient } from "../src/client.ts"
 const HERE = dirname(fileURLToPath(import.meta.url))
 const DAEMON = resolve(HERE, "../../daemon/src/daemon.ts")
 const PLUGIN_SERVER = resolve(HERE, "../../../plugins/claude/server.ts")
+const STDIO_ADAPTER = resolve(HERE, "../src/stdio-adapter.ts")
 const BUN_BIN = process.versions.bun ? process.execPath : "bun"
 const PERSONA = "@agent/restart-test"
 
@@ -325,5 +326,198 @@ describe("Claude plugin daemon-restart self-heal", () => {
     })
     expect(readFileSync(adapterLog, "utf8").match(/daemon generation changed/g)).toHaveLength(2)
     secondSuccessor.client.close()
+  }, 45_000)
+
+  it("keeps an unsupervised pull adapter alive after a daemon generation change", async () => {
+    const dbPath = join(tmpDir, "tribe-direct.db")
+    const daemonLog = join(tmpDir, "daemon-direct.log")
+    const adapterLog = join(tmpDir, "adapter-direct.log")
+    const daemon = spawn(BUN_BIN, [DAEMON, "--socket", socketPath, "--db", dbPath, "--foreground", "--no-lore"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_NO_PLUGINS: "1",
+        TRIBE_NO_AUTORELOAD: "1",
+        DEBUG_LOG: daemonLog,
+        LOG_FILE: daemonLog,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    }) as ChildProcessWithoutNullStreams
+    daemon.stdout.resume()
+    daemon.stderr.resume()
+    if (daemon.pid) daemonPids.add(daemon.pid)
+    await waitFor(() => existsSync(socketPath), "direct-adapter initial daemon socket")
+    const firstDaemon = await connectToGeneration(socketPath)
+    daemonPids.add(firstDaemon.pid)
+
+    const adapter = spawn(BUN_BIN, [STDIO_ADAPTER, "--socket", socketPath, "--name", PERSONA], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DAEMON_SCRIPT: DAEMON,
+        TRIBE_DB: dbPath,
+        TRIBE_DELIVERY: "pull",
+        TRIBE_PULL_TRANSPORT: "mcp",
+        TRIBE_REQUIRE_JOIN: "0",
+        TRIBE_TAKEOVER: "1",
+        TRIBE_LAUNCH_ID: "restart-direct-launch",
+        TRIBE_NO_PLUGINS: "1",
+        TRIBE_NO_AUTORELOAD: "1",
+        DEBUG_LOG: adapterLog,
+        LOG_FILE: adapterLog,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    }) as ChildProcessWithoutNullStreams
+    plugins.add(adapter)
+    let adapterStderr = ""
+    adapter.stderr.on("data", (chunk: Buffer | string) => {
+      adapterStderr += chunk.toString()
+    })
+    const stdout = collectJsonLines(adapter)
+    writeJson(adapter, initializePayload(10))
+    await waitFor(() => stdout.some((line) => line.id === 10), "direct-adapter initialize")
+    writeJson(adapter, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await waitFor(async () => {
+      const roster = parseToolJson(await firstDaemon.client.call("tribe.members", { all: true })).sessions ?? []
+      return roster.some(
+        (session) => session.name === PERSONA && session.transport_state === "connected" && session.transport_pids?.[0],
+      )
+    }, "direct-adapter initial membership")
+
+    await firstDaemon.client.call("tribe.reload", { reason: "22322 direct adapter restart acceptance" })
+    firstDaemon.client.close()
+    const successor = await connectToGeneration(socketPath, (pid) => pid !== firstDaemon.pid)
+    daemonPids.add(successor.pid)
+    await waitFor(async () => {
+      const roster = parseToolJson(await successor.client.call("tribe.members", { all: true })).sessions ?? []
+      return roster.some((session) => session.name === PERSONA && session.transport_state === "connected")
+    }, "direct-adapter rejoin")
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 250))
+
+    expect(adapter.exitCode, adapterStderr).toBeNull()
+    writeJson(adapter, callToolPayload(11, "members", { all: true }))
+    await waitFor(() => stdout.some((line) => line.id === 11), "direct-adapter post-restart tool call")
+    expect(mcpToolJson(stdout, 11).sessions?.find((session) => session.name === PERSONA)).toMatchObject({
+      launch_id: "restart-direct-launch",
+      transport_state: "connected",
+      owner_state: "live",
+    })
+    successor.client.close()
+  }, 35_000)
+
+  it("returns every registered seat across a rapid two-generation restart burst", async () => {
+    const dbPath = join(tmpDir, "tribe-multi.db")
+    const daemonLog = join(tmpDir, "daemon-multi.log")
+    const initialDaemonProcess = spawn(
+      BUN_BIN,
+      [DAEMON, "--socket", socketPath, "--db", dbPath, "--foreground", "--no-lore"],
+      {
+        cwd: tmpDir,
+        env: {
+          ...process.env,
+          TRIBE_NO_PLUGINS: "1",
+          TRIBE_NO_AUTORELOAD: "1",
+          DEBUG_LOG: daemonLog,
+          LOG_FILE: daemonLog,
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    ) as ChildProcessWithoutNullStreams
+    initialDaemonProcess.stdout.resume()
+    initialDaemonProcess.stderr.resume()
+    if (initialDaemonProcess.pid) daemonPids.add(initialDaemonProcess.pid)
+    await waitFor(() => existsSync(socketPath), "multi-seat initial daemon socket")
+    let generation = await connectToGeneration(socketPath)
+    daemonPids.add(generation.pid)
+
+    const personas = ["@agent/restart-a", "@agent/restart-b", "@agent/restart-c"]
+    const harnesses = personas.map((persona, index) => {
+      const adapterLog = join(tmpDir, `adapter-${index}.log`)
+      const child = spawn(BUN_BIN, [PLUGIN_SERVER, "--socket", socketPath, "--name", persona], {
+        cwd: tmpDir,
+        env: {
+          ...process.env,
+          TRIBE_DAEMON_SCRIPT: DAEMON,
+          TRIBE_DB: dbPath,
+          TRIBE_DELIVERY: "pull",
+          TRIBE_PULL_TRANSPORT: "mcp",
+          TRIBE_REQUIRE_JOIN: "0",
+          TRIBE_TAKEOVER: "1",
+          TRIBE_LAUNCH_ID: `restart-multi-${index}`,
+          TRIBE_NO_PLUGINS: "1",
+          TRIBE_NO_AUTORELOAD: "1",
+          DEBUG_LOG: adapterLog,
+          LOG_FILE: adapterLog,
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      }) as ChildProcessWithoutNullStreams
+      plugins.add(child)
+      child.stderr.resume()
+      const stdout = collectJsonLines(child)
+      writeJson(child, initializePayload(index + 1))
+      return { child, persona, stdout }
+    })
+    await waitFor(
+      () => harnesses.every(({ stdout }, index) => stdout.some((line) => line.id === index + 1)),
+      "multi-seat plugin initialization",
+    )
+    for (const { child } of harnesses) {
+      writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    }
+
+    const initialMembers = new Map<string, Member>()
+    await waitFor(async () => {
+      const roster = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
+      for (const persona of personas) {
+        const member = roster.find((session) => session.name === persona && session.transport_state === "connected")
+        if (member) initialMembers.set(persona, member)
+      }
+      return initialMembers.size === personas.length
+    }, "all multi-seat initial memberships")
+
+    let priorTransportPids = new Map(
+      personas.map((persona) => [persona, initialMembers.get(persona)!.transport_pids![0]!]),
+    )
+    for (let restart = 1; restart <= 2; restart += 1) {
+      const priorDaemonPid = generation.pid
+      await generation.client.call("tribe.reload", { reason: `22322 multi-seat restart ${restart}` })
+      generation.client.close()
+      generation = await connectToGeneration(socketPath, (pid) => pid !== priorDaemonPid)
+      daemonPids.add(generation.pid)
+
+      const rejoined = new Map<string, Member>()
+      await waitFor(async () => {
+        const roster = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
+        for (const persona of personas) {
+          const candidate = roster.find(
+            (session) =>
+              session.name === persona &&
+              session.transport_state === "connected" &&
+              session.transport_pids?.length === 1 &&
+              session.transport_pids[0] !== priorTransportPids.get(persona),
+          )
+          if (candidate) rejoined.set(persona, candidate)
+        }
+        return rejoined.size === personas.length
+      }, `all multi-seat memberships after daemon restart ${restart}`)
+
+      for (const persona of personas) {
+        const member = rejoined.get(persona)!
+        expect(member.member_id).toBe(initialMembers.get(persona)?.member_id)
+        expect(member.launch_parent_pid).toBe(initialMembers.get(persona)?.launch_parent_pid)
+        for (const pid of member.transport_pids ?? []) adapterPids.add(pid)
+      }
+      priorTransportPids = new Map(personas.map((persona) => [persona, rejoined.get(persona)!.transport_pids![0]!]))
+      expect(harnesses.map(({ child }) => child.exitCode)).toEqual([null, null, null])
+    }
+
+    const finalRoster = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
+    expect(
+      finalRoster
+        .filter((session) => session.transport_state === "connected")
+        .map((session) => session.name)
+        .sort(),
+    ).toEqual([...personas].sort())
+    generation.client.close()
   }, 45_000)
 })

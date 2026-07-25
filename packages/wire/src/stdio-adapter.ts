@@ -399,11 +399,19 @@ function failProtocolVersion(reason: string): never {
 
 const PLUGIN_RECONNECT_ATTEMPTS = 3
 
+function pluginReexecExitCode(): number | null {
+  const supervisedExitCode = Number(process.env.TRIBE_PLUGIN_REEXEC_EXIT_CODE)
+  if (Number.isSafeInteger(supervisedExitCode) && supervisedExitCode > 0 && supervisedExitCode <= 255) {
+    return supervisedExitCode
+  }
+  return null
+}
+
 function requestPluginReexec(reason: string): never {
   daemon?.close()
   proxyAc.abort()
-  const supervisedExitCode = Number(process.env.TRIBE_PLUGIN_REEXEC_EXIT_CODE)
-  if (Number.isSafeInteger(supervisedExitCode) && supervisedExitCode > 0 && supervisedExitCode <= 255) {
+  const supervisedExitCode = pluginReexecExitCode()
+  if (supervisedExitCode !== null) {
     log.warn?.(`tribe plugin requesting current-disk re-exec: ${reason}`)
     process.exitCode = supervisedExitCode
     process.exit()
@@ -413,6 +421,11 @@ function requestPluginReexec(reason: string): never {
   )
   process.exitCode = 2
   process.exit()
+}
+
+function reexecAfterDaemonGenerationChange(reason: string): void {
+  if (pluginReexecExitCode() !== null) requestPluginReexec(reason)
+  log.info?.(`tribe direct adapter re-registered without a host re-exec supervisor: ${reason}`)
 }
 
 const reconnectWatchdog = createReconnectWatchdog({
@@ -489,7 +502,9 @@ function startDaemonConnection(): Promise<DaemonClient> {
         nextDaemonPid !== null &&
         nextDaemonPid !== registeredDaemonPid
       ) {
-        requestPluginReexec(`daemon generation changed from pid ${registeredDaemonPid} to ${nextDaemonPid}`)
+        reexecAfterDaemonGenerationChange(
+          `daemon generation changed from pid ${registeredDaemonPid} to ${nextDaemonPid}`,
+        )
       }
       registeredDaemonPid = nextDaemonPid
       hasRegistered = true
