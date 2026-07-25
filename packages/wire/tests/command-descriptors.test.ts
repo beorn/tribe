@@ -112,7 +112,7 @@ describe("Tribe command descriptors", () => {
 
     const repair = visibleCliProjection(commandDescriptorByMcpName("repair")!)
     expect(repair.options?.find((option) => option.name === "inbox-cursor")?.mapsTo).toBe("inbox_cursor")
-    expect(repair.options?.find((option) => option.name === "inbox-cursor")?.enum).toEqual(["tail"])
+    expect(repair.options?.find((option) => option.name === "inbox-cursor")?.enum).toEqual(["tail", "reconcile"])
     expect(repair.options?.find((option) => option.name === "inbox-cursor")?.default).toBeUndefined()
     expect(repair.options?.find((option) => option.name === "reap-stale-transports")?.mapsTo).toBe(
       "reap_stale_transports",

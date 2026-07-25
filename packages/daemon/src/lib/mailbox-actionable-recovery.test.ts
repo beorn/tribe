@@ -823,4 +823,32 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(rejoin.recovered_actionables).toBeUndefined()
     expect(fetchEvents(b, opts)).toEqual([])
   })
+
+  it("repair reconcile mode rewinds mailbox cursor when an open request sits below the cursor (22203)", () => {
+    const b = connectAs("sess-b", NAME)
+    insertRow(stmts, {
+      id: "req-1",
+      type: "request",
+      sender: "@chief",
+      recipient: NAME,
+      kind: "direct",
+      content: "open request needing repair",
+      ts: now - 60_000,
+    })
+    db.prepare(
+      "INSERT INTO pending_request (request_id, recipient, sender, opened_at, expires_at, message_id, fanout) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).run("req-1", NAME, "@chief", now - 60_000, null, "req-1", "first")
+    // Advance mailbox cursor past req-1 to simulate cursor jump
+    stmts.advanceMailboxCursor.run({ $recipient: NAME, $seq: 9999, $now: Date.now() })
+
+    const repairResult = parseToolJson(handleToolCall(b, "tribe.repair", { inbox_cursor: "reconcile" }, opts))
+    expect(repairResult.repaired).toBe(true)
+    expect(repairResult.mailbox_reconciled).toBe(true)
+    expect(repairResult.mailbox_cursor_after).toBeLessThan(9999)
+
+    const fetchRes = fetchJson(b, opts)
+    expect(fetchRes.json.attention?.actionable_unread?.map((e) => e.id)).toContain("req-1")
+  })
 })
+
+
