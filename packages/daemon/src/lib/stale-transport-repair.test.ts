@@ -177,9 +177,22 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       cleanup: () => {},
       userRenamed: false,
       setUserRenamed: () => {},
-      getActiveSessionIds: () => new Set<string>(),
-      hasActiveTransport: () => false,
-      getActiveSessionInfo: () => [],
+      getActiveSessionIds: () => new Set(["legacy-health"]),
+      hasActiveTransport: (sessionId: string) => sessionId === "legacy-health",
+      getActiveSessionInfo: () => [
+        {
+          id: "legacy-health",
+          name: "legacy-health",
+          pid: 7007,
+          cwd: "/repo",
+          role: "member",
+          claudeSessionId: null,
+          registeredAt: Date.now(),
+          launchId: null,
+          launchParentPid: null,
+          transportPids: [7008],
+        },
+      ],
     } as HandlerOpts
 
     const health = parseToolJson(handleToolCall(ctx, "tribe.health", {}, opts)) as {
@@ -189,7 +202,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
     }
     expect(health.membership_discrepancy).toEqual({
       status: "degraded",
-      connected: 0,
+      connected_durable_launches: 0,
       known_durable_launches: 1,
       missing_count: 1,
       missing: [
@@ -233,7 +246,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       sessions: Array<Record<string, unknown>>
       membership_discrepancy: Record<string, unknown>
     }
-    expect(members.sessions).toEqual([])
+    expect(members.sessions).toEqual([expect.objectContaining({ name: "legacy-health" })])
     expect(members.membership_discrepancy).toEqual(health.membership_discrepancy)
   })
 

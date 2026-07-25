@@ -1,6 +1,6 @@
 /** Longer than the adapter's 60s fresh-daemon reconnect watchdog. */
 export const ADAPTER_STABLE_MS = 90_000
-export const MAX_CONSECUTIVE_REEXECS = 5
+const MAX_CONSECUTIVE_REEXECS = 5
 const REEXEC_BACKOFF_BASE_MS = 250
 const REEXEC_BACKOFF_MAX_MS = 4_000
 

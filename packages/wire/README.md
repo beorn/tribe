@@ -77,10 +77,11 @@ rows with no transport loud, while connection-scoped no-launch rows are reaped
 only after reconnect grace.
 
 When known durable launch rows have no authenticated transport, both
-`members` and `health` include `membership_discrepancy` with the connected,
-known-launch, and missing counts plus the affected launch identities. The
-projection deliberately says `missing-transport`: it does not infer that the
-agent itself is absent.
+`members` and `health` include `membership_discrepancy` with the connected
+durable-launch, known durable-launch, and missing counts plus the affected
+launch identities. Connection-scoped sessions do not inflate that comparison.
+The projection deliberately says `missing-transport`: it does not infer that
+the agent itself is absent.
 
 ## Surface delineation — protocol vs dev tooling
 

@@ -29,7 +29,7 @@ describe("Claude plugin adapter re-exec budget", () => {
     })
   })
 
-  it("re-arms one replacement after a genuinely stable adapter lifetime", () => {
+  it("re-arms the replacement budget after a genuinely stable adapter lifetime", () => {
     expect(evaluateAdapterReexec(1, ADAPTER_STABLE_MS)).toEqual({
       consecutiveReexecs: 1,
       retry: true,

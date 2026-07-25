@@ -31,6 +31,10 @@
 
 ### Fixed
 
+- Survive rapid daemon-generation bursts in the stable plugin supervisor with
+  bounded exponential replacement backoff and a stability reset. `members`
+  and `health` now expose missing durable-launch transports in-band without
+  letting connection-scoped sessions inflate the durable-launch comparison.
 - Pin the real daemon close/unlink/fresh-bind journey: the host stdio channel
   remains open, the adapter child is replaced, the persisted logical member
   rejoins, and post-restart tool calls succeed without human keystrokes.

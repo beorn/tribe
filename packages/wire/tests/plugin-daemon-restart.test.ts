@@ -88,6 +88,17 @@ function mcpToolJson(lines: JsonObject[], id: number): { sessions?: Member[] } {
   return parseToolJson(lines.find((line) => line.id === id)?.result)
 }
 
+function requireMember(member: Member | undefined, label: string): Member {
+  if (member === undefined) throw new Error(`expected ${label} member`)
+  return member
+}
+
+function requireTransportPid(member: Member, label: string): number {
+  const pid = member.transport_pids?.[0]
+  if (pid === undefined) throw new Error(`expected ${label} transport pid`)
+  return pid
+}
+
 async function connectToGeneration(
   socketPath: string,
   predicate: (pid: number) => boolean = () => true,
@@ -239,8 +250,9 @@ describe("Claude plugin daemon-restart self-heal", () => {
       owner_state: "live",
       transport_pids: [expect.any(Number)],
     })
-    const firstLaunchParentPid = firstMember!.launch_parent_pid
-    const firstTransportPid = firstMember!.transport_pids![0]!
+    const initialMember = requireMember(firstMember, "initial")
+    const firstLaunchParentPid = initialMember.launch_parent_pid
+    const firstTransportPid = requireTransportPid(initialMember, "initial")
     adapterPids.add(firstTransportPid)
 
     await firstDaemon.client.call("tribe.reload", { reason: "21416 restart acceptance" })
@@ -281,7 +293,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
       transport_state: "connected",
       transport_pids: rejoined?.transport_pids,
     })
-    const firstRejoinedPid = rejoined!.transport_pids![0]!
+    const firstRejoinedPid = requireTransportPid(requireMember(rejoined, "first rejoined"), "first rejoined")
 
     // Production incident 22322 restarted the daemon twice ten seconds apart.
     // The first generation replacement succeeded, but the wrapper's one-reexec
@@ -397,7 +409,10 @@ describe("Claude plugin daemon-restart self-heal", () => {
     }, "all multi-seat initial memberships")
 
     let priorTransportPids = new Map(
-      personas.map((persona) => [persona, initialMembers.get(persona)!.transport_pids![0]!]),
+      personas.map((persona): [string, number] => {
+        const member = requireMember(initialMembers.get(persona), `initial ${persona}`)
+        return [persona, requireTransportPid(member, `initial ${persona}`)]
+      }),
     )
     for (let restart = 1; restart <= 2; restart += 1) {
       const priorDaemonPid = generation.pid
@@ -423,12 +438,17 @@ describe("Claude plugin daemon-restart self-heal", () => {
       }, `all multi-seat memberships after daemon restart ${restart}`)
 
       for (const persona of personas) {
-        const member = rejoined.get(persona)!
+        const member = requireMember(rejoined.get(persona), `rejoined ${persona}`)
         expect(member.member_id).toBe(initialMembers.get(persona)?.member_id)
         expect(member.launch_parent_pid).toBe(initialMembers.get(persona)?.launch_parent_pid)
         for (const pid of member.transport_pids ?? []) adapterPids.add(pid)
       }
-      priorTransportPids = new Map(personas.map((persona) => [persona, rejoined.get(persona)!.transport_pids![0]!]))
+      priorTransportPids = new Map(
+        personas.map((persona): [string, number] => {
+          const member = requireMember(rejoined.get(persona), `rejoined ${persona}`)
+          return [persona, requireTransportPid(member, `rejoined ${persona}`)]
+        }),
+      )
       expect(harnesses.map(({ child }) => child.exitCode)).toEqual([null, null, null])
     }
 

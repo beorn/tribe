@@ -1011,9 +1011,14 @@ type MembershipSessionRow = {
   updated_at: number
 }
 
+type DurableMembershipSessionRow = MembershipSessionRow & {
+  launch_id: string
+  launch_parent_pid: number
+}
+
 type MembershipDiscrepancy = {
   status: "degraded"
-  connected: number
+  connected_durable_launches: number
   known_durable_launches: number
   missing_count: number
   missing: Array<{
@@ -1044,30 +1049,34 @@ function projectMembershipDiscrepancy(
   rows: readonly MembershipSessionRow[],
   activeIds: ReadonlySet<string>,
 ): MembershipDiscrepancy | undefined {
-  const durableRows = rows.filter(
-    (row) =>
-      classifySessionRegistrationLifetime({
-        launchId: row.launch_id,
-        launchParentPid: row.launch_parent_pid,
-      }) === "durable-launch",
-  )
+  const durableRows = rows.filter(isDurableMembershipSessionRow)
   const knownNames = new Set(durableRows.map((row) => row.name))
+  const connectedNames = new Set(durableRows.filter((row) => activeIds.has(row.id)).map((row) => row.name))
   const missing = latestDisconnectedSessionRows(durableRows, activeIds).map((row) => ({
     member_id: row.id,
     name: row.name,
-    launch_id: row.launch_id!,
-    launch_parent_pid: row.launch_parent_pid!,
+    launch_id: row.launch_id,
+    launch_parent_pid: row.launch_parent_pid,
     state: "missing-transport" as const,
   }))
   if (missing.length === 0) return undefined
   return {
     status: "degraded",
-    connected: activeIds.size,
+    connected_durable_launches: connectedNames.size,
     known_durable_launches: knownNames.size,
     missing_count: missing.length,
     missing,
     meaning: "missing transport does not establish agent absence",
   }
+}
+
+function isDurableMembershipSessionRow(row: MembershipSessionRow): row is DurableMembershipSessionRow {
+  return (
+    classifySessionRegistrationLifetime({
+      launchId: row.launch_id,
+      launchParentPid: row.launch_parent_pid,
+    }) === "durable-launch"
+  )
 }
 
 function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
