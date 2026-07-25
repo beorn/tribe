@@ -44,6 +44,7 @@ import {
 import { connectToDaemon, resolveSocketPath, TRIBE_PROTOCOL_VERSION, type DaemonClient } from "../lib/socket.ts"
 import { watchActivity } from "../lib/activity-watch.ts"
 import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-exempt.ts"
+import { readTribeLaunchId } from "../launch-environment.ts"
 
 const PENDING_CLI = visibleCliProjectionForMcp("pending")
 const INBOX_WAIT_CLI = visibleCliProjectionForMcp("inbox.wait")
@@ -83,9 +84,11 @@ async function callDaemon(method: string, params?: Record<string, unknown>): Pro
 
 function cliInboxTargetParams(session: string | undefined): Record<string, unknown> {
   if (session !== undefined) return { session }
-  const launchId = process.env.TRIBE_LAUNCH_ID?.trim()
+  const launchId = readTribeLaunchId(process.env)
   if (launchId) return { launch_id: launchId }
-  throw new Error("Managed inbox request requires TRIBE_LAUNCH_ID; use --session for an explicit operator target")
+  throw new Error(
+    "Managed inbox request requires provider launch identity; use --session for an explicit operator target",
+  )
 }
 
 function cliInboxMethod(base: "status" | "wait" | "drain", session: string | undefined): string {
@@ -302,8 +305,8 @@ async function cmdSessions(showAll: boolean): Promise<void> {
  * `tribe.members` handler (the same reply the MCP tool returns), printed as
  * one JSON object: `{"sessions":[...]}`. Unlike the human `sessions` verb
  * (cli_status text table), every row carries `launch_id` — the 21049
- * supervisor-issued launch identity the session's environment advertised via
- * TRIBE_LAUNCH_ID at registration — plus daemon-authoritative transport and
+ * claim-derived launch identity the session's adapter advertised at
+ * registration — plus daemon-authoritative transport and
  * owner verdicts, so a supervisor can match a
  * spawn's epoch against the JOIN EVIDENCE ITSELF instead of inferring from
  * name/row counts (tent bootstrap-epoch, @ag/super/21075 blocker 3).

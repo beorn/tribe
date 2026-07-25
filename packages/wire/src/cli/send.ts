@@ -35,6 +35,7 @@ import {
 import { connectToDaemon, resolveSocketPath, TRIBE_PROTOCOL_VERSION } from "../lib/socket.ts"
 import { resolveDbPath } from "../lib/config.ts"
 import { formatMarkdown, generateRetro, parseDuration } from "../lib/retro.ts"
+import { readTribeLaunchId } from "../launch-environment.ts"
 
 const SEND_CLI = visibleCliProjectionForMcp("send")
 const JOIN_CLI = visibleCliProjectionForMcp("join")
@@ -237,7 +238,7 @@ function rejectUnstructuredMessageIntent(input: SendPayloadInput): void {
 }
 
 async function resolveSendCaller(reply?: string): Promise<SendCaller | null> {
-  const launchId = process.env.TRIBE_LAUNCH_ID?.trim()
+  const launchId = readTribeLaunchId(process.env)
   if (launchId) {
     let failure: string
     try {
@@ -255,18 +256,17 @@ async function resolveSendCaller(reply?: string): Promise<SendCaller | null> {
           typeof status.launch_parent_pid === "number" &&
           Number.isSafeInteger(status.launch_parent_pid) &&
           status.launch_parent_pid > 0
-        )
+        ) {
           caller.launchParentPid = status.launch_parent_pid
+        }
         return caller
       }
       failure = `daemon launch authority returned no current session for launch id ${launchId}`
     } catch (error) {
-      failure = `cannot resolve launch identity ${launchId}: ${
-        error instanceof Error ? error.message : String(error)
-      }`
+      failure = `cannot resolve launch identity ${launchId}: ${error instanceof Error ? error.message : String(error)}`
     }
     // 21921 — the launch row can be absent (getSessionsByLaunchId → 0 rows),
-    // and every `ag code` seat carries TRIBE_LAUNCH_ID, so an unconditional
+    // and every `ag code` seat carries an adapter launch identity, so an unconditional
     // exit here takes away sending entirely. Eight seats went mute this way on
     // 2026-07-22 while reads kept working, because reads resolve an explicit
     // target and never need the caller's own identity.

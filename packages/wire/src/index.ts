@@ -34,6 +34,16 @@ export { withDaemonCall } from "./util.ts"
 // Socket path discovery
 export { resolvePeerSocketPath, resolveSocketPath } from "./paths.ts"
 
+// Process-boundary projection for a neutral launchId. Tribe owns its private
+// environment representation; launchers pass only the structural value.
+export type { TribeLaunchEnvironment } from "./launch-environment.ts"
+export {
+  projectTribeLaunchEnvironment,
+  readTribeLaunchId,
+  tribeLaunchEnvironmentNames,
+  withTribeLaunchEnvironment,
+} from "./launch-environment.ts"
+
 // Reaper-exempt markers — exempt a PID from the health-reaper auto-kill (gap 1)
 export type { ReaperExemptEntry } from "./reaper-exempt.ts"
 export {
