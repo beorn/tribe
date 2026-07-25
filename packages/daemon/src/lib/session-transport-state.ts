@@ -46,3 +46,33 @@ export function projectSessionTransportState(input: { transportConnected: boolea
     transport_reason: "owner-unknown-no-transport",
   }
 }
+
+/** Project combined session liveness (transport + process existence + silence degradation). */
+export function projectSessionLiveness(input: {
+  transportConnected: boolean
+  pidAlive?: boolean
+  agentPidAlive?: boolean
+  lastSeenSec?: number | null
+  maxSilenceSec?: number
+}): {
+  alive: boolean
+  transport_alive: boolean
+  agent_alive: boolean
+  pid_alive: boolean
+  is_silent: boolean
+} {
+  const transport_alive = input.transportConnected
+  const pid_alive = input.pidAlive ?? true
+  const agent_alive = input.agentPidAlive ?? true
+  const maxSilenceSec = input.maxSilenceSec ?? 14400
+  const is_silent = typeof input.lastSeenSec === "number" && input.lastSeenSec > maxSilenceSec
+  const alive = transport_alive && pid_alive && agent_alive && !is_silent
+
+  return {
+    alive,
+    transport_alive,
+    agent_alive,
+    pid_alive,
+    is_silent,
+  }
+}
