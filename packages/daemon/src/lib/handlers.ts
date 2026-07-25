@@ -297,6 +297,7 @@ export type HandlerOpts = {
    * authority for destructive reclaim decisions.
    */
   hasActiveTransport: (sessionId: string) => boolean
+  isReconnectGraceProtected?: (sessionId: string, nowMs: number) => boolean
   /** Realtime snapshot of connected sessions (daemon clients Map). */
   getActiveSessionInfo: () => ActiveSessionInfo[]
   /** Optional: dump daemon internals for `tribe.debug`. Daemon-only (tests using
@@ -409,7 +410,11 @@ export function handleToolCall(
  *  alternative without a separate `tribe.sessions` round-trip. */
 function listActiveSessionNames(ctx: TribeContext, activeIds?: Set<string> | string[]): string[] {
   const rows = ctx.db.prepare("SELECT id, name FROM sessions").all() as Array<{ id: string; name: string }>
-  const active = activeIds ? (Array.isArray(activeIds) ? new Set(activeIds) : activeIds) : new Set(rows.map((r) => r.id))
+  const active = activeIds
+    ? Array.isArray(activeIds)
+      ? new Set(activeIds)
+      : activeIds
+    : new Set(rows.map((r) => r.id))
   return rows
     .filter((r) => active.has(r.id))
     .map((r) => r.name)
@@ -1097,6 +1102,7 @@ function handleRename(
     getActiveSessionIds: () => Set<string>
     /** All connected transports, used to authorize destructive name reclaim. */
     hasActiveTransport: (sessionId: string) => boolean
+    isReconnectGraceProtected?: (sessionId: string, nowMs: number) => boolean
     /** Optional: opportunistic socket wakeup after a name-claim replay rewind. */
     notifyWakeupForReplay?: (sessionId: string, claimedName: string) => void
   },
@@ -1107,7 +1113,9 @@ function handleRename(
     .prepare("SELECT name FROM sessions WHERE id = $id LIMIT 1")
     .get({ $id: ctx.sessionId }) as { name: string } | null
   const storedName = ctx.getName()
-  const dbRow = ctx.db.prepare("SELECT name FROM sessions WHERE id = $id").get({ $id: ctx.sessionId }) as { name: string } | null
+  const dbRow = ctx.db.prepare("SELECT name FROM sessions WHERE id = $id").get({ $id: ctx.sessionId }) as {
+    name: string
+  } | null
   const dbName = dbRow?.name ?? storedName
 
   if (storedName === newName && dbName === newName) {
@@ -1125,12 +1133,17 @@ function handleRename(
     | { id: string }
     | undefined
   if (existing) {
-    const selfRow = ctx.db.prepare("SELECT pid FROM sessions WHERE id = $id").get({ $id: ctx.sessionId }) as { pid: number } | null
+    const selfRow = ctx.db.prepare("SELECT pid FROM sessions WHERE id = $id").get({ $id: ctx.sessionId }) as {
+      pid: number
+    } | null
     const selfPid = selfRow?.pid ?? 0
-    const existingRow = ctx.db.prepare("SELECT pid, updated_at FROM sessions WHERE id = $id").get({ $id: existing.id }) as { pid: number; updated_at: number } | null
+    const existingRow = ctx.db
+      .prepare("SELECT pid, updated_at FROM sessions WHERE id = $id")
+      .get({ $id: existing.id }) as { pid: number; updated_at: number } | null
     const existingPid = existingRow?.pid ?? 0
     const holderIsActive = opts.hasActiveTransport(existing.id)
-    const isDifferentLiveProcess = existingPid > 0 && (selfPid === 0 || existingPid !== selfPid) && pidStillAlive(existingPid)
+    const isDifferentLiveProcess =
+      existingPid > 0 && (selfPid === 0 || existingPid !== selfPid) && pidStillAlive(existingPid)
     const holderIsAlive =
       holderIsActive ||
       isDifferentLiveProcess ||
@@ -1253,8 +1266,15 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     | { id: string }
     | undefined
   if (taken) {
-    const selfPid = selfInfo?.pid ?? (ctx.db.prepare("SELECT pid FROM sessions WHERE id = $id").get({ $id: ctx.sessionId }) as { pid: number } | null)?.pid ?? 0
-    const takenRow = ctx.db.prepare("SELECT pid, updated_at FROM sessions WHERE id = $id").get({ $id: taken.id }) as { pid: number; updated_at: number } | null
+    const selfPid =
+      selfInfo?.pid ??
+      (ctx.db.prepare("SELECT pid FROM sessions WHERE id = $id").get({ $id: ctx.sessionId }) as { pid: number } | null)
+        ?.pid ??
+      0
+    const takenRow = ctx.db.prepare("SELECT pid, updated_at FROM sessions WHERE id = $id").get({ $id: taken.id }) as {
+      pid: number
+      updated_at: number
+    } | null
     const takenPid = takenRow?.pid ?? 0
     const holderIsActive = opts.hasActiveTransport(taken.id)
     const isDifferentLiveProcess = takenPid > 0 && (selfPid === 0 || takenPid !== selfPid) && pidStillAlive(takenPid)
