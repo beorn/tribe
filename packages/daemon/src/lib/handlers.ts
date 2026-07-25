@@ -1092,21 +1092,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
   return jsonResult({ sessions })
 }
 
-function handleRename(
-  ctx: TribeContext,
-  a: ToolArgs,
-  opts: {
-    userRenamed: boolean
-    setUserRenamed: (v: boolean) => void
-    /** Participating sessions, used only for user-facing member projections. */
-    getActiveSessionIds: () => Set<string>
-    /** All connected transports, used to authorize destructive name reclaim. */
-    hasActiveTransport: (sessionId: string) => boolean
-    isReconnectGraceProtected?: (sessionId: string, nowMs: number) => boolean
-    /** Optional: opportunistic socket wakeup after a name-claim replay rewind. */
-    notifyWakeupForReplay?: (sessionId: string, claimedName: string) => void
-  },
-): ToolResult {
+function handleRename(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
   const newName = a.new_name as string
   const contextName = ctx.getName()
   const storedSession = ctx.db

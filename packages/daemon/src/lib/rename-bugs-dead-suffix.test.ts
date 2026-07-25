@@ -54,7 +54,7 @@ describe("bead 22226 — rename and dead-suffix fixes", () => {
     const res = handleToolCall(ctx2, "tribe.join", { name: "@ci" }, opts as any) as any
 
     // Assertion 1: Join as "@ci" must fail with error because "@ci" is owned by live process s1
-    const json = JSON.parse(res.content[0].text)
+    const json = JSON.parse(res.content[0].text) as { error: string }
     expect(json.error).toContain('Name "@ci" is already taken')
 
     // Assertion 2: s1's row in SQLite DB must NOT be dead-suffixed to @ci-dead-s1
@@ -85,7 +85,11 @@ describe("bead 22226 — rename and dead-suffix fixes", () => {
     // Calling tribe.rename({ new_name: "@ci" }) must repair DB row back to "@ci".
     const res = handleToolCall(ctx, "tribe.rename", { new_name: "@ci" }, opts as any) as any
 
-    const json = JSON.parse(res.content[0].text)
+    const json = JSON.parse(res.content[0].text) as {
+      renamed: boolean
+      old_name: string
+      new_name: string
+    }
     expect(json.renamed).toBe(true)
     expect(json.old_name).toBe("@ci-dead-12345678")
     expect(json.new_name).toBe("@ci")
