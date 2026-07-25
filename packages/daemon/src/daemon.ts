@@ -32,6 +32,7 @@ import { accountlyPlugin } from "./lib/accountly-plugin.ts"
 import {
   createBaseTribe,
   recallTools,
+  fleetTools,
   messagingTools,
   probeAndCleanSocket,
   withBroadcast,
@@ -258,7 +259,11 @@ const withMCPShape = withMCPServer<typeof withDispatcherShape>({
     outputSchema: t.outputSchema,
   })),
   dispatch: async (toolName, args, ctx) => {
-    // Route every registered tool through the dispatcher's handleRequest.
+    // fleet.* tools are registry-only handlers (wrap tent CLI; no dispatcher
+    // method). Returning undefined here falls through to the registry path
+    // in with-mcp-server tools/call (21743 CLI/MCP parity).
+    if (toolName.startsWith("fleet.")) return undefined
+    // Route every other registered tool through the dispatcher's handleRequest.
     // The dispatcher's tribe.* / recall cases own connection context; for
     // unknown methods it returns -32601 which we surface as an MCP error.
     if (!withDispatcherShape.tools.has(toolName)) return undefined
@@ -310,6 +315,16 @@ const tribe = withRuntime<typeof withSignalsShape>({
 // reads the registry lazily, so late registration is safe.
 if (tribe.recall) {
   for (const t of recallTools(tribe.recall)) tribe.tools.set(t.name, t)
+}
+
+// fleet.* MCP tools (21743) — wrap tent fleet-read/wake/exec at the project root.
+// Registry-only: MCP tools/call falls through when dispatch returns undefined for
+// fleet.* (see withMCPServer dispatch above). Fail loud if tent is missing.
+if (tribe.projectRoot) {
+  for (const t of fleetTools({ projectRoot: tribe.projectRoot })) {
+    if (!tribe.tools.has(t.name)) tribe.tools.set(t.name, t)
+  }
+  log.info?.(`fleet tools registered (projectRoot=${tribe.projectRoot})`)
 }
 
 // Loud startup identity: name the version+sha THIS process loaded so a stale
