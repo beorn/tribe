@@ -682,11 +682,12 @@ function handleMultiSend(input: {
     maybeDerivedSummaryWarning(input.summaryDerived),
     trackerMissWarning(input.ctx, input.sender, input.recipients, tracker),
   )
+  const deliveries = deliveryReport(results)
   logEvent(input.ctx, `message.sent.${input.msgType}`, input.args.bead as string | undefined, {
     to: input.recipients,
     message_ids: results.map((result) => result.id),
     ...(sharedRequestId ? { request_id: sharedRequestId } : {}),
-    deliveries: deliveryReport(results),
+    deliveries,
     ...(input.summaryDerived ? { summary_derived: true } : {}),
   })
   return jsonResult({
@@ -695,7 +696,7 @@ function handleMultiSend(input: {
     ids: results.map((result) => result.id),
     ...(sharedRequestId ? { request_id: sharedRequestId } : {}),
     ...(tracker ? { tracker } : {}),
-    deliveries: deliveryReport(results),
+    deliveries,
     summary: input.summary,
     ...(input.summaryDerived ? { summary_derived: true } : {}),
     ...(warning ? { warning } : {}),
