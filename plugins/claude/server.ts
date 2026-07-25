@@ -32,6 +32,10 @@ function waitForExit(child: ChildProcess): Promise<{ code: number | null; error?
   })
 }
 
+function waitForRetry(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs))
+}
+
 async function superviseAdapter(): Promise<void> {
   // The wrapper is an implementation detail between the provider host and
   // the adapter. Capture the provider boundary once so every supervised
@@ -78,6 +82,7 @@ async function superviseAdapter(): Promise<void> {
       process.exitCode = 2
       return
     }
+    await waitForRetry(decision.retryDelayMs)
   }
 }
 

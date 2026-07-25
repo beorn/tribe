@@ -54,6 +54,11 @@ and daemon reload notifications use that same wrapper-owned replacement path;
 adapters never spawn adapters. The wrapper—and therefore Claude Code's stdio
 channel—stays in place while the child changes.
 
+The wrapper accepts a bounded burst of five current-disk replacements with
+exponential delay, then resets the budget after 90 seconds of stable runtime.
+This tolerates rapid legitimate daemon generations without turning a genuinely
+wedged adapter into an unbounded respawn loop.
+
 Updating the plugin on disk does not rewrite code already evaluated inside a
 running pre-supervisor process. Such sessions still require `/mcp` reconnect or
 a host-session restart once; newly launched/current-code plugin processes then

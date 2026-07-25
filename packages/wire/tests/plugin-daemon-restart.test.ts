@@ -139,7 +139,7 @@ async function terminateTestProcess(pid: number): Promise<void> {
 describe("Claude plugin daemon-restart self-heal", () => {
   let tmpDir: string
   let socketPath: string
-  let plugin: ChildProcessWithoutNullStreams | undefined
+  const plugins = new Set<ChildProcessWithoutNullStreams>()
   const daemonPids = new Set<number>()
   const adapterPids = new Set<number>()
 
@@ -159,14 +159,16 @@ describe("Claude plugin daemon-restart self-heal", () => {
         /* no reachable daemon remains */
       }
     }
-    const pluginPid = plugin?.pid
-    plugin?.kill("SIGTERM")
-    if (pluginPid) await terminateTestProcess(pluginPid)
+    for (const plugin of plugins) {
+      const pluginPid = plugin.pid
+      plugin.kill("SIGTERM")
+      if (pluginPid) await terminateTestProcess(pluginPid)
+    }
     for (const pid of adapterPids) await terminateTestProcess(pid)
     for (const pid of daemonPids) await terminateTestProcess(pid)
+    plugins.clear()
     adapterPids.clear()
     daemonPids.clear()
-    plugin = undefined
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
@@ -192,7 +194,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
     const firstDaemon = await connectToGeneration(socketPath)
     daemonPids.add(firstDaemon.pid)
 
-    plugin = spawn(BUN_BIN, [PLUGIN_SERVER, "--socket", socketPath, "--name", PERSONA], {
+    const plugin = spawn(BUN_BIN, [PLUGIN_SERVER, "--socket", socketPath, "--name", PERSONA], {
       cwd: tmpDir,
       env: {
         ...process.env,
@@ -210,6 +212,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
       },
       stdio: ["pipe", "pipe", "pipe"],
     }) as ChildProcessWithoutNullStreams
+    plugins.add(plugin)
     let pluginStderr = ""
     plugin.stderr.on("data", (chunk: Buffer | string) => {
       pluginStderr += chunk.toString()
@@ -278,7 +281,167 @@ describe("Claude plugin daemon-restart self-heal", () => {
       transport_state: "connected",
       transport_pids: rejoined?.transport_pids,
     })
-    expect(readFileSync(adapterLog, "utf8")).toContain("daemon generation changed")
+    const firstRejoinedPid = rejoined!.transport_pids![0]!
+
+    // Production incident 22322 restarted the daemon twice ten seconds apart.
+    // The first generation replacement succeeded, but the wrapper's one-reexec
+    // budget killed the bridge on the second legitimate generation change.
+    await successor.client.call("tribe.reload", { reason: "22322 rapid second restart acceptance" })
     successor.client.close()
-  }, 35_000)
+    const secondSuccessor = await connectToGeneration(socketPath, (pid) => pid !== successor.pid)
+    daemonPids.add(secondSuccessor.pid)
+
+    let secondRejoined: Member | undefined
+    await waitFor(async () => {
+      const result = await secondSuccessor.client.call("tribe.members", { all: true })
+      const candidate = parseToolJson(result).sessions?.find((session) => session.name === PERSONA)
+      if (
+        candidate?.transport_state === "connected" &&
+        candidate.transport_pids?.length === 1 &&
+        candidate.transport_pids[0] !== firstRejoinedPid
+      ) {
+        secondRejoined = candidate
+      }
+      return secondRejoined !== undefined
+    }, "supervised adapter rejoin after a rapid second daemon generation")
+
+    expect(secondRejoined).toMatchObject({
+      member_id: firstMember?.member_id,
+      launch_id: "restart-journey-launch",
+      launch_parent_pid: firstLaunchParentPid,
+      transport_state: "connected",
+      owner_state: "live",
+    })
+    for (const pid of secondRejoined?.transport_pids ?? []) adapterPids.add(pid)
+    await waitFor(() => !pidExists(firstRejoinedPid), "second replaced adapter process exit")
+    expect(plugin.exitCode, pluginStderr).toBeNull()
+
+    writeJson(plugin, callToolPayload(4, "members", { all: true }))
+    await waitFor(() => stdout.some((line) => line.id === 4), "post-second-restart tool call")
+    expect(mcpToolJson(stdout, 4).sessions?.find((session) => session.name === PERSONA)).toMatchObject({
+      member_id: firstMember?.member_id,
+      transport_state: "connected",
+      transport_pids: secondRejoined?.transport_pids,
+    })
+    expect(readFileSync(adapterLog, "utf8").match(/daemon generation changed/g)).toHaveLength(2)
+    secondSuccessor.client.close()
+  }, 45_000)
+
+  it("returns every registered seat across a rapid two-generation restart burst without junk rows", async () => {
+    const dbPath = join(tmpDir, "tribe.db")
+    const daemonLog = join(tmpDir, "daemon-multi.log")
+    const initialDaemonProcess = spawn(
+      BUN_BIN,
+      [DAEMON, "--socket", socketPath, "--db", dbPath, "--foreground", "--no-lore"],
+      {
+        cwd: tmpDir,
+        env: {
+          ...process.env,
+          TRIBE_NO_PLUGINS: "1",
+          TRIBE_NO_AUTORELOAD: "1",
+          DEBUG_LOG: daemonLog,
+          LOG_FILE: daemonLog,
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    ) as ChildProcessWithoutNullStreams
+    initialDaemonProcess.stdout.resume()
+    initialDaemonProcess.stderr.resume()
+    if (initialDaemonProcess.pid) daemonPids.add(initialDaemonProcess.pid)
+    await waitFor(() => existsSync(socketPath), "multi-seat initial daemon socket")
+    let generation = await connectToGeneration(socketPath)
+    daemonPids.add(generation.pid)
+
+    const personas = ["@agent/restart-a", "@agent/restart-b", "@agent/restart-c"]
+    const harnesses = personas.map((persona, index) => {
+      const adapterLog = join(tmpDir, `adapter-${index}.log`)
+      const child = spawn(BUN_BIN, [PLUGIN_SERVER, "--socket", socketPath, "--name", persona], {
+        cwd: tmpDir,
+        env: {
+          ...process.env,
+          TRIBE_DAEMON_SCRIPT: DAEMON,
+          TRIBE_DB: dbPath,
+          TRIBE_DELIVERY: "pull",
+          TRIBE_PULL_TRANSPORT: "mcp",
+          TRIBE_REQUIRE_JOIN: "0",
+          TRIBE_TAKEOVER: "1",
+          TRIBE_LAUNCH_ID: `restart-multi-${index}`,
+          TRIBE_NO_PLUGINS: "1",
+          TRIBE_NO_AUTORELOAD: "1",
+          DEBUG_LOG: adapterLog,
+          LOG_FILE: adapterLog,
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      }) as ChildProcessWithoutNullStreams
+      plugins.add(child)
+      const stdout = collectJsonLines(child)
+      writeJson(child, initializePayload(index + 1))
+      return { child, persona, stdout }
+    })
+    await waitFor(
+      () => harnesses.every(({ stdout }, index) => stdout.some((line) => line.id === index + 1)),
+      "multi-seat plugin initialization",
+    )
+    for (const { child } of harnesses) {
+      writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    }
+
+    const initialMembers = new Map<string, Member>()
+    await waitFor(async () => {
+      const roster = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
+      for (const persona of personas) {
+        const member = roster.find((session) => session.name === persona && session.transport_state === "connected")
+        if (member) initialMembers.set(persona, member)
+      }
+      return initialMembers.size === personas.length
+    }, "all multi-seat initial memberships")
+
+    let priorTransportPids = new Map(
+      personas.map((persona) => [persona, initialMembers.get(persona)!.transport_pids![0]!]),
+    )
+    for (let restart = 1; restart <= 2; restart += 1) {
+      const priorDaemonPid = generation.pid
+      await generation.client.call("tribe.reload", { reason: `22322 multi-seat restart ${restart}` })
+      generation.client.close()
+      generation = await connectToGeneration(socketPath, (pid) => pid !== priorDaemonPid)
+      daemonPids.add(generation.pid)
+
+      const rejoined = new Map<string, Member>()
+      await waitFor(async () => {
+        const roster = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
+        for (const persona of personas) {
+          const candidate = roster.find(
+            (session) =>
+              session.name === persona &&
+              session.transport_state === "connected" &&
+              session.transport_pids?.length === 1 &&
+              session.transport_pids[0] !== priorTransportPids.get(persona),
+          )
+          if (candidate) rejoined.set(persona, candidate)
+        }
+        return rejoined.size === personas.length
+      }, `all multi-seat memberships after daemon restart ${restart}`)
+
+      for (const persona of personas) {
+        const member = rejoined.get(persona)!
+        expect(member.member_id).toBe(initialMembers.get(persona)?.member_id)
+        expect(member.launch_parent_pid).toBe(initialMembers.get(persona)?.launch_parent_pid)
+        for (const pid of member.transport_pids ?? []) adapterPids.add(pid)
+      }
+      priorTransportPids = new Map(personas.map((persona) => [persona, rejoined.get(persona)!.transport_pids![0]!]))
+      expect(harnesses.map(({ child }) => child.exitCode)).toEqual([null, null, null])
+    }
+
+    const finalRoster = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
+    expect(
+      finalRoster
+        .filter((session) => personas.includes(session.name ?? ""))
+        .map((session) => session.name)
+        .sort(),
+    ).toEqual([...personas].sort())
+    expect(
+      finalRoster.some((session) => /^silvercode-\d+$/u.test(session.name ?? "") || session.name === "session 1"),
+    ).toBe(false)
+    generation.client.close()
+  }, 45_000)
 })

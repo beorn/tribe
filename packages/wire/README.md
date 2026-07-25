@@ -76,6 +76,12 @@ currently exists: the OS may have recycled it. Health keeps complete-launch
 rows with no transport loud, while connection-scoped no-launch rows are reaped
 only after reconnect grace.
 
+When known durable launch rows have no authenticated transport, both
+`members` and `health` include `membership_discrepancy` with the connected,
+known-launch, and missing counts plus the affected launch identities. The
+projection deliberately says `missing-transport`: it does not infer that the
+agent itself is absent.
+
 ## Surface delineation — protocol vs dev tooling
 
 If a verb belongs on the daemon protocol, it lives **here**. If a verb owns

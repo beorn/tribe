@@ -183,9 +183,26 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
     } as HandlerOpts
 
     const health = parseToolJson(handleToolCall(ctx, "tribe.health", {}, opts)) as {
+      membership_discrepancy: Record<string, unknown>
       transport_wedges: Array<Record<string, unknown>>
       issues: string[]
     }
+    expect(health.membership_discrepancy).toEqual({
+      status: "degraded",
+      connected: 0,
+      known_durable_launches: 1,
+      missing_count: 1,
+      missing: [
+        {
+          member_id: "durable-health",
+          name: "@agent/6",
+          launch_id: "launch-health",
+          launch_parent_pid: 6006,
+          state: "missing-transport",
+        },
+      ],
+      meaning: "missing transport does not establish agent absence",
+    })
     expect(health.transport_wedges).toHaveLength(2)
     expect(health.transport_wedges).toEqual(
       expect.arrayContaining([
@@ -211,6 +228,44 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       ]),
     )
     expect(health.issues.some((issue) => issue.includes("legacy-health"))).toBe(false)
+
+    const members = parseToolJson(handleToolCall(ctx, "tribe.members", {}, opts)) as {
+      sessions: Array<Record<string, unknown>>
+      membership_discrepancy: Record<string, unknown>
+    }
+    expect(members.sessions).toEqual([])
+    expect(members.membership_discrepancy).toEqual(health.membership_discrepancy)
+  })
+
+  it("omits membership degradation when every known durable launch has a connected transport", () => {
+    addSession(db, stmts, "durable", "@agent/6", { id: "launch-a6", parentPid: 6006 })
+    const ctx = makeContext(db, stmts, "operator", "@operator")
+    const opts = {
+      cleanup: () => {},
+      userRenamed: false,
+      setUserRenamed: () => {},
+      getActiveSessionIds: () => new Set(["durable"]),
+      hasActiveTransport: (sessionId: string) => sessionId === "durable",
+      getActiveSessionInfo: () => [
+        {
+          id: "durable",
+          name: "@agent/6",
+          pid: 6006,
+          cwd: "/repo",
+          role: "member",
+          claudeSessionId: null,
+          registeredAt: Date.now(),
+          launchId: "launch-a6",
+          launchParentPid: 6006,
+          transportPids: [6007],
+        },
+      ],
+    } as HandlerOpts
+
+    const members = parseToolJson(handleToolCall(ctx, "tribe.members", {}, opts))
+    const health = parseToolJson(handleToolCall(ctx, "tribe.health", {}, opts))
+    expect(members.membership_discrepancy).toBeUndefined()
+    expect(health.membership_discrepancy).toBeUndefined()
   })
 
   it("reaps only disconnected no-launch rows and leaves durable facts untouched", () => {
