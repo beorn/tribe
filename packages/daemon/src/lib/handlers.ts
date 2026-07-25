@@ -1452,7 +1452,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     const agentPid = active.launchParentPid ?? active.pid
     const agentPidAlive = agentPid ? pidStillAlive(agentPid) : pidAlive
     const transportAlive = transport.transport_state === "connected"
-    const lastSeenSec = lastMsgAge ? Math.round(lastMsgAge / 1000) : Math.round((Date.now() - s.startedAt) / 1000)
+    const lastSeenSec = lastMsgAge ? Math.round(lastMsgAge / 1000) : Math.round((Date.now() - s.started_at) / 1000)
     const isSilent = lastSeenSec > 14400
     if (isSilent) {
       warnings.push(`silent for ${Math.round(lastSeenSec / 60)} min`)
