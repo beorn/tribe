@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { projectSessionTransportState } from "./session-transport-state.ts"
+import { projectSessionLiveness, projectSessionTransportState } from "./session-transport-state.ts"
 
 describe("daemon-authoritative session transport state", () => {
   it("treats an authenticated registry entry as connected without a competing PID derivation", () => {
@@ -15,6 +15,37 @@ describe("daemon-authoritative session transport state", () => {
       transport_state: "disconnected",
       owner_state: "unknown",
       transport_reason: "owner-unknown-no-transport",
+    })
+  })
+
+  it("reports alive=false when agent process is dead even if MCP transport is connected (22317)", () => {
+    expect(
+      projectSessionLiveness({
+        transportConnected: true,
+        agentPidAlive: false,
+      }),
+    ).toEqual({
+      alive: false,
+      transport_alive: true,
+      agent_alive: false,
+      pid_alive: true,
+      is_silent: false,
+    })
+  })
+
+  it("reports alive=false when seat is silent beyond threshold (22317)", () => {
+    expect(
+      projectSessionLiveness({
+        transportConnected: true,
+        agentPidAlive: true,
+        lastSeenSec: 15234, // ~4h14m
+      }),
+    ).toEqual({
+      alive: false,
+      transport_alive: true,
+      agent_alive: true,
+      pid_alive: true,
+      is_silent: true,
     })
   })
 })
