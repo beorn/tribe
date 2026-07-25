@@ -866,8 +866,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           session: { type: "string", description: "Session name to repair. Defaults to the caller's current session." },
           inbox_cursor: {
             type: "string",
-            enum: ["tail"],
-            description: 'Use "tail" to advance the inbox cursor to the current journal tail.',
+            enum: ["tail", "reconcile"],
+            description: 'Use "tail" to advance the inbox cursor to the current journal tail, or "reconcile" to reconcile attention cursors.',
           },
           reap_stale_transports: {
             type: "boolean",
@@ -886,6 +886,9 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           cursor_before: { type: "number" },
           cursor_after: { type: "number" },
           tail: { type: "number" },
+          mailbox_cursor_before: { type: "number" },
+          mailbox_cursor_after: { type: "number" },
+          mailbox_reconciled: { type: "boolean" },
           examined: { type: "number" },
           reaped: { type: "number" },
           reason_counts: { type: "object", additionalProperties: { type: "number" } },
@@ -910,9 +913,9 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "inbox-cursor",
           flags: "--inbox-cursor <mode>",
-          description: "Inbox cursor repair mode; currently only 'tail'",
+          description: "Inbox cursor repair mode ('tail' or 'reconcile')",
           mapsTo: "inbox_cursor",
-          enum: ["tail"],
+          enum: ["tail", "reconcile"],
         },
         {
           name: "reap-stale-transports",

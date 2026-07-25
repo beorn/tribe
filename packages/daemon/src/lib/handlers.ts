@@ -1458,8 +1458,8 @@ function handleRepair(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
     }
     return jsonResult({ repaired: true, repair: "reap_stale_transports", ...opts.reapStaleTransports() })
   }
-  if (repairMode !== "tail") {
-    return jsonResult({ error: 'repair requires inbox_cursor: "tail"' })
+  if (repairMode !== "tail" && repairMode !== "reconcile") {
+    return jsonResult({ error: 'repair requires inbox_cursor: "tail" or "reconcile"' })
   }
 
   const sessionName = typeof a.session === "string" && a.session.length > 0 ? a.session : ctx.getName()
@@ -1493,17 +1493,63 @@ function handleRepair(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
     createdSession = true
   }
 
-  ctx.stmts.advanceInboxCursor.run({ $id: row.id, $seq: tail, $now: Date.now() })
+  if (repairMode === "tail") {
+    ctx.stmts.advanceInboxCursor.run({ $id: row.id, $seq: tail, $now: Date.now() })
+  }
   const after = ctx.stmts.getInboxCursor.get({ $id: row.id }) as { last_inbox_pull_seq: number } | null
+
+  const mbCurrent =
+    (
+      ctx.db.prepare("SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = ?").get(sessionName) as {
+        last_actionable_seq: number
+      } | null
+    )?.last_actionable_seq ?? 0
+
+  const minOpenReqRow = ctx.db
+    .prepare(
+      `
+    SELECT MIN(m.rowid) AS min_seq
+    FROM messages m
+    JOIN pending_request p ON p.message_id = m.id
+    WHERE p.recipient = ?
+  `,
+    )
+    .get(sessionName) as { min_seq: number | null } | null
+  const minOpenReqSeq = minOpenReqRow?.min_seq ?? null
+
+  let mbTarget = mbCurrent
+  if (minOpenReqSeq !== null && mbCurrent >= minOpenReqSeq) {
+    mbTarget = Math.max(0, minOpenReqSeq - 1)
+  }
+
+  let mbReconciled = false
+  if (mbTarget !== mbCurrent) {
+    const now = Date.now()
+    ctx.db
+      .prepare(
+        `
+      INSERT INTO mailbox_cursors (recipient, last_actionable_seq, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(recipient) DO UPDATE SET
+        last_actionable_seq = ?,
+        updated_at = ?
+    `,
+      )
+      .run(sessionName, mbTarget, now, mbTarget, now)
+    mbReconciled = true
+  }
 
   return jsonResult({
     repaired: true,
     created_session: createdSession,
     session: sessionName,
-    repair: "inbox_cursor_to_tail",
+    repair: repairMode === "tail" ? "inbox_cursor_to_tail" : "inbox_cursor_reconcile",
     cursor_before: row.last_inbox_pull_seq,
     cursor_after: after?.last_inbox_pull_seq ?? row.last_inbox_pull_seq,
     tail,
+    mailbox_cursor_before: mbCurrent,
+    mailbox_cursor_after: mbTarget,
+    mailbox_reconciled: mbReconciled,
   })
 }
 
