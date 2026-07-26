@@ -5,6 +5,14 @@ All notable changes to `@bearly/tribe` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this package adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- Keep the host stdio bridge alive across rapid daemon-generation bursts by
+  supervising up to five current-disk adapter replacements with exponential
+  backoff and resetting the budget after a stable runtime.
+
 ## 0.15.0 — 2026-05-25 — Bundle removed; stdio adapter ships via npm
 
 ### Changed

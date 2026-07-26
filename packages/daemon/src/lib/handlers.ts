@@ -32,7 +32,7 @@ import { gatherCodePin } from "./code-pin.ts"
 import { parseDbGrowthWarningBytes, projectHealthCadence } from "./health-cadence.ts"
 import { senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
 import type { LifecycleStore, LifecycleSnapshotRecord } from "./lifecycle-store.ts"
-import { projectSessionTransportState } from "./session-transport-state.ts"
+import { projectSessionLiveness, projectSessionTransportState } from "./session-transport-state.ts"
 import type { DirectDeliveryResolution, DirectDeliveryResolver } from "./delivery-resolution.ts"
 
 // ---------------------------------------------------------------------------
@@ -1542,14 +1542,16 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     }
     const agentPid = active.launchParentPid ?? active.pid
     const agentPidAlive = agentPid ? pidStillAlive(agentPid) : pidAlive
-    const transportAlive = transport.transport_state === "connected"
     const lastSeenSec = lastMsgAge ? Math.round(lastMsgAge / 1000) : Math.round((Date.now() - s.started_at) / 1000)
-    const isSilent = lastSeenSec > 14400
-    if (isSilent) {
+    const liveness = projectSessionLiveness({
+      transportConnected: transport.transport_state === "connected",
+      pidAlive,
+      agentPidAlive,
+      lastSeenSec,
+    })
+    if (liveness.is_silent) {
       warnings.push(`silent for ${Math.round(lastSeenSec / 60)} min`)
     }
-
-    const alive = transportAlive && pidAlive && agentPidAlive && !isSilent
 
     return {
       member_id: s.id,
@@ -1562,10 +1564,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
       launch_parent_pid: active.launchParentPid,
       transport_pids: transportPids,
       ...transport,
-      transport_alive: transportAlive,
-      agent_alive: agentPidAlive,
-      alive,
-      pid_alive: pidAlive,
+      ...liveness,
       last_message: lastMsgAge ? `${Math.round(lastMsgAge / 60_000)} min ago` : "never",
       warnings,
     }
