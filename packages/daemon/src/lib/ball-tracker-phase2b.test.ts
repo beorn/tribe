@@ -351,10 +351,55 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     )
 
     expect(reply.tracker).toEqual({ request_id: "mistyped-request", closed: 0 })
+    expect(reply.reply_close_failed).toBe(true)
     expect(reply.warning).toContain("closed 0")
     expect(reply.warning).toContain("actual-request")
     expect(reply.warning).toContain(opened.id)
     expect(pendingRecipients(db, "actual-request")).toEqual(["@agent/1"])
+  })
+
+  it("reports failure when a reply closes zero rows and the replier owns no balls at all", () => {
+    // The worst case, and the one that reads as clean success: a fabricated or
+    // truncated id matched nothing AND there was nothing it could have matched,
+    // so the "here are your open balls" listing has nothing to print.
+    const reply = parseToolJson(
+      handleToolCall(
+        agent1,
+        "tribe.send",
+        { to: "@chief", message: "acked", summary: "acked", type: "response", reply: "never-existed" },
+        makeOpts(["sess-chief", "sess-agent-1"]),
+      ),
+    )
+
+    expect(reply.sent).toBe(true)
+    expect(reply.tracker).toEqual({ request_id: "never-existed", closed: 0 })
+    expect(reply.reply_close_failed).toBe(true)
+    expect(reply.warning).toContain("closed 0 rows")
+    expect(reply.warning).toContain("@agent/1 owns no open balls")
+  })
+
+  it("leaves no failure flag on a reply that actually closed a row", () => {
+    parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        { to: "@agent/1", message: "review this", type: "request", request: "real-request" },
+        makeOpts(["sess-chief", "sess-agent-1"]),
+      ),
+    )
+
+    const reply = parseToolJson(
+      handleToolCall(
+        agent1,
+        "tribe.send",
+        { to: "@chief", message: "reviewed", summary: "reviewed", type: "response", reply: "real-request" },
+        makeOpts(["sess-chief", "sess-agent-1"]),
+      ),
+    )
+
+    expect(reply.tracker).toEqual({ request_id: "real-request", closed: 1 })
+    expect(reply.reply_close_failed).toBeUndefined()
+    expect(reply.warning).toBeUndefined()
   })
 
   it("settles a reply after its declared deadline without a daemon-policy warning", () => {

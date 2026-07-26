@@ -626,6 +626,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     ...(effectiveRequestId ? { request_id: effectiveRequestId } : {}),
     delivery: deliveryReport([{ recipient: recipients, resolution }])[0],
     ...(result.tracker ? { tracker: result.tracker } : {}),
+    ...replyCloseFailure(result.tracker),
     summary,
     ...(summaryDerived ? { summary_derived: true } : {}),
     ...(warning ? { warning } : {}),
@@ -701,6 +702,7 @@ function handleMultiSend(input: {
     ids: results.map((result) => result.id),
     ...(sharedRequestId ? { request_id: sharedRequestId } : {}),
     ...(tracker ? { tracker } : {}),
+    ...replyCloseFailure(tracker),
     deliveries,
     summary: input.summary,
     ...(input.summaryDerived ? { summary_derived: true } : {}),
@@ -889,7 +891,11 @@ function pendingCloseMissWarning(
   const now = Date.now()
   const fromRelevantPeer = (ball: PendingBall) => peerSet === null || peerSet.has(ball.sender)
   const pending = pendingBallsForOwner(ctx, owner, now).filter(fromRelevantPeer)
-  if (pending.length === 0) return undefined
+  // An empty ball list is the *loudest* case, not the quiet one: the id matched
+  // nothing and there was nothing it could have matched, which is exactly the
+  // shape a fabricated or truncated request id produces. Staying silent here
+  // let a close that closed nothing read as clean success.
+  if (pending.length === 0) return `reply/close ${attemptedId} closed 0 rows; ${owner} owns no open balls`
   const listing = pending
     .map((ball) => {
       const deadlinePassed = ball.expires_at !== null && Date.parse(ball.expires_at) <= now
@@ -908,6 +914,16 @@ function trackerMissWarning(
 ): string | undefined {
   if (tracker?.closed !== 0) return undefined
   return pendingCloseMissWarning(ctx, owner, peers, tracker.request_id)
+}
+
+/**
+ * A declared reply that closed no row did not settle anything. The CLI rail
+ * already exits non-zero on this; MCP callers only ever saw `sent: true`, so
+ * the close failure needs its own unambiguous field rather than a count they
+ * have to notice and interpret.
+ */
+function replyCloseFailure(tracker: Tracker | undefined): { reply_close_failed: true } | undefined {
+  return tracker?.closed === 0 ? { reply_close_failed: true } : undefined
 }
 
 function allPendingBalls(ctx: TribeContext, now: number, view: PendingBallView = "active"): PendingBall[] {

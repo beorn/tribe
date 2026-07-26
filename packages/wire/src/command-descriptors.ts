@@ -206,6 +206,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             required: ["request_id", "closed"],
             description: "Present for replies; reports the committed ball-tracker mutation.",
           },
+          reply_close_failed: {
+            type: "boolean",
+            description:
+              "Present and true when a declared `reply` closed zero rows. The message was still delivered, but nothing was settled — the id was wrong (fabricated, truncated, or already closed). Re-read `tribe.pending` and reply again with the exact id; do not treat `sent: true` as the ball being closed.",
+          },
           summary: {
             type: "string",
             description:
