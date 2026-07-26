@@ -46,9 +46,9 @@ Installs the provider-owned coordination surface:
 ```
 
 Restart Claude Code. The `tribe.*` MCP tools (`join`, `send`, `fetch`,
-`members`, `pending`, `health`, …) appear. The bridge is connect-only: start
-the singleton broker through Hab, an explicit hook/install lifecycle, or a
-manual daemon process before using those tools.
+`members`, `pending`, `health`, …) appear. The provider bridges are
+connect-only: start the singleton broker through Hab, an explicit hook/install
+lifecycle, or a manual daemon process before using those tools.
 
 The plugin is intentionally thin: it wires Claude Code's stdio MCP transport to
 `tribe-wire`'s adapter and never assumes ownership of the in-repo

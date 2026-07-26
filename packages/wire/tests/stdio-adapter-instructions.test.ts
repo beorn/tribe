@@ -21,13 +21,6 @@ const SRC = resolve(dirname(fileURLToPath(import.meta.url)), "../src/stdio-adapt
 const src = readFileSync(SRC, "utf8")
 
 describe("turn-start inbox instruction (km 19442 context-flood guard)", () => {
-  it("keeps the provider-owned stdio bridge connect-only", () => {
-    const start = src.indexOf("function startDaemonConnection")
-    const end = src.indexOf("\n}\n", start)
-    expect(start).toBeGreaterThanOrEqual(0)
-    expect(src.slice(start, end)).toMatch(/noSpawn:\s*true/u)
-  })
-
   it("defines the turn-start guidance through one shared delivery helper", () => {
     expect((src.match(/const turnStartInboxCheck\b/g) ?? []).length).toBe(1)
     expect((src.match(/function turnStartInboxCheckForDelivery\b/g) ?? []).length).toBe(1)

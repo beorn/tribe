@@ -56,13 +56,14 @@ The plugin's `.mcp.json` runs:
 (cd "$CLAUDE_PLUGIN_ROOT" && bun install --no-summary); exec bun "$CLAUDE_PLUGIN_ROOT/server.ts"
 ```
 
-`server.ts` delegates to `tribe-wire`'s stdio adapter. That adapter sets
-`noSpawn: true` for both its initial connection and reconnect loop, so a
-provider session cannot accidentally become the daemon's lifecycle owner.
-Start the daemon through Hab, an explicit hook/install lifecycle, or a manual
-`tribe-daemon` process before using the coordination tools. `tribe-daemon` is a
-**private, unpublished** package (`"private": true` in its `package.json`) and
-is available inside the full repository clone installed by the marketplace.
+`server.ts` delegates to `tribe-wire`'s stdio adapter. That adapter—and the
+provider-owned HTTP and recall bridges—sets `noSpawn: true` for both its initial
+connection and reconnect loop, so a provider session cannot accidentally
+become the daemon's lifecycle owner. Start the daemon through Hab, an explicit
+hook/install lifecycle, or a manual `tribe-daemon` process before using the
+coordination tools. `tribe-daemon` is a **private, unpublished** package
+(`"private": true` in its `package.json`) and is available inside the full
+repository clone installed by the marketplace.
 
 **Direct `.mcp.json` alternative** (no plugin marketplace, no channels) — for
 a project that vendors this repo directly:

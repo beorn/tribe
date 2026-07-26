@@ -9,9 +9,9 @@ stop/restart, and troubleshooting — all read directly from
 
 ## Autostart
 
-Autostart is **not** something the daemon or a provider-owned stdio bridge does
-to itself. It belongs to an explicit lifecycle caller, such as hook dispatch or
-a standalone install. The core helper is
+Autostart is **not** something the daemon or a provider-owned MCP bridge does to
+itself. It belongs to an explicit lifecycle caller, such as hook dispatch or a
+standalone install. The core helper is
 `ensureTribeDaemonIfConfigured()` (`packages/daemon/src/lib/autostart.ts`):
 
 1. Resolve the configured mode (`resolveAutostart()` — see
@@ -29,12 +29,12 @@ never block a Claude Code hook: probe failures and spawn failures are
 swallowed with a single log line, and the caller falls through to its own
 library-mode fallback for that one turn.
 
-Provider-owned stdio bridges are deliberately **connect-only**. Their
-reconnecting client sets `noSpawn: true` on the initial connection and every
-reconnect, so a missing singleton fails loudly without letting an arbitrary
-agent seat create an orphan daemon. A standalone hook/install path may still
-spawn a detached daemon; a supervised deployment such as Hab owns the daemon
-as a resident service.
+Provider-owned stdio, HTTP, and recall bridges are deliberately
+**connect-only**. Their reconnecting clients set `noSpawn: true` on the initial
+connection and every reconnect, so a missing singleton fails loudly without
+letting an arbitrary agent seat create an orphan daemon. A standalone
+hook/install path may still spawn a detached daemon; a supervised deployment
+such as Hab owns the daemon as a resident service.
 
 ## Socket location
 
@@ -234,8 +234,8 @@ never touched. Cleanup never signals a process and never restarts the daemon.
 
 - **`No daemon running (socket: ...)`** from any `tribe-wire` verb → nothing
   is listening at the resolved socket path. Start the declared supervisor
-  service, use an explicit autostart-enabled hook/install path, or run `bun
-packages/daemon/src/daemon.ts` yourself from a clone. Provider stdio bridges
+  service, use an explicit autostart-enabled hook/install path, or run
+  `bun packages/daemon/src/daemon.ts` yourself from a clone. Provider bridges
   intentionally do not start it. See [install.md](install.md).
 - **`tribe-wire doctor` reports STALE** → the _running_ process's code is
   provably older than what's on disk (or on disk is older than the
@@ -247,7 +247,8 @@ packages/daemon/src/daemon.ts` yourself from a clone. Provider stdio bridges
   `tribe.health()` reply is treated as stale _by the absence of that field_
   — the detector can't run inside a daemon too old to contain it, so the
   probe lives in the CLI instead. Fix: update the pin if it's behind, stop
-  the stale process, let the next connection autostart a fresh one.
+  the stale process, then let the declared supervisor or an explicit
+  autostart-enabled lifecycle hook start a fresh one.
 - **A daemon that "wins" the bind election never seems to update after a
   `git pull`** → that's exactly the `code_pin` case above; `doctor` is the
   detector, `reload` (or a manual stop) is the fix.

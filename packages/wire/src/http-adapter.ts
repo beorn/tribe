@@ -69,6 +69,7 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
   const daemon = await createReconnectingClient({
     socketPath,
     maxAttempts: 30,
+    noSpawn: true,
     async onConnect(client) {
       const registerName = myName !== "pending" ? myName : !requireJoin ? initialName : undefined
       const reg = (await client.call("register", {
