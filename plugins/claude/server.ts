@@ -29,6 +29,8 @@ const REMEDY =
   "tribe plugin reconnect failed after current-disk re-exec; restart the host session or reinstall the Tribe plugin."
 const PROVIDER_PARENT_REMEDY =
   "tribe plugin wrapper requires valid provider-parent provenance from a complete live managed launch; restart the host session or reinstall the Tribe plugin."
+const LEGACY_PARENT_WARNING =
+  "tribe plugin wrapper: managed launch supplied no provider-parent PID; falling back to the wrapper's real provider parent. Relaunch the host session to restore full launch provenance."
 
 function supervisedIdentityName(message: unknown): string | undefined {
   if (typeof message !== "object" || message === null || !("tribePluginIdentity" in message)) return undefined
@@ -61,7 +63,17 @@ function processExists(pid: number): boolean {
 function resolveProviderParentPid(): number {
   const raw = process.env[PLUGIN_PROVIDER_PARENT_PID]?.trim() ?? ""
   const launchId = process.env.TRIBE_LAUNCH_ID?.trim() ?? ""
-  if (raw.length === 0 && launchId.length === 0) return process.ppid
+  // An ABSENT parent PID is indistinguishable from a standalone install or a
+  // host launched before the bootstrap started injecting it, so it falls back to
+  // the wrapper's real provider parent — loudly, never silently. Rejecting it
+  // strands every already-running seat: a host's env is fixed at launch, so the
+  // only remedy is relaunching every seat, and the refusal surfaces to the
+  // provider as a bare transport error with the remedy text nowhere in view.
+  // A SUPPLIED-but-invalid PID is a genuine incomplete tuple and still throws.
+  if (raw.length === 0) {
+    if (launchId.length > 0) process.stderr.write(`${LEGACY_PARENT_WARNING}\n`)
+    return process.ppid
+  }
   const pid = Number(raw)
   if (
     launchId.length === 0 ||

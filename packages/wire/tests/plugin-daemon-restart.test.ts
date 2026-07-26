@@ -438,7 +438,6 @@ describe("Claude plugin daemon-restart self-heal", () => {
     ["a malformed parent PID", "not-a-pid", "invalid-provider-parent-launch"],
     ["a dead parent PID", String(Number.MAX_SAFE_INTEGER), "dead-provider-parent-launch"],
     ["a parent PID without a launch id", String(process.ppid), ""],
-    ["a launch id without a parent PID", "", "launch-without-provider-parent"],
   ])("fails loudly when a managed wrapper inherits %s", async (_label, providerParentPid, launchId) => {
     const dbPath = join(tmpDir, "tribe-invalid-provider-parent.db")
     const adapterLog = join(tmpDir, "adapter-invalid-provider-parent.log")
@@ -460,6 +459,35 @@ describe("Claude plugin daemon-restart self-heal", () => {
     await waitFor(() => plugin.exitCode !== null, "invalid-provider-parent plugin exit", 2_000)
     expect(plugin.exitCode).toBe(2)
     expect(pluginStderr).toContain("valid provider-parent provenance")
+  })
+
+  // A host's env is fixed at launch, so rejecting an absent provider-parent PID
+  // takes down every seat launched before the bootstrap injected it and offers
+  // no in-band remedy. It warns and falls back instead; only a SUPPLIED-but-bad
+  // tuple is a launcher bug the wrapper can attribute.
+  it("warns but keeps serving when a managed launch supplies no provider-parent PID", async () => {
+    const dbPath = join(tmpDir, "tribe-legacy-provider-parent.db")
+    const adapterLog = join(tmpDir, "adapter-legacy-provider-parent.log")
+    spawnTestDaemon(dbPath, join(tmpDir, "daemon-legacy-provider-parent.log"))
+    await waitFor(() => existsSync(socketPath), "legacy-provider-parent daemon socket")
+
+    const plugin = spawnTestPlugin({
+      dbPath,
+      logPath: adapterLog,
+      name: PERSONA,
+      launchId: "legacy-launch-without-provider-parent",
+      providerParentPid: "",
+      delivery: "pull",
+      requireJoin: false,
+    })
+    let pluginStderr = ""
+    plugin.stderr.on("data", (chunk: Buffer | string) => {
+      pluginStderr += chunk.toString()
+    })
+
+    await waitFor(() => pluginStderr.includes("supplied no provider-parent PID"), "legacy-parent warning", 5_000)
+    expect(plugin.exitCode).toBeNull()
+    expect(pluginStderr).not.toContain("valid provider-parent provenance")
   })
 
   it("restores a runtime-joined name when a launch-less Claude wrapper re-execs", async () => {
