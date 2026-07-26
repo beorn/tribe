@@ -593,7 +593,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           sessions: {
             type: "array",
             description:
-              "Per-session rows include daemon-authoritative transport_state (connected|disconnected), separate owner_state (live|dead|unknown), transport_reason, legacy alive, transport_pids, uptime_min, and activity-only last_seen_sec. A disconnected numeric PID without identity-bound process evidence reports owner unknown.",
+              "Per-session rows include the registered delivery mode (push|pull), daemon-authoritative transport_state (connected|disconnected), separate owner_state (live|dead|unknown), transport_reason, legacy alive, transport_pids, uptime_min, and activity-only last_seen_sec. A disconnected numeric PID without identity-bound process evidence reports owner unknown.",
             items: { type: "object", additionalProperties: true },
           },
           membership_discrepancy: {

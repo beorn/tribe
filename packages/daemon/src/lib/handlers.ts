@@ -1114,7 +1114,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     .prepare(`
       SELECT DISTINCT s.id, s.name, s.role, s.domains, s.pid, s.cwd,
         s.claude_session_id, s.claude_session_name, s.started_at, s.updated_at,
-        s.account, s.provider, s.launch_id, s.launch_parent_pid
+        s.account, s.provider, s.launch_id, s.launch_parent_pid, s.delivery
       FROM sessions s
       INNER JOIN room_members rm ON rm.session_id = s.id
       ORDER BY s.started_at
@@ -1134,6 +1134,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     provider: string | null
     launch_id: string | null
     launch_parent_pid: number | null
+    delivery: "push" | "pull"
   }>
 
   // By default return only currently-connected sessions. `a.all` exposes the
@@ -1163,6 +1164,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
       pid: active?.pid ?? r.pid,
       launch_id: r.launch_id,
       launch_parent_pid: r.launch_parent_pid,
+      delivery: r.delivery,
       transport_pids: active?.transportPids ?? [],
       cwd: r.cwd,
       claude_session_id: r.claude_session_id,

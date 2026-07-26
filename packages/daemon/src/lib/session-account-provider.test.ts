@@ -64,6 +64,7 @@ type MembersSession = {
   transport_state: "connected" | "disconnected"
   owner_state: "live" | "dead" | "unknown"
   transport_reason: string
+  delivery: "push" | "pull"
   account?: string
   provider?: string
 }
@@ -98,16 +99,16 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
     const opts = makeOpts(new Set([sessionId]))
 
     // Register with STALE labels (the row a Codex chief inherited).
-    registerSession(ctx, PROJECT_ID, () => true, null, 4321, "push", "/repo", "bjorns@gmail.com", "claude")
+    registerSession(ctx, PROJECT_ID, () => true, null, 4321, "pull", "/repo", "bjorns@gmail.com", "claude")
 
     const baseline = membersFor(ctx, opts, "@chief")
-    expect(baseline).toMatchObject({ account: "bjorns@gmail.com", provider: "claude" })
+    expect(baseline).toMatchObject({ delivery: "pull", account: "bjorns@gmail.com", provider: "claude" })
 
     // The corrective join — /up always re-joins, now carrying the real labels.
     handleToolCall(ctx, "tribe.join", { name: "@chief", account: "d@delei.org", provider: "codex" }, opts)
 
     const corrected = membersFor(ctx, opts, "@chief")
-    expect(corrected).toMatchObject({ account: "d@delei.org", provider: "codex" })
+    expect(corrected).toMatchObject({ delivery: "pull", account: "d@delei.org", provider: "codex" })
   })
 
   it("does not bind a disconnected legacy registration to a recycled live PID", () => {
