@@ -438,6 +438,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
     ["a malformed parent PID", "not-a-pid", "invalid-provider-parent-launch"],
     ["a dead parent PID", String(Number.MAX_SAFE_INTEGER), "dead-provider-parent-launch"],
     ["a parent PID without a launch id", String(process.ppid), ""],
+    ["a launch id without a parent PID", "", "launch-without-provider-parent"],
   ])("fails loudly when a managed wrapper inherits %s", async (_label, providerParentPid, launchId) => {
     const dbPath = join(tmpDir, "tribe-invalid-provider-parent.db")
     const adapterLog = join(tmpDir, "adapter-invalid-provider-parent.log")
@@ -631,6 +632,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
         logPath: adapterLog,
         name: persona,
         launchId: `restart-multi-${index}`,
+        providerParentPid: String(process.pid),
         delivery: "pull",
         requireJoin: false,
       })

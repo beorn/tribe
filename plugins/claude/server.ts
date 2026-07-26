@@ -60,8 +60,8 @@ function processExists(pid: number): boolean {
 
 function resolveProviderParentPid(): number {
   const raw = process.env[PLUGIN_PROVIDER_PARENT_PID]?.trim() ?? ""
-  if (raw.length === 0) return process.ppid
   const launchId = process.env.TRIBE_LAUNCH_ID?.trim() ?? ""
+  if (raw.length === 0 && launchId.length === 0) return process.ppid
   const pid = Number(raw)
   if (
     launchId.length === 0 ||
