@@ -666,7 +666,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           members: {
             type: "array",
             description:
-              "Connected-member diagnostics include transport_state, owner_state, transport_reason, legacy alive, and warnings.",
+              "Connected-member diagnostics separate transport_state/transport_alive, owner_state, agent_alive, pid_alive, and silence-derived is_silent; legacy alive is their conservative conjunction, with warnings carrying human-readable causes.",
             items: { type: "object", additionalProperties: true },
           },
           transport_wedges: {

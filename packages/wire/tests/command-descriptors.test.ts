@@ -264,6 +264,9 @@ describe("Tribe command descriptors", () => {
       pending_balls: { type: "object" },
       issues: { type: "array" },
     })
+    expect(health.mcp.outputSchema.properties?.members).toMatchObject({
+      description: expect.stringMatching(/is_silent/),
+    })
     const fetch = commandDescriptorByMcpName("fetch")!
     expect(fetch.mcp.outputSchema.properties).not.toHaveProperty("delivery_ack")
     expect(fetch.mcp.outputSchema.properties).not.toHaveProperty("ack_id")
