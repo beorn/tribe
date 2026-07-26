@@ -1073,15 +1073,15 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const first = await spawnLaunchAdapter(socketPath, "plugin-adapter-1.log", launchId, {
       throughPluginSupervisor: true,
     })
-    await callLaunchTool(first, 2, "members", {})
+    await callLaunchToolWhenRegistered(first, 2, "members", {})
     const second = await spawnLaunchAdapter(socketPath, "plugin-adapter-2.log", launchId, {
       throughPluginSupervisor: true,
     })
-    await callLaunchTool(second, 3, "members", {})
+    await callLaunchToolWhenRegistered(second, 3, "members", {})
     const third = await spawnLaunchAdapter(socketPath, "plugin-adapter-3.log", launchId, {
       throughPluginSupervisor: true,
     })
-    const members = (await callLaunchTool(third, 4, "members", {})) as {
+    const members = (await callLaunchToolWhenRegistered(third, 4, "members", {})) as {
       sessions?: Array<{
         name?: string
         launch_id?: string
