@@ -17,8 +17,6 @@ import { spawn, type ChildProcess } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { evaluateAdapterReexec } from "./supervisor-policy.ts"
 
-process.env.TRIBE_DAEMON_SCRIPT ??= fileURLToPath(import.meta.resolve("tribe-daemon"))
-
 const PLUGIN_CHILD = "TRIBE_PLUGIN_ADAPTER_CHILD"
 const PLUGIN_PROVIDER_PARENT_PID = "TRIBE_PLUGIN_PROVIDER_PARENT_PID"
 const PLUGIN_RESUME_JOINED = "TRIBE_PLUGIN_RESUME_JOINED"

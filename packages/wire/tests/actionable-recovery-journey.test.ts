@@ -558,18 +558,21 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     }
   }, 30_000)
 
-  it("preserves inherited operator authority through adapter autostart and daemon hot reload", async () => {
+  it("preserves daemon-owned operator authority through standalone hot reload", async () => {
     const socketPath = join(tmpDir, "operator-lifecycle.sock")
     const dbPath = join(tmpDir, "operator-lifecycle.db")
     const capability = "operator-lifecycle-secret"
     const capabilityPath = join(tmpDir, "operator-capability")
     writeFileSync(capabilityPath, capability, { mode: 0o600 })
     const capabilityFd = openSync(capabilityPath, "r")
+    daemonProc = spawnDaemon(socketPath, dbPath, { operatorCapabilityFd: capabilityFd })
+    closeSync(capabilityFd)
+    await waitForCondition(() => existsSync(socketPath), "operator lifecycle daemon socket")
+
     const child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/operator-test"], {
       cwd: tmpDir,
       env: {
         ...BASE_ENV,
-        TRIBE_DAEMON_SCRIPT: DAEMON,
         TRIBE_DB: dbPath,
         TRIBE_DELIVERY: "pull",
         TRIBE_PULL_TRANSPORT: "mcp",
@@ -580,9 +583,8 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         TRIBE_OPERATOR_CAPABILITY_FD: "3",
         DEBUG_LOG: join(tmpDir, "operator-adapter.log"),
       },
-      stdio: ["pipe", "pipe", "pipe", capabilityFd],
+      stdio: ["pipe", "pipe", "pipe"],
     }) as ChildProcessWithoutNullStreams
-    closeSync(capabilityFd)
     adapters.push(child)
     const stdout = collectStdoutJson(child)
     writeJson(child, initializePayload(1))

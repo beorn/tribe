@@ -9,9 +9,9 @@ stop/restart, and troubleshooting — all read directly from
 
 ## Autostart
 
-Autostart is **not** something the daemon does to itself — it's something a
-_caller_ (a hook dispatch, or the stdio adapter's `connectOrStart`) does when
-it can't reach a socket. The core helper is
+Autostart is **not** something the daemon or a provider-owned stdio bridge does
+to itself. It belongs to an explicit lifecycle caller, such as hook dispatch or
+a standalone install. The core helper is
 `ensureTribeDaemonIfConfigured()` (`packages/daemon/src/lib/autostart.ts`):
 
 1. Resolve the configured mode (`resolveAutostart()` — see
@@ -29,12 +29,12 @@ never block a Claude Code hook: probe failures and spawn failures are
 swallowed with a single log line, and the caller falls through to its own
 library-mode fallback for that one turn.
 
-The Claude Code plugin path autostarts by a different, simpler mechanism:
-`plugins/claude/server.ts` sets `TRIBE_DAEMON_SCRIPT` before importing the
-stdio adapter, so the wire client's own `connectOrStart(socketPath, {
-daemonScript, ... })` spawns the daemon on first connect failure instead of
-throwing. Either path lands at the same place: a detached `bun
-packages/daemon/src/daemon.ts` process.
+Provider-owned stdio bridges are deliberately **connect-only**. Their
+reconnecting client sets `noSpawn: true` on the initial connection and every
+reconnect, so a missing singleton fails loudly without letting an arbitrary
+agent seat create an orphan daemon. A standalone hook/install path may still
+spawn a detached daemon; a supervised deployment such as Hab owns the daemon
+as a resident service.
 
 ## Socket location
 
@@ -105,23 +105,26 @@ firing at once, both seeing "dead"). The daemon handles this in two stages:
 
 ## Hot-reload
 
-Two independent pieces, both in `withHotReload`:
+`withHotReload` keeps the replacement mechanism aligned with the daemon's
+lifecycle owner:
 
-- **`tribe.reload` (RPC) / `tribe-wire reload` (CLI) / `SIGHUP`** — all three
-  trigger the same `reload()`. It stops daemon plugins first (so any
-  file-cursor state flushes before the process changes), marks the socket as
-  "handed off," closes + unlinks it, then spawns a **detached** replacement
-  with a **fresh** bind (no fd inheritance). The old process exits ~1s
-  later (`spawnDelayMs`), with a hard `SIGKILL` self-destruct backstop at
-  +1.5s in case the clean shutdown path is somehow starved. Reconnecting
-  clients (`createReconnectingClient`) ride out the sub-second gap
-  transparently via their own backoff.
+- **Standalone daemon** — `tribe.reload` (RPC), `tribe-wire reload` (CLI), and
+  `SIGHUP` all stop daemon plugins, mark the socket as handed off, close +
+  unlink it, then spawn a **detached** replacement with a fresh bind (no fd
+  inheritance). The old process exits ~1s later (`spawnDelayMs`), with a hard
+  `SIGKILL` self-destruct backstop at +1.5s if clean shutdown is starved.
 
   (An earlier version tried to hand off the _listening fd itself_ to the
   child for a zero-gap reload — abandoned because Bun's `node:net` throws on
   `server.listen({ fd })`, which crash-looped the child under Bun. The
   close-then-fresh-bind approach costs a brief reconnect window but actually
   works.)
+
+- **Hab-supervised service** — when `HAB_SERVICE_KIND=service`, the same reload
+  entry points stop plugins and request clean shutdown. They do **not** mark
+  the socket handed off, unlink it early, or spawn a detached successor. Scope
+  disposal closes the socket, then Hab's declared restart policy starts the
+  replacement inside the same supervisor.
 
 - **Source-file watcher** — `fs.watch` on the daemon's own source
   directories, debounced (default 500ms), hashes the watched `.ts` files and
@@ -147,9 +150,10 @@ Two independent pieces, both in `withHotReload`:
   process spinning forever after some other process cleaned up its socket
   file out from under it.
 
-Net effect: the daemon costs nothing while idle (it exits itself) and comes
-back on the next connect attempt (via autostart) — no lifecycle ceremony
-either way, by design.
+Net effect for standalone installs: the daemon costs nothing while idle (it
+exits itself) and an explicit autostart-eligible lifecycle path can bring it
+back. Provider bridges never assume that ownership. A supervisor may instead
+declare its own always-on/restart policy.
 
 ### Host adapter recovery across daemon generations
 
@@ -182,8 +186,8 @@ There is no dedicated `stop` subcommand. In practice:
   `tribe-wire status`/`health`, both of which print `daemon.pid`) — the
   `withSignals` factory routes both to the same shutdown path as idle-quit.
 - **Restart to pick up new code**: `tribe-wire reload` (or the `tribe.reload`
-  MCP tool) — see Hot-reload above. This is the normal path; it's what you
-  want after pulling new tribe source.
+  MCP tool) — see Hot-reload above. Standalone daemons replace themselves;
+  supervised daemons exit cleanly and let their supervisor replace them.
 - **Force a clean respawn** (e.g. after `tribe-wire doctor` reports stale
   code and a reload isn't trusted): stop the process manually, then let the
   next autostart-eligible connection spawn a fresh one from current disk —
@@ -229,10 +233,10 @@ never touched. Cleanup never signals a process and never restarts the daemon.
 ## Troubleshooting
 
 - **`No daemon running (socket: ...)`** from any `tribe-wire` verb → nothing
-  is listening at the resolved socket path. Either let autostart spawn one
-  (if you're on a path that has `TRIBE_DAEMON_SCRIPT` wired) or run
-  `bun packages/daemon/src/daemon.ts` yourself from a clone. See
-  [install.md](install.md).
+  is listening at the resolved socket path. Start the declared supervisor
+  service, use an explicit autostart-enabled hook/install path, or run `bun
+packages/daemon/src/daemon.ts` yourself from a clone. Provider stdio bridges
+  intentionally do not start it. See [install.md](install.md).
 - **`tribe-wire doctor` reports STALE** → the _running_ process's code is
   provably older than what's on disk (or on disk is older than the
   superproject's pin). This is the `code_pin` mechanism

@@ -396,6 +396,8 @@ export type ReconnectingClientOpts = {
   maxAttempts?: number
   /** Forwarded to connectOrStart on each (re)connect */
   callTimeoutMs?: number
+  /** Keep this host connect-only; never create a daemon during initial connect or reconnect. */
+  noSpawn?: boolean
   daemonScript?: string
   daemonArgs?: string[]
   maxStartupAttempts?: number
@@ -418,11 +420,12 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
     onReconnectExhausted,
     maxAttempts = 30,
     callTimeoutMs,
+    noSpawn,
     daemonScript,
     daemonArgs,
     maxStartupAttempts,
   } = opts
-  const startOpts: ConnectOrStartOpts = { callTimeoutMs, daemonScript, daemonArgs, maxStartupAttempts }
+  const startOpts: ConnectOrStartOpts = { callTimeoutMs, noSpawn, daemonScript, daemonArgs, maxStartupAttempts }
   // Read the inherited descriptor at most once, then carry the capability in
   // this reconnecting client's closure. Every later daemon spawn gets a fresh
   // anonymous pipe, so a consumed/closed launch fd cannot silently strip

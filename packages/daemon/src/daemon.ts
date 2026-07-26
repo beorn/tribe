@@ -42,6 +42,7 @@ import {
   withDatabase,
   withDispatcher,
   withHotReload,
+  reloadReplacementForEnvironment,
   withIdleQuit,
   withRecall,
   withMCPServer,
@@ -285,6 +286,7 @@ const withMCPShape = withMCPServer<typeof withDispatcherShape>({
 const withHotReloadShape = withHotReload<typeof withMCPShape>({
   stopPlugins: () => refs.stopPlugins(),
   triggerShutdown: () => refs.shutdown(),
+  replaceProcess: reloadReplacementForEnvironment(process.env, () => refs.shutdown()),
 })(withMCPShape)
 // Confirm withMCPShape carries the MCP server handle (for tests / status).
 log.debug?.(

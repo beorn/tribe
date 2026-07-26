@@ -36,9 +36,9 @@ job; LLM features are opt-in and degrade loudly when unconfigured.
 
 There are two ways in, depending on your host.
 
-### Path A — Claude Code plugin (recommended, full stack)
+### Path A — Claude Code plugin
 
-Installs the coordination surface and autostarts the daemon for you:
+Installs the provider-owned coordination surface:
 
 ```text
 /plugin marketplace add beorn/tribe
@@ -46,12 +46,13 @@ Installs the coordination surface and autostarts the daemon for you:
 ```
 
 Restart Claude Code. The `tribe.*` MCP tools (`join`, `send`, `fetch`,
-`members`, `pending`, `health`, …) appear, and the broker daemon autostarts on
-first use. Nothing else to configure — two sessions on the same machine can now
-talk (see the quickstart below).
+`members`, `pending`, `health`, …) appear. The bridge is connect-only: start
+the singleton broker through Hab, an explicit hook/install lifecycle, or a
+manual daemon process before using those tools.
 
 The plugin is intentionally thin: it wires Claude Code's stdio MCP transport to
-`tribe-wire`'s adapter and points that adapter at the in-repo `tribe-daemon`.
+`tribe-wire`'s adapter and never assumes ownership of the in-repo
+`tribe-daemon`.
 It does **not** install recall hooks — recall is set up separately (see
 [Recall quickstart](#recall-quickstart)).
 
@@ -67,10 +68,10 @@ tribe-wire mcp --socket /path/to/tribe.sock
 ```
 
 `tribe-wire` is a **client**. It talks to a daemon over a Unix socket; it does
-not start one. Point it at a socket that already exists — one autostarted by the
-Claude Code plugin, one you run from a repo clone (below), or one forwarded over
-SSH. If no daemon is reachable, wire commands fail loudly and tell you how to
-start one; they never silently no-op.
+not start one. Point it at a socket that already exists — one owned by a
+supervisor or explicit lifecycle hook, one you run from a repo clone (below),
+or one forwarded over SSH. If no daemon is reachable, wire commands fail loudly
+and tell you how to start one; they never silently no-op.
 
 Register it as a plain project-level MCP server without plugin channels:
 
@@ -270,8 +271,9 @@ tribe-daemon  ── broker ──►  SQLite state · session registry · messa
   to participate, and nothing more.
 - **`tribe-daemon`** is the one long-running broker per project. It owns state
   and lifecycle; wire never silently owns lifecycle on its behalf.
-- **Host plugins** wire those pieces into a specific runtime. The Claude Code
-  plugin autostarts the daemon and registers the MCP tools.
+- **Host plugins** wire those pieces into a specific runtime. Provider-owned
+  bridges register MCP tools and connect to the singleton without taking over
+  daemon lifecycle.
 
 ---
 

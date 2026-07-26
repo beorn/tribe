@@ -3,23 +3,21 @@
  *
  * Two pieces:
  *
- *   1. `reload()` — close + unlink the listening socket, then spawn a DETACHED
- *      replacement (`detached:true` + `unref()`, no `--fd`) that binds the
- *      freed socket path fresh. The old process exits after a short delay.
- *      The replacement survives the old process's exit. (Earlier versions
- *      passed the listening fd to the child for zero-gap handoff, but Bun's
- *      `node:net` cannot `listen({ fd })` — fd inheritance crash-looped the
- *      child. Close-then-fresh-bind costs a sub-second reconnect window but
- *      works under Bun.)
+ *   1. `reload()` — stop plugins, then ask the declared lifecycle owner to
+ *      replace the process. Hab-supervised services shut down cleanly so Hab
+ *      can restart them. Standalone daemons close + unlink the socket and
+ *      spawn a DETACHED replacement (`detached:true` + `unref()`, no `--fd`)
+ *      that binds it fresh. (Earlier versions passed the listening fd to the
+ *      child for zero-gap handoff, but Bun cannot `listen({ fd })`.)
  *
  *   2. Source file watcher — fs.watch on the daemon's source directories;
  *      coalesced via debounce; emits SIGHUP to the current process on change.
  *      Skipped when `disableWatch: true` (tests) or `TRIBE_NO_AUTORELOAD=1`.
  *
- * The factory takes runtime callbacks the daemon supplies: `getStopPlugins()`
- * (called before spawn so plugin cursors flush), `triggerShutdown()` (called
- * after the spawn delay to release the old process). The withSignals factory
- * routes SIGHUP to `reload()`.
+ * The factory takes runtime callbacks the daemon supplies: `stopPlugins()`
+ * flushes plugin cursors; `triggerShutdown()` releases a standalone predecessor;
+ * and optional `replaceProcess()` delegates to a stable supervisor. The
+ * withSignals factory routes SIGHUP to `reload()`.
  */
 
 import { spawn } from "node:child_process"
@@ -38,6 +36,8 @@ export interface HotReloadOpts {
   stopPlugins: () => void
   /** Called after the spawn delay to abort/exit the current process. */
   triggerShutdown: () => void
+  /** Delegate replacement to an existing stable process supervisor. */
+  replaceProcess?: (reason: string) => void
   /** Skip the source-watcher (tests + non-source bundles). */
   disableWatch?: boolean
   /** ms between debounced source-change → SIGHUP emit. Default 500. */
@@ -47,7 +47,7 @@ export interface HotReloadOpts {
 }
 
 export interface HotReload {
-  /** Trigger an immediate re-exec. The withSignals factory wires SIGHUP here. */
+  /** Trigger replacement through the active lifecycle owner. */
   reload(): void
   /** Active watchers — exposed so tests can await close(). */
   readonly watchers: ReadonlyArray<FSWatcher>
@@ -55,6 +55,13 @@ export interface HotReload {
 
 export interface WithHotReload {
   readonly hotReload: HotReload
+}
+
+export function reloadReplacementForEnvironment(
+  env: Readonly<Record<string, string | undefined>>,
+  shutdown: () => void,
+): ((reason: string) => void) | undefined {
+  return env.HAB_SERVICE_KIND === "service" ? () => shutdown() : undefined
 }
 
 function buildSourceFiles(sourceDir: string, libTribeDir: string): string[] {
@@ -95,10 +102,15 @@ export function withHotReload<T extends BaseTribe & WithConfig & WithSocketServe
     const watchDebounceMs = opts.watchDebounceMs ?? 500
 
     function reload(): void {
-      log.info?.("SIGHUP received — re-exec for hot-reload")
-      // Stop plugins BEFORE spawning so cursor/state flushes to disk
-      // (prevents duplicate event delivery in the new process).
+      const reason = "SIGHUP received — re-exec for hot-reload"
+      log.info?.(reason)
+      // Stop plugins before either replacement path so cursor/state flushes
+      // before the process changes.
       opts.stopPlugins()
+      if (opts.replaceProcess) {
+        opts.replaceProcess(reason)
+        return
+      }
 
       // Re-exec strategy: close-then-spawn-detached-fresh.
       //

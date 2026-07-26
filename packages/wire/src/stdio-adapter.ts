@@ -474,6 +474,9 @@ const reconnectWatchdog = createReconnectWatchdog({
 function startDaemonConnection(): Promise<DaemonClient> {
   return createReconnectingClient({
     socketPath: SOCKET_PATH,
+    // Provider-owned bridges reconnect to the singleton; they never own it.
+    // Lifecycle belongs to an explicit daemon install or Hab supervision.
+    noSpawn: true,
     async onConnect(client) {
       // km 19442 — open a fresh connect-replay window so a stale daemon's body-push
       // burst on (re)connect is bounded (see connectReplayGate + the `channel` handler).
