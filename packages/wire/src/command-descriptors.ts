@@ -872,7 +872,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           inbox_cursor: {
             type: "string",
             enum: ["tail", "reconcile"],
-            description: 'Use "tail" to advance the inbox cursor to the current journal tail, or "reconcile" to reconcile attention cursors.',
+            description:
+              'Use "tail" to advance the inbox cursor to the current journal tail, or "reconcile" to reconcile attention cursors.',
           },
           reap_stale_transports: {
             type: "boolean",
