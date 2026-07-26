@@ -142,10 +142,10 @@ function resolveLaunchParentPid(): number {
 
 // 21049 — adapters forward a complete launcher-minted identity or nothing.
 // They never mint/default the id themselves. A direct adapter uses its actual
-// OS parent. A plugin-supervised adapter uses the provider parent recomputed
-// and overwritten by its wrapper, never arbitrary inherited provider env.
-// Thus sibling wrappers from one host fan in while a nested provider still
-// resolves a distinct parent and cannot adopt the old launch.
+// OS parent. A plugin-supervised adapter uses the provider parent validated by
+// its stable wrapper: either the complete Hab launcher tuple or, for standalone
+// plugins, the wrapper's actual OS parent. Thus child replacements preserve one
+// launch owner without treating ambient adapter env as authoritative.
 const LAUNCH_IDENTITY = LAUNCH_ID_RAW.length > 0 ? { id: LAUNCH_ID_RAW, parentPid: resolveLaunchParentPid() } : null
 
 // km 19442 — connect-time replay flood backstop. The wakeup→drain path is capped

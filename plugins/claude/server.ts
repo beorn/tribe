@@ -27,6 +27,8 @@ const GENERATION_REEXEC_OFFSET = 2
 const LAST_REEXEC_EXIT_CODE = REEXEC_EXIT_CODE + GENERATION_REEXEC_OFFSET + REEXEC_JOINED_OFFSET
 const REMEDY =
   "tribe plugin reconnect failed after current-disk re-exec; restart the host session or reinstall the Tribe plugin."
+const PROVIDER_PARENT_REMEDY =
+  "tribe plugin wrapper requires valid provider-parent provenance from a complete live managed launch; restart the host session or reinstall the Tribe plugin."
 
 function supervisedIdentityName(message: unknown): string | undefined {
   if (typeof message !== "object" || message === null || !("tribePluginIdentity" in message)) return undefined
@@ -42,14 +44,50 @@ function waitForExit(child: ChildProcess): Promise<{ code: number | null; error?
 }
 
 function waitForRetry(delayMs: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, delayMs))
+  return new Promise((resolve) => {
+    setTimeout(resolve, delayMs)
+  })
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM"
+  }
+}
+
+function resolveProviderParentPid(): number {
+  const raw = process.env[PLUGIN_PROVIDER_PARENT_PID]?.trim() ?? ""
+  if (raw.length === 0) return process.ppid
+  const launchId = process.env.TRIBE_LAUNCH_ID?.trim() ?? ""
+  const pid = Number(raw)
+  if (
+    launchId.length === 0 ||
+    !/^[1-9]\d*$/u.test(raw) ||
+    !Number.isSafeInteger(pid) ||
+    pid === process.pid ||
+    !processExists(pid)
+  ) {
+    throw new Error(PROVIDER_PARENT_REMEDY)
+  }
+  return pid
 }
 
 async function superviseAdapter(): Promise<void> {
   // The wrapper is an implementation detail between the provider host and
-  // the adapter. Capture the provider boundary once so every supervised
-  // child/re-exec from this wrapper reports the same logical launch owner.
-  const providerParentPid = process.ppid
+  // the adapter. A managed Hab launch supplies the authoritative harness PID;
+  // a standalone plugin uses the wrapper's actual provider parent. Capture the
+  // resolved boundary once so every child/re-exec reports one logical owner.
+  let providerParentPid: number
+  try {
+    providerParentPid = resolveProviderParentPid()
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : PROVIDER_PARENT_REMEDY}\n`)
+    process.exitCode = 2
+    return
+  }
   let active: ChildProcess | null = null
   let stopping = false
   let consecutiveReexecs = 0

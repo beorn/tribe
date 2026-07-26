@@ -191,6 +191,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
     logPath: string
     name: string
     launchId: string
+    providerParentPid?: string
     delivery: "push" | "pull"
     requireJoin: boolean
   }): ChildProcessWithoutNullStreams {
@@ -204,6 +205,10 @@ describe("Claude plugin daemon-restart self-heal", () => {
         ...(opts.requireJoin ? {} : { TRIBE_REQUIRE_JOIN: "0" }),
         TRIBE_TAKEOVER: "1",
         TRIBE_LAUNCH_ID: opts.launchId,
+        TRIBE_PLUGIN_ADAPTER_CHILD: "",
+        ...(opts.providerParentPid === undefined
+          ? { TRIBE_PLUGIN_PROVIDER_PARENT_PID: "" }
+          : { TRIBE_PLUGIN_PROVIDER_PARENT_PID: opts.providerParentPid }),
         TRIBE_NO_PLUGINS: "1",
         TRIBE_NO_AUTORELOAD: "1",
         DEBUG_LOG: opts.logPath,
@@ -253,11 +258,14 @@ describe("Claude plugin daemon-restart self-heal", () => {
     const firstDaemon = await connectToGeneration(socketPath)
     daemonPids.add(firstDaemon.pid)
 
+    const harnessParentPid = process.ppid
+    expect(harnessParentPid).not.toBe(process.pid)
     const plugin = spawnTestPlugin({
       dbPath,
       logPath: adapterLog,
       name: PERSONA,
       launchId: "restart-journey-launch",
+      providerParentPid: String(harnessParentPid),
       delivery: "push",
       requireJoin: true,
     })
@@ -309,7 +317,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
     expect(firstMember).toMatchObject({
       member_id: expect.any(String),
       launch_id: "restart-journey-launch",
-      launch_parent_pid: expect.any(Number),
+      launch_parent_pid: harnessParentPid,
       transport_state: "connected",
       owner_state: "live",
       transport_pids: [expect.any(Number)],
@@ -425,6 +433,33 @@ describe("Claude plugin daemon-restart self-heal", () => {
     expect(readFileSync(adapterLog, "utf8").match(/daemon generation changed/g)).toHaveLength(2)
     secondSuccessor.client.close()
   }, 45_000)
+
+  it.each([
+    ["a malformed parent PID", "not-a-pid", "invalid-provider-parent-launch"],
+    ["a dead parent PID", String(Number.MAX_SAFE_INTEGER), "dead-provider-parent-launch"],
+    ["a parent PID without a launch id", String(process.ppid), ""],
+  ])("fails loudly when a managed wrapper inherits %s", async (_label, providerParentPid, launchId) => {
+    const dbPath = join(tmpDir, "tribe-invalid-provider-parent.db")
+    const adapterLog = join(tmpDir, "adapter-invalid-provider-parent.log")
+
+    const plugin = spawnTestPlugin({
+      dbPath,
+      logPath: adapterLog,
+      name: PERSONA,
+      launchId,
+      providerParentPid,
+      delivery: "pull",
+      requireJoin: false,
+    })
+    let pluginStderr = ""
+    plugin.stderr.on("data", (chunk: Buffer | string) => {
+      pluginStderr += chunk.toString()
+    })
+
+    await waitFor(() => plugin.exitCode !== null, "invalid-provider-parent plugin exit", 2_000)
+    expect(plugin.exitCode).toBe(2)
+    expect(pluginStderr).toContain("valid provider-parent provenance")
+  })
 
   it("restores a runtime-joined name when a launch-less Claude wrapper re-execs", async () => {
     const dbPath = join(tmpDir, "tribe-runtime-name.db")

@@ -53,6 +53,12 @@ path;
 adapters never spawn adapters. The wrapper—and therefore Claude Code's stdio
 channel—stays in place while the child changes.
 
+Claim-bound Hab launches give the wrapper the complete launcher-minted launch
+id and harness parent PID. The wrapper validates that live provenance once and
+forwards it unchanged to every replacement child. Standalone plugin launches
+with no managed provenance use the wrapper's actual provider parent. The
+adapter-child marker is wrapper-owned and is never placed on Claude itself.
+
 Updating the plugin on disk does not rewrite code already evaluated inside a
 running pre-supervisor process. Such sessions still require `/mcp` reconnect or
 a host-session restart once; newly launched/current-code plugin processes then
