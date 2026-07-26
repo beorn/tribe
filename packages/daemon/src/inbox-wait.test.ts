@@ -394,6 +394,31 @@ describe("createInboxWaitManager", () => {
     })
   })
 
+  it("reports an actionable response found at the deadline as a wake, not an empty timeout", async () => {
+    vi.useFakeTimers()
+    const attention = {
+      actionable_unread: [{ id: "response-at-deadline", type: "response" }],
+      pending_balls: [],
+      pending_balls_summary: { total: 0, oldest_age_ms: 0 },
+    }
+    const manager = createInboxWaitManager(
+      (session) => status(session, 0),
+      () => attention,
+    )
+
+    const wait = manager.wait("@ci", "conn-1", 100)
+    vi.advanceTimersByTime(100)
+
+    await expect(wait).resolves.toMatchObject({
+      status: "woken",
+      session: "@ci",
+      unread_count: 0,
+      timed_out: false,
+      aborted: false,
+      attention,
+    })
+  })
+
   it("aborts pending waits when the connection closes", async () => {
     vi.useFakeTimers()
     const manager = createTestInboxWaitManager((session) => status(session, 0))
@@ -546,10 +571,7 @@ describe("createInboxWaitManager", () => {
       expect(readStatus(seat).unread_count).toBeGreaterThan(0)
       if (!wokenDespiteLag) manager.cancelConnection("conn-race")
       await wait
-      expect(
-        wokenDespiteLag,
-        "assign must wake a live waiter even when getUnreadDms lags at insert time",
-      ).toBe(true)
+      expect(wokenDespiteLag, "assign must wake a live waiter even when getUnreadDms lags at insert time").toBe(true)
     } finally {
       db.close()
       rmSync(tmpDir, { recursive: true, force: true })

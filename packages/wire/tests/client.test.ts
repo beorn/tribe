@@ -269,6 +269,28 @@ describe("callTribeTool", () => {
     expect(result).toMatchObject({ structuredContent: canonicalInboxWaitResult })
   })
 
+  it("normalizes a legacy timeout carrying actionable attention into a wake", async () => {
+    const legacyResult = {
+      ...canonicalInboxWaitResult,
+      attention: {
+        ...canonicalInboxWaitResult.attention,
+        actionable_unread: [{ id: "response-at-deadline", type: "response" }],
+      },
+    }
+    const client = { call: vi.fn(async () => legacyResult) } as unknown as DaemonClient
+
+    const result = await callTribeTool(client, "inbox.wait", { timeout_ms: 1_000 })
+
+    expect(result).toMatchObject({
+      structuredContent: {
+        status: "woken",
+        timed_out: false,
+        aborted: false,
+        attention: legacyResult.attention,
+      },
+    })
+  })
+
   it.each([
     { label: "incomplete raw object", value: { ok: true } },
     { label: "legacy wrapped content", value: { content: [{ type: "text", text: "{}" }] } },

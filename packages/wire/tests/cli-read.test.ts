@@ -416,10 +416,11 @@ describe("waitForInboxWithReconnect", () => {
     expect(result.waited_ms).toBe(750)
   })
 
-  test("preserves the daemon attention projection when the logical window times out", async () => {
+  test("reports preserved daemon attention as a wake when the logical window ends", async () => {
     let now = 0
+    const chunkCalls: number[] = []
     const attention = {
-      actionable_unread: [{ id: "request-visible" }],
+      actionable_unread: [{ id: "response-visible", type: "response" }],
       pending_balls: [{ request_id: "request-visible" }],
       pending_balls_summary: { total: 1, oldest_age_ms: 500 },
     }
@@ -429,32 +430,35 @@ describe("waitForInboxWithReconnect", () => {
       maxChunkMs: 30_000,
       now: () => now,
       call: async ({ timeoutMs }) => {
+        chunkCalls.push(timeoutMs)
         now += timeoutMs
         return {
-          status: "timeout",
+          status: "woken",
           session: "@ci",
           unread_count: 0,
           oldest_unread_age_min: 0,
           oldest_unread_ts: 0,
           waited_ms: timeoutMs,
           effective_timeout_ms: timeoutMs,
-          timed_out: true,
+          timed_out: false,
           aborted: false,
           attention,
         }
       },
     })
 
+    expect(chunkCalls).toEqual([30_000, 5_000])
     expect(result).toMatchObject({
+      status: "woken",
       waited_ms: 35_000,
       effective_timeout_ms: 35_000,
-      timed_out: true,
+      timed_out: false,
       aborted: false,
       attention,
     })
   })
 
-  test("preserves the last authoritative attention when the daemon becomes unavailable", async () => {
+  test("reports preserved authoritative attention as a wake when the daemon becomes unavailable", async () => {
     let now = 0
     let calls = 0
     const attention = {
@@ -495,9 +499,10 @@ describe("waitForInboxWithReconnect", () => {
 
     expect(calls).toBe(2)
     expect(result).toMatchObject({
+      status: "woken",
       waited_ms: 35_000,
       effective_timeout_ms: 35_000,
-      timed_out: true,
+      timed_out: false,
       aborted: false,
       attention,
     })

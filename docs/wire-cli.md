@@ -147,10 +147,13 @@ daemon disconnects/unavailability within the overall timeout, so a single
 logical wait survives a daemon hot-reload mid-poll. The logical window caps at
 30 minutes; every result reports the applied value as `effective_timeout_ms`.
 The `status` discriminant is `woken`, `timeout`, or `aborted`; the legacy
-boolean flags remain for compatibility. Before waiting, the CLI verifies the
-daemon's protocol version. A stale daemon is refused with the client/daemon
-version plus its running, on-disk, and superproject pins instead of attempting
-to parse a stale reply shape.
+boolean flags remain for compatibility. `timeout` means the full logical
+deadline elapsed with no actionable content in the final `attention`
+projection. A quiet response present at that deadline produces `woken` with
+`timed_out: false`, while remaining quiet during the window. Before waiting,
+the CLI verifies the daemon's protocol version. A stale daemon is refused with
+the client/daemon version plus its running, on-disk, and superproject pins
+instead of attempting to parse a stale reply shape.
 By default only actionable messages wake the wait. Opt into a validated
 `response` or `status` for one of the waiting session's own tracked requests
 with `--wake-on-correlated-reply`.

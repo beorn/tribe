@@ -432,7 +432,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             status: {
               type: "string",
               enum: ["woken", "timeout", "aborted", "host_cut"],
-              description: "Terminal reason for the MCP wait or its preflight refusal.",
+              description:
+                "Terminal outcome for the wait or its preflight refusal; timeout means the final attention projection is empty.",
             },
             session: { type: "string", description: "The session that was waited on." },
             unread_count: { type: "number", description: "Actionable unread direct-message count at return time." },
@@ -446,7 +447,10 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
               type: "number",
               description: "The applied timeout after Tribe's maximum-window cap.",
             },
-            timed_out: { type: "boolean", description: "True when the timeout elapsed before a DM arrived." },
+            timed_out: {
+              type: "boolean",
+              description: "True only when the timeout elapsed and the final attention projection is empty.",
+            },
             aborted: { type: "boolean", description: "True when the connection closed before a DM arrived." },
             attention: ATTENTION_SCHEMA,
             requested_ms: { type: "number", description: "Requested MCP wait when status=host_cut." },

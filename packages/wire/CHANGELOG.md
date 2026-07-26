@@ -31,6 +31,10 @@
 
 ### Fixed
 
+- Reconcile inbox-wait terminal outcomes with the final attention projection.
+  A deadline carrying actionable attention now reports `status: "woken"` and
+  `timed_out: false`; quiet responses still remain quiet until the caller's
+  full logical wait window ends.
 - Survive rapid daemon-generation bursts in the stable plugin supervisor with
   bounded exponential replacement backoff and a stability reset. `members`
   and `health` now expose missing durable-launch transports in-band without

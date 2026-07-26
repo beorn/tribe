@@ -37,6 +37,7 @@ import { Command, int } from "@silvery/commander"
 import { cliOption, visibleCliProjectionForMcp } from "../command-descriptors.ts"
 import {
   deriveInboxWaitCallTimeoutMs,
+  normalizeInboxWaitResult,
   parseInboxWaitResult,
   resolveInboxWaitControls,
   type InboxWaitResult,
@@ -789,6 +790,7 @@ async function cmdInboxDrain(opts: { session?: string; limit?: number; json?: bo
 }
 
 type InboxWaitErrorKind = "transport-close" | "daemon-unavailable" | null
+const DEFAULT_INBOX_WAIT_WAKE_TYPES = new Set(["request", "query", "assign", "verdict"])
 
 function inboxWaitErrorKind(err: unknown): InboxWaitErrorKind {
   const code = (err as NodeJS.ErrnoException | undefined)?.code
@@ -804,6 +806,15 @@ function inboxWaitErrorKind(err: unknown): InboxWaitErrorKind {
 
 export function isRetryableInboxWaitError(err: unknown): boolean {
   return inboxWaitErrorKind(err) !== null
+}
+
+function endsLogicalInboxWait(result: InboxWaitResult, wakeOnCorrelatedReply: boolean): boolean {
+  if (result.unread_count > 0) return true
+  if (result.aborted || result.timed_out) return false
+  if (wakeOnCorrelatedReply || result.attention.actionable_unread.length === 0) return true
+  return result.attention.actionable_unread.some(
+    (event) => typeof event.type === "string" && DEFAULT_INBOX_WAIT_WAKE_TYPES.has(event.type),
+  )
 }
 
 function totalWaited(
@@ -830,16 +841,18 @@ function logicalTimeoutInboxWaitResult(
     if (lastRetryableError !== undefined) throw lastRetryableError
     throw new Error("Inbox wait ended without an authoritative daemon result")
   }
-  return totalWaited(
-    {
-      ...latest,
-      status: "timeout",
-      timed_out: true,
-      aborted: false,
-    },
-    startedAt,
-    now,
-    effectiveTimeoutMs,
+  return normalizeInboxWaitResult(
+    totalWaited(
+      {
+        ...latest,
+        status: "timeout",
+        timed_out: true,
+        aborted: false,
+      },
+      startedAt,
+      now,
+      effectiveTimeoutMs,
+    ),
   )
 }
 
@@ -884,7 +897,11 @@ export async function waitForInboxWithReconnect(opts: {
       })
       latestResult = result
       lastRetryableError = undefined
-      if (result.unread_count > 0 || (!result.timed_out && !result.aborted)) {
+      // A daemon chunk can reach its own deadline with a quiet response in
+      // attention and normalize that chunk to "woken". Keep the response
+      // quiet until the caller's full logical window unless reply wake was
+      // explicitly enabled; default actionable types still return at once.
+      if (endsLogicalInboxWait(result, controls.wakeOnCorrelatedReply)) {
         return totalWaited(result, startedAt, now, controls.timeoutMs)
       }
       if (result.aborted || result.timed_out) {
