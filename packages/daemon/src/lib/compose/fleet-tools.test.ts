@@ -1,7 +1,7 @@
 /**
  * fleetTools registry wrappers (21743) — inject run(), no live tent.
  */
-import { describe, expect, test } from "bun:test"
+import { describe, expect, test } from "vitest"
 import { fleetTools } from "./fleet-tools.ts"
 
 describe("fleetTools", () => {
@@ -62,14 +62,7 @@ describe("fleetTools", () => {
     })
     const wake = tools.find((t) => t.name === "fleet.wake")!
     await wake.handler({ apply: true, notify: true, protect: "@dev/9" }, {})
-    expect(calls[0]).toEqual([
-      "fleet-wake",
-      "--json",
-      "--apply",
-      "--notify",
-      "--protect",
-      "@dev/9",
-    ])
+    expect(calls[0]).toEqual(["fleet-wake", "--json", "--apply", "--notify", "--protect", "@dev/9"])
   })
 
   test("missing JSON fails loud", async () => {

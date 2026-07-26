@@ -387,9 +387,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
           TRIBE_REQUIRE_JOIN: "0",
           TRIBE_TAKEOVER: opts.takeover === false ? "0" : "1",
           TRIBE_PLUGIN_ADAPTER_CHILD: "",
-          // The plugin wrapper must overwrite stale inherited provenance;
-          // direct adapters must ignore it without the private child marker.
-          TRIBE_PLUGIN_PROVIDER_PARENT_PID: "1",
+          // A managed plugin wrapper preserves its explicit provider parent;
+          // direct adapters ignore stale provenance without the child marker.
+          TRIBE_PLUGIN_PROVIDER_PARENT_PID: opts.throughPluginSupervisor ? String(process.pid) : "1",
           ...(opts.distinctProviderParent
             ? {
                 // Hostile/unsanitized nested launch: both identity inputs are
@@ -499,7 +499,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       delivery: "push",
       filterMode: "focus",
     })
-    await callLaunchTool(fleet, 2, "members", {})
+    await callLaunchToolWhenRegistered(fleet, 2, "members", {})
     const beforeAmbient = sessionDeliveryOffsets(dbPath, "@fleet")
 
     const sender = await connectToDaemon(socketPath)

@@ -17,6 +17,11 @@ import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
 
 const PLUGIN_SERVER = resolve(dirname(fileURLToPath(import.meta.url)), "../../../plugins/claude/server.ts")
 const BUN_BIN = process.versions.bun ? process.execPath : "bun"
+const STANDALONE_PLUGIN_ENV = {
+  TRIBE_LAUNCH_ID: "",
+  TRIBE_PLUGIN_ADAPTER_CHILD: "",
+  TRIBE_PLUGIN_PROVIDER_PARENT_PID: "",
+}
 
 function spawnSkewedDaemon(socketPath: string): Promise<{ server: Server; clients: Socket[] }> {
   const clients: Socket[] = []
@@ -137,7 +142,13 @@ describe("stdio adapter — protocol version skew", () => {
     daemon = await spawnSkewedDaemon(socketPath)
     child = spawn(BUN_BIN, [PLUGIN_SERVER, "--socket", socketPath, "--name", "skew-test"], {
       cwd: tmpDir,
-      env: { ...process.env, TRIBE_DELIVERY: "pull", DEBUG_LOG: logPath, LOG_LEVEL: "warn" },
+      env: {
+        ...process.env,
+        ...STANDALONE_PLUGIN_ENV,
+        TRIBE_DELIVERY: "pull",
+        DEBUG_LOG: logPath,
+        LOG_LEVEL: "warn",
+      },
       stdio: ["pipe", "pipe", "pipe"],
     }) as ChildProcessWithoutNullStreams
     let stderr = ""
@@ -168,7 +179,7 @@ describe("stdio adapter — protocol version skew", () => {
     daemon = generationDaemon
     child = spawn(BUN_BIN, [PLUGIN_SERVER, "--socket", socketPath, "--name", "generation-test"], {
       cwd: tmpDir,
-      env: { ...process.env, TRIBE_DELIVERY: "pull", LOG_LEVEL: "silent" },
+      env: { ...process.env, ...STANDALONE_PLUGIN_ENV, TRIBE_DELIVERY: "pull", LOG_LEVEL: "silent" },
       stdio: ["pipe", "pipe", "pipe"],
     }) as ChildProcessWithoutNullStreams
 
