@@ -433,14 +433,58 @@ describe("waitForInboxWithReconnect", () => {
         chunkCalls.push(timeoutMs)
         now += timeoutMs
         return {
-          status: "woken",
+          status: "timeout",
           session: "@ci",
           unread_count: 0,
           oldest_unread_age_min: 0,
           oldest_unread_ts: 0,
           waited_ms: timeoutMs,
           effective_timeout_ms: timeoutMs,
-          timed_out: false,
+          timed_out: true,
+          aborted: false,
+          attention,
+        }
+      },
+    })
+
+    expect(chunkCalls).toEqual([30_000, 5_000])
+    expect(result).toMatchObject({
+      status: "woken",
+      waited_ms: 35_000,
+      effective_timeout_ms: 35_000,
+      timed_out: false,
+      aborted: false,
+      attention,
+    })
+  })
+
+  test("does not treat an unrelated deadline response as a correlated wake between logical chunks", async () => {
+    let now = 0
+    const chunkCalls: number[] = []
+    const attention = {
+      actionable_unread: [{ id: "unrelated-response", type: "response" }],
+      pending_balls: [],
+      pending_balls_summary: { total: 0, oldest_age_ms: 0 },
+    }
+    const result = await waitForInboxWithReconnect({
+      session: "@ci",
+      timeoutMs: 35_000,
+      maxChunkMs: 30_000,
+      wakeOnCorrelatedReply: true,
+      now: () => now,
+      call: async ({ timeoutMs, wakeOnCorrelatedReply }) => {
+        expect(wakeOnCorrelatedReply).toBe(true)
+        chunkCalls.push(timeoutMs)
+        now += timeoutMs
+        return {
+          status: "timeout",
+          session: "@ci",
+          unread_count: 0,
+          oldest_unread_age_min: 0,
+          oldest_unread_ts: 0,
+          waited_ms: timeoutMs,
+          effective_timeout_ms: timeoutMs,
+          timed_out: true,
           aborted: false,
           attention,
         }

@@ -394,7 +394,7 @@ describe("createInboxWaitManager", () => {
     })
   })
 
-  it("reports an actionable response found at the deadline as a wake, not an empty timeout", async () => {
+  it("keeps deadline attention on a raw timeout so an outer logical wait can continue", async () => {
     vi.useFakeTimers()
     const attention = {
       actionable_unread: [{ id: "response-at-deadline", type: "response" }],
@@ -410,10 +410,10 @@ describe("createInboxWaitManager", () => {
     vi.advanceTimersByTime(100)
 
     await expect(wait).resolves.toMatchObject({
-      status: "woken",
+      status: "timeout",
       session: "@ci",
       unread_count: 0,
-      timed_out: false,
+      timed_out: true,
       aborted: false,
       attention,
     })

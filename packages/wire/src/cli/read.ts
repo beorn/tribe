@@ -790,7 +790,6 @@ async function cmdInboxDrain(opts: { session?: string; limit?: number; json?: bo
 }
 
 type InboxWaitErrorKind = "transport-close" | "daemon-unavailable" | null
-const DEFAULT_INBOX_WAIT_WAKE_TYPES = new Set(["request", "query", "assign", "verdict"])
 
 function inboxWaitErrorKind(err: unknown): InboxWaitErrorKind {
   const code = (err as NodeJS.ErrnoException | undefined)?.code
@@ -806,15 +805,6 @@ function inboxWaitErrorKind(err: unknown): InboxWaitErrorKind {
 
 export function isRetryableInboxWaitError(err: unknown): boolean {
   return inboxWaitErrorKind(err) !== null
-}
-
-function endsLogicalInboxWait(result: InboxWaitResult, wakeOnCorrelatedReply: boolean): boolean {
-  if (result.unread_count > 0) return true
-  if (result.aborted || result.timed_out) return false
-  if (wakeOnCorrelatedReply || result.attention.actionable_unread.length === 0) return true
-  return result.attention.actionable_unread.some(
-    (event) => typeof event.type === "string" && DEFAULT_INBOX_WAIT_WAKE_TYPES.has(event.type),
-  )
 }
 
 function totalWaited(
@@ -897,11 +887,7 @@ export async function waitForInboxWithReconnect(opts: {
       })
       latestResult = result
       lastRetryableError = undefined
-      // A daemon chunk can reach its own deadline with a quiet response in
-      // attention and normalize that chunk to "woken". Keep the response
-      // quiet until the caller's full logical window unless reply wake was
-      // explicitly enabled; default actionable types still return at once.
-      if (endsLogicalInboxWait(result, controls.wakeOnCorrelatedReply)) {
+      if (result.unread_count > 0 || (!result.timed_out && !result.aborted)) {
         return totalWaited(result, startedAt, now, controls.timeoutMs)
       }
       if (result.aborted || result.timed_out) {
@@ -999,7 +985,7 @@ async function cmdInboxWait(opts: {
     return
   }
   if (result.unread_count === 0) {
-    console.log(`${result.session}: correlated tracked-request reply arrived.`)
+    console.log(`${result.session}: actionable inbox attention is available.`)
     return
   }
   const n = result.unread_count

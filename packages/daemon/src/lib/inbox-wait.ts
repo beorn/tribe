@@ -1,5 +1,5 @@
 import type { MessageInsertedInfo } from "./context.ts"
-import { normalizeInboxWaitResult, type InboxWaitResult as WireInboxWaitResult } from "tribe-wire"
+import type { InboxWaitResult as WireInboxWaitResult } from "tribe-wire"
 import { ACTIONABLE_TYPES_SET as ACTIONABLE_TYPES } from "./database.ts"
 
 const CORRELATED_REPLY_TYPES = new Set(["response", "status"])
@@ -32,7 +32,7 @@ export function createInboxWaitManager(
     effectiveTimeoutMs: number,
     flags: { timedOut: boolean; aborted: boolean },
   ): WireInboxWaitResult {
-    return normalizeInboxWaitResult({
+    return {
       status: flags.aborted ? "aborted" : flags.timedOut ? "timeout" : "woken",
       ...status,
       waited_ms: waitedMs,
@@ -40,7 +40,7 @@ export function createInboxWaitManager(
       timed_out: flags.timedOut,
       aborted: flags.aborted,
       attention: readAttention(status.session),
-    })
+    }
   }
 
   function settle(waiter: Waiter, flags: { timedOut: boolean; aborted: boolean }): void {
