@@ -170,7 +170,8 @@ describe("stdio adapter — protocol version skew", () => {
 
     await waitFor(() => child?.exitCode !== null, 8_000, "adapter exit")
     expect(child.exitCode).toBe(2)
-    expect(stderr).toContain("restart the host session or reinstall the Tribe plugin")
+    expect(stderr).toContain("run /mcp reconnect after repairing the reported cause")
+    expect(stderr).not.toContain("restart the host session")
   }, 20_000)
 
   it("re-execs current disk code when a reconnect observes a new daemon pid", async () => {

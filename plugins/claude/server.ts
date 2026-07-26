@@ -1,11 +1,10 @@
 #!/usr/bin/env bun
 /**
- * Tribe plugin server — thin wrapper.
+ * Tribe plugin server — stable adapter supervisor.
  *
- * The MCP server runtime lives in `tribe-wire/stdio`. This file
- * is the plugin's invocation point: it imports and executes the stdio
- * adapter, which runs as a module-level bootstrap (no exported entry
- * function — the import has the side-effect).
+ * The MCP server runtime lives in `tribe-wire/stdio`. This file is the plugin's
+ * stable invocation point: it owns Claude Code's stdio channel and supervises
+ * one adapter child, replacing that child without replacing the host channel.
  *
  * Why this exists: Claude Code's `.mcp.json` `command` runs a single
  * script. Pointing it at `node_modules/tribe-wire/.../stdio-adapter.mjs`
@@ -32,10 +31,14 @@ const PROVIDER_PARENT_REMEDY =
 const LEGACY_PARENT_WARNING =
   "tribe plugin wrapper: managed launch supplied no provider-parent PID; falling back to the wrapper's real provider parent. Relaunch the host session to restore full launch provenance."
 
-function supervisedIdentityName(message: unknown): string | undefined {
+function supervisedIdentity(message: unknown): { name: string; joined: boolean } | undefined {
   if (typeof message !== "object" || message === null || !("tribePluginIdentity" in message)) return undefined
-  const name = (message as { tribePluginIdentity?: unknown }).tribePluginIdentity
-  return typeof name === "string" && isTribeNameShape(name) ? name : undefined
+  const identity = (message as { tribePluginIdentity?: unknown }).tribePluginIdentity
+  if (typeof identity !== "object" || identity === null) return undefined
+  const { name, joined } = identity as { name?: unknown; joined?: unknown }
+  return typeof name === "string" && isTribeNameShape(name) && typeof joined === "boolean"
+    ? { name, joined }
+    : undefined
 }
 
 function waitForExit(
@@ -106,7 +109,7 @@ async function superviseAdapter(): Promise<void> {
   let stopping = false
   let consecutiveReexecs = 0
   let resumeJoined = false
-  let joinedIdentityReported = false
+  let reportedJoined = false
   const launchName = process.env.TRIBE_NAME?.trim()
   let resumeName = launchName && isTribeNameShape(launchName) ? launchName : undefined
   const forward = (signal: NodeJS.Signals) => {
@@ -130,10 +133,10 @@ async function superviseAdapter(): Promise<void> {
       },
     })
     active.on("message", (message) => {
-      const name = supervisedIdentityName(message)
-      if (name !== undefined) {
-        resumeName = name
-        joinedIdentityReported = true
+      const identity = supervisedIdentity(message)
+      if (identity !== undefined) {
+        resumeName = identity.name
+        reportedJoined = identity.joined
       }
     })
     const result = await waitForExit(active)
@@ -155,9 +158,10 @@ async function superviseAdapter(): Promise<void> {
     } else {
       // The wrapper is the provider's stable stdio endpoint. An unexpected
       // adapter crash must not tear that endpoint down and require a human
-      // /mcp reconnect. Preserve a confirmed joined identity and apply the
-      // same bounded backoff used for daemon-generation replacements.
-      resumeJoined = joinedIdentityReported
+      // /mcp reconnect. Preserve the adapter's last authoritative join state
+      // and apply the same bounded backoff used for daemon-generation
+      // replacements.
+      resumeJoined = reportedJoined
     }
     const decision = evaluateAdapterRestart(consecutiveReexecs, Date.now() - startedAt, maxConsecutiveReexecs)
     consecutiveReexecs = decision.consecutiveReexecs

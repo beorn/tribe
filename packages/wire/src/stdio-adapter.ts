@@ -126,7 +126,7 @@ const PLUGIN_PROVIDER_PARENT_PID_RAW = process.env.TRIBE_PLUGIN_PROVIDER_PARENT_
 
 function reportSupervisedIdentity(name: string): void {
   if (!PLUGIN_ADAPTER_CHILD || !isTribeNameShape(name)) return
-  process.send?.({ tribePluginIdentity: name })
+  process.send?.({ tribePluginIdentity: { name, joined } })
 }
 
 function resolveLaunchParentPid(): number {

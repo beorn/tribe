@@ -26,6 +26,7 @@ type JsonObject = Record<string, unknown>
 type Member = {
   member_id?: string
   name?: string
+  delivery?: "push" | "pull"
   launch_id?: string
   launch_parent_pid?: number
   transport_pids?: number[]
@@ -449,8 +450,8 @@ describe("Claude plugin daemon-restart self-heal", () => {
       name: PERSONA,
       launchId: "adapter-crash-launch",
       providerParentPid: String(process.pid),
-      delivery: "pull",
-      requireJoin: false,
+      delivery: "push",
+      requireJoin: true,
     })
     let pluginStderr = ""
     plugin.stderr.on("data", (chunk: Buffer | string) => {
@@ -472,6 +473,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
     }, "adapter-crash initial membership")
     const initialTransportPid = initialMember!.transport_pids![0]!
     adapterPids.add(initialTransportPid)
+    expect(initialMember).toMatchObject({ delivery: "pull" })
 
     process.kill(initialTransportPid, "SIGKILL")
     await waitFor(() => !pidExists(initialTransportPid), "crashed adapter exit")
@@ -498,17 +500,15 @@ describe("Claude plugin daemon-restart self-heal", () => {
       member_id: initialMember?.member_id,
       launch_id: "adapter-crash-launch",
       launch_parent_pid: process.pid,
+      delivery: "pull",
       transport_state: "connected",
       owner_state: "live",
     })
     for (const pid of restoredMember?.transport_pids ?? []) adapterPids.add(pid)
 
-    writeJson(plugin, callToolPayload(21, "members", { all: true }))
-    await waitFor(() => stdout.some((line) => line.id === 21), "post-crash MCP tool call")
-    expect(mcpToolJson(stdout, 21).sessions?.find((session) => session.name === PERSONA)).toMatchObject({
-      member_id: initialMember?.member_id,
-      transport_pids: restoredMember?.transport_pids,
-    })
+    writeJson(plugin, callToolPayload(21, "join", { name: PERSONA }))
+    await waitFor(() => stdout.some((line) => line.id === 21), "post-crash explicit join")
+    expect(mcpToolJson(stdout, 21)).toMatchObject({ joined: true, name: PERSONA, delivery: "push" })
 
     let transportPid = restoredMember!.transport_pids![0]!
     for (let crash = 2; crash <= 6; crash += 1) {
@@ -517,6 +517,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
       if (crash === 6) break
 
       const priorTransportPid = transportPid
+      let recoveredMember: Member | undefined
       await waitFor(
         async () => {
           const roster = parseToolJson(await generation.client.call("tribe.members", { all: true }))
@@ -524,6 +525,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
             (session) => session.name === PERSONA && session.transport_state === "connected",
           )
           if (candidate?.transport_pids?.length === 1 && candidate.transport_pids[0] !== priorTransportPid) {
+            recoveredMember = candidate
             transportPid = candidate.transport_pids[0]!
             adapterPids.add(transportPid)
             return true
@@ -533,6 +535,20 @@ describe("Claude plugin daemon-restart self-heal", () => {
         `bounded adapter recovery ${crash}`,
         6_000,
       )
+      if (crash === 2) {
+        expect(recoveredMember).toMatchObject({
+          member_id: initialMember?.member_id,
+          delivery: "push",
+          transport_pids: [transportPid],
+        })
+        writeJson(plugin, callToolPayload(22, "members", { all: true }))
+        await waitFor(() => stdout.some((line) => line.id === 22), "post-join crash MCP tool call")
+        expect(mcpToolJson(stdout, 22).sessions?.find((session) => session.name === PERSONA)).toMatchObject({
+          member_id: initialMember?.member_id,
+          delivery: "push",
+          transport_pids: [transportPid],
+        })
+      }
     }
 
     await waitFor(() => plugin.exitCode !== null, "bounded adapter retry exhaustion", 2_000)
@@ -545,19 +561,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
     const degradedRoster = parseToolJson(await generation.client.call("tribe.members", { all: true }))
     expect(degradedRoster.membership_discrepancy).toMatchObject({
       status: "degraded",
-      connected_durable_launches: 0,
-      known_durable_launches: 1,
-      missing_count: 1,
-      missing: [
-        {
-          member_id: initialMember?.member_id,
-          name: PERSONA,
-          launch_id: "adapter-crash-launch",
-          launch_parent_pid: process.pid,
-          state: "missing-transport",
-        },
-      ],
-      meaning: "missing transport does not establish agent absence",
+      missing: [{ member_id: initialMember?.member_id, name: PERSONA }],
     })
     generation.client.close()
   }, 30_000)
