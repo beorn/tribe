@@ -389,10 +389,10 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
     ).toBe(1)
   })
 
-  it("automatically runs the same reaper after startup reconnect grace, then on the existing cadence", async () => {
+  it("automatically reaps the incident junk rows after startup reconnect grace and on the existing cadence", async () => {
     vi.useFakeTimers()
     vi.setSystemTime(10_000)
-    addSession(db, stmts, "auto-stale", "legacy-auto-stale")
+    addSession(db, stmts, "incident-silvercode-30852", "silvercode-30852")
     const scope = createScope("stale-transport-runtime-test")
     const registry = {
       clients: new Map(),
@@ -429,17 +429,21 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
     })(shape as never)
 
     await vi.advanceTimersByTimeAsync(99)
-    expect(db.prepare("SELECT id FROM sessions WHERE id = 'auto-stale'").get()).toEqual({ id: "auto-stale" })
+    expect(db.prepare("SELECT id FROM sessions WHERE id = 'incident-silvercode-30852'").get()).toEqual({
+      id: "incident-silvercode-30852",
+    })
     await vi.advanceTimersByTimeAsync(1)
-    expect(db.prepare("SELECT id FROM sessions WHERE id = 'auto-stale'").get()).toBeNull()
-    expect(registry.forgetTransportSessions).toHaveBeenCalledWith(["auto-stale"])
+    expect(db.prepare("SELECT id FROM sessions WHERE id = 'incident-silvercode-30852'").get()).toBeNull()
+    expect(registry.forgetTransportSessions).toHaveBeenCalledWith(["incident-silvercode-30852"])
 
-    addSession(db, stmts, "cadence-stale", "legacy-cadence-stale")
+    addSession(db, stmts, "incident-session-1", "session 1")
     await vi.advanceTimersByTimeAsync(899)
-    expect(db.prepare("SELECT id FROM sessions WHERE id = 'cadence-stale'").get()).toEqual({ id: "cadence-stale" })
+    expect(db.prepare("SELECT id FROM sessions WHERE id = 'incident-session-1'").get()).toEqual({
+      id: "incident-session-1",
+    })
     await vi.advanceTimersByTimeAsync(1)
-    expect(db.prepare("SELECT id FROM sessions WHERE id = 'cadence-stale'").get()).toBeNull()
-    expect(registry.forgetTransportSessions).toHaveBeenLastCalledWith(["cadence-stale"])
+    expect(db.prepare("SELECT id FROM sessions WHERE id = 'incident-session-1'").get()).toBeNull()
+    expect(registry.forgetTransportSessions).toHaveBeenLastCalledWith(["incident-session-1"])
     await scope[Symbol.asyncDispose]()
   })
 })

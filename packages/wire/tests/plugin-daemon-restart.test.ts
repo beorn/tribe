@@ -32,8 +32,23 @@ type Member = {
   transport_state?: "connected" | "disconnected"
   owner_state?: "live" | "dead" | "unknown"
 }
+type MembershipDiscrepancy = {
+  status?: "degraded"
+  connected_durable_launches?: number
+  known_durable_launches?: number
+  missing_count?: number
+  missing?: Array<{
+    member_id?: string
+    name?: string
+    launch_id?: string
+    launch_parent_pid?: number
+    state?: "missing-transport"
+  }>
+  meaning?: string
+}
 type ToolJson = {
   sessions?: Member[]
+  membership_discrepancy?: MembershipDiscrepancy
   joined?: boolean
   name?: string
   delivery?: "push" | "pull"
@@ -474,7 +489,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
     successor.client.close()
   }, 35_000)
 
-  it("returns every registered seat across a rapid two-generation restart burst", async () => {
+  it("after an N-seat restart, returns every live seat and reports any missing seat as a discrepancy", async () => {
     const dbPath = join(tmpDir, "tribe-multi.db")
     const daemonLog = join(tmpDir, "daemon-multi.log")
     spawnTestDaemon(dbPath, daemonLog)
@@ -519,7 +534,14 @@ describe("Claude plugin daemon-restart self-heal", () => {
     let priorTransportPids = new Map(
       personas.map((persona) => [persona, initialMembers.get(persona)!.transport_pids![0]!]),
     )
+    const withheldPersona = personas[2]!
     for (let restart = 1; restart <= 2; restart += 1) {
+      const expectedPersonas = restart === 1 ? personas : personas.filter((persona) => persona !== withheldPersona)
+      if (restart === 2) {
+        const withheld = harnesses.find(({ persona }) => persona === withheldPersona)!
+        await terminateTestProcess(withheld.child.pid!)
+      }
+
       const priorDaemonPid = generation.pid
       await generation.client.call("tribe.reload", { reason: `22322 multi-seat restart ${restart}` })
       generation.client.close()
@@ -529,7 +551,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
       const rejoined = new Map<string, Member>()
       await waitFor(async () => {
         const roster = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
-        for (const persona of personas) {
+        for (const persona of expectedPersonas) {
           const candidate = roster.find(
             (session) =>
               session.name === persona &&
@@ -539,17 +561,41 @@ describe("Claude plugin daemon-restart self-heal", () => {
           )
           if (candidate) rejoined.set(persona, candidate)
         }
-        return rejoined.size === personas.length
+        return rejoined.size === expectedPersonas.length
       }, `all multi-seat memberships after daemon restart ${restart}`)
 
-      for (const persona of personas) {
+      for (const persona of expectedPersonas) {
         const member = rejoined.get(persona)!
         expect(member.member_id).toBe(initialMembers.get(persona)?.member_id)
         expect(member.launch_parent_pid).toBe(initialMembers.get(persona)?.launch_parent_pid)
         for (const pid of member.transport_pids ?? []) adapterPids.add(pid)
       }
-      priorTransportPids = new Map(personas.map((persona) => [persona, rejoined.get(persona)!.transport_pids![0]!]))
-      expect(harnesses.map(({ child }) => child.exitCode)).toEqual([null, null, null])
+      priorTransportPids = new Map(
+        expectedPersonas.map((persona) => [persona, rejoined.get(persona)!.transport_pids![0]!]),
+      )
+      expect(harnesses.filter(({ persona }) => persona !== withheldPersona).map(({ child }) => child.exitCode)).toEqual(
+        [null, null],
+      )
+
+      if (restart === 2) {
+        const roster = parseToolJson(await generation.client.call("tribe.members", { all: true }))
+        expect(roster.membership_discrepancy).toMatchObject({
+          status: "degraded",
+          connected_durable_launches: 2,
+          known_durable_launches: 3,
+          missing_count: 1,
+          missing: [
+            {
+              member_id: initialMembers.get(withheldPersona)?.member_id,
+              name: withheldPersona,
+              launch_id: "restart-multi-2",
+              launch_parent_pid: initialMembers.get(withheldPersona)?.launch_parent_pid,
+              state: "missing-transport",
+            },
+          ],
+          meaning: "missing transport does not establish agent absence",
+        })
+      }
     }
 
     const finalRoster = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
@@ -558,7 +604,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
         .filter((session) => session.transport_state === "connected")
         .map((session) => session.name)
         .sort(),
-    ).toEqual([...personas].sort())
+    ).toEqual(personas.filter((persona) => persona !== withheldPersona).sort())
     generation.client.close()
   }, 45_000)
 })
