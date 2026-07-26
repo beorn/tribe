@@ -15,6 +15,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process"
 import { fileURLToPath } from "node:url"
+import { isTribeNameShape } from "tribe-wire/lib/persona-name"
 import { evaluateAdapterReexec } from "./supervisor-policy.ts"
 
 const PLUGIN_CHILD = "TRIBE_PLUGIN_ADAPTER_CHILD"
@@ -26,6 +27,12 @@ const GENERATION_REEXEC_OFFSET = 2
 const LAST_REEXEC_EXIT_CODE = REEXEC_EXIT_CODE + GENERATION_REEXEC_OFFSET + REEXEC_JOINED_OFFSET
 const REMEDY =
   "tribe plugin reconnect failed after current-disk re-exec; restart the host session or reinstall the Tribe plugin."
+
+function supervisedIdentityName(message: unknown): string | undefined {
+  if (typeof message !== "object" || message === null || !("tribePluginIdentity" in message)) return undefined
+  const name = (message as { tribePluginIdentity?: unknown }).tribePluginIdentity
+  return typeof name === "string" && isTribeNameShape(name) ? name : undefined
+}
 
 function waitForExit(child: ChildProcess): Promise<{ code: number | null; error?: Error }> {
   return new Promise((resolve) => {
@@ -47,6 +54,8 @@ async function superviseAdapter(): Promise<void> {
   let stopping = false
   let consecutiveReexecs = 0
   let resumeJoined = false
+  const launchName = process.env.TRIBE_NAME?.trim()
+  let resumeName = launchName && isTribeNameShape(launchName) ? launchName : undefined
   const forward = (signal: NodeJS.Signals) => {
     stopping = true
     active?.kill(signal)
@@ -56,15 +65,20 @@ async function superviseAdapter(): Promise<void> {
 
   while (!stopping) {
     const startedAt = Date.now()
+    const canResumeJoined = resumeJoined && resumeName !== undefined
     active = spawn(process.execPath, [fileURLToPath(import.meta.url), ...process.argv.slice(2)], {
-      stdio: "inherit",
+      stdio: ["inherit", "inherit", "inherit", "ipc"],
       env: {
         ...process.env,
         [PLUGIN_CHILD]: "1",
         [PLUGIN_PROVIDER_PARENT_PID]: String(providerParentPid),
         TRIBE_PLUGIN_REEXEC_EXIT_CODE: String(REEXEC_EXIT_CODE),
-        ...(resumeJoined ? { [PLUGIN_RESUME_JOINED]: "1" } : {}),
+        ...(canResumeJoined ? { [PLUGIN_RESUME_JOINED]: "1", TRIBE_NAME: resumeName } : {}),
       },
+    })
+    active.on("message", (message) => {
+      const name = supervisedIdentityName(message)
+      if (name !== undefined) resumeName = name
     })
     const result = await waitForExit(active)
     active = null

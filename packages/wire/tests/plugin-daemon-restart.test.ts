@@ -426,6 +426,97 @@ describe("Claude plugin daemon-restart self-heal", () => {
     secondSuccessor.client.close()
   }, 45_000)
 
+  it("restores a runtime-joined name when a launch-less Claude wrapper re-execs", async () => {
+    const dbPath = join(tmpDir, "tribe-runtime-name.db")
+    const daemonLog = join(tmpDir, "daemon-runtime-name.log")
+    const adapterLog = join(tmpDir, "adapter-runtime-name.log")
+    spawnTestDaemon(dbPath, daemonLog)
+    await waitFor(() => existsSync(socketPath), "runtime-name initial daemon socket")
+    const firstDaemon = await connectToGeneration(socketPath)
+    daemonPids.add(firstDaemon.pid)
+
+    // Standalone Claude plugin installs do not have Ag's durable launch tuple.
+    // Their model-issued join is therefore the only canonical identity source,
+    // and the wrapper must carry that effective name across child re-exec.
+    const plugin = spawn(BUN_BIN, [PLUGIN_SERVER, "--socket", socketPath], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        CLAUDE_SESSION_ID: "22322-launchless-runtime-name",
+        TRIBE_NAME: "",
+        TRIBE_LAUNCH_ID: "",
+        TRIBE_DELIVERY: "push",
+        TRIBE_TAKEOVER: "1",
+        TRIBE_NO_PLUGINS: "1",
+        TRIBE_NO_AUTORELOAD: "1",
+        DEBUG_LOG: adapterLog,
+        LOG_FILE: adapterLog,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    }) as ChildProcessWithoutNullStreams
+    plugins.add(plugin)
+    let pluginStderr = ""
+    plugin.stderr.on("data", (chunk: Buffer | string) => {
+      pluginStderr += chunk.toString()
+    })
+    const stdout = collectJsonLines(plugin)
+    writeJson(plugin, initializePayload(20))
+    await waitFor(() => stdout.some((line) => line.id === 20), "runtime-name plugin initialize")
+    writeJson(plugin, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await waitFor(async () => {
+      const roster = parseToolJson(await firstDaemon.client.call("tribe.members", { all: true })).sessions ?? []
+      return roster.some(
+        (session) =>
+          session.name?.startsWith("unknown-") === true &&
+          session.transport_state === "connected" &&
+          session.transport_pids?.length === 1,
+      )
+    }, "launch-less initial registration")
+
+    writeJson(plugin, callToolPayload(21, "join", { name: "@cto" }))
+    await waitFor(() => stdout.some((line) => line.id === 21), "runtime-name explicit join")
+    expect(mcpToolJson(stdout, 21)).toMatchObject({ joined: true, name: "@cto", delivery: "push" })
+
+    const initialRoster = parseToolJson(await firstDaemon.client.call("tribe.members", { all: true })).sessions ?? []
+    const initial = initialRoster.find((session) => session.name === "@cto" && session.transport_state === "connected")
+    expect(initial).toMatchObject({
+      member_id: expect.any(String),
+      transport_pids: [expect.any(Number)],
+    })
+    const initialTransportPid = initial!.transport_pids![0]!
+    adapterPids.add(initialTransportPid)
+
+    await firstDaemon.client.call("tribe.reload", { reason: "22322 runtime-name restart acceptance" })
+    firstDaemon.client.close()
+    const successor = await connectToGeneration(socketPath, (pid) => pid !== firstDaemon.pid)
+    daemonPids.add(successor.pid)
+
+    let rejoined: Member | undefined
+    await waitFor(async () => {
+      const roster = parseToolJson(await successor.client.call("tribe.members", { all: true })).sessions ?? []
+      const candidate = roster.find(
+        (session) =>
+          session.member_id === initial?.member_id &&
+          session.transport_state === "connected" &&
+          session.transport_pids?.length === 1 &&
+          session.transport_pids[0] !== initialTransportPid,
+      )
+      if (candidate) rejoined = candidate
+      return rejoined !== undefined
+    }, "launch-less wrapper process re-registration")
+
+    expect(rejoined).toMatchObject({
+      member_id: initial?.member_id,
+      name: "@cto",
+      transport_state: "connected",
+      owner_state: "live",
+    })
+    for (const pid of rejoined?.transport_pids ?? []) adapterPids.add(pid)
+    await waitFor(() => !pidExists(initialTransportPid), "runtime-name replaced adapter process exit")
+    expect(plugin.exitCode, pluginStderr).toBeNull()
+    successor.client.close()
+  }, 45_000)
+
   it("keeps an unsupervised pull adapter alive after a daemon generation change", async () => {
     const dbPath = join(tmpDir, "tribe-direct.db")
     const daemonLog = join(tmpDir, "daemon-direct.log")

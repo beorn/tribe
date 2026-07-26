@@ -124,6 +124,11 @@ const LAUNCH_ID_RAW = readTribeLaunchId(process.env) ?? ""
 const PLUGIN_ADAPTER_CHILD = process.env.TRIBE_PLUGIN_ADAPTER_CHILD === "1"
 const PLUGIN_PROVIDER_PARENT_PID_RAW = process.env.TRIBE_PLUGIN_PROVIDER_PARENT_PID?.trim() ?? ""
 
+function reportSupervisedIdentity(name: string): void {
+  if (!PLUGIN_ADAPTER_CHILD || !isTribeNameShape(name)) return
+  process.send?.({ tribePluginIdentity: name })
+}
+
 function resolveLaunchParentPid(): number {
   if (!PLUGIN_ADAPTER_CHILD) return process.ppid
   const providerParentPid = Number(PLUGIN_PROVIDER_PARENT_PID_RAW)
@@ -526,6 +531,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
       reconnectWatchdog.markConnected()
       daemonDegradedReason = null
       myName = reg.name
+      reportSupervisedIdentity(myName)
       myRole = reg.role
       log.info?.(`Registered as ${myName} (${myRole})`)
       if (typeof reg.protocolVersion === "number" && reg.protocolVersion !== TRIBE_PROTOCOL_VERSION) {
@@ -885,7 +891,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       const r = result as { content: Array<{ type: string; text: string }> }
       try {
         const data = JSON.parse(r.content[0]?.text ?? "{}") as Record<string, string>
-        if (data.name) myName = data.name
+        if (data.name) {
+          myName = data.name
+          reportSupervisedIdentity(myName)
+        }
         if (data.role) myRole = data.role
       } catch {
         /* parse error, ignore */
@@ -965,7 +974,10 @@ import { watch as fsWatch } from "node:fs"
           const r = result as { content: Array<{ type: string; text: string }> }
           try {
             const data = JSON.parse(r.content[0]?.text ?? "{}") as Record<string, string>
-            if (data.name) myName = data.name
+            if (data.name) {
+              myName = data.name
+              reportSupervisedIdentity(myName)
+            }
             log.info?.(`auto-renamed from /rename slug: ${myName}`)
           } catch {
             /* ignore */
@@ -1004,7 +1016,10 @@ function tryAutoRenameOnClaim(content: string): void {
       const r = result as { content: Array<{ type: string; text: string }> }
       try {
         const data = JSON.parse(r.content[0]?.text ?? "{}") as Record<string, string>
-        if (data.name) myName = data.name
+        if (data.name) {
+          myName = data.name
+          reportSupervisedIdentity(myName)
+        }
       } catch {
         /* ignore */
       }
