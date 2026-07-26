@@ -1019,6 +1019,82 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
   return jsonResult({ owner, expired, pending, count: pending.length })
 }
 
+type MembershipSessionRow = {
+  id: string
+  name: string
+  launch_id: string | null
+  launch_parent_pid: number | null
+  updated_at: number
+}
+
+type DurableMembershipSessionRow = MembershipSessionRow & {
+  launch_id: string
+  launch_parent_pid: number
+}
+
+type MembershipDiscrepancy = {
+  status: "degraded"
+  connected_durable_launches: number
+  known_durable_launches: number
+  missing_count: number
+  missing: Array<{
+    member_id: string
+    name: string
+    launch_id: string
+    launch_parent_pid: number
+    state: "missing-transport"
+  }>
+  meaning: "missing transport does not establish agent absence"
+}
+
+function latestDisconnectedSessionRows<T extends MembershipSessionRow>(
+  rows: readonly T[],
+  activeIds: ReadonlySet<string>,
+): T[] {
+  const activeNames = new Set(rows.filter((row) => activeIds.has(row.id)).map((row) => row.name))
+  const latestByName = new Map<string, T>()
+  for (const row of rows) {
+    if (activeIds.has(row.id) || activeNames.has(row.name)) continue
+    const previous = latestByName.get(row.name)
+    if (previous === undefined || row.updated_at > previous.updated_at) latestByName.set(row.name, row)
+  }
+  return [...latestByName.values()]
+}
+
+function projectMembershipDiscrepancy(
+  rows: readonly MembershipSessionRow[],
+  activeIds: ReadonlySet<string>,
+): MembershipDiscrepancy | undefined {
+  const durableRows = rows.filter(isDurableMembershipSessionRow)
+  const knownNames = new Set(durableRows.map((row) => row.name))
+  const connectedNames = new Set(durableRows.filter((row) => activeIds.has(row.id)).map((row) => row.name))
+  const missing = latestDisconnectedSessionRows(durableRows, activeIds).map((row) => ({
+    member_id: row.id,
+    name: row.name,
+    launch_id: row.launch_id,
+    launch_parent_pid: row.launch_parent_pid,
+    state: "missing-transport" as const,
+  }))
+  if (missing.length === 0) return undefined
+  return {
+    status: "degraded",
+    connected_durable_launches: connectedNames.size,
+    known_durable_launches: knownNames.size,
+    missing_count: missing.length,
+    missing,
+    meaning: "missing transport does not establish agent absence",
+  }
+}
+
+function isDurableMembershipSessionRow(row: MembershipSessionRow): row is DurableMembershipSessionRow {
+  return (
+    classifySessionRegistrationLifetime({
+      launchId: row.launch_id,
+      launchParentPid: row.launch_parent_pid,
+    }) === "durable-launch"
+  )
+}
+
 function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
   // Membership is sourced from the `room_members` table (Matrix-shape, see
   // km-tribe.matrix-shape). Today every project has exactly one default room
@@ -1105,7 +1181,11 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
       ...(r.provider ? { provider: r.provider } : {}),
     }
   })
-  return jsonResult({ sessions })
+  const membershipDiscrepancy = projectMembershipDiscrepancy(rows, activeIds)
+  return jsonResult({
+    sessions,
+    ...(membershipDiscrepancy === undefined ? {} : { membership_discrepancy: membershipDiscrepancy }),
+  })
 }
 
 function handleRename(
@@ -1396,7 +1476,6 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
   // are simply absent from activeSessionInfo — no DB pruning required.
   const activeInfo = opts.getActiveSessionInfo()
   const byId = new Map(activeInfo.map((s) => [s.id, s]))
-  const activeNames = new Set(activeInfo.map((session) => session.name))
   const rows = ctx.stmts.allSessions.all() as Array<{
     id: string
     name: string
@@ -1409,15 +1488,8 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     launch_parent_pid: number | null
   }>
   const liveSessions = rows.filter((r) => byId.has(r.id))
-  const latestDisconnectedByName = new Map<string, (typeof rows)[number]>()
-  for (const session of rows) {
-    if (byId.has(session.id) || activeNames.has(session.name)) continue
-    const previous = latestDisconnectedByName.get(session.name)
-    if (previous === undefined || session.updated_at > previous.updated_at) {
-      latestDisconnectedByName.set(session.name, session)
-    }
-  }
-  const transportWedges = [...latestDisconnectedByName.values()].flatMap((session) => {
+  const activeIds = new Set(byId.keys())
+  const transportWedges = latestDisconnectedSessionRows(rows, activeIds).flatMap((session) => {
     const lifetime = classifySessionRegistrationLifetime({
       launchId: session.launch_id,
       launchParentPid: session.launch_parent_pid,
@@ -1439,6 +1511,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
       },
     ]
   })
+  const membershipDiscrepancy = projectMembershipDiscrepancy(rows, activeIds)
 
   const members = liveSessions.map((s) => {
     const active = byId.get(s.id)!
@@ -1561,6 +1634,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
       },
     },
     transport_wedges: transportWedges,
+    ...(membershipDiscrepancy === undefined ? {} : { membership_discrepancy: membershipDiscrepancy }),
     issues: [
       ...transportWedges.map(
         (wedge) =>
