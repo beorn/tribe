@@ -183,23 +183,35 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
         {
           id: "legacy-health",
           name: "legacy-health",
-          pid: 7007,
+          pid: process.pid,
           cwd: "/repo",
           role: "member",
           claudeSessionId: null,
           registeredAt: Date.now(),
           launchId: null,
           launchParentPid: null,
-          transportPids: [7008],
+          transportPids: [process.pid],
         },
       ],
     } as HandlerOpts
 
     const health = parseToolJson(handleToolCall(ctx, "tribe.health", {}, opts)) as {
+      members: Array<Record<string, unknown>>
       membership_discrepancy: Record<string, unknown>
       transport_wedges: Array<Record<string, unknown>>
       issues: string[]
     }
+    expect(health.members).toEqual([
+      expect.objectContaining({
+        name: "legacy-health",
+        agent_pid: process.pid,
+        transport_alive: true,
+        agent_alive: true,
+        pid_alive: true,
+        is_silent: false,
+        alive: true,
+      }),
+    ])
     expect(health.membership_discrepancy).toEqual({
       status: "degraded",
       connected_durable_launches: 0,
