@@ -4,7 +4,7 @@ export const MAX_CONSECUTIVE_REEXECS = 5
 const REEXEC_BACKOFF_BASE_MS = 250
 const REEXEC_BACKOFF_MAX_MS = 4_000
 
-export function evaluateAdapterReexec(
+export function evaluateAdapterRestart(
   previousConsecutiveReexecs: number,
   childRuntimeMs: number,
   maxConsecutiveReexecs = MAX_CONSECUTIVE_REEXECS,

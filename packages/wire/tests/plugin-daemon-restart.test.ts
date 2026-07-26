@@ -434,6 +434,134 @@ describe("Claude plugin daemon-restart self-heal", () => {
     secondSuccessor.client.close()
   }, 45_000)
 
+  it("recovers adapter crashes within a bounded budget and reports exhaustion as membership degradation", async () => {
+    const dbPath = join(tmpDir, "tribe-adapter-crash.db")
+    const daemonLog = join(tmpDir, "daemon-adapter-crash.log")
+    const adapterLog = join(tmpDir, "adapter-crash.log")
+    spawnTestDaemon(dbPath, daemonLog)
+    await waitFor(() => existsSync(socketPath), "adapter-crash daemon socket")
+    const generation = await connectToGeneration(socketPath)
+    daemonPids.add(generation.pid)
+
+    const plugin = spawnTestPlugin({
+      dbPath,
+      logPath: adapterLog,
+      name: PERSONA,
+      launchId: "adapter-crash-launch",
+      providerParentPid: String(process.pid),
+      delivery: "pull",
+      requireJoin: false,
+    })
+    let pluginStderr = ""
+    plugin.stderr.on("data", (chunk: Buffer | string) => {
+      pluginStderr += chunk.toString()
+    })
+    const wrapperPid = plugin.pid!
+    const stdout = collectJsonLines(plugin)
+    writeJson(plugin, initializePayload(20))
+    await waitFor(() => stdout.some((line) => line.id === 20), "adapter-crash plugin initialization")
+    writeJson(plugin, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+
+    let initialMember: Member | undefined
+    await waitFor(async () => {
+      const roster = parseToolJson(await generation.client.call("tribe.members", { all: true }))
+      initialMember = roster.sessions?.find(
+        (session) => session.name === PERSONA && session.transport_state === "connected",
+      )
+      return initialMember?.transport_pids?.length === 1
+    }, "adapter-crash initial membership")
+    const initialTransportPid = initialMember!.transport_pids![0]!
+    adapterPids.add(initialTransportPid)
+
+    process.kill(initialTransportPid, "SIGKILL")
+    await waitFor(() => !pidExists(initialTransportPid), "crashed adapter exit")
+
+    let restoredMember: Member | undefined
+    await waitFor(
+      async () => {
+        const roster = parseToolJson(await generation.client.call("tribe.members", { all: true }))
+        const candidate = roster.sessions?.find(
+          (session) => session.name === PERSONA && session.transport_state === "connected",
+        )
+        if (candidate?.transport_pids?.length === 1 && candidate.transport_pids[0] !== initialTransportPid) {
+          restoredMember = candidate
+        }
+        return restoredMember !== undefined
+      },
+      "adapter-crash supervised recovery",
+      5_000,
+    )
+
+    expect(plugin.pid).toBe(wrapperPid)
+    expect(plugin.exitCode).toBeNull()
+    expect(restoredMember).toMatchObject({
+      member_id: initialMember?.member_id,
+      launch_id: "adapter-crash-launch",
+      launch_parent_pid: process.pid,
+      transport_state: "connected",
+      owner_state: "live",
+    })
+    for (const pid of restoredMember?.transport_pids ?? []) adapterPids.add(pid)
+
+    writeJson(plugin, callToolPayload(21, "members", { all: true }))
+    await waitFor(() => stdout.some((line) => line.id === 21), "post-crash MCP tool call")
+    expect(mcpToolJson(stdout, 21).sessions?.find((session) => session.name === PERSONA)).toMatchObject({
+      member_id: initialMember?.member_id,
+      transport_pids: restoredMember?.transport_pids,
+    })
+
+    let transportPid = restoredMember!.transport_pids![0]!
+    for (let crash = 2; crash <= 6; crash += 1) {
+      process.kill(transportPid, "SIGKILL")
+      await waitFor(() => !pidExists(transportPid), `crashed adapter ${crash} exit`)
+      if (crash === 6) break
+
+      const priorTransportPid = transportPid
+      await waitFor(
+        async () => {
+          const roster = parseToolJson(await generation.client.call("tribe.members", { all: true }))
+          const candidate = roster.sessions?.find(
+            (session) => session.name === PERSONA && session.transport_state === "connected",
+          )
+          if (candidate?.transport_pids?.length === 1 && candidate.transport_pids[0] !== priorTransportPid) {
+            transportPid = candidate.transport_pids[0]!
+            adapterPids.add(transportPid)
+            return true
+          }
+          return false
+        },
+        `bounded adapter recovery ${crash}`,
+        6_000,
+      )
+    }
+
+    await waitFor(() => plugin.exitCode !== null, "bounded adapter retry exhaustion", 2_000)
+    expect(plugin.exitCode).toBe(2)
+    expect(pluginStderr).toContain("adapter supervision exhausted its bounded restart budget")
+    await waitFor(async () => {
+      const roster = parseToolJson(await generation.client.call("tribe.members", { all: true }))
+      return roster.membership_discrepancy?.status === "degraded"
+    }, "adapter retry exhaustion membership degradation")
+    const degradedRoster = parseToolJson(await generation.client.call("tribe.members", { all: true }))
+    expect(degradedRoster.membership_discrepancy).toMatchObject({
+      status: "degraded",
+      connected_durable_launches: 0,
+      known_durable_launches: 1,
+      missing_count: 1,
+      missing: [
+        {
+          member_id: initialMember?.member_id,
+          name: PERSONA,
+          launch_id: "adapter-crash-launch",
+          launch_parent_pid: process.pid,
+          state: "missing-transport",
+        },
+      ],
+      meaning: "missing transport does not establish agent absence",
+    })
+    generation.client.close()
+  }, 30_000)
+
   it.each([
     ["a malformed parent PID", "not-a-pid", "invalid-provider-parent-launch"],
     ["a dead parent PID", String(Number.MAX_SAFE_INTEGER), "dead-provider-parent-launch"],

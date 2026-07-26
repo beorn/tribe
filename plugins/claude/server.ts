@@ -16,7 +16,7 @@
 import { spawn, type ChildProcess } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { isTribeNameShape } from "tribe-wire/lib/persona-name"
-import { evaluateAdapterReexec } from "./supervisor-policy.ts"
+import { evaluateAdapterRestart } from "./supervisor-policy.ts"
 
 const PLUGIN_CHILD = "TRIBE_PLUGIN_ADAPTER_CHILD"
 const PLUGIN_PROVIDER_PARENT_PID = "TRIBE_PLUGIN_PROVIDER_PARENT_PID"
@@ -26,7 +26,7 @@ const REEXEC_JOINED_OFFSET = 1
 const GENERATION_REEXEC_OFFSET = 2
 const LAST_REEXEC_EXIT_CODE = REEXEC_EXIT_CODE + GENERATION_REEXEC_OFFSET + REEXEC_JOINED_OFFSET
 const REMEDY =
-  "tribe plugin reconnect failed after current-disk re-exec; restart the host session or reinstall the Tribe plugin."
+  "tribe plugin adapter supervision exhausted its bounded restart budget; run /mcp reconnect after repairing the reported cause or reinstall the Tribe plugin."
 const PROVIDER_PARENT_REMEDY =
   "tribe plugin wrapper requires valid provider-parent provenance from a complete live managed launch; restart the host session or reinstall the Tribe plugin."
 const LEGACY_PARENT_WARNING =
@@ -38,10 +38,12 @@ function supervisedIdentityName(message: unknown): string | undefined {
   return typeof name === "string" && isTribeNameShape(name) ? name : undefined
 }
 
-function waitForExit(child: ChildProcess): Promise<{ code: number | null; error?: Error }> {
+function waitForExit(
+  child: ChildProcess,
+): Promise<{ code: number | null; signal: NodeJS.Signals | null; error?: Error }> {
   return new Promise((resolve) => {
-    child.once("error", (error) => resolve({ code: null, error }))
-    child.once("exit", (code) => resolve({ code }))
+    child.once("error", (error) => resolve({ code: null, signal: null, error }))
+    child.once("exit", (code, signal) => resolve({ code, signal }))
   })
 }
 
@@ -104,6 +106,7 @@ async function superviseAdapter(): Promise<void> {
   let stopping = false
   let consecutiveReexecs = 0
   let resumeJoined = false
+  let joinedIdentityReported = false
   const launchName = process.env.TRIBE_NAME?.trim()
   let resumeName = launchName && isTribeNameShape(launchName) ? launchName : undefined
   const forward = (signal: NodeJS.Signals) => {
@@ -128,31 +131,48 @@ async function superviseAdapter(): Promise<void> {
     })
     active.on("message", (message) => {
       const name = supervisedIdentityName(message)
-      if (name !== undefined) resumeName = name
+      if (name !== undefined) {
+        resumeName = name
+        joinedIdentityReported = true
+      }
     })
     const result = await waitForExit(active)
     active = null
     if (stopping) return
-    if (result.error) {
-      process.stderr.write(`${REMEDY} (${result.error.message})\n`)
-      process.exitCode = 2
-      return
-    }
-    if (result.code === null || result.code < REEXEC_EXIT_CODE || result.code > LAST_REEXEC_EXIT_CODE) {
-      process.exitCode = result.code ?? 1
+    if (!result.error && result.code === 0) {
+      process.exitCode = 0
       return
     }
 
-    const reexecOffset = result.code - REEXEC_EXIT_CODE
-    resumeJoined = reexecOffset % GENERATION_REEXEC_OFFSET === REEXEC_JOINED_OFFSET
-    const generationChange = reexecOffset >= GENERATION_REEXEC_OFFSET
-    const maxConsecutiveReexecs = generationChange ? undefined : 1
-    const decision = evaluateAdapterReexec(consecutiveReexecs, Date.now() - startedAt, maxConsecutiveReexecs)
+    const requestedReexec =
+      result.code !== null && result.code >= REEXEC_EXIT_CODE && result.code <= LAST_REEXEC_EXIT_CODE
+    let maxConsecutiveReexecs: number | undefined
+    if (requestedReexec && result.code !== null) {
+      const reexecOffset = result.code - REEXEC_EXIT_CODE
+      resumeJoined = reexecOffset % GENERATION_REEXEC_OFFSET === REEXEC_JOINED_OFFSET
+      const generationChange = reexecOffset >= GENERATION_REEXEC_OFFSET
+      maxConsecutiveReexecs = generationChange ? undefined : 1
+    } else {
+      // The wrapper is the provider's stable stdio endpoint. An unexpected
+      // adapter crash must not tear that endpoint down and require a human
+      // /mcp reconnect. Preserve a confirmed joined identity and apply the
+      // same bounded backoff used for daemon-generation replacements.
+      resumeJoined = joinedIdentityReported
+    }
+    const decision = evaluateAdapterRestart(consecutiveReexecs, Date.now() - startedAt, maxConsecutiveReexecs)
     consecutiveReexecs = decision.consecutiveReexecs
     if (!decision.retry) {
-      process.stderr.write(`${REMEDY}\n`)
+      const cause = result.error?.message ?? `exit=${String(result.code)} signal=${String(result.signal)}`
+      process.stderr.write(`${REMEDY} (${cause})\n`)
       process.exitCode = 2
       return
+    }
+    if (!requestedReexec) {
+      const cause = result.error?.message ?? `exit=${String(result.code)} signal=${String(result.signal)}`
+      process.stderr.write(
+        `tribe plugin adapter exited unexpectedly; retrying in ${decision.retryDelayMs}ms ` +
+          `(attempt ${decision.consecutiveReexecs}, ${cause})\n`,
+      )
     }
     await waitForRetry(decision.retryDelayMs)
   }

@@ -49,9 +49,14 @@ to the daemon socket and asks the supervisor for a current-disk replacement
 when it observes a new daemon generation, exhausts bounded reconnect, or
 remains reconnecting for 60 seconds while a fresh daemon RPC succeeds. Source
 changes and daemon reload notifications use that same wrapper-owned replacement
-path;
-adapters never spawn adapters. The wrapper—and therefore Claude Code's stdio
+path; adapters never spawn adapters. The wrapper—and therefore Claude Code's stdio
 channel—stays in place while the child changes.
+
+An unexpected adapter crash uses the same bounded exponential-backoff budget
+without replacing the wrapper or its stdio channel. A clean adapter exit still
+shuts the wrapper down. If repeated crashes exhaust the budget, the wrapper
+fails loudly and the durable launch remains visible as a membership discrepancy
+instead of silently disappearing.
 
 Claim-bound Hab launches give the wrapper the complete launcher-minted launch
 id and harness parent PID. The wrapper validates that live provenance once and
