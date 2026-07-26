@@ -20,8 +20,9 @@ process, restarts the daemon, or deletes messages/pending balls.
 
 ## Status
 
-Functional; ships with this repository (not published to npm). The Claude Code
-plugin autostarts it, or run it directly from a clone.
+Functional; ships with this repository (not published to npm). Run it through
+an explicit lifecycle owner such as Hab, an installed hook, or a direct clone.
+Provider-owned MCP bridges only connect to it.
 
 ## Run
 
@@ -30,9 +31,10 @@ bun packages/daemon/src/daemon.ts                                    # auto-disc
 bun packages/daemon/src/daemon.ts --socket ~/.local/share/tribe/tribe.sock
 ```
 
-Host plugins may autostart this daemon for their runtime. The wire package does
-not silently own daemon lifecycle; a missing daemon should be visible and
-actionable to callers. Lifecycle details: [docs/daemon.md](../../docs/daemon.md).
+Provider bridges do not autostart this daemon. Explicit hook/install lifecycle
+paths may do so for standalone use; a supervisor owns it in managed
+deployments. A missing daemon stays visible and actionable to callers.
+Lifecycle details: [docs/daemon.md](../../docs/daemon.md).
 
 ## Boundary
 

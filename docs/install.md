@@ -1,7 +1,7 @@
 # Install
 
-Tribe has two independent install paths: the **Claude Code plugin** (bundled
-MCP registration + daemon autostart) and the **npm `tribe-wire` package**
+Tribe has two independent client install paths: the **Claude Code plugin**
+(bundled MCP registration) and the **npm `tribe-wire` package**
 (protocol client only — for any other MCP host, or for scripting against a
 daemon directly). Both talk to the same daemon and the same Unix socket; pick
 based on what's launching the client.
@@ -41,8 +41,9 @@ tribe.send({to: "a", ...})  # in session 2
 only artifacts are `.claude-plugin/plugin.json` and `.mcp.json` — there is no
 `hooks.json` and no `hooks` field anywhere in the plugin. Installing the
 plugin registers the `tribe` MCP server (`tribe.join` / `send` / `fetch` /
-`members` / `health` / … tools, plus the `/tribe` skill) and gets you daemon
-autostart for that MCP connection. **It does not install the
+`members` / `health` / … tools, plus the `/tribe` skill). The provider bridge
+is connect-only: it never starts or replaces the singleton daemon. **The plugin
+also does not install the
 SessionStart / UserPromptSubmit / SessionEnd hooks that drive automatic
 recall injection.** If you want recall's per-prompt context injection, see
 ["Wiring the recall hooks" in recall.md](recall.md#wiring-the-hooks) — that
@@ -55,15 +56,14 @@ The plugin's `.mcp.json` runs:
 (cd "$CLAUDE_PLUGIN_ROOT" && bun install --no-summary); exec bun "$CLAUDE_PLUGIN_ROOT/server.ts"
 ```
 
-`server.ts` sets `TRIBE_DAEMON_SCRIPT` to the resolved path of the `tribe-daemon`
-package (`import.meta.resolve("tribe-daemon")`) before delegating to
-`tribe-wire`'s stdio adapter — that env var is what lets this path autostart a
-daemon on first use, spawning it detached if the socket isn't already alive.
-`tribe-daemon` is a **private, unpublished** package (`"private": true` in its
-`package.json`) — it only exists inside a full clone of this repository, which
-is exactly what `/plugin install` gives you (the whole marketplace repo, not
-just the `plugins/claude` subtree — that's why `workspace:*` deps in
-`plugins/claude/package.json` resolve at all).
+`server.ts` delegates to `tribe-wire`'s stdio adapter. That adapter—and the
+provider-owned HTTP and recall bridges—sets `noSpawn: true` for both its initial
+connection and reconnect loop, so a provider session cannot accidentally
+become the daemon's lifecycle owner. Start the daemon through Hab, an explicit
+hook/install lifecycle, or a manual `tribe-daemon` process before using the
+coordination tools. `tribe-daemon` is a **private, unpublished** package
+(`"private": true` in its `package.json`) and is available inside the full
+repository clone installed by the marketplace.
 
 **Direct `.mcp.json` alternative** (no plugin marketplace, no channels) — for
 a project that vendors this repo directly:
@@ -76,9 +76,8 @@ a project that vendors this repo directly:
 }
 ```
 
-This route does **not** set `TRIBE_DAEMON_SCRIPT`, so it expects an existing
-or forwarded daemon socket — it will not spawn one for you. See "Self-hosting
-the daemon" below.
+This route also expects an existing or forwarded daemon socket. See
+"Self-hosting the daemon" below.
 
 ## Path B — npm `tribe-wire`
 
@@ -94,22 +93,18 @@ tribe-wire mcp --socket /path/to/tribe.sock   # if installed globally
 
 Use this path for any MCP host that isn't the Claude Code plugin — Codex,
 Gemini, a custom agent harness, or a remote box reached over an
-SSH-forwarded socket. Because `tribe-wire mcp` has no `TRIBE_DAEMON_SCRIPT`
-by default, it needs a **reachable daemon** already:
+SSH-forwarded socket. The stdio bridge is connect-only, so it needs a
+**reachable daemon** already:
 
-- another process on the same machine already started one (e.g. the Claude
-  Code plugin, or a manual `tribe-daemon` run — see below), or
-- a remote daemon's socket forwarded over SSH to a local path, or
-- you export `TRIBE_DAEMON_SCRIPT=/path/to/tribe-daemon/src/daemon.ts`
-  yourself, from a clone of this repo, so `tribe-wire`'s `connectOrStart`
-  spawns it on demand exactly like the plugin does.
+- a declared supervisor service or explicit lifecycle hook already started
+  one,
+- a manual `tribe-daemon` process is running from a repository clone, or
+- a remote daemon's socket is forwarded over SSH to a local path.
 
-Without any of those, `tribe-wire mcp` connects, fails, and — per
-`connectOrStart` — throws `no daemon at <socket> and no daemonScript provided
-to spawn one` (or, from the stdio adapter specifically, degrades to a "loud
-but soft" solo mode: the MCP handshake still succeeds, and every tribe tool
-call returns one clear sentence saying tribe is unavailable, rather than
-hanging or crashing the host session).
+Without any of those, `tribe-wire mcp` degrades to a "loud but soft" solo
+mode: the MCP handshake still succeeds, and every tribe tool call returns one
+clear sentence saying Tribe is unavailable, rather than hanging, crashing the
+host session, or spawning a daemon.
 
 ### Self-hosting the daemon
 

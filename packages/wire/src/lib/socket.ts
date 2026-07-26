@@ -71,9 +71,9 @@ export type { JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcRespon
 // Tribe-flavored connectOrStart / createReconnectingClient.
 //
 // These wrap the lower-level client versions to append tribe daemon args when
-// a host surface explicitly opts into spawning. The wire package itself does
-// not guess a daemon path: plain `tribe-wire mcp` must either connect to an
-// existing/forwarded socket or receive TRIBE_DAEMON_SCRIPT from a host plugin.
+// a standalone lifecycle surface explicitly opts into spawning. The wire
+// package itself does not guess a daemon path: provider-owned `tribe-wire mcp`
+// connects to an existing/forwarded socket and sets `noSpawn`.
 // ---------------------------------------------------------------------------
 
 export type ConnectOrStartOpts = {
@@ -92,6 +92,7 @@ export type ReconnectingClientOpts = {
   onReconnectExhausted?: (error: unknown, attempts: number) => void
   maxAttempts?: number
   callTimeoutMs?: number
+  noSpawn?: boolean
   dbPath?: string
 }
 
@@ -123,6 +124,7 @@ export function createReconnectingClient(opts: ReconnectingClientOpts): Promise<
     onReconnectExhausted: opts.onReconnectExhausted,
     maxAttempts: opts.maxAttempts,
     callTimeoutMs: opts.callTimeoutMs,
+    noSpawn: opts.noSpawn,
     daemonScript: defaultDaemonScript(),
     daemonArgs: opts.dbPath ? ["--db", opts.dbPath] : undefined,
   }

@@ -37,7 +37,6 @@ import { getCurrentSessionContext } from "../../../packages/recall/src/lib/sessi
 import { setRecallLogging } from "../../../packages/recall/src/history/recall-shared.ts"
 import { createReconnectingClient, type LoreClient } from "./lib/socket.ts"
 import { resolveSocketPath as resolveTribeSocketPath } from "tribe-wire/lib/socket"
-import { ensureTribeDaemonIfConfigured } from "../../../packages/daemon/src/lib/autostart.ts"
 import {
   TRIBE_METHODS,
   RECALL_PROTOCOL_VERSION,
@@ -61,44 +60,17 @@ if (process.env.TRIBE_LOG !== "1") setRecallLogging(false)
 const USE_DAEMON = process.env.TRIBE_NO_DAEMON !== "1"
 let daemonClient: LoreClient | null = null
 let daemonDisabled = false // Set after repeated connect failures
-let autostartChecked = false // Run ensureDaemonIfConfigured at most once per MCP server process
 
 async function getDaemon(): Promise<LoreClient | null> {
   if (!USE_DAEMON || daemonDisabled) return null
   if (daemonClient) return daemonClient
-
-  // Autostart check (once per process): consult ~/.claude/tribe/config.json
-  // and spawn a detached tribe daemon if the user opted into autostart and
-  // none is currently running. This is fire-and-forget — we still try to
-  // connect below, and fall back to the library if the spawn hasn't booted yet.
-  //
-  // Phase 5b (km-bear.unified-daemon): lore MCP is now a thin proxy to the
-  // unified tribe daemon. The standalone lore daemon is no longer autostarted
-  // from here — the tribe daemon owns the lore RPC surface too.
-  if (!autostartChecked) {
-    autostartChecked = true
-    try {
-      const outcome = await ensureTribeDaemonIfConfigured({ budgetMs: 500 })
-      if (outcome.action === "spawned" && process.env.TRIBE_LOG === "1") {
-        process.stderr.write(`[lore] autostart: spawned unified tribe daemon (pid=${outcome.pid})\n`)
-      }
-      // Give a freshly-spawned daemon a moment to bind its socket so the
-      // connect below succeeds on first try. 1 s is the envelope before we
-      // give up and fall back to the library.
-      if (outcome.action === "spawned") {
-        await new Promise<void>((r) => setTimeout(r, 1000))
-      }
-    } catch {
-      /* autostart must never throw */
-    }
-  }
 
   try {
     // Connect to the unified tribe daemon's socket (not the old lore socket).
     // Both dialects — coord (tribe.send/broadcast/...) and lore (tribe.ask/
     // brief/...) — now share one socket.
     const socketPath = resolveTribeSocketPath()
-    const client = await createReconnectingClient({ socketPath, maxAttempts: 5 })
+    const client = await createReconnectingClient({ socketPath, maxAttempts: 5, noSpawn: true })
     await client.call(TRIBE_METHODS.hello, {
       clientName: "/tribe/lore",
       clientVersion: "0.14.1",

@@ -183,7 +183,6 @@ describe("Claude plugin daemon-restart self-heal", () => {
       cwd: tmpDir,
       env: {
         ...process.env,
-        TRIBE_DAEMON_SCRIPT: DAEMON,
         TRIBE_DB: opts.dbPath,
         TRIBE_DELIVERY: opts.delivery,
         ...(opts.delivery === "pull" ? { TRIBE_PULL_TRANSPORT: "mcp" } : {}),
@@ -425,7 +424,6 @@ describe("Claude plugin daemon-restart self-heal", () => {
       cwd: tmpDir,
       env: {
         ...process.env,
-        TRIBE_DAEMON_SCRIPT: DAEMON,
         TRIBE_DB: dbPath,
         TRIBE_DELIVERY: "pull",
         TRIBE_PULL_TRANSPORT: "mcp",

@@ -30,8 +30,9 @@ commands fail loudly and tell the caller how to start or install a daemon.
 ### Host Plugins
 
 Host plugins wire Tribe into an agent runtime. The Claude Code plugin owns MCP
-registration and autostart hooks for that host. Other hosts can add their own
-plugins without changing wire or daemon packages.
+registration and connect-only bridge supervision for that host. Explicit
+lifecycle hooks live with the daemon install path. Other hosts can add their
+own plugins without changing wire or daemon packages.
 
 ## Non-Goal: Team Workflow Policy
 

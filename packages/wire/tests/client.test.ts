@@ -462,6 +462,19 @@ describe("createReconnectingClient transport recovery", () => {
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
+  it("refuses daemon autostart when a reconnecting host is connect-only", async () => {
+    const sock = join(tmpDir, "connect-only-absent.sock")
+    await expect(
+      createReconnectingClient({
+        socketPath: sock,
+        daemonScript: join(tmpDir, "must-not-start.ts"),
+        noSpawn: true,
+        maxStartupAttempts: 1,
+      }),
+    ).rejects.toThrow("(noSpawn)")
+    expect(existsSync(sock)).toBe(false)
+  })
+
   it("closes an initial candidate when registration rejects", async () => {
     const sock = join(tmpDir, "initial-registration-reject.sock")
     const { server, clients } = await spawnFakeDaemon(sock)
@@ -546,6 +559,8 @@ describe("createReconnectingClient transport recovery", () => {
     let exhausted: { error: unknown; attempts: number } | undefined
     const client = await createReconnectingClient({
       socketPath: sock,
+      daemonScript: join(tmpDir, "must-not-restart.ts"),
+      noSpawn: true,
       maxAttempts: 1,
       maxStartupAttempts: 1,
       onReconnectExhausted: (error, attempts) => {
@@ -559,6 +574,7 @@ describe("createReconnectingClient transport recovery", () => {
       await vi.waitFor(() => {
         expect(exhausted?.attempts).toBe(1)
         expect(exhausted?.error).toBeInstanceOf(Error)
+        expect((exhausted?.error as Error).message).toContain("(noSpawn)")
       })
     } finally {
       client.close()
