@@ -164,8 +164,8 @@ There is a documented autostart config file,
 { "autostart": "daemon" }
 ```
 
-- `"daemon"` (default) — hooks/autostart paths spawn a detached daemon
-  on first use if none is reachable.
+- `"daemon"` (default) — hooks/autostart paths detach a stable repo-local
+  supervisor, which owns the daemon child, on first use if none is reachable.
 - `"library"` — never spawn; equivalent to setting `TRIBE_NO_DAEMON=1`.
 - `"never"` — skip the daemon entirely, even if one is running.
 

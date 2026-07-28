@@ -24,9 +24,9 @@
 
 import { createConnection } from "node:net"
 import { existsSync } from "node:fs"
-import { spawn } from "node:child_process"
 import { dirname, resolve } from "node:path"
 import { createLogger } from "loggily"
+import { spawnStandaloneDaemonSupervisor } from "tribe-wire"
 import { resolveAutostart, type TribeAutostart } from "./autostart-config.ts"
 import { resolveSocketPath as resolveTribeSocketPath } from "tribe-wire/lib/socket"
 
@@ -81,7 +81,7 @@ export function isDaemonAlive(socketPath: string, timeoutMs = 200): Promise<bool
 }
 
 // ---------------------------------------------------------------------------
-// Detached spawn
+// Standalone lifecycle-owner spawn
 // ---------------------------------------------------------------------------
 
 /** Location of the tribe coordination daemon script (relative to this file). */
@@ -103,9 +103,9 @@ export function resolveDaemonScriptPath(): string {
 export type SpawnResult = { ok: true; pid: number } | { ok: false; error: string }
 
 /**
- * Spawn the tribe daemon as a detached, unref'd child. Stdout/stderr are
- * discarded. Returns the child PID on success, an error on failure. Never
- * throws.
+ * Spawn the tribe daemon through the stable standalone lifecycle owner.
+ * Stdout/stderr are discarded. Returns the owner PID on success, an error on
+ * failure. Never throws.
  *
  * The spawn is fire-and-forget: we don't wait for the socket to be ready.
  * Hook dispatch proceeds to the library fallback for this one turn, and
@@ -127,18 +127,17 @@ export function spawnTribeDaemonDetached(
   if (opts.socketPath) args.push("--socket", opts.socketPath)
 
   try {
-    const child = spawn(bunPath, args, {
-      detached: true,
-      stdio: "ignore",
-      env: process.env,
+    const child = spawnStandaloneDaemonSupervisor({
+      daemonScript: args[0]!,
+      daemonArgs: args.slice(1),
+      runtimePath: bunPath,
     })
-    child.unref()
     const pid = child.pid
     if (typeof pid !== "number") {
       return { ok: false, error: "spawn returned no pid" }
     }
     const logFn = opts.log ?? defaultLog
-    logFn(`spawned ${label} daemon (pid=${pid})`)
+    logFn(`spawned ${label} daemon lifecycle owner (pid=${pid})`)
     return { ok: true, pid }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -188,9 +187,9 @@ export type EnsureDaemonOutcome =
 
 /**
  * Ensure the unified tribe daemon is alive. Probes the socket; if dead and
- * mode=daemon, spawns a detached replacement. Returns quickly — the whole
- * operation is bounded by `budgetMs` (default 300ms) so it can never delay
- * a hook. Never throws.
+ * mode=daemon, detaches a stable standalone owner which starts the daemon as
+ * its child. Returns quickly — the whole operation is bounded by `budgetMs`
+ * (default 300ms) so it can never delay a hook. Never throws.
  */
 export async function ensureTribeDaemonIfConfigured(deps: EnsureDaemonDeps = {}): Promise<EnsureDaemonOutcome> {
   const budgetMs = deps.budgetMs ?? 300

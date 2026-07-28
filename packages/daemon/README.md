@@ -32,8 +32,9 @@ bun packages/daemon/src/daemon.ts --socket ~/.local/share/tribe/tribe.sock
 ```
 
 Provider bridges do not autostart this daemon. Explicit hook/install lifecycle
-paths may do so for standalone use; a supervisor owns it in managed
-deployments. A missing daemon stays visible and actionable to callers.
+paths may detach the repo-local standalone supervisor, which owns the daemon as
+its child; Hab supplies the owner in managed deployments. A missing daemon
+stays visible and actionable to callers.
 Lifecycle details: [docs/daemon.md](../../docs/daemon.md).
 
 ## Boundary

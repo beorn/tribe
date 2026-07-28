@@ -6,9 +6,9 @@
  *
  *  1. `connectToDaemon(socketPath, opts?)` — plain connect; rejects on
  *     ECONNREFUSED / ENOENT. Per-call timeout configurable.
- *  2. `connectOrStart(socketPath, opts)` — connect; if no daemon, spawn the
- *     supplied `daemonScript` as a detached child and retry with
- *     exponential backoff.
+ *  2. `connectOrStart(socketPath, opts)` — connect; if no daemon, start one
+ *     through a stable standalone lifecycle owner and retry with exponential
+ *     backoff.
  *  3. `createReconnectingClient(opts)` — proxy that wraps a current client
  *     and transparently reconnects (via connectOrStart) on socket close,
  *     replaying registered notification handlers.
@@ -17,11 +17,13 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs"
 import { createConnection, type Socket } from "node:net"
 import { spawn } from "node:child_process"
-import { dirname } from "node:path"
+import { dirname, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 import { createLogger } from "loggily"
 import { createLineParser } from "./parser.ts"
 import { evaluateSpawnSourceForScript } from "./lib/spawn-pin-gate.ts"
 import { isNotification, isResponse, makeNotification, makeRequest } from "./rpc.ts"
+import { sanitizeStandaloneDaemonEnvironment } from "./standalone-supervisor.ts"
 import { createTimers } from "./timers.ts"
 
 const log = createLogger("tribe-client:client")
@@ -212,17 +214,39 @@ function createOperatorCapabilityReader(): () => string | null {
   }
 }
 
-function spawnDaemonWithOperatorCapability(
-  script: string,
-  args: string[],
-  readOperatorCapability: () => string | null,
-): ReturnType<typeof spawn> {
-  const capability = readOperatorCapability()
-  const env = { ...process.env }
+export type StandaloneDaemonSupervisorOpts = {
+  daemonScript: string
+  daemonArgs?: string[]
+  operatorCapability?: string | null
+  runtimePath?: string
+  waitForPid?: number
+}
+
+function resolveWireCliScript(): string {
+  const moduleDir = dirname(fileURLToPath(import.meta.url))
+  const candidates = [resolve(moduleDir, "cli.ts"), resolve(moduleDir, "cli.mjs"), resolve(moduleDir, "../cli.mjs")]
+  const script = candidates.find((candidate) => existsSync(candidate))
+  if (!script) {
+    throw new Error(`connectOrStart: cannot locate the tribe-wire lifecycle owner beside ${moduleDir}`)
+  }
+  return script
+}
+
+export function spawnStandaloneDaemonSupervisor(opts: StandaloneDaemonSupervisorOpts): ReturnType<typeof spawn> {
+  const capability = opts.operatorCapability?.trim() || null
+  const env = sanitizeStandaloneDaemonEnvironment(process.env)
   delete env[OPERATOR_CAPABILITY_FD_ENV]
   delete env.TRIBE_OPERATOR_CAPABILITY
   if (capability) env[OPERATOR_CAPABILITY_FD_ENV] = "3"
-  const child = spawn(process.execPath, [script, ...args], {
+  const supervisorArgs = [
+    resolveWireCliScript(),
+    "__standalone-supervisor",
+    ...(opts.waitForPid === undefined ? [] : ["--wait-for-pid", String(opts.waitForPid)]),
+    "--",
+    opts.daemonScript,
+    ...(opts.daemonArgs ?? []),
+  ]
+  const child = spawn(opts.runtimePath ?? process.execPath, supervisorArgs, {
     detached: true,
     stdio: capability ? ["ignore", "ignore", "ignore", "pipe"] : "ignore",
     env,
@@ -238,6 +262,18 @@ function spawnDaemonWithOperatorCapability(
   }
   child.unref()
   return child
+}
+
+function spawnLifecycleOwnerWithOperatorCapability(
+  script: string,
+  args: string[],
+  readOperatorCapability: () => string | null,
+): ReturnType<typeof spawn> {
+  return spawnStandaloneDaemonSupervisor({
+    daemonScript: script,
+    daemonArgs: args,
+    operatorCapability: readOperatorCapability(),
+  })
 }
 
 /**
@@ -358,7 +394,7 @@ async function connectOrStartWithCapability(
   if (pinGate.reason) log.warn?.(pinGate.reason)
 
   const args = ["--socket", socketPath, ...(opts?.daemonArgs ?? [])]
-  spawnDaemonWithOperatorCapability(script, args, readOperatorCapability)
+  spawnLifecycleOwnerWithOperatorCapability(script, args, readOperatorCapability)
 
   const maxAttempts = opts?.maxStartupAttempts ?? 10
   for (let attempt = 0; attempt < maxAttempts; attempt++) {

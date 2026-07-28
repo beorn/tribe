@@ -5,10 +5,9 @@
  *
  *   1. `reload()` — stop plugins, then ask the declared lifecycle owner to
  *      replace the process. Hab-supervised services shut down cleanly so Hab
- *      can restart them. Standalone daemons close + unlink the socket and
- *      spawn a DETACHED replacement (`detached:true` + `unref()`, no `--fd`)
- *      that binds it fresh. (Earlier versions passed the listening fd to the
- *      child for zero-gap handoff, but Bun cannot `listen({ fd })`.)
+ *      can restart them. A supervised standalone daemon exits with its private
+ *      reload code; a directly launched predecessor installs the same stable
+ *      standalone owner before exiting. Successor daemons never self-detach.
  *
  *   2. Source file watcher — fs.watch on the daemon's source directories;
  *      coalesced via debounce; emits SIGHUP to the current process on change.
@@ -20,11 +19,11 @@
  * withSignals factory routes SIGHUP to `reload()`.
  */
 
-import { spawn } from "node:child_process"
 import { existsSync, readdirSync, readFileSync, unlinkSync, watch, type FSWatcher } from "node:fs"
 import { createHash } from "node:crypto"
 import { dirname as pathDirname, resolve as pathResolve } from "node:path"
 import { createLogger } from "loggily"
+import { spawnStandaloneDaemonSupervisor } from "tribe-wire"
 import type { BaseTribe } from "./base.ts"
 import type { WithConfig } from "./with-config.ts"
 import type { WithSocketServer } from "./with-socket-server.ts"
@@ -60,8 +59,24 @@ export interface WithHotReload {
 export function reloadReplacementForEnvironment(
   env: Readonly<Record<string, string | undefined>>,
   shutdown: () => void,
+  parentPid = process.ppid,
 ): ((reason: string) => void) | undefined {
-  return env.HAB_SERVICE_KIND === "service" ? () => shutdown() : undefined
+  if (env.HAB_SERVICE_KIND === "service") return () => shutdown()
+
+  const supervisorPid = Number(env.TRIBE_DAEMON_SUPERVISOR_PID)
+  const reloadExitCode = Number(env.TRIBE_DAEMON_RELOAD_EXIT_CODE)
+  const hasStandaloneOwner =
+    Number.isSafeInteger(supervisorPid) &&
+    supervisorPid > 1 &&
+    supervisorPid === parentPid &&
+    Number.isSafeInteger(reloadExitCode) &&
+    reloadExitCode > 0 &&
+    reloadExitCode <= 255
+  if (!hasStandaloneOwner) return undefined
+  return () => {
+    process.exitCode = reloadExitCode
+    shutdown()
+  }
 }
 
 function buildSourceFiles(sourceDir: string, libTribeDir: string): string[] {
@@ -112,23 +127,11 @@ export function withHotReload<T extends BaseTribe & WithConfig & WithSocketServe
         return
       }
 
-      // Re-exec strategy: close-then-spawn-detached-fresh.
+      // A directly launched standalone daemon has no durable owner yet.
+      // Install the same repo-local supervisor used by connectOrStart, but ask
+      // it to wait for this predecessor to exit before it starts the next
+      // generation. The supervisor may detach; the daemon never does.
       //
-      // The previous strategy passed the listening socket fd to the child
-      // (`--fd=N` + `stdio[3]=fd`) so it could inherit the bound socket. That
-      // only works under Node — Bun's `node:net` throws "Bun does not support
-      // listening on a file descriptor" on `server.listen({ fd })`. Under Bun
-      // the child crash-looped on startup, the old daemon exited anyway, and
-      // every session saw "No daemon running" (reproduced 2026-05-21 via the
-      // `tribe.reload` MCP tool, which routes here through SIGHUP).
-      //
-      // Instead: the OLD daemon closes + unlinks the socket, then spawns the
-      // replacement DETACHED (its own session via `detached:true` + `unref()`,
-      // so it survives this process's exit) with a FRESH bind — no `--fd`.
-      // The child binds the now-free socket path. There is a sub-second
-      // window with no listener; adapters reconnect transparently via
-      // `createReconnectingClient`'s backoff. Crucially the daemon SURVIVES
-      // a reload — `detached` severs it from the dying parent's lifecycle.
       // Mark the socket as handed off BEFORE closing so the scope-cleanup
       // defer in withSocketServer skips its own unlink (it would otherwise
       // race the replacement daemon's fresh bind).
@@ -146,41 +149,21 @@ export function withHotReload<T extends BaseTribe & WithConfig & WithSocketServe
 
       const argv = process.argv.slice(1).filter((a) => !a.startsWith("--fd"))
       const operatorCapability = t.config.operatorCapability?.trim() || null
-      const childEnv = { ...process.env }
-      delete childEnv.TRIBE_OPERATOR_CAPABILITY_FD
-      delete childEnv.TRIBE_OPERATOR_CAPABILITY
-      if (operatorCapability) childEnv.TRIBE_OPERATOR_CAPABILITY_FD = "3"
-      const child = spawn(process.execPath, argv, {
-        stdio: operatorCapability ? ["ignore", "ignore", "ignore", "pipe"] : "ignore",
-        detached: true,
-        env: childEnv,
+      const child = spawnStandaloneDaemonSupervisor({
+        daemonScript: argv[0]!,
+        daemonArgs: argv.slice(1),
+        operatorCapability,
+        waitForPid: process.pid,
       })
-      if (operatorCapability) {
-        const capabilityPipe = child.stdio[3]
-        if (!capabilityPipe || !("end" in capabilityPipe)) {
-          child.kill()
-          throw new Error("Hot-reload spawn did not expose the operator capability pipe")
-        }
-        capabilityPipe.on("error", (err) => {
-          log.info?.(`Hot-reload operator capability pipe failed: ${err.message}`)
-        })
-        capabilityPipe.end(operatorCapability)
-      }
-      child.unref()
 
       child.on("error", (err) => {
-        log.info?.(`Hot-reload spawn failed: ${err.message}`)
+        log.info?.(`Hot-reload lifecycle owner failed: ${err.message}`)
       })
 
-      // Give new process time to start, then exit. Use a raw setTimeout here —
-      // we WANT this timer to fire even after `triggerShutdown()` is initiated
-      // by something else, because the new process needs the old one out of
-      // the way to take over the fd cleanly. Do NOT unref — if every other
-      // handle is also unref'd or the loop is sync-starved, the donor stays
-      // alive serving its now-dead state. See @km/bearly/hot-reload-zombie-
-      // exit-not-forced for the zombie-daemon incident.
+      // Give the supervisor time to start and enter its predecessor wait before
+      // exiting. Do NOT unref the timer: it owns forward progress to shutdown.
       setTimeout(() => {
-        log.info?.("Hot-reload: old process exiting, new process taking over")
+        log.info?.("Hot-reload: old process exiting under the new lifecycle owner")
         opts.triggerShutdown()
       }, spawnDelayMs)
 

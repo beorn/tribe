@@ -1674,14 +1674,13 @@ function handleReload(ctx: TribeContext, a: ToolArgs, cleanup: () => void): Tool
   // session calling `tribe.reload` repeatedly killed the daemon.)
   //
   // Instead we SIGHUP ourselves. The daemon's `withSignals` factory routes
-  // SIGHUP → `withHotReload.reload()`, which closes + unlinks the socket then
-  // spawns a DETACHED replacement that binds the freed path fresh — the
-  // replacement survives this process's exit, and adapters reconnect
-  // transparently. This is the same hardened path `tribe reload` (the CLI)
-  // already uses.
+  // SIGHUP → `withHotReload.reload()`, which asks the declared lifecycle owner
+  // for a replacement. A directly launched standalone daemon first installs
+  // that stable owner; successor daemons never detach themselves. This is the
+  // same hardened path `tribe reload` (the CLI) already uses.
   setTimeout(() => {
     cleanup()
-    log.info?.(`SIGHUP self (pid=${process.pid}) — hot-reload via detached re-exec`)
+    log.info?.(`SIGHUP self (pid=${process.pid}) — hot-reload via lifecycle owner`)
     process.kill(process.pid, "SIGHUP")
   }, 100) // small delay so the tool response gets sent first
 

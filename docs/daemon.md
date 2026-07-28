@@ -19,10 +19,9 @@ standalone install. The core helper is
    → no-op, immediately.
 2. Probe the socket with a short (50–200ms) connect attempt.
    Already alive → no-op.
-3. If dead and mode is `"daemon"`, spawn a **detached, unref'd** child
-   (`spawn(bunPath, [scriptPath, ...], { detached: true, stdio: "ignore" })`)
-   and return immediately — this is fire-and-forget; the caller does not
-   wait for the socket to become ready.
+3. If dead and mode is `"daemon"`, detach one stable standalone supervisor.
+   That owner starts the daemon as its ordinary child and the hook returns
+   immediately without waiting for the socket.
 
 The whole operation is budgeted at **300ms** by default and is designed to
 never block a Claude Code hook: probe failures and spawn failures are
@@ -33,8 +32,8 @@ Provider-owned stdio, HTTP, and recall bridges are deliberately
 **connect-only**. Their reconnecting clients set `noSpawn: true` on the initial
 connection and every reconnect, so a missing singleton fails loudly without
 letting an arbitrary agent seat create an orphan daemon. A standalone
-hook/install path may still spawn a detached daemon; a supervised deployment
-such as Hab owns the daemon as a resident service.
+hook/install path may detach the repo-local supervisor, never the daemon
+itself; a managed deployment such as Hab supplies the stable owner instead.
 
 ## Socket location
 
@@ -108,17 +107,15 @@ firing at once, both seeing "dead"). The daemon handles this in two stages:
 `withHotReload` keeps the replacement mechanism aligned with the daemon's
 lifecycle owner:
 
-- **Standalone daemon** — `tribe.reload` (RPC), `tribe-wire reload` (CLI), and
-  `SIGHUP` all stop daemon plugins, mark the socket as handed off, close +
-  unlink it, then spawn a **detached** replacement with a fresh bind (no fd
-  inheritance). The old process exits ~1s later (`spawnDelayMs`), with a hard
-  `SIGKILL` self-destruct backstop at +1.5s if clean shutdown is starved.
-
-  (An earlier version tried to hand off the _listening fd itself_ to the
-  child for a zero-gap reload — abandoned because Bun's `node:net` throws on
-  `server.listen({ fd })`, which crash-looped the child under Bun. The
-  close-then-fresh-bind approach costs a brief reconnect window but actually
-  works.)
+- **Standalone daemon** — the repo-local supervisor is the durable parent of
+  every daemon generation. `tribe.reload` (RPC), `tribe-wire reload` (CLI), and
+  `SIGHUP` stop plugins and exit with a private reload code; the same supervisor
+  starts the successor with a fresh bind. If a user launched the first
+  generation directly, that generation installs the supervisor and asks it to
+  wait for the predecessor to exit before starting the replacement. The
+  supervisor carries operator capability in memory and reconstructs a fresh
+  anonymous pipe for each generation. No daemon self-detaches or inherits a
+  seat's identity environment.
 
 - **Hab-supervised service** — when `HAB_SERVICE_KIND=service`, the same reload
   entry points stop plugins and request clean shutdown. They do **not** mark
@@ -151,9 +148,10 @@ lifecycle owner:
   file out from under it.
 
 Net effect for standalone installs: the daemon costs nothing while idle (it
-exits itself) and an explicit autostart-eligible lifecycle path can bring it
-back. Provider bridges never assume that ownership. A supervisor may instead
-declare its own always-on/restart policy.
+exits itself, and its standalone supervisor exits with it) and an explicit
+autostart-eligible lifecycle path can bring both back. Provider bridges never
+assume that ownership. A managed supervisor may instead declare its own
+always-on/restart policy.
 
 ### Host adapter recovery across daemon generations
 

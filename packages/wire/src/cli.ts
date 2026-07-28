@@ -36,6 +36,15 @@ async function main(): Promise<void> {
   const argv = process.argv.slice(2)
   const sub = argv[0]
 
+  // Private process boundary used by connectOrStart and ownerless standalone
+  // reload adoption. It is intentionally absent from Commander/help: callers
+  // use the typed client helper, not this argv protocol.
+  if (sub === "__standalone-supervisor") {
+    const { runStandaloneSupervisor } = await import("./standalone-supervisor.ts")
+    process.exitCode = await runStandaloneSupervisor(argv.slice(1))
+    return
+  }
+
   // Version identity runs BEFORE Commander, short-circuited like `mcp`, so the
   // output is the canonical `<name> <version>+<sha>` shape (the drill-parseable
   // form the rest of the system uses) rather than Commander's bare semver.

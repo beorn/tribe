@@ -17,9 +17,9 @@
  * JSON). We must not swallow errors or rewrite output — just dispatch.
  *
  * Before forwarding, we consult the autostart config and (if configured)
- * ensure the unified tribe daemon is running. The spawn is detached +
- * unref'd so it never blocks the hook; the overall 300 ms budget guarantees
- * Claude Code never waits on us.
+ * ensure the unified tribe daemon is running. The stable standalone owner is
+ * detached + unref'd while the daemon remains its child, so the overall
+ * 300 ms budget guarantees Claude Code never waits on us.
  *
  * km-bear.unified-daemon Phase 5d: collapsed from two parallel probes
  * (lore + tribe) to one — the unified daemon hosts both surfaces.

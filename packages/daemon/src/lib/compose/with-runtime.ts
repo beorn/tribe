@@ -204,7 +204,7 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
       // file unlink + db close + watcher close all live in scope-deferred
       // disposers registered by their factories.
       void t.scope[Symbol.asyncDispose]().catch(() => {})
-      // Force-exit hammer: process.exit(0) WILL fire after 250ms regardless
+      // Force-exit hammer WILL fire after 250ms regardless
       // of what scope dispose is doing. The previous `.unref()` here was a
       // bug — an unref'd timer doesn't keep the event loop alive long enough
       // to fire its own callback if every other handle is also unref'd or if
@@ -213,7 +213,8 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
       // ghost daemon after SIGHUP handoff) traces here: the exit hammer
       // never landed. The 250ms cost vs. previous "maybe sub-250ms" is a
       // worthwhile trade for guaranteed termination.
-      setTimeout(() => process.exit(0), 250)
+      const exitCode = process.exitCode ?? 0
+      setTimeout(() => process.exit(exitCode), 250)
     }
 
     opts.publishShutdown(shutdown)

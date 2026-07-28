@@ -35,7 +35,7 @@ describe("daemon reload lifecycle ownership", () => {
     expect(triggerShutdown).not.toHaveBeenCalled()
   })
 
-  it("selects supervisor replacement only for a Hab service process", () => {
+  it("selects replacement for Hab and the daemon's actual standalone supervisor", () => {
     const shutdown = vi.fn()
 
     const supervised = reloadReplacementForEnvironment({ HAB_SERVICE_KIND: "service" }, shutdown)
@@ -45,5 +45,34 @@ describe("daemon reload lifecycle ownership", () => {
 
     expect(reloadReplacementForEnvironment({}, shutdown)).toBeUndefined()
     expect(reloadReplacementForEnvironment({ HAB_SERVICE_KIND: "watcher" }, shutdown)).toBeUndefined()
+
+    const previousExitCode = process.exitCode
+    try {
+      const standalone = reloadReplacementForEnvironment(
+        {
+          TRIBE_DAEMON_RELOAD_EXIT_CODE: "75",
+          TRIBE_DAEMON_SUPERVISOR_PID: "4242",
+        },
+        shutdown,
+        4242,
+      )
+      expect(standalone).toBeTypeOf("function")
+      standalone?.("operator requested reload")
+      expect(process.exitCode).toBe(75)
+      expect(shutdown).toHaveBeenCalledTimes(2)
+
+      expect(
+        reloadReplacementForEnvironment(
+          {
+            TRIBE_DAEMON_RELOAD_EXIT_CODE: "75",
+            TRIBE_DAEMON_SUPERVISOR_PID: "4242",
+          },
+          shutdown,
+          9999,
+        ),
+      ).toBeUndefined()
+    } finally {
+      process.exitCode = previousExitCode
+    }
   })
 })

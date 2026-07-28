@@ -24,8 +24,15 @@ export type {
   DaemonCallOpts,
   DaemonClient,
   ReconnectingClientOpts,
+  StandaloneDaemonSupervisorOpts,
 } from "./client.ts"
-export { connectOrStart, connectToDaemon, createReconnectingClient, isSocketAlive } from "./client.ts"
+export {
+  connectOrStart,
+  connectToDaemon,
+  createReconnectingClient,
+  isSocketAlive,
+  spawnStandaloneDaemonSupervisor,
+} from "./client.ts"
 
 // Deadline-bounded call (hook-friendly)
 export type { DaemonCallOutcome, WithDaemonCallOpts } from "./util.ts"

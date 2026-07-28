@@ -61,7 +61,7 @@ import { prefixFallbackDeliveryResolver } from "./lib/delivery-resolution.ts"
 // command `tribe install` plants in ~/.claude/settings.json (see
 // lib/install.ts TRIBE_HOOK_MARKER). It must dispatch and EXIT before the
 // daemon pipe below boots: a hook invocation never starts a broker
-// in-process — dispatchHook owns detached autostart itself.
+// in-process — dispatchHook owns standalone supervisor autostart itself.
 // ---------------------------------------------------------------------------
 
 if (process.argv[2] === "hook") {

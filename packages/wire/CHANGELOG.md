@@ -31,6 +31,11 @@
 
 ### Fixed
 
+- Keep every standalone daemon generation under one stable lifecycle owner.
+  Client/hook autostart detaches the supervisor rather than the daemon, strips
+  ambient seat identity before launch, and preserves that same owner across
+  manual reloads. A directly launched daemon adopts the supervisor before
+  replacement instead of self-detaching its successor.
 - Reconcile inbox-wait terminal outcomes with final
   `attention.actionable_unread`. A deadline carrying actionable attention now
   reports `status: "woken"` and `timed_out: false`; daemon chunks remain raw so
