@@ -98,9 +98,10 @@ export type SanitizedMessage = {
 /**
  * Sanitize `content` **and report whether the cap cut it**.
  *
- * Prefer this over {@link sanitizeMessage} at any surface that reports an
- * outcome back to a caller: a surface that says "sent" while silently dropping
- * the tail of the message is the exact defect this function exists to close.
+ * There is deliberately no string-returning variant: the truncation fact has
+ * exactly one way out of this module, so no caller can drop it by writing the
+ * shorter call. A surface that says "sent" while silently discarding the tail
+ * of the message is the defect this function exists to close.
  */
 export function sanitizeMessageWithReport(content: string): SanitizedMessage {
   // Strip control chars except newlines
@@ -117,14 +118,4 @@ export function sanitizeMessageWithReport(content: string): SanitizedMessage {
   // truncation, or malformed input) with U+FFFD so the message can never
   // poison a downstream JSON serialization.
   return { content: stripLoneSurrogates(capped), truncated, originalLength }
-}
-
-/**
- * Sanitize `content`, discarding the truncation report.
- *
- * Only for callers with no result surface to report on. Anything that returns
- * an outcome to a sender must use {@link sanitizeMessageWithReport} instead.
- */
-export function sanitizeMessage(content: string): string {
-  return sanitizeMessageWithReport(content).content
 }
