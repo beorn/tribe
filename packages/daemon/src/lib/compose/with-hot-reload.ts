@@ -14,9 +14,9 @@
  *      Skipped when `disableWatch: true` (tests) or `TRIBE_NO_AUTORELOAD=1`.
  *
  * The factory takes runtime callbacks the daemon supplies: `stopPlugins()`
- * flushes plugin cursors; `triggerShutdown()` releases a standalone predecessor;
- * and optional `replaceProcess()` delegates to a stable supervisor. The
- * withSignals factory routes SIGHUP to `reload()`.
+ * flushes plugin cursors immediately before handoff; `triggerShutdown()`
+ * releases a standalone predecessor; and optional `replaceProcess()` delegates
+ * to a stable supervisor. The withSignals factory routes SIGHUP to `reload()`.
  */
 
 import { existsSync, readdirSync, readFileSync, unlinkSync, watch, type FSWatcher } from "node:fs"
@@ -119,10 +119,8 @@ export function withHotReload<T extends BaseTribe & WithConfig & WithSocketServe
     function reload(): void {
       const reason = "SIGHUP received — re-exec for hot-reload"
       log.info?.(reason)
-      // Stop plugins before either replacement path so cursor/state flushes
-      // before the process changes.
-      opts.stopPlugins()
       if (opts.replaceProcess) {
+        opts.stopPlugins()
         opts.replaceProcess(reason)
         return
       }
@@ -131,22 +129,6 @@ export function withHotReload<T extends BaseTribe & WithConfig & WithSocketServe
       // Install the same repo-local supervisor used by connectOrStart, but ask
       // it to wait for this predecessor to exit before it starts the next
       // generation. The supervisor may detach; the daemon never does.
-      //
-      // Mark the socket as handed off BEFORE closing so the scope-cleanup
-      // defer in withSocketServer skips its own unlink (it would otherwise
-      // race the replacement daemon's fresh bind).
-      t.socket.handedOff = true
-      try {
-        t.socket.server.close()
-      } catch {
-        /* already closing */
-      }
-      try {
-        if (existsSync(t.socket.socketPath)) unlinkSync(t.socket.socketPath)
-      } catch {
-        /* not present or no permission */
-      }
-
       const argv = process.argv.slice(1).filter((a) => !a.startsWith("--fd"))
       const operatorCapability = t.config.operatorCapability?.trim() || null
       const child = spawnStandaloneDaemonSupervisor({
@@ -156,32 +138,61 @@ export function withHotReload<T extends BaseTribe & WithConfig & WithSocketServe
         waitForPid: process.pid,
       })
 
+      let ownerFailed = false
+      let handoffStarted = false
       child.on("error", (err) => {
+        if (handoffStarted) return
+        ownerFailed = true
         log.info?.(`Hot-reload lifecycle owner failed: ${err.message}`)
       })
+      child.on("exit", (code, signal) => {
+        if (handoffStarted) return
+        ownerFailed = true
+        log.info?.(`Hot-reload lifecycle owner exited before handoff (code=${String(code)}, signal=${String(signal)})`)
+      })
 
-      // Give the supervisor time to start and enter its predecessor wait before
-      // exiting. Do NOT unref the timer: it owns forward progress to shutdown.
+      // Prove the supervisor survives startup and enters its predecessor wait
+      // before mutating the live daemon. Do NOT unref the timer: it owns
+      // forward progress to shutdown.
       setTimeout(() => {
+        if (ownerFailed) return
+        opts.stopPlugins()
+        handoffStarted = true
+
+        // Mark the socket as handed off BEFORE closing so the scope-cleanup
+        // defer in withSocketServer skips its own unlink (it would otherwise
+        // race the replacement daemon's fresh bind).
+        t.socket.handedOff = true
+        try {
+          t.socket.server.close()
+        } catch {
+          /* already closing */
+        }
+        try {
+          if (existsSync(t.socket.socketPath)) unlinkSync(t.socket.socketPath)
+        } catch {
+          /* not present or no permission */
+        }
+
+        // Belt-and-braces nuke: if triggerShutdown + withRuntime's force-exit
+        // hammer somehow still don't terminate this process — say a sync-heavy
+        // plugin starves both timers' callbacks — SIGKILL self after 1500ms.
+        // Synchronous, kernel-enforced, can't be starved. This is the last line
+        // of defense; previous fixes (dropping .unref() on both timers) should
+        // make it unreachable in practice, but the historical zombie-daemon
+        // incident proved we need the hammer.
+        setTimeout(() => {
+          log.info?.("Hot-reload: belt-and-braces SIGKILL — clean shutdown did not terminate process")
+          try {
+            process.kill(process.pid, "SIGKILL")
+          } catch {
+            /* even the kill failed; nothing left to try */
+          }
+        }, 1500)
+
         log.info?.("Hot-reload: old process exiting under the new lifecycle owner")
         opts.triggerShutdown()
       }, spawnDelayMs)
-
-      // Belt-and-braces nuke: if triggerShutdown + withRuntime's force-exit
-      // hammer somehow still don't terminate this process — say a sync-heavy
-      // plugin starves both timers' callbacks — SIGKILL self at
-      // spawnDelayMs + 1500ms. Synchronous, kernel-enforced, can't be
-      // starved. This is the last line of defense; previous fixes (dropping
-      // .unref() on both timers) should make it unreachable in practice,
-      // but the historical zombie-daemon incident proved we need the hammer.
-      setTimeout(() => {
-        log.info?.("Hot-reload: belt-and-braces SIGKILL — clean shutdown did not terminate process")
-        try {
-          process.kill(process.pid, "SIGKILL")
-        } catch {
-          /* even the kill failed; nothing left to try */
-        }
-      }, spawnDelayMs + 1500)
     }
 
     // Source-file watcher — auto-SIGHUP on code changes.

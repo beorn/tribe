@@ -245,6 +245,11 @@ client.close()
       supervisorPid: String(ownerPid),
     })
     successor.client.close()
+
+    await terminate(successor.pid)
+    daemonPids.delete(successor.pid)
+    await waitFor(() => !pidExists(ownerPid), "standalone owner exit after clean daemon shutdown")
+    ownerPids.delete(ownerPid)
   }, 30_000)
 
   it("adopts a directly launched daemon before replacing it", async () => {

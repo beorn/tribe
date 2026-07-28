@@ -5,8 +5,15 @@
  * @consumer @ag/tribe/22322-daemon-restart-drops-bridges-with-no-repair-verb
  */
 
+import { EventEmitter } from "node:events"
 import { describe, expect, it, vi } from "vitest"
 import { reloadReplacementForEnvironment, withHotReload } from "./with-hot-reload.ts"
+
+const { spawnStandaloneDaemonSupervisor } = vi.hoisted(() => ({
+  spawnStandaloneDaemonSupervisor: vi.fn(),
+}))
+
+vi.mock("tribe-wire", () => ({ spawnStandaloneDaemonSupervisor }))
 
 describe("daemon reload lifecycle ownership", () => {
   it("delegates replacement without mutating the socket when a supervisor owns the daemon", () => {
@@ -33,6 +40,64 @@ describe("daemon reload lifecycle ownership", () => {
     expect(socket.handedOff).toBe(false)
     expect(close).not.toHaveBeenCalled()
     expect(triggerShutdown).not.toHaveBeenCalled()
+  })
+
+  it("keeps the current socket alive when a standalone owner cannot start", () => {
+    const stopPlugins = vi.fn()
+    const triggerShutdown = vi.fn()
+    const close = vi.fn()
+    const socket = {
+      handedOff: false,
+      server: { close },
+      socketPath: "/must-not-unlink-owner-start-failure.sock",
+    }
+    spawnStandaloneDaemonSupervisor.mockImplementationOnce(() => {
+      throw new Error("owner startup failed")
+    })
+    const subject = withHotReload({
+      stopPlugins,
+      triggerShutdown,
+      disableWatch: true,
+    })({ config: { operatorCapability: null }, socket } as never)
+
+    expect(() => subject.hotReload.reload()).toThrow("owner startup failed")
+
+    expect(stopPlugins).not.toHaveBeenCalled()
+    expect(socket.handedOff).toBe(false)
+    expect(close).not.toHaveBeenCalled()
+    expect(triggerShutdown).not.toHaveBeenCalled()
+  })
+
+  it("keeps the current socket alive when a standalone owner exits during startup", () => {
+    vi.useFakeTimers()
+    try {
+      const stopPlugins = vi.fn()
+      const triggerShutdown = vi.fn()
+      const close = vi.fn()
+      const socket = {
+        handedOff: false,
+        server: { close },
+        socketPath: "/must-not-unlink-owner-early-exit.sock",
+      }
+      const owner = new EventEmitter()
+      spawnStandaloneDaemonSupervisor.mockReturnValueOnce(owner as never)
+      const subject = withHotReload({
+        stopPlugins,
+        triggerShutdown,
+        disableWatch: true,
+      })({ config: { operatorCapability: null }, socket } as never)
+
+      subject.hotReload.reload()
+      owner.emit("exit", 1, null)
+      vi.advanceTimersByTime(1000)
+
+      expect(stopPlugins).not.toHaveBeenCalled()
+      expect(socket.handedOff).toBe(false)
+      expect(close).not.toHaveBeenCalled()
+      expect(triggerShutdown).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("selects replacement for Hab and the daemon's actual standalone supervisor", () => {
