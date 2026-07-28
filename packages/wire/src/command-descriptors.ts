@@ -220,10 +220,23 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             type: "boolean",
             description: "Present and true when a non-LLM sender omitted `summary` and the daemon derived one.",
           },
-          warning: { type: "string", description: "Human-readable note emitted when the summary was derived." },
+          truncated: {
+            type: "boolean",
+            description:
+              "Always present. True when the message exceeded the 4096-char cap and the recipient received only a prefix ending in `...`. The daemon still delivered it and still reports `sent: true` — treat `truncated: true` as a partial send and resend the remainder or link the full text.",
+          },
+          original_length: {
+            type: "number",
+            description:
+              "Always present. Length the 4096-char cap was measured against (the message after control characters are stripped). Subtract 4096 to get how much a truncated send dropped.",
+          },
+          warning: {
+            type: "string",
+            description: "Human-readable note — emitted when the summary was derived or the message was truncated.",
+          },
           ...ERROR_SHAPE,
         },
-        "Send result: { sent, id, summary, tracker? } on success (tracker for replies; summary_derived + warning when derived), { error } on validation failure.",
+        "Send result: { sent, id, summary, truncated, original_length, tracker? } on success (tracker for replies; summary_derived + warning when derived; truncated: true means only a prefix was delivered), { error } on validation failure.",
       ),
     },
     cli: available({

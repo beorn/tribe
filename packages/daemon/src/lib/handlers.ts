@@ -10,7 +10,7 @@ import type { TribeRole } from "tribe-wire/lib/config"
 
 const log = createLogger("tribe:handlers")
 import { existsSync, readFileSync, statSync } from "node:fs"
-import { validateName, sanitizeMessage } from "./validation.ts"
+import { validateName, sanitizeMessageWithReport, MESSAGE_MAX_LENGTH, type SanitizedMessage } from "./validation.ts"
 import {
   sendMessage,
   deriveSummary,
@@ -492,7 +492,8 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     return jsonResult({ error: "tribe.send: `to` must be a non-empty string or array of non-empty strings." })
   }
   const msgType = (a.type as string) ?? "notify"
-  const sanitized = sanitizeMessage(a.message as string)
+  const truncation = sanitizeMessageWithReport(a.message as string)
+  const sanitized = truncation.content
   const deliveryArg = a.delivery
   let delivery: Delivery | undefined
   if (deliveryArg === "push" || deliveryArg === "pull") delivery = deliveryArg
@@ -567,6 +568,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       expiresInMs,
       summary,
       summaryDerived,
+      truncation,
       resolveRecipient,
     })
   }
@@ -618,6 +620,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   })
   const warning = combineWarnings(
     maybeDerivedSummaryWarning(summaryDerived),
+    maybeTruncationWarning(truncation),
     trackerMissWarning(ctx, sender, [recipients], result.tracker),
   )
   return jsonResult({
@@ -629,6 +632,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     ...replyCloseFailure(result.tracker),
     summary,
     ...(summaryDerived ? { summary_derived: true } : {}),
+    ...truncationReport(truncation),
     ...(warning ? { warning } : {}),
   })
 }
@@ -649,6 +653,7 @@ function handleMultiSend(input: {
   expiresInMs: number | undefined
   summary: string
   summaryDerived: boolean
+  truncation: SanitizedMessage
   resolveRecipient: (recipient: string) => DirectDeliveryResolution
 }): ToolResult {
   const resolutions = resolveDirectRecipients(input.recipients, input.resolveRecipient)
@@ -686,6 +691,7 @@ function handleMultiSend(input: {
   const tracker = aggregateReplyTracker(results, input.replyId)
   const warning = combineWarnings(
     maybeDerivedSummaryWarning(input.summaryDerived),
+    maybeTruncationWarning(input.truncation),
     trackerMissWarning(input.ctx, input.sender, input.recipients, tracker),
   )
   const deliveries = deliveryReport(results)
@@ -706,6 +712,7 @@ function handleMultiSend(input: {
     deliveries,
     summary: input.summary,
     ...(input.summaryDerived ? { summary_derived: true } : {}),
+    ...truncationReport(input.truncation),
     ...(warning ? { warning } : {}),
   })
 }
@@ -793,6 +800,29 @@ function derivedSummaryWarning(): string {
 
 function maybeDerivedSummaryWarning(summaryDerived: boolean): string | undefined {
   return summaryDerived ? derivedSummaryWarning() : undefined
+}
+
+/**
+ * @ag/tribe/22497 — report the cap on every send result, both ways.
+ *
+ * `truncated` is emitted unconditionally (never only when true): an absent
+ * flag aliases "not truncated" with "this daemon predates the field", so a
+ * sender could not tell an intact message from an unknown one. An explicit
+ * `false` is the affirmative statement that nothing was dropped.
+ */
+function truncationReport(truncation: SanitizedMessage): { truncated: boolean; original_length: number } {
+  return { truncated: truncation.truncated, original_length: truncation.originalLength }
+}
+
+/**
+ * The human/LLM-readable half of the same fact. The structured flag alone is
+ * easy to skip past; a sender that only reads `warning` still learns the tail
+ * of its message never arrived.
+ */
+function maybeTruncationWarning(truncation: SanitizedMessage): string | undefined {
+  if (!truncation.truncated) return undefined
+  const dropped = truncation.originalLength - MESSAGE_MAX_LENGTH
+  return `message truncated to ${MESSAGE_MAX_LENGTH} chars — ${dropped} of ${truncation.originalLength} were dropped and the recipient did NOT receive them; resend the remainder or link the full text.`
 }
 
 type Tracker = { request_id: string; closed: number }
@@ -2264,10 +2294,11 @@ function handleHealthPublish(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts)
   // from the lateral producer. Never load-bearing for the emit itself.
   const agent = typeof a.agent === "string" ? a.agent : undefined
   const seq = typeof a.seq === "number" ? a.seq : undefined
+  const truncation = sanitizeMessageWithReport(content)
   const result = sendMessage(
     ctx,
     "*",
-    sanitizeMessage(content),
+    truncation.content,
     HEALTH_RECOVERY_TOPIC, // type == topic, mirroring the accountly-plugin's health:* broadcasts
     undefined,
     undefined,
@@ -2275,7 +2306,15 @@ function handleHealthPublish(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts)
     { delivery: "pull", topic: HEALTH_RECOVERY_TOPIC },
   )
   logEvent(ctx, `message.sent.${HEALTH_RECOVERY_TOPIC}`, undefined, { agent, seq, message_id: result.id })
-  return jsonResult({ published: true, id: result.id, agent, seq })
+  const warning = maybeTruncationWarning(truncation)
+  return jsonResult({
+    published: true,
+    id: result.id,
+    agent,
+    seq,
+    ...truncationReport(truncation),
+    ...(warning ? { warning } : {}),
+  })
 }
 
 function handleLifecycle(a: ToolArgs, opts: HandlerOpts): ToolResult {

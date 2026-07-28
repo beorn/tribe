@@ -382,6 +382,8 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     summary?: string
     summary_derived?: boolean
     warning?: string
+    truncated?: boolean
+    original_length?: number
     tracker?: { request_id?: string; closed?: number }
   }
   if (typeof result.error === "string" && result.error.length > 0) {
@@ -394,6 +396,14 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
   // because none was authored, so the sender learns to pass `--summary`.
   if (result.summary_derived) {
     console.warn(`  no --summary given; derived one-liner: "${result.summary ?? ""}"`)
+  }
+  // @ag/tribe/22497: the daemon caps messages and used to cut them silently, so
+  // "Sent message to X" above could describe a mutilated send. Same no-silent
+  // rule as the derived summary — the sender learns from its own terminal.
+  if (result.truncated) {
+    console.warn(
+      `  message TRUNCATED: only the first 4096 of ${result.original_length ?? "?"} chars were delivered; resend the remainder or link the full text`,
+    )
   }
 }
 
