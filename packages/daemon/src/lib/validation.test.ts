@@ -20,7 +20,7 @@
  */
 
 import { describe, test, expect } from "vitest"
-import { sanitizeMessage, stripLoneSurrogates, truncateSurrogateSafe, validateName } from "./validation.ts"
+import { sanitizeMessageWithReport, stripLoneSurrogates, truncateSurrogateSafe, validateName } from "./validation.ts"
 
 // A lone high surrogate appears anywhere in a string iff this matches.
 const HAS_LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
@@ -84,13 +84,13 @@ describe("stripLoneSurrogates", () => {
   })
 })
 
-describe("sanitizeMessage — lone-surrogate poison guard", () => {
+describe("sanitizeMessageWithReport — lone-surrogate poison guard", () => {
   test("truncating a 4096+ char message at a surrogate boundary never poisons", () => {
     // Build a message where the 4093-char cap lands mid-emoji.
     // 4092 'a' + 😀 (units 4092,4093) + filler past 4096 to trigger truncation.
     const text = "a".repeat(4092) + "😀" + "b".repeat(200)
     expect(text.length).toBeGreaterThan(4096)
-    const out = sanitizeMessage(text)
+    const out = sanitizeMessageWithReport(text).content
     expect(HAS_LONE_SURROGATE.test(out)).toBe(false)
     // Result is JSON-serializable — the actual failure mode in the incident.
     expect(() => JSON.parse(JSON.stringify(out))).not.toThrow()
@@ -98,14 +98,14 @@ describe("sanitizeMessage — lone-surrogate poison guard", () => {
 
   test("sanitized message containing astral input round-trips through JSON", () => {
     const text = "agent says: 😀 deployed 🎉 — astral char 𝕏 ok"
-    const out = sanitizeMessage(text)
+    const out = sanitizeMessageWithReport(text).content
     expect(out).toBe(text) // short, well-formed → passes through verbatim
     expect(JSON.parse(JSON.stringify(out))).toBe(out)
   })
 
   test("an already-poisoned message (lone surrogate from upstream) is sanitized", () => {
     const poisoned = "tribe notification ends here\uD83D"
-    const out = sanitizeMessage(poisoned)
+    const out = sanitizeMessageWithReport(poisoned).content
     expect(HAS_LONE_SURROGATE.test(out)).toBe(false)
     expect(() => JSON.parse(JSON.stringify(out))).not.toThrow()
   })
@@ -114,7 +114,7 @@ describe("sanitizeMessage — lone-surrogate poison guard", () => {
     // Sweep the emoji across the cut point: any position must stay clean.
     for (let pad = 4088; pad <= 4096; pad++) {
       const text = "a".repeat(pad) + "😀" + "b".repeat(100)
-      const out = sanitizeMessage(text)
+      const out = sanitizeMessageWithReport(text).content
       expect(HAS_LONE_SURROGATE.test(out)).toBe(false)
     }
   })

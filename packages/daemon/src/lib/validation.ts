@@ -65,15 +65,57 @@ export function validateName(name: string): string | null {
   return null
 }
 
-export function sanitizeMessage(content: string): string {
+/** Hard cap on a tribe message, in UTF-16 code units. Content past it is cut. */
+export const MESSAGE_MAX_LENGTH = 4096
+
+/** Appended to a message the cap cut, so the recipient can see it is partial. */
+const TRUNCATION_MARKER = "..."
+
+/**
+ * A sanitized message plus the fact of whether sanitizing dropped content.
+ *
+ * The `truncated` flag exists because the cut used to be invisible: the daemon
+ * returned a bare string, so `tribe.send` reported `sent: true` on a mutilated
+ * message and the sender had no way to learn the tail was gone
+ * (@ag/tribe/22497). Carrying the fact in the return type is what makes it
+ * impossible to drop by accident — docs/principles.md § "Fail Loud, Fail Now".
+ */
+export type SanitizedMessage = {
+  /** Sanitized content: control chars stripped, capped, surrogate-safe. */
+  readonly content: string
+  /** True iff the cap dropped characters — `content` is a prefix, not the whole message. */
+  readonly truncated: boolean
+  /**
+   * The length the cap was measured against: the input after control-char
+   * stripping, before capping. This is the number directly comparable to
+   * `MESSAGE_MAX_LENGTH`, so `originalLength - MESSAGE_MAX_LENGTH` is how much
+   * a truncated send lost. It is not the raw argument's length when the input
+   * carried control characters, which are removed before the cap applies.
+   */
+  readonly originalLength: number
+}
+
+/**
+ * Sanitize `content` **and report whether the cap cut it**.
+ *
+ * There is deliberately no string-returning variant: the truncation fact has
+ * exactly one way out of this module, so no caller can drop it by writing the
+ * shorter call. A surface that says "sent" while silently discarding the tail
+ * of the message is the defect this function exists to close.
+ */
+export function sanitizeMessageWithReport(content: string): SanitizedMessage {
   // Strip control chars except newlines
-  let cleaned = content.replace(/[\x00-\x09\x0B-\x1F\x7F]/g, "")
-  // Cap at 4096 chars — surrogate-safe so the cut never lands mid-pair.
-  if (cleaned.length > 4096) {
-    cleaned = truncateSurrogateSafe(cleaned, 4093) + "..."
-  }
+  const cleaned = content.replace(/[\x00-\x09\x0B-\x1F\x7F]/g, "")
+  const originalLength = cleaned.length
+  const truncated = originalLength > MESSAGE_MAX_LENGTH
+  // Cap — surrogate-safe so the cut never lands mid-pair. The marker occupies
+  // the tail of the budget, so a capped message is exactly MESSAGE_MAX_LENGTH
+  // code units (one fewer when the cut dropped a half-pair).
+  const capped = truncated
+    ? truncateSurrogateSafe(cleaned, MESSAGE_MAX_LENGTH - TRUNCATION_MARKER.length) + TRUNCATION_MARKER
+    : cleaned
   // Defensive net: replace any lone surrogate (from this or any upstream
   // truncation, or malformed input) with U+FFFD so the message can never
   // poison a downstream JSON serialization.
-  return stripLoneSurrogates(cleaned)
+  return { content: stripLoneSurrogates(capped), truncated, originalLength }
 }
