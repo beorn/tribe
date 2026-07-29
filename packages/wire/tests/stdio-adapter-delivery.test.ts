@@ -732,6 +732,7 @@ describe("stdio adapter delivery modes", () => {
         TRIBE_LAUNCH_ID: "provider-launch-a",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: logPath,
+        LOG_LEVEL: "warn",
       },
       stdio: ["pipe", "pipe", "pipe"],
     })

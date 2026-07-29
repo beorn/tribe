@@ -14,7 +14,7 @@
 
 import { execSync } from "node:child_process"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
-import { dirname, resolve } from "node:path"
+import { resolve } from "node:path"
 import { createLogger } from "loggily"
 import { findBeadsDir } from "tribe-wire/lib/config"
 import { createTimers } from "./timers.ts"
@@ -569,18 +569,6 @@ export function formatEvent(
     default:
       return null
   }
-}
-
-// ---------------------------------------------------------------------------
-// Recent events buffer (dedup for workflow runs)
-// ---------------------------------------------------------------------------
-
-interface RecentEvent {
-  repo: string
-  line: string
-  type: string
-  url: string
-  ts: string
 }
 
 // ---------------------------------------------------------------------------

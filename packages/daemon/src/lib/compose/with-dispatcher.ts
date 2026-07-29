@@ -712,7 +712,6 @@ export function withDispatcher<
               isActive,
               projectId,
               takenNames,
-              clientPid,
             })
             // 21454 — re-apply a persisted runtime rename. tribe.rename /
             // explicit tribe.join wrote the session's chosen name through to

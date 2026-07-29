@@ -1236,10 +1236,6 @@ function handleRename(
   },
 ): ToolResult {
   const newName = a.new_name as string
-  const contextName = ctx.getName()
-  const storedSession = ctx.db
-    .prepare("SELECT name FROM sessions WHERE id = $id LIMIT 1")
-    .get({ $id: ctx.sessionId }) as { name: string } | null
   const storedName = ctx.getName()
   const dbRow = ctx.db.prepare("SELECT name FROM sessions WHERE id = $id").get({ $id: ctx.sessionId }) as {
     name: string
@@ -1718,7 +1714,7 @@ function handleReload(ctx: TribeContext, a: ToolArgs, cleanup: () => void): Tool
 }
 
 async function handleRetro(ctx: TribeContext, a: ToolArgs): Promise<ToolResult> {
-  const { generateRetro, formatMarkdown, parseDuration } = await import("./retro.ts")
+  const { generateRetro, formatMarkdown, parseDuration } = await import("../../../wire/src/lib/retro.ts")
   const sinceStr = a.since as string | undefined
   let sinceMs: number | undefined
   if (sinceStr) {

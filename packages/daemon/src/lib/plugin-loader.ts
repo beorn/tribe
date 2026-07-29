@@ -2,8 +2,8 @@
  * Plugin loader — starts each available plugin with a shared TribeClientApi
  * and returns a combined stop function.
  *
- * Plugins that report `!available()` are skipped silently (dependency missing
- * — e.g. no .beads/, no gh auth, no accountly config).
+ * Plugins that report `!available()` are recorded inactive and skipped
+ * (dependency missing — e.g. no gh auth or account configuration).
  */
 
 import { createLogger } from "loggily"

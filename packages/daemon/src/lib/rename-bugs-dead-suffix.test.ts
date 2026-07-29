@@ -26,7 +26,6 @@ describe("bead 22226 — rename and dead-suffix fixes", () => {
   it("never dead-suffixes a session whose OS PID is alive even if active transport is absent", () => {
     const db = openDatabase(":memory:")
     const stmts = createStatements(db)
-    const ctx1 = makeCtx(db, stmts, "s1", "@ci")
     const now = Date.now()
 
     // Insert session s1 with name "@ci" and PID = process.pid (current live PID)

@@ -301,8 +301,6 @@ export interface ResolveNameContext {
   projectId: string | null
   /** Names currently held by connected clients. Used for flavor-number assignment. */
   takenNames: ReadonlySet<string>
-  /** Client OS PID. Used as last-resort fallback name suffix. */
-  clientPid?: number
 }
 
 /**
@@ -318,7 +316,7 @@ export interface ResolveNameContext {
  * /up skills sync the tribe session name to the hat at claim time.
  */
 export function resolveName(ctx: ResolveNameContext): string {
-  const { p, claudeSessionName, takenNames, clientPid } = ctx
+  const { p, claudeSessionName, takenNames } = ctx
 
   // 1. p.name set — split into flavor-default (auto-number) vs explicit (verbatim)
   if (p.name) {

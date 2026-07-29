@@ -213,16 +213,3 @@ What the envelope does:
 | `TRIBE_RECALL_ENGINE_DIR`                 | Override where `tribe hook <event>` loads the recall hook engine from (fork/experiment seam; normally unset).                                                                                            |
 | `TRIBE_INJECTION_DEBUG_DIR`               | Same idea for the injection-envelope debug recorder.                                                                                                                                                     |
 | `LOGGILY_FILE` / `INJECTION_DEBUG_LOG`    | JSONL observability sink for `injection:*` events.                                                                                                                                                       |
-
-## Related: `bg-recall` (not wired up here)
-
-`packages/bg-recall/` (`@bearly/bg-recall` in its own docs) is a documented,
-tested, standalone package for **background**, entity-driven recall: a
-daemon watches tool calls (`PostToolUse`), extracts entities, runs recall
-queries in the background, and pushes high-relevance hints over the tribe
-channel — instead of blocking `UserPromptSubmit` on every turn. It's real
-code with real tests (`bun vitest run tests/` from the package), but it has
-no `bin`, and nothing in `plugins/claude/` or `packages/daemon/` imports or
-starts it — it's a library you'd wire up yourself
-(`createBgRecallDaemon({...})`), not part of the out-of-the-box hook
-pipeline described above.

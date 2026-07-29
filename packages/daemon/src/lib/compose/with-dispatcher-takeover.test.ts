@@ -23,6 +23,7 @@ import { join } from "node:path"
 import type { Server, Socket as NetSocket } from "node:net"
 import type { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import { getLogLevel, setLogLevel } from "loggily"
 import { createScope } from "tribe-wire"
 import { TRIBE_PROTOCOL_VERSION, type JsonRpcRequest } from "tribe-wire/lib/socket"
 import type { TribeRole } from "tribe-wire/lib/config"
@@ -163,10 +164,10 @@ describe("dispatcher explicit-persona takeover (@ag/tribe/20703)", () => {
     )
 
     harness.addPendingClient("conn-taker")
-    // The takeover branch logs a loud recovery line via log.warn (routes to
-    // console.warn through loggily) — some runners (e.g. the hh vendor-project
-    // vitest setup) fail any test that produces console output, so the spy
-    // both captures the line for assertion and suppresses it from stdout.
+    // Pin the level: the parent shell's LOG_LEVEL must not decide whether this
+    // behavior assertion sees the warning.
+    const previousLogLevel = getLogLevel()
+    setLogLevel("warn")
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
     try {
       const taker = parseResult<RegisterResult>(
@@ -205,6 +206,7 @@ describe("dispatcher explicit-persona takeover (@ag/tribe/20703)", () => {
       expect(takeoverLine).toContain("new pid 4002")
     } finally {
       warnSpy.mockRestore()
+      setLogLevel(previousLogLevel)
     }
   })
 

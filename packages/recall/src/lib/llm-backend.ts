@@ -114,11 +114,7 @@ function warnOnce(reason: string): void {
   )
 }
 
-/**
- * Display formatting for USD costs. Copied verbatim from bearly
- * plugins/llm/src/lib/types.ts — pure display logic duplicated so that
- * sync formatting call sites don't need the async backend probe.
- */
+/** Synchronous display formatting for USD costs. */
 export function formatCost(cost: number): string {
   if (cost < 0.01) return `$${(cost * 100).toFixed(2)}¢`
   if (cost < 1) return `$${cost.toFixed(3)}`

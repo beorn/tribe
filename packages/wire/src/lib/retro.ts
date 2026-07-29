@@ -1,20 +1,8 @@
 /**
- * Tribe Retro — Retrospective report generator for tribe sessions
+ * Canonical Tribe retrospective report generator.
  *
- * Analyzes tribe message history and generates observability reports
- * with per-member activity, coordination health, and timeline.
- *
- * Ported into `tribe-wire` (Phase A.2 of
- * `@km/bearly/tribe-cli-unify-phase-a2-verbs`) from the original location at
- * `tools/lib/tribe/retro.ts`. The module reads directly via `bun:sqlite` —
- * this is a DB-direct access pattern (no daemon RPC) that straddles the
- * client/daemon boundary. Phase A.2 accepts this compromise because the
- * functionality works identically in both contexts (CLI + daemon-side
- * MCP tool). Phase C may revisit and split the boundary cleanly.
- *
- * Used by: the `retro` subcommand in `cli/send.ts`, and the daemon's
- * `tribe.retro` MCP tool (which dynamic-imports the legacy copy at
- * `tools/lib/tribe/retro.ts` for now — Phase C unifies on this copy).
+ * Both the wire CLI and daemon RPC pass their database handle through this
+ * pure analysis/formatting core, so response metrics cannot drift by surface.
  */
 
 import type { Database } from "bun:sqlite"

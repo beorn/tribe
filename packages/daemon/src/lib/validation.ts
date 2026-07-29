@@ -105,7 +105,8 @@ export type SanitizedMessage = {
  */
 export function sanitizeMessageWithReport(content: string): SanitizedMessage {
   // Strip control chars except newlines
-  const cleaned = content.replace(/[\x00-\x09\x0B-\x1F\x7F]/g, "")
+  // oxlint-disable-next-line no-control-regex -- the sanitizer intentionally removes C0 controls.
+  const cleaned = content.replace(/[\u0000-\u0009\u000B-\u001F\u007F]/g, "")
   const originalLength = cleaned.length
   const truncated = originalLength > MESSAGE_MAX_LENGTH
   // Cap — surrogate-safe so the cut never lands mid-pair. The marker occupies

@@ -53,11 +53,7 @@ import {
   type StatusResult,
   type WorkspaceStateResult,
 } from "../../../../plugins/claude/recall/lib/rpc.ts"
-import {
-  resolveSummarizerMode,
-  summarizeTail,
-  type SummarizerMode,
-} from "../../../../plugins/claude/recall/lib/summarizer.ts"
+import { summarizeTail, type SummarizerMode } from "../../../../plugins/claude/recall/lib/summarizer.ts"
 // ---------------------------------------------------------------------------
 // Deep-recall engine — in-repo since the 19273 move (packages/recall)
 // ---------------------------------------------------------------------------
@@ -212,7 +208,7 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
   }
 
   // ---------------------------------------------------------------------------
-  // Handlers (ported verbatim from plugins/claude/recall/daemon.ts)
+  // Handlers over the shared recall database and wire protocol.
   // ---------------------------------------------------------------------------
 
   async function handleHello(_conn: RecallConnState, params: HelloParams): Promise<HelloResult> {

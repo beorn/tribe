@@ -5,11 +5,6 @@
  * The unified dispatcher (`cli.ts`) registers these handlers on its shared
  * `Command` instance.
  *
- *   - Import paths are intra-package (`../lib/...`) instead of
- *     `tribe-wire/lib/...` (to avoid self-import).
- *   - The `retro.ts` module was copied into `../lib/retro.ts` so this module
- *     has no `tools/` dependency. It still uses DB-direct access (read-only
- *     `bun:sqlite`) — straddles client/daemon boundary; Phase C may revisit.
  * Verbs in this family:
  *   - send
  *   - join          one-shot CLI join/rejoin checkpoint
@@ -32,17 +27,18 @@ import {
   type TribeFanout as Fanout,
   type TribeMessageType as MessageType,
 } from "../command-descriptors.ts"
-import { connectToDaemon, resolveSocketPath, TRIBE_PROTOCOL_VERSION } from "../lib/socket.ts"
+import { TRIBE_PROTOCOL_VERSION } from "../lib/socket.ts"
 import { resolveDbPath } from "../lib/config.ts"
 import { formatMarkdown, generateRetro, parseDuration } from "../lib/retro.ts"
 import { readTribeLaunchId } from "../launch-environment.ts"
+import { withCliDaemonClient } from "./daemon-client.ts"
+import { mcpJsonContent } from "./mcp-json-content.ts"
 
 const SEND_CLI = visibleCliProjectionForMcp("send")
 const JOIN_CLI = visibleCliProjectionForMcp("join")
 
 // ---------------------------------------------------------------------------
-// Daemon connection (shared shape with read.ts — kept local per
-// intra-module rule; Phase C may extract to ../lib/daemon-call.ts)
+// Identity-aware calls over the shared CLI daemon-client lifecycle
 // ---------------------------------------------------------------------------
 
 /**
@@ -88,79 +84,46 @@ async function callDaemon(
   as?: SendCaller | null,
   requireIdentity = false,
 ): Promise<unknown> {
-  const socketPath = resolveSocketPath()
-  try {
-    const client = await connectToDaemon(socketPath)
-    try {
-      // One-shot identity: register under the caller's session name BEFORE the
-      // call so the daemon attributes the message (and can close ball-tracker
-      // rows owned by that name) instead of an anonymous pending-* session.
-      //
-      // When the caller is a MANAGED launch, resolveSendCaller carries the
-      // daemon-authoritative (launch_id, launch_parent_pid) tuple; forwarding
-      // it lets the daemon fan this connection into the live seat of the same
-      // launch (attributed, no takeover) rather than colliding on the persona
-      // name. A one-shot cannot mint that tuple itself — the daemon minted it —
-      // so this never lets an unrelated caller steal a name. For a bare
-      // TRIBE_NAME caller (no launch), we omit it; the grant check below then
-      // decides between fail-loud abort (tracked reply) and attributed warn.
-      if (as) {
-        const registered = mcpJsonContent(
-          await client.call("register", {
-            name: as.name,
-            role: "member",
-            domains: [],
-            delivery: "pull",
-            project: process.cwd(),
-            projectName: process.cwd().split("/").filter(Boolean).at(-1) ?? "unknown",
-            pid: process.pid,
-            protocolVersion: TRIBE_PROTOCOL_VERSION,
-            ...(as.launchId !== undefined && as.launchParentPid !== undefined
-              ? { launchId: as.launchId, launchParentPid: as.launchParentPid }
-              : {}),
-          }),
-        ) as { name?: string }
-        const grant = classifyIdentityGrant(as.name, registered?.name, requireIdentity)
-        if (!grant.ok) {
-          if (grant.fatal) {
-            console.error(grant.message)
-            client.close()
-            process.exit(1)
-          }
-          console.warn(grant.message)
+  return withCliDaemonClient(async (client) => {
+    // One-shot identity: register under the caller's session name BEFORE the
+    // call so the daemon attributes the message (and can close ball-tracker
+    // rows owned by that name) instead of an anonymous pending-* session.
+    //
+    // When the caller is a MANAGED launch, resolveSendCaller carries the
+    // daemon-authoritative (launch_id, launch_parent_pid) tuple; forwarding
+    // it lets the daemon fan this connection into the live seat of the same
+    // launch (attributed, no takeover) rather than colliding on the persona
+    // name. A one-shot cannot mint that tuple itself — the daemon minted it —
+    // so this never lets an unrelated caller steal a name. For a bare
+    // TRIBE_NAME caller (no launch), we omit it; the grant check below then
+    // decides between fail-loud abort (tracked reply) and attributed warn.
+    if (as) {
+      const registered = mcpJsonContent(
+        await client.call("register", {
+          name: as.name,
+          role: "member",
+          domains: [],
+          delivery: "pull",
+          project: process.cwd(),
+          projectName: process.cwd().split("/").filter(Boolean).at(-1) ?? "unknown",
+          pid: process.pid,
+          protocolVersion: TRIBE_PROTOCOL_VERSION,
+          ...(as.launchId !== undefined && as.launchParentPid !== undefined
+            ? { launchId: as.launchId, launchParentPid: as.launchParentPid }
+            : {}),
+        }),
+      ) as { name?: string }
+      const grant = classifyIdentityGrant(as.name, registered?.name, requireIdentity)
+      if (!grant.ok) {
+        if (grant.fatal) {
+          console.error(grant.message)
+          process.exit(1)
         }
+        console.warn(grant.message)
       }
-      const result = await client.call(method, params)
-      return result
-    } finally {
-      client.close()
     }
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code
-    if (code === "ECONNREFUSED" || code === "ENOENT") {
-      console.error(`No daemon running (socket: ${socketPath})`)
-      console.error(`Start one with: bun tribe-daemon (package tribe-daemon), or let a host autostart it`)
-      process.exit(1)
-    }
-    throw err
-  }
-}
-
-/**
- * Unwrap an MCP tool result's JSON content (`content[0].text` -> parsed), or
- * return the raw value when there is no parseable content. Local copy for the
- * send/messaging verb family until the CLI-daemon seam is extracted.
- */
-function mcpJsonContent(raw: unknown): unknown {
-  const text = (raw as { content?: ReadonlyArray<{ text?: string }> })?.content?.[0]?.text
-  if (typeof text === "string") {
-    try {
-      return JSON.parse(text)
-    } catch {
-      /* not JSON - fall back to the raw value */
-    }
-  }
-  return raw
+    return client.call(method, params)
+  })
 }
 
 /** Thin wrapper so `retro` uses the same DB resolution as the daemon. */
@@ -420,43 +383,28 @@ async function cmdJoin(
   const cwd = process.cwd()
   const role = opts.role ?? "member"
   const domains = parseDomains(opts.domain)
-  const socketPath = resolveSocketPath()
   const ephemeralName = `cli-join-${process.pid}-${Date.now()}`
-  let result: {
-    joined?: boolean
-    name?: string
-    role?: string
-    domains?: string[]
-    delivery?: string
-    previous_name?: string
-    error?: string
-  }
-  try {
-    const client = await connectToDaemon(socketPath)
-    try {
-      await client.call("register", {
-        name: ephemeralName,
-        role: "member",
-        domains: [],
-        delivery,
-        project: cwd,
-        projectName: cwd.split("/").filter(Boolean).at(-1) ?? "unknown",
-        pid: process.pid,
-        protocolVersion: TRIBE_PROTOCOL_VERSION,
-      })
-      result = mcpJsonContent(await client.call("tribe.join", { name, role, domains, delivery })) as typeof result
-    } finally {
-      client.close()
+  const result = await withCliDaemonClient(async (client) => {
+    await client.call("register", {
+      name: ephemeralName,
+      role: "member",
+      domains: [],
+      delivery,
+      project: cwd,
+      projectName: cwd.split("/").filter(Boolean).at(-1) ?? "unknown",
+      pid: process.pid,
+      protocolVersion: TRIBE_PROTOCOL_VERSION,
+    })
+    return mcpJsonContent(await client.call("tribe.join", { name, role, domains, delivery })) as {
+      joined?: boolean
+      name?: string
+      role?: string
+      domains?: string[]
+      delivery?: string
+      previous_name?: string
+      error?: string
     }
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code
-    if (code === "ECONNREFUSED" || code === "ENOENT") {
-      console.error(`No daemon running (socket: ${socketPath})`)
-      console.error(`Start one with: bun tribe-daemon (package tribe-daemon), or let a host autostart it`)
-      process.exit(1)
-    }
-    throw err
-  }
+  })
 
   if (opts.json) {
     console.log(JSON.stringify(result))

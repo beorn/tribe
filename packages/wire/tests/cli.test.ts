@@ -24,8 +24,8 @@ const BUN_BIN = process.env.BUN_EXECUTABLE ?? "bun"
 // breaks word-boundary regex like /\bsend\b/ because the byte before "s"
 // is the "m" terminator of a color escape — a word character.
 function stripAnsi(s: string): string {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escapes
-  return s.replace(/\x1b\[[0-9;]*m/g, "")
+  // oxlint-disable-next-line no-control-regex -- ANSI SGR is framed by an ESC byte.
+  return s.replace(/\u001B\[[0-9;]*m/g, "")
 }
 
 function runCli(args: string[], opts: { timeoutMs?: number } = {}): { stdout: string; stderr: string; code: number } {

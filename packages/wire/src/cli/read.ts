@@ -1,36 +1,4 @@
-/**
- * Read/inspect verbs for the unified `tribe-wire` CLI.
- *
- * Family 1 of Phase A.2 verb-port — see
- * `@km/bearly/19231-tribe-cli-unify-phase-a2-verbs`. Each verb mirrors the
- * implementation in `vendor/tribe/tools/tribe-cli.ts` (which stays canonical
- * until the Phase C atomic-delete). The handlers here are pure ports — same
- * RPCs, same flags, same output shape — with the only changes being:
- *
- *   - Import paths are intra-package (`../lib/...`) instead of
- *     `tribe-wire/lib/...` (to avoid self-import).
- *   - The `activity-watch.ts` reader was copied into
- *     `../lib/activity-watch.ts` so this module has no `tools/` dependency.
- *   - The verbs are registered on a caller-supplied `Command` rather than
- *     created on a fresh `program` — the main dispatcher (`cli.ts`) calls
- *     `registerReadCommands(program)` to wire them up.
- *
- * Verbs in this family:
- *   - status        (line ~570 in tools/tribe-cli.ts)
- *   - sessions      (line ~575)
- *   - pending       (line ~596)
- *   - log           (line ~610)
- *   - health        (line ~617)
- *   - inbox-status  (line ~622)
- *   - inbox-drain   (bounded actionable drain without transient registration)
- *   - reload        (MCP/RPC tribe.reload hot-reload parity)
- *   - repair        (operator-bounded state repair)
- *   - activity      (line ~674)
- *
- * The legacy `tools/tribe-cli.ts` continues to ship these same verbs until
- * Phase C deletes it. There is no `members` verb in the source — it is
- * exposed via `tribe.members` MCP call only, not the CLI.
- */
+/** Read and inspect verbs for the canonical `tribe-wire` CLI. */
 
 import { readFileSync } from "node:fs"
 import { Command, int } from "@silvery/commander"
@@ -46,6 +14,8 @@ import { connectToDaemon, resolveSocketPath, TRIBE_PROTOCOL_VERSION, type Daemon
 import { watchActivity } from "../lib/activity-watch.ts"
 import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-exempt.ts"
 import { readTribeLaunchId } from "../launch-environment.ts"
+import { withCliDaemonClient } from "./daemon-client.ts"
+import { mcpJsonContent } from "./mcp-json-content.ts"
 
 const PENDING_CLI = visibleCliProjectionForMcp("pending")
 const INBOX_WAIT_CLI = visibleCliProjectionForMcp("inbox.wait")
@@ -60,27 +30,17 @@ const INBOX_WAIT_PROTOCOL_MISMATCH = "TRIBE_INBOX_WAIT_PROTOCOL_MISMATCH"
 // ---------------------------------------------------------------------------
 
 async function callDaemon(method: string, params?: Record<string, unknown>): Promise<unknown> {
-  const socketPath = resolveSocketPath()
-  try {
-    const client = await connectToDaemon(socketPath)
+  return withCliDaemonClient(async (client) => {
     try {
-      const result = await client.call(method, params)
-      return result
-    } finally {
-      client.close()
+      return await client.call(method, params)
+    } catch (error) {
+      const code = (error as { code?: string | number }).code
+      if (code === -32601 && method.endsWith("_by_launch_v1")) {
+        throw new Error(STALE_MANAGED_INBOX_DAEMON_ERROR)
+      }
+      throw error
     }
-  } catch (err) {
-    const code = (err as { code?: string | number }).code
-    if (code === -32601 && method.endsWith("_by_launch_v1")) {
-      throw new Error(STALE_MANAGED_INBOX_DAEMON_ERROR)
-    }
-    if (code === "ECONNREFUSED" || code === "ENOENT") {
-      console.error(`No daemon running (socket: ${socketPath})`)
-      console.error(`Start one with: bun tribe-daemon (package tribe-daemon), or let a host autostart it`)
-      process.exit(1)
-    }
-    throw err
-  }
+  })
 }
 
 function cliInboxTargetParams(session: string | undefined): Record<string, unknown> {
@@ -94,24 +54,6 @@ function cliInboxTargetParams(session: string | undefined): Record<string, unkno
 
 function cliInboxMethod(base: "status" | "wait" | "drain", session: string | undefined): string {
   return session === undefined ? `cli_inbox_${base}_by_launch_v1` : `cli_inbox_${base}`
-}
-
-/**
- * Unwrap an MCP tool result's JSON content (`content[0].text` → parsed), or
- * return the raw value when there is no parseable content. Shared by the read
- * verbs that consume MCP-formatted daemon replies (`health`, `doctor`) so the
- * unwrap is not re-derived per verb.
- */
-export function mcpJsonContent(raw: unknown): unknown {
-  const text = (raw as { content?: ReadonlyArray<{ text?: string }> })?.content?.[0]?.text
-  if (typeof text === "string") {
-    try {
-      return JSON.parse(text)
-    } catch {
-      /* not JSON — fall back to the raw value */
-    }
-  }
-  return raw
 }
 
 interface ReloadResult {
@@ -233,7 +175,7 @@ const INBOX_WAIT_RETRY_DELAY_MS = 250
 const INBOX_WAIT_UNAVAILABLE_GRACE_MS = 2_000
 
 // ---------------------------------------------------------------------------
-// Command implementations (ported verbatim from tools/tribe-cli.ts)
+// Command implementations
 // ---------------------------------------------------------------------------
 
 async function cmdStatus(): Promise<void> {
@@ -578,7 +520,6 @@ async function cmdHealth(): Promise<void> {
       const nW = Math.max(4, ...result.sessions.map((r) => r.name.length))
       const rW = Math.max(4, ...result.sessions.map((r) => r.role.length))
       const cwds = result.sessions.map((r) => fmtCwd(r.cwd))
-      const cW = Math.max(3, ...cwds.map((c) => c.length))
       console.log(
         `    ${pad("NAME", nW)}  ${pad("ROLE", rW)}  ${pad("PID", 7)}  ${pad("UPTIME", 10)}  ${pad("IDLE", 8)}  CWD`,
       )
@@ -1088,12 +1029,7 @@ async function cmdReload(opts: { reason?: string; json?: boolean }): Promise<voi
 // Registration
 // ---------------------------------------------------------------------------
 
-/**
- * Register read/inspect verbs (Family 1 of Phase A.2 verb-port).
- * Each verb mirrors the implementation in `vendor/tribe/tools/tribe-cli.ts`.
- *
- * Bead: @km/bearly/19231-tribe-cli-unify-phase-a2-verbs
- */
+/** Register the CLI's read and inspect verbs. */
 export function registerReadCommands(program: Command): void {
   program
     .command("status")

@@ -5,7 +5,7 @@
 import * as os from "os"
 import { getDb, closeDb } from "../history/db"
 import type { WriteRecord } from "../history/types"
-import { formatBytes, groupBy, BOLD, DIM, RESET } from "./format"
+import { formatBytes, groupBy } from "./format"
 
 // ============================================================================
 // List/search writes

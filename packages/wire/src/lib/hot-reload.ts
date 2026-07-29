@@ -97,12 +97,15 @@ export function setupHotReload(opts: HotReloadOpts): Disposable | null {
 
   const currentHash = computeHash()
   let debounceTimer: ReturnType<typeof setTimeout> | null = null
+  let disposed = false
   const watchers: FSWatcher[] = []
 
   function onChange(filename: string | null): void {
+    if (disposed) return
     if (filename && !filename.endsWith(".ts") && !filename.endsWith(".tsx")) return
     if (debounceTimer) clearTimeout(debounceTimer)
     debounceTimer = setTimeout(() => {
+      if (disposed) return
       const newHash = computeHash()
       if (newHash === currentHash) return
       const reason = `source changed (${currentHash} → ${newHash})`
@@ -156,10 +159,16 @@ export function setupHotReload(opts: HotReloadOpts): Disposable | null {
     }
   }
 
+  // Close the gap between taking the baseline hash and arming every watcher.
+  // Callers can change a source immediately after setup returns, before the
+  // platform watcher has begun delivering events.
+  queueMicrotask(() => onChange(null))
+
   log.info?.(`Watching ${getSourceFiles().length} source files for hot-reload`)
 
   return {
     [Symbol.dispose]() {
+      disposed = true
       if (debounceTimer) clearTimeout(debounceTimer)
       for (const w of watchers) w.close()
     },

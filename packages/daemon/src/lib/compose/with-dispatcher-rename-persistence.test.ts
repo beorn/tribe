@@ -31,6 +31,7 @@ import { join } from "node:path"
 import type { Server, Socket as NetSocket } from "node:net"
 import type { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import { getLogLevel, setLogLevel } from "loggily"
 import { createScope } from "tribe-wire"
 import { TRIBE_PROTOCOL_VERSION, type JsonRpcRequest } from "tribe-wire/lib/socket"
 import type { TribeRole } from "tribe-wire/lib/config"
@@ -156,63 +157,69 @@ describe("runtime rename persists across reconnect/restart (@ag/tribe/21454)", (
   })
 
   it("guard: re-application never steals a name held by a LIVE session of a different launch", async () => {
-    // The guard path warns loudly by design (the daemon logs console.warn
-    // through loggily); the vendor-project vitest setup fails any test that
-    // produces console output, so pin the warn through a spy instead.
+    // Pin the level: the parent shell's LOG_LEVEL must not decide whether this
+    // behavior assertion sees the warning.
+    const previousLogLevel = getLogLevel()
+    setLogLevel("warn")
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
-    const daemon = createDispatcherHarness(sharedDir())
-    cleanups.push(daemon.dispose)
+    try {
+      const daemon = createDispatcherHarness(sharedDir())
+      cleanups.push(daemon.dispose)
 
-    // Launch A becomes @chief, then goes away (predecessor).
-    daemon.addPendingClient("conn-a")
-    parseResult<RegisterResult>(
-      await daemon.register("conn-a", {
-        name: "@chief/next",
-        pid: 5401,
-        project: "/repo/hh",
-        launchId: "launch-old-chief",
-        launchParentPid: 902,
-      }),
-    )
-    parseToolJson<{ renamed: boolean }>(await daemon.rename("conn-a", "@chief"))
-    daemon.dropClient("conn-a")
+      // Launch A becomes @chief, then goes away (predecessor).
+      daemon.addPendingClient("conn-a")
+      parseResult<RegisterResult>(
+        await daemon.register("conn-a", {
+          name: "@chief/next",
+          pid: 5401,
+          project: "/repo/hh",
+          launchId: "launch-old-chief",
+          launchParentPid: 902,
+        }),
+      )
+      parseToolJson<{ renamed: boolean }>(await daemon.rename("conn-a", "@chief"))
+      daemon.dropClient("conn-a")
 
-    // Launch B (the successor) legitimately claims @chief and stays LIVE.
-    daemon.addPendingClient("conn-b")
-    parseResult<RegisterResult>(
-      await daemon.register("conn-b", {
-        name: "@relief",
-        pid: 5402,
-        project: "/repo/hh",
-        launchId: "launch-new-chief",
-        launchParentPid: 903,
-      }),
-    )
-    const bRename = parseToolJson<{ renamed: boolean; new_name: string }>(await daemon.rename("conn-b", "@chief"))
-    expect(bRename).toMatchObject({ renamed: true, new_name: "@chief" })
+      // Launch B (the successor) legitimately claims @chief and stays LIVE.
+      daemon.addPendingClient("conn-b")
+      parseResult<RegisterResult>(
+        await daemon.register("conn-b", {
+          name: "@relief",
+          pid: 5402,
+          project: "/repo/hh",
+          launchId: "launch-new-chief",
+          launchParentPid: 903,
+        }),
+      )
+      const bRename = parseToolJson<{ renamed: boolean; new_name: string }>(await daemon.rename("conn-b", "@chief"))
+      expect(bRename).toMatchObject({ renamed: true, new_name: "@chief" })
 
-    // Launch A's zombie adapter reconnects. Its persisted rename says @chief,
-    // but a live DIFFERENT launch holds it — A must NOT displace B.
-    daemon.addPendingClient("conn-a2")
-    const regA2 = parseResult<RegisterResult>(
-      await daemon.register("conn-a2", {
-        name: "@chief/next",
-        pid: 5403,
-        project: "/repo/hh",
-        launchId: "launch-old-chief",
-        launchParentPid: 902,
-      }),
-    )
-    expect(regA2.name).toBe("@chief/next")
-    // And the successor is untouched.
-    const bRow = daemon.db.prepare("SELECT name FROM sessions WHERE launch_id = 'launch-new-chief'").get() as {
-      name: string
-    } | null
-    expect(bRow?.name).toBe("@chief")
-    // The refusal is LOUD — the guard names the launch and the kept name.
-    expect(warnSpy.mock.calls.map((call) => call.join(" ")).join("\n")).toContain(
-      'persisted rename "@chief" for launch launch-old-chief is held by a live different-launch session',
-    )
+      // Launch A's zombie adapter reconnects. Its persisted rename says @chief,
+      // but a live DIFFERENT launch holds it — A must NOT displace B.
+      daemon.addPendingClient("conn-a2")
+      const regA2 = parseResult<RegisterResult>(
+        await daemon.register("conn-a2", {
+          name: "@chief/next",
+          pid: 5403,
+          project: "/repo/hh",
+          launchId: "launch-old-chief",
+          launchParentPid: 902,
+        }),
+      )
+      expect(regA2.name).toBe("@chief/next")
+      // And the successor is untouched.
+      const bRow = daemon.db.prepare("SELECT name FROM sessions WHERE launch_id = 'launch-new-chief'").get() as {
+        name: string
+      } | null
+      expect(bRow?.name).toBe("@chief")
+      // The refusal is LOUD — the guard names the launch and the kept name.
+      expect(warnSpy.mock.calls.map((call) => call.join(" ")).join("\n")).toContain(
+        'persisted rename "@chief" for launch launch-old-chief is held by a live different-launch session',
+      )
+    } finally {
+      warnSpy.mockRestore()
+      setLogLevel(previousLogLevel)
+    }
   })
 
   it("explicit tribe.join writes through like tribe.rename; no launch identity means no persistence", async () => {

@@ -4,7 +4,7 @@ import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { openDatabase } from "./database.ts"
-import { formatMarkdown, generateRetro } from "./retro.ts"
+import { formatMarkdown, generateRetro } from "../../../wire/src/lib/retro.ts"
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE

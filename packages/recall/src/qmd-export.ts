@@ -38,14 +38,13 @@ import { spawnSync } from "node:child_process"
 import {
   wrapInjectedContext as envelopeWrap,
   emitHookJson as envelopeEmitHookJson,
-  sanitize as envelopeSanitize,
   type InjectedItem,
 } from "../../injection-envelope/src/index.ts"
 import { emitInjectionDebugEvent } from "../../injection-envelope/src/debug.ts"
 // Quality gate. Rejects corrupted/decayed/stuck-loop session exports before
 // they reach the qmd index. Same module backstops the query path below
 // (cmdHook drops bad hits silently). Co-located in @bearly/recall so the
-// bg-recall daemon can compose with it from the daemon's query layer.
+// Daemon-side consumers can compose with it from their query layer.
 import { analyzeQuality, isAcceptable } from "./lib/quality-gate.ts"
 
 const HOME = homedir()
@@ -726,17 +725,6 @@ function cmdHook(): void {
   })
 
   process.stdout.write(envelopeEmitHookJson("UserPromptSubmit", additionalContext))
-}
-
-/**
- * Defense against indirect prompt injection via indexed past-session content.
- *
- * Routes through `@bearly/injection-envelope`'s `sanitize()` — the canonical
- * implementation. Kept as a named export for test compatibility and any
- * callers still importing `sanitizeForContext` from this module.
- */
-export function sanitizeForContext(text: string, maxLen: number): string {
-  return envelopeSanitize(text, maxLen)
 }
 
 // ── index / status / help ────────────────────────────────────────────────

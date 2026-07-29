@@ -14,12 +14,7 @@
  * swallowed with a single stderr line, and the hook proceeds to its library
  * fallback.
  *
- * km-bear.unified-daemon Phase 5c: the standalone lore daemon was deleted.
- * There is now a single daemon — the tribe daemon — that hosts both the
- * coordination and memory RPC surfaces. The legacy export names
- * (`ensureDaemonIfConfigured`, `ensureAllDaemonsIfConfigured`, ...) are kept
- * as aliases so external callers (e.g. the lore MCP proxy) don't break, but
- * they all resolve to the tribe-daemon path.
+ * The tribe daemon hosts both coordination and memory RPC surfaces.
  */
 
 import { createConnection } from "node:net"
@@ -91,15 +86,6 @@ export function resolveTribeDaemonScriptPath(): string {
   return resolve(thisDir, "..", "daemon.ts")
 }
 
-/**
- * Legacy alias — pre-Phase-5c callers expected a lore-specific daemon script.
- * The unified daemon hosts both surfaces, so this resolves to the tribe
- * daemon script. Kept for callers that still import the legacy helper.
- */
-export function resolveDaemonScriptPath(): string {
-  return resolveTribeDaemonScriptPath()
-}
-
 export type SpawnResult = { ok: true; pid: number } | { ok: false; error: string }
 
 /**
@@ -146,12 +132,6 @@ export function spawnTribeDaemonDetached(
     return { ok: false, error: msg }
   }
 }
-
-/**
- * Legacy alias — callers that asked for `spawnDaemonDetached` (lore-specific)
- * now get the unified tribe daemon. Kept so external imports don't break.
- */
-export const spawnDaemonDetached = spawnTribeDaemonDetached
 
 function defaultLog(msg: string): void {
   // Routed through loggily so hook contexts can suppress + redirect via
@@ -224,26 +204,4 @@ export async function ensureTribeDaemonIfConfigured(deps: EnsureDaemonDeps = {})
   const result = spawnFn({ socketPath })
   if (result.ok) return { action: "spawned", pid: result.pid }
   return { action: "spawn-failed", error: result.error }
-}
-
-/**
- * Legacy alias — pre-Phase-5c callers spawned a lore-specific daemon. The
- * unified daemon hosts both surfaces now, so both names resolve to the same
- * function. Kept for the lore MCP proxy and any external importers.
- */
-export const ensureDaemonIfConfigured = ensureTribeDaemonIfConfigured
-
-/**
- * Legacy alias — pre-Phase-5c this spawned lore + tribe in parallel. The
- * unified daemon is the whole thing now, so this is just
- * `ensureTribeDaemonIfConfigured` returning the outcome twice (once under
- * `lore`, once under `tribe`) for back-compat with existing tests.
- */
-export async function ensureAllDaemonsIfConfigured(
-  deps: EnsureDaemonDeps = {},
-): Promise<{ lore: EnsureDaemonOutcome; tribe: EnsureDaemonOutcome }> {
-  const outcome = await ensureTribeDaemonIfConfigured(deps)
-  // Return the same outcome under both keys — the daemon is unified, so
-  // "lore is alive" and "tribe is alive" are the same statement.
-  return { lore: outcome, tribe: outcome }
 }

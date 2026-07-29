@@ -226,9 +226,7 @@ instead of by hand:
   index the session that just finished.
 
 The marketplace plugin does not install these — add them to your Claude Code
-hook config (or adapt your host's) yourself. For _just-in-time_ background
-recall driven by what the model is currently doing, see the `tribe-bg-recall`
-package below.
+hook config (or adapt your host's) yourself.
 
 ---
 
@@ -239,7 +237,6 @@ package below.
 | Wire client        | `tribe-wire`               | `tribe-wire`   | ✅ published  | Unix-socket JSON-RPC client, reconnecting transport, MCP stdio + HTTP adapters, protocol CLI                                                                                                                       |
 | Daemon             | `tribe-daemon`             | `tribe-daemon` | ships in repo | Broker process: Unix socket server, SQLite state, session registry, message journal, delivery modes, pending-ball tracker, health cadence, daemon plugins (git / github / health / `beads` issue-tracker observer) |
 | Recall engine      | `tribe-recall`             | recall CLI     | ships in repo | FTS5 session-history search, LLM planner/agent, file recovery, summaries, hook handlers                                                                                                                            |
-| Background recall  | `tribe-bg-recall`          | `bg-recall`    | ships in repo | Non-blocking just-in-time recall: watches tool calls, runs entity-driven queries, injects high-relevance hints through the tribe channel                                                                           |
 | Injection envelope | `tribe-injection-envelope` | n/a            | ships in repo | Prompt-injection defense: envelope framing, imperative-mood rewrite, sanitizer, turn-manifest authority gate                                                                                                       |
 | Claude Code plugin | `plugins/claude`           | n/a            | marketplace   | `tribe@tribe`: MCP registration + host-managed daemon lifecycle                                                                                                                                                    |
 
@@ -317,17 +314,17 @@ session inbox lag, and database growth — surfaced via `tribe.health` /
 Everything works with zero configuration. These knobs are for LLM features,
 custom paths, and observability.
 
-| Variable                                               | Applies to           | Purpose                                                                                                                                                                                                                  |
-| ------------------------------------------------------ | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `TRIBE_SOCKET`                                         | wire, daemon         | Override the daemon socket path                                                                                                                                                                                          |
-| `TRIBE_DB`                                             | daemon               | Override the SQLite database path                                                                                                                                                                                        |
-| `TRIBE_DELIVERY`                                       | wire (MCP adapter)   | `push` or `pull` — threaded into the join call on start                                                                                                                                                                  |
-| `TRIBE_LLM_DIR`                                        | recall, injection    | Directory exposing `lib/types.ts`, `lib/research.ts`, `lib/providers.ts`. Enables LLM synthesis, the query planner, and session summaries. Without it, those features degrade to their documented no-LLM paths — loudly. |
-| `RECALL_STALE_THRESHOLD`                               | recall               | Index-freshness window before an auto-refresh (default `5m`; accepts `10m`, `1h`, `30s`, bare number = minutes)                                                                                                          |
-| `TRIBE_LOG`                                            | recall MCP           | Set `1` to un-silence recall engine logging over MCP stderr                                                                                                                                                              |
-| `TRIBE_NO_DAEMON`                                      | recall MCP           | Set `1` to force in-process library mode (skip the daemon)                                                                                                                                                               |
-| `LOGGILY_FILE`, `DEBUG`                                | bg-recall, injection | Wire a JSONL observability file and namespace filter (e.g. `DEBUG='bg-recall:*,injection:*'`)                                                                                                                            |
-| `TRIBE_RECALL_ENGINE_DIR`, `TRIBE_INJECTION_DEBUG_DIR` | forks                | Override in-repo engine/recorder locations. You normally never set these.                                                                                                                                                |
+| Variable                                               | Applies to         | Purpose                                                                                                                                                                                                                  |
+| ------------------------------------------------------ | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `TRIBE_SOCKET`                                         | wire, daemon       | Override the daemon socket path                                                                                                                                                                                          |
+| `TRIBE_DB`                                             | daemon             | Override the SQLite database path                                                                                                                                                                                        |
+| `TRIBE_DELIVERY`                                       | wire (MCP adapter) | `push` or `pull` — threaded into the join call on start                                                                                                                                                                  |
+| `TRIBE_LLM_DIR`                                        | recall, injection  | Directory exposing `lib/types.ts`, `lib/research.ts`, `lib/providers.ts`. Enables LLM synthesis, the query planner, and session summaries. Without it, those features degrade to their documented no-LLM paths — loudly. |
+| `RECALL_STALE_THRESHOLD`                               | recall             | Index-freshness window before an auto-refresh (default `5m`; accepts `10m`, `1h`, `30s`, bare number = minutes)                                                                                                          |
+| `TRIBE_LOG`                                            | recall MCP         | Set `1` to un-silence recall engine logging over MCP stderr                                                                                                                                                              |
+| `TRIBE_NO_DAEMON`                                      | recall MCP         | Set `1` to force in-process library mode (skip the daemon)                                                                                                                                                               |
+| `LOGGILY_FILE`, `DEBUG`                                | injection          | Wire a JSONL observability file and namespace filter (e.g. `DEBUG='injection:*'`)                                                                                                                                        |
+| `TRIBE_RECALL_ENGINE_DIR`, `TRIBE_INJECTION_DEBUG_DIR` | forks              | Override in-repo engine/recorder locations. You normally never set these.                                                                                                                                                |
 
 **Default paths.**
 
@@ -356,7 +353,6 @@ packages/
   wire/                 # tribe-wire — npm client + `tribe-wire` CLI + MCP/HTTP adapters
   daemon/               # tribe-daemon — the broker (ships in repo)
   recall/               # tribe-recall — FTS5 search engine + recall CLI
-  bg-recall/            # tribe-bg-recall — background just-in-time recall daemon
   injection-envelope/   # tribe-injection-envelope — prompt-injection defense
 plugins/
   claude/               # Claude Code marketplace plugin (tribe@tribe)
@@ -394,8 +390,6 @@ bun run fmt:check   # oxfmt --check
   verb reference and library exports.
 - [packages/recall/README.md](packages/recall/README.md) — recall modes, index
   internals, and freshness behavior.
-- [packages/bg-recall/README.md](packages/bg-recall/README.md) — the background
-  recall pipeline and its observability model.
 - [packages/injection-envelope/README.md](packages/injection-envelope/README.md)
   — the prompt-injection defense chokepoint.
 

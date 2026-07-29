@@ -33,7 +33,7 @@ import {
 } from "./lib/socket.ts"
 import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
 import { createReconnectWatchdog } from "./lib/reconnect-watchdog.ts"
-import { createHash, randomUUID } from "node:crypto"
+import { createHash } from "node:crypto"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
@@ -174,7 +174,6 @@ log.info?.(`Connecting to daemon at ${SOCKET_PATH}`)
 
 let myName = "pending"
 let myRole = "member"
-const mySessionId = randomUUID()
 const PROJECT_NAME = resolveProjectName()
 
 // MCP server reference — constructed + connected to Claude Code BEFORE the
@@ -958,7 +957,6 @@ if (CWD_EVAL.kind === "warn" || CWD_EVAL.kind === "refuse") {
 
 // Watch transcript file for /rename slug changes and auto-sync to tribe
 import { resolveTranscriptPath, readTranscriptSlug } from "./lib/transcript.ts"
-import { watch as fsWatch } from "node:fs"
 {
   const transcriptPath = resolveTranscriptPath(CLAUDE_SESSION_ID)
   if (transcriptPath) {

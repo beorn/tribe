@@ -16,7 +16,6 @@ import {
   registerReadCommands,
   resolveRepairOptions,
   waitForInboxWithReconnect,
-  type InboxWaitResult,
 } from "../src/cli/read.ts"
 import {
   deriveInboxWaitCallTimeoutMs,

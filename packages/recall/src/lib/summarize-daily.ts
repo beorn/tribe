@@ -603,7 +603,7 @@ export async function summarizeWeek(weekOf: string, opts: { verbose?: boolean } 
   }
 }
 
-export async function cmdWeekly(weekOf?: string, opts: { verbose?: boolean } = {}): Promise<void> {
+export async function cmdWeekly(weekOf?: string, _opts: { verbose?: boolean } = {}): Promise<void> {
   // Default to last week (most recent complete week)
   if (!weekOf) {
     const lastWeek = new Date()

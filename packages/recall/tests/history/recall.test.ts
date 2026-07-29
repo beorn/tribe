@@ -302,11 +302,6 @@ describe("recall integration", () => {
     return mod.recall
   }
 
-  async function getCloseDb(): Promise<() => void> {
-    const mod = await import("../../src/history/db")
-    return mod.closeDb
-  }
-
   test.skipIf(!dbExists)(
     "returns RecallResult shape in raw mode",
     async () => {

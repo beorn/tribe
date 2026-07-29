@@ -241,7 +241,10 @@ describe("recallAgent — empty plan handling", () => {
       sessions: [{ id: "sess-a", title: "A", messages: ["content"] }],
     })
 
-    const result = await recallAgent("q", { limit: 3 })
+    // This test exercises planner fallthrough, not synthesis. Raw mode keeps
+    // the fallback hermetic when a developer's live session or vault happens
+    // to contain the deliberately broad query.
+    const result = await recallAgent("q", { limit: 3, raw: true })
 
     expect(result.fellThrough).toBe(true)
     expect(result.trace.rounds[0]!.planner.error).toMatch(/parse-failed/)
@@ -337,7 +340,7 @@ describe("recallAgent — fallthrough", () => {
       sessions: [{ id: "sess-a", title: "A", messages: ["alpha"] }],
     })
 
-    const result = await recallAgent("q", { limit: 3 })
+    const result = await recallAgent("q", { limit: 3, raw: true })
 
     expect(result.fellThrough).toBe(true)
     expect(result.trace.rounds[0]!.planner.error).toBe("empty-plan")

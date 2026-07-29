@@ -18,8 +18,8 @@ import { synthesizeResults } from "./synthesize.ts"
 import { log, ONE_HOUR_MS, ONE_DAY_MS, THIRTY_DAYS_MS } from "./recall-shared.ts"
 import type { RecallOptions, RecallResult, RecallSearchResult } from "./recall-shared.ts"
 
-import { existsSync, readFileSync } from "node:fs"
-import { resolve, basename } from "node:path"
+import { existsSync } from "node:fs"
+import { resolve } from "node:path"
 import { searchVault, getVaultDbPath } from "./vault-fts.ts"
 
 // Re-export shared items so existing internal imports continue to work
@@ -281,7 +281,6 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     limit = 10,
     raw = false,
     since,
-    json = false,
     timeout = 4000,
     snippetTokens = 200,
     projectFilter,

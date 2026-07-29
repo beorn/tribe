@@ -214,6 +214,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
         TRIBE_NO_AUTORELOAD: "1",
         DEBUG_LOG: opts.logPath,
         LOG_FILE: opts.logPath,
+        LOG_LEVEL: "info",
       },
       stdio: ["pipe", "pipe", "pipe"],
     }) as ChildProcessWithoutNullStreams

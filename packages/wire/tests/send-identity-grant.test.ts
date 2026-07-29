@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { classifyIdentityGrant } from "./send.ts"
+import { classifyIdentityGrant } from "../src/cli/send.ts"
 
 // The one-shot CLI registers under the caller's session name so the daemon can
 // attribute the message and close ball-tracker rows that name owns. The daemon

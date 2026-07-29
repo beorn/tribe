@@ -117,7 +117,7 @@ export interface PlanOptions {
   priorResults?: RecallSearchResult[]
   priorVariants?: string[]
   timeoutMs?: number
-  /** Force a specific model (v2 feature; currently unused). */
+  /** Use a caller-selected planner model instead of the backend default. */
   model?: LlmModel
   /** Test/host seam; defaults to loading TRIBE_LLM_DIR. */
   llm?: LlmBackend
@@ -374,12 +374,4 @@ export function parsePlanResult(raw: string): { plan: QueryPlan | null; reason?:
   if (total === 0) return { plan: null, reason: "empty-plan" }
 
   return { plan }
-}
-
-/**
- * Back-compat: returns null on any failure (doesn't expose the reason).
- * Kept for existing tests and external callers.
- */
-export function parsePlan(raw: string): QueryPlan | null {
-  return parsePlanResult(raw).plan
 }

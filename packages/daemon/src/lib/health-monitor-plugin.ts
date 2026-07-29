@@ -141,16 +141,8 @@ export interface HealthThresholds {
   reaperCpuThreshold: number
   /** Reaper: minimum process age in minutes before suspect (default: 30) */
   reaperAgeMinutes: number
-  /** Reaper: samples to wait after asking before escalating/killing (default: 6, i.e. 60s at 10s interval) */
+  /** Reaper: samples to wait after asking before escalating (default: 6, i.e. 60s at 10s interval) */
   reaperGraceSamples: number
-  /**
-   * Reaper: whether the kill arm may fire (default: false). Detection and the
-   * claim query always run when reaperEnabled; actually killing an unclaimed
-   * process is an operator/LLM decision, never automatic. With the kill arm
-   * off, an unclaimed suspect gets ONE `health:reaper:unclaimed` escalation
-   * broadcast instead of a signal.
-   */
-  reaperKillEnabled: boolean
 }
 
 export function defaultThresholds(): HealthThresholds {
@@ -172,7 +164,6 @@ export function defaultThresholds(): HealthThresholds {
     reaperCpuThreshold: parseInt(process.env.HEALTH_REAPER_CPU_THRESHOLD ?? "80", 10),
     reaperAgeMinutes: parseInt(process.env.HEALTH_REAPER_AGE_MINUTES ?? "30", 10),
     reaperGraceSamples: parseInt(process.env.HEALTH_REAPER_GRACE_SAMPLES ?? "6", 10),
-    reaperKillEnabled: process.env.HEALTH_REAPER_KILL === "1",
   }
 }
 
@@ -1219,7 +1210,7 @@ export async function checkReaper(
   // Process suspects through the lifecycle
   for (const [pid, suspect] of state.reaperSuspects) {
     // gap 1: an exemption can land AFTER a PID was tracked — honor it at the
-    // decision point too, so an exempt repro is never asked-about or killed.
+    // decision point too, so an exempt repro is never asked about or escalated.
     if (isExempt(pid)) {
       log.info?.(`reaper: PID ${pid} is reaper-exempt — skipping (live repro / under investigation)`)
       state.reaperSuspects.delete(pid)
@@ -1229,9 +1220,7 @@ export async function checkReaper(
     // After 3 samples: ask sessions to claim
     if (suspect.samples >= 3 && !suspect.asked) {
       suspect.asked = true
-      const consequence = thresholds.reaperKillEnabled
-        ? "Reply within 60s or it will be killed."
-        : "Reply to claim it; unclaimed processes are escalated to the operator (never auto-killed)."
+      const consequence = "Reply to claim it; unclaimed processes are escalated to the operator."
       const msg = `health:reaper: PID ${pid} (${suspect.command}) at ${suspect.cpu}% CPU for ${suspect.etime}. Is this yours? ${consequence}`
       log.info?.(`reaper: asking about PID ${pid}`)
       api.broadcast(msg, "health:reaper:query", undefined, {
@@ -1240,7 +1229,7 @@ export async function checkReaper(
       })
     }
 
-    // After 3 + graceSamples: check for claims, then kill
+    // After 3 + graceSamples: check for claims, then escalate
     if (suspect.asked && suspect.samples >= 3 + thresholds.reaperGraceSamples) {
       // Check if anyone claimed this PID
       const claimed = api.hasRecentMessage(`reaper:claim PID ${pid}`)
@@ -1250,7 +1239,7 @@ export async function checkReaper(
         continue
       }
 
-      // Verify process still exists and is still high-CPU before killing
+      // Verify the process still exists before escalating.
       let stillAlive = false
       try {
         const checkProc = Bun.spawn(["ps", "-p", String(pid), "-o", "pid="], {
@@ -1268,50 +1257,18 @@ export async function checkReaper(
         continue
       }
 
-      // Kill arm off (the default): intervention is an operator/LLM decision,
-      // never automatic. Escalate ONCE per suspect and keep tracking so a
-      // later claim or process exit still clears it — but never signal it.
-      if (!thresholds.reaperKillEnabled) {
-        if (!suspect.escalated) {
-          suspect.escalated = true
-          const escMsg = `health:reaper: PID ${pid} (${suspect.command}) unclaimed after ${thresholds.reaperGraceSamples * 10}s at ${suspect.cpu}% CPU for ${suspect.etime} — auto-kill is disabled; operator decision required (reply "reaper:claim PID ${pid}" to clear)`
-          log.info?.(`reaper: escalating unclaimed PID ${pid} (kill arm disabled)`)
-          api.broadcast(escMsg, "health:reaper:unclaimed", undefined, {
-            delivery: "push",
-            topic: "health:reaper:unclaimed",
-          })
-        }
-        continue
+      // Intervention is an operator decision, never automatic. Escalate ONCE
+      // per suspect and keep tracking so a later claim or exit still clears it.
+      if (!suspect.escalated) {
+        suspect.escalated = true
+        const escMsg = `health:reaper: PID ${pid} (${suspect.command}) unclaimed after ${thresholds.reaperGraceSamples * 10}s at ${suspect.cpu}% CPU for ${suspect.etime} — operator decision required (reply "reaper:claim PID ${pid}" to clear)`
+        log.info?.(`reaper: escalating unclaimed PID ${pid}`)
+        api.broadcast(escMsg, "health:reaper:unclaimed", undefined, {
+          delivery: "push",
+          topic: "health:reaper:unclaimed",
+        })
       }
-
-      // Kill: SIGTERM first
-      log.info?.(
-        `reaper: killing PID ${pid} (${suspect.command}) — unclaimed after ${thresholds.reaperGraceSamples * 10}s`,
-      )
-      try {
-        process.kill(pid, "SIGTERM")
-      } catch {
-        // Process may have already exited
-        state.reaperSuspects.delete(pid)
-        continue
-      }
-
-      // Wait 2s, then SIGKILL if still alive
-      await new Promise((resolve) => setTimeout(resolve, 2000))
-      try {
-        process.kill(pid, 0) // Check if still alive
-        process.kill(pid, "SIGKILL")
-        log.info?.(`reaper: SIGKILL sent to PID ${pid}`)
-      } catch {
-        // Already dead from SIGTERM — good
-      }
-
-      const killMsg = `health:reaper: killed PID ${pid} (${suspect.command}) — unclaimed after ${thresholds.reaperGraceSamples * 10}s, ${suspect.cpu}% CPU for ${suspect.etime}`
-      api.broadcast(killMsg, "health:reaper:killed", undefined, {
-        delivery: "pull",
-        topic: "health:reaper:killed",
-      })
-      state.reaperSuspects.delete(pid)
+      continue
     }
   }
 }

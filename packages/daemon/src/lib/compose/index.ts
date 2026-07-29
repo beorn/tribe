@@ -8,7 +8,7 @@
  *
  *   createBaseTribe → withConfig → withProjectRoot → withDatabase
  *     → withDaemonContext → withRecall → withTools → withTool(messagingTools())
- *     → withTool(recallTools(lore)) → withPluginApi → withPlugin(...)
+ *     → withTool(recallTools(lore)) → withClientRegistry → withBroadcast
  *
  * Each `withX` accepts a value extending its prerequisites (the type system
  * enforces order) and registers cleanup on the daemon's root `Scope`.
@@ -40,12 +40,6 @@ export type { MessagingToolExtra } from "./messaging-tools.ts"
 
 export { recallTools } from "./recall-tools.ts"
 export type { RecallToolExtra } from "./recall-tools.ts"
-
-export { withPluginApi } from "./with-plugin-api.ts"
-export type { WithPluginApi } from "./with-plugin-api.ts"
-
-export { withPlugin, withPlugins } from "./with-plugin.ts"
-export type { WithPlugins } from "./with-plugin.ts"
 
 export { withClientRegistry } from "./with-client-registry.ts"
 export type { ClientRegistry, ClientSession, WithClientRegistry } from "./with-client-registry.ts"

@@ -31,7 +31,6 @@ import {
   THIRTY_DAYS_MS,
   parseTime,
   parseInclude,
-  formatBytes,
   formatTime,
   formatRelativeTime,
   displayProjectPath,
@@ -85,7 +84,7 @@ export interface SearchOptions {
 // live in staleness.ts so unit tests can import them without dragging the search.ts
 // transitive closure (bun:sqlite, indexer, llm/agent → zod) into vitest's node runtime.
 export { RECALL_STALE_THRESHOLD_DEFAULT, parseThreshold, getStaleThresholdMs, type RefreshResult } from "./staleness"
-import { getStaleThresholdMs, type RefreshResult } from "./staleness"
+import type { RefreshResult } from "./staleness"
 
 /**
  * Check if the FTS5 index is stale and, if so, run `bun recall index --incremental`
@@ -123,7 +122,7 @@ export async function refreshIndexIfStale(
   /** Test seam — override deps for unit testing. Production callers omit. */
   deps?: Partial<RefreshDeps>,
 ): Promise<RefreshResult> {
-  const merged = { ...makeRefreshDeps(readLastRebuild), ...(deps ?? {}) }
+  const merged = { ...makeRefreshDeps(readLastRebuild), ...deps }
   return refreshIndexIfStaleWithDeps(options, merged)
 }
 

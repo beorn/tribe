@@ -23,7 +23,6 @@ import {
   sanitize,
   wrapInjectedContext,
   type RegisteredSource,
-  type InjectedItem,
   readTurnManifest,
   clearTurnManifest,
   writeTurnManifest,

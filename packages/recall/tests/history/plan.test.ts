@@ -4,9 +4,9 @@
  */
 
 import { describe, test, expect } from "vitest"
-import { parsePlan, planVariants, type QueryPlan } from "../../src/lib/plan"
+import { parsePlanResult, planVariants, type QueryPlan } from "../../src/lib/plan"
 
-describe("parsePlan", () => {
+describe("parsePlanResult", () => {
   test("parses a well-formed JSON plan", () => {
     const raw = JSON.stringify({
       keywords: ["column", "layout"],
@@ -19,7 +19,7 @@ describe("parsePlan", () => {
       notes: "Found column-layout work in recent sessions.",
     })
 
-    const plan = parsePlan(raw)
+    const { plan } = parsePlanResult(raw)
     expect(plan).not.toBeNull()
     expect(plan!.keywords).toEqual(["column", "layout"])
     expect(plan!.phrases).toEqual(["column width"])
@@ -32,7 +32,7 @@ describe("parsePlan", () => {
   test("handles ```json fenced blocks", () => {
     const raw =
       '```json\n{"keywords": ["foo"], "phrases": [], "concepts": [], "paths": [], "errors": [], "bead_ids": [], "time_hint": null}\n```'
-    const plan = parsePlan(raw)
+    const { plan } = parsePlanResult(raw)
     expect(plan).not.toBeNull()
     expect(plan!.keywords).toEqual(["foo"])
   })
@@ -40,13 +40,13 @@ describe("parsePlan", () => {
   test("extracts JSON from prose wrapping", () => {
     const raw =
       'Here is the plan: {"keywords": ["bar"], "phrases": [], "concepts": [], "paths": [], "errors": [], "bead_ids": [], "time_hint": null} — hope this helps!'
-    const plan = parsePlan(raw)
+    const { plan } = parsePlanResult(raw)
     expect(plan).not.toBeNull()
     expect(plan!.keywords).toEqual(["bar"])
   })
 
   test("normalizes missing/non-array fields to empty arrays", () => {
-    const plan = parsePlan('{"keywords": "not-an-array", "phrases": ["ok"]}')
+    const { plan } = parsePlanResult('{"keywords": "not-an-array", "phrases": ["ok"]}')
     expect(plan).not.toBeNull()
     expect(plan!.keywords).toEqual([])
     expect(plan!.phrases).toEqual(["ok"])
@@ -55,28 +55,30 @@ describe("parsePlan", () => {
   })
 
   test("filters empty and non-string entries from arrays", () => {
-    const plan = parsePlan('{"keywords": ["foo", "", "   ", 42, null, "bar"]}')
+    const { plan } = parsePlanResult('{"keywords": ["foo", "", "   ", 42, null, "bar"]}')
     expect(plan).not.toBeNull()
     expect(plan!.keywords).toEqual(["foo", "bar"])
   })
 
   test("rejects a plan with zero usable variants", () => {
-    const plan = parsePlan('{"keywords": [], "phrases": [], "concepts": [], "paths": [], "errors": [], "bead_ids": []}')
+    const { plan } = parsePlanResult(
+      '{"keywords": [], "phrases": [], "concepts": [], "paths": [], "errors": [], "bead_ids": []}',
+    )
     expect(plan).toBeNull()
   })
 
   test("rejects non-JSON garbage", () => {
-    expect(parsePlan("not json at all")).toBeNull()
-    expect(parsePlan("")).toBeNull()
-    expect(parsePlan("{")).toBeNull()
+    expect(parsePlanResult("not json at all").plan).toBeNull()
+    expect(parsePlanResult("").plan).toBeNull()
+    expect(parsePlanResult("{").plan).toBeNull()
   })
 
   test("rejects a JSON array at top level", () => {
-    expect(parsePlan("[1, 2, 3]")).toBeNull()
+    expect(parsePlanResult("[1, 2, 3]").plan).toBeNull()
   })
 
   test("trims whitespace from string entries", () => {
-    const plan = parsePlan('{"keywords": ["  foo  ", "\\tbar\\n"]}')
+    const { plan } = parsePlanResult('{"keywords": ["  foo  ", "\\tbar\\n"]}')
     expect(plan).not.toBeNull()
     expect(plan!.keywords).toEqual(["foo", "bar"])
   })

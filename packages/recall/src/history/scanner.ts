@@ -24,7 +24,6 @@ import type { RecallSearchResult } from "./recall-shared.ts"
 import { runInjectDelta, createTmpfileSeenStore } from "../lib/inject-core.ts"
 import { recall, parseTimeToMs } from "./search.ts"
 import { SYNTHESIS_PROMPT, raceLlmModels, formatResultsForLlm, type LlmRaceModelResult } from "./synthesize.ts"
-import { ensureProjectSourcesIndexed } from "./project-sources.ts"
 
 // ============================================================================
 // Transcript extraction

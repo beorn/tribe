@@ -13,8 +13,6 @@ import * as readline from "readline"
 import * as os from "os"
 import {
   PROJECTS_DIR,
-  PLANS_DIR,
-  TODOS_DIR,
   MAX_CONTENT_SIZE,
   upsertSession,
   insertMessage,

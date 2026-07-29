@@ -594,9 +594,12 @@ describe("createReconnectingClient transport recovery", () => {
     await new Promise<void>((resolve) => server.close(() => resolve()))
     try {
       await vi.waitFor(() => {
-        expect(exhausted?.attempts).toBe(1)
-        expect(exhausted?.error).toBeInstanceOf(Error)
-        expect((exhausted?.error as Error).message).toContain("(noSpawn)")
+        const result = exhausted
+        expect(result).toBeDefined()
+        if (!result) throw new Error("reconnect exhaustion callback has not fired")
+        expect(result.attempts).toBe(1)
+        expect(result.error).toBeInstanceOf(Error)
+        expect((result.error as Error).message).toContain("(noSpawn)")
       })
     } finally {
       client.close()

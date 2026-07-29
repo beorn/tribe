@@ -10,7 +10,8 @@
  */
 
 import { describe, expect, test } from "vitest"
-import { evaluateDoctor, mcpJsonContent } from "../src/cli/read.ts"
+import { evaluateDoctor } from "../src/cli/read.ts"
+import { mcpJsonContent } from "../src/cli/mcp-json-content.ts"
 
 describe("mcpJsonContent (MCP tool-result unwrap, shared by health + doctor)", () => {
   test("MCP-wrapped JSON content → parsed object", () => {
