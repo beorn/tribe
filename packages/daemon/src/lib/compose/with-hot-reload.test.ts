@@ -45,6 +45,7 @@ describe("daemon reload lifecycle ownership", () => {
   it("keeps the current socket alive when a standalone owner cannot start", () => {
     const stopPlugins = vi.fn()
     const triggerShutdown = vi.fn()
+    const healthLog = vi.fn()
     const close = vi.fn()
     const socket = {
       handedOff: false,
@@ -58,10 +59,14 @@ describe("daemon reload lifecycle ownership", () => {
       stopPlugins,
       triggerShutdown,
       disableWatch: true,
-    })({ config: { operatorCapability: null }, socket } as never)
+    })({ broadcast: { log: healthLog }, config: { operatorCapability: null }, socket } as never)
 
     expect(() => subject.hotReload.reload()).toThrow("owner startup failed")
 
+    expect(healthLog).toHaveBeenCalledWith(
+      "tribe:hot-reload: Hot-reload lifecycle owner failed to start: owner startup failed",
+      "health:daemon:error",
+    )
     expect(stopPlugins).not.toHaveBeenCalled()
     expect(socket.handedOff).toBe(false)
     expect(close).not.toHaveBeenCalled()
@@ -73,6 +78,7 @@ describe("daemon reload lifecycle ownership", () => {
     try {
       const stopPlugins = vi.fn()
       const triggerShutdown = vi.fn()
+      const healthLog = vi.fn()
       const close = vi.fn()
       const socket = {
         handedOff: false,
@@ -85,12 +91,16 @@ describe("daemon reload lifecycle ownership", () => {
         stopPlugins,
         triggerShutdown,
         disableWatch: true,
-      })({ config: { operatorCapability: null }, socket } as never)
+      })({ broadcast: { log: healthLog }, config: { operatorCapability: null }, socket } as never)
 
       subject.hotReload.reload()
       owner.emit("exit", 1, null)
       vi.advanceTimersByTime(1000)
 
+      expect(healthLog).toHaveBeenCalledWith(
+        "tribe:hot-reload: Hot-reload lifecycle owner exited before handoff (code=1, signal=null)",
+        "health:daemon:error",
+      )
       expect(stopPlugins).not.toHaveBeenCalled()
       expect(socket.handedOff).toBe(false)
       expect(close).not.toHaveBeenCalled()
@@ -98,6 +108,32 @@ describe("daemon reload lifecycle ownership", () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it("reports and rethrows a supervised replacement failure", () => {
+    const healthLog = vi.fn()
+    const subject = withHotReload({
+      stopPlugins: vi.fn(),
+      replaceProcess() {
+        throw new Error("owner handoff failed")
+      },
+      triggerShutdown: vi.fn(),
+      disableWatch: true,
+    })({
+      broadcast: { log: healthLog },
+      config: { operatorCapability: null },
+      socket: {
+        handedOff: false,
+        server: { close: vi.fn() },
+        socketPath: "/must-not-unlink-supervised-failure.sock",
+      },
+    } as never)
+
+    expect(() => subject.hotReload.reload()).toThrow("owner handoff failed")
+    expect(healthLog).toHaveBeenCalledWith(
+      "tribe:hot-reload: Hot-reload lifecycle owner replacement failed: owner handoff failed",
+      "health:daemon:error",
+    )
   })
 
   it("selects replacement for Hab and the daemon's actual standalone supervisor", () => {

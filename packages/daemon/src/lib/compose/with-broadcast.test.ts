@@ -9,6 +9,7 @@ import { afterEach, describe, expect, test, vi } from "vitest"
 import { createLogger, getLogLevel, setLogLevel, setSuppressConsole } from "loggily"
 import { defangModelInput } from "tribe-injection-envelope"
 import { withBroadcast } from "./with-broadcast.ts"
+import { withHotReload } from "./with-hot-reload.ts"
 
 type InsertedRow = Record<string, unknown>
 
@@ -62,6 +63,7 @@ function createHarness() {
   return {
     broadcast: tribe.broadcast,
     inserted,
+    tribe,
     dispose() {
       for (const fn of deferred.reverse()) fn()
     },
@@ -166,6 +168,40 @@ describe("22514 daemon health-log broadcast admission", () => {
       expect(safeHarness.inserted[0]?.$topic).toBe("health:daemon:error")
     } finally {
       safeHarness.dispose()
+    }
+  })
+
+  test("persists a real hot-reload owner failure through the bounded health gate", () => {
+    const harness = createHarness()
+    try {
+      const subject = withHotReload({
+        stopPlugins: vi.fn(),
+        replaceProcess() {
+          throw new Error("owner handoff failed")
+        },
+        triggerShutdown: vi.fn(),
+        disableWatch: true,
+      })({
+        ...harness.tribe,
+        config: { operatorCapability: null },
+        socket: {
+          handedOff: false,
+          server: { close: vi.fn() },
+          socketPath: "/must-not-unlink-health-integration.sock",
+        },
+      } as never)
+
+      expect(() => subject.hotReload.reload()).toThrow("owner handoff failed")
+      expect(harness.inserted).toContainEqual(
+        expect.objectContaining({
+          $content: "tribe:hot-reload: Hot-reload lifecycle owner replacement failed: owner handoff failed",
+          $delivery: "pull",
+          $topic: "health:daemon:error",
+          $type: "health:daemon:error",
+        }),
+      )
+    } finally {
+      harness.dispose()
     }
   })
 })

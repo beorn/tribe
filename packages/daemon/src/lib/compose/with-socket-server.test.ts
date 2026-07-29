@@ -2,8 +2,9 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createServer, type Server } from "node:net"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { probeAndCleanSocket } from "./with-socket-server.ts"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { createScope } from "tribe-wire"
+import { probeAndCleanSocket, withSocketServer } from "./with-socket-server.ts"
 
 /**
  * Regression guard for the tribe presence/offline root cause: a daemon
@@ -54,5 +55,22 @@ describe("probeAndCleanSocket (never unlinks a live socket)", () => {
     const alive = await probeAndCleanSocket(sock)
     expect(alive).toBe(false)
     expect(existsSync(sock)).toBe(false)
+  })
+
+  it("reports a non-election bind failure through the daemon health gate", async () => {
+    const scope = createScope("socket-bind-health-test")
+    const healthLog = vi.fn()
+    const subject = withSocketServer()({
+      scope,
+      config: {
+        inheritFd: null,
+        socketPath: join(tmpDir, "missing", "tribe.sock"),
+      },
+      broadcast: { log: healthLog },
+    } as never)
+
+    await expect(subject.socket.binding).rejects.toMatchObject({ code: "ENOENT" })
+    expect(healthLog).toHaveBeenCalledWith("tribe:socket: bind failed (code=ENOENT)", "health:daemon:error")
+    await scope[Symbol.asyncDispose]()
   })
 })

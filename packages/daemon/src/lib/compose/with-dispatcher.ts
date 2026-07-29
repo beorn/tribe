@@ -1547,6 +1547,13 @@ export function withDispatcher<
           const siblingTransport = Array.from(clients.values()).some(
             (candidate) => candidate.id !== connId && candidate.ctx.sessionId === client.ctx.sessionId,
           )
+          if (hadError && !siblingTransport && client.launchId) {
+            broadcast.log(
+              `tribe:dispatcher: managed bridge lost after socket error ` +
+                `(name=${client.name}, launch=${client.launchId}, parent_pid=${String(client.launchParentPid)})`,
+              "health:daemon:warn",
+            )
+          }
           if (siblingTransport) {
             log.debug?.("transport.disconnected", connectionFields)
           } else {

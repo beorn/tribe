@@ -667,6 +667,14 @@ describe("dispatcher operational logging", () => {
         name: "@agent/4",
         reason: "socket-error",
       })
+      expect(harness.healthLogs()).toEqual([
+        {
+          message:
+            "tribe:dispatcher: managed bridge lost after socket error " +
+            "(name=@agent/4, launch=launch-agent-4-real-socket, parent_pid=4004)",
+          type: "health:daemon:warn",
+        },
+      ])
       expect(JSON.stringify(logs)).not.toContain("sensitive real-socket detail")
     } finally {
       client.destroy()
@@ -1458,6 +1466,7 @@ function createDispatcherHarness(
   const clients = new Map<string, ClientSession>()
   const socketToClient = new Map<NetSocket, string>()
   const transportLifetimeEvents: Array<{ type: "connected" | "disconnected"; sessionId: string }> = []
+  const healthLogs: Array<{ message: string; type: string }> = []
   const fakeServer = createFakeServer()
 
   const shape = {
@@ -1552,7 +1561,9 @@ function createDispatcherHarness(
       pushToClient() {},
       persistDeliveredCursor() {},
       async toConnected() {},
-      log() {},
+      log(message: string, type: string) {
+        healthLogs.push({ message, type })
+      },
       flushConnection() {},
       discardConnection() {},
       messageTap() {},
@@ -1608,6 +1619,9 @@ function createDispatcherHarness(
     },
     transportLifetimeEvents() {
       return [...transportLifetimeEvents]
+    },
+    healthLogs() {
+      return [...healthLogs]
     },
     connectClient(): { connId: string; name: string; socket: TestSocket } {
       const socket = createTestSocket()

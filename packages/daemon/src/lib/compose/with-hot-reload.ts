@@ -25,6 +25,7 @@ import { dirname as pathDirname, resolve as pathResolve } from "node:path"
 import { createLogger } from "loggily"
 import { spawnStandaloneDaemonSupervisor } from "tribe-wire"
 import type { BaseTribe } from "./base.ts"
+import type { WithBroadcast } from "./with-broadcast.ts"
 import type { WithConfig } from "./with-config.ts"
 import type { WithSocketServer } from "./with-socket-server.ts"
 
@@ -109,19 +110,29 @@ function computeSourceHash(files: string[]): string {
   return hash.digest("hex").slice(0, 12)
 }
 
-export function withHotReload<T extends BaseTribe & WithConfig & WithSocketServer>(
+export function withHotReload<T extends BaseTribe & WithBroadcast & WithConfig & WithSocketServer>(
   opts: HotReloadOpts,
 ): (t: T) => T & WithHotReload {
   return (t) => {
     const spawnDelayMs = opts.spawnDelayMs ?? 1000
     const watchDebounceMs = opts.watchDebounceMs ?? 500
+    const reportLifecycleOwnerFailure = (detail: string): void => {
+      const message = `Hot-reload lifecycle owner ${detail}`
+      log.info?.(message)
+      t.broadcast.log(`tribe:hot-reload: ${message}`, "health:daemon:error")
+    }
 
     function reload(): void {
       const reason = "SIGHUP received — re-exec for hot-reload"
       log.info?.(reason)
       if (opts.replaceProcess) {
         opts.stopPlugins()
-        opts.replaceProcess(reason)
+        try {
+          opts.replaceProcess(reason)
+        } catch (error) {
+          reportLifecycleOwnerFailure(`replacement failed: ${error instanceof Error ? error.message : String(error)}`)
+          throw error
+        }
         return
       }
 
@@ -131,24 +142,31 @@ export function withHotReload<T extends BaseTribe & WithConfig & WithSocketServe
       // generation. The supervisor may detach; the daemon never does.
       const argv = process.argv.slice(1).filter((a) => !a.startsWith("--fd"))
       const operatorCapability = t.config.operatorCapability?.trim() || null
-      const child = spawnStandaloneDaemonSupervisor({
-        daemonScript: argv[0]!,
-        daemonArgs: argv.slice(1),
-        operatorCapability,
-        waitForPid: process.pid,
-      })
+      const child = (() => {
+        try {
+          return spawnStandaloneDaemonSupervisor({
+            daemonScript: argv[0]!,
+            daemonArgs: argv.slice(1),
+            operatorCapability,
+            waitForPid: process.pid,
+          })
+        } catch (error) {
+          reportLifecycleOwnerFailure(`failed to start: ${error instanceof Error ? error.message : String(error)}`)
+          throw error
+        }
+      })()
 
       let ownerFailed = false
       let handoffStarted = false
       child.on("error", (err) => {
-        if (handoffStarted) return
+        if (handoffStarted || ownerFailed) return
         ownerFailed = true
-        log.info?.(`Hot-reload lifecycle owner failed: ${err.message}`)
+        reportLifecycleOwnerFailure(`failed before handoff: ${err.message}`)
       })
       child.on("exit", (code, signal) => {
-        if (handoffStarted) return
+        if (handoffStarted || ownerFailed) return
         ownerFailed = true
-        log.info?.(`Hot-reload lifecycle owner exited before handoff (code=${String(code)}, signal=${String(signal)})`)
+        reportLifecycleOwnerFailure(`exited before handoff (code=${String(code)}, signal=${String(signal)})`)
       })
 
       // Prove the supervisor survives startup and enters its predecessor wait

@@ -26,6 +26,7 @@ import { waitForSocketAlive } from "tribe-wire/lib/socket"
 import { evaluateSpawnSourceForTree, writePinSidecar } from "tribe-wire/lib/spawn-pin-gate"
 import { STARTUP_SHA } from "../code-pin.ts"
 import type { BaseTribe } from "./base.ts"
+import type { WithBroadcast } from "./with-broadcast.ts"
 import type { WithConfig } from "./with-config.ts"
 
 const log = createLogger("tribe:socket")
@@ -83,7 +84,7 @@ export async function probeAndCleanSocket(socketPath: string): Promise<boolean> 
  * assumes the caller has already invoked `probeAndCleanSocket(...)` to handle
  * stale-socket cleanup and another-daemon-running detection.
  */
-export function withSocketServer<T extends BaseTribe & WithConfig>(): (t: T) => T & WithSocketServer {
+export function withSocketServer<T extends BaseTribe & WithBroadcast & WithConfig>(): (t: T) => T & WithSocketServer {
   return (t) => {
     const socketPath = t.config.socketPath
     const inheritFd = t.config.inheritFd
@@ -107,6 +108,15 @@ export function withSocketServer<T extends BaseTribe & WithConfig>(): (t: T) => 
         return
       }
       rejectBinding(error)
+      try {
+        t.broadcast.log(`tribe:socket: bind failed (code=${error.code ?? error.name})`, "health:daemon:error")
+      } catch (healthError) {
+        log.error?.(
+          `Could not persist socket bind health diagnostic: ${
+            healthError instanceof Error ? healthError.message : String(healthError)
+          }`,
+        )
+      }
     }
 
     if (inheritFd !== null) {
