@@ -569,7 +569,7 @@ export function registerSendCommands(program: Command): void {
           summary: opts.summary,
           delivery: opts.delivery as Delivery | undefined,
           ref: opts.ref,
-          request: opts.request === false ? undefined : opts.request,
+          request: opts.request === "true" ? true : opts.request === false ? undefined : opts.request,
           reply: opts.reply,
           fanout: opts.fanout as Fanout | undefined,
           expiresInMs,

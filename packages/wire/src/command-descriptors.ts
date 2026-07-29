@@ -159,9 +159,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           bead: { type: "string", description: "Associated bead ID (optional)" },
           ref: { type: "string", description: "Durable correlation reference stored with the message (optional)" },
           request: {
-            oneOf: [{ type: "string" }, { type: "boolean" }],
+            oneOf: [
+              { type: "string", minLength: 1, not: { const: "true" } },
+              { type: "boolean", const: true },
+            ],
             description:
-              "Direct request/query/assign messages automatically open a semantic recipient-owned ball using the message id. Verdict stays wakeable but does not auto-mint. Pass `true` to track any direct message type, or a non-empty string to override the request id. Recipient(s) own the ball until a send carries the structured MCP `reply` field (CLI: `--reply`); content never closes it. This is not a transport delivery ACK.",
+              'Direct request/query/assign messages automatically open a semantic recipient-owned ball using the message id. Verdict stays wakeable but does not auto-mint. Pass boolean `true` to track any direct message type, or a non-empty string other than the reserved value "true" to override the request id. Recipient(s) own the ball until a send carries the structured MCP `reply` field (CLI: `--reply`); content never closes it. This is not a transport delivery ACK.',
           },
           reply: {
             type: "string",
@@ -282,7 +285,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           name: "request",
           flags: "--request [request_id]",
           description:
-            "Explicitly track any direct type or override its id; direct request/query/assign auto-track, verdict does not",
+            'Explicitly track any direct type or override its id; bare `--request` and `--request true` generate a unique id, while "true" is reserved',
         },
         {
           name: "fanout",

@@ -121,6 +121,56 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     expect(row.request).toBe(id)
   })
 
+  it("request:true sends from different senders open distinct tracker rows", () => {
+    const first = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        { to: "@agent/2", message: "first", type: "notify", request: true },
+        makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+      ),
+    )
+    const second = parseToolJson(
+      handleToolCall(
+        agent1,
+        "tribe.send",
+        { to: "@agent/2", message: "second", type: "notify", request: true },
+        makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+      ),
+    )
+
+    expect(first.request_id).toBe(first.id)
+    expect(second.request_id).toBe(second.id)
+    expect(second.request_id).not.toBe(first.request_id)
+    const rows = db
+      .prepare("SELECT request_id, sender, message_id FROM pending_request WHERE recipient = ?")
+      .all("@agent/2")
+    expect(rows).toHaveLength(2)
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        { request_id: first.id, sender: "@chief", message_id: first.id },
+        { request_id: second.id, sender: "@agent/1", message_id: second.id },
+      ]),
+    )
+  })
+
+  it('rejects the reserved explicit request id "true"', () => {
+    const messagesBefore = db.prepare("SELECT COUNT(*) AS count FROM messages").get()
+    const pendingBefore = db.prepare("SELECT COUNT(*) AS count FROM pending_request").get()
+    const res = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        { to: "@agent/2", message: "ambiguous", type: "notify", request: "true" },
+        makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+      ),
+    )
+
+    expect(res.error).toMatch(/request.*true.*reserved/i)
+    expect(db.prepare("SELECT COUNT(*) AS count FROM messages").get()).toEqual(messagesBefore)
+    expect(db.prepare("SELECT COUNT(*) AS count FROM pending_request").get()).toEqual(pendingBefore)
+  })
+
   it("rejects an empty multi-target recipient list", () => {
     const res = parseToolJson(
       handleToolCall(

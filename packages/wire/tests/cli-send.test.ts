@@ -502,15 +502,19 @@ describe("registerSendCommands", () => {
         })
       })
       const res = await new Promise<{ code: number | null; stderr: string }>((resolveProc) => {
-        const child = spawn(BUN_BIN, [CLI, "send", "@agent/7", "answered", "--type", "response", "--reply", "req-123"], {
-          env: {
-            ...process.env,
-            TRIBE_SOCKET: socketPath,
-            TRIBE_NAME: "@chief",
-            TRIBE_LAUNCH_ID: "launch-id-with-no-stored-session",
+        const child = spawn(
+          BUN_BIN,
+          [CLI, "send", "@agent/7", "answered", "--type", "response", "--reply", "req-123"],
+          {
+            env: {
+              ...process.env,
+              TRIBE_SOCKET: socketPath,
+              TRIBE_NAME: "@chief",
+              TRIBE_LAUNCH_ID: "launch-id-with-no-stored-session",
+            },
+            stdio: ["ignore", "pipe", "pipe"],
           },
-          stdio: ["ignore", "pipe", "pipe"],
-        })
+        )
         let stderr = ""
         child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
         child.on("close", (code) => resolveProc({ code, stderr }))
@@ -518,6 +522,83 @@ describe("registerSendCommands", () => {
 
       expect(res.code).toBe(1)
       expect(res.stderr).toContain("req-123")
+    } finally {
+      server.close()
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  test("two CLI --request true sends from different senders forward boolean tracking requests", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-send-request-true-"))
+    const socketPath = join(tmp, "tribe.sock")
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = []
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as {
+            id: number
+            method: string
+            params?: Record<string, unknown>
+          }
+          calls.push({ method: request.method, params: request.params ?? {} })
+          socket.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { sent: true } }) + "\n")
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const runSend = (sender: string, message: string) =>
+        new Promise<{ code: number | null; stderr: string }>((resolveProc) => {
+          const child = spawn(BUN_BIN, [CLI, "send", "@reviewer", message, "--type", "notify", "--request", "true"], {
+            env: {
+              ...process.env,
+              TRIBE_SOCKET: socketPath,
+              TRIBE_NAME: sender,
+              TRIBE_LAUNCH_ID: "",
+            },
+            stdio: ["ignore", "ignore", "pipe"],
+          })
+          let stderr = ""
+          child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+          child.on("close", (code) => resolveProc({ code, stderr }))
+        })
+
+      expect(await runSend("@sender/1", "first")).toEqual({ code: 0, stderr: "" })
+      expect(await runSend("@sender/2", "second")).toEqual({ code: 0, stderr: "" })
+      expect(calls).toEqual([
+        {
+          method: "tribe.send",
+          params: {
+            to: "@reviewer",
+            message: "first",
+            type: "notify",
+            request: true,
+          },
+        },
+        {
+          method: "tribe.send",
+          params: {
+            to: "@reviewer",
+            message: "second",
+            type: "notify",
+            request: true,
+          },
+        },
+      ])
     } finally {
       server.close()
       rmSync(tmp, { recursive: true, force: true })

@@ -513,6 +513,12 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   if (typeof requestArg === "string" && requestArg.trim().length === 0) {
     return jsonResult({ error: "tribe.send: `request` must be true or a non-empty string when supplied." })
   }
+  if (typeof requestArg === "string" && requestArg.trim() === "true") {
+    return jsonResult({
+      error:
+        'tribe.send: explicit request id "true" is reserved for generated message-id tracking; pass boolean `true` instead.',
+    })
+  }
   const requestFlag = requestArg === true
   const requestId = typeof requestArg === "string" ? requestArg.trim() : null
   const replyId = typeof replyArg === "string" ? replyArg : null

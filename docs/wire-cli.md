@@ -228,10 +228,12 @@ If the first non-whitespace message token looks like `reply=<id>` or
 different structured flag is also present—and prints the exact `--reply <id>`
 or `--ref <value>` replacement. Remove the marker from content; message prose
 never mutates reply/ref state.
-`--request` opts any direct message into ball-tracking (direct
-request/query/assign auto-track already; this overrides the id or opts in a
-`notify`/`response`/`verdict`). `--fanout all` opens one ball per recipient
-on a multi-target send instead of the default first-reply-wins.
+`--request` and `--request true` opt any direct message into ball-tracking with
+the message's unique id (direct request/query/assign auto-track already).
+Another non-empty value overrides the id or opts in a
+`notify`/`response`/`verdict`; the explicit id `true` is reserved and rejected
+by the daemon. `--fanout all` opens one ball per recipient on a multi-target
+send instead of the default first-reply-wins.
 
 ```bash
 tribe-wire send '@alice' 'task X done' --type=notify

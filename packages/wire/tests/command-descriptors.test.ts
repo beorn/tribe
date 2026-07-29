@@ -98,7 +98,6 @@ describe("Tribe command descriptors", () => {
       minimum: 1,
       maximum: 86_400_000,
     })
-
     const join = visibleCliProjection(commandDescriptorByMcpName("join")!)
     expect(join.arguments?.map((arg) => arg.name)).toEqual(["name"])
     expect(join.options?.find((option) => option.name === "delivery")?.enum).toEqual(["push", "pull"])
@@ -226,7 +225,10 @@ describe("Tribe command descriptors", () => {
   test("pins semantic actionable ownership without inventing a delivery-ack surface", () => {
     const send = commandDescriptorByMcpName("send")!
     expect(send.mcp.inputSchema.properties?.request).toMatchObject({
-      oneOf: expect.arrayContaining([{ type: "boolean" }, { type: "string" }]),
+      oneOf: [
+        { type: "string", minLength: 1, not: { const: "true" } },
+        { type: "boolean", const: true },
+      ],
     })
     expect(send.mcp.inputSchema.properties?.delivery).toMatchObject({
       type: "string",
