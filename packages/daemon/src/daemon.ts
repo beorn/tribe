@@ -24,7 +24,6 @@ import { createLogger } from "loggily"
 import { pipe, withTool, withTools, createScope, formatRuntimeId } from "tribe-wire"
 import type { TribeAutostart } from "./lib/autostart-config.ts"
 import { gitPlugin } from "./lib/git-plugin.ts"
-import { beadsPlugin } from "./lib/beads-plugin.ts"
 import { githubPlugin } from "./lib/github-plugin.ts"
 import { healthMonitorPlugin } from "./lib/health-monitor-plugin.ts"
 import { accountlyPlugin } from "./lib/accountly-plugin.ts"
@@ -32,7 +31,6 @@ import { accountlyPlugin } from "./lib/accountly-plugin.ts"
 import {
   createBaseTribe,
   recallTools,
-  fleetTools,
   messagingTools,
   probeAndCleanSocket,
   withBroadcast,
@@ -260,10 +258,6 @@ const withMCPShape = withMCPServer<typeof withDispatcherShape>({
     outputSchema: t.outputSchema,
   })),
   dispatch: async (toolName, args, ctx) => {
-    // fleet.* tools are registry-only handlers (wrap tent CLI; no dispatcher
-    // method). Returning undefined here falls through to the registry path
-    // in with-mcp-server tools/call (21743 CLI/MCP parity).
-    if (toolName.startsWith("fleet.")) return undefined
     // Route every other registered tool through the dispatcher's handleRequest.
     // The dispatcher's tribe.* / recall cases own connection context; for
     // unknown methods it returns -32601 which we surface as an MCP error.
@@ -298,9 +292,7 @@ const withSignalsShape = withSignals<typeof withHotReloadShape>({
   onReload: () => withHotReloadShape.hotReload.reload(),
 })(withHotReloadShape)
 const tribe = withRuntime<typeof withSignalsShape>({
-  plugins: process.env.TRIBE_NO_PLUGINS
-    ? []
-    : [gitPlugin, beadsPlugin, githubPlugin, healthMonitorPlugin, accountlyPlugin],
+  plugins: process.env.TRIBE_NO_PLUGINS ? [] : [gitPlugin, githubPlugin, healthMonitorPlugin, accountlyPlugin],
   publishActivePluginNames: (n) => {
     refs.activePluginNames = n
   },
@@ -317,16 +309,6 @@ const tribe = withRuntime<typeof withSignalsShape>({
 // reads the registry lazily, so late registration is safe.
 if (tribe.recall) {
   for (const t of recallTools(tribe.recall)) tribe.tools.set(t.name, t)
-}
-
-// fleet.* MCP tools (21743) — wrap tent fleet-read/wake/exec at the project root.
-// Registry-only: MCP tools/call falls through when dispatch returns undefined for
-// fleet.* (see withMCPServer dispatch above). Fail loud if tent is missing.
-if (tribe.projectRoot) {
-  for (const t of fleetTools({ projectRoot: tribe.projectRoot })) {
-    if (!tribe.tools.has(t.name)) tribe.tools.set(t.name, t)
-  }
-  log.info?.(`fleet tools registered (projectRoot=${tribe.projectRoot})`)
 }
 
 // Loud startup identity: name the version+sha THIS process loaded so a stale

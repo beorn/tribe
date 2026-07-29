@@ -39,11 +39,6 @@ import {
  * `tribe.reload` / `tribe.retro` / `tribe.chief` / `tribe.claim-chief` /
  * `tribe.release-chief` / `tribe.debug`. See ../CHANGELOG.md for the wire
  * protocol history.
- *
- * 0.14.0 added two OPTIONAL fields on `assign`-typed channel envelopes —
- * `bead_state` (fresh snapshot from `.beads/backup/issues.jsonl`) and
- * `reissue_count`. Purely additive: pre-0.14 clients ignore them. No protocol
- * bump then (v4 unchanged). See km-tribe.task-assignment-stale-snapshot.
  */
 export const TRIBE_PROTOCOL_VERSION = 9
 

@@ -41,9 +41,6 @@ export type { MessagingToolExtra } from "./messaging-tools.ts"
 export { recallTools } from "./recall-tools.ts"
 export type { RecallToolExtra } from "./recall-tools.ts"
 
-export { fleetTools, FLEET_TOOL_NAMES } from "./fleet-tools.ts"
-export type { FleetToolsOpts } from "./fleet-tools.ts"
-
 export { withPluginApi } from "./with-plugin-api.ts"
 export type { WithPluginApi } from "./with-plugin-api.ts"
 

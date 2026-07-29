@@ -194,14 +194,13 @@ There is no dedicated `stop` subcommand. In practice:
 ## Daemon plugins
 
 `daemon.ts` loads a fixed plugin list unless `TRIBE_NO_PLUGINS` is set:
-`gitPlugin`, `beadsPlugin`, `githubPlugin`, `healthMonitorPlugin`,
-`accountlyPlugin`. Each is self-gating via an `available()` check, so none
-of them require anything from a standalone/non-hab install:
+`gitPlugin`, `githubPlugin`, `healthMonitorPlugin`, `accountlyPlugin`. Each is
+self-gating via an `available()` check, so none of them require anything from a
+standalone/non-hab install:
 
 | Plugin           | Gate                                                               | What it does                                                                                                                                                          |
 | ---------------- | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `git`            | `git rev-parse HEAD` succeeds in cwd                               | Broadcasts a status message when `git log -1` HEAD advances (30s poll).                                                                                               |
-| `beads`          | `.beads/backup/issues.jsonl` exists (found by walking up from cwd) | Broadcasts issue-tracker (bead) state transitions (new/claimed/closed/status-change), snapshotting current state on start so history isn't replayed.                  |
 | `github`         | `GITHUB_TOKEN` env or `gh auth token` succeeds                     | Polls the GitHub API and broadcasts push/workflow_run/pull_request/issues events; configurable via `GITHUB_POLL_INTERVAL`, `GITHUB_EVENTS`, `GITHUB_WORKFLOW_NOTIFY`. |
 | `health-monitor` | (always available)                                                 | Backs `tribe.health()`'s diagnostics.                                                                                                                                 |
 | `accountly`      | `~/.config/ag/accounts.json` exists                                | Monitors Claude subscription quota usage and warns near thresholds (`AG_THRESHOLD_5HOUR`/`AG_THRESHOLD_7DAY`/`AG_THRESHOLD_MONTHLY`).                                 |
