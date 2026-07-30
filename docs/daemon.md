@@ -47,6 +47,15 @@ order:
 
 The daemon `chmod`s the socket to `0600` right after binding.
 
+### Process environment
+
+The daemon removes caller session identity (`TRIBE_NAME`, role, account,
+provider, launch, takeover, and plugin-adapter fields) at its own process
+boundary. It accepts an operator-capability fd and standalone lifecycle markers
+only when those markers identify its actual parent supervisor. A Hab-managed
+service therefore does not need blank environment overrides to avoid inheriting
+the identity of whichever seat invoked `hab up`.
+
 ### Optional delivery fallbacks
 
 `TRIBE_DELIVERY_FALLBACKS` accepts an ordered JSON array of generic
@@ -117,11 +126,13 @@ lifecycle owner:
   anonymous pipe for each generation. No daemon self-detaches or inherits a
   seat's identity environment.
 
-- **Hab-supervised service** — when `HAB_SERVICE_KIND=service`, the same reload
+- **Hab-supervised workload** — when `HAB_SERVICE_KIND` is present, the same reload
   entry points stop plugins and request clean shutdown. They do **not** mark
   the socket handed off, unlink it early, or spawn a detached successor. Scope
   disposal closes the socket, then Hab's declared restart policy starts the
-  replacement inside the same supervisor.
+  replacement inside the same supervisor. The daemon also suppresses its source
+  watcher in this mode, so managed deployments do not need to declare a
+  `TRIBE_NO_AUTORELOAD` environment override.
 
 - **Source-file watcher** — `fs.watch` on the daemon's own source
   directories, debounced (default 500ms), hashes the watched `.ts` files and
@@ -198,12 +209,12 @@ There is no dedicated `stop` subcommand. In practice:
 self-gating via an `available()` check, so none of them require anything from a
 standalone/non-hab install:
 
-| Plugin           | Gate                                                               | What it does                                                                                                                                                          |
-| ---------------- | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `git`            | `git rev-parse HEAD` succeeds in cwd                               | Broadcasts a status message when `git log -1` HEAD advances (30s poll).                                                                                               |
-| `github`         | `GITHUB_TOKEN` env or `gh auth token` succeeds                     | Polls the GitHub API and broadcasts push/workflow_run/pull_request/issues events; configurable via `GITHUB_POLL_INTERVAL`, `GITHUB_EVENTS`, `GITHUB_WORKFLOW_NOTIFY`. |
-| `health-monitor` | (always available)                                                 | Backs `tribe.health()`'s diagnostics.                                                                                                                                 |
-| `accountly`      | `~/.config/ag/accounts.json` exists                                | Monitors Claude subscription quota usage and warns near thresholds (`AG_THRESHOLD_5HOUR`/`AG_THRESHOLD_7DAY`/`AG_THRESHOLD_MONTHLY`).                                 |
+| Plugin           | Gate                                           | What it does                                                                                                                                                          |
+| ---------------- | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `git`            | `git rev-parse HEAD` succeeds in cwd           | Broadcasts a status message when `git log -1` HEAD advances (30s poll).                                                                                               |
+| `github`         | `GITHUB_TOKEN` env or `gh auth token` succeeds | Polls the GitHub API and broadcasts push/workflow_run/pull_request/issues events; configurable via `GITHUB_POLL_INTERVAL`, `GITHUB_EVENTS`, `GITHUB_WORKFLOW_NOTIFY`. |
+| `health-monitor` | (always available)                             | Backs `tribe.health()`'s diagnostics.                                                                                                                                 |
+| `accountly`      | `~/.config/ag/accounts.json` exists            | Monitors Claude subscription quota usage and warns near thresholds (`AG_THRESHOLD_5HOUR`/`AG_THRESHOLD_7DAY`/`AG_THRESHOLD_MONTHLY`).                                 |
 
 None of these are project-specific coordination policy (no coordinator
 roles, task queues, or branch-assignment concepts) — that boundary is intentional; see

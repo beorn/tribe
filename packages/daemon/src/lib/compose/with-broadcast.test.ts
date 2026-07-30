@@ -85,13 +85,13 @@ describe("22514 daemon health-log broadcast admission", () => {
     setSuppressConsole(true)
     try {
       expect(
-        defangModelInput('22:20:34 WARN tribe:dispatcher takeover: superseding live holder of "@flt"'),
+        defangModelInput('22:20:34 WARN tribe:dispatcher takeover: superseding live holder of "@worker"'),
         "the actual formatted specimen is fully redacted at the model-input boundary",
       ).toBe("[log-redacted]")
 
       const log = createLogger("tribe:dispatcher")
       log.warn?.(
-        'takeover: superseding live holder of "@flt" ' + "(old pid 95053, old session session-1, new pid 94345)",
+        'takeover: superseding live holder of "@worker" ' + "(old pid 95053, old session session-1, new pid 94345)",
       )
 
       expect(harness.inserted, "local daemon logs must never re-enter Tribe as health messages").toHaveLength(0)
@@ -108,7 +108,7 @@ describe("22514 daemon health-log broadcast admission", () => {
     try {
       for (let i = 0; i < 50; i++) {
         harness.broadcast.log(
-          `22:20:34 WARN tribe:dispatcher takeover: superseding live holder of "@flt" ` +
+          `22:20:34 WARN tribe:dispatcher takeover: superseding live holder of "@worker" ` +
             `(old pid 95053, old session session-${i}, new pid 94345)`,
           "health:daemon:warn",
         )

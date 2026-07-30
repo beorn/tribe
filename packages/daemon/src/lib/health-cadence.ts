@@ -17,7 +17,7 @@ const DEFAULT_SLA_TARGET_MS = MINUTE
 // unset the whole `role_actionable_response` projection — and its threshold
 // warnings — are ABSENT from tribe.health(), so the daemon stays free of any
 // project-specific workflow concept (matches packages/daemon/README.md §
-// Boundary and the `TRIBE_RECONCILER_SNAPSHOT` opt-in precedent).
+// Boundary).
 //
 // `TRIBE_SLA_SECONDS` optionally overrides the default 60s target.
 // ---------------------------------------------------------------------------

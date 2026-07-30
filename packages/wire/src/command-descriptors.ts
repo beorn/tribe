@@ -725,13 +725,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
               "Diagnostic warnings, including stale balls plus response latency, as-of-stamped connected-session cursor projections, and configured database-growth breaches. Cursor projections never assert seat liveness.",
             items: { type: "string" },
           },
-          reconciler: {
-            type: "object",
-            description: "Optional chief-reconciler snapshot (opt-in via TRIBE_RECONCILER_SNAPSHOT env var).",
-            additionalProperties: true,
-          },
         },
-        "Health snapshot - members + counts + cadence + optional reconciler snapshot.",
+        "Health snapshot - members + counts + cadence.",
       ),
     },
     cli: hidden(
