@@ -290,6 +290,22 @@ describe("provider-parent transport fan-in (@ag/tribe/22631)", () => {
     expect(reconnectedParentSocket.destroyedByDispatcher).toBe(false)
     expect(harness.supersededEvents("@dev/2")).toHaveLength(0)
 
+    harness.dropClient("conn-parent-publisher")
+    harness.dropClient("conn-mcp-adapter")
+    harness.dropClient("conn-parent-publisher-reconnect")
+
+    const restartedParentSocket = harness.addPendingClient("conn-parent-after-daemon-restart")
+    const restartedParent = parseResult<RegisterResult>(
+      await harness.register("conn-parent-after-daemon-restart", {
+        name: "@dev/2",
+        pid: 48829,
+        project: "/tmp/hh-wt2",
+        takeover: true,
+      }),
+    )
+    expect(restartedParent.sessionId).toBe(parent.sessionId)
+    expect(restartedParentSocket.destroyedByDispatcher).toBe(false)
+
     const persisted = harness.db
       .prepare("SELECT pid, identity_token, launch_id, launch_parent_pid FROM sessions WHERE id = ?")
       .get(parent.sessionId) as {

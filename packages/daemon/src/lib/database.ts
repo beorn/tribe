@@ -1032,14 +1032,21 @@ export type TribeStatements = ReturnType<typeof createStatements>
 
 export function createStatements(db: Database) {
   return {
+    // Identity omission is not revocation. A legacy provider-parent transport
+    // can reconnect before its launch-bearing child after daemon restart; the
+    // adopted durable member must retain the provenance that child promoted.
+    // Explicit non-null values still replace the prior identity.
     upsertSession: db.prepare(`
 		INSERT INTO sessions (id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, identity_token, launch_id, launch_parent_pid, started_at, updated_at, delivery, account, provider)
 		VALUES ($id, $name, $role, $domains, $pid, $cwd, $project_id, $claude_session_id, $claude_session_name, $identity_token, $launch_id, $launch_parent_pid, $now, $now, COALESCE($delivery, 'push'), $account, $provider)
 		ON CONFLICT(id) DO UPDATE SET
 			name = $name, role = $role, domains = $domains,
 			pid = $pid, cwd = $cwd, project_id = $project_id, claude_session_id = $claude_session_id,
-			claude_session_name = $claude_session_name, identity_token = $identity_token,
-			launch_id = $launch_id, launch_parent_pid = $launch_parent_pid, started_at = $now, updated_at = $now,
+			claude_session_name = $claude_session_name,
+			identity_token = COALESCE($identity_token, identity_token),
+			launch_id = COALESCE($launch_id, launch_id),
+			launch_parent_pid = COALESCE($launch_parent_pid, launch_parent_pid),
+			started_at = $now, updated_at = $now,
 			delivery = COALESCE($delivery, delivery, 'push'),
 			account = COALESCE($account, account),
 			provider = COALESCE($provider, provider)
