@@ -245,6 +245,109 @@ describe("dispatcher explicit-persona takeover (@ag/tribe/20703)", () => {
   })
 })
 
+describe("provider-parent transport fan-in (@ag/tribe/22631)", () => {
+  it("attaches a legacy parent publisher and its launch-bearing MCP child without mutual takeover", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const parentSocket = harness.addPendingClient("conn-parent-publisher")
+    const parent = parseResult<RegisterResult>(
+      await harness.register("conn-parent-publisher", {
+        name: "@dev/2",
+        pid: 48829,
+        project: "/tmp/hh-wt2",
+        takeover: true,
+      }),
+    )
+
+    const mcpSocket = harness.addPendingClient("conn-mcp-adapter")
+    const mcp = parseResult<RegisterResult>(
+      await harness.register("conn-mcp-adapter", {
+        name: "@dev/2",
+        pid: 49853,
+        project: "/tmp/hh-wt2",
+        takeover: true,
+        identityToken: "tok-dev-2",
+        launchId: "hab-dev-2-g7-a1",
+        launchParentPid: 48829,
+      }),
+    )
+
+    const reconnectedParentSocket = harness.addPendingClient("conn-parent-publisher-reconnect")
+    const reconnectedParent = parseResult<RegisterResult>(
+      await harness.register("conn-parent-publisher-reconnect", {
+        name: "@dev/2",
+        pid: 48829,
+        project: "/tmp/hh-wt2",
+        takeover: true,
+      }),
+    )
+
+    expect(mcp.sessionId).toBe(parent.sessionId)
+    expect(reconnectedParent.sessionId).toBe(parent.sessionId)
+    expect(parentSocket.destroyedByDispatcher).toBe(false)
+    expect(mcpSocket.destroyedByDispatcher).toBe(false)
+    expect(reconnectedParentSocket.destroyedByDispatcher).toBe(false)
+    expect(harness.supersededEvents("@dev/2")).toHaveLength(0)
+
+    const persisted = harness.db
+      .prepare("SELECT pid, identity_token, launch_id, launch_parent_pid FROM sessions WHERE id = ?")
+      .get(parent.sessionId) as {
+      pid: number
+      identity_token: string | null
+      launch_id: string | null
+      launch_parent_pid: number | null
+    }
+    expect(persisted).toEqual({
+      pid: 48829,
+      identity_token: "tok-dev-2",
+      launch_id: "hab-dev-2-g7-a1",
+      launch_parent_pid: 48829,
+    })
+  })
+
+  it("keeps a different full launch on the explicit takeover path", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const holderSocket = harness.addPendingClient("conn-launch-holder")
+    const holder = parseResult<RegisterResult>(
+      await harness.register("conn-launch-holder", {
+        name: "@dev/2",
+        pid: 49853,
+        project: "/tmp/hh-wt2",
+        takeover: true,
+        identityToken: "tok-dev-2-old",
+        launchId: "hab-dev-2-g7-a1",
+        launchParentPid: 48829,
+      }),
+    )
+
+    harness.addPendingClient("conn-foreign-launch")
+    const foreign = parseResult<RegisterResult>(
+      await harness.register("conn-foreign-launch", {
+        name: "@dev/2",
+        pid: 50999,
+        project: "/tmp/hh-wt2",
+        takeover: true,
+        identityToken: "tok-dev-2-new",
+        launchId: "hab-dev-2-g8-a1",
+        launchParentPid: 49853,
+      }),
+    )
+
+    expect(foreign.sessionId).not.toBe(holder.sessionId)
+    expect(holderSocket.destroyedByDispatcher).toBe(true)
+    expect(harness.supersededEvents("@dev/2")).toEqual([
+      expect.objectContaining({
+        old_pid: 49853,
+        new_pid: 50999,
+        reason: "explicit-persona takeover (20703)",
+      }),
+    ])
+  })
+})
+
 describe("asymmetric identity displacement (@ag/tribe/21052)", () => {
   // The 19442 agent/4 adapter-death class: a token-less carrier (CLI drains
   // register with no identityToken) grabs a persona name across a daemon

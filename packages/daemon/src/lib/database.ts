@@ -1197,6 +1197,19 @@ export function createStatements(db: Database) {
 		WHERE id = $id
 	`),
 
+    promoteSessionLaunchIdentity: db.prepare(`
+		UPDATE sessions SET
+			identity_token = COALESCE(identity_token, $identity_token),
+			launch_id = $launch_id,
+			launch_parent_pid = $launch_parent_pid,
+			updated_at = $now
+		WHERE id = $id
+			AND (
+				(launch_id IS NULL AND launch_parent_pid IS NULL)
+				OR (launch_id = $launch_id AND launch_parent_pid = $launch_parent_pid)
+			)
+	`),
+
     hasRecentMessage: db.prepare(`
 		SELECT 1 FROM messages WHERE content LIKE $prefix || '%' AND ts > $since LIMIT 1
 	`),

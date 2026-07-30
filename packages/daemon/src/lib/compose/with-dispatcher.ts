@@ -500,6 +500,67 @@ export function withDispatcher<
       return Array.from(clients.values()).find((c) => c.id !== connId && c.name === name && c.pid === clientPid) ?? null
     }
 
+    type LaunchIdentity = { id: string; parentPid: number }
+
+    function findLaunchFanIn(
+      name: string,
+      clientPid: number,
+      launchIdentity: LaunchIdentity | null,
+      connId: string,
+    ): { holder: ClientSession; launch: LaunchIdentity; transportClass: string } | null {
+      for (const holder of clients.values()) {
+        if (holder.id === connId || holder.name !== name) continue
+
+        const holderLaunch =
+          holder.launchId !== null && holder.launchParentPid !== null
+            ? { id: holder.launchId, parentPid: holder.launchParentPid }
+            : null
+        if (
+          launchIdentity !== null &&
+          holderLaunch !== null &&
+          holderLaunch.id === launchIdentity.id &&
+          holderLaunch.parentPid === launchIdentity.parentPid
+        ) {
+          return { holder, launch: launchIdentity, transportClass: "same-launch-fan-in" }
+        }
+
+        const launchChildFoundLegacyParent =
+          launchIdentity !== null && holderLaunch === null && holder.pid === launchIdentity.parentPid
+        if (launchChildFoundLegacyParent) {
+          return { holder, launch: launchIdentity, transportClass: "provider-parent-fan-in" }
+        }
+
+        const legacyParentFoundLaunchChild =
+          launchIdentity === null && clientPid === holderLaunch?.parentPid
+        if (legacyParentFoundLaunchChild) {
+          return { holder, launch: holderLaunch, transportClass: "provider-parent-fan-in" }
+        }
+      }
+      return null
+    }
+
+    function promoteSessionLaunchIdentity(
+      sessionId: string,
+      launch: LaunchIdentity,
+      identityToken: string | null,
+    ): void {
+      const result = stmts.promoteSessionLaunchIdentity.run({
+        $id: sessionId,
+        $identity_token: identityToken,
+        $launch_id: launch.id,
+        $launch_parent_pid: launch.parentPid,
+        $now: Date.now(),
+      })
+      if (result.changes !== 1) {
+        throw new Error(`refusing launch fan-in for ${sessionId}: persisted launch identity disagrees`)
+      }
+      for (const sibling of clients.values()) {
+        if (sibling.ctx.sessionId !== sessionId) continue
+        sibling.launchId = launch.id
+        sibling.launchParentPid = launch.parentPid
+      }
+    }
+
     function retireReplacedClient(client: ClientSession, reason: TransportRetirementReason): void {
       log.debug?.("transport.retired", {
         ...identityLogFields(client),
@@ -748,22 +809,15 @@ export function withDispatcher<
                 }
               }
             }
-            const launch = launchIdentity
-            const sameLaunchHolder = launch
-              ? (Array.from(clients.values()).find(
-                  (client) =>
-                    client.id !== connId &&
-                    client.name === resolvedName &&
-                    client.launchId === launch.id &&
-                    client.launchParentPid === launch.parentPid,
-                ) ?? null)
-              : null
-            if (sameLaunchHolder && launch) {
-              if (filterMode !== undefined) applyLaunchDeclaredFilter(sameLaunchHolder.ctx, filterMode)
+            const launchFanIn = findLaunchFanIn(resolvedName, clientPid, launchIdentity, connId)
+            if (launchFanIn) {
+              const { holder, launch, transportClass } = launchFanIn
+              promoteSessionLaunchIdentity(holder.ctx.sessionId, launch, identityToken)
+              if (filterMode !== undefined) applyLaunchDeclaredFilter(holder.ctx, filterMode)
               const client = applyClient(connId, {
-                name: sameLaunchHolder.name,
-                role: sameLaunchHolder.role,
-                domains: sameLaunchHolder.domains,
+                name: holder.name,
+                role: holder.role,
+                domains: holder.domains,
                 project,
                 projectName,
                 projectId,
@@ -772,13 +826,13 @@ export function withDispatcher<
                 launchParentPid: launch.parentPid,
                 claudeSessionId,
                 peerSocket,
-                ctx: sameLaunchHolder.ctx,
+                ctx: holder.ctx,
               })
               registry.markTransportConnected(client.ctx.sessionId)
               log.debug?.("transport.attached", {
                 ...identityLogFields(client),
                 operation: "register",
-                transport_class: "same-launch-fan-in",
+                transport_class: transportClass,
               })
               const coordState = db
                 .prepare("SELECT key, value FROM coordination WHERE project_id = ?")
