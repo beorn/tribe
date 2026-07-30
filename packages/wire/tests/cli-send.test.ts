@@ -141,6 +141,140 @@ describe("registerSendCommands", () => {
     expect(optionFlags(cmd!)).toEqual(expect.arrayContaining(["--role", "--domain", "--delivery", "--json"]))
   })
 
+  test("one-shot join checkpoints the persistent member without registering a disposable member", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-join-checkpoint-"))
+    const socketPath = join(tmp, "tribe.sock")
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = []
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as {
+            id: number
+            method: string
+            params?: Record<string, unknown>
+          }
+          calls.push({ method: request.method, params: request.params ?? {} })
+          socket.write(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: request.id,
+              result: {
+                joined: true,
+                observed: true,
+                name: "@agent/8",
+                role: "member",
+                domains: ["test-lean"],
+                delivery: "pull",
+              },
+            }) + "\n",
+          )
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProcess) => {
+        const child = spawn(
+          BUN_BIN,
+          [CLI, "join", "@agent/8", "--domain", "test-lean", "--delivery", "pull", "--json"],
+          {
+            env: {
+              ...process.env,
+              TRIBE_SOCKET: socketPath,
+              TRIBE_NAME: "@agent/8",
+              TRIBE_TAKEOVER: "1",
+            },
+            stdio: ["ignore", "pipe", "pipe"],
+          },
+        )
+        let stdout = ""
+        let stderr = ""
+        child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+        child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+        child.on("close", (code) => resolveProcess({ code, stdout, stderr }))
+      })
+
+      expect(result).toMatchObject({ code: 0, stderr: "" })
+      expect(JSON.parse(result.stdout)).toMatchObject({ joined: true, observed: true, name: "@agent/8" })
+      expect(calls).toEqual([
+        {
+          method: "cli_join",
+          params: { name: "@agent/8", role: "member", domains: ["test-lean"], delivery: "pull" },
+        },
+      ])
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  test("one-shot join exits nonzero when no persistent holder exists, including with --json", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-join-missing-"))
+    const socketPath = join(tmp, "tribe.sock")
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        const newline = buffer.indexOf("\n")
+        if (newline < 0) return
+        const request = JSON.parse(buffer.slice(0, newline)) as { id: number }
+        socket.write(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: request.id,
+            result: {
+              joined: false,
+              observed: false,
+              error: "one-shot CLI cannot establish persistent membership for @agent/missing",
+            },
+          }) + "\n",
+        )
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProcess) => {
+        const child = spawn(BUN_BIN, [CLI, "join", "@agent/missing", "--json"], {
+          env: { ...process.env, TRIBE_SOCKET: socketPath },
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+        let stdout = ""
+        let stderr = ""
+        child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+        child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+        child.on("close", (code) => resolveProcess({ code, stdout, stderr }))
+      })
+
+      expect(result.code).toBe(1)
+      expect(result.stdout).toBe("")
+      expect(result.stderr).toContain("one-shot CLI cannot establish persistent membership")
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
   test("alarm verb is registered and accepts --by", () => {
     const cmd = findCmd(buildProgram(), "alarm")
     expect(cmd).toBeDefined()

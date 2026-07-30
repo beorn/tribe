@@ -48,6 +48,8 @@ export type TribeCliProjection =
       readonly name: string
       readonly description: string
       readonly lifetime: "one-shot"
+      /** MCP descriptor that owns this CLI projection. A one-shot projection
+       * may enforce a stricter lifetime contract than the live-session tool. */
       readonly mapsToMcp: string
       readonly arguments?: readonly TribeCliArgument[]
       readonly options?: readonly TribeCliOption[]
@@ -783,23 +785,29 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     },
     cli: available({
       name: "join",
-      description: "Join/rejoin: re-announce this session's name and domains after compaction or rejoin.",
+      description:
+        "Join/rejoin checkpoint: verify an already-persistent native session without claiming it from this one-shot CLI.",
       lifetime: "one-shot",
       mapsToMcp: "join",
-      arguments: [{ name: "name", description: "Session name to claim, e.g. @chief or @ci" }],
+      arguments: [{ name: "name", description: "Persistent session name to verify, e.g. @chief or @ci" }],
       options: [
-        { name: "role", flags: "-r, --role <role>", description: "Session role (default: member)", default: "member" },
+        {
+          name: "role",
+          flags: "-r, --role <role>",
+          description: "Compatibility hint; the checkpoint reports the persistent holder's actual role",
+          default: "member",
+        },
         {
           name: "domain",
           flags: "-d, --domain <domain>",
-          description: "Domain label; repeat or comma-separate for multiple",
+          description: "Compatibility hint; the checkpoint reports the holder's actual domains",
           repeatable: true,
           transform: "csv-list",
         },
         {
           name: "delivery",
           flags: "--delivery <mode>",
-          description: "Delivery mode: pull or push (default: pull)",
+          description: "Compatibility hint; the checkpoint reports the holder's actual delivery mode",
           enum: TRIBE_DELIVERY_MODES,
           default: "pull",
         },

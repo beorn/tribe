@@ -246,10 +246,12 @@ tribe-wire send '@ci' 'R656 failed; see journal evidence' --type=notify --delive
 tribe-wire join <name> [-r, --role <role>=member] [-d, --domain <label>] [--delivery pull|push=pull] [--json]
 ```
 
-One-shot CLI join/rejoin — registers an ephemeral connection, calls
-`tribe.join`, then disconnects. `--domain` is repeatable or comma-separated
-for multiple domain labels. Example: `tribe-wire join @scratch --domain
-silvery,flexily`.
+One-shot join/rejoin checkpoint — verifies an already-persistent native
+session without registering, renaming, or disconnecting a member. It exits
+nonzero when no live persistent holder owns `<name>`; the one-shot CLI cannot
+establish durable membership itself. `--domain` remains repeatable or
+comma-separated for command compatibility, but the checkpoint reports the
+holder's actual role, domains, and delivery mode without mutating them.
 
 ### `alarm`, `alarm-status`, `alarm-ack`
 

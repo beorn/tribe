@@ -48,7 +48,7 @@ describe("Tribe command descriptors", () => {
     }
   })
 
-  test("project the approved CLI/MCP parity slice from one descriptor", () => {
+  test("project the approved CLI surface from its related MCP descriptors", () => {
     const pairs = [
       ["send", "send"],
       ["join", "join"],
@@ -63,7 +63,7 @@ describe("Tribe command descriptors", () => {
       const cli = visibleCliProjection(descriptor!)
       expect(cli.name).toBe(cliName)
       expect(cli.mapsToMcp).toBe(mcpName)
-      if (mcpName === "inbox.wait") expect(cli.description).not.toBe(descriptor!.description)
+      if (mcpName === "inbox.wait" || mcpName === "join") expect(cli.description).not.toBe(descriptor!.description)
       else expect(cli.description).toBe(descriptor!.description)
       expect(cli.lifetime).toBe("one-shot")
     }

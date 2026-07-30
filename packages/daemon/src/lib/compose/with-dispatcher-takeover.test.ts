@@ -346,6 +346,92 @@ describe("asymmetric identity displacement (@ag/tribe/21052)", () => {
   })
 })
 
+describe("one-shot CLI join checkpoint (@ag/tribe/22429)", () => {
+  it("observes the live native holder without claiming, renaming, or retiring it", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const holderSocket = harness.addPendingClient("conn-native-holder")
+    const holder = parseResult<RegisterResult>(
+      await harness.register("conn-native-holder", {
+        name: "@agent/8",
+        pid: 8801,
+        project: "/tmp/km-wt8",
+        launchId: "provider-launch-agent-8",
+        launchParentPid: 88,
+        takeover: true,
+      }),
+    )
+    const sessionLinesBefore = harness.sessionLines()
+
+    const checkpoint = parseResult<{
+      joined: boolean
+      observed: boolean
+      name: string
+      memberId: string
+      transportPids: number[]
+    }>(
+      await harness.request("cli_join", {
+        name: "@agent/8",
+        role: "member",
+        domains: ["test-lean"],
+        delivery: "pull",
+      }),
+    )
+
+    expect(checkpoint).toMatchObject({
+      joined: true,
+      observed: true,
+      name: "@agent/8",
+      memberId: holder.sessionId,
+      transportPids: [8801],
+    })
+    expect(holderSocket.destroyedByDispatcher).toBe(false)
+    expect(parseResult<CliStatusResult>(await harness.cliStatus()).sessions).toEqual([
+      expect.objectContaining({ name: "@agent/8", pid: 8801 }),
+    ])
+    expect(harness.sessionLines()).toBe(sessionLinesBefore)
+  })
+
+  it("fails loud when no persistent native holder can own the requested persona", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const result = parseResult<{ joined: boolean; observed: boolean; error: string }>(
+      await harness.request("cli_join", { name: "@agent/8", role: "member", domains: [], delivery: "pull" }),
+    )
+
+    expect(result).toMatchObject({ joined: false, observed: false })
+    expect(result.error).toContain("one-shot CLI cannot establish persistent membership")
+    expect(parseResult<CliStatusResult>(await harness.cliStatus()).sessions).toEqual([])
+  })
+
+  it("does not mistake a surviving watch transport for a persistent member", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    harness.addPendingClient("conn-native-holder")
+    const holder = parseResult<RegisterResult>(
+      await harness.register("conn-native-holder", {
+        name: "@agent/8",
+        pid: 8801,
+        project: "/tmp/km-wt8",
+        takeover: true,
+      }),
+    )
+    harness.addWatchTransport("conn-watch", holder.sessionId)
+    harness.dropClient("conn-native-holder")
+
+    const result = parseResult<{ joined: boolean; observed: boolean; error: string }>(
+      await harness.request("cli_join", { name: "@agent/8" }),
+    )
+
+    expect(result).toMatchObject({ joined: false, observed: false })
+    expect(result.error).toContain("one-shot CLI cannot establish persistent membership")
+    expect(parseResult<CliStatusResult>(await harness.cliStatus()).sessions).toEqual([])
+  })
+})
+
 function createDispatcherHarness() {
   const tempDir = mkdtempSync(join(tmpdir(), "tribe-dispatcher-takeover-"))
   const scope = createScope("dispatcher-takeover-test")
@@ -411,18 +497,20 @@ function createDispatcherHarness() {
       },
       forgetTransportSessions() {},
       getActiveSessionInfo() {
-        return Array.from(clients.values()).map((c) => ({
-          id: c.ctx.sessionId,
-          name: c.name,
-          pid: c.pid,
-          cwd: c.project,
-          role: c.role,
-          claudeSessionId: c.claudeSessionId,
-          registeredAt: c.registeredAt,
-          launchId: c.launchId,
-          launchParentPid: c.launchParentPid,
-          transportPids: c.pid > 0 ? [c.pid] : [],
-        }))
+        return Array.from(clients.values())
+          .filter((client) => client.role === "member")
+          .map((client) => ({
+            id: client.ctx.sessionId,
+            name: client.name,
+            pid: client.pid,
+            cwd: client.project,
+            role: client.role,
+            claudeSessionId: client.claudeSessionId,
+            registeredAt: client.registeredAt,
+            launchId: client.launchId,
+            launchParentPid: client.launchParentPid,
+            transportPids: client.pid > 0 ? [client.pid] : [],
+          }))
       },
     },
     broadcast: {
@@ -470,6 +558,35 @@ function createDispatcherHarness() {
         "conn-status-probe",
       )
     },
+    request(method: string, params: Record<string, unknown>) {
+      return daemon.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: `request-${method}`, method, params },
+        `conn-${method}-probe`,
+      )
+    },
+    dropClient(connId: string): void {
+      const client = clients.get(connId)
+      if (client) socketToClient.delete(client.socket)
+      clients.delete(connId)
+    },
+    addWatchTransport(connId: string, sessionId: string): TestSocket {
+      const member = Array.from(clients.values()).find(
+        (client) => client.role === "member" && client.ctx.sessionId === sessionId,
+      )
+      if (!member) throw new Error(`cannot attach watch transport: member session ${sessionId} is not connected`)
+      const socket = createTestSocket()
+      clients.set(connId, {
+        ...member,
+        socket,
+        id: connId,
+        role: "watch",
+        conn: "test-watch",
+        registeredAt: Date.now(),
+        lastActivityAt: Date.now(),
+      })
+      socketToClient.set(socket, connId)
+      return socket
+    },
     /** Direct journal-row read — `event.session.superseded` rows written by logEvent(). */
     supersededEvents(name: string): Array<{ name: string; old_pid: number; new_pid: number; reason: string }> {
       const rows = db
@@ -478,6 +595,12 @@ function createDispatcherHarness() {
       return rows
         .map((r) => JSON.parse(r.content) as { name: string; old_pid: number; new_pid: number; reason: string })
         .filter((e) => e.name === name)
+    },
+    sessionLines(): string {
+      const rows = db.prepare("SELECT content FROM messages WHERE type = 'session' ORDER BY ts ASC").all() as Array<{
+        content: string
+      }>
+      return rows.map((row) => row.content).join("\n")
     },
     addPendingClient(connId: string): TestSocket {
       const socket = createTestSocket()

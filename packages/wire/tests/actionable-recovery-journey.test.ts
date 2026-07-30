@@ -81,6 +81,20 @@ const BASE_ENV: NodeJS.ProcessEnv = (() => {
   return env
 })()
 
+function readLifecycleRows(dbPath: string): Array<{ type: string; sender: string; content: string }> {
+  const db = openDatabase(dbPath)
+  try {
+    return db
+      .prepare(
+        "SELECT type, sender, content FROM messages " +
+          "WHERE type IN ('session', 'event.session.joined', 'event.session.left') ORDER BY rowid ASC",
+      )
+      .all() as Array<{ type: string; sender: string; content: string }>
+  } finally {
+    db.close()
+  }
+}
+
 function seedAttentionFixture(dbPath: string): void {
   const db = openDatabase(dbPath)
   const stmts = createStatements(db)
@@ -988,6 +1002,25 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       })
     }
     expect(readFileSync(join(tmpDir, "activity.jsonl"), "utf8")).not.toContain(`${NAME} left`)
+
+    const lifecycleRowsBefore = readLifecycleRows(dbPath)
+    const cliJoin = await runCli(["join", NAME, "--domain", "test-lean", "--delivery", "pull", "--json"], {
+      ...BASE_ENV,
+      TRIBE_SOCKET: socketPath,
+      TRIBE_NAME: NAME,
+      TRIBE_TAKEOVER: "1",
+      TRIBE_LAUNCH_ID: launchId,
+      TRIBE_NO_AUTOSTART: "1",
+    })
+    expect(cliJoin.exitCode, cliJoin.stderr).toBe(0)
+    expect(JSON.parse(cliJoin.stdout)).toMatchObject({
+      joined: true,
+      observed: true,
+      name: NAME,
+      memberId: initialMemberId,
+    })
+    expect(launchAdapters.map(({ child }) => child.exitCode)).toEqual([null, null, null])
+    expect(readLifecycleRows(dbPath)).toEqual(lifecycleRowsBefore)
 
     // Replacing one transport inside the same provider launch retains the
     // logical member and restores the three-transport diagnostic set.

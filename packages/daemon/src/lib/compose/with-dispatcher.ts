@@ -1099,6 +1099,58 @@ export function withDispatcher<
             })
           }
 
+          // A one-shot CLI cannot own persistent membership. The historical
+          // register -> tribe.join -> close sequence created a disposable
+          // cli-join-* member, announced it fleet-wide, and immediately
+          // announced it left. Checkpoint the native holder instead; provider
+          // adapters remain the only membership authority.
+          case "cli_join": {
+            const name = typeof p.name === "string" ? p.name.trim() : ""
+            if (name.length === 0) {
+              return makeResponse(id, {
+                joined: false,
+                observed: false,
+                error: "join requires a non-empty persistent persona name",
+              })
+            }
+            const holders = canonicalSessionRows(Date.now()).filter((session) => session.name === name)
+            if (holders.length === 0) {
+              return makeResponse(id, {
+                joined: false,
+                observed: false,
+                error:
+                  `one-shot CLI cannot establish persistent membership for ${name}; ` +
+                  "submit a native Tribe join to the live provider pane",
+              })
+            }
+            if (holders.length !== 1) {
+              return makeResponse(id, {
+                joined: false,
+                observed: false,
+                error: `contradictory live membership for ${name}: ${holders.length} logical holders`,
+              })
+            }
+            const holder = holders[0]!
+            const row = db.prepare("SELECT delivery FROM sessions WHERE id = ?").get(holder.id) as {
+              delivery: string
+            } | null
+            if (!row) {
+              throw new Error(
+                `live holder ${name} has no durable session row; restart that provider session before retrying tribe join`,
+              )
+            }
+            return makeResponse(id, {
+              joined: true,
+              observed: true,
+              name: holder.name,
+              role: holder.role,
+              domains: holder.domains,
+              delivery: row.delivery,
+              memberId: holder.id,
+              transportPids: holder.transportPids,
+            })
+          }
+
           case "cli_log": {
             const limit = Number(p.limit ?? 20)
             const all = p.all === true

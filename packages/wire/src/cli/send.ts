@@ -7,7 +7,7 @@
  *
  * Verbs in this family:
  *   - send
- *   - join          one-shot CLI join/rejoin checkpoint
+ *   - join          observe/checkpoint a persistent native join
  *   - alarm <reason>
  *   - alarm-status
  *   - alarm-ack
@@ -380,42 +380,32 @@ async function cmdJoin(
     process.exit(2)
   }
 
-  const cwd = process.cwd()
   const role = opts.role ?? "member"
   const domains = parseDomains(opts.domain)
-  const ephemeralName = `cli-join-${process.pid}-${Date.now()}`
-  const result = await withCliDaemonClient(async (client) => {
-    await client.call("register", {
-      name: ephemeralName,
-      role: "member",
-      domains: [],
-      delivery,
-      project: cwd,
-      projectName: cwd.split("/").filter(Boolean).at(-1) ?? "unknown",
-      pid: process.pid,
-      protocolVersion: TRIBE_PROTOCOL_VERSION,
-    })
-    return mcpJsonContent(await client.call("tribe.join", { name, role, domains, delivery })) as {
-      joined?: boolean
-      name?: string
-      role?: string
-      domains?: string[]
-      delivery?: string
-      previous_name?: string
-      error?: string
-    }
-  })
-
-  if (opts.json) {
-    console.log(JSON.stringify(result))
-    return
+  const result = (await callDaemon("cli_join", { name, role, domains, delivery })) as {
+    joined?: boolean
+    observed?: boolean
+    name?: string
+    role?: string
+    domains?: string[]
+    delivery?: string
+    memberId?: string
+    transportPids?: number[]
+    error?: string
   }
+
   if (result.error) {
     console.error(`tribe-wire join: ${result.error}`)
     process.exit(1)
   }
-  console.log(`Joined ${result.name ?? name} as ${result.role ?? role} (delivery=${result.delivery ?? delivery}).`)
-  if (result.previous_name) console.log(`  previous: ${result.previous_name}`)
+  if (opts.json) {
+    console.log(JSON.stringify(result))
+    return
+  }
+  console.log(
+    `Verified ${result.name ?? name} is persistently joined as ${result.role ?? role} ` +
+      `(delivery=${result.delivery ?? delivery}).`,
+  )
 }
 
 /**
