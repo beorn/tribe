@@ -11,7 +11,8 @@
  *
  *   2. Source file watcher — fs.watch on the daemon's source directories;
  *      coalesced via debounce; emits SIGHUP to the current process on change.
- *      Skipped when `disableWatch: true` (tests) or `TRIBE_NO_AUTORELOAD=1`.
+ *      Skipped for an externally supervised workload, `disableWatch: true`
+ *      (tests), or `TRIBE_NO_AUTORELOAD=1`.
  *
  * The factory takes runtime callbacks the daemon supplies: `stopPlugins()`
  * flushes plugin cursors immediately before handoff; `triggerShutdown()`
@@ -24,6 +25,7 @@ import { createHash } from "node:crypto"
 import { dirname as pathDirname, resolve as pathResolve } from "node:path"
 import { createLogger } from "loggily"
 import { spawnStandaloneDaemonSupervisor } from "tribe-wire"
+import { hasStandaloneDaemonOwner } from "../../../../wire/src/daemon-environment.ts"
 import type { BaseTribe } from "./base.ts"
 import type { WithBroadcast } from "./with-broadcast.ts"
 import type { WithConfig } from "./with-config.ts"
@@ -62,22 +64,18 @@ export function reloadReplacementForEnvironment(
   shutdown: () => void,
   parentPid = process.ppid,
 ): ((reason: string) => void) | undefined {
-  if (env.HAB_SERVICE_KIND === "service") return () => shutdown()
+  if (env.HAB_SERVICE_KIND !== undefined) return () => shutdown()
 
-  const supervisorPid = Number(env.TRIBE_DAEMON_SUPERVISOR_PID)
   const reloadExitCode = Number(env.TRIBE_DAEMON_RELOAD_EXIT_CODE)
-  const hasStandaloneOwner =
-    Number.isSafeInteger(supervisorPid) &&
-    supervisorPid > 1 &&
-    supervisorPid === parentPid &&
-    Number.isSafeInteger(reloadExitCode) &&
-    reloadExitCode > 0 &&
-    reloadExitCode <= 255
-  if (!hasStandaloneOwner) return undefined
+  if (!hasStandaloneDaemonOwner(env, parentPid)) return undefined
   return () => {
     process.exitCode = reloadExitCode
     shutdown()
   }
+}
+
+export function hotReloadSourceWatchEnabled(env: Readonly<NodeJS.ProcessEnv>, disableWatch = false): boolean {
+  return !disableWatch && env.HAB_SERVICE_KIND === undefined && !env.TRIBE_NO_AUTORELOAD
 }
 
 function buildSourceFiles(sourceDir: string, libTribeDir: string): string[] {
@@ -215,7 +213,7 @@ export function withHotReload<T extends BaseTribe & WithBroadcast & WithConfig &
 
     // Source-file watcher — auto-SIGHUP on code changes.
     const watchers: FSWatcher[] = []
-    if (!opts.disableWatch && !process.env.TRIBE_NO_AUTORELOAD) {
+    if (hotReloadSourceWatchEnabled(process.env, opts.disableWatch)) {
       const sourceDir = pathDirname(new URL(import.meta.url).pathname)
       // Resolve relative to the actual tribe-daemon location (one level up
       // from this compose/ dir; lib/tribe sits next to it).

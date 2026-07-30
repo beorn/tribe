@@ -23,7 +23,7 @@ import { createLogger } from "loggily"
 import { createLineParser } from "./parser.ts"
 import { evaluateSpawnSourceForScript } from "./lib/spawn-pin-gate.ts"
 import { isNotification, isResponse, makeNotification, makeRequest } from "./rpc.ts"
-import { sanitizeStandaloneDaemonEnvironment } from "./standalone-supervisor.ts"
+import { sanitizeStandaloneDaemonEnvironment } from "./daemon-environment.ts"
 import { createTimers } from "./timers.ts"
 
 const log = createLogger("tribe-client:client")

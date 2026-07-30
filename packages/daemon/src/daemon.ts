@@ -53,6 +53,7 @@ import { TOOLS_LIST } from "tribe-wire/lib/tools-list"
 import { pruneOldActivityLogs } from "./lib/activity-log.ts"
 import { gatherCodePin, STARTUP_SHA } from "./lib/code-pin.ts"
 import { prefixFallbackDeliveryResolver } from "./lib/delivery-resolution.ts"
+import { sanitizeDaemonProcessEnvironment } from "../../wire/src/daemon-environment.ts"
 
 // ---------------------------------------------------------------------------
 // `daemon.ts hook <event>` — Claude Code hook entry point. This is the
@@ -143,6 +144,8 @@ if (process.argv[2] === "install" || process.argv[2] === "uninstall" || process.
   console.log(formatDoctorReport(report))
   process.exit(report.hasFailures ? 1 : 0)
 }
+
+sanitizeDaemonProcessEnvironment(process.env)
 
 const log = createLogger("tribe:daemon")
 

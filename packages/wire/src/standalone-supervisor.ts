@@ -10,53 +10,33 @@
 
 import { spawn, type ChildProcess } from "node:child_process"
 import { readFileSync } from "node:fs"
+import {
+  sanitizeStandaloneDaemonEnvironment,
+  TRIBE_DAEMON_RELOAD_EXIT_CODE_ENV,
+  TRIBE_DAEMON_SUPERVISOR_PID_ENV,
+  TRIBE_OPERATOR_CAPABILITY_ENV,
+  TRIBE_OPERATOR_CAPABILITY_FD_ENV,
+} from "./daemon-environment.ts"
 
-export const STANDALONE_SUPERVISOR_PID_ENV = "TRIBE_DAEMON_SUPERVISOR_PID"
-export const STANDALONE_RELOAD_EXIT_CODE_ENV = "TRIBE_DAEMON_RELOAD_EXIT_CODE"
+export const STANDALONE_SUPERVISOR_PID_ENV = TRIBE_DAEMON_SUPERVISOR_PID_ENV
+export const STANDALONE_RELOAD_EXIT_CODE_ENV = TRIBE_DAEMON_RELOAD_EXIT_CODE_ENV
 export const STANDALONE_RELOAD_EXIT_CODE = 75
 
-const OPERATOR_CAPABILITY_FD_ENV = "TRIBE_OPERATOR_CAPABILITY_FD"
-const OPERATOR_CAPABILITY_ENV = "TRIBE_OPERATOR_CAPABILITY"
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000
 
-const AMBIENT_IDENTITY_ENV = [
-  "HAB_SERVICE_KIND",
-  "TRIBE_ACCOUNT",
-  "TRIBE_DOMAINS",
-  "TRIBE_LAUNCH_ID",
-  "TRIBE_NAME",
-  "TRIBE_PLUGIN_ADAPTER_CHILD",
-  "TRIBE_PLUGIN_PROVIDER_PARENT_PID",
-  "TRIBE_PLUGIN_REEXEC_EXIT_CODE",
-  "TRIBE_PLUGIN_RESUME_JOINED",
-  "TRIBE_PROVIDER",
-  "TRIBE_ROLE",
-  "TRIBE_SESSION_NAME",
-  "TRIBE_SLA_ROLE",
-  "TRIBE_TAKEOVER",
-  STANDALONE_RELOAD_EXIT_CODE_ENV,
-  STANDALONE_SUPERVISOR_PID_ENV,
-] as const
-
-export function sanitizeStandaloneDaemonEnvironment(source: Readonly<NodeJS.ProcessEnv>): NodeJS.ProcessEnv {
-  const env = { ...source }
-  for (const key of AMBIENT_IDENTITY_ENV) delete env[key]
-  delete env[OPERATOR_CAPABILITY_ENV]
-  delete env[OPERATOR_CAPABILITY_FD_ENV]
-  return env
-}
-
 function readInheritedOperatorCapability(env: NodeJS.ProcessEnv): string | null {
-  const raw = env[OPERATOR_CAPABILITY_FD_ENV]
-  delete env[OPERATOR_CAPABILITY_ENV]
-  delete env[OPERATOR_CAPABILITY_FD_ENV]
+  const raw = env[TRIBE_OPERATOR_CAPABILITY_FD_ENV]
+  delete env[TRIBE_OPERATOR_CAPABILITY_ENV]
+  delete env[TRIBE_OPERATOR_CAPABILITY_FD_ENV]
   if (raw === undefined) return null
   const fd = Number(raw)
   if (!Number.isSafeInteger(fd) || fd < 3) {
-    throw new Error(`${OPERATOR_CAPABILITY_FD_ENV} must name an inherited fd >= 3, received ${JSON.stringify(raw)}`)
+    throw new Error(
+      `${TRIBE_OPERATOR_CAPABILITY_FD_ENV} must name an inherited fd >= 3, received ${JSON.stringify(raw)}`,
+    )
   }
   const capability = readFileSync(fd, "utf8").trim()
-  if (!capability) throw new Error(`${OPERATOR_CAPABILITY_FD_ENV} contained an empty operator capability`)
+  if (!capability) throw new Error(`${TRIBE_OPERATOR_CAPABILITY_FD_ENV} contained an empty operator capability`)
   return capability
 }
 
@@ -106,7 +86,7 @@ function spawnGeneration(command: string[], capability: string | null): ChildPro
   const env = sanitizeStandaloneDaemonEnvironment(process.env)
   env[STANDALONE_SUPERVISOR_PID_ENV] = String(process.pid)
   env[STANDALONE_RELOAD_EXIT_CODE_ENV] = String(STANDALONE_RELOAD_EXIT_CODE)
-  if (capability) env[OPERATOR_CAPABILITY_FD_ENV] = "3"
+  if (capability) env[TRIBE_OPERATOR_CAPABILITY_FD_ENV] = "3"
   const child = spawn(process.execPath, command, {
     detached: false,
     env,
@@ -130,13 +110,14 @@ export async function runStandaloneSupervisor(argv = process.argv.slice(2)): Pro
   const { command, waitForPid } = parseSupervisorArgs(argv)
   const inheritedEnv = { ...process.env }
   const capability = readInheritedOperatorCapability(inheritedEnv)
-  for (const key of [...AMBIENT_IDENTITY_ENV, OPERATOR_CAPABILITY_ENV, OPERATOR_CAPABILITY_FD_ENV]) {
-    delete process.env[key]
+  const supervisorEnv = sanitizeStandaloneDaemonEnvironment(inheritedEnv)
+  for (const key of Object.keys(process.env)) {
+    if (!(key in supervisorEnv)) delete process.env[key]
   }
-  Object.assign(process.env, sanitizeStandaloneDaemonEnvironment(inheritedEnv))
+  Object.assign(process.env, supervisorEnv)
   if (waitForPid !== null) await waitForProcessExit(waitForPid)
 
-  return await new Promise<number>((resolveSupervisor) => {
+  return new Promise<number>((resolveSupervisor) => {
     let active: ChildProcess | null = null
     let stopping = false
     let settled = false

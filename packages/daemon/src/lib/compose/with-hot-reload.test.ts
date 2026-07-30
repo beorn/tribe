@@ -7,7 +7,7 @@
 
 import { EventEmitter } from "node:events"
 import { describe, expect, it, vi } from "vitest"
-import { reloadReplacementForEnvironment, withHotReload } from "./with-hot-reload.ts"
+import { hotReloadSourceWatchEnabled, reloadReplacementForEnvironment, withHotReload } from "./with-hot-reload.ts"
 
 const { spawnStandaloneDaemonSupervisor } = vi.hoisted(() => ({
   spawnStandaloneDaemonSupervisor: vi.fn(),
@@ -16,6 +16,13 @@ const { spawnStandaloneDaemonSupervisor } = vi.hoisted(() => ({
 vi.mock("tribe-wire", () => ({ spawnStandaloneDaemonSupervisor }))
 
 describe("daemon reload lifecycle ownership", () => {
+  it("leaves source watching to explicit reload when Hab owns lifecycle", () => {
+    expect(hotReloadSourceWatchEnabled({ HAB_SERVICE_KIND: "service" })).toBe(false)
+    expect(hotReloadSourceWatchEnabled({ HAB_SERVICE_KIND: "watcher" })).toBe(false)
+    expect(hotReloadSourceWatchEnabled({ TRIBE_NO_AUTORELOAD: "1" })).toBe(false)
+    expect(hotReloadSourceWatchEnabled({}, true)).toBe(false)
+  })
+
   it("delegates replacement without mutating the socket when a supervisor owns the daemon", () => {
     const stopPlugins = vi.fn()
     const replaceProcess = vi.fn()
@@ -145,7 +152,10 @@ describe("daemon reload lifecycle ownership", () => {
     expect(shutdown).toHaveBeenCalledOnce()
 
     expect(reloadReplacementForEnvironment({}, shutdown)).toBeUndefined()
-    expect(reloadReplacementForEnvironment({ HAB_SERVICE_KIND: "watcher" }, shutdown)).toBeUndefined()
+    const supervisedWatcher = reloadReplacementForEnvironment({ HAB_SERVICE_KIND: "watcher" }, shutdown)
+    expect(supervisedWatcher).toBeTypeOf("function")
+    supervisedWatcher?.("operator requested reload")
+    expect(shutdown).toHaveBeenCalledTimes(2)
 
     const previousExitCode = process.exitCode
     try {
@@ -160,7 +170,7 @@ describe("daemon reload lifecycle ownership", () => {
       expect(standalone).toBeTypeOf("function")
       standalone?.("operator requested reload")
       expect(process.exitCode).toBe(75)
-      expect(shutdown).toHaveBeenCalledTimes(2)
+      expect(shutdown).toHaveBeenCalledTimes(3)
 
       expect(
         reloadReplacementForEnvironment(
