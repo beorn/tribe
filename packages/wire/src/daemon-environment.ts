@@ -6,6 +6,8 @@
  * only to the supervisor that minted them.
  */
 
+import { fstatSync } from "node:fs"
+
 export const TRIBE_OPERATOR_CAPABILITY_FD_ENV = "TRIBE_OPERATOR_CAPABILITY_FD"
 export const TRIBE_OPERATOR_CAPABILITY_ENV = "TRIBE_OPERATOR_CAPABILITY"
 export const TRIBE_DAEMON_SUPERVISOR_PID_ENV = "TRIBE_DAEMON_SUPERVISOR_PID"
@@ -41,14 +43,32 @@ export function hasStandaloneDaemonOwner(env: Readonly<NodeJS.ProcessEnv>, paren
   )
 }
 
+function isOpenInheritedFd(fd: number): boolean {
+  try {
+    fstatSync(fd)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function hasDirectInheritedOperatorCapability(env: Readonly<NodeJS.ProcessEnv>): boolean {
+  if (env.HAB_SERVICE_KIND !== undefined) return false
+  const fd = Number(env[TRIBE_OPERATOR_CAPABILITY_FD_ENV])
+  return Number.isSafeInteger(fd) && fd >= 3 && isOpenInheritedFd(fd)
+}
+
 /** Sanitize the environment of the daemon process itself, in place. */
 export function sanitizeDaemonProcessEnvironment(env: NodeJS.ProcessEnv, parentPid = process.ppid): NodeJS.ProcessEnv {
   const hasStandaloneOwner = hasStandaloneDaemonOwner(env, parentPid)
+  const hasDirectOperatorCapability = hasDirectInheritedOperatorCapability(env)
   for (const key of AMBIENT_SESSION_IDENTITY_ENV) delete env[key]
   delete env[TRIBE_OPERATOR_CAPABILITY_ENV]
   if (!hasStandaloneOwner) {
     delete env[TRIBE_DAEMON_RELOAD_EXIT_CODE_ENV]
     delete env[TRIBE_DAEMON_SUPERVISOR_PID_ENV]
+  }
+  if (!hasStandaloneOwner && !hasDirectOperatorCapability) {
     delete env[TRIBE_OPERATOR_CAPABILITY_FD_ENV]
   }
   return env

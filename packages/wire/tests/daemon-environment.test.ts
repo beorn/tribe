@@ -6,6 +6,8 @@
  * @consumer root hab.yml wire service
  */
 
+import { closeSync, openSync } from "node:fs"
+import { fileURLToPath } from "node:url"
 import { describe, expect, test } from "vitest"
 import { sanitizeDaemonProcessEnvironment, sanitizeStandaloneDaemonEnvironment } from "../src/daemon-environment.ts"
 
@@ -83,11 +85,31 @@ describe("Tribe daemon environment ownership", () => {
     })
   })
 
+  test("a direct daemon preserves an explicitly inherited capability fd while deleting ambient seat identity", () => {
+    const capabilityFd = openSync(fileURLToPath(import.meta.url), "r")
+    try {
+      const env: NodeJS.ProcessEnv = {
+        ...ambientIdentity,
+        PATH: "/bin",
+        TRIBE_OPERATOR_CAPABILITY_FD: String(capabilityFd),
+      }
+
+      sanitizeDaemonProcessEnvironment(env, 999)
+
+      expect(env).toEqual({
+        PATH: "/bin",
+        TRIBE_OPERATOR_CAPABILITY_FD: String(capabilityFd),
+      })
+    } finally {
+      closeSync(capabilityFd)
+    }
+  })
+
   test("a mismatched standalone envelope carries no ownership or capability", () => {
     const env: NodeJS.ProcessEnv = {
       TRIBE_DAEMON_RELOAD_EXIT_CODE: "75",
       TRIBE_DAEMON_SUPERVISOR_PID: "123",
-      TRIBE_OPERATOR_CAPABILITY_FD: "3",
+      TRIBE_OPERATOR_CAPABILITY_FD: "2147483647",
     }
 
     sanitizeDaemonProcessEnvironment(env, 456)
