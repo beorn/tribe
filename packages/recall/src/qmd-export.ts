@@ -24,6 +24,18 @@ import { emitHookJson as envelopeEmitHookJson } from "../../injection-envelope/s
 // Reject corrupted/decayed/stuck-loop exports before they reach qmd.
 import { analyzeQuality } from "./lib/quality-gate.ts"
 
+export interface ExportOptions {
+  session?: string
+  all?: boolean
+  force?: boolean
+  catchup?: boolean
+  hook?: boolean
+}
+
+export function cmdExport(options: ExportOptions): void {
+  exportTranscripts(options)
+}
+
 const HOME = homedir()
 const CLAUDE_PROJECTS_DIR = `${HOME}/.claude/projects`
 const QMD = "qmd"
@@ -295,10 +307,10 @@ function gcNudge(): void {
   if (typeof bun?.gc === "function") bun.gc(false)
 }
 
-export function cmdExport(args: string[]): void {
-  const force = args.includes("--force")
-  const all = args.includes("--all")
-  const isHook = args.includes("--hook")
+function exportTranscripts(options: ExportOptions): void {
+  const force = options.force ?? false
+  const all = options.all ?? false
+  const isHook = options.hook ?? false
   // --catchup: "export anything missing, silently".
   // Same filesystem scan as --all but:
   //   - stderr stays empty unless we actually wrote something (no spam on
@@ -309,7 +321,7 @@ export function cmdExport(args: string[]): void {
   //     having to remember to run `qmd update`
   // This is the "system always tries to complete stuff" path: wire it into
   // SessionStart and missing-export state self-heals over time.
-  const isCatchup = args.includes("--catchup")
+  const isCatchup = options.catchup ?? false
 
   let jsonlPaths: string[] = []
   if (isCatchup) {
@@ -344,7 +356,7 @@ export function cmdExport(args: string[]): void {
   } else if (all) {
     jsonlPaths = listAllJsonlPaths()
   } else {
-    const positional = args.find((a) => !a.startsWith("--"))
+    const positional = options.session
     if (!positional) {
       process.stderr.write("usage: recall export <session-id|jsonl-path> | --all [--force] | --hook\n")
       process.exit(2)

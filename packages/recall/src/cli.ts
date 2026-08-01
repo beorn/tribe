@@ -151,13 +151,7 @@ program
   .option("--catchup", "Export only missing transcripts")
   .option("--hook", "Read SessionEnd input and emit a valid hook response")
   .actionMerged((opts: { session?: string; all?: boolean; force?: boolean; catchup?: boolean; hook?: boolean }) => {
-    const args: string[] = []
-    if (opts.session) args.push(opts.session)
-    if (opts.all) args.push("--all")
-    if (opts.force) args.push("--force")
-    if (opts.catchup) args.push("--catchup")
-    if (opts.hook) args.push("--hook")
-    cmdExport(args)
+    cmdExport(opts)
   })
 
 // ── remember (internal) ─────────────────────────────────────────────────
