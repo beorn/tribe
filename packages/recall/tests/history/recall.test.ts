@@ -2,6 +2,8 @@ import { describe, test, expect, beforeAll } from "vitest"
 import * as fs from "fs"
 import { parseTimeToMs, setRecallLogging, boostedRank, expandQueryVariants } from "../../src/history/recall"
 import type { RecallResult } from "../../src/history/recall"
+import { synthesizeResults } from "../../src/history/synthesize"
+import type { LlmBackend, LlmModel } from "../../src/lib/llm-backend"
 import { toFts5Query, DB_PATH } from "../../src/history/db"
 
 // Suppress verbose [recall] logging during tests
@@ -423,4 +425,51 @@ describe("recall integration", () => {
     },
     15_000,
   )
+})
+
+describe("synthesizeResults", () => {
+  test("filters provider availability before limiting the synthesis race", async () => {
+    const models: LlmModel[] = [
+      { provider: "openai", modelId: "openai-cheap" },
+      { provider: "anthropic", modelId: "anthropic-cheap" },
+      { provider: "xai", modelId: "xai-cheap" },
+      { provider: "openrouter", modelId: "openrouter-cheap" },
+    ]
+    const queried: string[] = []
+    let requestedMax = 0
+    const llm: LlmBackend = {
+      queryModel: async ({ model }) => {
+        queried.push(model.modelId)
+        return { response: { content: `answer from ${model.modelId}` } }
+      },
+      getModel: (id) => models.find((model) => model.modelId === id),
+      getCheapModel: () => models[0],
+      getCheapModels: (max = 2) => {
+        requestedMax = max
+        return models.slice(0, max)
+      },
+      estimateCost: () => 0,
+      isProviderAvailable: (provider) => provider === "xai" || provider === "openrouter",
+    }
+
+    const result = await synthesizeResults(
+      "provider selection",
+      [
+        {
+          type: "message",
+          sessionId: "session-a",
+          sessionTitle: "Session A",
+          timestamp: Date.now(),
+          snippet: "provider selection evidence",
+          rank: 1,
+        },
+      ],
+      1_000,
+      llm,
+    )
+
+    expect(requestedMax).toBeGreaterThan(2)
+    expect(queried).toEqual(["xai-cheap", "openrouter-cheap"])
+    expect(result.text).toMatch(/^answer from (xai|openrouter)-cheap$/)
+  })
 })

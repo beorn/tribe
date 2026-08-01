@@ -38,6 +38,7 @@ vi.mock("../../src/lib/refresh.ts", async (importOriginal) => {
 
 const { cmdSearch } = await import("../../src/lib/search")
 const { closeDb, getDb, setIndexMeta } = await import("../../src/history/db")
+const { _resetLlmBackendForTests } = await import("../../src/lib/llm-backend")
 
 function seedMessage(content: string): void {
   const db = getDb()
@@ -88,18 +89,41 @@ function callsText(spy: ReturnType<typeof vi.spyOn>): string {
 describe("recall search output", () => {
   let logSpy: ReturnType<typeof vi.spyOn>
   let errSpy: ReturnType<typeof vi.spyOn>
+  let stderrWriteSpy: ReturnType<typeof vi.spyOn>
 
   beforeEach(() => {
     closeDb()
     mockAgent.result = null
     logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
     errSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+    stderrWriteSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
   })
 
   afterEach(() => {
+    _resetLlmBackendForTests()
     logSpy.mockRestore()
     errSpy.mockRestore()
+    stderrWriteSpy.mockRestore()
     closeDb()
+  })
+
+  test("fails loud instead of returning lexical hits when default synthesis is unavailable", async () => {
+    const previousLlmDir = process.env.TRIBE_LLM_DIR
+    delete process.env.TRIBE_LLM_DIR
+    _resetLlmBackendForTests()
+    seedMessage("synthesisneedle fixture must never masquerade as a synthesized answer")
+
+    try {
+      await expect(cmdSearch("synthesisneedle", { refresh: false })).rejects.toThrow(
+        /recall synthesis.*TRIBE_LLM_DIR.*--raw/is,
+      )
+    } finally {
+      if (previousLlmDir === undefined) delete process.env.TRIBE_LLM_DIR
+      else process.env.TRIBE_LLM_DIR = previousLlmDir
+    }
+
+    expect(callsText(logSpy)).not.toContain('results for "synthesisneedle"')
+    expect(callsText(logSpy)).not.toContain("synthesisneedle fixture")
   })
 
   test("agent zero-results raw-probes literal tokens before printing authoritative no-results", async () => {

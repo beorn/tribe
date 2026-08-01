@@ -179,7 +179,10 @@ export async function synthesizeResults(
     return { text: null }
   }
 
-  const models = llm.getCheapModels(2).filter((m) => llm.isProviderAvailable(m.provider))
+  const models = llm
+    .getCheapModels(Number.MAX_SAFE_INTEGER)
+    .filter((model) => llm.isProviderAvailable(model.provider))
+    .slice(0, 2)
   if (models.length === 0) {
     log(`no LLM providers available for synthesis`)
     return { text: null }

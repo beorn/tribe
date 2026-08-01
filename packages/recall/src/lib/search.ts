@@ -217,6 +217,7 @@ async function runAgentSearch(query: string, options: SearchOptions, base: Recal
   }
 
   const result = await recallAgent(query, agentOpts)
+  requireSynthesizedAnswer(result)
 
   if (options.json) {
     console.log(JSON.stringify(result, null, 2))
@@ -534,6 +535,8 @@ function emitSearchPrelude(projectFilter: string | undefined): void {
 }
 
 function formatRecallOutput(result: RecallResult, options: { json?: boolean }): void {
+  requireSynthesizedAnswer(result)
+
   if (options.json) {
     console.log(JSON.stringify(result, null, 2))
     return
@@ -559,26 +562,26 @@ function formatRecallOutput(result: RecallResult, options: { json?: boolean }): 
     return
   }
 
-  if (result.synthesis) {
-    console.log(result.synthesis)
-    console.log()
-    const uniqueSessions = new Set(result.results.map((r) => r.sessionId)).size
-    const timingParts = [`${result.durationMs}ms`]
-    if (result.timing) {
-      timingParts.push(`search=${result.timing.searchMs}ms`)
-      if (result.timing.llmMs !== undefined) timingParts.push(`llm=${result.timing.llmMs}ms`)
-    }
-    console.log(
-      `${DIM}${result.results.length} results from ${uniqueSessions} sessions (${timingParts.join(", ")})${RESET}`,
-    )
-    if (result.llmCost !== undefined && result.llmCost > 0) {
-      console.log(`${DIM}LLM cost: $${result.llmCost.toFixed(4)}${RESET}`)
-    }
-    return
+  console.log(result.synthesis)
+  console.log()
+  const uniqueSessions = new Set(result.results.map((r) => r.sessionId)).size
+  const timingParts = [`${result.durationMs}ms`]
+  if (result.timing) {
+    timingParts.push(`search=${result.timing.searchMs}ms`)
+    if (result.timing.llmMs !== undefined) timingParts.push(`llm=${result.timing.llmMs}ms`)
   }
+  console.log(`${DIM}${result.results.length} results from ${uniqueSessions} sessions (${timingParts.join(", ")})${RESET}`)
+  if (result.llmCost !== undefined && result.llmCost > 0) {
+    console.log(`${DIM}LLM cost: $${result.llmCost.toFixed(4)}${RESET}`)
+  }
+}
 
-  // Fallback: synthesis failed/aborted, show raw results
-  formatRawRecallResults(result)
+function requireSynthesizedAnswer(result: RecallResult): void {
+  if (result.results.length === 0 || result.synthesis) return
+  throw new Error(
+    "Recall synthesis failed or is unavailable; no synthesized answer was produced. " +
+      "Configure TRIBE_LLM_DIR and provider credentials, or rerun with --raw for lexical results.",
+  )
 }
 
 function formatRawRecallResults(result: RecallResult): void {
