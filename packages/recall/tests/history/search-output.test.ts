@@ -37,7 +37,7 @@ vi.mock("../../src/lib/refresh.ts", async (importOriginal) => {
 })
 
 const { cmdSearch } = await import("../../src/lib/search")
-const { closeDb, getDb, setIndexMeta } = await import("../../src/history/db")
+const { closeDb, ftsSearchWithSnippet, getDb, setIndexMeta } = await import("../../src/history/db")
 
 function seedMessage(content: string): void {
   const db = getDb()
@@ -53,6 +53,19 @@ function seedMessage(content: string): void {
     content,
     now,
   )
+}
+
+function seedRankedMessage(id: string, content: string, toolName: string | null): void {
+  const db = getDb()
+  const now = Date.now()
+  db.prepare(
+    `INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(`sess-${id}`, "/test/km", `/tmp/sess-${id}.jsonl`, now - 60_000, now, 1, `Session ${id}`)
+  db.prepare(
+    `INSERT INTO messages (uuid, session_id, type, content, tool_name, file_paths, timestamp)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(`msg-${id}`, `sess-${id}`, "assistant", content, toolName, null, now)
 }
 
 function zeroAgentResult(query: string) {
@@ -100,6 +113,16 @@ describe("recall search output", () => {
     logSpy.mockRestore()
     errSpy.mockRestore()
     closeDb()
+  })
+
+  test("ranks prose above matching tool-call payloads", () => {
+    const terms = "streaming chunk boundary markdown split list items transcript"
+    seedRankedMessage("prose", `We fixed the ${terms} bug by carrying parser state across chunks.`, null)
+    seedRankedMessage("tool", Array(8).fill(terms).join(" "), "Bash")
+
+    const result = ftsSearchWithSnippet(getDb(), terms, { limit: 2 })
+
+    expect(result.results.map((row) => row.session_id)).toEqual(["sess-prose", "sess-tool"])
   })
 
   test("agent zero-results raw-probes literal tokens before printing authoritative no-results", async () => {
