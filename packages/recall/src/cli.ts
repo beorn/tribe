@@ -13,6 +13,7 @@
  *   recall sessions [id]              # List sessions or show details
  *   recall files [pattern]            # List/search file writes
  *   recall files --restore <file>     # Recover file content
+ *   recall export [session|--all]      # Export transcript markdown for qmd
  *
  * Internal/manual (hook-shaped, but NOT hook-dispatched):
  *   recall remember                   # daily summarization, stdin-JSON shaped
@@ -32,6 +33,7 @@ import { cmdSessions, cmdIndex } from "./lib/sessions"
 import { cmdFiles } from "./lib/files"
 import { cmdRemember } from "./lib/hooks"
 import { cmdSummarize, cmdWeekly, cmdShow } from "./lib/summarize-daily"
+import { cmdExport } from "./qmd-export"
 
 // ============================================================================
 // CLI
@@ -42,6 +44,7 @@ const SUBCOMMANDS = new Set([
   "status",
   "sessions",
   "files",
+  "export",
   "remember",
   "summarize",
   "weekly",
@@ -136,6 +139,25 @@ program
   .option("--date <date>", "Filter by date (e.g., 2026-02)")
   .actionMerged(async (opts: { pattern?: string; restore?: string; date?: string }) => {
     await cmdFiles(opts.pattern, opts)
+  })
+
+// ── qmd transcript export adapter ──────────────────────────────────────
+program
+  .command("export")
+  .argument("[session]", "Session ID or transcript JSONL path")
+  .description("Export Claude Code transcripts as quality-gated markdown for qmd")
+  .option("--all", "Export every transcript")
+  .option("--force", "Rewrite existing exports")
+  .option("--catchup", "Export only missing transcripts")
+  .option("--hook", "Read SessionEnd input and emit a valid hook response")
+  .actionMerged((opts: { session?: string; all?: boolean; force?: boolean; catchup?: boolean; hook?: boolean }) => {
+    const args: string[] = []
+    if (opts.session) args.push(opts.session)
+    if (opts.all) args.push("--all")
+    if (opts.force) args.push("--force")
+    if (opts.catchup) args.push("--catchup")
+    if (opts.hook) args.push("--hook")
+    cmdExport(args)
   })
 
 // ── remember (internal) ─────────────────────────────────────────────────

@@ -31,5 +31,8 @@
   "engines": {
     "bun": ">=1.3.13",
     "node": ">=23.6.0"
-  }
+  },
+  "trustedDependencies": [
+    "better-sqlite3"
+  ]
 }

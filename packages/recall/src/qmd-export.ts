@@ -1,51 +1,29 @@
 #!/usr/bin/env bun
 /**
- * recall — qmd-backed session memory search and exporter.
+ * qmd transcript export adapter for the canonical Recall CLI.
  *
- * Replaces the km-project-local `bun recall` (bearly FTS5 over
- * ~/.claude/session-index.db) with a unified, cross-project tool. When
- * RECALL_SESSIONS_DIR and RECALL_REJECTED_DIR are explicitly set, exports
- * Claude Code session JSONLs as plain markdown so qmd can search, embed, and
- * rerank them like any other markdown.
- *
- * Commands:
- *   recall <query> [-n N] [-c cols] [--json]    hybrid search via qmd
- *   recall export <session-id|jsonl-path>       export a single session
- *   recall export --all [--force]               bootstrap: export every session
- *   recall hook                                  UserPromptSubmit hook mode
- *   recall index                                 run `qmd update`
- *   recall status                                counts + qmd status
- *   recall help
+ * When RECALL_SESSIONS_DIR and RECALL_REJECTED_DIR are explicitly set,
+ * exports Claude Code session JSONLs as plain markdown for qmd collections.
+ * Interactive search, indexing, status, and prompt hooks belong to the
+ * canonical FTS-backed CLI and `tribe hook`; this module must not grow a
+ * second dispatcher for them.
  *
  * Design notes:
  *   - Session markdown is the source of truth for everything except the live
  *     JSONL files. qmd indexes it via its post-commit hook + `qmd update`.
  *   - Output filename: YYYY-MM-DDTHHMM-<slug>.md (per EPIC - Knowledge Infra plan).
  *   - Idempotent: existing output files are skipped unless --force.
- *   - Hook mode emits `hookSpecificOutput.additionalContext` JSON so Claude
- *     Code renders it as "Session Memory" inline on every prompt.
+ *   - SessionEnd hook mode emits the event's valid empty response after the
+ *     export side effect.
  */
 import { readFileSync, readdirSync, writeFileSync, existsSync, mkdirSync, openSync, readSync, closeSync } from "node:fs"
 import { StringDecoder } from "node:string_decoder"
 import { join, resolve } from "node:path"
 import { homedir } from "node:os"
-import { spawnSync } from "node:child_process"
-// Envelope framing primitives. See km-bearly.injection-envelope-lib. The
-// qmd-export recall hook emits UserPromptSubmit additionalContext — it must
-// route through the shared library so the hardened wrapper, imperative
-// rewrite, sanitizer, and turn-manifest side effect all stay in one place.
-// Sibling plugin within @bearly — imported by package-relative path.
-import {
-  wrapInjectedContext as envelopeWrap,
-  emitHookJson as envelopeEmitHookJson,
-  type InjectedItem,
-} from "../../injection-envelope/src/index.ts"
-import { emitInjectionDebugEvent } from "../../injection-envelope/src/debug.ts"
-// Quality gate. Rejects corrupted/decayed/stuck-loop session exports before
-// they reach the qmd index. Same module backstops the query path below
-// (cmdHook drops bad hits silently). Co-located in @bearly/recall so the
-// Daemon-side consumers can compose with it from their query layer.
-import { analyzeQuality, isAcceptable } from "./lib/quality-gate.ts"
+import { spawn } from "node:child_process"
+import { emitHookJson as envelopeEmitHookJson } from "../../injection-envelope/src/index.ts"
+// Reject corrupted/decayed/stuck-loop exports before they reach qmd.
+import { analyzeQuality } from "./lib/quality-gate.ts"
 
 const HOME = homedir()
 const CLAUDE_PROJECTS_DIR = `${HOME}/.claude/projects`
@@ -318,7 +296,7 @@ function gcNudge(): void {
   if (typeof bun?.gc === "function") bun.gc(false)
 }
 
-function cmdExport(args: string[]): void {
+export function cmdExport(args: string[]): void {
   const force = args.includes("--force")
   const all = args.includes("--all")
   const isHook = args.includes("--hook")
@@ -480,7 +458,7 @@ function cmdExport(args: string[]): void {
       `recall export: ${written} written, ${skipped} skipped (exists), ${rejected} rejected (quality gate), ${empty} unreadable (of ${jsonlPaths.length} total)\n`,
     )
     if (written > 0) {
-      process.stderr.write(`run \`recall index\` to refresh qmd's sessions collection\n`)
+      process.stderr.write(`run \`qmd update\` to refresh qmd's sessions collection\n`)
     }
   }
   // Catchup: stay silent unless we actually did work. When we did work, log
@@ -493,19 +471,16 @@ function cmdExport(args: string[]): void {
       // Fire-and-forget background reindex. We unref() + detach so catchup
       // returns immediately — the reindex may take seconds to minutes and
       // the user shouldn't wait on it.
-      try {
-        // Lazy import so non-catchup paths don't pay for this
-        // biome-ignore lint: dynamic import is intentional
-        const { spawn } = require("node:child_process") as typeof import("node:child_process")
-        const child = spawn("qmd", ["update"], {
-          stdio: "ignore",
-          detached: true,
-        })
-        child.unref()
-      } catch {
-        // If qmd isn't installed or spawn fails, just skip — next manual
-        // `recall index` will catch up.
-      }
+      const child = spawn(QMD, ["update"], {
+        stdio: "ignore",
+        detached: true,
+      })
+      child.once("error", (error) => {
+        process.stderr.write(
+          `recall export: qmd update could not start: ${error.message}; run \`bun install\`, then \`qmd doctor\`\n`,
+        )
+      })
+      child.unref()
     }
   }
   if (isHook) {
@@ -531,302 +506,15 @@ export function emitHookJson(eventName: string, additionalContext?: string): str
   return envelopeEmitHookJson(eventName, additionalContext)
 }
 
-// ── search ───────────────────────────────────────────────────────────────
-
-/**
- * Run a qmd search. By default uses BM25 (`qmd search`) which is <200ms and
- * has no model dependencies — important for the UserPromptSubmit hook path
- * where latency + reliability matter more than semantic recall. Passing
- * `hybrid: true` falls back to the full hybrid pipeline (`qmd query`).
- */
-function qmdQuery(
-  query: string,
-  opts: { limit?: number; json?: boolean; collection?: string; hybrid?: boolean } = {},
-): string {
-  const verb = opts.hybrid ? "query" : "search"
-  const args = [verb, query]
-  if (opts.limit) args.push("-n", String(opts.limit))
-  if (opts.json) args.push("--json")
-  if (opts.collection) args.push("-c", opts.collection)
-  const res = spawnSync(QMD, args, {
-    encoding: "utf-8",
-    stdio: ["ignore", "pipe", "pipe"],
-  })
-  if (res.status !== 0) {
-    return opts.json ? "[]" : (res.stderr ?? "qmd: search failed")
-  }
-  return res.stdout
-}
-
-function cmdSearch(args: string[]): void {
-  // Pull out flags, leaving positional terms as the query.
-  const positional: string[] = []
-  let limit = 10
-  let collection: string | undefined
-  let json = false
-  let hybrid = false
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i]!
-    if (a === "-n" || a === "--limit") {
-      limit = parseInt(args[++i] ?? "10", 10) || 10
-    } else if (a === "-c" || a === "--collection") {
-      collection = args[++i]
-    } else if (a === "--json") {
-      json = true
-    } else if (a === "--hybrid") {
-      hybrid = true
-    } else if (a.startsWith("-")) {
-      process.stderr.write(`recall: unknown option "${a}"\n`)
-      process.exit(2)
-    } else {
-      positional.push(a)
-    }
-  }
-  const query = positional.join(" ").trim()
-  if (!query) {
-    process.stderr.write("usage: recall <query> [-n N] [-c collection] [--json] [--hybrid]\n")
-    process.exit(2)
-  }
-  const out = qmdQuery(query, { limit, json, collection, hybrid })
-  process.stdout.write(out)
-  if (!out.endsWith("\n")) process.stdout.write("\n")
-}
-
-// ── hook ─────────────────────────────────────────────────────────────────
-
-interface QmdHit {
-  docid?: string
-  score?: number
-  file?: string
-  title?: string
-  context?: string
-  snippet?: string
-}
-
-// NOTE: CONTEXT_PROTOCOL_FOOTER, IMPERATIVE_VERBS, and rewriteImperativeAsReported
-// used to live here as phase-0 duct-tape ports from bearly/inject-core.ts. They
-// now route through `@bearly/injection-envelope` — the single chokepoint that
-// also side-effects the turn-manifest file consumed by the PreToolUse authority
-// gate. See km-bearly.injection-envelope-lib (phase 2) and
-// km-bearly.injection-gate-pretooluse (phase 1).
-
-function cmdHook(): void {
-  let raw = ""
-  try {
-    raw = readFileSync(0, "utf-8")
-  } catch {
-    /* no stdin — emit empty */
-  }
-  let input: { prompt?: string; session_id?: string } = {}
-  try {
-    input = JSON.parse(raw) as { prompt?: string; session_id?: string }
-  } catch {
-    /* ignore */
-  }
-  const prompt = (input.prompt ?? "").trim()
-  // Skip short prompts and slash commands — no value in injecting memory.
-  if (!prompt || prompt.length < 12 || prompt.startsWith("/")) {
-    emitInjectionDebugEvent({
-      source: "qmd",
-      sessionId: input.session_id,
-      action: "skip",
-      reason: !prompt ? "empty" : prompt.startsWith("/") ? "slash_command" : "short",
-      prompt: prompt.slice(0, 200),
-    })
-    process.stdout.write(envelopeEmitHookJson("UserPromptSubmit"))
-    return
-  }
-
-  // BM25-only, no collection filter — qmd searches all configured collections.
-  // Keeps the hook <200ms and avoids the LLM/Metal paths that can hang.
-  // Request more than we'll show so we can dedupe overlapping qmd
-  // collections.
-  const out = qmdQuery(prompt, { limit: 8, json: true })
-  let hits: QmdHit[] = []
-  try {
-    hits = JSON.parse(out) as QmdHit[]
-  } catch {
-    /* bad JSON = no hits */
-  }
-  if (hits.length === 0) {
-    emitInjectionDebugEvent({
-      source: "qmd",
-      sessionId: input.session_id,
-      action: "skip",
-      reason: "no_results",
-      prompt: prompt.slice(0, 200),
-    })
-    process.stdout.write(envelopeEmitHookJson("UserPromptSubmit"))
-    return
-  }
-
-  // Dedupe by file basename — catches files indexed twice across overlapping
-  // collections (e.g. sessions/ and vault/ both pick up the same exported
-  // transcript, and vault/archive/ mirrors km/imports/).
-  const seen = new Set<string>()
-  const deduped = hits
-    .filter((h) => {
-      const path = h.file ?? ""
-      const key = path.split("/").pop() ?? path
-      if (!key || seen.has(key)) return false
-      seen.add(key)
-      // Query-time backstop: drop hits whose snippet/context smells corrupt.
-      // Cheap lexical, no LLM. Catches docs that slipped past the index-time
-      // gate before the gate existed (or before the bad doc was quarantined).
-      // Silent drop — don't spam debug events for routine quality misses.
-      const blob = `${h.snippet ?? ""} ${h.context ?? ""}`.trim()
-      if (blob.length > 0 && !isAcceptable(blob)) return false
-      return true
-    })
-    .slice(0, 3)
-
-  if (deduped.length === 0) {
-    emitInjectionDebugEvent({
-      source: "qmd",
-      sessionId: input.session_id,
-      action: "skip",
-      reason: "all_dedup",
-      prompt: prompt.slice(0, 200),
-    })
-    process.stdout.write(envelopeEmitHookJson("UserPromptSubmit"))
-    return
-  }
-
-  // Route through the shared injection-envelope library. Defaults to
-  // "pointer" mode (phase 3): pointer emission starves the attack of its
-  // carrier (imperative-shaped body prose never lands in the user role).
-  // Set INJECTION_MODE=snippet for the legacy body-inline behavior —
-  // useful when the model is configured without retrieve_memory tool
-  // access. Either way, the library handles: hardened wrapper, imperative
-  // rewrite, sanitizer, trailing footer, and turn-manifest side effect.
-  const mode = (process.env.INJECTION_MODE ?? "pointer") as "snippet" | "pointer"
-  const items: InjectedItem[] = deduped.map((hit) => {
-    const path = (hit.file ?? "").replace(/[^\w@./:+-]/g, "")
-    const snippet = hit.snippet
-      ? hit.snippet
-          .replace(/@@ -\d+,?\d* @@ \([^)]*\)\s*/g, "") // strip qmd diff headers
-          .replace(/\n+/g, " ")
-      : undefined
-    return {
-      id: hit.docid ?? (path || undefined),
-      title: hit.title ?? hit.file ?? "(untitled)",
-      path: path || undefined,
-      snippet,
-      summary: hit.context,
-    }
-  })
-
-  const additionalContext = envelopeWrap({
-    source: "qmd",
-    mode,
-    items,
-    sessionId: input.session_id,
-    typedUserText: prompt,
-  })
-
-  process.stdout.write(envelopeEmitHookJson("UserPromptSubmit", additionalContext))
-}
-
-// ── index / status / help ────────────────────────────────────────────────
-
-function cmdIndex(): void {
-  process.stderr.write("recall: running `qmd update`…\n")
-  const res = spawnSync(QMD, ["update"], { stdio: "inherit" })
-  process.exit(res.status ?? 1)
-}
-
-function cmdStatus(): void {
-  const jsonlCount = listAllJsonlPaths().length
-  const sessionsDir = explicitEnv("RECALL_SESSIONS_DIR")
-  const chatsCount =
-    sessionsDir && existsSync(sessionsDir) ? readdirSync(sessionsDir).filter((f) => f.endsWith(".md")).length : 0
-  process.stdout.write(`recall status\n`)
-  process.stdout.write(`  JSONL sessions on disk: ${jsonlCount}\n`)
-  process.stdout.write(`  markdown chats exported: ${chatsCount}\n`)
-  process.stdout.write(`  chats dir: ${sessionsDir ?? "(unset; export disabled)"}\n`)
-  process.stdout.write(`\nqmd status:\n`)
-  spawnSync(QMD, ["status"], { stdio: "inherit" })
-}
-
-function printHelp(): void {
-  process.stderr.write(`recall — qmd-backed session memory
-
-usage:
-  recall <query> [-n N] [--json]                 search (default)
-  recall export <session-id|jsonl-path>          export one session to markdown
-  recall export --all [--force]                  bootstrap: export every session
-  recall export --catchup [--hook]               silent: export missing sessions only
-  recall hook                                    UserPromptSubmit hook (stdin JSON)
-  recall export --hook                           SessionEnd hook (stdin JSON)
-  recall index                                   run qmd update to refresh collections
-  recall status                                  show counts + qmd status
-  recall help                                    this message
-
-export targets:
-  RECALL_SESSIONS_DIR   required for accepted markdown exports
-  RECALL_REJECTED_DIR   required for rejected markdown exports
-
-bootstrap / one-time:
-  recall export --all          # write markdown for every session
-  recall index                 # refresh qmd's sessions collection
-
-self-healing via Claude Code hooks (~/.claude/settings.json):
-
-  Set RECALL_SESSIONS_DIR and RECALL_REJECTED_DIR in the hook environment.
-  Without both, export hooks no-op and do not choose a default destination.
-
-  hooks.SessionStart:
-    { "type": "command", "command": "recall export --catchup --hook" }
-      # runs silently on every session start; exports any sessions that
-      # were missed (e.g. SessionEnd hook crashed), fires background
-      # qmd update if work was done
-
-  hooks.SessionEnd:
-    { "type": "command", "command": "recall export --hook" }
-      # immediate export of the session that just ended
-
-  hooks.UserPromptSubmit:
-    { "type": "command", "command": "recall hook" }
-      # injects qmd search hits as Session Memory
-
-With all three hooks wired up, missed exports self-heal on the next
-session start. Use \`recall export --all\` only for a forced full rebuild.
-`)
-}
-
-// ── dispatch ─────────────────────────────────────────────────────────────
-// Gated on import.meta.main so the module can be imported by tests without
-// executing the CLI side effects.
-
 function main(): void {
   const args = process.argv.slice(2)
-  if (args.length === 0) {
-    printHelp()
+  if (args[0] !== "export") {
+    process.stderr.write(
+      "[recall] qmd export adapter only supports `export`; use `recall <query>` for search or `tribe hook <event>` for hooks\n",
+    )
     process.exit(2)
   }
-  switch (args[0]) {
-    case "help":
-    case "-h":
-    case "--help":
-      printHelp()
-      process.exit(0)
-      break
-    case "export":
-      cmdExport(args.slice(1))
-      break
-    case "hook":
-      cmdHook()
-      break
-    case "index":
-      cmdIndex()
-      break
-    case "status":
-      cmdStatus()
-      break
-    default:
-      cmdSearch(args)
-      break
-  }
+  cmdExport(args.slice(1))
 }
 
 if (import.meta.main) main()

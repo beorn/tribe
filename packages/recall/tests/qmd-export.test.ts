@@ -1,4 +1,10 @@
-import { describe, test, expect } from "vitest"
+import { spawnSync } from "node:child_process"
+import { readFileSync, realpathSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
+
+import { describe, expect, test } from "vitest"
+
 import { slugFromText, emitHookJson } from "../src/qmd-export.ts"
 
 // slugFromText becomes a filesystem filename. It must never produce path
@@ -81,5 +87,51 @@ describe("emitHookJson", () => {
     if (out.hookSpecificOutput !== undefined) {
       expect(out.hookSpecificOutput.additionalContext).toBeDefined()
     }
+  })
+})
+
+describe("qmd export boundary", () => {
+  test("rejects the retired shadow query CLI", () => {
+    const script = fileURLToPath(new URL("../src/qmd-export.ts", import.meta.url))
+    const result = spawnSync("bun", [script, "shadow-query-must-not-run"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain("qmd export adapter")
+    expect(result.stderr).toContain("use `recall <query>`")
+  })
+
+  test("ships qmd with a Node-loadable native SQLite module", () => {
+    const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+      dependencies?: Record<string, string>
+    }
+    expect(manifest.dependencies?.["@tobilu/qmd"]).toBe("2.5.3")
+
+    const qmdRoot = realpathSync(fileURLToPath(new URL("../node_modules/@tobilu/qmd/", import.meta.url)))
+    const qmdNodeModules = dirname(dirname(qmdRoot))
+    const betterSqliteRoot = realpathSync(join(qmdNodeModules, "better-sqlite3"))
+    const betterSqliteEntry = join(betterSqliteRoot, "lib", "index.js")
+
+    const nativeProbe = spawnSync(
+      "node",
+      [
+        "--input-type=module",
+        "-e",
+        'const { default: Database } = await import(process.argv[1]); const db = new Database(":memory:"); const row = db.prepare("select 1 as value").get(); db.close(); process.stdout.write(String(row.value));',
+        betterSqliteEntry,
+      ],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    )
+    expect(nativeProbe.status, nativeProbe.stderr).toBe(0)
+    expect(nativeProbe.stdout).toBe("1")
+
+    const versionProbe = spawnSync(join(qmdRoot, "bin", "qmd"), ["--version"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+    expect(versionProbe.status, versionProbe.stderr).toBe(0)
+    expect(versionProbe.stdout.trim()).toMatch(/^qmd 2\.5\.3(?:\s|$)/)
   })
 })
