@@ -8,6 +8,11 @@ import * as fs from "fs"
 import type { SessionRecord, MessageRecord, ContentType, ContentRecord, SessionIndexEntry } from "./types.ts"
 import { PROJECTS_DIR, PLANS_DIR, TODOS_DIR } from "./db-schema.ts"
 
+// Assistant rows containing tool_use blocks mix prose with serialized tool
+// inputs. Keep them searchable for --tool and forensic lookup, but prevent a
+// repetitive command payload from outranking an actual explanation.
+const MESSAGE_RANK_SQL = "bm25(messages_fts, 10.0, 1.0, 2.0) * CASE WHEN m.tool_name IS NULL THEN 1.0 ELSE 0.001 END"
+
 // ============================================================================
 // Session operations
 // ============================================================================
@@ -169,7 +174,7 @@ export function ftsSearch(
     WHERE messages_fts MATCH ?
   `
   let searchQuery = `
-    SELECT m.*, s.project_path, bm25(messages_fts, 10.0, 1.0, 2.0) as rank
+    SELECT m.*, s.project_path, ${MESSAGE_RANK_SQL} as rank
     FROM messages_fts f
     JOIN messages m ON f.rowid = m.id
     JOIN sessions s ON m.session_id = s.id
@@ -240,7 +245,7 @@ export function ftsSearchWithSnippet(
   let searchQuery = `
     SELECT m.*, s.project_path,
            snippet(messages_fts, 0, '>>>', '<<<', '...', ${snippetTokens}) as snippet,
-           bm25(messages_fts, 10.0, 1.0, 2.0) as rank
+           ${MESSAGE_RANK_SQL} as rank
     FROM messages_fts f
     JOIN messages m ON f.rowid = m.id
     JOIN sessions s ON m.session_id = s.id
