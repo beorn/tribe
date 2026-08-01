@@ -76,6 +76,26 @@ export interface SearchOptions {
   refresh?: boolean
 }
 
+/**
+ * Default searches to the current repository family. Linked worktrees keep
+ * their conventional `-wtN` suffix, so `km`, `km-wt0`, and `km-wt7` all map
+ * to the same `km` substring already understood by the shared DB queries.
+ * An explicit --project remains the narrower caller-owned filter.
+ */
+export function resolveProjectScope(project: string | undefined, cwd = process.cwd()): string | undefined {
+  if (project !== undefined) return project.replace(/\*/g, "").trim() || undefined
+
+  let root = cwd
+  const gitRoot = Bun.spawnSync(["git", "-C", cwd, "rev-parse", "--show-toplevel"], {
+    stdout: "pipe",
+    stderr: "ignore",
+  })
+  if (gitRoot.exitCode === 0) root = gitRoot.stdout.toString().trim() || cwd
+
+  const name = path.basename(root).replace(/-wt\d+$/, "")
+  return name || undefined
+}
+
 // ============================================================================
 // Stale-index auto-refresh — see @km/bearly/19216-recall-freshness-shrink-threshold
 // ============================================================================
@@ -137,7 +157,6 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
     since,
     limit: limitStr,
     timeout: timeoutStr,
-    project,
     grep: regexMode,
     question,
     response,
@@ -145,6 +164,7 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
     session,
     include,
   } = options
+  const project = resolveProjectScope(options.project)
 
   // Auto-refresh stale FTS5 index BEFORE search runs (so results reflect the last
   // few minutes of work). See @km/bearly/19216-recall-freshness-shrink-threshold.
@@ -180,6 +200,7 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
   if (impliedRaw) {
     await rawSearch(query, {
       ...options,
+      project,
       limit: limitStr ? parseInt(limitStr, 10) : 10,
     })
     return
@@ -229,7 +250,6 @@ async function runAgentSearch(query: string, options: SearchOptions, base: Recal
   if (result.results.length === 0) {
     const rawProbe = probeLiteralRawMatches(query, base)
     if (rawProbe && rawProbe.result.results.length > 0) {
-      emitSearchPrelude(base.projectFilter)
       console.log(
         `${YELLOW}⚠ recall: agent variants missed literal raw matches; showing raw hits for "${rawProbe.token}".${RESET}\n`,
       )
@@ -458,21 +478,6 @@ function printAgentTrace(result: AgentRecallResult, debugPlan: boolean): void {
 // ============================================================================
 
 /**
- * NO SILENT ERRORS — recall output prelude.
- *
- * Per `docs/principles.md` § "Fail Loud, Fail Now" + @km/all/silent-errors-enforcement
- * violations #3, #4, #5: search results MUST surface what was searched, where we
- * looked, and what was excluded. Prepends warnings to result output:
- *
- *   #5 — stale index: when last_rebuild > 1h ago, warn that recent sessions
- *        may not be in the FTS index yet. Status command already says "(stale)";
- *        search results need the same warn so users don't trust empty results.
- *   #3 — project scope: when no --project filter passed AND sibling -wtN dirs
- *        exist in ~/.claude/projects, warn that those sessions are NOT excluded
- *        by default (the filter only narrows; absence means "all projects").
- *        This catches the "silent empty when wrong scope expected" failure mode.
- */
-/**
  * Print a one-line note about the auto-refresh attempt to stderr.
  * Silent on the "fresh" path (the happy path — no need to spam users every search).
  */
@@ -492,55 +497,11 @@ export function emitRefreshNote(r: RefreshResult): void {
   // "fresh" | "no-meta" | "opt-out" — silent (happy path or intentional).
 }
 
-function emitSearchPrelude(projectFilter: string | undefined): void {
-  // Stale-index check moved to cmdSearch's refreshIndexIfStale (auto-refresh
-  // path + emitRefreshNote). The prior in-prelude check duplicated the work
-  // for the fresh case and only fired meaningfully when the auto-refresh
-  // failed or was opted-out — that path is now owned by emitRefreshNote, so
-  // the prelude focuses on the orthogonal worktree-scope warning below.
-  // See @km/bearly/19243 + @km/bearly/19216-recall-freshness-shrink-threshold.
-
-  // sibling -wtN project dirs check
-  try {
-    const home = process.env.HOME ?? ""
-    const projectsDir = path.join(home, ".claude", "projects")
-    if (fs.existsSync(projectsDir)) {
-      const cwd = process.cwd()
-      const cwdSlug = "-" + cwd.slice(1).replace(/\//g, "-")
-      const matchesCwd = fs.existsSync(path.join(projectsDir, cwdSlug))
-      if (matchesCwd) {
-        // Find sibling dirs that share the base name (e.g., -...-km-wt0 alongside -...-km)
-        const siblings = fs
-          .readdirSync(projectsDir)
-          .filter(
-            (d) =>
-              d.startsWith(cwdSlug + "-wt") ||
-              (d.startsWith(cwdSlug) && d !== cwdSlug && /^-wt\d+/.test(d.slice(cwdSlug.length))),
-          )
-        if (siblings.length > 0 && !projectFilter) {
-          const basename = cwd.split("/").pop() ?? "project"
-          console.error(
-            `${YELLOW}⚠ recall: ${siblings.length} sibling worktree project dir(s) detected (${siblings.slice(0, 3).join(", ")}${siblings.length > 3 ? "…" : ""}).${RESET}\n` +
-              `  Default scope = ALL projects (no current-project narrowing), but if the\n` +
-              `  planner-generated variants are project-context-scoped, sibling -wtN\n` +
-              `  sessions may be missed. Pass \`--project '*${basename}*'\` to aggregate.`,
-          )
-        }
-      }
-    }
-  } catch {
-    // Best-effort — never break search on prelude errors.
-  }
-}
-
 function formatRecallOutput(result: RecallResult, options: { json?: boolean }): void {
   if (options.json) {
     console.log(JSON.stringify(result, null, 2))
     return
   }
-
-  // NO SILENT ERRORS — surface stale-index + worktree-scope warnings BEFORE result.
-  emitSearchPrelude((result as RecallResult & { projectFilter?: string }).projectFilter)
 
   if (result.results.length === 0) {
     // #4 — agent zero-result lie. When agent mode returns 0 but the literal

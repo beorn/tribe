@@ -7,11 +7,13 @@ process.env.RECALL_DB_PATH = ":memory:"
 
 const mockAgent: {
   result: Awaited<typeof import("../../src/lib/agent")>["recallAgent"] | null
-} = { result: null }
+  options: unknown
+} = { result: null, options: null }
 
 vi.mock("../../src/lib/agent.ts", () => ({
   recallAgent: (query: string, options: unknown) => {
     if (!mockAgent.result) throw new Error("Test did not install a mock recallAgent")
+    mockAgent.options = options
     return mockAgent.result(query, options as never)
   },
 }))
@@ -36,19 +38,19 @@ vi.mock("../../src/lib/refresh.ts", async (importOriginal) => {
   }
 })
 
-const { cmdSearch } = await import("../../src/lib/search")
+const { cmdSearch, resolveProjectScope } = await import("../../src/lib/search")
 const { closeDb, getDb, setIndexMeta } = await import("../../src/history/db")
 
-function seedMessage(content: string): void {
+function seedMessage(content: string, id = "a", projectPath = "/test/km"): void {
   const db = getDb()
   const now = Date.now()
   db.prepare(
     `INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run("sess-a", "/test/km", "/tmp/sess-a.jsonl", now - 60_000, now, 1, "Session A")
+  ).run(`sess-${id}`, projectPath, `/tmp/sess-${id}.jsonl`, now - 60_000, now, 1, `Session ${id}`)
   db.prepare(`INSERT INTO messages (uuid, session_id, type, content, timestamp) VALUES (?, ?, ?, ?, ?)`).run(
-    "msg-a",
-    "sess-a",
+    `msg-${id}`,
+    `sess-${id}`,
     "user",
     content,
     now,
@@ -92,6 +94,7 @@ describe("recall search output", () => {
   beforeEach(() => {
     closeDb()
     mockAgent.result = null
+    mockAgent.options = null
     logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
     errSpy = vi.spyOn(console, "error").mockImplementation(() => {})
   })
@@ -102,12 +105,19 @@ describe("recall search output", () => {
     closeDb()
   })
 
+  test("normalizes repo and worktree names while preserving explicit narrowing", () => {
+    expect(resolveProjectScope(undefined, "/repos/km")).toBe("km")
+    expect(resolveProjectScope(undefined, "/repos/km-wt7")).toBe("km")
+    expect(resolveProjectScope("*km-wt7*", "/repos/km-wt1")).toBe("km-wt7")
+  })
+
   test("agent zero-results raw-probes literal tokens before printing authoritative no-results", async () => {
     seedMessage("The prior session mentioned barenode in the architecture notes.")
     mockAgent.result = async (query) => zeroAgentResult(query) as never
 
     await cmdSearch("how should we debug barenode", {
       agent: true,
+      project: "km",
       limit: "5",
       round2: "off",
       refresh: false,
@@ -165,16 +175,15 @@ describe("recall search output", () => {
     expect(output).toContain('No results found for "nohits"')
   })
 
-  test("sibling worktree warning prints before empty results when no project filter narrows scope", async () => {
+  test("defaults search to the current repo family across sibling worktrees", async () => {
     const prevHome = process.env.HOME
     const prevCwd = process.cwd()
     const home = mkdtempSync(join(tmpdir(), "recall-home-"))
-    const project = mkdtempSync(join(tmpdir(), "km-"))
+    const parent = mkdtempSync(join(tmpdir(), "recall-projects-"))
+    const project = join(parent, "km-wt1")
+    mkdirSync(project)
     process.env.HOME = home
     process.chdir(project)
-    const projectSlug = "-" + process.cwd().slice(1).replace(/\//g, "-")
-    mkdirSync(join(home, ".claude", "projects", projectSlug), { recursive: true })
-    mkdirSync(join(home, ".claude", "projects", `${projectSlug}-wt1`), { recursive: true })
     mockAgent.result = async (query) => zeroAgentResult(query) as never
 
     try {
@@ -189,12 +198,35 @@ describe("recall search output", () => {
       if (prevHome === undefined) delete process.env.HOME
       else process.env.HOME = prevHome
       rmSync(home, { recursive: true, force: true })
-      rmSync(project, { recursive: true, force: true })
+      rmSync(parent, { recursive: true, force: true })
     }
 
     const errors = callsText(errSpy)
     const output = callsText(logSpy)
-    expect(errors).toContain("sibling worktree project dir(s) detected")
+    expect(mockAgent.options).toMatchObject({ projectFilter: "km" })
+    expect(errors).not.toContain("sibling worktree project dir(s) detected")
     expect(output).toContain('No results found for "nohits"')
+  })
+
+  test("default raw search includes sibling worktrees but excludes unrelated repos", async () => {
+    const prevCwd = process.cwd()
+    const parent = mkdtempSync(join(tmpdir(), "recall-projects-"))
+    const project = join(parent, "km-wt1")
+    mkdirSync(project)
+    process.chdir(project)
+    seedMessage("familyscope marker", "sibling", "/repos/km-wt7")
+    seedMessage("familyscope marker", "unrelated", "/repos/elsewhere")
+
+    try {
+      await cmdSearch("familyscope", { raw: true, refresh: false })
+    } finally {
+      process.chdir(prevCwd)
+      rmSync(parent, { recursive: true, force: true })
+    }
+
+    const output = callsText(logSpy)
+    expect(output).toContain("Found 1 matches")
+    expect(output).toContain("/repos/km/wt7")
+    expect(output).not.toContain("elsewhere")
   })
 })
