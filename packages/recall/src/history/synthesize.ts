@@ -37,6 +37,7 @@ export interface LlmRaceModelResult {
   model: string
   ms: number
   status: "ok" | "timeout" | "error"
+  error?: string
   tokens?: { input: number; output: number }
   cost?: number // USD
 }
@@ -77,16 +78,23 @@ export async function raceLlmModels(
 
   // Race all models
   const racePromises = models.map(async (model, i) => {
-    const result = await llm.queryModel({
-      question: context,
-      model,
-      systemPrompt,
-      abortSignal: controller.signal,
-    })
-
-    const elapsed = Date.now() - raceStart
     const mr = modelResults[i]!
-    mr.ms = elapsed
+    let result
+    try {
+      result = await llm.queryModel({
+        question: context,
+        model,
+        systemPrompt,
+        abortSignal: controller.signal,
+      })
+    } catch (error) {
+      mr.ms = Date.now() - raceStart
+      mr.status = "error"
+      mr.error = error instanceof Error ? error.message : String(error)
+      return null
+    }
+
+    mr.ms = Date.now() - raceStart
 
     // Track tokens + compute cost from actual usage
     const usage = result.response.usage
@@ -102,12 +110,14 @@ export async function raceLlmModels(
     }
     if (result.response.error) {
       mr.status = "error"
+      mr.error = result.response.error
       return null
     }
 
     const content = result.response.content
     if (!content) {
       mr.status = "error"
+      mr.error = "empty response"
       return null
     }
 
@@ -176,35 +186,53 @@ export async function synthesizeResults(
   const llm = llmOverride ?? (await loadLlm())
   if (!llm) {
     log(`no LLM backend (TRIBE_LLM_DIR) — synthesis skipped`)
-    return { text: null }
+    throw new Error(
+      "Recall synthesis requires an LLM backend. Configure TRIBE_LLM_DIR, or rerun with --raw for lexical results.",
+    )
   }
 
-  const models = llm
-    .getCheapModels(Number.MAX_SAFE_INTEGER)
-    .filter((model) => llm.isProviderAvailable(model.provider))
-    .slice(0, 2)
+  const models = llm.getCheapModels(Number.MAX_SAFE_INTEGER).filter((model) => llm.isProviderAvailable(model.provider))
   if (models.length === 0) {
     log(`no LLM providers available for synthesis`)
-    return { text: null }
+    throw new Error(
+      "Recall synthesis has no available LLM provider. Configure provider credentials, or rerun with --raw for lexical results.",
+    )
   }
 
   const context = formatResultsForLlm(query, results)
-  const modelNames = models.map((m) => m.modelId).join(", ")
-  log(`LLM synthesis: racing [${modelNames}] context=${context.length} chars timeout=${timeoutMs}ms`)
+  const deadline = Date.now() + timeoutMs
+  const failures: string[] = []
+  let timedOut = false
+  let totalCost = 0
 
-  const race = await raceLlmModels(context, SYNTHESIS_PROMPT, models, timeoutMs, llm)
+  for (let offset = 0; offset < models.length; offset += 2) {
+    const remainingMs = deadline - Date.now()
+    if (remainingMs <= 0) {
+      timedOut = true
+      break
+    }
 
-  if (race.winner) {
-    log(`LLM winner: ${race.winner} in ${race.totalMs}ms`)
-  } else {
+    const batch = models.slice(offset, offset + 2)
+    const modelNames = batch.map((model) => model.modelId).join(", ")
+    log(`LLM synthesis: racing [${modelNames}] context=${context.length} chars timeout=${remainingMs}ms`)
+    const race = await raceLlmModels(context, SYNTHESIS_PROMPT, batch, remainingMs, llm)
+    totalCost += race.totalCost
+
+    if (race.winner) {
+      log(`LLM winner: ${race.winner} in ${race.totalMs}ms`)
+      return { text: race.text, cost: totalCost, aborted: false }
+    }
+
+    timedOut ||= race.timedOut
+    failures.push(...race.perModel.map((result) => `${result.model}: ${result.error ?? result.status}`))
     log(`LLM synthesis ${race.timedOut ? "aborted" : "failed"} after ${race.totalMs}ms (models: [${modelNames}])`)
+    if (race.timedOut) break
   }
 
-  return {
-    text: race.text,
-    cost: race.cost,
-    aborted: race.timedOut,
-  }
+  throw new Error(
+    `Recall synthesis ${timedOut ? "timed out" : "failed"}: ${failures.join("; ")}. ` +
+      "Check provider credentials, or rerun with --raw for lexical results.",
+  )
 }
 
 export function formatResultsForLlm(query: string, results: RecallSearchResult[]): string {

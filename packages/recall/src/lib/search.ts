@@ -570,7 +570,9 @@ function formatRecallOutput(result: RecallResult, options: { json?: boolean }): 
     timingParts.push(`search=${result.timing.searchMs}ms`)
     if (result.timing.llmMs !== undefined) timingParts.push(`llm=${result.timing.llmMs}ms`)
   }
-  console.log(`${DIM}${result.results.length} results from ${uniqueSessions} sessions (${timingParts.join(", ")})${RESET}`)
+  console.log(
+    `${DIM}${result.results.length} results from ${uniqueSessions} sessions (${timingParts.join(", ")})${RESET}`,
+  )
   if (result.llmCost !== undefined && result.llmCost > 0) {
     console.log(`${DIM}LLM cost: $${result.llmCost.toFixed(4)}${RESET}`)
   }

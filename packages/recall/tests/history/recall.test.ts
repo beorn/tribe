@@ -472,4 +472,77 @@ describe("synthesizeResults", () => {
     expect(queried).toEqual(["xai-cheap", "openrouter-cheap"])
     expect(result.text).toMatch(/^answer from (xai|openrouter)-cheap$/)
   })
+
+  test("reports provider errors when every synthesis model fails", async () => {
+    const models: LlmModel[] = [
+      { provider: "openai", modelId: "openai-cheap" },
+      { provider: "xai", modelId: "xai-cheap" },
+    ]
+    const llm: LlmBackend = {
+      queryModel: async ({ model }) => ({ response: { error: `${model.provider} quota exhausted` } }),
+      getModel: (id) => models.find((model) => model.modelId === id),
+      getCheapModel: () => models[0],
+      getCheapModels: () => models,
+      estimateCost: () => 0,
+      isProviderAvailable: () => true,
+    }
+
+    await expect(
+      synthesizeResults(
+        "provider failure",
+        [
+          {
+            type: "message",
+            sessionId: "session-a",
+            sessionTitle: "Session A",
+            timestamp: Date.now(),
+            snippet: "provider failure evidence",
+            rank: 1,
+          },
+        ],
+        1_000,
+        llm,
+      ),
+    ).rejects.toThrow(/openai-cheap: openai quota exhausted.*xai-cheap: xai quota exhausted/is)
+  })
+
+  test("tries the next available provider batch when the first race fails", async () => {
+    const models: LlmModel[] = [
+      { provider: "openai", modelId: "openai-cheap" },
+      { provider: "xai", modelId: "xai-cheap" },
+      { provider: "openrouter", modelId: "openrouter-cheap" },
+    ]
+    const queried: string[] = []
+    const llm: LlmBackend = {
+      queryModel: async ({ model }) => {
+        queried.push(model.modelId)
+        if (model.provider === "openrouter") return { response: { content: "fallback synthesis" } }
+        return { response: { error: `${model.provider} unavailable` } }
+      },
+      getModel: (id) => models.find((model) => model.modelId === id),
+      getCheapModel: () => models[0],
+      getCheapModels: () => models,
+      estimateCost: () => 0,
+      isProviderAvailable: () => true,
+    }
+
+    const result = await synthesizeResults(
+      "provider fallback",
+      [
+        {
+          type: "message",
+          sessionId: "session-a",
+          sessionTitle: "Session A",
+          timestamp: Date.now(),
+          snippet: "provider fallback evidence",
+          rank: 1,
+        },
+      ],
+      1_000,
+      llm,
+    )
+
+    expect(queried).toEqual(["openai-cheap", "xai-cheap", "openrouter-cheap"])
+    expect(result.text).toBe("fallback synthesis")
+  })
 })
