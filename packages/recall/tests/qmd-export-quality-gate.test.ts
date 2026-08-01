@@ -13,7 +13,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
-const RECALL_BIN = join(import.meta.dirname, "..", "src", "qmd-export.ts")
+const RECALL_BIN = join(import.meta.dirname, "..", "src", "cli.ts")
 
 let tmpRoot: string
 let chatsDir: string

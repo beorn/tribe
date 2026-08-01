@@ -216,7 +216,7 @@ describe("catchup skips quarantined sessions (19775)", () => {
       RECALL_SESSIONS_DIR: chats,
       RECALL_REJECTED_DIR: rejectedDir,
     }
-    const script = fileURLToPath(new URL("../src/qmd-export.ts", import.meta.url))
+    const script = fileURLToPath(new URL("../src/cli.ts", import.meta.url))
     const run = () => spawnSync("bun", [script, "export", "--catchup"], { env, encoding: "utf-8" })
 
     const first = run()

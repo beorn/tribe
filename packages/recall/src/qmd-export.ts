@@ -1,4 +1,3 @@
-#!/usr/bin/env bun
 /**
  * qmd transcript export adapter for the canonical Recall CLI.
  *
@@ -307,7 +306,7 @@ export function cmdExport(args: string[]): void {
   //   - when combined with --hook, emits a valid empty hook response
   //   - fires a fire-and-forget `qmd update` at the end if new files were
   //     written, so the search index picks up fresh exports without the user
-  //     having to remember to run `recall index`
+  //     having to remember to run `qmd update`
   // This is the "system always tries to complete stuff" path: wire it into
   // SessionStart and missing-export state self-heals over time.
   const isCatchup = args.includes("--catchup")
@@ -333,12 +332,12 @@ export function cmdExport(args: string[]): void {
     const sid = input.session_id
     if (!sid) {
       // No session id — emit valid empty hook JSON and exit cleanly.
-      process.stdout.write(emitHookJson("SessionEnd"))
+      process.stdout.write(envelopeEmitHookJson("SessionEnd"))
       return
     }
     const found = findJsonlBySessionId(sid)
     if (!found) {
-      process.stdout.write(emitHookJson("SessionEnd"))
+      process.stdout.write(envelopeEmitHookJson("SessionEnd"))
       return
     }
     jsonlPaths = [found]
@@ -374,7 +373,7 @@ export function cmdExport(args: string[]): void {
 
   const exportDirs = resolveExportDirs(isHook)
   if (!exportDirs) {
-    if (isHook) process.stdout.write(emitHookJson("SessionEnd"))
+    if (isHook) process.stdout.write(envelopeEmitHookJson("SessionEnd"))
     return
   }
   const { sessionsDir, rejectedDir } = exportDirs
@@ -485,36 +484,7 @@ export function cmdExport(args: string[]): void {
   }
   if (isHook) {
     // Claude Code's SessionEnd validator doesn't accept hookSpecificOutput
-    // for this event (see emitHookJson docs). Plain {} is the correct no-op.
-    process.stdout.write(emitHookJson("SessionEnd"))
+    // for this event. Plain {} is the correct no-op.
+    process.stdout.write(envelopeEmitHookJson("SessionEnd"))
   }
 }
-
-/**
- * Build a valid Claude Code hook-response JSON blob.
- *
- * Routes through `@bearly/injection-envelope`'s `emitHookJson` — the
- * canonical implementation. Re-exported here so existing callers and tests
- * that import from `./qmd-export.ts` keep working.
- *
- * Schema summary (enforced upstream):
- *   - **UserPromptSubmit** + additionalContext → full envelope
- *   - **UserPromptSubmit** with no context → plain `{}`
- *   - **SessionEnd** + anything else → plain `{}`
- */
-export function emitHookJson(eventName: string, additionalContext?: string): string {
-  return envelopeEmitHookJson(eventName, additionalContext)
-}
-
-function main(): void {
-  const args = process.argv.slice(2)
-  if (args[0] !== "export") {
-    process.stderr.write(
-      "[recall] qmd export adapter only supports `export`; use `recall <query>` for search or `tribe hook <event>` for hooks\n",
-    )
-    process.exit(2)
-  }
-  cmdExport(args.slice(1))
-}
-
-if (import.meta.main) main()

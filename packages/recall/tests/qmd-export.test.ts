@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url"
 
 import { describe, expect, test } from "vitest"
 
-import { slugFromText, emitHookJson } from "../src/qmd-export.ts"
+import { slugFromText } from "../src/qmd-export.ts"
 
 // slugFromText becomes a filesystem filename. It must never produce path
 // separators, dots, or anything that would break out of the target directory.
@@ -41,68 +41,7 @@ describe("slugFromText", () => {
   })
 })
 
-// emitHookJson builds the hook response envelope. The schema Claude Code
-// enforces is event-specific and strict:
-//
-//   - UserPromptSubmit: hookSpecificOutput.additionalContext is REQUIRED
-//     when hookSpecificOutput is present. No additionalContext → don't
-//     emit hookSpecificOutput → emit plain `{}`.
-//   - SessionEnd: has no event-specific hookSpecificOutput schema. Always
-//     emit `{}`.
-//
-// Any deviation trips the validator and raises a 500 on the next turn.
-
-type HookEnvelope = {
-  hookSpecificOutput?: {
-    hookEventName: string
-    additionalContext?: string
-  }
-}
-
-describe("emitHookJson", () => {
-  test("UserPromptSubmit with additionalContext emits full envelope", () => {
-    const out = JSON.parse(emitHookJson("UserPromptSubmit", "## Memory")) as HookEnvelope
-    expect(out.hookSpecificOutput?.hookEventName).toBe("UserPromptSubmit")
-    expect(out.hookSpecificOutput?.additionalContext).toBe("## Memory")
-  })
-
-  test("UserPromptSubmit with no context emits empty object", () => {
-    const out = JSON.parse(emitHookJson("UserPromptSubmit")) as HookEnvelope
-    expect(out).toEqual({})
-  })
-
-  test("SessionEnd always emits empty object (schema forbids hookSpecificOutput)", () => {
-    expect(JSON.parse(emitHookJson("SessionEnd"))).toEqual({})
-    expect(JSON.parse(emitHookJson("SessionEnd", "ignored"))).toEqual({})
-  })
-
-  test("unknown event emits empty object", () => {
-    expect(JSON.parse(emitHookJson("Whatever"))).toEqual({})
-  })
-
-  // Schema invariant: if hookSpecificOutput is present on UserPromptSubmit,
-  // additionalContext MUST be present too (it's required by the validator).
-  test("never emits hookSpecificOutput without additionalContext (UserPromptSubmit)", () => {
-    const out = JSON.parse(emitHookJson("UserPromptSubmit")) as HookEnvelope
-    if (out.hookSpecificOutput !== undefined) {
-      expect(out.hookSpecificOutput.additionalContext).toBeDefined()
-    }
-  })
-})
-
 describe("qmd export boundary", () => {
-  test("rejects the retired shadow query CLI", () => {
-    const script = fileURLToPath(new URL("../src/qmd-export.ts", import.meta.url))
-    const result = spawnSync("bun", [script, "shadow-query-must-not-run"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    })
-
-    expect(result.status).toBe(2)
-    expect(result.stderr).toContain("qmd export adapter")
-    expect(result.stderr).toContain("use `recall <query>`")
-  })
-
   test("ships qmd with a Node-loadable native SQLite module", () => {
     const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
       dependencies?: Record<string, string>
