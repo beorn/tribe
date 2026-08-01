@@ -168,6 +168,36 @@ describe("recallAgent — short-circuit", () => {
 })
 
 describe("recallAgent — speculative synth", () => {
+  test("propagates a speculative synthesis failure instead of returning a null answer", async () => {
+    const plan = buildPlanJson({ keywords: ["alpha"] })
+    mockHolder.fn = async (opts) => {
+      if (opts.systemPrompt?.toLowerCase().includes("query planner")) {
+        return {
+          response: {
+            model: opts.model,
+            content: plan,
+            durationMs: 10,
+          },
+        }
+      }
+      return {
+        response: {
+          model: opts.model,
+          content: "",
+          durationMs: 10,
+          error: "synthesis provider failed",
+        },
+      }
+    }
+    seedCorpus({
+      sessions: [{ id: "sess-a", title: "A", messages: ["alpha content"] }],
+    })
+
+    await expect(recallAgent("q", { limit: 3, round2: "off" })).rejects.toThrow(
+      /Recall synthesis failed.*synthesis provider failed/is,
+    )
+  })
+
   test("uses speculative round-1 when round 2 adds no new top-K docs", async () => {
     // Round 1 plan with few variants so short-circuit doesn't fire
     const round1Plan = buildPlanJson({ keywords: ["alpha"], phrases: [] })

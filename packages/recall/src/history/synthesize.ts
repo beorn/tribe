@@ -172,7 +172,7 @@ export async function raceLlmModels(
 // ============================================================================
 
 export interface SynthesisResult {
-  text: string | null
+  text: string
   cost?: number
   aborted?: boolean
 }
@@ -218,7 +218,7 @@ export async function synthesizeResults(
     const race = await raceLlmModels(context, SYNTHESIS_PROMPT, batch, remainingMs, llm)
     totalCost += race.totalCost
 
-    if (race.winner) {
+    if (race.winner && race.text) {
       log(`LLM winner: ${race.winner} in ${race.totalMs}ms`)
       return { text: race.text, cost: totalCost, aborted: false }
     }
@@ -229,8 +229,10 @@ export async function synthesizeResults(
     if (race.timedOut) break
   }
 
+  const failureSummary = failures.join("; ") || "the deadline expired before a provider could run"
+  const separator = /[.!?]$/.test(failureSummary) ? " " : ". "
   throw new Error(
-    `Recall synthesis ${timedOut ? "timed out" : "failed"}: ${failures.join("; ")}. ` +
+    `Recall synthesis ${timedOut ? "timed out" : "failed"}: ${failureSummary}${separator}` +
       "Check provider credentials, or rerun with --raw for lexical results.",
   )
 }

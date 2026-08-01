@@ -9,13 +9,14 @@
  *   5. Synthesize final answer via existing race-of-2.
  *   6. Optionally write a post-hoc trace.
  *
- * Failure modes all fall through cleanly to the existing single-query
- * `recall()` path — agent mode never makes things worse than today.
+ * Planning failures fall through to the existing single-query `recall()`
+ * path. Synthesis failures stay loud because a null answer is not a valid
+ * replacement for the synthesized result the caller requested.
  */
 
 import { getDb, closeDb } from "../history/db.ts"
 import { parseTimeToMs, recall } from "../history/search.ts"
-import { synthesizeResults } from "../history/synthesize.ts"
+import { synthesizeResults, type SynthesisResult } from "../history/synthesize.ts"
 import { log, THIRTY_DAYS_MS } from "../history/recall-shared.ts"
 import type { RecallOptions, RecallResult, RecallSearchResult } from "../history/recall-shared.ts"
 import { buildQueryContext, renderContextPrompt, type QueryContext } from "./context.ts"
@@ -215,9 +216,12 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
   // results (the speculative call settles in the background, wasted).
   // ──────────────────────────────────────────────────────────────────────
   const speculativeSynthStart = Date.now()
-  const speculativeSynthPromise: Promise<{ text: string | null; cost?: number }> | null =
+  const speculativeSynthPromise: Promise<{ result: SynthesisResult } | { error: unknown }> | null =
     speculativeSynth && fanoutR1.results.length > 0
-      ? synthesizeResults(query, fanoutR1.results, timeout, llm).catch(() => ({ text: null }))
+      ? synthesizeResults(query, fanoutR1.results, timeout, llm).then(
+          (result) => ({ result }),
+          (error: unknown) => ({ error }),
+        )
       : null
   if (speculativeSynthPromise) {
     log(`agent: speculative synth fired on round-1 results (${fanoutR1.results.length} docs)`)
@@ -298,7 +302,9 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
     const useSpeculative = speculativeSynthPromise !== null && (!round2Ran || newDocsInTop < ROUND2_NEW_DOCS_THRESHOLD)
 
     if (useSpeculative) {
-      const specResult = await speculativeSynthPromise!
+      const speculative = await speculativeSynthPromise!
+      if ("error" in speculative) throw speculative.error
+      const specResult = speculative.result
       synthesis = { text: specResult.text, cost: specResult.cost }
       synthPath = round2Ran ? "speculative-round1" : "single-pass"
       synthCallsUsed = 1
@@ -312,20 +318,22 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
       // (usually already done) to capture its cost — it was a real billed
       // call whose result we're abandoning, and our cost + synth-count
       // report should reflect that honestly.
-      const [freshResult, abandonedSpec] = await Promise.all([
+      const [freshResult, abandonedSpeculative] = await Promise.all([
         synthesizeResults(query, finalFanout.results, timeout, llm),
-        speculativeSynthPromise ?? Promise.resolve({ text: null as string | null, cost: undefined }),
+        speculativeSynthPromise,
       ])
+      const abandonedSpec =
+        abandonedSpeculative && "result" in abandonedSpeculative ? abandonedSpeculative.result : null
       synthesis = {
         text: freshResult.text,
-        cost: (freshResult.cost ?? 0) + (abandonedSpec.cost ?? 0),
+        cost: (freshResult.cost ?? 0) + (abandonedSpec?.cost ?? 0),
       }
       synthPath = round2Ran ? "fresh-merged" : "single-pass"
       synthCallsUsed = speculativeSynthPromise ? 2 : 1
       round1ShortCircuited = false
       log(
         `agent: using fresh synth on ${round2Ran ? `merged results (r2 added ${newDocsInTop} new top-K)` : "round 1 results (speculative disabled)"} — ${synthCallsUsed} synth call${synthCallsUsed === 1 ? "" : "s"}${
-          abandonedSpec.cost ? ` (abandoned spec cost $${abandonedSpec.cost.toFixed(4)})` : ""
+          abandonedSpec?.cost ? ` (abandoned spec cost $${abandonedSpec.cost.toFixed(4)})` : ""
         }`,
       )
     }

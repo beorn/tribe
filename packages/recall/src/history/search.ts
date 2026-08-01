@@ -621,15 +621,9 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     const llmMs = Date.now() - llmStart
 
     const totalMs = Date.now() - startTime
-    if (synthesis.text) {
-      log(
-        `synthesis OK: ${synthesis.text.length} chars, cost=$${(synthesis.cost ?? 0).toFixed(4)} (${totalMs}ms total, search=${searchMs}ms llm=${llmMs}ms${synthesis.aborted ? " ABORTED" : ""})`,
-      )
-    } else {
-      log(
-        `synthesis returned null (${totalMs}ms total, search=${searchMs}ms llm=${llmMs}ms${synthesis.aborted ? " ABORTED" : ""})`,
-      )
-    }
+    log(
+      `synthesis OK: ${synthesis.text.length} chars, cost=$${(synthesis.cost ?? 0).toFixed(4)} (${totalMs}ms total, search=${searchMs}ms llm=${llmMs}ms${synthesis.aborted ? " ABORTED" : ""})`,
+    )
 
     return {
       query,
