@@ -7,7 +7,8 @@
  */
 
 import { Database } from "bun:sqlite"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, realpathSync } from "node:fs"
+import { safeRemoveSync } from "removely"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
@@ -21,7 +22,7 @@ describe("session launch identity schema (migration chain from v18)", () => {
   })
 
   afterEach(() => {
-    rmSync(tmpDir, { recursive: true, force: true })
+    safeRemoveSync(tmpDir, { within: realpathSync(tmpdir()), allowMissing: true })
   })
 
   it("adds launch identity to a v18 database without losing the member row", () => {

@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it } from "vitest"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, realpathSync } from "node:fs"
+import { safeRemoveSync } from "removely"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { openDatabase } from "./database.ts"
@@ -8,7 +9,7 @@ import { openDatabase } from "./database.ts"
 const cleanupDirs: string[] = []
 
 afterEach(() => {
-  for (const dir of cleanupDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  for (const dir of cleanupDirs.splice(0)) safeRemoveSync(dir, { within: realpathSync(tmpdir()), allowMissing: true })
 })
 
 describe("validated reply correlation schema (migration v25)", () => {
