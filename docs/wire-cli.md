@@ -148,12 +148,20 @@ logical wait survives a daemon hot-reload mid-poll. The logical window caps at
 30 minutes; every result reports the applied value as `effective_timeout_ms`.
 The `status` discriminant is `woken`, `timeout`, or `aborted`; the legacy
 boolean flags remain for compatibility. `timeout` means the full logical
-deadline elapsed with an empty final `attention.actionable_unread` projection.
-A quiet response present at that deadline produces `woken` with
-`timed_out: false`, while remaining quiet during the window. Before waiting,
+deadline elapsed; the returned attention snapshot is orthogonal and may still
+contain rows that predate the wait baseline. Before waiting,
 the CLI verifies the daemon's protocol version. A stale daemon is refused with
 the client/daemon version plus its running, on-disk, and superproject pins
 instead of attempting to parse a stale reply shape.
+
+An `aborted` daemon result is terminal and the CLI returns it without retrying.
+It is observable only when the daemon can send that result over a still-open
+socket. Closing the waiting client's own socket both causes cancellation and
+destroys the reply path, so the public CLI can observe only the transport
+close—not the resulting daemon-side `aborted` value. A future externally
+observable cancellation contract therefore needs a separate control path or a
+reply channel that survives cancellation; it cannot be created in the current
+client wrapper.
 By default only actionable messages wake the wait. Opt into a validated
 `response` or `status` for one of the waiting session's own tracked requests
 with `--wake-on-correlated-reply`.

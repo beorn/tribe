@@ -1145,12 +1145,14 @@ function logicalTimeoutInboxWaitResult(
     if (lastRetryableError !== undefined) throw lastRetryableError
     throw new Error("Inbox wait ended without an authoritative daemon result")
   }
+  if (latest.aborted) {
+    return totalWaited(latest, startedAt, now, effectiveTimeoutMs)
+  }
   return totalWaited(
     {
       ...latest,
       status: "timeout",
       timed_out: true,
-      aborted: false,
     },
     startedAt,
     now,
@@ -1208,15 +1210,16 @@ export async function waitForInboxWithReconnect(opts: {
       if (result.reconnect === true) {
         continue
       }
-      if (!result.timed_out && !result.aborted) {
+      if (result.aborted) {
         return totalWaited(result, startedAt, now, controls.timeoutMs)
       }
-      if (result.aborted || result.timed_out) {
-        if (now() >= deadline) {
-          return logicalTimeoutInboxWaitResult(result, lastRetryableError, startedAt, now, controls.timeoutMs)
-        }
-        continue
+      if (!result.timed_out) {
+        return totalWaited(result, startedAt, now, controls.timeoutMs)
       }
+      if (now() >= deadline) {
+        return logicalTimeoutInboxWaitResult(result, lastRetryableError, startedAt, now, controls.timeoutMs)
+      }
+      continue
     } catch (err) {
       const kind = inboxWaitErrorKind(err)
       if (!kind) throw err

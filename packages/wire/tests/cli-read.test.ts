@@ -400,6 +400,40 @@ describe("waitForInboxWithReconnect", () => {
     expect(result.reconnect).toBeUndefined()
   })
 
+  test("returns a terminal daemon abort without retrying or rewriting it as timeout", async () => {
+    let now = 0
+    let calls = 0
+    const result = await waitForInboxWithReconnect({
+      session: "@ci",
+      timeoutMs: 20,
+      now: () => now,
+      call: async ({ timeoutMs }) => {
+        calls += 1
+        now += 1
+        return {
+          status: "aborted",
+          session: "@ci",
+          unread_count: 0,
+          oldest_unread_age_min: 0,
+          oldest_unread_ts: 0,
+          waited_ms: 1,
+          effective_timeout_ms: timeoutMs,
+          timed_out: false,
+          aborted: true,
+          attention: EMPTY_ATTENTION,
+        }
+      },
+    })
+
+    expect(calls).toBe(1)
+    expect(result).toMatchObject({
+      status: "aborted",
+      waited_ms: 1,
+      timed_out: false,
+      aborted: true,
+    })
+  })
+
   test("daemon-unavailable errors retry only during the short startup grace, then stay loud", async () => {
     let now = 0
     const chunkCalls: number[] = []

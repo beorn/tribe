@@ -488,7 +488,10 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
               type: "boolean",
               description: "True only when the timeout elapsed without a qualifying row newer than the wait baseline.",
             },
-            aborted: { type: "boolean", description: "True when the connection closed before a DM arrived." },
+            aborted: {
+              type: "boolean",
+              description: "True when the daemon ended the wait before a qualifying DM arrived.",
+            },
             attention: ATTENTION_SCHEMA,
             requested_ms: { type: "number", description: "Requested MCP wait when status=host_cut." },
             ceiling_ms: { type: "number", description: "Measured host-safe MCP wait ceiling." },
