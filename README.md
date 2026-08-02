@@ -299,8 +299,9 @@ The ball stores ownership, age, fanout, and an optional sender-declared
 deadline. A reply closes the original ownership row. `tribe.fetch()` returns a
 read-only `attention` projection — actionable unread plus the oldest open balls
 — ahead of the chronological events; `tribe.pending()` returns the full pile.
-Tribe supplies these facts without interpreting them: it does not page, remind,
-transfer, or escalate. That policy is the consumer's job.
+At the first daemon operation after a declared deadline passes, Tribe settles the
+open ownership row while retaining the message history. Paging, reminders,
+transfer, and escalation remain consumer policy.
 
 **Health cadence.** The daemon projects a health snapshot — response-latency
 percentiles by role and message type, open-ball counts and oldest age, per-

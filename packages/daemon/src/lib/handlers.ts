@@ -276,6 +276,10 @@ export function handleToolCall(
   opts: HandlerOpts,
   connId?: string,
 ): ToolResult | Promise<ToolResult> {
+  // Sender-declared deadlines are daemon-owned containment: every RPC boundary
+  // settles rows whose ownership window has passed before projecting or
+  // mutating attention. The message remains in history for audit/replay.
+  ctx.stmts.settleExpiredPendingRequests.run({ $now: Date.now() })
   // Presence heartbeat (@km/tribe/19784): ANY authenticated tool call
   // refreshes the caller's last_seen — presence = "spoke to the daemon
   // recently", not "joined or drained rows recently". Before this, send-only
@@ -823,9 +827,9 @@ type PendingBallView = "active" | "expired"
 
 function pendingRowMatchesView(row: PendingBallRow, now: number, view: PendingBallView): boolean {
   const expired = row.expires_at !== null && row.expires_at <= now
-  // Passing a declared deadline never settles ownership. The default/open
-  // view therefore includes every pending row; --expired is a narrower fact
-  // projection for consumers that need deadline-passed rows specifically.
+  // The daemon normally removes expired rows at the RPC boundary. Keep the
+  // explicit diagnostic view for legacy/direct projections that may still
+  // contain a row between persistence and that boundary.
   return view === "expired" ? expired : true
 }
 

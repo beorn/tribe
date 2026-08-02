@@ -135,8 +135,8 @@ export type BallTracker = {
    * Ignored if `request` is not set.
    */
   fanout?: "first" | "all"
-  /** Optional sender-declared deadline fact. Tribe stores it but does not
-   * interpret it as escalation, reassignment, or ownership settlement. */
+  /** Optional sender-declared deadline. The daemon settles ownership at the
+   * first RPC boundary after this deadline passes. */
   expiresInMs?: number
 }
 
@@ -277,9 +277,8 @@ export function sendMessage(
           $fanout: ballTracker.fanout ?? "first",
         })
       }
-      // Deadlines are facts, not daemon-owned lifecycle policy. Any explicit
-      // reply settles the open ownership row even when its declared deadline
-      // has passed; L3 controllers may already have journaled an exception.
+      // A daemon boundary settles expired rows before this send path runs.
+      // Any still-open row is therefore closed by an explicit reply here.
       if (canonicalReplyId) {
         if (pendingReply?.fanout === "first") {
           const closed = ctx.stmts.closePendingRequestAll.run({ $request_id: canonicalReplyId })

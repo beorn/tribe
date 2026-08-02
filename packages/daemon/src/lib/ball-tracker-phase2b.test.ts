@@ -452,7 +452,7 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     expect(reply.warning).toBeUndefined()
   })
 
-  it("settles a reply after its declared deadline without a daemon-policy warning", () => {
+  it("reports a late reply after daemon expiry settlement", () => {
     parseToolJson(
       handleToolCall(
         chief,
@@ -472,19 +472,20 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       ),
     )
 
-    expect(reply.tracker).toEqual({ request_id: "late-request", closed: 1 })
-    expect(reply.warning).toBeUndefined()
+    expect(reply.tracker).toEqual({ request_id: "late-request", closed: 0 })
+    expect(reply.reply_close_failed).toBe(true)
+    expect(reply.warning).toContain("closed 0")
     expect(pendingRecipients(db, "late-request")).toEqual([])
   })
 
-  it("keeps a deadline-passed row in the default open-ball projection until a reply closes it", () => {
+  it("removes a deadline-passed row from the default open-ball projection", () => {
     parseToolJson(
       handleToolCall(
         chief,
         "tribe.send",
         {
           to: "@agent/1",
-          message: "deadline is a fact, not ownership settlement",
+          message: "deadline settles ownership at the daemon boundary",
           type: "request",
           request: "deadline-passed-open",
           expires_in_ms: 60_000,
@@ -499,7 +500,7 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       handleToolCall(agent1, "tribe.pending", { expired: true }, makeOpts(["sess-chief", "sess-agent-1"])),
     )
 
-    expect(active.pending).toEqual([expect.objectContaining({ request_id: "deadline-passed-open" })])
-    expect(expired.pending).toEqual([expect.objectContaining({ request_id: "deadline-passed-open" })])
+    expect(active.pending).toEqual([])
+    expect(expired.pending).toEqual([])
   })
 })

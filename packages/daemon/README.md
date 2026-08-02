@@ -48,7 +48,7 @@ branch assignments, or merge authority.
 Direct `request`, `query`, and `assign` messages open one recipient-owned ball;
 other message types open one only when explicitly requested. The
 `pending_request` row stores ownership, age, fanout, and an optional
-sender-declared deadline. Tribe supplies those facts without a default and does
-not interpret a passed deadline as a reminder, page, transfer, or settlement;
-replies still close the original ownership row. Habitat policy and actuation
-belong to the consuming L3 controller.
+sender-declared deadline. At the first daemon operation after that deadline
+passes, Tribe settles the open ownership row while retaining message history.
+Reminders, pages, transfer, and escalation remain consuming L3 controller
+policy.

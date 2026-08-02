@@ -184,7 +184,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             minimum: 1,
             maximum: 24 * 60 * 60_000,
             description:
-              "Optional sender-declared deadline offset in milliseconds. No default: Tribe stores the resulting deadline as a fact but never settles ownership from it. Must be no greater than one day.",
+              "Optional sender-declared deadline offset in milliseconds. At the first daemon operation after it passes, Tribe settles the pending ownership row. Must be no greater than one day.",
           },
         },
         required: ["to", "message"],
@@ -309,12 +309,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     id: "tribe.pending",
     title: "Pending Requests",
     description:
-      "Ball-tracker query: list every open request where the given owner is responsible for replying, or filter to rows whose declared deadline passed. A passed deadline never settles ownership. Default owner is the caller's session.",
+      "Ball-tracker query: list every open request where the given owner is responsible for replying, or inspect legacy rows whose declared deadline passed before daemon expiry settlement. Default owner is the caller's session.",
     lifetime: "live-session",
     mcp: {
       name: "pending",
       description:
-        "Ball-tracker query: list every open request where the given owner is responsible for replying, or filter to rows whose declared deadline passed. A passed deadline never settles ownership. Default owner is the caller's session.",
+        "Ball-tracker query: list every open request where the given owner is responsible for replying, or inspect legacy rows whose declared deadline passed before daemon expiry settlement. Default owner is the caller's session.",
       inputSchema: {
         type: "object",
         properties: {
@@ -380,7 +380,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     cli: available({
       name: "pending",
       description:
-        "Ball-tracker query: list every open request where the given owner is responsible for replying, or filter to rows whose declared deadline passed. A passed deadline never settles ownership. Default owner is the caller's session.",
+        "Ball-tracker query: list every open request where the given owner is responsible for replying, or inspect legacy rows whose declared deadline passed before daemon expiry settlement. Default owner is the caller's session.",
       lifetime: "one-shot",
       mapsToMcp: "pending",
       options: [

@@ -1107,6 +1107,13 @@ export function createStatements(db: Database) {
 		DELETE FROM pending_request WHERE request_id = $request_id
 	`),
 
+    /** Daemon-owned expiry settlement: a sender-declared deadline releases
+     *  ownership at the first RPC boundary after it passes. Message history
+     *  remains durable; only the open obligation is removed. */
+    settleExpiredPendingRequests: db.prepare(
+      "DELETE FROM pending_request WHERE expires_at IS NOT NULL AND expires_at <= $now",
+    ),
+
     /** Ball-tracker lookup: used when a reply arrives to decide whether this
      *  recipient's row is still active and whether fanout='first' closes all
      *  or fanout='all' closes only the replying recipient. */

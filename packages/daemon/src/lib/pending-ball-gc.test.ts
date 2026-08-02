@@ -186,7 +186,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
     }
   })
 
-  it("a deadline-passed ball appears once in a close-miss warning", () => {
+  it("settles deadline-passed balls before close-miss warnings", () => {
     const { db, stmts } = setup()
     try {
       const now = Date.now()
@@ -195,6 +195,13 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         recipient: "@chief",
         openedAt: now - 60_000,
         expiresAt: now - 1,
+        sender: "@agent/2",
+      })
+      openBall(stmts, {
+        id: "still-owned",
+        recipient: "@chief",
+        openedAt: now - 60_000,
+        expiresAt: now + 60_000,
         sender: "@agent/2",
       })
       const ctx = createTribeContext({
@@ -212,7 +219,46 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       const warning = String(res.warning)
 
       expect(warning.match(/\(message/gu)).toHaveLength(1)
-      expect(warning).toContain("declared deadline passed, still open")
+      expect(warning).toContain("still-owned")
+      expect(warning).not.toContain("deadline-passed")
+    } finally {
+      db.close()
+    }
+  })
+
+  it("settles an expired ball at the daemon boundary", () => {
+    const { db, stmts } = setup()
+    try {
+      const now = Date.now()
+      openBall(stmts, {
+        id: "expired-at-boundary",
+        recipient: "@chief",
+        openedAt: now - 60_000,
+        expiresAt: now - 1,
+        sender: "@agent/2",
+      })
+      openBall(stmts, {
+        id: "still-owned-at-boundary",
+        recipient: "@chief",
+        openedAt: now - 60_000,
+        expiresAt: now + 60_000,
+        sender: "@agent/2",
+      })
+      const ctx = createTribeContext({
+        db,
+        stmts,
+        sessionId: "sess-chief",
+        sessionRole: "member",
+        initialName: "@chief",
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+      })
+
+      const result = parseToolJson(handleToolCall(ctx, "tribe.pending", {}, makeOpts()))
+
+      expect(result.pending).toEqual([expect.objectContaining({ request_id: "still-owned-at-boundary" })])
+      expect(openIds(stmts, "@chief")).toEqual(["still-owned-at-boundary"])
     } finally {
       db.close()
     }
@@ -341,7 +387,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
     }
   })
 
-  it("keeps deadline-passed balls open across pending, attention, and health while exposing the filtered view", () => {
+  it("settles deadline-passed balls before pending, attention, and health projections", () => {
     const { db, stmts } = setup()
     // The actionable-response SLA projection is opt-in via TRIBE_SLA_ROLE; name
     // @chief so tribe.health() surfaces the @chief open-ball count below.
@@ -388,13 +434,13 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         }
       }
 
-      expect(pending.pending.map((ball) => ball.request_id)).toEqual(["expired-review", "active-review"])
+      expect(pending.pending.map((ball) => ball.request_id)).toEqual(["active-review"])
       expect(expired.expired).toBe(true)
-      expect(expired.pending.map((ball) => ball.request_id)).toEqual(["expired-review"])
-      expect(attention.pending_balls.map((ball) => ball.request_id)).toEqual(["expired-review", "active-review"])
-      expect(health.pending_balls?.count).toBe(2)
-      expect(health.cadence?.open_balls.count).toBe(2)
-      expect(health.cadence?.role_actionable_response.open.count).toBe(2)
+      expect(expired.pending).toEqual([])
+      expect(attention.pending_balls.map((ball) => ball.request_id)).toEqual(["active-review"])
+      expect(health.pending_balls?.count).toBe(1)
+      expect(health.cadence?.open_balls.count).toBe(1)
+      expect(health.cadence?.role_actionable_response.open.count).toBe(1)
     } finally {
       db.close()
       if (savedSlaRole === undefined) delete process.env.TRIBE_SLA_ROLE
