@@ -29,7 +29,7 @@ const INBOX_WAIT_CLI = visibleCliProjectionForMcp("inbox.wait")
 const REPAIR_CLI = visibleCliProjectionForMcp("repair")
 
 const STALE_MANAGED_INBOX_DAEMON_ERROR =
-  "Running Tribe daemon is stale and cannot resolve this managed inbox; update/reload the daemon before retrying. Use --session only for an explicit operator target."
+  "Running Tribe daemon is stale and cannot resolve this managed inbox; update the module root before restarting the daemon. Use --session only for an explicit operator target."
 const INBOX_WAIT_PROTOCOL_MISMATCH = "TRIBE_INBOX_WAIT_PROTOCOL_MISMATCH"
 
 // ---------------------------------------------------------------------------
@@ -63,17 +63,17 @@ function cliInboxMethod(base: "status" | "wait" | "drain", session: string | und
   return session === undefined ? `cli_inbox_${base}_by_launch_v1` : `cli_inbox_${base}`
 }
 
-interface ReloadResult {
+interface RestartResult {
   error?: string
-  reloading?: boolean
+  restarting?: boolean
   reason?: string
   pid?: number
 }
 
-export function formatReloadResult(result: ReloadResult): string {
+export function formatRestartResult(result: RestartResult): string {
   const pid = typeof result.pid === "number" ? ` (pid ${result.pid})` : ""
-  const reason = result.reason ?? "manual reload"
-  return `Reloading tribe daemon${pid}: ${reason}.`
+  const reason = result.reason ?? "manual restart"
+  return `Restarting tribe daemon${pid}: ${reason}.`
 }
 
 // ---------------------------------------------------------------------------
@@ -703,7 +703,8 @@ export function evaluateDoctorIdentity(
       severity: "CRITICAL",
       values,
       diagnosis: `daemon code integrity mismatch running=${values.running} on_disk=${values.on_disk} pin=${values.pin}`,
-      remedy: 'run `tribe reload --reason "doctor found daemon code mismatch"`, then re-run `tribe doctor`',
+      remedy:
+        "the daemon is running a different module root; restarting will not help. Advance the daemon module root, then re-run `tribe doctor`",
     }
   }
   if (values.on_disk !== values.pin) {
@@ -747,7 +748,7 @@ export function evaluateDoctorVersions(
     return {
       severity: "WARNING",
       diagnosis: degraded.join(" "),
-      remedy: "finish the rolling Tribe reload so every daemon and seat negotiates the current wire version",
+      remedy: "finish the rolling Tribe restart so every daemon and seat negotiates the current wire version",
     }
   }
   const unknown = sessions
@@ -866,7 +867,7 @@ export async function probeDoctorRail(
     return {
       severity: "CRITICAL",
       diagnosis: `rail canary failed${code === undefined ? "" : ` (${String(code)})`}: ${detail}`,
-      remedy: 'run `tribe reload --reason "doctor rail canary failed"`, then re-run `tribe doctor`',
+      remedy: 'run `tribe restart --reason "doctor rail canary failed"`, then re-run `tribe doctor`',
     }
   } finally {
     sender?.close()
@@ -1407,20 +1408,20 @@ async function cmdRepair(opts: RepairCliOptions): Promise<void> {
   )
 }
 
-async function cmdReload(opts: { reason?: string; json?: boolean }): Promise<void> {
+async function cmdRestart(opts: { reason?: string; json?: boolean }): Promise<void> {
   const params: Record<string, unknown> = opts.reason ? { reason: opts.reason } : {}
-  const result = mcpJsonContent(await callDaemon("tribe.reload", params)) as ReloadResult
+  const result = mcpJsonContent(await callDaemon("tribe.restart", params)) as RestartResult
 
   if (opts.json) {
     console.log(JSON.stringify(result))
     return
   }
   if (result.error) {
-    console.error(`tribe reload: ${result.error}`)
+    console.error(`tribe restart: ${result.error}`)
     process.exit(1)
   }
 
-  console.log(formatReloadResult(result))
+  console.log(formatRestartResult(result))
 }
 
 // ---------------------------------------------------------------------------
@@ -1585,11 +1586,11 @@ export function registerReadCommands(program: Command): void {
     .action((opts: RepairCliOptions) => void cmdRepair(opts))
 
   program
-    .command("reload")
-    .description("Hot-reload the tribe daemon via RPC tribe.reload")
-    .option("--reason <text>", "Why the reload is needed (logged by the daemon)")
+    .command("restart")
+    .description("Restart the tribe daemon from the same pinned module root via RPC tribe.restart")
+    .option("--reason <text>", "Why the restart is needed (logged by the daemon)")
     .option("--json", "Emit machine-readable JSON")
-    .action((opts: { reason?: string; json?: boolean }) => void cmdReload(opts))
+    .action((opts: { reason?: string; json?: boolean }) => void cmdRestart(opts))
 
   program
     .command("activity")

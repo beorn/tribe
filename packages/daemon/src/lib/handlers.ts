@@ -47,7 +47,7 @@ export const TRIBE_COORD_METHODS = {
   rename: "tribe.rename",
   health: "tribe.health",
   join: "tribe.join",
-  reload: "tribe.reload",
+  restart: "tribe.restart",
   retro: "tribe.retro",
   debug: "tribe.debug",
   repair: "tribe.repair",
@@ -122,6 +122,7 @@ const REMOVED_TRIBE_METHODS = new Set([
   "tribe.chief",
   "tribe.claim-chief",
   "tribe.release-chief",
+  "tribe.reload",
 ])
 const REMOVED_TRIBE_METHOD_HINT = "use send/fetch/filter — see docs/architecture.md"
 
@@ -130,6 +131,9 @@ export function isRemovedTribeMethod(name: string): boolean {
 }
 
 export function removedTribeMethodMessage(name: string): string {
+  if (name === "tribe.reload") {
+    return `${name} renamed to tribe.restart; restart re-execs the same pinned module root and does not change code`
+  }
   return `${name} removed; ${REMOVED_TRIBE_METHOD_HINT}`
 }
 
@@ -303,8 +307,8 @@ export function handleToolCall(
       return handleJoin(ctx, a, opts)
     case TRIBE_COORD_METHODS.health:
       return handleHealth(ctx, opts)
-    case TRIBE_COORD_METHODS.reload:
-      return handleReload(ctx, a, opts.cleanup)
+    case TRIBE_COORD_METHODS.restart:
+      return handleRestart(ctx, a, opts.cleanup)
     case TRIBE_COORD_METHODS.retro:
       return handleRetro(ctx, a)
     case TRIBE_COORD_METHODS.debug:
@@ -1638,10 +1642,10 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
   return jsonResult(result)
 }
 
-function handleReload(ctx: TribeContext, a: ToolArgs, cleanup: () => void): ToolResult {
-  const reason = (a.reason as string) ?? "manual reload"
-  logEvent(ctx, "session.reload", undefined, { name: ctx.getName(), reason })
-  log.info?.(`reloading: ${reason}`)
+function handleRestart(ctx: TribeContext, a: ToolArgs, cleanup: () => void): ToolResult {
+  const reason = (a.reason as string) ?? "manual restart"
+  logEvent(ctx, "session.restart", undefined, { name: ctx.getName(), reason })
+  log.info?.(`restarting: ${reason}`)
 
   // Schedule the re-exec after the tool response is flushed.
   //
@@ -1650,20 +1654,20 @@ function handleReload(ctx: TribeContext, a: ToolArgs, cleanup: () => void): Tool
   // re-bind the socket, sees "Another daemon is already listening", and exits
   // immediately; meanwhile the old daemon also exits. Net result: NO daemon,
   // and every session sees "No daemon running". (Reproduced 2026-05-21 — a
-  // session calling `tribe.reload` repeatedly killed the daemon.)
+  // session calling `tribe.restart` repeatedly killed the daemon.)
   //
   // Instead we SIGHUP ourselves. The daemon's `withSignals` factory routes
   // SIGHUP → `withHotReload.reload()`, which asks the declared lifecycle owner
   // for a replacement. A directly launched standalone daemon first installs
   // that stable owner; successor daemons never detach themselves. This is the
-  // same hardened path `tribe reload` (the CLI) already uses.
+  // same hardened path `tribe restart` (the CLI) already uses.
   setTimeout(() => {
     cleanup()
-    log.info?.(`SIGHUP self (pid=${process.pid}) — hot-reload via lifecycle owner`)
+    log.info?.(`SIGHUP self (pid=${process.pid}) — restart via lifecycle owner`)
     process.kill(process.pid, "SIGHUP")
   }, 100) // small delay so the tool response gets sent first
 
-  return jsonResult({ reloading: true, reason, pid: process.pid })
+  return jsonResult({ restarting: true, reason, pid: process.pid })
 }
 
 async function handleRetro(ctx: TribeContext, a: ToolArgs): Promise<ToolResult> {

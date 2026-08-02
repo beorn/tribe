@@ -423,7 +423,8 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
 
     expect(error.message).toContain(`client=${TRIBE_PROTOCOL_VERSION - 2}`)
     expect(error.message).toContain(`supported=${TRIBE_PROTOCOL_VERSION},${TRIBE_PROTOCOL_VERSION - 1}`)
-    expect(error.message).toMatch(/upgrade.*client.*reconnect/i)
+    expect(error.message).toMatch(/upgrade.*client.*module root/i)
+    expect(error.message).toMatch(/restarting will not help/i)
     expect(harness.sessionCount("@agent/too-old")).toBe(0)
   })
 

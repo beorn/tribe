@@ -117,7 +117,7 @@ firing at once, both seeing "dead"). The daemon handles this in two stages:
 lifecycle owner:
 
 - **Standalone daemon** — the repo-local supervisor is the durable parent of
-  every daemon generation. `tribe.reload` (RPC), `tribe-wire reload` (CLI), and
+  every daemon generation. `tribe.restart` (RPC), `tribe-wire restart` (CLI), and
   `SIGHUP` stop plugins and exit with a private reload code; the same supervisor
   starts the successor with a fresh bind. If a user launched the first
   generation directly, that generation installs the supervisor and asks it to
@@ -194,11 +194,13 @@ There is no dedicated `stop` subcommand. In practice:
 - **Graceful stop**: send `SIGTERM`/`SIGINT` to the daemon's pid (find it via
   `tribe-wire status`/`health`, both of which print `daemon.pid`) — the
   `withSignals` factory routes both to the same shutdown path as idle-quit.
-- **Restart to pick up new code**: `tribe-wire reload` (or the `tribe.reload`
-  MCP tool) — see Hot-reload above. Standalone daemons replace themselves;
-  supervised daemons exit cleanly and let their supervisor replace them.
+- **Restart from the current pinned module root**: `tribe-wire restart` (or the
+  `tribe.restart` MCP tool) — see Hot-reload above. Restart changes no code;
+  standalone daemons replace themselves, while supervised daemons exit cleanly
+  and let their supervisor replace them. To change code, materialize and
+  activate a different module root first.
 - **Force a clean respawn** (e.g. after `tribe-wire doctor` reports stale
-  code and a reload isn't trusted): stop the process manually, then let the
+  code and a restart isn't trusted): stop the process manually, then let the
   next autostart-eligible connection spawn a fresh one from current disk —
   `doctor --fix`'s printed remedy is exactly this sequence.
 

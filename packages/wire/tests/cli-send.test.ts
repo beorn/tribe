@@ -16,6 +16,7 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { buildSendPayload, registerSendCommands } from "../src/cli/send.ts"
+import { oversizedMessageError } from "../src/lib/send-validation.ts"
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "../src/cli.ts")
 const BUN_BIN = process.env.BUN_EXECUTABLE ?? "bun"
@@ -37,6 +38,14 @@ function optionFlags(cmd: Command): string[] {
 }
 
 describe("registerSendCommands", () => {
+  test("client rejects oversize content with byte count and a file+SHA pointer", () => {
+    const message = "🙂".repeat(2_050)
+    const error = oversizedMessageError(message)
+
+    expect(error).toContain(`${Buffer.byteLength(message, "utf8")} UTF-8 bytes`)
+    expect(error).toMatch(/file:\/\/\/absolute\/path\/to\/message sha256:[0-9a-f]{64}/u)
+  })
+
   test("registers all send/messaging verbs", () => {
     const program = buildProgram()
     const names = program.commands.map((c) => c.name())

@@ -173,15 +173,16 @@ messages, and pending balls are preserved. The JSON result reports examined and
 reaped totals, reason counts, and reaped member ids/names. The modes are
 mutually exclusive; neither repair signals a process or restarts the daemon.
 
-### `reload`
+### `restart`
 
 ```bash
-tribe-wire reload [--reason <text>] [--json]
+tribe-wire restart [--reason <text>] [--json]
 ```
 
-Hot-reloads the **daemon** via the `tribe.reload` RPC (SIGHUP-equivalent —
-see [daemon.md](daemon.md) for what actually happens). `--reason` is logged
-by the daemon.
+Restarts the **daemon** via the `tribe.restart` RPC. The daemon re-execs from
+the same pinned module root, so this changes no code; connected clients
+reconnect on their own. `--reason` is logged by the daemon. Use a separate
+materialize/activate operation to change the code root.
 
 ### `activity`
 

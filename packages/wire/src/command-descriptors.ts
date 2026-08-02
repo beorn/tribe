@@ -139,7 +139,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, minItems: 1 }],
             description: 'Recipient session name, recipient session names, or "*" for broadcast',
           },
-          message: { type: "string", description: "Message content" },
+          message: {
+            type: "string",
+            description:
+              "Message content. The client rejects content over 4096 characters before sending; save larger content to a file and send a file+SHA pointer.",
+          },
           summary: {
             type: "string",
             description:
@@ -237,7 +241,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           truncated: {
             type: "boolean",
             description:
-              "Always present. True when the message exceeded the 4096-char cap and the recipient received only a prefix ending in `...`. The daemon still delivered it and still reports `sent: true` — treat `truncated: true` as a partial send and resend the remainder or link the full text.",
+              "Legacy-daemon compatibility field. New clients reject over-cap content before sending; true means an older daemon delivered only a prefix ending in `...`.",
           },
           original_length: {
             type: "number",
@@ -826,29 +830,32 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     }),
   },
   {
-    id: "tribe.reload",
-    title: "Reload",
+    id: "tribe.restart",
+    title: "Restart",
     description:
-      "Hot-reload the tribe MCP server - re-exec with latest code from disk. Use after tribe code is updated to pick up fixes without restarting the Claude Code session.",
+      "Restart the tribe MCP server from the same pinned module root. This changes no code; clients reconnect on their own.",
     lifetime: "operator",
     mcp: {
-      name: "reload",
+      name: "restart",
       description:
-        "Hot-reload the tribe MCP server - re-exec with latest code from disk. Use after tribe code is updated to pick up fixes without restarting the Claude Code session.",
+        "Restart the tribe MCP server from the same pinned module root. This changes no code; clients reconnect on their own.",
       inputSchema: {
         type: "object",
-        properties: { reason: { type: "string", description: "Why the reload is needed (logged to events)" } },
+        properties: { reason: { type: "string", description: "Why the restart is needed (logged to events)" } },
       },
       outputSchema: OBJ(
         {
-          reloading: { type: "boolean" },
+          restarting: { type: "boolean" },
           reason: { type: "string" },
           pid: { type: "number", description: "PID of the daemon about to re-exec." },
         },
-        "Reload acknowledgment - the actual re-exec happens shortly after this response flushes.",
+        "Restart acknowledgment - the actual re-exec happens shortly after this response flushes.",
       ),
     },
-    cli: hidden("Legacy CLI reload exists, but reload is outside the first descriptor-backed parity slice.", "reload"),
+    cli: hidden(
+      "Legacy CLI restart exists, but restart is outside the first descriptor-backed parity slice.",
+      "restart",
+    ),
   },
   {
     id: "tribe.retro",

@@ -259,6 +259,23 @@ describe("callTribeTool", () => {
     expect(result).toMatchObject({ structuredContent: canonicalInboxWaitResult })
   })
 
+  it("rejects an oversized send before it reaches the daemon and gives a file+SHA remedy", async () => {
+    const call = vi.fn(async () => ({ sent: true }))
+    const client = { call } as unknown as DaemonClient
+
+    const result = await callTribeTool(client, "send", {
+      to: "@agent/test",
+      message: "x".repeat(4_097),
+    })
+
+    expect(call).not.toHaveBeenCalled()
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: { error: expect.stringContaining("4097") },
+    })
+    expect(JSON.stringify(result)).toMatch(/file.*sha256/i)
+  })
+
   it("uses a host-safe diagnostic window when MCP omits timeout_ms", async () => {
     const call = vi.fn(async () => canonicalInboxWaitResult)
     const client = { call } as unknown as DaemonClient

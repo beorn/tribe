@@ -314,7 +314,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     expect(stdout).toMatch(/Commands:/)
     // A few canonical verbs from each registered family are visible.
     expect(stdout).toMatch(/\bstatus\b/)
-    expect(stdout).toMatch(/\breload\b/)
+    expect(stdout).toMatch(/\brestart\b/)
     expect(stdout).toMatch(/\bsend\b/)
     expect(stdout).toMatch(/\bretro\b/)
     // addHelpText footer documents the argv-forwarded mcp subcommand.
@@ -708,7 +708,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       expect(result.stdout).toContain(`OK — code identity running=${TRIBE_SHA} on_disk=${TRIBE_SHA} pin=${TRIBE_SHA}`)
       expect(result.stderr).toContain("CRITICAL — rail canary failed: long-poll returned status=timeout timed_out=true")
       expect(result.stderr).toContain(
-        'REMEDY — run `tribe reload --reason "doctor rail canary failed"`, then re-run `tribe doctor`',
+        'REMEDY — run `tribe restart --reason "doctor rail canary failed"`, then re-run `tribe doctor`',
       )
       expect(result.stderr).toContain("FINAL FAIL — derived from the worst doctor check")
       expect(methods).toEqual(["cli_status", "tribe.members", "register", "cli_inbox_wait", "tribe.send"])
@@ -770,7 +770,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         `CRITICAL — code identity: daemon code integrity mismatch running=deadbeef on_disk=${TRIBE_SHA} pin=${TRIBE_SHA}`,
       )
       expect(result.stderr).toContain(
-        'REMEDY — run `tribe reload --reason "doctor found daemon code mismatch"`, then re-run `tribe doctor`',
+        "REMEDY — the daemon is running a different module root; restarting will not help. Advance the daemon module root, then re-run `tribe doctor`",
       )
       expect(result.stdout).toContain("OK — rail canary message=00000000-0000-4000-8000-000000000001")
       expect(result.stderr).toContain("FINAL FAIL — derived from the worst doctor check")
@@ -956,7 +956,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       })
       for (const cli of [managedStatus, managedWait, managedDrain]) {
         expect(cli.code).not.toBe(0)
-        expect(cli.stderr).toMatch(/stale.*reload/i)
+        expect(cli.stderr).toMatch(/stale.*restart/i)
       }
 
       expect(calls).toEqual([

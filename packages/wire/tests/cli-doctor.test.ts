@@ -138,7 +138,8 @@ describe("status-backed doctor checks", () => {
     )
     expect(check).toMatchObject({ severity: "CRITICAL" })
     expect(check.diagnosis).toContain("running=old123 on_disk=new456")
-    expect(check.remedy).toContain('tribe reload --reason "doctor found daemon code mismatch"')
+    expect(check.remedy).toContain("restarting will not help")
+    expect(check.remedy).toContain("daemon module root")
   })
 
   test("disk vs superproject pin mismatch is WARNING with the exact source root", () => {

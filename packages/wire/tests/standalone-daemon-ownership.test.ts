@@ -221,7 +221,7 @@ client.close()
     })
 
     const first = await connectToGeneration(socketPath, (pid) => pid === firstPid)
-    await first.client.call("tribe.reload", { reason: "22322 lifecycle-owner acceptance" })
+    await first.client.call("tribe.restart", { reason: "22322 lifecycle-owner acceptance" })
     first.client.close()
 
     const successor = await connectToGeneration(socketPath, (pid) => pid !== firstPid)
@@ -291,7 +291,7 @@ await import(${JSON.stringify(pathToFileURL(DAEMON).href)})
     await waitFor(() => existsSync(socketPath), "direct daemon socket")
     const first = await connectToGeneration(socketPath, (pid) => pid === direct.pid)
 
-    await first.client.call("tribe.reload", { reason: "22322 direct-owner adoption acceptance" })
+    await first.client.call("tribe.restart", { reason: "22322 direct-owner adoption acceptance" })
     first.client.close()
     await waitFor(() => !pidExists(first.pid), "direct predecessor exit")
 

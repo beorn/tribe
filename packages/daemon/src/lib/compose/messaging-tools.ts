@@ -1,6 +1,6 @@
 /**
  * messagingTools() — protocol-agnostic ToolDef array for the tribe.* coord
- * methods (send, broadcast, members, history, rename, join, health, reload,
+ * methods (send, broadcast, members, history, rename, join, health, restart,
  * retro, chief, claim-chief, release-chief, debug).
  *
  * Each tool wraps the existing `handleToolCall` from `handlers.ts`, which

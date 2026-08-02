@@ -328,7 +328,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
     const firstTransportPid = firstMember!.transport_pids![0]!
     adapterPids.add(firstTransportPid)
 
-    await firstDaemon.client.call("tribe.reload", { reason: "21416 restart acceptance" })
+    await firstDaemon.client.call("tribe.restart", { reason: "21416 restart acceptance" })
     firstDaemon.client.close()
     const successor = await connectToGeneration(socketPath, (pid) => pid !== firstDaemon.pid)
     daemonPids.add(successor.pid)
@@ -371,7 +371,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
     // Production incident 22322 restarted the daemon twice ten seconds apart.
     // The first generation replacement succeeded, but the wrapper's one-reexec
     // budget killed the bridge on the second legitimate generation change.
-    await successor.client.call("tribe.reload", { reason: "22322 rapid second restart acceptance" })
+    await successor.client.call("tribe.restart", { reason: "22322 rapid second restart acceptance" })
     successor.client.close()
     const secondSuccessor = await connectToGeneration(socketPath, (pid) => pid !== successor.pid)
     daemonPids.add(secondSuccessor.pid)
@@ -687,7 +687,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
     const initialTransportPid = initial!.transport_pids![0]!
     adapterPids.add(initialTransportPid)
 
-    await firstDaemon.client.call("tribe.reload", { reason: "22322 runtime-name restart acceptance" })
+    await firstDaemon.client.call("tribe.restart", { reason: "22322 runtime-name restart acceptance" })
     firstDaemon.client.close()
     const successor = await connectToGeneration(socketPath, (pid) => pid !== firstDaemon.pid)
     daemonPids.add(successor.pid)
@@ -760,7 +760,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
       )
     }, "direct-adapter initial membership")
 
-    await firstDaemon.client.call("tribe.reload", { reason: "22322 direct adapter restart acceptance" })
+    await firstDaemon.client.call("tribe.restart", { reason: "22322 direct adapter restart acceptance" })
     firstDaemon.client.close()
     const successor = await connectToGeneration(socketPath, (pid) => pid !== firstDaemon.pid)
     daemonPids.add(successor.pid)
@@ -836,7 +836,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
       }
 
       const priorDaemonPid = generation.pid
-      await generation.client.call("tribe.reload", { reason: `22322 multi-seat restart ${restart}` })
+      await generation.client.call("tribe.restart", { reason: `22322 multi-seat restart ${restart}` })
       generation.client.close()
       generation = await connectToGeneration(socketPath, (pid) => pid !== priorDaemonPid)
       daemonPids.add(generation.pid)

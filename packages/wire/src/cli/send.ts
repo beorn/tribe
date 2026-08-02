@@ -33,6 +33,7 @@ import { formatMarkdown, generateRetro, parseDuration } from "../lib/retro.ts"
 import { readTribeLaunchId } from "../launch-environment.ts"
 import { withCliDaemonClient } from "./daemon-client.ts"
 import { mcpJsonContent } from "./mcp-json-content.ts"
+import { oversizedMessageError } from "../lib/send-validation.ts"
 
 const SEND_CLI = visibleCliProjectionForMcp("send")
 const JOIN_CLI = visibleCliProjectionForMcp("join")
@@ -339,6 +340,11 @@ function parseDomains(values: string[] | undefined): string[] {
 
 async function cmdSend(input: SendPayloadInput): Promise<void> {
   rejectUnstructuredMessageIntent(input)
+  const oversized = oversizedMessageError(input.message)
+  if (oversized !== null) {
+    console.error(`tribe-wire send: ${oversized}`)
+    process.exit(2)
+  }
   const caller = await resolveSendCaller(input.reply)
   if (input.reply && caller) await verifyPendingReplyOwner(caller.name, input.reply)
 

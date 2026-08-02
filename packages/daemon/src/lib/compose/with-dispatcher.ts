@@ -37,13 +37,13 @@ import {
   makeError,
   makeResponse,
   negotiateProtocolVersion,
-  protocolVersionMismatchMessage,
   supportedProtocolVersionsFromAdvertisement,
   TRIBE_SUPPORTED_PROTOCOL_VERSIONS,
   TRIBE_PROTOCOL_VERSION,
   type JsonRpcMessage,
   type JsonRpcRequest,
 } from "tribe-wire/lib/socket"
+import { protocolVersionMismatchMessage } from "../../../../wire/src/lib/protocol-mismatch.ts"
 import { detectRole, resolveProjectId, type TribeRole } from "tribe-wire/lib/config"
 import { createTribeContext, type MessageInsertedInfo, type TribeContext } from "../context.ts"
 import {
@@ -702,7 +702,11 @@ export function withDispatcher<
                 ? undefined
                 : negotiateProtocolVersion(clientProtocolVersions)
             if (negotiatedProtocolVersion === null) {
-              return makeError(id, -32006, protocolVersionMismatchMessage(clientProtocolVersions))
+              return makeError(
+                id,
+                -32006,
+                protocolVersionMismatchMessage(clientProtocolVersions, TRIBE_SUPPORTED_PROTOCOL_VERSIONS),
+              )
             }
             const filterMode = p.filterMode
             if (filterMode !== undefined && !isSessionFilterMode(filterMode)) {
@@ -1112,7 +1116,7 @@ export function withDispatcher<
           case TRIBE_COORD_METHODS.rename:
           case TRIBE_COORD_METHODS.join:
           case TRIBE_COORD_METHODS.health:
-          case TRIBE_COORD_METHODS.reload:
+          case TRIBE_COORD_METHODS.restart:
           case TRIBE_COORD_METHODS.retro:
           case TRIBE_COORD_METHODS.debug:
           case TRIBE_COORD_METHODS.repair:

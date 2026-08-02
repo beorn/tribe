@@ -622,7 +622,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       }),
     ).rejects.toThrow(/authenticated current session or the configured operator capability/i)
 
-    await first.client.call("tribe.reload", { reason: "operator capability lifecycle test" })
+    await first.client.call("tribe.restart", { reason: "operator capability lifecycle test" })
     first.client.close()
     const successor = await connectToDaemonPid(socketPath, (pid) => pid !== first.pid)
     detachedDaemonPids.push(successor.pid)

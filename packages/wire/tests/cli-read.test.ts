@@ -12,7 +12,7 @@
 import { describe, expect, test } from "vitest"
 import { Command } from "@silvery/commander"
 import {
-  formatReloadResult,
+  formatRestartResult,
   registerReadCommands,
   resolveRepairOptions,
   waitForInboxWithReconnect,
@@ -54,7 +54,7 @@ describe("registerReadCommands", () => {
         "inbox-drain",
         "inbox-status",
         "inbox-wait",
-        "reload",
+        "restart",
         "repair",
         "activity",
       ]),
@@ -128,10 +128,10 @@ describe("registerReadCommands", () => {
     expect(flags).toEqual(expect.arrayContaining(["--session", "--inbox-cursor", "--reap-stale-transports", "--json"]))
   })
 
-  test("reload verb accepts --reason and --json", () => {
-    const cmd = findCmd(buildProgram(), "reload")
+  test("restart verb accepts --reason and --json", () => {
+    const cmd = findCmd(buildProgram(), "restart")
     expect(cmd).toBeDefined()
-    expect(cmd!.description()).toMatch(/hot-reload/i)
+    expect(cmd!.description()).toMatch(/restart.*same pinned module root/i)
     const flags = optionFlags(cmd!)
     expect(flags).toEqual(expect.arrayContaining(["--reason", "--json"]))
   })
@@ -173,16 +173,16 @@ describe("resolveRepairOptions", () => {
   })
 })
 
-describe("formatReloadResult", () => {
-  test("formats the daemon reload acknowledgement with pid and reason", () => {
-    expect(formatReloadResult({ reloading: true, reason: "pick up CLI fix", pid: 1234 })).toBe(
-      "Reloading tribe daemon (pid 1234): pick up CLI fix.",
+describe("formatRestartResult", () => {
+  test("formats the daemon restart acknowledgement with pid and reason", () => {
+    expect(formatRestartResult({ restarting: true, reason: "pick up CLI fix", pid: 1234 })).toBe(
+      "Restarting tribe daemon (pid 1234): pick up CLI fix.",
     )
   })
 
-  test("formats older daemon reload acknowledgements without pid", () => {
-    expect(formatReloadResult({ reloading: true, reason: "manual reload" })).toBe(
-      "Reloading tribe daemon: manual reload.",
+  test("formats older daemon restart acknowledgements without pid", () => {
+    expect(formatRestartResult({ restarting: true, reason: "manual restart" })).toBe(
+      "Restarting tribe daemon: manual restart.",
     )
   })
 })
