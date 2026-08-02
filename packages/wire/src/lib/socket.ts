@@ -52,6 +52,32 @@ export const TRIBE_PROTOCOL_VERSION = 10
  */
 export const TRIBE_SUPPORTED_PROTOCOL_VERSIONS = [TRIBE_PROTOCOL_VERSION, TRIBE_PROTOCOL_VERSION - 1] as const
 
+/** One registration advertisement for every persistent Tribe transport. */
+export function protocolVersionAdvertisement(protocolVersion = TRIBE_PROTOCOL_VERSION - 1): {
+  protocolVersion: number
+  supportedProtocolVersions: number[]
+} {
+  return {
+    protocolVersion,
+    supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
+  }
+}
+
+/** Extract the daemon's advertised window from a protocol-mismatch refusal. */
+export function protocolVersionsFromMismatch(reason: string): number[] {
+  const supportedLabel = /(?:^|[;\s])supported=(\d+(?:\s*,\s*\d+)*)/i.exec(reason)?.[1]
+  const advertised = supportedLabel?.split(",").map((value) => Number(value.trim()))
+  const legacy = Number(/(?:^|[;\s])daemon=(\d+)/i.exec(reason)?.[1])
+  return supportedProtocolVersionsFromAdvertisement(advertised, legacy)
+}
+
+/** Small bounded jitter layered over the reconnect client's capped backoff. */
+export function reconnectRegistrationJitterMs(random: () => number = Math.random): number {
+  const sample = random()
+  const bounded = Number.isFinite(sample) ? Math.max(0, Math.min(sample, 0.999_999)) : 0
+  return Math.floor(bounded * 250)
+}
+
 export function supportedProtocolVersionsFromAdvertisement(advertised: unknown, legacy: unknown): number[] {
   const advertisedVersions = Array.isArray(advertised)
     ? advertised.filter(

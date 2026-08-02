@@ -13,7 +13,12 @@ import { createServer, type Server, type Socket } from "node:net"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createLineParser } from "../src/parser.ts"
 import { isRequest, makeError, makeResponse } from "../src/rpc.ts"
-import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
+import {
+  protocolVersionAdvertisement,
+  protocolVersionsFromMismatch,
+  reconnectRegistrationJitterMs,
+  TRIBE_PROTOCOL_VERSION,
+} from "../src/lib/socket.ts"
 
 const PLUGIN_SERVER = resolve(dirname(fileURLToPath(import.meta.url)), "../../../plugins/claude/server.ts")
 const STDIO_ADAPTER = resolve(dirname(fileURLToPath(import.meta.url)), "../src/stdio-adapter.ts")
@@ -124,6 +129,24 @@ function spawnCompatibleDaemon(socketPath: string): Promise<{
         if (!isRequest(msg)) return
         if (msg.method === "register") {
           registrations.push(msg.params ?? {})
+          const params = msg.params as {
+            protocolVersion?: unknown
+            supportedProtocolVersions?: unknown
+          }
+          if (
+            params.protocolVersion !== TRIBE_PROTOCOL_VERSION - 1 ||
+            JSON.stringify(params.supportedProtocolVersions) !==
+              JSON.stringify([TRIBE_PROTOCOL_VERSION, TRIBE_PROTOCOL_VERSION - 1])
+          ) {
+            socket.write(
+              makeError(
+                msg.id,
+                -32006,
+                `Protocol version mismatch: client=${String(params.protocolVersion)}; daemon=${TRIBE_PROTOCOL_VERSION - 1}; supported=${TRIBE_PROTOCOL_VERSION - 1}. Advance the Tribe daemon to v${TRIBE_PROTOCOL_VERSION - 1} or newer, then reconnect.`,
+              ),
+            )
+            return
+          }
           socket.write(
             makeResponse(msg.id, {
               sessionId: "compatible-s1",
@@ -165,7 +188,7 @@ function spawnReconnectSkewDaemon(socketPath: string): Promise<{
         if (!isRequest(msg)) return
         if (msg.method === "register") {
           registrations += 1
-          if (registrations === 2) {
+          if (registrations >= 2 && registrations <= 4) {
             socket.write(
               makeError(
                 msg.id,
@@ -211,6 +234,72 @@ function spawnReconnectSkewDaemon(socketPath: string): Promise<{
   })
 }
 
+function spawnClampDaemon(socketPath: string): Promise<{
+  server: Server
+  clients: Socket[]
+  registrations: number[]
+}> {
+  const clients: Socket[] = []
+  const registrations: number[] = []
+  return new Promise((resolveServer) => {
+    const server = createServer((socket) => {
+      clients.push(socket)
+      const parse = createLineParser((msg) => {
+        if (!isRequest(msg)) return
+        if (msg.method === "register") {
+          const protocolVersion = (msg.params as { protocolVersion?: unknown } | undefined)?.protocolVersion
+          registrations.push(typeof protocolVersion === "number" ? protocolVersion : -1)
+          if (registrations.length === 1) {
+            socket.write(
+              makeResponse(msg.id, {
+                sessionId: "clamp-v10",
+                name: "clamp-test",
+                role: "member",
+                chief: "",
+                protocolVersion: TRIBE_PROTOCOL_VERSION,
+                daemon: { pid: 5005, uptime: 0 },
+              }),
+            )
+            setTimeout(() => socket.destroy(), 25)
+            return
+          }
+          if (protocolVersion !== TRIBE_PROTOCOL_VERSION - 1) {
+            socket.write(
+              makeError(
+                msg.id,
+                -32006,
+                `Protocol version mismatch: client=${String(protocolVersion)}; daemon=${TRIBE_PROTOCOL_VERSION - 1}; supported=${TRIBE_PROTOCOL_VERSION - 1}. Advance the Tribe daemon to v${TRIBE_PROTOCOL_VERSION - 1} or newer, then reconnect.`,
+              ),
+            )
+            return
+          }
+          socket.write(
+            makeResponse(msg.id, {
+              sessionId: "clamp-s1",
+              name: "clamp-test",
+              role: "member",
+              chief: "",
+              protocolVersion: TRIBE_PROTOCOL_VERSION - 1,
+              daemon: { pid: 5005, uptime: 0 },
+            }),
+          )
+          return
+        }
+        if (msg.method === "tribe.members") {
+          socket.write(makeResponse(msg.id, { content: [{ type: "text", text: JSON.stringify({ sessions: [] }) }] }))
+          return
+        }
+        socket.write(makeResponse(msg.id, { ok: true }))
+      })
+      socket.on("data", parse)
+      socket.on("error", () => {
+        /* test teardown */
+      })
+    })
+    server.listen(socketPath, () => resolveServer({ server, clients, registrations }))
+  })
+}
+
 async function waitFor(predicate: () => boolean, timeoutMs = 5_000, label = "condition"): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -227,6 +316,21 @@ describe("stdio adapter — protocol version skew", () => {
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "tribe-skew-"))
+  })
+
+  it("derives registration advertisement, mismatch versions, and bounded jitter from shared helpers", () => {
+    expect(protocolVersionAdvertisement()).toEqual({
+      protocolVersion: TRIBE_PROTOCOL_VERSION - 1,
+      supportedProtocolVersions: [TRIBE_PROTOCOL_VERSION, TRIBE_PROTOCOL_VERSION - 1],
+    })
+    expect(
+      protocolVersionsFromMismatch(
+        `Protocol version mismatch: client=${TRIBE_PROTOCOL_VERSION}; daemon=${TRIBE_PROTOCOL_VERSION - 1}; supported=${TRIBE_PROTOCOL_VERSION - 1}.`,
+      ),
+    ).toEqual([TRIBE_PROTOCOL_VERSION - 1])
+    expect(reconnectRegistrationJitterMs(() => 0)).toBe(0)
+    expect(reconnectRegistrationJitterMs(() => 0.5)).toBe(125)
+    expect(reconnectRegistrationJitterMs(() => 0.999)).toBe(249)
   })
 
   afterEach(async () => {
@@ -269,7 +373,7 @@ describe("stdio adapter — protocol version skew", () => {
     expect(child.exitCode).toBeNull()
   }, 20_000)
 
-  it("runs the existing reconnect loop after a transient version mismatch", async () => {
+  it("keeps retrying after the old three-attempt budget would have detached the transport", async () => {
     const socketPath = join(tmpDir, "tribe-reconnect-skew.sock")
     const reconnectDaemon = await spawnReconnectSkewDaemon(socketPath)
     daemon = reconnectDaemon
@@ -279,7 +383,26 @@ describe("stdio adapter — protocol version skew", () => {
       stdio: ["pipe", "pipe", "pipe"],
     }) as ChildProcessWithoutNullStreams
 
-    await waitFor(() => reconnectDaemon.registrations >= 3, 12_000, "reconnect after version mismatch")
+    await waitFor(() => reconnectDaemon.registrations >= 5, 12_000, "reconnect after version mismatch")
+    expect(child.exitCode).toBeNull()
+  }, 20_000)
+
+  it("clamps registration to a daemon version inside the advertised window", async () => {
+    const socketPath = join(tmpDir, "tribe-clamp.sock")
+    const clampDaemon = await spawnClampDaemon(socketPath)
+    daemon = clampDaemon
+    child = spawn(BUN_BIN, [STDIO_ADAPTER, "--socket", socketPath, "--name", "clamp-test"], {
+      cwd: tmpDir,
+      env: { ...process.env, ...STANDALONE_PLUGIN_ENV, TRIBE_DELIVERY: "pull", LOG_LEVEL: "silent" },
+      stdio: ["pipe", "pipe", "pipe"],
+    }) as ChildProcessWithoutNullStreams
+
+    await waitFor(() => clampDaemon.registrations.length >= 3, 8_000, "registration at the daemon-selected version")
+    expect(clampDaemon.registrations).toEqual([
+      TRIBE_PROTOCOL_VERSION - 1,
+      TRIBE_PROTOCOL_VERSION,
+      TRIBE_PROTOCOL_VERSION - 1,
+    ])
     expect(child.exitCode).toBeNull()
   }, 20_000)
 

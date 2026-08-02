@@ -29,6 +29,10 @@ import {
   connectToDaemon,
   createReconnectingClient,
   isSupportedProtocolVersion,
+  negotiateProtocolVersion,
+  protocolVersionAdvertisement,
+  protocolVersionsFromMismatch,
+  reconnectRegistrationJitterMs,
   TRIBE_PROTOCOL_VERSION,
   TRIBE_SUPPORTED_PROTOCOL_VERSIONS,
   type DaemonClient,
@@ -305,10 +309,6 @@ const baseRegisterParams = {
   project: process.cwd(),
   projectName: PROJECT_NAME,
   projectId: resolveProjectId(),
-  // Keep the legacy scalar at N-1 so a pre-window daemon can still accept the
-  // registration. New daemons use the advertised set to negotiate N.
-  protocolVersion: TRIBE_PROTOCOL_VERSION - 1,
-  supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
   // Peer-direct messaging was removed (km-tribe DM-body-drop bug): a DM
   // delivered socket-to-socket bypassed the daemon journal, so the body row
   // never landed in `messages` and pull/reconnect readers lost it. All sends
@@ -328,6 +328,9 @@ const baseRegisterParams = {
   ...(args.provider ? { provider: args.provider } : {}),
 }
 let hasRegistered = false
+let hasAttemptedRegistration = false
+let selectedProtocolVersion = TRIBE_PROTOCOL_VERSION - 1
+let protocolMismatchReason: string | null = null
 
 type RequiredMcpTransportStatus = "advertised" | "live" | "closed"
 
@@ -377,6 +380,7 @@ function registerParamsForConnection(): typeof baseRegisterParams & {
 } {
   return {
     ...baseRegisterParams,
+    ...protocolVersionAdvertisement(selectedProtocolVersion),
     delivery: joined ? DELIVERY : "pull",
     ...(TAKEOVER && !hasRegistered ? { takeover: true as const } : {}),
   }
@@ -411,8 +415,6 @@ function failManagedPersonaRegistration(err: unknown): never {
 function reportProtocolVersion(reason: string): void {
   log.warn?.(`tribe protocol version mismatch; staying degraded until it is repaired: ${reason}`)
 }
-
-const PLUGIN_RECONNECT_ATTEMPTS = 3
 
 function pluginReexecExitCode(): number | null {
   const supervisedExitCode = Number(process.env.TRIBE_PLUGIN_REEXEC_EXIT_CODE)
@@ -466,6 +468,10 @@ const reconnectWatchdog = createReconnectWatchdog({
     }
   },
   onStuck({ reconnectingMs }) {
+    if (protocolMismatchReason !== null) {
+      reportProtocolVersion(`${protocolMismatchReason}; retrying without host re-exec`)
+      return
+    }
     requestPluginReexec(
       `primary transport remained reconnecting for ${reconnectingMs}ms while the daemon answered a fresh connection`,
     )
@@ -486,6 +492,10 @@ function startDaemonConnection(): Promise<DaemonClient> {
     // Lifecycle belongs to an explicit daemon install or Hab supervision.
     noSpawn: true,
     async onConnect(client) {
+      if (hasAttemptedRegistration) {
+        await timers.delay(reconnectRegistrationJitterMs())
+      }
+      hasAttemptedRegistration = true
       // km 19442 — open a fresh connect-replay window so a stale daemon's body-push
       // burst on (re)connect is bounded (see connectReplayGate + the `channel` handler).
       connectReplayGate.reset(Date.now())
@@ -500,8 +510,17 @@ function startDaemonConnection(): Promise<DaemonClient> {
       try {
         reg = (await client.call("register", registerParamsForConnection())) as typeof reg
       } catch (err) {
-        if (/protocol version mismatch/i.test(errorMessage(err))) {
-          reportProtocolVersion(errorMessage(err))
+        const reason = errorMessage(err)
+        if (/protocol version mismatch/i.test(reason)) {
+          protocolMismatchReason = reason
+          const daemonVersions = protocolVersionsFromMismatch(reason)
+          const negotiatedVersion = negotiateProtocolVersion(TRIBE_SUPPORTED_PROTOCOL_VERSIONS, daemonVersions)
+          if (negotiatedVersion !== null) {
+            selectedProtocolVersion = negotiatedVersion
+            reportProtocolVersion(`${reason}; retrying protocol=${negotiatedVersion}`)
+          } else {
+            reportProtocolVersion(`${reason}; no compatible version in the shipped window; retrying slowly`)
+          }
         }
         // Legacy adapters launched without a logical launch id cannot tell a
         // transient reconnect race from another adapter in the same provider
@@ -529,6 +548,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
       }
       registeredDaemonPid = nextDaemonPid
       hasRegistered = true
+      protocolMismatchReason = null
       managedRegistrationConflicts = 0
       setRequiredMcpTransportHealth("live", "registered with tribe daemon")
       reconnectWatchdog.markConnected()
@@ -537,8 +557,12 @@ function startDaemonConnection(): Promise<DaemonClient> {
       reportSupervisedIdentity(myName)
       myRole = reg.role
       log.info?.(`Registered as ${myName} (${myRole})`)
-      if (typeof reg.protocolVersion === "number" && !isSupportedProtocolVersion(reg.protocolVersion)) {
-        reportProtocolVersion(`session=${TRIBE_PROTOCOL_VERSION}, daemon=${reg.protocolVersion}`)
+      if (typeof reg.protocolVersion === "number") {
+        if (isSupportedProtocolVersion(reg.protocolVersion)) {
+          selectedProtocolVersion = reg.protocolVersion
+        } else {
+          reportProtocolVersion(`session=${TRIBE_PROTOCOL_VERSION}, daemon=${reg.protocolVersion}`)
+        }
       }
       void client.call("subscribe").catch(() => {})
 
@@ -582,10 +606,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
       // km 19442 — a reconnect can replay the daemon's pending body-push burst; rebound it.
       connectReplayGate.reset(Date.now())
     },
-    maxAttempts: PLUGIN_RECONNECT_ATTEMPTS,
-    onReconnectExhausted(error, attempts) {
-      requestPluginReexec(`daemon reconnect exhausted after ${attempts} attempts: ${errorMessage(error)}`)
-    },
+    maxAttempts: Number.POSITIVE_INFINITY,
   }).then((client) => {
     daemon = client
     // A successful (re)connect clears the degrade — the session is live again.
