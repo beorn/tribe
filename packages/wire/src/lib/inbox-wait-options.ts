@@ -134,12 +134,6 @@ export function parseInboxWaitResult(value: unknown): InboxWaitResult {
   }
 }
 
-/** Preserve the daemon's terminal reason. Attention can contain rows that
- * predate the logical wait, so its presence is not evidence of a new wake. */
-export function normalizeInboxWaitResult(result: InboxWaitResult): InboxWaitResult {
-  return result
-}
-
 export function resolveInboxWaitOptions(
   source: InboxWaitOptionSource,
   opts: { readonly defaultSession?: string } = {},
