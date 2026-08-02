@@ -145,6 +145,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             description:
               "Authored one-line summary - the channel UI shows it by default and discloses the markdown body on click. Required for LLM senders; non-LLM callers may omit it and the daemon derives one from the message's first line. When derived, the response includes `summary_derived: true`.",
           },
+          message_id: {
+            type: "string",
+            description:
+              "Optional client-generated UUID. Retrying the same UUID is a no-op and returns the original message id.",
+          },
           type: {
             type: "string",
             description:
@@ -225,6 +230,10 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             type: "boolean",
             description: "Present and true when a non-LLM sender omitted `summary` and the daemon derived one.",
           },
+          deduplicated: {
+            type: "boolean",
+            description: "Present and true when this client UUID was already committed and the retry was ignored.",
+          },
           truncated: {
             type: "boolean",
             description:
@@ -266,6 +275,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           flags: "-s, --summary <summary>",
           description:
             "Authored one-line summary shown by default in the channel UI (required for LLM senders; derived for non-LLM callers if omitted)",
+        },
+        {
+          name: "message-id",
+          flags: "--message-id <uuid>",
+          description: "Client-generated UUID; retrying it is idempotent.",
+          mapsTo: "message_id",
         },
         {
           name: "delivery",

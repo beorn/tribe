@@ -138,6 +138,8 @@ export interface Dispatcher {
    * throws.
    */
   register: (method: string, handler: MethodHandler) => void
+  /** Answer pending long-polls before the daemon closes client sockets. */
+  shutdown: () => void
 }
 
 export interface WithDispatcher {
@@ -1771,7 +1773,12 @@ export function withDispatcher<
 
     return {
       ...t,
-      dispatcher: { handleConnection, handleRequest, register },
+      dispatcher: {
+        handleConnection,
+        handleRequest,
+        register,
+        shutdown: inboxWait.shutdown,
+      },
     }
   }
 }

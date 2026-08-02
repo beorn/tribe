@@ -428,6 +428,15 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   else if (deliveryArg !== undefined) {
     return jsonResult({ error: "tribe.send: `delivery` must be 'push' or 'pull' when supplied." })
   }
+  const messageIdArg = a.message_id
+  if (messageIdArg !== undefined && (typeof messageIdArg !== "string" || messageIdArg.trim().length === 0)) {
+    return jsonResult({ error: "tribe.send: `message_id` must be a non-empty client-generated UUID when supplied." })
+  }
+  if (messageIdArg !== undefined && Array.isArray(recipients)) {
+    return jsonResult({
+      error: "tribe.send: `message_id` is supported for one recipient or broadcast, not a recipient list.",
+    })
+  }
   // Ball-tracker fields (@km/tribe/message-ball-tracker Phase 2a): typed
   // non-self direct actionables auto-open a semantic ball in sendMessage.
   // `request:true` explicitly applies message-id ownership to another type;
@@ -480,7 +489,11 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   // ergonomic.
   const summaryDerived = summaryArg.length === 0
   const summary = summaryDerived ? deriveSummary(sanitized) : summaryArg
-  const classification = { summary, ...(delivery ? { delivery } : {}) }
+  const classification = {
+    summary,
+    ...(delivery ? { delivery } : {}),
+    ...(typeof messageIdArg === "string" ? { messageId: messageIdArg.trim() } : {}),
+  }
   const sender = ctx.getName()
   const activeNames = new Set(opts.getActiveSessionInfo().map((session) => session.name))
   const resolveRecipient = (recipient: string): DirectDeliveryResolution =>
@@ -534,7 +547,9 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     requestFlag || (requestId === null && AUTO_TRACK_TYPES_SET.has(msgType) && sender !== recipients)
       ? result.id
       : requestId
-  persistDeadLetter(ctx, resolution, sanitized, a, classification, effectiveRequestId)
+  if (!result.deduplicated) {
+    persistDeadLetter(ctx, resolution, sanitized, a, classification, effectiveRequestId)
+  }
   if ((requestFlag || requestId) && recipients === "*") {
     openPendingRows(
       ctx,
@@ -547,11 +562,13 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       sender,
     )
   }
-  logEvent(ctx, `message.sent.${msgType}`, a.bead as string | undefined, {
-    to: recipients,
-    message_id: result.id,
-    ...(summaryDerived ? { summary_derived: true } : {}),
-  })
+  if (!result.deduplicated) {
+    logEvent(ctx, `message.sent.${msgType}`, a.bead as string | undefined, {
+      to: recipients,
+      message_id: result.id,
+      ...(summaryDerived ? { summary_derived: true } : {}),
+    })
+  }
   const warning = combineWarnings(
     maybeDerivedSummaryWarning(summaryDerived),
     maybeTruncationWarning(truncation),
@@ -563,6 +580,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     ...(effectiveRequestId ? { request_id: effectiveRequestId } : {}),
     delivery: deliveryReport([{ recipient: recipients, resolution }])[0],
     ...(result.tracker ? { tracker: result.tracker } : {}),
+    ...(result.deduplicated ? { deduplicated: true } : {}),
     ...replyCloseFailure(result.tracker),
     summary,
     ...(summaryDerived ? { summary_derived: true } : {}),

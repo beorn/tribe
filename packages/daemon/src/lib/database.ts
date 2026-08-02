@@ -1076,7 +1076,7 @@ export function createStatements(db: Database) {
 	`),
 
     insertMessage: db.prepare(`
-		INSERT INTO messages (id, type, sender, recipient, kind, content, bead_id, ref, ts,
+		INSERT OR IGNORE INTO messages (id, type, sender, recipient, kind, content, bead_id, ref, ts,
 			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, attention_required)
 		VALUES ($id, $type, $sender, $recipient, $kind, $content, $bead_id, $ref, $ts,
 			$delivery, $topic, $room_id, $request, $reply, $correlated_reply_requester, $summary,
@@ -1086,6 +1086,8 @@ export function createStatements(db: Database) {
 				ELSE 0
 			END)
 	`),
+
+    selectMessageById: db.prepare("SELECT rowid, ts FROM messages WHERE id = $id"),
 
     /** Ball-tracker insert: opens a new pending request (one row per recipient).
      *  See @km/tribe/message-ball-tracker Phase 2. */

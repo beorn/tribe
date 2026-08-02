@@ -525,6 +525,21 @@ describe("createInboxWaitManager", () => {
     })
   })
 
+  it("returns a reconnect signal to every pending wait during daemon shutdown", async () => {
+    vi.useFakeTimers()
+    const manager = createTestInboxWaitManager((session) => status(session, 0))
+
+    const wait = manager.wait("@ci", "conn-1", 60_000)
+    manager.shutdown()
+
+    await expect(wait).resolves.toMatchObject({
+      status: "woken",
+      timed_out: false,
+      aborted: false,
+      reconnect: true,
+    })
+  })
+
   /**
    * CTO residual 2026-07-25 on @tent/tooling/21420: live @dev/3 sat in
    * `tribe inbox-wait` while a type=assign addressed to it had already landed.

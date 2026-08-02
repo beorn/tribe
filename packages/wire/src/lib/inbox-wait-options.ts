@@ -47,6 +47,8 @@ export type InboxWaitResult = {
   readonly effective_timeout_ms: number
   readonly timed_out: boolean
   readonly aborted: boolean
+  /** Daemon shutdown is deliberate; callers should immediately redial. */
+  readonly reconnect?: boolean
   readonly attention: InboxWaitAttention
 }
 
@@ -101,6 +103,7 @@ export function parseInboxWaitResult(value: unknown): InboxWaitResult {
     !isFiniteNumber(value.effective_timeout_ms) ||
     typeof value.timed_out !== "boolean" ||
     typeof value.aborted !== "boolean" ||
+    (value.reconnect !== undefined && typeof value.reconnect !== "boolean") ||
     !isRecord(attention) ||
     !isRecordArray(attention.actionable_unread) ||
     !isRecordArray(attention.pending_balls) ||
@@ -123,6 +126,7 @@ export function parseInboxWaitResult(value: unknown): InboxWaitResult {
     effective_timeout_ms: value.effective_timeout_ms,
     timed_out: value.timed_out,
     aborted: value.aborted,
+    ...(value.reconnect === true ? { reconnect: true } : {}),
     attention: {
       actionable_unread: attention.actionable_unread,
       pending_balls: attention.pending_balls,

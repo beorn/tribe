@@ -34,6 +34,7 @@ import type { WithBroadcast } from "./with-broadcast.ts"
 import type { WithClientRegistry } from "./with-client-registry.ts"
 import type { WithConfig } from "./with-config.ts"
 import type { WithDaemonContext } from "./with-daemon-context.ts"
+import type { WithDispatcher } from "./with-dispatcher.ts"
 import type { WithDatabase } from "./with-database.ts"
 import type { WithRecall } from "./with-recall.ts"
 import type { WithSocketServer } from "./with-socket-server.ts"
@@ -44,6 +45,7 @@ type RuntimeShape = BaseTribe &
   WithConfig &
   WithDatabase &
   WithDaemonContext &
+  WithDispatcher &
   WithRecall &
   WithClientRegistry &
   WithBroadcast &
@@ -186,6 +188,9 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
       if (exited) return
       exited = true
       log.info?.("Shutting down...")
+      // GOAWAY before socket teardown lets long-poll clients redial
+      // deliberately instead of discovering shutdown through EOF.
+      t.dispatcher.shutdown()
       stopPlugins()
       // Close recall explicitly for ordering (the scope.defer in withRecall would
       // catch it too, but we want it before sockets so the focus poller and

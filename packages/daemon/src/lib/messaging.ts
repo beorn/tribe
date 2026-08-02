@@ -70,6 +70,8 @@ export type Classification = {
    * @ag/code/20113-visual-polish/llm-authored-tribe-summary-persistence.
    */
   summary?: string
+  /** Client-generated durable identity; retries reuse the same row. */
+  messageId?: string
 }
 
 export type SenderAttribution = {
@@ -189,8 +191,14 @@ export function sendMessage(
   classification: Classification = {},
   ballTracker: BallTracker = {},
   attribution: SenderAttribution = {},
-): { id: string; ts: number; rowid: number; tracker?: { request_id: string; closed: number } } {
-  const id = randomUUID()
+): {
+  id: string
+  ts: number
+  rowid: number
+  tracker?: { request_id: string; closed: number }
+  deduplicated?: boolean
+} {
+  const id = classification.messageId ?? randomUUID()
   const ts = Date.now()
   const sender = attribution.sender ?? ctx.getName()
   const senderRole = attribution.senderRole ?? ctx.getRole()
@@ -261,6 +269,11 @@ export function sendMessage(
       $summary: classification.summary ?? null,
       $attention_required: classification.attentionRequired === true ? 1 : 0,
     })
+    if (result.changes === 0) {
+      const existing = ctx.stmts.selectMessageById.get({ $id: id }) as { rowid: number; ts: number } | undefined
+      if (existing === undefined) throw new Error(`message idempotency row disappeared for ${id}`)
+      return { rowid: existing.rowid, ts: existing.ts, deduplicated: true as const }
+    }
     const rowid = Number(result.lastInsertRowid)
     // sendMessage knows one durable recipient string. Explicit broadcast
     // snapshots remain handleSend's responsibility; direct rows are complete
@@ -292,9 +305,10 @@ export function sendMessage(
         }
       }
     }
-    return { rowid, tracker, correlatedReply }
+    return { rowid, ts, tracker, correlatedReply }
   })
-  const { rowid, tracker, correlatedReply } = persist()
+  const { rowid, ts: persistedTs, tracker, correlatedReply, deduplicated } = persist()
+  if (deduplicated) return { id, ts: persistedTs, rowid, deduplicated: true }
   ctx.onMessageInserted?.({
     id,
     ts,
@@ -311,7 +325,7 @@ export function sendMessage(
     roomId: classification.roomId ?? null,
     correlatedReply,
   })
-  return { id, ts, rowid, ...(tracker ? { tracker } : {}) }
+  return { id, ts: persistedTs, rowid, ...(tracker ? { tracker } : {}) }
 }
 
 /**

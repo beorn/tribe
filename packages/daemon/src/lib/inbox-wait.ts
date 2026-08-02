@@ -64,6 +64,21 @@ export function createInboxWaitManager(
     )
   }
 
+  function settleForShutdown(waiter: Waiter): void {
+    if (waiter.done) return
+    waiter.done = true
+    clearTimeout(waiter.timer)
+    waiters.delete(waiter)
+    const status = readStatus(waiter.session)
+    waiter.resolve({
+      ...assembleResult(status, Date.now() - waiter.startedAt, waiter.effectiveTimeoutMs, waiter.baselineSeq, {
+        timedOut: false,
+        aborted: false,
+      }),
+      reconnect: true,
+    })
+  }
+
   function onMessageInserted(info: MessageInsertedInfo): void {
     if (info.kind !== "direct") return
     for (const waiter of Array.from(waiters)) {
@@ -94,6 +109,10 @@ export function createInboxWaitManager(
     for (const waiter of Array.from(waiters)) {
       if (waiter.connId === connId) settle(waiter, { timedOut: false, aborted: true })
     }
+  }
+
+  function shutdown(): void {
+    for (const waiter of Array.from(waiters)) settleForShutdown(waiter)
   }
 
   function wait(
@@ -138,5 +157,6 @@ export function createInboxWaitManager(
     wait,
     onMessageInserted,
     cancelConnection,
+    shutdown,
   }
 }

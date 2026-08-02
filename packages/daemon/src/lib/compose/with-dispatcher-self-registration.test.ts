@@ -1367,6 +1367,31 @@ describe("dispatcher session announcement recovery (@ag/tribe/21052/19442)", () 
 })
 
 describe("dispatcher inbox-wait parsing", () => {
+  it("answers a pending long-poll with GOAWAY before dispatcher shutdown", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const wait = harness.dispatcher.handleRequest(
+      {
+        jsonrpc: "2.0",
+        id: "shutdown-wait",
+        method: "tribe.inbox.wait",
+        params: { session: "@agent/wait", timeoutMs: 60_000 },
+      },
+      "conn-wait",
+    )
+
+    await new Promise((resolveWait) => setTimeout(resolveWait, 10))
+    harness.dispatcher.shutdown()
+
+    await expect(wait.then(parseResult<InboxWaitResult>)).resolves.toMatchObject({
+      status: "woken",
+      timed_out: false,
+      aborted: false,
+      reconnect: true,
+    })
+  })
+
   it("wakes waits for actionable messages sent through a registered client context", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose

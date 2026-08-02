@@ -1204,6 +1204,9 @@ export async function waitForInboxWithReconnect(opts: {
       }
       latestResult = result
       lastRetryableError = undefined
+      if (result.reconnect === true) {
+        continue
+      }
       if (!result.timed_out && !result.aborted) {
         return totalWaited(result, startedAt, now, controls.timeoutMs)
       }

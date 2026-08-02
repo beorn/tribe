@@ -141,6 +141,7 @@ type SendPayloadInput = {
   message: string
   type?: MessageType
   summary?: string
+  messageId?: string
   delivery?: Delivery
   ref?: string
   request?: boolean | string
@@ -154,6 +155,7 @@ type SendPayload = {
   message: string
   type: MessageType
   summary?: string
+  message_id?: string
   delivery?: Delivery
   ref?: string
   request?: true | string
@@ -169,6 +171,7 @@ export function buildSendPayload(input: SendPayloadInput): SendPayload {
     type: input.type ?? "notify",
   }
   if (input.summary) payload.summary = input.summary
+  if (input.messageId) payload.message_id = input.messageId
   if (input.delivery) payload.delivery = input.delivery
   if (input.ref) payload.ref = input.ref
   if (input.request !== undefined && input.request !== false) payload.request = input.request
@@ -495,6 +498,7 @@ export function registerSendCommands(program: Command): void {
   const sendMessage = cliArgument(SEND_CLI, "message")
   const sendType = cliOption(SEND_CLI, "type")
   const sendSummary = cliOption(SEND_CLI, "summary")
+  const sendMessageId = cliOption(SEND_CLI, "message-id")
   const sendDelivery = cliOption(SEND_CLI, "delivery")
   const sendRef = cliOption(SEND_CLI, "ref")
   const sendReply = cliOption(SEND_CLI, "reply")
@@ -508,6 +512,7 @@ export function registerSendCommands(program: Command): void {
     .argument(`<${sendMessage.name}...>`, sendMessage.description)
     .option(sendType.flags, sendType.description)
     .option(sendSummary.flags, sendSummary.description)
+    .option(sendMessageId.flags, sendMessageId.description)
     .option(sendDelivery.flags, sendDelivery.description)
     .option(sendRef.flags, sendRef.description)
     .option(sendReply.flags, sendReply.description)
@@ -521,6 +526,7 @@ export function registerSendCommands(program: Command): void {
         opts: {
           type?: string
           summary?: string
+          messageId?: string
           delivery?: string
           ref?: string
           request?: boolean | string
@@ -558,6 +564,7 @@ export function registerSendCommands(program: Command): void {
           message: message.join(" "),
           type: type as MessageType,
           summary: opts.summary,
+          messageId: opts.messageId,
           delivery: opts.delivery as Delivery | undefined,
           ref: opts.ref,
           request: opts.request === "true" ? true : opts.request === false ? undefined : opts.request,

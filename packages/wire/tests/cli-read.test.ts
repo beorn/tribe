@@ -350,6 +350,56 @@ describe("waitForInboxWithReconnect", () => {
     expect(result.waited_ms).toBe(35_600)
   })
 
+  test("redials immediately when the daemon answers a GOAWAY reconnect signal", async () => {
+    let now = 0
+    const calls: number[] = []
+    const result = await waitForInboxWithReconnect({
+      session: "@ci",
+      timeoutMs: 45_000,
+      maxChunkMs: 30_000,
+      retryDelayMs: 250,
+      now: () => now,
+      sleep: async (ms) => {
+        now += ms
+      },
+      call: async ({ timeoutMs }) => {
+        calls.push(timeoutMs)
+        if (calls.length === 1) {
+          return {
+            status: "woken",
+            session: "@ci",
+            unread_count: 0,
+            oldest_unread_age_min: 0,
+            oldest_unread_ts: 0,
+            waited_ms: 100,
+            effective_timeout_ms: timeoutMs,
+            timed_out: false,
+            aborted: false,
+            reconnect: true,
+            attention: EMPTY_ATTENTION,
+          }
+        }
+        now += timeoutMs
+        return {
+          status: "timeout",
+          session: "@ci",
+          unread_count: 0,
+          oldest_unread_age_min: 0,
+          oldest_unread_ts: 0,
+          waited_ms: 44_900,
+          effective_timeout_ms: timeoutMs,
+          timed_out: true,
+          aborted: false,
+          attention: EMPTY_ATTENTION,
+        }
+      },
+    })
+
+    expect(calls).toEqual([30_000, 30_000, 15_000])
+    expect(result.timed_out).toBe(true)
+    expect(result.reconnect).toBeUndefined()
+  })
+
   test("daemon-unavailable errors retry only during the short startup grace, then stay loud", async () => {
     let now = 0
     const chunkCalls: number[] = []
