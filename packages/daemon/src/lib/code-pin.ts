@@ -23,16 +23,12 @@
  * null (never a false "fresh") when git or a superproject is absent.
  */
 
-import { execFileSync } from "node:child_process"
-import { relative } from "node:path"
+import { dirname, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 import { createLogger } from "loggily"
+import { probeGitValue, resolveCheckoutCodeIdentity } from "tribe-wire/lib/code-identity"
 
 const log = createLogger("tribe:code-pin")
-
-/** Source identity belongs to the probed checkout, never to a caller-selected git context. */
-function gitProbeEnv(): NodeJS.ProcessEnv {
-  return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")))
-}
 
 export interface CodePinEval {
   /** True when the running process is provably not the on-disk / pinned code. */
@@ -86,44 +82,26 @@ export function evaluateCodePin(input: {
  * a repo, ref missing). Null is surfaced in `code_pin` (fail-loud at the report
  * layer) and treated as "cannot tell" by evaluateCodePin — never masked as fresh.
  */
-function git(dir: string, args: string[]): string | null {
-  try {
-    const out = execFileSync("git", ["-C", dir, ...args], {
-      encoding: "utf8",
-      env: gitProbeEnv(),
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim()
-    return out.length > 0 ? out : null
-  } catch (err) {
-    // Optional external probe: standalone deploys may have no git / no
-    // superproject. Log at debug so the miss is observable; the null result
-    // surfaces in code_pin rather than being silently dropped.
-    log.debug?.(`git ${args.join(" ")} in ${dir} failed: ${String(err)}`)
-    return null
-  }
-}
-
 /**
  * The source commit THIS process loaded — captured at import time, which is
  * process start (and re-capture on the hot-reload re-exec). `import.meta.dir` is
  * inside the tribe checkout, so `git -C` resolves the checkout HEAD.
  */
-export const STARTUP_SHA: string | null = git(import.meta.dir, ["rev-parse", "HEAD"])
+export const TRIBE_SOURCE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..")
+const startupProbe = probeGitValue(TRIBE_SOURCE_ROOT, ["rev-parse", "HEAD"])
+export const STARTUP_SHA: string | null = startupProbe.ok ? startupProbe.value : null
 
 /** Gather running / on-disk / superproject-pin SHAs and evaluate staleness. */
 export function gatherCodePin(
-  srcDir: string = import.meta.dir,
+  srcDir: string = TRIBE_SOURCE_ROOT,
   startupSha: string | null = STARTUP_SHA,
 ): CodePinStatus {
-  const onDisk = git(srcDir, ["rev-parse", "HEAD"])
-  const superproject = git(srcDir, ["rev-parse", "--show-superproject-working-tree"])
-  let superprojectPin: string | null = null
-  if (superproject) {
-    const top = git(srcDir, ["rev-parse", "--show-toplevel"])
-    if (top) {
-      const rel = relative(superproject, top)
-      superprojectPin = rel.length > 0 ? git(superproject, ["rev-parse", `HEAD:${rel}`]) : null
-    }
+  const resolved = resolveCheckoutCodeIdentity(srcDir)
+  const onDisk = resolved.onDisk.ok ? resolved.onDisk.value : null
+  const superprojectPin = resolved.superprojectPin.ok ? resolved.superprojectPin.value : null
+  if (!resolved.onDisk.ok) log.debug?.(`on-disk code probe failed: ${resolved.onDisk.failure.message}`)
+  if (!resolved.superprojectPin.ok) {
+    log.debug?.(`superproject pin probe failed: ${resolved.superprojectPin.failure.message}`)
   }
   const evaluated = evaluateCodePin({ running: startupSha, onDisk, superprojectPin })
   return {

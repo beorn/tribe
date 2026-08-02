@@ -66,6 +66,8 @@ export type ClientSession = {
    *  tribe-side sessionId because a single proxy connection may carry both
    *  coordination + memory traffic interleaved. */
   recall: RecallConnState
+  /** Wire version negotiated for this transport; null before registration. */
+  protocolVersion?: number | null
 }
 
 export interface ClientRegistry {
@@ -86,6 +88,7 @@ export interface ClientRegistry {
     launchId: string | null
     launchParentPid: number | null
     transportPids: number[]
+    protocolVersions?: number[]
   }>
   /** True for any authenticated, fully registered transport, including watch
    * connections. This is broader than participating-member projection. */
@@ -137,6 +140,7 @@ export function withClientRegistry<T extends BaseTribe>(): (t: T) => T & WithCli
             launchId: string | null
             launchParentPid: number | null
             transportPids: number[]
+            protocolVersions: number[]
           }
         >()
         for (const client of clients.values()) {
@@ -145,6 +149,12 @@ export function withClientRegistry<T extends BaseTribe>(): (t: T) => T & WithCli
           const member = members.get(id)
           if (member) {
             if (client.pid > 0 && !member.transportPids.includes(client.pid)) member.transportPids.push(client.pid)
+            if (
+              typeof client.protocolVersion === "number" &&
+              !member.protocolVersions.includes(client.protocolVersion)
+            ) {
+              member.protocolVersions.push(client.protocolVersion)
+            }
             member.registeredAt = Math.min(member.registeredAt, client.registeredAt)
             continue
           }
@@ -159,6 +169,7 @@ export function withClientRegistry<T extends BaseTribe>(): (t: T) => T & WithCli
             launchId: client.launchId,
             launchParentPid: client.launchParentPid,
             transportPids: client.pid > 0 ? [client.pid] : [],
+            protocolVersions: typeof client.protocolVersion === "number" ? [client.protocolVersion] : [],
           })
         }
         return Array.from(members.values())

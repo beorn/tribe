@@ -10,6 +10,7 @@ import type { TribeRole } from "tribe-wire/lib/config"
 import { createTribeContext } from "../context.ts"
 import { openDatabase, createStatements } from "../database.ts"
 import { sendMessage } from "../messaging.ts"
+import { STARTUP_SHA, TRIBE_SOURCE_ROOT } from "../code-pin.ts"
 import type { ClientSession } from "./with-client-registry.ts"
 import { withDispatcher } from "./with-dispatcher.ts"
 
@@ -38,7 +39,12 @@ type CliStatusResult = {
     pid: number
     role: TribeRole
     transportPids: number[]
+    protocol_versions: number[]
+    version_state: "current" | "version-degraded" | "version-unknown"
   }>
+  daemon: {
+    code_identity: { cert: string | null; root: string }
+  }
 }
 
 type InboxDrainResult = {
@@ -359,6 +365,40 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
     expect(legacy.protocolVersion).toBe(TRIBE_PROTOCOL_VERSION - 1)
     expect(harness.sessionCount("@agent/legacy")).toBe(1)
 
+    const status = parseResult<CliStatusResult>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "protocol-status", method: "cli_status", params: {} },
+        "conn-current",
+      ),
+    )
+    expect(status.sessions.find((session) => session.name === "@agent/current")).toMatchObject({
+      protocol_versions: [TRIBE_PROTOCOL_VERSION],
+      version_state: "current",
+    })
+    expect(status.sessions.find((session) => session.name === "@agent/legacy")).toMatchObject({
+      protocol_versions: [TRIBE_PROTOCOL_VERSION - 1],
+      version_state: "version-degraded",
+    })
+
+    const members = parseResult<{
+      structuredContent: {
+        sessions: Array<{
+          name: string
+          protocol_versions: number[]
+          version_state: string
+        }>
+      }
+    }>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "protocol-members", method: "tribe.members", params: {} },
+        "conn-current",
+      ),
+    ).structuredContent.sessions
+    expect(members.find((session) => session.name === "@agent/legacy")).toMatchObject({
+      protocol_versions: [TRIBE_PROTOCOL_VERSION - 1],
+      version_state: "version-degraded",
+    })
+
     harness.addPendingClient("conn-too-old")
     const error = parseError(
       await harness.dispatcher.handleRequest(
@@ -403,6 +443,20 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
       supported_protocol_versions: [TRIBE_PROTOCOL_VERSION, TRIBE_PROTOCOL_VERSION - 1],
     })
     expect(harness.sessionCount("@agent/protocol-probe")).toBe(0)
+  })
+
+  it("exposes the daemon-reported startup cert and source root on the status RPC", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const status = parseResult<CliStatusResult>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "status-identity", method: "cli_status", params: {} },
+        "conn-status-identity",
+      ),
+    )
+
+    expect(status.daemon.code_identity).toEqual({ cert: STARTUP_SHA, root: TRIBE_SOURCE_ROOT })
   })
 
   it("projects launch fan-in as one canonical session and omits pending probes", async () => {
@@ -1631,6 +1685,7 @@ function createDispatcherHarness(
             launchId: string | null
             launchParentPid: number | null
             transportPids: number[]
+            protocolVersions: number[]
           }
         >()
         for (const client of clients.values()) {
@@ -1639,6 +1694,12 @@ function createDispatcherHarness(
           const member = members.get(id)
           if (member) {
             if (client.pid > 0 && !member.transportPids.includes(client.pid)) member.transportPids.push(client.pid)
+            if (
+              typeof client.protocolVersion === "number" &&
+              !member.protocolVersions.includes(client.protocolVersion)
+            ) {
+              member.protocolVersions.push(client.protocolVersion)
+            }
             member.registeredAt = Math.min(member.registeredAt, client.registeredAt)
             continue
           }
@@ -1653,6 +1714,7 @@ function createDispatcherHarness(
             launchId: client.launchId,
             launchParentPid: client.launchParentPid,
             transportPids: client.pid > 0 ? [client.pid] : [],
+            protocolVersions: typeof client.protocolVersion === "number" ? [client.protocolVersion] : [],
           })
         }
         return Array.from(members.values())

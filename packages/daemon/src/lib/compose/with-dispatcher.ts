@@ -76,6 +76,7 @@ import type { WithDatabase } from "./with-database.ts"
 import type { WithRecall } from "./with-recall.ts"
 import type { WithSocketServer } from "./with-socket-server.ts"
 import type { DirectDeliveryResolver } from "../delivery-resolution.ts"
+import { STARTUP_SHA, TRIBE_SOURCE_ROOT } from "../code-pin.ts"
 
 const log = createLogger("tribe:dispatcher")
 
@@ -416,6 +417,16 @@ export function withDispatcher<
           resources: [] as string[],
           parent: parent && parent !== member.name ? parent : undefined,
           lifecycle: lifecycleStore.get(member.name) ?? null,
+          protocol_versions: [...new Set(transports.flatMap((client) => client.protocolVersion ?? []))].sort(
+            (a, b) => b - a,
+          ),
+          version_state: transports.some(
+            (client) => typeof client.protocolVersion === "number" && client.protocolVersion < TRIBE_PROTOCOL_VERSION,
+          )
+            ? ("version-degraded" as const)
+            : transports.some((client) => typeof client.protocolVersion === "number")
+              ? ("current" as const)
+              : ("version-unknown" as const),
         }
       })
     }
@@ -603,6 +614,7 @@ export function withDispatcher<
         claudeSessionId: string | null
         peerSocket: string | null
         ctx: TribeContext
+        protocolVersion: number | null
       },
     ): ClientSession {
       const existing = clients.get(connId)
@@ -626,6 +638,7 @@ export function withDispatcher<
         registeredAt: Date.now(),
         lastActivityAt: Date.now(),
         recall: existing.recall,
+        protocolVersion: fields.protocolVersion,
       }
       clients.set(connId, client)
       onActiveClient()
@@ -844,6 +857,7 @@ export function withDispatcher<
                 claudeSessionId,
                 peerSocket,
                 ctx: holder.ctx,
+                protocolVersion: negotiatedProtocolVersion ?? null,
               })
               registry.markTransportConnected(client.ctx.sessionId)
               log.debug?.("transport.attached", {
@@ -992,6 +1006,7 @@ export function withDispatcher<
               claudeSessionId,
               peerSocket,
               ctx: clientCtx,
+              protocolVersion: negotiatedProtocolVersion ?? null,
             })
             registry.markTransportConnected(client.ctx.sessionId)
 
@@ -1133,6 +1148,8 @@ export function withDispatcher<
                 dbPath: t.config.dbPath,
                 socketPath: socket.socketPath,
                 resources: getActivePluginNames(),
+                code_identity: { cert: STARTUP_SHA, root: TRIBE_SOURCE_ROOT },
+                protocol_version: TRIBE_PROTOCOL_VERSION,
               },
             })
           }
@@ -1662,6 +1679,7 @@ export function withDispatcher<
         registeredAt: Date.now(),
         lastActivityAt: Date.now(),
         recall: { sessionId: null, claudePid: null },
+        protocolVersion: null,
       }
       clients.set(connId, placeholder)
       socketToClient.set(sock, connId)

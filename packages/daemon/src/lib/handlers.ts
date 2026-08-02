@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto"
 import { resolveInboxWaitOptions, type InboxWaitResult } from "tribe-wire"
 import type { TribeContext } from "./context.ts"
 import type { TribeRole } from "tribe-wire/lib/config"
+import { TRIBE_PROTOCOL_VERSION } from "tribe-wire/lib/socket"
 
 const log = createLogger("tribe:handlers")
 import { validateName, sanitizeMessageWithReport, MESSAGE_MAX_LENGTH, type SanitizedMessage } from "./validation.ts"
@@ -201,6 +202,7 @@ export type ActiveSessionInfo = {
   launchId: string | null
   launchParentPid: number | null
   transportPids: number[]
+  protocolVersions?: number[]
 }
 
 export type HandlerOpts = {
@@ -1115,6 +1117,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
   const sessions = visibleRows.map((r) => {
     const parent = r.claude_session_id ? parentMap.get(r.claude_session_id) : undefined
     const active = activeInfo.find((session) => session.id === r.id)
+    const protocolVersions = active?.protocolVersions ?? []
     const transport = projectSessionTransportState({
       transportConnected: activeIds.has(r.id),
     })
@@ -1128,6 +1131,13 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
       launch_parent_pid: r.launch_parent_pid,
       delivery: r.delivery,
       transport_pids: active?.transportPids ?? [],
+      protocol_versions: protocolVersions,
+      version_state:
+        protocolVersions.length === 0
+          ? "version-unknown"
+          : protocolVersions.some((version) => version < TRIBE_PROTOCOL_VERSION)
+            ? "version-degraded"
+            : "current",
       cwd: r.cwd,
       claude_session_id: r.claude_session_id,
       claude_session_name: r.claude_session_name,

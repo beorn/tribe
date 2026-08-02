@@ -44,6 +44,7 @@
     "./lib/defang": "./src/lib/defang.ts",
     "./lib/persona-name": "./src/lib/persona-name.ts",
     "./lib/spawn-pin-gate": "./src/lib/spawn-pin-gate.ts",
+    "./lib/code-identity": "./src/lib/code-identity.ts",
     "./http": "./src/http-adapter.ts"
   },
   "publishConfig": {
@@ -99,6 +100,10 @@
         "types": "./dist/lib/spawn-pin-gate.d.mts",
         "import": "./dist/lib/spawn-pin-gate.mjs"
       },
+      "./lib/code-identity": {
+        "types": "./dist/lib/code-identity.d.mts",
+        "import": "./dist/lib/code-identity.mjs"
+      },
       "./http": {
         "types": "./dist/http-adapter.d.mts",
         "import": "./dist/http-adapter.mjs"
@@ -135,6 +140,7 @@
       "src/lib/defang.ts",
       "src/lib/persona-name.ts",
       "src/lib/spawn-pin-gate.ts",
+      "src/lib/code-identity.ts",
       "src/http-adapter.ts"
     ],
     "format": "esm"
