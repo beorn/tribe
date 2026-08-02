@@ -9,7 +9,13 @@ import {
   resolveInboxWaitControls,
   type InboxWaitResult,
 } from "../lib/inbox-wait-options.ts"
-import { connectToDaemon, resolveSocketPath, TRIBE_PROTOCOL_VERSION, type DaemonClient } from "../lib/socket.ts"
+import {
+  connectToDaemon,
+  resolveSocketPath,
+  isSupportedProtocolVersion,
+  TRIBE_PROTOCOL_VERSION,
+  type DaemonClient,
+} from "../lib/socket.ts"
 import { watchActivity } from "../lib/activity-watch.ts"
 import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-exempt.ts"
 import { readTribeLaunchId } from "../launch-environment.ts"
@@ -628,7 +634,7 @@ async function assertInboxWaitProtocol(client: DaemonClient, timeoutMs: number):
     if ((err as { code?: unknown }).code !== -32601) throw err
   }
 
-  if (daemonProtocolVersion === TRIBE_PROTOCOL_VERSION) return
+  if (daemonProtocolVersion !== null && isSupportedProtocolVersion(daemonProtocolVersion)) return
 
   let health: DoctorHealthShape = {}
   try {

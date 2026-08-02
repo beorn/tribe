@@ -109,6 +109,47 @@ function spawnGenerationDaemon(socketPath: string): Promise<{
   })
 }
 
+function spawnCompatibleDaemon(socketPath: string): Promise<{
+  server: Server
+  clients: Socket[]
+  registrations: Array<{ protocolVersion?: unknown; supportedProtocolVersions?: unknown }>
+}> {
+  const clients: Socket[] = []
+  const registrations: Array<{ protocolVersion?: unknown; supportedProtocolVersions?: unknown }> = []
+  return new Promise((resolveServer) => {
+    const server = createServer((socket) => {
+      clients.push(socket)
+      const parse = createLineParser((msg) => {
+        if (!isRequest(msg)) return
+        if (msg.method === "register") {
+          registrations.push(msg.params ?? {})
+          socket.write(
+            makeResponse(msg.id, {
+              sessionId: "compatible-s1",
+              name: "compatible-test",
+              role: "member",
+              chief: "",
+              protocolVersion: TRIBE_PROTOCOL_VERSION - 1,
+              daemon: { pid: 3003, uptime: 0 },
+            }),
+          )
+          return
+        }
+        if (msg.method === "tribe.members") {
+          socket.write(makeResponse(msg.id, { content: [{ type: "text", text: JSON.stringify({ sessions: [] }) }] }))
+          return
+        }
+        socket.write(makeResponse(msg.id, { ok: true }))
+      })
+      socket.on("data", parse)
+      socket.on("error", () => {
+        /* test teardown */
+      })
+    })
+    server.listen(socketPath, () => resolveServer({ server, clients, registrations }))
+  })
+}
+
 async function waitFor(predicate: () => boolean, timeoutMs = 5_000, label = "condition"): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -172,6 +213,32 @@ describe("stdio adapter — protocol version skew", () => {
     expect(child.exitCode).toBe(2)
     expect(stderr).toContain("run /mcp reconnect after repairing the reported cause")
     expect(stderr).not.toContain("restart the host session")
+  }, 20_000)
+
+  it("keeps a client live when the daemon selects the previous supported version", async () => {
+    const socketPath = join(tmpDir, "tribe-compatible.sock")
+    const logPath = join(tmpDir, "compatible-adapter.log")
+    const compatibleDaemon = await spawnCompatibleDaemon(socketPath)
+    daemon = compatibleDaemon
+    child = spawn(BUN_BIN, [PLUGIN_SERVER, "--socket", socketPath, "--name", "compatible-test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        ...STANDALONE_PLUGIN_ENV,
+        TRIBE_DELIVERY: "pull",
+        DEBUG_LOG: logPath,
+        LOG_LEVEL: "info",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    }) as ChildProcessWithoutNullStreams
+
+    await waitFor(() => compatibleDaemon.registrations.length >= 1, 8_000, "compatible registration")
+    expect(compatibleDaemon.registrations[0]).toMatchObject({
+      protocolVersion: TRIBE_PROTOCOL_VERSION - 1,
+      supportedProtocolVersions: [TRIBE_PROTOCOL_VERSION, TRIBE_PROTOCOL_VERSION - 1],
+    })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(child.exitCode).toBeNull()
   }, 20_000)
 
   it("re-execs current disk code when a reconnect observes a new daemon pid", async () => {

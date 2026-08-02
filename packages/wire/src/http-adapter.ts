@@ -15,7 +15,13 @@ import { createHash, randomUUID } from "node:crypto"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
-import { resolveSocketPath, createReconnectingClient, TRIBE_PROTOCOL_VERSION, type DaemonClient } from "./lib/socket.ts"
+import {
+  resolveSocketPath,
+  createReconnectingClient,
+  TRIBE_PROTOCOL_VERSION,
+  TRIBE_SUPPORTED_PROTOCOL_VERSIONS,
+  type DaemonClient,
+} from "./lib/socket.ts"
 import {
   deliveryCapabilityInstruction,
   resolveDeliveryCapability,
@@ -79,7 +85,8 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
         project: opts.project ?? process.cwd(),
         projectName: opts.projectName ?? process.cwd().split("/").pop() ?? "silvercode",
         projectId: opts.projectId,
-        protocolVersion: TRIBE_PROTOCOL_VERSION,
+        protocolVersion: TRIBE_PROTOCOL_VERSION - 1,
+        supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
         peerSocket: null,
         pid: process.pid,
         identityToken,

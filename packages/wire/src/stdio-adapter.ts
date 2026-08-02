@@ -28,7 +28,9 @@ import {
   resolveSocketPath,
   connectToDaemon,
   createReconnectingClient,
+  isSupportedProtocolVersion,
   TRIBE_PROTOCOL_VERSION,
+  TRIBE_SUPPORTED_PROTOCOL_VERSIONS,
   type DaemonClient,
 } from "./lib/socket.ts"
 import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
@@ -303,7 +305,10 @@ const baseRegisterParams = {
   project: process.cwd(),
   projectName: PROJECT_NAME,
   projectId: resolveProjectId(),
-  protocolVersion: TRIBE_PROTOCOL_VERSION,
+  // Keep the legacy scalar at N-1 so a pre-window daemon can still accept the
+  // registration. New daemons use the advertised set to negotiate N.
+  protocolVersion: TRIBE_PROTOCOL_VERSION - 1,
+  supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
   // Peer-direct messaging was removed (km-tribe DM-body-drop bug): a DM
   // delivered socket-to-socket bypassed the daemon journal, so the body row
   // never landed in `messages` and pull/reconnect readers lost it. All sends
@@ -533,7 +538,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
       reportSupervisedIdentity(myName)
       myRole = reg.role
       log.info?.(`Registered as ${myName} (${myRole})`)
-      if (typeof reg.protocolVersion === "number" && reg.protocolVersion !== TRIBE_PROTOCOL_VERSION) {
+      if (typeof reg.protocolVersion === "number" && !isSupportedProtocolVersion(reg.protocolVersion)) {
         failProtocolVersion(`session=${TRIBE_PROTOCOL_VERSION}, daemon=${reg.protocolVersion}`)
       }
       void client.call("subscribe").catch(() => {})

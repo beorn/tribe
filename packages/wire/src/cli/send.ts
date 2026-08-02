@@ -27,7 +27,7 @@ import {
   type TribeFanout as Fanout,
   type TribeMessageType as MessageType,
 } from "../command-descriptors.ts"
-import { TRIBE_PROTOCOL_VERSION } from "../lib/socket.ts"
+import { TRIBE_PROTOCOL_VERSION, TRIBE_SUPPORTED_PROTOCOL_VERSIONS } from "../lib/socket.ts"
 import { resolveDbPath } from "../lib/config.ts"
 import { formatMarkdown, generateRetro, parseDuration } from "../lib/retro.ts"
 import { readTribeLaunchId } from "../launch-environment.ts"
@@ -107,7 +107,8 @@ async function callDaemon(
           project: process.cwd(),
           projectName: process.cwd().split("/").filter(Boolean).at(-1) ?? "unknown",
           pid: process.pid,
-          protocolVersion: TRIBE_PROTOCOL_VERSION,
+          protocolVersion: TRIBE_PROTOCOL_VERSION - 1,
+          supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
           ...(as.launchId !== undefined && as.launchParentPid !== undefined
             ? { launchId: as.launchId, launchParentPid: as.launchParentPid }
             : {}),

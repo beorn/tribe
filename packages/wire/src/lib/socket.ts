@@ -43,6 +43,50 @@ import {
  */
 export const TRIBE_PROTOCOL_VERSION = 10
 
+/**
+ * Protocol versions this checkout can speak during a rolling daemon update.
+ * Keep the newest version first so negotiation naturally chooses the highest
+ * common version. The legacy scalar below deliberately remains N-1: an older
+ * daemon that knows nothing about `supportedProtocolVersions` can still accept
+ * a new client during the transition.
+ */
+export const TRIBE_SUPPORTED_PROTOCOL_VERSIONS = [TRIBE_PROTOCOL_VERSION, TRIBE_PROTOCOL_VERSION - 1] as const
+
+export function supportedProtocolVersionsFromAdvertisement(advertised: unknown, legacy: unknown): number[] {
+  const advertisedVersions = Array.isArray(advertised)
+    ? advertised.filter((version): version is number => Number.isSafeInteger(version) && version > 0)
+    : []
+  if (advertisedVersions.length > 0) return [...new Set(advertisedVersions)].sort((a, b) => b - a)
+  return Number.isSafeInteger(legacy) && Number(legacy) > 0 ? [Number(legacy)] : []
+}
+
+export function negotiateProtocolVersion(
+  clientVersions: readonly number[],
+  daemonVersions: readonly number[] = TRIBE_SUPPORTED_PROTOCOL_VERSIONS,
+): number | null {
+  const daemonSet = new Set(daemonVersions)
+  return clientVersions.find((version) => daemonSet.has(version)) ?? null
+}
+
+export function isSupportedProtocolVersion(version: unknown): boolean {
+  return Number.isSafeInteger(version) && TRIBE_SUPPORTED_PROTOCOL_VERSIONS.includes(version as number)
+}
+
+export function protocolVersionMismatchMessage(
+  clientVersions: readonly number[],
+  daemonVersions: readonly number[] = TRIBE_SUPPORTED_PROTOCOL_VERSIONS,
+): string {
+  const clientLabel = clientVersions.length > 0 ? clientVersions.join(",") : "unknown"
+  const daemonLabel = daemonVersions.join(",")
+  const clientNewest = clientVersions[0]
+  const daemonNewest = daemonVersions[0]
+  const action =
+    clientNewest !== undefined && daemonNewest !== undefined && clientNewest < daemonNewest
+      ? `Upgrade the Tribe client to v${daemonVersions.at(-1)} or newer, then reconnect.`
+      : `Advance the Tribe daemon to v${clientNewest ?? daemonNewest} or newer, then reconnect.`
+  return `Protocol version mismatch: client=${clientLabel}; daemon=${daemonNewest ?? "unknown"}; supported=${daemonLabel}. ${action}`
+}
+
 // ---------------------------------------------------------------------------
 // Re-exports from the surrounding tribe-client package
 // ---------------------------------------------------------------------------

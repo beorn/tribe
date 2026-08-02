@@ -36,6 +36,10 @@ import {
   isRequest,
   makeError,
   makeResponse,
+  negotiateProtocolVersion,
+  protocolVersionMismatchMessage,
+  supportedProtocolVersionsFromAdvertisement,
+  TRIBE_SUPPORTED_PROTOCOL_VERSIONS,
   TRIBE_PROTOCOL_VERSION,
   type JsonRpcMessage,
   type JsonRpcRequest,
@@ -674,12 +678,16 @@ export function withDispatcher<
         switch (method) {
           case "register": {
             const clientProtocolVersion = p.protocolVersion === undefined ? undefined : Number(p.protocolVersion)
-            if (clientProtocolVersion !== undefined && clientProtocolVersion !== TRIBE_PROTOCOL_VERSION) {
-              return makeError(
-                id,
-                -32006,
-                `Protocol version mismatch: client=${clientProtocolVersion}, daemon=${TRIBE_PROTOCOL_VERSION}`,
-              )
+            const clientProtocolVersions = supportedProtocolVersionsFromAdvertisement(
+              p.supportedProtocolVersions,
+              clientProtocolVersion,
+            )
+            const negotiatedProtocolVersion =
+              clientProtocolVersion === undefined && p.supportedProtocolVersions === undefined
+                ? undefined
+                : negotiateProtocolVersion(clientProtocolVersions)
+            if (negotiatedProtocolVersion === null) {
+              return makeError(id, -32006, protocolVersionMismatchMessage(clientProtocolVersions))
             }
             const filterMode = p.filterMode
             if (filterMode !== undefined && !isSessionFilterMode(filterMode)) {
@@ -850,7 +858,8 @@ export function withDispatcher<
                 sessionId: client.ctx.sessionId,
                 name: client.name,
                 role: client.role,
-                protocolVersion: TRIBE_PROTOCOL_VERSION,
+                protocolVersion: negotiatedProtocolVersion ?? TRIBE_PROTOCOL_VERSION,
+                supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
                 coordinationState: coordState,
                 daemon: { pid: process.pid, uptime: Math.floor((Date.now() - socket.startedAt) / 1000) },
               })
@@ -1001,7 +1010,8 @@ export function withDispatcher<
               sessionId: clientCtx.sessionId,
               name,
               role,
-              protocolVersion: TRIBE_PROTOCOL_VERSION,
+              protocolVersion: negotiatedProtocolVersion ?? TRIBE_PROTOCOL_VERSION,
+              supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
               coordinationState: coordState,
               daemon: { pid: process.pid, uptime: Math.floor((Date.now() - socket.startedAt) / 1000) },
             })
@@ -1105,7 +1115,10 @@ export function withDispatcher<
           }
 
           case "cli_protocol": {
-            return makeResponse(id, { protocol_version: TRIBE_PROTOCOL_VERSION })
+            return makeResponse(id, {
+              protocol_version: TRIBE_PROTOCOL_VERSION,
+              supported_protocol_versions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
+            })
           }
 
           case "cli_status": {

@@ -301,21 +301,50 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
     expect(duplicate.message).toBe(`Name "@agent/9" is already taken by live pid ${liveHolderPid}`)
   })
 
-  it("rejects a registered client with an incompatible wire protocol before creating session state", async () => {
+  it("clamps a registered client to the highest mutually supported wire protocol", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
-    harness.addPendingClient("conn-skew")
+    harness.addPendingClient("conn-current")
 
-    const error = parseError(
+    const current = parseResult<{ protocolVersion: number }>(
       await harness.dispatcher.handleRequest(
         {
           jsonrpc: "2.0",
-          id: "register-skew",
+          id: "register-current",
           method: "register",
           params: {
-            name: "@agent/skew",
+            name: "@agent/current",
             role: "member",
             pid: liveHolderPid,
+            project: "/tmp/km-wt9",
+            projectName: "km-wt9",
+            projectId: "test-project",
+            delivery: "pull",
+            // Keep the old scalar at N-1 so a pre-window daemon can still
+            // accept this registration, while the new daemon intersects the
+            // advertised capability set and selects N.
+            protocolVersion: TRIBE_PROTOCOL_VERSION - 1,
+            supportedProtocolVersions: [TRIBE_PROTOCOL_VERSION, TRIBE_PROTOCOL_VERSION - 1],
+          },
+        },
+        "conn-current",
+      ),
+    )
+
+    expect(current.protocolVersion).toBe(TRIBE_PROTOCOL_VERSION)
+    expect(harness.sessionCount("@agent/current")).toBe(1)
+
+    harness.addPendingClient("conn-legacy")
+    const legacy = parseResult<{ protocolVersion: number }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "register-legacy",
+          method: "register",
+          params: {
+            name: "@agent/legacy",
+            role: "member",
+            pid: otherLivePid,
             project: "/tmp/km-wt9",
             projectName: "km-wt9",
             projectId: "test-project",
@@ -323,12 +352,39 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
             protocolVersion: TRIBE_PROTOCOL_VERSION - 1,
           },
         },
-        "conn-skew",
+        "conn-legacy",
       ),
     )
 
-    expect(error.message).toMatch(/protocol version mismatch/i)
-    expect(harness.sessionCount("@agent/skew")).toBe(0)
+    expect(legacy.protocolVersion).toBe(TRIBE_PROTOCOL_VERSION - 1)
+    expect(harness.sessionCount("@agent/legacy")).toBe(1)
+
+    harness.addPendingClient("conn-too-old")
+    const error = parseError(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "register-too-old",
+          method: "register",
+          params: {
+            name: "@agent/too-old",
+            role: "member",
+            pid: otherLivePid + 1,
+            project: "/tmp/km-wt9",
+            projectName: "km-wt9",
+            projectId: "test-project",
+            delivery: "pull",
+            protocolVersion: TRIBE_PROTOCOL_VERSION - 2,
+          },
+        },
+        "conn-too-old",
+      ),
+    )
+
+    expect(error.message).toContain(`client=${TRIBE_PROTOCOL_VERSION - 2}`)
+    expect(error.message).toContain(`supported=${TRIBE_PROTOCOL_VERSION},${TRIBE_PROTOCOL_VERSION - 1}`)
+    expect(error.message).toMatch(/upgrade.*client.*reconnect/i)
+    expect(harness.sessionCount("@agent/too-old")).toBe(0)
   })
 
   it("exposes the current wire protocol without creating session state", async () => {
@@ -342,7 +398,10 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
       ),
     )
 
-    expect(result).toEqual({ protocol_version: TRIBE_PROTOCOL_VERSION })
+    expect(result).toEqual({
+      protocol_version: TRIBE_PROTOCOL_VERSION,
+      supported_protocol_versions: [TRIBE_PROTOCOL_VERSION, TRIBE_PROTOCOL_VERSION - 1],
+    })
     expect(harness.sessionCount("@agent/protocol-probe")).toBe(0)
   })
 
