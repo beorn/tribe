@@ -408,9 +408,8 @@ function failManagedPersonaRegistration(err: unknown): never {
   process.exit()
 }
 
-function failProtocolVersion(reason: string): never {
-  log.warn?.(`tribe protocol version mismatch: ${reason}`)
-  requestPluginReexec(`protocol version mismatch: ${reason}`)
+function reportProtocolVersion(reason: string): void {
+  log.warn?.(`tribe protocol version mismatch; staying degraded until it is repaired: ${reason}`)
 }
 
 const PLUGIN_RECONNECT_ATTEMPTS = 3
@@ -502,7 +501,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
         reg = (await client.call("register", registerParamsForConnection())) as typeof reg
       } catch (err) {
         if (/protocol version mismatch/i.test(errorMessage(err))) {
-          failProtocolVersion(errorMessage(err))
+          reportProtocolVersion(errorMessage(err))
         }
         // Legacy adapters launched without a logical launch id cannot tell a
         // transient reconnect race from another adapter in the same provider
@@ -539,7 +538,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
       myRole = reg.role
       log.info?.(`Registered as ${myName} (${myRole})`)
       if (typeof reg.protocolVersion === "number" && !isSupportedProtocolVersion(reg.protocolVersion)) {
-        failProtocolVersion(`session=${TRIBE_PROTOCOL_VERSION}, daemon=${reg.protocolVersion}`)
+        reportProtocolVersion(`session=${TRIBE_PROTOCOL_VERSION}, daemon=${reg.protocolVersion}`)
       }
       void client.call("subscribe").catch(() => {})
 

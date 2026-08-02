@@ -1,7 +1,7 @@
 /**
- * Version-skew guard (km @km/silvercode/19851 slice 3): when the daemon's
- * register response carries a different protocolVersion, the adapter fails
- * loud instead of continuing with an incompatible payload contract.
+ * Version-skew recovery: a deterministic protocol mismatch is reported and
+ * allowed to use the adapter's existing degraded/reconnect machinery instead
+ * of terminating the transport before that machinery can run.
  */
 
 import { mkdtempSync, readFileSync, rmSync } from "node:fs"
@@ -12,10 +12,11 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { createServer, type Server, type Socket } from "node:net"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createLineParser } from "../src/parser.ts"
-import { isRequest, makeResponse } from "../src/rpc.ts"
+import { isRequest, makeError, makeResponse } from "../src/rpc.ts"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
 
 const PLUGIN_SERVER = resolve(dirname(fileURLToPath(import.meta.url)), "../../../plugins/claude/server.ts")
+const STDIO_ADAPTER = resolve(dirname(fileURLToPath(import.meta.url)), "../src/stdio-adapter.ts")
 const BUN_BIN = process.versions.bun ? process.execPath : "bun"
 const STANDALONE_PLUGIN_ENV = {
   TRIBE_LAUNCH_ID: "",
@@ -150,6 +151,66 @@ function spawnCompatibleDaemon(socketPath: string): Promise<{
   })
 }
 
+function spawnReconnectSkewDaemon(socketPath: string): Promise<{
+  server: Server
+  clients: Socket[]
+  registrations: number
+}> {
+  const clients: Socket[] = []
+  let registrations = 0
+  return new Promise((resolveServer) => {
+    const server = createServer((socket) => {
+      clients.push(socket)
+      const parse = createLineParser((msg) => {
+        if (!isRequest(msg)) return
+        if (msg.method === "register") {
+          registrations += 1
+          if (registrations === 2) {
+            socket.write(
+              makeError(
+                msg.id,
+                -32006,
+                "Protocol version mismatch: client=10; daemon=12; supported=12,11. Upgrade the Tribe client to v11 or newer, then reconnect.",
+              ),
+            )
+            return
+          }
+          socket.write(
+            makeResponse(msg.id, {
+              sessionId: `reconnect-s${registrations}`,
+              name: "reconnect-test",
+              role: "member",
+              chief: "",
+              protocolVersion: TRIBE_PROTOCOL_VERSION,
+              daemon: { pid: 4004, uptime: 0 },
+            }),
+          )
+          if (registrations === 1) setTimeout(() => socket.destroy(), 25)
+          return
+        }
+        if (msg.method === "tribe.members") {
+          socket.write(makeResponse(msg.id, { content: [{ type: "text", text: JSON.stringify({ sessions: [] }) }] }))
+          return
+        }
+        socket.write(makeResponse(msg.id, { ok: true }))
+      })
+      socket.on("data", parse)
+      socket.on("error", () => {
+        /* test teardown */
+      })
+    })
+    server.listen(socketPath, () =>
+      resolveServer({
+        server,
+        clients,
+        get registrations() {
+          return registrations
+        },
+      }),
+    )
+  })
+}
+
 async function waitFor(predicate: () => boolean, timeoutMs = 5_000, label = "condition"): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -177,11 +238,11 @@ describe("stdio adapter — protocol version skew", () => {
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  it("fails loud on mismatch instead of serving tools across incompatible payload contracts", async () => {
+  it("stays alive and reports a mismatch instead of exiting the adapter", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const logPath = join(tmpDir, "adapter.log")
     daemon = await spawnSkewedDaemon(socketPath)
-    child = spawn(BUN_BIN, [PLUGIN_SERVER, "--socket", socketPath, "--name", "skew-test"], {
+    child = spawn(BUN_BIN, [STDIO_ADAPTER, "--socket", socketPath, "--name", "skew-test"], {
       cwd: tmpDir,
       env: {
         ...process.env,
@@ -192,11 +253,6 @@ describe("stdio adapter — protocol version skew", () => {
       },
       stdio: ["pipe", "pipe", "pipe"],
     }) as ChildProcessWithoutNullStreams
-    let stderr = ""
-    child.stderr.on("data", (chunk) => {
-      stderr += String(chunk)
-    })
-
     await waitFor(
       () => {
         try {
@@ -209,10 +265,22 @@ describe("stdio adapter — protocol version skew", () => {
       "skew failure in adapter log",
     )
 
-    await waitFor(() => child?.exitCode !== null, 8_000, "adapter exit")
-    expect(child.exitCode).toBe(2)
-    expect(stderr).toContain("run /mcp reconnect after repairing the reported cause")
-    expect(stderr).not.toContain("restart the host session")
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(child.exitCode).toBeNull()
+  }, 20_000)
+
+  it("runs the existing reconnect loop after a transient version mismatch", async () => {
+    const socketPath = join(tmpDir, "tribe-reconnect-skew.sock")
+    const reconnectDaemon = await spawnReconnectSkewDaemon(socketPath)
+    daemon = reconnectDaemon
+    child = spawn(BUN_BIN, [STDIO_ADAPTER, "--socket", socketPath, "--name", "reconnect-test"], {
+      cwd: tmpDir,
+      env: { ...process.env, ...STANDALONE_PLUGIN_ENV, TRIBE_DELIVERY: "pull", LOG_LEVEL: "silent" },
+      stdio: ["pipe", "pipe", "pipe"],
+    }) as ChildProcessWithoutNullStreams
+
+    await waitFor(() => reconnectDaemon.registrations >= 3, 12_000, "reconnect after version mismatch")
+    expect(child.exitCode).toBeNull()
   }, 20_000)
 
   it("keeps a client live when the daemon selects the previous supported version", async () => {
