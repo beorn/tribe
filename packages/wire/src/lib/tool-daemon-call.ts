@@ -4,7 +4,6 @@ import {
   deriveInboxWaitCallTimeoutMs,
   inboxWaitHostCutResult,
   MCP_INBOX_WAIT_HOST_CEILING_MS,
-  normalizeInboxWaitResult,
   parseInboxWaitResult,
   parseInboxWaitTimeoutMs,
   resolveInboxWaitControls,
@@ -38,7 +37,7 @@ export async function callTribeTool(
   delete payload.wakeOnCorrelatedReply
   if (controls.wakeOnCorrelatedReply) payload.wake_on_correlated_reply = true
   const result = await client.call(method, payload, { timeoutMs: deriveInboxWaitCallTimeoutMs(controls.timeoutMs) })
-  const structuredContent = normalizeInboxWaitResult(parseInboxWaitResult(result))
+  const structuredContent = parseInboxWaitResult(result)
   return {
     content: [{ type: "text", text: JSON.stringify(structuredContent) }],
     structuredContent,

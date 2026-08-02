@@ -104,7 +104,6 @@ export {
   MCP_INBOX_WAIT_HOST_CEILING_SOURCE,
   deriveInboxWaitCallTimeoutMs,
   inboxWaitHostCutResult,
-  normalizeInboxWaitResult,
   parseInboxWaitTimeoutMs,
   resolveInboxWaitOptions,
 } from "./lib/inbox-wait-options.ts"

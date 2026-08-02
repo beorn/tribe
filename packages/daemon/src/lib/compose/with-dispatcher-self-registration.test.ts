@@ -1072,7 +1072,43 @@ describe("dispatcher bounded mailbox drain", () => {
     expect(chiefStatus.unread_count).toBe(1)
   })
 
-  it("fails closed for an unregistered caller without the configured operator capability", async () => {
+  it("reports indeterminate authority when no operator capability exists to evaluate", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    harness.sendActionable("@chief", "must remain unread")
+
+    const indeterminate = parseError(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "unconfigured-authority-drain",
+          method: "cli_inbox_drain",
+          params: { session: "@chief", limit: 10 },
+        },
+        "conn-untrusted",
+      ),
+    )
+    expect(indeterminate).toMatchObject({
+      code: -32004,
+      message: expect.stringMatching(/could-not-evaluate.*operator capability is not configured/i),
+      data: { kind: "could-not-evaluate", reason: "operator-capability-unconfigured" },
+    })
+
+    const status = parseResult<{ unread_count: number }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "chief-status-after-indeterminate",
+          method: "cli_inbox_status",
+          params: { session: "@chief" },
+        },
+        "conn-untrusted",
+      ),
+    )
+    expect(status.unread_count).toBe(1)
+  })
+
+  it("reports unauthenticated when an unregistered caller presents the wrong operator capability", async () => {
     const harness = createDispatcherHarness({ operatorCapability: "operator-test-secret" })
     cleanup = harness.dispose
     harness.sendActionable("@chief", "must remain unread")
@@ -1088,7 +1124,11 @@ describe("dispatcher bounded mailbox drain", () => {
         "conn-untrusted",
       ),
     )
-    expect(denied.message).toMatch(/authenticated current session or the configured operator capability/i)
+    expect(denied).toMatchObject({
+      code: -32003,
+      message: expect.stringMatching(/unauthenticated.*operator capability was rejected/i),
+      data: { kind: "unauthenticated", reason: "operator-capability-rejected" },
+    })
 
     const status = parseResult<{ unread_count: number }>(
       await harness.dispatcher.handleRequest(
@@ -1257,6 +1297,7 @@ describe("dispatcher inbox-wait parsing", () => {
     expect(result.unread_count).toBe(1)
     expect(result.timed_out).toBe(false)
     expect(result.aborted).toBe(false)
+    expect(result).not.toHaveProperty("baseline_seq")
     expect(result.attention.actionable_unread).toEqual([expect.objectContaining({ content: "wake inbox wait" })])
     expect(result.attention.pending_balls).toEqual([expect.objectContaining({ recipient: "@agent/wait" })])
   })
@@ -1409,7 +1450,7 @@ describe("dispatcher inbox-wait parsing", () => {
     const receiptAt = Date.now() + 5_000
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(receiptAt)
     try {
-      const explicit = parseResult<InboxWaitResult>(
+      const explicit = parseResult<InboxWaitResult & { baseline_seq: number }>(
         await harness.dispatcher.handleRequest(
           {
             jsonrpc: "2.0",
@@ -1421,9 +1462,10 @@ describe("dispatcher inbox-wait parsing", () => {
         ),
       )
       expect(explicit.timed_out).toBe(true)
+      expect(explicit.baseline_seq).toBe(0)
       expect(harness.mailboxAttentionReadAt(name)).toBeNull()
 
-      const correlated = parseResult<InboxWaitResult>(
+      const correlated = parseResult<InboxWaitResult & { baseline_seq: number }>(
         await harness.dispatcher.handleRequest(
           {
             jsonrpc: "2.0",
@@ -1435,6 +1477,7 @@ describe("dispatcher inbox-wait parsing", () => {
         ),
       )
       expect(correlated.timed_out).toBe(true)
+      expect(correlated.baseline_seq).toBe(0)
       expect(harness.mailboxAttentionReadAt(name)).toBe(receiptAt)
     } finally {
       nowSpy.mockRestore()
@@ -1777,7 +1820,7 @@ async function registerMember(
   )
 }
 
-function parseError(line: string): { code: number; message: string } {
+function parseError(line: string): { code: number; message: string; data?: unknown } {
   const response = JSON.parse(line) as JsonRpcResponse<unknown>
   expect(response.result).toBeUndefined()
   expect(response.error).toBeDefined()

@@ -1793,7 +1793,13 @@ function handleInboxWait(
   if (!opts.inboxWait || connId === undefined) {
     return jsonResult({ error: "inbox wait requires a connection-owned handler context" })
   }
-  return opts.inboxWait.wait(session, connId, timeoutMs, { wakeOnCorrelatedReply }).then((result) => jsonResult(result))
+  return opts.inboxWait.wait(session, connId, timeoutMs, { wakeOnCorrelatedReply }).then((result) => {
+    const publicResult = { ...result } as InboxWaitResult & {
+      baseline_seq?: number
+    }
+    delete publicResult.baseline_seq
+    return jsonResult(publicResult)
+  })
 }
 
 // ---------------------------------------------------------------------------

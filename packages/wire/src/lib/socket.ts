@@ -25,7 +25,8 @@ import {
 
 /**
  * Wire-protocol version. Bump on any payload-shape change a client cares about.
- * v9 (current) adds the typed inbox-wait terminal status and MCP host-cut
+ * v10 (current) adds the private reconnect-stable inbox-wait baseline.
+ * v9 adds the typed inbox-wait terminal status and MCP host-cut
  * preflight result.
  * v8 added the effective inbox-wait timeout and optional correlated-
  * reply wake control.
@@ -40,7 +41,7 @@ import {
  * `tribe.release-chief` / `tribe.debug`. See ../CHANGELOG.md for the wire
  * protocol history.
  */
-export const TRIBE_PROTOCOL_VERSION = 9
+export const TRIBE_PROTOCOL_VERSION = 10
 
 // ---------------------------------------------------------------------------
 // Re-exports from the surrounding tribe-client package

@@ -451,7 +451,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
               type: "string",
               enum: ["woken", "timeout", "aborted", "host_cut"],
               description:
-                "Terminal outcome for the wait or its preflight refusal; timeout means attention.actionable_unread is empty.",
+                "Terminal outcome for the wait or its preflight refusal; timeout means no qualifying row arrived after the wait baseline.",
             },
             session: { type: "string", description: "The session that was waited on." },
             unread_count: { type: "number", description: "Actionable unread direct-message count at return time." },
@@ -467,7 +467,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             },
             timed_out: {
               type: "boolean",
-              description: "True only when the timeout elapsed and attention.actionable_unread is empty.",
+              description: "True only when the timeout elapsed without a qualifying row newer than the wait baseline.",
             },
             aborted: { type: "boolean", description: "True when the connection closed before a DM arrived." },
             attention: ATTENTION_SCHEMA,
