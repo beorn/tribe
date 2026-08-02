@@ -174,7 +174,7 @@ function spawnCompatibleDaemon(socketPath: string): Promise<{
   })
 }
 
-function spawnReconnectSkewDaemon(socketPath: string): Promise<{
+function spawnExtendedReconnectDaemon(socketPath: string): Promise<{
   server: Server
   clients: Socket[]
   registrations: number
@@ -189,13 +189,7 @@ function spawnReconnectSkewDaemon(socketPath: string): Promise<{
         if (msg.method === "register") {
           registrations += 1
           if (registrations >= 2 && registrations <= 4) {
-            socket.write(
-              makeError(
-                msg.id,
-                -32006,
-                "Protocol version mismatch: client=10; daemon=12; supported=12,11. Upgrade the Tribe client to v11 or newer, then reconnect.",
-              ),
-            )
+            socket.write(makeError(msg.id, -32000, "daemon reload is still settling"))
             return
           }
           socket.write(
@@ -375,7 +369,7 @@ describe("stdio adapter — protocol version skew", () => {
 
   it("keeps retrying after the old three-attempt budget would have detached the transport", async () => {
     const socketPath = join(tmpDir, "tribe-reconnect-skew.sock")
-    const reconnectDaemon = await spawnReconnectSkewDaemon(socketPath)
+    const reconnectDaemon = await spawnExtendedReconnectDaemon(socketPath)
     daemon = reconnectDaemon
     child = spawn(BUN_BIN, [STDIO_ADAPTER, "--socket", socketPath, "--name", "reconnect-test"], {
       cwd: tmpDir,
@@ -388,6 +382,9 @@ describe("stdio adapter — protocol version skew", () => {
   }, 20_000)
 
   it("clamps registration to a daemon version inside the advertised window", async () => {
+    // Defence-in-depth for a future rolling transition. The live v9 daemon
+    // accepts a freshly restarted v10 bridge through the N-1 scalar today;
+    // version rejection was not the cause of the fleet outage.
     const socketPath = join(tmpDir, "tribe-clamp.sock")
     const clampDaemon = await spawnClampDaemon(socketPath)
     daemon = clampDaemon
