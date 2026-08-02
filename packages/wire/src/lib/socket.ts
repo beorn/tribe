@@ -54,7 +54,9 @@ export const TRIBE_SUPPORTED_PROTOCOL_VERSIONS = [TRIBE_PROTOCOL_VERSION, TRIBE_
 
 export function supportedProtocolVersionsFromAdvertisement(advertised: unknown, legacy: unknown): number[] {
   const advertisedVersions = Array.isArray(advertised)
-    ? advertised.filter((version): version is number => Number.isSafeInteger(version) && version > 0)
+    ? advertised.filter(
+        (version): version is number => typeof version === "number" && Number.isSafeInteger(version) && version > 0,
+      )
     : []
   if (advertisedVersions.length > 0) return [...new Set(advertisedVersions)].sort((a, b) => b - a)
   return Number.isSafeInteger(legacy) && Number(legacy) > 0 ? [Number(legacy)] : []
