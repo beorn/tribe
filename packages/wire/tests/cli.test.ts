@@ -698,6 +698,55 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     }
   })
 
+  it("renders an unclassified inbox-drain authority failure as could-not-evaluate JSON", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-drain-authority-"))
+    const socketPath = join(dir, "tribe.sock")
+    const server = createServer((socket) => {
+      socket.once("data", (chunk) => {
+        const request = JSON.parse(chunk.toString("utf8").trim()) as { id: number }
+        socket.write(
+          `${JSON.stringify({
+            jsonrpc: "2.0",
+            id: request.id,
+            error: {
+              code: -32004,
+              message: "could-not-evaluate inbox drain authority: an operator capability is not configured",
+              data: { kind: "could-not-evaluate", reason: "operator-capability-unconfigured" },
+            },
+          })}\n`,
+        )
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const result = await runCliAsync(["inbox-drain", "--session", "@dev/1", "--json"], {
+        ...process.env,
+        TRIBE_SOCKET: socketPath,
+        TRIBE_NO_AUTOSTART: "1",
+      })
+
+      expect(result).toMatchObject({ code: 1, stdout: "" })
+      expect(JSON.parse(result.stderr)).toEqual({
+        error: {
+          code: -32004,
+          kind: "could-not-evaluate",
+          message: "could-not-evaluate inbox drain authority: an operator capability is not configured",
+          reason: "operator-capability-unconfigured",
+        },
+      })
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it("does not expose a deadline response as an empty timeout through the JSON CLI", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-wait-attention-"))
     const socketPath = join(dir, "tribe.sock")

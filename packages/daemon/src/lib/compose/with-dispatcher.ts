@@ -240,11 +240,14 @@ export function withDispatcher<
       }
     }
 
-    function hasOperatorCapability(value: unknown): boolean {
+    type OperatorCapabilityVerdict = "authorized" | "unconfigured" | "rejected"
+
+    function operatorCapabilityVerdict(value: unknown): OperatorCapabilityVerdict {
       const configured = t.config.operatorCapability?.trim()
+      if (!configured) return "unconfigured"
       const supplied = typeof value === "string" ? value : ""
-      if (!configured || supplied.length !== configured.length) return false
-      return timingSafeEqual(Buffer.from(supplied), Buffer.from(configured))
+      if (supplied.length !== configured.length) return "rejected"
+      return timingSafeEqual(Buffer.from(supplied), Buffer.from(configured)) ? "authorized" : "rejected"
     }
 
     function requiredNonEmptyString(value: unknown): string | null {
@@ -530,8 +533,7 @@ export function withDispatcher<
           return { holder, launch: launchIdentity, transportClass: "provider-parent-fan-in" }
         }
 
-        const legacyParentFoundLaunchChild =
-          launchIdentity === null && clientPid === holderLaunch?.parentPid
+        const legacyParentFoundLaunchChild = launchIdentity === null && clientPid === holderLaunch?.parentPid
         if (legacyParentFoundLaunchChild) {
           return { holder, launch: holderLaunch, transportClass: "provider-parent-fan-in" }
         }
@@ -1314,13 +1316,21 @@ export function withDispatcher<
             const client = clients.get(connId)
             const authenticatedName =
               client && client.role !== "pending" && client.role !== "watch" ? client.name : null
-            const operatorAuthorized = hasOperatorCapability(p.operator_capability)
+            const operatorVerdict = operatorCapabilityVerdict(p.operator_capability)
+            const operatorAuthorized = operatorVerdict === "authorized"
             if (!operatorAuthorized && !authenticatedName) {
-              return makeError(
-                id,
-                -32003,
-                "Inbox drain requires an authenticated current session or the configured operator capability",
-              )
+              if (operatorVerdict === "unconfigured") {
+                return makeError(
+                  id,
+                  -32004,
+                  "could-not-evaluate inbox drain authority: an operator capability is not configured",
+                  { kind: "could-not-evaluate", reason: "operator-capability-unconfigured" },
+                )
+              }
+              return makeError(id, -32003, "unauthenticated inbox drain: the operator capability was rejected", {
+                kind: "unauthenticated",
+                reason: "operator-capability-rejected",
+              })
             }
             if (
               !operatorAuthorized &&

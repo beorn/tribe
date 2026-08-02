@@ -730,6 +730,36 @@ async function cmdInboxDrain(opts: { session?: string; limit?: number; json?: bo
   )
 }
 
+interface InboxDrainFailureProjection {
+  code: number | string | null
+  kind: string
+  message: string
+  reason: string
+}
+
+function projectInboxDrainFailure(error: unknown): InboxDrainFailureProjection {
+  const failure = error instanceof Error ? (error as Error & { code?: unknown; data?: unknown }) : undefined
+  const data =
+    typeof failure?.data === "object" && failure.data !== null ? (failure.data as Record<string, unknown>) : undefined
+  return {
+    code: typeof failure?.code === "number" || typeof failure?.code === "string" ? failure.code : null,
+    // An older daemon can return -32003 without saying whether it evaluated a
+    // credential. That evidence is indeterminate, never proof of rejection.
+    kind: typeof data?.kind === "string" ? data.kind : "could-not-evaluate",
+    message: failure?.message ?? String(error),
+    reason: typeof data?.reason === "string" ? data.reason : "unclassified-authority-failure",
+  }
+}
+
+function renderInboxDrainFailure(error: unknown, json: boolean): void {
+  const failure = projectInboxDrainFailure(error)
+  if (json) {
+    console.error(JSON.stringify({ error: failure }))
+    return
+  }
+  console.error(`tribe inbox-drain: ${failure.kind} — ${failure.message} (reason=${failure.reason})`)
+}
+
 type InboxWaitErrorKind = "transport-close" | "daemon-unavailable" | null
 
 function inboxWaitErrorKind(err: unknown): InboxWaitErrorKind {
@@ -1132,7 +1162,14 @@ export function registerReadCommands(program: Command): void {
     )
     .option("--limit <n>", "Maximum actionable DMs to return and acknowledge (max 100)", int, 10)
     .option("--json", "Emit machine-readable JSON")
-    .action((opts: { session?: string; limit?: number; json?: boolean }) => void cmdInboxDrain(opts))
+    .action(async (opts: { session?: string; limit?: number; json?: boolean }) => {
+      try {
+        await cmdInboxDrain(opts)
+      } catch (error) {
+        renderInboxDrainFailure(error, !!opts.json)
+        process.exitCode = 1
+      }
+    })
 
   program
     .command("inbox-status")
