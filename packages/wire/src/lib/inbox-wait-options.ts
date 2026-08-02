@@ -134,22 +134,6 @@ export function parseInboxWaitResult(value: unknown): InboxWaitResult {
   }
 }
 
-/**
- * Reconcile the terminal reason with the authoritative attention projection.
- *
- * Quiet responses do not wake a running default wait, but once the wait ends a
- * result carrying actionable attention must not be readable as an empty
- * timeout. Preserve aborts because they report a transport lifecycle event.
- */
-export function normalizeInboxWaitResult(result: InboxWaitResult): InboxWaitResult {
-  if (result.aborted || result.attention.actionable_unread.length === 0 || !result.timed_out) return result
-  return {
-    ...result,
-    status: "woken",
-    timed_out: false,
-  }
-}
-
 export function resolveInboxWaitOptions(
   source: InboxWaitOptionSource,
   opts: { readonly defaultSession?: string } = {},

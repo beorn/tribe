@@ -257,6 +257,7 @@ export function sendMessage(
       $room_id: classification.roomId ?? null,
       $request: persistedRequest,
       $reply: canonicalReplyId,
+      $correlated_reply_requester: correlatedReply?.requester ?? null,
       $summary: classification.summary ?? null,
       $attention_required: classification.attentionRequired === true ? 1 : 0,
     })

@@ -18,8 +18,9 @@
  * pathology.
  */
 import { randomUUID } from "node:crypto"
-import { mkdirSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs"
+import { mkdirSync, readdirSync, realpathSync, statSync } from "node:fs"
 import { join } from "node:path"
+import { safeRemoveSync } from "removely"
 
 // realpathSync: /tmp is a symlink to /private/tmp on macOS — tools that
 // compare resolved paths against fixture paths (e.g. the ripgrep-backed
@@ -29,12 +30,22 @@ const TEST_TMP_BASE = realpathSync(`/tmp/tribe-vitest-${process.getuid?.() ?? 0}
 const STALE_CUTOFF_MS = Date.now() - 24 * 60 * 60 * 1000
 for (const name of readdirSync(TEST_TMP_BASE)) {
   const stale = join(TEST_TMP_BASE, name)
+  // A readdir walk that deletes each entry is the exact shape of the 2026-07-31
+  // incident, so this loop of all places routes through the guarded primitive.
+  //
+  // The try/catch is now scoped to the stat alone. It used to wrap the removal
+  // too, which meant a containment REFUSAL would have been swallowed by the
+  // same `catch {}` that legitimately absorbs the worker race — the failure
+  // mode where the guard fires and nobody hears it.
+  let mtimeMs: number
   try {
-    if (statSync(stale).mtimeMs < STALE_CUTOFF_MS) rmSync(stale, { recursive: true, force: true })
+    mtimeMs = statSync(stale).mtimeMs
   } catch {
     // Concurrent workers race to sweep the same stale entry; losing the race
-    // (ENOENT between stat and rm) is the expected outcome, not an error.
+    // (ENOENT between readdir and stat) is the expected outcome, not an error.
+    continue
   }
+  if (mtimeMs < STALE_CUTOFF_MS) safeRemoveSync(stale, { within: TEST_TMP_BASE, allowMissing: true })
 }
 process.env.TMPDIR = TEST_TMP_BASE
 

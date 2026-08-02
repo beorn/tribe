@@ -86,7 +86,7 @@ function makeOpts(inboxWait?: HandlerOpts["inboxWait"]): HandlerOpts {
 }
 
 describe("createInboxWaitManager", () => {
-  it("returns one canonical result with the current attention projection", async () => {
+  it("returns one canonical timeout with the current attention projection", async () => {
     const attention = {
       actionable_unread: [{ id: "actionable-1" }],
       pending_balls: [{ request_id: "request-1" }],
@@ -96,15 +96,15 @@ describe("createInboxWaitManager", () => {
       (session) => status(session, 3),
       () => attention,
     )
-    const result = await manager.wait("@ci", "conn-1", 30_000)
+    const result = await manager.wait("@ci", "conn-1", 0)
     expect(result).toMatchObject({
-      status: "woken",
+      status: "timeout",
       session: "@ci",
       unread_count: 3,
-      timed_out: false,
+      timed_out: true,
       aborted: false,
       waited_ms: 0,
-      effective_timeout_ms: 30_000,
+      effective_timeout_ms: 0,
       attention,
     })
   })
@@ -377,6 +377,95 @@ describe("createInboxWaitManager", () => {
     }
   })
 
+  it("re-armed opt-in wait wakes for a validated reply that landed between chunks", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-reply-gap-"))
+    const db = openDatabase(join(tmpDir, "tribe.db"))
+    const stmts = createStatements(db)
+    const manager = createInboxWaitManager(
+      (session) => status(session, 0),
+      () => EMPTY_ATTENTION,
+      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
+    )
+    const requester = makeContext(db, stmts, "requester", "@requester", manager.onMessageInserted)
+    const responder = makeContext(db, stmts, "responder", "@responder", manager.onMessageInserted)
+
+    try {
+      sendMessage(
+        requester,
+        "@responder",
+        "please respond",
+        "request",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        { request: "req-gap" },
+      )
+      const baseline = await manager.wait("@requester", "conn-baseline", 0, { wakeOnCorrelatedReply: true })
+
+      sendMessage(
+        responder,
+        "@requester",
+        "unvalidated response while between chunks",
+        "response",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        { reply: "missing-request" },
+      )
+      await expect(
+        manager.wait("@requester", "conn-after-invalid-gap", 1, {
+          wakeOnCorrelatedReply: true,
+          afterSeq: baseline.baseline_seq,
+        }),
+      ).resolves.toMatchObject({ status: "timeout", timed_out: true })
+
+      sendMessage(
+        responder,
+        "@requester",
+        "reply while between chunks",
+        "response",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        { reply: "req-gap" },
+      )
+      expect(
+        db
+          .prepare("SELECT correlated_reply_requester FROM messages WHERE recipient = ? AND content = ? ORDER BY rowid")
+          .all("@requester", "unvalidated response while between chunks"),
+      ).toEqual([{ correlated_reply_requester: null }])
+      expect(
+        db
+          .prepare("SELECT correlated_reply_requester FROM messages WHERE recipient = ? AND content = ?")
+          .get("@requester", "reply while between chunks"),
+      ).toEqual({ correlated_reply_requester: "@requester" })
+
+      await expect(
+        manager.wait("@requester", "conn-default-after-gap", 1, {
+          afterSeq: baseline.baseline_seq,
+        }),
+      ).resolves.toMatchObject({ status: "timeout", timed_out: true })
+
+      await expect(
+        manager.wait("@requester", "conn-after-gap", 1, {
+          wakeOnCorrelatedReply: true,
+          afterSeq: baseline.baseline_seq,
+        }),
+      ).resolves.toMatchObject({
+        status: "woken",
+        timed_out: false,
+        aborted: false,
+        waited_ms: 0,
+      })
+    } finally {
+      db.close()
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
   it("times out when no actionable message arrives", async () => {
     vi.useFakeTimers()
     const manager = createTestInboxWaitManager((session) => status(session, 0))
@@ -457,12 +546,24 @@ describe("createInboxWaitManager", () => {
     }
   }
 
+  function realLatestInboxWaitSeq(stmts: TribeStatements, session: string, wakeOnCorrelatedReply = false): number {
+    const row = stmts.getLatestInboxWaitMessage.get({
+      $name: session,
+      $include_correlated_replies: wakeOnCorrelatedReply ? 1 : 0,
+    }) as { rowid: number } | undefined
+    return row?.rowid ?? 0
+  }
+
   it("wakes on real DB assign (and every other actionable type) without a mock unread counter", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-assign-"))
     const db = openDatabase(join(tmpDir, "tribe.db"))
     const stmts = createStatements(db)
     const readStatus = realUnreadReader(stmts)
-    const manager = createInboxWaitManager(readStatus, () => EMPTY_ATTENTION)
+    const manager = createInboxWaitManager(
+      readStatus,
+      () => EMPTY_ATTENTION,
+      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
+    )
     const chief = makeContext(db, stmts, "chief", "@chief", manager.onMessageInserted)
 
     try {
@@ -498,30 +599,79 @@ describe("createInboxWaitManager", () => {
     }
   })
 
+  it("does not publish a pre-existing unread row as a new wait wake", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-new-row-"))
+    const db = openDatabase(join(tmpDir, "tribe.db"))
+    const stmts = createStatements(db)
+    const readStatus = realUnreadReader(stmts)
+    const manager = createInboxWaitManager(
+      readStatus,
+      () => EMPTY_ATTENTION,
+      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
+    )
+    const chief = makeContext(db, stmts, "chief", "@chief", manager.onMessageInserted)
+    const seat = "@dev/1"
+
+    try {
+      sendMessage(chief, seat, "already surfaced before the wait", "verdict", undefined, undefined, "direct")
+      expect(readStatus(seat).unread_count).toBe(1)
+
+      const wait = manager.wait(seat, "conn-new-row", 2_000)
+      let settled: Awaited<typeof wait> | undefined
+      void wait.then((value) => {
+        settled = value
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(settled, "an old unread row must not sticky-wake a newly armed wait").toBeUndefined()
+
+      sendMessage(chief, seat, "arrived after the wait began", "assign", undefined, undefined, "direct")
+      await Promise.resolve()
+      await Promise.resolve()
+
+      await expect(wait).resolves.toMatchObject({
+        status: "woken",
+        session: seat,
+        timed_out: false,
+        aborted: false,
+      })
+    } finally {
+      manager.cancelConnection("conn-new-row")
+      db.close()
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
   it("re-armed wait returns immediately when assign landed between chunks (reconnect gap)", async () => {
     // CLI wait closes the socket after each chunk (callInboxWaitChunk finally
     // client.close → cancelConnection). An assign that arrives in the gap
-    // between chunks must still wake the next wait via unread_count > 0, not
-    // require a second insert notification.
+    // between chunks must still wake the next wait from the logical wait's
+    // durable baseline, without treating rows older than that baseline as new.
     const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-gap-"))
     const db = openDatabase(join(tmpDir, "tribe.db"))
     const stmts = createStatements(db)
     const readStatus = realUnreadReader(stmts)
-    const manager = createInboxWaitManager(readStatus, () => EMPTY_ATTENTION)
+    const manager = createInboxWaitManager(
+      readStatus,
+      () => EMPTY_ATTENTION,
+      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
+    )
     const chief = makeContext(db, stmts, "chief", "@chief", manager.onMessageInserted)
     const seat = "@dev/3"
 
     try {
       const first = manager.wait(seat, "conn-chunk-1", 5_000)
       manager.cancelConnection("conn-chunk-1") // simulate chunk socket close
-      await expect(first).resolves.toMatchObject({ aborted: true, unread_count: 0 })
+      const firstResult = await first
+      expect(firstResult).toMatchObject({ aborted: true, unread_count: 0, baseline_seq: 0 })
 
       // Assign lands while NO waiter is registered (inter-chunk gap).
       sendMessage(chief, seat, "assign while between chunks", "assign", undefined, undefined, "direct")
       expect(readStatus(seat).unread_count).toBeGreaterThan(0)
 
-      // Next chunk re-arms — must wake immediately from the durable unread.
-      const second = await manager.wait(seat, "conn-chunk-2", 5_000)
+      // Next chunk re-arms — must wake immediately from the durable logical baseline.
+      const second = await manager.wait(seat, "conn-chunk-2", 5_000, { afterSeq: firstResult.baseline_seq })
       expect(second).toMatchObject({
         status: "woken",
         session: seat,
@@ -530,6 +680,44 @@ describe("createInboxWaitManager", () => {
       })
       expect(second.unread_count).toBeGreaterThan(0)
       expect(second.waited_ms).toBe(0)
+    } finally {
+      db.close()
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("re-armed wait still wakes when the gap assign was acknowledged before reconnect", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-gap-ack-"))
+    const db = openDatabase(join(tmpDir, "tribe.db"))
+    const stmts = createStatements(db)
+    const readStatus = realUnreadReader(stmts)
+    const manager = createInboxWaitManager(
+      readStatus,
+      () => EMPTY_ATTENTION,
+      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
+    )
+    const chief = makeContext(db, stmts, "chief", "@chief", manager.onMessageInserted)
+    const seat = "@dev/3"
+
+    try {
+      const baseline = await manager.wait(seat, "conn-baseline", 0)
+      expect(baseline).toMatchObject({ timed_out: true, baseline_seq: 0 })
+
+      sendMessage(chief, seat, "assign while between chunks", "assign", undefined, undefined, "direct")
+      const latest = stmts.getLatestActionableAttention.get({ $name: seat }) as { rowid: number }
+      stmts.advanceMailboxCursor.run({ $recipient: seat, $seq: latest.rowid, $now: Date.now() })
+      expect(readStatus(seat).unread_count).toBe(0)
+
+      await expect(
+        manager.wait(seat, "conn-after-ack", 5_000, { afterSeq: baseline.baseline_seq }),
+      ).resolves.toMatchObject({
+        status: "woken",
+        session: seat,
+        timed_out: false,
+        aborted: false,
+        unread_count: 0,
+        waited_ms: 0,
+      })
     } finally {
       db.close()
       rmSync(tmpDir, { recursive: true, force: true })
@@ -548,7 +736,11 @@ describe("createInboxWaitManager", () => {
       if (forceZeroUnread) return status(session, 0)
       return realUnreadReader(stmts)(session)
     }
-    const manager = createInboxWaitManager(readStatus, () => EMPTY_ATTENTION)
+    const manager = createInboxWaitManager(
+      readStatus,
+      () => EMPTY_ATTENTION,
+      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
+    )
     const chief = makeContext(db, stmts, "chief", "@chief", manager.onMessageInserted)
     const seat = "@dev/3"
 

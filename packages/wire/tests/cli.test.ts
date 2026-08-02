@@ -617,7 +617,11 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
                     id: request.id,
                     error: { code: -32601, message: `Method not found: ${request.method}` },
                   }
-                : { jsonrpc: "2.0", id: request.id, result }
+                : {
+                    jsonrpc: "2.0",
+                    id: request.id,
+                    result: request.method === "cli_inbox_wait" ? { ...waitResult, baseline_seq: 0 } : result,
+                  }
           socket.write(`${JSON.stringify(response)}\n`)
         }
       })
@@ -670,6 +674,8 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         { method: "cli_inbox_status", params: { session: "@chief" } },
         { method: "cli_protocol", params: undefined },
         { method: "cli_inbox_wait", params: { session: "@chief", timeout_ms: 0 } },
+        { method: "cli_protocol", params: undefined },
+        { method: "cli_inbox_wait", params: { session: "@chief", timeout_ms: 0, after_seq: 0 } },
         {
           method: "cli_inbox_drain",
           params: { session: "@chief", limit: 1, operator_capability: "fd-only-operator-secret" },
@@ -698,7 +704,56 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     }
   })
 
-  it("does not expose a deadline response as an empty timeout through the JSON CLI", async () => {
+  it("renders an unclassified inbox-drain authority failure as could-not-evaluate JSON", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-drain-authority-"))
+    const socketPath = join(dir, "tribe.sock")
+    const server = createServer((socket) => {
+      socket.once("data", (chunk) => {
+        const request = JSON.parse(chunk.toString("utf8").trim()) as { id: number }
+        socket.write(
+          `${JSON.stringify({
+            jsonrpc: "2.0",
+            id: request.id,
+            error: {
+              code: -32004,
+              message: "could-not-evaluate inbox drain authority: an operator capability is not configured",
+              data: { kind: "could-not-evaluate", reason: "operator-capability-unconfigured" },
+            },
+          })}\n`,
+        )
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const result = await runCliAsync(["inbox-drain", "--session", "@dev/1", "--json"], {
+        ...process.env,
+        TRIBE_SOCKET: socketPath,
+        TRIBE_NO_AUTOSTART: "1",
+      })
+
+      expect(result).toMatchObject({ code: 1, stdout: "" })
+      expect(JSON.parse(result.stderr)).toEqual({
+        error: {
+          code: -32004,
+          kind: "could-not-evaluate",
+          message: "could-not-evaluate inbox drain authority: an operator capability is not configured",
+          reason: "operator-capability-unconfigured",
+        },
+      })
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps a pre-existing deadline response visible without publishing a new JSON wake", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-wait-attention-"))
     const socketPath = join(dir, "tribe.sock")
     const attention = {
@@ -731,6 +786,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
                   timed_out: true,
                   aborted: false,
                   attention,
+                  baseline_seq: 0,
                 }
           socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`)
         }
@@ -753,8 +809,8 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
 
       expect(result, result.stderr).toMatchObject({ code: 0, stderr: "" })
       expect(JSON.parse(result.stdout)).toMatchObject({
-        status: "woken",
-        timed_out: false,
+        status: "timeout",
+        timed_out: true,
         unread_count: 0,
         attention,
       })

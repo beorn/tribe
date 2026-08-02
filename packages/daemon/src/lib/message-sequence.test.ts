@@ -5,7 +5,8 @@
  * @level    l1 - real temporary SQLite file, no daemon process or sockets.
  * @consumer @km/all/21576-seat-stall-undead-meta S2 shadow delivery cursor.
  */
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, realpathSync } from "node:fs"
+import { safeRemoveSync } from "removely"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Database } from "bun:sqlite"
@@ -17,7 +18,7 @@ import { openDatabase } from "./database.ts"
 const roots: string[] = []
 
 afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
+  for (const root of roots.splice(0)) safeRemoveSync(root, { within: realpathSync(tmpdir()), allowMissing: true })
 })
 
 function insertMessage(db: ReturnType<typeof openDatabase>, id: string, ts: number): number {

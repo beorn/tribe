@@ -84,6 +84,7 @@ export function openDatabase(path: string): Database {
 		room_id    TEXT,
 		request    TEXT,
 		reply      TEXT,
+		correlated_reply_requester TEXT,
 		summary    TEXT,
 		attention_required INTEGER NOT NULL DEFAULT 0
 	)`)
@@ -105,6 +106,7 @@ export function openDatabase(path: string): Database {
 		archived_at INTEGER NOT NULL,
 		request     TEXT,
 		reply       TEXT,
+		correlated_reply_requester TEXT,
 		summary     TEXT
 	)`)
 
@@ -1003,6 +1005,24 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 25,
+    name: "validated-reply-correlation",
+    up(db) {
+      for (const table of ["messages", "messages_archive"]) {
+        const exists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='${table}'`).get() as {
+          name: string
+        } | null
+        if (!exists) continue
+        const columns = new Set(
+          (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name),
+        )
+        if (!columns.has("correlated_reply_requester")) {
+          db.run(`ALTER TABLE ${table} ADD COLUMN correlated_reply_requester TEXT`)
+        }
+      }
+    },
+  },
 ]
 
 // ---------------------------------------------------------------------------
@@ -1018,12 +1038,15 @@ const MIGRATIONS: readonly Migration[] = [
  */
 export const ACTIONABLE_TYPES = ["request", "query", "verdict", "assign"] as const
 export const ACTIONABLE_TYPES_SET: ReadonlySet<string> = new Set(ACTIONABLE_TYPES)
+export const CORRELATED_REPLY_TYPES = ["response", "status"] as const
+export const CORRELATED_REPLY_TYPES_SET: ReadonlySet<string> = new Set(CORRELATED_REPLY_TYPES)
 /** Direct types that implicitly open a semantic response ball. Verdict remains
  * wakeable/actionable but does not manufacture a second obligation unless the
  * sender explicitly supplies `request`. */
 export const AUTO_TRACK_TYPES = ["request", "query", "assign"] as const
 export const AUTO_TRACK_TYPES_SET: ReadonlySet<string> = new Set(AUTO_TRACK_TYPES)
 export const ACTIONABLE_TYPES_SQL = ACTIONABLE_TYPES.map((t) => `'${t}'`).join(", ")
+export const CORRELATED_REPLY_TYPES_SQL = CORRELATED_REPLY_TYPES.map((type) => `'${type}'`).join(", ")
 /** One canonical durable-attention classification: default-wake actionables
  * plus rows atomically classified at insertion (currently direct responses). */
 export const ATTENTION_PREDICATE_SQL = `(type IN (${ACTIONABLE_TYPES_SQL}) OR attention_required = 1)`
@@ -1054,9 +1077,9 @@ export function createStatements(db: Database) {
 
     insertMessage: db.prepare(`
 		INSERT INTO messages (id, type, sender, recipient, kind, content, bead_id, ref, ts,
-			delivery, topic, room_id, request, reply, summary, attention_required)
+			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, attention_required)
 		VALUES ($id, $type, $sender, $recipient, $kind, $content, $bead_id, $ref, $ts,
-			$delivery, $topic, $room_id, $request, $reply, $summary,
+			$delivery, $topic, $room_id, $request, $reply, $correlated_reply_requester, $summary,
 			CASE
 				WHEN $attention_required = 1 THEN 1
 				WHEN $kind = 'direct' AND $sender != $recipient AND $type = 'response' THEN 1
@@ -1256,6 +1279,27 @@ export function createStatements(db: Database) {
       LIMIT 1
     `),
 
+    /** Durable actionable tail independent of mailbox acknowledgement. A
+     * reconnecting wait compares this against its logical baseline so a row
+     * inserted and acknowledged between transport chunks is still observed. */
+    getLatestInboxWaitMessage: db.prepare(`
+      SELECT rowid
+      FROM messages
+      WHERE recipient = $name
+        AND kind = 'direct'
+        AND sender != $name
+        AND (
+          type IN (${ACTIONABLE_TYPES_SQL})
+          OR (
+            $include_correlated_replies = 1
+            AND type IN (${CORRELATED_REPLY_TYPES_SQL})
+            AND correlated_reply_requester = $name
+          )
+        )
+      ORDER BY rowid DESC
+      LIMIT 1
+    `),
+
     /** Exact OOB delivery envelope selected by the structural cursor. This is
      * read-only and remains launch/session constrained in the dispatcher; the
      * caller must present both cursor and message id so a racing tail cannot
@@ -1281,11 +1325,11 @@ export function createStatements(db: Database) {
     archiveExpiredMessages: db.prepare(`
 		INSERT OR IGNORE INTO messages_archive (
 			seq, id, type, sender, recipient, kind, content, bead_id, ref, ts,
-			delivery, topic, room_id, summary, archived_at
+			delivery, topic, room_id, correlated_reply_requester, summary, archived_at
 		)
 		SELECT
 			rowid, id, type, sender, recipient, kind, content, bead_id, ref, ts,
-			delivery, topic, room_id, summary, $archived_at
+			delivery, topic, room_id, correlated_reply_requester, summary, $archived_at
 		FROM messages
 		WHERE ts < $cutoff
 	`),

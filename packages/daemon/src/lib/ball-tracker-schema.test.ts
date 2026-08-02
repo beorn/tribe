@@ -10,7 +10,8 @@
  */
 
 import { Database } from "bun:sqlite"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, realpathSync } from "node:fs"
+import { safeRemoveSync } from "removely"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
@@ -25,7 +26,7 @@ describe("ball-tracker schema (migration v16)", () => {
   })
 
   afterEach(() => {
-    rmSync(tmpDir, { recursive: true, force: true })
+    safeRemoveSync(tmpDir, { within: realpathSync(tmpdir()), allowMissing: true })
   })
 
   it("fresh install has request + reply columns on messages", () => {

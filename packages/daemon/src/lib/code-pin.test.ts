@@ -8,7 +8,8 @@
  */
 
 import { execFileSync } from "node:child_process"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, realpathSync } from "node:fs"
+import { safeRemoveSync } from "removely"
 import { tmpdir } from "node:os"
 import { dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -97,8 +98,9 @@ describe("gatherCodePin (real git path, temp repo)", () => {
     fakeGit(["config", "user.name", "t"])
   })
   afterEach(() => {
-    rmSync(repo, { recursive: true, force: true })
-    rmSync(fakeRepo, { recursive: true, force: true })
+    const within = realpathSync(tmpdir())
+    safeRemoveSync(repo, { within, allowMissing: true })
+    safeRemoveSync(fakeRepo, { within, allowMissing: true })
   })
 
   it("reproduces the stale-code class: process loaded A, checkout advanced to B", () => {
