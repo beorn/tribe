@@ -9,15 +9,18 @@
  */
 
 import { describe, expect, it } from "vitest"
-import { spawn, spawnSync } from "node:child_process"
+import { execFileSync, spawn, spawnSync } from "node:child_process"
 import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { createServer, type Socket } from "node:net"
+import { createConnection, createServer, type Socket } from "node:net"
 import { tmpdir } from "node:os"
 import { resolve, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "../src/cli.ts")
+const DAEMON = resolve(dirname(fileURLToPath(import.meta.url)), "../../daemon/src/daemon.ts")
+const TRIBE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..")
+const TRIBE_SHA = execFileSync("git", ["-C", TRIBE_ROOT, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()
 const BUN_BIN = process.env.BUN_EXECUTABLE ?? "bun"
 
 // Strip ANSI SGR sequences (Commander colorizes its help output, which
@@ -82,7 +85,69 @@ function runCliAsync(
   })
 }
 
+async function waitForSocket(socketPath: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const connected = await new Promise<boolean>((resolveConnect) => {
+      const socket = createConnection(socketPath)
+      socket.once("connect", () => {
+        socket.end()
+        resolveConnect(true)
+      })
+      socket.once("error", () => resolveConnect(false))
+    })
+    if (connected) return
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25))
+  }
+  throw new Error(`timed out waiting for daemon socket ${socketPath}`)
+}
+
+function createDoctorCanaryResponder(mode: "pass" | "timeout" = "pass") {
+  return (method: string): unknown | null => {
+    if (method === "register") return { name: "tribe-doctor-canary" }
+    if (method === "cli_inbox_wait") {
+      return mode === "pass"
+        ? { status: "woken", timed_out: false, waited_ms: 3 }
+        : { status: "timeout", timed_out: true, waited_ms: 2_000 }
+    }
+    if (method === "tribe.send") return { sent: true, id: "00000000-0000-4000-8000-000000000001" }
+    if (method === "tribe.fetch") return { messages: [] }
+    return null
+  }
+}
+
 describe("tribe-wire CLI — Commander dispatcher", () => {
+  it("doctor proves the rail with a real daemon send and long-poll canary", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-doctor-canary-"))
+    const socketPath = join(dir, "tribe.sock")
+    const dbPath = join(dir, "tribe.db")
+    const env = {
+      ...process.env,
+      TRIBE_SOCKET: socketPath,
+      TRIBE_DB: dbPath,
+      TRIBE_NO_AUTOSTART: "1",
+      TRIBE_SUMMARIZER_MODEL: "off",
+    }
+    const daemon = spawn(
+      BUN_BIN,
+      [DAEMON, "--socket", socketPath, "--db", dbPath, "--quit-timeout", "-1", "--no-lore"],
+      { env, stdio: "ignore" },
+    )
+
+    try {
+      await waitForSocket(socketPath)
+      const result = await runCliAsync(["doctor"], env, { timeoutMs: 10_000 })
+
+      expect(result, result.stderr).toMatchObject({ code: 0 })
+      expect(result.stdout).toMatch(/OK — rail canary message=[0-9a-f-]+ waited_ms=\d+/)
+      expect(result.stdout).toContain(`OK — code identity running=${TRIBE_SHA} on_disk=${TRIBE_SHA} pin=${TRIBE_SHA}`)
+    } finally {
+      daemon.kill("SIGTERM")
+      await new Promise<void>((resolveClose) => daemon.once("close", () => resolveClose()))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it("refuses a legacy inbox-wait daemon before parsing its stale result and names the served pins", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-wait-skew-"))
     const socketPath = join(dir, "tribe.sock")
@@ -406,6 +471,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-diagnostics-"))
     const socketPath = join(dir, "tribe.sock")
     const methods: string[] = []
+    const doctorCanaryResponse = createDoctorCanaryResponder()
     const holder = {
       id: "holder-session",
       name: "@chief",
@@ -418,6 +484,8 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       idleMs: 0,
       cwd: "/repo",
       source: "daemon",
+      protocol_versions: [TRIBE_PROTOCOL_VERSION],
+      version_state: "current",
     }
     const server = createServer((socket) => {
       let buffer = ""
@@ -431,32 +499,44 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
           if (!line.trim()) continue
           const request = JSON.parse(line) as { id: number; method: string }
           methods.push(request.method)
-          const daemon = { pid: 99, uptime: 10, clients: 1, dbPath: join(dir, "tribe.db"), socketPath }
+          const daemon = {
+            pid: 99,
+            uptime: 10,
+            clients: 1,
+            dbPath: join(dir, "tribe.db"),
+            socketPath,
+            code_identity: { cert: TRIBE_SHA, root: TRIBE_ROOT },
+            protocol_version: TRIBE_PROTOCOL_VERSION,
+          }
+          const canaryResult = doctorCanaryResponse(request.method)
           const result =
-            request.method === "cli_status"
-              ? { sessions: [holder], daemon }
-              : request.method === "cli_health"
-                ? { content: [{ type: "text", text: JSON.stringify({ issues: [] }) }], sessions: [holder], daemon }
-                : request.method === "cli_log"
-                  ? { messages: [] }
-                  : request.method === "tribe.health"
-                    ? {
-                        content: [
-                          {
-                            type: "text",
-                            text: JSON.stringify({
-                              code_pin: {
-                                stale: false,
-                                reason: null,
-                                running: "abc",
-                                on_disk: "abc",
-                                superproject_pin: "abc",
-                              },
-                            }),
-                          },
-                        ],
-                      }
-                    : { error: `unexpected method ${request.method}` }
+            canaryResult ??
+            (request.method === "tribe.members"
+              ? { content: [{ type: "text", text: JSON.stringify({ sessions: [] }) }] }
+              : request.method === "cli_status"
+                ? { sessions: [holder], daemon }
+                : request.method === "cli_health"
+                  ? { content: [{ type: "text", text: JSON.stringify({ issues: [] }) }], sessions: [holder], daemon }
+                  : request.method === "cli_log"
+                    ? { messages: [] }
+                    : request.method === "tribe.health"
+                      ? {
+                          content: [
+                            {
+                              type: "text",
+                              text: JSON.stringify({
+                                code_pin: {
+                                  stale: false,
+                                  reason: null,
+                                  running: "abc",
+                                  on_disk: "abc",
+                                  superproject_pin: "abc",
+                                },
+                              }),
+                            },
+                          ],
+                        }
+                      : { error: `unexpected method ${request.method}` })
           socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`)
         }
       })
@@ -483,8 +563,217 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         expect(result, `${args[0]} failed: ${result.stderr}`).toMatchObject({ code: 0 })
       }
 
-      expect(methods).toEqual(["tribe.health", "cli_health", "cli_status", "cli_log"])
-      expect(methods).not.toContain("register")
+      expect(methods).toEqual([
+        "cli_status",
+        "tribe.members",
+        "register",
+        "cli_inbox_wait",
+        "tribe.send",
+        "tribe.fetch",
+        "cli_health",
+        "cli_status",
+        "cli_log",
+      ])
+      expect(methods.filter((method) => method === "register")).toHaveLength(1)
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("doctor exits UNKNOWN instead of certifying unresolved code identity", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-doctor-unknown-"))
+    const socketPath = join(dir, "tribe.sock")
+    const methods: string[] = []
+    const doctorCanaryResponse = createDoctorCanaryResponder()
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as { id: number; method: string }
+          methods.push(request.method)
+          const canaryResult = doctorCanaryResponse(request.method)
+          const result =
+            request.method === "cli_status"
+              ? {
+                  sessions: [],
+                  daemon: {
+                    protocol_version: TRIBE_PROTOCOL_VERSION,
+                    code_identity: { cert: null, root: "/missing/tribe" },
+                  },
+                }
+              : request.method === "tribe.members"
+                ? { content: [{ type: "text", text: JSON.stringify({ sessions: [] }) }] }
+                : canaryResult
+          socket.write(
+            `${JSON.stringify({
+              jsonrpc: "2.0",
+              id: request.id,
+              result,
+            })}\n`,
+          )
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const result = await runCliAsync(["doctor"], {
+        ...process.env,
+        TRIBE_SOCKET: socketPath,
+        TRIBE_NO_AUTOSTART: "1",
+      })
+
+      expect(result.code).toBe(2)
+      expect(result.stderr).toContain(
+        "UNKNOWN — code identity: daemon code identity is unresolved path=/missing/tribe errno=UNREPORTED_CERT",
+      )
+      expect(`${result.stdout}\n${result.stderr}`).not.toContain("OK — code identity")
+      expect(methods).toEqual([
+        "cli_status",
+        "tribe.members",
+        "register",
+        "cli_inbox_wait",
+        "tribe.send",
+        "tribe.fetch",
+      ])
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("doctor reports an exact CRITICAL diagnosis and executable remedy when the long-poll canary times out", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-doctor-critical-"))
+    const socketPath = join(dir, "tribe.sock")
+    const methods: string[] = []
+    const doctorCanaryResponse = createDoctorCanaryResponder("timeout")
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as { id: number; method: string }
+          methods.push(request.method)
+          const canaryResult = doctorCanaryResponse(request.method)
+          const result =
+            request.method === "cli_status"
+              ? {
+                  sessions: [],
+                  daemon: {
+                    protocol_version: TRIBE_PROTOCOL_VERSION,
+                    code_identity: { cert: TRIBE_SHA, root: TRIBE_ROOT },
+                  },
+                }
+              : request.method === "tribe.members"
+                ? { content: [{ type: "text", text: JSON.stringify({ sessions: [] }) }] }
+                : canaryResult
+          socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`)
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const result = await runCliAsync(["doctor"], {
+        ...process.env,
+        TRIBE_SOCKET: socketPath,
+        TRIBE_NO_AUTOSTART: "1",
+      })
+
+      expect(result.code).toBe(1)
+      expect(result.stdout).toContain(`OK — code identity running=${TRIBE_SHA} on_disk=${TRIBE_SHA} pin=${TRIBE_SHA}`)
+      expect(result.stderr).toContain("CRITICAL — rail canary failed: long-poll returned status=timeout timed_out=true")
+      expect(result.stderr).toContain(
+        'REMEDY — run `tribe reload --reason "doctor rail canary failed"`, then re-run `tribe doctor`',
+      )
+      expect(result.stderr).toContain("FINAL FAIL — derived from the worst doctor check")
+      expect(methods).toEqual(["cli_status", "tribe.members", "register", "cli_inbox_wait", "tribe.send"])
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("doctor against a mismatched daemon prints the exact CRITICAL identity line and remedy", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-doctor-mismatch-"))
+    const socketPath = join(dir, "tribe.sock")
+    const doctorCanaryResponse = createDoctorCanaryResponder()
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as { id: number; method: string }
+          const canaryResult = doctorCanaryResponse(request.method)
+          const result =
+            request.method === "cli_status"
+              ? {
+                  sessions: [],
+                  daemon: {
+                    protocol_version: TRIBE_PROTOCOL_VERSION,
+                    code_identity: { cert: "deadbeef", root: TRIBE_ROOT },
+                  },
+                }
+              : request.method === "tribe.members"
+                ? { content: [{ type: "text", text: JSON.stringify({ sessions: [] }) }] }
+                : canaryResult
+          socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`)
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const result = await runCliAsync(["doctor"], {
+        ...process.env,
+        TRIBE_SOCKET: socketPath,
+        TRIBE_NO_AUTOSTART: "1",
+      })
+
+      expect(result.code).toBe(1)
+      expect(result.stderr).toContain(
+        `CRITICAL — code identity: daemon code integrity mismatch running=deadbeef on_disk=${TRIBE_SHA} pin=${TRIBE_SHA}`,
+      )
+      expect(result.stderr).toContain(
+        'REMEDY — run `tribe reload --reason "doctor found daemon code mismatch"`, then re-run `tribe doctor`',
+      )
+      expect(result.stdout).toContain("OK — rail canary message=00000000-0000-4000-8000-000000000001")
+      expect(result.stderr).toContain("FINAL FAIL — derived from the worst doctor check")
     } finally {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
       rmSync(dir, { recursive: true, force: true })

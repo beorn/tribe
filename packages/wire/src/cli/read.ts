@@ -14,6 +14,7 @@ import {
   resolveSocketPath,
   isSupportedProtocolVersion,
   TRIBE_PROTOCOL_VERSION,
+  TRIBE_SUPPORTED_PROTOCOL_VERSIONS,
   type DaemonClient,
 } from "../lib/socket.ts"
 import { watchActivity } from "../lib/activity-watch.ts"
@@ -21,6 +22,7 @@ import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-
 import { readTribeLaunchId } from "../launch-environment.ts"
 import { withCliDaemonClient } from "./daemon-client.ts"
 import { mcpJsonContent } from "./mcp-json-content.ts"
+import { resolveCheckoutCodeIdentity, type CheckoutCodeIdentity, type GitProbe } from "../lib/code-identity.ts"
 
 const PENDING_CLI = visibleCliProjectionForMcp("pending")
 const INBOX_WAIT_CLI = visibleCliProjectionForMcp("inbox.wait")
@@ -570,11 +572,32 @@ async function cmdHealth(): Promise<void> {
  * contain it; the probe must live outside (here).
  */
 export interface DoctorVerdict {
-  stale: boolean
+  outcome: DoctorOutcome
+  severity: DoctorCheckVerdict
   /** Operator-facing remedy, or null when fresh. */
   reason: string | null
   /** running/on-disk/pin SHAs when the daemon could self-report, else null. */
   detail: { running: string | null; on_disk: string | null; superproject_pin: string | null } | null
+}
+
+export type DoctorCheckVerdict = "OK" | "WARNING" | "CRITICAL" | "UNKNOWN"
+export type DoctorFinalVerdict = "OK" | "FAIL" | "UNKNOWN"
+
+export interface DoctorOutcome {
+  verdict: DoctorFinalVerdict
+  exitCode: 0 | 1 | 2
+}
+
+/**
+ * Reduce every doctor check through one verdict algebra. UNKNOWN is worst:
+ * an unanswerable check can never be collapsed into an evidence-free green.
+ */
+export function deriveDoctorOutcome(checks: readonly DoctorCheckVerdict[]): DoctorOutcome {
+  if (checks.includes("UNKNOWN")) return { verdict: "UNKNOWN", exitCode: 2 }
+  if (checks.some((check) => check === "WARNING" || check === "CRITICAL")) {
+    return { verdict: "FAIL", exitCode: 1 }
+  }
+  return { verdict: "OK", exitCode: 0 }
 }
 
 interface DoctorHealthShape {
@@ -592,15 +615,263 @@ export function evaluateDoctor(health: DoctorHealthShape): DoctorVerdict {
   const cp = health.code_pin
   if (cp === undefined) {
     return {
-      stale: true,
+      outcome: deriveDoctorOutcome(["UNKNOWN"]),
+      severity: "UNKNOWN",
       reason:
         "running daemon predates the code_pin detector (@km/tribe/20033): its tribe.health() has no `code_pin` field, so it is too old to self-report. Stop it so the next autostart respawns from current source.",
       detail: null,
     }
   }
   const detail = { running: cp.running, on_disk: cp.on_disk, superproject_pin: cp.superproject_pin }
-  if (cp.stale) return { stale: true, reason: cp.reason, detail }
-  return { stale: false, reason: null, detail }
+  const unresolved = (Object.entries(detail) as Array<[keyof typeof detail, string | null]>)
+    .filter(([, value]) => value === null)
+    .map(([field]) => field)
+  if (unresolved.length > 0) {
+    return {
+      outcome: deriveDoctorOutcome(["UNKNOWN"]),
+      severity: "UNKNOWN",
+      reason: `cannot compare daemon code identity: unresolved ${unresolved.join(", ")}`,
+      detail,
+    }
+  }
+  if (cp.stale || cp.running !== cp.on_disk || cp.on_disk !== cp.superproject_pin) {
+    const severity = cp.running !== cp.on_disk ? "CRITICAL" : "WARNING"
+    return {
+      outcome: deriveDoctorOutcome([severity]),
+      severity,
+      reason:
+        cp.reason ??
+        (cp.running !== cp.on_disk
+          ? `running ${cp.running} != on_disk ${cp.on_disk} — restart the daemon from the on-disk source`
+          : `on_disk ${cp.on_disk} != superproject_pin ${cp.superproject_pin} — materialize the pinned Tribe checkout`),
+      detail,
+    }
+  }
+  return { outcome: deriveDoctorOutcome(["OK"]), severity: "OK", reason: null, detail }
+}
+
+export type DoctorRailCheck =
+  | { severity: "OK"; evidence: { messageId: string; waitedMs: number } }
+  | { severity: "CRITICAL"; diagnosis: string; remedy: string }
+
+export interface DoctorDiagnosticCheck {
+  severity: DoctorCheckVerdict
+  diagnosis: string
+  remedy?: string
+  values?: { running: string; on_disk: string; pin: string }
+}
+
+function probeFailure(probe: Exclude<GitProbe, { ok: true }>): string {
+  const { path, operation, errno, message } = probe.failure
+  return `${operation} failed path=${path} errno=${errno}: ${message}`
+}
+
+export function evaluateDoctorIdentity(
+  reported: { cert: string | null; root: string } | undefined,
+  resolved: CheckoutCodeIdentity | undefined,
+): DoctorDiagnosticCheck {
+  if (reported === undefined) {
+    return {
+      severity: "UNKNOWN",
+      diagnosis: "daemon status did not report code identity path=? errno=UNSUPPORTED_CODE_IDENTITY",
+      remedy: "materialize current Tribe code, reload the daemon, then re-run `tribe doctor`",
+    }
+  }
+  if (!reported.root || reported.cert === null) {
+    return {
+      severity: "UNKNOWN",
+      diagnosis: `daemon code identity is unresolved path=${reported.root || "?"} errno=UNREPORTED_CERT`,
+      remedy: "reload the daemon from a Git-backed Tribe checkout, then re-run `tribe doctor`",
+    }
+  }
+  if (resolved === undefined) {
+    return { severity: "UNKNOWN", diagnosis: `checkout identity was not resolved path=${reported.root} errno=NO_PROBE` }
+  }
+  if (!resolved.onDisk.ok) {
+    return { severity: "UNKNOWN", diagnosis: probeFailure(resolved.onDisk) }
+  }
+  if (!resolved.superprojectPin.ok) {
+    return { severity: "UNKNOWN", diagnosis: probeFailure(resolved.superprojectPin) }
+  }
+  const values = {
+    running: reported.cert,
+    on_disk: resolved.onDisk.value,
+    pin: resolved.superprojectPin.value,
+  }
+  if (values.running !== values.on_disk) {
+    return {
+      severity: "CRITICAL",
+      values,
+      diagnosis: `daemon code integrity mismatch running=${values.running} on_disk=${values.on_disk} pin=${values.pin}`,
+      remedy: 'run `tribe reload --reason "doctor found daemon code mismatch"`, then re-run `tribe doctor`',
+    }
+  }
+  if (values.on_disk !== values.pin) {
+    return {
+      severity: "WARNING",
+      values,
+      diagnosis: `Tribe checkout is behind its host pin running=${values.running} on_disk=${values.on_disk} pin=${values.pin}`,
+      remedy:
+        `resolve the superproject with \`git -C ${JSON.stringify(reported.root)} rev-parse --show-superproject-working-tree\`, ` +
+        "materialize its pinned Tribe submodule, then re-run `tribe doctor`",
+    }
+  }
+  return {
+    severity: "OK",
+    values,
+    diagnosis: `running=${values.running} on_disk=${values.on_disk} pin=${values.pin}`,
+  }
+}
+
+type DoctorVersionRow = {
+  name: string
+  protocol_versions?: number[]
+  version_state?: "current" | "version-degraded" | "version-unknown" | string
+}
+
+export function evaluateDoctorVersions(
+  daemonProtocol: number | undefined,
+  sessions: readonly DoctorVersionRow[],
+): DoctorDiagnosticCheck {
+  if (daemonProtocol === undefined) {
+    return { severity: "UNKNOWN", diagnosis: "daemon protocol version is unresolved" }
+  }
+  const degraded = sessions
+    .filter((session) => session.version_state === "version-degraded")
+    .map(
+      (session) =>
+        `${session.name}=version-degraded(${(session.protocol_versions ?? []).map((v) => `v${v}`).join(",") || "unknown"})`,
+    )
+  if (daemonProtocol < TRIBE_PROTOCOL_VERSION) degraded.unshift(`daemon=version-degraded(v${daemonProtocol})`)
+  if (degraded.length > 0) {
+    return {
+      severity: "WARNING",
+      diagnosis: degraded.join(" "),
+      remedy: "finish the rolling Tribe reload so every daemon and seat negotiates the current wire version",
+    }
+  }
+  const unknown = sessions
+    .filter(
+      (session) =>
+        session.version_state === undefined ||
+        session.version_state === "version-unknown" ||
+        !Array.isArray(session.protocol_versions),
+    )
+    .map((session) => session.name)
+  if (unknown.length > 0) {
+    return { severity: "UNKNOWN", diagnosis: `wire version unresolved for ${unknown.join(", ")}` }
+  }
+  const seats = sessions.map(
+    (session) =>
+      `${session.name}:${(session.protocol_versions ?? []).map((version) => `v${version}`).join(",") || "none"}`,
+  )
+  return {
+    severity: "OK",
+    diagnosis: `daemon=v${daemonProtocol} seats=${seats.join(" ") || "none"}`,
+  }
+}
+
+type DoctorMembershipRow = { name: string; transport_state?: string }
+type DoctorMembershipDiscrepancy = { status?: string; missing?: Array<{ name: string; state: string }> }
+
+export function evaluateDoctorMembership(
+  sessions: readonly DoctorMembershipRow[],
+  discrepancy: DoctorMembershipDiscrepancy | undefined,
+): DoctorDiagnosticCheck {
+  const states = new Map(sessions.map((session) => [session.name, session.transport_state ?? "unknown"]))
+  for (const missing of discrepancy?.missing ?? []) states.set(missing.name, missing.state)
+  const evidence = [...states].map(([name, state]) => `${name}=${state}`).join(" ") || "seats=none"
+  if ([...states.values()].some((state) => state === "unknown")) {
+    return { severity: "UNKNOWN", diagnosis: `membership rail state unresolved: ${evidence}` }
+  }
+  if (discrepancy?.status === "degraded" || [...states.values()].some((state) => state !== "connected")) {
+    return {
+      severity: "WARNING",
+      diagnosis: `membership degraded: ${evidence}`,
+      remedy: "rejoin each disconnected or missing-transport seat, then re-run `tribe doctor`",
+    }
+  }
+  return { severity: "OK", diagnosis: `connected=${states.size} missing=0 ${evidence}` }
+}
+
+type DoctorConnect = typeof connectToDaemon
+
+/**
+ * Exercise the coordination rail through its ordinary write + long-poll
+ * paths. The pending sender and ephemeral receiver are isolated from every
+ * live seat identity; the receiver consumes the canary before disconnecting.
+ */
+export async function probeDoctorRail(
+  socketPath = resolveSocketPath(),
+  connect: DoctorConnect = connectToDaemon,
+): Promise<DoctorRailCheck> {
+  let receiver: DaemonClient | undefined
+  let sender: DaemonClient | undefined
+  try {
+    receiver = await connect(socketPath, { callTimeoutMs: 3_000 })
+    sender = await connect(socketPath, { callTimeoutMs: 3_000 })
+    const registered = mcpJsonContent(
+      await receiver.call("register", {
+        name: "tribe-doctor-canary",
+        role: "member",
+        domains: ["diagnostics"],
+        delivery: "pull",
+        project: process.cwd(),
+        projectName: process.cwd().split("/").filter(Boolean).at(-1) ?? "unknown",
+        pid: process.pid,
+        protocolVersion: TRIBE_PROTOCOL_VERSION - 1,
+        supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
+      }),
+    ) as { name?: unknown }
+    if (typeof registered.name !== "string" || registered.name.length === 0) {
+      throw new Error("daemon registration returned no canary mailbox name")
+    }
+    const mailbox = registered.name
+    // Both requests share one sender socket. JSON-RPC request ordering makes
+    // the wait arm before the send is dispatched, while the daemon's
+    // concurrent request callbacks let the send wake that pending wait.
+    const waitPromise = sender.call(
+      "cli_inbox_wait",
+      { session: mailbox, timeout_ms: 2_000 },
+      { timeoutMs: 2_500 },
+    ) as Promise<{ status?: unknown; timed_out?: unknown; waited_ms?: unknown }>
+    const sendPromise = sender.call("tribe.send", {
+      to: mailbox,
+      message: "tribe doctor coordination-rail canary",
+      type: "verdict",
+      delivery: "pull",
+      summary: "doctor rail canary",
+    })
+    const [waited, sentRaw] = await Promise.all([waitPromise, sendPromise])
+    const sent = mcpJsonContent(sentRaw) as { sent?: unknown; id?: unknown; error?: unknown }
+    if (sent.error !== undefined) throw new Error(String(sent.error))
+    if (sent.sent !== true || typeof sent.id !== "string") {
+      throw new Error("daemon send did not acknowledge the canary message")
+    }
+    if (waited.status !== "woken" || waited.timed_out !== false) {
+      throw new Error(`long-poll returned status=${String(waited.status)} timed_out=${String(waited.timed_out)}`)
+    }
+
+    await receiver.call("tribe.fetch", {})
+    return {
+      severity: "OK",
+      evidence: {
+        messageId: sent.id,
+        waitedMs: typeof waited.waited_ms === "number" ? waited.waited_ms : 0,
+      },
+    }
+  } catch (error) {
+    const code = (error as { code?: unknown }).code
+    const detail = error instanceof Error ? error.message : String(error)
+    return {
+      severity: "CRITICAL",
+      diagnosis: `rail canary failed${code === undefined ? "" : ` (${String(code)})`}: ${detail}`,
+      remedy: 'run `tribe reload --reason "doctor rail canary failed"`, then re-run `tribe doctor`',
+    }
+  } finally {
+    sender?.close()
+    receiver?.close()
+  }
 }
 
 /** Extract the health payload from a callDaemon result (MCP-wrapped or raw). */
@@ -647,37 +918,95 @@ async function assertInboxWaitProtocol(client: DaemonClient, timeoutMs: number):
 }
 
 async function cmdDoctor(opts: { fix?: boolean }): Promise<void> {
-  const health = parseDoctorHealth(await callDaemon("tribe.health"))
-  const verdict = evaluateDoctor(health)
+  let status: {
+    sessions?: DoctorVersionRow[]
+    daemon?: {
+      protocol_version?: number
+      code_identity?: { cert: string | null; root: string }
+    }
+  } = {}
+  try {
+    status = (await callDaemon("cli_status")) as typeof status
+  } catch {
+    // Older daemons may not expose the status RPC. The missing identity is an
+    // UNKNOWN check below; the rail canary still runs independently.
+  }
+  let daemonProtocol = status.daemon?.protocol_version
+  if (daemonProtocol === undefined) {
+    try {
+      const protocol = (await callDaemon("cli_protocol")) as { protocol_version?: unknown }
+      if (typeof protocol.protocol_version === "number") daemonProtocol = protocol.protocol_version
+    } catch {
+      // evaluateDoctorVersions turns the unresolved value into UNKNOWN.
+    }
+  }
+  const rawReportedIdentity = status.daemon?.code_identity
+  const reportedIdentity =
+    rawReportedIdentity &&
+    typeof rawReportedIdentity.root === "string" &&
+    (typeof rawReportedIdentity.cert === "string" || rawReportedIdentity.cert === null)
+      ? rawReportedIdentity
+      : undefined
+  const resolvedIdentity =
+    reportedIdentity?.root && typeof reportedIdentity.root === "string"
+      ? resolveCheckoutCodeIdentity(reportedIdentity.root)
+      : undefined
+  const identity = evaluateDoctorIdentity(reportedIdentity, resolvedIdentity)
+  const versions = evaluateDoctorVersions(daemonProtocol, status.sessions ?? [])
 
-  console.log("TRIBE DOCTOR — daemon code-staleness check\n")
-  if (verdict.detail) {
-    const d = verdict.detail
-    console.log(`  running=${d.running ?? "?"}  on_disk=${d.on_disk ?? "?"}  pin=${d.superproject_pin ?? "?"}`)
+  let membership: DoctorDiagnosticCheck
+  try {
+    const members = mcpJsonContent(await callDaemon("tribe.members")) as {
+      sessions?: DoctorMembershipRow[]
+      membership_discrepancy?: DoctorMembershipDiscrepancy
+    }
+    if (members === null || typeof members !== "object" || !Array.isArray(members.sessions)) {
+      throw new Error(`daemon returned an unexpected members shape: ${JSON.stringify(members)}`)
+    }
+    membership = evaluateDoctorMembership(members.sessions, members.membership_discrepancy)
+  } catch (error) {
+    membership = {
+      severity: "UNKNOWN",
+      diagnosis: `membership query failed: ${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
+  const rail = await probeDoctorRail()
+  const outcome = deriveDoctorOutcome([identity.severity, versions.severity, membership.severity, rail.severity])
+
+  console.log("TRIBE DOCTOR — coordination rail + daemon code identity\n")
+  if (identity.severity === "OK") {
+    console.log(`  OK — code identity ${identity.diagnosis}`)
+  } else {
+    console.error(`  ${identity.severity} — code identity: ${identity.diagnosis}`)
+    if (identity.remedy) console.error(`  REMEDY — ${identity.remedy}`)
+  }
+  if (versions.severity === "OK") {
+    console.log(`  OK — wire versions ${versions.diagnosis}`)
+  } else {
+    console.error(`  ${versions.severity} — wire versions: ${versions.diagnosis}`)
+    if (versions.remedy) console.error(`  REMEDY — ${versions.remedy}`)
+  }
+  if (membership.severity === "OK") {
+    console.log(`  OK — membership ${membership.diagnosis}`)
+  } else {
+    console.error(`  ${membership.severity} — ${membership.diagnosis}`)
+    if (membership.remedy) console.error(`  REMEDY — ${membership.remedy}`)
   }
 
-  if (!verdict.stale) {
-    console.log("  OK — running daemon matches the on-disk + superproject-pinned tribe code.")
+  if (rail.severity === "OK") {
+    console.log(`  OK — rail canary message=${rail.evidence.messageId} waited_ms=${rail.evidence.waitedMs}`)
+  } else {
+    console.error(`  CRITICAL — ${rail.diagnosis}`)
+    console.error(`  REMEDY — ${rail.remedy}`)
+  }
+
+  if (outcome.verdict === "OK") {
     return
   }
 
-  console.error(`  STALE — ${verdict.reason}`)
-  if (opts.fix) {
-    // Operator-gated only — never auto, never in the hot hook path. The actual
-    // restart is a lifecycle op (which lives in the tribe-daemon package, not
-    // this read-only CLI), so --fix prints the exact operator remedy rather
-    // than mutating live daemon state from here. Restart-execution wiring is
-    // the tracked lifecycle follow-up slice.
-    console.error(
-      "\n  --fix (operator-gated remedy):\n" +
-        "    1. if on_disk != pin: update the tribe submodule to its pin, then\n" +
-        "    2. stop the stale daemon (it idle-exits; or kill its `daemon.ts` pid)\n" +
-        "       so the next autostart respawns from current source, then\n" +
-        "    3. re-run `tribe doctor` to confirm OK.\n" +
-        "  (Automated restart is the tracked lifecycle follow-up; not wired here.)",
-    )
-  }
-  process.exit(1)
+  console.error(`\n  FINAL ${outcome.verdict} — derived from the worst doctor check.`)
+  if (opts.fix) console.error("  --fix is read-only; execute the diagnosis-specific REMEDY line(s) above.")
+  process.exitCode = outcome.exitCode
 }
 
 /**
