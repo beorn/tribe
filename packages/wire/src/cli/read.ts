@@ -302,10 +302,19 @@ async function cmdLog(
 
   if (!follow) {
     if (!rows.length) {
-      console.log("No messages in tribe log.")
+      console.log(all ? "No messages in tribe log." : `No messages in the last ${limit}. Older messages may exist — use --all.`)
       return
     }
-    console.log(`TRIBE LOG — last ${rows.length} message${rows.length !== 1 ? "s" : ""}\n`)
+    // A saturated window means older messages almost certainly exist. Saying only
+    // "last N messages" is how a reader concludes "not present" when the truth is
+    // "outside my window" — that misread cost two coordination failures on
+    // 2026-08-01 (a delivered verdict read as never sent; eight open balls read as
+    // absent). Never report a bounded read as if it were exhaustive.
+    const saturated = !all && rows.length >= limit
+    const scope = saturated
+      ? `last ${rows.length} — WINDOW FULL, older messages exist (use --limit N or --all)`
+      : `${rows.length} message${rows.length !== 1 ? "s" : ""}${all ? "" : " (all that exist)"}`
+    console.log(`TRIBE LOG — ${scope}\n`)
     for (const m of rows) {
       fmtMsg(m)
     }
