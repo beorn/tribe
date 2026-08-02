@@ -336,6 +336,13 @@ export function withDispatcher<
     const inboxWait = createInboxWaitManager(
       readInboxStatus,
       (sessionName) => readAttentionProjection(daemonCtx, sessionName).attention,
+      (sessionName, wakeOnCorrelatedReply) => {
+        const latest = stmts.getLatestInboxWaitMessage.get({
+          $name: sessionName,
+          $include_correlated_replies: wakeOnCorrelatedReply ? 1 : 0,
+        }) as { rowid: number } | undefined
+        return latest?.rowid ?? 0
+      },
     )
     const previousOnMessageInserted = daemonCtx.onMessageInserted
     const onMessageInserted = (info: MessageInsertedInfo) => {
@@ -1385,7 +1392,14 @@ export function withDispatcher<
             if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage)
             const { timeoutMs, wakeOnCorrelatedReply } = resolveInboxWaitOptions(p)
             const sessionName = target.sessionName
-            const result = await inboxWait.wait(sessionName, connId, timeoutMs, { wakeOnCorrelatedReply })
+            const afterSeqRaw = p.after_seq
+            if (afterSeqRaw !== undefined && (!Number.isSafeInteger(afterSeqRaw) || Number(afterSeqRaw) < 0)) {
+              return makeError(id, -32602, "Inbox wait after_seq must be a non-negative safe integer")
+            }
+            const result = await inboxWait.wait(sessionName, connId, timeoutMs, {
+              wakeOnCorrelatedReply,
+              ...(afterSeqRaw === undefined ? {} : { afterSeq: Number(afterSeqRaw) }),
+            })
             // The launch-correlated form proves which managed mailbox is
             // reading. The explicit operator form observes another mailbox
             // and must never forge that seat's receipt.
@@ -1410,7 +1424,9 @@ export function withDispatcher<
               // explicit target supplied in params.
               stmts.touchMailboxAttentionRead.run({ $recipient: client.name, $now: Date.now() })
             }
-            return makeResponse(id, result)
+            const publicResult: Record<string, unknown> = { ...result }
+            delete publicResult.baseline_seq
+            return makeResponse(id, publicResult)
           }
 
           /**

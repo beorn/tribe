@@ -617,7 +617,11 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
                     id: request.id,
                     error: { code: -32601, message: `Method not found: ${request.method}` },
                   }
-                : { jsonrpc: "2.0", id: request.id, result }
+                : {
+                    jsonrpc: "2.0",
+                    id: request.id,
+                    result: request.method === "cli_inbox_wait" ? { ...waitResult, baseline_seq: 0 } : result,
+                  }
           socket.write(`${JSON.stringify(response)}\n`)
         }
       })
@@ -670,6 +674,8 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         { method: "cli_inbox_status", params: { session: "@chief" } },
         { method: "cli_protocol", params: undefined },
         { method: "cli_inbox_wait", params: { session: "@chief", timeout_ms: 0 } },
+        { method: "cli_protocol", params: undefined },
+        { method: "cli_inbox_wait", params: { session: "@chief", timeout_ms: 0, after_seq: 0 } },
         {
           method: "cli_inbox_drain",
           params: { session: "@chief", limit: 1, operator_capability: "fd-only-operator-secret" },
@@ -747,7 +753,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     }
   })
 
-  it("does not expose a deadline response as an empty timeout through the JSON CLI", async () => {
+  it("keeps a pre-existing deadline response visible without publishing a new JSON wake", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-wait-attention-"))
     const socketPath = join(dir, "tribe.sock")
     const attention = {
@@ -780,6 +786,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
                   timed_out: true,
                   aborted: false,
                   attention,
+                  baseline_seq: 0,
                 }
           socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`)
         }
@@ -802,8 +809,8 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
 
       expect(result, result.stderr).toMatchObject({ code: 0, stderr: "" })
       expect(JSON.parse(result.stdout)).toMatchObject({
-        status: "woken",
-        timed_out: false,
+        status: "timeout",
+        timed_out: true,
         unread_count: 0,
         attention,
       })

@@ -415,7 +415,69 @@ describe("waitForInboxWithReconnect", () => {
     expect(result.waited_ms).toBe(750)
   })
 
-  test("reports preserved daemon attention as a wake when the logical window ends", async () => {
+  test("does not publish pre-existing attention as a new logical-wait wake", async () => {
+    let now = 0
+    let calls = 0
+    const afterSeqs: Array<number | undefined> = []
+    const oldAttention = {
+      actionable_unread: [{ id: "verdict-before-wait", type: "verdict" }],
+      pending_balls: [],
+      pending_balls_summary: { total: 0, oldest_age_ms: 0 },
+    }
+    const result = await waitForInboxWithReconnect({
+      session: "@dev/1",
+      timeoutMs: 35_000,
+      maxChunkMs: 30_000,
+      initialAfterSeq: 41,
+      now: () => now,
+      call: async ({ timeoutMs, afterSeq }) => {
+        calls += 1
+        afterSeqs.push(afterSeq)
+        if (calls === 1) {
+          now += timeoutMs
+          return {
+            status: "timeout",
+            session: "@dev/1",
+            unread_count: 1,
+            oldest_unread_age_min: 5,
+            oldest_unread_ts: 1,
+            waited_ms: timeoutMs,
+            effective_timeout_ms: timeoutMs,
+            timed_out: true,
+            aborted: false,
+            attention: oldAttention,
+          }
+        }
+        now += 100
+        return {
+          status: "woken",
+          session: "@dev/1",
+          unread_count: 2,
+          oldest_unread_age_min: 5,
+          oldest_unread_ts: 1,
+          waited_ms: 100,
+          effective_timeout_ms: timeoutMs,
+          timed_out: false,
+          aborted: false,
+          attention: {
+            ...oldAttention,
+            actionable_unread: [...oldAttention.actionable_unread, { id: "assign-after-wait", type: "assign" }],
+          },
+        }
+      },
+    })
+
+    expect(calls).toBe(2)
+    expect(afterSeqs).toEqual([41, 41])
+    expect(result).toMatchObject({
+      status: "woken",
+      waited_ms: 30_100,
+      timed_out: false,
+      aborted: false,
+    })
+  })
+
+  test("keeps preserved pre-existing attention visible without publishing a new wake", async () => {
     let now = 0
     const chunkCalls: number[] = []
     const attention = {
@@ -448,10 +510,10 @@ describe("waitForInboxWithReconnect", () => {
 
     expect(chunkCalls).toEqual([30_000, 5_000])
     expect(result).toMatchObject({
-      status: "woken",
+      status: "timeout",
       waited_ms: 35_000,
       effective_timeout_ms: 35_000,
-      timed_out: false,
+      timed_out: true,
       aborted: false,
       attention,
     })
@@ -492,16 +554,16 @@ describe("waitForInboxWithReconnect", () => {
 
     expect(chunkCalls).toEqual([30_000, 5_000])
     expect(result).toMatchObject({
-      status: "woken",
+      status: "timeout",
       waited_ms: 35_000,
       effective_timeout_ms: 35_000,
-      timed_out: false,
+      timed_out: true,
       aborted: false,
       attention,
     })
   })
 
-  test("reports preserved authoritative attention as a wake when the daemon becomes unavailable", async () => {
+  test("keeps preserved attention visible without fabricating a wake when the daemon becomes unavailable", async () => {
     let now = 0
     let calls = 0
     const attention = {
@@ -542,10 +604,10 @@ describe("waitForInboxWithReconnect", () => {
 
     expect(calls).toBe(2)
     expect(result).toMatchObject({
-      status: "woken",
+      status: "timeout",
       waited_ms: 35_000,
       effective_timeout_ms: 35_000,
-      timed_out: false,
+      timed_out: true,
       aborted: false,
       attention,
     })

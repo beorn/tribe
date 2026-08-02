@@ -269,7 +269,7 @@ describe("callTribeTool", () => {
     expect(result).toMatchObject({ structuredContent: canonicalInboxWaitResult })
   })
 
-  it("normalizes a legacy timeout carrying actionable attention into a wake", async () => {
+  it("keeps the daemon terminal reason authoritative when old attention remains visible", async () => {
     const legacyResult = {
       ...canonicalInboxWaitResult,
       attention: {
@@ -283,8 +283,8 @@ describe("callTribeTool", () => {
 
     expect(result).toMatchObject({
       structuredContent: {
-        status: "woken",
-        timed_out: false,
+        status: "timeout",
+        timed_out: true,
         aborted: false,
         attention: legacyResult.attention,
       },

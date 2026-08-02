@@ -5,7 +5,6 @@ import { Command, int } from "@silvery/commander"
 import { cliOption, visibleCliProjectionForMcp } from "../command-descriptors.ts"
 import {
   deriveInboxWaitCallTimeoutMs,
-  normalizeInboxWaitResult,
   parseInboxWaitResult,
   resolveInboxWaitControls,
   type InboxWaitResult,
@@ -168,7 +167,13 @@ type InboxWaitCall = (args: {
   session?: string
   timeoutMs: number
   wakeOnCorrelatedReply: boolean
-}) => Promise<InboxWaitResult>
+  afterSeq?: number
+}) => Promise<InboxWaitChunkResult>
+
+type InboxWaitChunkResult = InboxWaitResult & {
+  /** Private daemon reconnect cursor; never exposed by the CLI. */
+  baseline_seq?: number
+}
 
 const INBOX_WAIT_CHUNK_MS = 30_000
 const INBOX_WAIT_RETRY_DELAY_MS = 250
@@ -779,13 +784,15 @@ export function isRetryableInboxWaitError(err: unknown): boolean {
 }
 
 function totalWaited(
-  result: InboxWaitResult,
+  result: InboxWaitChunkResult,
   startedAt: number,
   now: () => number,
   effectiveTimeoutMs: number,
 ): InboxWaitResult {
+  const publicResult = { ...result }
+  delete publicResult.baseline_seq
   return {
-    ...result,
+    ...publicResult,
     waited_ms: Math.max(result.waited_ms, Math.max(0, now() - startedAt)),
     effective_timeout_ms: effectiveTimeoutMs,
   }
@@ -802,18 +809,16 @@ function logicalTimeoutInboxWaitResult(
     if (lastRetryableError !== undefined) throw lastRetryableError
     throw new Error("Inbox wait ended without an authoritative daemon result")
   }
-  return normalizeInboxWaitResult(
-    totalWaited(
-      {
-        ...latest,
-        status: "timeout",
-        timed_out: true,
-        aborted: false,
-      },
-      startedAt,
-      now,
-      effectiveTimeoutMs,
-    ),
+  return totalWaited(
+    {
+      ...latest,
+      status: "timeout",
+      timed_out: true,
+      aborted: false,
+    },
+    startedAt,
+    now,
+    effectiveTimeoutMs,
   )
 }
 
@@ -827,6 +832,7 @@ export async function waitForInboxWithReconnect(opts: {
   retryDelayMs?: number
   unavailableGraceMs?: number
   wakeOnCorrelatedReply?: boolean
+  initialAfterSeq?: number
 }): Promise<InboxWaitResult> {
   const now = opts.now ?? Date.now
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
@@ -842,6 +848,7 @@ export async function waitForInboxWithReconnect(opts: {
   let latestResult: InboxWaitResult | undefined
   let lastRetryableError: unknown
   let attempted = false
+  let afterSeq = opts.initialAfterSeq
 
   while (true) {
     const remainingMs = Math.max(0, deadline - now())
@@ -855,10 +862,14 @@ export async function waitForInboxWithReconnect(opts: {
         session: opts.session,
         timeoutMs: Math.min(maxChunkMs, remainingMs),
         wakeOnCorrelatedReply: controls.wakeOnCorrelatedReply,
+        ...(afterSeq === undefined ? {} : { afterSeq }),
       })
+      if (Number.isSafeInteger(result.baseline_seq) && Number(result.baseline_seq) >= 0) {
+        afterSeq = Number(result.baseline_seq)
+      }
       latestResult = result
       lastRetryableError = undefined
-      if (result.unread_count > 0 || (!result.timed_out && !result.aborted)) {
+      if (!result.timed_out && !result.aborted) {
         return totalWaited(result, startedAt, now, controls.timeoutMs)
       }
       if (result.aborted || result.timed_out) {
@@ -889,23 +900,29 @@ async function callInboxWaitChunk(
   target: Record<string, unknown>,
   timeoutMs: number,
   wakeOnCorrelatedReply: boolean,
-): Promise<InboxWaitResult> {
+  afterSeq?: number,
+): Promise<InboxWaitChunkResult> {
   const socketPath = resolveSocketPath()
   const callTimeoutMs = deriveInboxWaitCallTimeoutMs(timeoutMs)
   const client = await connectToDaemon(socketPath, { callTimeoutMs })
   try {
     await assertInboxWaitProtocol(client, deriveInboxWaitCallTimeoutMs(0))
-    return parseInboxWaitResult(
-      await client.call(
-        method,
-        {
-          ...target,
-          timeout_ms: timeoutMs,
-          ...(wakeOnCorrelatedReply ? { wake_on_correlated_reply: true } : {}),
-        },
-        { timeoutMs: callTimeoutMs },
-      ),
+    const raw = await client.call(
+      method,
+      {
+        ...target,
+        timeout_ms: timeoutMs,
+        ...(wakeOnCorrelatedReply ? { wake_on_correlated_reply: true } : {}),
+        ...(afterSeq === undefined ? {} : { after_seq: afterSeq }),
+      },
+      { timeoutMs: callTimeoutMs },
     )
+    const parsed = parseInboxWaitResult(raw)
+    const baselineSeq = (raw as { baseline_seq?: unknown }).baseline_seq
+    if (!Number.isSafeInteger(baselineSeq) || Number(baselineSeq) < 0) {
+      throw new Error("Inbox-wait daemon omitted the private reconnect baseline")
+    }
+    return { ...parsed, baseline_seq: Number(baselineSeq) }
   } catch (err) {
     if ((err as { code?: unknown }).code === -32601 && method.endsWith("_by_launch_v1")) {
       throw new Error(STALE_MANAGED_INBOX_DAEMON_ERROR)
@@ -929,12 +946,25 @@ async function cmdInboxWait(opts: {
   const target = cliInboxTargetParams(opts.session)
   let result: InboxWaitResult
   try {
+    const baseline = await callInboxWaitChunk(
+      cliInboxMethod("wait", opts.session),
+      target,
+      0,
+      controls.wakeOnCorrelatedReply,
+    )
     result = await waitForInboxWithReconnect({
       session: opts.session,
       timeoutMs: controls.timeoutMs,
       wakeOnCorrelatedReply: controls.wakeOnCorrelatedReply,
-      call: ({ timeoutMs: chunkTimeoutMs, wakeOnCorrelatedReply }) =>
-        callInboxWaitChunk(cliInboxMethod("wait", opts.session), target, chunkTimeoutMs, wakeOnCorrelatedReply),
+      initialAfterSeq: baseline.baseline_seq,
+      call: ({ timeoutMs: chunkTimeoutMs, wakeOnCorrelatedReply, afterSeq }) =>
+        callInboxWaitChunk(
+          cliInboxMethod("wait", opts.session),
+          target,
+          chunkTimeoutMs,
+          wakeOnCorrelatedReply,
+          afterSeq,
+        ),
     })
   } catch (err) {
     if ((err as { code?: unknown }).code !== INBOX_WAIT_PROTOCOL_MISMATCH) throw err
@@ -951,7 +981,7 @@ async function cmdInboxWait(opts: {
     return
   }
   if (result.timed_out) {
-    console.log(`${result.session}: no actionable DMs within ${Math.round(controls.timeoutMs / 1000)}s.`)
+    console.log(`${result.session}: no new actionable DMs within ${Math.round(controls.timeoutMs / 1000)}s.`)
     process.exitCode = 64
     return
   }

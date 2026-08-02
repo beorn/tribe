@@ -1,8 +1,9 @@
 import type { MessageInsertedInfo } from "./context.ts"
 import type { InboxWaitResult as WireInboxWaitResult } from "tribe-wire"
-import { ACTIONABLE_TYPES_SET as ACTIONABLE_TYPES } from "./database.ts"
-
-const CORRELATED_REPLY_TYPES = new Set(["response", "status"])
+import {
+  ACTIONABLE_TYPES_SET as ACTIONABLE_TYPES,
+  CORRELATED_REPLY_TYPES_SET as CORRELATED_REPLY_TYPES,
+} from "./database.ts"
 
 export type InboxStatus = Pick<
   WireInboxWaitResult,
@@ -12,17 +13,24 @@ export type InboxStatus = Pick<
 type Waiter = {
   readonly connId: string
   readonly session: string
+  readonly baselineSeq: number
   readonly startedAt: number
   readonly effectiveTimeoutMs: number
   readonly wakeOnCorrelatedReply: boolean
-  readonly resolve: (result: WireInboxWaitResult) => void
+  readonly resolve: (result: InboxWaitChunkResult) => void
   timer: ReturnType<typeof setTimeout>
   done: boolean
+}
+
+export type InboxWaitChunkResult = WireInboxWaitResult & {
+  /** Private CLI reconnect cursor; stripped before public MCP/CLI output. */
+  readonly baseline_seq: number
 }
 
 export function createInboxWaitManager(
   readStatus: (session: string) => InboxStatus,
   readAttention: (session: string) => WireInboxWaitResult["attention"],
+  readLatestQualifyingSeq: (session: string, wakeOnCorrelatedReply: boolean) => number = () => 0,
 ) {
   const waiters = new Set<Waiter>()
 
@@ -30,8 +38,9 @@ export function createInboxWaitManager(
     status: InboxStatus,
     waitedMs: number,
     effectiveTimeoutMs: number,
+    baselineSeq: number,
     flags: { timedOut: boolean; aborted: boolean },
-  ): WireInboxWaitResult {
+  ): InboxWaitChunkResult {
     return {
       status: flags.aborted ? "aborted" : flags.timedOut ? "timeout" : "woken",
       ...status,
@@ -40,6 +49,7 @@ export function createInboxWaitManager(
       timed_out: flags.timedOut,
       aborted: flags.aborted,
       attention: readAttention(status.session),
+      baseline_seq: baselineSeq,
     }
   }
 
@@ -49,13 +59,16 @@ export function createInboxWaitManager(
     clearTimeout(waiter.timer)
     waiters.delete(waiter)
     const status = readStatus(waiter.session)
-    waiter.resolve(assembleResult(status, Date.now() - waiter.startedAt, waiter.effectiveTimeoutMs, flags))
+    waiter.resolve(
+      assembleResult(status, Date.now() - waiter.startedAt, waiter.effectiveTimeoutMs, waiter.baselineSeq, flags),
+    )
   }
 
   function onMessageInserted(info: MessageInsertedInfo): void {
     if (info.kind !== "direct") return
     for (const waiter of Array.from(waiters)) {
       if (waiter.session !== info.recipient) continue
+      if (info.rowid <= waiter.baselineSeq) continue
       if (
         waiter.wakeOnCorrelatedReply &&
         CORRELATED_REPLY_TYPES.has(info.type) &&
@@ -87,23 +100,31 @@ export function createInboxWaitManager(
     session: string,
     connId: string,
     timeoutMs: number,
-    opts: { readonly wakeOnCorrelatedReply?: boolean } = {},
-  ): Promise<WireInboxWaitResult> {
+    opts: { readonly wakeOnCorrelatedReply?: boolean; readonly afterSeq?: number } = {},
+  ): Promise<InboxWaitChunkResult> {
     const effectiveTimeoutMs = Number.isFinite(timeoutMs) ? Math.max(0, timeoutMs) : 0
     const snapshot = readStatus(session)
-    if (snapshot.unread_count > 0) {
-      return Promise.resolve(assembleResult(snapshot, 0, effectiveTimeoutMs, { timedOut: false, aborted: false }))
+    const wakeOnCorrelatedReply = opts.wakeOnCorrelatedReply === true
+    const latestSeq = readLatestQualifyingSeq(session, wakeOnCorrelatedReply)
+    const baselineSeq = opts.afterSeq ?? latestSeq
+    if (latestSeq > baselineSeq) {
+      return Promise.resolve(
+        assembleResult(snapshot, 0, effectiveTimeoutMs, baselineSeq, { timedOut: false, aborted: false }),
+      )
     }
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-      return Promise.resolve(assembleResult(snapshot, 0, effectiveTimeoutMs, { timedOut: true, aborted: false }))
+      return Promise.resolve(
+        assembleResult(snapshot, 0, effectiveTimeoutMs, baselineSeq, { timedOut: true, aborted: false }),
+      )
     }
     return new Promise((resolve) => {
       const waiter: Waiter = {
         connId,
         session,
+        baselineSeq,
         startedAt: Date.now(),
         effectiveTimeoutMs,
-        wakeOnCorrelatedReply: opts.wakeOnCorrelatedReply === true,
+        wakeOnCorrelatedReply,
         resolve,
         done: false,
         timer: undefined as unknown as ReturnType<typeof setTimeout>,

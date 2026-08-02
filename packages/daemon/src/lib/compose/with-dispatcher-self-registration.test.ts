@@ -1297,6 +1297,7 @@ describe("dispatcher inbox-wait parsing", () => {
     expect(result.unread_count).toBe(1)
     expect(result.timed_out).toBe(false)
     expect(result.aborted).toBe(false)
+    expect(result).not.toHaveProperty("baseline_seq")
     expect(result.attention.actionable_unread).toEqual([expect.objectContaining({ content: "wake inbox wait" })])
     expect(result.attention.pending_balls).toEqual([expect.objectContaining({ recipient: "@agent/wait" })])
   })
@@ -1449,7 +1450,7 @@ describe("dispatcher inbox-wait parsing", () => {
     const receiptAt = Date.now() + 5_000
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(receiptAt)
     try {
-      const explicit = parseResult<InboxWaitResult>(
+      const explicit = parseResult<InboxWaitResult & { baseline_seq: number }>(
         await harness.dispatcher.handleRequest(
           {
             jsonrpc: "2.0",
@@ -1461,9 +1462,10 @@ describe("dispatcher inbox-wait parsing", () => {
         ),
       )
       expect(explicit.timed_out).toBe(true)
+      expect(explicit.baseline_seq).toBe(0)
       expect(harness.mailboxAttentionReadAt(name)).toBeNull()
 
-      const correlated = parseResult<InboxWaitResult>(
+      const correlated = parseResult<InboxWaitResult & { baseline_seq: number }>(
         await harness.dispatcher.handleRequest(
           {
             jsonrpc: "2.0",
@@ -1475,6 +1477,7 @@ describe("dispatcher inbox-wait parsing", () => {
         ),
       )
       expect(correlated.timed_out).toBe(true)
+      expect(correlated.baseline_seq).toBe(0)
       expect(harness.mailboxAttentionReadAt(name)).toBe(receiptAt)
     } finally {
       nowSpy.mockRestore()
