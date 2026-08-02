@@ -16,11 +16,11 @@ import { spawn, type ChildProcess } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { isTribeNameShape } from "tribe-wire/lib/persona-name"
 import { evaluateAdapterRestart } from "./supervisor-policy.ts"
+import { buildPluginAdapterEnvironment, PLUGIN_REEXEC_EXIT_CODE } from "./supervisor-environment.ts"
 
 const PLUGIN_CHILD = "TRIBE_PLUGIN_ADAPTER_CHILD"
 const PLUGIN_PROVIDER_PARENT_PID = "TRIBE_PLUGIN_PROVIDER_PARENT_PID"
-const PLUGIN_RESUME_JOINED = "TRIBE_PLUGIN_RESUME_JOINED"
-const REEXEC_EXIT_CODE = 75
+const REEXEC_EXIT_CODE = PLUGIN_REEXEC_EXIT_CODE
 const REEXEC_JOINED_OFFSET = 1
 const GENERATION_REEXEC_OFFSET = 2
 const LAST_REEXEC_EXIT_CODE = REEXEC_EXIT_CODE + GENERATION_REEXEC_OFFSET + REEXEC_JOINED_OFFSET
@@ -124,13 +124,11 @@ async function superviseAdapter(): Promise<void> {
     const canResumeJoined = resumeJoined && resumeName !== undefined
     active = spawn(process.execPath, [fileURLToPath(import.meta.url), ...process.argv.slice(2)], {
       stdio: ["inherit", "inherit", "inherit", "ipc"],
-      env: {
-        ...process.env,
-        [PLUGIN_CHILD]: "1",
-        [PLUGIN_PROVIDER_PARENT_PID]: String(providerParentPid),
-        TRIBE_PLUGIN_REEXEC_EXIT_CODE: String(REEXEC_EXIT_CODE),
-        ...(canResumeJoined ? { [PLUGIN_RESUME_JOINED]: "1", TRIBE_NAME: resumeName } : {}),
-      },
+      env: buildPluginAdapterEnvironment(
+        process.env,
+        providerParentPid,
+        canResumeJoined && resumeName !== undefined ? { name: resumeName } : undefined,
+      ),
     })
     active.on("message", (message) => {
       const identity = supervisedIdentity(message)

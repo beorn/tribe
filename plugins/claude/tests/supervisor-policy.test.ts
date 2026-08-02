@@ -1,7 +1,20 @@
 import { describe, expect, it } from "vitest"
 import { ADAPTER_STABLE_MS, evaluateAdapterRestart } from "../supervisor-policy.ts"
+import {
+  buildPluginAdapterEnvironment,
+  PLUGIN_REEXEC_EXIT_CODE,
+  PLUGIN_REEXEC_EXIT_CODE_ENV,
+} from "../supervisor-environment.ts"
 
 describe("Claude plugin adapter restart budget", () => {
+  it("puts the re-exec value in the actual supervised child environment", () => {
+    const env = buildPluginAdapterEnvironment({ [PLUGIN_REEXEC_EXIT_CODE_ENV]: "" }, 4321)
+
+    expect(env[PLUGIN_REEXEC_EXIT_CODE_ENV]).toBe(String(PLUGIN_REEXEC_EXIT_CODE))
+    expect(env.TRIBE_PLUGIN_ADAPTER_CHILD).toBe("1")
+    expect(env.TRIBE_PLUGIN_PROVIDER_PARENT_PID).toBe("4321")
+  })
+
   it("allows a second quick re-exec when two legitimate daemon generations arrive in one restart burst", () => {
     expect(evaluateAdapterRestart(1, 10_000)).toEqual({
       consecutiveReexecs: 2,
