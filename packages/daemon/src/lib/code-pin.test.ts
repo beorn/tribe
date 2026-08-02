@@ -57,9 +57,19 @@ describe("evaluateCodePin (pure decision)", () => {
     })
   })
 
-  it("never false-alarms when a SHA is indeterminate (null)", () => {
-    expect(evaluateCodePin({ running: null, onDisk: "ffff", superprojectPin: null }).stale).toBe(false)
-    expect(evaluateCodePin({ running: "ffff", onDisk: null, superprojectPin: null }).stale).toBe(false)
+  it("reports UNKNOWN when a SHA is indeterminate (null)", () => {
+    expect(evaluateCodePin({ running: null, onDisk: "ffff", superprojectPin: null }).stale).toBeNull()
+    expect(evaluateCodePin({ running: "ffff", onDisk: null, superprojectPin: null }).stale).toBeNull()
+  })
+
+  it("reports UNKNOWN when health cannot resolve any code-pin operand", () => {
+    // Live specimen: health.code_pin reported stale:false while all three
+    // identity probes were NULL. Equality over unresolved operands is not a
+    // freshness proof and must remain visible to the doctor.
+    expect(evaluateCodePin({ running: null, onDisk: null, superprojectPin: null })).toEqual({
+      stale: null,
+      reason: "cannot compare daemon code identity: unresolved running, on_disk, superproject_pin",
+    })
   })
 })
 
@@ -122,7 +132,8 @@ describe("gatherCodePin (real git path, temp repo)", () => {
     expect(status.on_disk).toBe(sha)
     // Standalone temp repo: no superproject, so superproject_pin is null (visible, not masked).
     expect(status.superproject_pin).toBeNull()
-    expect(status.stale).toBe(false)
+    expect(status.stale).toBeNull()
+    expect(status.reason).toContain("unresolved superproject_pin")
   })
 
   it("reports the requested checkout rather than a caller-selected GIT_* repository", () => {
@@ -159,7 +170,7 @@ describe("gatherCodePin (real git path, temp repo)", () => {
     expect(status.running).toBe(sourceSha)
     expect(status.on_disk).toBe(sourceSha)
     expect(status.superproject_pin).toBeNull()
-    expect(status.stale).toBe(false)
-    expect(status.reason).toBeNull()
+    expect(status.stale).toBeNull()
+    expect(status.reason).toContain("unresolved superproject_pin")
   })
 })

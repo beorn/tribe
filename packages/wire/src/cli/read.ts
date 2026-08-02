@@ -602,7 +602,7 @@ export function deriveDoctorOutcome(checks: readonly DoctorCheckVerdict[]): Doct
 
 interface DoctorHealthShape {
   code_pin?: {
-    stale: boolean
+    stale: boolean | null
     reason: string | null
     running: string | null
     on_disk: string | null

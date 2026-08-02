@@ -31,9 +31,9 @@ import { probeGitValue, resolveCheckoutCodeIdentity } from "tribe-wire/lib/code-
 const log = createLogger("tribe:code-pin")
 
 export interface CodePinEval {
-  /** True when the running process is provably not the on-disk / pinned code. */
-  stale: boolean
-  /** Operator-facing remedy, or null when fresh / indeterminate. */
+  /** True when stale, false when fresh, or null when identity is unresolved. */
+  stale: boolean | null
+  /** Operator-facing remedy, or null when fresh. */
   reason: string | null
 }
 
@@ -48,9 +48,10 @@ const shortSha = (sha: string): string => sha.slice(0, 12)
 
 /**
  * Pure staleness decision — no IO, so the stale-code class is deterministically
- * reproducible in a unit test. A null SHA means "cannot tell" and never reports
- * stale (avoids false alarms in standalone/no-git deploys); the nulls are still
- * surfaced in CodePinStatus so the indeterminate state stays visible.
+ * reproducible in a unit test. A null SHA means "cannot tell": after checking
+ * every provable mismatch, return UNKNOWN rather than certifying freshness.
+ * The nulls are still surfaced in CodePinStatus so the indeterminate state
+ * stays visible to doctor callers.
  */
 export function evaluateCodePin(input: {
   running: string | null
@@ -72,6 +73,17 @@ export function evaluateCodePin(input: {
       reason:
         `tribe submodule checkout ${shortSha(onDisk)} != superproject pin ${shortSha(superprojectPin)} — ` +
         "run `git submodule update --init` for the tribe path, then restart the daemon",
+    }
+  }
+  const unresolved = [
+    running === null ? "running" : null,
+    onDisk === null ? "on_disk" : null,
+    superprojectPin === null ? "superproject_pin" : null,
+  ].filter((field): field is string => field !== null)
+  if (unresolved.length > 0) {
+    return {
+      stale: null,
+      reason: `cannot compare daemon code identity: unresolved ${unresolved.join(", ")}`,
     }
   }
   return { stale: false, reason: null }

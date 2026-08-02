@@ -99,7 +99,13 @@ describe("evaluateDoctor (@km/tribe/20033 daemon staleness probe)", () => {
 
   test("all unresolved code_pin operands cannot certify a standalone / no-git daemon", () => {
     const v = evaluateDoctor({
-      code_pin: { stale: false, reason: null, running: null, on_disk: null, superproject_pin: null },
+      code_pin: {
+        stale: null,
+        reason: "cannot compare daemon code identity: unresolved running, on_disk, superproject_pin",
+        running: null,
+        on_disk: null,
+        superproject_pin: null,
+      },
     })
     expect(v.outcome).toEqual({ verdict: "UNKNOWN", exitCode: 2 })
     expect(v.reason).toContain("running")
