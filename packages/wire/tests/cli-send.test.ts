@@ -10,16 +10,18 @@
 import { describe, expect, test } from "vitest"
 import { Command } from "@silvery/commander"
 import { spawn } from "node:child_process"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, realpathSync } from "node:fs"
 import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { buildSendPayload, registerSendCommands } from "../src/cli/send.ts"
 import { oversizedMessageError } from "../src/lib/send-validation.ts"
+import { safeRemoveSync } from "removely"
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "../src/cli.ts")
 const BUN_BIN = process.env.BUN_EXECUTABLE ?? "bun"
+const TEST_ROOT = realpathSync(tmpdir())
 
 function buildProgram(): Command {
   const program = new Command("tribe-test")
@@ -227,7 +229,7 @@ describe("registerSendCommands", () => {
       ])
     } finally {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
-      rmSync(tmp, { recursive: true, force: true })
+      safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
     }
   })
 
@@ -280,7 +282,7 @@ describe("registerSendCommands", () => {
       expect(result.stderr).toContain("one-shot CLI cannot establish persistent membership")
     } finally {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
-      rmSync(tmp, { recursive: true, force: true })
+      safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
     }
   })
 
@@ -473,7 +475,7 @@ describe("registerSendCommands", () => {
       expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(5)
     } finally {
       server.close()
-      rmSync(tmp, { recursive: true, force: true })
+      safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
     }
   })
 
@@ -612,7 +614,7 @@ describe("registerSendCommands", () => {
       expect(calls.some((c) => c.method === "tribe.send")).toBe(true)
     } finally {
       server.close()
-      rmSync(tmp, { recursive: true, force: true })
+      safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
     }
   })
 
@@ -667,7 +669,7 @@ describe("registerSendCommands", () => {
       expect(res.stderr).toContain("req-123")
     } finally {
       server.close()
-      rmSync(tmp, { recursive: true, force: true })
+      safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
     }
   })
 
@@ -744,7 +746,7 @@ describe("registerSendCommands", () => {
       ])
     } finally {
       server.close()
-      rmSync(tmp, { recursive: true, force: true })
+      safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
     }
   })
 
@@ -817,7 +819,7 @@ describe("registerSendCommands", () => {
       ])
     } finally {
       server.close()
-      rmSync(tmp, { recursive: true, force: true })
+      safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
     }
   })
 })

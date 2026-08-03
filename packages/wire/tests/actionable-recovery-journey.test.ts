@@ -26,13 +26,14 @@
  *   exit-2 path. This journey adds no standalone gate surface.
  */
 
-import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { once } from "node:events"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { safeRemoveSync } from "removely"
 import { createStatements, openDatabase } from "../../daemon/src/lib/database.ts"
 import { connectToDaemon, type DaemonClient } from "../src/client.ts"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
@@ -43,6 +44,7 @@ const PLUGIN_SERVER = resolve(HERE, "../../../plugins/claude/server.ts")
 const CLI = resolve(HERE, "../src/cli.ts")
 const DAEMON = resolve(HERE, "../../daemon/src/daemon.ts")
 const BUN_BIN = process.versions.bun ? process.execPath : "bun"
+const TEST_ROOT = realpathSync(tmpdir())
 const PROVIDER_PARENT_WRAPPER = `
 const command = JSON.parse(process.env.TRIBE_TEST_CHILD_COMMAND)
 const child = Bun.spawn(command, { stdin: "inherit", stdout: "inherit", stderr: "inherit", env: process.env })
@@ -283,7 +285,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       }
     }
     detachedDaemonPids.length = 0
-    rmSync(tmpDir, { recursive: true, force: true })
+    safeRemoveSync(tmpDir, { within: TEST_ROOT, allowMissing: true })
   })
 
   async function connectToDaemonPid(
