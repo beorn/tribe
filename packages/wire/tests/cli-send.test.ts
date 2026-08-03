@@ -84,6 +84,59 @@ describe("registerSendCommands", () => {
     })
   })
 
+  // habwire stage 2(d): the CLI is one of the two emitter-facing rails, so the
+  // key it accepts must parse into the same identity the daemon keys the ball
+  // on. A malformed key has to fail HERE, with the shape named — reaching the
+  // daemon as a mystery refusal is how a watcher silently stops obligating.
+  test("buildSendPayload parses --incident into the structured identity", () => {
+    expect(
+      buildSendPayload({
+        to: "@chief",
+        message: "seat wedged",
+        type: "notify",
+        incident: "health-monitor:@dev/5:transport-wedged",
+      }),
+    ).toEqual({
+      to: "@chief",
+      message: "seat wedged",
+      type: "notify",
+      incident: { emitter: "health-monitor", subject: "@dev/5", condition: "transport-wedged" },
+    })
+  })
+
+  test("buildSendPayload marks the clearing edge so the ball closes", () => {
+    expect(
+      buildSendPayload({
+        to: "@chief",
+        message: "seat recovered",
+        type: "notify",
+        incident: "health-monitor:@dev/5:transport-wedged",
+        incidentCleared: true,
+      }).incident,
+    ).toEqual({
+      emitter: "health-monitor",
+      subject: "@dev/5",
+      condition: "transport-wedged",
+      active: false,
+    })
+  })
+
+  test("buildSendPayload rejects a malformed or under-specified incident key", () => {
+    for (const bad of ["health-monitor:@dev/5", "health-monitor::transport-wedged", "just-one-part"]) {
+      expect(() => buildSendPayload({ to: "@chief", message: "x", type: "notify", incident: bad })).toThrow(
+        /emitter.*subject.*condition/is,
+      )
+    }
+  })
+
+  test("buildSendPayload refuses a clearing edge that names no condition", () => {
+    // Silently ignoring this would report a successful send while the ball
+    // stayed open — the failure looks like success.
+    expect(() =>
+      buildSendPayload({ to: "@chief", message: "recovered", type: "notify", incidentCleared: true }),
+    ).toThrow(/requires --incident/i)
+  })
+
   test("buildSendPayload forwards delivery and ball-tracker fields for tribe.send", () => {
     expect(
       buildSendPayload({

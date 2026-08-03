@@ -84,6 +84,18 @@ export { startTribeHttpMcpServer } from "./http-adapter.ts"
 // Join delivery resolution (require-join-before-push contract, c6071f3 + 333193c).
 export { resolveJoinDelivery } from "./lib/delivery.ts"
 
+// One-ball-per-incident identity, shared by the CLI (which parses the
+// `--incident` key) and the daemon (which keys the ball on it). One
+// definition, so the wire and the tracker cannot disagree about what a
+// well-formed identity is.
+export {
+  incidentKey,
+  parseIncidentKey,
+  isIncidentKey,
+  INCIDENT_KEY_SEPARATOR,
+  type IncidentIdentity,
+} from "./lib/incident.ts"
+
 // Inbox-wait option parsing shared by CLI and MCP/raw daemon call paths.
 export type {
   InboxWaitAttention,

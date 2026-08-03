@@ -32,7 +32,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
-import { incidentKey, parseIncidentKey } from "./incident.ts"
+import { handleToolCall, type HandlerOpts } from "./handlers.ts"
+import { incidentKey, parseIncidentKey } from "tribe-wire"
 import { sendMessage } from "./messaging.ts"
 
 function makeContext(db: Database, stmts: TribeStatements, name: string): TribeContext {
@@ -213,6 +214,74 @@ describe("one ball per incident (habwire stage 2(d))", () => {
         },
       ),
     ).toThrow(/incident identity/i)
+  })
+
+  // The mechanism above is unreachable unless an emitter can actually express
+  // an incident on the wire. These pin the MCP surface, because a watcher that
+  // cannot pass an identity falls back to minting one obligation per tick.
+  describe("MCP tribe.send passthrough", () => {
+    function makeOpts(): HandlerOpts {
+      return {
+        cleanup: () => undefined,
+        userRenamed: false,
+        setUserRenamed: () => undefined,
+        getActiveSessionIds: () => new Set(["sess-@fleet", "sess-@chief"]),
+        hasActiveTransport: () => true,
+        getActiveSessionInfo: () => [],
+      }
+    }
+
+    function call(ctx: TribeContext, args: Record<string, unknown>): Record<string, unknown> {
+      const result = handleToolCall(ctx, "tribe.send", args, makeOpts())
+      const text = (result as { content: Array<{ text: string }> }).content[0]?.text ?? "{}"
+      return JSON.parse(text) as Record<string, unknown>
+    }
+
+    const INCIDENT = { emitter: WATCHER, subject: "@dev/5", condition: "transport-wedged" }
+
+    it("repeated sends carrying the same identity hold ONE ball, and report its key", () => {
+      const watcher = makeContext(db, stmts, "@fleet")
+
+      const first = call(watcher, { to: "@chief", message: "wedged", incident: INCIDENT })
+      call(watcher, { to: "@chief", message: "still wedged", incident: INCIDENT })
+      call(watcher, { to: "@chief", message: "still wedged", incident: INCIDENT })
+
+      expect(first.request_id).toBe(incidentKey(INCIDENT))
+      expect(openKeys("@chief")).toEqual([incidentKey(INCIDENT)])
+    })
+
+    it("active:false over the wire closes the ball", () => {
+      const watcher = makeContext(db, stmts, "@fleet")
+      call(watcher, { to: "@chief", message: "wedged", incident: INCIDENT })
+      expect(openKeys("@chief")).toHaveLength(1)
+
+      call(watcher, { to: "@chief", message: "recovered", incident: { ...INCIDENT, active: false } })
+      expect(openKeys("@chief")).toHaveLength(0)
+    })
+
+    it("refuses a partial identity with the supported shape named", () => {
+      const watcher = makeContext(db, stmts, "@fleet")
+      const res = call(watcher, {
+        to: "@chief",
+        message: "wedged",
+        incident: { emitter: WATCHER, subject: "@dev/5" },
+      })
+      expect(String(res.error)).toMatch(/incident\.condition/)
+      expect(openKeys("@chief")).toHaveLength(0)
+    })
+
+    it("refuses incident together with request — one obligation cannot have two ids", () => {
+      const watcher = makeContext(db, stmts, "@fleet")
+      const res = call(watcher, { to: "@chief", message: "wedged", incident: INCIDENT, request: true })
+      expect(String(res.error)).toMatch(/not both/i)
+      expect(openKeys("@chief")).toHaveLength(0)
+    })
+
+    it("refuses a broadcast incident — a broadcast owns no ball", () => {
+      const watcher = makeContext(db, stmts, "@fleet")
+      const res = call(watcher, { to: "*", message: "wedged", incident: INCIDENT })
+      expect(String(res.error)).toMatch(/exactly one recipient/i)
+    })
   })
 
   it("the open ball is addressable as its identity — the pile reads as current conditions", () => {

@@ -28,6 +28,8 @@
  * dedup primitive, and an optional members roster for targeted alerts.
  */
 
+import type { IncidentIdentity } from "tribe-wire"
+
 export interface TribePluginApi {
   /** Stable identifier — also the sender name when broadcasting. */
   readonly name: string
@@ -65,8 +67,24 @@ export type EventClassification = {
 }
 
 export interface TribeClientApi {
-  /** Direct message to a single recipient (name) or the daemon's dispatcher. */
-  send(recipient: string, content: string, type: string, beadId?: string, classification?: EventClassification): void
+  /**
+   * Direct message to a single recipient (name) or the daemon's dispatcher.
+   *
+   * `incident` is the habwire stage 2(d) rail for WATCHERS: a plugin that
+   * fires every tick passes the identity of the condition it observed, and the
+   * daemon holds ONE obligation for as long as that condition holds instead of
+   * one per observation. `active: false` is the clearing edge and closes it.
+   * Without it, a ticking plugin can only emit telemetry nobody owes a reply
+   * to — which is visibility, not a reader.
+   */
+  send(
+    recipient: string,
+    content: string,
+    type: string,
+    beadId?: string,
+    classification?: EventClassification,
+    incident?: IncidentIdentity & { active?: boolean },
+  ): void
 
   /** Broadcast to all connected sessions (recipient = '*'). */
   broadcast(content: string, type: string, beadId?: string, classification?: EventClassification): void

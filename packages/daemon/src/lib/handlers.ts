@@ -28,6 +28,7 @@ import {
   registerSession,
   type StaleTransportReapReport,
 } from "./session.ts"
+import { incidentKey, type IncidentIdentity } from "tribe-wire"
 import { gatherCodePin } from "./code-pin.ts"
 import { parseDbGrowthWarningBytes, projectHealthCadence } from "./health-cadence.ts"
 import { senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
@@ -477,7 +478,63 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     }
     expiresInMs = a.expires_in_ms
   }
-  const willTrack = requestFlag || requestId !== null || (recipients !== "*" && AUTO_TRACK_TYPES_SET.has(msgType))
+  // Stage 2(d) incident identity. A watcher passes the identity of the
+  // condition it observed instead of letting the tracker key on the message
+  // id, so N observations hold ONE obligation. Validation is a typed refusal
+  // with the supported shape named, never a throw across the RPC boundary.
+  let incident: (IncidentIdentity & { active?: boolean }) | undefined
+  if (a.incident !== undefined) {
+    const raw = a.incident
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      return jsonResult({
+        error:
+          "tribe.send: `incident` must be an object {emitter, subject, condition, active?} identifying one live condition.",
+      })
+    }
+    const fields = raw as Record<string, unknown>
+    for (const field of ["emitter", "subject", "condition"] as const) {
+      if (typeof fields[field] !== "string" || (fields[field] as string).trim().length === 0) {
+        return jsonResult({
+          error: `tribe.send: \`incident.${field}\` must be a non-empty string; all three of emitter/subject/condition identify the condition and a missing part would merge distinct incidents.`,
+        })
+      }
+    }
+    if (fields.active !== undefined && typeof fields.active !== "boolean") {
+      return jsonResult({
+        error:
+          "tribe.send: `incident.active` must be a boolean — omit it (or pass true) while the condition holds, pass false as the clearing edge that closes the ball.",
+      })
+    }
+    if (requestFlag || requestId !== null) {
+      return jsonResult({
+        error: "tribe.send: pass `incident` or `request`, not both — the incident identity IS the tracked request id.",
+      })
+    }
+    if (recipients === "*" || Array.isArray(recipients)) {
+      return jsonResult({
+        error:
+          "tribe.send: `incident` requires exactly one recipient — an incident is one standing obligation with one owner, and a broadcast owns no ball.",
+      })
+    }
+    try {
+      // Reuses the canonical builder so the wire and the daemon can never
+      // disagree about what a well-formed identity is.
+      incidentKey(fields as unknown as IncidentIdentity)
+    } catch (error) {
+      return jsonResult({ error: `tribe.send: ${(error as Error).message}` })
+    }
+    incident = {
+      emitter: (fields.emitter as string).trim(),
+      subject: (fields.subject as string).trim(),
+      condition: (fields.condition as string).trim(),
+      ...(fields.active === undefined ? {} : { active: fields.active as boolean }),
+    }
+  }
+  const willTrack =
+    requestFlag ||
+    requestId !== null ||
+    (incident !== undefined && incident.active !== false) ||
+    (recipients !== "*" && AUTO_TRACK_TYPES_SET.has(msgType))
   if (a.expires_in_ms !== undefined && !willTrack) {
     return jsonResult({ error: "tribe.send: `expires_in_ms` requires a tracked request." })
   }
@@ -545,12 +602,18 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       reply: replyId ?? undefined,
       fanout: fanoutArg,
       expiresInMs,
+      incident,
     },
   )
+  // An incident reports its identity as the request id so the caller can see
+  // which standing obligation this observation landed on — the same key a
+  // later clearing edge must carry.
   const effectiveRequestId =
-    requestFlag || (requestId === null && AUTO_TRACK_TYPES_SET.has(msgType) && sender !== recipients)
-      ? result.id
-      : requestId
+    incident !== undefined
+      ? incidentKey(incident)
+      : requestFlag || (requestId === null && AUTO_TRACK_TYPES_SET.has(msgType) && sender !== recipients)
+        ? result.id
+        : requestId
   if (!result.deduplicated) {
     persistDeadLetter(ctx, resolution, sanitized, a, classification, effectiveRequestId)
   }

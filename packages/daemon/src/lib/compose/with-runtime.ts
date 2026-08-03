@@ -81,7 +81,7 @@ function defaultBuildPluginApi<T extends RuntimeShape>(t: T): TribeClientApi {
   const { stmts, daemonCtx, daemonSessionId, registry } = t
   const { clients } = registry
   return {
-    send(recipient, content, type, beadId, classification) {
+    send(recipient, content, type, beadId, classification, incident) {
       sendMessage(
         daemonCtx,
         recipient,
@@ -91,6 +91,10 @@ function defaultBuildPluginApi<T extends RuntimeShape>(t: T): TribeClientApi {
         undefined,
         recipient === "*" ? "broadcast" : "direct",
         classification ?? {},
+        // A watcher's incident identity reaches the ball tracker here. Absent
+        // it, the tracker keys on the message id and every tick is a new
+        // obligation — the shape stage 2(d) exists to end.
+        incident === undefined ? {} : { incident },
       )
     },
     broadcast(content, type, beadId, classification) {

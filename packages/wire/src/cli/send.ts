@@ -29,6 +29,7 @@ import {
 } from "../command-descriptors.ts"
 import { TRIBE_PROTOCOL_VERSION, TRIBE_SUPPORTED_PROTOCOL_VERSIONS } from "../lib/socket.ts"
 import { resolveDbPath } from "../lib/config.ts"
+import { INCIDENT_KEY_SEPARATOR, parseIncidentKey, type IncidentIdentity } from "../lib/incident.ts"
 import { formatMarkdown, generateRetro, parseDuration } from "../lib/retro.ts"
 import { readTribeLaunchId } from "../launch-environment.ts"
 import { withCliDaemonClient } from "./daemon-client.ts"
@@ -149,6 +150,10 @@ type SendPayloadInput = {
   reply?: string
   fanout?: Fanout
   expiresInMs?: number
+  /** Raw `--incident emitter:subject:condition` value. */
+  incident?: string
+  /** `--incident-cleared`: the condition no longer holds. */
+  incidentCleared?: boolean
 }
 
 type SendPayload = {
@@ -163,6 +168,7 @@ type SendPayload = {
   reply?: string
   fanout?: Fanout
   expires_in_ms?: number
+  incident?: IncidentIdentity & { active?: boolean }
 }
 
 export function buildSendPayload(input: SendPayloadInput): SendPayload {
@@ -179,6 +185,24 @@ export function buildSendPayload(input: SendPayloadInput): SendPayload {
   if (input.reply) payload.reply = input.reply
   if (input.fanout) payload.fanout = input.fanout
   if (input.expiresInMs !== undefined) payload.expires_in_ms = input.expiresInMs
+  if (input.incident !== undefined) {
+    // Parsed here rather than split inline so the CLI and the daemon share one
+    // definition of a well-formed identity. A bad key fails at the CLI with the
+    // shape named, instead of reaching the daemon as a mystery refusal.
+    const identity = parseIncidentKey(input.incident)
+    if (identity === null) {
+      throw new Error(
+        `--incident must be emitter${INCIDENT_KEY_SEPARATOR}subject${INCIDENT_KEY_SEPARATOR}condition with all three parts non-empty (got ${JSON.stringify(input.incident)})`,
+      )
+    }
+    payload.incident = input.incidentCleared === true ? { ...identity, active: false } : identity
+  } else if (input.incidentCleared === true) {
+    // Clearing needs to know WHAT cleared; silently ignoring this would look
+    // like a successful close while the ball stayed open.
+    throw new Error(
+      "--incident-cleared requires --incident <emitter:subject:condition> naming the condition that cleared",
+    )
+  }
   return payload
 }
 
@@ -511,6 +535,8 @@ export function registerSendCommands(program: Command): void {
   const sendRequest = cliOption(SEND_CLI, "request")
   const sendFanout = cliOption(SEND_CLI, "fanout")
   const sendExpiresInMs = cliOption(SEND_CLI, "expires-in-ms")
+  const sendIncident = cliOption(SEND_CLI, "incident")
+  const sendIncidentCleared = cliOption(SEND_CLI, "incident-cleared")
   program
     .command(SEND_CLI.name)
     .description(SEND_CLI.description)
@@ -525,6 +551,8 @@ export function registerSendCommands(program: Command): void {
     .option(sendRequest.flags, sendRequest.description)
     .option(sendFanout.flags, sendFanout.description)
     .option(sendExpiresInMs.flags, sendExpiresInMs.description)
+    .option(sendIncident.flags, sendIncident.description)
+    .option(sendIncidentCleared.flags, sendIncidentCleared.description)
     .action(
       (
         to: string,
@@ -539,6 +567,8 @@ export function registerSendCommands(program: Command): void {
           reply?: string
           fanout?: string
           expiresInMs?: string
+          incident?: string
+          incidentCleared?: boolean
         },
       ) => {
         const type = opts.type ?? "notify"
@@ -565,6 +595,20 @@ export function registerSendCommands(program: Command): void {
           console.error(`tribe-wire send: invalid --expires-in-ms '${opts.expiresInMs}' — expected an integer`)
           process.exit(2)
         }
+        // Validated here as well as in buildSendPayload so a malformed key
+        // exits 2 with the shape named, rather than surfacing as a stack trace.
+        if (opts.incident !== undefined && parseIncidentKey(opts.incident) === null) {
+          console.error(
+            `tribe-wire send: invalid --incident '${opts.incident}' — expected emitter${INCIDENT_KEY_SEPARATOR}subject${INCIDENT_KEY_SEPARATOR}condition with all three parts non-empty`,
+          )
+          process.exit(2)
+        }
+        if (opts.incidentCleared === true && opts.incident === undefined) {
+          console.error(
+            "tribe-wire send: --incident-cleared requires --incident <emitter:subject:condition> naming the condition that cleared",
+          )
+          process.exit(2)
+        }
         void cmdSend({
           to,
           message: message.join(" "),
@@ -577,6 +621,8 @@ export function registerSendCommands(program: Command): void {
           reply: opts.reply,
           fanout: opts.fanout as Fanout | undefined,
           expiresInMs,
+          incident: opts.incident,
+          incidentCleared: opts.incidentCleared,
         })
       },
     )

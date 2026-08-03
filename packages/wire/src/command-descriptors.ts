@@ -195,6 +195,22 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             description:
               "Optional sender-declared deadline offset in milliseconds. At the first daemon operation after it passes, Tribe settles the pending ownership row. Must be no greater than one day.",
           },
+          incident: {
+            type: "object",
+            properties: {
+              emitter: { type: "string", minLength: 1, description: "The watcher that observed the condition." },
+              subject: { type: "string", minLength: 1, description: "What the condition is about, e.g. a seat name." },
+              condition: { type: "string", minLength: 1, description: "Which condition holds, e.g. transport-wedged." },
+              active: {
+                type: "boolean",
+                description:
+                  "Whether the condition still holds. Omit or pass true while it does; pass false as the clearing edge that closes the ball.",
+              },
+            },
+            required: ["emitter", "subject", "condition"],
+            description:
+              "For WATCHERS that fire on a cadence: hold ONE standing obligation per live condition instead of one per observation. Repeated sends with the same emitter/subject/condition upsert onto the same ball, so the open pile is bounded by distinct conditions rather than tick rate; `active: false` closes it with no operator verb. Requires exactly one recipient, and is mutually exclusive with `request` — the identity IS the request id. Use this instead of a telemetry type when the incident genuinely needs a reader.",
+          },
         },
         required: ["to", "message"],
       },
@@ -320,6 +336,17 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           flags: "--expires-in-ms <milliseconds>",
           description: "Optional tracked-ball deadline offset in milliseconds (no default, maximum 1d)",
           mapsTo: "expires_in_ms",
+        },
+        {
+          name: "incident",
+          flags: "--incident <emitter:subject:condition>",
+          description:
+            "Watcher rail: hold ONE standing obligation for this live condition instead of one per tick. Repeats upsert onto the same ball; pair with --incident-cleared to close it",
+        },
+        {
+          name: "incident-cleared",
+          flags: "--incident-cleared",
+          description: "The condition named by --incident no longer holds: close its ball (no operator verb needed)",
         },
       ],
     }),

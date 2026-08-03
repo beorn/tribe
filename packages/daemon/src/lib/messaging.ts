@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto"
 import type { TribeContext } from "./context.ts"
 import { AUTO_TRACK_TYPES_SET } from "./database.ts"
-import { incidentKey, type IncidentIdentity } from "./incident.ts"
+import { incidentKey, type IncidentIdentity } from "tribe-wire"
 
 // ---------------------------------------------------------------------------
 // Types
