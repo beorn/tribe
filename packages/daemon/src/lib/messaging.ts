@@ -5,6 +5,7 @@
 import { randomUUID } from "node:crypto"
 import type { TribeContext } from "./context.ts"
 import { AUTO_TRACK_TYPES_SET } from "./database.ts"
+import { incidentKey, type IncidentIdentity } from "./incident.ts"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -140,6 +141,23 @@ export type BallTracker = {
   /** Optional sender-declared deadline. The daemon settles ownership at the
    * first RPC boundary after this deadline passes. */
   expiresInMs?: number
+  /**
+   * Ambient incident identity — habwire stage 2(d), "one ball per incident".
+   *
+   * A watcher that fires on every tick would otherwise mint one obligation per
+   * OBSERVATION. Supplying an identity derives the tracked request id from
+   * `emitter:subject:condition` instead of the message id, so repeated
+   * observations of ONE live condition upsert into ONE ball: the open pile
+   * becomes a projection of current conditions rather than a log of sightings.
+   *
+   * `active: false` is the clearing edge — the watcher reporting that the
+   * condition no longer holds. It closes that ball with no operator verb.
+   *
+   * This adds no lifecycle owner: it is a new TRIGGER for the existing
+   * `pending_request` open/close transitions, which remain the only place a
+   * ball begins or ends.
+   */
+  incident?: IncidentIdentity & { active?: boolean }
 }
 
 export const MAX_BALL_TTL_MS = 24 * 60 * 60_000
@@ -220,7 +238,28 @@ export function sendMessage(
   if (typeof explicitRequest === "string" && explicitRequest.length === 0) {
     throw new Error("tracked request id must be non-empty")
   }
-  const requestId = explicitRequest === true ? id : (explicitRequest ?? (autoTrackActionable ? id : null))
+  // Stage 2(d): an incident identity replaces the message id as the tracked
+  // request id, which is what turns repeated observations into one upserted
+  // ball. Accepting both an identity and an explicit id would leave two
+  // answers to "which obligation is this" — refuse rather than pick one.
+  const incident = ballTracker.incident
+  if (incident !== undefined && explicitRequest !== undefined && explicitRequest !== null) {
+    throw new Error(
+      "a tracked send may carry an incident identity or an explicit request id, not both: the incident identity IS the request id",
+    )
+  }
+  // Built before the transaction so a malformed identity fails loud without
+  // persisting a message whose obligation could not be keyed.
+  const incidentRequestId = incident === undefined ? null : incidentKey(incident)
+  const incidentActive = incident?.active ?? true
+  const requestId =
+    incidentRequestId !== null
+      ? incidentActive
+        ? incidentRequestId
+        : null
+      : explicitRequest === true
+        ? id
+        : (explicitRequest ?? (autoTrackActionable ? id : null))
   const correlationRequest = classification.correlationRequest?.trim()
   if (classification.correlationRequest !== undefined && !correlationRequest) {
     throw new Error("correlation request id must be non-empty")
@@ -289,6 +328,16 @@ export function sendMessage(
           $message_id: id,
           $fanout: ballTracker.fanout ?? "first",
         })
+      }
+      // Stage 2(d) clearing edge: the watcher reports the condition no longer
+      // holds, so the standing obligation ends without an operator verb. This
+      // reuses the ordinary ball-close transition — an incident is closed the
+      // same way a replied-to request is, so there is still exactly one place
+      // a ball ends. `closePendingRequestAll` because the condition cleared
+      // for every owner of that identity, not just one.
+      if (incidentRequestId !== null && !incidentActive) {
+        const closed = ctx.stmts.closePendingRequestAll.run({ $request_id: incidentRequestId })
+        tracker = { request_id: incidentRequestId, closed: closed.changes ?? 0 }
       }
       // A daemon boundary settles expired rows before this send path runs.
       // Any still-open row is therefore closed by an explicit reply here.
