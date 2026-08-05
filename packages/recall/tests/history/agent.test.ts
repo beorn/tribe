@@ -10,6 +10,7 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest"
 import { buildMockQueryModel, buildPlanJson, alwaysAvailable } from "../helpers/llm-mock.ts"
 import type { LlmBackend } from "../../src/lib/llm-backend.ts"
+import { SynthesisFailure } from "../../src/history/recall-shared.ts"
 
 process.env.RECALL_DB_PATH = ":memory:"
 
@@ -193,9 +194,22 @@ describe("recallAgent — speculative synth", () => {
       sessions: [{ id: "sess-a", title: "A", messages: ["alpha content"] }],
     })
 
-    await expect(recallAgent("q", { limit: 3, round2: "off" })).rejects.toThrow(
-      /Recall synthesis failed.*synthesis provider failed/is,
-    )
+    // The failure must propagate (not collapse into a null answer), but the
+    // one-sentence .message is now deliberately tight (no per-attempt error
+    // text embedded — see synthesize.ts's buildFailureSummary). The
+    // underlying provider detail still has to survive somewhere: it's on
+    // SynthesisFailure.diagnostics.attempts, checked separately below.
+    let caught: unknown
+    try {
+      await recallAgent("q", { limit: 3, round2: "off" })
+      expect.unreachable("expected recallAgent to reject")
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeInstanceOf(SynthesisFailure)
+    const failure = caught as SynthesisFailure
+    expect(failure.message).toMatch(/Synthesis failed/)
+    expect(failure.diagnostics.attempts.some((a) => a.error?.includes("synthesis provider failed"))).toBe(true)
   })
 
   test("uses speculative round-1 when round 2 adds no new top-K docs", async () => {

@@ -67,6 +67,18 @@ program
   .configureOutput({
     writeErr: (str) => console.error(str.trimEnd()),
   })
+  .addHelpText(
+    "after",
+    `\nExit codes:\n` +
+      `  0  clean success — synthesized answer, --raw results, or a genuine\n` +
+      `     "no results found" (an empty search is not a failure)\n` +
+      `  1  hard failure — an unexpected crash, not the degraded path below\n` +
+      `  2  CLI usage error (bad flags, removed subcommand)\n` +
+      `  3  degraded — lexical search found results but LLM synthesis failed;\n` +
+      `     the results still print, below a labeled failure report — never\n` +
+      `     silently dropped. Only reachable from the default search/synthesis\n` +
+      `     path, never from --raw, index, status, sessions, files, or export.\n`,
+  )
 
 // ── Default: search ─────────────────────────────────────────────────────
 program

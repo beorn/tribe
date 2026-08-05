@@ -6,8 +6,13 @@
 import * as fs from "fs"
 import * as path from "path"
 import { loadLlm, requireLlm, type LlmBackend, type LlmModel } from "../lib/llm-backend.ts"
-import { log } from "./recall-shared.ts"
-import type { RecallSearchResult } from "./recall-shared.ts"
+import { log, SynthesisFailure, suggestRetryTimeoutMs } from "./recall-shared.ts"
+import type {
+  RecallSearchResult,
+  SynthesisAttempt,
+  SynthesisBatchAccounting,
+  ExcludedProvider,
+} from "./recall-shared.ts"
 
 // ============================================================================
 // Synthesis prompt
@@ -53,6 +58,20 @@ export interface LlmRaceResult {
 }
 
 /**
+ * Turn a raw failure into one actionable line via the SAME classifier /pro
+ * uses for its own leg errors (bearly's formatLegDispatchError, bridged
+ * through llm.formatProviderError) — so recall and /pro never give
+ * conflicting advice for the same underlying failure (quota exhausted,
+ * model renamed, timeout: none of these are "check your credentials").
+ * Falls back to the raw message when the shared formatter isn't available
+ * (older TRIBE_LLM_DIR, or a hand-built test backend).
+ */
+function formatAttemptError(llm: LlmBackend, model: LlmModel, error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error)
+  return llm.formatProviderError?.(model, error instanceof Error ? error : new Error(raw)) ?? raw
+}
+
+/**
  * Race multiple LLM models — first valid response wins.
  * Returns per-model timing diagnostics regardless of outcome.
  */
@@ -69,16 +88,17 @@ export async function raceLlmModels(
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
 
-  // Track per-model results (settled after race completes)
-  const modelResults: LlmRaceModelResult[] = models.map((m) => ({
-    model: m.modelId,
-    ms: 0,
-    status: "timeout" as const,
+  // Pair each model with its own result slot up front — avoids indexing
+  // back into a parallel array (models[i] / modelResults[i]) later, which
+  // TS can't prove in-bounds without a non-null assertion.
+  const paired: { model: LlmModel; mr: LlmRaceModelResult }[] = models.map((model) => ({
+    model,
+    mr: { model: model.modelId, ms: 0, status: "timeout" },
   }))
+  const modelResults: LlmRaceModelResult[] = paired.map(({ mr }) => mr)
 
   // Race all models
-  const racePromises = models.map(async (model, i) => {
-    const mr = modelResults[i]!
+  const racePromises = paired.map(async ({ model, mr }) => {
     let result
     try {
       result = await llm.queryModel({
@@ -90,7 +110,7 @@ export async function raceLlmModels(
     } catch (error) {
       mr.ms = Date.now() - raceStart
       mr.status = "error"
-      mr.error = error instanceof Error ? error.message : String(error)
+      mr.error = formatAttemptError(llm, model, error)
       return null
     }
 
@@ -106,11 +126,12 @@ export async function raceLlmModels(
     // queryModel catches errors internally — check for abort/error
     if (controller.signal.aborted) {
       mr.status = "timeout"
+      mr.error = formatAttemptError(llm, model, new Error(`timed out after ${mr.ms}ms (given ${timeoutMs}ms)`))
       return null
     }
     if (result.response.error) {
       mr.status = "error"
-      mr.error = result.response.error
+      mr.error = formatAttemptError(llm, model, result.response.error)
       return null
     }
 
@@ -186,62 +207,168 @@ export async function synthesizeResults(
   const llm = llmOverride ?? (await loadLlm())
   if (!llm) {
     log(`no LLM backend (TRIBE_LLM_DIR) — synthesis skipped`)
-    throw new Error(
-      "Recall synthesis requires an LLM backend. Configure TRIBE_LLM_DIR, or rerun with --raw for lexical results.",
-    )
+    const summary = `No LLM backend configured (TRIBE_LLM_DIR unset). ${resultCountPhrase(results.length)}; rerun with --raw to see them without an LLM.`
+    throw new SynthesisFailure(summary, {
+      summary,
+      totalBudgetMs: timeoutMs,
+      attempts: [],
+      batches: [],
+      excludedProviders: [],
+      consideredProviders: [],
+    })
   }
 
-  const models = llm.getCheapModels(Number.MAX_SAFE_INTEGER).filter((model) => llm.isProviderAvailable(model.provider))
+  // Full candidate list BEFORE filtering — kept around so a failure report
+  // can name every provider that was considered, not just the ones that
+  // survived isProviderAvailable.
+  const candidates = llm.getCheapModels(Number.MAX_SAFE_INTEGER)
+  const models = candidates.filter((model) => llm.isProviderAvailable(model.provider))
+  const excludedProviders: ExcludedProvider[] = candidates
+    .filter((model) => !llm.isProviderAvailable(model.provider))
+    .map((model) => ({
+      provider: model.provider,
+      modelId: model.modelId,
+      reason: llm.explainUnavailable?.(model.provider) ?? "unavailable (this LLM backend gives no further detail)",
+    }))
+
   if (models.length === 0) {
     log(`no LLM providers available for synthesis`)
-    throw new Error(
-      "Recall synthesis has no available LLM provider. Configure provider credentials, or rerun with --raw for lexical results.",
-    )
+    const summary = `No LLM provider is available (see Excluded below for why). ${resultCountPhrase(results.length)}; rerun with --raw to see them without an LLM.`
+    throw new SynthesisFailure(summary, {
+      summary,
+      totalBudgetMs: timeoutMs,
+      attempts: [],
+      batches: [],
+      excludedProviders,
+      consideredProviders: [],
+    })
   }
 
   const context = formatResultsForLlm(query, results)
   const deadline = Date.now() + timeoutMs
-  const failures: string[] = []
-  let timedOut = false
+  const attempts: SynthesisAttempt[] = []
+  const batches: SynthesisBatchAccounting[] = []
+  let deadlineExceeded = false
   let totalCost = 0
 
   for (let offset = 0; offset < models.length; offset += 2) {
     const remainingMs = deadline - Date.now()
     if (remainingMs <= 0) {
-      timedOut = true
+      deadlineExceeded = true
       break
     }
 
+    // Fair-share the remaining budget across the batches still ahead —
+    // recomputed every iteration, not a fixed up-front split. A batch that
+    // fails FAST (auth/quota errors return in milliseconds) hands its
+    // unused time forward; a batch that fails SLOW (retries eating most of
+    // the timeout) can no longer burn the entire remaining budget and
+    // starve every batch after it. Previously a batch's own race used
+    // `remainingMs` — the WHOLE rest of the deadline — as its timeout, so
+    // two doomed providers racing first could spend 8s of a 10s budget and
+    // leave the only live provider 1.7s, structurally unwinnable.
+    const batchesRemaining = Math.ceil((models.length - offset) / 2)
+    const batchTimeoutMs = Math.max(1, Math.floor(remainingMs / batchesRemaining))
+
     const batch = models.slice(offset, offset + 2)
     const modelNames = batch.map((model) => model.modelId).join(", ")
-    log(`LLM synthesis: racing [${modelNames}] context=${context.length} chars timeout=${remainingMs}ms`)
-    const race = await raceLlmModels(context, SYNTHESIS_PROMPT, batch, remainingMs, llm)
+    log(
+      `LLM synthesis: racing [${modelNames}] context=${context.length} chars timeout=${batchTimeoutMs}ms ` +
+        `(${remainingMs}ms budget / ${batchesRemaining} batch${batchesRemaining === 1 ? "" : "es"} left)`,
+    )
+    const race = await raceLlmModels(context, SYNTHESIS_PROMPT, batch, batchTimeoutMs, llm)
     totalCost += race.totalCost
+
+    batches.push({
+      modelIds: batch.map((model) => model.modelId),
+      budgetAtStartMs: remainingMs,
+      allocatedMs: batchTimeoutMs,
+      elapsedMs: race.totalMs,
+      timedOut: race.timedOut,
+    })
+    for (const pm of race.perModel) {
+      const model = batch.find((m) => m.modelId === pm.model)
+      attempts.push({
+        modelId: pm.model,
+        provider: model?.provider ?? "unknown",
+        status: pm.status,
+        error: pm.error,
+        elapsedMs: pm.ms,
+        timeoutMs: batchTimeoutMs,
+      })
+    }
 
     if (race.winner && race.text) {
       log(`LLM winner: ${race.winner} in ${race.totalMs}ms`)
       return { text: race.text, cost: totalCost, aborted: false }
     }
 
-    timedOut ||= race.timedOut
-    failures.push(...race.perModel.map((result) => `${result.model}: ${result.error ?? result.status}`))
-    log(`LLM synthesis ${race.timedOut ? "aborted" : "failed"} after ${race.totalMs}ms (models: [${modelNames}])`)
-    if (race.timedOut) break
+    log(
+      `LLM synthesis ${race.timedOut ? "hit its batch-share timeout" : "failed"} after ${race.totalMs}ms (models: [${modelNames}])`,
+    )
+    // Note: race.timedOut only means THIS batch used up its fair share, not
+    // that the overall deadline is gone — the top-of-loop check above is
+    // the sole authority on that, so we always fall through to the next
+    // batch rather than breaking here.
   }
 
-  const failureSummary = failures.join("; ") || "the deadline expired before a provider could run"
-  const separator = /[.!?]$/.test(failureSummary) ? " " : ". "
-  throw new Error(
-    `Recall synthesis ${timedOut ? "timed out" : "failed"}: ${failureSummary}${separator}` +
-      "Check provider credentials, or rerun with --raw for lexical results.",
+  const timedOut = deadlineExceeded || Date.now() >= deadline
+  // One sentence: what happened (model named once), what the caller has
+  // (result count), what to do next (one concrete command). Every other
+  // fact — per-attempt errors, budget accounting, exclusions — lives in
+  // SynthesisDiagnostics and is rendered separately, below this line; this
+  // string is read once and acted on, not a log dump.
+  const summary = buildFailureSummary({ resultCount: results.length, attempts, timeoutMs, timedOut })
+  throw new SynthesisFailure(summary, {
+    summary,
+    totalBudgetMs: timeoutMs,
+    attempts,
+    batches,
+    excludedProviders,
+    consideredProviders: models.map((model) => model.provider),
+  })
+}
+
+function resultCountPhrase(resultCount: number): string {
+  return `Your ${resultCount} search result${resultCount === 1 ? "" : "s"} ${resultCount === 1 ? "is" : "are"} below`
+}
+
+function buildFailureSummary(opts: {
+  resultCount: number
+  attempts: SynthesisAttempt[]
+  timeoutMs: number
+  timedOut: boolean
+}): string {
+  const { resultCount, attempts, timeoutMs, timedOut } = opts
+  const budgetS = Math.round(timeoutMs / 1000)
+  const allTimedOut = attempts.length > 0 && attempts.every((a) => a.status === "timeout")
+
+  if (timedOut && allTimedOut) {
+    const suggested = suggestRetryTimeoutMs(timeoutMs, attempts)
+    const firstAttempt = attempts[0]
+    const who =
+      attempts.length === 1 && firstAttempt ? firstAttempt.modelId : `every provider tried (${attempts.length})`
+    return (
+      `Synthesis timed out — ${who} needed more than the ${budgetS}s budget. ` +
+      `${resultCountPhrase(resultCount)}; rerun with --timeout ${suggested} to summarize them.`
+    )
+  }
+  if (attempts.length > 0) {
+    return (
+      `Synthesis failed — see the attempts below for why. ` +
+      `${resultCountPhrase(resultCount)}; rerun with --raw to see them without an LLM.`
+    )
+  }
+  return (
+    `Synthesis ${timedOut ? "timed out" : "failed"} before any provider could run. ` +
+    `${resultCountPhrase(resultCount)}; rerun with --raw to see them without an LLM.`
   )
 }
 
 export function formatResultsForLlm(query: string, results: RecallSearchResult[]): string {
   const lines: string[] = [`Query: "${query}"`, "", `Found ${results.length} relevant results from prior sessions:`, ""]
 
-  for (let i = 0; i < results.length; i++) {
-    const r = results[i]!
+  results.forEach((r, i) => {
     const date = new Date(r.timestamp).toISOString().split("T")[0]
     const sessionLabel = r.sessionTitle ? `${r.sessionTitle} (${r.sessionId.slice(0, 8)})` : r.sessionId.slice(0, 8)
 
@@ -251,7 +378,7 @@ export function formatResultsForLlm(query: string, results: RecallSearchResult[]
     const cleanSnippet = r.snippet.replace(/>>>/g, "").replace(/<<</g, "").trim()
     lines.push(cleanSnippet)
     lines.push("")
-  }
+  })
 
   lines.push("---")
   lines.push("Synthesize the above results into concise, actionable bullet points relevant to the query.")

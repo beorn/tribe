@@ -21,6 +21,16 @@ export {
   type RecallSearchResult,
 } from "./search.ts"
 
+// recall-shared.ts — synthesis failure diagnostics (surfaced on RecallResult.synthesisFailure)
+export {
+  SynthesisFailure,
+  suggestRetryTimeoutMs,
+  type SynthesisAttempt,
+  type SynthesisBatchAccounting,
+  type ExcludedProvider,
+  type SynthesisDiagnostics,
+} from "./recall-shared.ts"
+
 // synthesize.ts — LLM synthesis, model racing, lesson extraction
 export {
   SYNTHESIS_PROMPT,

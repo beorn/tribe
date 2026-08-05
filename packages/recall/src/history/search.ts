@@ -15,8 +15,8 @@ import {
 } from "./db.ts"
 import type { ContentType } from "./types.ts"
 import { synthesizeResults } from "./synthesize.ts"
-import { log, ONE_HOUR_MS, ONE_DAY_MS, THIRTY_DAYS_MS } from "./recall-shared.ts"
-import type { RecallOptions, RecallResult, RecallSearchResult } from "./recall-shared.ts"
+import { log, ONE_HOUR_MS, ONE_DAY_MS, THIRTY_DAYS_MS, SynthesisFailure } from "./recall-shared.ts"
+import type { RecallOptions, RecallResult, RecallSearchResult, SynthesisDiagnostics } from "./recall-shared.ts"
 
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
@@ -262,6 +262,36 @@ export function searchLiveSession(query: string, limit: number): RecallSearchRes
   } catch {
     // silent-fallback-allow: current-session transcript scan is opportunistic recall enrichment.
     return []
+  }
+}
+
+// ============================================================================
+// Synthesis-failure helpers — keep recall()'s catch block flat
+// ============================================================================
+
+function describeSynthesisError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * Build the diagnostics attached to RecallResult.synthesisFailure. A
+ * SynthesisFailure carries a full structured report; any other thrown
+ * value (unexpected — synthesizeResults is documented to only throw
+ * SynthesisFailure) still gets a minimal, honest one rather than being
+ * silently dropped.
+ */
+function diagnosticsFromSynthesisError(err: unknown, timeoutMs: number): SynthesisDiagnostics {
+  if (err instanceof SynthesisFailure) {
+    return { ...err.diagnostics, rawStack: err.stack }
+  }
+  return {
+    summary: describeSynthesisError(err),
+    totalBudgetMs: timeoutMs,
+    attempts: [],
+    batches: [],
+    excludedProviders: [],
+    consideredProviders: [],
+    rawStack: err instanceof Error ? err.stack : undefined,
   }
 }
 
@@ -615,9 +645,31 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       }
     }
 
-    // Attempt LLM synthesis with AbortController for clean timeout
+    // Attempt LLM synthesis with AbortController for clean timeout. A
+    // failure here must NOT throw the lexical results away — the search
+    // already succeeded (deduped.length > 0, checked above); losing that on
+    // a downstream LLM failure is exactly the "tool is broken" reading as
+    // "nothing found" defect. Catch, keep the lexical results, and attach a
+    // full diagnostic report so the formatter can say so loudly.
     const llmStart = Date.now()
-    const synthesis = await synthesizeResults(query, deduped, timeout)
+    let synthesis
+    try {
+      synthesis = await synthesizeResults(query, deduped, timeout)
+    } catch (err) {
+      const llmMs = Date.now() - llmStart
+      const totalMs = Date.now() - startTime
+      log(
+        `synthesis FAILED after ${llmMs}ms — keeping ${deduped.length} lexical results: ${describeSynthesisError(err)}`,
+      )
+      return {
+        query,
+        synthesis: null,
+        results: deduped,
+        durationMs: totalMs,
+        timing: { searchMs, llmMs },
+        synthesisFailure: diagnosticsFromSynthesisError(err, timeout),
+      }
+    }
     const llmMs = Date.now() - llmStart
 
     const totalMs = Date.now() - startTime

@@ -123,23 +123,46 @@ describe("recall search output", () => {
     closeDb()
   })
 
-  test("fails loud instead of returning lexical hits when default synthesis is unavailable", async () => {
+  test("reports a loud tool-broken failure — with the lexical hits, clearly labeled, never silently dropped — when default synthesis is unavailable", async () => {
     const previousLlmDir = process.env.TRIBE_LLM_DIR
+    const previousExitCode = process.exitCode
     delete process.env.TRIBE_LLM_DIR
     _resetLlmBackendForTests()
-    seedMessage("synthesisneedle fixture must never masquerade as a synthesized answer")
+    seedMessage("synthesisneedle fixture must show up labeled as a lexical hit, never as a synthesized answer")
 
     try {
-      await expect(cmdSearch("synthesisneedle", { refresh: false, project: "*" })).rejects.toThrow(
-        /recall synthesis.*TRIBE_LLM_DIR.*--raw/is,
-      )
+      // Must NOT throw — a synthesis failure with real lexical results in
+      // hand is a distinct, reportable outcome, not a crash. Throwing here
+      // is exactly the defect this test used to encode: it discards the
+      // results recall() already found.
+      await expect(cmdSearch("synthesisneedle", { refresh: false, project: "*" })).resolves.toBeUndefined()
     } finally {
       if (previousLlmDir === undefined) delete process.env.TRIBE_LLM_DIR
       else process.env.TRIBE_LLM_DIR = previousLlmDir
     }
 
-    expect(callsText(logSpy)).not.toContain('results for "synthesisneedle"')
-    expect(callsText(logSpy)).not.toContain("synthesisneedle fixture")
+    const output = callsText(logSpy)
+    // Unmistakable banner — must not read as "no prior work exists".
+    expect(output).toContain("RECALL SYNTHESIS FAILED")
+    expect(output).toContain("THE TOOL IS BROKEN, NOT EMPTY")
+    // The lexical hit is present, but labeled — never masquerading as a
+    // synthesized answer (it's under "Lexical search: OK", not printed as
+    // if it were `result.synthesis`). The matched term is ANSI-highlighted
+    // inline, so assert on the unhighlighted tail of the snippet.
+    expect(output).toContain("fixture must show up labeled as a lexical hit")
+    expect(output).toContain("Lexical search: OK")
+    // Concrete diagnostics: this failure mode (no LLM backend configured at
+    // all) has no per-provider exclusions to list — there's nothing to
+    // evaluate providers against — so the summary line carries the "why",
+    // and it must say so, not silently print an empty report.
+    expect(output).toContain("No LLM backend configured")
+    expect(output).toContain("TRIBE_LLM_DIR")
+    expect(output).toContain("--raw")
+    // Distinct exit code — degraded-but-has-results is neither a clean 0
+    // nor the generic 1 a hard crash would use.
+    expect(process.exitCode).toBe(3)
+
+    process.exitCode = previousExitCode
   })
 
   test("normalizes repo and worktree names while preserving explicit narrowing", () => {

@@ -14,7 +14,14 @@ import {
   getAllSessionTitles,
   type MessageSearchOptions,
 } from "../history/db"
-import { recall, type RecallOptions, type RecallResult, type RecallSearchResult } from "../history/recall"
+import {
+  recall,
+  suggestRetryTimeoutMs,
+  type RecallOptions,
+  type RecallResult,
+  type RecallSearchResult,
+  type SynthesisDiagnostics,
+} from "../history/recall"
 import type { AgentRecallOptions, AgentRecallResult } from "./agent.ts"
 import type { QueryPlan } from "./plan.ts"
 import { searchLiveSession } from "../history/search"
@@ -27,6 +34,7 @@ import {
   CYAN,
   YELLOW,
   GREEN,
+  RED,
   MAGENTA,
   THIRTY_DAYS_MS,
   parseTime,
@@ -499,6 +507,15 @@ export function emitRefreshNote(r: RefreshResult): void {
 }
 
 function formatRecallOutput(result: RecallResult, options: { json?: boolean }): void {
+  // Check FIRST, before requireSynthesizedAnswer would throw a generic
+  // "no synthesized answer" error that discards the rich diagnostic report
+  // recall() already built. A synthesis failure with lexical results in
+  // hand is a distinct, better-understood case than "nothing came back."
+  if (result.synthesisFailure) {
+    renderSynthesisFailure(result, result.synthesisFailure, options)
+    return
+  }
+
   requireSynthesizedAnswer(result)
 
   if (options.json) {
@@ -547,10 +564,9 @@ function requireSynthesizedAnswer(result: RecallResult): void {
   )
 }
 
-function formatRawRecallResults(result: RecallResult): void {
-  console.log(`${BOLD}${result.results.length} results${RESET} for "${result.query}":\n`)
-
-  for (const r of result.results) {
+/** Shared per-result renderer — used by raw mode and by the synthesis-failure report, so failed synthesis never has to throw its lexical hits away. */
+function printResultEntries(results: RecallSearchResult[]): void {
+  for (const r of results) {
     const date = new Date(r.timestamp)
       .toISOString()
       .replace("T", " ")
@@ -568,6 +584,11 @@ function formatRawRecallResults(result: RecallResult): void {
     console.log(indented)
     console.log()
   }
+}
+
+function formatRawRecallResults(result: RecallResult): void {
+  console.log(`${BOLD}${result.results.length} results${RESET} for "${result.query}":\n`)
+  printResultEntries(result.results)
 
   const timingParts = [`${result.durationMs}ms`]
   if (result.timing) {
@@ -575,6 +596,109 @@ function formatRawRecallResults(result: RecallResult): void {
     if (result.timing.llmMs !== undefined) timingParts.push(`llm=${result.timing.llmMs}ms`)
   }
   console.log(`${DIM}(${timingParts.join(", ")})${RESET}`)
+}
+
+/**
+ * The tool is BROKEN, not empty — lexical search succeeded but the LLM
+ * synthesis step didn't. Render a report that's impossible to mistake for
+ * "no prior work exists": an unambiguous banner, per-attempt provider
+ * detail, budget accounting, what got excluded and why, what DID work
+ * (the lexical hits, printed below, never dropped), and a concrete retry
+ * command naming a provider that's actually available on this host.
+ *
+ * Exit code 3 (distinct from 0=full success, 1=hard crash, 2=CLI usage
+ * error already used elsewhere in this CLI) — a caller or script must be
+ * able to tell "search worked, synthesis degraded" apart from both a clean
+ * run and a total failure. Silently returning 0 here would be its own
+ * silent-failure variant: real, unsummarized results sitting behind a
+ * green exit code nobody double-checks.
+ */
+function renderSynthesisFailure(result: RecallResult, diag: SynthesisDiagnostics, options: { json?: boolean }): void {
+  process.exitCode = 3
+
+  if (options.json) {
+    console.log(JSON.stringify(result, null, 2))
+    return
+  }
+
+  console.log(`${BOLD}${RED}⚠ RECALL SYNTHESIS FAILED — THE TOOL IS BROKEN, NOT EMPTY${RESET}`)
+  console.log(
+    `${BOLD}Lexical search found ${result.results.length} result(s) for "${result.query}" — the LLM step that summarizes them did not complete.${RESET}`,
+  )
+  console.log(diag.summary)
+  console.log()
+
+  // Budget accounting — total, per-batch allocation vs actual spend, and
+  // what was left over. This is the exact detail (e.g. "8265ms then only
+  // 1735ms left") that made the original provider-starvation bug diagnosable.
+  console.log(`${BOLD}Budget:${RESET} ${diag.totalBudgetMs}ms total`)
+  if (diag.batches.length === 0 && diag.excludedProviders.length > 0) {
+    console.log(`  (no batch was ever raced — see "Excluded before racing" below)`)
+  } else if (diag.batches.length === 0) {
+    console.log(`  (no batch was ever raced — see the summary above)`)
+  }
+  for (const b of diag.batches) {
+    const leftAfter = Math.max(0, b.budgetAtStartMs - b.elapsedMs)
+    console.log(
+      `  [${b.modelIds.join(", ")}] given ${b.allocatedMs}ms (of ${b.budgetAtStartMs}ms remaining) → ` +
+        `took ${b.elapsedMs}ms${b.timedOut ? " (hit its share timeout)" : ""} → ${leftAfter}ms left for the next batch`,
+    )
+  }
+  console.log()
+
+  // Per-model attempt detail — model, provider, why it failed, timing.
+  if (diag.attempts.length > 0) {
+    console.log(`${BOLD}Attempts:${RESET}`)
+    for (const a of diag.attempts) {
+      const reason = a.error ?? a.status
+      console.log(
+        `  ${a.modelId} (${a.provider}): ${a.status} — ${reason} — ${a.elapsedMs}ms of ${a.timeoutMs}ms given`,
+      )
+    }
+    console.log()
+  }
+
+  // Excluded providers — key missing vs key present but flagged dead.
+  if (diag.excludedProviders.length > 0) {
+    console.log(`${BOLD}Excluded before racing:${RESET}`)
+    for (const e of diag.excludedProviders) {
+      console.log(`  ${e.provider} (${e.modelId}) — ${e.reason}`)
+    }
+    console.log()
+  }
+
+  // What DID work — never let a synthesis failure imply the search failed too.
+  const searchMs = result.timing?.searchMs
+  console.log(
+    `${GREEN}Lexical search: OK${RESET} — found ${result.results.length} result(s)${searchMs !== undefined ? ` in ${searchMs}ms` : ""} (shown below).`,
+  )
+  console.log()
+
+  // Concrete next action — name providers that actually work on THIS host,
+  // not the ones already known dead (they're in "Excluded" above).
+  console.log(`${BOLD}Next steps:${RESET}`)
+  const q = JSON.stringify(result.query)
+  console.log(`  • See the lexical results without needing an LLM: bun recall ${q} --raw`)
+  if (diag.consideredProviders.length > 0) {
+    const suggestedTimeout = suggestRetryTimeoutMs(diag.totalBudgetMs, diag.attempts)
+    const providers = [...new Set(diag.consideredProviders)].join(", ")
+    console.log(`  • Retry with more time for ${providers}: bun recall ${q} --timeout ${suggestedTimeout}`)
+  } else if (diag.excludedProviders.length > 0) {
+    console.log(`  • No provider was available to try — check API key env vars, or see "Excluded before racing" above.`)
+  } else {
+    console.log(`  • No provider was available to try — see the summary above (likely TRIBE_LLM_DIR is unset).`)
+  }
+  console.log(
+    `  • Provider exclusions live in .envrc.local (RECALL_LLM_DENY_PROVIDERS) — edit it if an excluded provider is actually working now.`,
+  )
+  console.log()
+
+  printResultEntries(result.results)
+
+  if (diag.rawStack) {
+    console.log(`${DIM}raw error (debugging only, not the primary signal):${RESET}`)
+    console.log(`${DIM}${diag.rawStack}${RESET}`)
+  }
 }
 
 function formatType(type: string): string {
