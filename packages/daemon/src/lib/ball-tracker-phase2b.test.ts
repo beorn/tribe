@@ -358,7 +358,7 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     ])
   })
 
-  it("rejects empty comma segments, broadcast mixtures, and blank request ids", () => {
+  it("rejects malformed recipients, invalid request ids, and deadlines with no owner", () => {
     const messageCountBefore = (db.prepare("SELECT COUNT(*) AS count FROM messages").get() as { count: number }).count
     for (const args of [
       { to: "@agent/1, ,@agent/2", request: "req-empty-segment" },
@@ -368,6 +368,7 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       { to: "@agent/1", request: "req-string-ttl", expires_in_ms: "60000" },
       { to: "@agent/1", request: "req-too-long-ttl", expires_in_ms: 24 * 60 * 60 * 1_000 + 1 },
       { to: "*", expires_in_ms: 60_000 },
+      { to: "@chief", expires_in_ms: 60_000 },
     ]) {
       const res = parseToolJson(
         handleToolCall(

@@ -558,11 +558,15 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       ...(fields.active === undefined ? {} : { active: fields.active as boolean }),
     }
   }
+  const sender = ctx.getName()
+  const hasImplicitOwner = Array.isArray(recipients)
+    ? recipients.some((recipient) => recipient !== sender)
+    : recipients !== "*" && recipients !== sender
   const willTrack =
     requestFlag ||
     requestId !== null ||
     (incident !== undefined && incident.active !== false) ||
-    (recipients !== "*" && AUTO_TRACK_TYPES_SET.has(msgType))
+    (hasImplicitOwner && AUTO_TRACK_TYPES_SET.has(msgType))
   if (a.expires_in_ms !== undefined && !willTrack) {
     return jsonResult({ error: "tribe.send: `expires_in_ms` requires a tracked request." })
   }
@@ -584,7 +588,6 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     ...(delivery ? { delivery } : {}),
     ...(typeof messageIdArg === "string" ? { messageId: messageIdArg.trim() } : {}),
   }
-  const sender = ctx.getName()
   const activeNames = new Set(opts.getActiveSessionInfo().map((session) => session.name))
   const resolveRecipient = (recipient: string): DirectDeliveryResolution =>
     resolveDirectDelivery(recipient, activeNames, opts.resolveDelivery)
