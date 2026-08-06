@@ -193,7 +193,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             minimum: 1,
             maximum: 24 * 60 * 60_000,
             description:
-              "Override the 20-minute class default for a tracked request, query, or assignment. At the first daemon operation after the deadline, Tribe settles ownership and records an expired outcome. Must be no greater than one day.",
+              "Override the class escalation policy for one tracked send. Requests and queries default to 20 minutes; assignments have no reply-clock default. Deadline passage makes the still-owned ball louder and records an expiry observation; it never settles ownership. Must be no greater than one day.",
           },
           incident: {
             type: "object",
@@ -334,7 +334,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "expires-in-ms",
           flags: "--expires-in-ms <milliseconds>",
-          description: "Override the tracked-ball 20m class default (maximum 1d)",
+          description: "Override the tracked-ball escalation policy for this send (maximum 1d)",
           mapsTo: "expires_in_ms",
         },
         {
@@ -355,12 +355,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     id: "tribe.pending",
     title: "Pending Requests",
     description:
-      "Ball-tracker query: list active requests where the owner must reply, or derive historical expired outcomes from the journal. Default owner is the caller's session.",
+      "Ball-tracker query: list active requests where the owner must reply, or derive expired/unanswered outcomes from active rows, journal facts, and replies. Default owner is the caller's session.",
     lifetime: "live-session",
     mcp: {
       name: "pending",
       description:
-        "Ball-tracker query: list active requests where the owner must reply, or derive historical expired outcomes from the journal. Default owner is the caller's session.",
+        "Ball-tracker query: list active requests where the owner must reply, or derive expired/unanswered outcomes from active rows, journal facts, and replies. Default owner is the caller's session.",
       inputSchema: {
         type: "object",
         properties: {
@@ -370,7 +370,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           },
           expired: {
             type: "boolean",
-            description: "Read historical expired outcomes from the hot and archived journal.",
+            description:
+              "Read deadline-passed and historical unanswered outcomes. Live expiry remains owned; terminal non-reply reasons stay distinct; answered rows are omitted.",
           },
           owner: {
             type: "string",
@@ -382,7 +383,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           },
           prune: {
             type: "boolean",
-            description: "Delete this owner's pending requests older than stale_ms; stale_ms is required.",
+            description:
+              "Settle this owner's requests older than stale_ms as gc-expired with recoverable evidence; stale_ms is required.",
           },
           close: {
             type: "string",
@@ -400,7 +402,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           pending: {
             type: "array",
             description:
-              "Active requests, or expired outcomes when expired=true. Expired rows add settlement='expired' and settled_at to the request identity and timing fields.",
+              "Active requests, or derive-at-read expired/unanswered outcomes when expired=true. A still-owned expired row has settlement=null; terminal non-reply rows preserve manual-close, incident-cleared, gc-expired, or sender-withdrawn. Answered rows are omitted.",
             items: { type: "object", additionalProperties: true },
           },
           owners: {
@@ -426,7 +428,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     cli: available({
       name: "pending",
       description:
-        "Ball-tracker query: list active requests where the owner must reply, or derive historical expired outcomes from the journal. Default owner is the caller's session.",
+        "Ball-tracker query: list active requests where the owner must reply, or derive expired/unanswered outcomes from active rows, journal facts, and replies. Default owner is the caller's session.",
       lifetime: "one-shot",
       mapsToMcp: "pending",
       options: [
@@ -443,7 +445,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "expired",
           flags: "--expired",
-          description: "Show historical expired outcomes derived from the journal",
+          description: "Show live deadline-passed and historical unanswered outcomes",
         },
         { name: "owner", flags: "-o, --owner <name>", description: "Owner session name (default: caller)" },
         {

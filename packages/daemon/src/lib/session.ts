@@ -9,7 +9,7 @@ import type { TribeContext } from "./context.ts"
 import { probeProcessState } from "./session-transport-state.ts"
 
 const log = createLogger("tribe:session")
-import { sendMessage, logEvent } from "./messaging.ts"
+import { sendMessage, logEvent, settlePendingRows, type PendingSettlementRow } from "./messaging.ts"
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -498,17 +498,21 @@ export function cleanupOldData(ctx: TribeContext): void {
   // Ball-tracker GC (@km/tribe/20008): a pending request that never got a reply
   // would otherwise stay "open" forever and pollute tribe.pending. Tie the GC to
   // the SAME cutoff as message retention — a ball never outlives the message that
-  // opened it. Fresh request/reply balls (well within 7d) are untouched; only the
-  // ball-tracker row is removed, never message history.
-  const pendingDel = ctx.stmts.gcStalePendingRequests.run({ $cutoff: cutoff })
+  // opened it. Fresh request/reply balls (well within 7d) are untouched. Each
+  // stale row gets a recoverable gc-expired journal fact before active ownership
+  // is removed; source message history remains subject only to normal retention.
+  const pendingDel = ctx.db.transaction(() => {
+    const rows = ctx.stmts.selectPendingSettlementsBefore.all({ $cutoff: cutoff }) as PendingSettlementRow[]
+    return settlePendingRows(ctx, rows, "gc-expired", "daemon", now_ms)
+  })()
   // Runtime-rename authority GC (21454): a launch id is minted per seat launch
   // and never reused, so records for long-dead launches are inert. 30 days
   // comfortably outlives any seat; the table stays a handful of rows.
   ctx.stmts.gcOldLaunchRenames.run({ $cutoff: now_ms - 30 * 24 * 60 * 60 * 1000 })
 
-  if ((msgsDel.changes ?? 0) > 0 || (pendingDel.changes ?? 0) > 0) {
+  if ((msgsDel.changes ?? 0) > 0 || pendingDel > 0) {
     log.info?.(
-      `cleanup: ${archived.changes ?? 0} msgs archived, ${msgsDel.changes ?? 0} msgs deleted, ${pendingDel.changes ?? 0} stale pending balls GC'd`,
+      `cleanup: ${archived.changes ?? 0} msgs archived, ${msgsDel.changes ?? 0} msgs deleted, ${pendingDel} stale pending balls GC'd`,
     )
   }
 }

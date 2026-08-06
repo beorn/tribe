@@ -418,6 +418,49 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         },
       ],
     }
+    const expiredSnapshot = {
+      all: true,
+      expired: true,
+      count: 2,
+      owner_count: 1,
+      oldest_age_ms: 10_800_000,
+      pending: [],
+      owners: [
+        {
+          owner: "@agent/2",
+          count: 2,
+          oldest_age_ms: 10_800_000,
+          pending: [
+            {
+              request_id: "req-manual",
+              recipient: "@agent/2",
+              sender: "@chief",
+              summary: "closed after an out-of-band decision",
+              opened_at: "2026-07-14T08:00:00.000Z",
+              age_ms: 10_800_000,
+              message_id: "msg-manual",
+              fanout: "first",
+              status: "unanswered",
+              settlement: "manual-close",
+              settled_at: "2026-07-14T10:00:00.000Z",
+            },
+            {
+              request_id: "req-gc",
+              recipient: "@agent/2",
+              sender: "@chief",
+              summary: "never answered before retention",
+              opened_at: "2026-07-14T09:00:00.000Z",
+              age_ms: 7_200_000,
+              message_id: "msg-gc",
+              fanout: "first",
+              status: "unanswered",
+              settlement: "gc-expired",
+              settled_at: "2026-07-14T10:30:00.000Z",
+            },
+          ],
+        },
+      ],
+    }
     const server = createServer((socket) => {
       let buffer = ""
       socket.on("data", (chunk) => {
@@ -430,8 +473,9 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
           if (!line.trim()) continue
           const request = JSON.parse(line) as { id: number; method: string; params?: Record<string, unknown> }
           calls.push({ method: request.method, params: request.params })
+          const response = request.params?.expired === true ? expiredSnapshot : snapshot
           socket.write(
-            `${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { structuredContent: snapshot } })}\n`,
+            `${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { structuredContent: response } })}\n`,
           )
         }
       })
@@ -448,17 +492,23 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       const env = { ...process.env, TRIBE_SOCKET: socketPath, TRIBE_NO_AUTOSTART: "1" }
       const human = await runCliAsync(["pending", "--all"], env)
       const json = await runCliAsync(["pending", "--all", "--json"], env)
+      const expiredHuman = await runCliAsync(["pending", "--all", "--expired"], env)
       const expiredJson = await runCliAsync(["pending", "--all", "--expired", "--json"], env)
 
       expect(human).toMatchObject({ code: 0, stderr: "" })
       expect(human.stdout).toContain("2 pending request(s) across 2 owner(s)")
       expect(human.stdout).toContain("@agent/2: 1 (oldest 180m ago)")
       expect(human.stdout).toContain("req-agent-2  from @chief  to @agent/2  review immutable carrier")
+      expect(expiredHuman.stdout).toContain("req-manual")
+      expect(expiredHuman.stdout).toContain("settlement=manual-close")
+      expect(expiredHuman.stdout).toContain("req-gc")
+      expect(expiredHuman.stdout).toContain("settlement=gc-expired")
       expect(JSON.parse(json.stdout)).toEqual(snapshot)
-      expect(JSON.parse(expiredJson.stdout)).toEqual(snapshot)
+      expect(JSON.parse(expiredJson.stdout)).toEqual(expiredSnapshot)
       expect(calls).toEqual([
         { method: "tribe.pending", params: { all: true } },
         { method: "tribe.pending", params: { all: true } },
+        { method: "tribe.pending", params: { all: true, expired: true } },
         { method: "tribe.pending", params: { all: true, expired: true } },
       ])
     } finally {

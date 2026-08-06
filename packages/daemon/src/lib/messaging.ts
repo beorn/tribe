@@ -141,8 +141,8 @@ export type BallTracker = {
   /** Snapshot owners for one persisted broadcast request. Ownership rows are
    * committed with the broadcast before its publish callback can observe it. */
   owners?: readonly string[]
-  /** Per-send deadline override. Tracked sends otherwise use their class
-   * default; the daemon settles ownership at the first later RPC boundary. */
+  /** Per-send escalation-deadline override. Tracked sends otherwise use their
+   * class policy; deadline passage never settles ownership. */
   expiresInMs?: number
   /**
    * Ambient incident identity — habwire stage 2(d), "one ball per incident".
@@ -169,6 +169,55 @@ export const DEFAULT_BALL_TTL_MS_BY_CLASS = {
 } as const
 
 export const MAX_BALL_TTL_MS = 24 * 60 * 60_000
+
+export type BallSettlementReason = "manual-close" | "incident-cleared" | "gc-expired" | "sender-withdrawn"
+
+export type PendingSettlementRow = {
+  request_id: string
+  recipient: string
+  sender: string
+  opened_at: number
+  expires_at: number | null
+  message_id: string
+  fanout: "first" | "all"
+  summary: string | null
+}
+
+/** Append recoverable non-reply outcomes, then release exactly those owner
+ * rows. The caller selects the rows and invokes this inside the same SQLite
+ * transaction, so history and active ownership cannot disagree after a crash. */
+export function settlePendingRows(
+  ctx: TribeContext,
+  rows: readonly PendingSettlementRow[],
+  settlement: BallSettlementReason,
+  settledBy: string,
+  settledAt = Date.now(),
+): number {
+  for (const row of rows) {
+    logEvent(
+      ctx,
+      "ball.settled",
+      undefined,
+      {
+        schema_version: 1,
+        request_id: row.request_id,
+        recipient: row.recipient,
+        sender: row.sender,
+        opened_at: row.opened_at,
+        expires_at: row.expires_at,
+        message_id: row.message_id,
+        fanout: row.fanout,
+        summary: row.summary,
+        settlement,
+        settled_at: settledAt,
+        settled_by: settledBy,
+      },
+      { sender: "daemon", ref: row.request_id, ts: settledAt },
+    )
+    ctx.stmts.closePendingRequest.run({ $request_id: row.request_id, $recipient: row.recipient })
+  }
+  return rows.length
+}
 
 /** Resolve the mechanism-owned deadline default. Explicitly tracked message
  *  types outside the implicit trio are requests by construction: the sender
@@ -354,8 +403,13 @@ export function sendMessage(
       // a ball ends. `closePendingRequestAll` because the condition cleared
       // for every owner of that identity, not just one.
       if (incidentRequestId !== null && !incidentActive) {
-        const closed = ctx.stmts.closePendingRequestAll.run({ $request_id: incidentRequestId })
-        tracker = { request_id: incidentRequestId, closed: closed.changes ?? 0 }
+        const rows = ctx.stmts.selectPendingSettlementsForRequest.all({
+          $request_id: incidentRequestId,
+        }) as PendingSettlementRow[]
+        tracker = {
+          request_id: incidentRequestId,
+          closed: settlePendingRows(ctx, rows, "incident-cleared", sender, ts),
+        }
       }
       // A daemon boundary settles expired rows before this send path runs.
       // Any still-open row is therefore closed by an explicit reply here.

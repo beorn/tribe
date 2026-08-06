@@ -18,8 +18,11 @@ import {
   countUnackedAttention,
   defaultBallTtlMs,
   MAX_BALL_TTL_MS,
+  settlePendingRows,
   type Classification,
+  type BallSettlementReason,
   type Delivery,
+  type PendingSettlementRow,
 } from "./messaging.ts"
 import {
   ACTIONABLE_TYPES_SET,
@@ -298,12 +301,12 @@ type ExpiredPendingRequest = {
  * the owner. The selection excludes already-recorded edges across both
  * retention tiers, and the transaction makes each daemon boundary observe a
  * stable set. */
-function settleExpiredPendingRequests(ctx: TribeContext, now: number): number {
+function recordExpiredPendingRequests(ctx: TribeContext, now: number): number {
   return ctx.db.transaction(() => {
     const rows = ctx.stmts.selectExpiredPendingRequests.all({ $now: now }) as ExpiredPendingRequest[]
     for (const row of rows) {
       const fact = {
-        schema_version: 1,
+        schema_version: 2,
         request_id: row.request_id,
         recipient: row.recipient,
         sender: row.sender,
@@ -312,9 +315,9 @@ function settleExpiredPendingRequests(ctx: TribeContext, now: number): number {
         message_id: row.message_id,
         fanout: row.fanout,
         summary: row.summary,
-        settlement: "expired",
-        settled_at: now,
-      } satisfies ExpiredPendingFact
+        observation: "deadline-passed",
+        observed_at: now,
+      } satisfies DeadlineObservationPayload
       logEvent(ctx, "ball.expired", undefined, fact, { sender: "daemon", ref: row.request_id, ts: now })
     }
     return rows.length
@@ -328,11 +331,12 @@ export function handleToolCall(
   opts: HandlerOpts,
   connId?: string,
 ): ToolResult | Promise<ToolResult> {
-  // Class-default deadlines are daemon-owned containment; a sender can only
-  // override their duration. Every RPC boundary settles elapsed ownership
-  // before projecting or mutating attention. History remains for audit/replay.
+  // Class-default deadlines are daemon-owned escalation; a sender can only
+  // override their duration. Every RPC boundary records elapsed deadlines
+  // before projecting attention, but ownership remains active until an actual
+  // reply or typed non-reply settlement. History remains for audit/replay.
   const now = Date.now()
-  settleExpiredPendingRequests(ctx, now)
+  recordExpiredPendingRequests(ctx, now)
   // Presence heartbeat (@km/tribe/19784): ANY authenticated tool call
   // refreshes the caller's last_seen — presence = "spoke to the daemon
   // recently", not "joined or drained rows recently". Before this, send-only
@@ -887,7 +891,7 @@ type PendingBallRow = {
   opened_at: number
   expires_at: number | null
   message_id: string
-  fanout: string
+  fanout: "first" | "all"
   summary: string | null
 }
 
@@ -899,34 +903,68 @@ type PendingBall = {
   expires_at: string | null
   age_ms: number
   message_id: string
-  fanout: string
+  fanout: "first" | "all"
   summary: string | null
-  status: "active" | "expired"
+  status: "active" | "expired" | "unanswered"
 }
 
-type ExpiredPendingBall = PendingBall & {
-  settlement: "expired"
-  settled_at: string
+type PendingOutcomeBall = PendingBall & {
+  status: "expired" | "unanswered"
+  settlement: BallSettlementReason | null
+  settled_at: string | null
 }
 
-type ExpiredPendingFactRow = {
+type PendingOutcomeFactRow = {
   id: string
+  type: "event.ball.expired" | "event.ball.settled"
   content: string
   ts: number
 }
 
-type ExpiredPendingFact = {
-  schema_version: 1
+type PendingReplyFactRow = {
+  sender: string
+  reply: string
+}
+
+type PendingFactEvidence = {
+  schema_version: 1 | 2
   request_id: string
   recipient: string
   sender: string
   opened_at: number
-  expires_at: number
+  expires_at: number | null
   message_id: string
-  fanout: string
+  fanout: "first" | "all"
   summary: string | null
-  settlement: "expired"
+}
+
+type DeadlineObservationPayload = PendingFactEvidence & {
+  schema_version: 2
+  expires_at: number
+  observation: "deadline-passed"
+  observed_at: number
+}
+
+type ExpiredPendingFact = PendingFactEvidence & {
+  kind: "deadline-passed"
+  expires_at: number
+  observed_at: number
+}
+
+type SettledPendingFact = PendingFactEvidence & {
+  kind: "settled"
+  schema_version: 1
+  settlement: BallSettlementReason
   settled_at: number
+  settled_by: string
+}
+
+type PendingOutcomeFactInput = Partial<PendingFactEvidence> & {
+  observation?: unknown
+  observed_at?: unknown
+  settlement?: unknown
+  settled_at?: unknown
+  settled_by?: unknown
 }
 
 type PendingBallSummary = {
@@ -958,54 +996,84 @@ function pendingBall(row: PendingBallRow, now: number): PendingBall {
   }
 }
 
-function parseExpiredPendingFact(row: ExpiredPendingFactRow): ExpiredPendingFact {
+const BALL_SETTLEMENT_REASONS = new Set<BallSettlementReason>([
+  "manual-close",
+  "incident-cleared",
+  "gc-expired",
+  "sender-withdrawn",
+])
+
+function parsePendingOutcomeFact(row: PendingOutcomeFactRow): ExpiredPendingFact | SettledPendingFact {
   let value: unknown
   try {
     value = JSON.parse(row.content)
   } catch (error) {
-    throw new Error(`invalid ball expiry fact ${row.id}: content is not JSON`, { cause: error })
+    throw new Error(`invalid ball outcome fact ${row.id}: content is not JSON`, { cause: error })
   }
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(`invalid ball expiry fact ${row.id}: replay evidence must be an object`)
+    throw new Error(`invalid ball outcome fact ${row.id}: replay evidence must be an object`)
   }
-  const fact = value as Partial<ExpiredPendingFact>
+  const fact = value as PendingOutcomeFactInput
   const identity = typeof fact.request_id === "string" ? fact.request_id : row.id
   const validString = (candidate: unknown): candidate is string => typeof candidate === "string" && candidate.length > 0
   const validTime = (candidate: unknown): candidate is number =>
     typeof candidate === "number" && Number.isFinite(candidate)
-  if (
-    fact.schema_version !== 1 ||
+  const evidenceIsInvalid =
+    (fact.schema_version !== 1 && fact.schema_version !== 2) ||
     !validString(fact.request_id) ||
     !validString(fact.recipient) ||
     !validString(fact.sender) ||
     !validTime(fact.opened_at) ||
-    !validTime(fact.expires_at) ||
+    (fact.expires_at !== null && !validTime(fact.expires_at)) ||
     !validString(fact.message_id) ||
     (fact.fanout !== "first" && fact.fanout !== "all") ||
-    (fact.summary !== null && typeof fact.summary !== "string") ||
-    fact.settlement !== "expired" ||
-    !validTime(fact.settled_at)
-  ) {
-    throw new Error(`invalid ball expiry fact ${identity}: required replay evidence is missing or malformed`)
+    (fact.summary !== null && typeof fact.summary !== "string")
+  if (evidenceIsInvalid) {
+    const factKind = row.type === "event.ball.expired" ? "expiry" : "settlement"
+    throw new Error(`invalid ball ${factKind} fact ${identity}: required replay evidence is missing or malformed`)
   }
-  return fact as ExpiredPendingFact
+  if (row.type === "event.ball.expired") {
+    if (fact.schema_version === 2) {
+      if (!validTime(fact.expires_at) || fact.observation !== "deadline-passed" || !validTime(fact.observed_at)) {
+        throw new Error(`invalid ball expiry fact ${identity}: required replay evidence is missing or malformed`)
+      }
+      return { ...fact, kind: "deadline-passed" } as ExpiredPendingFact
+    }
+    if (!validTime(fact.expires_at) || fact.settlement !== "expired" || !validTime(fact.settled_at)) {
+      throw new Error(`invalid ball expiry fact ${identity}: required replay evidence is missing or malformed`)
+    }
+    return { ...fact, kind: "deadline-passed", observed_at: fact.settled_at } as ExpiredPendingFact
+  }
+  if (
+    fact.schema_version !== 1 ||
+    !validTime(fact.settled_at) ||
+    !BALL_SETTLEMENT_REASONS.has(fact.settlement as BallSettlementReason) ||
+    !validString(fact.settled_by)
+  ) {
+    throw new Error(`invalid ball settlement fact ${identity}: required replay evidence is missing or malformed`)
+  }
+  return { ...fact, kind: "settled" } as SettledPendingFact
 }
 
-function expiredPendingBall(row: ExpiredPendingFactRow, now: number): ExpiredPendingBall {
-  const fact = parseExpiredPendingFact(row)
+function pendingOutcomeBall(
+  fact: PendingFactEvidence,
+  now: number,
+  settlement: BallSettlementReason | null,
+  settledAt: number | null,
+): PendingOutcomeBall {
   return {
     request_id: fact.request_id,
     recipient: fact.recipient,
     sender: fact.sender,
     opened_at: new Date(fact.opened_at).toISOString(),
-    expires_at: new Date(fact.expires_at).toISOString(),
+    expires_at: fact.expires_at === null ? null : new Date(fact.expires_at).toISOString(),
     age_ms: now - fact.opened_at,
     message_id: fact.message_id,
     fanout: fact.fanout,
     summary: fact.summary,
-    status: "expired",
-    settlement: "expired",
-    settled_at: new Date(fact.settled_at).toISOString(),
+    status: "unanswered",
+    settlement,
+    settled_at: settledAt === null ? null : new Date(settledAt).toISOString(),
   }
 }
 
@@ -1014,9 +1082,76 @@ function pendingBallsForOwner(ctx: TribeContext, owner: string, now: number): Pe
   return sortPendingBalls(rows.map((row) => pendingBall(row, now)))
 }
 
-function expiredPendingBalls(ctx: TribeContext, now: number): ExpiredPendingBall[] {
-  const rows = ctx.stmts.selectExpiredPendingFacts.all() as ExpiredPendingFactRow[]
-  return rows.map((row) => expiredPendingBall(row, now))
+function pendingFactKey(fact: Pick<PendingFactEvidence, "request_id" | "recipient" | "message_id">): string {
+  return JSON.stringify([fact.request_id, fact.recipient, fact.message_id])
+}
+
+function indexPendingReplies(replies: readonly PendingReplyFactRow[]): Map<string, Set<string>> {
+  const respondersByRef = new Map<string, Set<string>>()
+  for (const reply of replies) {
+    const responders = respondersByRef.get(reply.reply) ?? new Set<string>()
+    responders.add(reply.sender)
+    respondersByRef.set(reply.reply, responders)
+  }
+  return respondersByRef
+}
+
+function pendingFactWasAnswered(
+  fact: Pick<PendingFactEvidence, "request_id" | "recipient" | "message_id" | "fanout">,
+  respondersByRef: ReadonlyMap<string, ReadonlySet<string>>,
+): boolean {
+  const requestResponders = respondersByRef.get(fact.request_id)
+  const messageResponders = respondersByRef.get(fact.message_id)
+  if (fact.fanout === "first") return (requestResponders?.size ?? 0) > 0 || (messageResponders?.size ?? 0) > 0
+  return requestResponders?.has(fact.recipient) === true || messageResponders?.has(fact.recipient) === true
+}
+
+/** Read-authoritative fold. Live deadline passage comes from pending_request,
+ * replies come from durable messages, and non-reply terminal reasons come from
+ * journal facts. The journal's ball.expired row is only an observation echo;
+ * it is never misreported as a terminal settlement. */
+function expiredPendingBalls(ctx: TribeContext, now: number): PendingOutcomeBall[] {
+  const rows = ctx.stmts.selectPendingOutcomeFacts.all() as PendingOutcomeFactRow[]
+  const replies = ctx.stmts.selectPendingReplyFacts.all() as PendingReplyFactRow[]
+  const respondersByRef = indexPendingReplies(replies)
+  const facts = rows.map(parsePendingOutcomeFact)
+  const settlements = new Map<string, SettledPendingFact>()
+  for (const fact of facts) {
+    if (fact.kind !== "settled") continue
+    const key = pendingFactKey(fact)
+    const prior = settlements.get(key)
+    if (prior !== undefined && prior.settlement !== fact.settlement) {
+      throw new Error(
+        `conflicting ball settlement facts for ${fact.request_id}: ${prior.settlement} vs ${fact.settlement}`,
+      )
+    }
+    settlements.set(key, fact)
+  }
+
+  const live = allPendingBalls(ctx, now).filter(
+    (ball): ball is PendingBall & { status: "expired" } => ball.status === "expired",
+  )
+  const liveKeys = new Set(live.map(pendingFactKey))
+  const outcomes: PendingOutcomeBall[] = live
+    .filter((ball) => !pendingFactWasAnswered(ball, respondersByRef))
+    .map((ball) => ({ ...ball, settlement: null, settled_at: null }))
+  const representedSettlements = new Set<string>()
+
+  for (const fact of facts) {
+    if (fact.kind !== "deadline-passed") continue
+    const key = pendingFactKey(fact)
+    if (liveKeys.has(key) || pendingFactWasAnswered(fact, respondersByRef)) continue
+    const settlement = settlements.get(key)
+    if (settlement) representedSettlements.add(key)
+    outcomes.push(pendingOutcomeBall(fact, now, settlement?.settlement ?? null, settlement?.settled_at ?? null))
+  }
+
+  for (const fact of settlements.values()) {
+    const key = pendingFactKey(fact)
+    if (liveKeys.has(key) || representedSettlements.has(key) || pendingFactWasAnswered(fact, respondersByRef)) continue
+    outcomes.push(pendingOutcomeBall(fact, now, fact.settlement, fact.settled_at))
+  }
+  return sortPendingBalls(outcomes)
 }
 
 function pendingCloseMissWarning(
@@ -1069,15 +1204,16 @@ function allPendingBalls(ctx: TribeContext, now: number): PendingBall[] {
   return sortPendingBalls(rows.map((row) => pendingBall(row, now)))
 }
 
-function sortPendingBalls(rows: readonly PendingBall[]): PendingBall[] {
+function sortPendingBalls<T extends PendingBall>(rows: readonly T[]): T[] {
+  const statusRank = { expired: 0, unanswered: 1, active: 2 } as const
   return rows.toSorted((left, right) => {
-    if (left.status !== right.status) return left.status === "expired" ? -1 : 1
+    if (left.status !== right.status) return statusRank[left.status] - statusRank[right.status]
     return Date.parse(left.opened_at) - Date.parse(right.opened_at) || left.request_id.localeCompare(right.request_id)
   })
 }
 
-function pendingOwnerGroups(pending: readonly PendingBall[]) {
-  const byOwner = new Map<string, PendingBall[]>()
+function pendingOwnerGroups<T extends PendingBall>(pending: readonly T[]) {
+  const byOwner = new Map<string, T[]>()
   for (const ball of pending) {
     const rows = byOwner.get(ball.recipient) ?? []
     rows.push(ball)
@@ -1123,15 +1259,21 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
 
   // Explicit repair path (@km/tribe/20008): prune stale balls for `owner`. Safe
   // to run during chief recovery — it REQUIRES a stale_ms threshold so it can
-  // only ever delete balls older than that age (fresh request/reply balls and
-  // other recipients are untouched), and it removes only the ball-tracker row,
-  // never message history.
+  // only ever settle balls older than that age (fresh request/reply balls and
+  // other recipients are untouched). It records full gc-expired evidence before
+  // removing active ownership and never deletes message history.
   if (a.prune === true) {
     if (staleMs === null) {
       return jsonResult({ error: "prune requires stale_ms (the minimum ball age, in ms, to GC)." })
     }
-    const res = ctx.stmts.gcStalePendingForRecipient.run({ $recipient: owner, $cutoff: now - staleMs })
-    return jsonResult({ owner, pruned: res.changes ?? 0, stale_ms: staleMs })
+    const pruned = ctx.db.transaction(() => {
+      const rows = ctx.stmts.selectPendingSettlementsForRecipientBefore.all({
+        $recipient: owner,
+        $cutoff: now - staleMs,
+      }) as PendingSettlementRow[]
+      return settlePendingRows(ctx, rows, "gc-expired", ctx.getName(), now)
+    })()
+    return jsonResult({ owner, pruned, stale_ms: staleMs })
   }
 
   const closeId = typeof a.close === "string" && a.close.length > 0 ? a.close : null
@@ -1141,8 +1283,15 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
       $recipient: owner,
     }) as { request_id: string } | null
     const requestId = pending?.request_id ?? closeId
-    const res = ctx.stmts.closePendingRequest.run({ $request_id: requestId, $recipient: owner })
-    const closed = res.changes ?? 0
+    const closed = ctx.db.transaction(() => {
+      const row = ctx.stmts.selectPendingSettlementForRecipient.get({
+        $request_id: requestId,
+        $recipient: owner,
+      }) as PendingSettlementRow | null
+      if (row === null) return 0
+      const settlement = ctx.getName() === row.sender && ctx.getName() !== owner ? "sender-withdrawn" : "manual-close"
+      return settlePendingRows(ctx, [row], settlement, ctx.getName(), now)
+    })()
     const warning = closed === 0 ? pendingCloseMissWarning(ctx, owner, undefined, closeId) : undefined
     return jsonResult({ owner, request_id: requestId, closed, ...(warning ? { warning } : {}) })
   }

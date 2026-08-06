@@ -47,11 +47,17 @@ branch assignments, or merge authority.
 
 Direct `request`, `query`, and `assign` messages open one recipient-owned ball;
 other message types open one only when explicitly requested. The
-`pending_request` row stores active ownership, age, and fanout. Tracked
-requests, queries, and assignments receive a 20-minute class default;
-`expires_in_ms` overrides it for one send. At the first daemon operation after
-that deadline passes, Tribe atomically appends an `expired` journal fact and
-settles the active ownership row. The historical expired view derives from the
-hot and archived journal rather than retaining a second status table.
+`pending_request` row stores active ownership, age, and fanout. Tracked requests
+and queries receive a 20-minute escalation deadline; assignments have no
+reply-clock default. `expires_in_ms` overrides that policy for one send.
+Deadline passage changes presentation, never membership: the owner keeps the
+row, which reads `expired`, sorts first, and carries its age. Reads compare the
+deadline directly and are authoritative even when the idempotent
+`ball.expired` journal echo has not reached its next recorder sweep. The
+expired/unanswered view derives from the active row, hot and archived deadline
+and settlement facts, and durable replies rather than retaining a second status
+table. Non-reply settlement reasons remain distinct: `manual-close`,
+`incident-cleared`, `gc-expired`, and `sender-withdrawn`; answers derive from
+reply messages.
 Reminders, pages, transfer, and escalation remain consuming L3 controller
 policy.

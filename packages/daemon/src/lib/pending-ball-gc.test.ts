@@ -8,7 +8,8 @@
  *    retention);
  *  - the scoped `gcStalePendingForRecipient` engine behind the explicit
  *    `tribe.pending` prune/close (safe chief-recovery repair — scoped).
- * Neither deletes message history; only ball-tracker rows are removed.
+ * Neither deletes message history; each production path records a typed
+ * non-reply settlement before removing the ball-tracker row.
  */
 
 import { mkdtempSync, rmSync } from "node:fs"
@@ -57,6 +58,19 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
     return { db, stmts }
   }
 
+  function makeContext(db: ReturnType<typeof openDatabase>, stmts: TribeStatements, initialName = "@chief") {
+    return createTribeContext({
+      db,
+      stmts,
+      sessionId: `sess-${initialName.slice(1).replaceAll("/", "-")}`,
+      sessionRole: "member",
+      initialName,
+      domains: [],
+      claudeSessionId: null,
+      claudeSessionName: null,
+    })
+  }
+
   function openBall(
     stmts: TribeStatements,
     o: { id: string; recipient: string; openedAt: number; expiresAt?: number | null; sender?: string },
@@ -78,16 +92,69 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
     )
   }
 
-  it("cleanupOldData GCs balls older than the 7d retention, keeps fresh ones", () => {
+  function settlementFacts(db: ReturnType<typeof openDatabase>): Array<Record<string, unknown>> {
+    return (
+      db
+        .prepare("SELECT content FROM messages WHERE kind = 'event' AND type = 'event.ball.settled' ORDER BY ts, id")
+        .all() as Array<{ content: string }>
+    ).map((row) => JSON.parse(row.content) as Record<string, unknown>)
+  }
+
+  it("cleanupOldData records gc-expired evidence before removing a stale ball", () => {
     const { db, stmts } = setup()
     try {
       const now = Date.now()
-      openBall(stmts, { id: "stale", recipient: "@chief", openedAt: now - 8 * DAY }) // > 7d → GC
-      openBall(stmts, { id: "fresh", recipient: "@chief", openedAt: now - 1 * DAY }) // < 7d → keep
+      const ctx = createTribeContext({
+        db,
+        stmts,
+        sessionId: "sess-agent-2",
+        sessionRole: "member",
+        initialName: "@agent/2",
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+      })
+      sendMessage(
+        ctx,
+        "@chief",
+        "stale review body",
+        "request",
+        undefined,
+        undefined,
+        "direct",
+        {
+          summary: "stale review summary",
+        },
+        { request: "stale" },
+      )
+      sendMessage(
+        ctx,
+        "@chief",
+        "fresh review body",
+        "request",
+        undefined,
+        undefined,
+        "direct",
+        {
+          summary: "fresh review summary",
+        },
+        { request: "fresh" },
+      )
+      db.prepare("UPDATE pending_request SET opened_at = ? WHERE request_id = 'stale'").run(now - 8 * DAY)
+      db.prepare("UPDATE pending_request SET opened_at = ? WHERE request_id = 'fresh'").run(now - 1 * DAY)
 
-      cleanupOldData({ stmts } as unknown as Parameters<typeof cleanupOldData>[0])
+      cleanupOldData(ctx)
 
       expect(openIds(stmts, "@chief")).toEqual(["fresh"])
+      expect(settlementFacts(db)).toEqual([
+        expect.objectContaining({
+          request_id: "stale",
+          recipient: "@chief",
+          sender: "@agent/2",
+          summary: "stale review summary",
+          settlement: "gc-expired",
+        }),
+      ])
     } finally {
       db.close()
     }
@@ -118,7 +185,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       openBall(stmts, { id: "live", recipient: "@chief", openedAt: now - 5 * 60 * 1000 }) // 5m old
 
       // Auto-GC + a scoped prune with a 1d threshold both leave it open.
-      cleanupOldData({ stmts } as unknown as Parameters<typeof cleanupOldData>[0])
+      cleanupOldData(makeContext(db, stmts))
       stmts.gcStalePendingForRecipient.run({ $recipient: "@chief", $cutoff: now - 1 * DAY })
       expect(openIds(stmts, "@chief")).toEqual(["live"])
 
@@ -153,6 +220,86 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       expect(res).toMatchObject({ owner: "@chief", request_id: "done", closed: 1 })
       expect(openIds(stmts, "@chief")).toEqual(["keep"])
       expect(openIds(stmts, "@agent/2")).toEqual(["done"])
+      expect(settlementFacts(db)).toEqual([
+        expect.objectContaining({
+          request_id: "done",
+          recipient: "@chief",
+          settlement: "manual-close",
+          settled_by: "@chief",
+        }),
+      ])
+    } finally {
+      db.close()
+    }
+  })
+
+  it("records sender-withdrawn when the sender closes another persona's ball", () => {
+    const { db, stmts } = setup()
+    try {
+      const now = Date.now()
+      openBall(stmts, { id: "withdraw", recipient: "@chief", openedAt: now, sender: "@agent/2" })
+      const sender = createTribeContext({
+        db,
+        stmts,
+        sessionId: "sess-agent-2",
+        sessionRole: "member",
+        initialName: "@agent/2",
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+      })
+
+      const result = parseToolJson(
+        handleToolCall(sender, "tribe.pending", { owner: "@chief", close: "withdraw-msg" }, makeOpts()),
+      )
+
+      expect(result).toMatchObject({ owner: "@chief", request_id: "withdraw", closed: 1 })
+      expect(settlementFacts(db)).toEqual([
+        expect.objectContaining({
+          request_id: "withdraw",
+          recipient: "@chief",
+          sender: "@agent/2",
+          settlement: "sender-withdrawn",
+          settled_by: "@agent/2",
+        }),
+      ])
+    } finally {
+      db.close()
+    }
+  })
+
+  it("records gc-expired evidence for every scoped prune without touching another owner", () => {
+    const { db, stmts } = setup()
+    try {
+      const now = Date.now()
+      openBall(stmts, { id: "chief-stale", recipient: "@chief", openedAt: now - 3 * DAY, sender: "@agent/2" })
+      openBall(stmts, { id: "chief-fresh", recipient: "@chief", openedAt: now, sender: "@agent/2" })
+      openBall(stmts, { id: "other-stale", recipient: "@agent/3", openedAt: now - 3 * DAY, sender: "@agent/2" })
+      const chief = createTribeContext({
+        db,
+        stmts,
+        sessionId: "sess-chief",
+        sessionRole: "member",
+        initialName: "@chief",
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+      })
+
+      const result = parseToolJson(handleToolCall(chief, "tribe.pending", { prune: true, stale_ms: DAY }, makeOpts()))
+
+      expect(result).toMatchObject({ owner: "@chief", pruned: 1 })
+      expect(openIds(stmts, "@chief")).toEqual(["chief-fresh"])
+      expect(openIds(stmts, "@agent/3")).toEqual(["other-stale"])
+      expect(settlementFacts(db)).toEqual([
+        expect.objectContaining({
+          request_id: "chief-stale",
+          recipient: "@chief",
+          sender: "@agent/2",
+          settlement: "gc-expired",
+          settled_by: "@chief",
+        }),
+      ])
     } finally {
       db.close()
     }
@@ -279,7 +426,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         $ts: now - 2 * DAY,
       })
 
-      cleanupOldData({ stmts } as unknown as Parameters<typeof cleanupOldData>[0])
+      cleanupOldData(makeContext(db, stmts))
 
       const row = db.prepare("SELECT COUNT(*) AS count FROM dedup WHERE key LIKE 'ball-deadline:%'").get() as {
         count: number
@@ -446,8 +593,9 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       expect(expired.pending).toEqual([
         expect.objectContaining({
           request_id: "expired-review",
-          settlement: "expired",
-          settled_at: expect.any(String),
+          status: "expired",
+          settlement: null,
+          settled_at: null,
         }),
       ])
 
@@ -461,12 +609,12 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         owners: Array<{ owner: string; pending: Array<{ request_id: string; settlement: string }> }>
       }
       expect(archived.pending).toEqual([
-        expect.objectContaining({ request_id: "expired-review", settlement: "expired" }),
+        expect.objectContaining({ request_id: "expired-review", status: "expired", settlement: null }),
       ])
       expect(archived.owners).toEqual([
         expect.objectContaining({
           owner: "@chief",
-          pending: [expect.objectContaining({ request_id: "expired-review", settlement: "expired" })],
+          pending: [expect.objectContaining({ request_id: "expired-review", status: "expired", settlement: null })],
         }),
       ])
       expect(attention.pending_balls).toEqual([
@@ -480,6 +628,104 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       db.close()
       if (savedSlaRole === undefined) delete process.env.TRIBE_SLA_ROLE
       else process.env.TRIBE_SLA_ROLE = savedSlaRole
+    }
+  })
+
+  it("derives every non-reply settlement reason and excludes a later answer", () => {
+    const { db, stmts } = setup()
+    try {
+      const sender = makeContext(db, stmts, "@agent/2")
+      const chief = makeContext(db, stmts)
+      const track = (requestId: string, summary: string) =>
+        sendMessage(
+          sender,
+          "@chief",
+          summary,
+          "request",
+          undefined,
+          undefined,
+          "direct",
+          { summary },
+          {
+            request: requestId,
+          },
+        )
+
+      track("manual", "manually closed review")
+      handleToolCall(chief, "tribe.pending", { close: "manual" }, makeOpts())
+
+      track("withdrawn", "withdrawn by sender")
+      handleToolCall(sender, "tribe.pending", { owner: "@chief", close: "withdrawn" }, makeOpts())
+
+      track("gc", "never answered before retention")
+      db.prepare("UPDATE pending_request SET opened_at = ? WHERE request_id = 'gc'").run(Date.now() - 8 * DAY)
+      cleanupOldData(sender)
+
+      const incident = { emitter: "test-monitor", subject: "yrd-runner", condition: "absent" }
+      sendMessage(sender, "@chief", "runner absent", "notify", undefined, undefined, "direct", {}, { incident })
+      sendMessage(
+        sender,
+        "@chief",
+        "runner recovered",
+        "notify",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        {
+          incident: { ...incident, active: false },
+        },
+      )
+
+      track("late-answer", "answered after deadline")
+      db.prepare("UPDATE pending_request SET expires_at = ? WHERE request_id = 'late-answer'").run(Date.now() - 1)
+      handleToolCall(chief, "tribe.pending", { expired: true }, makeOpts())
+      sendMessage(
+        chief,
+        "@agent/2",
+        "late but valid",
+        "response",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        {
+          reply: "late-answer",
+        },
+      )
+
+      const archiveCutoff = Date.now() + 1_000
+      stmts.archiveExpiredMessages.run({ $cutoff: archiveCutoff, $archived_at: archiveCutoff })
+      stmts.deleteExpiredMessages.run({ $cutoff: archiveCutoff })
+
+      const outcomes = parseToolJson(
+        handleToolCall(chief, "tribe.pending", { all: true, expired: true }, makeOpts()),
+      ) as {
+        pending: Array<{ request_id: string; settlement: string | null; status: string }>
+      }
+
+      expect(outcomes.pending).toHaveLength(4)
+      expect(outcomes.pending).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ request_id: "manual", status: "unanswered", settlement: "manual-close" }),
+          expect.objectContaining({
+            request_id: "withdrawn",
+            status: "unanswered",
+            settlement: "sender-withdrawn",
+          }),
+          expect.objectContaining({ request_id: "gc", status: "unanswered", settlement: "gc-expired" }),
+          expect.objectContaining({
+            request_id: "test-monitor:yrd-runner:absent",
+            status: "unanswered",
+            settlement: "incident-cleared",
+          }),
+        ]),
+      )
+      expect(outcomes.pending).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ request_id: "late-answer" })]),
+      )
+    } finally {
+      db.close()
     }
   })
 
@@ -597,9 +843,19 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
 
       const expired = parseToolJson(handleToolCall(ctx, "tribe.pending", { all: true, expired: true }, makeOpts())) as {
         count: number
+        pending: Array<{ request_id: string; status: string; settlement: string | null }>
         owners: Array<{ owner: string; oldest_age_ms: number }>
       }
       expect(expired.count).toBe(3)
+      expect(expired.pending).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            request_id: "same-payload-distinct-events",
+            status: "unanswered",
+            settlement: null,
+          }),
+        ]),
+      )
       expect(expired.owners).toEqual([
         expect.objectContaining({ owner: "@chief", oldest_age_ms: expect.closeTo(2 * 60 * 60_000, -3) }),
       ])

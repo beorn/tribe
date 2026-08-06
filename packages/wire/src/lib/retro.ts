@@ -78,6 +78,11 @@ interface MemberMetrics {
   responseLatenciesMs: number[]
 }
 
+const NON_REPLY_SETTLEMENT_REASONS = ["manual-close", "incident-cleared", "gc-expired", "sender-withdrawn"] as const
+type NonReplySettlementReason = (typeof NON_REPLY_SETTLEMENT_REASONS)[number]
+type SettlementReason = "answered" | NonReplySettlementReason
+type SettlementCounts = Record<SettlementReason, number>
+
 export interface RetroReport {
   generated_at: string
   window: { start: number; end: number; duration_ms: number }
@@ -104,6 +109,8 @@ export interface RetroReport {
     response_p90: string | null
     longest_response: string | null
     longest_response_member: string | null
+    /** Read-derived terminal outcomes. Deadline observations are not settlements. */
+    settlements: SettlementCounts
   }
 }
 
@@ -181,6 +188,55 @@ function computeResponseTimes(messages: Message[]): {
   return { latenciesByResponder, answeredRequestIds, openRequestIds }
 }
 
+function deriveSettlementCounts(
+  db: Database,
+  windowStart: number,
+  answeredRequestIds: ReadonlySet<string>,
+): SettlementCounts {
+  const settlementByIdentity = new Map<string, NonReplySettlementReason>()
+  const settlementRows = db
+    .prepare("SELECT id, content FROM messages WHERE kind = 'event' AND type = 'event.ball.settled' AND ts >= ?")
+    .all(windowStart) as Array<{ id: string; content: string }>
+  for (const row of settlementRows) {
+    let value: unknown
+    try {
+      value = JSON.parse(row.content)
+    } catch (error) {
+      throw new Error(`invalid ball settlement fact ${row.id}: content is not JSON`, { cause: error })
+    }
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new Error(`invalid ball settlement fact ${row.id}: replay evidence must be an object`)
+    }
+    const fact = value as { request_id?: unknown; recipient?: unknown; message_id?: unknown; settlement?: unknown }
+    if (
+      typeof fact.request_id !== "string" ||
+      typeof fact.recipient !== "string" ||
+      typeof fact.message_id !== "string" ||
+      !NON_REPLY_SETTLEMENT_REASONS.includes(fact.settlement as NonReplySettlementReason)
+    ) {
+      throw new Error(`invalid ball settlement fact ${row.id}: required replay evidence is missing or malformed`)
+    }
+    if (answeredRequestIds.has(fact.request_id)) continue
+    const identity = JSON.stringify([fact.request_id, fact.recipient, fact.message_id])
+    const prior = settlementByIdentity.get(identity)
+    if (prior !== undefined && prior !== fact.settlement) {
+      throw new Error(
+        `conflicting ball settlement facts for ${fact.request_id}: ${prior} vs ${String(fact.settlement)}`,
+      )
+    }
+    settlementByIdentity.set(identity, fact.settlement as NonReplySettlementReason)
+  }
+  const counts: SettlementCounts = {
+    answered: answeredRequestIds.size,
+    "manual-close": 0,
+    "incident-cleared": 0,
+    "gc-expired": 0,
+    "sender-withdrawn": 0,
+  }
+  for (const reason of settlementByIdentity.values()) counts[reason] += 1
+  return counts
+}
+
 export function generateRetro(db: Database, sinceMs?: number): RetroReport {
   const now = Date.now()
   const windowStart = sinceMs ? now - sinceMs : getEarliestTimestamp(db)
@@ -238,28 +294,19 @@ export function generateRetro(db: Database, sinceMs?: number): RetroReport {
     if (member) member.responseLatenciesMs = latencies
   }
 
-  const expiredRequestIds = new Set(
-    (
-      db
-        .prepare(
-          "SELECT ref FROM messages WHERE kind = 'event' AND type = 'event.ball.expired' AND ts >= ? AND ref IS NOT NULL",
-        )
-        .all(windowStart) as Array<{ ref: string }>
-    ).map((row) => row.ref),
-  )
-  const unansweredQueries = [...openRequestIds].filter(
-    (id) => !answeredRequestIds.has(id) && !expiredRequestIds.has(id),
-  ).length
+  const settlements = deriveSettlementCounts(db, windowStart, answeredRequestIds)
+  const unansweredQueries = [...openRequestIds].filter((id) => !answeredRequestIds.has(id)).length
   const allLatencies = [...latenciesByResponder.values()].flat().sort((a, b) => a - b)
   const avgResponseTime = mean(allLatencies)
   const longestResponse = allLatencies.length > 0 ? allLatencies.at(-1)! : null
   let longestResponseMember: string | null = null
   if (longestResponse !== null) {
-    for (const [name, t] of latenciesByResponder)
+    for (const [name, t] of latenciesByResponder) {
       if (t.includes(longestResponse)) {
         longestResponseMember = name
         break
       }
+    }
   }
 
   // Timeline: events + notable messages. Events now live in `messages` with
@@ -338,6 +385,7 @@ export function generateRetro(db: Database, sinceMs?: number): RetroReport {
       response_p90: durationOrNull(percentile(allLatencies, 0.9)),
       longest_response: durationOrNull(longestResponse),
       longest_response_member: longestResponseMember,
+      settlements,
     },
   }
 }
@@ -368,10 +416,11 @@ export function formatMarkdown(report: RetroReport): string {
     lines.push("## Per-Member Activity")
     lines.push("| Member | Sent | Received | Beads Mentioned | Responses | Avg Response | p50 | p90 |")
     lines.push("|--------|------|----------|-----------------|-----------|--------------|-----|-----|")
-    for (const m of report.members)
+    for (const m of report.members) {
       lines.push(
         `| ${m.name} | ${m.sent} | ${m.received} | ${m.beads_mentioned.length} | ${m.responses} | ${m.avg_response ?? "—"} | ${m.response_p50 ?? "—"} | ${m.response_p90 ?? "—"} |`,
       )
+    }
     lines.push("")
   }
 
@@ -383,15 +432,20 @@ export function formatMarkdown(report: RetroReport): string {
 
   lines.push("## Coordination Health")
   lines.push(`- Unanswered queries: ${report.coordination.unanswered_queries}`)
+  lines.push(
+    `- Settlements: answered=${report.coordination.settlements.answered}, manual-close=${report.coordination.settlements["manual-close"]}, incident-cleared=${report.coordination.settlements["incident-cleared"]}, gc-expired=${report.coordination.settlements["gc-expired"]}, sender-withdrawn=${report.coordination.settlements["sender-withdrawn"]}`,
+  )
   lines.push(`- Average response time: ${report.coordination.avg_response_time ?? "—"}`)
-  if (report.coordination.response_p50 || report.coordination.response_p90)
+  if (report.coordination.response_p50 || report.coordination.response_p90) {
     lines.push(
       `- Response p50 / p90: ${report.coordination.response_p50 ?? "—"} / ${report.coordination.response_p90 ?? "—"}`,
     )
-  if (report.coordination.longest_response)
+  }
+  if (report.coordination.longest_response) {
     lines.push(
       `- Longest response: ${report.coordination.longest_response} (${report.coordination.longest_response_member})`,
     )
+  }
   lines.push("")
   return lines.join("\n")
 }

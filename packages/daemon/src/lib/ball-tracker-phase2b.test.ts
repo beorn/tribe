@@ -537,7 +537,7 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
         "tribe.send",
         {
           to: "@agent/1",
-          message: "deadline settles ownership at the daemon boundary",
+          message: "deadline escalates ownership at the daemon boundary",
           type: "request",
           request: "deadline-passed-open",
           expires_in_ms: 60_000,
@@ -556,12 +556,15 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       .all() as Array<{ type: string; kind: string; content: string }>
     expect(expiryFacts).toHaveLength(1)
     expect(JSON.parse(expiryFacts[0]!.content)).toMatchObject({
+      schema_version: 2,
       request_id: "deadline-passed-open",
       recipient: "@agent/1",
       sender: "@chief",
-      settlement: "expired",
+      observation: "deadline-passed",
+      observed_at: expect.any(Number),
       expires_at: 0,
     })
+    expect(JSON.parse(expiryFacts[0]!.content)).not.toHaveProperty("settlement")
 
     // Lazy expiry can be checked by many subsequent RPCs. The journal fact is
     // an edge and must stay exactly-once while ownership remains active.
