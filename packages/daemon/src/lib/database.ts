@@ -1136,10 +1136,25 @@ export function createStatements(db: Database) {
     /** Daemon-owned expiry settlement input. The handler records one durable
      *  journal fact before deleting each current-ownership row. */
     selectExpiredPendingRequests: db.prepare(`
-		SELECT request_id, recipient, sender, opened_at, expires_at, message_id, fanout
-		FROM pending_request
-		WHERE expires_at IS NOT NULL AND expires_at <= $now
-		ORDER BY opened_at, request_id, recipient
+		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
+			COALESCE(m.summary, a.summary) AS summary
+		FROM pending_request p
+		LEFT JOIN messages m ON m.id = p.message_id
+		LEFT JOIN messages_archive a ON a.id = p.message_id
+		WHERE p.expires_at IS NOT NULL AND p.expires_at <= $now
+		ORDER BY p.opened_at, p.request_id, p.recipient
+	`),
+
+    /** Historical expiry outcomes derive from the journal rather than a
+     *  second tracker table. UNION spans the hot and archived retention tiers;
+     *  an archive/delete interruption cannot duplicate an identical fact. */
+    selectExpiredPendingFacts: db.prepare(`
+		SELECT content, ts FROM messages
+		WHERE kind = 'event' AND type = 'event.ball.expired'
+		UNION
+		SELECT content, ts FROM messages_archive
+		WHERE kind = 'event' AND type = 'event.ball.expired'
+		ORDER BY ts
 	`),
 
     /** Ball-tracker lookup: used when a reply arrives to decide whether this

@@ -68,10 +68,13 @@ tribe-wire pending [--all] [--json] [--expired] [-o, --owner <name>] [-s, --stal
 
 Ball-tracker query: open requests where `owner` (default: caller's session)
 is responsible for replying. `--all` lists every owner's open requests,
-grouped (mutually exclusive with `--owner`). `--expired` filters to rows
-whose sender-declared deadline passed (read-only; not combinable with
-`--close`). `--close <id>` closes one pending request without sending a
-reply — requires `--owner`. Example:
+grouped (mutually exclusive with `--owner`). `--expired` reads historical
+expired outcomes from the hot and archived journal; each row explicitly names
+`settlement: "expired"` and `settled_at` (read-only; not combinable with
+`--close`). Tracked requests, queries, and assignments default to a 20-minute
+lifetime; `--expires-in-ms` overrides that class default for one send.
+`--close <id>` closes one pending request without sending a reply — requires
+`--owner`. Example:
 
 ```bash
 tribe-wire pending --owner @alice --stale 15m

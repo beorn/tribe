@@ -219,6 +219,39 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(fetchEvents(b, opts)).toEqual([])
   })
 
+  it("surfaces an obligation sent while its persona is stopped to the successor instance", () => {
+    const stopped = connectAs("sess-stopped", NAME)
+    const chief = connectAs("sess-chief", "@chief")
+    disconnect("sess-stopped")
+    void stopped
+
+    const sent = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        {
+          to: NAME,
+          message: "resume the durable review",
+          type: "request",
+          request: true,
+        },
+        opts,
+      ),
+    ) as { id: string }
+
+    // A newly started process resets its chronological cursor to the tail.
+    // The persona-keyed mailbox and ownership projection must still surface
+    // both halves of the obligation without inheriting the dead session id.
+    const successor = connectAs("sess-successor", NAME)
+    const first = fetchJson(successor, opts).json
+    expect(first.attention?.actionable_unread).toEqual([
+      expect.objectContaining({ id: sent.id, type: "request", from: "@chief" }),
+    ])
+    expect(first.attention?.pending_balls).toEqual([
+      expect.objectContaining({ request_id: sent.id, message_id: sent.id, sender: "@chief" }),
+    ])
+  })
+
   it("recovers a response that closed its tracked ball while the requester was parked", () => {
     const requester = connectAs("sess-requester", NAME)
     const chief = connectAs("sess-chief", "@chief")
