@@ -279,6 +279,54 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(second.events).toEqual([])
   })
 
+  it("retires a replied-to direct from the recipient's next actionable read", () => {
+    const worker = connectAs("sess-reply-worker", NAME)
+    const chief = connectAs("sess-reply-chief", "@chief")
+    const request = parseToolJson(
+      handleToolCall(chief, "tribe.send", { to: NAME, message: "take the assignment", type: "request" }, opts),
+    ) as { id: string }
+
+    const response = parseToolJson(
+      handleToolCall(
+        worker,
+        "tribe.send",
+        { to: "@chief", message: "accepted", type: "response", reply: request.id },
+        opts,
+      ),
+    ) as { tracker?: { request_id: string; closed: number } }
+    expect(response.tracker).toEqual({ request_id: request.id, closed: 1 })
+
+    const fetched = fetchJson(worker, opts).json
+    expect(fetched.attention?.actionable_unread).toEqual([])
+    expect(fetched.events?.map((event) => event.id)).not.toContain(request.id)
+  })
+
+  it("reply retirement does not advance the mailbox cursor or hide an unrelated older actionable", () => {
+    const worker = connectAs("sess-reply-cursor-worker", NAME)
+    const chief = connectAs("sess-reply-cursor-chief", "@chief")
+    const older = parseToolJson(
+      handleToolCall(chief, "tribe.send", { to: NAME, message: "older independent work", type: "request" }, opts),
+    ) as { id: string }
+    const replied = parseToolJson(
+      handleToolCall(chief, "tribe.send", { to: NAME, message: "newer answered work", type: "request" }, opts),
+    ) as { id: string }
+    const before = stmts.getMailboxCursor.get({ $recipient: NAME })
+
+    parseToolJson(
+      handleToolCall(
+        worker,
+        "tribe.send",
+        { to: "@chief", message: "newer work answered", type: "response", reply: replied.id },
+        opts,
+      ),
+    )
+
+    expect(stmts.getMailboxCursor.get({ $recipient: NAME })).toEqual(before)
+    const fetched = fetchJson(worker, opts).json
+    expect(fetched.attention?.actionable_unread?.map((event) => event.id)).toEqual([older.id])
+    expect(fetched.events?.map((event) => event.id)).toEqual([older.id])
+  })
+
   it("keeps a push-delivered response in attention until the parked seat fetches it", () => {
     const requester = connectAs("sess-push-parked", NAME)
     const chief = connectAs("sess-push-chief", "@chief")
@@ -850,4 +898,3 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(fetchRes.json.attention?.actionable_unread?.map((e) => e.id)).toContain("req-1")
   })
 })
-

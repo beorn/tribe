@@ -20,7 +20,12 @@ import {
   type Classification,
   type Delivery,
 } from "./messaging.ts"
-import { ACTIONABLE_TYPES_SET, ACTIONABLE_TYPES_SQL, AUTO_TRACK_TYPES_SET } from "./database.ts"
+import {
+  ACTIONABLE_TYPES_SET,
+  ACTIONABLE_TYPES_SQL,
+  AUTO_TRACK_TYPES_SET,
+  unretiredAttentionPredicateSql,
+} from "./database.ts"
 import {
   classifySessionRegistrationLifetime,
   isPidAlive as pidStillAlive,
@@ -1633,6 +1638,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
 				AND m.kind = 'direct'
 				AND m.sender != m.recipient
 				AND m.type IN (${ACTIONABLE_TYPES_SQL})
+				AND ${unretiredAttentionPredicateSql("m")}
 				AND m.rowid > COALESCE(
 					(SELECT c.last_actionable_seq FROM mailbox_cursors c WHERE c.recipient = m.recipient),
 					0

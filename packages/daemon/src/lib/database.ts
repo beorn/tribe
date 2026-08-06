@@ -1051,6 +1051,24 @@ export const CORRELATED_REPLY_TYPES_SQL = CORRELATED_REPLY_TYPES.map((type) => `
  * plus rows atomically classified at insertion (currently direct responses). */
 export const ATTENTION_PREDICATE_SQL = `(type IN (${ACTIONABLE_TYPES_SQL}) OR attention_required = 1)`
 
+/**
+ * Selective reply retirement over the existing durable message correlation.
+ * A recipient-wide cursor cannot express this safely: advancing it for one
+ * reply could swallow an unrelated older actionable row.
+ */
+export function unretiredAttentionPredicateSql(alias: string): string {
+  const row = `${alias}.`
+  return `NOT EXISTS (
+    SELECT 1
+    FROM messages AS reply_message
+    WHERE reply_message.kind = 'direct'
+      AND reply_message.sender = ${row}recipient
+      AND reply_message.recipient = ${row}sender
+      AND reply_message.rowid > ${row}rowid
+      AND reply_message.reply = COALESCE(${row}request, ${row}id)
+  )`
+}
+
 export type TribeStatements = ReturnType<typeof createStatements>
 
 export function createStatements(db: Database) {
@@ -1265,12 +1283,13 @@ export function createStatements(db: Database) {
       SELECT
         COUNT(*) AS count,
         COALESCE(MIN(ts), 0) AS oldest_ts
-      FROM messages
-      WHERE recipient = $name
-        AND kind = 'direct'
-        AND sender != $name
-        AND type IN (${ACTIONABLE_TYPES_SQL})
-        AND rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+      FROM messages AS m
+      WHERE m.recipient = $name
+        AND m.kind = 'direct'
+        AND m.sender != $name
+        AND m.type IN (${ACTIONABLE_TYPES_SQL})
+        AND ${unretiredAttentionPredicateSql("m")}
+        AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
     `),
 
     /** Structural tail of the same actionable-mailbox projection. Await
@@ -1278,13 +1297,14 @@ export function createStatements(db: Database) {
      * copying message content across the control plane. */
     getLatestActionableAttention: db.prepare(`
       SELECT rowid, id, type
-      FROM messages
-      WHERE recipient = $name
-        AND kind = 'direct'
-        AND sender != $name
-        AND type IN (${ACTIONABLE_TYPES_SQL})
-        AND rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
-      ORDER BY rowid DESC
+      FROM messages AS m
+      WHERE m.recipient = $name
+        AND m.kind = 'direct'
+        AND m.sender != $name
+        AND m.type IN (${ACTIONABLE_TYPES_SQL})
+        AND ${unretiredAttentionPredicateSql("m")}
+        AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+      ORDER BY m.rowid DESC
       LIMIT 1
     `),
 
@@ -1293,10 +1313,11 @@ export function createStatements(db: Database) {
      * inserted and acknowledged between transport chunks is still observed. */
     getLatestInboxWaitMessage: db.prepare(`
       SELECT rowid
-      FROM messages
-      WHERE recipient = $name
-        AND kind = 'direct'
-        AND sender != $name
+      FROM messages AS m
+      WHERE m.recipient = $name
+        AND m.kind = 'direct'
+        AND m.sender != $name
+        AND ${unretiredAttentionPredicateSql("m")}
         AND (
           type IN (${ACTIONABLE_TYPES_SQL})
           OR (
@@ -1305,7 +1326,7 @@ export function createStatements(db: Database) {
             AND correlated_reply_requester = $name
           )
         )
-      ORDER BY rowid DESC
+      ORDER BY m.rowid DESC
       LIMIT 1
     `),
 
@@ -1316,14 +1337,15 @@ export function createStatements(db: Database) {
     getActionableAttentionDelivery: db.prepare(`
       SELECT rowid AS seq, id, type, sender, content, bead_id, ref,
              request, reply, ts
-      FROM messages
-      WHERE recipient = $name
-        AND kind = 'direct'
-        AND sender != $name
-        AND type IN (${ACTIONABLE_TYPES_SQL})
-        AND rowid = $seq
-        AND id = $id
-        AND rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+      FROM messages AS m
+      WHERE m.recipient = $name
+        AND m.kind = 'direct'
+        AND m.sender != $name
+        AND m.type IN (${ACTIONABLE_TYPES_SQL})
+        AND ${unretiredAttentionPredicateSql("m")}
+        AND m.rowid = $seq
+        AND m.id = $id
+        AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
       LIMIT 1
     `),
 
@@ -1368,23 +1390,27 @@ export function createStatements(db: Database) {
     /** Pull pending inbox rows for a session — push + pull rows whose rowid
      *  exceeds the session's pull cursor and whose recipient matches. */
     getInboxRows: db.prepare(`
-		SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts,
-			delivery, topic, room_id, summary, attention_required
-		FROM messages
-		WHERE rowid > $since
-			AND (recipient = $name OR recipient = '*')
-			AND kind != 'event'
-			AND sender != $name
+		SELECT m.id, m.rowid, m.type, m.sender, m.recipient, m.content, m.bead_id, m.ref, m.ts,
+			m.delivery, m.topic, m.room_id, m.summary, m.attention_required
+		FROM messages AS m
+		WHERE m.rowid > $since
+			AND (m.recipient = $name OR m.recipient = '*')
+			AND m.kind != 'event'
+			AND m.sender != $name
+			AND (
+				NOT (m.recipient = $name AND m.kind = 'direct' AND (m.type IN (${ACTIONABLE_TYPES_SQL}) OR m.attention_required = 1))
+				OR ${unretiredAttentionPredicateSql("m")}
+			)
 			AND NOT (
-				recipient = $name
-				AND kind = 'direct'
-				AND ${ATTENTION_PREDICATE_SQL}
-				AND rowid <= COALESCE(
+				m.recipient = $name
+				AND m.kind = 'direct'
+				AND (m.type IN (${ACTIONABLE_TYPES_SQL}) OR m.attention_required = 1)
+				AND m.rowid <= COALESCE(
 					(SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name),
 					0
 				)
 			)
-		ORDER BY rowid ASC
+		ORDER BY m.rowid ASC
 		LIMIT $limit
 	`),
 
@@ -1445,14 +1471,15 @@ export function createStatements(db: Database) {
     selectUnackedAttention: db.prepare(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
              attention_required
-      FROM messages
-      WHERE recipient = $name
-        AND kind = 'direct'
-        AND sender != $name
-        AND ${ATTENTION_PREDICATE_SQL}
-        AND rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
-        AND rowid <= $upto
-      ORDER BY rowid ASC
+      FROM messages AS m
+      WHERE m.recipient = $name
+        AND m.kind = 'direct'
+        AND m.sender != $name
+        AND (m.type IN (${ACTIONABLE_TYPES_SQL}) OR m.attention_required = 1)
+        AND ${unretiredAttentionPredicateSql("m")}
+        AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+        AND m.rowid <= $upto
+      ORDER BY m.rowid ASC
       LIMIT $limit
     `),
 
@@ -1467,24 +1494,26 @@ export function createStatements(db: Database) {
     selectAttention: db.prepare(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
              attention_required
-      FROM messages
-      WHERE recipient = $name
-        AND kind = 'direct'
-        AND sender != $name
-        AND ${ATTENTION_PREDICATE_SQL}
-        AND rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
-      ORDER BY rowid ASC
+      FROM messages AS m
+      WHERE m.recipient = $name
+        AND m.kind = 'direct'
+        AND m.sender != $name
+        AND (m.type IN (${ACTIONABLE_TYPES_SQL}) OR m.attention_required = 1)
+        AND ${unretiredAttentionPredicateSql("m")}
+        AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+      ORDER BY m.rowid ASC
     `),
 
     /** Count-only form of the recovery view — join/rename recovery reporting. */
     countUnackedAttention: db.prepare(`
       SELECT COUNT(*) AS count
-      FROM messages
-      WHERE recipient = $name
-        AND kind = 'direct'
-        AND sender != $name
-        AND ${ATTENTION_PREDICATE_SQL}
-        AND rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+      FROM messages AS m
+      WHERE m.recipient = $name
+        AND m.kind = 'direct'
+        AND m.sender != $name
+        AND (m.type IN (${ACTIONABLE_TYPES_SQL}) OR m.attention_required = 1)
+        AND ${unretiredAttentionPredicateSql("m")}
+        AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
     `),
 
     /**
