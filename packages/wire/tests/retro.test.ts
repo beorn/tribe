@@ -43,6 +43,12 @@ function insertMessage(
   ).run(m.id, m.type, m.sender, m.recipient, m.id, m.ts, m.request ?? null, m.reply ?? null)
 }
 
+function insertExpiry(db: Database, requestId: string, ts: number): void {
+  db.prepare(
+    "INSERT INTO messages (id, type, sender, recipient, kind, content, ref, ts, request, reply) VALUES (?, 'event.ball.expired', 'daemon', '*', 'event', ?, ?, ?, NULL, NULL)",
+  ).run(`${requestId}-expired`, JSON.stringify({ request_id: requestId, settlement: "expired" }), requestId, ts)
+}
+
 function insertBall(
   db: Database,
   ball: { id: string; from: string; to: string; openedAt: number; latencyMs: number },
@@ -111,5 +117,20 @@ describe("21714 wire retro response latency", () => {
     const report = generateRetro(db, 6 * HOUR)
     expect(report.members.find((m) => m.name === "@chief")?.avg_response).toBe("4m")
     expect(report.coordination.unanswered_queries).toBe(1)
+  })
+
+  it("does not report an explicitly expired obligation as unanswered", () => {
+    insertMessage(db, {
+      id: "expired",
+      type: "request",
+      sender: "@agent/1",
+      recipient: "@chief",
+      ts: now - 20 * MINUTE,
+      request: "expired",
+    })
+    insertExpiry(db, "expired", now - 10 * MINUTE)
+
+    const report = generateRetro(db, 6 * HOUR)
+    expect(report.coordination.unanswered_queries).toBe(0)
   })
 })

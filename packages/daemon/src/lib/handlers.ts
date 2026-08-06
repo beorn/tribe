@@ -306,6 +306,7 @@ function settleExpiredPendingRequests(ctx: TribeContext, now: number): number {
         "ball.expired",
         undefined,
         {
+          schema_version: 1,
           request_id: row.request_id,
           recipient: row.recipient,
           sender: row.sender,
@@ -332,9 +333,9 @@ export function handleToolCall(
   opts: HandlerOpts,
   connId?: string,
 ): ToolResult | Promise<ToolResult> {
-  // Sender-declared deadlines are daemon-owned containment: every RPC boundary
-  // settles rows whose ownership window has passed before projecting or
-  // mutating attention. The message remains in history for audit/replay.
+  // Class-default deadlines are daemon-owned containment; a sender can only
+  // override their duration. Every RPC boundary settles elapsed ownership
+  // before projecting or mutating attention. History remains for audit/replay.
   const now = Date.now()
   settleExpiredPendingRequests(ctx, now)
   // Presence heartbeat (@km/tribe/19784): ANY authenticated tool call
@@ -440,29 +441,6 @@ function activeBroadcastRecipients(ctx: TribeContext, opts: HandlerOpts): string
     `)
     .all(...activeIds, ctx.getName()) as Array<{ name: string }>
   return rows.map((row) => row.name)
-}
-
-function openPendingRows(
-  ctx: TribeContext,
-  recipients: readonly string[],
-  requestId: string,
-  messageId: string,
-  openedAt: number,
-  expiresAt: number | null,
-  fanout: "first" | "all" | undefined,
-  sender: string,
-): void {
-  for (const recipient of recipients) {
-    ctx.stmts.openPendingRequest.run({
-      $request_id: requestId,
-      $recipient: recipient,
-      $sender: sender,
-      $opened_at: openedAt,
-      $expires_at: expiresAt,
-      $message_id: messageId,
-      $fanout: fanout ?? "first",
-    })
-  }
 }
 
 function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
@@ -638,6 +616,8 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       error: `tribe.send: ${resolution.status} recipient ${JSON.stringify(recipients)}: ${resolution.reason}`,
     })
   }
+  const broadcastOwners =
+    recipients === "*" && (requestFlag || requestId !== null) ? activeBroadcastRecipients(ctx, opts) : undefined
   const result = sendMessage(
     ctx,
     recipients,
@@ -653,6 +633,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       reply: replyId ?? undefined,
       fanout: fanoutArg,
       expiresInMs,
+      owners: broadcastOwners,
       incident,
     },
   )
@@ -667,18 +648,6 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
         : requestId
   if (!result.deduplicated) {
     persistDeadLetter(ctx, resolution, sanitized, a, classification, effectiveRequestId)
-  }
-  if ((requestFlag || requestId) && recipients === "*") {
-    openPendingRows(
-      ctx,
-      activeBroadcastRecipients(ctx, opts),
-      requestFlag ? result.id : requestId!,
-      result.id,
-      result.ts,
-      expiresInMs === undefined ? null : result.ts + expiresInMs,
-      fanoutArg,
-      sender,
-    )
   }
   if (!result.deduplicated) {
     logEvent(ctx, `message.sent.${msgType}`, a.bead as string | undefined, {
@@ -940,11 +909,13 @@ type ExpiredPendingBall = PendingBall & {
 }
 
 type ExpiredPendingFactRow = {
+  id: string
   content: string
   ts: number
 }
 
 type ExpiredPendingFact = {
+  schema_version: 1
   request_id: string
   recipient: string
   sender: string
@@ -984,8 +955,41 @@ function pendingBall(row: PendingBallRow, now: number): PendingBall {
   }
 }
 
+function parseExpiredPendingFact(row: ExpiredPendingFactRow): ExpiredPendingFact {
+  let value: unknown
+  try {
+    value = JSON.parse(row.content)
+  } catch (error) {
+    throw new Error(`invalid ball expiry fact ${row.id}: content is not JSON`, { cause: error })
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`invalid ball expiry fact ${row.id}: replay evidence must be an object`)
+  }
+  const fact = value as Partial<ExpiredPendingFact>
+  const identity = typeof fact.request_id === "string" ? fact.request_id : row.id
+  const validString = (candidate: unknown): candidate is string => typeof candidate === "string" && candidate.length > 0
+  const validTime = (candidate: unknown): candidate is number =>
+    typeof candidate === "number" && Number.isFinite(candidate)
+  if (
+    fact.schema_version !== 1 ||
+    !validString(fact.request_id) ||
+    !validString(fact.recipient) ||
+    !validString(fact.sender) ||
+    !validTime(fact.opened_at) ||
+    !validTime(fact.expires_at) ||
+    !validString(fact.message_id) ||
+    (fact.fanout !== "first" && fact.fanout !== "all") ||
+    (fact.summary !== null && typeof fact.summary !== "string") ||
+    fact.settlement !== "expired" ||
+    !validTime(fact.settled_at)
+  ) {
+    throw new Error(`invalid ball expiry fact ${identity}: required replay evidence is missing or malformed`)
+  }
+  return fact as ExpiredPendingFact
+}
+
 function expiredPendingBall(row: ExpiredPendingFactRow, now: number): ExpiredPendingBall {
-  const fact = JSON.parse(row.content) as ExpiredPendingFact
+  const fact = parseExpiredPendingFact(row)
   return {
     request_id: fact.request_id,
     recipient: fact.recipient,
@@ -997,7 +1001,7 @@ function expiredPendingBall(row: ExpiredPendingFactRow, now: number): ExpiredPen
     fanout: fact.fanout,
     summary: fact.summary,
     settlement: "expired",
-    settled_at: new Date(fact.settled_at ?? row.ts).toISOString(),
+    settled_at: new Date(fact.settled_at).toISOString(),
   }
 }
 
@@ -1068,12 +1072,17 @@ function pendingOwnerGroups(pending: readonly PendingBall[]) {
     rows.push(ball)
     byOwner.set(ball.recipient, rows)
   }
-  return [...byOwner.entries()].map(([owner, rows]) => ({
-    owner,
-    count: rows.length,
-    oldest_age_ms: rows[0]?.age_ms ?? 0,
-    pending: rows,
-  }))
+  return [...byOwner.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([owner, rows]) => {
+      const oldestFirst = rows.toSorted((left, right) => Date.parse(left.opened_at) - Date.parse(right.opened_at))
+      return {
+        owner,
+        count: oldestFirst.length,
+        oldest_age_ms: oldestFirst.reduce((oldest, row) => Math.max(oldest, row.age_ms), 0),
+        pending: oldestFirst,
+      }
+    })
 }
 
 function pendingOwnerSummaries(pending: readonly PendingBall[]) {

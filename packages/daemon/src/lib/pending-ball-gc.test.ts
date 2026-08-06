@@ -19,7 +19,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createTribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { handleToolCall, readAttentionProjection, type HandlerOpts } from "./handlers.ts"
-import { sendMessage } from "./messaging.ts"
+import { logEvent, sendMessage } from "./messaging.ts"
 import { cleanupOldData } from "./session.ts"
 
 const DAY = 24 * 60 * 60 * 1000
@@ -470,6 +470,154 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       db.close()
       if (savedSlaRole === undefined) delete process.env.TRIBE_SLA_ROLE
       else process.env.TRIBE_SLA_ROLE = savedSlaRole
+    }
+  })
+
+  it("archives request and reply correlation so answered remains distinct from expired", () => {
+    const { db, stmts } = setup()
+    try {
+      const chief = createTribeContext({
+        db,
+        stmts,
+        sessionId: "sess-chief",
+        sessionRole: "member",
+        initialName: "@chief",
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+      })
+      const agent = createTribeContext({
+        db,
+        stmts,
+        sessionId: "sess-agent",
+        sessionRole: "member",
+        initialName: "@agent/8",
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+      })
+      sendMessage(
+        chief,
+        "@agent/8",
+        "answer before archival",
+        "query",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        {
+          request: "answered-before-archive",
+        },
+      )
+      sendMessage(
+        agent,
+        "@chief",
+        "answered",
+        "response",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        {
+          reply: "answered-before-archive",
+        },
+      )
+
+      const archiveCutoff = Date.now() + 1_000
+      stmts.archiveExpiredMessages.run({ $cutoff: archiveCutoff, $archived_at: archiveCutoff })
+      stmts.deleteExpiredMessages.run({ $cutoff: archiveCutoff })
+
+      expect(
+        db.prepare("SELECT type, request, reply FROM messages_archive ORDER BY seq").all() as Array<{
+          type: string
+          request: string | null
+          reply: string | null
+        }>,
+      ).toEqual([
+        { type: "query", request: "answered-before-archive", reply: null },
+        { type: "response", request: null, reply: "answered-before-archive" },
+      ])
+    } finally {
+      db.close()
+    }
+  })
+
+  it("keeps journal identity and computes historical oldest age from openings, not settlement order", () => {
+    const { db, stmts } = setup()
+    try {
+      const now = Date.now()
+      const ctx = createTribeContext({
+        db,
+        stmts,
+        sessionId: "sess-chief",
+        sessionRole: "member",
+        initialName: "@chief",
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+      })
+      const fact = {
+        schema_version: 1,
+        request_id: "same-payload-distinct-events",
+        recipient: "@chief",
+        sender: "@sender",
+        opened_at: now - 60 * 60_000,
+        expires_at: now - 30 * 60_000,
+        message_id: "same-payload-message",
+        fanout: "first",
+        summary: null,
+        settlement: "expired",
+        settled_at: now - 1_000,
+      }
+      logEvent(ctx, "ball.expired", undefined, fact, { sender: "daemon", ref: fact.request_id, ts: now - 1_000 })
+      logEvent(ctx, "ball.expired", undefined, fact, { sender: "daemon", ref: fact.request_id, ts: now - 1_000 })
+      logEvent(
+        ctx,
+        "ball.expired",
+        undefined,
+        {
+          ...fact,
+          request_id: "older-opening-later-settlement",
+          opened_at: now - 2 * 60 * 60_000,
+          message_id: "older-opening-message",
+          settled_at: now,
+        },
+        { sender: "daemon", ref: "older-opening-later-settlement", ts: now },
+      )
+
+      const expired = parseToolJson(handleToolCall(ctx, "tribe.pending", { all: true, expired: true }, makeOpts())) as {
+        count: number
+        owners: Array<{ owner: string; oldest_age_ms: number }>
+      }
+      expect(expired.count).toBe(3)
+      expect(expired.owners).toEqual([
+        expect.objectContaining({ owner: "@chief", oldest_age_ms: expect.closeTo(2 * 60 * 60_000, -3) }),
+      ])
+    } finally {
+      db.close()
+    }
+  })
+
+  it("fails loud when an expiry journal fact cannot be replayed", () => {
+    const { db, stmts } = setup()
+    try {
+      const ctx = createTribeContext({
+        db,
+        stmts,
+        sessionId: "sess-chief",
+        sessionRole: "member",
+        initialName: "@chief",
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+      })
+      logEvent(ctx, "ball.expired", undefined, { request_id: "missing-evidence" }, { sender: "daemon" })
+
+      expect(() => handleToolCall(ctx, "tribe.pending", { expired: true }, makeOpts())).toThrow(
+        /invalid ball expiry fact.*missing-evidence/i,
+      )
+    } finally {
+      db.close()
     }
   })
 

@@ -138,8 +138,11 @@ export type BallTracker = {
    * Ignored if `request` is not set.
    */
   fanout?: "first" | "all"
-  /** Optional sender-declared deadline. The daemon settles ownership at the
-   * first RPC boundary after this deadline passes. */
+  /** Snapshot owners for one persisted broadcast request. Ownership rows are
+   * committed with the broadcast before its publish callback can observe it. */
+  owners?: readonly string[]
+  /** Per-send deadline override. Tracked sends otherwise use their class
+   * default; the daemon settles ownership at the first later RPC boundary. */
   expiresInMs?: number
   /**
    * Ambient incident identity — habwire stage 2(d), "one ball per incident".
@@ -367,6 +370,19 @@ export function sendMessage(
           })
           tracker = { request_id: canonicalReplyId, closed: closed.changes ?? 0 }
         }
+      }
+    }
+    if (resolvedKind === "broadcast" && requestId) {
+      for (const owner of ballTracker.owners ?? []) {
+        ctx.stmts.openPendingRequest.run({
+          $request_id: requestId,
+          $recipient: owner,
+          $sender: sender,
+          $opened_at: ts,
+          $expires_at: expiresInMs === undefined ? null : ts + expiresInMs,
+          $message_id: id,
+          $fanout: ballTracker.fanout ?? "first",
+        })
       }
     }
     return { rowid, ts, tracker, correlatedReply }
