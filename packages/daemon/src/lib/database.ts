@@ -1149,10 +1149,10 @@ export function createStatements(db: Database) {
      *  second tracker table. UNION spans the hot and archived retention tiers;
      *  an archive/delete interruption cannot duplicate an identical fact. */
     selectExpiredPendingFacts: db.prepare(`
-		SELECT content, ts FROM messages
+		SELECT id, content, ts FROM messages
 		WHERE kind = 'event' AND type = 'event.ball.expired'
 		UNION
-		SELECT content, ts FROM messages_archive
+		SELECT id, content, ts FROM messages_archive
 		WHERE kind = 'event' AND type = 'event.ball.expired'
 		ORDER BY ts
 	`),
@@ -1379,11 +1379,11 @@ export function createStatements(db: Database) {
     archiveExpiredMessages: db.prepare(`
 		INSERT OR IGNORE INTO messages_archive (
 			seq, id, type, sender, recipient, kind, content, bead_id, ref, ts,
-			delivery, topic, room_id, correlated_reply_requester, summary, archived_at
+			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, archived_at
 		)
 		SELECT
 			rowid, id, type, sender, recipient, kind, content, bead_id, ref, ts,
-			delivery, topic, room_id, correlated_reply_requester, summary, $archived_at
+			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, $archived_at
 		FROM messages
 		WHERE ts < $cutoff
 	`),

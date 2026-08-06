@@ -878,6 +878,45 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(channelNotifications(second.stdout)).toHaveLength(0)
   }, 60_000)
 
+  it("surfaces an obligation sent while a persona process is stopped to its successor process", async () => {
+    const socketPath = join(tmpDir, "stopped-persona.sock")
+    const dbPath = join(tmpDir, "stopped-persona.db")
+    daemonProc = spawnDaemon(socketPath, dbPath)
+    await waitForCondition(() => existsSync(socketPath), "daemon socket")
+
+    const launchId = "stopped-persona-launch"
+    const initial = await spawnLaunchAdapter(socketPath, "stopped-persona-initial.log", launchId, { name: NAME })
+    await callLaunchToolWhenRegistered(initial, 10, "members", {})
+    initial.child.kill("SIGTERM")
+    await once(initial.child, "exit")
+
+    const chief = await spawnLaunchAdapter(socketPath, "stopped-persona-chief.log", "stopped-persona-chief", {
+      name: "@chief",
+    })
+    await callLaunchToolWhenRegistered(chief, 20, "members", {})
+    const sent = (await callLaunchTool(chief, 21, "send", {
+      to: NAME,
+      message: "resume the durable stopped-persona review",
+      type: "request",
+      request: true,
+    })) as { id?: string }
+    expect(sent.id).toEqual(expect.any(String))
+
+    const successor = await spawnLaunchAdapter(socketPath, "stopped-persona-successor.log", launchId, { name: NAME })
+    const fetched = (await callLaunchToolWhenRegistered(successor, 30, "fetch", { limit: 10 })) as {
+      attention?: {
+        actionable_unread?: Array<{ id?: string; type?: string; from?: string }>
+        pending_balls?: Array<{ request_id?: string; message_id?: string; sender?: string }>
+      }
+    }
+    expect(fetched.attention?.actionable_unread).toEqual([
+      expect.objectContaining({ id: sent.id, type: "request", from: "@chief" }),
+    ])
+    expect(fetched.attention?.pending_balls).toEqual([
+      expect.objectContaining({ request_id: sent.id, message_id: sent.id, sender: "@chief" }),
+    ])
+  }, 60_000)
+
   it("fans three native adapters from one provider launch into one live member", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const dbPath = join(tmpDir, "tribe.db")

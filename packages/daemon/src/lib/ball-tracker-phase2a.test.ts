@@ -28,7 +28,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { TRIBE_JOIN_PRIMER } from "./handlers.ts"
-import { sendMessage } from "./messaging.ts"
+import { DEFAULT_BALL_TTL_MS_BY_CLASS, sendMessage } from "./messaging.ts"
 
 function makeContext(
   db: Database,
@@ -142,6 +142,7 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
       expect(row.expires_at).not.toBeNull()
       expect(row.expires_at! - row.opened_at).toBe(20 * 60_000)
     }
+    for (const ttl of Object.values(DEFAULT_BALL_TTL_MS_BY_CLASS)) expect(ttl).toBeLessThan(30 * 60_000)
     expect(rows.find((row) => row.message_id === explicitTtl.id)?.expires_at).toBe(
       rows.find((row) => row.message_id === explicitTtl.id)!.opened_at + 5 * 60_000,
     )
@@ -210,7 +211,7 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
     expect(close?.type).toBe("response")
   })
 
-  it("a reply closes its open ball even after a sender-declared deadline has passed", () => {
+  it("a reply closes its open ball even after an override deadline has passed", () => {
     const chief = makeContext(db, stmts, "@chief")
     const agent = makeContext(db, stmts, "@agent/8")
     sendMessage(

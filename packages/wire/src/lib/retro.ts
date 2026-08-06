@@ -238,7 +238,18 @@ export function generateRetro(db: Database, sinceMs?: number): RetroReport {
     if (member) member.responseLatenciesMs = latencies
   }
 
-  const unansweredQueries = [...openRequestIds].filter((id) => !answeredRequestIds.has(id)).length
+  const expiredRequestIds = new Set(
+    (
+      db
+        .prepare(
+          "SELECT ref FROM messages WHERE kind = 'event' AND type = 'event.ball.expired' AND ts >= ? AND ref IS NOT NULL",
+        )
+        .all(windowStart) as Array<{ ref: string }>
+    ).map((row) => row.ref),
+  )
+  const unansweredQueries = [...openRequestIds].filter(
+    (id) => !answeredRequestIds.has(id) && !expiredRequestIds.has(id),
+  ).length
   const allLatencies = [...latenciesByResponder.values()].flat().sort((a, b) => a - b)
   const avgResponseTime = mean(allLatencies)
   const longestResponse = allLatencies.length > 0 ? allLatencies.at(-1)! : null

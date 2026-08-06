@@ -105,6 +105,35 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     expect(row).toMatchObject({ recipient: "*", kind: "broadcast", request: "req-broadcast" })
   })
 
+  it("commits broadcast ownership before the persisted message becomes observable", () => {
+    let ownersAtPublish: string[] = []
+    const observingChief = createTribeContext({
+      db,
+      stmts,
+      sessionId: "sess-chief",
+      sessionRole: "member",
+      initialName: "@chief",
+      domains: [],
+      claudeSessionId: null,
+      claudeSessionName: null,
+      onMessageInserted: (message) => {
+        if (message.kind === "broadcast") ownersAtPublish = pendingRecipients(db, "req-atomic-broadcast")
+      },
+    })
+
+    const res = parseToolJson(
+      handleToolCall(
+        observingChief,
+        "tribe.send",
+        { to: "*", message: "commit the owners with me", type: "request", request: "req-atomic-broadcast" },
+        makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+      ),
+    )
+
+    expect(res.sent).toBe(true)
+    expect(ownersAtPublish).toEqual(["@agent/1", "@agent/2"])
+  })
+
   it("broadcast request:true uses the message id as the persisted request id", () => {
     const res = parseToolJson(
       handleToolCall(
@@ -300,7 +329,7 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     expect(pendingRecipients(db, requestId)).toEqual([])
   })
 
-  it("applies one sender-declared deadline fact to every resolved recipient", () => {
+  it("applies one per-send deadline override to every resolved recipient", () => {
     const res = parseToolJson(
       handleToolCall(
         chief,
