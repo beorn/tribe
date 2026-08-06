@@ -281,6 +281,47 @@ interface ResolvedDirectRecipient {
   readonly resolution: AcceptedDirectDeliveryResolution
 }
 
+type ExpiredPendingRequest = {
+  request_id: string
+  recipient: string
+  sender: string
+  opened_at: number
+  expires_at: number
+  message_id: string
+  fanout: string
+}
+
+/** Release deadline-passed ownership without erasing why it ended. The
+ *  journal insert and tracker delete are one SQLite transaction, so a crash or
+ *  concurrent boundary can produce neither fact or exactly one fact, never a
+ *  silent delete or duplicate expiry edge. */
+function settleExpiredPendingRequests(ctx: TribeContext, now: number): number {
+  return ctx.db.transaction(() => {
+    const rows = ctx.stmts.selectExpiredPendingRequests.all({ $now: now }) as ExpiredPendingRequest[]
+    for (const row of rows) {
+      logEvent(
+        ctx,
+        "ball.expired",
+        undefined,
+        {
+          request_id: row.request_id,
+          recipient: row.recipient,
+          sender: row.sender,
+          opened_at: row.opened_at,
+          expires_at: row.expires_at,
+          message_id: row.message_id,
+          fanout: row.fanout,
+          settlement: "expired",
+          settled_at: now,
+        },
+        { sender: "daemon", ref: row.request_id, ts: now },
+      )
+      ctx.stmts.closePendingRequest.run({ $request_id: row.request_id, $recipient: row.recipient })
+    }
+    return rows.length
+  })()
+}
+
 export function handleToolCall(
   ctx: TribeContext,
   name: string,
@@ -291,13 +332,14 @@ export function handleToolCall(
   // Sender-declared deadlines are daemon-owned containment: every RPC boundary
   // settles rows whose ownership window has passed before projecting or
   // mutating attention. The message remains in history for audit/replay.
-  ctx.stmts.settleExpiredPendingRequests.run({ $now: Date.now() })
+  const now = Date.now()
+  settleExpiredPendingRequests(ctx, now)
   // Presence heartbeat (@km/tribe/19784): ANY authenticated tool call
   // refreshes the caller's last_seen — presence = "spoke to the daemon
   // recently", not "joined or drained rows recently". Before this, send-only
   // / empty-drain sessions read as idle (the 2026-06-10 false-idle class,
   // pinned in tests/tribe-delivery-semantics.test.ts).
-  ctx.stmts.touchSessionPresence.run({ $id: ctx.sessionId, $now: Date.now() })
+  ctx.stmts.touchSessionPresence.run({ $id: ctx.sessionId, $now: now })
   switch (name) {
     case TRIBE_COORD_METHODS.send:
       return handleSend(ctx, a, opts)

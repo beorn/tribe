@@ -415,17 +415,23 @@ export function countUnackedAttention(ctx: TribeContext, recipient: string): num
  * queries that join on recipient; the delivery-side filter
  * (`broadcastToConnected`) skips `kind='event'` rows before fanning out.
  */
-export function logEvent(ctx: TribeContext, type: string, bead_id?: string, data?: Record<string, unknown>): void {
+export function logEvent(
+  ctx: TribeContext,
+  type: string,
+  bead_id?: string,
+  data?: Record<string, unknown>,
+  options: { sender?: string; ref?: string; ts?: number } = {},
+): void {
   ctx.stmts.insertMessage.run({
     $id: randomUUID(),
     $type: `event.${type}`,
-    $sender: ctx.getName(),
+    $sender: options.sender ?? ctx.getName(),
     $recipient: "*",
     $kind: "event",
     $content: data ? JSON.stringify(data) : "",
     $bead_id: bead_id ?? null,
-    $ref: null,
-    $ts: Date.now(),
+    $ref: options.ref ?? null,
+    $ts: options.ts ?? Date.now(),
     // Event rows are journal-only; the daemon's broadcastToConnected drops
     // kind='event' before delivery. The delivery column is still populated to
     // keep schema invariants — every row carries a delivery class.
@@ -437,5 +443,8 @@ export function logEvent(ctx: TribeContext, type: string, bead_id?: string, data
     // schema invariants.
     $request: null,
     $reply: null,
+    $correlated_reply_requester: null,
+    $summary: null,
+    $attention_required: 0,
   })
 }
