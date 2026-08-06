@@ -1,7 +1,8 @@
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { safeRemoveSync } from "removely"
 
 import { createTribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
@@ -176,7 +177,7 @@ describe("20876 Tribe health cadence", () => {
 
   afterEach(() => {
     db.close()
-    rmSync(tmpDir, { recursive: true, force: true })
+    safeRemoveSync(tmpDir, { within: tmpdir(), allowMissing: true })
     if (savedSlaRole === undefined) delete process.env.TRIBE_SLA_ROLE
     else process.env.TRIBE_SLA_ROLE = savedSlaRole
     if (savedSlaSeconds === undefined) delete process.env.TRIBE_SLA_SECONDS
