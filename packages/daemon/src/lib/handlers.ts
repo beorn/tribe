@@ -2331,6 +2331,8 @@ function handleHealthPublish(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts)
     undefined,
     "broadcast",
     { delivery: "pull", topic: HEALTH_RECOVERY_TOPIC },
+    {},
+    { sender: "daemon", senderRole: "daemon" },
   )
   logEvent(ctx, `message.sent.${HEALTH_RECOVERY_TOPIC}`, undefined, { agent, seq, message_id: result.id })
   const warning = maybeTruncationWarning(truncation)
