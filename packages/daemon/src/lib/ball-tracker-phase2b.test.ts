@@ -478,7 +478,7 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     expect(pendingRecipients(db, "late-request")).toEqual([])
   })
 
-  it("removes a deadline-passed row from the default open-ball projection", () => {
+  it("settles a deadline-passed row with one durable correlated expiry fact", () => {
     parseToolJson(
       handleToolCall(
         chief,
@@ -496,11 +496,25 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     db.prepare("UPDATE pending_request SET expires_at = 0 WHERE request_id = ?").run("deadline-passed-open")
 
     const active = parseToolJson(handleToolCall(agent1, "tribe.pending", {}, makeOpts(["sess-chief", "sess-agent-1"])))
-    const expired = parseToolJson(
-      handleToolCall(agent1, "tribe.pending", { expired: true }, makeOpts(["sess-chief", "sess-agent-1"])),
-    )
-
     expect(active.pending).toEqual([])
-    expect(expired.pending).toEqual([])
+
+    const expiryFacts = db
+      .prepare("SELECT type, kind, content FROM messages WHERE kind = 'event' AND type = 'event.ball.expired'")
+      .all() as Array<{ type: string; kind: string; content: string }>
+    expect(expiryFacts).toHaveLength(1)
+    expect(JSON.parse(expiryFacts[0]!.content)).toMatchObject({
+      request_id: "deadline-passed-open",
+      recipient: "@agent/1",
+      sender: "@chief",
+      settlement: "expired",
+      expires_at: 0,
+    })
+
+    // Lazy expiry can be checked by many subsequent RPCs. The journal fact is
+    // an edge and must stay exactly-once after the ownership row is gone.
+    parseToolJson(handleToolCall(agent1, "tribe.pending", {}, makeOpts(["sess-chief", "sess-agent-1"])))
+    expect(
+      db.prepare("SELECT COUNT(*) AS count FROM messages WHERE kind = 'event' AND type = 'event.ball.expired'").get(),
+    ).toEqual({ count: 1 })
   })
 })
