@@ -37,6 +37,9 @@
 
 ### Fixed
 
+- Keep retained disconnected `unknown-*` launch rows observable under the
+  bounded `anonymous_disconnected` health count without manufacturing
+  addressable transport wedges or membership discrepancies.
 - Keep every standalone daemon generation under one stable lifecycle owner.
   Client/hook autostart detaches the supervisor rather than the daemon, strips
   ambient seat identity before launch, and preserves that same owner across

@@ -262,6 +262,38 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
     expect(members.membership_discrepancy).toEqual(health.membership_discrepancy)
   })
 
+  it("reports disconnected unidentified launches without polluting named health", () => {
+    addSession(db, stmts, "named-health", "@agent/6", { id: "launch-a6", parentPid: 6006 })
+    const ctx = makeContext(db, stmts, "operator", "@operator")
+    const opts = {
+      cleanup: () => {},
+      userRenamed: false,
+      setUserRenamed: () => {},
+      getActiveSessionIds: () => new Set<string>(),
+      hasActiveTransport: () => false,
+      getActiveSessionInfo: () => [],
+    } as HandlerOpts
+
+    const before = parseToolJson(handleToolCall(ctx, "tribe.health", {}, opts)) as {
+      anonymous_disconnected?: number
+      membership_discrepancy: { missing: Array<Record<string, unknown>> }
+      transport_wedges: Array<Record<string, unknown>>
+    }
+
+    // Models an unnamed adapter registering with launch provenance and then
+    // disconnecting. Keep the count visible: @ag/tribe/no-tribe-flag-does-not-gate-the-join
+    // is one known producer of these rows.
+    addSession(db, stmts, "anonymous-health", "unknown-a1b2c", {
+      id: "launch-smoke",
+      parentPid: 7007,
+    })
+    const after = parseToolJson(handleToolCall(ctx, "tribe.health", {}, opts)) as typeof before
+
+    expect(after.transport_wedges).toEqual(before.transport_wedges)
+    expect(after.membership_discrepancy).toEqual(before.membership_discrepancy)
+    expect(after.anonymous_disconnected).toBe(1)
+  })
+
   it("omits membership degradation when every known durable launch has a connected transport", () => {
     addSession(db, stmts, "durable", "@agent/6", { id: "launch-a6", parentPid: 6006 })
     const ctx = makeContext(db, stmts, "operator", "@operator")

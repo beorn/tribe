@@ -76,12 +76,14 @@ currently exists: the OS may have recycled it. Health keeps complete-launch
 rows with no transport loud, while connection-scoped no-launch rows are reaped
 only after reconnect grace.
 
-When known durable launch rows have no authenticated transport, both
-`members` and `health` include `membership_discrepancy` with the connected
+When known addressable durable launch rows have no authenticated transport,
+both `members` and `health` include `membership_discrepancy` with the connected
 durable-launch, known durable-launch, and missing counts plus the affected
-launch identities. Connection-scoped sessions do not inflate that comparison.
-The projection deliberately says `missing-transport`: it does not infer that
-the agent itself is absent.
+launch identities. `health` reports retained disconnected `unknown-*` launch
+rows separately as the bounded `anonymous_disconnected` count; they do not
+inflate the addressable wedge or membership projections. Connection-scoped
+sessions do not inflate either comparison. The projection deliberately says
+`missing-transport`: it does not infer that the agent itself is absent.
 
 ## Surface delineation — protocol vs dev tooling
 

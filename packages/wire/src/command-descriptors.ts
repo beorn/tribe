@@ -743,13 +743,18 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           transport_wedges: {
             type: "array",
             description:
-              "Disconnected complete-launch rows (plus malformed partial provenance) kept loud with wedge_reason. Connection-scoped no-launch litter is excluded and reapable after grace; bare PID existence does not prove owner liveness.",
+              "Disconnected addressable complete-launch rows (plus malformed partial provenance) kept loud with wedge_reason. Unidentified complete-launch rows are counted separately under anonymous_disconnected; connection-scoped no-launch litter is excluded and reapable after grace.",
             items: { type: "object", additionalProperties: true },
+          },
+          anonymous_disconnected: {
+            type: "number",
+            description:
+              "Count of retained disconnected unknown-* complete-launch rows. They remain observable without inflating addressable transport wedges or membership discrepancy.",
           },
           membership_discrepancy: {
             type: "object",
             description:
-              "Present when known durable launch rows are missing authenticated transports. Uses the same projection as tribe.members so MISSING is never silently aliased to ABSENT.",
+              "Present when known addressable durable launch rows are missing authenticated transports. Uses the same projection as tribe.members so MISSING is never silently aliased to ABSENT.",
             additionalProperties: true,
           },
           stale_beads: { type: "number", description: "Count of beads claimed but idle past threshold." },

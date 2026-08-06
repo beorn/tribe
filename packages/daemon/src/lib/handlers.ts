@@ -41,6 +41,7 @@ import { senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts
 import type { LifecycleStore, LifecycleSnapshotRecord } from "./lifecycle-store.ts"
 import { projectSessionLiveness, projectSessionTransportState } from "./session-transport-state.ts"
 import type { DirectDeliveryResolution, DirectDeliveryResolver } from "./delivery-resolution.ts"
+import { isUnidentifiedSessionName } from "./resolve-name.ts"
 
 // ---------------------------------------------------------------------------
 // Canonical tribe-coordination daemon RPC method names.
@@ -1199,14 +1200,31 @@ function latestDisconnectedSessionRows<T extends MembershipSessionRow>(
   return [...latestByName.values()]
 }
 
+function projectDisconnectedSessionRows<T extends MembershipSessionRow>(
+  rows: readonly T[],
+  activeIds: ReadonlySet<string>,
+): { diagnostic: T[]; anonymousDurable: T[] } {
+  const diagnostic: T[] = []
+  const anonymousDurable: T[] = []
+  for (const row of latestDisconnectedSessionRows(rows, activeIds)) {
+    if (isDurableMembershipSessionRow(row) && isUnidentifiedSessionName(row.name)) {
+      anonymousDurable.push(row)
+    } else {
+      diagnostic.push(row)
+    }
+  }
+  return { diagnostic, anonymousDurable }
+}
+
 function projectMembershipDiscrepancy(
   rows: readonly MembershipSessionRow[],
   activeIds: ReadonlySet<string>,
+  disconnectedRows: readonly MembershipSessionRow[],
 ): MembershipDiscrepancy | undefined {
-  const durableRows = rows.filter(isDurableMembershipSessionRow)
+  const durableRows = rows.filter(isDurableMembershipSessionRow).filter((row) => !isUnidentifiedSessionName(row.name))
   const knownNames = new Set(durableRows.map((row) => row.name))
   const connectedNames = new Set(durableRows.filter((row) => activeIds.has(row.id)).map((row) => row.name))
-  const missing = latestDisconnectedSessionRows(durableRows, activeIds).map((row) => ({
+  const missing = disconnectedRows.filter(isDurableMembershipSessionRow).map((row) => ({
     member_id: row.id,
     name: row.name,
     launch_id: row.launch_id,
@@ -1329,7 +1347,8 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
       ...(r.provider ? { provider: r.provider } : {}),
     }
   })
-  const membershipDiscrepancy = projectMembershipDiscrepancy(rows, activeIds)
+  const disconnected = projectDisconnectedSessionRows(rows, activeIds)
+  const membershipDiscrepancy = projectMembershipDiscrepancy(rows, activeIds, disconnected.diagnostic)
   return jsonResult({
     sessions,
     ...(membershipDiscrepancy === undefined ? {} : { membership_discrepancy: membershipDiscrepancy }),
@@ -1633,7 +1652,8 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
   }>
   const liveSessions = rows.filter((r) => byId.has(r.id))
   const activeIds = new Set(byId.keys())
-  const transportWedges = latestDisconnectedSessionRows(rows, activeIds).flatMap((session) => {
+  const disconnected = projectDisconnectedSessionRows(rows, activeIds)
+  const transportWedges = disconnected.diagnostic.flatMap((session) => {
     const lifetime = classifySessionRegistrationLifetime({
       launchId: session.launch_id,
       launchParentPid: session.launch_parent_pid,
@@ -1655,7 +1675,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
       },
     ]
   })
-  const membershipDiscrepancy = projectMembershipDiscrepancy(rows, activeIds)
+  const membershipDiscrepancy = projectMembershipDiscrepancy(rows, activeIds, disconnected.diagnostic)
 
   const members = liveSessions.map((s) => {
     const active = byId.get(s.id)!
@@ -1778,6 +1798,9 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
       },
     },
     transport_wedges: transportWedges,
+    // Retain unidentified durable history without manufacturing named-seat
+    // alarms. One known producer is @ag/tribe/no-tribe-flag-does-not-gate-the-join.
+    anonymous_disconnected: disconnected.anonymousDurable.length,
     ...(membershipDiscrepancy === undefined ? {} : { membership_discrepancy: membershipDiscrepancy }),
     issues: [
       ...transportWedges.map(
