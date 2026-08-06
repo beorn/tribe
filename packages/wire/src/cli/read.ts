@@ -23,6 +23,7 @@ import { readTribeLaunchId } from "../launch-environment.ts"
 import { withCliDaemonClient } from "./daemon-client.ts"
 import { mcpJsonContent } from "./mcp-json-content.ts"
 import { resolveCheckoutCodeIdentity, type CheckoutCodeIdentity, type GitProbe } from "../lib/code-identity.ts"
+import type { BallSettlementReason } from "../lib/ball-outcome.ts"
 
 const PENDING_CLI = visibleCliProjectionForMcp("pending")
 const INBOX_WAIT_CLI = visibleCliProjectionForMcp("inbox.wait")
@@ -411,7 +412,7 @@ type PendingCliRow = {
   fanout: string
   summary: string | null
   status?: "active" | "expired" | "unanswered"
-  settlement?: "manual-close" | "incident-cleared" | "gc-expired" | "sender-withdrawn" | null
+  settlement?: BallSettlementReason | null
   settled_at?: string | null
 }
 
