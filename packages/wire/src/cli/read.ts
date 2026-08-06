@@ -23,6 +23,7 @@ import { readTribeLaunchId } from "../launch-environment.ts"
 import { withCliDaemonClient } from "./daemon-client.ts"
 import { mcpJsonContent } from "./mcp-json-content.ts"
 import { resolveCheckoutCodeIdentity, type CheckoutCodeIdentity, type GitProbe } from "../lib/code-identity.ts"
+import type { BallSettlementReason } from "../lib/ball-outcome.ts"
 
 const PENDING_CLI = visibleCliProjectionForMcp("pending")
 const INBOX_WAIT_CLI = visibleCliProjectionForMcp("inbox.wait")
@@ -401,6 +402,20 @@ function parseDurationMs(spec: string): number | undefined {
  * @km/tribe/message-ball-tracker Phase 2a. Used by §C1 chief loop step 0.5
  * (call with `--owner @chief --stale 15m` to surface dropped balls).
  */
+type PendingCliRow = {
+  request_id: string
+  recipient: string
+  sender: string
+  opened_at: string
+  age_ms: number
+  message_id: string
+  fanout: string
+  summary: string | null
+  status?: "active" | "expired" | "unanswered"
+  settlement?: BallSettlementReason | null
+  settled_at?: string | null
+}
+
 async function cmdPending(
   owner: string | undefined,
   all: boolean,
@@ -423,30 +438,12 @@ async function cmdPending(
       request_id?: string
       closed?: number
       warning?: string
-      pending?: Array<{
-        request_id: string
-        recipient: string
-        sender: string
-        opened_at: string
-        age_ms: number
-        message_id: string
-        fanout: string
-        summary: string | null
-      }>
+      pending?: PendingCliRow[]
       owners?: Array<{
         owner: string
         count: number
         oldest_age_ms: number
-        pending: Array<{
-          request_id: string
-          recipient: string
-          sender: string
-          opened_at: string
-          age_ms: number
-          message_id: string
-          fanout: string
-          summary: string | null
-        }>
+        pending: PendingCliRow[]
       }>
       owner_count?: number
       oldest_age_ms?: number
@@ -485,7 +482,10 @@ async function cmdPending(
       console.log(`  ${group.owner}: ${group.count} (oldest ${oldest} ago)`)
       for (const p of group.pending) {
         const summary = p.summary?.trim() || "(no summary)"
-        console.log(`    ${p.request_id}  from ${p.sender}  to ${p.recipient}  ${summary}  (msg ${p.message_id})`)
+        const outcome = expired ? `  settlement=${p.settlement ?? "unsettled"}` : ""
+        console.log(
+          `    ${p.request_id}  from ${p.sender}  to ${p.recipient}  ${summary}${outcome}  (msg ${p.message_id})`,
+        )
       }
     }
     return
@@ -499,7 +499,8 @@ async function cmdPending(
   for (const p of payload.pending ?? []) {
     const ageSec = Math.floor(p.age_ms / 1000)
     const age = ageSec >= 60 ? `${Math.floor(ageSec / 60)}m` : `${ageSec}s`
-    console.log(`  ${p.request_id}  from ${p.sender}  ${age} ago  fanout=${p.fanout}  (msg ${p.message_id})`)
+    const outcome = expired ? `  settlement=${p.settlement ?? "unsettled"}` : ""
+    console.log(`  ${p.request_id}  from ${p.sender}  ${age} ago  fanout=${p.fanout}${outcome}  (msg ${p.message_id})`)
   }
 }
 

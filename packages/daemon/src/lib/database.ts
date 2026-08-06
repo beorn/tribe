@@ -1133,8 +1133,10 @@ export function createStatements(db: Database) {
 		DELETE FROM pending_request WHERE request_id = $request_id
 	`),
 
-    /** Daemon-owned expiry settlement input. The handler records one durable
-     *  journal fact before deleting each current-ownership row. */
+    /** Daemon-owned expiry-observation input. Deadline passage changes the
+     *  row's read projection, never its active ownership. Exclude obligations
+     *  whose durable edge is already present in either retention tier so an
+     *  arbitrary number of later daemon operations cannot duplicate it. */
     selectExpiredPendingRequests: db.prepare(`
 		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
 			COALESCE(m.summary, a.summary) AS summary
@@ -1142,19 +1144,45 @@ export function createStatements(db: Database) {
 		LEFT JOIN messages m ON m.id = p.message_id
 		LEFT JOIN messages_archive a ON a.id = p.message_id
 		WHERE p.expires_at IS NOT NULL AND p.expires_at <= $now
+			AND NOT EXISTS (
+				SELECT 1
+				FROM (
+					SELECT ref, content FROM messages
+					WHERE kind = 'event' AND type = 'event.ball.expired'
+					UNION ALL
+					SELECT ref, content FROM messages_archive
+					WHERE kind = 'event' AND type = 'event.ball.expired'
+				) expiry
+				WHERE expiry.ref = p.request_id
+					AND json_extract(expiry.content, '$.recipient') = p.recipient
+					AND json_extract(expiry.content, '$.message_id') = p.message_id
+			)
 		ORDER BY p.opened_at, p.request_id, p.recipient
 	`),
 
-    /** Historical expiry outcomes derive from the journal rather than a
-     *  second tracker table. UNION spans the hot and archived retention tiers;
-     *  an archive/delete interruption cannot duplicate an identical fact. */
-    selectExpiredPendingFacts: db.prepare(`
-		SELECT id, content, ts FROM messages
-		WHERE kind = 'event' AND type = 'event.ball.expired'
+    /** Historical unanswered outcomes derive from the journal rather than a
+     *  second tracker table. Deadline observations and terminal non-reply
+     *  settlements are separate facts; the read fold preserves that distinction.
+     *  UNION spans both retention tiers and deduplicates an interrupted archive. */
+    selectPendingOutcomeFacts: db.prepare(`
+		SELECT id, type, content, ts FROM messages
+		WHERE kind = 'event' AND type IN ('event.ball.expired', 'event.ball.settled')
 		UNION
-		SELECT id, content, ts FROM messages_archive
-		WHERE kind = 'event' AND type = 'event.ball.expired'
-		ORDER BY ts
+		SELECT id, type, content, ts FROM messages_archive
+		WHERE kind = 'event' AND type IN ('event.ball.expired', 'event.ball.settled')
+		ORDER BY ts, id
+	`),
+
+    /** Answers are already durable message facts. Keep responder identity so
+     *  fanout=all closes only that owner's outcome while fanout=first closes
+     *  the shared request for every snapshotted owner. */
+    selectPendingReplyFacts: db.prepare(`
+		SELECT sender, reply FROM messages
+		WHERE kind = 'direct' AND reply IS NOT NULL
+		UNION
+		SELECT sender, reply FROM messages_archive
+		WHERE kind = 'direct' AND reply IS NOT NULL
+		ORDER BY reply, sender
 	`),
 
     /** Ball-tracker lookup: used when a reply arrives to decide whether this
@@ -1168,6 +1196,51 @@ export function createStatements(db: Database) {
 			ORDER BY CASE WHEN request_id = $reply_id THEN 0 ELSE 1 END
 			LIMIT 1
 		`),
+
+    /** Full evidence for one exact owner row before a non-reply settlement. */
+    selectPendingSettlementForRecipient: db.prepare(`
+		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
+			COALESCE(m.summary, a.summary) AS summary
+		FROM pending_request p
+		LEFT JOIN messages m ON m.id = p.message_id
+		LEFT JOIN messages_archive a ON a.id = p.message_id
+		WHERE p.recipient = $recipient AND p.request_id = $request_id
+		LIMIT 1
+	`),
+
+    /** Full evidence for every owner of a semantic request before a shared
+     *  non-reply settlement such as incident clear. */
+    selectPendingSettlementsForRequest: db.prepare(`
+		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
+			COALESCE(m.summary, a.summary) AS summary
+		FROM pending_request p
+		LEFT JOIN messages m ON m.id = p.message_id
+		LEFT JOIN messages_archive a ON a.id = p.message_id
+		WHERE p.request_id = $request_id
+		ORDER BY p.recipient
+	`),
+
+    /** Full evidence for retention settlement. Selection precedes deletion so
+     *  gc-expired records what was never answered, not merely a count. */
+    selectPendingSettlementsBefore: db.prepare(`
+		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
+			COALESCE(m.summary, a.summary) AS summary
+		FROM pending_request p
+		LEFT JOIN messages m ON m.id = p.message_id
+		LEFT JOIN messages_archive a ON a.id = p.message_id
+		WHERE p.opened_at < $cutoff
+		ORDER BY p.opened_at, p.request_id, p.recipient
+	`),
+
+    selectPendingSettlementsForRecipientBefore: db.prepare(`
+		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
+			COALESCE(m.summary, a.summary) AS summary
+		FROM pending_request p
+		LEFT JOIN messages m ON m.id = p.message_id
+		LEFT JOIN messages_archive a ON a.id = p.message_id
+		WHERE p.recipient = $recipient AND p.opened_at < $cutoff
+		ORDER BY p.opened_at, p.request_id
+	`),
 
     /** Ball-tracker query: open requests addressed to a particular recipient (the "owner"
      *  of the open ball). Sorted oldest-first so callers can act on the longest-pending. */

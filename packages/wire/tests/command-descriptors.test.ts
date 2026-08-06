@@ -244,7 +244,7 @@ describe("Tribe command descriptors", () => {
     expect(pending.mcp.inputSchema.properties?.all).toMatchObject({ type: "boolean" })
     expect(pending.mcp.inputSchema.properties?.expired).toMatchObject({
       type: "boolean",
-      description: expect.stringMatching(/historical expired outcomes.*journal/i),
+      description: expect.stringMatching(/deadline-passed.*historical unanswered/i),
     })
     expect(pending.mcp.inputSchema.properties?.prune).toMatchObject({
       type: "boolean",

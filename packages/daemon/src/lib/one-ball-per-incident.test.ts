@@ -257,6 +257,18 @@ describe("one ball per incident (habwire stage 2(d))", () => {
 
       call(watcher, { to: "@chief", message: "recovered", incident: { ...INCIDENT, active: false } })
       expect(openKeys("@chief")).toHaveLength(0)
+      const facts = db
+        .prepare("SELECT content FROM messages WHERE kind = 'event' AND type = 'event.ball.settled'")
+        .all() as Array<{ content: string }>
+      expect(facts.map((row) => JSON.parse(row.content))).toEqual([
+        expect.objectContaining({
+          request_id: incidentKey(INCIDENT),
+          recipient: "@chief",
+          sender: "@fleet",
+          settlement: "incident-cleared",
+          settled_by: "@fleet",
+        }),
+      ])
     })
 
     it("refuses a partial identity with the supported shape named", () => {

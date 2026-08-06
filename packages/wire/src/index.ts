@@ -84,6 +84,20 @@ export { startTribeHttpMcpServer } from "./http-adapter.ts"
 // Join delivery resolution (require-join-before-push contract, c6071f3 + 333193c).
 export { resolveJoinDelivery } from "./lib/delivery.ts"
 
+// Pending-ball deadline and settlement replay facts. The daemon and wire
+// reports share this parser so malformed evidence cannot mean different things
+// on different read surfaces.
+export {
+  NON_REPLY_BALL_SETTLEMENT_REASONS,
+  parseBallOutcomeFact,
+  type BallDeadlineFact,
+  type BallDeadlineObservationPayload,
+  type BallFactEvidence,
+  type BallOutcomeFactRow,
+  type BallSettlementFact,
+  type BallSettlementReason,
+} from "./lib/ball-outcome.ts"
+
 // One-ball-per-incident identity, shared by the CLI (which parses the
 // `--incident` key) and the daemon (which keys the ball on it). One
 // definition, so the wire and the tracker cannot disagree about what a

@@ -117,11 +117,12 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
     })
   })
 
-  it("applies the 20-minute class default and preserves an explicit sender override", () => {
+  it("escalates requests and queries after 20 minutes, leaves assignments unbounded, and preserves an override", () => {
     const chief = makeContext(db, stmts, "@chief")
-    const defaults = (["request", "query", "assign"] as const).map((type) =>
+    const defaults = (["request", "query"] as const).map((type) =>
       sendMessage(chief, "@agent/8", `${type} default deadline`, type),
     )
+    const assignment = sendMessage(chief, "@agent/8", "assignment follows work lifetime", "assign")
     const explicitTtl = sendMessage(
       chief,
       "@agent/8",
@@ -142,6 +143,7 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
       expect(row.expires_at).not.toBeNull()
       expect(row.expires_at! - row.opened_at).toBe(20 * 60_000)
     }
+    expect(rows.find((row) => row.message_id === assignment.id)?.expires_at).toBeNull()
     for (const ttl of Object.values(DEFAULT_BALL_TTL_MS_BY_CLASS)) expect(ttl).toBeLessThan(30 * 60_000)
     expect(rows.find((row) => row.message_id === explicitTtl.id)?.expires_at).toBe(
       rows.find((row) => row.message_id === explicitTtl.id)!.opened_at + 5 * 60_000,

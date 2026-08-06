@@ -68,13 +68,16 @@ tribe-wire pending [--all] [--json] [--expired] [-o, --owner <name>] [-s, --stal
 
 Ball-tracker query: open requests where `owner` (default: caller's session)
 is responsible for replying. `--all` lists every owner's open requests,
-grouped (mutually exclusive with `--owner`). `--expired` reads historical
-expired outcomes from the hot and archived journal; each row explicitly names
-`settlement: "expired"` and `settled_at` (read-only; not combinable with
-`--close`). Tracked requests, queries, and assignments default to a 20-minute
-lifetime; `--expires-in-ms` overrides that class default for one send.
-`--close <id>` closes one pending request without sending a reply — requires
-`--owner`. Example:
+grouped (mutually exclusive with `--owner`). `--expired` is a read-only,
+derive-at-read expired/unanswered view. A live deadline-passed row remains
+owned and reports `status: "expired"`, `settlement: null`; historical non-reply
+outcomes report `status: "unanswered"` plus `manual-close`,
+`incident-cleared`, `gc-expired`, or `sender-withdrawn`. A later reply is the
+authoritative `answered` fact and removes that row from this view. Requests and
+queries default to a 20-minute escalation deadline; assignments have no
+reply-clock default. `--expires-in-ms` overrides the policy for one send.
+`--close <id>` records a typed non-reply settlement and closes one pending
+request without sending a reply — requires `--owner`. Example:
 
 ```bash
 tribe-wire pending --owner @alice --stale 15m
@@ -246,6 +249,10 @@ Another non-empty value overrides the id or opts in a
 `notify`/`response`/`verdict`; the explicit id `true` is reserved and rejected
 by the daemon. `--fanout all` opens one ball per recipient on a multi-target
 send instead of the default first-reply-wins.
+`--expires-in-ms` sets an escalation deadline for that send. Requests and
+queries otherwise default to 20 minutes; assignments have no reply-clock
+default. Passing the deadline makes the obligation louder and records a durable
+observation, but never closes it.
 
 ```bash
 tribe-wire send '@alice' 'task X done' --type=notify

@@ -49,6 +49,35 @@ function insertExpiry(db: Database, requestId: string, ts: number): void {
   ).run(`${requestId}-expired`, JSON.stringify({ request_id: requestId, settlement: "expired" }), requestId, ts)
 }
 
+function insertSettlement(
+  db: Database,
+  requestId: string,
+  settlement: "manual-close" | "incident-cleared" | "gc-expired" | "sender-withdrawn",
+  ts: number,
+): void {
+  db.prepare(
+    "INSERT INTO messages (id, type, sender, recipient, kind, content, ref, ts, request, reply) VALUES (?, 'event.ball.settled', 'daemon', '*', 'event', ?, ?, ?, NULL, NULL)",
+  ).run(
+    `${requestId}-${settlement}`,
+    JSON.stringify({
+      schema_version: 1,
+      request_id: requestId,
+      recipient: "@chief",
+      sender: "@agent/1",
+      opened_at: ts - MINUTE,
+      expires_at: null,
+      message_id: requestId,
+      fanout: "first",
+      summary: null,
+      settlement,
+      settled_at: ts,
+      settled_by: "daemon",
+    }),
+    requestId,
+    ts,
+  )
+}
+
 function insertBall(
   db: Database,
   ball: { id: string; from: string; to: string; openedAt: number; latencyMs: number },
@@ -119,7 +148,7 @@ describe("21714 wire retro response latency", () => {
     expect(report.coordination.unanswered_queries).toBe(1)
   })
 
-  it("does not report an explicitly expired obligation as unanswered", () => {
+  it("keeps a deadline-passed obligation unanswered until a real settlement", () => {
     insertMessage(db, {
       id: "expired",
       type: "request",
@@ -131,6 +160,35 @@ describe("21714 wire retro response latency", () => {
     insertExpiry(db, "expired", now - 10 * MINUTE)
 
     const report = generateRetro(db, 6 * HOUR)
-    expect(report.coordination.unanswered_queries).toBe(0)
+    expect(report.coordination.unanswered_queries).toBe(1)
+  })
+
+  it("reports every terminal settlement reason without collapsing them", () => {
+    const reasons = ["manual-close", "incident-cleared", "gc-expired", "sender-withdrawn"] as const
+    for (const [index, reason] of reasons.entries()) {
+      const requestId = `settled-${reason}`
+      insertMessage(db, {
+        id: requestId,
+        type: "request",
+        sender: "@agent/1",
+        recipient: "@chief",
+        ts: now - (index + 2) * MINUTE,
+        request: requestId,
+      })
+      insertSettlement(db, requestId, reason, now - MINUTE)
+    }
+
+    const report = generateRetro(db, 6 * HOUR)
+    expect(report.coordination.unanswered_queries).toBe(4)
+    expect(report.coordination.settlements).toEqual({
+      answered: 0,
+      "manual-close": 1,
+      "incident-cleared": 1,
+      "gc-expired": 1,
+      "sender-withdrawn": 1,
+    })
+    expect(formatMarkdown(report)).toContain(
+      "Settlements: answered=0, manual-close=1, incident-cleared=1, gc-expired=1, sender-withdrawn=1",
+    )
   })
 })

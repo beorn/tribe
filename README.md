@@ -295,16 +295,22 @@ tracking — only message type and `request` decide whether a pending ball opens
 
 **Pending balls & attention.** A direct `request`, `query`, or `assign` message
 opens exactly one recipient-owned "ball"; other types open one only when asked.
-The ball stores ownership, age, and fanout. Tracked requests, queries, and
-assignments receive a 20-minute class default; `expires_in_ms` overrides it for
-one send. A reply closes the original ownership row. `tribe.fetch()` returns a
+The ball stores ownership, age, and fanout. Tracked requests and queries receive
+a 20-minute escalation deadline; assignments have no reply-clock default.
+`expires_in_ms` overrides the class policy for one send. A reply closes the
+original ownership row. `tribe.fetch()` returns a
 read-only `attention` projection — actionable unread plus the oldest open balls
 — ahead of the chronological events; `tribe.pending()` returns the full pile.
-At the first daemon operation after a deadline passes, Tribe settles the active
-ownership row and appends an `expired` journal outcome. `tribe.pending({
-expired: true })` derives its historical view from those hot or archived facts;
-it does not keep a second status store. Paging, reminders, transfer, and
-escalation remain consumer policy.
+Deadline passage changes presentation, never membership: the ball becomes
+`expired`, sorts first, and remains in the owner's pile. Reads compare the live
+deadline directly, so they stay authoritative even if the durable
+`ball.expired` observation echo waits for the next recorder sweep or daemon
+boundary. `tribe.pending({ expired: true })` folds active rows, hot or archived
+journal facts, and durable replies into one expired/unanswered view. A live
+deadline-passed row has no settlement; terminal non-reply rows preserve
+`manual-close`, `incident-cleared`, `gc-expired`, or `sender-withdrawn`; a later
+answer is derived from the reply message and omitted. There is no second status
+store. Paging, reminders, transfer, and escalation remain consumer policy.
 
 **Health cadence.** The daemon projects a health snapshot — response-latency
 percentiles by role and message type, open-ball counts and oldest age, per-
