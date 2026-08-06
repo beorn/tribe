@@ -289,7 +289,7 @@ type ExpiredPendingRequest = {
   opened_at: number
   expires_at: number
   message_id: string
-  fanout: string
+  fanout: "first" | "all"
   summary: string | null
 }
 
@@ -301,25 +301,20 @@ function settleExpiredPendingRequests(ctx: TribeContext, now: number): number {
   return ctx.db.transaction(() => {
     const rows = ctx.stmts.selectExpiredPendingRequests.all({ $now: now }) as ExpiredPendingRequest[]
     for (const row of rows) {
-      logEvent(
-        ctx,
-        "ball.expired",
-        undefined,
-        {
-          schema_version: 1,
-          request_id: row.request_id,
-          recipient: row.recipient,
-          sender: row.sender,
-          opened_at: row.opened_at,
-          expires_at: row.expires_at,
-          message_id: row.message_id,
-          fanout: row.fanout,
-          summary: row.summary,
-          settlement: "expired",
-          settled_at: now,
-        },
-        { sender: "daemon", ref: row.request_id, ts: now },
-      )
+      const fact = {
+        schema_version: 1,
+        request_id: row.request_id,
+        recipient: row.recipient,
+        sender: row.sender,
+        opened_at: row.opened_at,
+        expires_at: row.expires_at,
+        message_id: row.message_id,
+        fanout: row.fanout,
+        summary: row.summary,
+        settlement: "expired",
+        settled_at: now,
+      } satisfies ExpiredPendingFact
+      logEvent(ctx, "ball.expired", undefined, fact, { sender: "daemon", ref: row.request_id, ts: now })
       ctx.stmts.closePendingRequest.run({ $request_id: row.request_id, $recipient: row.recipient })
     }
     return rows.length
