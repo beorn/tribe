@@ -49,6 +49,8 @@ type MembershipDiscrepancy = {
 }
 type ToolJson = {
   sessions?: Member[]
+  transport_wedges?: Array<Record<string, unknown>>
+  anonymous_disconnected?: number
   membership_discrepancy?: MembershipDiscrepancy
   joined?: boolean
   name?: string
@@ -779,6 +781,62 @@ describe("Claude plugin daemon-restart self-heal", () => {
       owner_state: "live",
     })
     successor.client.close()
+  }, 35_000)
+
+  it("keeps an unnamed adapter disconnect out of addressable health alarms", async () => {
+    const dbPath = join(tmpDir, "tribe-unnamed-health.db")
+    const daemonLog = join(tmpDir, "daemon-unnamed-health.log")
+    const adapterLog = join(tmpDir, "adapter-unnamed-health.log")
+    spawnTestDaemon(dbPath, daemonLog)
+    await waitFor(() => existsSync(socketPath), "unnamed-health daemon socket")
+    const daemon = await connectToGeneration(socketPath)
+    daemonPids.add(daemon.pid)
+
+    const before = parseToolJson(await daemon.client.call("tribe.health"))
+    const adapter = spawn(BUN_BIN, [STDIO_ADAPTER, "--socket", socketPath], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DB: dbPath,
+        TRIBE_NAME: "",
+        TRIBE_DELIVERY: "pull",
+        TRIBE_PULL_TRANSPORT: "mcp",
+        TRIBE_REQUIRE_JOIN: "0",
+        TRIBE_LAUNCH_ID: "unnamed-health-launch",
+        TRIBE_NO_PLUGINS: "1",
+        TRIBE_NO_AUTORELOAD: "1",
+        DEBUG_LOG: adapterLog,
+        LOG_FILE: adapterLog,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    }) as ChildProcessWithoutNullStreams
+    plugins.add(adapter)
+    const stdout = collectJsonLines(adapter)
+    writeJson(adapter, initializePayload(30))
+    await waitFor(() => stdout.some((line) => line.id === 30), "unnamed adapter initialize")
+    writeJson(adapter, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await waitFor(async () => {
+      const roster = parseToolJson(await daemon.client.call("tribe.members", { all: true })).sessions ?? []
+      return roster.some(
+        (session) => session.launch_id === "unnamed-health-launch" && session.transport_state === "connected",
+      )
+    }, "unnamed adapter registration")
+    const connectedRoster = parseToolJson(await daemon.client.call("tribe.members", { all: true })).sessions ?? []
+    expect(connectedRoster.find((session) => session.launch_id === "unnamed-health-launch")?.name).toMatch(/^unknown-/u)
+
+    const adapterPid = adapter.pid
+    if (adapterPid === undefined) throw new Error("unnamed adapter did not expose a process id")
+    await terminateTestProcess(adapterPid)
+    let after: ToolJson = {}
+    await waitFor(async () => {
+      after = parseToolJson(await daemon.client.call("tribe.health"))
+      return after.anonymous_disconnected === (before.anonymous_disconnected ?? 0) + 1
+    }, "unnamed adapter disconnected health projection")
+
+    expect(after.transport_wedges).toEqual(before.transport_wedges)
+    expect(after.membership_discrepancy).toEqual(before.membership_discrepancy)
+    expect(after.anonymous_disconnected).toBe((before.anonymous_disconnected ?? 0) + 1)
+    daemon.client.close()
   }, 35_000)
 
   it("after an N-seat restart, returns every live seat and reports any missing seat as a discrepancy", async () => {

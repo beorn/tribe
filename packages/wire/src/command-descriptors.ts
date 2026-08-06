@@ -670,11 +670,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           membership_discrepancy: {
             type: "object",
             description:
-              "Present when one or more known durable launch rows have no authenticated transport. Carries connected-durable/known-durable/missing counts plus missing launch identities; connection-scoped sessions do not inflate the comparison, and missing transport does not establish agent absence.",
+              "Present when one or more known addressable durable launch rows have no authenticated transport. Carries connected-durable/known-durable/missing counts plus missing launch identities; unidentified and connection-scoped sessions do not inflate the comparison, and missing transport does not establish agent absence.",
             additionalProperties: true,
           },
         },
-        "Members list under `sessions`, plus optional `membership_discrepancy` when known durable launches are missing transports.",
+        "Members list under `sessions`, plus optional `membership_discrepancy` when known addressable durable launches are missing transports.",
       ),
     },
     cli: available({

@@ -289,12 +289,13 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
     })
     const after = parseToolJson(handleToolCall(ctx, "tribe.health", {}, opts)) as typeof before
 
+    expect(before.anonymous_disconnected).toBe(0)
     expect(after.transport_wedges).toEqual(before.transport_wedges)
     expect(after.membership_discrepancy).toEqual(before.membership_discrepancy)
-    expect(after.anonymous_disconnected).toBe(1)
+    expect(after.anonymous_disconnected).toBe((before.anonymous_disconnected ?? 0) + 1)
   })
 
-  it("omits membership degradation when every known durable launch has a connected transport", () => {
+  it("omits membership degradation when every known addressable durable launch has a connected transport", () => {
     addSession(db, stmts, "durable", "@agent/6", { id: "launch-a6", parentPid: 6006 })
     const ctx = makeContext(db, stmts, "operator", "@operator")
     const opts = {

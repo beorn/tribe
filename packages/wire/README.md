@@ -72,9 +72,9 @@ evidence. `last_seen_sec` reports activity age only. A host MCP dialog may say
 connected while the daemon reports the member disconnected, so host UI state is
 not a substitute for this projection. After disconnect, a stored numeric PID
 without launch-bound process evidence reports owner `unknown` even if that PID
-currently exists: the OS may have recycled it. Health keeps complete-launch
-rows with no transport loud, while connection-scoped no-launch rows are reaped
-only after reconnect grace.
+currently exists: the OS may have recycled it. Health keeps addressable
+complete-launch rows with no transport loud, while connection-scoped no-launch
+rows are reaped only after reconnect grace.
 
 When known addressable durable launch rows have no authenticated transport,
 both `members` and `health` include `membership_discrepancy` with the connected
@@ -84,6 +84,11 @@ rows separately as the bounded `anonymous_disconnected` count; they do not
 inflate the addressable wedge or membership projections. Connection-scoped
 sessions do not inflate either comparison. The projection deliberately says
 `missing-transport`: it does not infer that the agent itself is absent.
+
+This is deliberately a projection fix. Refusing unnamed registration would
+silently remove Tribe from legitimate manual launches, while reaping retained
+launch rows would discard durable provenance and introduce a second lifetime
+policy. Launchers that should not join Tribe must suppress the join upstream.
 
 ## Surface delineation — protocol vs dev tooling
 

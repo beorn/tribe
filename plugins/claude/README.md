@@ -55,8 +55,10 @@ channel—stays in place while the child changes.
 An unexpected adapter crash uses the same bounded exponential-backoff budget
 without replacing the wrapper or its stdio channel. A clean adapter exit still
 shuts the wrapper down. If repeated crashes exhaust the budget, the wrapper
-fails loudly and the durable launch remains visible as a membership discrepancy
-instead of silently disappearing.
+fails loudly and the durable launch remains visible instead of silently
+disappearing: addressable identities appear in `membership_discrepancy`, while
+retained unidentified `unknown-*` identities contribute to the bounded
+`anonymous_disconnected` health count.
 
 Claim-bound Hab launches give the wrapper the complete launcher-minted launch
 id and harness parent PID. The wrapper validates that live provenance once and
