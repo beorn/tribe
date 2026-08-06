@@ -229,18 +229,12 @@ describe("20876 Tribe health cadence", () => {
         session: "@agent/5",
         rows: 6,
         oldest_age_ms: 8 * DAY,
-        actionable_rows: 4,
-        actionable_oldest_age_ms: 23 * HOUR,
+        actionable_rows: 0,
+        actionable_oldest_age_ms: 0,
         tracking_since_ms: now,
         last_attention_read_at_ms: null,
         last_attention_read_age_ms: null,
-        oldest_actionable: {
-          id: "request-1",
-          type: "request",
-          sender: "@chief",
-          summary: "request-1",
-          ts_ms: now - 23 * HOUR,
-        },
+        oldest_actionable: null,
         evidence: {
           source: "tribe-mailbox-cursors",
           scope: "connected-session cursor backlog",
@@ -353,15 +347,42 @@ describe("20876 Tribe health cadence", () => {
     const row = projectHealthCadence(db, { now, connectedSessionNames: ["@agent/5"] }).inbox_lag[0]
     expect(row).toMatchObject({
       session: "@agent/5",
-      actionable_rows: 4,
-      actionable_oldest_age_ms: 23 * HOUR,
+      actionable_rows: 0,
+      actionable_oldest_age_ms: 0,
       last_attention_read_at_ms: now - 12 * MINUTE,
       last_attention_read_age_ms: 12 * MINUTE,
+      oldest_actionable: null,
+    })
+  })
+
+  it("retires replied actionables from cadence without hiding an unrelated older request", () => {
+    insertSession(db, { id: "sess-dev-2", name: "@dev/2", role: "member", now })
+    insertMessage(db, {
+      id: "dev-2-older-open",
+      type: "request",
+      sender: "@chief",
+      recipient: "@dev/2",
+      ts: now - 2 * HOUR,
+      request: "dev-2-older-open",
+    })
+    insertResponsePair(db, {
+      id: "dev-2-newer-replied",
+      type: "request",
+      sender: "@chief",
+      recipient: "@dev/2",
+      requestAt: now - HOUR,
+      latencyMs: MINUTE,
+    })
+
+    const row = projectHealthCadence(db, { now, connectedSessionNames: ["@dev/2"] }).inbox_lag[0]
+    expect(row).toMatchObject({
+      session: "@dev/2",
+      actionable_rows: 1,
+      actionable_oldest_age_ms: 2 * HOUR,
       oldest_actionable: {
-        id: "request-1",
+        id: "dev-2-older-open",
         type: "request",
         sender: "@chief",
-        summary: "request-1",
       },
     })
   })

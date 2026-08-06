@@ -1056,15 +1056,21 @@ export const ATTENTION_PREDICATE_SQL = `(type IN (${ACTIONABLE_TYPES_SQL}) OR at
  * A recipient-wide cursor cannot express this safely: advancing it for one
  * reply could swallow an unrelated older actionable row.
  */
-export function unretiredAttentionPredicateSql(alias: string): string {
+export function unretiredAttentionPredicateSql(
+  alias: string,
+  source: { readonly relation: "messages" | "journal"; readonly sequence: "rowid" | "seq" } = {
+    relation: "messages",
+    sequence: "rowid",
+  },
+): string {
   const row = `${alias}.`
   return `NOT EXISTS (
     SELECT 1
-    FROM messages AS reply_message
+    FROM ${source.relation} AS reply_message
     WHERE reply_message.kind = 'direct'
       AND reply_message.sender = ${row}recipient
       AND reply_message.recipient = ${row}sender
-      AND reply_message.rowid > ${row}rowid
+      AND reply_message.${source.sequence} > ${row}${source.sequence}
       AND reply_message.reply = COALESCE(${row}request, ${row}id)
   )`
 }

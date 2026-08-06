@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite"
-import { ACTIONABLE_TYPES_SQL } from "./database.ts"
+import { ACTIONABLE_TYPES_SQL, unretiredAttentionPredicateSql } from "./database.ts"
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
@@ -217,12 +217,14 @@ function responseLatencyProjection(
       message_type: group.messageType,
       ...summarizeLatencies(group.values),
     }))
-  const warnings = byRoleAndType
-    .filter((group) => group.p95_ms !== null && group.p95_ms > RESPONSE_WARNING_MS)
-    .map(
-      (group) =>
-        `response latency role=${group.role} type=${group.message_type} p95=${Math.floor(group.p95_ms! / MINUTE)}m exceeds 30m (n=${group.count})`,
-    )
+  const warnings = byRoleAndType.flatMap((group) => {
+    const p95 = group.p95_ms
+    return p95 !== null && p95 > RESPONSE_WARNING_MS
+      ? [
+          `response latency role=${group.role} type=${group.message_type} p95=${Math.floor(p95 / MINUTE)}m exceeds 30m (n=${group.count})`,
+        ]
+      : []
+  })
 
   return {
     summary: {
@@ -373,38 +375,40 @@ function inboxLagProjection(
   `)
   const actionableLagQuery = db.prepare(`
     WITH journal AS (
-      SELECT rowid AS seq, type, sender, recipient, kind, ts FROM messages
+      SELECT rowid AS seq, id, type, sender, recipient, kind, ts, request, reply FROM messages
       UNION ALL
-      SELECT seq, type, sender, recipient, kind, ts FROM messages_archive
+      SELECT seq, id, type, sender, recipient, kind, ts, request, reply FROM messages_archive
     )
     SELECT COUNT(*) AS rows, MIN(ts) AS oldest_ts
-    FROM journal
-    WHERE seq > COALESCE(
+    FROM journal AS m
+    WHERE m.seq > COALESCE(
       (SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $session),
       0
     )
-      AND recipient = $session
-      AND kind = 'direct'
-      AND sender != $session
-      AND type IN (${ACTIONABLE_TYPES_SQL})
+      AND m.recipient = $session
+      AND m.kind = 'direct'
+      AND m.sender != $session
+      AND m.type IN (${ACTIONABLE_TYPES_SQL})
+      AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "seq" })}
   `)
   const oldestActionableQuery = db.prepare(`
     WITH journal AS (
-      SELECT rowid AS seq, id, type, sender, recipient, kind, ts, summary FROM messages
+      SELECT rowid AS seq, id, type, sender, recipient, kind, ts, summary, request, reply FROM messages
       UNION ALL
-      SELECT seq, id, type, sender, recipient, kind, ts, summary FROM messages_archive
+      SELECT seq, id, type, sender, recipient, kind, ts, summary, request, reply FROM messages_archive
     )
-    SELECT id, type, sender, summary, ts
-    FROM journal
-    WHERE seq > COALESCE(
+    SELECT m.id, m.type, m.sender, m.summary, m.ts
+    FROM journal AS m
+    WHERE m.seq > COALESCE(
       (SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $session),
       0
     )
-      AND recipient = $session
-      AND kind = 'direct'
-      AND sender != $session
-      AND type IN (${ACTIONABLE_TYPES_SQL})
-    ORDER BY seq ASC
+      AND m.recipient = $session
+      AND m.kind = 'direct'
+      AND m.sender != $session
+      AND m.type IN (${ACTIONABLE_TYPES_SQL})
+      AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "seq" })}
+    ORDER BY m.seq ASC
     LIMIT 1
   `)
 
