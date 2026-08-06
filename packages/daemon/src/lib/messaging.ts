@@ -166,7 +166,6 @@ export type BallTracker = {
 export const DEFAULT_BALL_TTL_MS_BY_CLASS = {
   request: 20 * 60_000,
   query: 20 * 60_000,
-  assign: 20 * 60_000,
 } as const
 
 export const MAX_BALL_TTL_MS = 24 * 60 * 60_000
@@ -176,7 +175,8 @@ export const MAX_BALL_TTL_MS = 24 * 60 * 60_000
  *  supplied `request` (or an incident identity) to open ownership. */
 export function defaultBallTtlMs(type: string, tracked: boolean): number | undefined {
   if (!tracked) return undefined
-  if (type === "query" || type === "assign") return DEFAULT_BALL_TTL_MS_BY_CLASS[type]
+  if (type === "assign") return undefined
+  if (type === "query") return DEFAULT_BALL_TTL_MS_BY_CLASS.query
   return DEFAULT_BALL_TTL_MS_BY_CLASS.request
 }
 

@@ -293,10 +293,11 @@ type ExpiredPendingRequest = {
   summary: string | null
 }
 
-/** Release deadline-passed ownership without erasing why it ended. The
- *  journal insert and tracker delete are one SQLite transaction, so a crash or
- *  concurrent boundary can produce neither fact or exactly one fact, never a
- *  silent delete or duplicate expiry edge. */
+/** Record deadline passage without releasing ownership. Expiry is an
+ * escalation/presentation fact; only an explicit settlement edge may remove
+ * the owner. The selection excludes already-recorded edges across both
+ * retention tiers, and the transaction makes each daemon boundary observe a
+ * stable set. */
 function settleExpiredPendingRequests(ctx: TribeContext, now: number): number {
   return ctx.db.transaction(() => {
     const rows = ctx.stmts.selectExpiredPendingRequests.all({ $now: now }) as ExpiredPendingRequest[]
@@ -315,7 +316,6 @@ function settleExpiredPendingRequests(ctx: TribeContext, now: number): number {
         settled_at: now,
       } satisfies ExpiredPendingFact
       logEvent(ctx, "ball.expired", undefined, fact, { sender: "daemon", ref: row.request_id, ts: now })
-      ctx.stmts.closePendingRequest.run({ $request_id: row.request_id, $recipient: row.recipient })
     }
     return rows.length
   })()
@@ -417,7 +417,9 @@ function normalizeRecipients(value: unknown): string | string[] | null {
   }
   const unique = [...new Set(recipients)]
   if (unique.includes("*") && unique.length > 1) return null
-  return unique.length === 1 ? unique[0]! : unique
+  const only = unique.at(0)
+  if (unique.length === 1 && only !== undefined) return only
+  return unique
 }
 
 function activeBroadcastRecipients(ctx: TribeContext, opts: HandlerOpts): string[] {
@@ -899,6 +901,7 @@ type PendingBall = {
   message_id: string
   fanout: string
   summary: string | null
+  status: "active" | "expired"
 }
 
 type ExpiredPendingBall = PendingBall & {
@@ -940,6 +943,7 @@ export type AttentionProjection = {
 }
 
 function pendingBall(row: PendingBallRow, now: number): PendingBall {
+  const expired = row.expires_at !== null && row.expires_at <= now
   return {
     request_id: row.request_id,
     recipient: row.recipient,
@@ -950,6 +954,7 @@ function pendingBall(row: PendingBallRow, now: number): PendingBall {
     message_id: row.message_id,
     fanout: row.fanout,
     summary: row.summary,
+    status: expired ? "expired" : "active",
   }
 }
 
@@ -998,6 +1003,7 @@ function expiredPendingBall(row: ExpiredPendingFactRow, now: number): ExpiredPen
     message_id: fact.message_id,
     fanout: fact.fanout,
     summary: fact.summary,
+    status: "expired",
     settlement: "expired",
     settled_at: new Date(fact.settled_at).toISOString(),
   }
@@ -1005,7 +1011,7 @@ function expiredPendingBall(row: ExpiredPendingFactRow, now: number): ExpiredPen
 
 function pendingBallsForOwner(ctx: TribeContext, owner: string, now: number): PendingBall[] {
   const rows = ctx.stmts.selectPendingForRecipient.all({ $recipient: owner }) as PendingBallRow[]
-  return rows.map((row) => pendingBall(row, now))
+  return sortPendingBalls(rows.map((row) => pendingBall(row, now)))
 }
 
 function expiredPendingBalls(ctx: TribeContext, now: number): ExpiredPendingBall[] {
@@ -1060,7 +1066,14 @@ function replyCloseFailure(tracker: Tracker | undefined): { reply_close_failed: 
 
 function allPendingBalls(ctx: TribeContext, now: number): PendingBall[] {
   const rows = ctx.stmts.selectAllPendingRequests.all() as PendingBallRow[]
-  return rows.map((row) => pendingBall(row, now))
+  return sortPendingBalls(rows.map((row) => pendingBall(row, now)))
+}
+
+function sortPendingBalls(rows: readonly PendingBall[]): PendingBall[] {
+  return rows.toSorted((left, right) => {
+    if (left.status !== right.status) return left.status === "expired" ? -1 : 1
+    return Date.parse(left.opened_at) - Date.parse(right.opened_at) || left.request_id.localeCompare(right.request_id)
+  })
 }
 
 function pendingOwnerGroups(pending: readonly PendingBall[]) {
@@ -1073,7 +1086,7 @@ function pendingOwnerGroups(pending: readonly PendingBall[]) {
   return [...byOwner.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([owner, rows]) => {
-      const oldestFirst = rows.toSorted((left, right) => Date.parse(left.opened_at) - Date.parse(right.opened_at))
+      const oldestFirst = sortPendingBalls(rows)
       return {
         owner,
         count: oldestFirst.length,
@@ -1658,7 +1671,8 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
   const membershipDiscrepancy = projectMembershipDiscrepancy(rows, activeIds)
 
   const members = liveSessions.map((s) => {
-    const active = byId.get(s.id)!
+    const active = byId.get(s.id)
+    if (active === undefined) throw new Error(`active session ${s.id} disappeared during membership projection`)
     const transport = projectSessionTransportState({ transportConnected: true })
     // Find last message from this member
     const lastMsg = ctx.db

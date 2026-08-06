@@ -504,7 +504,7 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     expect(reply.warning).toBeUndefined()
   })
 
-  it("reports a late reply after daemon expiry settlement", () => {
+  it("accepts a late reply because deadline passage never releases ownership", () => {
     parseToolJson(
       handleToolCall(
         chief,
@@ -524,13 +524,13 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       ),
     )
 
-    expect(reply.tracker).toEqual({ request_id: "late-request", closed: 0 })
-    expect(reply.reply_close_failed).toBe(true)
-    expect(reply.warning).toContain("closed 0")
+    expect(reply.tracker).toEqual({ request_id: "late-request", closed: 1 })
+    expect(reply.reply_close_failed).toBeUndefined()
+    expect(reply.warning).toBeUndefined()
     expect(pendingRecipients(db, "late-request")).toEqual([])
   })
 
-  it("settles a deadline-passed row with one durable correlated expiry fact", () => {
+  it("keeps a deadline-passed row owned and visible while recording one durable expiry edge", () => {
     parseToolJson(
       handleToolCall(
         chief,
@@ -548,7 +548,8 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     db.prepare("UPDATE pending_request SET expires_at = 0 WHERE request_id = ?").run("deadline-passed-open")
 
     const active = parseToolJson(handleToolCall(agent1, "tribe.pending", {}, makeOpts(["sess-chief", "sess-agent-1"])))
-    expect(active.pending).toEqual([])
+    expect(active.pending).toEqual([expect.objectContaining({ request_id: "deadline-passed-open", status: "expired" })])
+    expect(pendingRecipients(db, "deadline-passed-open")).toEqual(["@agent/1"])
 
     const expiryFacts = db
       .prepare("SELECT type, kind, content FROM messages WHERE kind = 'event' AND type = 'event.ball.expired'")
@@ -563,7 +564,7 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     })
 
     // Lazy expiry can be checked by many subsequent RPCs. The journal fact is
-    // an edge and must stay exactly-once after the ownership row is gone.
+    // an edge and must stay exactly-once while ownership remains active.
     parseToolJson(handleToolCall(agent1, "tribe.pending", {}, makeOpts(["sess-chief", "sess-agent-1"])))
     expect(
       db.prepare("SELECT COUNT(*) AS count FROM messages WHERE kind = 'event' AND type = 'event.ball.expired'").get(),

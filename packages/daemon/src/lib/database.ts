@@ -1133,8 +1133,10 @@ export function createStatements(db: Database) {
 		DELETE FROM pending_request WHERE request_id = $request_id
 	`),
 
-    /** Daemon-owned expiry settlement input. The handler records one durable
-     *  journal fact before deleting each current-ownership row. */
+    /** Daemon-owned expiry-observation input. Deadline passage changes the
+     *  row's read projection, never its active ownership. Exclude obligations
+     *  whose durable edge is already present in either retention tier so an
+     *  arbitrary number of later daemon operations cannot duplicate it. */
     selectExpiredPendingRequests: db.prepare(`
 		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
 			COALESCE(m.summary, a.summary) AS summary
@@ -1142,6 +1144,19 @@ export function createStatements(db: Database) {
 		LEFT JOIN messages m ON m.id = p.message_id
 		LEFT JOIN messages_archive a ON a.id = p.message_id
 		WHERE p.expires_at IS NOT NULL AND p.expires_at <= $now
+			AND NOT EXISTS (
+				SELECT 1
+				FROM (
+					SELECT ref, content FROM messages
+					WHERE kind = 'event' AND type = 'event.ball.expired'
+					UNION ALL
+					SELECT ref, content FROM messages_archive
+					WHERE kind = 'event' AND type = 'event.ball.expired'
+				) expiry
+				WHERE expiry.ref = p.request_id
+					AND json_extract(expiry.content, '$.recipient') = p.recipient
+					AND json_extract(expiry.content, '$.message_id') = p.message_id
+			)
 		ORDER BY p.opened_at, p.request_id, p.recipient
 	`),
 

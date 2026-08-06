@@ -186,7 +186,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
     }
   })
 
-  it("settles deadline-passed balls before close-miss warnings", () => {
+  it("keeps deadline-passed balls loud in close-miss warnings", () => {
     const { db, stmts } = setup()
     try {
       const now = Date.now()
@@ -218,15 +218,16 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       const res = parseToolJson(handleToolCall(ctx, "tribe.pending", { close: "missing" }, makeOpts()))
       const warning = String(res.warning)
 
-      expect(warning.match(/\(message/gu)).toHaveLength(1)
+      expect(warning.match(/\(message/gu)).toHaveLength(2)
       expect(warning).toContain("still-owned")
-      expect(warning).not.toContain("deadline-passed")
+      expect(warning).toContain("deadline-passed")
+      expect(warning).toContain("declared deadline passed, still open")
     } finally {
       db.close()
     }
   })
 
-  it("settles an expired ball at the daemon boundary", () => {
+  it("records expiry at the daemon boundary without releasing ownership", () => {
     const { db, stmts } = setup()
     try {
       const now = Date.now()
@@ -257,8 +258,11 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
 
       const result = parseToolJson(handleToolCall(ctx, "tribe.pending", {}, makeOpts()))
 
-      expect(result.pending).toEqual([expect.objectContaining({ request_id: "still-owned-at-boundary" })])
-      expect(openIds(stmts, "@chief")).toEqual(["still-owned-at-boundary"])
+      expect(result.pending).toEqual([
+        expect.objectContaining({ request_id: "expired-at-boundary", status: "expired" }),
+        expect.objectContaining({ request_id: "still-owned-at-boundary", status: "active" }),
+      ])
+      expect(openIds(stmts, "@chief")).toEqual(["expired-at-boundary", "still-owned-at-boundary"])
     } finally {
       db.close()
     }
@@ -387,7 +391,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
     }
   })
 
-  it("settles deadline-passed balls before live projections and retains an explicit expired outcome", () => {
+  it("keeps expired balls loud in live projections and retains an explicit durable outcome", () => {
     const { db, stmts } = setup()
     // The actionable-response SLA projection is opt-in via TRIBE_SLA_ROLE; name
     // @chief so tribe.health() surfaces the @chief open-ball count below.
@@ -414,12 +418,12 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       openBall(stmts, {
         id: "active-review",
         recipient: "@chief",
-        openedAt: now - 60_000,
+        openedAt: now - 60 * 60_000,
         expiresAt: now + 9 * 60_000,
       })
 
       const pending = parseToolJson(handleToolCall(ctx, "tribe.pending", {}, makeOpts())) as {
-        pending: Array<{ request_id: string }>
+        pending: Array<{ request_id: string; status: string }>
       }
       const expired = parseToolJson(handleToolCall(ctx, "tribe.pending", { expired: true }, makeOpts())) as {
         expired: boolean
@@ -434,7 +438,10 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         }
       }
 
-      expect(pending.pending.map((ball) => ball.request_id)).toEqual(["active-review"])
+      expect(pending.pending).toEqual([
+        expect.objectContaining({ request_id: "expired-review", status: "expired" }),
+        expect.objectContaining({ request_id: "active-review", status: "active" }),
+      ])
       expect(expired.expired).toBe(true)
       expect(expired.pending).toEqual([
         expect.objectContaining({
@@ -462,10 +469,13 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
           pending: [expect.objectContaining({ request_id: "expired-review", settlement: "expired" })],
         }),
       ])
-      expect(attention.pending_balls.map((ball) => ball.request_id)).toEqual(["active-review"])
-      expect(health.pending_balls?.count).toBe(1)
-      expect(health.cadence?.open_balls.count).toBe(1)
-      expect(health.cadence?.role_actionable_response.open.count).toBe(1)
+      expect(attention.pending_balls).toEqual([
+        expect.objectContaining({ request_id: "expired-review", status: "expired" }),
+        expect.objectContaining({ request_id: "active-review", status: "active" }),
+      ])
+      expect(health.pending_balls?.count).toBe(2)
+      expect(health.cadence?.open_balls.count).toBe(2)
+      expect(health.cadence?.role_actionable_response.open.count).toBe(2)
     } finally {
       db.close()
       if (savedSlaRole === undefined) delete process.env.TRIBE_SLA_ROLE
