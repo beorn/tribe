@@ -117,9 +117,11 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
     })
   })
 
-  it("leaves implicit tracked balls unbounded and preserves an explicit sender deadline as data", () => {
+  it("applies the 20-minute class default and preserves an explicit sender override", () => {
     const chief = makeContext(db, stmts, "@chief")
-    const defaultTtl = sendMessage(chief, "@agent/8", "default deadline", "request")
+    const defaults = (["request", "query", "assign"] as const).map((type) =>
+      sendMessage(chief, "@agent/8", `${type} default deadline`, type),
+    )
     const explicitTtl = sendMessage(
       chief,
       "@agent/8",
@@ -135,7 +137,11 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
     const rows = db
       .prepare("SELECT message_id, opened_at, expires_at FROM pending_request ORDER BY opened_at, request_id")
       .all() as Array<{ message_id: string; opened_at: number; expires_at: number | null }>
-    expect(rows.find((row) => row.message_id === defaultTtl.id)?.expires_at).toBeNull()
+    for (const result of defaults) {
+      const row = rows.find((candidate) => candidate.message_id === result.id)!
+      expect(row.expires_at).not.toBeNull()
+      expect(row.expires_at! - row.opened_at).toBe(20 * 60_000)
+    }
     expect(rows.find((row) => row.message_id === explicitTtl.id)?.expires_at).toBe(
       rows.find((row) => row.message_id === explicitTtl.id)!.opened_at + 5 * 60_000,
     )

@@ -16,6 +16,7 @@ import {
   deriveSummary,
   logEvent,
   countUnackedAttention,
+  defaultBallTtlMs,
   MAX_BALL_TTL_MS,
   type Classification,
   type Delivery,
@@ -289,6 +290,7 @@ type ExpiredPendingRequest = {
   expires_at: number
   message_id: string
   fanout: string
+  summary: string | null
 }
 
 /** Release deadline-passed ownership without erasing why it ended. The
@@ -311,6 +313,7 @@ function settleExpiredPendingRequests(ctx: TribeContext, now: number): number {
           expires_at: row.expires_at,
           message_id: row.message_id,
           fanout: row.fanout,
+          summary: row.summary,
           settlement: "expired",
           settled_at: now,
         },
@@ -585,6 +588,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   if (a.expires_in_ms !== undefined && !willTrack) {
     return jsonResult({ error: "tribe.send: `expires_in_ms` requires a tracked request." })
   }
+  expiresInMs ??= defaultBallTtlMs(msgType, willTrack)
   const summaryArg = typeof a.summary === "string" ? a.summary.trim() : ""
   const llmSender = ctx.claudeSessionId !== null || ctx.claudeSessionName !== null
   if (llmSender && summaryArg.length === 0) {
@@ -930,6 +934,29 @@ type PendingBall = {
   summary: string | null
 }
 
+type ExpiredPendingBall = PendingBall & {
+  settlement: "expired"
+  settled_at: string
+}
+
+type ExpiredPendingFactRow = {
+  content: string
+  ts: number
+}
+
+type ExpiredPendingFact = {
+  request_id: string
+  recipient: string
+  sender: string
+  opened_at: number
+  expires_at: number
+  message_id: string
+  fanout: string
+  summary: string | null
+  settlement: "expired"
+  settled_at: number
+}
+
 type PendingBallSummary = {
   total: number
   oldest_age_ms: number
@@ -957,24 +984,31 @@ function pendingBall(row: PendingBallRow, now: number): PendingBall {
   }
 }
 
-type PendingBallView = "active" | "expired"
-
-function pendingRowMatchesView(row: PendingBallRow, now: number, view: PendingBallView): boolean {
-  const expired = row.expires_at !== null && row.expires_at <= now
-  // The daemon normally removes expired rows at the RPC boundary. Keep the
-  // explicit diagnostic view for legacy/direct projections that may still
-  // contain a row between persistence and that boundary.
-  return view === "expired" ? expired : true
+function expiredPendingBall(row: ExpiredPendingFactRow, now: number): ExpiredPendingBall {
+  const fact = JSON.parse(row.content) as ExpiredPendingFact
+  return {
+    request_id: fact.request_id,
+    recipient: fact.recipient,
+    sender: fact.sender,
+    opened_at: new Date(fact.opened_at).toISOString(),
+    expires_at: new Date(fact.expires_at).toISOString(),
+    age_ms: now - fact.opened_at,
+    message_id: fact.message_id,
+    fanout: fact.fanout,
+    summary: fact.summary,
+    settlement: "expired",
+    settled_at: new Date(fact.settled_at ?? row.ts).toISOString(),
+  }
 }
 
-function pendingBallsForOwner(
-  ctx: TribeContext,
-  owner: string,
-  now: number,
-  view: PendingBallView = "active",
-): PendingBall[] {
+function pendingBallsForOwner(ctx: TribeContext, owner: string, now: number): PendingBall[] {
   const rows = ctx.stmts.selectPendingForRecipient.all({ $recipient: owner }) as PendingBallRow[]
-  return rows.filter((row) => pendingRowMatchesView(row, now, view)).map((row) => pendingBall(row, now))
+  return rows.map((row) => pendingBall(row, now))
+}
+
+function expiredPendingBalls(ctx: TribeContext, now: number): ExpiredPendingBall[] {
+  const rows = ctx.stmts.selectExpiredPendingFacts.all() as ExpiredPendingFactRow[]
+  return rows.map((row) => expiredPendingBall(row, now))
 }
 
 function pendingCloseMissWarning(
@@ -1022,9 +1056,9 @@ function replyCloseFailure(tracker: Tracker | undefined): { reply_close_failed: 
   return tracker?.closed === 0 ? { reply_close_failed: true } : undefined
 }
 
-function allPendingBalls(ctx: TribeContext, now: number, view: PendingBallView = "active"): PendingBall[] {
+function allPendingBalls(ctx: TribeContext, now: number): PendingBall[] {
   const rows = ctx.stmts.selectAllPendingRequests.all() as PendingBallRow[]
-  return rows.filter((row) => pendingRowMatchesView(row, now, view)).map((row) => pendingBall(row, now))
+  return rows.map((row) => pendingBall(row, now))
 }
 
 function pendingOwnerGroups(pending: readonly PendingBall[]) {
@@ -1054,7 +1088,6 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
   const owner = (a.owner as string) ?? ctx.getName()
   const all = a.all === true
   const expired = a.expired === true
-  const view: PendingBallView = expired ? "expired" : "active"
   const staleMs = typeof a.stale_ms === "number" ? a.stale_ms : null
   const now = Date.now()
 
@@ -1095,7 +1128,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
   }
 
   if (all) {
-    const rows = allPendingBalls(ctx, now, view)
+    const rows = expired ? expiredPendingBalls(ctx, now) : allPendingBalls(ctx, now)
     const pending = staleMs === null ? rows : rows.filter((row) => row.age_ms >= staleMs)
     const owners = pendingOwnerGroups(pending)
     return jsonResult({
@@ -1110,7 +1143,9 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
     })
   }
 
-  const rows = pendingBallsForOwner(ctx, owner, now, view)
+  const rows = expired
+    ? expiredPendingBalls(ctx, now).filter((row) => row.recipient === owner)
+    : pendingBallsForOwner(ctx, owner, now)
   const pending = staleMs === null ? rows : rows.filter((row) => row.age_ms >= staleMs)
   return jsonResult({ owner, expired, pending, count: pending.length })
 }

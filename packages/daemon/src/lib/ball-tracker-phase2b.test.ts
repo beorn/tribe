@@ -121,6 +121,28 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     expect(row.request).toBe(id)
   })
 
+  it("applies the request-class default to every broadcast owner", () => {
+    const res = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        { to: "*", message: "ack before the next sweep", type: "request", request: "req-default-broadcast" },
+        makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+      ),
+    )
+
+    expect(res.sent).toBe(true)
+    const rows = db
+      .prepare(
+        "SELECT recipient, expires_at - opened_at AS ttl_ms FROM pending_request WHERE request_id = ? ORDER BY recipient",
+      )
+      .all("req-default-broadcast")
+    expect(rows).toEqual([
+      { recipient: "@agent/1", ttl_ms: 20 * 60_000 },
+      { recipient: "@agent/2", ttl_ms: 20 * 60_000 },
+    ])
+  })
+
   it("request:true sends from different senders open distinct tracker rows", () => {
     const first = parseToolJson(
       handleToolCall(

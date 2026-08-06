@@ -160,7 +160,22 @@ export type BallTracker = {
   incident?: IncidentIdentity & { active?: boolean }
 }
 
+export const DEFAULT_BALL_TTL_MS_BY_CLASS = {
+  request: 20 * 60_000,
+  query: 20 * 60_000,
+  assign: 20 * 60_000,
+} as const
+
 export const MAX_BALL_TTL_MS = 24 * 60 * 60_000
+
+/** Resolve the mechanism-owned deadline default. Explicitly tracked message
+ *  types outside the implicit trio are requests by construction: the sender
+ *  supplied `request` (or an incident identity) to open ownership. */
+export function defaultBallTtlMs(type: string, tracked: boolean): number | undefined {
+  if (!tracked) return undefined
+  if (type === "query" || type === "assign") return DEFAULT_BALL_TTL_MS_BY_CLASS[type]
+  return DEFAULT_BALL_TTL_MS_BY_CLASS.request
+}
 
 /**
  * Derive the channel-envelope reply hint from the durable message metadata.
@@ -266,7 +281,7 @@ export function sendMessage(
   }
   const persistedRequest = correlationRequest ?? requestId
   const replyId = ballTracker.reply ?? null
-  const expiresInMs = ballTracker.expiresInMs
+  const expiresInMs = ballTracker.expiresInMs ?? defaultBallTtlMs(type, requestId !== null)
   if (
     requestId &&
     expiresInMs !== undefined &&

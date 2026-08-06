@@ -387,7 +387,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
     }
   })
 
-  it("settles deadline-passed balls before pending, attention, and health projections", () => {
+  it("settles deadline-passed balls before live projections and retains an explicit expired outcome", () => {
     const { db, stmts } = setup()
     // The actionable-response SLA projection is opt-in via TRIBE_SLA_ROLE; name
     // @chief so tribe.health() surfaces the @chief open-ball count below.
@@ -423,7 +423,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       }
       const expired = parseToolJson(handleToolCall(ctx, "tribe.pending", { expired: true }, makeOpts())) as {
         expired: boolean
-        pending: Array<{ request_id: string }>
+        pending: Array<{ request_id: string; settlement: string; settled_at: string }>
       }
       const attention = readAttentionProjection(ctx, "@chief", now).attention
       const health = parseToolJson(handleToolCall(ctx, "tribe.health", {}, makeOpts())) as {
@@ -436,7 +436,32 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
 
       expect(pending.pending.map((ball) => ball.request_id)).toEqual(["active-review"])
       expect(expired.expired).toBe(true)
-      expect(expired.pending).toEqual([])
+      expect(expired.pending).toEqual([
+        expect.objectContaining({
+          request_id: "expired-review",
+          settlement: "expired",
+          settled_at: expect.any(String),
+        }),
+      ])
+
+      const archiveCutoff = Date.now() + 1_000
+      stmts.archiveExpiredMessages.run({ $cutoff: archiveCutoff, $archived_at: archiveCutoff })
+      stmts.deleteExpiredMessages.run({ $cutoff: archiveCutoff })
+      const archived = parseToolJson(
+        handleToolCall(ctx, "tribe.pending", { all: true, expired: true }, makeOpts()),
+      ) as {
+        pending: Array<{ request_id: string; settlement: string }>
+        owners: Array<{ owner: string; pending: Array<{ request_id: string; settlement: string }> }>
+      }
+      expect(archived.pending).toEqual([
+        expect.objectContaining({ request_id: "expired-review", settlement: "expired" }),
+      ])
+      expect(archived.owners).toEqual([
+        expect.objectContaining({
+          owner: "@chief",
+          pending: [expect.objectContaining({ request_id: "expired-review", settlement: "expired" })],
+        }),
+      ])
       expect(attention.pending_balls.map((ball) => ball.request_id)).toEqual(["active-review"])
       expect(health.pending_balls?.count).toBe(1)
       expect(health.cadence?.open_balls.count).toBe(1)

@@ -193,7 +193,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             minimum: 1,
             maximum: 24 * 60 * 60_000,
             description:
-              "Optional sender-declared deadline offset in milliseconds. At the first daemon operation after it passes, Tribe settles the pending ownership row. Must be no greater than one day.",
+              "Override the 20-minute class default for a tracked request, query, or assignment. At the first daemon operation after the deadline, Tribe settles ownership and records an expired outcome. Must be no greater than one day.",
           },
           incident: {
             type: "object",
@@ -334,7 +334,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "expires-in-ms",
           flags: "--expires-in-ms <milliseconds>",
-          description: "Optional tracked-ball deadline offset in milliseconds (no default, maximum 1d)",
+          description: "Override the tracked-ball 20m class default (maximum 1d)",
           mapsTo: "expires_in_ms",
         },
         {
@@ -355,12 +355,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     id: "tribe.pending",
     title: "Pending Requests",
     description:
-      "Ball-tracker query: list every open request where the given owner is responsible for replying, or inspect legacy rows whose declared deadline passed before daemon expiry settlement. Default owner is the caller's session.",
+      "Ball-tracker query: list active requests where the owner must reply, or derive historical expired outcomes from the journal. Default owner is the caller's session.",
     lifetime: "live-session",
     mcp: {
       name: "pending",
       description:
-        "Ball-tracker query: list every open request where the given owner is responsible for replying, or inspect legacy rows whose declared deadline passed before daemon expiry settlement. Default owner is the caller's session.",
+        "Ball-tracker query: list active requests where the owner must reply, or derive historical expired outcomes from the journal. Default owner is the caller's session.",
       inputSchema: {
         type: "object",
         properties: {
@@ -370,7 +370,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           },
           expired: {
             type: "boolean",
-            description: "Filter to open rows whose optional sender-declared deadline has passed.",
+            description: "Read historical expired outcomes from the hot and archived journal.",
           },
           owner: {
             type: "string",
@@ -400,7 +400,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           pending: {
             type: "array",
             description:
-              "Open requests, optionally filtered to deadline-passed rows. Each includes request_id, recipient, sender, summary, opened_at, expires_at, age_ms, message_id, and fanout.",
+              "Active requests, or expired outcomes when expired=true. Expired rows add settlement='expired' and settled_at to the request identity and timing fields.",
             items: { type: "object", additionalProperties: true },
           },
           owners: {
@@ -426,7 +426,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     cli: available({
       name: "pending",
       description:
-        "Ball-tracker query: list every open request where the given owner is responsible for replying, or inspect legacy rows whose declared deadline passed before daemon expiry settlement. Default owner is the caller's session.",
+        "Ball-tracker query: list active requests where the owner must reply, or derive historical expired outcomes from the journal. Default owner is the caller's session.",
       lifetime: "one-shot",
       mapsToMcp: "pending",
       options: [
@@ -443,7 +443,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "expired",
           flags: "--expired",
-          description: "Filter to open requests whose declared deadline passed",
+          description: "Show historical expired outcomes derived from the journal",
         },
         { name: "owner", flags: "-o, --owner <name>", description: "Owner session name (default: caller)" },
         {
