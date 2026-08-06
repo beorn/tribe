@@ -59,7 +59,20 @@ function insertSettlement(
     "INSERT INTO messages (id, type, sender, recipient, kind, content, ref, ts, request, reply) VALUES (?, 'event.ball.settled', 'daemon', '*', 'event', ?, ?, ?, NULL, NULL)",
   ).run(
     `${requestId}-${settlement}`,
-    JSON.stringify({ request_id: requestId, recipient: "@chief", message_id: requestId, settlement }),
+    JSON.stringify({
+      schema_version: 1,
+      request_id: requestId,
+      recipient: "@chief",
+      sender: "@agent/1",
+      opened_at: ts - MINUTE,
+      expires_at: null,
+      message_id: requestId,
+      fanout: "first",
+      summary: null,
+      settlement,
+      settled_at: ts,
+      settled_by: "daemon",
+    }),
     requestId,
     ts,
   )

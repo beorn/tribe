@@ -5,7 +5,9 @@
 import { randomUUID } from "node:crypto"
 import type { TribeContext } from "./context.ts"
 import { AUTO_TRACK_TYPES_SET } from "./database.ts"
-import { incidentKey, type IncidentIdentity } from "tribe-wire"
+import { incidentKey, type BallSettlementReason, type IncidentIdentity } from "tribe-wire"
+
+export type { BallSettlementReason } from "tribe-wire"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -169,8 +171,6 @@ export const DEFAULT_BALL_TTL_MS_BY_CLASS = {
 } as const
 
 export const MAX_BALL_TTL_MS = 24 * 60 * 60_000
-
-export type BallSettlementReason = "manual-close" | "incident-cleared" | "gc-expired" | "sender-withdrawn"
 
 export type PendingSettlementRow = {
   request_id: string

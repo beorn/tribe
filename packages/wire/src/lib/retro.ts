@@ -6,6 +6,7 @@
  */
 
 import type { Database } from "bun:sqlite"
+import { parseBallOutcomeFact, type BallOutcomeFactRow, type BallSettlementReason } from "./ball-outcome.ts"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -78,8 +79,7 @@ interface MemberMetrics {
   responseLatenciesMs: number[]
 }
 
-const NON_REPLY_SETTLEMENT_REASONS = ["manual-close", "incident-cleared", "gc-expired", "sender-withdrawn"] as const
-type NonReplySettlementReason = (typeof NON_REPLY_SETTLEMENT_REASONS)[number]
+type NonReplySettlementReason = BallSettlementReason
 type SettlementReason = "answered" | NonReplySettlementReason
 type SettlementCounts = Record<SettlementReason, number>
 
@@ -195,36 +195,20 @@ function deriveSettlementCounts(
 ): SettlementCounts {
   const settlementByIdentity = new Map<string, NonReplySettlementReason>()
   const settlementRows = db
-    .prepare("SELECT id, content FROM messages WHERE kind = 'event' AND type = 'event.ball.settled' AND ts >= ?")
-    .all(windowStart) as Array<{ id: string; content: string }>
+    .prepare(
+      "SELECT id, type, content, ts FROM messages WHERE kind = 'event' AND type = 'event.ball.settled' AND ts >= ?",
+    )
+    .all(windowStart) as BallOutcomeFactRow[]
   for (const row of settlementRows) {
-    let value: unknown
-    try {
-      value = JSON.parse(row.content)
-    } catch (error) {
-      throw new Error(`invalid ball settlement fact ${row.id}: content is not JSON`, { cause: error })
-    }
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      throw new Error(`invalid ball settlement fact ${row.id}: replay evidence must be an object`)
-    }
-    const fact = value as { request_id?: unknown; recipient?: unknown; message_id?: unknown; settlement?: unknown }
-    if (
-      typeof fact.request_id !== "string" ||
-      typeof fact.recipient !== "string" ||
-      typeof fact.message_id !== "string" ||
-      !NON_REPLY_SETTLEMENT_REASONS.includes(fact.settlement as NonReplySettlementReason)
-    ) {
-      throw new Error(`invalid ball settlement fact ${row.id}: required replay evidence is missing or malformed`)
-    }
+    const fact = parseBallOutcomeFact(row)
+    if (fact.kind !== "settled") throw new Error(`expected ball settlement fact ${row.id}`)
     if (answeredRequestIds.has(fact.request_id)) continue
     const identity = JSON.stringify([fact.request_id, fact.recipient, fact.message_id])
     const prior = settlementByIdentity.get(identity)
     if (prior !== undefined && prior !== fact.settlement) {
-      throw new Error(
-        `conflicting ball settlement facts for ${fact.request_id}: ${prior} vs ${String(fact.settlement)}`,
-      )
+      throw new Error(`conflicting ball settlement facts for ${fact.request_id}: ${prior} vs ${fact.settlement}`)
     }
-    settlementByIdentity.set(identity, fact.settlement as NonReplySettlementReason)
+    settlementByIdentity.set(identity, fact.settlement)
   }
   const counts: SettlementCounts = {
     answered: answeredRequestIds.size,

@@ -4,7 +4,15 @@
 
 import { createLogger } from "loggily"
 import { randomUUID } from "node:crypto"
-import { resolveInboxWaitOptions, type InboxWaitResult } from "tribe-wire"
+import {
+  parseBallOutcomeFact,
+  resolveInboxWaitOptions,
+  type BallDeadlineObservationPayload,
+  type BallFactEvidence,
+  type BallOutcomeFactRow,
+  type BallSettlementFact,
+  type InboxWaitResult,
+} from "tribe-wire"
 import type { TribeContext } from "./context.ts"
 import type { TribeRole } from "tribe-wire/lib/config"
 import { TRIBE_PROTOCOL_VERSION } from "tribe-wire/lib/socket"
@@ -317,7 +325,7 @@ function recordExpiredPendingRequests(ctx: TribeContext, now: number): number {
         summary: row.summary,
         observation: "deadline-passed",
         observed_at: now,
-      } satisfies DeadlineObservationPayload
+      } satisfies BallDeadlineObservationPayload
       logEvent(ctx, "ball.expired", undefined, fact, { sender: "daemon", ref: row.request_id, ts: now })
     }
     return rows.length
@@ -914,57 +922,9 @@ type PendingOutcomeBall = PendingBall & {
   settled_at: string | null
 }
 
-type PendingOutcomeFactRow = {
-  id: string
-  type: "event.ball.expired" | "event.ball.settled"
-  content: string
-  ts: number
-}
-
 type PendingReplyFactRow = {
   sender: string
   reply: string
-}
-
-type PendingFactEvidence = {
-  schema_version: 1 | 2
-  request_id: string
-  recipient: string
-  sender: string
-  opened_at: number
-  expires_at: number | null
-  message_id: string
-  fanout: "first" | "all"
-  summary: string | null
-}
-
-type DeadlineObservationPayload = PendingFactEvidence & {
-  schema_version: 2
-  expires_at: number
-  observation: "deadline-passed"
-  observed_at: number
-}
-
-type ExpiredPendingFact = PendingFactEvidence & {
-  kind: "deadline-passed"
-  expires_at: number
-  observed_at: number
-}
-
-type SettledPendingFact = PendingFactEvidence & {
-  kind: "settled"
-  schema_version: 1
-  settlement: BallSettlementReason
-  settled_at: number
-  settled_by: string
-}
-
-type PendingOutcomeFactInput = Partial<PendingFactEvidence> & {
-  observation?: unknown
-  observed_at?: unknown
-  settlement?: unknown
-  settled_at?: unknown
-  settled_by?: unknown
 }
 
 type PendingBallSummary = {
@@ -996,67 +956,8 @@ function pendingBall(row: PendingBallRow, now: number): PendingBall {
   }
 }
 
-const BALL_SETTLEMENT_REASONS = new Set<BallSettlementReason>([
-  "manual-close",
-  "incident-cleared",
-  "gc-expired",
-  "sender-withdrawn",
-])
-
-function parsePendingOutcomeFact(row: PendingOutcomeFactRow): ExpiredPendingFact | SettledPendingFact {
-  let value: unknown
-  try {
-    value = JSON.parse(row.content)
-  } catch (error) {
-    throw new Error(`invalid ball outcome fact ${row.id}: content is not JSON`, { cause: error })
-  }
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(`invalid ball outcome fact ${row.id}: replay evidence must be an object`)
-  }
-  const fact = value as PendingOutcomeFactInput
-  const identity = typeof fact.request_id === "string" ? fact.request_id : row.id
-  const validString = (candidate: unknown): candidate is string => typeof candidate === "string" && candidate.length > 0
-  const validTime = (candidate: unknown): candidate is number =>
-    typeof candidate === "number" && Number.isFinite(candidate)
-  const evidenceIsInvalid =
-    (fact.schema_version !== 1 && fact.schema_version !== 2) ||
-    !validString(fact.request_id) ||
-    !validString(fact.recipient) ||
-    !validString(fact.sender) ||
-    !validTime(fact.opened_at) ||
-    (fact.expires_at !== null && !validTime(fact.expires_at)) ||
-    !validString(fact.message_id) ||
-    (fact.fanout !== "first" && fact.fanout !== "all") ||
-    (fact.summary !== null && typeof fact.summary !== "string")
-  if (evidenceIsInvalid) {
-    const factKind = row.type === "event.ball.expired" ? "expiry" : "settlement"
-    throw new Error(`invalid ball ${factKind} fact ${identity}: required replay evidence is missing or malformed`)
-  }
-  if (row.type === "event.ball.expired") {
-    if (fact.schema_version === 2) {
-      if (!validTime(fact.expires_at) || fact.observation !== "deadline-passed" || !validTime(fact.observed_at)) {
-        throw new Error(`invalid ball expiry fact ${identity}: required replay evidence is missing or malformed`)
-      }
-      return { ...fact, kind: "deadline-passed" } as ExpiredPendingFact
-    }
-    if (!validTime(fact.expires_at) || fact.settlement !== "expired" || !validTime(fact.settled_at)) {
-      throw new Error(`invalid ball expiry fact ${identity}: required replay evidence is missing or malformed`)
-    }
-    return { ...fact, kind: "deadline-passed", observed_at: fact.settled_at } as ExpiredPendingFact
-  }
-  if (
-    fact.schema_version !== 1 ||
-    !validTime(fact.settled_at) ||
-    !BALL_SETTLEMENT_REASONS.has(fact.settlement as BallSettlementReason) ||
-    !validString(fact.settled_by)
-  ) {
-    throw new Error(`invalid ball settlement fact ${identity}: required replay evidence is missing or malformed`)
-  }
-  return { ...fact, kind: "settled" } as SettledPendingFact
-}
-
 function pendingOutcomeBall(
-  fact: PendingFactEvidence,
+  fact: BallFactEvidence,
   now: number,
   settlement: BallSettlementReason | null,
   settledAt: number | null,
@@ -1082,7 +983,7 @@ function pendingBallsForOwner(ctx: TribeContext, owner: string, now: number): Pe
   return sortPendingBalls(rows.map((row) => pendingBall(row, now)))
 }
 
-function pendingFactKey(fact: Pick<PendingFactEvidence, "request_id" | "recipient" | "message_id">): string {
+function pendingFactKey(fact: Pick<BallFactEvidence, "request_id" | "recipient" | "message_id">): string {
   return JSON.stringify([fact.request_id, fact.recipient, fact.message_id])
 }
 
@@ -1097,7 +998,7 @@ function indexPendingReplies(replies: readonly PendingReplyFactRow[]): Map<strin
 }
 
 function pendingFactWasAnswered(
-  fact: Pick<PendingFactEvidence, "request_id" | "recipient" | "message_id" | "fanout">,
+  fact: Pick<BallFactEvidence, "request_id" | "recipient" | "message_id" | "fanout">,
   respondersByRef: ReadonlyMap<string, ReadonlySet<string>>,
 ): boolean {
   const requestResponders = respondersByRef.get(fact.request_id)
@@ -1111,11 +1012,11 @@ function pendingFactWasAnswered(
  * journal facts. The journal's ball.expired row is only an observation echo;
  * it is never misreported as a terminal settlement. */
 function expiredPendingBalls(ctx: TribeContext, now: number): PendingOutcomeBall[] {
-  const rows = ctx.stmts.selectPendingOutcomeFacts.all() as PendingOutcomeFactRow[]
+  const rows = ctx.stmts.selectPendingOutcomeFacts.all() as BallOutcomeFactRow[]
   const replies = ctx.stmts.selectPendingReplyFacts.all() as PendingReplyFactRow[]
   const respondersByRef = indexPendingReplies(replies)
-  const facts = rows.map(parsePendingOutcomeFact)
-  const settlements = new Map<string, SettledPendingFact>()
+  const facts = rows.map(parseBallOutcomeFact)
+  const settlements = new Map<string, BallSettlementFact>()
   for (const fact of facts) {
     if (fact.kind !== "settled") continue
     const key = pendingFactKey(fact)
