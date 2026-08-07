@@ -561,7 +561,7 @@ describe("stdio adapter delivery modes", () => {
       | undefined
     expect(register?.params?.name).toBe("@agent/9")
     expect(register?.params?.takeover).toBe(true)
-    expect(register?.params?.launchId).toBe("provider-launch-a")
+    expect(register?.params?.launchId).toBe("provider-launch-a::%40agent%2F9")
     expect(register?.params?.launchParentPid).toBe(process.pid)
   })
 

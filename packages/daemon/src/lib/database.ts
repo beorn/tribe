@@ -1318,6 +1318,10 @@ export function createStatements(db: Database) {
     getSessionsByLaunchId: db.prepare(
       "SELECT name, launch_parent_pid FROM sessions WHERE launch_id = $launch_id ORDER BY id",
     ),
+    getSessionsByProviderLaunchId: db.prepare(
+      "SELECT name, launch_id, launch_parent_pid FROM sessions " +
+        "WHERE launch_id = $launch_id OR substr(launch_id, 1, length($derived_prefix)) = $derived_prefix ORDER BY id",
+    ),
     insertTurnStartReceipt: db.prepare(`
       INSERT OR IGNORE INTO turn_start_receipts (
         session, launch_id, launch_parent_pid, controller_session_id,

@@ -31,6 +31,7 @@ import { randomUUID, timingSafeEqual } from "node:crypto"
 import { type Socket as NetSocket } from "node:net"
 import { createLogger } from "loggily"
 import { DEFAULT_INBOX_WAIT_SESSION, resolveInboxWaitOptions } from "tribe-wire"
+import { deriveTribePersonaLaunchIdentity } from "tribe-wire/lib/persona-launch-identity"
 import {
   createLineParser,
   isRequest,
@@ -307,8 +308,12 @@ export function withDispatcher<
           errorMessage: "Managed inbox request requires a non-empty launch_id",
         }
       }
-      const launchSessions = stmts.getSessionsByLaunchId.all({ $launch_id: launchId }) as Array<{
+      const launchSessions = stmts.getSessionsByProviderLaunchId.all({
+        $launch_id: launchId,
+        $derived_prefix: `${launchId}::`,
+      }) as Array<{
         name: string
+        launch_id: string
         launch_parent_pid: number | null
       }>
       // Tombstones retain journal addressability but no longer own routing.
@@ -325,7 +330,11 @@ export function withDispatcher<
       // recovery retains the launch-only behavior.
       const resolvedLaunchSessions =
         routableLaunchSessions.length > 1 && persona.length > 0
-          ? routableLaunchSessions.filter((session) => session.name === persona)
+          ? routableLaunchSessions.filter(
+              (session) =>
+                session.launch_id === deriveTribePersonaLaunchIdentity(persona, launchId).launchId ||
+                (session.launch_id === launchId && session.name === persona),
+            )
           : routableLaunchSessions
       const launchSession = resolvedLaunchSessions[0]
       if (resolvedLaunchSessions.length !== 1 || launchSession === undefined) {
@@ -352,7 +361,7 @@ export function withDispatcher<
       }
       return {
         sessionName: launchSession.name,
-        launchId,
+        launchId: launchSession.launch_id,
         launchParentPid: Number(launchSession.launch_parent_pid),
       }
     }

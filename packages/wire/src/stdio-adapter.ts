@@ -44,6 +44,7 @@ import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
 import { isExplicitTribePersonaName, isTribeNameShape, TRIBE_NAME_SHAPE_ERROR } from "./lib/persona-name.ts"
+import { deriveTribePersonaLaunchIdentity } from "./lib/persona-launch-identity.ts"
 import { createLogger, setSuppressConsole } from "loggily"
 import { createTimers } from "./timers.ts"
 import { defangModelInput } from "./lib/defang.ts"
@@ -152,7 +153,16 @@ function resolveLaunchParentPid(): number {
 // its stable wrapper: either the complete Hab launcher tuple or, for standalone
 // plugins, the wrapper's actual OS parent. Thus child replacements preserve one
 // launch owner without treating ambient adapter env as authoritative.
-const LAUNCH_IDENTITY = LAUNCH_ID_RAW.length > 0 ? { id: LAUNCH_ID_RAW, parentPid: resolveLaunchParentPid() } : null
+const LAUNCH_IDENTITY =
+  LAUNCH_ID_RAW.length > 0
+    ? {
+        id:
+          REGISTER_WITH_LAUNCH_NAME && LAUNCH_NAME !== undefined
+            ? deriveTribePersonaLaunchIdentity(LAUNCH_NAME, LAUNCH_ID_RAW).launchId
+            : LAUNCH_ID_RAW,
+        parentPid: resolveLaunchParentPid(),
+      }
+    : null
 
 // km 19442 — connect-time replay flood backstop. The wakeup→drain path is capped
 // by selectReplayEvents, but a stale/old daemon that still pushes message BODIES

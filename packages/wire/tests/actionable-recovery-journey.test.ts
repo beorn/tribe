@@ -752,8 +752,11 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     }>
     membershipDb.close()
     expect(sessions).toEqual([
-      { name: runtimeName, launch_id: ownLaunchId },
-      { name: foreignName, launch_id: "managed-cli-foreign-launch" },
+      { name: runtimeName, launch_id: `${ownLaunchId}::${encodeURIComponent(spawnTimeName)}` },
+      {
+        name: foreignName,
+        launch_id: `managed-cli-foreign-launch::${encodeURIComponent(foreignName)}`,
+      },
     ])
   }, 60_000)
 
@@ -864,7 +867,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     }
     for (const persona of personas) {
       expect(members.sessions?.find((session) => session.name === persona)).toMatchObject({
-        launch_id: launchId,
+        launch_id: `${launchId}::${encodeURIComponent(persona)}`,
         launch_parent_pid: process.pid,
       })
     }
@@ -1051,7 +1054,10 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       }>
     }
     const member = members.sessions?.find((session) => session.name === NAME)
-    expect(member).toMatchObject({ launch_id: launchId, launch_parent_pid: process.pid })
+    expect(member).toMatchObject({
+      launch_id: `${launchId}::${encodeURIComponent(NAME)}`,
+      launch_parent_pid: process.pid,
+    })
     expect(member?.member_id).toEqual(expect.any(String))
     const initialMemberId = member!.member_id!
     expect(member?.transport_pids?.toSorted((a, b) => a - b)).toEqual(
@@ -1068,7 +1074,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     }
     expect(health.members?.find((session) => session.name === NAME)).toMatchObject({
       member_id: initialMemberId,
-      launch_id: launchId,
+      launch_id: `${launchId}::${encodeURIComponent(NAME)}`,
       launch_parent_pid: process.pid,
       transport_pids: expect.arrayContaining(launchAdapters.map(({ child }) => child.pid!)),
     })
@@ -1120,7 +1126,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     }>) {
       expect(result.sessions?.find((session) => session.name === NAME)).toMatchObject({
         member_id: initialMemberId,
-        launch_id: launchId,
+        launch_id: `${launchId}::${encodeURIComponent(NAME)}`,
         transport_pids: expect.arrayContaining(launchAdapters.map(({ child }) => child.pid!)),
       })
     }
@@ -1156,7 +1162,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     }
     expect(afterReconnect.sessions?.find((session) => session.name === NAME)).toMatchObject({
       member_id: initialMemberId,
-      launch_id: launchId,
+      launch_id: `${launchId}::${encodeURIComponent(NAME)}`,
       transport_pids: expect.arrayContaining(launchAdapters.map(({ child }) => child.pid!)),
     })
 
@@ -1178,7 +1184,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       expect(result.sessions?.filter((session) => session.name === NAME)).toHaveLength(1)
       expect(result.sessions?.find((session) => session.name === NAME)).toMatchObject({
         member_id: initialMemberId,
-        launch_id: launchId,
+        launch_id: `${launchId}::${encodeURIComponent(NAME)}`,
         transport_pids: expect.arrayContaining(launchAdapters.map(({ child }) => child.pid!)),
       })
     }
@@ -1259,7 +1265,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       .join("\n--- plugin adapter ---\n")
     expect([first.child.exitCode, second.child.exitCode, third.child.exitCode], logs).toEqual([null, null, null])
     expect(member).toMatchObject({
-      launch_id: launchId,
+      launch_id: `${launchId}::${encodeURIComponent(NAME)}`,
       launch_parent_pid: process.pid,
     })
     expect(member?.transport_pids).toHaveLength(3)
@@ -1293,7 +1299,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       sessions?: Array<{ name?: string; member_id?: string; launch_id?: string }>
     }
     const inheritedMember = inheritedMembers.sessions?.find((session) => session.name === NAME)
-    expect(inheritedMember).toMatchObject({ launch_id: staleLaunchId })
+    expect(inheritedMember).toMatchObject({
+      launch_id: `${staleLaunchId}::${encodeURIComponent(NAME)}`,
+    })
     expect(inheritedMember?.member_id).toEqual(expect.any(String))
     expect(inheritedMember?.member_id).not.toBe(firstMemberId)
   }, 60_000)

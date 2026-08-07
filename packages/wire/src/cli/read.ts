@@ -54,7 +54,10 @@ async function callDaemon(method: string, params?: Record<string, unknown>): Pro
 function cliInboxTargetParams(session: string | undefined): Record<string, unknown> {
   if (session !== undefined) return { session }
   const launchId = readTribeLaunchId(process.env)
-  if (launchId) return { launch_id: launchId }
+  const persona = process.env.TRIBE_SESSION_NAME?.trim() || process.env.TRIBE_NAME?.trim()
+  if (launchId) {
+    return { launch_id: launchId, ...(persona === undefined ? {} : { persona }) }
+  }
   throw new Error(
     "Managed inbox request requires provider launch identity; use --session for an explicit operator target",
   )

@@ -43,6 +43,7 @@
     "./lib/transcript": "./src/lib/transcript.ts",
     "./lib/defang": "./src/lib/defang.ts",
     "./lib/persona-name": "./src/lib/persona-name.ts",
+    "./lib/persona-launch-identity": "./src/lib/persona-launch-identity.ts",
     "./lib/spawn-pin-gate": "./src/lib/spawn-pin-gate.ts",
     "./lib/code-identity": "./src/lib/code-identity.ts",
     "./http": "./src/http-adapter.ts"
@@ -96,6 +97,10 @@
         "types": "./dist/lib/persona-name.d.mts",
         "import": "./dist/lib/persona-name.mjs"
       },
+      "./lib/persona-launch-identity": {
+        "types": "./dist/lib/persona-launch-identity.d.mts",
+        "import": "./dist/lib/persona-launch-identity.mjs"
+      },
       "./lib/spawn-pin-gate": {
         "types": "./dist/lib/spawn-pin-gate.d.mts",
         "import": "./dist/lib/spawn-pin-gate.mjs"
@@ -139,6 +144,7 @@
       "src/lib/transcript.ts",
       "src/lib/defang.ts",
       "src/lib/persona-name.ts",
+      "src/lib/persona-launch-identity.ts",
       "src/lib/spawn-pin-gate.ts",
       "src/lib/code-identity.ts",
       "src/http-adapter.ts"

@@ -15,6 +15,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
+import { deriveTribePersonaLaunchIdentity } from "./lib/persona-launch-identity.ts"
 import {
   resolveSocketPath,
   createReconnectingClient,
@@ -58,7 +59,7 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
   const initialFilterMode = initialFilterModeFromEnv(process.env.TRIBE_FILTER_MODE)
   const requireJoin = opts.requireJoin !== false
   const initialName = opts.name?.trim() || undefined
-  const launchId = opts.launchId?.trim() || undefined
+  const providerLaunchId = opts.launchId?.trim() || undefined
   const deliveryCapability = resolveDeliveryCapability({
     delivery: opts.delivery ?? "pull",
     channel: false,
@@ -78,6 +79,11 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
     noSpawn: true,
     async onConnect(client) {
       const registerName = myName !== "pending" ? myName : !requireJoin ? initialName : undefined
+      const identityPersona = registerName ?? initialName
+      const launchId =
+        providerLaunchId !== undefined && identityPersona !== undefined
+          ? deriveTribePersonaLaunchIdentity(identityPersona, providerLaunchId).launchId
+          : providerLaunchId
       const reg = (await client.call("register", {
         ...(registerName !== undefined ? { name: registerName } : {}),
         role: myRole,

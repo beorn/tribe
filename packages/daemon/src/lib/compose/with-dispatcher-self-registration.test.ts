@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { createScope, type InboxWaitResult } from "tribe-wire"
 import { TRIBE_PROTOCOL_VERSION, type JsonRpcRequest } from "tribe-wire/lib/socket"
 import type { TribeRole } from "tribe-wire/lib/config"
+import { deriveTribePersonaLaunchIdentity } from "tribe-wire/lib/persona-launch-identity"
 import { createTribeContext } from "../context.ts"
 import { openDatabase, createStatements } from "../database.ts"
 import { sendMessage } from "../messaging.ts"
@@ -905,7 +906,7 @@ describe("dispatcher bounded mailbox drain", () => {
         name,
         pid,
         project,
-        launchId: "shared-inherited-launch",
+        launchId: deriveTribePersonaLaunchIdentity(name, "shared-inherited-launch").launchId,
         launchParentPid: process.pid,
       })
     }
@@ -939,7 +940,7 @@ describe("dispatcher bounded mailbox drain", () => {
       )
       expect(scoped).toMatchObject({
         session: persona,
-        launch_id: "shared-inherited-launch",
+        launch_id: deriveTribePersonaLaunchIdentity(persona, "shared-inherited-launch").launchId,
         launch_parent_pid: process.pid,
       })
     }
