@@ -229,12 +229,16 @@ tribe-wire send <to> <message...> [-t, --type <type>] [-s, --summary <text>] [--
 `<to>` is a session name or `*` for broadcast. `--type` is one of `assign`,
 `status`, `query`, `response`, `notify` (default), `request`, `verdict` —
 the daemon delivers every type to every session; no type is role-gated.
-`--reply <request_id>` closes a tracked request. A managed one-shot CLI resolves
-its current member from daemon authority using `TRIBE_LAUNCH_ID`; when one
-launch contains multiple named personas, `TRIBE_NAME`/`TRIBE_SESSION_NAME`
-only narrows that daemon-owned launch set. The CLI then attaches its one-shot
-connection to the resolved live member so the message is attributed. A name
-without launch authority is never accepted as ordinary-send attribution.
+`--reply <request_id>` closes a tracked request. At registration, managed
+adapters derive a seat launch id from the provider launch plus persona with
+`deriveTribePersonaLaunchIdentity`; two personas from one provider launch
+therefore have distinct routable and writer identities. A managed one-shot CLI
+still presents the provider-owned `TRIBE_LAUNCH_ID`. The daemon resolves its
+derived identity family and uses `TRIBE_NAME`/`TRIBE_SESSION_NAME` only to
+narrow within that family; a stale or hostile name cannot select another
+provider launch. The CLI then attaches its one-shot connection to the resolved
+live member so the message is attributed. A name without launch authority is
+never accepted as ordinary-send attribution.
 An unattributable send fails instead of silently delivering from a generated
 pending identity. `--anonymous` is the explicit exception and is limited to
 untracked messages: it cannot be combined with reply/request/incident tracking

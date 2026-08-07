@@ -65,9 +65,10 @@ launch controller, not the Tribe daemon.
 ```ts
 import { connectToDaemon, resolveSocketPath } from "tribe-wire/lib/socket"
 import { TRIBE_PROTOCOL_VERSION } from "tribe-wire/lib/socket"
+import { deriveTribePersonaLaunchIdentity } from "tribe-wire/lib/persona-launch-identity"
 ```
 
-JSON-RPC client, reconnecting client, line parser, composition primitives (pipe / Scope / Tool registry). See `src/lib/socket.ts`.
+JSON-RPC client, reconnecting client, line parser, composition primitives (pipe / Scope / Tool registry), and the canonical provider-launch + persona derivation shared by wire and durable writer consumers. See `src/lib/socket.ts` and `src/lib/persona-launch-identity.ts`.
 
 `members --all` is the daemon-side rejoin verdict. `transport_state` is derived
 from the authenticated socket registry; `owner_state` is separate process
