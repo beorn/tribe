@@ -67,6 +67,7 @@ describe("registerSendCommands", () => {
         "--delivery",
         "--ref",
         "--reply",
+        "--anonymous",
         "--request",
         "--fanout",
         "--expires-in-ms",
@@ -590,7 +591,7 @@ describe("registerSendCommands", () => {
 
     const prose = await runSend("checkpoint mentions reply=req-123 in ordinary prose")
     expect(prose.code).toBe(1)
-    expect(prose.stderr).toContain("No daemon running")
+    expect(prose.stderr).toContain("no daemon-validated launch identity")
     expect(prose.stderr).not.toContain("message content begins with")
 
     const structured = await runSend("answered", ["--type", "response", "--reply", "req-123"])
@@ -605,14 +606,13 @@ describe("registerSendCommands", () => {
     expect(mismatched.stderr).not.toContain("No daemon running")
   })
 
-  // @ag/tribe/21921 — P0 REGRESSION PIN. The launch row can be ABSENT
-  // (getSessionsByLaunchId -> 0 rows), and every `ag code` seat carries
-  // TRIBE_LAUNCH_ID, so an unconditional exit on that path removes sending
-  // entirely. Eight seats went mute on 2026-07-22 while reads kept working,
-  // because reads resolve an explicit target and never need the caller's own
-  // identity. The daemon-side launch-tuple fix (f2f4cc02) repairs the case
-  // where a session IS returned; this pins the case where none is.
-  test("a NON-REPLY send survives an unresolvable launch identity (degrades to anonymous)", async () => {
+  // @ag/tribe/21921 originally kept seats from going mute by degrading an
+  // unresolvable launch to an anonymous send. That preserved delivery but
+  // silently lost the sender — and anonymous actionables cannot participate
+  // coherently in the ball graph. The replacement contract is fail-loud by
+  // default, with an explicit opt-in for callers that genuinely want an
+  // untracked anonymous notification.
+  test("an unresolvable launch refuses implicit anonymity and permits explicit anonymous notify", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-send-stale-launch-"))
     const socketPath = join(tmp, "tribe.sock")
     const calls: Array<{ method: string; params: Record<string, unknown> }> = []
@@ -642,29 +642,54 @@ describe("registerSendCommands", () => {
           resolveListen()
         })
       })
-      const res = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProc) => {
-        const child = spawn(BUN_BIN, [CLI, "send", "@agent/7", "still", "reachable"], {
-          env: {
-            ...process.env,
-            TRIBE_SOCKET: socketPath,
-            TRIBE_NAME: "@chief",
-            TRIBE_LAUNCH_ID: "launch-id-with-no-stored-session",
-          },
-          stdio: ["ignore", "pipe", "pipe"],
+      const runSend = (extraArgs: string[] = []) =>
+        new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProc) => {
+          const child = spawn(BUN_BIN, [CLI, "send", "@agent/7", "still", "reachable", ...extraArgs], {
+            env: {
+              ...process.env,
+              TRIBE_SOCKET: socketPath,
+              TRIBE_NAME: "@chief",
+              TRIBE_LAUNCH_ID: "launch-id-with-no-stored-session",
+            },
+            stdio: ["ignore", "pipe", "pipe"],
+          })
+          let stdout = ""
+          let stderr = ""
+          child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+          child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+          child.on("close", (code) => resolveProc({ code, stdout, stderr }))
         })
-        let stdout = ""
-        let stderr = ""
-        child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
-        child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
-        child.on("close", (code) => resolveProc({ code, stdout, stderr }))
-      })
 
-      expect(res).toMatchObject({ code: 0 })
-      expect(res.stdout).toContain("Sent message to @agent/7")
-      expect(res.stderr).toContain("launch-id-with-no-stored-session")
-      // Degrading must not fall back to the env name (21717 anti-spoof).
+      const refused = await runSend()
+      expect(refused).toMatchObject({ code: 1, stdout: "" })
+      expect(refused.stderr).toContain("launch-id-with-no-stored-session")
+      expect(refused.stderr).toMatch(/not sending/i)
+      expect(calls.some((c) => c.method === "tribe.send")).toBe(false)
+
+      calls.length = 0
+      const anonymous = await runSend(["--anonymous"])
+      expect(anonymous).toMatchObject({ code: 0 })
+      expect(anonymous.stdout).toContain("Sent message to @agent/7")
+      // Explicit anonymity must not fall back to the env name (21717
+      // anti-spoof) or perform a launch lookup whose result is irrelevant.
       expect(calls.some((c) => c.method === "register")).toBe(false)
       expect(calls.some((c) => c.method === "tribe.send")).toBe(true)
+      expect(calls.some((c) => c.method === "cli_inbox_status_by_launch_v1")).toBe(false)
+
+      for (const trackedArgs of [
+        ["--anonymous", "--reply", "req-123"],
+        ["--anonymous", "--request"],
+        ["--anonymous", "--incident", "watcher:@agent/7:wedged"],
+        ["--anonymous", "--type", "request"],
+        ["--anonymous", "--type", "query"],
+        ["--anonymous", "--type", "assign"],
+      ]) {
+        calls.length = 0
+        const tracked = await runSend(trackedArgs)
+        expect(tracked.code, trackedArgs.join(" ")).toBe(2)
+        expect(tracked.stderr).toContain("--anonymous is limited to untracked messages")
+        expect(calls, trackedArgs.join(" ")).toEqual([])
+      }
     } finally {
       server.close()
       safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
@@ -746,7 +771,18 @@ describe("registerSendCommands", () => {
             params?: Record<string, unknown>
           }
           calls.push({ method: request.method, params: request.params ?? {} })
-          socket.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { sent: true } }) + "\n")
+          const launchId = String(request.params?.launch_id ?? "")
+          const result =
+            request.method === "cli_inbox_status_by_launch_v1"
+              ? {
+                  session: launchId.replace(/^launch-/u, ""),
+                  launch_id: launchId,
+                  launch_parent_pid: process.pid,
+                }
+              : request.method === "register"
+                ? { name: request.params?.name }
+                : { sent: true }
+          socket.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\n")
         }
       })
     })
@@ -766,7 +802,7 @@ describe("registerSendCommands", () => {
               ...process.env,
               TRIBE_SOCKET: socketPath,
               TRIBE_NAME: sender,
-              TRIBE_LAUNCH_ID: "",
+              TRIBE_LAUNCH_ID: `launch-${sender}`,
             },
             stdio: ["ignore", "ignore", "pipe"],
           })
@@ -777,7 +813,7 @@ describe("registerSendCommands", () => {
 
       expect(await runSend("@sender/1", "first")).toEqual({ code: 0, stderr: "" })
       expect(await runSend("@sender/2", "second")).toEqual({ code: 0, stderr: "" })
-      expect(calls).toEqual([
+      expect(calls.filter((call) => call.method === "tribe.send")).toEqual([
         {
           method: "tribe.send",
           params: {
@@ -803,7 +839,7 @@ describe("registerSendCommands", () => {
     }
   })
 
-  test("send does not forward TRIBE_NAME as a caller-authored identity", async () => {
+  test("send refuses TRIBE_NAME as caller-authored identity without explicit anonymity", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-send-identity-"))
     const socketPath = join(tmp, "tribe.sock")
     const calls: Array<{ method: string; params: Record<string, unknown> }> = []
@@ -857,19 +893,9 @@ describe("registerSendCommands", () => {
         child.on("close", (code) => resolveProc({ code, stdout, stderr }))
       })
 
-      expect(res).toMatchObject({ code: 0 })
-      expect(res.stdout).toContain("Sent message to @agent/7")
-      expect(calls).toEqual([
-        {
-          method: "tribe.send",
-          params: {
-            to: "@agent/7",
-            message: "please handle this",
-            type: "request",
-            request: true,
-          },
-        },
-      ])
+      expect(res).toMatchObject({ code: 1, stdout: "" })
+      expect(res.stderr).toContain("no daemon-validated launch identity")
+      expect(calls).toEqual([])
     } finally {
       server.close()
       safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })

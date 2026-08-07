@@ -896,9 +896,9 @@ describe("dispatcher bounded mailbox drain", () => {
       expect(error.code, label).toBe(code)
     }
 
-    for (const [connId, name, pid, project, launchParentPid] of [
-      ["conn-outer", "@agent/outer", process.pid, "/tmp/km-outer", process.pid],
-      ["conn-inner", "@agent/inner", process.ppid, "/tmp/km-inner", process.ppid],
+    for (const [connId, name, pid, project] of [
+      ["conn-outer", "@agent/outer", process.pid, "/tmp/km-outer"],
+      ["conn-inner", "@agent/inner", process.ppid, "/tmp/km-inner"],
     ] as const) {
       harness.addPendingClient(connId)
       await harness.register(connId, {
@@ -906,7 +906,7 @@ describe("dispatcher bounded mailbox drain", () => {
         pid,
         project,
         launchId: "shared-inherited-launch",
-        launchParentPid,
+        launchParentPid: process.pid,
       })
     }
 
@@ -924,6 +924,25 @@ describe("dispatcher bounded mailbox drain", () => {
 
     expect(ambiguous.code).toBe(-32003)
     expect(ambiguous.message).toMatch(/resolved to 2 sessions|ambiguous/i)
+
+    for (const persona of ["@agent/outer", "@agent/inner"] as const) {
+      const scoped = parseResult<{ session: string; launch_id: string; launch_parent_pid: number }>(
+        await harness.dispatcher.handleRequest(
+          {
+            jsonrpc: "2.0",
+            id: `scoped-launch-inbox-${persona}`,
+            method: "cli_inbox_status_by_launch_v1",
+            params: { launch_id: "shared-inherited-launch", persona },
+          },
+          "conn-status",
+        ),
+      )
+      expect(scoped).toMatchObject({
+        session: persona,
+        launch_id: "shared-inherited-launch",
+        launch_parent_pid: process.pid,
+      })
+    }
   })
 
   it("resolves a launch to its sole routable session when connected tombstones share the launch id", async () => {

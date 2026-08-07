@@ -845,6 +845,87 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(attributed.sender).toBe("@chief")
   }, 60_000)
 
+  it("routes attributed CLI replies from two personas sharing one provider launch", async () => {
+    const socketPath = join(tmpDir, "shared-launch-personas.sock")
+    const dbPath = join(tmpDir, "shared-launch-personas.db")
+    const launchId = "shared-persona-launch"
+    const personas = ["@chief", "@cto"] as const
+
+    daemonProc = spawnDaemon(socketPath, dbPath)
+    await waitForCondition(() => existsSync(socketPath), "shared-persona daemon socket")
+
+    const seats = await Promise.all(
+      personas.map((name) => spawnLaunchAdapter(socketPath, `shared-persona-${name.slice(1)}.log`, launchId, { name })),
+    )
+    const firstSeat = seats.at(0)
+    if (firstSeat === undefined) throw new Error("shared-persona journey started no seats")
+    const members = (await callLaunchToolWhenRegistered(firstSeat, 80, "members", {})) as {
+      sessions?: Array<{ name?: string; launch_id?: string; launch_parent_pid?: number }>
+    }
+    for (const persona of personas) {
+      expect(members.sessions?.find((session) => session.name === persona)).toMatchObject({
+        launch_id: launchId,
+        launch_parent_pid: process.pid,
+      })
+    }
+
+    const requester = await connectToDaemon(socketPath)
+    await requester.call("register", {
+      name: "@requester",
+      role: "member",
+      domains: ["test"],
+      project: tmpDir,
+      projectName: "test",
+      protocolVersion: TRIBE_PROTOCOL_VERSION,
+      pid: process.pid,
+      delivery: "pull",
+    })
+
+    try {
+      for (const [index, persona] of personas.entries()) {
+        const requestId = `shared-persona-request-${index}`
+        const replyText = `reply from ${persona}`
+        await requester.call("tribe.send", {
+          to: persona,
+          message: `request for ${persona}`,
+          type: "request",
+          summary: `request for ${persona}`,
+          request: requestId,
+        })
+
+        const reply = await runCli(
+          ["send", "@requester", replyText, "--type", "response", "--summary", replyText, "--reply", requestId],
+          {
+            ...BASE_ENV,
+            TRIBE_SOCKET: socketPath,
+            TRIBE_LAUNCH_ID: launchId,
+            TRIBE_NAME: persona,
+            TRIBE_SESSION_NAME: persona,
+            TRIBE_NO_AUTOSTART: "1",
+          },
+          { throughParent: true },
+        )
+        expect(reply.exitCode, reply.stderr).toBe(0)
+        expect(reply.stdout).toContain(`Closed 1 pending request row(s) for ${persona}: ${requestId}`)
+
+        const log = await runCli(["log", "--json", "--reply-prefix", requestId], {
+          ...BASE_ENV,
+          TRIBE_SOCKET: socketPath,
+          TRIBE_NO_AUTOSTART: "1",
+        })
+        expect(log.exitCode, log.stderr).toBe(0)
+        const snapshot = JSON.parse(log.stdout) as {
+          messages: Array<{ sender?: string; content?: string; reply?: string }>
+        }
+        expect(snapshot.messages).toEqual([
+          expect.objectContaining({ sender: persona, content: replyText, reply: requestId }),
+        ])
+      }
+    } finally {
+      requester.close()
+    }
+  }, 60_000)
+
   it("claiming a parked name forwards actionable and response attention without ambient replay", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const dbPath = join(tmpDir, "tribe.db")
@@ -933,8 +1014,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     // Force every transport through daemon registration, then give displaced
     // transports time to reconnect. A provider launch is one logical member:
     // none of its independently spawned MCP adapters may evict another.
-    for (const [index, adapter] of launchAdapters.entries())
+    for (const [index, adapter] of launchAdapters.entries()) {
       writeJson(adapter.child, callToolPayload(index + 2, "members", {}))
+    }
     await waitForCondition(
       () =>
         launchAdapters.every((adapter, index) => adapter.stdout.some((line) => line.id === index + 2)) ||

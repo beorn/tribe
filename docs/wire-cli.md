@@ -223,19 +223,24 @@ current exemptions with their reasons.
 ### `send`
 
 ```bash
-tribe-wire send <to> <message...> [-t, --type <type>] [-s, --summary <text>] [--delivery push|pull] [--ref <text>] [--reply <request_id>] [--request [request_id]] [--fanout first|all] [--expires-in-ms <ms>]
+tribe-wire send <to> <message...> [-t, --type <type>] [-s, --summary <text>] [--delivery push|pull] [--ref <text>] [--reply <request_id>] [--anonymous] [--request [request_id]] [--fanout first|all] [--expires-in-ms <ms>]
 ```
 
 `<to>` is a session name or `*` for broadcast. `--type` is one of `assign`,
 `status`, `query`, `response`, `notify` (default), `request`, `verdict` —
 the daemon delivers every type to every session; no type is role-gated.
-`--reply <request_id>` closes a tracked request. A one-shot CLI is not a
-registered member transport, so the daemon attributes its message to the
-connection's unique pending identity; `TRIBE_NAME`, `TRIBE_SESSION_NAME`, and
-`TRIBE_LAUNCH_ID` are never accepted as send attribution. For replies, a
-managed CLI resolves the current owner from daemon authority using
-`TRIBE_LAUNCH_ID`; an unmanaged CLI uses `TRIBE_NAME`/`TRIBE_SESSION_NAME` only
-for the ownership preflight. The command verifies ownership against
+`--reply <request_id>` closes a tracked request. A managed one-shot CLI resolves
+its current member from daemon authority using `TRIBE_LAUNCH_ID`; when one
+launch contains multiple named personas, `TRIBE_NAME`/`TRIBE_SESSION_NAME`
+only narrows that daemon-owned launch set. The CLI then attaches its one-shot
+connection to the resolved live member so the message is attributed. A name
+without launch authority is never accepted as ordinary-send attribution.
+An unattributable send fails instead of silently delivering from a generated
+pending identity. `--anonymous` is the explicit exception and is limited to
+untracked messages: it cannot be combined with reply/request/incident tracking
+or with `request`, `query`, or `assign` types. For replies, an unmanaged CLI
+uses `TRIBE_NAME`/`TRIBE_SESSION_NAME` only for the ownership preflight. The
+command verifies ownership against
 `tribe.pending` before sending, and verifies the daemon's committed-closed count
 afterward; it will not report success on an unproven close.
 If the first non-whitespace message token looks like `reply=<id>` or
@@ -255,8 +260,8 @@ default. Passing the deadline makes the obligation louder and records a durable
 observation, but never closes it.
 
 ```bash
-tribe-wire send '@alice' 'task X done' --type=notify
-tribe-wire send '@ci' 'R656 failed; see journal evidence' --type=notify --delivery=pull
+tribe-wire send '@alice' 'task X done' --type=notify --anonymous
+tribe-wire send '@ci' 'R656 failed; see journal evidence' --type=notify --delivery=pull --anonymous
 ```
 
 ### `join`

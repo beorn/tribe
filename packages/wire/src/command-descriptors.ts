@@ -319,6 +319,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           description: "Ball-tracker: close the tracked request with this id",
         },
         {
+          name: "anonymous",
+          flags: "--anonymous",
+          description: "Explicitly send an untracked message without sender attribution",
+        },
+        {
           name: "request",
           flags: "--request [request_id]",
           description:

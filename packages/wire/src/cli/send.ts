@@ -148,6 +148,8 @@ type SendPayloadInput = {
   ref?: string
   request?: boolean | string
   reply?: string
+  /** CLI control only; never forwarded to the daemon payload. */
+  anonymous?: boolean
   fanout?: Fanout
   expiresInMs?: number
   /** Raw `--incident emitter:subject:condition` value. */
@@ -229,12 +231,19 @@ function rejectUnstructuredMessageIntent(input: SendPayloadInput): void {
   process.exit(2)
 }
 
-async function resolveSendCaller(reply?: string): Promise<SendCaller | null> {
+async function resolveSendCaller(reply?: string, anonymous = false): Promise<SendCaller | null> {
+  if (anonymous) return null
   const launchId = readTribeLaunchId(process.env)
   if (launchId) {
     let failure: string
     try {
-      const status = mcpJsonContent(await callDaemon("cli_inbox_status_by_launch_v1", { launch_id: launchId })) as {
+      const persona = replyOwnerFromEnv()
+      const status = mcpJsonContent(
+        await callDaemon("cli_inbox_status_by_launch_v1", {
+          launch_id: launchId,
+          ...(persona === null ? {} : { persona }),
+        }),
+      ) as {
         session?: unknown
         launch_id?: unknown
         launch_parent_pid?: unknown
@@ -257,26 +266,13 @@ async function resolveSendCaller(reply?: string): Promise<SendCaller | null> {
     } catch (error) {
       failure = `cannot resolve launch identity ${launchId}: ${error instanceof Error ? error.message : String(error)}`
     }
-    // 21921 — the launch row can be absent (getSessionsByLaunchId → 0 rows),
-    // and every `ag code` seat carries an adapter launch identity, so an unconditional
-    // exit here takes away sending entirely. Eight seats went mute this way on
-    // 2026-07-22 while reads kept working, because reads resolve an explicit
-    // target and never need the caller's own identity.
-    //
-    // Split on whether the send CLAIMS anything. A --reply closes a tracker row
-    // someone else is waiting on, so an unverifiable identity stays fatal. A
-    // bare send claims nothing, so an unresolvable one costs nothing — it falls
-    // through to the anonymous path below, which is the same 21717 contract
-    // this function already applies when there is no launch authority at all.
-    if (reply) {
-      console.error(`tribe-wire send: ${failure}; not sending --reply ${reply}.`)
-      console.error(`A tracked reply must be sent by the ball's owner. Inspect with: tribe pending --owner <owner>`)
-      process.exit(1)
-    }
-    // Loud, not fatal: the stale launch id is named so the identity fault stays
-    // visible even though the message goes out.
-    console.error(`tribe-wire send: ${failure}; sending anonymously.`)
-    return null
+    console.error(`tribe-wire send: ${failure}; not sending${reply ? ` --reply ${reply}` : ""}.`)
+    console.error(
+      reply
+        ? `A tracked reply must be sent by the ball's owner. Inspect with: tribe pending --owner <owner>`
+        : "Restore the managed seat identity, or pass --anonymous for an intentionally unattributed untracked message.",
+    )
+    process.exit(1)
   }
 
   // No launch authority. TRIBE_NAME / TRIBE_SESSION_NAME is a caller-authored
@@ -285,7 +281,13 @@ async function resolveSendCaller(reply?: string): Promise<SendCaller | null> {
   // it, to name the ball owner the response must close; register there so the
   // daemon can attribute the closure (a live holder still dedupes fail-loud, so
   // a running seat is never stolen by a one-shot).
-  if (!reply) return null
+  if (!reply) {
+    console.error("tribe-wire send: no daemon-validated launch identity is available; not sending.")
+    console.error(
+      "Send from a managed Tribe seat, or pass --anonymous for an intentionally unattributed untracked message.",
+    )
+    process.exit(1)
+  }
   const owner = replyOwnerFromEnv()
   if (owner) return { name: owner }
   console.error(
@@ -369,12 +371,25 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     console.error(`tribe-wire send: ${oversized}`)
     process.exit(2)
   }
-  const caller = await resolveSendCaller(input.reply)
+  const type = input.type ?? "notify"
+  const anonymousWouldTrack =
+    input.reply !== undefined ||
+    input.request !== undefined ||
+    input.incident !== undefined ||
+    input.incidentCleared === true ||
+    type === "request" ||
+    type === "query" ||
+    type === "assign"
+  if (input.anonymous && anonymousWouldTrack) {
+    console.error(
+      "tribe-wire send: --anonymous is limited to untracked messages; it cannot be combined with reply/request/incident tracking or request, query, or assign types.",
+    )
+    process.exit(2)
+  }
+  const caller = await resolveSendCaller(input.reply, input.anonymous)
   if (input.reply && caller) await verifyPendingReplyOwner(caller.name, input.reply)
 
-  const result = mcpJsonContent(
-    await callDaemon("tribe.send", buildSendPayload(input), caller, Boolean(input.reply)),
-  ) as {
+  const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input), caller, !input.anonymous)) as {
     error?: string
     summary?: string
     summary_derived?: boolean
@@ -532,6 +547,7 @@ export function registerSendCommands(program: Command): void {
   const sendDelivery = cliOption(SEND_CLI, "delivery")
   const sendRef = cliOption(SEND_CLI, "ref")
   const sendReply = cliOption(SEND_CLI, "reply")
+  const sendAnonymous = cliOption(SEND_CLI, "anonymous")
   const sendRequest = cliOption(SEND_CLI, "request")
   const sendFanout = cliOption(SEND_CLI, "fanout")
   const sendExpiresInMs = cliOption(SEND_CLI, "expires-in-ms")
@@ -548,6 +564,7 @@ export function registerSendCommands(program: Command): void {
     .option(sendDelivery.flags, sendDelivery.description)
     .option(sendRef.flags, sendRef.description)
     .option(sendReply.flags, sendReply.description)
+    .option(sendAnonymous.flags, sendAnonymous.description)
     .option(sendRequest.flags, sendRequest.description)
     .option(sendFanout.flags, sendFanout.description)
     .option(sendExpiresInMs.flags, sendExpiresInMs.description)
@@ -565,6 +582,7 @@ export function registerSendCommands(program: Command): void {
           ref?: string
           request?: boolean | string
           reply?: string
+          anonymous?: boolean
           fanout?: string
           expiresInMs?: string
           incident?: string
@@ -619,6 +637,7 @@ export function registerSendCommands(program: Command): void {
           ref: opts.ref,
           request: opts.request === "true" ? true : opts.request === false ? undefined : opts.request,
           reply: opts.reply,
+          anonymous: opts.anonymous,
           fanout: opts.fanout as Fanout | undefined,
           expiresInMs,
           incident: opts.incident,

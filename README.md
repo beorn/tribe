@@ -142,11 +142,16 @@ oldest open balls) ahead of the chronological event log.
 The same flow from a terminal, without Claude Code (a daemon must be running):
 
 ```bash
-tribe-wire send '@bob' 'starting on the parser refactor' --type notify
+tribe-wire send '@bob' 'starting on the parser refactor' --type notify --anonymous
 tribe-wire members            # JSON rows: name, role, launch_id, alive
 tribe-wire log                # recent messages
 tribe-wire pending            # open balls awaiting replies
 ```
+
+The standalone shell has no managed seat identity, so this notification opts
+into anonymous delivery explicitly. Managed provider seats omit `--anonymous`;
+the daemon resolves and attributes them from their launch authority. Anonymous
+delivery is restricted to untracked messages.
 
 ---
 

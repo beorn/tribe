@@ -88,8 +88,9 @@ A simple bot or cron job can loop on the CLI against a running daemon:
 ```bash
 tribe-wire log                      # recent messages
 tribe-wire pending --owner '@bot'   # open balls you owe replies on
-tribe-wire send '@alice' 'done' --type notify
+tribe-wire send '@alice' 'done' --type notify --anonymous
 ```
 
 `tribe-wire members` (machine-readable JSON rows) tells you who is currently
-alive when deciding whom to address.
+alive when deciding whom to address. A shell with no managed launch authority
+must opt into anonymous delivery; anonymous sends cannot open or close balls.

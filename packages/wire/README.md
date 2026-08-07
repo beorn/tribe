@@ -38,8 +38,8 @@ tribe-wire --help                                 # full Commander help + addHel
 tribe-wire status                                 # active sessions with uptime + last-seen
 tribe-wire members --all                          # JSON transport + owner verdicts, including disconnected rows
 tribe-wire repair --reap-stale-transports --json # bounded stale connection-row repair with reason counts
-tribe-wire send '@alice' 'task X done' --type=notify
-tribe-wire send '@ci' 'R656 failed; see journal evidence' --type=notify --delivery=pull
+tribe-wire send '@alice' 'task X done' --type=notify --anonymous
+tribe-wire send '@ci' 'R656 failed; see journal evidence' --type=notify --delivery=pull --anonymous
 tribe-wire retro --since 2h --format markdown
 tribe-wire mcp --name '@bob' --role member    # argv-forwarded; what .mcp.json invokes
 ```
@@ -49,6 +49,9 @@ recipient session's delivery mode. `push` is the default and permits live
 channel fanout; `pull` persists the message for inbox reads without a channel
 wakeup. Delivery classification is orthogonal to semantic ball tracking: only
 the message type and `--request` decide whether a pending ball opens.
+The shell examples opt into `--anonymous` because no managed launch identity is
+present; anonymous sends are limited to untracked messages. Managed provider
+seats omit the flag and are attributed through daemon launch authority.
 
 Launch controllers can set `TRIBE_FILTER_MODE=focus|normal|ambient` on the MCP
 stdio or loopback-HTTP adapter. The preference is persisted during registration,

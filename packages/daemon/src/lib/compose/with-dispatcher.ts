@@ -280,6 +280,7 @@ export function withDispatcher<
       const hasLaunchId = Object.prototype.hasOwnProperty.call(params, "launch_id")
       const hasLaunchParentPid = Object.prototype.hasOwnProperty.call(params, "launch_parent_pid")
       const hasLaunchParentPids = Object.prototype.hasOwnProperty.call(params, "launch_parent_pids")
+      const hasPersona = Object.prototype.hasOwnProperty.call(params, "persona")
       if (opts.mode === "explicit") {
         if (hasLaunchId || hasLaunchParentPid || hasLaunchParentPids) {
           return { errorCode: -32602, errorMessage: "Explicit inbox request accepts session, not launch identity" }
@@ -313,11 +314,27 @@ export function withDispatcher<
       // Tombstones retain journal addressability but no longer own routing.
       // A disconnected canonical row remains valid for managed CLI recovery.
       const routableLaunchSessions = launchSessions.filter((session) => !isTombstonedSessionName(session.name))
-      const launchSession = routableLaunchSessions[0]
-      if (routableLaunchSessions.length !== 1 || launchSession === undefined) {
+      const persona = hasPersona && typeof params.persona === "string" ? params.persona.trim() : ""
+      if (hasPersona && persona.length === 0) {
+        return { errorCode: -32602, errorMessage: "Managed inbox persona must be a non-empty string" }
+      }
+      // A launch can legitimately host distinct named bridges. Launch
+      // authority remains the trust boundary; persona only narrows an
+      // otherwise ambiguous set already proven to belong to that launch. For
+      // a sole session, ignore a stale spawn-time persona so runtime rename
+      // recovery retains the launch-only behavior.
+      const resolvedLaunchSessions =
+        routableLaunchSessions.length > 1 && persona.length > 0
+          ? routableLaunchSessions.filter((session) => session.name === persona)
+          : routableLaunchSessions
+      const launchSession = resolvedLaunchSessions[0]
+      if (resolvedLaunchSessions.length !== 1 || launchSession === undefined) {
         return {
           errorCode: -32003,
-          errorMessage: `Inbox launch identity resolved to ${routableLaunchSessions.length} sessions (${launchSessions.length} stored); exactly one routable session is required`,
+          errorMessage:
+            `Inbox launch identity resolved to ${routableLaunchSessions.length} sessions (${launchSessions.length} stored)` +
+            (persona.length > 0 ? `; persona ${persona} matched ${resolvedLaunchSessions.length}` : "") +
+            "; exactly one routable session is required",
         }
       }
       if (!Number.isSafeInteger(launchSession.launch_parent_pid) || Number(launchSession.launch_parent_pid) <= 0) {
