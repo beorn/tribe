@@ -123,7 +123,8 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@silvery/commander": "^0.19.2",
-    "loggily": "^0.10.2"
+    "loggily": "^0.10.2",
+    "removely": "^0.1.0"
   },
   "devDependencies": {
     "tsdown": "^0.21.7",

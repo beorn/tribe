@@ -15,8 +15,9 @@ import {
   renameSync,
   writeFileSync,
 } from "node:fs"
-import { basename, dirname, resolve } from "node:path"
+import { basename, dirname, parse, resolve } from "node:path"
 import { parseArgs } from "node:util"
+import { findAncestorWithin, findGitProjectRoot } from "removely"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -118,15 +119,12 @@ export function parseSessionDomains(args: TribeArgs): string[] {
     .filter(Boolean)
 }
 
-/** Find .beads/ directory by walking up from cwd (returns null if not found) */
+/** Find .beads/ inside the current Git/superproject boundary. */
 export function findBeadsDir(from?: string): string | null {
-  let dir = from ?? process.cwd()
-  while (dir !== "/") {
-    const candidate = resolve(dir, ".beads")
-    if (existsSync(candidate)) return candidate
-    dir = dirname(dir)
-  }
-  return null
+  const start = resolve(from ?? process.cwd())
+  const boundary = findGitProjectRoot(start) ?? parse(start).root
+  const projectRoot = findAncestorWithin(start, boundary, (directory) => existsSync(resolve(directory, ".beads")))
+  return projectRoot ? resolve(projectRoot, ".beads") : null
 }
 
 /** Resolve project name from .beads/ config or directory name.
@@ -136,21 +134,17 @@ export function resolveProjectName(cwd?: string): string {
   const beadsDir = findBeadsDir(dir)
   if (beadsDir) {
     const projectRoot = dirname(beadsDir)
-    // Only use .beads/ if it's nearby (skip ~/.beads/ found far up the tree)
-    const depth = dir.replace(projectRoot, "").split("/").filter(Boolean).length
-    if (depth <= 2) {
-      const configPath = resolve(beadsDir, "config.yaml")
-      if (existsSync(configPath)) {
-        try {
-          const content = readFileSync(configPath, "utf-8")
-          const match = content.match(/^project:\s*["']?(\w+)["']?/m)
-          if (match?.[1]) return match[1].toLowerCase()
-        } catch {
-          /* fallback */
-        }
+    const configPath = resolve(beadsDir, "config.yaml")
+    if (existsSync(configPath)) {
+      try {
+        const content = readFileSync(configPath, "utf-8")
+        const match = content.match(/^project:\s*["']?(\w+)["']?/m)
+        if (match?.[1]) return match[1].toLowerCase()
+      } catch {
+        /* fallback */
       }
-      return basename(projectRoot).toLowerCase()
     }
+    return basename(projectRoot).toLowerCase()
   }
   // No nearby .beads/ — use cwd directory name
   return basename(dir).toLowerCase()
