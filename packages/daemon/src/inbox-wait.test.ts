@@ -86,7 +86,7 @@ function makeOpts(inboxWait?: HandlerOpts["inboxWait"]): HandlerOpts {
 }
 
 describe("createInboxWaitManager", () => {
-  it("returns one canonical timeout with the current attention projection", async () => {
+  it("returns one canonical wake with the current attention projection", async () => {
     const attention = {
       actionable_unread: [{ id: "actionable-1" }],
       pending_balls: [{ request_id: "request-1" }],
@@ -98,14 +98,48 @@ describe("createInboxWaitManager", () => {
     )
     const result = await manager.wait("@ci", "conn-1", 0)
     expect(result).toMatchObject({
-      status: "timeout",
+      status: "woken",
       session: "@ci",
       unread_count: 3,
-      timed_out: true,
+      timed_out: false,
       aborted: false,
       waited_ms: 0,
       effective_timeout_ms: 0,
       attention,
+    })
+  })
+
+  it("carries a pending ball without treating it as inbox activity", async () => {
+    const attention = {
+      actionable_unread: [],
+      pending_balls: [{ request_id: "request-1" }],
+      pending_balls_summary: { total: 1, oldest_age_ms: 5_000 },
+    }
+    const manager = createInboxWaitManager(
+      (session) => status(session, 0),
+      () => attention,
+    )
+
+    await expect(manager.wait("@ci", "conn-pending", 0)).resolves.toMatchObject({
+      status: "timeout",
+      timed_out: true,
+      attention,
+    })
+  })
+
+  it("rechecks after subscribing so a row in the registration gap cannot be lost", async () => {
+    let durableReads = 0
+    const manager = createInboxWaitManager(
+      (session) => status(session, 0),
+      () => EMPTY_ATTENTION,
+      () => (durableReads++ === 0 ? 0 : 1),
+      () => 0,
+    )
+
+    await expect(manager.wait("@ci", "conn-race", 1_000)).resolves.toMatchObject({
+      status: "woken",
+      timed_out: false,
+      waited_ms: 0,
     })
   })
 
@@ -377,6 +411,75 @@ describe("createInboxWaitManager", () => {
     }
   })
 
+  it("fresh opt-in wait wakes for a pre-existing validated reply only", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-current-reply-"))
+    const db = openDatabase(join(tmpDir, "tribe.db"))
+    const stmts = createStatements(db)
+    const manager = createInboxWaitManager(
+      (session) => status(session, 0),
+      () => EMPTY_ATTENTION,
+      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
+      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply, true),
+    )
+    const requester = makeContext(db, stmts, "requester", "@requester", manager.onMessageInserted)
+    const responder = makeContext(db, stmts, "responder", "@responder", manager.onMessageInserted)
+
+    try {
+      sendMessage(
+        responder,
+        "@requester",
+        "unvalidated response",
+        "response",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        { reply: "missing-request" },
+      )
+      await expect(
+        manager.wait("@requester", "conn-unvalidated-current", 0, { wakeOnCorrelatedReply: true }),
+      ).resolves.toMatchObject({ status: "timeout", timed_out: true })
+
+      sendMessage(
+        requester,
+        "@responder",
+        "please respond",
+        "request",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        { request: "req-current" },
+      )
+      sendMessage(
+        responder,
+        "@requester",
+        "validated status",
+        "status",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        { reply: "req-current" },
+      )
+
+      await expect(manager.wait("@requester", "conn-default-current", 0)).resolves.toMatchObject({
+        status: "timeout",
+        timed_out: true,
+      })
+      await expect(
+        manager.wait("@requester", "conn-validated-current", 0, { wakeOnCorrelatedReply: true }),
+      ).resolves.toMatchObject({
+        status: "woken",
+        timed_out: false,
+        waited_ms: 0,
+      })
+    } finally {
+      db.close()
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
   it("re-armed opt-in wait wakes for a validated reply that landed between chunks", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-reply-gap-"))
     const db = openDatabase(join(tmpDir, "tribe.db"))
@@ -561,10 +664,16 @@ describe("createInboxWaitManager", () => {
     }
   }
 
-  function realLatestInboxWaitSeq(stmts: TribeStatements, session: string, wakeOnCorrelatedReply = false): number {
+  function realLatestInboxWaitSeq(
+    stmts: TribeStatements,
+    session: string,
+    wakeOnCorrelatedReply = false,
+    unacknowledgedOnly = false,
+  ): number {
     const row = stmts.getLatestInboxWaitMessage.get({
       $name: session,
       $include_correlated_replies: wakeOnCorrelatedReply ? 1 : 0,
+      $unacknowledged_only: unacknowledgedOnly ? 1 : 0,
     }) as { rowid: number } | undefined
     return row?.rowid ?? 0
   }
@@ -614,7 +723,7 @@ describe("createInboxWaitManager", () => {
     }
   })
 
-  it("does not publish a pre-existing unread row as a new wait wake", async () => {
+  it("wakes immediately for a pre-existing unacknowledged actionable row", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-new-row-"))
     const db = openDatabase(join(tmpDir, "tribe.db"))
     const stmts = createStatements(db)
@@ -628,31 +737,48 @@ describe("createInboxWaitManager", () => {
     const seat = "@dev/1"
 
     try {
-      sendMessage(chief, seat, "already surfaced before the wait", "verdict", undefined, undefined, "direct")
+      sendMessage(chief, seat, "still unacknowledged before the wait", "verdict", undefined, undefined, "direct")
       expect(readStatus(seat).unread_count).toBe(1)
 
-      const wait = manager.wait(seat, "conn-new-row", 2_000)
-      let settled: Awaited<typeof wait> | undefined
-      void wait.then((value) => {
-        settled = value
-      })
-      await Promise.resolve()
-      await Promise.resolve()
-
-      expect(settled, "an old unread row must not sticky-wake a newly armed wait").toBeUndefined()
-
-      sendMessage(chief, seat, "arrived after the wait began", "assign", undefined, undefined, "direct")
-      await Promise.resolve()
-      await Promise.resolve()
-
-      await expect(wait).resolves.toMatchObject({
+      await expect(manager.wait(seat, "conn-current-row", 2_000)).resolves.toMatchObject({
         status: "woken",
         session: seat,
         timed_out: false,
         aborted: false,
+        waited_ms: 0,
       })
     } finally {
-      manager.cancelConnection("conn-new-row")
+      db.close()
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("does not wake for an acknowledged historical actionable row", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-acknowledged-row-"))
+    const db = openDatabase(join(tmpDir, "tribe.db"))
+    const stmts = createStatements(db)
+    const readStatus = realUnreadReader(stmts)
+    const manager = createInboxWaitManager(
+      readStatus,
+      () => EMPTY_ATTENTION,
+      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
+      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply, true),
+    )
+    const chief = makeContext(db, stmts, "chief", "@chief", manager.onMessageInserted)
+    const seat = "@dev/1"
+
+    try {
+      sendMessage(chief, seat, "already handled before the wait", "verdict", undefined, undefined, "direct")
+      const latest = stmts.getLatestActionableAttention.get({ $name: seat }) as { rowid: number }
+      stmts.advanceMailboxCursor.run({ $recipient: seat, $seq: latest.rowid, $now: Date.now() })
+      expect(readStatus(seat).unread_count).toBe(0)
+
+      await expect(manager.wait(seat, "conn-acknowledged-row", 0)).resolves.toMatchObject({
+        status: "timeout",
+        timed_out: true,
+        aborted: false,
+      })
+    } finally {
       db.close()
       rmSync(tmpDir, { recursive: true, force: true })
     }

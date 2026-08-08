@@ -373,8 +373,17 @@ export function withDispatcher<
         const latest = stmts.getLatestInboxWaitMessage.get({
           $name: sessionName,
           $include_correlated_replies: wakeOnCorrelatedReply ? 1 : 0,
+          $unacknowledged_only: 0,
         }) as { rowid: number } | undefined
         return latest?.rowid ?? 0
+      },
+      (sessionName, wakeOnCorrelatedReply) => {
+        const current = stmts.getLatestInboxWaitMessage.get({
+          $name: sessionName,
+          $include_correlated_replies: wakeOnCorrelatedReply ? 1 : 0,
+          $unacknowledged_only: 1,
+        }) as { rowid: number } | undefined
+        return current?.rowid ?? 0
       },
     )
     const previousOnMessageInserted = daemonCtx.onMessageInserted

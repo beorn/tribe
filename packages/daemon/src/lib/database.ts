@@ -1408,9 +1408,10 @@ export function createStatements(db: Database) {
       LIMIT 1
     `),
 
-    /** Durable actionable tail independent of mailbox acknowledgement. A
-     * reconnecting wait compares this against its logical baseline so a row
-     * inserted and acknowledged between transport chunks is still observed. */
+    /** One qualifying-tail predicate with two explicit projections. Fresh
+     * waits request the cursor-aware current tail; reconnecting chunks request
+     * the durable tail so a row inserted and acknowledged between transports
+     * is still observed relative to the logical wait baseline. */
     getLatestInboxWaitMessage: db.prepare(`
       SELECT rowid
       FROM messages AS m
@@ -1425,6 +1426,10 @@ export function createStatements(db: Database) {
             AND type IN (${CORRELATED_REPLY_TYPES_SQL})
             AND correlated_reply_requester = $name
           )
+        )
+        AND (
+          $unacknowledged_only = 0
+          OR m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
         )
       ORDER BY m.rowid DESC
       LIMIT 1

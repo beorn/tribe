@@ -1292,17 +1292,10 @@ async function cmdInboxWait(opts: {
   const target = cliInboxTargetParams(opts.session)
   let result: InboxWaitResult
   try {
-    const baseline = await callInboxWaitChunk(
-      cliInboxMethod("wait", opts.session),
-      target,
-      0,
-      controls.wakeOnCorrelatedReply,
-    )
     result = await waitForInboxWithReconnect({
       session: opts.session,
       timeoutMs: controls.timeoutMs,
       wakeOnCorrelatedReply: controls.wakeOnCorrelatedReply,
-      initialAfterSeq: baseline.baseline_seq,
       call: ({ timeoutMs: chunkTimeoutMs, wakeOnCorrelatedReply, afterSeq }) =>
         callInboxWaitChunk(
           cliInboxMethod("wait", opts.session),
@@ -1327,7 +1320,7 @@ async function cmdInboxWait(opts: {
     return
   }
   if (result.timed_out) {
-    console.log(`${result.session}: no new actionable DMs within ${Math.round(controls.timeoutMs / 1000)}s.`)
+    console.log(`${result.session}: no actionable DMs within ${Math.round(controls.timeoutMs / 1000)}s.`)
     process.exitCode = 64
     return
   }

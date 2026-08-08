@@ -638,7 +638,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     successor.client.close()
   }, 60_000)
 
-  it.fails("drains the managed launch mailbox instead of a foreign environment identity when MCP is unavailable", async () => {
+  it("drains the managed launch mailbox instead of a foreign environment identity when MCP is unavailable", async () => {
     const socketPath = join(tmpDir, "managed-cli-inbox.sock")
     const dbPath = join(tmpDir, "managed-cli-inbox.db")
     const capability = "managed-cli-inbox-secret"

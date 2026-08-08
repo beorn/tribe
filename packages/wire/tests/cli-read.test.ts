@@ -499,7 +499,7 @@ describe("waitForInboxWithReconnect", () => {
     expect(result.waited_ms).toBe(750)
   })
 
-  test("does not publish pre-existing attention as a new logical-wait wake", async () => {
+  test("preserves the logical baseline across reconnect chunks", async () => {
     let now = 0
     let calls = 0
     const afterSeqs: Array<number | undefined> = []

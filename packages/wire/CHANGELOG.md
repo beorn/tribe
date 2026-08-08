@@ -6,10 +6,10 @@
 
 - **Reconnect-stable inbox-wait baselines.** Protocol v10 gives the installed
   CLI a private durable cursor across its 30-second transport chunks while
-  keeping that cursor out of public MCP and CLI results. A logical wait now
-  wakes only for a default actionable or opted-in validated tracked-request
-  reply inserted after it began, including rows inserted during a reconnect
-  gap and acknowledged before the next socket opens.
+  keeping that cursor out of public MCP and CLI results. A fresh logical wait
+  is level-triggered by current unacknowledged default actionables or opted-in
+  validated replies; reconnect chunks are edge-triggered from the original
+  baseline, including rows inserted and acknowledged while the socket is down.
 - **Typed MCP host-ceiling refusal and CLI/daemon version preflight.** Protocol
   v9 adds `status` to completed waits, returns `host_cut` before an MCP request
   reaches the measured 10,000ms native-host ceiling, uses a host-safe 5,000ms
@@ -45,10 +45,9 @@
   ambient seat identity before launch, and preserves that same owner across
   manual reloads. A directly launched daemon adopts the supervisor before
   replacement instead of self-detaching its successor.
-- Keep inbox-wait terminal outcomes daemon-authoritative. Attention that
-  predates the logical wait remains visible in the result but no longer turns
-  a timeout into a synthetic wake; the private baseline is the authority for
-  whether a qualifying row arrived after the wait began.
+- Keep inbox-wait terminal outcomes daemon-authoritative. Current
+  unacknowledged qualifying work wakes a fresh wait; the private baseline is
+  the authority only after a logical wait has begun and reconnects.
 - Survive rapid daemon-generation bursts in the stable plugin supervisor with
   bounded exponential replacement backoff and a stability reset. `members`
   and `health` now expose missing durable-launch transports in-band without

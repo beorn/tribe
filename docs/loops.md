@@ -40,8 +40,10 @@ rows stay quiet by default; `--wake-on-correlated-reply` additionally admits a
 validated `response` or `status` to the waiting session's own tracked request.
 Every completed wait has `status: "woken" | "timeout" | "aborted"` and reports
 the logical window as `effective_timeout_ms`. `timeout` means the deadline
-elapsed; the attention snapshot is independent and can still contain rows that
-predate the wait baseline. `aborted` is terminal and is never retried.
+elapsed without qualifying inbox work: a fresh wait first checks current
+unacknowledged actionables, while reconnect chunks retain the original durable
+baseline. The attention snapshot can still contain quiet responses or pending
+balls. `aborted` is terminal and is never retried.
 On wake, drain with a small fetch and handle what `attention` shows.
 
 MCP `inbox.wait` is diagnostic-only and defaults to a host-safe 5,000ms. The

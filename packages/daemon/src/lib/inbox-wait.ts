@@ -27,15 +27,37 @@ export type InboxWaitChunkResult = WireInboxWaitResult & {
   readonly baseline_seq: number
 }
 
+type InboxWaitSnapshot = {
+  readonly status: InboxStatus
+  readonly attention: WireInboxWaitResult["attention"]
+  readonly currentQualifyingSeq: number
+  readonly latestQualifyingSeq: number
+}
+
 export function createInboxWaitManager(
   readStatus: (session: string) => InboxStatus,
   readAttention: (session: string) => WireInboxWaitResult["attention"],
   readLatestQualifyingSeq: (session: string, wakeOnCorrelatedReply: boolean) => number = () => 0,
+  readCurrentQualifyingSeq: (session: string, wakeOnCorrelatedReply: boolean, status: InboxStatus) => number = (
+    _session,
+    _wakeOnCorrelatedReply,
+    status,
+  ) => (status.unread_count > 0 ? 1 : 0),
 ) {
   const waiters = new Set<Waiter>()
 
+  function readSnapshot(session: string, wakeOnCorrelatedReply: boolean): InboxWaitSnapshot {
+    const status = readStatus(session)
+    return {
+      status,
+      attention: readAttention(session),
+      currentQualifyingSeq: readCurrentQualifyingSeq(session, wakeOnCorrelatedReply, status),
+      latestQualifyingSeq: readLatestQualifyingSeq(session, wakeOnCorrelatedReply),
+    }
+  }
+
   function assembleResult(
-    status: InboxStatus,
+    snapshot: InboxWaitSnapshot,
     waitedMs: number,
     effectiveTimeoutMs: number,
     baselineSeq: number,
@@ -43,24 +65,27 @@ export function createInboxWaitManager(
   ): InboxWaitChunkResult {
     return {
       status: flags.aborted ? "aborted" : flags.timedOut ? "timeout" : "woken",
-      ...status,
+      ...snapshot.status,
       waited_ms: waitedMs,
       effective_timeout_ms: effectiveTimeoutMs,
       timed_out: flags.timedOut,
       aborted: flags.aborted,
-      attention: readAttention(status.session),
+      attention: snapshot.attention,
       baseline_seq: baselineSeq,
     }
   }
 
-  function settle(waiter: Waiter, flags: { timedOut: boolean; aborted: boolean }): void {
+  function settle(
+    waiter: Waiter,
+    flags: { timedOut: boolean; aborted: boolean },
+    snapshot = readSnapshot(waiter.session, waiter.wakeOnCorrelatedReply),
+  ): void {
     if (waiter.done) return
     waiter.done = true
     clearTimeout(waiter.timer)
     waiters.delete(waiter)
-    const status = readStatus(waiter.session)
     waiter.resolve(
-      assembleResult(status, Date.now() - waiter.startedAt, waiter.effectiveTimeoutMs, waiter.baselineSeq, flags),
+      assembleResult(snapshot, Date.now() - waiter.startedAt, waiter.effectiveTimeoutMs, waiter.baselineSeq, flags),
     )
   }
 
@@ -69,9 +94,9 @@ export function createInboxWaitManager(
     waiter.done = true
     clearTimeout(waiter.timer)
     waiters.delete(waiter)
-    const status = readStatus(waiter.session)
+    const snapshot = readSnapshot(waiter.session, waiter.wakeOnCorrelatedReply)
     waiter.resolve({
-      ...assembleResult(status, Date.now() - waiter.startedAt, waiter.effectiveTimeoutMs, waiter.baselineSeq, {
+      ...assembleResult(snapshot, Date.now() - waiter.startedAt, waiter.effectiveTimeoutMs, waiter.baselineSeq, {
         timedOut: false,
         aborted: false,
       }),
@@ -122,11 +147,12 @@ export function createInboxWaitManager(
     opts: { readonly wakeOnCorrelatedReply?: boolean; readonly afterSeq?: number } = {},
   ): Promise<InboxWaitChunkResult> {
     const effectiveTimeoutMs = Number.isFinite(timeoutMs) ? Math.max(0, timeoutMs) : 0
-    const snapshot = readStatus(session)
     const wakeOnCorrelatedReply = opts.wakeOnCorrelatedReply === true
-    const latestSeq = readLatestQualifyingSeq(session, wakeOnCorrelatedReply)
-    const baselineSeq = opts.afterSeq ?? latestSeq
-    if (latestSeq > baselineSeq) {
+    const snapshot = readSnapshot(session, wakeOnCorrelatedReply)
+    const freshLogicalWait = opts.afterSeq === undefined
+    const baselineSeq = opts.afterSeq ?? snapshot.latestQualifyingSeq
+    const shouldWake = freshLogicalWait ? snapshot.currentQualifyingSeq > 0 : snapshot.latestQualifyingSeq > baselineSeq
+    if (shouldWake) {
       return Promise.resolve(
         assembleResult(snapshot, 0, effectiveTimeoutMs, baselineSeq, { timedOut: false, aborted: false }),
       )
@@ -150,6 +176,15 @@ export function createInboxWaitManager(
       }
       waiter.timer = setTimeout(() => settle(waiter, { timedOut: true, aborted: false }), effectiveTimeoutMs)
       waiters.add(waiter)
+
+      // Condition-variable discipline: check, subscribe, then recheck. A row
+      // inserted between the first snapshot and waiter registration must not
+      // need a second message to wake the receive rail.
+      const afterSubscribe = readSnapshot(session, wakeOnCorrelatedReply)
+      const raced = freshLogicalWait
+        ? afterSubscribe.currentQualifyingSeq > 0 || afterSubscribe.latestQualifyingSeq > baselineSeq
+        : afterSubscribe.latestQualifyingSeq > baselineSeq
+      if (raced) settle(waiter, { timedOut: false, aborted: false }, afterSubscribe)
     })
   }
 

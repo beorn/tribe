@@ -146,16 +146,18 @@ capability content never touches process-inspectable state).
 tribe-wire inbox-wait [--session <name>] [--timeout <30s|1m|5m>=30s] [--wake-on-correlated-reply] [--json]
 ```
 
-Long-polls the actionable inbox until a request/query/assign/verdict direct
-message arrives or the timeout elapses. Internally chunks the wait
+Long-polls the actionable inbox. A fresh logical wait returns immediately when
+a request/query/assign/verdict direct is still unacknowledged, then later
+chunks wake only for qualifying rows beyond that logical wait's durable
+baseline. Internally the CLI chunks the wait
 (30s per RPC call by default) and transparently retries across transient
 daemon disconnects/unavailability within the overall timeout, so a single
 logical wait survives a daemon hot-reload mid-poll. The logical window caps at
 30 minutes; every result reports the applied value as `effective_timeout_ms`.
 The `status` discriminant is `woken`, `timeout`, or `aborted`; the legacy
 boolean flags remain for compatibility. `timeout` means the full logical
-deadline elapsed; the returned attention snapshot is orthogonal and may still
-contain rows that predate the wait baseline. Before waiting,
+deadline elapsed with no qualifying current or later inbox row; the returned
+attention snapshot may still carry quiet responses or pending balls. Before waiting,
 the CLI verifies the daemon's protocol version. A stale daemon is refused with
 the client/daemon version plus its running, on-disk, and superproject pins
 instead of attempting to parse a stale reply shape.
