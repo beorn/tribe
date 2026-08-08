@@ -846,13 +846,18 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         pending: Array<{ request_id: string; status: string; settlement: string | null }>
         owners: Array<{ owner: string; oldest_age_ms: number }>
       }
-      expect(expired.count).toBe(3)
+      // Journal identity stays in the journal; the VIEW shows one obligation
+      // per (request_id, recipient) with duplicate generations disclosed via
+      // superseded_count (the expired-view-collapse contract) — while the
+      // owner's oldest age still derives from the earliest OPENING.
+      expect(expired.count).toBe(2)
       expect(expired.pending).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
             request_id: "same-payload-distinct-events",
             status: "unanswered",
             settlement: null,
+            superseded_count: 1,
           }),
         ]),
       )

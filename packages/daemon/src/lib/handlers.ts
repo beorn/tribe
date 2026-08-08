@@ -926,6 +926,11 @@ type PendingOutcomeBall = PendingBall & {
   status: "expired" | "unanswered"
   settlement: BallSettlementReason | null
   settled_at: string | null
+  /** Older generations of the same (request_id, recipient) collapsed behind
+   * this row — the incident rail re-sends one condition under fresh message
+   * ids, and each generation's deadline fact would otherwise render as its
+   * own obligation. History is disclosed here, never multiplied. */
+  superseded_count?: number
 }
 
 type PendingReplyFactRow = {
@@ -1081,7 +1086,36 @@ function expiredPendingBalls(ctx: TribeContext, now: number): PendingOutcomeBall
     if (liveKeys.has(key) || representedSettlements.has(key) || pendingFactWasAnswered(fact, respondersByRef)) continue
     outcomes.push(pendingOutcomeBall(fact, now, fact.settlement, fact.settled_at))
   }
-  return sortPendingBalls(outcomes)
+  return sortPendingBalls(collapseOutcomeGenerations(outcomes))
+}
+
+/**
+ * One obligation per (request_id, recipient). The fact fold above is keyed
+ * per MESSAGE — correct for journal identity, wrong for display: a standing
+ * condition re-sent across generations leaves one deadline fact per fresh
+ * message id, and the live pile rendered 255 rows for 198 identities (one
+ * wait-watch condition alone rendered 15 unanswered ghosts no close could
+ * reach). Keep the latest generation; disclose the rest as superseded_count.
+ */
+function collapseOutcomeGenerations(outcomes: PendingOutcomeBall[]): PendingOutcomeBall[] {
+  const byIdentity = new Map<string, PendingOutcomeBall>()
+  for (const row of outcomes) {
+    const key = JSON.stringify([row.request_id, row.recipient])
+    const prior = byIdentity.get(key)
+    if (prior === undefined) {
+      byIdentity.set(key, { ...row, superseded_count: 0 })
+      continue
+    }
+    const latest = prior.opened_at >= row.opened_at ? prior : { ...row, superseded_count: 0 }
+    latest.superseded_count = (prior.superseded_count ?? 0) + 1
+    // Content (message id, summary, settlement) is the LATEST generation's;
+    // the obligation's AGE is the condition's whole standing life — it has
+    // been owed since the first opening, not since the newest re-send.
+    latest.opened_at = prior.opened_at <= row.opened_at ? prior.opened_at : row.opened_at
+    latest.age_ms = Math.max(prior.age_ms, row.age_ms)
+    byIdentity.set(key, latest)
+  }
+  return [...byIdentity.values()]
 }
 
 function pendingCloseMissWarning(
