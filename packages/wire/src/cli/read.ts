@@ -1174,7 +1174,6 @@ export async function waitForInboxWithReconnect(opts: {
   retryDelayMs?: number
   unavailableGraceMs?: number
   wakeOnCorrelatedReply?: boolean
-  initialAfterSeq?: number
 }): Promise<InboxWaitResult> {
   const now = opts.now ?? Date.now
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
@@ -1190,7 +1189,7 @@ export async function waitForInboxWithReconnect(opts: {
   let latestResult: InboxWaitResult | undefined
   let lastRetryableError: unknown
   let attempted = false
-  let afterSeq = opts.initialAfterSeq
+  let afterSeq: number | undefined
 
   while (true) {
     const remainingMs = Math.max(0, deadline - now())

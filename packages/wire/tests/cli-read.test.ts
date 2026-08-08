@@ -512,7 +512,6 @@ describe("waitForInboxWithReconnect", () => {
       session: "@dev/1",
       timeoutMs: 35_000,
       maxChunkMs: 30_000,
-      initialAfterSeq: 41,
       now: () => now,
       call: async ({ timeoutMs, afterSeq }) => {
         calls += 1
@@ -530,6 +529,7 @@ describe("waitForInboxWithReconnect", () => {
             timed_out: true,
             aborted: false,
             attention: oldAttention,
+            baseline_seq: 41,
           }
         }
         now += 100
@@ -547,12 +547,13 @@ describe("waitForInboxWithReconnect", () => {
             ...oldAttention,
             actionable_unread: [...oldAttention.actionable_unread, { id: "assign-after-wait", type: "assign" }],
           },
+          baseline_seq: 41,
         }
       },
     })
 
     expect(calls).toBe(2)
-    expect(afterSeqs).toEqual([41, 41])
+    expect(afterSeqs).toEqual([undefined, 41])
     expect(result).toMatchObject({
       status: "woken",
       waited_ms: 30_100,
