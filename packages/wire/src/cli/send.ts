@@ -298,30 +298,44 @@ async function resolveSendCaller(reply?: string, anonymous = false): Promise<Sen
   process.exit(2)
 }
 
-async function verifyPendingReplyOwner(owner: string, reply: string): Promise<void> {
+/**
+ * Advisory only (22844): closing a ball and delivering its answer must never
+ * be one coupled operation. A reply whose id is no longer owned STILL SENDS —
+ * a seat that waited hours must get the content even when the bookkeeping
+ * half has expired, been settled out-of-band, or aged past the tracker. The
+ * close outcome is reported separately after delivery.
+ */
+async function warnPendingReplyOwner(owner: string, reply: string): Promise<void> {
   const pending = mcpJsonContent(await callDaemon("tribe.pending", { owner })) as PendingListResult
   if (pending.error) {
-    console.error(`tribe-wire send: cannot verify pending request ${reply} for ${owner}: ${pending.error}`)
-    console.error(`Not sending response. Check with: tribe pending --owner ${owner}`)
-    process.exit(1)
+    console.error(`tribe-wire send: note — cannot verify pending request ${reply} for ${owner}: ${pending.error}`)
+    console.error(`Sending anyway; the close outcome is reported after delivery.`)
+    return
   }
   const hasRequest = (pending.pending ?? []).some((p) => p.request_id === reply || p.message_id === reply)
   if (!hasRequest) {
-    console.error(`tribe-wire send: no pending request ${reply} is owned by ${owner}; not sending response.`)
-    console.error(`Check the owner with: tribe pending --owner ${owner}`)
-    process.exit(1)
+    console.error(`tribe-wire send: note — no pending request ${reply} is currently owned by ${owner}; sending anyway.`)
+    console.error(`The close will report 0 rows; the recipient still gets the message.`)
   }
 }
 
+/**
+ * Runs strictly AFTER delivery (22844): every branch here reports on the
+ * bookkeeping half of an already-sent response, so none may read as a
+ * delivery failure. Exit 3 = delivered, close not confirmed — distinct from
+ * 1 (not delivered) and 2 (identity/usage).
+ */
 function reportCommittedReplyTracker(
   owner: string,
   reply: string,
   tracker: { request_id?: string; closed?: number } | undefined,
 ): void {
   if (tracker === undefined) {
-    console.error(`tribe-wire send: response sent, but the daemon returned no committed tracker proof for ${reply}.`)
+    console.error(
+      `tribe-wire send: response DELIVERED, but the daemon returned no committed tracker proof for ${reply}.`,
+    )
     console.error(`Verify current state with: tribe pending --owner ${owner}`)
-    process.exit(1)
+    process.exit(3)
   }
   const closed = tracker.closed
   const canonicalRequestId = tracker.request_id
@@ -333,18 +347,19 @@ function reportCommittedReplyTracker(
     closed < 0
   ) {
     console.error(
-      `tribe-wire send: response sent, but the daemon returned malformed committed tracker proof for ${reply} ` +
+      `tribe-wire send: response DELIVERED, but the daemon returned malformed committed tracker proof for ${reply} ` +
         `(expected a canonical request_id and a non-negative integer closed count).`,
     )
     console.error(`Verify current state with: tribe pending --owner ${owner}`)
-    process.exit(1)
+    process.exit(3)
   }
   if (closed < 1) {
     console.error(
-      `tribe-wire send: response sent, but its committed tracker result closed 0 rows for ${canonicalRequestId}.`,
+      `tribe-wire send: response DELIVERED, but its committed tracker result closed 0 rows for ${canonicalRequestId} ` +
+        `(ball not currently owned — expired, settled out-of-band, or never tracked).`,
     )
     console.error(`Verify current state with: tribe pending --owner ${owner}`)
-    process.exit(1)
+    process.exit(3)
   }
   console.log(`Closed ${closed} pending request row(s) for ${owner}: ${canonicalRequestId}`)
 }
@@ -387,7 +402,7 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     process.exit(2)
   }
   const caller = await resolveSendCaller(input.reply, input.anonymous)
-  if (input.reply && caller) await verifyPendingReplyOwner(caller.name, input.reply)
+  if (input.reply && caller) await warnPendingReplyOwner(caller.name, input.reply)
 
   const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input), caller, !input.anonymous)) as {
     error?: string

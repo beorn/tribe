@@ -503,25 +503,33 @@ describe("registerSendCommands", () => {
         "reply/close req-123 closed 0 rows; balls owned by @chief: req-other (message msg-other, from @agent/4)",
       )
 
+      // 22844: every branch below reports on the bookkeeping half of an
+      // ALREADY-DELIVERED response — exit 3 (delivered, close unconfirmed),
+      // never exit 1 (not delivered), and the wording says DELIVERED.
       pendingOpen = true
       const unproven = await runReply("unproven")
-      expect(unproven.code).toBe(1)
+      expect(unproven.code).toBe(3)
       expect(unproven.stdout).toBe("")
+      expect(unproven.stderr).toContain("response DELIVERED")
       expect(unproven.stderr).toContain("committed tracker result closed 0 rows for req-123")
       expect(unproven.stderr).toContain("Verify current state with: tribe pending --owner @chief")
 
       pendingOpen = true
       const missing = await runReply("missing")
-      expect(missing.code).toBe(1)
+      expect(missing.code).toBe(3)
       expect(missing.stdout).toBe("")
-      expect(missing.stderr).toContain("response sent, but the daemon returned no committed tracker proof for req-123")
+      expect(missing.stderr).toContain(
+        "response DELIVERED, but the daemon returned no committed tracker proof for req-123",
+      )
       expect(missing.stderr).toContain("Verify current state with: tribe pending --owner @chief")
 
       pendingOpen = true
       const malformed = await runReply("malformed")
-      expect(malformed.code).toBe(1)
+      expect(malformed.code).toBe(3)
       expect(malformed.stdout).toBe("")
-      expect(malformed.stderr).toContain("response sent, but the daemon returned malformed committed tracker proof")
+      expect(malformed.stderr).toContain(
+        "response DELIVERED, but the daemon returned malformed committed tracker proof",
+      )
       expect(malformed.stderr).toContain("Verify current state with: tribe pending --owner @chief")
 
       const closes = calls.filter((call) => call.method === "tribe.pending" && call.params.close !== undefined)

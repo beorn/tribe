@@ -915,6 +915,11 @@ type PendingBall = {
   fanout: "first" | "all"
   summary: string | null
   status: "active" | "expired" | "unanswered"
+  /** Full question body, joined from the messages table on the pending
+   * surfaces (22844). `null` means the store no longer holds the body — the
+   * row stays listed, explicitly distinguishable from a readable one. Absent
+   * on the attention preview, which stays summary-sized. */
+  content?: string | null
 }
 
 type PendingOutcomeBall = PendingBall & {
@@ -982,6 +987,29 @@ function pendingOutcomeBall(
 function pendingBallsForOwner(ctx: TribeContext, owner: string, now: number): PendingBall[] {
   const rows = ctx.stmts.selectPendingForRecipient.all({ $recipient: owner }) as PendingBallRow[]
   return sortPendingBalls(rows.map((row) => pendingBall(row, now)))
+}
+
+/**
+ * A ball must never outlive its question (22844): the tracker's retention is
+ * unbounded while every log read is a window, so the pending surfaces join
+ * the body back in by message id. `content: null` marks a body the store no
+ * longer holds — the obligation stays listed, explicitly flagged, never
+ * indistinguishable from a readable one.
+ */
+function withQuestionBodies<T extends { message_id: string }>(
+  ctx: TribeContext,
+  balls: T[],
+): (T & { content: string | null })[] {
+  const bodies = new Map<string, string | null>()
+  return balls.map((ball) => {
+    let content = bodies.get(ball.message_id)
+    if (content === undefined) {
+      const row = ctx.stmts.selectMessageContentById.get({ $id: ball.message_id }) as { content: string } | null
+      content = row?.content ?? null
+      bodies.set(ball.message_id, content)
+    }
+    return { ...ball, content }
+  })
 }
 
 function pendingFactKey(fact: Pick<BallFactEvidence, "request_id" | "recipient" | "message_id">): string {
@@ -1200,7 +1228,8 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
 
   if (all) {
     const rows = expired ? expiredPendingBalls(ctx, now) : allPendingBalls(ctx, now)
-    const pending = staleMs === null ? rows : rows.filter((row) => row.age_ms >= staleMs)
+    const filtered = staleMs === null ? rows : rows.filter((row) => row.age_ms >= staleMs)
+    const pending = withQuestionBodies(ctx, filtered)
     const owners = pendingOwnerGroups(pending)
     return jsonResult({
       all: true,
@@ -1217,7 +1246,8 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
   const rows = expired
     ? expiredPendingBalls(ctx, now).filter((row) => row.recipient === owner)
     : pendingBallsForOwner(ctx, owner, now)
-  const pending = staleMs === null ? rows : rows.filter((row) => row.age_ms >= staleMs)
+  const filtered = staleMs === null ? rows : rows.filter((row) => row.age_ms >= staleMs)
+  const pending = withQuestionBodies(ctx, filtered)
   return jsonResult({ owner, expired, pending, count: pending.length })
 }
 

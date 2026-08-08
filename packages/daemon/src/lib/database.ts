@@ -1113,6 +1113,11 @@ export function createStatements(db: Database) {
 
     selectMessageById: db.prepare("SELECT rowid, ts FROM messages WHERE id = $id"),
 
+    /** The question body for an owed ball (22844). The messages table — not
+     *  any windowed read — is the true retention bound; pending views join
+     *  through this so an obligation is never listed without its question. */
+    selectMessageContentById: db.prepare("SELECT content FROM messages WHERE id = $id"),
+
     /** Ball-tracker insert: opens a new pending request (one row per recipient).
      *  See @km/tribe/message-ball-tracker Phase 2. */
     openPendingRequest: db.prepare(`
