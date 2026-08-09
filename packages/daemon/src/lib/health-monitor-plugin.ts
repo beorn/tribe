@@ -27,6 +27,16 @@ import { createLogger } from "loggily"
 import { isReaperExempt } from "tribe-wire"
 import { createTimers } from "./timers.ts"
 import type { TribePluginApi, TribeClientApi } from "./plugin-api.ts"
+import {
+  createHealthProcessSource,
+  type CanonicalProcessObservation,
+  type HealthProcessSource,
+} from "./health-process-source.ts"
+import {
+  checkCanonicalReaper,
+  createCanonicalReaperState,
+  type CanonicalReaperState,
+} from "./health-monitor-canonical-reaper.ts"
 
 const log = createLogger("tribe:health")
 const CPU_ALERT_COOLDOWN_MS = 5 * 60_000
@@ -72,6 +82,18 @@ export interface HealthMetrics {
     usagePercent: number
   }
   bunProcesses: number
+  processObservation:
+    | { readonly kind: "standalone-os" }
+    | {
+        readonly kind: "canonical-available"
+        readonly observedAt: number
+        readonly source: { readonly epoch: string; readonly sequence: number }
+      }
+    | {
+        readonly diagnostic: Extract<CanonicalProcessObservation, { kind: "unavailable" }>["diagnostic"]
+        readonly kind: "canonical-unavailable"
+        readonly reason: string
+      }
   worktrees: number
   timestamp: number
 }
@@ -206,6 +228,17 @@ export function resolveLiveHealthRecipients(
   return resolved
 }
 
+function unresolvedHealthRecipients(
+  attributedSessions: ReadonlySet<string>,
+  sampledSessions: readonly HealthSession[],
+  liveSessions: readonly HealthSession[],
+): string[] {
+  return [...attributedSessions].filter(
+    (attributedName) =>
+      resolveLiveHealthRecipients(new Set([attributedName]), sampledSessions, liveSessions).size === 0,
+  )
+}
+
 /** Execute the delivery plan without per-client fleet fanout. */
 export function deliverHealthAlert(
   api: Pick<TribeClientApi, "send" | "broadcast" | "getActiveSessions">,
@@ -232,6 +265,16 @@ export function deliverHealthAlert(
   const recipients = [
     ...resolveLiveHealthRecipients(attributedSessions, sampledSessions ?? liveSessions, liveSessions),
   ].sort((left, right) => left.localeCompare(right, undefined, { numeric: true }))
+  const unresolved = unresolvedHealthRecipients(attributedSessions, sampledSessions ?? liveSessions, liveSessions)
+  if (unresolved.length > 0) {
+    api.broadcast(
+      `${message}. routing diagnostic: attributed owner(s) are not live Tribe recipients: ${unresolved.join(",")}`,
+      topic,
+      undefined,
+      { delivery: "push", topic },
+    )
+    return { kind: "broadcast" }
+  }
   for (const recipient of recipients) {
     api.send(recipient, message, topic, undefined, { delivery: "push", topic })
   }
@@ -243,7 +286,10 @@ export function deliverHealthAlert(
 // ---------------------------------------------------------------------------
 
 /** Collect OS-level metrics (no child process needed). */
-export function collectOsMetrics(): Omit<HealthMetrics, "bunProcesses" | "worktrees" | "disk" | "cpu"> & {
+export function collectOsMetrics(): Omit<
+  HealthMetrics,
+  "bunProcesses" | "worktrees" | "disk" | "cpu" | "processObservation"
+> & {
   cpu: Omit<HealthMetrics["cpu"], "topProcesses">
 } {
   const [load1, load5] = loadavg()
@@ -393,6 +439,40 @@ export function deriveProcessMetricsFromSnapshot(
   }
 }
 
+/** Derive ranking and count inputs from the exact canonical observation that
+ * also carries routing. No PID is ever joined to a separately sampled table. */
+export function deriveProcessMetricsFromCanonical(
+  observation: Extract<CanonicalProcessObservation, { kind: "available" }>,
+  supervisorPid: number,
+  totalBytes = totalmem(),
+): {
+  topProcesses: HealthMetrics["cpu"]["topProcesses"]
+  bunProcesses: number
+  pidToParent: Map<number, number>
+} {
+  const snapshot: HealthProcess[] = observation.processes.map(({ process }) => ({
+    command: process.command,
+    cpu: process.cpuPercent ?? 0,
+    mem: process.rssBytes === undefined || totalBytes <= 0 ? 0 : (process.rssBytes / totalBytes) * 100,
+    pgid: process.pgid,
+    pid: process.pid,
+    ppid: process.ppid,
+  }))
+  const pidToParent = new Map(snapshot.map((process) => [process.pid, process.ppid]))
+  const supervisorPgid = snapshot.find((process) => process.pid === supervisorPid)?.pgid
+  const observed = snapshot.filter(
+    (process) =>
+      process.pid !== supervisorPid &&
+      (supervisorPgid === undefined || process.pgid !== supervisorPgid) &&
+      !isDescendantOf(process.pid, supervisorPid, pidToParent),
+  )
+  return {
+    topProcesses: topCpuConsumers(observed.filter((process) => process.cpu > CPU_OFFENDER_MIN_PERCENT)),
+    bunProcesses: countBunNodeProcesses(observed),
+    pidToParent,
+  }
+}
+
 /**
  * Attribute a process to a tribe session by walking the PPID chain.
  * Session PIDs are stdio-adapter PIDs — their parent is the Claude Code process.
@@ -481,6 +561,94 @@ export function formatHealthAlertForDelivery(
     attributedSessions,
     hasUnattributed: sessionLoad.has("unattributed"),
   }
+}
+
+/** Format process blame from the same canonical observation that produced the
+ * offender ranking. Unknown and unowned remain operator-routed states. */
+export function formatCanonicalHealthAlertForDelivery(
+  alert: Pick<HealthAlert, "type" | "message" | "topOffenders">,
+  observation: Extract<CanonicalProcessObservation, { kind: "available" }>,
+): { message: string; attributedSessions: Set<string>; hasUnattributed: boolean } {
+  const byPid = new Map(observation.processes.map((row) => [row.process.pid, row]))
+  const attributedSessions = new Set<string>()
+  const offenders: string[] = []
+  let hasUnattributed = false
+  for (const process of alert.topOffenders) {
+    const row = byPid.get(process.pid)
+    const argv = process.command.slice(0, HEALTH_ALERT_ARGV_MAX_CHARS)
+    const prefix = `pid=${process.pid} cpu=${process.cpu}% argv=${argv}`
+    if (row?.attribution.kind === "owned" || row?.attribution.kind === "exempt") {
+      attributedSessions.add(row.attribution.ownerId)
+      offenders.push(`${row.attribution.ownerId} via=${row.attribution.via}: ${prefix}`)
+      continue
+    }
+    hasUnattributed = true
+    if (row?.attribution.kind === "unknown") {
+      const evidence = row.attribution.evidence
+      offenders.push(
+        `unknown(${row.attribution.reason}; owners=${evidence.ownerIds.join(",") || "none"}; ownerCount=${evidence.ownerCount}; via=${evidence.vias.join(",") || "none"}; queried=${observation.diagnostic.query}; location=${observation.diagnostic.location}; excluded=${observation.diagnostic.excluded.join(",")}): ${prefix}`,
+      )
+    } else {
+      offenders.push(`unowned: ${prefix}`)
+    }
+  }
+  return {
+    message:
+      offenders.length > 0
+        ? `${alert.message}. ${offenders.join(" | ")}`
+        : alert.type === "cpu"
+          ? `${alert.message}. offenders=none above ${CPU_OFFENDER_MIN_PERCENT}% after supervisor exclusion`
+          : alert.message,
+    attributedSessions,
+    hasUnattributed,
+  }
+}
+
+type CollectedProcessObservation = CanonicalProcessObservation | { readonly kind: "standalone-os" }
+
+function formatCollectedHealthAlert(
+  alert: Pick<HealthAlert, "type" | "message" | "topOffenders">,
+  observation: CollectedProcessObservation,
+  pidToParent: Map<number, number>,
+  sessions: HealthSession[],
+): { message: string; attributedSessions: Set<string>; hasUnattributed: boolean } {
+  if (observation.kind === "standalone-os") return formatHealthAlertForDelivery(alert, pidToParent, sessions)
+  if (observation.kind === "available") return formatCanonicalHealthAlertForDelivery(alert, observation)
+  return {
+    attributedSessions: new Set<string>(),
+    hasUnattributed: true,
+    message: `${alert.message}. process attribution unavailable (${observation.reason}); queried ${observation.diagnostic.query} in ${observation.diagnostic.location}; excluded ${observation.diagnostic.excluded.join(",")}`,
+  }
+}
+
+export function ownerForLockHolder(
+  holderPid: number,
+  observation: CollectedProcessObservation,
+  pidToParent: Map<number, number>,
+  sessions: HealthSession[],
+): string | null {
+  // lsof observes the holder after the canonical batch and supplies only a
+  // PID. Without the holder's start time, joining it to an older incarnation
+  // would be cross-batch attribution and can misroute after PID reuse.
+  if (observation.kind === "available") return null
+  if (observation.kind === "standalone-os") return attributeToSession(holderPid, pidToParent, sessions)
+  return null
+}
+
+async function checkCollectedProcessReaper(
+  observation: CollectedProcessObservation,
+  metrics: HealthMetrics,
+  pidToParent: Map<number, number>,
+  sessions: HealthSession[],
+  thresholds: HealthThresholds,
+  state: AlertState,
+  api: TribeClientApi,
+): Promise<void> {
+  if (observation.kind === "standalone-os") {
+    await checkReaper(metrics.cpu.topProcesses, pidToParent, sessions, thresholds, state, api)
+    return
+  }
+  checkCanonicalReaper(observation, thresholds, state.canonicalReaper, api, sessions)
 }
 
 /** Parse `df -g .` output to extract disk usage (macOS format). */
@@ -774,6 +942,8 @@ export interface AlertState {
   lockStaleWarned: Set<string>
   /** Reaper: tracked suspect PIDs with detection state */
   reaperSuspects: Map<number, ReaperSuspect>
+  /** Managed reaper state is incarnation-keyed and never shared with the standalone ps path. */
+  canonicalReaper: CanonicalReaperState
 }
 
 export function createAlertState(): AlertState {
@@ -791,6 +961,7 @@ export function createAlertState(): AlertState {
     lockFirstSeen: new Map(),
     lockStaleWarned: new Set(),
     reaperSuspects: new Map(),
+    canonicalReaper: createCanonicalReaperState(),
   }
 }
 
@@ -1274,10 +1445,14 @@ export async function checkReaper(
 }
 
 // ---------------------------------------------------------------------------
-// Full metrics collection (async — spawns ps)
+// Full metrics collection
 // ---------------------------------------------------------------------------
 
-async function collectFullMetrics(): Promise<{ metrics: HealthMetrics; pidToParent: Map<number, number> }> {
+export async function collectFullMetrics(processSource: HealthProcessSource = createHealthProcessSource()): Promise<{
+  metrics: HealthMetrics
+  pidToParent: Map<number, number>
+  processObservation: CollectedProcessObservation
+}> {
   const osMetrics = collectOsMetrics()
 
   let topProcesses: Array<{ pid: number; cpu: number; mem: number; command: string }> = []
@@ -1287,29 +1462,42 @@ async function collectFullMetrics(): Promise<{ metrics: HealthMetrics; pidToPare
   let disk: HealthMetrics["disk"]
   let worktrees = 0
   let fdCount: HealthMetrics["fdCount"]
+  const processObservation: CollectedProcessObservation =
+    processSource.kind === "managed" ? await processSource.read() : { kind: "standalone-os" }
+  if (processObservation.kind === "available") {
+    const processMetrics = deriveProcessMetricsFromCanonical(processObservation, process.pid)
+    topProcesses = processMetrics.topProcesses
+    bunProcesses = processMetrics.bunProcesses
+    pidToParent = processMetrics.pidToParent
+  }
 
   try {
-    // One PID/PPID/PGID snapshot is the truth source for both ranking and
-    // attribution. Separate ps calls race short-lived probe children.
-    const psProc = Bun.spawn(["ps", "-axo", "pid=,ppid=,pgid=,%cpu=,%mem=,command="], {
-      stdout: "pipe",
-      stderr: "ignore",
-    })
     const dfProc = Bun.spawn(["df", "-g", "."], { stdout: "pipe", stderr: "ignore" })
     const wtProc = Bun.spawn(["git", "worktree", "list"], { stdout: "pipe", stderr: "ignore" })
     const fdCountProc = Bun.spawn(["sh", "-c", "lsof -n 2>/dev/null | wc -l"], { stdout: "pipe", stderr: "ignore" })
     const ulimitProc = Bun.spawn(["sh", "-c", "ulimit -n"], { stdout: "pipe", stderr: "ignore" })
-    const [psOutput, dfOutput, wtOutput, fdCountOutput, ulimitOutput] = await Promise.all([
-      new Response(psProc.stdout).text(),
+    const psOutput =
+      processObservation.kind === "standalone-os"
+        ? new Response(
+            Bun.spawn(["ps", "-axo", "pid=,ppid=,pgid=,%cpu=,%mem=,command="], {
+              stdout: "pipe",
+              stderr: "ignore",
+            }).stdout,
+          ).text()
+        : Promise.resolve("")
+    const [observedPs, dfOutput, wtOutput, fdCountOutput, ulimitOutput] = await Promise.all([
+      psOutput,
       new Response(dfProc.stdout).text().catch(() => ""),
       new Response(wtProc.stdout).text().catch(() => ""),
       new Response(fdCountProc.stdout).text().catch(() => "0"),
       new Response(ulimitProc.stdout).text().catch(() => "0"),
     ])
-    const processMetrics = deriveProcessMetricsFromSnapshot(psOutput, process.pid)
-    topProcesses = processMetrics.topProcesses
-    bunProcesses = processMetrics.bunProcesses
-    pidToParent = processMetrics.pidToParent
+    if (processObservation.kind === "standalone-os") {
+      const processMetrics = deriveProcessMetricsFromSnapshot(observedPs, process.pid)
+      topProcesses = processMetrics.topProcesses
+      bunProcesses = processMetrics.bunProcesses
+      pidToParent = processMetrics.pidToParent
+    }
     disk = parseDfOutput(dfOutput) ?? undefined
     worktrees = parseWorktreeList(wtOutput)
 
@@ -1321,7 +1509,7 @@ async function collectFullMetrics(): Promise<{ metrics: HealthMetrics; pidToPare
       fdCount = { total: fdInfo.total, perSession: [], limit: fdInfo.limit }
     }
   } catch (err) {
-    log.debug?.(`ps failed: ${err instanceof Error ? err.message : err}`)
+    log.debug?.(`health metric collection failed: ${err instanceof Error ? err.message : String(err)}`)
   }
 
   // macOS swap detection + accurate memory pressure via vm_stat.
@@ -1374,10 +1562,25 @@ async function collectFullMetrics(): Promise<{ metrics: HealthMetrics; pidToPare
       disk,
       fdCount,
       bunProcesses,
+      processObservation:
+        processObservation.kind === "standalone-os"
+          ? processObservation
+          : processObservation.kind === "available"
+            ? {
+                kind: "canonical-available",
+                observedAt: processObservation.observedAt,
+                source: processObservation.source,
+              }
+            : {
+                diagnostic: processObservation.diagnostic,
+                kind: "canonical-unavailable",
+                reason: processObservation.reason,
+              },
       worktrees,
       timestamp: osMetrics.timestamp,
     },
     pidToParent,
+    processObservation,
   }
 }
 
@@ -1385,8 +1588,10 @@ async function collectFullMetrics(): Promise<{ metrics: HealthMetrics; pidToPare
 // On-demand health snapshot (for tribe_health_check requests)
 // ---------------------------------------------------------------------------
 
-export async function getHealthSnapshot(): Promise<HealthMetrics> {
-  const { metrics } = await collectFullMetrics()
+export async function getHealthSnapshot(
+  processSource: HealthProcessSource = createHealthProcessSource(),
+): Promise<HealthMetrics> {
+  const { metrics } = await collectFullMetrics(processSource)
   return metrics
 }
 
@@ -1406,6 +1611,7 @@ export const healthMonitorPlugin: TribePluginApi = {
     const pollIntervalSec = parseInt(process.env.HEALTH_POLL_INTERVAL ?? "10", 10) || 10
     const thresholds = defaultThresholds()
     const alertState = createAlertState()
+    const processSource = createHealthProcessSource()
 
     const ac = new AbortController()
     const timers = createTimers(ac.signal)
@@ -1420,7 +1626,7 @@ export const healthMonitorPlugin: TribePluginApi = {
 
     async function sample(): Promise<void> {
       try {
-        const { metrics, pidToParent } = await collectFullMetrics()
+        const { metrics, pidToParent, processObservation } = await collectFullMetrics(processSource)
         const sessions = api.getActiveSessions()
         // Pass active-agent count so process-count threshold scales with the
         // number of connected sessions; alarms tuned for solo dev shouldn't
@@ -1429,7 +1635,7 @@ export const healthMonitorPlugin: TribePluginApi = {
         const alerts = evaluateAlerts(metrics, thresholds, alertState, activeAgentCount)
 
         for (const alert of alerts) {
-          const formatted = formatHealthAlertForDelivery(alert, pidToParent, sessions)
+          const formatted = formatCollectedHealthAlert(alert, processObservation, pidToParent, sessions)
           log.info?.(`alert: ${formatted.message}`)
           deliverHealthAlert(
             api,
@@ -1458,12 +1664,20 @@ export const healthMonitorPlugin: TribePluginApi = {
               })
             }
           } catch (err) {
-            log.error?.(`chief-absence check failed: ${err instanceof Error ? err.message : err}`)
+            log.error?.(`chief-absence check failed: ${err instanceof Error ? err.message : String(err)}`)
           }
         }
 
         // --- Process reaper ---
-        await checkReaper(metrics.cpu.topProcesses, pidToParent, sessions, thresholds, alertState, api)
+        await checkCollectedProcessReaper(
+          processObservation,
+          metrics,
+          pidToParent,
+          sessions,
+          thresholds,
+          alertState,
+          api,
+        )
 
         // --- Git lock detection (main repo + submodules) ---
         const gitDir = `${process.cwd()}/.git`
@@ -1496,7 +1710,9 @@ export const healthMonitorPlugin: TribePluginApi = {
           const durationSec = Math.round(durationMs / 1000)
 
           // Attribute to a session if possible
-          const sessionName = lock.holder ? attributeToSession(lock.holder.pid, pidToParent, sessions) : null
+          const sessionName = lock.holder
+            ? ownerForLockHolder(lock.holder.pid, processObservation, pidToParent, sessions)
+            : null
 
           // First detection: broadcast lock info. Suppress unattributed locks
           // under the stale threshold — "held by unknown for 10s" is almost
@@ -1619,7 +1835,7 @@ export const healthMonitorPlugin: TribePluginApi = {
           }
         }
       } catch (err) {
-        log.error?.(`sample failed: ${err instanceof Error ? err.message : err}`)
+        log.error?.(`sample failed: ${err instanceof Error ? err.message : String(err)}`)
       }
     }
 
