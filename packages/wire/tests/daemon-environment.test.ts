@@ -55,6 +55,7 @@ describe("Tribe daemon environment ownership", () => {
       sanitizeStandaloneDaemonEnvironment({
         ...ambientIdentity,
         HAB_SERVICE_KIND: "service",
+        HAB_SESSION_DIR: "/hab/@dev-3",
         PATH: "/bin",
         TRIBE_DAEMON_RELOAD_EXIT_CODE: "75",
         TRIBE_DAEMON_SUPERVISOR_PID: "123",

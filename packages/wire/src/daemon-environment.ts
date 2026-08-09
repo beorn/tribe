@@ -79,6 +79,7 @@ export function sanitizeStandaloneDaemonEnvironment(source: Readonly<NodeJS.Proc
   const env = { ...source }
   sanitizeDaemonProcessEnvironment(env)
   delete env.HAB_SERVICE_KIND
+  delete env.HAB_SESSION_DIR
   delete env[TRIBE_DAEMON_RELOAD_EXIT_CODE_ENV]
   delete env[TRIBE_DAEMON_SUPERVISOR_PID_ENV]
   delete env[TRIBE_OPERATOR_CAPABILITY_FD_ENV]

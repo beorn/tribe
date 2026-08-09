@@ -18,6 +18,7 @@ function metrics(loadAvg1m: number, timestamp: number): HealthMetrics {
     cpu: { loadAvg1m, loadAvg5m: loadAvg1m, coreCount: 4, topProcesses: [] },
     memory: { totalMB: 100, usedMB: 10, availableMB: 90, pressurePercent: 10, swapUsedMB: 0 },
     bunProcesses: 0,
+    processObservation: { kind: "standalone-os" },
     worktrees: 0,
     timestamp,
   }
@@ -100,6 +101,32 @@ describe("health alert delivery", () => {
     )
 
     expect(sends).toEqual(["@agent/7"])
+  })
+
+  test("broadcasts one operator diagnostic when an attributed warning has no live recipient", () => {
+    const broadcasts: string[] = []
+    const sends: string[] = []
+    const api = {
+      broadcast: (message: string) => broadcasts.push(message),
+      getActiveSessions: () => [],
+      send: (recipient: string) => sends.push(recipient),
+    } as unknown as TribeClientApi
+
+    expect(
+      deliverHealthAlert(
+        api,
+        { type: "cpu", severity: "warning" },
+        "CPU warning sample",
+        new Set(["yrd-runner"]),
+        false,
+        [],
+      ),
+    ).toEqual({ kind: "broadcast" })
+
+    expect(sends).toEqual([])
+    expect(broadcasts).toEqual([
+      "CPU warning sample. routing diagnostic: attributed owner(s) are not live Tribe recipients: yrd-runner",
+    ])
   })
 
   test("rate-limits a repeated CPU episode after a brief below-threshold sample", () => {
