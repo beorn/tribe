@@ -423,6 +423,7 @@ async function cmdPending(
   owner: string | undefined,
   all: boolean,
   expired: boolean,
+  owed: boolean,
   json: boolean,
   staleMs: number | undefined,
   close: string | undefined,
@@ -430,12 +431,14 @@ async function cmdPending(
   const args: Record<string, unknown> = {}
   if (all) args.all = true
   if (expired) args.expired = true
+  if (owed) args.owed = true
   if (owner) args.owner = owner
   if (staleMs !== undefined) args.stale_ms = staleMs
   if (close) args.close = close
   const result = (await callDaemon("tribe.pending", args)) as {
     content?: Array<{ type?: string; text?: string }>
     structuredContent?: {
+      error?: string
       all?: boolean
       owner?: string
       request_id?: string
@@ -457,6 +460,14 @@ async function cmdPending(
   if (!payload) {
     console.log("No structured result returned.")
     return
+  }
+  // A daemon refusal arrives as a SUCCESSFUL response carrying `error`, not as a
+  // thrown RPC fault, so callDaemon passes it straight through. Without this the
+  // refusal falls to `count ?? 0` below and prints "No pending requests" — a
+  // confident, well-formed wrong answer to a query the daemon actually rejected.
+  if (typeof payload.error === "string") {
+    console.error(`tribe pending: ${payload.error}`)
+    process.exit(2)
   }
   if (json) {
     console.log(JSON.stringify(payload, null, 2))
@@ -1450,6 +1461,7 @@ export function registerReadCommands(program: Command): void {
   const pendingAll = cliOption(PENDING_CLI, "all")
   const pendingJson = cliOption(PENDING_CLI, "json")
   const pendingExpired = cliOption(PENDING_CLI, "expired")
+  const pendingOwed = cliOption(PENDING_CLI, "owed")
   const pendingStale = cliOption(PENDING_CLI, "stale")
   const pendingClose = cliOption(PENDING_CLI, "close")
   program
@@ -1458,11 +1470,20 @@ export function registerReadCommands(program: Command): void {
     .option(pendingAll.flags, pendingAll.description)
     .option(pendingJson.flags, pendingJson.description)
     .option(pendingExpired.flags, pendingExpired.description)
+    .option(pendingOwed.flags, pendingOwed.description)
     .option(pendingOwner.flags, pendingOwner.description)
     .option(pendingStale.flags, pendingStale.description)
     .option(pendingClose.flags, pendingClose.description)
     .action(
-      (opts: { all?: boolean; expired?: boolean; json?: boolean; owner?: string; stale?: string; close?: string }) => {
+      (opts: {
+        all?: boolean
+        expired?: boolean
+        owed?: boolean
+        json?: boolean
+        owner?: string
+        stale?: string
+        close?: string
+      }) => {
         const stale = opts.stale ? parseStaleMs(opts.stale) : undefined
         if (opts.stale && stale === undefined) {
           console.error(`tribe pending: bad --stale '${opts.stale}' (expected NNs|NNm|NNh)`)
@@ -1486,7 +1507,11 @@ export function registerReadCommands(program: Command): void {
           console.error("tribe pending: --expired is read-only; --close is not allowed")
           process.exit(2)
         }
-        void cmdPending(opts.owner, !!opts.all, !!opts.expired, !!opts.json, stale, opts.close)
+        // `--owed` without `--expired` is deliberately NOT re-validated here: the
+        // daemon already owns that rule and refuses loudly, and the refusal now
+        // reaches the user (see cmdPending). Duplicating it would be a second
+        // authority for one invariant, free to drift from the first.
+        void cmdPending(opts.owner, !!opts.all, !!opts.expired, !!opts.owed, !!opts.json, stale, opts.close)
       },
     )
 
