@@ -82,6 +82,19 @@ describe("Tribe project-boundary discovery", () => {
     expect(findBeadsDir(fixture.resolve("missing"))).toBe(beads)
   })
 
+  test("a prospective path in a nested Git island cannot inherit outer project config", async () => {
+    await using fixture = await tempTree("tribe-project-prospective-island-")
+    const outer = fixture.resolve("outer")
+    const nestedRepo = join(outer, "nested")
+    const beads = join(outer, ".beads")
+    mkdirSync(nestedRepo, { recursive: true })
+    mkdirSync(beads)
+    execFileSync("git", ["init", "--quiet", outer])
+    execFileSync("git", ["init", "--quiet", nestedRepo])
+
+    expect(findBeadsDir(join(nestedRepo, "future", "child"))).toBeNull()
+  })
+
   test("an operational Git probe failure does not widen discovery to filesystem root", async () => {
     await using fixture = await tempTree("tribe-project-probe-failure-")
     const file = fixture.resolve("not-a-directory")
