@@ -378,6 +378,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             description:
               "Read deadline-passed and historical unanswered outcomes. Live expiry remains owned; terminal non-reply reasons stay distinct; answered rows are omitted.",
           },
+          owed: {
+            type: "boolean",
+            description:
+              "With expired: keep only rows a live pending_request still stands behind (backing \"live\" — declared deadline passed, still open, needs the owner's decision). Drops journal-only history: settled rows and unsettled ghosts no close can reach.",
+          },
           owner: {
             type: "string",
             description: "Session name that owns the open ball. Defaults to the caller's own session.",
@@ -407,7 +412,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           pending: {
             type: "array",
             description:
-              "Active requests, or derive-at-read expired/unanswered outcomes when expired=true. A still-owned expired row has settlement=null; terminal non-reply rows preserve manual-close, incident-cleared, gc-expired, or sender-withdrawn. Answered rows are omitted.",
+              "Active requests, or derive-at-read expired/unanswered outcomes when expired=true. Expired rows collapse to one per (request_id, recipient) with older generations disclosed as superseded_count, and carry backing: \"live\" (a pending_request row still stands behind it, settlement=null, genuinely owed) or \"journal\" (history: manual-close, incident-cleared, gc-expired, sender-withdrawn, or an unsettled ghost). Answered rows are omitted; owed=true keeps only backing \"live\".",
             items: { type: "object", additionalProperties: true },
           },
           owners: {
@@ -451,6 +456,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           name: "expired",
           flags: "--expired",
           description: "Show live deadline-passed and historical unanswered outcomes",
+        },
+        {
+          name: "owed",
+          flags: "--owed",
+          description: "With --expired: only rows still backed by a live pending request (needs a decision)",
         },
         { name: "owner", flags: "-o, --owner <name>", description: "Owner session name (default: caller)" },
         {

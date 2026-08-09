@@ -12,6 +12,13 @@
  * Contract pinned here: one obligation per (request_id, recipient) — the
  * LATEST generation — with the rest disclosed as superseded_count, never
  * multiplied into phantom obligations.
+ *
+ * Second half of the contract (chief's verdict on the same incident): the
+ * distinction a reader needs is "still needs a decision from me" versus
+ * "overtaken by events". Each row carries backing: "live" (a pending_request
+ * row still stands behind it — genuinely owed) or "journal" (history), and
+ * owed: true filters the view to the live-backed rows. That filter is the
+ * coordinator's needs-a-decision query.
  */
 
 import { mkdtempSync, rmSync } from "node:fs"
@@ -25,7 +32,13 @@ import { handleToolCall, type HandlerOpts } from "./handlers.ts"
 import { logEvent } from "./messaging.ts"
 
 type ToolJson = Record<string, unknown>
-type Row = { request_id: string; message_id: string; superseded_count?: number; settlement?: string | null }
+type Row = {
+  request_id: string
+  message_id: string
+  superseded_count?: number
+  settlement?: string | null
+  backing?: string
+}
 
 function makeOpts(): HandlerOpts {
   return {
@@ -110,6 +123,7 @@ describe("expired view collapses generations of one obligation", () => {
     expect(rows).toHaveLength(1)
     expect(rows[0]!.message_id).toBe("gen-m3")
     expect(rows[0]!.superseded_count).toBe(2)
+    expect(rows[0]!.backing).toBe("journal")
     // Content is the newest generation; the AGE is the condition's whole
     // standing life — owed since the first opening.
     expect((rows[0] as unknown as { opened_at: string }).opened_at).toBe(new Date(1000).toISOString())
@@ -125,5 +139,65 @@ describe("expired view collapses generations of one obligation", () => {
 
     expect(rows).toHaveLength(2)
     expect(rows.every((r) => r.superseded_count === 0)).toBe(true)
+  })
+
+  it("owed keeps only live-backed obligations; journal rows are history", () => {
+    const { ctx, stmts } = setup()
+    const now = Date.now()
+    // Genuinely owed: a live request whose declared deadline has passed —
+    // with an OLDER journal generation of the same condition that must fold
+    // under it rather than render as a second obligation.
+    stmts.openPendingRequest.run({
+      $request_id: "live-req",
+      $recipient: "@chief",
+      $sender: "@watcher",
+      $opened_at: now - 3_600_000,
+      $expires_at: now - 60_000,
+      $message_id: "live-m1",
+      $fanout: "first",
+    })
+    journalExpiry(ctx, "live-req", "live-m0", 1000)
+    // History, unsettled: a journal fact with no row behind it — the ghost
+    // class no close can reach.
+    journalExpiry(ctx, "ghost-req", "ghost-m1", 2000)
+    // History, settled: a live expired ball closed through the real path,
+    // leaving only its settlement fact.
+    stmts.openPendingRequest.run({
+      $request_id: "settled-req",
+      $recipient: "@chief",
+      $sender: "@watcher",
+      $opened_at: now - 7_200_000,
+      $expires_at: now - 3_600_000,
+      $message_id: "settled-m1",
+      $fanout: "first",
+    })
+    handleToolCall(ctx, "tribe.pending", { close: "settled-req" }, makeOpts())
+
+    const owedView = parseToolJson(
+      handleToolCall(ctx, "tribe.pending", { owner: "@chief", expired: true, owed: true }, makeOpts()),
+    )
+    const owedRows = (owedView.pending ?? []) as Row[]
+    expect(owedRows).toHaveLength(1)
+    expect(owedRows[0]!.request_id).toBe("live-req")
+    expect(owedRows[0]!.backing).toBe("live")
+    expect(owedRows[0]!.settlement).toBeNull()
+    expect(owedRows[0]!.superseded_count).toBe(1)
+    expect(owedView.owed).toBe(true)
+
+    const fullView = parseToolJson(handleToolCall(ctx, "tribe.pending", { owner: "@chief", expired: true }, makeOpts()))
+    const fullRows = (fullView.pending ?? []) as Row[]
+    expect(fullRows).toHaveLength(3)
+    const byId = new Map(fullRows.map((r) => [r.request_id, r]))
+    expect(byId.get("live-req")!.backing).toBe("live")
+    expect(byId.get("ghost-req")!.backing).toBe("journal")
+    expect(byId.get("ghost-req")!.settlement).toBeNull()
+    expect(byId.get("settled-req")!.backing).toBe("journal")
+    expect(byId.get("settled-req")!.settlement).toBe("manual-close")
+  })
+
+  it("owed without expired refuses loudly", () => {
+    const { ctx } = setup()
+    const res = parseToolJson(handleToolCall(ctx, "tribe.pending", { owed: true }, makeOpts()))
+    expect(res.error).toMatch(/owed filters the expired view/)
   })
 })

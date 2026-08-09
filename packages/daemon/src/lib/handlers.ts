@@ -931,6 +931,13 @@ type PendingOutcomeBall = PendingBall & {
    * ids, and each generation's deadline fact would otherwise render as its
    * own obligation. History is disclosed here, never multiplied. */
   superseded_count?: number
+  /** Which store stands behind the row: "live" = a pending_request row still
+   * exists (declared deadline passed, still open — genuinely owed, and
+   * closable); "journal" = reconstructed from journal facts alone (history:
+   * settled later, or an unsettled ghost no close can reach). The legacy
+   * status labels encode the same split under misleading names ("expired" =
+   * live, "unanswered" = journal). */
+  backing: "live" | "journal"
 }
 
 type PendingReplyFactRow = {
@@ -986,6 +993,7 @@ function pendingOutcomeBall(
     status: "unanswered",
     settlement,
     settled_at: settledAt === null ? null : new Date(settledAt).toISOString(),
+    backing: "journal",
   }
 }
 
@@ -1069,7 +1077,7 @@ function expiredPendingBalls(ctx: TribeContext, now: number): PendingOutcomeBall
   const liveKeys = new Set(live.map(pendingFactKey))
   const outcomes: PendingOutcomeBall[] = live
     .filter((ball) => !pendingFactWasAnswered(ball, respondersByRef))
-    .map((ball) => ({ ...ball, settlement: null, settled_at: null }))
+    .map((ball) => ({ ...ball, settlement: null, settled_at: null, backing: "live" as const }))
   const representedSettlements = new Set<string>()
 
   for (const fact of facts) {
@@ -1208,6 +1216,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
   const owner = (a.owner as string) ?? ctx.getName()
   const all = a.all === true
   const expired = a.expired === true
+  const owed = a.owed === true
   const staleMs = typeof a.stale_ms === "number" ? a.stale_ms : null
   const now = Date.now()
 
@@ -1219,6 +1228,9 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
   }
   if (expired && (a.close !== undefined || a.prune === true)) {
     return jsonResult({ error: "tribe.pending: expired is a read-only diagnostic view." })
+  }
+  if (owed && !expired) {
+    return jsonResult({ error: "tribe.pending: owed filters the expired view; pass expired: true." })
   }
 
   // Explicit repair path (@km/tribe/20008): prune stale balls for `owner`. Safe
@@ -1261,13 +1273,16 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
   }
 
   if (all) {
-    const rows = expired ? expiredPendingBalls(ctx, now) : allPendingBalls(ctx, now)
+    const rows = expired
+      ? expiredPendingBalls(ctx, now).filter((row) => !owed || row.backing === "live")
+      : allPendingBalls(ctx, now)
     const filtered = staleMs === null ? rows : rows.filter((row) => row.age_ms >= staleMs)
     const pending = withQuestionBodies(ctx, filtered)
     const owners = pendingOwnerGroups(pending)
     return jsonResult({
       all: true,
       expired,
+      ...(owed ? { owed: true } : {}),
       scope: "all",
       pending,
       owners,
@@ -1278,11 +1293,11 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
   }
 
   const rows = expired
-    ? expiredPendingBalls(ctx, now).filter((row) => row.recipient === owner)
+    ? expiredPendingBalls(ctx, now).filter((row) => row.recipient === owner && (!owed || row.backing === "live"))
     : pendingBallsForOwner(ctx, owner, now)
   const filtered = staleMs === null ? rows : rows.filter((row) => row.age_ms >= staleMs)
   const pending = withQuestionBodies(ctx, filtered)
-  return jsonResult({ owner, expired, pending, count: pending.length })
+  return jsonResult({ owner, expired, ...(owed ? { owed: true } : {}), pending, count: pending.length })
 }
 
 type MembershipSessionRow = {
