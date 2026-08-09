@@ -74,9 +74,20 @@ describe("Tribe project-boundary discovery", () => {
     expect(resolveProjectName(nested)).toBe("super")
   })
 
+  test("a missing prospective directory can discover project config from its parent", async () => {
+    await using fixture = await tempTree("tribe-project-prospective-")
+    const beads = fixture.resolve(".beads")
+    mkdirSync(beads)
+
+    expect(findBeadsDir(fixture.resolve("missing"))).toBe(beads)
+  })
+
   test("an operational Git probe failure does not widen discovery to filesystem root", async () => {
     await using fixture = await tempTree("tribe-project-probe-failure-")
-    expect(() => findBeadsDir(fixture.resolve("missing"))).toThrow(/git project boundary probe failed/u)
+    const file = fixture.resolve("not-a-directory")
+    writeFileSync(file, "fixture\n", "utf8")
+
+    expect(() => findBeadsDir(file)).toThrow(/git project boundary probe failed/u)
   })
 })
 
