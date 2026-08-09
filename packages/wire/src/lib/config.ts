@@ -3,18 +3,9 @@
  */
 
 import type { Database } from "bun:sqlite"
-import { dlopen, FFIType, suffix } from "bun:ffi"
+import { acquireFlockBlocking } from "@bearly/flock"
 import { createHash } from "node:crypto"
-import {
-  closeSync,
-  existsSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  realpathSync,
-  renameSync,
-  writeFileSync,
-} from "node:fs"
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs"
 import { basename, dirname, parse, resolve } from "node:path"
 import { parseArgs } from "node:util"
 import { findAncestorWithin, findGitProjectRoot } from "removely"
@@ -83,12 +74,6 @@ export type ResolveDbPathOptions = {
   /** Defer legacy migration so a caller can hold the lock through DB creation. */
   migrateLegacy?: boolean
 }
-
-type Flock = { flock(fd: number, operation: number): number }
-
-const LOCK_EX = 2
-const LOCK_UN = 8
-let libc: Flock | undefined
 
 // ---------------------------------------------------------------------------
 // Exports
@@ -192,16 +177,8 @@ export function resolveDbPath(args: TribeArgs, options: ResolveDbPathOptions = {
 export function withDbPathLock<Result>(dbPath: string, operation: () => Result): Result {
   mkdirSync(dirname(dbPath), { recursive: true })
   const lockPath = `${dbPath}.migration.lock`
-  const fd = openSync(lockPath, "a+")
-  let locked = false
-  try {
-    if (flock(fd, LOCK_EX) !== 0) throw new Error(`tribe: failed to lock database migration at ${lockPath}`)
-    locked = true
-    return operation()
-  } finally {
-    if (locked) flock(fd, LOCK_UN)
-    closeSync(fd)
-  }
+  using _lock = acquireFlockBlocking(lockPath)
+  return operation()
 }
 
 /** Re-check and migrate the legacy DB while the caller holds the DB-path lock. */
@@ -212,29 +189,6 @@ export function migrateLegacyTribeDbIfNeeded(xdgDbPath: string, from?: string): 
   const legacyDb = resolve(beadsDir, "tribe.db")
   if (!existsSync(legacyDb)) return
   migrateLegacyTribeDb(legacyDb, xdgDbPath)
-}
-
-function flock(fd: number, operation: number): number {
-  libc ??= loadFlock()
-  return libc.flock(fd, operation)
-}
-
-function loadFlock(): Flock {
-  // glibc ships no loadable bare "libc.so" (that name is a linker script, and
-  // absent entirely on typical CI runners) — the runtime soname is libc.so.6.
-  // Keep the unversioned name as a fallback for musl.
-  const candidates = process.platform === "darwin" ? ["libc.dylib"] : ["libc.so.6", `libc.${suffix}`]
-  let firstCause: unknown
-  for (const path of candidates) {
-    try {
-      return dlopen(path, {
-        flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
-      }).symbols as unknown as Flock
-    } catch (cause) {
-      firstCause ??= cause
-    }
-  }
-  throw new Error(`tribe: failed to load POSIX flock from ${candidates.join(", ")}`, { cause: firstCause })
 }
 
 /**
