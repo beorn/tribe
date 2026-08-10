@@ -6,7 +6,11 @@
  */
 
 import { describe, expect, it, vi } from "vitest"
-import type { CanonicalProcessObservation, HealthProcessSource } from "./health-process-source.ts"
+import type {
+  CanonicalHostScalarObservation,
+  CanonicalProcessObservation,
+  HealthProcessSource,
+} from "./health-process-source.ts"
 import {
   collectFullMetrics,
   formatCanonicalHealthAlertForDelivery,
@@ -49,8 +53,49 @@ function observation(kind: "owned" | "unknown" = "owned"): Extract<CanonicalProc
   }
 }
 
-function managed(value: CanonicalProcessObservation): HealthProcessSource {
-  return { kind: "managed", read: vi.fn(async () => value) }
+function managed(
+  value: CanonicalProcessObservation,
+  scalars: CanonicalHostScalarObservation = scalarObservation(),
+): HealthProcessSource {
+  return { kind: "managed", read: vi.fn(async () => value), readScalars: vi.fn(async () => scalars) }
+}
+
+function scalarObservation(): Extract<CanonicalHostScalarObservation, { kind: "available" }> {
+  return {
+    kind: "available",
+    observedAt: 1_500,
+    schema: "host-scalar-observation/1",
+    source: { epoch: "host-a", sequence: 8 },
+    values: {
+      cpu: {
+        kind: "supported",
+        value: { busyPercent: 25, loadAverage1m: 1.25, loadAverage5m: 1, loadAverage15m: 0.75, logicalCores: 8 },
+      },
+      disk: {
+        kind: "supported",
+        value: {
+          availableBytes: 6 * 1024 ** 3,
+          freeBytes: 6 * 1024 ** 3,
+          path: "/",
+          totalBytes: 10 * 1024 ** 3,
+          usedBytes: 4 * 1024 ** 3,
+        },
+      },
+      diskIo: { kind: "supported", value: { readWriteBytesPerSecond: 2 * 1024 ** 2 } },
+      kind: "host:scalars",
+      memory: {
+        kind: "supported",
+        value: { availableBytes: 6 * 1024 ** 3, totalBytes: 10 * 1024 ** 3, usedBytes: 4 * 1024 ** 3 },
+      },
+      sampleBudgetMs: 250,
+      sampleDurationMs: 4,
+      sampleOverBudget: false,
+      swap: {
+        kind: "supported",
+        value: { freeBytes: 924 * 1024 ** 2, totalBytes: 1024 * 1024 ** 2, usedBytes: 100 * 1024 ** 2 },
+      },
+    },
+  }
 }
 
 function stubPeripheralCommands() {
@@ -73,6 +118,89 @@ function stubPeripheralCommands() {
 }
 
 describe("health monitor managed process source", () => {
+  it("maps canonical host scalars and never invokes standalone OS acquisition", async () => {
+    const spawn = stubPeripheralCommands()
+    const osSampler = vi.fn(() => {
+      throw new Error("standalone OS sampler must not run")
+    })
+
+    const result = await collectFullMetrics(managed(observation()), { collectOsMetrics: osSampler })
+
+    expect(osSampler).not.toHaveBeenCalled()
+    expect(result.metrics).toMatchObject({
+      cpu: { coreCount: 8, loadAvg1m: 1.25, loadAvg5m: 1 },
+      disk: { availableGB: 6, totalGB: 10, usagePercent: 40, usedGB: 4 },
+      diskIo: { readWriteMBps: 2 },
+      memory: { availableMB: 6_144, pressurePercent: 40, swapUsedMB: 100, totalMB: 10_240, usedMB: 4_096 },
+      scalarObservation: {
+        kind: "canonical-available",
+        observedAt: 1_500,
+        source: { epoch: "host-a", sequence: 8 },
+      },
+      timestamp: 1_500,
+    })
+    expect(
+      spawn.mock.calls.some(
+        ([argv]) => Array.isArray(argv) && ["df", "iostat", "ps", "sh", "sysctl", "vm_stat"].includes(String(argv[0])),
+      ),
+    ).toBe(false)
+    spawn.mockRestore()
+  })
+
+  it("keeps the legacy OS sampler live only for standalone mode", async () => {
+    const spawn = stubPeripheralCommands()
+    const osSampler = vi.fn(() => ({
+      cpu: { coreCount: 4, loadAvg1m: 2, loadAvg5m: 1 },
+      memory: { availableMB: 750, pressurePercent: 25, swapUsedMB: 0, totalMB: 1_000, usedMB: 250 },
+      timestamp: 9_000,
+    }))
+
+    const result = await collectFullMetrics({ kind: "standalone-os" }, { collectOsMetrics: osSampler })
+
+    expect(osSampler).toHaveBeenCalledOnce()
+    expect(result.metrics).toMatchObject({
+      cpu: { coreCount: 4, loadAvg1m: 2, loadAvg5m: 1 },
+      memory: { availableMB: 750, pressurePercent: 25, totalMB: 1_000, usedMB: 250 },
+      scalarObservation: { kind: "standalone-os" },
+      timestamp: 9_000,
+    })
+    spawn.mockRestore()
+  })
+
+  it("keeps managed scalar unavailability explicit without any OS fallback", async () => {
+    const spawn = stubPeripheralCommands()
+    const osSampler = vi.fn(() => {
+      throw new Error("standalone OS sampler must not run")
+    })
+    const unavailable: CanonicalHostScalarObservation = {
+      detail: "scalar journal stale",
+      kind: "unavailable",
+      reason: "scalar-fact-stale",
+      schema: "host-scalar-observation/1",
+    }
+
+    const result = await collectFullMetrics(managed(observation(), unavailable), { collectOsMetrics: osSampler })
+
+    expect(osSampler).not.toHaveBeenCalled()
+    expect(result.metrics.cpu).toEqual({
+      topProcesses: [expect.objectContaining({ command: "bun worker.ts", pid: 10 })],
+    })
+    expect(result.metrics.memory).toBeUndefined()
+    expect(result.metrics.disk).toBeUndefined()
+    expect(result.metrics.diskIo).toBeUndefined()
+    expect(result.metrics.scalarObservation).toEqual({
+      detail: "scalar journal stale",
+      kind: "canonical-unavailable",
+      reason: "scalar-fact-stale",
+    })
+    expect(
+      spawn.mock.calls.some(
+        ([argv]) => Array.isArray(argv) && ["df", "iostat", "ps", "sh", "sysctl", "vm_stat"].includes(String(argv[0])),
+      ),
+    ).toBe(false)
+    spawn.mockRestore()
+  })
+
   it("uses one canonical source for ranking/counting and never spawns ps", async () => {
     const spawn = stubPeripheralCommands()
     const source = managed(observation())

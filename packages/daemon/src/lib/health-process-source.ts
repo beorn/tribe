@@ -1,6 +1,7 @@
 import { dirname, join } from "node:path"
 
 const PROCESS_OBSERVATION_SCHEMA = "process-observation/1" as const
+const HOST_SCALAR_OBSERVATION_SCHEMA = "host-scalar-observation/1" as const
 const DEFAULT_MAX_AGE_MS = 90_000
 const MAX_COMMAND_CHARS = 512
 const MAX_DIAGNOSTIC_CHARS = 1_024
@@ -8,6 +9,27 @@ const MAX_ROUTING_TEXT_CHARS = 256
 const EXCLUDED_FALLBACKS = ["standalone-os-resample", "cross-batch-attribution", "implicit-unowned"] as const
 const OBSERVATION_QUERY = "latest exact process census with owner attribution"
 const ROUTING_VIAS = new Set(["env", "reactive", "root", "tree"])
+const SCALAR_PLATFORMS = new Set([
+  "aix",
+  "android",
+  "cygwin",
+  "darwin",
+  "freebsd",
+  "haiku",
+  "linux",
+  "netbsd",
+  "openbsd",
+  "sunos",
+  "win32",
+])
+const SCALAR_UNAVAILABLE_REASONS = new Set([
+  "counter-reset",
+  "mount-changed",
+  "provider-error",
+  "unsupported-on-platform",
+  "unresolvable-device",
+  "warming-up",
+])
 
 export type ProcessRoutingAttribution =
   | { readonly kind: "exempt" | "owned"; readonly ownerId: string; readonly via: string }
@@ -61,9 +83,74 @@ export type CanonicalProcessObservation =
       readonly schema: typeof PROCESS_OBSERVATION_SCHEMA
     }
 
+type ScalarUnavailableMetric = {
+  readonly detail?: string
+  readonly kind: "unavailable"
+  readonly metric: "cpu" | "disk" | "diskIo" | "memory" | "swap"
+  readonly platform: string
+  readonly reason: string
+}
+
+type ScalarMetric<Name extends ScalarUnavailableMetric["metric"], Value> =
+  | { readonly kind: "supported"; readonly value: Value }
+  | (ScalarUnavailableMetric & { readonly metric: Name })
+
+export type CanonicalHostScalarObservation =
+  | {
+      readonly kind: "available"
+      readonly observedAt: number
+      readonly schema: typeof HOST_SCALAR_OBSERVATION_SCHEMA
+      readonly source: { readonly epoch: string; readonly sequence: number }
+      readonly values: {
+        readonly cpu: ScalarMetric<
+          "cpu",
+          {
+            readonly busyPercent?: number
+            readonly loadAverage1m: number
+            readonly loadAverage5m: number
+            readonly loadAverage15m: number
+            readonly logicalCores: number
+          }
+        >
+        readonly disk: ScalarMetric<
+          "disk",
+          {
+            readonly availableBytes: number
+            readonly freeBytes: number
+            readonly path: string
+            readonly totalBytes: number
+            readonly usedBytes: number
+          }
+        >
+        readonly diskIo: ScalarMetric<"diskIo", { readonly readWriteBytesPerSecond: number }>
+        readonly kind: "host:scalars"
+        readonly memory: ScalarMetric<
+          "memory",
+          { readonly availableBytes: number; readonly totalBytes: number; readonly usedBytes: number }
+        >
+        readonly sampleBudgetMs: number
+        readonly sampleDurationMs: number
+        readonly sampleOverBudget: boolean
+        readonly swap: ScalarMetric<
+          "swap",
+          { readonly freeBytes: number; readonly totalBytes: number; readonly usedBytes: number }
+        >
+      }
+    }
+  | {
+      readonly detail?: string
+      readonly kind: "unavailable"
+      readonly reason: string
+      readonly schema: typeof HOST_SCALAR_OBSERVATION_SCHEMA
+    }
+
 export type HealthProcessSource =
   | { readonly kind: "standalone-os" }
-  | { readonly kind: "managed"; readonly read: () => Promise<CanonicalProcessObservation> }
+  | {
+      readonly kind: "managed"
+      readonly read: () => Promise<CanonicalProcessObservation>
+      readonly readScalars: () => Promise<CanonicalHostScalarObservation>
+    }
 
 export interface HealthProcessSourceOptions {
   readonly env?: Readonly<Record<string, string | undefined>>
@@ -85,6 +172,10 @@ function isFiniteNonNegative(value: unknown): value is number {
 
 function isPositiveInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) > 0
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -186,6 +277,113 @@ function parseObservation(value: unknown): CanonicalProcessObservation | undefin
   return value as CanonicalProcessObservation
 }
 
+function isUnavailableScalarMetric(value: unknown, metric: string): boolean {
+  return (
+    isRecord(value) &&
+    value.kind === "unavailable" &&
+    value.metric === metric &&
+    isBoundedText(value.platform) &&
+    SCALAR_PLATFORMS.has(value.platform) &&
+    isBoundedText(value.reason) &&
+    SCALAR_UNAVAILABLE_REASONS.has(value.reason) &&
+    (value.detail === undefined || typeof value.detail === "string")
+  )
+}
+
+function isSupportedScalarMetric(value: unknown, validate: (metric: Record<string, unknown>) => boolean): boolean {
+  return isRecord(value) && value.kind === "supported" && isRecord(value.value) && validate(value.value)
+}
+
+function isScalarMetric(value: unknown, metric: ScalarUnavailableMetric["metric"]): boolean {
+  if (isUnavailableScalarMetric(value, metric)) return true
+  if (metric === "cpu") {
+    return isSupportedScalarMetric(
+      value,
+      (item) =>
+        (item.busyPercent === undefined || (isFiniteNonNegative(item.busyPercent) && item.busyPercent <= 100)) &&
+        isFiniteNonNegative(item.loadAverage1m) &&
+        isFiniteNonNegative(item.loadAverage5m) &&
+        isFiniteNonNegative(item.loadAverage15m) &&
+        isPositiveInteger(item.logicalCores),
+    )
+  }
+  if (metric === "disk") {
+    return isSupportedScalarMetric(
+      value,
+      (item) =>
+        isNonNegativeInteger(item.availableBytes) &&
+        isNonNegativeInteger(item.freeBytes) &&
+        isBoundedText(item.path, MAX_DIAGNOSTIC_CHARS) &&
+        isNonNegativeInteger(item.totalBytes) &&
+        item.totalBytes > 0 &&
+        isNonNegativeInteger(item.usedBytes) &&
+        item.availableBytes <= item.totalBytes &&
+        item.availableBytes <= item.freeBytes &&
+        item.freeBytes <= item.totalBytes &&
+        item.usedBytes <= item.totalBytes &&
+        item.freeBytes + item.usedBytes === item.totalBytes,
+    )
+  }
+  if (metric === "diskIo") {
+    return isSupportedScalarMetric(value, (item) => isFiniteNonNegative(item.readWriteBytesPerSecond))
+  }
+  if (metric === "memory") {
+    return isSupportedScalarMetric(
+      value,
+      (item) =>
+        isNonNegativeInteger(item.availableBytes) &&
+        isNonNegativeInteger(item.totalBytes) &&
+        item.totalBytes > 0 &&
+        isNonNegativeInteger(item.usedBytes) &&
+        item.availableBytes <= item.totalBytes &&
+        item.usedBytes <= item.totalBytes &&
+        item.availableBytes + item.usedBytes === item.totalBytes,
+    )
+  }
+  return isSupportedScalarMetric(
+    value,
+    (item) =>
+      isFiniteNonNegative(item.freeBytes) &&
+      isFiniteNonNegative(item.totalBytes) &&
+      isFiniteNonNegative(item.usedBytes) &&
+      item.freeBytes <= item.totalBytes &&
+      item.usedBytes <= item.totalBytes &&
+      Math.abs(item.totalBytes - item.freeBytes - item.usedBytes) <= 1,
+  )
+}
+
+function parseScalarObservation(value: unknown): CanonicalHostScalarObservation | undefined {
+  if (!isRecord(value) || value.schema !== HOST_SCALAR_OBSERVATION_SCHEMA || typeof value.kind !== "string") {
+    return undefined
+  }
+  if (value.kind === "unavailable") {
+    return isBoundedText(value.reason) &&
+      (value.detail === undefined || (typeof value.detail === "string" && value.detail.length <= MAX_DIAGNOSTIC_CHARS))
+      ? (value as CanonicalHostScalarObservation)
+      : undefined
+  }
+  if (
+    value.kind !== "available" ||
+    !isFiniteNonNegative(value.observedAt) ||
+    !isRecord(value.source) ||
+    !isBoundedText(value.source.epoch) ||
+    !isPositiveInteger(value.source.sequence) ||
+    !isRecord(value.values) ||
+    value.values.kind !== "host:scalars" ||
+    !isFiniteNonNegative(value.values.sampleBudgetMs) ||
+    !isFiniteNonNegative(value.values.sampleDurationMs) ||
+    typeof value.values.sampleOverBudget !== "boolean" ||
+    !isScalarMetric(value.values.cpu, "cpu") ||
+    !isScalarMetric(value.values.disk, "disk") ||
+    !isScalarMetric(value.values.diskIo, "diskIo") ||
+    !isScalarMetric(value.values.memory, "memory") ||
+    !isScalarMetric(value.values.swap, "swap")
+  ) {
+    return undefined
+  }
+  return value as CanonicalHostScalarObservation
+}
+
 function unavailable(
   sessionDir: string,
   reason: string,
@@ -201,6 +399,18 @@ function unavailable(
     kind: "unavailable",
     reason,
     schema: PROCESS_OBSERVATION_SCHEMA,
+  }
+}
+
+function scalarUnavailable(
+  reason: string,
+  detail?: string,
+): Extract<CanonicalHostScalarObservation, { kind: "unavailable" }> {
+  return {
+    ...(detail === undefined || detail === "" ? {} : { detail: detail.slice(0, MAX_DIAGNOSTIC_CHARS) }),
+    kind: "unavailable",
+    reason,
+    schema: HOST_SCALAR_OBSERVATION_SCHEMA,
   }
 }
 
@@ -262,6 +472,47 @@ export function createHealthProcessSource(options: HealthProcessSourceOptions = 
         controllerSessionDir,
         "source-protocol-invalid",
         "command did not emit one valid process-observation/1 row",
+      )
+    },
+    async readScalars() {
+      const argv = [
+        "hab",
+        "sysmon",
+        "snapshot",
+        "--state-root",
+        stateRoot,
+        "--kind",
+        "scalars",
+        "--max-age-ms",
+        String(maxAgeMs),
+        "--json",
+      ]
+      let result: Awaited<ReturnType<typeof runCommand>>
+      try {
+        result = await runCommand(argv)
+      } catch (error) {
+        return scalarUnavailable("source-command-failed", error instanceof Error ? error.message : String(error))
+      }
+      const lines = result.stdout.trim().split("\n").filter(Boolean)
+      if (lines.length === 1) {
+        try {
+          const line = lines[0]
+          if (line === undefined) return scalarUnavailable("source-protocol-invalid")
+          const parsed = parseScalarObservation(JSON.parse(line))
+          if (parsed !== undefined && (result.exitCode === 0 || parsed.kind === "unavailable")) return parsed
+        } catch {
+          // The typed unavailable below preserves the source boundary.
+        }
+      }
+      if (result.exitCode !== 0) {
+        return scalarUnavailable(
+          "source-command-failed",
+          `exit=${result.exitCode}${result.stderr.trim() === "" ? "" : ` stderr=${result.stderr.trim()}`}`,
+        )
+      }
+      return scalarUnavailable(
+        "source-protocol-invalid",
+        "command did not emit one valid host-scalar-observation/1 row",
       )
     },
   }

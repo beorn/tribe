@@ -146,4 +146,74 @@ describe("health alert delivery", () => {
       critical(BASE_TIME_MS + CPU_ALERT_COOLDOWN_MS + 1).map((alert) => `${alert.type}:${alert.severity}`),
     ).toContain("cpu:critical")
   })
+
+  test("counts one canonical scalar fact once toward a sustained alert", () => {
+    const thresholds = { ...defaultThresholds(), cpuCriticalMultiplier: 2, sustainedSamples: 2 }
+    const state = createAlertState()
+    const canonical = (sequence: number, timestamp: number): HealthMetrics => ({
+      ...metrics(9, timestamp),
+      scalarObservation: {
+        kind: "canonical-available",
+        observedAt: timestamp,
+        source: { epoch: "host-a", sequence },
+        unavailable: [],
+      },
+    })
+
+    const first = canonical(1, BASE_TIME_MS)
+    expect(evaluateAlerts(first, thresholds, state)).toEqual([])
+    expect(evaluateAlerts(first, thresholds, state)).toEqual([])
+    expect(evaluateAlerts(canonical(2, BASE_TIME_MS + 20_000), thresholds, state)).toEqual([
+      expect.objectContaining({ severity: "critical", type: "cpu" }),
+    ])
+  })
+
+  test("an unavailable scalar fact breaks a sustained sequence without inventing healthy values", () => {
+    const thresholds = { ...defaultThresholds(), cpuCriticalMultiplier: 2, sustainedSamples: 2 }
+    const state = createAlertState()
+    const high = (sequence: number, timestamp: number): HealthMetrics => ({
+      ...metrics(9, timestamp),
+      scalarObservation: {
+        kind: "canonical-available",
+        observedAt: timestamp,
+        source: { epoch: "host-a", sequence },
+        unavailable: [],
+      },
+    })
+    const unavailable: HealthMetrics = {
+      ...metrics(0, BASE_TIME_MS + 10_000),
+      cpu: { topProcesses: [] },
+      memory: undefined,
+      scalarObservation: { kind: "canonical-unavailable", reason: "scalar-fact-stale" },
+    }
+
+    expect(evaluateAlerts(high(1, BASE_TIME_MS), thresholds, state)).toEqual([])
+    expect(evaluateAlerts(unavailable, thresholds, state)).toEqual([])
+    expect(evaluateAlerts(high(2, BASE_TIME_MS + 20_000), thresholds, state)).toEqual([])
+  })
+
+  test("process-source unavailability does not clear a live process-count episode", () => {
+    const thresholds = { ...defaultThresholds(), processCountWarning: 1 }
+    const state = createAlertState()
+    const high: HealthMetrics = { ...metrics(0, BASE_TIME_MS), bunProcesses: 2 }
+    const unavailable: HealthMetrics = {
+      ...metrics(0, BASE_TIME_MS + 10_000),
+      bunProcesses: undefined,
+      processObservation: {
+        diagnostic: {
+          excluded: ["standalone-os-resample", "cross-batch-attribution", "implicit-unowned"],
+          location: "/hab/habmod",
+          query: "latest exact process census with owner attribution",
+        },
+        kind: "canonical-unavailable",
+        reason: "process-fact-stale",
+      },
+    }
+
+    expect(evaluateAlerts(high, thresholds, state)).toEqual([
+      expect.objectContaining({ severity: "warning", type: "process-count" }),
+    ])
+    expect(evaluateAlerts(unavailable, thresholds, state)).toEqual([])
+    expect(evaluateAlerts({ ...high, timestamp: BASE_TIME_MS + 20_000 }, thresholds, state)).toEqual([])
+  })
 })

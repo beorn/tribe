@@ -29,6 +29,7 @@ import { createTimers } from "./timers.ts"
 import type { TribePluginApi, TribeClientApi } from "./plugin-api.ts"
 import {
   createHealthProcessSource,
+  type CanonicalHostScalarObservation,
   type CanonicalProcessObservation,
   type HealthProcessSource,
 } from "./health-process-source.ts"
@@ -49,17 +50,17 @@ const HEALTH_ALERT_ARGV_MAX_CHARS = 160
 
 export interface HealthMetrics {
   cpu: {
-    loadAvg1m: number
-    loadAvg5m: number
-    coreCount: number
-    topProcesses: Array<{ pid: number; cpu: number; mem: number; command: string }>
+    loadAvg1m?: number
+    loadAvg5m?: number
+    coreCount?: number
+    topProcesses: Array<{ pid: number; cpu: number; mem?: number; command: string }>
   }
-  memory: {
+  memory?: {
     totalMB: number
     usedMB: number
     availableMB: number
     pressurePercent: number
-    swapUsedMB: number
+    swapUsedMB?: number
   }
   disk?: {
     totalGB: number
@@ -81,7 +82,7 @@ export interface HealthMetrics {
     resetAt: number // Unix timestamp
     usagePercent: number
   }
-  bunProcesses: number
+  bunProcesses?: number
   processObservation:
     | { readonly kind: "standalone-os" }
     | {
@@ -94,6 +95,15 @@ export interface HealthMetrics {
         readonly kind: "canonical-unavailable"
         readonly reason: string
       }
+  scalarObservation?:
+    | { readonly kind: "standalone-os" }
+    | {
+        readonly kind: "canonical-available"
+        readonly observedAt: number
+        readonly source: { readonly epoch: string; readonly sequence: number }
+        readonly unavailable: readonly string[]
+      }
+    | { readonly detail?: string; readonly kind: "canonical-unavailable"; readonly reason: string }
   worktrees: number
   timestamp: number
 }
@@ -114,7 +124,7 @@ export interface HealthAlert {
   severity: "warning" | "critical"
   message: string
   metrics: Partial<HealthMetrics>
-  topOffenders: Array<{ pid: number; cpu: number; mem: number; command: string }>
+  topOffenders: Array<{ pid: number; cpu: number; mem?: number; command: string }>
 }
 
 export interface HealthProcess {
@@ -122,7 +132,7 @@ export interface HealthProcess {
   ppid: number
   pgid: number
   cpu: number
-  mem: number
+  mem?: number
   command: string
 }
 
@@ -444,7 +454,7 @@ export function deriveProcessMetricsFromSnapshot(
 export function deriveProcessMetricsFromCanonical(
   observation: Extract<CanonicalProcessObservation, { kind: "available" }>,
   supervisorPid: number,
-  totalBytes = totalmem(),
+  totalBytes?: number,
 ): {
   topProcesses: HealthMetrics["cpu"]["topProcesses"]
   bunProcesses: number
@@ -453,7 +463,9 @@ export function deriveProcessMetricsFromCanonical(
   const snapshot: HealthProcess[] = observation.processes.map(({ process }) => ({
     command: process.command,
     cpu: process.cpuPercent ?? 0,
-    mem: process.rssBytes === undefined || totalBytes <= 0 ? 0 : (process.rssBytes / totalBytes) * 100,
+    ...(process.rssBytes === undefined || totalBytes === undefined || totalBytes <= 0
+      ? {}
+      : { mem: (process.rssBytes / totalBytes) * 100 }),
     pgid: process.pgid,
     pid: process.pid,
     ppid: process.ppid,
@@ -519,16 +531,16 @@ export function countBunNodeProcesses(processes: Array<{ command: string }>): nu
 
 /** Get top N CPU consumers from a parsed process list. */
 export function topCpuConsumers(
-  processes: Array<{ pid: number; cpu: number; mem: number; command: string }>,
+  processes: Array<{ pid: number; cpu: number; mem?: number; command: string }>,
   n = 5,
-): Array<{ pid: number; cpu: number; mem: number; command: string }> {
+): Array<{ pid: number; cpu: number; mem?: number; command: string }> {
   return [...processes]
     .sort((a, b) => b.cpu - a.cpu)
     .slice(0, n)
     .map((p) => ({
       pid: p.pid,
       cpu: p.cpu,
-      mem: p.mem,
+      ...(p.mem === undefined ? {} : { mem: p.mem }),
       command: p.command.slice(0, HEALTH_ALERT_ARGV_MAX_CHARS),
     }))
 }
@@ -944,6 +956,8 @@ export interface AlertState {
   reaperSuspects: Map<number, ReaperSuspect>
   /** Managed reaper state is incarnation-keyed and never shared with the standalone ps path. */
   canonicalReaper: CanonicalReaperState
+  /** Last canonical scalar fact evaluated for sustained thresholds. */
+  lastScalarFact?: string
 }
 
 export function createAlertState(): AlertState {
@@ -1067,102 +1081,123 @@ export function evaluateAlerts(
   activeAgentCount = 0,
 ): HealthAlert[] {
   const alerts: HealthAlert[] = []
+  const scalarFact =
+    metrics.scalarObservation?.kind === "canonical-available"
+      ? `${metrics.scalarObservation.source.epoch}\0${metrics.scalarObservation.source.sequence}`
+      : undefined
+  const evaluateScalarMetrics = scalarFact === undefined || scalarFact !== state.lastScalarFact
+  if (scalarFact !== undefined && evaluateScalarMetrics) state.lastScalarFact = scalarFact
   const cores = metrics.cpu.coreCount
   const load = metrics.cpu.loadAvg1m
 
   // --- CPU ---
-  const cpuCriticalThreshold = cores * thresholds.cpuCriticalMultiplier
-  const cpuWarningThreshold = cores * thresholds.cpuWarningMultiplier
-  const cpuCriticalCoolingDown =
-    metrics.timestamp - (state.firedAt.get("cpu:critical") ?? Number.NEGATIVE_INFINITY) < CPU_ALERT_COOLDOWN_MS
-  const cpuWarningCoolingDown =
-    metrics.timestamp - (state.firedAt.get("cpu:warning") ?? Number.NEGATIVE_INFINITY) < CPU_ALERT_COOLDOWN_MS
+  if (evaluateScalarMetrics && cores !== undefined && load !== undefined) {
+    const cpuCriticalThreshold = cores * thresholds.cpuCriticalMultiplier
+    const cpuWarningThreshold = cores * thresholds.cpuWarningMultiplier
+    const cpuCriticalCoolingDown =
+      metrics.timestamp - (state.firedAt.get("cpu:critical") ?? Number.NEGATIVE_INFINITY) < CPU_ALERT_COOLDOWN_MS
+    const cpuWarningCoolingDown =
+      metrics.timestamp - (state.firedAt.get("cpu:warning") ?? Number.NEGATIVE_INFINITY) < CPU_ALERT_COOLDOWN_MS
 
-  if (load > cpuCriticalThreshold) {
-    state.cpuAboveCritical++
-    state.cpuAboveWarning++
-  } else if (load > cpuWarningThreshold) {
-    state.cpuAboveCritical = 0
-    state.cpuAboveWarning++
-  } else {
+    if (load > cpuCriticalThreshold) {
+      state.cpuAboveCritical++
+      state.cpuAboveWarning++
+    } else if (load > cpuWarningThreshold) {
+      state.cpuAboveCritical = 0
+      state.cpuAboveWarning++
+    } else {
+      state.cpuAboveCritical = 0
+      state.cpuAboveWarning = 0
+      state.firedAlerts.delete("cpu:critical")
+      state.firedAlerts.delete("cpu:warning")
+    }
+
+    if (
+      state.cpuAboveCritical >= thresholds.sustainedSamples &&
+      !state.firedAlerts.has("cpu:critical") &&
+      !cpuCriticalCoolingDown
+    ) {
+      state.firedAlerts.add("cpu:critical")
+      state.firedAlerts.delete("cpu:warning") // Supersedes warning
+      state.firedAt.set("cpu:critical", metrics.timestamp)
+      state.firedAt.set("cpu:warning", metrics.timestamp)
+      alerts.push({
+        type: "cpu",
+        severity: "critical",
+        message: `CPU critical: load ${load} exceeds ${cpuCriticalThreshold.toFixed(1)} (${cores} cores x ${thresholds.cpuCriticalMultiplier}) for ${thresholds.sustainedSamples * 10}s`,
+        metrics: { cpu: metrics.cpu },
+        topOffenders: metrics.cpu.topProcesses.slice(0, 5),
+      })
+    } else if (
+      state.cpuAboveWarning >= thresholds.sustainedSamples &&
+      !state.firedAlerts.has("cpu:warning") &&
+      !state.firedAlerts.has("cpu:critical") &&
+      !cpuWarningCoolingDown
+    ) {
+      state.firedAlerts.add("cpu:warning")
+      state.firedAt.set("cpu:warning", metrics.timestamp)
+      alerts.push({
+        type: "cpu",
+        severity: "warning",
+        message: `CPU warning: load ${load} exceeds ${cpuWarningThreshold.toFixed(1)} (${cores} cores x ${thresholds.cpuWarningMultiplier}) for ${thresholds.sustainedSamples * 10}s`,
+        metrics: { cpu: metrics.cpu },
+        topOffenders: metrics.cpu.topProcesses.slice(0, 5),
+      })
+    }
+  } else if (evaluateScalarMetrics) {
     state.cpuAboveCritical = 0
     state.cpuAboveWarning = 0
     state.firedAlerts.delete("cpu:critical")
     state.firedAlerts.delete("cpu:warning")
   }
 
-  if (
-    state.cpuAboveCritical >= thresholds.sustainedSamples &&
-    !state.firedAlerts.has("cpu:critical") &&
-    !cpuCriticalCoolingDown
-  ) {
-    state.firedAlerts.add("cpu:critical")
-    state.firedAlerts.delete("cpu:warning") // Supersedes warning
-    state.firedAt.set("cpu:critical", metrics.timestamp)
-    state.firedAt.set("cpu:warning", metrics.timestamp)
-    alerts.push({
-      type: "cpu",
-      severity: "critical",
-      message: `CPU critical: load ${load} exceeds ${cpuCriticalThreshold.toFixed(1)} (${cores} cores x ${thresholds.cpuCriticalMultiplier}) for ${thresholds.sustainedSamples * 10}s`,
-      metrics: { cpu: metrics.cpu },
-      topOffenders: metrics.cpu.topProcesses.slice(0, 5),
-    })
-  } else if (
-    state.cpuAboveWarning >= thresholds.sustainedSamples &&
-    !state.firedAlerts.has("cpu:warning") &&
-    !state.firedAlerts.has("cpu:critical") &&
-    !cpuWarningCoolingDown
-  ) {
-    state.firedAlerts.add("cpu:warning")
-    state.firedAt.set("cpu:warning", metrics.timestamp)
-    alerts.push({
-      type: "cpu",
-      severity: "warning",
-      message: `CPU warning: load ${load} exceeds ${cpuWarningThreshold.toFixed(1)} (${cores} cores x ${thresholds.cpuWarningMultiplier}) for ${thresholds.sustainedSamples * 10}s`,
-      metrics: { cpu: metrics.cpu },
-      topOffenders: metrics.cpu.topProcesses.slice(0, 5),
-    })
-  }
-
   // --- Memory ---
-  const memPressure = metrics.memory.pressurePercent
+  const memory = metrics.memory
+  if (evaluateScalarMetrics && memory !== undefined) {
+    const memPressure = memory.pressurePercent
 
-  if (memPressure > thresholds.memCriticalPercent) {
-    state.memAboveCritical++
-    state.memAboveWarning++
-  } else if (memPressure > thresholds.memWarningPercent) {
-    state.memAboveCritical = 0
-    state.memAboveWarning++
-  } else {
+    if (memPressure > thresholds.memCriticalPercent) {
+      state.memAboveCritical++
+      state.memAboveWarning++
+    } else if (memPressure > thresholds.memWarningPercent) {
+      state.memAboveCritical = 0
+      state.memAboveWarning++
+    } else {
+      state.memAboveCritical = 0
+      state.memAboveWarning = 0
+      state.firedAlerts.delete("memory:critical")
+      state.firedAlerts.delete("memory:warning")
+    }
+
+    if (state.memAboveCritical >= 1 && !state.firedAlerts.has("memory:critical")) {
+      state.firedAlerts.add("memory:critical")
+      state.firedAlerts.delete("memory:warning")
+      alerts.push({
+        type: "memory",
+        severity: "critical",
+        message: `Memory critical: ${memPressure}% used (${memory.usedMB}MB / ${memory.totalMB}MB)${memory.swapUsedMB === undefined ? "" : `, swap: ${memory.swapUsedMB}MB`}`,
+        metrics: { memory },
+        topOffenders: metrics.cpu.topProcesses.slice(0, 5),
+      })
+    } else if (
+      state.memAboveWarning >= 1 &&
+      !state.firedAlerts.has("memory:warning") &&
+      !state.firedAlerts.has("memory:critical")
+    ) {
+      state.firedAlerts.add("memory:warning")
+      alerts.push({
+        type: "memory",
+        severity: "warning",
+        message: `Memory warning: ${memPressure}% used (${memory.usedMB}MB / ${memory.totalMB}MB)`,
+        metrics: { memory },
+        topOffenders: metrics.cpu.topProcesses.slice(0, 5),
+      })
+    }
+  } else if (evaluateScalarMetrics) {
     state.memAboveCritical = 0
     state.memAboveWarning = 0
     state.firedAlerts.delete("memory:critical")
     state.firedAlerts.delete("memory:warning")
-  }
-
-  if (state.memAboveCritical >= 1 && !state.firedAlerts.has("memory:critical")) {
-    state.firedAlerts.add("memory:critical")
-    state.firedAlerts.delete("memory:warning")
-    alerts.push({
-      type: "memory",
-      severity: "critical",
-      message: `Memory critical: ${memPressure}% used (${metrics.memory.usedMB}MB / ${metrics.memory.totalMB}MB), swap: ${metrics.memory.swapUsedMB}MB`,
-      metrics: { memory: metrics.memory },
-      topOffenders: metrics.cpu.topProcesses.slice(0, 5),
-    })
-  } else if (
-    state.memAboveWarning >= 1 &&
-    !state.firedAlerts.has("memory:warning") &&
-    !state.firedAlerts.has("memory:critical")
-  ) {
-    state.firedAlerts.add("memory:warning")
-    alerts.push({
-      type: "memory",
-      severity: "warning",
-      message: `Memory warning: ${memPressure}% used (${metrics.memory.usedMB}MB / ${metrics.memory.totalMB}MB)`,
-      metrics: { memory: metrics.memory },
-      topOffenders: metrics.cpu.topProcesses.slice(0, 5),
-    })
   }
 
   // --- Process count ---
@@ -1172,7 +1207,7 @@ export function evaluateAlerts(
   // agents are connected (standalone deployments), so the bar never goes
   // BELOW the configured static threshold.
   const processThreshold = dynamicProcessThreshold(thresholds.processCountWarning, activeAgentCount)
-  if (metrics.bunProcesses > processThreshold) {
+  if (metrics.bunProcesses !== undefined && metrics.bunProcesses > processThreshold) {
     if (!state.firedAlerts.has("process-count:warning")) {
       state.firedAlerts.add("process-count:warning")
       const thresholdDetail =
@@ -1187,12 +1222,12 @@ export function evaluateAlerts(
         topOffenders: metrics.cpu.topProcesses.slice(0, 5),
       })
     }
-  } else {
+  } else if (metrics.bunProcesses !== undefined) {
     state.firedAlerts.delete("process-count:warning")
   }
 
   // --- Disk ---
-  if (metrics.disk) {
+  if (evaluateScalarMetrics && metrics.disk) {
     const diskUsage = metrics.disk.usagePercent
     if (diskUsage > thresholds.diskCriticalPercent) {
       if (!state.firedAlerts.has("disk:critical")) {
@@ -1221,6 +1256,11 @@ export function evaluateAlerts(
       state.firedAlerts.delete("disk:critical")
       state.firedAlerts.delete("disk:warning")
     }
+  } else if (evaluateScalarMetrics) {
+    state.diskAboveCritical = 0
+    state.diskAboveWarning = 0
+    state.firedAlerts.delete("disk:critical")
+    state.firedAlerts.delete("disk:warning")
   }
 
   // --- Worktrees ---
@@ -1448,34 +1488,171 @@ export async function checkReaper(
 // Full metrics collection
 // ---------------------------------------------------------------------------
 
-export async function collectFullMetrics(processSource: HealthProcessSource = createHealthProcessSource()): Promise<{
+interface CollectFullMetricsDeps {
+  readonly collectOsMetrics?: typeof collectOsMetrics
+}
+
+function metricUnavailableNames(observation: Extract<CanonicalHostScalarObservation, { kind: "available" }>): string[] {
+  return (["cpu", "disk", "diskIo", "memory", "swap"] as const).filter(
+    (name) => observation.values[name].kind === "unavailable",
+  )
+}
+
+function canonicalScalarMetrics(
+  observation: CanonicalHostScalarObservation,
+): Pick<HealthMetrics, "cpu" | "disk" | "diskIo" | "memory" | "scalarObservation" | "timestamp"> {
+  if (observation.kind === "unavailable") {
+    return {
+      cpu: { topProcesses: [] },
+      scalarObservation: {
+        ...(observation.detail === undefined ? {} : { detail: observation.detail }),
+        kind: "canonical-unavailable",
+        reason: observation.reason,
+      },
+      timestamp: Date.now(),
+    }
+  }
+  const { values } = observation
+  const bytesPerMB = 1024 * 1024
+  const bytesPerGB = bytesPerMB * 1024
+  const cpu =
+    values.cpu.kind === "supported"
+      ? {
+          coreCount: values.cpu.value.logicalCores,
+          loadAvg1m: values.cpu.value.loadAverage1m,
+          loadAvg5m: values.cpu.value.loadAverage5m,
+          topProcesses: [],
+        }
+      : { topProcesses: [] }
+  const memory =
+    values.memory.kind === "supported"
+      ? {
+          availableMB: Math.round(values.memory.value.availableBytes / bytesPerMB),
+          pressurePercent: Math.round((values.memory.value.usedBytes / values.memory.value.totalBytes) * 100),
+          ...(values.swap.kind === "supported"
+            ? { swapUsedMB: Math.round(values.swap.value.usedBytes / bytesPerMB) }
+            : {}),
+          totalMB: Math.round(values.memory.value.totalBytes / bytesPerMB),
+          usedMB: Math.round(values.memory.value.usedBytes / bytesPerMB),
+        }
+      : undefined
+  const disk =
+    values.disk.kind === "supported"
+      ? {
+          availableGB: Math.round(values.disk.value.availableBytes / bytesPerGB),
+          totalGB: Math.round(values.disk.value.totalBytes / bytesPerGB),
+          usagePercent: Math.round((values.disk.value.usedBytes / values.disk.value.totalBytes) * 100),
+          usedGB: Math.round(values.disk.value.usedBytes / bytesPerGB),
+        }
+      : undefined
+  const diskIo =
+    values.diskIo.kind === "supported"
+      ? { readWriteMBps: values.diskIo.value.readWriteBytesPerSecond / bytesPerMB }
+      : undefined
+  return {
+    cpu,
+    ...(disk === undefined ? {} : { disk }),
+    ...(diskIo === undefined ? {} : { diskIo }),
+    ...(memory === undefined ? {} : { memory }),
+    scalarObservation: {
+      kind: "canonical-available",
+      observedAt: observation.observedAt,
+      source: observation.source,
+      unavailable: metricUnavailableNames(observation),
+    },
+    timestamp: observation.observedAt,
+  }
+}
+
+async function readDiskIoMetric(
+  processSource: HealthProcessSource,
+  metrics: HealthMetrics,
+): Promise<HealthMetrics["diskIo"]> {
+  if (processSource.kind === "managed") return metrics.diskIo
+  const ioProc = Bun.spawn(["iostat", "-d", "-c", "2", "-w", "1"], { stdout: "pipe", stderr: "ignore" })
+  return parseIostatOutput(await new Response(ioProc.stdout).text()) ?? undefined
+}
+
+function updateDiskIoAlert(
+  io: HealthMetrics["diskIo"],
+  thresholds: HealthThresholds,
+  state: AlertState,
+  api: TribeClientApi,
+): void {
+  if (io && io.readWriteMBps > thresholds.diskIoWarningMBps) {
+    state.ioAboveWarning++
+    if (state.ioAboveWarning >= 2 && !state.firedAlerts.has("disk-io:warning")) {
+      state.firedAlerts.add("disk-io:warning")
+      const message = `Disk I/O warning: ${io.readWriteMBps.toFixed(0)} MB/s sustained (threshold: ${thresholds.diskIoWarningMBps} MB/s). Multiple agents may be running tests simultaneously.`
+      log.info?.(`alert: ${message}`)
+      api.broadcast(message, "health:disk-io:warning", undefined, {
+        delivery: "pull",
+        topic: "health:disk-io:warning",
+      })
+    }
+    return
+  }
+  state.ioAboveWarning = 0
+  state.firedAlerts.delete("disk-io:warning")
+}
+
+export async function collectFullMetrics(
+  processSource: HealthProcessSource = createHealthProcessSource(),
+  deps: CollectFullMetricsDeps = {},
+): Promise<{
   metrics: HealthMetrics
   pidToParent: Map<number, number>
   processObservation: CollectedProcessObservation
 }> {
-  const osMetrics = collectOsMetrics()
+  const [processObservation, scalarObservation] =
+    processSource.kind === "managed"
+      ? await Promise.all([processSource.read(), processSource.readScalars()])
+      : ([{ kind: "standalone-os" }, { kind: "standalone-os" }] as const)
+  const hostMetrics: Pick<HealthMetrics, "cpu" | "disk" | "diskIo" | "memory" | "scalarObservation" | "timestamp"> =
+    scalarObservation.kind === "standalone-os"
+      ? (() => {
+          const sampled = (deps.collectOsMetrics ?? collectOsMetrics)()
+          return {
+            ...sampled,
+            cpu: { ...sampled.cpu, topProcesses: [] },
+            scalarObservation: { kind: "standalone-os" as const },
+          }
+        })()
+      : canonicalScalarMetrics(scalarObservation)
 
-  let topProcesses: Array<{ pid: number; cpu: number; mem: number; command: string }> = []
-  let bunProcesses = 0
+  let topProcesses: Array<{ pid: number; cpu: number; mem?: number; command: string }> = []
+  let bunProcesses: number | undefined
   let swapUsedMB = 0
   let pidToParent = new Map<number, number>()
-  let disk: HealthMetrics["disk"]
+  let disk: HealthMetrics["disk"] = hostMetrics.disk
   let worktrees = 0
   let fdCount: HealthMetrics["fdCount"]
-  const processObservation: CollectedProcessObservation =
-    processSource.kind === "managed" ? await processSource.read() : { kind: "standalone-os" }
   if (processObservation.kind === "available") {
-    const processMetrics = deriveProcessMetricsFromCanonical(processObservation, process.pid)
+    const totalBytes =
+      scalarObservation.kind === "available" && scalarObservation.values.memory.kind === "supported"
+        ? scalarObservation.values.memory.value.totalBytes
+        : undefined
+    const processMetrics = deriveProcessMetricsFromCanonical(processObservation, process.pid, totalBytes)
     topProcesses = processMetrics.topProcesses
     bunProcesses = processMetrics.bunProcesses
     pidToParent = processMetrics.pidToParent
   }
 
   try {
-    const dfProc = Bun.spawn(["df", "-g", "."], { stdout: "pipe", stderr: "ignore" })
     const wtProc = Bun.spawn(["git", "worktree", "list"], { stdout: "pipe", stderr: "ignore" })
-    const fdCountProc = Bun.spawn(["sh", "-c", "lsof -n 2>/dev/null | wc -l"], { stdout: "pipe", stderr: "ignore" })
-    const ulimitProc = Bun.spawn(["sh", "-c", "ulimit -n"], { stdout: "pipe", stderr: "ignore" })
+    const fdCountOutputPromise =
+      processObservation.kind === "standalone-os"
+        ? new Response(
+            Bun.spawn(["sh", "-c", "lsof -n 2>/dev/null | wc -l"], {
+              stdout: "pipe",
+              stderr: "ignore",
+            }).stdout,
+          ).text()
+        : Promise.resolve("0")
+    const ulimitOutputPromise =
+      processObservation.kind === "standalone-os"
+        ? new Response(Bun.spawn(["sh", "-c", "ulimit -n"], { stdout: "pipe", stderr: "ignore" }).stdout).text()
+        : Promise.resolve("0")
     const psOutput =
       processObservation.kind === "standalone-os"
         ? new Response(
@@ -1485,12 +1662,16 @@ export async function collectFullMetrics(processSource: HealthProcessSource = cr
             }).stdout,
           ).text()
         : Promise.resolve("")
+    const dfOutputPromise =
+      processObservation.kind === "standalone-os"
+        ? new Response(Bun.spawn(["df", "-g", "."], { stdout: "pipe", stderr: "ignore" }).stdout).text()
+        : Promise.resolve("")
     const [observedPs, dfOutput, wtOutput, fdCountOutput, ulimitOutput] = await Promise.all([
       psOutput,
-      new Response(dfProc.stdout).text().catch(() => ""),
+      dfOutputPromise,
       new Response(wtProc.stdout).text().catch(() => ""),
-      new Response(fdCountProc.stdout).text().catch(() => "0"),
-      new Response(ulimitProc.stdout).text().catch(() => "0"),
+      fdCountOutputPromise.catch(() => "0"),
+      ulimitOutputPromise.catch(() => "0"),
     ])
     if (processObservation.kind === "standalone-os") {
       const processMetrics = deriveProcessMetricsFromSnapshot(observedPs, process.pid)
@@ -1498,7 +1679,7 @@ export async function collectFullMetrics(processSource: HealthProcessSource = cr
       bunProcesses = processMetrics.bunProcesses
       pidToParent = processMetrics.pidToParent
     }
-    disk = parseDfOutput(dfOutput) ?? undefined
+    if (processObservation.kind === "standalone-os") disk = parseDfOutput(dfOutput) ?? undefined
     worktrees = parseWorktreeList(wtOutput)
 
     // File descriptor count
@@ -1519,7 +1700,7 @@ export async function collectFullMetrics(processSource: HealthProcessSource = cr
   // available). Override with vm_stat-derived numbers matching Activity
   // Monitor semantics. See km-tribe.reliability-sweep-0415.
   let memoryOverride: { usedMB: number; availableMB: number; pressurePercent: number } | null = null
-  if (process.platform === "darwin") {
+  if (processObservation.kind === "standalone-os" && process.platform === "darwin") {
     try {
       const swapProc = Bun.spawn(["sysctl", "vm.swapusage"], { stdout: "pipe", stderr: "ignore" })
       const swapOutput = await new Response(swapProc.stdout).text()
@@ -1551,17 +1732,22 @@ export async function collectFullMetrics(processSource: HealthProcessSource = cr
   return {
     metrics: {
       cpu: {
-        ...osMetrics.cpu,
+        ...hostMetrics.cpu,
         topProcesses,
       },
-      memory: {
-        ...osMetrics.memory,
-        ...memoryOverride,
-        swapUsedMB,
-      },
+      ...(hostMetrics.memory === undefined
+        ? {}
+        : {
+            memory: {
+              ...hostMetrics.memory,
+              ...memoryOverride,
+              ...(processObservation.kind === "standalone-os" ? { swapUsedMB } : {}),
+            },
+          }),
       disk,
+      diskIo: hostMetrics.diskIo,
       fdCount,
-      bunProcesses,
+      ...(bunProcesses === undefined ? {} : { bunProcesses }),
       processObservation:
         processObservation.kind === "standalone-os"
           ? processObservation
@@ -1576,8 +1762,9 @@ export async function collectFullMetrics(processSource: HealthProcessSource = cr
                 kind: "canonical-unavailable",
                 reason: processObservation.reason,
               },
+      scalarObservation: hostMetrics.scalarObservation,
       worktrees,
-      timestamp: osMetrics.timestamp,
+      timestamp: hostMetrics.timestamp,
     },
     pidToParent,
     processObservation,
@@ -1619,6 +1806,7 @@ export const healthMonitorPlugin: TribePluginApi = {
     let ghRateSampleCount = 0
     let ioSampleCount = 0
     let chiefPresenceSampleCount = 0
+    let lastIoScalarFact: string | undefined
 
     log.info?.(
       `starting: poll=${pollIntervalSec}s, cpu warn=${thresholds.cpuWarningMultiplier}x crit=${thresholds.cpuCriticalMultiplier}x, mem warn=${thresholds.memWarningPercent}% crit=${thresholds.memCriticalPercent}%`,
@@ -1632,6 +1820,10 @@ export const healthMonitorPlugin: TribePluginApi = {
         // number of connected sessions; alarms tuned for solo dev shouldn't
         // fire on a healthy 4-agent baseline.
         const activeAgentCount = new Set(sessions.map((session) => session.name)).size
+        const scalarFact =
+          metrics.scalarObservation?.kind === "canonical-available"
+            ? `${metrics.scalarObservation.source.epoch}\0${metrics.scalarObservation.source.sequence}`
+            : undefined
         const alerts = evaluateAlerts(metrics, thresholds, alertState, activeAgentCount)
 
         for (const alert of alerts) {
@@ -1781,23 +1973,10 @@ export const healthMonitorPlugin: TribePluginApi = {
         ioSampleCount++
         if (ioSampleCount % 3 === 0) {
           try {
-            const ioProc = Bun.spawn(["iostat", "-d", "-c", "2", "-w", "1"], { stdout: "pipe", stderr: "ignore" })
-            const ioOutput = await new Response(ioProc.stdout).text()
-            const io = parseIostatOutput(ioOutput)
-            if (io && io.readWriteMBps > thresholds.diskIoWarningMBps) {
-              alertState.ioAboveWarning++
-              if (alertState.ioAboveWarning >= 2 && !alertState.firedAlerts.has("disk-io:warning")) {
-                alertState.firedAlerts.add("disk-io:warning")
-                const msg = `Disk I/O warning: ${io.readWriteMBps.toFixed(0)} MB/s sustained (threshold: ${thresholds.diskIoWarningMBps} MB/s). Multiple agents may be running tests simultaneously.`
-                log.info?.(`alert: ${msg}`)
-                api.broadcast(msg, "health:disk-io:warning", undefined, {
-                  delivery: "pull",
-                  topic: "health:disk-io:warning",
-                })
-              }
-            } else {
-              alertState.ioAboveWarning = 0
-              alertState.firedAlerts.delete("disk-io:warning")
+            const evaluateIo = scalarFact === undefined || scalarFact !== lastIoScalarFact
+            if (scalarFact !== undefined && evaluateIo) lastIoScalarFact = scalarFact
+            if (evaluateIo) {
+              updateDiskIoAlert(await readDiskIoMetric(processSource, metrics), thresholds, alertState, api)
             }
           } catch {
             // iostat not available — skip silently
