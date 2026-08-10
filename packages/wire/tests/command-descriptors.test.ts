@@ -246,6 +246,11 @@ describe("Tribe command descriptors", () => {
       type: "boolean",
       description: expect.stringMatching(/deadline-passed.*historical unanswered/i),
     })
+    const expiredDescription = (
+      pending.mcp.inputSchema.properties?.expired as { readonly description?: string } | undefined
+    )?.description
+    expect(expiredDescription).toMatch(/default.*deadline-passed.*remain.*visible/i)
+    expect(expiredDescription).not.toMatch(/default view omits|lapsed request is invisible/i)
     expect(pending.mcp.inputSchema.properties?.prune).toMatchObject({
       type: "boolean",
       description: expect.stringMatching(/stale_ms/i),

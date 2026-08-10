@@ -184,7 +184,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           fanout: {
             type: "string",
             enum: TRIBE_FANOUTS,
-            description: "Multi-recipient ball routing: 'first' (competing consumers) or 'all' (per-recipient ball). See /tribe.",
+            description:
+              "Multi-recipient ball routing: 'first' (competing consumers) or 'all' (per-recipient ball). See /tribe.",
             default: "first",
           },
           expires_in_ms: {
@@ -375,12 +376,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           expired: {
             type: "boolean",
             description:
-              "Read deadline-passed and historical unanswered outcomes. The default view omits these, so a lapsed request is invisible without it. Answered rows are omitted.",
+              "Read deadline-passed and historical unanswered outcomes. In the default view, live deadline-passed requests remain visible; this diagnostic view additionally reconstructs journal-backed history. Answered rows are omitted.",
           },
           owed: {
             type: "boolean",
             description:
-              "With expired: keep only rows a live pending_request still stands behind (backing \"live\" — declared deadline passed, still open, needs the owner's decision). Drops journal-only history: settled rows and unsettled ghosts no close can reach.",
+              'With expired: keep only rows a live pending_request still stands behind (backing "live" — declared deadline passed, still open, needs the owner\'s decision). Drops journal-only history: settled rows and unsettled ghosts no close can reach.',
           },
           owner: {
             type: "string",
@@ -410,7 +411,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           pending: {
             type: "array",
             description:
-              "Active requests, or derive-at-read expired/unanswered outcomes when expired=true. Expired rows collapse to one per (request_id, recipient) with older generations disclosed as superseded_count, and carry backing: \"live\" (a pending_request row still stands behind it, settlement=null, genuinely owed) or \"journal\" (history: manual-close, incident-cleared, gc-expired, sender-withdrawn, or an unsettled ghost). Answered rows are omitted; owed=true keeps only backing \"live\".",
+              'Active requests, or derive-at-read expired/unanswered outcomes when expired=true. Expired rows collapse to one per (request_id, recipient) with older generations disclosed as superseded_count, and carry backing: "live" (a pending_request row still stands behind it, settlement=null, genuinely owed) or "journal" (history: manual-close, incident-cleared, gc-expired, sender-withdrawn, or an unsettled ghost). Answered rows are omitted; owed=true keeps only backing "live".',
             items: { type: "object", additionalProperties: true },
           },
           owners: {
