@@ -95,7 +95,7 @@ export interface HealthMetrics {
         readonly kind: "canonical-unavailable"
         readonly reason: string
       }
-  scalarObservation?:
+  scalarObservation:
     | { readonly kind: "standalone-os" }
     | {
         readonly kind: "canonical-available"
@@ -298,7 +298,7 @@ export function deliverHealthAlert(
 /** Collect OS-level metrics (no child process needed). */
 export function collectOsMetrics(): Omit<
   HealthMetrics,
-  "bunProcesses" | "worktrees" | "disk" | "cpu" | "processObservation"
+  "bunProcesses" | "worktrees" | "disk" | "cpu" | "processObservation" | "scalarObservation"
 > & {
   cpu: Omit<HealthMetrics["cpu"], "topProcesses">
 } {
@@ -1074,6 +1074,12 @@ export function dynamicProcessThreshold(staticThreshold: number, activeAgentCoun
   return Math.max(staticThreshold, dynamic)
 }
 
+function scalarFactIdentity(observation: HealthMetrics["scalarObservation"]): string | undefined {
+  return observation.kind === "canonical-available"
+    ? `${observation.source.epoch}\0${observation.source.sequence}`
+    : undefined
+}
+
 export function evaluateAlerts(
   metrics: HealthMetrics,
   thresholds: HealthThresholds,
@@ -1081,10 +1087,7 @@ export function evaluateAlerts(
   activeAgentCount = 0,
 ): HealthAlert[] {
   const alerts: HealthAlert[] = []
-  const scalarFact =
-    metrics.scalarObservation?.kind === "canonical-available"
-      ? `${metrics.scalarObservation.source.epoch}\0${metrics.scalarObservation.source.sequence}`
-      : undefined
+  const scalarFact = scalarFactIdentity(metrics.scalarObservation)
   const evaluateScalarMetrics = scalarFact === undefined || scalarFact !== state.lastScalarFact
   if (scalarFact !== undefined && evaluateScalarMetrics) state.lastScalarFact = scalarFact
   const cores = metrics.cpu.coreCount
@@ -1820,10 +1823,7 @@ export const healthMonitorPlugin: TribePluginApi = {
         // number of connected sessions; alarms tuned for solo dev shouldn't
         // fire on a healthy 4-agent baseline.
         const activeAgentCount = new Set(sessions.map((session) => session.name)).size
-        const scalarFact =
-          metrics.scalarObservation?.kind === "canonical-available"
-            ? `${metrics.scalarObservation.source.epoch}\0${metrics.scalarObservation.source.sequence}`
-            : undefined
+        const scalarFact = scalarFactIdentity(metrics.scalarObservation)
         const alerts = evaluateAlerts(metrics, thresholds, alertState, activeAgentCount)
 
         for (const alert of alerts) {

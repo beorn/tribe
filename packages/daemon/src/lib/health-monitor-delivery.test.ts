@@ -19,12 +19,17 @@ function metrics(loadAvg1m: number, timestamp: number): HealthMetrics {
     memory: { totalMB: 100, usedMB: 10, availableMB: 90, pressurePercent: 10, swapUsedMB: 0 },
     bunProcesses: 0,
     processObservation: { kind: "standalone-os" },
+    scalarObservation: { kind: "standalone-os" },
     worktrees: 0,
     timestamp,
   }
 }
 
 describe("health alert delivery", () => {
+  test("standalone metrics carry explicit scalar provenance", () => {
+    expect(metrics(0, BASE_TIME_MS).scalarObservation).toEqual({ kind: "standalone-os" })
+  })
+
   test("absent chief with actionable unread escalates immediately to a live authority", () => {
     const state = createAlertState()
     const check = (chiefOnline: boolean) => checkChiefAbsent({ count: 1, oldestTs: BASE_TIME_MS }, chiefOnline, state)
