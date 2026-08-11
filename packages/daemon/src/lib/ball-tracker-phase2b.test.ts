@@ -482,6 +482,33 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     expect(expired.pending).toEqual([expect.objectContaining({ request_id: "actual-request" })])
   })
 
+  it("does not claim the replier owns no balls when its open ball came from another peer", () => {
+    const opened = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        { to: "@agent/1", message: "review this", type: "request", request: "other-peer-request" },
+        makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+      ),
+    )
+
+    const reply = parseToolJson(
+      handleToolCall(
+        agent1,
+        "tribe.send",
+        { to: "@agent/2", message: "reviewed", type: "response", reply: "mistyped-request" },
+        makeOpts(["sess-chief", "sess-agent-1", "sess-agent-2"]),
+      ),
+    )
+
+    expect(reply.tracker).toEqual({ request_id: "mistyped-request", closed: 0 })
+    expect(reply.reply_close_failed).toBe(true)
+    expect(reply.warning).not.toContain("@agent/1 owns no open balls")
+    expect(reply.warning).toContain("other-peer-request")
+    expect(reply.warning).toContain(opened.id)
+    expect(pendingRecipients(db, "other-peer-request")).toEqual(["@agent/1"])
+  })
+
   it("reports failure when a reply closes zero rows and the replier owns no balls at all", () => {
     // The worst case, and the one that reads as clean success: a fabricated or
     // truncated id matched nothing AND there was nothing it could have matched,

@@ -1143,12 +1143,17 @@ function pendingCloseMissWarning(
   const peerSet = peers ? new Set(peers) : null
   const now = Date.now()
   const fromRelevantPeer = (ball: PendingBall) => peerSet === null || peerSet.has(ball.sender)
-  const pending = pendingBallsForOwner(ctx, owner, now).filter(fromRelevantPeer)
+  const allPending = pendingBallsForOwner(ctx, owner, now)
+  const peerPending = allPending.filter(fromRelevantPeer)
   // An empty ball list is the *loudest* case, not the quiet one: the id matched
   // nothing and there was nothing it could have matched, which is exactly the
   // shape a fabricated or truncated request id produces. Staying silent here
   // let a close that closed nothing read as clean success.
-  if (pending.length === 0) return `reply/close ${attemptedId} closed 0 rows; ${owner} owns no open balls`
+  if (allPending.length === 0) return `reply/close ${attemptedId} closed 0 rows; ${owner} owns no open balls`
+  // Prefer obligations from the addressed peer because they are the likely
+  // intended close target. If that peer has none, show the owner's actual open
+  // obligations instead of making the false global claim that none exist.
+  const pending = peerPending.length > 0 ? peerPending : allPending
   const listing = pending
     .map((ball) => {
       const deadlinePassed = ball.expires_at !== null && Date.parse(ball.expires_at) <= now
