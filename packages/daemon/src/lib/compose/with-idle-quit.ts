@@ -106,7 +106,18 @@ export function withIdleQuit<T extends BaseTribe & WithConfig & WithClientRegist
       if (quitTimeoutSec < 0) return // -1 disables auto-quit
       if (idleDeadline !== null) return // already counting down
       idleDeadline = now() + quitTimeoutSec * 1000
-      log.info?.(`No clients connected. Auto-quit in ${quitTimeoutSec}s...`)
+      // WARN, not info: the daemon is announcing it intends to stop serving, and every seat
+      // coordinates through this process. It logged at info on 2026-08-11 and nothing scanning
+      // for warnings saw it — correctly, because nothing warned. The socket-missing backstop
+      // below already uses warn for a strictly less severe condition.
+      //
+      // The message names the KNOB and its VALUE inline. Reading "auto-quit in 1800s" cost a
+      // reader three files to find what governed it; a message that says what to change is the
+      // difference between a diagnosis and a search.
+      log.warn?.(
+        `No clients => auto-quit ARMED, stopping in ${quitTimeoutSec}s ` +
+          `(tribe config TRIBE_QUIT_TIMEOUT=${quitTimeoutSec}; -1 disables, 0 quits immediately)`,
+      )
     }
 
     function checkSocketPathGone(nowMs: number): void {
@@ -167,7 +178,16 @@ export function withIdleQuit<T extends BaseTribe & WithConfig & WithClientRegist
         return
       }
       if (nowMs >= idleDeadline) {
-        log.info?.("Auto-quit: idle deadline reached")
+        // WARN, and say what it MEANS rather than what fired. "idle deadline reached" reads like
+        // a timer expiring; what happens is the coordination rail going down. Name the knob and
+        // the value, and name the supervisor consequence — a clean exit that a supervisor still
+        // counts against its restart budget is a CONFIG condition wearing a crash's clothes, and
+        // that disguise cost a morning on 2026-08-11.
+        log.warn?.(
+          `No clients for ${quitTimeoutSec}s => AUTO-QUITTING the coordination daemon ` +
+            `(tribe config TRIBE_QUIT_TIMEOUT=${quitTimeoutSec}; -1 disables). ` +
+            `Exit is CLEAN (code 0) — a supervisor may still count it against its restart budget.`,
+        )
         opts.triggerShutdown()
       }
     }
