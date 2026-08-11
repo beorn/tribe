@@ -65,7 +65,12 @@ export function withConfig<T extends BaseTribe>(opts: ConfigOpts = {}): (t: T) =
         socket: { type: "string" },
         db: { type: "string" },
         fd: { type: "string" },
-        "quit-timeout": { type: "string", default: "1800" },
+        // Env-backed like its neighbours below. It was NOT, and that was silent: hab set
+        // TRIBE_QUIT_TIMEOUT on the wire service, the variable reached the daemon's environment,
+        // and nothing read it — the daemon kept the 1800s literal while its own log line and
+        // docstring named the variable as the knob. A config that is documented, passed, and
+        // ignored is worse than one that does not exist, because every reader believes it works.
+        "quit-timeout": { type: "string", default: process.env.TRIBE_AUTOQUIT_ON_IDLE ?? "1800" },
         foreground: { type: "boolean", default: false },
         "recall-db": { type: "string" },
         "focus-poll-ms": { type: "string", default: process.env.TRIBE_FOCUS_POLL_MS ?? "60000" },

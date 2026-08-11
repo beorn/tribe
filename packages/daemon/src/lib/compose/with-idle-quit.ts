@@ -14,7 +14,7 @@
  *       own socket (inheritFd === null); inherited-fd daemons skip this
  *       check because the socket path may be unlinked by the donor.
  *
- * On `quitTimeoutSec < 0` the timer never fires (TRIBE_QUIT_TIMEOUT=-1). On
+ * On `quitTimeoutSec < 0` the timer never fires (TRIBE_AUTOQUIT_ON_IDLE=-1). On
  * `quitTimeoutSec === 0` the daemon shuts down immediately when the registry
  * empties. Both paths are independent of the socket-path backstop.
  *
@@ -81,19 +81,20 @@ export function withIdleQuit<T extends BaseTribe & WithConfig & WithClientRegist
 ): (t: T) => T & WithIdleQuit {
   return (t) => {
     const quitTimeoutSec = t.config.quitTimeoutSec
-    // Disclose the CONFIG once, at startup — separately from the EVENT that later trips it.
-    // These are two different facts at two different moments, and folding them into one line
-    // ("no clients => auto-quit is on => stopping in Ns") reads as though being switched on
-    // were itself something that just happened. Stating it here also means the reader learns
-    // the daemon can stop itself BEFORE it does, and keeps the event lines short.
-    if (quitTimeoutSec < 0) {
-      log.info?.(`auto-quit-on-idle: OFF (TRIBE_QUIT_TIMEOUT=-1) — this daemon will not stop itself`)
-    } else {
-      log.info?.(
-        `auto-quit-on-idle: ON, ${quitTimeoutSec}s with no clients ` +
-          `(TRIBE_QUIT_TIMEOUT=${quitTimeoutSec}; -1 disables, 0 quits immediately)`,
-      )
-    }
+    // Durations are written the way a reader says them. "21600s" is six hours and nobody
+    // converts it under pressure.
+    const dur = (s: number): string =>
+      s >= 3600 ? `${Number((s / 3600).toFixed(2))}h` : s >= 60 ? `${Number((s / 60).toFixed(1))}m` : `${s}s`
+    const clockAt = (ms: number): string => new Date(ms).toTimeString().slice(0, 5)
+    // Disclose the CONFIG once at startup, separately from the EVENT that later trips it —
+    // being switched on is not something that just happened. Saying it here also lets the two
+    // event lines below stay short, and tells the reader the daemon can stop itself BEFORE
+    // it does.
+    log.info?.(
+      quitTimeoutSec < 0
+        ? `auto-quit-on-idle=off (TRIBE_AUTOQUIT_ON_IDLE=-1)`
+        : `auto-quit-on-idle=${dur(quitTimeoutSec)} (TRIBE_AUTOQUIT_ON_IDLE)`,
+    )
     const tickIntervalMs = opts.tickIntervalMs ?? 1000
     const pendingExpiryMs = opts.pendingExpiryMs ?? 60_000
     const socketPathGoneTimeoutMs = opts.socketPathGoneTimeoutMs ?? 30_000
@@ -123,11 +124,10 @@ export function withIdleQuit<T extends BaseTribe & WithConfig & WithClientRegist
       // coordinates through this process. It logged at info on 2026-08-11 and nothing scanning
       // for warnings saw it — correctly, because nothing warned. The socket-missing backstop
       // below already uses warn for a strictly less severe condition.
-      // Same syllogism as the firing line: observation => rule that applies => consequence.
-      // The rule repeats even though startup disclosed it, because arming is also a decision a
-      // reader may meet on its own — in an incident paste, a grep, a tail — and a line that
-      // cannot say why it happened sends them looking.
-      log.warn?.(`No clients => auto-quit-on-idle=${quitTimeoutSec}s => quitting in ${quitTimeoutSec}s`)
+      // observation => rule => consequence, and each term says something the others do not.
+      // The consequence is a WALL CLOCK, not a countdown: "stopping at 17:22" tells a reader
+      // whether to care right now; "in 21600s" makes them do arithmetic to find out.
+      log.warn?.(`no clients => auto-quit-on-idle=${dur(quitTimeoutSec)} => stopping at ${clockAt(idleDeadline)}`)
     }
 
     function checkSocketPathGone(nowMs: number): void {
@@ -193,13 +193,10 @@ export function withIdleQuit<T extends BaseTribe & WithConfig & WithClientRegist
         // clause earns its place because a supervisor may still count it against a restart
         // budget — a config condition wearing a crash's clothes, which cost a morning on
         // 2026-08-11. The knob was already disclosed at startup; do not repeat it here.
-        // observation => the rule that applies => the consequence. The middle term is the "why
-        // this counts", and it is repeated here even though startup already disclosed it: the
-        // ARMING line is a countdown notice, but THIS line is the record of a decision, and a
-        // decision record gets quoted, pasted and read alone. It must stand without its log.
-        log.warn?.(
-          `No clients for ${quitTimeoutSec}s => auto-quit-on-idle=${quitTimeoutSec}s => auto-quitting (clean exit, code 0)`,
-        )
+        // Same three terms. The rule repeats even though startup disclosed it: this line is the
+        // record of a DECISION, and decision records get quoted, pasted and read alone. "exit 0"
+        // stays because a supervisor may still count this clean stop against a restart budget.
+        log.warn?.(`idle ${dur(quitTimeoutSec)} => auto-quit-on-idle => stopping now (exit 0)`)
         opts.triggerShutdown()
       }
     }

@@ -23,7 +23,7 @@ export default {
       //
       // 6h is chosen against the two failure modes, not as a round number: far longer than any
       // relaunch sweep (minutes), short enough that an orphan self-clears within a working day.
-      env: { TRIBE_DELIVERY_FALLBACKS: '[{"prefix":"@dev/","to":"@dev"}]', TRIBE_QUIT_TIMEOUT: "21600" },
+      env: { TRIBE_DELIVERY_FALLBACKS: '[{"prefix":"@dev/","to":"@dev"}]', TRIBE_AUTOQUIT_ON_IDLE: "21600" },
       // oxfmt-ignore
       stateRoots: ["${TRIBE_DB:-${XDG_DATA_HOME:-$HOME/.local/share}/tribe/tribe.db}", "${TRIBE_SOCKET:-${XDG_RUNTIME_DIR:-$HOME/.local/share/tribe}/tribe.sock}"],
       health: { command: "tribe health" },
