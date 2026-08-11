@@ -5,8 +5,13 @@
  * pure analysis/formatting core, so response metrics cannot drift by surface.
  */
 
-import type { Database } from "bun:sqlite"
-import { parseBallOutcomeFact, type BallOutcomeFactRow, type BallSettlementReason } from "./ball-outcome.ts"
+import { TRIBE_AUTO_TRACK_TYPES } from "../command-descriptors.ts"
+import {
+  parseBallOutcomeFact,
+  type BallOutcomeFactRow,
+  type BallSettlementFact,
+  type BallSettlementReason,
+} from "./ball-outcome.ts"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -14,11 +19,23 @@ import { parseBallOutcomeFact, type BallOutcomeFactRow, type BallSettlementReaso
 
 const DURATION_MULTIPLIERS: Record<string, number> = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }
 
+type SqlBinding = string | number | bigint | boolean | null | Uint8Array
+interface RetroDatabase {
+  prepare(sql: string): {
+    all(...bindings: SqlBinding[]): unknown[]
+    get(...bindings: SqlBinding[]): unknown
+  }
+}
+
 /** Parse a duration string like "2h", "30m", "1d" into milliseconds */
 export function parseDuration(s: string): number {
   const match = s.match(/^(\d+(?:\.\d+)?)\s*(s|m|h|d)$/)
   if (!match) throw new Error(`Invalid duration: "${s}" — use e.g. "2h", "30m", "1d"`)
-  return parseFloat(match[1]!) * DURATION_MULTIPLIERS[match[2]!]!
+  const amount = match[1]
+  const unit = match[2]
+  const multiplier = unit === undefined ? undefined : DURATION_MULTIPLIERS[unit]
+  if (amount === undefined || multiplier === undefined) throw new Error(`Invalid duration: "${s}"`)
+  return parseFloat(amount) * multiplier
 }
 
 function formatDuration(ms: number): string {
@@ -55,6 +72,8 @@ interface Message {
   request: string | null
   /** Set when this message CLOSES a tracked ball; value is the request id it answers. */
   reply: string | null
+  summary: string | null
+  correlated_reply_requester: string | null
   ts: number
 }
 
@@ -79,9 +98,30 @@ interface MemberMetrics {
   responseLatenciesMs: number[]
 }
 
-type NonReplySettlementReason = BallSettlementReason
-type SettlementReason = "answered" | NonReplySettlementReason
-type SettlementCounts = Record<SettlementReason, number>
+type SettlementCounts = Record<BallSettlementReason, number>
+type BallEndings = SettlementCounts & { open: number; unknown: number }
+
+interface BallMetricsReport {
+  arrivals: number
+  answers: number
+  answer_share: number | null
+  response_p50: string | null
+  response_p90: string | null
+  response_max: string | null
+  endings: BallEndings
+  oldest_unanswered: string | null
+  /** Free-text semantics require the supervised daily reviewer. Null is honest, not zero. */
+  default_acceptance: null
+}
+
+interface BallReviewEntry {
+  request_id: string
+  owner: string
+  request: { id: string; sender: string; content: string; summary: string | null; ts: number }
+  reply: { id: string; sender: string; content: string; summary: string | null; ts: number } | null
+  ending: BallSettlementReason | "open" | "unknown"
+  default_acceptance: null
+}
 
 export interface RetroReport {
   generated_at: string
@@ -99,7 +139,11 @@ export interface RetroReport {
     avg_response: string | null
     response_p50: string | null
     response_p90: string | null
+    balls: BallMetricsReport
   }>
+  unattributed_activity: { messages: number; distinct_endpoints: number }
+  /** Lossless content seam for the supervised daily classifier. */
+  review_corpus: BallReviewEntry[]
   timeline: Array<{ time: string; event: string }>
   coordination: {
     /** Balls opened in the window that never received a matching reply. */
@@ -135,65 +179,61 @@ function mean(values: number[]): number | null {
 
 const durationOrNull = (ms: number | null): string | null => (ms !== null ? formatDuration(ms) : null)
 
-function getOrCreateMember(map: Map<string, MemberMetrics>, name: string): MemberMetrics {
-  let m = map.get(name)
-  if (!m) {
-    m = makeMember(name, "unknown", [])
-    map.set(name, m)
-  }
-  return m
+const emptySettlementCounts = (): SettlementCounts => ({
+  answered: 0,
+  "manual-close": 0,
+  "incident-cleared": 0,
+  "gc-expired": 0,
+  "sender-withdrawn": 0,
+})
+
+const emptyBallEndings = (): BallEndings => ({ ...emptySettlementCounts(), open: 0, unknown: 0 })
+
+interface PendingBallRow {
+  request_id: string
+  recipient: string
+  sender: string
+  opened_at: number
+  message_id: string
 }
 
-/**
- * Ball-tracker response latencies. A message with `request` set opens a tracked
- * ball at its `ts` (== pending_request.opened_at); a later message whose `reply`
- * equals that request id closes it, and that closer (reply.sender) is the
- * responder. Latency = reply.ts − request.ts, attributed to the responder — the
- * same request→reply join the health cadence uses (health-cadence.ts).
- *
- * NO SILENT ERRORS: an opened ball with no matching reply is returned in
- * `openRequestIds` (minus `answeredRequestIds`) and counted as OPEN — never
- * scored as a 0ms response. A reply whose opening request fell outside the
- * loaded window has no known opened_at here, so it is skipped rather than timed
- * against a fabricated start.
- */
-function computeResponseTimes(messages: Message[]): {
-  latenciesByResponder: Map<string, number[]>
-  answeredRequestIds: Set<string>
-  openRequestIds: Set<string>
-} {
-  const latenciesByResponder = new Map<string, number[]>()
-  const answeredRequestIds = new Set<string>()
-  const openRequestIds = new Set<string>()
-  const openedAt = new Map<string, number>()
-
-  for (const msg of messages) {
-    if (msg.request) {
-      openRequestIds.add(msg.request)
-      // The opening send is authoritative; keep the earliest ts if duplicated.
-      const prior = openedAt.get(msg.request)
-      if (prior === undefined || msg.ts < prior) openedAt.set(msg.request, msg.ts)
-    }
-  }
-  for (const msg of messages) {
-    if (!msg.reply) continue
-    const openTs = openedAt.get(msg.reply)
-    if (openTs === undefined) continue // opener outside window — cannot time it
-    if (msg.ts < openTs) continue // out-of-order / clock skew — never a negative latency
-    answeredRequestIds.add(msg.reply)
-    const arr = latenciesByResponder.get(msg.sender) ?? []
-    arr.push(msg.ts - openTs)
-    latenciesByResponder.set(msg.sender, arr)
-  }
-  return { latenciesByResponder, answeredRequestIds, openRequestIds }
+interface BallRecord {
+  requestId: string
+  owner: string
+  openedAt: number
+  messageId: string
+  opener: Message | null
+  reply: Message | null
+  ending: BallSettlementReason | "open" | "unknown"
+  latencyMs: number | null
 }
 
-function deriveSettlementCounts(
-  db: Database,
-  windowStart: number,
-  answeredRequestIds: ReadonlySet<string>,
-): SettlementCounts {
-  const settlementByIdentity = new Map<string, NonReplySettlementReason>()
+function ballIdentity(requestId: string, owner: string, messageId: string): string {
+  return JSON.stringify([requestId, owner, messageId])
+}
+
+function deriveBallAnalysis(db: RetroDatabase, messages: Message[], windowStart: number, now: number) {
+  const records = new Map<string, BallRecord>()
+  const messageById = new Map(messages.map((message) => [message.id, message]))
+  const autoTrackedTypes: ReadonlySet<string> = new Set(TRIBE_AUTO_TRACK_TYPES)
+  const openers = messages.filter(
+    (message): message is Message & { request: string } =>
+      message.request !== null && message.recipient !== "*" && autoTrackedTypes.has(message.type),
+  )
+  for (const opener of openers) {
+    records.set(ballIdentity(opener.request, opener.recipient, opener.id), {
+      requestId: opener.request,
+      owner: opener.recipient,
+      openedAt: opener.ts,
+      messageId: opener.id,
+      opener,
+      reply: null,
+      ending: "unknown",
+      latencyMs: null,
+    })
+  }
+
+  const settlements = new Map<string, BallSettlementFact>()
   const settlementRows = db
     .prepare(
       "SELECT id, type, content, ts FROM messages WHERE kind = 'event' AND type = 'event.ball.settled' AND ts >= ?",
@@ -202,26 +242,282 @@ function deriveSettlementCounts(
   for (const row of settlementRows) {
     const fact = parseBallOutcomeFact(row)
     if (fact.kind !== "settled") throw new Error(`expected ball settlement fact ${row.id}`)
-    if (answeredRequestIds.has(fact.request_id)) continue
-    const identity = JSON.stringify([fact.request_id, fact.recipient, fact.message_id])
-    const prior = settlementByIdentity.get(identity)
-    if (prior !== undefined && prior !== fact.settlement) {
-      throw new Error(`conflicting ball settlement facts for ${fact.request_id}: ${prior} vs ${fact.settlement}`)
+    if (fact.opened_at < windowStart) continue
+    const key = ballIdentity(fact.request_id, fact.recipient, fact.message_id)
+    const prior = settlements.get(key)
+    if (prior !== undefined && prior.settlement !== fact.settlement) {
+      throw new Error(
+        `conflicting ball settlement facts for ${fact.request_id}: ${prior.settlement} vs ${fact.settlement}`,
+      )
     }
-    settlementByIdentity.set(identity, fact.settlement)
+    settlements.set(key, fact)
+    if (!records.has(key)) {
+      records.set(key, {
+        requestId: fact.request_id,
+        owner: fact.recipient,
+        openedAt: fact.opened_at,
+        messageId: fact.message_id,
+        opener: messageById.get(fact.message_id) ?? null,
+        reply: null,
+        ending: fact.settlement,
+        latencyMs: fact.settlement === "answered" ? fact.settled_at - fact.opened_at : null,
+      })
+    }
   }
-  const counts: SettlementCounts = {
-    answered: answeredRequestIds.size,
-    "manual-close": 0,
-    "incident-cleared": 0,
-    "gc-expired": 0,
-    "sender-withdrawn": 0,
+
+  const pendingRows = db
+    .prepare(
+      "SELECT request_id, recipient, sender, opened_at, message_id FROM pending_request WHERE opened_at >= ? AND opened_at <= ?",
+    )
+    .all(windowStart, now) as PendingBallRow[]
+  const pendingKeys = new Set(pendingRows.map((row) => ballIdentity(row.request_id, row.recipient, row.message_id)))
+  for (const row of pendingRows) {
+    const key = ballIdentity(row.request_id, row.recipient, row.message_id)
+    if (!records.has(key)) {
+      records.set(key, {
+        requestId: row.request_id,
+        owner: row.recipient,
+        openedAt: row.opened_at,
+        messageId: row.message_id,
+        opener: messageById.get(row.message_id) ?? null,
+        reply: null,
+        ending: "open",
+        latencyMs: null,
+      })
+    }
   }
-  for (const reason of settlementByIdentity.values()) counts[reason] += 1
-  return counts
+
+  const repliesByReference = new Map<string, Message[]>()
+  for (const message of messages) {
+    if (message.reply === null) continue
+    const replies = repliesByReference.get(message.reply) ?? []
+    replies.push(message)
+    repliesByReference.set(message.reply, replies)
+  }
+  const matchingReply = (record: BallRecord): Message | null => {
+    const candidates =
+      record.requestId === record.messageId
+        ? (repliesByReference.get(record.requestId) ?? [])
+        : [...(repliesByReference.get(record.requestId) ?? []), ...(repliesByReference.get(record.messageId) ?? [])]
+    return (
+      candidates.find(
+        (reply) =>
+          reply.sender === record.owner &&
+          (record.opener === null || reply.recipient === record.opener.sender) &&
+          (reply.correlated_reply_requester === null ||
+            record.opener === null ||
+            reply.correlated_reply_requester === record.opener.sender),
+      ) ?? null
+    )
+  }
+  for (const [key, record] of records) {
+    const settlement = settlements.get(key)
+    if (settlement !== undefined) {
+      record.ending = settlement.settlement
+      record.latencyMs = settlement.settlement === "answered" ? settlement.settled_at - record.openedAt : null
+      record.reply = matchingReply(record)
+      continue
+    }
+    if (pendingKeys.has(key)) {
+      record.ending = "open"
+      continue
+    }
+    const reply = matchingReply(record)
+    if (reply !== null && reply.ts >= record.openedAt) {
+      record.reply = reply
+      record.ending = "answered"
+      record.latencyMs = reply.ts - record.openedAt
+    }
+  }
+
+  const byOwner = new Map<string, BallRecord[]>()
+  for (const record of records.values()) {
+    const ownerRecords = byOwner.get(record.owner) ?? []
+    ownerRecords.push(record)
+    byOwner.set(record.owner, ownerRecords)
+  }
+  const metricsByOwner = new Map<string, BallMetricsReport>()
+  for (const [owner, ownerRecords] of byOwner) {
+    const endings = emptyBallEndings()
+    const latencies = ownerRecords
+      .flatMap((record) => (record.ending === "answered" && record.latencyMs !== null ? [record.latencyMs] : []))
+      .sort((left, right) => left - right)
+    for (const record of ownerRecords) endings[record.ending] += 1
+    const openAges = ownerRecords.filter((record) => record.ending === "open").map((record) => now - record.openedAt)
+    metricsByOwner.set(owner, {
+      arrivals: ownerRecords.length,
+      answers: endings.answered,
+      answer_share: ownerRecords.length === 0 ? null : endings.answered / ownerRecords.length,
+      response_p50: durationOrNull(percentile(latencies, 0.5)),
+      response_p90: durationOrNull(percentile(latencies, 0.9)),
+      response_max: durationOrNull(latencies.at(-1) ?? null),
+      endings,
+      oldest_unanswered: durationOrNull(openAges.length === 0 ? null : Math.max(...openAges)),
+      default_acceptance: null,
+    })
+  }
+
+  const reviewCorpus = [...records.values()]
+    .filter((record): record is BallRecord & { opener: Message } => record.opener !== null)
+    .sort((left, right) => left.openedAt - right.openedAt)
+    .map(
+      (record): BallReviewEntry => ({
+        request_id: record.requestId,
+        owner: record.owner,
+        request: {
+          id: record.opener.id,
+          sender: record.opener.sender,
+          content: record.opener.content,
+          summary: record.opener.summary,
+          ts: record.opener.ts,
+        },
+        reply:
+          record.reply === null
+            ? null
+            : {
+                id: record.reply.id,
+                sender: record.reply.sender,
+                content: record.reply.content,
+                summary: record.reply.summary,
+                ts: record.reply.ts,
+              },
+        ending: record.ending,
+        default_acceptance: null,
+      }),
+    )
+  return { records: [...records.values()], metricsByOwner, reviewCorpus }
 }
 
-export function generateRetro(db: Database, sinceMs?: number): RetroReport {
+function collectMemberActivity(messages: Message[], sessions: Session[]) {
+  const memberMap = new Map<string, MemberMetrics>()
+  for (const session of sessions) {
+    memberMap.set(session.name, makeMember(session.name, session.role, JSON.parse(session.domains) as string[]))
+  }
+  const byType: Record<string, number> = {}
+  const unattributedEndpoints = new Set<string>()
+  let unattributedMessages = 0
+  for (const message of messages) {
+    byType[message.type] = (byType[message.type] ?? 0) + 1
+    const sender = memberMap.get(message.sender)
+    if (sender !== undefined) {
+      sender.sent++
+      sender.byType[message.type] = (sender.byType[message.type] ?? 0) + 1
+      if (message.bead_id) sender.beads.add(message.bead_id)
+      const beadRefs = message.content.match(/\bkm-[\w.-]+/g)
+      if (beadRefs) for (const ref of beadRefs) sender.beads.add(ref)
+    }
+    if (message.recipient === "*") {
+      for (const [name, member] of memberMap) {
+        if (name !== message.sender) member.received++
+      }
+    } else {
+      const recipient = memberMap.get(message.recipient)
+      if (recipient !== undefined) recipient.received++
+    }
+    const unknown = [message.sender, ...(message.recipient === "*" ? [] : [message.recipient])].filter(
+      (endpoint) => !memberMap.has(endpoint),
+    )
+    if (unknown.length > 0) {
+      unattributedMessages++
+      for (const endpoint of unknown) unattributedEndpoints.add(endpoint)
+    }
+  }
+  return { memberMap, byType, unattributedMessages, unattributedEndpoints }
+}
+
+function emptyBallMetrics(): BallMetricsReport {
+  return {
+    arrivals: 0,
+    answers: 0,
+    answer_share: null,
+    response_p50: null,
+    response_p90: null,
+    response_max: null,
+    endings: emptyBallEndings(),
+    oldest_unanswered: null,
+    default_acceptance: null,
+  }
+}
+
+function projectMembers(
+  memberMap: ReadonlyMap<string, MemberMetrics>,
+  ballAnalysis: ReturnType<typeof deriveBallAnalysis>,
+): RetroReport["members"] {
+  return [...memberMap.values()]
+    .filter((member) => member.sent > 0 || member.received > 0)
+    .sort((left, right) => right.sent - left.sent)
+    .map((member) => {
+      const sorted = [...member.responseLatenciesMs].sort((left, right) => left - right)
+      return {
+        name: member.name,
+        role: member.role,
+        domains: member.domains,
+        sent: member.sent,
+        received: member.received,
+        beads_mentioned: [...member.beads].sort(),
+        responses: sorted.length,
+        avg_response: durationOrNull(mean(sorted)),
+        response_p50: durationOrNull(percentile(sorted, 0.5)),
+        response_p90: durationOrNull(percentile(sorted, 0.9)),
+        balls: ballAnalysis.metricsByOwner.get(member.name) ?? emptyBallMetrics(),
+      }
+    })
+}
+
+function buildTimeline(
+  db: RetroDatabase,
+  messages: Message[],
+  windowStart: number,
+): Array<{ time: string; event: string; ts: number }> {
+  const timeline: Array<{ time: string; event: string; ts: number }> = []
+  const events = db
+    .prepare("SELECT type, sender, content, ts FROM messages WHERE kind = 'event' AND ts >= ? ORDER BY ts ASC")
+    .all(windowStart) as Array<{ type: string; sender: string; content: string; ts: number }>
+  const eventFormatters: Record<string, (event: (typeof events)[0], data: Record<string, string>) => string | null> = {
+    "session.joined": (event, data) => `${event.sender} joined (${data.role ?? "member"})`,
+    "session.left": (event) => `${event.sender} left`,
+    "session.renamed": (_, data) => `${data.old_name} renamed to ${data.new_name}`,
+    "message.broadcast": (event) => `${event.sender} broadcast a message`,
+  }
+  for (const event of events) {
+    const formatter = eventFormatters[event.type.slice("event.".length)]
+    if (formatter === undefined) continue
+    const text = formatter(event, (event.content ? JSON.parse(event.content) : {}) as Record<string, string>)
+    if (text) timeline.push({ time: formatTime(event.ts), event: text, ts: event.ts })
+  }
+  const messageFormatters: Record<string, (message: Message) => string> = {
+    assign: (message) => `${message.sender} assigned to ${message.recipient}: ${snippet(message.content)}`,
+    request: (message) => `${message.sender} requested from ${message.recipient}: ${snippet(message.content)}`,
+    verdict: (message) => `${message.recipient} received verdict: ${snippet(message.content)}`,
+  }
+  for (const message of messages) {
+    const formatter = messageFormatters[message.type]
+    if (formatter) timeline.push({ time: formatTime(message.ts), event: formatter(message), ts: message.ts })
+  }
+  timeline.sort((left, right) => left.ts - right.ts)
+  return timeline
+}
+
+function deriveCoordination(ballAnalysis: ReturnType<typeof deriveBallAnalysis>) {
+  const settlements = emptySettlementCounts()
+  for (const record of ballAnalysis.records) {
+    if (record.ending in settlements) settlements[record.ending as BallSettlementReason] += 1
+  }
+  const unansweredQueries = ballAnalysis.records.filter(
+    (record) => record.ending === "open" || record.ending === "unknown",
+  ).length
+  const allLatencies = ballAnalysis.records
+    .flatMap((record) => (record.ending === "answered" && record.latencyMs !== null ? [record.latencyMs] : []))
+    .sort((left, right) => left - right)
+  const longestResponse = allLatencies.at(-1) ?? null
+  const longestResponseMember =
+    longestResponse === null
+      ? null
+      : (ballAnalysis.records.find((record) => record.latencyMs === longestResponse)?.owner ?? null)
+  return { settlements, unansweredQueries, allLatencies, longestResponse, longestResponseMember }
+}
+
+export function generateRetro(db: RetroDatabase, sinceMs?: number): RetroReport {
   const now = Date.now()
   const windowStart = sinceMs ? now - sinceMs : getEarliestTimestamp(db)
   const windowEnd = now
@@ -231,124 +527,33 @@ export function generateRetro(db: Database, sinceMs?: number): RetroReport {
   const messages = db
     .prepare("SELECT * FROM messages WHERE ts >= ? AND kind != 'event' ORDER BY ts ASC")
     .all(windowStart) as Message[]
-  const sessions = db
-    .prepare("SELECT * FROM sessions WHERE started_at <= ? AND updated_at >= ?")
-    .all(windowEnd, windowStart) as Session[]
+  const endpointNames = new Set(messages.flatMap((message) => [message.sender, message.recipient]))
+  // A journal endpoint string is not a person. Only durable session evidence
+  // can admit a named member; transport placeholders and retired names stay in
+  // one unattributed aggregate instead of inflating the roster.
+  const sessions = (db.prepare("SELECT * FROM sessions ORDER BY updated_at ASC").all() as Session[]).filter(
+    (session) =>
+      (session.started_at <= windowEnd && session.updated_at >= windowStart) || endpointNames.has(session.name),
+  )
 
-  // Include sessions that sent messages but might have expired
-  const sessionNames = new Set(sessions.map((s) => s.name))
-  for (const sender of new Set(messages.map((m) => m.sender))) {
-    if (!sessionNames.has(sender)) {
-      const s = db.prepare("SELECT * FROM sessions WHERE name = ?").get(sender) as Session | null
-      if (s) {
-        sessions.push(s)
-        sessionNames.add(s.name)
-      }
-    }
-  }
+  const { memberMap, byType, unattributedMessages, unattributedEndpoints } = collectMemberActivity(messages, sessions)
 
-  // Initialize per-member metrics from sessions
-  const memberMap = new Map<string, MemberMetrics>()
-  for (const s of sessions) memberMap.set(s.name, makeMember(s.name, s.role, JSON.parse(s.domains) as string[]))
-
-  // Count messages and extract beads
-  const byType: Record<string, number> = {}
-  for (const msg of messages) {
-    byType[msg.type] = (byType[msg.type] ?? 0) + 1
-    const sender = getOrCreateMember(memberMap, msg.sender)
-    sender.sent++
-    sender.byType[msg.type] = (sender.byType[msg.type] ?? 0) + 1
-    if (msg.bead_id) sender.beads.add(msg.bead_id)
-    const beadRefs = msg.content.match(/\bkm-[\w.-]+/g)
-    if (beadRefs) for (const ref of beadRefs) sender.beads.add(ref)
-
-    if (msg.recipient === "*") {
-      for (const [name, m] of memberMap) {
-        if (name !== msg.sender) m.received++
-      }
-    } else {
-      getOrCreateMember(memberMap, msg.recipient).received++
-    }
-  }
-
-  // Response latencies (ball-tracker request→reply pairs)
-  const { latenciesByResponder, answeredRequestIds, openRequestIds } = computeResponseTimes(messages)
-  for (const [name, latencies] of latenciesByResponder) {
+  const ballAnalysis = deriveBallAnalysis(db, messages, windowStart, now)
+  for (const name of ballAnalysis.metricsByOwner.keys()) {
     const member = memberMap.get(name)
-    if (member) member.responseLatenciesMs = latencies
+    if (member !== undefined) {
+      const records = ballAnalysis.records.filter((record) => record.owner === name)
+      member.responseLatenciesMs = records.flatMap((record) =>
+        record.ending === "answered" && record.latencyMs !== null ? [record.latencyMs] : [],
+      )
+    }
   }
 
-  const settlements = deriveSettlementCounts(db, windowStart, answeredRequestIds)
-  const unansweredQueries = [...openRequestIds].filter((id) => !answeredRequestIds.has(id)).length
-  const allLatencies = [...latenciesByResponder.values()].flat().sort((a, b) => a - b)
+  const { settlements, unansweredQueries, allLatencies, longestResponse, longestResponseMember } =
+    deriveCoordination(ballAnalysis)
   const avgResponseTime = mean(allLatencies)
-  const longestResponse = allLatencies.length > 0 ? allLatencies.at(-1)! : null
-  let longestResponseMember: string | null = null
-  if (longestResponse !== null) {
-    for (const [name, t] of latenciesByResponder) {
-      if (t.includes(longestResponse)) {
-        longestResponseMember = name
-        break
-      }
-    }
-  }
-
-  // Timeline: events + notable messages. Events now live in `messages` with
-  // type `event.<orig-type>`, sender = session name, content = JSON data.
-  const timeline: Array<{ time: string; event: string; ts: number }> = []
-  const events = db
-    .prepare("SELECT type, sender, content, ts FROM messages WHERE kind = 'event' AND ts >= ? ORDER BY ts ASC")
-    .all(windowStart) as Array<{
-    type: string
-    sender: string
-    content: string
-    ts: number
-  }>
-
-  const eventFormatters: Record<string, (ev: (typeof events)[0], data: Record<string, string>) => string | null> = {
-    "session.joined": (ev, data) => `${ev.sender} joined (${data.role ?? "member"})`,
-    "session.left": (ev) => `${ev.sender} left`,
-    "session.renamed": (_, data) => `${data.old_name} renamed to ${data.new_name}`,
-    "message.broadcast": (ev) => `${ev.sender} broadcast a message`,
-  }
-  for (const ev of events) {
-    const origType = ev.type.slice("event.".length)
-    const fmt = eventFormatters[origType]
-    if (fmt) {
-      const text = fmt(ev, (ev.content ? JSON.parse(ev.content) : {}) as Record<string, string>)
-      if (text) timeline.push({ time: formatTime(ev.ts), event: text, ts: ev.ts })
-    }
-  }
-
-  const msgFormatters: Record<string, (msg: Message) => string> = {
-    assign: (m) => `${m.sender} assigned to ${m.recipient}: ${snippet(m.content)}`,
-    request: (m) => `${m.sender} requested from ${m.recipient}: ${snippet(m.content)}`,
-    verdict: (m) => `${m.recipient} received verdict: ${snippet(m.content)}`,
-  }
-  for (const msg of messages) {
-    const fmt = msgFormatters[msg.type]
-    if (fmt) timeline.push({ time: formatTime(msg.ts), event: fmt(msg), ts: msg.ts })
-  }
-  timeline.sort((a, b) => a.ts - b.ts)
-
-  const memberList = [...memberMap.values()]
-    .filter((m) => m.sent > 0 || m.received > 0)
-    .sort((a, b) => b.sent - a.sent)
-    .map((m) => {
-      const sorted = [...m.responseLatenciesMs].sort((a, b) => a - b)
-      return {
-        name: m.name,
-        role: m.role,
-        domains: m.domains,
-        sent: m.sent,
-        received: m.received,
-        beads_mentioned: [...m.beads].sort(),
-        responses: sorted.length,
-        avg_response: durationOrNull(mean(sorted)),
-        response_p50: durationOrNull(percentile(sorted, 0.5)),
-        response_p90: durationOrNull(percentile(sorted, 0.9)),
-      }
-    })
+  const timeline = buildTimeline(db, messages, windowStart)
+  const memberList = projectMembers(memberMap, ballAnalysis)
 
   const durationMs = windowEnd - windowStart
   return {
@@ -361,6 +566,11 @@ export function generateRetro(db: Database, sinceMs?: number): RetroReport {
       by_type: byType,
     },
     members: memberList,
+    unattributed_activity: {
+      messages: unattributedMessages,
+      distinct_endpoints: unattributedEndpoints.size,
+    },
+    review_corpus: ballAnalysis.reviewCorpus,
     timeline: timeline.map(({ time, event }) => ({ time, event })),
     coordination: {
       unanswered_queries: unansweredQueries,
@@ -374,7 +584,7 @@ export function generateRetro(db: Database, sinceMs?: number): RetroReport {
   }
 }
 
-function getEarliestTimestamp(db: Database): number {
+function getEarliestTimestamp(db: RetroDatabase): number {
   const row = db.prepare("SELECT MIN(ts) as min_ts FROM messages").get() as { min_ts: number | null } | null
   if (row?.min_ts) return row.min_ts
   const session = db.prepare("SELECT MIN(started_at) as min_ts FROM sessions").get() as { min_ts: number | null } | null
@@ -386,6 +596,7 @@ function getEarliestTimestamp(db: Database): number {
 // ---------------------------------------------------------------------------
 
 export function formatMarkdown(report: RetroReport): string {
+  const TIMELINE_LIMIT = 10
   const lines: string[] = []
   lines.push(`# Tribe Retro — ${formatDate(report.window.start)}`, "")
   lines.push("## Summary")
@@ -395,22 +606,40 @@ export function formatMarkdown(report: RetroReport): string {
     .map(([t, c]) => `${c} ${t}`)
     .join(", ")
   lines.push(`- Messages: ${report.summary.total_messages} total (${typeBreakdown})`, "")
+  if (report.unattributed_activity.messages > 0) {
+    lines.push(
+      `- Unattributed transport activity: ${report.unattributed_activity.messages} messages across ${report.unattributed_activity.distinct_endpoints} endpoints`,
+      "",
+    )
+  }
 
   if (report.members.length > 0) {
-    lines.push("## Per-Member Activity")
-    lines.push("| Member | Sent | Received | Beads Mentioned | Responses | Avg Response | p50 | p90 |")
-    lines.push("|--------|------|----------|-----------------|-----------|--------------|-----|-----|")
+    lines.push("## Per-Seat Ball Reliability")
+    lines.push("| Seat | Arrivals | Answers | Share | p50 | p90 | Max | Open | Oldest | Other endings |")
+    lines.push("|------|----------|---------|-------|-----|-----|-----|------|--------|---------------|")
     for (const m of report.members) {
+      const share = m.balls.answer_share === null ? "—" : `${Math.round(m.balls.answer_share * 100)}%`
+      const otherEndings = [
+        `manual=${m.balls.endings["manual-close"]}`,
+        `incident=${m.balls.endings["incident-cleared"]}`,
+        `gc=${m.balls.endings["gc-expired"]}`,
+        `withdrawn=${m.balls.endings["sender-withdrawn"]}`,
+        `unknown=${m.balls.endings.unknown}`,
+      ].join(" ")
       lines.push(
-        `| ${m.name} | ${m.sent} | ${m.received} | ${m.beads_mentioned.length} | ${m.responses} | ${m.avg_response ?? "—"} | ${m.response_p50 ?? "—"} | ${m.response_p90 ?? "—"} |`,
+        `| ${m.name} | ${m.balls.arrivals} | ${m.balls.answers} | ${share} | ${m.balls.response_p50 ?? "—"} | ${m.balls.response_p90 ?? "—"} | ${m.balls.response_max ?? "—"} | ${m.balls.endings.open} | ${m.balls.oldest_unanswered ?? "—"} | ${otherEndings} |`,
       )
     }
+    lines.push("", "Default acceptance: requires supervised review of the correlated corpus; unknown is never zero.")
     lines.push("")
   }
 
   if (report.timeline.length > 0) {
     lines.push("## Timeline")
-    for (const ev of report.timeline) lines.push(`- ${ev.time} — ${ev.event}`)
+    const visible = report.timeline.slice(-TIMELINE_LIMIT)
+    const omitted = report.timeline.length - visible.length
+    if (omitted > 0) lines.push(`- … ${omitted} older event${omitted === 1 ? "" : "s"} omitted`)
+    for (const ev of visible) lines.push(`- ${ev.time} — ${ev.event}`)
     lines.push("")
   }
 
@@ -419,7 +648,6 @@ export function formatMarkdown(report: RetroReport): string {
   lines.push(
     `- Settlements: answered=${report.coordination.settlements.answered}, manual-close=${report.coordination.settlements["manual-close"]}, incident-cleared=${report.coordination.settlements["incident-cleared"]}, gc-expired=${report.coordination.settlements["gc-expired"]}, sender-withdrawn=${report.coordination.settlements["sender-withdrawn"]}`,
   )
-  lines.push(`- Average response time: ${report.coordination.avg_response_time ?? "—"}`)
   if (report.coordination.response_p50 || report.coordination.response_p90) {
     lines.push(
       `- Response p50 / p90: ${report.coordination.response_p50 ?? "—"} / ${report.coordination.response_p90 ?? "—"}`,
@@ -427,9 +655,10 @@ export function formatMarkdown(report: RetroReport): string {
   }
   if (report.coordination.longest_response) {
     lines.push(
-      `- Longest response: ${report.coordination.longest_response} (${report.coordination.longest_response_member})`,
+      `- Response max: ${report.coordination.longest_response} (${report.coordination.longest_response_member})`,
     )
   }
+  lines.push(`- Review corpus: ${report.review_corpus.length} tracked arrivals with auditable ids and content`)
   lines.push("")
   return lines.join("\n")
 }

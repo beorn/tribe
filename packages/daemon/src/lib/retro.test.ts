@@ -161,6 +161,7 @@ describe("21714 Tribe retro response latency", () => {
     const agent1 = report.members.find((m) => m.name === "@agent/1")
     expect(agent1?.avg_response).toBeNull()
     expect(md).toContain("| @chief |")
-    expect(md).toMatch(/Average response time: 3m/)
+    expect(md).toMatch(/Response p50 \/ p90: 3m \/ 3m/)
+    expect(md).toMatch(/Response max: 3m/)
   })
 })

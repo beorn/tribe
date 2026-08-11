@@ -183,7 +183,7 @@ export type PendingSettlementRow = {
   summary: string | null
 }
 
-/** Append recoverable non-reply outcomes, then release exactly those owner
+/** Append a recoverable terminal outcome, then release exactly those owner
  * rows. The caller selects the rows and invokes this inside the same SQLite
  * transaction, so history and active ownership cannot disagree after a crash. */
 export function settlePendingRows(
@@ -415,14 +415,22 @@ export function sendMessage(
       // Any still-open row is therefore closed by an explicit reply here.
       if (canonicalReplyId) {
         if (pendingReply?.fanout === "first") {
-          const closed = ctx.stmts.closePendingRequestAll.run({ $request_id: canonicalReplyId })
-          tracker = { request_id: canonicalReplyId, closed: closed.changes ?? 0 }
+          const rows = ctx.stmts.selectPendingSettlementsForRequest.all({
+            $request_id: canonicalReplyId,
+          }) as PendingSettlementRow[]
+          tracker = {
+            request_id: canonicalReplyId,
+            closed: settlePendingRows(ctx, rows, "answered", sender, ts),
+          }
         } else {
-          const closed = ctx.stmts.closePendingRequest.run({
+          const row = ctx.stmts.selectPendingSettlementForRecipient.get({
             $request_id: canonicalReplyId,
             $recipient: sender,
-          })
-          tracker = { request_id: canonicalReplyId, closed: closed.changes ?? 0 }
+          }) as PendingSettlementRow | null
+          tracker = {
+            request_id: canonicalReplyId,
+            closed: settlePendingRows(ctx, row === null ? [] : [row], "answered", sender, ts),
+          }
         }
       }
     }

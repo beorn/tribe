@@ -12,7 +12,9 @@ export const NON_REPLY_BALL_SETTLEMENT_REASONS = [
   "sender-withdrawn",
 ] as const
 
-export type BallSettlementReason = (typeof NON_REPLY_BALL_SETTLEMENT_REASONS)[number]
+export const BALL_SETTLEMENT_REASONS = ["answered", ...NON_REPLY_BALL_SETTLEMENT_REASONS] as const
+
+export type BallSettlementReason = (typeof BALL_SETTLEMENT_REASONS)[number]
 
 export type BallFactEvidence = {
   schema_version: 1 | 2
@@ -106,7 +108,7 @@ export function parseBallOutcomeFact(row: BallOutcomeFactRow): BallDeadlineFact 
   if (
     fact.schema_version !== 1 ||
     !validTime(fact.settled_at) ||
-    !NON_REPLY_BALL_SETTLEMENT_REASONS.includes(fact.settlement as BallSettlementReason) ||
+    !BALL_SETTLEMENT_REASONS.includes(fact.settlement as BallSettlementReason) ||
     !validString(fact.settled_by)
   ) {
     throw new Error(`invalid ball settlement fact ${identity}: required replay evidence is missing or malformed`)

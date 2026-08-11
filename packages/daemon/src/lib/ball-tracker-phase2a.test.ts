@@ -211,6 +211,18 @@ describe("ball-tracker Phase 2a — 1:1 wire-up", () => {
     expect(open?.type).toBe("query")
     expect(close?.sender).toBe("@agent/8")
     expect(close?.type).toBe("response")
+
+    const settlementRow = db
+      .prepare("SELECT content, ts FROM messages WHERE kind = 'event' AND type = 'event.ball.settled'")
+      .get() as { content: string; ts: number }
+    expect(JSON.parse(settlementRow.content)).toMatchObject({
+      request_id: "req-xyz-789",
+      recipient: "@agent/8",
+      sender: "@chief",
+      settlement: "answered",
+      settled_at: settlementRow.ts,
+      settled_by: "@agent/8",
+    })
   })
 
   it("a reply closes its open ball even after an override deadline has passed", () => {

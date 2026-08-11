@@ -2,6 +2,10 @@ import { DEFAULT_MCP_INBOX_WAIT_TIMEOUT_MS, MCP_INBOX_WAIT_HOST_CEILING_MS } fro
 
 export const TRIBE_MESSAGE_TYPES = ["assign", "status", "query", "response", "notify", "request", "verdict"] as const
 export type TribeMessageType = (typeof TRIBE_MESSAGE_TYPES)[number]
+/** Direct types that implicitly open a semantic response ball. Verdict wakes
+ * the recipient but opens a ball only when the sender explicitly requests it. */
+export const TRIBE_AUTO_TRACK_TYPES = ["request", "query", "assign"] as const
+export const TRIBE_ACTIONABLE_TYPES = ["request", "query", "verdict", "assign"] as const
 
 export const TRIBE_FANOUTS = ["first", "all"] as const
 export type TribeFanout = (typeof TRIBE_FANOUTS)[number]

@@ -1075,9 +1075,15 @@ function expiredPendingBalls(ctx: TribeContext, now: number): PendingOutcomeBall
     (ball): ball is PendingBall & { status: "expired" } => ball.status === "expired",
   )
   const liveKeys = new Set(live.map(pendingFactKey))
-  const outcomes: PendingOutcomeBall[] = live
-    .filter((ball) => !pendingFactWasAnswered(ball, respondersByRef))
-    .map((ball) => ({ ...ball, settlement: null, settled_at: null, backing: "live" as const }))
+  // A live pending_request row is the ownership authority. A malformed or
+  // wrong-owner reply may be durably recorded with closed=0, but it must never
+  // hide the row that still exists and is still owed.
+  const outcomes: PendingOutcomeBall[] = live.map((ball) => ({
+    ...ball,
+    settlement: null,
+    settled_at: null,
+    backing: "live" as const,
+  }))
   const representedSettlements = new Set<string>()
 
   for (const fact of facts) {
@@ -1085,11 +1091,13 @@ function expiredPendingBalls(ctx: TribeContext, now: number): PendingOutcomeBall
     const key = pendingFactKey(fact)
     if (liveKeys.has(key) || pendingFactWasAnswered(fact, respondersByRef)) continue
     const settlement = settlements.get(key)
+    if (settlement?.settlement === "answered") continue
     if (settlement) representedSettlements.add(key)
     outcomes.push(pendingOutcomeBall(fact, now, settlement?.settlement ?? null, settlement?.settled_at ?? null))
   }
 
   for (const fact of settlements.values()) {
+    if (fact.settlement === "answered") continue
     const key = pendingFactKey(fact)
     if (liveKeys.has(key) || representedSettlements.has(key) || pendingFactWasAnswered(fact, respondersByRef)) continue
     outcomes.push(pendingOutcomeBall(fact, now, fact.settlement, fact.settled_at))

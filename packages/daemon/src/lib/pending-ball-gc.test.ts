@@ -792,6 +792,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       ).toEqual([
         { type: "query", request: "answered-before-archive", reply: null },
         { type: "response", request: null, reply: "answered-before-archive" },
+        { type: "event.ball.settled", request: null, reply: null },
       ])
     } finally {
       db.close()

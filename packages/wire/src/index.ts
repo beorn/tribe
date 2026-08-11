@@ -88,6 +88,7 @@ export { resolveJoinDelivery } from "./lib/delivery.ts"
 // reports share this parser so malformed evidence cannot mean different things
 // on different read surfaces.
 export {
+  BALL_SETTLEMENT_REASONS,
   NON_REPLY_BALL_SETTLEMENT_REASONS,
   parseBallOutcomeFact,
   type BallDeadlineFact,

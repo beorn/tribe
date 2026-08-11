@@ -408,6 +408,15 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     )
 
     expect(pendingRecipients(db, "req-first")).toEqual([])
+    const settlements = db
+      .prepare("SELECT content FROM messages WHERE kind = 'event' AND type = 'event.ball.settled'")
+      .all() as Array<{ content: string }>
+    expect(settlements.map((row) => JSON.parse(row.content))).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ request_id: "req-first", recipient: "@agent/1", settlement: "answered" }),
+        expect.objectContaining({ request_id: "req-first", recipient: "@agent/2", settlement: "answered" }),
+      ]),
+    )
   })
 
   it("fanout='all' closes only the replying recipient row", () => {
@@ -431,6 +440,12 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     )
 
     expect(pendingRecipients(db, "req-all")).toEqual(["@agent/2"])
+    const settlements = db
+      .prepare("SELECT content FROM messages WHERE kind = 'event' AND type = 'event.ball.settled'")
+      .all() as Array<{ content: string }>
+    expect(settlements.map((row) => JSON.parse(row.content))).toEqual([
+      expect.objectContaining({ request_id: "req-all", recipient: "@agent/1", settlement: "answered" }),
+    ])
   })
 
   it("warns with the peer's open balls when a reply closes zero rows", () => {
@@ -442,6 +457,8 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
         makeOpts(["sess-chief", "sess-agent-1"]),
       ),
     )
+
+    db.prepare("UPDATE pending_request SET expires_at = 0 WHERE request_id = 'actual-request'").run()
 
     const reply = parseToolJson(
       handleToolCall(
@@ -458,6 +475,11 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     expect(reply.warning).toContain("actual-request")
     expect(reply.warning).toContain(opened.id)
     expect(pendingRecipients(db, "actual-request")).toEqual(["@agent/1"])
+
+    const expired = parseToolJson(
+      handleToolCall(agent1, "tribe.pending", { expired: true, owed: true }, makeOpts(["sess-agent-1"])),
+    ) as { pending: Array<{ request_id: string }> }
+    expect(expired.pending).toEqual([expect.objectContaining({ request_id: "actual-request" })])
   })
 
   it("reports failure when a reply closes zero rows and the replier owns no balls at all", () => {

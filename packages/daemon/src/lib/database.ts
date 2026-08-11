@@ -3,6 +3,7 @@
  */
 
 import { Database } from "bun:sqlite"
+import { TRIBE_ACTIONABLE_TYPES, TRIBE_AUTO_TRACK_TYPES } from "../../../wire/src/command-descriptors.ts"
 
 // ---------------------------------------------------------------------------
 // Schema & migrations
@@ -1036,14 +1037,14 @@ const MIGRATIONS: readonly Migration[] = [
  * chief-absence watchdog counts it. Durable attention additionally carries
  * newly classified direct responses without making them default wakeups.
  */
-export const ACTIONABLE_TYPES = ["request", "query", "verdict", "assign"] as const
+export const ACTIONABLE_TYPES = TRIBE_ACTIONABLE_TYPES
 export const ACTIONABLE_TYPES_SET: ReadonlySet<string> = new Set(ACTIONABLE_TYPES)
 export const CORRELATED_REPLY_TYPES = ["response", "status"] as const
 export const CORRELATED_REPLY_TYPES_SET: ReadonlySet<string> = new Set(CORRELATED_REPLY_TYPES)
 /** Direct types that implicitly open a semantic response ball. Verdict remains
  * wakeable/actionable but does not manufacture a second obligation unless the
  * sender explicitly supplies `request`. */
-export const AUTO_TRACK_TYPES = ["request", "query", "assign"] as const
+export const AUTO_TRACK_TYPES = TRIBE_AUTO_TRACK_TYPES
 export const AUTO_TRACK_TYPES_SET: ReadonlySet<string> = new Set(AUTO_TRACK_TYPES)
 export const ACTIONABLE_TYPES_SQL = ACTIONABLE_TYPES.map((t) => `'${t}'`).join(", ")
 export const CORRELATED_REPLY_TYPES_SQL = CORRELATED_REPLY_TYPES.map((type) => `'${type}'`).join(", ")

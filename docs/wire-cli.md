@@ -309,6 +309,14 @@ verb in this family that talks to the SQLite file instead of the socket.
 `--db` overrides the same resolution order the daemon itself uses
 (`--db` > `TRIBE_DB` > XDG default; see [daemon.md](daemon.md)).
 
+The Markdown projection is a bounded human page: durable session identities,
+per-seat ball arrivals/answers and p50/p90/max latency, typed endings, oldest
+open age, and at most ten recent timeline entries. Unknown transport endpoints
+are kept as one unattributed aggregate rather than counted as members. JSON is
+the lossless analysis surface and also carries the correlated request/reply
+corpus used by the supervised daily classification review. Historical endings
+without durable outcome evidence remain `unknown`; they are never backfilled.
+
 ## MCP tools with no CLI equivalent
 
 Not every `tribe.*` MCP tool has a `tribe-wire` subcommand — some are
