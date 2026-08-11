@@ -13,6 +13,9 @@ import type {
 } from "./health-process-source.ts"
 import {
   collectFullMetrics,
+  createAlertState,
+  defaultThresholds,
+  evaluateAlerts,
   formatCanonicalHealthAlertForDelivery,
   getHealthSnapshot,
   ownerForLockHolder,
@@ -76,7 +79,8 @@ function scalarObservation(): Extract<CanonicalHostScalarObservation, { kind: "a
         value: {
           availableBytes: 6 * 1024 ** 3,
           freeBytes: 6 * 1024 ** 3,
-          path: "/",
+          inodes: { kind: "supported", value: { free: 600, total: 1_000, used: 400 } },
+          path: "/tmp",
           totalBytes: 10 * 1024 ** 3,
           usedBytes: 4 * 1024 ** 3,
         },
@@ -102,13 +106,11 @@ function stubPeripheralCommands() {
   return vi.spyOn(Bun, "spawn").mockImplementation((argv) => {
     const command = Array.isArray(argv) ? argv[0] : ""
     const stdout =
-      command === "df"
-        ? "Filesystem 1G-blocks Used Available Capacity Mounted_on\n/dev/disk 100 25 75 25% /\n"
-        : command === "git"
-          ? "/repo branch\n"
-          : command === "sh" && Array.isArray(argv) && String(argv[2]).includes("ulimit")
-            ? "1024\n"
-            : "0\n"
+      command === "git"
+        ? "/repo branch\n"
+        : command === "sh" && Array.isArray(argv) && String(argv[2]).includes("ulimit")
+          ? "1024\n"
+          : "0\n"
     return {
       exited: Promise.resolve(0),
       stderr: new Response("").body,
@@ -129,7 +131,14 @@ describe("health monitor managed process source", () => {
     expect(osSampler).not.toHaveBeenCalled()
     expect(result.metrics).toMatchObject({
       cpu: { coreCount: 8, loadAvg1m: 1.25, loadAvg5m: 1 },
-      disk: { availableGB: 6, totalGB: 10, usagePercent: 40, usedGB: 4 },
+      disk: {
+        availableBytes: 6 * 1024 ** 3,
+        freeBytes: 6 * 1024 ** 3,
+        inodes: { kind: "supported", value: { free: 600, total: 1_000, used: 400 } },
+        path: "/tmp",
+        totalBytes: 10 * 1024 ** 3,
+        usedBytes: 4 * 1024 ** 3,
+      },
       diskIo: { readWriteMBps: 2 },
       memory: { availableMB: 6_144, pressurePercent: 40, swapUsedMB: 100, totalMB: 10_240, usedMB: 4_096 },
       scalarObservation: {
@@ -164,6 +173,58 @@ describe("health monitor managed process source", () => {
       scalarObservation: { kind: "standalone-os" },
       timestamp: 9_000,
     })
+    expect(spawn.mock.calls.some(([argv]) => Array.isArray(argv) && argv[0] === "df")).toBe(false)
+    spawn.mockRestore()
+  })
+
+  it("names missing inode evidence when replaying a historical byte-only reading", async () => {
+    const scalars = structuredClone(scalarObservation())
+    if (scalars.values.disk.kind !== "supported") throw new Error("expected supported disk fixture")
+    delete (scalars.values.disk.value as { inodes?: unknown }).inodes
+
+    const { metrics } = await collectFullMetrics(managed(observation(), scalars))
+
+    expect(metrics.disk).toMatchObject({ path: "/tmp", usedBytes: 4 * 1024 ** 3 })
+    expect(metrics.scalarObservation).toMatchObject({ unavailable: ["disk.inodes"] })
+  })
+
+  it("treats 98 percent inodes as critical while bytes are only 62 percent used", async () => {
+    const base = scalarObservation()
+    if (base.values.disk.kind !== "supported") throw new Error("fixture disk must be supported")
+    const scalars: CanonicalHostScalarObservation = {
+      ...base,
+      values: {
+        ...base.values,
+        disk: {
+          kind: "supported",
+          value: {
+            ...base.values.disk.value,
+            availableBytes: 38,
+            freeBytes: 38,
+            inodes: { kind: "supported", value: { free: 20, total: 1_000, used: 980 } },
+            totalBytes: 100,
+            usedBytes: 62,
+          },
+        },
+      },
+    }
+    const spawn = stubPeripheralCommands()
+    const { metrics } = await collectFullMetrics(managed(observation(), scalars))
+    const alerts = evaluateAlerts(metrics, defaultThresholds(), createAlertState())
+
+    expect(metrics.disk).toMatchObject({
+      inodes: { kind: "supported", value: { used: 980 } },
+      path: "/tmp",
+      totalBytes: 100,
+      usedBytes: 62,
+    })
+    expect(alerts).toEqual([
+      expect.objectContaining({
+        message: expect.stringMatching(/\/tmp.*98% inodes.*62% bytes.*root filesystem not covered/i),
+        severity: "critical",
+        type: "disk",
+      }),
+    ])
     spawn.mockRestore()
   })
 
