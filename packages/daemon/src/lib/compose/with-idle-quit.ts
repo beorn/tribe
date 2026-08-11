@@ -123,8 +123,11 @@ export function withIdleQuit<T extends BaseTribe & WithConfig & WithClientRegist
       // coordinates through this process. It logged at info on 2026-08-11 and nothing scanning
       // for warnings saw it — correctly, because nothing warned. The socket-missing backstop
       // below already uses warn for a strictly less severe condition.
-      // The config was disclosed at startup, so this line stays one event: clients hit zero.
-      log.warn?.(`No clients => quitting in ${quitTimeoutSec}s`)
+      // Same syllogism as the firing line: observation => rule that applies => consequence.
+      // The rule repeats even though startup disclosed it, because arming is also a decision a
+      // reader may meet on its own — in an incident paste, a grep, a tail — and a line that
+      // cannot say why it happened sends them looking.
+      log.warn?.(`No clients => auto-quit-on-idle=${quitTimeoutSec}s => quitting in ${quitTimeoutSec}s`)
     }
 
     function checkSocketPathGone(nowMs: number): void {
