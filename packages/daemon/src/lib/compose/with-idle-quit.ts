@@ -81,6 +81,19 @@ export function withIdleQuit<T extends BaseTribe & WithConfig & WithClientRegist
 ): (t: T) => T & WithIdleQuit {
   return (t) => {
     const quitTimeoutSec = t.config.quitTimeoutSec
+    // Disclose the CONFIG once, at startup — separately from the EVENT that later trips it.
+    // These are two different facts at two different moments, and folding them into one line
+    // ("no clients => auto-quit is on => stopping in Ns") reads as though being switched on
+    // were itself something that just happened. Stating it here also means the reader learns
+    // the daemon can stop itself BEFORE it does, and keeps the event lines short.
+    if (quitTimeoutSec < 0) {
+      log.info?.(`auto-quit-on-idle: OFF (TRIBE_QUIT_TIMEOUT=-1) — this daemon will not stop itself`)
+    } else {
+      log.info?.(
+        `auto-quit-on-idle: ON, ${quitTimeoutSec}s with no clients ` +
+          `(TRIBE_QUIT_TIMEOUT=${quitTimeoutSec}; -1 disables, 0 quits immediately)`,
+      )
+    }
     const tickIntervalMs = opts.tickIntervalMs ?? 1000
     const pendingExpiryMs = opts.pendingExpiryMs ?? 60_000
     const socketPathGoneTimeoutMs = opts.socketPathGoneTimeoutMs ?? 30_000
@@ -110,14 +123,8 @@ export function withIdleQuit<T extends BaseTribe & WithConfig & WithClientRegist
       // coordinates through this process. It logged at info on 2026-08-11 and nothing scanning
       // for warnings saw it — correctly, because nothing warned. The socket-missing backstop
       // below already uses warn for a strictly less severe condition.
-      //
-      // The message names the KNOB and its VALUE inline. Reading "auto-quit in 1800s" cost a
-      // reader three files to find what governed it; a message that says what to change is the
-      // difference between a diagnosis and a search.
-      log.warn?.(
-        `No clients => auto-quit ARMED, stopping in ${quitTimeoutSec}s ` +
-          `(tribe config TRIBE_QUIT_TIMEOUT=${quitTimeoutSec}; -1 disables, 0 quits immediately)`,
-      )
+      // The config was disclosed at startup, so this line stays one event: clients hit zero.
+      log.warn?.(`No clients => quitting in ${quitTimeoutSec}s`)
     }
 
     function checkSocketPathGone(nowMs: number): void {
@@ -179,15 +186,11 @@ export function withIdleQuit<T extends BaseTribe & WithConfig & WithClientRegist
       }
       if (nowMs >= idleDeadline) {
         // WARN, and say what it MEANS rather than what fired. "idle deadline reached" reads like
-        // a timer expiring; what happens is the coordination rail going down. Name the knob and
-        // the value, and name the supervisor consequence — a clean exit that a supervisor still
-        // counts against its restart budget is a CONFIG condition wearing a crash's clothes, and
-        // that disguise cost a morning on 2026-08-11.
-        log.warn?.(
-          `No clients for ${quitTimeoutSec}s => AUTO-QUITTING the coordination daemon ` +
-            `(tribe config TRIBE_QUIT_TIMEOUT=${quitTimeoutSec}; -1 disables). ` +
-            `Exit is CLEAN (code 0) — a supervisor may still count it against its restart budget.`,
-        )
+        // a timer expiring; what happens is the coordination rail going down. The exit-is-clean
+        // clause earns its place because a supervisor may still count it against a restart
+        // budget — a config condition wearing a crash's clothes, which cost a morning on
+        // 2026-08-11. The knob was already disclosed at startup; do not repeat it here.
+        log.warn?.(`No clients for ${quitTimeoutSec}s => stopping the coordination daemon now (clean exit, code 0)`)
         opts.triggerShutdown()
       }
     }
