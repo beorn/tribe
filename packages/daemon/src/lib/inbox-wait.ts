@@ -66,6 +66,23 @@ export function createInboxWaitManager(
     return {
       status: flags.aborted ? "aborted" : flags.timedOut ? "timeout" : "woken",
       ...snapshot.status,
+      // unread_count reconciles TWO independent reads instead of trusting one.
+      // The status projection and the attention projection are separate queries and
+      // nothing made them agree, so a payload could report unread_count: 0 beside a
+      // non-empty actionable_unread — measured four times in one seat's waits. The
+      // seat reads the count, concludes nothing arrived, and sleeps on top of work
+      // it was just handed.
+      //
+      // Neither source is authoritative, and each is empty when the other is not:
+      // the status projection lags an insert (the cursor race onMessageInserted
+      // below already refuses to trust), while attention can be empty for a live
+      // assign the status read can see. Taking the max is the only combination that
+      // never UNDER-reports, and under-reporting is the harmful direction — it is
+      // what puts a seat back to sleep on top of real work.
+      //
+      // Deriving purely from actionable_unread was tried and is wrong: it returns
+      // zero for a landed assign whose row attention has not projected yet.
+      unread_count: Math.max(snapshot.status.unread_count, snapshot.attention.actionable_unread.length),
       waited_ms: waitedMs,
       effective_timeout_ms: effectiveTimeoutMs,
       timed_out: flags.timedOut,

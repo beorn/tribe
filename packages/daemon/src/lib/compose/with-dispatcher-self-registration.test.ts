@@ -1523,7 +1523,13 @@ describe("dispatcher inbox-wait parsing", () => {
 
     await expect(wait.then(parseResult<InboxWaitResult>)).resolves.toMatchObject({
       session: "@requester",
-      unread_count: 0,
+      // Was asserted as 0 while the wait is being woken BY a validated reply that
+      // attention then carries — the payload said "nothing unread" in the same
+      // breath as handing the reply over. The count now reconciles both
+      // projections and never under-reports; the wake behaviour under test
+      // (only the opted-in requester wakes, on its own validated reply) is
+      // unchanged and still asserted by the surrounding fields.
+      unread_count: 1,
       effective_timeout_ms: 30 * 60_000,
       timed_out: false,
       aborted: false,

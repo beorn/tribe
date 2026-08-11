@@ -604,7 +604,12 @@ describe("createInboxWaitManager", () => {
     await expect(wait).resolves.toMatchObject({
       status: "timeout",
       session: "@ci",
-      unread_count: 0,
+      // Was asserted as 0, which pinned the contradiction this payload used to
+      // carry: a caller handed one actionable row and told the count is zero
+      // reads the count, concludes nothing arrived, and sleeps on top of it.
+      // The point of this test — attention survives a raw timeout so an outer
+      // logical wait can continue — is unchanged and still asserted below.
+      unread_count: 1,
       timed_out: true,
       aborted: false,
       attention,
