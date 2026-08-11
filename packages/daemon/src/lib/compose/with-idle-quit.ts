@@ -190,7 +190,13 @@ export function withIdleQuit<T extends BaseTribe & WithConfig & WithClientRegist
         // clause earns its place because a supervisor may still count it against a restart
         // budget — a config condition wearing a crash's clothes, which cost a morning on
         // 2026-08-11. The knob was already disclosed at startup; do not repeat it here.
-        log.warn?.(`No clients for ${quitTimeoutSec}s => stopping the coordination daemon now (clean exit, code 0)`)
+        // observation => the rule that applies => the consequence. The middle term is the "why
+        // this counts", and it is repeated here even though startup already disclosed it: the
+        // ARMING line is a countdown notice, but THIS line is the record of a decision, and a
+        // decision record gets quoted, pasted and read alone. It must stand without its log.
+        log.warn?.(
+          `No clients for ${quitTimeoutSec}s => auto-quit-on-idle=${quitTimeoutSec}s => auto-quitting (clean exit, code 0)`,
+        )
         opts.triggerShutdown()
       }
     }
