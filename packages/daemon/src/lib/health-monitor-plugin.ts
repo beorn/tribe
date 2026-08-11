@@ -43,6 +43,10 @@ const log = createLogger("tribe:health")
 const CPU_ALERT_COOLDOWN_MS = 5 * 60_000
 const CPU_OFFENDER_MIN_PERCENT = 3
 const HEALTH_ALERT_ARGV_MAX_CHARS = 160
+type CanonicalDiskCapacity = Extract<
+  Extract<CanonicalHostScalarObservation, { kind: "available" }>["values"]["disk"],
+  { kind: "supported" }
+>["value"]
 
 // ---------------------------------------------------------------------------
 // Types
@@ -62,12 +66,7 @@ export interface HealthMetrics {
     pressurePercent: number
     swapUsedMB?: number
   }
-  disk?: {
-    totalGB: number
-    usedGB: number
-    availableGB: number
-    usagePercent: number
-  }
+  disk?: CanonicalDiskCapacity
   diskIo?: {
     readWriteMBps: number
   }
@@ -96,7 +95,7 @@ export interface HealthMetrics {
         readonly reason: string
       }
   scalarObservation:
-    | { readonly kind: "standalone-os" }
+    | { readonly kind: "standalone-os"; readonly unavailable: readonly ["disk.bytes", "disk.inodes"] }
     | {
         readonly kind: "canonical-available"
         readonly observedAt: number
@@ -302,7 +301,7 @@ export function collectOsMetrics(): Omit<
 > & {
   cpu: Omit<HealthMetrics["cpu"], "topProcesses">
 } {
-  const [load1, load5] = loadavg()
+  const [load1 = 0, load5 = 0] = loadavg()
   const totalBytes = totalmem()
   const freeBytes = freemem()
   const totalMB = Math.round(totalBytes / 1024 / 1024)
@@ -312,8 +311,8 @@ export function collectOsMetrics(): Omit<
 
   return {
     cpu: {
-      loadAvg1m: Math.round(load1! * 100) / 100,
-      loadAvg5m: Math.round(load5! * 100) / 100,
+      loadAvg1m: Math.round(load1 * 100) / 100,
+      loadAvg5m: Math.round(load5 * 100) / 100,
       coreCount: cpus().length,
     },
     memory: {
@@ -331,7 +330,7 @@ export function collectOsMetrics(): Omit<
 export function parseSwapUsage(output: string): number {
   // Format: "vm.swapusage: total = 2048.00M  used = 123.45M  free = 1924.55M"
   const match = output.match(/used\s*=\s*([\d.]+)M/)
-  return match ? parseFloat(match[1]!) : 0
+  return match ? parseFloat(match[1] ?? "0") : 0
 }
 
 /**
@@ -366,12 +365,12 @@ export function parseVmStat(output: string): {
   compressed: number
 } {
   const pageSizeMatch = output.match(/page size of (\d+) bytes/)
-  const pageSizeBytes = pageSizeMatch ? parseInt(pageSizeMatch[1]!, 10) : 16384
+  const pageSizeBytes = pageSizeMatch ? parseInt(pageSizeMatch[1] ?? "16384", 10) : 16384
 
   const readPages = (label: string): number => {
     const re = new RegExp(`${label}:\\s*(\\d+)\\.?`)
     const m = output.match(re)
-    return m ? parseInt(m[1]!, 10) : 0
+    return m ? parseInt(m[1] ?? "0", 10) : 0
   }
 
   return {
@@ -392,14 +391,14 @@ export function parseProcessSnapshot(psOutput: string): HealthProcess[] {
   for (const line of psOutput.trim().split("\n")) {
     const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+(.+)$/u)
     if (!match) continue
-    const [, pidRaw, ppidRaw, pgidRaw, cpuRaw, memRaw, command] = match
-    const pid = Number.parseInt(pidRaw!, 10)
-    const ppid = Number.parseInt(ppidRaw!, 10)
-    const pgid = Number.parseInt(pgidRaw!, 10)
-    const cpu = Number.parseFloat(cpuRaw!)
-    const mem = Number.parseFloat(memRaw!)
+    const [, pidRaw = "", ppidRaw = "", pgidRaw = "", cpuRaw = "", memRaw = "", command = ""] = match
+    const pid = Number.parseInt(pidRaw, 10)
+    const ppid = Number.parseInt(ppidRaw, 10)
+    const pgid = Number.parseInt(pgidRaw, 10)
+    const cpu = Number.parseFloat(cpuRaw)
+    const mem = Number.parseFloat(memRaw)
     if (![pid, ppid, pgid, cpu, mem].every(Number.isFinite)) continue
-    processes.push({ pid, ppid, pgid, cpu, mem, command: command! })
+    processes.push({ pid, ppid, pgid, cpu, mem, command })
   }
   return processes
 }
@@ -663,25 +662,6 @@ async function checkCollectedProcessReaper(
   checkCanonicalReaper(observation, thresholds, state.canonicalReaper, api, sessions)
 }
 
-/** Parse `df -g .` output to extract disk usage (macOS format). */
-export function parseDfOutput(
-  output: string,
-): { totalGB: number; usedGB: number; availableGB: number; usagePercent: number } | null {
-  const lines = output.trim().split("\n")
-  // Skip header; parse first data line
-  // Columns: Filesystem 1G-blocks Used Available Capacity Mounted_on
-  if (lines.length < 2) return null
-  const parts = lines[1]!.trim().split(/\s+/)
-  if (parts.length < 5) return null
-  const totalGB = parseInt(parts[1]!, 10)
-  const usedGB = parseInt(parts[2]!, 10)
-  const availableGB = parseInt(parts[3]!, 10)
-  const capacityMatch = parts[4]!.match(/(\d+)%/)
-  const usagePercent = capacityMatch ? parseInt(capacityMatch[1]!, 10) : 0
-  if (isNaN(totalGB) || isNaN(usedGB) || isNaN(availableGB)) return null
-  return { totalGB, usedGB, availableGB, usagePercent }
-}
-
 /** Parse `git worktree list` output to count worktrees. */
 export function parseWorktreeList(output: string): number {
   const trimmed = output.trim()
@@ -759,10 +739,10 @@ export function parseIostatOutput(output: string): { readWriteMBps: number } | n
     // Match lines that look like data: numbers separated by whitespace
     const parts = trimmed.split(/\s+/)
     if (parts.length < 3) continue
-    const mbps = parseFloat(parts[parts.length - 1]!)
+    const mbps = parseFloat(parts.at(-1) ?? "")
     if (isNaN(mbps)) continue
     // Verify it's a data line by checking the first column is also numeric
-    const first = parseFloat(parts[0]!)
+    const first = parseFloat(parts[0] ?? "")
     if (isNaN(first)) continue
     lastMBps = mbps
   }
@@ -788,11 +768,11 @@ export function parseLsofOutput(output: string): { pid: number; command: string 
   const lines = output.trim().split("\n")
   // Skip header line; parse first data line
   for (let i = 1; i < lines.length; i++) {
-    const parts = lines[i]!.trim().split(/\s+/)
+    const parts = lines[i]?.trim().split(/\s+/) ?? []
     // lsof columns: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
     if (parts.length < 2) continue
-    const command = parts[0]!
-    const pid = parseInt(parts[1]!, 10)
+    const command = parts[0] ?? ""
+    const pid = parseInt(parts[1] ?? "", 10)
     if (!isNaN(pid)) return { pid, command }
   }
   return null
@@ -938,8 +918,6 @@ export interface AlertState {
   cpuAboveWarning: number
   memAboveCritical: number
   memAboveWarning: number
-  diskAboveCritical: number
-  diskAboveWarning: number
   /** Consecutive high disk I/O readings */
   ioAboveWarning: number
   /** Track which alerts have been fired to avoid repeating */
@@ -966,8 +944,6 @@ export function createAlertState(): AlertState {
     cpuAboveWarning: 0,
     memAboveCritical: 0,
     memAboveWarning: 0,
-    diskAboveCritical: 0,
-    diskAboveWarning: 0,
     ioAboveWarning: 0,
     firedAlerts: new Set(),
     firedAt: new Map(),
@@ -1078,6 +1054,22 @@ function scalarFactIdentity(observation: HealthMetrics["scalarObservation"]): st
   return observation.kind === "canonical-available"
     ? `${observation.source.epoch}\0${observation.source.sequence}`
     : undefined
+}
+
+function describeDiskCapacity(capacity: CanonicalDiskCapacity): { detail: string; usagePercent: number } {
+  const byteUsage = Math.round((capacity.usedBytes / capacity.totalBytes) * 100)
+  const inodes = capacity.inodes
+  const inodeUsage =
+    inodes?.kind === "supported" ? Math.round((inodes.value.used / inodes.value.total) * 100) : undefined
+  const inodeDetail =
+    inodes?.kind === "supported"
+      ? `${inodeUsage}% inodes (${inodes.value.used}/${inodes.value.total})`
+      : `inodes unavailable (${inodes?.reason ?? "not-reported"})`
+  const detail =
+    `${capacity.path}: ${inodeDetail}; ${byteUsage}% bytes ` +
+    `(${capacity.usedBytes}/${capacity.totalBytes}, ${capacity.availableBytes} available)` +
+    (capacity.path === "/" ? "" : "; root filesystem not covered")
+  return { detail, usagePercent: Math.max(byteUsage, inodeUsage ?? Number.NEGATIVE_INFINITY) }
 }
 
 export function evaluateAlerts(
@@ -1231,26 +1223,26 @@ export function evaluateAlerts(
 
   // --- Disk ---
   if (evaluateScalarMetrics && metrics.disk) {
-    const diskUsage = metrics.disk.usagePercent
-    if (diskUsage > thresholds.diskCriticalPercent) {
+    const disk = describeDiskCapacity(metrics.disk)
+    if (disk.usagePercent > thresholds.diskCriticalPercent) {
       if (!state.firedAlerts.has("disk:critical")) {
         state.firedAlerts.add("disk:critical")
         state.firedAlerts.delete("disk:warning") // Supersedes warning
         alerts.push({
           type: "disk",
           severity: "critical",
-          message: `Disk critical: ${diskUsage}% used (${metrics.disk.usedGB}GB / ${metrics.disk.totalGB}GB, ${metrics.disk.availableGB}GB available)`,
+          message: `Disk critical: ${disk.detail}`,
           metrics: { disk: metrics.disk },
           topOffenders: [],
         })
       }
-    } else if (diskUsage > thresholds.diskWarningPercent) {
+    } else if (disk.usagePercent > thresholds.diskWarningPercent) {
       if (!state.firedAlerts.has("disk:warning") && !state.firedAlerts.has("disk:critical")) {
         state.firedAlerts.add("disk:warning")
         alerts.push({
           type: "disk",
           severity: "warning",
-          message: `Disk warning: ${diskUsage}% used (${metrics.disk.usedGB}GB / ${metrics.disk.totalGB}GB, ${metrics.disk.availableGB}GB available)`,
+          message: `Disk warning: ${disk.detail}`,
           metrics: { disk: metrics.disk },
           topOffenders: [],
         })
@@ -1260,8 +1252,6 @@ export function evaluateAlerts(
       state.firedAlerts.delete("disk:warning")
     }
   } else if (evaluateScalarMetrics) {
-    state.diskAboveCritical = 0
-    state.diskAboveWarning = 0
     state.firedAlerts.delete("disk:critical")
     state.firedAlerts.delete("disk:warning")
   }
@@ -1319,24 +1309,24 @@ export function parseEtime(etime: string): number {
   // Format: D-HH:MM:SS
   const dayMatch = trimmed.match(/^(\d+)-(\d+):(\d+):(\d+)$/)
   if (dayMatch) {
-    const days = parseInt(dayMatch[1]!, 10)
-    const hours = parseInt(dayMatch[2]!, 10)
-    const mins = parseInt(dayMatch[3]!, 10)
+    const days = parseInt(dayMatch[1] ?? "0", 10)
+    const hours = parseInt(dayMatch[2] ?? "0", 10)
+    const mins = parseInt(dayMatch[3] ?? "0", 10)
     return days * 24 * 60 + hours * 60 + mins
   }
 
   // Format: HH:MM:SS
   const hmsMatch = trimmed.match(/^(\d+):(\d+):(\d+)$/)
   if (hmsMatch) {
-    const hours = parseInt(hmsMatch[1]!, 10)
-    const mins = parseInt(hmsMatch[2]!, 10)
+    const hours = parseInt(hmsMatch[1] ?? "0", 10)
+    const mins = parseInt(hmsMatch[2] ?? "0", 10)
     return hours * 60 + mins
   }
 
   // Format: MM:SS
   const msMatch = trimmed.match(/^(\d+):(\d+)$/)
   if (msMatch) {
-    return parseInt(msMatch[1]!, 10)
+    return parseInt(msMatch[1] ?? "0", 10)
   }
 
   return 0
@@ -1496,9 +1486,13 @@ interface CollectFullMetricsDeps {
 }
 
 function metricUnavailableNames(observation: Extract<CanonicalHostScalarObservation, { kind: "available" }>): string[] {
-  return (["cpu", "disk", "diskIo", "memory", "swap"] as const).filter(
+  const unavailable: string[] = (["cpu", "disk", "diskIo", "memory", "swap"] as const).filter(
     (name) => observation.values[name].kind === "unavailable",
   )
+  if (observation.values.disk.kind === "supported" && observation.values.disk.value.inodes?.kind !== "supported") {
+    unavailable.push("disk.inodes")
+  }
+  return unavailable
 }
 
 function canonicalScalarMetrics(
@@ -1517,7 +1511,6 @@ function canonicalScalarMetrics(
   }
   const { values } = observation
   const bytesPerMB = 1024 * 1024
-  const bytesPerGB = bytesPerMB * 1024
   const cpu =
     values.cpu.kind === "supported"
       ? {
@@ -1539,15 +1532,7 @@ function canonicalScalarMetrics(
           usedMB: Math.round(values.memory.value.usedBytes / bytesPerMB),
         }
       : undefined
-  const disk =
-    values.disk.kind === "supported"
-      ? {
-          availableGB: Math.round(values.disk.value.availableBytes / bytesPerGB),
-          totalGB: Math.round(values.disk.value.totalBytes / bytesPerGB),
-          usagePercent: Math.round((values.disk.value.usedBytes / values.disk.value.totalBytes) * 100),
-          usedGB: Math.round(values.disk.value.usedBytes / bytesPerGB),
-        }
-      : undefined
+  const disk = values.disk.kind === "supported" ? values.disk.value : undefined
   const diskIo =
     values.diskIo.kind === "supported"
       ? { readWriteMBps: values.diskIo.value.readWriteBytesPerSecond / bytesPerMB }
@@ -1618,7 +1603,10 @@ export async function collectFullMetrics(
           return {
             ...sampled,
             cpu: { ...sampled.cpu, topProcesses: [] },
-            scalarObservation: { kind: "standalone-os" as const },
+            scalarObservation: {
+              kind: "standalone-os" as const,
+              unavailable: ["disk.bytes", "disk.inodes"] as const,
+            },
           }
         })()
       : canonicalScalarMetrics(scalarObservation)
@@ -1627,7 +1615,6 @@ export async function collectFullMetrics(
   let bunProcesses: number | undefined
   let swapUsedMB = 0
   let pidToParent = new Map<number, number>()
-  let disk: HealthMetrics["disk"] = hostMetrics.disk
   let worktrees = 0
   let fdCount: HealthMetrics["fdCount"]
   if (processObservation.kind === "available") {
@@ -1665,13 +1652,8 @@ export async function collectFullMetrics(
             }).stdout,
           ).text()
         : Promise.resolve("")
-    const dfOutputPromise =
-      processObservation.kind === "standalone-os"
-        ? new Response(Bun.spawn(["df", "-g", "."], { stdout: "pipe", stderr: "ignore" }).stdout).text()
-        : Promise.resolve("")
-    const [observedPs, dfOutput, wtOutput, fdCountOutput, ulimitOutput] = await Promise.all([
+    const [observedPs, wtOutput, fdCountOutput, ulimitOutput] = await Promise.all([
       psOutput,
-      dfOutputPromise,
       new Response(wtProc.stdout).text().catch(() => ""),
       fdCountOutputPromise.catch(() => "0"),
       ulimitOutputPromise.catch(() => "0"),
@@ -1682,7 +1664,6 @@ export async function collectFullMetrics(
       bunProcesses = processMetrics.bunProcesses
       pidToParent = processMetrics.pidToParent
     }
-    if (processObservation.kind === "standalone-os") disk = parseDfOutput(dfOutput) ?? undefined
     worktrees = parseWorktreeList(wtOutput)
 
     // File descriptor count
@@ -1747,7 +1728,7 @@ export async function collectFullMetrics(
               ...(processObservation.kind === "standalone-os" ? { swapUsedMB } : {}),
             },
           }),
-      disk,
+      disk: hostMetrics.disk,
       diskIo: hostMetrics.diskIo,
       fdCount,
       ...(bunProcesses === undefined ? {} : { bunProcesses }),
@@ -1897,7 +1878,7 @@ export const healthMonitorPlugin: TribePluginApi = {
           if (!alertState.lockFirstSeen.has(lock.path)) {
             alertState.lockFirstSeen.set(lock.path, now)
           }
-          const firstSeen = alertState.lockFirstSeen.get(lock.path)!
+          const firstSeen = alertState.lockFirstSeen.get(lock.path) ?? now
           const durationMs = now - firstSeen
           const durationSec = Math.round(durationMs / 1000)
 

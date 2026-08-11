@@ -49,6 +49,7 @@ const scalarPayload = {
       value: {
         availableBytes: 6_000_000_000,
         freeBytes: 6_000_000_000,
+        inodes: { kind: "supported", value: { free: 600, total: 1_000, used: 400 } },
         path: "/",
         totalBytes: 10_000_000_000,
         usedBytes: 4_000_000_000,
@@ -140,6 +141,29 @@ describe("neutral health process source", () => {
       reason: "source-command-failed",
       schema: "process-observation/1",
     })
+  })
+
+  it("keeps historical byte-only scalar records readable for consumer-side derivation", async () => {
+    const { inodes: _inodes, ...historicalDisk } = scalarPayload.values.disk.value
+    const payload = {
+      ...scalarPayload,
+      values: {
+        ...scalarPayload.values,
+        disk: { ...scalarPayload.values.disk, value: historicalDisk },
+      },
+    }
+    const source = createHealthProcessSource({
+      env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+      runCommand: async () => ({ exitCode: 0, stderr: "", stdout: `${JSON.stringify(payload)}\n` }),
+    })
+    if (source.kind !== "managed") throw new Error("expected managed source")
+
+    const observation = await source.readScalars()
+    expect(observation.kind).toBe("available")
+    if (observation.kind !== "available" || observation.values.disk.kind !== "supported") {
+      throw new Error("expected supported historical byte capacity")
+    }
+    expect(observation.values.disk.value.inodes).toBeUndefined()
   })
 
   it("fails closed on malformed command output instead of returning an empty process list", async () => {

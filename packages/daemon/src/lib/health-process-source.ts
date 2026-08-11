@@ -25,7 +25,9 @@ const SCALAR_PLATFORMS = new Set([
 const SCALAR_UNAVAILABLE_REASONS = new Set([
   "counter-reset",
   "mount-changed",
+  "not-reported",
   "provider-error",
+  "unsupported-on-filesystem",
   "unsupported-on-platform",
   "unresolvable-device",
   "warming-up",
@@ -86,7 +88,7 @@ export type CanonicalProcessObservation =
 type ScalarUnavailableMetric = {
   readonly detail?: string
   readonly kind: "unavailable"
-  readonly metric: "cpu" | "disk" | "diskIo" | "memory" | "swap"
+  readonly metric: "cpu" | "disk" | "disk.inodes" | "diskIo" | "memory" | "swap"
   readonly platform: string
   readonly reason: string
 }
@@ -117,6 +119,10 @@ export type CanonicalHostScalarObservation =
           {
             readonly availableBytes: number
             readonly freeBytes: number
+            readonly inodes?: ScalarMetric<
+              "disk.inodes",
+              { readonly free: number; readonly total: number; readonly used: number }
+            >
             readonly path: string
             readonly totalBytes: number
             readonly usedBytes: number
@@ -296,6 +302,13 @@ function isSupportedScalarMetric(value: unknown, validate: (metric: Record<strin
 
 function isScalarMetric(value: unknown, metric: ScalarUnavailableMetric["metric"]): boolean {
   if (isUnavailableScalarMetric(value, metric)) return true
+  if (metric === "disk.inodes") {
+    return isSupportedScalarMetric(
+      value,
+      ({ free, total, used }) =>
+        isNonNegativeInteger(free) && isNonNegativeInteger(used) && isPositiveInteger(total) && free + used === total,
+    )
+  }
   if (metric === "cpu") {
     return isSupportedScalarMetric(
       value,
@@ -321,7 +334,8 @@ function isScalarMetric(value: unknown, metric: ScalarUnavailableMetric["metric"
         item.availableBytes <= item.freeBytes &&
         item.freeBytes <= item.totalBytes &&
         item.usedBytes <= item.totalBytes &&
-        item.freeBytes + item.usedBytes === item.totalBytes,
+        item.freeBytes + item.usedBytes === item.totalBytes &&
+        (item.inodes === undefined || isScalarMetric(item.inodes, "disk.inodes")),
     )
   }
   if (metric === "diskIo") {
