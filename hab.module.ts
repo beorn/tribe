@@ -3,21 +3,27 @@ export default {
   services: {
     wire: {
       command: "bun vendor/tribe/packages/daemon/src/daemon.ts",
-      // TRIBE_QUIT_TIMEOUT=-1 disables idle auto-quit (with-idle-quit.ts: -1 never fires the timer,
-      // 0 quits immediately). Set 2026-08-11 after idle-quit took the whole fleet's coordination
-      // rail down: the daemon logged "No clients connected. Auto-quit in 1800s" at 10:07 while
-      // seats were being relaunched — every client disconnected at once, which is routine here and
-      // looks exactly like idleness from inside the daemon.
+      // Idle auto-quit raised 1800s -> 6h, 2026-08-11. NOT disabled (-1), deliberately.
       //
-      // The auto-quit alone would be survivable; the INTERACTION is not. hab counts each exit as a
-      // service failure, so a handful of idle windows exhausted wire's restart budget and
-      // suppressed it — "restarts suppressed until 17:25 (5 failures)" — turning a benign
-      // on-demand behaviour into a permanent outage that no restart could clear.
+      // What went wrong at 1800s: the daemon logged "No clients connected. Auto-quit in 1800s" at
+      // 10:07 while seats were being relaunched. Every client disconnecting at once is routine in a
+      // supervised fleet and is indistinguishable from real idleness from inside the daemon. The
+      // auto-quit alone would be survivable; the INTERACTION is not — hab counts each exit as a
+      // service failure, so a few idle windows exhausted wire's restart budget and suppressed it
+      // ("restarts suppressed until 17:25, 5 failures"), turning an on-demand convenience into an
+      // outage no restart could clear.
       //
-      // Auto-quit is right for a single-user on-demand CLI. This is a persistent multi-seat fleet
-      // where the daemon is never legitimately idle, and nothing here does socket activation, so
-      // "let it quit and come back on demand" has no mechanism to come back.
-      env: { TRIBE_DELIVERY_FALLBACKS: '[{"prefix":"@dev/","to":"@dev"}]', TRIBE_QUIT_TIMEOUT: "-1" },
+      // Why NOT -1, which was the first instinct and is wrong: idle-quit is the ONLY automatic
+      // recovery from an orphaned daemon. A starting daemon does not take over — it logs "Another
+      // daemon is already listening on <socket>, exiting" and defers to the incumbent. So a daemon
+      // that outlives an ungraceful hab teardown holds the socket and REJECTS EVERY REPLACEMENT,
+      // including one carrying a fix. At -1 that state is permanent and needs a human with a kill.
+      // Graceful `hab down` reaps wire by process group, so this only bites on abnormal death —
+      // which is exactly when nobody is watching.
+      //
+      // 6h is chosen against the two failure modes, not as a round number: far longer than any
+      // relaunch sweep (minutes), short enough that an orphan self-clears within a working day.
+      env: { TRIBE_DELIVERY_FALLBACKS: '[{"prefix":"@dev/","to":"@dev"}]', TRIBE_QUIT_TIMEOUT: "21600" },
       // oxfmt-ignore
       stateRoots: ["${TRIBE_DB:-${XDG_DATA_HOME:-$HOME/.local/share}/tribe/tribe.db}", "${TRIBE_SOCKET:-${XDG_RUNTIME_DIR:-$HOME/.local/share/tribe}/tribe.sock}"],
       health: { command: "tribe health" },
