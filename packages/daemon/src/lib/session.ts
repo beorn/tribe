@@ -512,7 +512,8 @@ export function cleanupOldData(ctx: TribeContext): void {
 
   const archived = ctx.stmts.archiveExpiredMessages.run({ $cutoff: cutoff, $archived_at: now_ms })
   const msgsDel = ctx.stmts.deleteExpiredMessages.run({ $cutoff: cutoff })
-  // Clean dedup keys older than 1 day (they only need to survive the poll race window)
+  // Clean short-lived poll/event dedup keys older than 1 day. The prepared
+  // statement preserves durable authority namespaces such as launch takeover.
   ctx.stmts.cleanupDedup.run({ $cutoff: now_ms - 24 * 60 * 60 * 1000 })
   // Ball-tracker GC (@km/tribe/20008): a pending request that never got a reply
   // would otherwise stay "open" forever and pollute tribe.pending. Tie the GC to

@@ -570,6 +570,15 @@ export function withDispatcher<
 
     type LaunchIdentity = { id: string; parentPid: number }
 
+    function claimLaunchTakeover(name: string, launch: LaunchIdentity, connId: string): boolean {
+      const result = stmts.claimDedup.run({
+        $key: `launch-takeover:${JSON.stringify([name, launch.id, launch.parentPid])}`,
+        $session_id: connId,
+        $ts: Date.now(),
+      })
+      return result.changes > 0
+    }
+
     function findLaunchFanIn(
       name: string,
       clientPid: number,
@@ -889,6 +898,11 @@ export function withDispatcher<
             const launchFanIn = findLaunchFanIn(resolvedName, clientPid, launchIdentity, connId)
             if (launchFanIn) {
               const { holder, launch, transportClass } = launchFanIn
+              // Backfill the durable one-shot fence when multiple transports
+              // from a launch fan in before any cross-launch contention.
+              if (p.takeover === true && typeof p.name === "string") {
+                claimLaunchTakeover(resolvedName, launch, connId)
+              }
               promoteSessionLaunchIdentity(holder.ctx.sessionId, launch, identityToken)
               if (filterMode !== undefined) applyLaunchDeclaredFilter(holder.ctx, filterMode)
               const client = applyClient(connId, {
@@ -946,11 +960,18 @@ export function withDispatcher<
             // semantics via deduplicateName. Guarded on an explicit requested name
             // so auto-named sessions can never steal.
             if (p.takeover === true && typeof p.name === "string") {
+              // TRIBE_TAKEOVER is inherited by every MCP adapter in one
+              // provider launch. Treat it as a launch-scoped, durable
+              // capability: the first registration consumes it, including a
+              // no-contention registration. Otherwise a fresh adapter from a
+              // displaced launch can replay the env bit and steal the persona
+              // back from its deliberate successor (21049).
+              const takeoverAuthorized = !launchIdentity || claimLaunchTakeover(resolvedName, launchIdentity, connId)
               const holders = Array.from(clients.values()).filter(
                 (client) => client.id !== connId && client.name === resolvedName,
               )
               const holder = holders[0]
-              if (holder) {
+              if (holder && takeoverAuthorized) {
                 const oldPids = [...new Set(holders.map((client) => client.pid))]
                 log.warn?.(
                   `takeover: superseding live holder of "${resolvedName}" (old pid ${holder.pid}, old pids ${oldPids.join(",")}, old session ${holder.ctx.sessionId}, new pid ${clientPid})`,
@@ -963,6 +984,10 @@ export function withDispatcher<
                   reason: "explicit-persona takeover (20703)",
                 })
                 for (const replaced of holders) retireReplacedClient(replaced, "explicit-takeover")
+              } else if (holder) {
+                log.warn?.(
+                  `takeover replay refused for "${resolvedName}" (launch ${launchIdentity?.id ?? "legacy"}, holder pid ${holder.pid}, claimant pid ${clientPid})`,
+                )
               }
             }
 

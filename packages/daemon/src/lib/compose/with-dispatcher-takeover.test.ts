@@ -243,6 +243,61 @@ describe("dispatcher explicit-persona takeover (@ag/tribe/20703)", () => {
     expect(agentSessions[0]?.pid).toBe(5001)
     expect(harness.supersededEvents("@agent/79")).toHaveLength(0)
   })
+
+  it("consumes takeover once per launch so a displaced launch cannot reclaim the persona", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    harness.addPendingClient("conn-launch-a")
+    parseResult<RegisterResult>(
+      await harness.register("conn-launch-a", {
+        name: "@agent/84",
+        pid: 8401,
+        project: "/tmp/km-wt9-launch-a",
+        launchId: "provider-launch-a",
+        launchParentPid: 84,
+        takeover: true,
+      }),
+    )
+    harness.db
+      .prepare("INSERT INTO dedup (key, session_id, ts) VALUES (?, ?, ?)")
+      .run("short-lived:test-key", "daemon-test", 0)
+    harness.cleanupDedup(Number.MAX_SAFE_INTEGER)
+    expect(harness.db.prepare("SELECT key FROM dedup ORDER BY key").all()).toEqual([
+      { key: 'launch-takeover:["@agent/84","provider-launch-a",84]' },
+    ])
+
+    harness.addPendingClient("conn-launch-b")
+    parseResult<RegisterResult>(
+      await harness.register("conn-launch-b", {
+        name: "@agent/84",
+        pid: 8402,
+        project: "/tmp/km-wt9-launch-b",
+        launchId: "provider-launch-b",
+        launchParentPid: 85,
+        takeover: true,
+      }),
+    )
+
+    harness.addPendingClient("conn-launch-a-replay")
+    const replay = parseError(
+      await harness.register("conn-launch-a-replay", {
+        name: "@agent/84",
+        pid: 8403,
+        project: "/tmp/km-wt9-launch-a",
+        launchId: "provider-launch-a",
+        launchParentPid: 84,
+        takeover: true,
+      }),
+    )
+    expect(replay.message).toBe('Name "@agent/84" is already taken by live pid 8402')
+
+    const status = parseResult<CliStatusResult>(await harness.cliStatus())
+    expect(status.sessions.filter((session) => session.name === "@agent/84")).toEqual([
+      expect.objectContaining({ pid: 8402 }),
+    ])
+    expect(harness.supersededEvents("@agent/84")).toHaveLength(1)
+  })
 })
 
 describe("provider-parent transport fan-in (@ag/tribe/22631)", () => {
@@ -706,6 +761,9 @@ function createDispatcherHarness() {
       })
       socketToClient.set(socket, connId)
       return socket
+    },
+    cleanupDedup(cutoff: number): void {
+      stmts.cleanupDedup.run({ $cutoff: cutoff })
     },
     /** Direct journal-row read — `event.session.superseded` rows written by logEvent(). */
     supersededEvents(name: string): Array<{ name: string; old_pid: number; new_pid: number; reason: string }> {

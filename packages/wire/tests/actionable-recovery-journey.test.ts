@@ -1210,7 +1210,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     )
     expect(successorMembers.sessions?.filter((session) => session.name === NAME)).toEqual([
       expect.objectContaining({
-        launch_id: "provider-launch-b",
+        launch_id: `provider-launch-b::${encodeURIComponent(NAME)}`,
         transport_pids: [successor.child.pid],
       }),
     ])
@@ -1219,6 +1219,29 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const rows = db.prepare("SELECT name FROM sessions ORDER BY name").all() as Array<{ name: string }>
     db.close()
     expect(rows).toEqual([{ name: NAME }])
+
+    // Replacing or reconnecting an adapter from the displaced launch must not
+    // replay the launch's inherited takeover bit. The launch already consumed
+    // that authority before the daemon restart above; each fresh transport
+    // now fails closed while the deliberate successor remains authoritative.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const replay = await spawnLaunchAdapter(socketPath, `displaced-launch-replay-${attempt + 1}.log`, launchId)
+      writeJson(replay.child, callToolPayload(42 + attempt, "members", {}))
+      await waitForCondition(() => replay.child.exitCode !== null, `displaced launch replay ${attempt + 1} exit`)
+      expect(replay.child.exitCode, readFileSync(replay.logPath, "utf8")).toBe(2)
+      expect(successor.child.exitCode).toBeNull()
+
+      const current = (await callLaunchTool(successor, 44 + attempt, "members", {})) as {
+        sessions?: Array<{ name?: string; launch_id?: string; transport_pids?: number[] }>
+      }
+      expect(current.sessions?.filter((session) => session.name === NAME)).toEqual([
+        expect.objectContaining({
+          launch_id: `provider-launch-b::${encodeURIComponent(NAME)}`,
+          transport_pids: [successor.child.pid],
+        }),
+      ])
+    }
+
     const finalDaemonLog = readFileSync(join(tmpDir, "daemon.log"), "utf8")
     expect(finalDaemonLog.match(/takeover: superseding live holder/g)).toHaveLength(1)
     // Heaviest journey: it drives a daemon restart + three transport re-execs +
