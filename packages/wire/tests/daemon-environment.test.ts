@@ -51,10 +51,14 @@ describe("Tribe daemon environment ownership", () => {
   })
 
   test("standalone pre-spawn sanitation also drops stale lifecycle ownership", () => {
+    // HAB_SERVICE_NAME must drop with its siblings: it selects the hab-managed
+    // never-idle-quit default, and a standalone daemon minted from a hab seat
+    // must keep the standalone 30m default instead of never retiring.
     expect(
       sanitizeStandaloneDaemonEnvironment({
         ...ambientIdentity,
         HAB_SERVICE_KIND: "service",
+        HAB_SERVICE_NAME: "wire",
         HAB_SESSION_DIR: "/hab/@dev-3",
         PATH: "/bin",
         TRIBE_DAEMON_RELOAD_EXIT_CODE: "75",

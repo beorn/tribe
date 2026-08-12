@@ -79,6 +79,11 @@ export function sanitizeStandaloneDaemonEnvironment(source: Readonly<NodeJS.Proc
   const env = { ...source }
   sanitizeDaemonProcessEnvironment(env)
   delete env.HAB_SERVICE_KIND
+  // HAB_SERVICE_NAME drives the hab-managed idle-quit default (never quit).
+  // A standalone daemon minted FROM a hab-supervised session is not itself
+  // hab-managed — without this strip it would inherit the marker and never
+  // retire, the daemon-leak inverse of the 2026-08-12 rail outage.
+  delete env.HAB_SERVICE_NAME
   delete env.HAB_SESSION_DIR
   delete env[TRIBE_DAEMON_RELOAD_EXIT_CODE_ENV]
   delete env[TRIBE_DAEMON_SUPERVISOR_PID_ENV]
