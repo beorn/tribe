@@ -19,7 +19,9 @@
         "tribe-daemon": "./src/daemon.ts",
       },
       "dependencies": {
+        "@bearly/flock": "0.1.0",
         "loggily": "^0.10.2",
+        "removely": "^0.1.0",
         "tribe-injection-envelope": "workspace:*",
         "tribe-recall": "workspace:*",
         "tribe-wire": "workspace:*",
