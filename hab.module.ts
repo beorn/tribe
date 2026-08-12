@@ -2,7 +2,8 @@ export default {
   name: "tribe",
   services: {
     wire: {
-      // --quit-timeout -1: this daemon never stops itself. Set 2026-08-11.
+      // --idle-quit-after never: this daemon never stops itself. Set 2026-08-11
+      // (as `--quit-timeout -1`; flag renamed 2026-08-12, old name still parses).
       //
       // The 1800s default took the whole fleet's coordination rail down. Every client disconnects
       // at once during a seat-relaunch sweep — routine here, and indistinguishable from idleness
@@ -20,8 +21,9 @@ export default {
       //
       // ON THE COMMAND LINE, not env: co-located with what it configures, and visible in `ps`, so
       // a running daemon's actual value is readable from outside it. The equivalent env var sat
-      // unwired for hours and nothing could see that.
-      command: "bun vendor/tribe/packages/daemon/src/daemon.ts --quit-timeout -1",
+      // unwired for hours and nothing could see that. Belt-and-braces: the daemon also defaults
+      // to `never` on its own whenever HAB_SERVICE_NAME is present and no explicit knob is set.
+      command: "bun vendor/tribe/packages/daemon/src/daemon.ts --idle-quit-after never",
       env: { TRIBE_DELIVERY_FALLBACKS: '[{"prefix":"@dev/","to":"@dev"}]' },
       // oxfmt-ignore
       stateRoots: ["${TRIBE_DB:-${XDG_DATA_HOME:-$HOME/.local/share}/tribe/tribe.db}", "${TRIBE_SOCKET:-${XDG_RUNTIME_DIR:-$HOME/.local/share/tribe}/tribe.sock}"],

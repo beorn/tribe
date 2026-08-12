@@ -141,14 +141,31 @@ lifecycle owner:
 
 ## Idle auto-quit
 
-`withIdleQuit` ties liveness to connection count, not a fixed schedule:
+`withIdleQuit` ties liveness to the client census, not a fixed schedule:
 
-- `--quit-timeout <seconds>` (default **1800** = 30 min). `markIdle()` sets
-  a deadline that many seconds out whenever the client registry empties;
-  `markActive()` (called on any client connect) clears it. A 1s tick
-  (`checkLiveness`) evaluates whether the deadline has passed.
-  - `-1` disables auto-quit entirely.
-  - `0` quits immediately once the registry is empty.
+- `--idle-quit-after <duration|never>` (standalone default **1800** = 30 min;
+  also seconds like `1800`, or `90s` / `30m` / `6h`). `markIdle()` sets a
+  deadline that far out whenever the census empties; `markActive()` (called on
+  any client connect) clears it. A 1s tick (`checkLiveness`) evaluates whether
+  the deadline has passed.
+  - `never` (or `-1`) disables auto-quit entirely.
+  - `0` quits immediately once the census is empty.
+  - `--quit-timeout <seconds>` still parses as a hidden deprecated alias
+    (field supervise.json passes it); a one-line deprecation notice is logged.
+  - Resolution order: `--idle-quit-after` → `--quit-timeout` →
+    `TRIBE_AUTOQUIT_ON_IDLE` env → hab-managed default (`never` when
+    `HAB_SERVICE_NAME` is present) → 1800s.
+- **The census counts registered sessions, not just sockets.** Connected
+  sockets plus registered durable sessions (rows with launch identity, any
+  delivery mode) hold the daemon up. Pull-delivery seats connect per poll, so
+  between polls the socket count is legally zero while the fleet is fully
+  populated — on 2026-08-12 that state read as "no clients" and idle-quit
+  stopped the coordination rail.
+- **`tribe.stop` RPC / `tribe stop` CLI** — clean shutdown on demand (drain
+  long-polls, close socket, exit 0) without the SIGHUP/lifecycle-owner
+  restart path. Refused unless `force: true` (CLI `--force`, or the CLI runs
+  in the hab supervisor context, i.e. `HAB_SERVICE_NAME` set). Deliberately
+  absent from the MCP tool surface so a bridge session cannot stop the rail.
 - **Stale pending-session reap**: any connection that never completed a
   `register` call within 60s (`pendingExpiryMs`) is dropped.
 - **Socket-path-gone backstop**: if the daemon bound its own socket

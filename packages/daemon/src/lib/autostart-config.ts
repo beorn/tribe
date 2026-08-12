@@ -10,7 +10,7 @@
  *
  *   - "daemon" (default): on first hook after the daemon dies, detach a stable
  *     repo-local supervisor that owns the daemon child. Pairs with the daemon's
- *     own idle --quit-timeout for zero-ceremony lifecycle.
+ *     own --idle-quit-after exit for zero-ceremony lifecycle.
  *   - "library": never spawn; hooks always use the in-process library path.
  *     Persistent equivalent of TRIBE_NO_DAEMON=1.
  *   - "never": hooks skip the daemon entirely — even if one is running.

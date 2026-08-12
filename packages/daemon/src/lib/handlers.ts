@@ -67,6 +67,7 @@ export const TRIBE_COORD_METHODS = {
   health: "tribe.health",
   join: "tribe.join",
   restart: "tribe.restart",
+  stop: "tribe.stop",
   retro: "tribe.retro",
   debug: "tribe.debug",
   repair: "tribe.repair",
@@ -281,6 +282,13 @@ export type HandlerOpts = {
    * not compose the authenticated transport registry. */
   reapStaleTransports?: () => StaleTransportReapReport
   /**
+   * Optional: clean daemon shutdown (drain, close socket, exit 0) — the
+   * `tribe.stop` actuator. The daemon wires this to withRuntime's shutdown();
+   * direct handler harnesses omit it and `tribe.stop` reports itself
+   * unavailable instead of pretending to stop anything.
+   */
+  triggerStop?: () => void
+  /**
    * Optional host/project delivery policy. Tribe owns only the generic
    * disposition; concrete parent/fallback routing is injected by composition.
    */
@@ -369,6 +377,8 @@ export function handleToolCall(
       return handleHealth(ctx, opts)
     case TRIBE_COORD_METHODS.restart:
       return handleRestart(ctx, a, opts.cleanup)
+    case TRIBE_COORD_METHODS.stop:
+      return handleStop(ctx, a, opts)
     case TRIBE_COORD_METHODS.retro:
       return handleRetro(ctx, a)
     case TRIBE_COORD_METHODS.debug:
@@ -2000,6 +2010,48 @@ function handleRestart(ctx: TribeContext, a: ToolArgs, cleanup: () => void): Too
   }, 100) // small delay so the tool response gets sent first
 
   return jsonResult({ restarting: true, reason, pid: process.pid })
+}
+
+/**
+ * `tribe.stop` — clean daemon shutdown: drain long-polls, close the socket,
+ * exit 0. Mirrors handleRestart's flush-then-act shape but routes to the
+ * plain shutdown path, NOT the SIGHUP → lifecycle-owner re-exec: no successor
+ * is asked for. This is the sanctioned alternative to killing the process
+ * externally (the socket-squatter kill era).
+ *
+ * Guarded: stopping halts coordination for every registered session, so a
+ * casual caller must not be able to do it by accident. The daemon refuses
+ * without an explicit `force: true`; the CLI (`tribe stop`) supplies it for
+ * `--force` or a hab-supervisor context (HAB_SERVICE_NAME in the caller's
+ * environment). There is deliberately NO command descriptor for this method —
+ * it never appears on the MCP tool surface, so a bridge session cannot reach
+ * it at all; the force gate covers raw socket callers.
+ */
+function handleStop(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
+  if (a.force !== true) {
+    return jsonResult({
+      error:
+        "tribe.stop refused: stopping halts the shared coordination daemon for every registered session. " +
+        "Pass force: true (CLI: `tribe stop --force`) — or run the CLI from the hab supervisor context — " +
+        "if you really mean to stop the rail.",
+    })
+  }
+  const triggerStop = opts.triggerStop
+  if (!triggerStop) {
+    return jsonResult({
+      error: "tribe.stop unavailable: this handler surface has no daemon shutdown hook (direct handler harness?)",
+    })
+  }
+  const reason = (a.reason as string) ?? "manual stop"
+  logEvent(ctx, "daemon.stop", undefined, { name: ctx.getName(), reason })
+  log.info?.(`stopping: ${reason} (requested by ${ctx.getName()})`)
+  // Schedule after the tool response is flushed — same shape as handleRestart.
+  setTimeout(() => {
+    opts.cleanup()
+    log.info?.(`clean shutdown (pid=${process.pid}) — tribe.stop, no successor`)
+    triggerStop()
+  }, 100)
+  return jsonResult({ stopping: true, reason, pid: process.pid })
 }
 
 async function handleRetro(ctx: TribeContext, a: ToolArgs): Promise<ToolResult> {

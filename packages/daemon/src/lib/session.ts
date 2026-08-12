@@ -214,6 +214,25 @@ export function sweepDeadSessionRows(
   })()
 }
 
+/**
+ * Count registered session rows that outlive their transport — the DB half of
+ * the idle-quit client census (`withIdleQuit`). This is the complement of the
+ * stale-transport reaper's "connection-scoped" classification: any row
+ * carrying launch identity (durable-launch, and conservatively the malformed
+ * rows the reaper also preserves) represents a live registered seat whose
+ * transports legitimately come and go — a pull-delivery seat connects per
+ * poll, so between polls it has a row and no socket. On 2026-08-12 thirteen
+ * such rows read as "no clients" and idle-quit stopped the fleet rail.
+ * Connection-scoped rows are excluded: their liveness IS their socket, which
+ * the in-memory client registry already counts.
+ */
+export function countDurableSessionRows(db: Database): number {
+  const row = db
+    .query("SELECT COUNT(*) AS n FROM sessions WHERE launch_id IS NOT NULL OR launch_parent_pid IS NOT NULL")
+    .get() as { n: number }
+  return row.n
+}
+
 /** True iff the given OS PID exists and we have permission to signal it.
  *  Used by spawn-time identity binding to differentiate "zombie session
  *  the daemon thinks is alive but whose owning process is gone" from

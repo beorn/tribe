@@ -1162,6 +1162,87 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     }
   })
 
+  it("stop refuses without --force outside the hab supervisor context — before touching any socket", async () => {
+    // TRIBE_SOCKET points at a guaranteed-absent path anyway: this test must
+    // never be able to reach a real daemon even if the guard regressed.
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      TRIBE_NO_AUTOSTART: "1",
+      TRIBE_SOCKET: "/tmp/tribe-stop-guard-absent.sock",
+    }
+    delete env.HAB_SERVICE_NAME
+    const result = await runCliAsync(["stop"], env)
+    expect(result.code).toBe(2)
+    expect(result.stderr).toMatch(/refusing to stop the shared coordination daemon/)
+    expect(result.stderr).toMatch(/--force/)
+    // The local guard fired before any connection attempt.
+    expect(result.stderr).not.toMatch(/No daemon running/)
+  })
+
+  it("stop passes the guard without --force when HAB_SERVICE_NAME marks the hab supervisor context", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-stop-hab-"))
+    try {
+      const env = {
+        ...process.env,
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_SOCKET: join(dir, "absent.sock"),
+        HAB_SERVICE_NAME: "wire",
+      }
+      const result = await runCliAsync(["stop"], env)
+      // Guard passed; the failure is the absent daemon, not a refusal.
+      expect(result.stderr).not.toMatch(/refusing to stop/)
+      expect(result.stderr).toMatch(/No daemon running/)
+      expect(result.code).toBe(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("stop --force cleanly stops a real daemon: RPC acknowledged, then daemon exit 0", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-stop-e2e-"))
+    const socketPath = join(dir, "tribe.sock")
+    const dbPath = join(dir, "tribe.db")
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      TRIBE_SOCKET: socketPath,
+      TRIBE_DB: dbPath,
+      TRIBE_NO_AUTOSTART: "1",
+      TRIBE_SUMMARIZER_MODEL: "off",
+    }
+    delete env.HAB_SERVICE_NAME // prove --force alone authorizes
+    const daemon = spawn(
+      BUN_BIN,
+      [DAEMON, "--socket", socketPath, "--db", dbPath, "--idle-quit-after", "never", "--no-lore"],
+      {
+        env,
+        stdio: "ignore",
+      },
+    )
+    const daemonExit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit) =>
+      daemon.once("close", (code, signal) => resolveExit({ code, signal })),
+    )
+    let stopped = false
+    try {
+      await waitForSocket(socketPath)
+      const result = await runCliAsync(["stop", "--force", "--reason", "cli e2e"], env, { timeoutMs: 10_000 })
+      expect(result.code, result.stderr).toBe(0)
+      expect(result.stdout).toContain("Stopping tribe daemon")
+      expect(result.stdout).toContain("cli e2e")
+      const exit = await Promise.race([
+        daemonExit,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("daemon did not exit within 10s of tribe stop")), 10_000),
+        ),
+      ])
+      stopped = true
+      // The whole point: a CLEAN exit — code 0, no signal, no kill involved.
+      expect(exit).toEqual({ code: 0, signal: null })
+    } finally {
+      if (!stopped) daemon.kill("SIGTERM")
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it("bare `help` prints help and exits 0", () => {
     const { stdout, code } = runCli(["help"])
     expect(code).toBe(0)

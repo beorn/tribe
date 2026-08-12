@@ -8,6 +8,12 @@ describe("socket dispatcher coordination method routing", () => {
 
     expect(source).toContain("case TRIBE_COORD_METHODS.repair:")
   })
+
+  it("routes tribe.stop through the normal tool-call dispatcher", () => {
+    const source = readFileSync(new URL("./with-dispatcher.ts", import.meta.url), "utf8")
+
+    expect(source).toContain("case TRIBE_COORD_METHODS.stop:")
+  })
 })
 
 describe("focus-mode notification diet", () => {

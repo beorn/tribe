@@ -1,7 +1,7 @@
 /**
  * Tribe autostart — probe-and-spawn helpers for zero-ceremony daemon lifecycle.
  *
- * Pairs with the daemon's own idle `--quit-timeout` exit: the daemon quits
+ * Pairs with the daemon's own `--idle-quit-after` exit: the daemon quits
  * itself when unused, this module spawns it back on first demand. Net effect
  * for the user: no lifecycle ceremony at all.
  *

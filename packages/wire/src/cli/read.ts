@@ -80,6 +80,31 @@ export function formatRestartResult(result: RestartResult): string {
   return `Restarting tribe daemon${pid}: ${reason}.`
 }
 
+interface StopResult {
+  error?: string
+  stopping?: boolean
+  reason?: string
+  pid?: number
+}
+
+export function formatStopResult(result: StopResult): string {
+  const pid = typeof result.pid === "number" ? ` (pid ${result.pid})` : ""
+  const reason = result.reason ?? "manual stop"
+  return `Stopping tribe daemon${pid}: ${reason}. Clean exit 0 — no successor will be spawned.`
+}
+
+/** The hab supervisor context — hab stamps HAB_SERVICE_NAME into every
+ * service environment, so its own lifecycle tooling may stop the daemon
+ * without the --force ceremony. */
+export function isHabSupervisorContext(env: { HAB_SERVICE_NAME?: string }): boolean {
+  return typeof env.HAB_SERVICE_NAME === "string" && env.HAB_SERVICE_NAME.trim() !== ""
+}
+
+export const STOP_REFUSAL_MESSAGE =
+  "tribe stop: refusing to stop the shared coordination daemon — every registered session loses its rail. " +
+  "Pass --force if you mean it. (Runs without --force only from the hab supervisor context, " +
+  "i.e. HAB_SERVICE_NAME set.)"
+
 // ---------------------------------------------------------------------------
 // Formatting helpers (shared with the legacy CLI; same byte-for-byte output)
 // ---------------------------------------------------------------------------
@@ -1434,6 +1459,33 @@ async function cmdRestart(opts: { reason?: string; json?: boolean }): Promise<vo
   console.log(formatRestartResult(result))
 }
 
+/**
+ * `tribe stop` — clean daemon shutdown via RPC `tribe.stop` (drain, close
+ * socket, exit 0; no SIGHUP/lifecycle-owner successor). Guarded twice, same
+ * rule: this CLI refuses locally without --force outside the hab supervisor
+ * context, and the daemon independently refuses the RPC without `force: true`
+ * so a raw socket caller cannot stop the rail casually either.
+ */
+async function cmdStop(opts: { force?: boolean; reason?: string; json?: boolean }): Promise<void> {
+  if (!opts.force && !isHabSupervisorContext({ HAB_SERVICE_NAME: process.env.HAB_SERVICE_NAME })) {
+    console.error(STOP_REFUSAL_MESSAGE)
+    process.exit(2)
+  }
+  const params: Record<string, unknown> = { force: true, ...(opts.reason ? { reason: opts.reason } : {}) }
+  const result = mcpJsonContent(await callDaemon("tribe.stop", params)) as StopResult
+
+  if (opts.json) {
+    console.log(JSON.stringify(result))
+    return
+  }
+  if (result.error) {
+    console.error(`tribe stop: ${result.error}`)
+    process.exit(1)
+  }
+
+  console.log(formatStopResult(result))
+}
+
 // ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
@@ -1615,6 +1667,14 @@ export function registerReadCommands(program: Command): void {
     .option("--reason <text>", "Why the restart is needed (logged by the daemon)")
     .option("--json", "Emit machine-readable JSON")
     .action((opts: { reason?: string; json?: boolean }) => void cmdRestart(opts))
+
+  program
+    .command("stop")
+    .description("Stop the tribe daemon cleanly via RPC tribe.stop (drain, close socket, exit 0; no restart)")
+    .option("--force", "Confirm stopping the shared daemon (required outside the hab supervisor context)")
+    .option("--reason <text>", "Why the stop is needed (logged by the daemon)")
+    .option("--json", "Emit machine-readable JSON")
+    .action((opts: { force?: boolean; reason?: string; json?: boolean }) => void cmdStop(opts))
 
   program
     .command("activity")

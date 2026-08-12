@@ -25,8 +25,12 @@
  *   tribe-wire send | retro | alarm | alarm-status | alarm-ack
  *     Send/messaging verbs — register via cli/send.ts (Family 2).
  *
- *   Daemon lifecycle verbs intentionally live outside tribe-wire. Use a host
- *   plugin or the tribe-daemon package for lifecycle ownership.
+ *   tribe-wire restart | stop
+ *     RPC-backed daemon lifecycle: restart re-execs via the lifecycle owner
+ *     (SIGHUP path); stop shuts down cleanly (exit 0, no successor) and is
+ *     guarded — `--force`, or the hab supervisor context. Spawn/ownership
+ *     lifecycle otherwise lives outside tribe-wire (host plugin or the
+ *     tribe-daemon package).
  */
 
 const ARGV_FORWARDED_SUBCOMMANDS = new Set(["mcp"])

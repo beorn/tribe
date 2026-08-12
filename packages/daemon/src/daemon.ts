@@ -3,10 +3,11 @@
  * Tribe Daemon — single process per project, sessions connect via Unix socket.
  *
  * Usage:
- *   bun tribe-daemon.ts                    # Auto-discover socket path
- *   bun tribe-daemon.ts --socket /path     # Explicit socket path
- *   bun tribe-daemon.ts --quit-timeout 0   # Quit immediately when last client disconnects
- *   bun tribe-daemon.ts --fd 3             # Inherit socket fd (for hot-reload re-exec)
+ *   bun tribe-daemon.ts                         # Auto-discover socket path
+ *   bun tribe-daemon.ts --socket /path          # Explicit socket path
+ *   bun tribe-daemon.ts --idle-quit-after never # Never idle-quit (also: 30m, 6h, 1800, 0)
+ *   bun tribe-daemon.ts --fd 3                  # Inherit socket fd (for hot-reload re-exec)
+ *   (--quit-timeout <seconds> still parses as a hidden deprecated alias)
  *
  * Setup automation (dispatch-and-exit, never boots the daemon pipe below):
  *   bun tribe-daemon.ts install [--dry-run] [--autostart daemon|library|never]
@@ -51,6 +52,7 @@ import {
 } from "./lib/compose/index.ts"
 import { TOOLS_LIST } from "tribe-wire/lib/tools-list"
 import { pruneOldActivityLogs } from "./lib/activity-log.ts"
+import { countDurableSessionRows } from "./lib/session.ts"
 import { gatherCodePin, STARTUP_SHA } from "./lib/code-pin.ts"
 import { prefixFallbackDeliveryResolver } from "./lib/delivery-resolution.ts"
 import { sanitizeDaemonProcessEnvironment } from "../../wire/src/daemon-environment.ts"
@@ -238,12 +240,18 @@ void socketBinding
   })
 const withIdleQuitShape = withIdleQuit<typeof withSocketShape>({
   triggerShutdown: () => refs.shutdown(),
+  // The census's DB half: registered sessions of any delivery mode count as
+  // clients for the idle-quit decision (2026-08-12 — a fully-populated pull
+  // fleet read as "no clients" and the rail self-quit).
+  countDurableSessions: () => countDurableSessionRows(withSocketShape.db),
 })(withSocketShape)
 const withDispatcherShape = withDispatcher<typeof withIdleQuitShape>({
   onActiveClient: () => withIdleQuitShape.idleQuit.markActive(),
   onIdle: () => withIdleQuitShape.idleQuit.markIdle(),
   getActivePluginNames: () => refs.activePluginNames,
-  getQuitTimeoutSec: () => withSocketShape.config.quitTimeoutSec,
+  getIdleQuitAfterSec: () => withSocketShape.config.idleQuitAfterSec,
+  // tribe.stop: clean shutdown (drain, close socket, exit 0), no successor.
+  triggerShutdown: () => refs.shutdown(),
   resolveDelivery: prefixFallbackDeliveryResolver(process.env.TRIBE_DELIVERY_FALLBACKS),
 })(withIdleQuitShape)
 // MCP-spec surface — reads the tool registry, registers initialize / tools/list

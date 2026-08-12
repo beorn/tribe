@@ -88,8 +88,11 @@ export interface DispatcherRuntimeHooks {
   onIdle?: () => void
   /** Plugin names surfaced via cli_status. Default: empty array. */
   getActivePluginNames?: () => string[]
-  /** Quit-timeout (seconds) returned by cli_daemon. Default: -1. */
-  getQuitTimeoutSec?: () => number
+  /** Idle-quit delay (seconds) returned by cli_daemon (wire key `quitTimeout`). Default: -1. */
+  getIdleQuitAfterSec?: () => number
+  /** Clean daemon shutdown for `tribe.stop`. Default: absent — the handler
+   * then refuses loudly instead of pretending to stop anything. */
+  triggerShutdown?: () => void
   /** Suppress-window for join/leave broadcasts. Default: 10000ms (0 disables). */
   suppressWindowMs?: number
   /** Generic direct-message delivery policy supplied by the composing layer. */
@@ -168,7 +171,7 @@ export function withDispatcher<
     const onActiveClient = hooks.onActiveClient ?? (() => {})
     const onIdle = hooks.onIdle ?? (() => {})
     const getActivePluginNames = hooks.getActivePluginNames ?? (() => [])
-    const getQuitTimeoutSec = hooks.getQuitTimeoutSec ?? (() => -1)
+    const getIdleQuitAfterSec = hooks.getIdleQuitAfterSec ?? (() => -1)
     const suppressWindowMs = hooks.suppressWindowMs ?? (process.env.TRIBE_NO_SUPPRESS ? 0 : 10_000)
     const sessionAnnounceGate = createSessionAnnounceGate(suppressWindowMs)
     const channelJoinAnnounced = new Set<string>()
@@ -519,6 +522,9 @@ export function withDispatcher<
       notifyWakeupForReplay,
       reapStaleTransports,
       resolveDelivery: hooks.resolveDelivery,
+      // tribe.stop actuator — absent (handler refuses loudly) unless the
+      // composing daemon supplied its shutdown.
+      triggerStop: hooks.triggerShutdown,
       getDebugState: () => ({
         clients: Array.from(clients.values()).map((c) => ({
           member_id: c.ctx.sessionId,
@@ -1152,6 +1158,7 @@ export function withDispatcher<
           case TRIBE_COORD_METHODS.join:
           case TRIBE_COORD_METHODS.health:
           case TRIBE_COORD_METHODS.restart:
+          case TRIBE_COORD_METHODS.stop:
           case TRIBE_COORD_METHODS.retro:
           case TRIBE_COORD_METHODS.debug:
           case TRIBE_COORD_METHODS.repair:
@@ -1555,7 +1562,9 @@ export function withDispatcher<
               dbPath: t.config.dbPath,
               socketPath: socket.socketPath,
               startedAt: socket.startedAt,
-              quitTimeout: getQuitTimeoutSec(),
+              // Wire key kept as `quitTimeout` for external readers; the
+              // value is the effective idle-quit delay in seconds.
+              quitTimeout: getIdleQuitAfterSec(),
             })
           }
 
