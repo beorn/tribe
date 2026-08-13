@@ -39,6 +39,15 @@ const STALE_MANAGED_INBOX_DAEMON_ERROR =
   "Running Tribe daemon is stale and cannot resolve this managed inbox; update the module root before restarting the daemon. Use --session only for an explicit operator target."
 const INBOX_WAIT_PROTOCOL_MISMATCH = "TRIBE_INBOX_WAIT_PROTOCOL_MISMATCH"
 
+function writeStdoutLine(value: string): Promise<void> {
+  return new Promise((resolveWrite, rejectWrite) => {
+    process.stdout.write(`${value}\n`, (error) => {
+      if (error) rejectWrite(error)
+      else resolveWrite()
+    })
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Daemon connection
 // ---------------------------------------------------------------------------
@@ -377,7 +386,7 @@ async function cmdLog(
   const rows = result.messages
 
   if (json) {
-    console.log(JSON.stringify({ messages: rows, query: result.query }))
+    await writeStdoutLine(JSON.stringify({ messages: rows, query: result.query }))
     return
   }
 
@@ -549,7 +558,7 @@ async function cmdPending(
     process.exit(2)
   }
   if (json) {
-    console.log(JSON.stringify(payload, null, 2))
+    await writeStdoutLine(JSON.stringify(payload, null, 2))
     return
   }
   if (close) {
@@ -1679,7 +1688,7 @@ export function registerReadCommands(program: Command): void {
     .option(pendingStale.flags, pendingStale.description)
     .option(pendingClose.flags, pendingClose.description)
     .action(
-      (opts: {
+      async (opts: {
         all?: boolean
         expired?: boolean
         owed?: boolean
@@ -1715,7 +1724,7 @@ export function registerReadCommands(program: Command): void {
         // daemon already owns that rule and refuses loudly, and the refusal now
         // reaches the user (see cmdPending). Duplicating it would be a second
         // authority for one invariant, free to drift from the first.
-        void cmdPending(opts.owner, !!opts.all, !!opts.expired, !!opts.owed, !!opts.json, stale, opts.close)
+        await cmdPending(opts.owner, !!opts.all, !!opts.expired, !!opts.owed, !!opts.json, stale, opts.close)
       },
     )
 
@@ -1729,14 +1738,14 @@ export function registerReadCommands(program: Command): void {
     .option("--ref-prefix <prefix>", "Only messages whose durable ref starts with this literal prefix")
     .option("--reply-prefix <prefix>", "Also include messages whose tracked reply id starts with this literal prefix")
     .action(
-      (opts: {
+      async (opts: {
         limit?: number
         all?: boolean
         follow?: boolean
         json?: boolean
         refPrefix?: string
         replyPrefix?: string
-      }) => void cmdLog(opts.limit ?? 20, !!opts.all, !!opts.follow, !!opts.json, opts.refPrefix, opts.replyPrefix),
+      }) => await cmdLog(opts.limit ?? 20, !!opts.all, !!opts.follow, !!opts.json, opts.refPrefix, opts.replyPrefix),
     )
 
   program
