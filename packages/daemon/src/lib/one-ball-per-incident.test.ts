@@ -227,7 +227,19 @@ describe("one ball per incident (habwire stage 2(d))", () => {
         setUserRenamed: () => undefined,
         getActiveSessionIds: () => new Set(["sess-@fleet", "sess-@chief"]),
         hasActiveTransport: () => true,
-        getActiveSessionInfo: () => [],
+        getActiveSessionInfo: () =>
+          ["@fleet", "@chief"].map((name) => ({
+            id: `sess-${name}`,
+            name,
+            pid: process.pid,
+            cwd: "/repo",
+            role: "member",
+            claudeSessionId: null,
+            registeredAt: Date.now(),
+            launchId: null,
+            launchParentPid: null,
+            transportPids: [process.pid],
+          })),
       }
     }
 

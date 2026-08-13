@@ -59,14 +59,33 @@ function makeContext(db: Database, stmts: TribeStatements, sessionId: string, in
   })
 }
 
-function makeOpts(activeIds: () => Set<string>): HandlerOpts {
+function makeOpts(activeIds: () => Set<string>, db: Database): HandlerOpts {
   return {
     cleanup: () => {},
     userRenamed: false,
     setUserRenamed: () => {},
     getActiveSessionIds: activeIds,
     hasActiveTransport: (sessionId) => activeIds().has(sessionId),
-    getActiveSessionInfo: () => [],
+    getActiveSessionInfo: () =>
+      [...activeIds()].flatMap((id) => {
+        const row = db.prepare("SELECT name FROM sessions WHERE id = ?").get(id) as { name: string } | null
+        return row === null
+          ? []
+          : [
+              {
+                id,
+                name: row.name,
+                pid: process.pid,
+                cwd: "/repo",
+                role: "member",
+                claudeSessionId: null,
+                registeredAt: Date.now(),
+                launchId: null,
+                launchParentPid: null,
+                transportPids: [process.pid],
+              },
+            ]
+      }),
   }
 }
 
@@ -178,7 +197,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     db = openDatabase(join(tmpDir, "tribe.db"))
     stmts = createStatements(db)
     active = new Set()
-    opts = makeOpts(() => active)
+    opts = makeOpts(() => active, db)
   })
 
   afterEach(() => {
@@ -219,7 +238,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(fetchEvents(b, opts)).toEqual([])
   })
 
-  it("surfaces an obligation sent while its persona is stopped to the successor instance", () => {
+  it("refuses an obligation sent while its persona is stopped instead of stranding it for a successor", () => {
     const stopped = connectAs("sess-stopped", NAME)
     const chief = connectAs("sess-chief", "@chief")
     disconnect("sess-stopped")
@@ -237,19 +256,20 @@ describe("19442 mailbox-cursor actionable recovery", () => {
         },
         opts,
       ),
-    ) as { id: string }
+    ) as { error: string; delivery_failure_id: string }
 
-    // A newly started process resets its chronological cursor to the tail.
-    // The persona-keyed mailbox and ownership projection must still surface
-    // both halves of the obligation without inheriting the dead session id.
+    expect(sent.error).toContain(`no connected, PID-live transport was observed for "${NAME}"`)
+    expect(sent.delivery_failure_id).toEqual(expect.any(String))
+    expect(db.prepare("SELECT request_id FROM pending_request WHERE recipient = ?").get(NAME)).toBeNull()
+    expect(db.prepare("SELECT id FROM messages WHERE kind = 'direct' AND recipient = ?").get(NAME)).toBeNull()
+
+    // A newly started process has no phantom ownership or addressed mail to
+    // inherit from the refused opening. The journal-only terminal fact stays
+    // ambient rather than masquerading as work for the successor.
     const successor = connectAs("sess-successor", NAME)
     const first = fetchJson(successor, opts).json
-    expect(first.attention?.actionable_unread).toEqual([
-      expect.objectContaining({ id: sent.id, type: "request", from: "@chief" }),
-    ])
-    expect(first.attention?.pending_balls).toEqual([
-      expect.objectContaining({ request_id: sent.id, message_id: sent.id, sender: "@chief" }),
-    ])
+    expect(first.attention?.actionable_unread).toEqual([])
+    expect(first.attention?.pending_balls).toEqual([])
   })
 
   it("recovers a response that closed its tracked ball while the requester was parked", () => {

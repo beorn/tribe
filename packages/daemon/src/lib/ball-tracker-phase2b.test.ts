@@ -32,13 +32,31 @@ function makeContext(db: Database, stmts: TribeStatements, name: string, session
 }
 
 function makeOpts(activeIds: readonly string[]): HandlerOpts {
+  const names = new Map([
+    ["sess-chief", "@chief"],
+    ["sess-agent-1", "@agent/1"],
+    ["sess-agent-2", "@agent/2"],
+    ["sess-stale", "@agent/stale"],
+  ])
   return {
     cleanup: () => undefined,
     userRenamed: false,
     setUserRenamed: () => undefined,
     getActiveSessionIds: () => new Set(activeIds),
     hasActiveTransport: (sessionId) => activeIds.includes(sessionId),
-    getActiveSessionInfo: () => [],
+    getActiveSessionInfo: () =>
+      activeIds.map((id) => ({
+        id,
+        name: names.get(id) ?? id,
+        pid: process.pid,
+        cwd: "/repo",
+        role: "member",
+        claudeSessionId: null,
+        registeredAt: Date.now(),
+        launchId: null,
+        launchParentPid: null,
+        transportPids: [process.pid],
+      })),
   }
 }
 

@@ -39,14 +39,26 @@ function makeContext(
   })
 }
 
-function makeOpts(activeIds: readonly string[] = []): HandlerOpts {
+function makeOpts(activeNames: readonly string[] = []): HandlerOpts {
   return {
     cleanup: () => undefined,
     userRenamed: false,
     setUserRenamed: () => undefined,
-    getActiveSessionIds: () => new Set(activeIds),
-    hasActiveTransport: (sessionId) => activeIds.includes(sessionId),
-    getActiveSessionInfo: () => [],
+    getActiveSessionIds: () => new Set(activeNames.map((name) => `sess-${name}`)),
+    hasActiveTransport: (sessionId) => activeNames.some((name) => sessionId === `sess-${name}`),
+    getActiveSessionInfo: () =>
+      activeNames.map((name) => ({
+        id: `sess-${name}`,
+        name,
+        pid: process.pid,
+        cwd: "/repo",
+        role: "member",
+        claudeSessionId: null,
+        registeredAt: Date.now(),
+        launchId: null,
+        launchParentPid: null,
+        transportPids: [process.pid],
+      })),
   }
 }
 
@@ -86,7 +98,7 @@ describe("tribe.send attribution and delivery", () => {
           request: true,
           sender: "@chief",
         },
-        makeOpts(),
+        makeOpts(["@agent/7"]),
       ),
     )
 

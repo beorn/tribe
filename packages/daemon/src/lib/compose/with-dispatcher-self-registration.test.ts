@@ -1423,6 +1423,12 @@ describe("dispatcher inbox-wait parsing", () => {
       pid: liveHolderPid,
       project: "/tmp/km-wt9",
     })
+    harness.addPendingClient("conn-wait")
+    await harness.register("conn-wait", {
+      name: "@agent/wait",
+      pid: liveHolderPid,
+      project: "/tmp/km-wt9",
+    })
 
     const wait = harness.dispatcher.handleRequest(
       {
