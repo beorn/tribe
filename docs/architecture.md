@@ -27,6 +27,13 @@ commands fail loudly and tell the caller how to start or install a daemon.
 - daemon plugin runtime
 - Git/GitHub/health/issue-tracker-style event emitters where those are generic
 
+Daemon runtime state is machine-local. The GitHub poller stores its cursor at
+`$XDG_DATA_HOME/tribe/github-cursor.json` (falling back to
+`$HOME/.local/share/tribe/github-cursor.json`), never in a project's `.beads/`
+tree. On first start it adopts a legacy `.beads/github-cursor.json` under a
+process-shared lock. Corrupt or conflicting source/destination state fails
+loudly; identical dual state converges to the XDG-owned carrier.
+
 ### Host Plugins
 
 Host plugins wire Tribe into an agent runtime. The Claude Code plugin owns MCP

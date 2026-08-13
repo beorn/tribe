@@ -13,10 +13,11 @@
  */
 
 import { execSync } from "node:child_process"
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
-import { resolve } from "node:path"
+import { dirname, resolve } from "node:path"
+import { URLSearchParams } from "node:url"
 import { createLogger } from "loggily"
 import { findBeadsDir } from "tribe-wire/lib/config"
+import { openGitHubCursorStore, resolveGitHubCursorPath } from "./github-cursor-store.ts"
 import { createTimers } from "./timers.ts"
 import type { TribePluginApi, TribeClientApi } from "./plugin-api.ts"
 
@@ -88,38 +89,6 @@ async function fetchUserRepos(headers: Record<string, string>): Promise<string[]
     page++
   }
   return repos
-}
-
-// ---------------------------------------------------------------------------
-// Cursor persistence
-// ---------------------------------------------------------------------------
-
-interface CursorState {
-  repos: Record<string, { lastEventId: string; lastPollAt: string }>
-}
-
-function resolveCursorPath(): string {
-  const beadsDir = findBeadsDir()
-  if (beadsDir) return resolve(beadsDir, "github-cursor.json")
-  // Fallback to cwd .beads/
-  const fallback = resolve(process.cwd(), ".beads")
-  mkdirSync(fallback, { recursive: true })
-  return resolve(fallback, "github-cursor.json")
-}
-
-export function loadCursor(cursorPath: string): CursorState {
-  try {
-    if (existsSync(cursorPath)) {
-      return JSON.parse(readFileSync(cursorPath, "utf-8")) as CursorState
-    }
-  } catch {
-    // Corrupt file — start fresh
-  }
-  return { repos: {} }
-}
-
-export function saveCursor(cursorPath: string, state: CursorState): void {
-  writeFileSync(cursorPath, JSON.stringify(state, null, 2))
 }
 
 // ---------------------------------------------------------------------------
@@ -229,8 +198,8 @@ export async function ghFetch<T>(path: string, headers: Record<string, string>):
   if (etag) {
     etagCache.set(url, { etag, data })
     if (etagCache.size > ETAG_CACHE_MAX) {
-      const oldest = etagCache.keys().next().value!
-      etagCache.delete(oldest)
+      const oldest = etagCache.keys().next().value
+      if (oldest !== undefined) etagCache.delete(oldest)
     }
   }
   return data
@@ -292,7 +261,8 @@ export function summarizePollErrors(
     .sort((a, b) => b[1] - a[1])
     .map(([cls, n]) => `${cls}×${n}`)
     .join(", ")
-  const sample = errors[0]!
+  const sample = errors[0]
+  if (sample === undefined) throw new Error("summarizePollErrors requires at least one poll error")
   // Collapse whitespace so a raw multi-line API payload in the error body
   // can never spray log-line-shaped content into the warn (the defang layer
   // otherwise redacts each sprayed line into `[n]` noise in member panes).
@@ -431,7 +401,8 @@ export function createPollHealth(now: () => number = Date.now): PollHealth {
       // --- Outage: every repo failed → escalating backoff ---
       if (errors.length >= repoCount && repoCount > 0) {
         outageStep = Math.min(outageStep + 1, OUTAGE_BACKOFF_STEPS_MS.length - 1)
-        const stepMs = OUTAGE_BACKOFF_STEPS_MS[outageStep]!
+        const stepMs = OUTAGE_BACKOFF_STEPS_MS[outageStep]
+        if (stepMs === undefined) throw new Error(`outage backoff step ${outageStep} is not configured`)
         pause("outage", now() + stepMs)
         state.signature = `outage:${errors.length}/${repoCount}`
         state.lastWarnAtMs = now()
@@ -471,7 +442,10 @@ async function fetchWorkflowRuns(
 ): Promise<WorkflowRun[]> {
   const params = new URLSearchParams({ per_page: "20" })
   if (status) params.set("status", status)
-  const data = await ghFetch<{ workflow_runs: WorkflowRun[] }>(`/repos/${repo}/actions/runs?${params}`, headers)
+  const data = await ghFetch<{ workflow_runs: WorkflowRun[] }>(
+    `/repos/${repo}/actions/runs?${params.toString()}`,
+    headers,
+  )
   return data.workflow_runs
 }
 
@@ -602,8 +576,13 @@ export const githubPlugin: TribePluginApi = {
     const eventTypes = (process.env.GITHUB_EVENTS ?? "push,workflow_run,pull_request,issues").split(",").filter(Boolean)
     const workflowNotify = (process.env.GITHUB_WORKFLOW_NOTIFY ?? "failure") as "all" | "failure" | "success"
 
-    const cursorPath = resolveCursorPath()
-    const cursorState = loadCursor(cursorPath)
+    const cursorPath = resolveGitHubCursorPath()
+    const beadsDir = findBeadsDir()
+    const cursorStore = openGitHubCursorStore({
+      stateDir: dirname(cursorPath),
+      legacyPath: beadsDir === null ? null : resolve(beadsDir, "github-cursor.json"),
+    })
+    const cursorState = cursorStore.state
 
     // Dedup sets — prevent duplicate delivery across reloads
     const seenEventIds = new Set<string>()
@@ -627,6 +606,7 @@ export const githubPlugin: TribePluginApi = {
         for (const r of userRepos) repos.add(r)
         const all = Array.from(repos).sort()
         log.info?.(`monitoring ${all.length} repos: ${all.join(", ")}`)
+        return undefined
       })
       .catch((err) => {
         log.error?.(`failed to fetch user repos: ${err instanceof Error ? err.message : err}`)
@@ -654,12 +634,13 @@ export const githubPlugin: TribePluginApi = {
 
           // First poll or no cursor: set cursor without delivering
           if (!lastSeenId) {
-            if (events.length > 0) {
+            const first = events[0]
+            if (first !== undefined) {
               cursorState.repos[r] = {
-                lastEventId: events[0]!.id,
+                lastEventId: first.id,
                 lastPollAt: new Date().toISOString(),
               }
-              saveCursor(cursorPath, cursorState)
+              cursorStore.save(cursorState)
             }
             continue
           }
@@ -700,12 +681,13 @@ export const githubPlugin: TribePluginApi = {
           }
 
           // Update cursor
-          if (events.length > 0) {
+          const first = events[0]
+          if (first !== undefined) {
             cursorState.repos[r] = {
-              lastEventId: events[0]!.id,
+              lastEventId: first.id,
               lastPollAt: new Date().toISOString(),
             }
-            saveCursor(cursorPath, cursorState)
+            cursorStore.save(cursorState)
           }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
@@ -854,7 +836,7 @@ export const githubPlugin: TribePluginApi = {
     // Cleanup
     return () => {
       ac.abort()
-      saveCursor(cursorPath, cursorState)
+      cursorStore.save(cursorState)
     }
   },
 
