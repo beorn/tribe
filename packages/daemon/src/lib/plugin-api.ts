@@ -40,6 +40,14 @@ export interface TribePluginApi {
   /** Start observing. Returns a disposer called on daemon shutdown / hot-reload. */
   start(api: TribeClientApi): (() => void) | void
 
+  /**
+   * Opt in to fatal load semantics: a throw from `available()`/`start()` stops
+   * the daemon instead of disabling just this plugin. Default (absent/false) is
+   * the observer contract — the daemon serves without it. Only set this if
+   * coordination is genuinely incorrect when the plugin is missing.
+   */
+  readonly loadBearing?: boolean
+
   /** Optional text appended to the MCP system prompt for connected sessions. */
   instructions?(): string
 }
@@ -48,6 +56,12 @@ export interface TribePluginApi {
 export interface TribePluginHandle {
   readonly name: string
   readonly active: boolean
+  /**
+   * Present iff the plugin FAILED to load — the verbatim cause. Its absence on
+   * an `active: false` handle means the plugin was merely unavailable
+   * (dependency absent), which is a different, expected state.
+   */
+  readonly error?: string
 }
 
 /**

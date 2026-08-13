@@ -28,6 +28,7 @@ import { gitPlugin } from "./lib/git-plugin.ts"
 import { githubPlugin } from "./lib/github-plugin.ts"
 import { healthMonitorPlugin } from "./lib/health-monitor-plugin.ts"
 import { accountlyPlugin } from "./lib/accountly-plugin.ts"
+import type { TribePluginHandle } from "./lib/plugin-api.ts"
 
 import {
   createBaseTribe,
@@ -210,6 +211,7 @@ try {
 
 const refs = {
   activePluginNames: [] as string[],
+  pluginStatus: [] as TribePluginHandle[],
   stopPlugins: () => {},
   shutdown: () => {},
 }
@@ -249,6 +251,7 @@ const withDispatcherShape = withDispatcher<typeof withIdleQuitShape>({
   onActiveClient: () => withIdleQuitShape.idleQuit.markActive(),
   onIdle: () => withIdleQuitShape.idleQuit.markIdle(),
   getActivePluginNames: () => refs.activePluginNames,
+  getPluginStatus: () => refs.pluginStatus,
   getIdleQuitAfterSec: () => withSocketShape.config.idleQuitAfterSec,
   // tribe.stop: clean shutdown (drain, close socket, exit 0), no successor.
   triggerShutdown: () => refs.shutdown(),
@@ -306,6 +309,9 @@ const tribe = withRuntime<typeof withSignalsShape>({
   plugins: process.env.TRIBE_NO_PLUGINS ? [] : [gitPlugin, githubPlugin, healthMonitorPlugin, accountlyPlugin],
   publishActivePluginNames: (n) => {
     refs.activePluginNames = n
+  },
+  publishPluginStatus: (handles) => {
+    refs.pluginStatus = handles
   },
   publishStopPlugins: (fn) => {
     refs.stopPlugins = fn

@@ -15,6 +15,9 @@
  *
  *   - `publishActivePluginNames(names)` — let withDispatcher's cli_status see
  *     the loaded plugin names.
+ *   - `publishPluginStatus(handles)` — the same surface, but including plugins
+ *     that were skipped or FAILED, so a disabled plugin is a named state in
+ *     `tribe status` rather than a silent absence from the names list.
  *   - `publishStopPlugins(fn)` — let withHotReload's re-exec call stop() so
  *     plugin cursors flush.
  *   - `publishShutdown(fn)` — let withSignals + withIdleQuit + withHotReload
@@ -28,7 +31,7 @@ import { createLogger } from "loggily"
 import { sendMessage } from "../messaging.ts"
 import { cleanupOldData, backfillDefaultRoomMembers, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
 import { loadPlugins } from "../plugin-loader.ts"
-import type { TribeClientApi, TribePluginApi } from "../plugin-api.ts"
+import type { TribeClientApi, TribePluginApi, TribePluginHandle } from "../plugin-api.ts"
 import type { BaseTribe } from "./base.ts"
 import type { WithBroadcast } from "./with-broadcast.ts"
 import { DEFAULT_RECONNECT_GRACE_MS, type WithClientRegistry } from "./with-client-registry.ts"
@@ -60,6 +63,11 @@ export interface RuntimeOpts<T extends RuntimeShape> {
   cleanupIntervalMs?: number
   /** Bridges to other factories — see file header. */
   publishActivePluginNames: (names: string[]) => void
+  /**
+   * Full per-plugin outcome, including the ones that failed to load and WHY.
+   * Optional so test harnesses composing withRuntime need not care.
+   */
+  publishPluginStatus?: (handles: TribePluginHandle[]) => void
   publishStopPlugins: (fn: () => void) => void
   publishShutdown: (fn: () => void) => void
 }
@@ -140,6 +148,7 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
     const stopPlugins = loadedPlugins.stop
 
     opts.publishActivePluginNames(activePluginNames)
+    opts.publishPluginStatus?.(loadedPlugins.active)
     opts.publishStopPlugins(stopPlugins)
 
     const reapStaleTransports = (onlySessionIds?: ReadonlySet<string>) => {

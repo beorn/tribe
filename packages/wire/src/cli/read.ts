@@ -152,6 +152,13 @@ function fmtCwd(cwd: string | undefined, maxWidth: number = 30): string {
 // Types (subset of the daemon's reply shapes used by the read verbs)
 // ---------------------------------------------------------------------------
 
+/** Mirrors the daemon's TribePluginHandle — `error` present iff the load failed. */
+interface PluginStatus {
+  name: string
+  active: boolean
+  error?: string
+}
+
 interface SessionInfo {
   id: string
   name: string
@@ -226,15 +233,39 @@ const INBOX_WAIT_UNAVAILABLE_GRACE_MS = 2_000
 // Command implementations
 // ---------------------------------------------------------------------------
 
+/**
+ * A plugin that refused to load is reported here and nowhere else the operator
+ * routinely looks. Printing it unconditionally — including when the session
+ * list is empty — is the point: the 2026-08-13 outage was a plugin failure that
+ * no status surface named.
+ */
+function printDegradedPlugins(plugins: PluginStatus[] | undefined): void {
+  const failed = (plugins ?? []).filter((plugin) => plugin.error !== undefined)
+  if (!failed.length) return
+  console.log(`\n  DEGRADED — ${failed.length} plugin${failed.length !== 1 ? "s" : ""} disabled by a load failure:`)
+  for (const plugin of failed) {
+    console.log(`    ${plugin.name}: ${plugin.error?.split("\n")[0] ?? "(no cause recorded)"}`)
+  }
+  console.log(`  Coordination is unaffected; these plugins' signals are NOT being observed.`)
+}
+
 async function cmdStatus(): Promise<void> {
   const result = (await callDaemon("cli_status")) as {
     sessions: SessionInfo[]
-    daemon: { pid: number; uptime: number; clients: number; dbPath: string; socketPath: string }
+    daemon: {
+      pid: number
+      uptime: number
+      clients: number
+      dbPath: string
+      socketPath: string
+      plugins?: PluginStatus[]
+    }
   }
   const { sessions, daemon } = result
 
   if (!sessions.length) {
     console.log("No active tribe sessions.")
+    printDegradedPlugins(daemon?.plugins)
     return
   }
 
@@ -256,6 +287,7 @@ async function cmdStatus(): Promise<void> {
     )
   }
   console.log(`\n  Daemon: pid=${daemon.pid}, uptime=${fmtDur(daemon.uptime * 1000)}, clients=${daemon.clients}`)
+  printDegradedPlugins(daemon.plugins)
 }
 
 async function cmdSessions(showAll: boolean): Promise<void> {

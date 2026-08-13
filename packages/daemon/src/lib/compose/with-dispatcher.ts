@@ -19,6 +19,8 @@
  *   - `onIdle()` — invoked when the registry empties on disconnect. Wired
  *     to `withIdleQuit.markIdle()`.
  *   - `getActivePluginNames()` — surfaced via `cli_status` for UI.
+ *   - `getPluginStatus()` — the same, plus the plugins that failed to load and
+ *     the cause, so `tribe status` names a disabled plugin instead of omitting it.
  *   - `getCliDaemonExtras()` / `getCliStatusExtras()` — late-bound
  *     introspection that needs runtime knobs (quitTimeout, etc.).
  *   - `suppressWindowMs` — join/leave broadcast window after hot-reload.
@@ -57,6 +59,7 @@ import {
   type FetchRow,
 } from "../handlers.ts"
 import { createLifecycleStore } from "../lifecycle-store.ts"
+import type { TribePluginHandle } from "../plugin-api.ts"
 import { createInboxWaitManager } from "../inbox-wait.ts"
 import { logEvent, sendMessage } from "../messaging.ts"
 import { registerSession, NameConflictError, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
@@ -90,6 +93,12 @@ export interface DispatcherRuntimeHooks {
   onIdle?: () => void
   /** Plugin names surfaced via cli_status. Default: empty array. */
   getActivePluginNames?: () => string[]
+  /**
+   * Per-plugin load outcome surfaced via cli_status, INCLUDING plugins that
+   * failed to start and why. Default: empty array. Without this a plugin that
+   * refused to load is indistinguishable from one that was never configured.
+   */
+  getPluginStatus?: () => TribePluginHandle[]
   /** Idle-quit delay (seconds) returned by cli_daemon (wire key `quitTimeout`). Default: -1. */
   getIdleQuitAfterSec?: () => number
   /** Clean daemon shutdown for `tribe.stop`. Default: absent — the handler
@@ -173,6 +182,7 @@ export function withDispatcher<
     const onActiveClient = hooks.onActiveClient ?? (() => {})
     const onIdle = hooks.onIdle ?? (() => {})
     const getActivePluginNames = hooks.getActivePluginNames ?? (() => [])
+    const getPluginStatus = hooks.getPluginStatus ?? (() => [] as TribePluginHandle[])
     const getIdleQuitAfterSec = hooks.getIdleQuitAfterSec ?? (() => -1)
     const suppressWindowMs = hooks.suppressWindowMs ?? (process.env.TRIBE_NO_SUPPRESS ? 0 : 10_000)
     const sessionAnnounceGate = createSessionAnnounceGate(suppressWindowMs)
@@ -1263,6 +1273,7 @@ export function withDispatcher<
                 dbPath: t.config.dbPath,
                 socketPath: socket.socketPath,
                 resources: getActivePluginNames(),
+                plugins: getPluginStatus(),
                 code_identity: { cert: STARTUP_SHA, root: TRIBE_SOURCE_ROOT },
                 protocol_version: TRIBE_PROTOCOL_VERSION,
               },
