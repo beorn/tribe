@@ -24,16 +24,26 @@ import { afterEach, describe, expect, test } from "vitest"
 
 import { openGitHubCursorStore, resolveGitHubCursorPath, type GitHubCursorState } from "./github-cursor-store.ts"
 
-const roots: string[] = []
 const tempRoot = realpathSync(tmpdir())
+const tribeRoot = realpathSync(join(dirname(new URL(import.meta.url).pathname), "../../../.."))
+const roots: Array<{ path: string; within: string }> = []
 
 afterEach(() => {
-  for (const root of roots.splice(0)) safeRemoveSync(root, { within: tempRoot, allowMissing: true })
+  for (const root of roots.splice(0)) {
+    safeRemoveSync(root.path, {
+      within: root.within,
+      allowedRoots: [root.within],
+      allowMissing: true,
+    })
+  }
 })
 
-function fixture(label: string): { repo: string; stateDir: string; legacyPath: string; targetPath: string } {
-  const root = realpathSync(mkdtempSync(join(tempRoot, `tribe-github-cursor-${label}-`)))
-  roots.push(root)
+function fixture(
+  label: string,
+  parent = tempRoot,
+): { repo: string; stateDir: string; legacyPath: string; targetPath: string } {
+  const root = realpathSync(mkdtempSync(join(parent, `tribe-github-cursor-${label}-`)))
+  roots.push({ path: root, within: parent })
   const repo = join(root, "project")
   const stateDir = join(root, "xdg-data", "tribe")
   const legacyPath = join(repo, ".beads", "github-cursor.json")
@@ -101,6 +111,24 @@ describe("GitHub cursor machine-state ownership", () => {
     mkdirSync(f.stateDir, { recursive: true })
     writeFileSync(f.legacyPath, `${JSON.stringify(state)}\n`)
     writeFileSync(f.targetPath, `${JSON.stringify(state, null, 2)}\n`)
+
+    const store = openGitHubCursorStore({ stateDir: f.stateDir, legacyPath: f.legacyPath })
+
+    expect(store.state).toEqual(state)
+    expect(existsSync(f.legacyPath)).toBe(false)
+    expect(JSON.parse(readFileSync(f.targetPath, "utf8"))).toEqual(state)
+  })
+
+  test.each([
+    { label: "legacy adoption", destinationExists: false },
+    { label: "identical dual state", destinationExists: true },
+  ])("$label removes a legacy cursor outside the default /tmp safety root", ({ label, destinationExists }) => {
+    const f = fixture(`outside-tmp-${label.replaceAll(" ", "-")}`, tribeRoot)
+    writeFileSync(f.legacyPath, `${JSON.stringify(state)}\n`)
+    if (destinationExists) {
+      mkdirSync(f.stateDir, { recursive: true })
+      writeFileSync(f.targetPath, `${JSON.stringify(state, null, 2)}\n`)
+    }
 
     const store = openGitHubCursorStore({ stateDir: f.stateDir, legacyPath: f.legacyPath })
 

@@ -77,7 +77,7 @@ export function openGitHubCursorStore(options: OpenGitHubCursorStoreOptions): Gi
       if (!sameCursor(targetState, legacyState)) {
         throw new Error("conflicting GitHub cursor states; refusing to choose, merge, or reset either cursor")
       }
-      safeRemoveSync(distinctLegacyPath, { within: dirname(distinctLegacyPath), allowMissing: false })
+      removeLegacyCursor(distinctLegacyPath)
       state = targetState
     } else if (targetExists) {
       state = readCursor(path)
@@ -88,7 +88,7 @@ export function openGitHubCursorStore(options: OpenGitHubCursorStoreOptions): Gi
       if (!sameCursor(state, installed)) {
         throw new Error("adoption changed state while copying the legacy cursor")
       }
-      safeRemoveSync(distinctLegacyPath, { within: dirname(distinctLegacyPath), allowMissing: false })
+      removeLegacyCursor(distinctLegacyPath)
     } else {
       state = { repos: {} }
     }
@@ -106,6 +106,11 @@ export function openGitHubCursorStore(options: OpenGitHubCursorStoreOptions): Gi
         `${distinctLegacyPath ?? "(not configured)"}: ${error instanceof Error ? error.message : String(error)}`,
     )
   }
+}
+
+function removeLegacyCursor(path: string): void {
+  const parent = dirname(path)
+  safeRemoveSync(path, { within: parent, allowedRoots: [parent], allowMissing: false })
 }
 
 function cursorError(path: string, detail: string): Error {
