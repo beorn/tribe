@@ -53,6 +53,31 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
+/**
+ * `waited_ms` is WALL CLOCK, measured as `Date.now() - startedAt`. In the tests
+ * below that run on real timers, a wake that returned without ever waiting
+ * still reads 1-2ms whenever the machine is busy — so asserting exactly 0 made
+ * them fail under full-suite parallel load, on main, for everyone. One such
+ * failure ("rechecks after subscribing…", waited_ms 1 where 0 was expected)
+ * masqueraded as a regression during a landing because the run's failure COUNT
+ * happened to match.
+ *
+ * The claim these assertions exist to make is "this wake did not block", not
+ * "this wake took zero milliseconds". Bounding keeps the claim and drops the
+ * dependence on scheduler luck: 50ms is far below any real wait in this file
+ * (the shortest is 1_000ms) yet far above scheduling jitter, so a wake that
+ * genuinely blocked still fails.
+ *
+ * Tests driven by fake timers keep their exact assertions — there `waited_ms`
+ * is deterministic and a bound would weaken them.
+ */
+const IMMEDIATE_WAKE_MS = 50
+const immediateWakeMs = {
+  asymmetricMatch: (actual: unknown): boolean =>
+    typeof actual === "number" && actual >= 0 && actual <= IMMEDIATE_WAKE_MS,
+  toString: () => `ImmediateWake(<=${IMMEDIATE_WAKE_MS}ms)`,
+}
+
 function makeContext(
   db: ReturnType<typeof openDatabase>,
   stmts: TribeStatements,
@@ -103,7 +128,7 @@ describe("createInboxWaitManager", () => {
       unread_count: 3,
       timed_out: false,
       aborted: false,
-      waited_ms: 0,
+      waited_ms: immediateWakeMs,
       effective_timeout_ms: 0,
       attention,
     })
@@ -139,7 +164,7 @@ describe("createInboxWaitManager", () => {
     await expect(manager.wait("@ci", "conn-race", 1_000)).resolves.toMatchObject({
       status: "woken",
       timed_out: false,
-      waited_ms: 0,
+      waited_ms: immediateWakeMs,
     })
   })
 
@@ -472,7 +497,7 @@ describe("createInboxWaitManager", () => {
       ).resolves.toMatchObject({
         status: "woken",
         timed_out: false,
-        waited_ms: 0,
+        waited_ms: immediateWakeMs,
       })
     } finally {
       db.close()
@@ -561,7 +586,7 @@ describe("createInboxWaitManager", () => {
         status: "woken",
         timed_out: false,
         aborted: false,
-        waited_ms: 0,
+        waited_ms: immediateWakeMs,
       })
     } finally {
       db.close()
@@ -750,7 +775,7 @@ describe("createInboxWaitManager", () => {
         session: seat,
         timed_out: false,
         aborted: false,
-        waited_ms: 0,
+        waited_ms: immediateWakeMs,
       })
     } finally {
       db.close()
@@ -825,7 +850,7 @@ describe("createInboxWaitManager", () => {
         aborted: false,
       })
       expect(second.unread_count).toBeGreaterThan(0)
-      expect(second.waited_ms).toBe(0)
+      expect(second.waited_ms).toBeLessThanOrEqual(IMMEDIATE_WAKE_MS)
     } finally {
       db.close()
       rmSync(tmpDir, { recursive: true, force: true })
@@ -862,7 +887,7 @@ describe("createInboxWaitManager", () => {
         timed_out: false,
         aborted: false,
         unread_count: 0,
-        waited_ms: 0,
+        waited_ms: immediateWakeMs,
       })
     } finally {
       db.close()
