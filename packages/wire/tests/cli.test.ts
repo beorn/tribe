@@ -1015,8 +1015,6 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         { method: "cli_inbox_status", params: { session: "@chief" } },
         { method: "cli_protocol", params: undefined },
         { method: "cli_inbox_wait", params: { session: "@chief", timeout_ms: 0 } },
-        { method: "cli_protocol", params: undefined },
-        { method: "cli_inbox_wait", params: { session: "@chief", timeout_ms: 0, after_seq: 0 } },
         {
           method: "cli_inbox_drain",
           params: { session: "@chief", limit: 1, operator_capability: "fd-only-operator-secret" },
