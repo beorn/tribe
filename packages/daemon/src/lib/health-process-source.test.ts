@@ -6,7 +6,14 @@
  */
 
 import { describe, expect, it, vi } from "vitest"
-import { createHealthProcessSource } from "./health-process-source.ts"
+import {
+  createHealthProcessSource,
+  ManagedSysmonCommandError,
+  SYSMON_CIRCUIT_FAILURES,
+  SYSMON_CIRCUIT_OPEN_MS,
+  SYSMON_COMMAND_TIMEOUT_MS,
+  SYSMON_MAX_OUTPUT_BYTES,
+} from "./health-process-source.ts"
 
 const availablePayload = {
   diagnostic: {
@@ -302,6 +309,144 @@ describe("neutral health process source", () => {
     await expect(source.readScalars()).resolves.toMatchObject({
       kind: "available",
       values: { swap: { kind: "supported", value: payload.values.swap.value } },
+    })
+  })
+
+  /**
+   * @failure health-monitor sample() re-spawns dual hab sysmon every poll and
+   *          the unbounded stdout slurp + multi-GB habcp journal walk pegs the
+   *          daemon core and times out every RPC (2026-08-13 live PID 2351697).
+   */
+  describe("sysmon sample hot-loop bounds", () => {
+    it("exports the production bounds the live specimen violated", () => {
+      // One JSON line is KB-scale; the live child burned ~1.5GB rchar per spawn.
+      expect(SYSMON_MAX_OUTPUT_BYTES).toBeLessThan(1_000_000)
+      // Multi-second journal walks must not outlive a poll window uncontested.
+      expect(SYSMON_COMMAND_TIMEOUT_MS).toBeLessThanOrEqual(5_000)
+      expect(SYSMON_CIRCUIT_FAILURES).toBeGreaterThanOrEqual(2)
+      expect(SYSMON_CIRCUIT_OPEN_MS).toBeGreaterThanOrEqual(30_000)
+    })
+
+    it("maps a timeout throw to source-command-timeout without rethrowing", async () => {
+      const runCommand = vi.fn(async () => {
+        throw new ManagedSysmonCommandError({
+          kind: "timeout",
+          message: `sysmon snapshot exceeded ${SYSMON_COMMAND_TIMEOUT_MS}ms (killed)`,
+        })
+      })
+      const source = createHealthProcessSource({
+        env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+        runCommand,
+      })
+      if (source.kind !== "managed") throw new Error("expected managed source")
+
+      await expect(source.read()).resolves.toMatchObject({
+        kind: "unavailable",
+        reason: "source-command-timeout",
+      })
+      expect(runCommand).toHaveBeenCalledTimes(1)
+    })
+
+    it("maps oversized output to source-output-too-large", async () => {
+      const runCommand = vi.fn(async () => {
+        throw new ManagedSysmonCommandError({
+          kind: "output-too-large",
+          message: `sysmon snapshot exceeded ${SYSMON_MAX_OUTPUT_BYTES} byte stdout/stderr bound (killed)`,
+        })
+      })
+      const source = createHealthProcessSource({
+        env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+        runCommand,
+      })
+      if (source.kind !== "managed") throw new Error("expected managed source")
+
+      await expect(source.readScalars()).resolves.toMatchObject({
+        kind: "unavailable",
+        reason: "source-output-too-large",
+      })
+    })
+
+    it("opens the circuit after consecutive hard failures and skips the next spawn", async () => {
+      let nowMs = 1_000_000
+      const runCommand = vi.fn(async () => {
+        throw new ManagedSysmonCommandError({
+          kind: "timeout",
+          message: "sysmon snapshot exceeded 2500ms (killed)",
+        })
+      })
+      const source = createHealthProcessSource({
+        env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+        runCommand,
+        now: () => nowMs,
+        circuitFailures: 2,
+        circuitOpenMs: 60_000,
+      })
+      if (source.kind !== "managed") throw new Error("expected managed source")
+
+      await expect(source.read()).resolves.toMatchObject({ reason: "source-command-timeout" })
+      await expect(source.readScalars()).resolves.toMatchObject({ reason: "source-command-timeout" })
+      expect(runCommand).toHaveBeenCalledTimes(2)
+
+      // Circuit open: next attempt must not spawn.
+      await expect(source.read()).resolves.toMatchObject({
+        kind: "unavailable",
+        reason: "source-circuit-open",
+      })
+      expect(runCommand).toHaveBeenCalledTimes(2)
+
+      // After the open window, spawn is allowed again.
+      nowMs += 60_001
+      await expect(source.read()).resolves.toMatchObject({ reason: "source-command-timeout" })
+      expect(runCommand).toHaveBeenCalledTimes(3)
+    })
+
+    it("does not open the circuit on ordinary exit-nonzero failures", async () => {
+      const runCommand = vi.fn(async () => ({ exitCode: 1, stderr: "journal unreadable", stdout: "" }))
+      const source = createHealthProcessSource({
+        env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+        runCommand,
+        circuitFailures: 2,
+      })
+      if (source.kind !== "managed") throw new Error("expected managed source")
+
+      await source.read()
+      await source.read()
+      await source.read()
+      expect(runCommand).toHaveBeenCalledTimes(3)
+      await expect(source.read()).resolves.toMatchObject({ reason: "source-command-failed" })
+      expect(runCommand).toHaveBeenCalledTimes(4)
+    })
+
+    it("clears the circuit after a successful snapshot", async () => {
+      let fail = true
+      const runCommand = vi.fn(async (argv: readonly string[]) => {
+        if (fail) {
+          throw new ManagedSysmonCommandError({ kind: "timeout", message: "timeout" })
+        }
+        return {
+          exitCode: 0,
+          stderr: "",
+          stdout: `${JSON.stringify(argv.includes("scalars") ? scalarPayload : availablePayload)}\n`,
+        }
+      })
+      const source = createHealthProcessSource({
+        env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+        runCommand,
+        circuitFailures: 2,
+        circuitOpenMs: 60_000,
+      })
+      if (source.kind !== "managed") throw new Error("expected managed source")
+
+      await source.read()
+      fail = false
+      await expect(source.read()).resolves.toMatchObject({ kind: "available" })
+      // One more hard failure must not open the circuit alone (counter reset).
+      fail = true
+      await expect(source.read()).resolves.toMatchObject({ reason: "source-command-timeout" })
+      await expect(source.readScalars()).resolves.toMatchObject({ reason: "source-command-timeout" })
+      // That second consecutive failure opens it — third spawn skipped:
+      await expect(source.read()).resolves.toMatchObject({ reason: "source-circuit-open" })
+      expect(runCommand.mock.calls.length).toBe(4)
     })
   })
 })
