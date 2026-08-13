@@ -962,7 +962,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(channelNotifications(second.stdout)).toHaveLength(0)
   }, 60_000)
 
-  it("surfaces an obligation sent while a persona process is stopped to its successor process", async () => {
+  it("refuses an obligation sent while a persona process is stopped", async () => {
     const socketPath = join(tmpDir, "stopped-persona.sock")
     const dbPath = join(tmpDir, "stopped-persona.db")
     daemonProc = spawnDaemon(socketPath, dbPath)
@@ -983,8 +983,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       message: "resume the durable stopped-persona review",
       type: "request",
       request: true,
-    })) as { id?: string }
-    expect(sent.id).toEqual(expect.any(String))
+    })) as { error?: string; delivery_failure_id?: string }
+    expect(sent.error).toContain(`no connected, PID-live transport was observed for "${NAME}"`)
+    expect(sent.delivery_failure_id).toEqual(expect.any(String))
 
     const successor = await spawnLaunchAdapter(socketPath, "stopped-persona-successor.log", launchId, { name: NAME })
     const fetched = (await callLaunchToolWhenRegistered(successor, 30, "fetch", { limit: 10 })) as {
@@ -993,12 +994,8 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         pending_balls?: Array<{ request_id?: string; message_id?: string; sender?: string }>
       }
     }
-    expect(fetched.attention?.actionable_unread).toEqual([
-      expect.objectContaining({ id: sent.id, type: "request", from: "@chief" }),
-    ])
-    expect(fetched.attention?.pending_balls).toEqual([
-      expect.objectContaining({ request_id: sent.id, message_id: sent.id, sender: "@chief" }),
-    ])
+    expect(fetched.attention?.actionable_unread).toEqual([])
+    expect(fetched.attention?.pending_balls).toEqual([])
   }, 60_000)
 
   it("fans three native adapters from one provider launch into one live member", async () => {
