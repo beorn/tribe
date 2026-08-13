@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from "vitest"
 import {
   createHealthProcessSource,
   ManagedSysmonCommandError,
+  runBoundedProcessCommand,
   SYSMON_CIRCUIT_FAILURES,
   SYSMON_CIRCUIT_OPEN_MS,
   SYSMON_COMMAND_TIMEOUT_MS,
@@ -317,6 +318,64 @@ describe("neutral health process source", () => {
    *          the unbounded stdout slurp + multi-GB habcp journal walk pegs the
    *          daemon core and times out every RPC (2026-08-13 live PID 2351697).
    */
+  /**
+   * Every test above injects a fake `runCommand`, so `runBoundedProcessCommand`
+   * — the function that actually spawns, reads the pipes and enforces the
+   * bounds — was never executed by the suite. These run it for real. They also
+   * pin the typing the bounds depend on: `readStreamBounded` takes
+   * `ReadableStream | null`, and it only ever receives a stream because the
+   * subprocess type is inferred from `{ stdout: "pipe", stderr: "pipe" }`
+   * rather than widened to every stdio mode at once.
+   */
+  describe("runBoundedProcessCommand (real spawn)", () => {
+    it("returns the child's exit code and piped output", async () => {
+      const result = await runBoundedProcessCommand(["echo", "sysmon-ok"], {
+        timeoutMs: 5_000,
+        maxOutputBytes: 64 * 1024,
+      })
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout.trim()).toBe("sysmon-ok")
+      expect(result.stderr).toBe("")
+    })
+
+    it("reports a nonzero exit without treating it as a bound failure", async () => {
+      // An ordinary failing command must NOT open the circuit breaker; only
+      // timeout and oversize do. This is the path a missing --state-root takes.
+      const result = await runBoundedProcessCommand(["sh", "-c", "echo boom >&2; exit 3"], {
+        timeoutMs: 5_000,
+        maxOutputBytes: 64 * 1024,
+      })
+      expect(result.exitCode).toBe(3)
+      expect(result.stderr.trim()).toBe("boom")
+    })
+
+    it("raises spawn-failed when the binary does not exist", async () => {
+      await expect(
+        runBoundedProcessCommand(["tribe-sysmon-no-such-binary-cbb0f1"], {
+          timeoutMs: 5_000,
+          maxOutputBytes: 64 * 1024,
+        }),
+      ).rejects.toMatchObject({ failure: { kind: "spawn-failed" } })
+    })
+
+    it("kills and reports oversize rather than materialising the stream", async () => {
+      // The live failure: a child that emits far more than the cap. The bound
+      // must fire instead of building the whole string in the daemon's heap.
+      await expect(
+        runBoundedProcessCommand(["sh", "-c", "head -c 4000000 /dev/zero | tr '\\0' 'x'"], {
+          timeoutMs: 10_000,
+          maxOutputBytes: 64 * 1024,
+        }),
+      ).rejects.toMatchObject({ failure: { kind: "output-too-large" } })
+    })
+
+    it("kills and reports timeout when the child outlives its wall clock", async () => {
+      await expect(
+        runBoundedProcessCommand(["sleep", "5"], { timeoutMs: 250, maxOutputBytes: 64 * 1024 }),
+      ).rejects.toMatchObject({ failure: { kind: "timeout" } })
+    })
+  })
+
   describe("sysmon sample hot-loop bounds", () => {
     it("exports the production bounds the live specimen violated", () => {
       // One JSON line is KB-scale; the live child burned ~1.5GB rchar per spawn.
