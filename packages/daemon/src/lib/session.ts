@@ -131,14 +131,14 @@ export type StaleTransportReapOpts = {
 export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpts): StaleTransportReapReport {
   const nowMs = opts.nowMs ?? Date.now()
   const scoped = opts.onlySessionIds
-  const rows = (
+  const selectScopedRow =
     scoped === undefined
+      ? null
+      : db.prepare("SELECT id, name, launch_id, launch_parent_pid FROM sessions WHERE id = $id")
+  const rows = (
+    selectScopedRow === null
       ? db.prepare("SELECT id, name, launch_id, launch_parent_pid FROM sessions ORDER BY id").all()
-      : [...scoped].flatMap((sessionId) =>
-          db
-            .prepare("SELECT id, name, launch_id, launch_parent_pid FROM sessions WHERE id = $id")
-            .all({ $id: sessionId }),
-        )
+      : [...(scoped as ReadonlySet<string>)].flatMap((sessionId) => selectScopedRow.all({ $id: sessionId }))
   ) as Array<{
     id: string
     name: string

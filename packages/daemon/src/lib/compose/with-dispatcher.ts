@@ -734,7 +734,37 @@ export function withDispatcher<
       channelJoinAnnounced.add(client.id)
     }
 
+    /**
+     * Times every request and names the slow ones, then delegates. This wraps
+     * the router rather than sitting at a call site because there are two
+     * entry points: the socket line-parser below, and `tools/call` from the
+     * MCP surface, which reaches the same router directly (daemon.ts). Timing
+     * only the socket path left MCP untimed — and MCP `members` was one of the
+     * calls observed timing out, so the transport whose slowness was reported
+     * was the one the log could not see.
+     */
     async function handleRequest(req: JsonRpcRequest, connId: string): Promise<string> {
+      const startedAt = Date.now()
+      try {
+        return await dispatchRequest(req, connId)
+      } finally {
+        // Clients give up on a fixed 10s timer (wire client.ts) and can report
+        // only that the call did not return, so from the outside every wedge
+        // looks alike. A stack walk cannot settle it either — yama
+        // ptrace_scope blocks strace/perf on this host — which leaves the
+        // daemon's own log as the evidence that survives.
+        const elapsed = Date.now() - startedAt
+        if (shouldLogSlowRequest(req.method, elapsed)) {
+          log.warn?.("operation.slow", {
+            ...connectionLogIdentity(clients.get(connId), connId),
+            operation: operationLogName(req.method),
+            duration_ms: elapsed,
+          })
+        }
+      }
+    }
+
+    async function dispatchRequest(req: JsonRpcRequest, connId: string): Promise<string> {
       const { method, params, id } = req
       const p = (params ?? {}) as Record<string, unknown>
 
@@ -1774,23 +1804,9 @@ export function withDispatcher<
 
       const parse = createLineParser(async (msg: JsonRpcMessage) => {
         if (isRequest(msg)) {
-          const startedAt = Date.now()
+          // Slow-method timing lives inside handleRequest so this path and the
+          // MCP tools/call path are covered by one implementation.
           const response = await handleRequest(msg, connId)
-          // Name the slow method in the daemon's own log. Clients time out on a
-          // fixed 10s timer (wire client.ts) and report only that "the daemon"
-          // was unreachable, so a wedge presents identically no matter which
-          // method ate the loop — and a stack walk is not available to settle
-          // it (yama ptrace_scope blocks strace/perf on this host). Logging the
-          // method and its duration at the one dispatch chokepoint is the
-          // evidence that survives: the next wedge names itself.
-          const elapsed = Date.now() - startedAt
-          if (shouldLogSlowRequest(msg.method, elapsed)) {
-            log.warn?.("operation.slow", {
-              ...connectionLogIdentity(clients.get(connId), connId),
-              operation: operationLogName(msg.method),
-              duration_ms: elapsed,
-            })
-          }
           try {
             sock.write(response)
           } catch {

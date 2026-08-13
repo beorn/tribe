@@ -172,21 +172,55 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
     // simply still connected and its row is preserved by the existing
     // `hasActiveTransport` fence — no second eviction rule, no new race.
     //
-    // Departures are batched behind a single timer so a churn storm costs one
-    // scoped reap rather than one timer and one scan per dead connection.
-    const pendingReapSessionIds = new Set<string>()
+    // Departures are batched behind a SINGLE timer so a churn storm costs one
+    // scoped reap rather than one timer and one scan per dead connection. Each
+    // pending session keeps its OWN disconnect time, because each one's grace
+    // ends at its own expiry, not at the first departure's: batching on one
+    // timer armed by the first disconnect and then clearing the whole queue
+    // reaps that one session and silently forgets every session that was still
+    // inside its own grace when the timer fired — they fall through to the
+    // six-hour sweep, which is the behaviour this code exists to replace.
+    //
+    // So the timer fires, reaps only what has actually expired, leaves the
+    // rest queued, and re-arms for the earliest remaining expiry. An empty
+    // queue disarms. Later disconnects always expire later than earlier ones,
+    // so an armed timer never needs to be moved earlier.
+    const REAP_SLACK_MS = 1_000
+    const pendingReapAt = new Map<string, number>()
     let reapTimer: ReturnType<typeof setTimeout> | null = null
-    t.registry.onTransportDisconnected((sessionId) => {
-      pendingReapSessionIds.add(sessionId)
-      if (reapTimer !== null) return
-      reapTimer = setTimeout(() => {
-        reapTimer = null
-        const batch = new Set(pendingReapSessionIds)
-        pendingReapSessionIds.clear()
-        if (batch.size === 0) return
-        reapStaleTransports(batch)
-      }, DEFAULT_RECONNECT_GRACE_MS + 1_000)
-      reapTimer.unref?.()
+
+    const graceExpiryFor = (disconnectedAtMs: number): number =>
+      disconnectedAtMs + DEFAULT_RECONNECT_GRACE_MS + REAP_SLACK_MS
+
+    function armReapTimer(nowMs: number): void {
+      if (reapTimer !== null || pendingReapAt.size === 0) return
+      let earliest = Number.POSITIVE_INFINITY
+      for (const disconnectedAt of pendingReapAt.values()) {
+        earliest = Math.min(earliest, graceExpiryFor(disconnectedAt))
+      }
+      reapTimer = setTimeout(collectExpiredRegistrations, Math.max(0, earliest - nowMs))
+      ;(reapTimer as { unref?: () => void }).unref?.()
+    }
+
+    function collectExpiredRegistrations(): void {
+      reapTimer = null
+      const nowMs = Date.now()
+      const due = new Set<string>()
+      for (const [sessionId, disconnectedAt] of pendingReapAt) {
+        if (graceExpiryFor(disconnectedAt) <= nowMs) {
+          due.add(sessionId)
+          pendingReapAt.delete(sessionId)
+        }
+      }
+      if (due.size > 0) reapStaleTransports(due)
+      // Whatever is still inside its own grace stays queued and re-arms here,
+      // so no departure is ever dropped between fires.
+      armReapTimer(Date.now())
+    }
+
+    t.registry.onTransportDisconnected((sessionId, nowMs) => {
+      pendingReapAt.set(sessionId, nowMs)
+      armReapTimer(nowMs)
     })
     t.scope.defer(() => {
       if (reapTimer !== null) clearTimeout(reapTimer)

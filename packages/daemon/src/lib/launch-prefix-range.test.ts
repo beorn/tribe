@@ -17,6 +17,8 @@ import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
+import { createTribeContext } from "./context.ts"
+import { readAttentionProjection } from "./handlers.ts"
 import { derivedLaunchPrefixUpperBound } from "./launch-prefix-range.ts"
 
 describe("derivedLaunchPrefixUpperBound", () => {
@@ -40,6 +42,82 @@ describe("derivedLaunchPrefixUpperBound", () => {
     const upper = derivedLaunchPrefixUpperBound("x\u{10FFFF}")
     expect(upper).not.toBeNull()
     expect("x\u{10FFFF}" < (upper as string)).toBe(true)
+  })
+})
+
+/**
+ * `filterRowsByTrust` now materialises the roster only when a row actually
+ * carries a registered trust topic. That is a change on a SECURITY path: if the
+ * short-circuit were too broad, a row that should be trust-filtered would be
+ * admitted unchecked. These pin both directions — the skip must apply only to
+ * topics the trust rules do not govern, and a governed topic must still be
+ * filtered exactly as before.
+ */
+describe("trust filtering after the roster short-circuit", () => {
+  let tmpDir: string
+  let db: Database
+  let stmts: TribeStatements
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "trust-shortcircuit-"))
+    db = openDatabase(join(tmpDir, "tribe.db"))
+    stmts = createStatements(db)
+    // Only "@rostered" is a registered member. "@stranger" never joined.
+    db.prepare(
+      "INSERT INTO sessions (id, name, role, domains, pid, cwd, project_id, started_at, updated_at) " +
+        "VALUES ('s1', '@rostered', 'member', '[]', 1, '/repo', 'p', 0, 0)",
+    ).run()
+  })
+
+  afterEach(() => {
+    db.close()
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  function seed(id: string, sender: string, topic: string | null): void {
+    db.prepare(
+      "INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, topic, attention_required) " +
+        "VALUES ($id, 'request', $sender, '@reader', 'direct', 'x', 0, 'pull', $topic, 1)",
+    ).run({ $id: id, $sender: sender, $topic: topic })
+  }
+
+  function admittedSenders(): string[] {
+    const ctx = createTribeContext({
+      db,
+      stmts,
+      sessionId: "reader",
+      sessionRole: "member",
+      initialName: "@reader",
+      domains: [],
+      claudeSessionId: null,
+      claudeSessionName: null,
+    })
+    return readAttentionProjection(ctx, "@reader").attentionRows.map((row) => row.sender)
+  }
+
+  it("still filters an unrostered sender off a registered trust topic", () => {
+    // "bead:*" is an internal-tier registered topic, so the roster decides.
+    seed("m1", "@stranger", "bead:22873")
+    expect(admittedSenders()).toEqual([])
+  })
+
+  it("still admits a rostered sender on the same registered trust topic", () => {
+    seed("m1", "@rostered", "bead:22873")
+    expect(admittedSenders()).toEqual(["@rostered"])
+  })
+
+  it("admits an ungoverned topic from any sender, which is what the skip covers", () => {
+    seed("m1", "@stranger", "chat")
+    seed("m2", "@stranger", null)
+    expect(admittedSenders().sort()).toEqual(["@stranger", "@stranger"])
+  })
+
+  it("filters the governed row even when ungoverned rows share the batch", () => {
+    // The short-circuit is per-BATCH, so one governed row must pull the whole
+    // batch through the roster filter rather than the batch skipping it.
+    seed("m1", "@stranger", "chat")
+    seed("m2", "@stranger", "bead:22873")
+    expect(admittedSenders()).toEqual(["@stranger"])
   })
 })
 

@@ -149,6 +149,57 @@ describe("single-flight runner — a periodic poller never overlaps itself", () 
     expect(errors.join("\n")).toContain("sysmon snapshot unavailable")
   })
 
+  it("releases the slot when run() throws SYNCHRONOUSLY, not just via a rejected promise", async () => {
+    // An `async` run that throws yields a REJECTED PROMISE — the body has
+    // already suspended, so the slot assignment has long since happened. A
+    // function that throws synchronously is a different path: it runs to
+    // completion inside the caller's own frame, before the assignment. The
+    // slot must already be claimed by then, or the assignment lands after the
+    // release and wedges the runner forever.
+    const errors: string[] = []
+    let started = 0
+    const runner = createSingleFlightRunner({
+      name: "health-sample",
+      intervalMs: 10_000,
+      // Deliberately NOT async: this returns nothing and throws in-frame.
+      run: (() => {
+        started++
+        throw new Error("spawn failed in-frame")
+      }) as unknown as () => Promise<void>,
+      log: { error: (message) => errors.push(message) },
+    })
+
+    runner.tick()
+    expect(runner.stats().inFlight).toBe(false)
+    expect(runner.stats().failed).toBe(1)
+
+    // The slot must be usable again immediately — this is the assertion that
+    // fails fast when the ordering regresses, before any hang can occur.
+    runner.tick()
+    expect(started).toBe(2)
+    expect(runner.stats().failed).toBe(2)
+    expect(runner.stats().skipped).toBe(0)
+    expect(errors.join("\n")).toContain("spawn failed in-frame")
+  })
+
+  it("settled() resolves after a synchronous throw instead of spinning on a resolved promise", async () => {
+    const runner = createSingleFlightRunner({
+      name: "health-sample",
+      intervalMs: 10_000,
+      run: (() => {
+        throw new Error("spawn failed in-frame")
+      }) as unknown as () => Promise<void>,
+      log: {},
+    })
+
+    runner.tick()
+    // On the wedged ordering this never returns: `while (inFlight !== null)
+    // await inFlight` re-queues a microtask forever, starving even timers, so
+    // a racing deadline could not rescue it. Resolution IS the assertion.
+    await runner.settled()
+    expect(runner.stats().inFlight).toBe(false)
+  })
+
   it("reports the overrun so a run outlasting its interval names itself", async () => {
     const warnings: string[] = []
     const gate = deferred()

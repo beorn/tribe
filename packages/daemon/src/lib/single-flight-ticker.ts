@@ -95,7 +95,23 @@ export function createSingleFlightRunner(opts: {
     startedAt = now()
     const runStartedAt = startedAt
 
-    inFlight = (async () => {
+    // The slot is claimed BEFORE `run()` can execute, and the claim is a
+    // promise this function resolves itself rather than the one the async body
+    // returns. Assigning `inFlight = (async () => { ... })()` looks equivalent
+    // and is not: the body runs synchronously up to its first `await`, so a
+    // run that throws SYNCHRONOUSLY reaches the `finally` — and its
+    // `inFlight = null` — while the outer assignment still hasn't happened.
+    // The assignment then lands afterwards and overwrites null with an
+    // already-settled promise, so every later tick sees an occupied slot and
+    // is skipped forever, and `settled()` below spins on a resolved promise:
+    // an unkillable microtask loop, which is the exact failure this module
+    // exists to prevent, reproduced inside the fix for it.
+    let releaseSlot!: () => void
+    inFlight = new Promise<void>((resolve) => {
+      releaseSlot = resolve
+    })
+
+    void (async () => {
       try {
         await opts.run()
         completed++
@@ -109,6 +125,7 @@ export function createSingleFlightRunner(opts: {
         const elapsed = now() - runStartedAt
         if (elapsed > maxObservedRunMs) maxObservedRunMs = elapsed
         inFlight = null
+        releaseSlot()
         if (elapsed > opts.intervalMs) {
           log?.warn?.(`${opts.name}: run overran its ${opts.intervalMs}ms interval — took ${elapsed}ms`)
         }

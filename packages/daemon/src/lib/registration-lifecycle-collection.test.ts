@@ -21,11 +21,14 @@ import { Database } from "bun:sqlite"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { createScope } from "tribe-wire"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createTribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { registerSession, reapStaleTransportRows } from "./session.ts"
+import { DEFAULT_RECONNECT_GRACE_MS, withClientRegistry } from "./compose/with-client-registry.ts"
+import { withRuntime } from "./compose/with-runtime.ts"
 
 const PROJECT_ID = "registration-lifecycle-collection"
 
@@ -146,5 +149,169 @@ describe("a registration is collected by its own lifecycle", () => {
 
     const survivors = db.prepare("SELECT id FROM sessions").all() as Array<{ id: string }>
     expect(survivors.map((row) => row.id)).toEqual(["durable-1"])
+  })
+
+  /**
+   * The tests above call `reapStaleTransportRows` directly, which leaves the
+   * part that decides WHEN to call it — the registry listener, the pending
+   * batch and its timer — with no executing coverage at all. That gap hid a
+   * defect that made the whole feature a no-op for every session but one:
+   * a single timer armed by the FIRST disconnect, fired at that session's
+   * grace expiry, and the queue cleared unconditionally, so every session
+   * still inside its OWN grace at fire time was classified reconnect_grace,
+   * dropped from the queue and never retried. Steady churn therefore reaped
+   * one row and forgot the rest to the six-hour sweep — exactly the behaviour
+   * this feature replaces.
+   *
+   * This drives the real listener through `withRuntime` with staggered
+   * disconnects and asserts every row is collected within its own grace.
+   */
+  describe("the real listener path under steady disconnect churn", () => {
+    const T0 = 1_000_000
+    const CHURN = 30
+    const STAGGER_MS = 10_000
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    function connectedClient(sessionId: string) {
+      return { role: "member", ctx: { sessionId }, pid: 0, protocolVersion: null }
+    }
+
+    it("collects every departed registration, not just the one that armed the timer", async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(T0)
+
+      for (let i = 0; i < CHURN; i++) registerAnonymous(i)
+      expect(countRows()).toBe(CHURN)
+
+      const scope = createScope("registration-lifecycle-collection-test")
+      const base = { scope, startedAt: T0 } as unknown as Parameters<ReturnType<typeof withClientRegistry>>[0]
+      const { registry } = withClientRegistry()(base)
+
+      // Every session starts with a live transport, so nothing is reapable
+      // until it actually departs.
+      for (let i = 0; i < CHURN; i++) {
+        registry.clients.set(`conn-${i}`, connectedClient(`conn-${i}`) as never)
+      }
+
+      const shape = {
+        scope,
+        daemonSessionId: "daemon",
+        startedAt: T0,
+        daemonVersion: "test",
+        daemonPid: process.pid,
+        config: {},
+        db,
+        stmts,
+        daemonCtx: createTribeContext({
+          db,
+          stmts,
+          sessionId: "daemon",
+          sessionRole: "member",
+          initialName: "daemon",
+          domains: [],
+          claudeSessionId: null,
+          claudeSessionName: null,
+        }),
+        recall: null,
+        registry,
+        broadcast: {},
+        socket: {},
+      }
+      withRuntime({
+        plugins: [],
+        buildPluginApi: () => ({}) as never,
+        // Far beyond the test window: the six-hour sweep must not be what
+        // collects these rows, or the test would pass on main's behaviour.
+        cleanupIntervalMs: 24 * 60 * 60 * 1000,
+        publishActivePluginNames: () => {},
+        publishStopPlugins: () => {},
+        publishShutdown: () => {},
+      })(shape as never)
+
+      // Steady churn: one seat departs every 10s, so each one's grace expires
+      // at its own time, not at the first departure's.
+      for (let i = 0; i < CHURN; i++) {
+        await vi.advanceTimersByTimeAsync(i === 0 ? 0 : STAGGER_MS)
+        registry.clients.delete(`conn-${i}`)
+        registry.markTransportDisconnected(`conn-${i}`, Date.now())
+      }
+
+      // Nothing has outlived its grace yet.
+      expect(countRows()).toBe(CHURN)
+
+      // Past the FIRST seat's grace only: precisely one row should be gone.
+      // This is the state the defect mistook for "done".
+      await vi.advanceTimersByTimeAsync(DEFAULT_RECONNECT_GRACE_MS + 2_000 - (CHURN - 1) * STAGGER_MS)
+      expect(countRows()).toBe(CHURN - 1)
+
+      // Past the LAST seat's grace: every row must be collected.
+      await vi.advanceTimersByTimeAsync((CHURN - 1) * STAGGER_MS + 2_000)
+      expect(countRows()).toBe(0)
+    })
+
+    it("keeps a seat that reconnected inside its grace and still collects the rest", async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(T0)
+
+      registerAnonymous(1)
+      registerAnonymous(2)
+
+      const scope = createScope("registration-lifecycle-reconnect-test")
+      const base = { scope, startedAt: T0 } as unknown as Parameters<ReturnType<typeof withClientRegistry>>[0]
+      const { registry } = withClientRegistry()(base)
+      registry.clients.set("conn-1", connectedClient("conn-1") as never)
+      registry.clients.set("conn-2", connectedClient("conn-2") as never)
+
+      const shape = {
+        scope,
+        daemonSessionId: "daemon",
+        startedAt: T0,
+        daemonVersion: "test",
+        daemonPid: process.pid,
+        config: {},
+        db,
+        stmts,
+        daemonCtx: createTribeContext({
+          db,
+          stmts,
+          sessionId: "daemon",
+          sessionRole: "member",
+          initialName: "daemon",
+          domains: [],
+          claudeSessionId: null,
+          claudeSessionName: null,
+        }),
+        recall: null,
+        registry,
+        broadcast: {},
+        socket: {},
+      }
+      withRuntime({
+        plugins: [],
+        buildPluginApi: () => ({}) as never,
+        cleanupIntervalMs: 24 * 60 * 60 * 1000,
+        publishActivePluginNames: () => {},
+        publishStopPlugins: () => {},
+        publishShutdown: () => {},
+      })(shape as never)
+
+      registry.clients.delete("conn-1")
+      registry.markTransportDisconnected("conn-1", Date.now())
+      registry.clients.delete("conn-2")
+      registry.markTransportDisconnected("conn-2", Date.now())
+
+      // conn-1 comes back before its grace expires — the pull-delivery seat
+      // shape this whole deferral exists to protect.
+      await vi.advanceTimersByTimeAsync(60_000)
+      registry.clients.set("conn-1", connectedClient("conn-1") as never)
+
+      await vi.advanceTimersByTimeAsync(DEFAULT_RECONNECT_GRACE_MS + 5_000)
+
+      const survivors = db.prepare("SELECT id FROM sessions ORDER BY id").all() as Array<{ id: string }>
+      expect(survivors.map((row) => row.id)).toEqual(["conn-1"])
+    })
   })
 })
