@@ -100,6 +100,53 @@ describe("a ball never outlives its question (22844)", () => {
     expect(pending[0]!.content).toBe(body)
   })
 
+  it("active pending snapshots join a large population without per-ball body queries", () => {
+    const { db, stmts } = setup()
+    const sender = makeContext(db, stmts, "@fable/1")
+    const population = 256
+    const bodySuffix = "x".repeat(2_000)
+    for (let index = 0; index < population; index += 1) {
+      sendMessage(
+        sender,
+        index % 2 === 0 ? "@chief" : "@cto",
+        `question-${index}-${bodySuffix}`,
+        "request",
+        undefined,
+        undefined,
+        "direct",
+        { summary: `question ${index}` },
+        { request: `large-population-${index}` },
+      )
+    }
+
+    let perBallBodyQueries = 0
+    const bodyStatement = stmts.selectMessageContentById
+    const instrumentedStmts = {
+      ...stmts,
+      selectMessageContentById: new Proxy(bodyStatement, {
+        get(target, property) {
+          if (property !== "get") return Reflect.get(target, property, target)
+          return (...args: Parameters<typeof target.get>) => {
+            perBallBodyQueries += 1
+            return target.get(...args)
+          }
+        },
+      }),
+    } as TribeStatements
+    const chief = makeContext(db, instrumentedStmts, "@chief")
+
+    const all = parseToolJson(handleToolCall(chief, "tribe.pending", { all: true }, makeOpts()))
+    const allPending = (all.pending ?? []) as PendingRow[]
+    expect(allPending).toHaveLength(population)
+    expect(allPending[255]!.content).toContain("question-")
+
+    const owned = parseToolJson(handleToolCall(chief, "tribe.pending", { owner: "@chief" }, makeOpts()))
+    const ownedPending = (owned.pending ?? []) as PendingRow[]
+    expect(ownedPending).toHaveLength(population / 2)
+    expect(ownedPending[127]!.content).toContain("question-")
+    expect(perBallBodyQueries).toBe(0)
+  })
+
   it("an owed ball whose message row is gone stays listed, flagged by content: null", () => {
     const { db, stmts } = setup()
     const now = Date.now()
