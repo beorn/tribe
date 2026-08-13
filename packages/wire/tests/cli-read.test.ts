@@ -275,8 +275,6 @@ describe("waitForInboxWithReconnect", () => {
       session: "@ci",
       timeoutMs: 60_000,
       maxChunkMs: 30_000,
-      retryDelayMs: 100,
-      maxRetryDelayMs: 250,
       now: () => now,
       sleep: async (ms) => {
         sleeps.push(ms)
@@ -284,7 +282,7 @@ describe("waitForInboxWithReconnect", () => {
       },
       call: async ({ timeoutMs }) => {
         calls += 1
-        if (calls <= 4) {
+        if (calls <= 7) {
           throw Object.assign(new Error("Connection closed"), { code: "ECONNRESET" })
         }
         now += 1
@@ -303,8 +301,8 @@ describe("waitForInboxWithReconnect", () => {
       },
     })
 
-    expect(sleeps).toEqual([100, 200, 250, 250])
-    expect(result.waited_ms).toBe(801)
+    expect(sleeps).toEqual([250, 500, 1_000, 2_000, 4_000, 5_000, 5_000])
+    expect(result.waited_ms).toBe(17_751)
   })
 
   test("resets reconnect backoff after an authoritative daemon chunk", async () => {
@@ -316,7 +314,6 @@ describe("waitForInboxWithReconnect", () => {
       timeoutMs: 60_000,
       maxChunkMs: 30_000,
       retryDelayMs: 100,
-      maxRetryDelayMs: 1_000,
       now: () => now,
       sleep: async (ms) => {
         sleeps.push(ms)
