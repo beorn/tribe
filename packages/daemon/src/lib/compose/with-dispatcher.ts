@@ -78,6 +78,7 @@ import type { WithRecall } from "./with-recall.ts"
 import type { WithSocketServer } from "./with-socket-server.ts"
 import type { DirectDeliveryResolver } from "../delivery-resolution.ts"
 import { STARTUP_SHA, TRIBE_SOURCE_ROOT } from "../code-pin.ts"
+import { shouldLogSlowRequest } from "../slow-request-log.ts"
 
 const log = createLogger("tribe:dispatcher")
 
@@ -1763,7 +1764,23 @@ export function withDispatcher<
 
       const parse = createLineParser(async (msg: JsonRpcMessage) => {
         if (isRequest(msg)) {
+          const startedAt = Date.now()
           const response = await handleRequest(msg, connId)
+          // Name the slow method in the daemon's own log. Clients time out on a
+          // fixed 10s timer (wire client.ts) and report only that "the daemon"
+          // was unreachable, so a wedge presents identically no matter which
+          // method ate the loop — and a stack walk is not available to settle
+          // it (yama ptrace_scope blocks strace/perf on this host). Logging the
+          // method and its duration at the one dispatch chokepoint is the
+          // evidence that survives: the next wedge names itself.
+          const elapsed = Date.now() - startedAt
+          if (shouldLogSlowRequest(msg.method, elapsed)) {
+            log.warn?.("operation.slow", {
+              ...connectionLogIdentity(clients.get(connId), connId),
+              operation: operationLogName(msg.method),
+              duration_ms: elapsed,
+            })
+          }
           try {
             sock.write(response)
           } catch {
