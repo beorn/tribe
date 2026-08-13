@@ -19,21 +19,22 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createTribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
-import { handleToolCall, readAttentionProjection, type HandlerOpts } from "./handlers.ts"
+import { handleToolCall, readAttentionProjection, type ActiveSessionInfo, type HandlerOpts } from "./handlers.ts"
 import { logEvent, sendMessage } from "./messaging.ts"
-import { cleanupOldData } from "./session.ts"
+import { cleanupOldData, registerSession } from "./session.ts"
 
 const DAY = 24 * 60 * 60 * 1000
+const PROJECT_ID = "pending-ball-gc"
 type ToolJson = Record<string, unknown>
 
-function makeOpts(): HandlerOpts {
+function makeOpts(active: ActiveSessionInfo[] = []): HandlerOpts {
   return {
     cleanup: () => undefined,
     userRenamed: false,
     setUserRenamed: () => undefined,
-    getActiveSessionIds: () => new Set(["sess-chief"]),
-    hasActiveTransport: (sessionId) => sessionId === "sess-chief",
-    getActiveSessionInfo: () => [],
+    getActiveSessionIds: () => new Set(active.map((session) => session.id)),
+    hasActiveTransport: (sessionId) => active.some((session) => session.id === sessionId),
+    getActiveSessionInfo: () => active,
   }
 }
 
@@ -533,6 +534,69 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
           ],
         },
       ])
+    } finally {
+      db.close()
+    }
+  })
+
+  it("projects PID-aware answer capability onto flat and grouped pending rows", () => {
+    const { db, stmts } = setup()
+    try {
+      const ctx = makeContext(db, stmts)
+      const live = makeContext(db, stmts, "@agent/live")
+      const disconnected = makeContext(db, stmts, "@agent/disconnected")
+      registerSession(live, PROJECT_ID, () => false, null, process.pid, "pull", "/repo", null, "codex")
+      registerSession(disconnected, PROJECT_ID, () => false, null, 999_999_999, "pull", "/repo", null, "codex")
+      for (const [id, recipient] of [
+        ["req-live", "@agent/live"],
+        ["req-disconnected", "@agent/disconnected"],
+        ["req-unknown", "@agent/unknown"],
+      ] as const) {
+        openBall(stmts, { id, recipient, openedAt: Date.now() - 1_000 })
+      }
+      const active: ActiveSessionInfo[] = [
+        {
+          id: live.sessionId,
+          name: "@agent/live",
+          pid: process.pid,
+          cwd: "/repo",
+          role: "member",
+          claudeSessionId: null,
+          registeredAt: Date.now(),
+          launchId: null,
+          launchParentPid: null,
+          transportPids: [process.pid],
+        },
+      ]
+
+      const all = parseToolJson(handleToolCall(ctx, "tribe.pending", { all: true }, makeOpts(active))) as {
+        pending: Array<Record<string, unknown>>
+        owners: Array<{ owner: string; pending: Array<Record<string, unknown>> }>
+      }
+      const byOwner = new Map(all.pending.map((row) => [row.recipient, row]))
+      expect(byOwner.get("@agent/live")).toMatchObject({
+        owner_transport_registered: true,
+        owner_transport_state: "connected",
+        owner_state: "live",
+        owner_answer_capability: "observed",
+        owner_transport_reason: "connected-pid-live-transport",
+        owner_transport_observed_at: expect.any(String),
+      })
+      expect(byOwner.get("@agent/disconnected")).toMatchObject({
+        owner_transport_registered: false,
+        owner_transport_state: "disconnected",
+        owner_state: "unknown",
+        owner_answer_capability: "not-observed",
+        owner_transport_reason: "owner-unknown-no-transport",
+      })
+      expect(byOwner.get("@agent/unknown")).toMatchObject({
+        owner_transport_registered: false,
+        owner_transport_state: "disconnected",
+        owner_state: "unknown",
+        owner_answer_capability: "not-observed",
+        owner_transport_reason: "no-session-record",
+      })
+      expect(all.owners.flatMap((owner) => owner.pending)).toEqual(all.pending)
     } finally {
       db.close()
     }

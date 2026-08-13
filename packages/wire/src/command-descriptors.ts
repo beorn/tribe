@@ -272,9 +272,18 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             type: "string",
             description: "Human-readable note — emitted when the summary was derived or the message was truncated.",
           },
+          delivery_failure_id: {
+            type: "string",
+            description:
+              "Journal event id returned when tracked-send admission refuses because no answer-capable owner or declared fallback was observed. No direct message or pending row was created.",
+          },
+          observed_at: {
+            type: "string",
+            description: "ISO timestamp of the transport snapshot behind a tracked-send delivery refusal.",
+          },
           ...ERROR_SHAPE,
         },
-        "Send result: { sent, id, summary, truncated, original_length, tracker? } on success (tracker for replies; summary_derived + warning when derived; truncated: true means only a prefix was delivered), { error } on validation failure.",
+        "Send result: { sent, id, summary, truncated, original_length, tracker? } on success (tracker for replies; summary_derived + warning when derived; truncated: true means only a prefix was delivered), { error, delivery_failure_id?, observed_at? } on refusal. A tracked request with no answer-capable recipient or declared fallback is journaled and refused without a direct message or pending row.",
       ),
     },
     cli: available({
@@ -415,7 +424,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           pending: {
             type: "array",
             description:
-              'Active requests, or derive-at-read expired/unanswered outcomes when expired=true. Expired rows collapse to one per (request_id, recipient) with older generations disclosed as superseded_count, and carry backing: "live" (a pending_request row still stands behind it, settlement=null, genuinely owed) or "journal" (history: manual-close, incident-cleared, gc-expired, sender-withdrawn, or an unsettled ghost). Answered rows are omitted; owed=true keeps only backing "live".',
+              'Active requests, or derive-at-read expired/unanswered outcomes when expired=true. Every row carries the current owner transport snapshot: owner_transport_registered, owner_transport_state, owner_state, owner_answer_capability, owner_transport_reason, and owner_transport_observed_at. These describe observation-time answer capability only; they never auto-close or reroute an obligation. Expired rows collapse to one per (request_id, recipient) with older generations disclosed as superseded_count, and carry backing: "live" (a pending_request row still stands behind it, settlement=null, genuinely owed) or "journal" (history: manual-close, incident-cleared, gc-expired, sender-withdrawn, or an unsettled ghost). Answered rows are omitted; owed=true keeps only backing "live".',
             items: { type: "object", additionalProperties: true },
           },
           owners: {

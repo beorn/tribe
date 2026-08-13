@@ -514,9 +514,10 @@ export function logEvent(
   bead_id?: string,
   data?: Record<string, unknown>,
   options: { sender?: string; ref?: string; ts?: number } = {},
-): void {
+): string {
+  const id = randomUUID()
   ctx.stmts.insertMessage.run({
-    $id: randomUUID(),
+    $id: id,
     $type: `event.${type}`,
     $sender: options.sender ?? ctx.getName(),
     $recipient: "*",
@@ -540,4 +541,5 @@ export function logEvent(
     $summary: null,
     $attention_required: 0,
   })
+  return id
 }

@@ -481,6 +481,21 @@ type PendingCliRow = {
   status?: "active" | "expired" | "unanswered"
   settlement?: BallSettlementReason | null
   settled_at?: string | null
+  owner_transport_registered?: boolean
+  owner_transport_state?: "connected" | "disconnected"
+  owner_state?: "live" | "dead" | "unknown"
+  owner_answer_capability?: "observed" | "not-observed"
+  owner_transport_reason?: string
+  owner_transport_observed_at?: string
+}
+
+function pendingOwnerTransportWarning(row: PendingCliRow): string {
+  if (row.owner_answer_capability !== "not-observed") return ""
+  const observedAt = row.owner_transport_observed_at ?? "unknown observation time"
+  return (
+    `  DEGRADED — current owner has no connected, PID-live transport as of ${observedAt}` +
+    "; obligation remains open; no automatic close/reroute"
+  )
 }
 
 async function cmdPending(
@@ -557,7 +572,8 @@ async function cmdPending(
     for (const group of groups) {
       const oldestSec = Math.floor(group.oldest_age_ms / 1000)
       const oldest = oldestSec >= 60 ? `${Math.floor(oldestSec / 60)}m` : `${oldestSec}s`
-      console.log(`  ${group.owner}: ${group.count} (oldest ${oldest} ago)`)
+      const ownerWarning = group.pending[0] ? pendingOwnerTransportWarning(group.pending[0]) : ""
+      console.log(`  ${group.owner}: ${group.count} (oldest ${oldest} ago)${ownerWarning}`)
       for (const p of group.pending) {
         const summary = p.summary?.trim() || "(no summary)"
         const outcome = expired ? `  settlement=${p.settlement ?? "unsettled"}` : ""
@@ -578,7 +594,10 @@ async function cmdPending(
     const ageSec = Math.floor(p.age_ms / 1000)
     const age = ageSec >= 60 ? `${Math.floor(ageSec / 60)}m` : `${ageSec}s`
     const outcome = expired ? `  settlement=${p.settlement ?? "unsettled"}` : ""
-    console.log(`  ${p.request_id}  from ${p.sender}  ${age} ago  fanout=${p.fanout}${outcome}  (msg ${p.message_id})`)
+    console.log(
+      `  ${p.request_id}  from ${p.sender}  ${age} ago  fanout=${p.fanout}${outcome}  ` +
+        `(msg ${p.message_id})${pendingOwnerTransportWarning(p)}`,
+    )
   }
 }
 

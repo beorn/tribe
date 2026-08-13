@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest"
-import { projectSessionLiveness, projectSessionTransportState } from "./session-transport-state.ts"
+import {
+  projectSessionLiveness,
+  projectSessionTransportEvidence,
+  projectSessionTransportState,
+} from "./session-transport-state.ts"
 
 describe("daemon-authoritative session transport state", () => {
   it("treats an authenticated registry entry with no contrary pid evidence as connected", () => {
@@ -81,6 +85,61 @@ describe("daemon-authoritative session transport state", () => {
       agent_alive: true,
       pid_alive: true,
       is_silent: true,
+    })
+  })
+
+  it("uses one PID-aware projection for answer-capability admission", () => {
+    expect(
+      projectSessionTransportEvidence({
+        transportConnected: true,
+        transportPids: [41],
+        agentPid: 42,
+        probe: () => "live",
+      }),
+    ).toMatchObject({
+      transport_state: "connected",
+      owner_state: "live",
+      answer_capability: "observed",
+      answer_reason: "connected-pid-live-transport",
+    })
+    expect(
+      projectSessionTransportEvidence({
+        transportConnected: true,
+        transportPids: [41],
+        agentPid: 42,
+        probe: (pid) => (pid === 41 ? "dead" : "live"),
+      }),
+    ).toMatchObject({
+      transport_registered: true,
+      transport_state: "disconnected",
+      owner_state: "dead",
+      answer_capability: "not-observed",
+      answer_reason: "registered-transport-pids-dead",
+    })
+  })
+
+  it("does not promote silence or disconnected historical rows into an owner identity claim", () => {
+    expect(
+      projectSessionTransportEvidence({
+        transportConnected: true,
+        transportPids: [],
+        agentPid: null,
+        lastSeenSec: 15_234,
+      }),
+    ).toMatchObject({ alive: false, is_silent: true, answer_capability: "observed" })
+    expect(
+      projectSessionTransportEvidence({
+        transportConnected: false,
+        transportPids: [41],
+        agentPid: 42,
+        probe: () => "live",
+      }),
+    ).toMatchObject({
+      transport_registered: false,
+      transport_state: "disconnected",
+      owner_state: "unknown",
+      answer_capability: "not-observed",
+      answer_reason: "owner-unknown-no-transport",
     })
   })
 })

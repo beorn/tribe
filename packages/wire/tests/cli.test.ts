@@ -396,6 +396,12 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
               age_ms: 10_800_000,
               message_id: "msg-agent-2",
               fanout: "first",
+              owner_transport_registered: false,
+              owner_transport_state: "disconnected",
+              owner_state: "unknown",
+              owner_answer_capability: "not-observed",
+              owner_transport_reason: "owner-unknown-no-transport",
+              owner_transport_observed_at: "2026-07-14T11:00:00.000Z",
             },
           ],
         },
@@ -413,6 +419,12 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
               age_ms: 60_000,
               message_id: "msg-ci",
               fanout: "first",
+              owner_transport_registered: true,
+              owner_transport_state: "connected",
+              owner_state: "live",
+              owner_answer_capability: "observed",
+              owner_transport_reason: "connected-pid-live-transport",
+              owner_transport_observed_at: "2026-07-14T11:00:00.000Z",
             },
           ],
         },
@@ -498,6 +510,9 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       expect(human).toMatchObject({ code: 0, stderr: "" })
       expect(human.stdout).toContain("2 pending request(s) across 2 owner(s)")
       expect(human.stdout).toContain("@agent/2: 1 (oldest 180m ago)")
+      expect(human.stdout).toContain("DEGRADED — current owner has no connected, PID-live transport")
+      expect(human.stdout).toContain("obligation remains open; no automatic close/reroute")
+      expect(human.stdout).not.toMatch(/@ci:.*DEGRADED/)
       expect(human.stdout).toContain("req-agent-2  from @chief  to @agent/2  review immutable carrier")
       expect(expiredHuman.stdout).toContain("req-manual")
       expect(expiredHuman.stdout).toContain("settlement=manual-close")

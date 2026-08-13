@@ -58,18 +58,22 @@ the identity of whichever seat invoked `hab up`.
 
 ### Optional delivery fallbacks
 
-`TRIBE_DELIVERY_FALLBACKS` accepts an ordered JSON array of generic
-`{"prefix":"...","to":"..."}` rows. When a direct recipient has no live
-transport, the first matching row persists the original mail, routes an
-attention-bearing `dead-letter` copy to `to`, and makes that fallback recipient
-own the original request id. Concrete rows are composition policy; Tribe never
-infers a parent from a name:
+`TRIBE_DELIVERY_FALLBACKS` accepts an ordered JSON array of generic rows with
+exactly one matcher: `{"name":"...","to":"..."}` for one exact persona, or
+`{"prefix":"...","to":"..."}` for an explicitly declared family. When an
+untracked direct recipient has no answer-capable transport, the first matching
+row persists the original mail and routes an attention-bearing `dead-letter`
+copy to `to`. A tracked request is admitted only when the original recipient or
+its declared fallback has a connected, PID-live transport in the same snapshot;
+otherwise Tribe journals a correlated delivery-failure fact, creates no direct
+message or pending row, and returns a loud refusal. Concrete rows are
+composition policy; Tribe never infers a parent from a name:
 
 ```bash
-TRIBE_DELIVERY_FALLBACKS='[{"prefix":"@worker/","to":"@manager"}]' tribe-daemon
+TRIBE_DELIVERY_FALLBACKS='[{"name":"@scheduler","to":"@chief"}]' tribe-daemon
 ```
 
-Empty fields, duplicate prefixes, unknown keys, malformed JSON, and a
+Empty fields, duplicate matchers, unknown keys, malformed JSON, and a
 self-bounce fail loudly at startup/send time.
 
 ## SQLite state location
