@@ -16,7 +16,13 @@
  *                submodule to at its HEAD (null when standalone / no git).
  *
  * running != on-disk → the checkout advanced after the daemon started → restart.
- * on-disk != pin     → the submodule was never updated to its pin → update+restart.
+ * on-disk != pin     → checkout and pin disagree. Direction matters (@km/tribe
+ *                       live specimen 2026-08-13): a checkout AHEAD of the pin
+ *                       (pin is an ancestor of on-disk) means the PIN is stale,
+ *                       not the checkout — `git submodule update` would roll a
+ *                       good checkout backward. Only a checkout BEHIND the pin
+ *                       (on-disk is an ancestor of pin) gets that remedy; a
+ *                       diverged or unresolvable pair gets neither.
  *
  * Surfaced in `tribe.health()` (`code_pin`) and logged loudly at daemon startup.
  * Vendor-independent: self-locates via `import.meta.dir`, degrades to a visible
@@ -26,15 +32,28 @@
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { createLogger } from "loggily"
-import { probeGitValue, resolveCheckoutCodeIdentity } from "tribe-wire/lib/code-identity"
+import {
+  probeGitValue,
+  resolveCheckoutCodeIdentity,
+  resolvePinDirection,
+  type PinDirection,
+} from "tribe-wire/lib/code-identity"
 
 const log = createLogger("tribe:code-pin")
+
+export type { PinDirection }
 
 export interface CodePinEval {
   /** True when stale, false when fresh, or null when identity is unresolved. */
   stale: boolean | null
   /** Operator-facing remedy, or null when fresh. */
   reason: string | null
+  /**
+   * Ancestry direction of an on-disk-vs-pin mismatch. Null when the two
+   * match, either is unresolved, or the mismatch is the running-vs-on-disk
+   * kind (which has no direction to resolve — restart is always correct).
+   */
+  pin_direction: PinDirection | null
 }
 
 export interface CodePinStatus extends CodePinEval {
@@ -52,27 +71,65 @@ const shortSha = (sha: string): string => sha.slice(0, 12)
  * every provable mismatch, return UNKNOWN rather than certifying freshness.
  * The nulls are still surfaced in CodePinStatus so the indeterminate state
  * stays visible to doctor callers.
+ *
+ * `pinDirection` is an INPUT, not something this function derives itself:
+ * resolving it needs `git merge-base --is-ancestor` (IO), and this decision
+ * stays pure/IO-free like every other field here — callers resolve ancestry
+ * (gatherCodePin, via resolvePinDirection) and pass the fact in. Required
+ * (not optional) so a caller can never silently forget to wire it through;
+ * pass null when onDisk/superprojectPin don't differ (direction moot).
  */
 export function evaluateCodePin(input: {
   running: string | null
   onDisk: string | null
   superprojectPin: string | null
+  pinDirection: PinDirection | null
 }): CodePinEval {
-  const { running, onDisk, superprojectPin } = input
+  const { running, onDisk, superprojectPin, pinDirection } = input
   if (running && onDisk && running !== onDisk) {
     return {
       stale: true,
+      pin_direction: null,
       reason:
         `tribe daemon is running code ${shortSha(running)} but the checkout is now ${shortSha(onDisk)} — ` +
         "restart the daemon to load the integrated code",
     }
   }
   if (onDisk && superprojectPin && onDisk !== superprojectPin) {
+    if (pinDirection === "checkout-ahead") {
+      return {
+        stale: true,
+        pin_direction: "checkout-ahead",
+        reason:
+          `tribe checkout ${shortSha(onDisk)} is ahead of superproject pin ${shortSha(superprojectPin)} — ` +
+          "the pin lags the running checkout (convergence pending elsewhere); no daemon action needed — " +
+          "do NOT run `git submodule update`, it would roll the checkout backward",
+      }
+    }
+    if (pinDirection === "divergent") {
+      return {
+        stale: true,
+        pin_direction: "divergent",
+        reason:
+          `tribe checkout ${shortSha(onDisk)} and superproject pin ${shortSha(superprojectPin)} have diverged ` +
+          "(neither is an ancestor of the other) — investigate before acting; no mechanical remedy applies",
+      }
+    }
+    if (pinDirection === "checkout-behind") {
+      return {
+        stale: true,
+        pin_direction: "checkout-behind",
+        reason:
+          `tribe submodule checkout ${shortSha(onDisk)} != superproject pin ${shortSha(superprojectPin)} — ` +
+          "run `git submodule update --init` for the tribe path, then restart the daemon",
+      }
+    }
     return {
       stale: true,
+      pin_direction: "unknown",
       reason:
-        `tribe submodule checkout ${shortSha(onDisk)} != superproject pin ${shortSha(superprojectPin)} — ` +
-        "run `git submodule update --init` for the tribe path, then restart the daemon",
+        `tribe submodule checkout ${shortSha(onDisk)} != superproject pin ${shortSha(superprojectPin)}, but ` +
+        "ancestry between them could not be resolved (unknown-direction) — do not guess; inspect both commits before acting",
     }
   }
   const unresolved = [
@@ -83,10 +140,11 @@ export function evaluateCodePin(input: {
   if (unresolved.length > 0) {
     return {
       stale: null,
+      pin_direction: null,
       reason: `cannot compare daemon code identity: unresolved ${unresolved.join(", ")}`,
     }
   }
-  return { stale: false, reason: null }
+  return { stale: false, pin_direction: null, reason: null }
 }
 
 /**
@@ -115,7 +173,14 @@ export function gatherCodePin(
   if (!resolved.superprojectPin.ok) {
     log.debug?.(`superproject pin probe failed: ${resolved.superprojectPin.failure.message}`)
   }
-  const evaluated = evaluateCodePin({ running: startupSha, onDisk, superprojectPin })
+  // Only worth an extra `merge-base --is-ancestor` round trip when the two
+  // SHAs actually differ — matches the precondition documented on
+  // resolvePinDirection and avoids IO evaluateCodePin's other branches never use.
+  const pinDirection =
+    onDisk && superprojectPin && onDisk !== superprojectPin
+      ? resolvePinDirection(srcDir, onDisk, superprojectPin)
+      : null
+  const evaluated = evaluateCodePin({ running: startupSha, onDisk, superprojectPin, pinDirection })
   return {
     ...evaluated,
     running: startupSha,

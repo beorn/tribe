@@ -133,6 +133,7 @@ describe("status-backed doctor checks", () => {
     const check = evaluateDoctorIdentity(
       { cert: "abc123", root: "/repo/vendor/tribe" },
       { onDisk: success("abc123"), superprojectPin: success("abc123") },
+      null,
     )
     expect(check).toMatchObject({ severity: "OK", values: { running: "abc123", on_disk: "abc123", pin: "abc123" } })
   })
@@ -141,6 +142,7 @@ describe("status-backed doctor checks", () => {
     const check = evaluateDoctorIdentity(
       { cert: "old123", root: "/repo/vendor/tribe" },
       { onDisk: success("new456"), superprojectPin: success("new456") },
+      null,
     )
     expect(check).toMatchObject({ severity: "CRITICAL" })
     expect(check.diagnosis).toContain("running=old123 on_disk=new456")
@@ -148,14 +150,54 @@ describe("status-backed doctor checks", () => {
     expect(check.remedy).toContain("daemon module root")
   })
 
-  test("disk vs superproject pin mismatch is WARNING with the exact source root", () => {
+  test("disk vs superproject pin mismatch is WARNING with the exact source root, checkout-behind", () => {
     const check = evaluateDoctorIdentity(
       { cert: "old123", root: "/repo/vendor/tribe" },
       { onDisk: success("old123"), superprojectPin: success("new456") },
+      "checkout-behind",
     )
     expect(check).toMatchObject({ severity: "WARNING" })
     expect(check.diagnosis).toContain("on_disk=old123 pin=new456")
+    expect(check.diagnosis).toMatch(/behind/i)
     expect(check.remedy).toContain("/repo/vendor/tribe")
+  })
+
+  test("checkout AHEAD of its host pin must NOT emit the rollback remedy (live specimen 2026-08-13)", () => {
+    // Same live specimen as code-pin.test.ts: on_disk c15f7d1bb7aa was 6
+    // commits ahead of pin 60a5c3c8816a. The un-fixed evaluateDoctorIdentity
+    // treats any on_disk!=pin mismatch as "checkout is behind" and tells the
+    // operator to materialize the (older) pin — a rollback dressed as a fix.
+    const check = evaluateDoctorIdentity(
+      { cert: "c15f7d1bb7aa", root: "/repo/vendor/tribe" },
+      { onDisk: success("c15f7d1bb7aa"), superprojectPin: success("60a5c3c8816a") },
+      "checkout-ahead",
+    )
+    expect(check.severity).not.toBe("UNKNOWN")
+    expect(check.diagnosis).not.toMatch(/is behind/i)
+    expect(check.diagnosis).toMatch(/ahead/i)
+    expect(check.remedy).not.toContain("materialize its pinned Tribe submodule")
+    expect(check.remedy).toMatch(/no daemon action/i)
+  })
+
+  test("diverged checkout and pin recommend investigation, no mechanical remedy", () => {
+    const check = evaluateDoctorIdentity(
+      { cert: "1111", root: "/repo/vendor/tribe" },
+      { onDisk: success("1111"), superprojectPin: success("2222") },
+      "divergent",
+    )
+    expect(check.diagnosis).toMatch(/diverged/i)
+    expect(check.remedy).not.toContain("materialize its pinned Tribe submodule")
+  })
+
+  test("unresolvable ancestry (unknown-object) is UNKNOWN, never guessed toward a remedy", () => {
+    const check = evaluateDoctorIdentity(
+      { cert: "3333", root: "/repo/vendor/tribe" },
+      { onDisk: success("3333"), superprojectPin: success("4444") },
+      "unknown",
+    )
+    expect(check.severity).toBe("UNKNOWN")
+    expect(check.diagnosis).toMatch(/unknown-direction/i)
+    expect(check.remedy).not.toContain("materialize its pinned Tribe submodule")
   })
 
   test("an unresolvable disk probe is UNKNOWN with path and errno", () => {
@@ -173,6 +215,7 @@ describe("status-backed doctor checks", () => {
         },
         superprojectPin: success("abc123"),
       },
+      null,
     )
     expect(check).toMatchObject({ severity: "UNKNOWN" })
     expect(check.diagnosis).toContain("path=/missing/tribe")

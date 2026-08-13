@@ -22,7 +22,13 @@ import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-
 import { readTribeLaunchId } from "../launch-environment.ts"
 import { withCliDaemonClient } from "./daemon-client.ts"
 import { mcpJsonContent } from "./mcp-json-content.ts"
-import { resolveCheckoutCodeIdentity, type CheckoutCodeIdentity, type GitProbe } from "../lib/code-identity.ts"
+import {
+  resolveCheckoutCodeIdentity,
+  resolvePinDirection,
+  type CheckoutCodeIdentity,
+  type GitProbe,
+  type PinDirection,
+} from "../lib/code-identity.ts"
 import type { BallSettlementReason } from "../lib/ball-outcome.ts"
 
 const PENDING_CLI = visibleCliProjectionForMcp("pending")
@@ -647,6 +653,14 @@ interface DoctorHealthShape {
     running: string | null
     on_disk: string | null
     superproject_pin: string | null
+    /**
+     * Ancestry direction of an on_disk-vs-pin mismatch (additive field; older
+     * daemons omit it). evaluateDoctor doesn't branch on it today — the
+     * daemon's own `reason` text is already direction-aware and is what's
+     * surfaced — but the shape is declared here so it isn't silently dropped
+     * by callers that log or forward the full payload.
+     */
+    pin_direction?: PinDirection | null
   }
 }
 
@@ -706,9 +720,18 @@ function probeFailure(probe: Exclude<GitProbe, { ok: true }>): string {
   return `${operation} failed path=${path} errno=${errno}: ${message}`
 }
 
+/**
+ * `pinDirection` is an INPUT, not derived here: resolving ancestry needs
+ * `git merge-base --is-ancestor` (IO), and this check is tested with
+ * fabricated GitProbe values, no live git — mirrors the same pure/impure
+ * split as code-pin.ts's evaluateCodePin. Callers (cmdDoctor) resolve
+ * direction via resolvePinDirection and pass the fact in; pass null when
+ * on_disk/pin don't differ (direction moot) or wasn't computed.
+ */
 export function evaluateDoctorIdentity(
   reported: { cert: string | null; root: string } | undefined,
   resolved: CheckoutCodeIdentity | undefined,
+  pinDirection: PinDirection | null,
 ): DoctorDiagnosticCheck {
   if (reported === undefined) {
     return {
@@ -748,13 +771,45 @@ export function evaluateDoctorIdentity(
     }
   }
   if (values.on_disk !== values.pin) {
+    if (pinDirection === "checkout-ahead") {
+      return {
+        severity: "WARNING",
+        values,
+        diagnosis:
+          `Tribe checkout is ahead of its host pin running=${values.running} on_disk=${values.on_disk} pin=${values.pin} ` +
+          "(the pin lags the checkout; convergence pending elsewhere)",
+        remedy:
+          "no daemon action needed; do NOT materialize the submodule from this pin, it would roll the checkout " +
+          "backward. If the pin itself needs to move, that is a superproject change made upstream, not a `tribe doctor` remedy.",
+      }
+    }
+    if (pinDirection === "divergent") {
+      return {
+        severity: "WARNING",
+        values,
+        diagnosis:
+          `Tribe checkout and its host pin have diverged running=${values.running} on_disk=${values.on_disk} pin=${values.pin} ` +
+          "(neither is an ancestor of the other)",
+        remedy: "investigate before acting; no mechanical remedy applies here",
+      }
+    }
+    if (pinDirection === "checkout-behind") {
+      return {
+        severity: "WARNING",
+        values,
+        diagnosis: `Tribe checkout is behind its host pin running=${values.running} on_disk=${values.on_disk} pin=${values.pin}`,
+        remedy:
+          `resolve the superproject with \`git -C ${JSON.stringify(reported.root)} rev-parse --show-superproject-working-tree\`, ` +
+          "materialize its pinned Tribe submodule, then re-run `tribe doctor`",
+      }
+    }
     return {
-      severity: "WARNING",
+      severity: "UNKNOWN",
       values,
-      diagnosis: `Tribe checkout is behind its host pin running=${values.running} on_disk=${values.on_disk} pin=${values.pin}`,
-      remedy:
-        `resolve the superproject with \`git -C ${JSON.stringify(reported.root)} rev-parse --show-superproject-working-tree\`, ` +
-        "materialize its pinned Tribe submodule, then re-run `tribe doctor`",
+      diagnosis:
+        `Tribe checkout differs from its host pin running=${values.running} on_disk=${values.on_disk} pin=${values.pin}, ` +
+        "but ancestry between them could not be resolved (unknown-direction)",
+      remedy: "do not guess; inspect both commits (e.g. fetch missing objects) before acting",
     }
   }
   return {
@@ -992,7 +1047,20 @@ async function cmdDoctor(opts: { fix?: boolean }): Promise<void> {
     reportedIdentity?.root && typeof reportedIdentity.root === "string"
       ? resolveCheckoutCodeIdentity(reportedIdentity.root)
       : undefined
-  const identity = evaluateDoctorIdentity(reportedIdentity, resolvedIdentity)
+  // Same precondition as gatherCodePin: only worth resolving ancestry when
+  // on_disk and pin actually differ (and both resolved in the first place).
+  const identityPinDirection =
+    reportedIdentity?.root &&
+    resolvedIdentity?.onDisk.ok &&
+    resolvedIdentity.superprojectPin.ok &&
+    resolvedIdentity.onDisk.value !== resolvedIdentity.superprojectPin.value
+      ? resolvePinDirection(
+          reportedIdentity.root,
+          resolvedIdentity.onDisk.value,
+          resolvedIdentity.superprojectPin.value,
+        )
+      : null
+  const identity = evaluateDoctorIdentity(reportedIdentity, resolvedIdentity, identityPinDirection)
   const versions = evaluateDoctorVersions(daemonProtocol, status.sessions ?? [])
 
   let membership: DoctorDiagnosticCheck
