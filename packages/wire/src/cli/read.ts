@@ -227,6 +227,7 @@ type InboxWaitChunkResult = InboxWaitResult & {
 
 const INBOX_WAIT_CHUNK_MS = 30_000
 const INBOX_WAIT_RETRY_DELAY_MS = 250
+const INBOX_WAIT_MAX_RETRY_DELAY_MS = 5_000
 const INBOX_WAIT_UNAVAILABLE_GRACE_MS = 2_000
 
 // ---------------------------------------------------------------------------
@@ -1308,13 +1309,15 @@ export async function waitForInboxWithReconnect(opts: {
   sleep?: (ms: number) => Promise<void>
   maxChunkMs?: number
   retryDelayMs?: number
+  maxRetryDelayMs?: number
   unavailableGraceMs?: number
   wakeOnCorrelatedReply?: boolean
 }): Promise<InboxWaitResult> {
   const now = opts.now ?? Date.now
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
   const maxChunkMs = opts.maxChunkMs ?? INBOX_WAIT_CHUNK_MS
-  const retryDelayMs = opts.retryDelayMs ?? INBOX_WAIT_RETRY_DELAY_MS
+  const retryDelayMs = Math.max(0, opts.retryDelayMs ?? INBOX_WAIT_RETRY_DELAY_MS)
+  const maxRetryDelayMs = Math.max(retryDelayMs, opts.maxRetryDelayMs ?? INBOX_WAIT_MAX_RETRY_DELAY_MS)
   const unavailableGraceMs = opts.unavailableGraceMs ?? INBOX_WAIT_UNAVAILABLE_GRACE_MS
   const controls = resolveInboxWaitControls({
     timeout_ms: opts.timeoutMs,
@@ -1326,6 +1329,7 @@ export async function waitForInboxWithReconnect(opts: {
   let lastRetryableError: unknown
   let attempted = false
   let afterSeq: number | undefined
+  let consecutiveRetryableErrors = 0
 
   while (true) {
     const remainingMs = Math.max(0, deadline - now())
@@ -1341,6 +1345,7 @@ export async function waitForInboxWithReconnect(opts: {
         wakeOnCorrelatedReply: controls.wakeOnCorrelatedReply,
         ...(afterSeq === undefined ? {} : { afterSeq }),
       })
+      consecutiveRetryableErrors = 0
       if (Number.isSafeInteger(result.baseline_seq) && Number(result.baseline_seq) >= 0) {
         afterSeq = Number(result.baseline_seq)
       }
@@ -1370,7 +1375,9 @@ export async function waitForInboxWithReconnect(opts: {
       if (afterErrorRemainingMs <= 0) {
         return logicalTimeoutInboxWaitResult(latestResult, lastRetryableError, startedAt, now, controls.timeoutMs)
       }
-      const pauseMs = Math.min(retryDelayMs, afterErrorRemainingMs)
+      const retryBackoffMs = Math.min(maxRetryDelayMs, retryDelayMs * 2 ** Math.min(consecutiveRetryableErrors, 30))
+      consecutiveRetryableErrors += 1
+      const pauseMs = Math.min(retryBackoffMs, afterErrorRemainingMs)
       if (pauseMs > 0) await sleep(pauseMs)
     }
   }

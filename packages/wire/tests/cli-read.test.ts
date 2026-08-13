@@ -267,6 +267,86 @@ describe("waitForInboxWithReconnect", () => {
     expect(result.timed_out).toBe(false)
   })
 
+  test("backs off consecutive transport redials and caps the retry delay", async () => {
+    let now = 0
+    let calls = 0
+    const sleeps: number[] = []
+    const result = await waitForInboxWithReconnect({
+      session: "@ci",
+      timeoutMs: 60_000,
+      maxChunkMs: 30_000,
+      retryDelayMs: 100,
+      maxRetryDelayMs: 250,
+      now: () => now,
+      sleep: async (ms) => {
+        sleeps.push(ms)
+        now += ms
+      },
+      call: async ({ timeoutMs }) => {
+        calls += 1
+        if (calls <= 4) {
+          throw Object.assign(new Error("Connection closed"), { code: "ECONNRESET" })
+        }
+        now += 1
+        return {
+          status: "woken",
+          session: "@ci",
+          unread_count: 1,
+          oldest_unread_age_min: 0,
+          oldest_unread_ts: now,
+          waited_ms: 1,
+          effective_timeout_ms: timeoutMs,
+          timed_out: false,
+          aborted: false,
+          attention: EMPTY_ATTENTION,
+        }
+      },
+    })
+
+    expect(sleeps).toEqual([100, 200, 250, 250])
+    expect(result.waited_ms).toBe(801)
+  })
+
+  test("resets reconnect backoff after an authoritative daemon chunk", async () => {
+    let now = 0
+    let calls = 0
+    const sleeps: number[] = []
+    const result = await waitForInboxWithReconnect({
+      session: "@ci",
+      timeoutMs: 60_000,
+      maxChunkMs: 30_000,
+      retryDelayMs: 100,
+      maxRetryDelayMs: 1_000,
+      now: () => now,
+      sleep: async (ms) => {
+        sleeps.push(ms)
+        now += ms
+      },
+      call: async ({ timeoutMs }) => {
+        calls += 1
+        if (calls === 1 || calls === 3) {
+          throw Object.assign(new Error("Connection closed"), { code: "ECONNRESET" })
+        }
+        now += 1
+        return {
+          status: calls === 2 ? "timeout" : "woken",
+          session: "@ci",
+          unread_count: calls === 2 ? 0 : 1,
+          oldest_unread_age_min: 0,
+          oldest_unread_ts: now,
+          waited_ms: 1,
+          effective_timeout_ms: timeoutMs,
+          timed_out: calls === 2,
+          aborted: false,
+          attention: EMPTY_ATTENTION,
+        }
+      },
+    })
+
+    expect(sleeps).toEqual([100, 100])
+    expect(result.unread_count).toBe(1)
+  })
+
   test("clamps the last retry and keeps reload churn loud without an authoritative daemon result", async () => {
     let now = 0
     const chunkCalls: number[] = []
