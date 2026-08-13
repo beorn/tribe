@@ -160,6 +160,102 @@ describe("closing a ball backlog in one call", () => {
     expect(payload.results).toBeUndefined()
   })
 
+  /**
+   * The batch reused the SINGLE-id miss template, whose text hardcodes
+   * "closed 0 rows", and passed a count string ("1 of 4") where the template
+   * expects a request id. A drain that WORKED therefore announced its own
+   * failure: closing 4 ids against a pile of 3 emptied the pile and emitted
+   * "reply/close 1 of 4 closed 0 rows; @chief owns no open balls". Loud, on
+   * the primary path, and triggered precisely BECAUSE the close succeeded —
+   * the inverse of a silent error and just as damaging to trust.
+   */
+  describe("batch warning tells the truth about a partial drain", () => {
+    it("reports what actually closed instead of 'closed 0 rows'", () => {
+      openBall("req-a")
+      openBall("req-b")
+      openBall("req-c")
+
+      const payload = callClose(["req-a", "req-b", "req-c", "req-stale"])
+      const warning = String(payload.warning ?? "")
+
+      expect(payload.closed).toBe(3)
+      expect(openCount()).toBe(0)
+      // The drain worked. The warning must say so.
+      expect(warning).not.toMatch(/closed 0 rows/)
+      expect(warning).toMatch(/3/)
+      expect(warning).toMatch(/4/)
+    })
+
+    it("does not claim the owner holds no balls when it just emptied the pile", () => {
+      openBall("req-a")
+
+      const payload = callClose(["req-a", "req-stale"])
+      const warning = String(payload.warning ?? "")
+
+      // "owns no open balls" was literally true after the drain and utterly
+      // misleading as an explanation for why an id missed.
+      expect(payload.closed).toBe(1)
+      expect(warning).not.toMatch(/owns no open balls/)
+      expect(warning).toMatch(/req-stale/)
+    })
+
+    it("handles a duplicate id honestly rather than as a failed drain", () => {
+      openBall("req-x")
+
+      const payload = callClose(["req-x", "req-x"])
+      const results = payload.results as Array<{ request_id: string; closed: number }>
+
+      expect(payload.closed).toBe(1)
+      expect(results.map((row) => row.closed)).toEqual([1, 0])
+      expect(String(payload.warning ?? "")).not.toMatch(/closed 0 rows/)
+      expect(openCount()).toBe(0)
+    })
+
+    it("stays silent when every id in the batch closed", () => {
+      openBall("req-a")
+      openBall("req-b")
+
+      const payload = callClose(["req-a", "req-b"])
+
+      expect(payload.closed).toBe(2)
+      expect(payload.warning).toBeUndefined()
+    })
+  })
+
+  describe("batch size is capped", () => {
+    it("refuses an oversized batch loudly, naming the cap and the submitted count", () => {
+      // One call holds ONE write transaction across every id, on a branch whose
+      // whole subject is event-loop starvation. An unbounded list is a wedge
+      // waiting to be submitted.
+      const ids = Array.from({ length: 101 }, (_, i) => `req-${i}`)
+      const payload = callClose(ids)
+      const error = String(payload.error ?? "")
+
+      expect(error).toMatch(/100/)
+      expect(error).toMatch(/101/)
+      expect(openCount()).toBe(0)
+    })
+
+    it("accepts a batch exactly at the cap", () => {
+      for (let i = 0; i < 100; i++) openBall(`req-${i}`)
+      const ids = Array.from({ length: 100 }, (_, i) => `req-${i}`)
+
+      expect(callClose(ids).closed).toBe(100)
+      expect(openCount()).toBe(0)
+    })
+  })
+
+  it("refuses an empty single-form close instead of printing a listing", () => {
+    // "" fell through the batch branch (not an array) AND the single branch
+    // (length 0), landing on the plain pending listing — a close that closed
+    // nothing and never said so.
+    openBall("req-a")
+    const payload = callClose("")
+
+    expect(String(payload.error ?? "")).toMatch(/close/i)
+    expect(openCount()).toBe(1)
+  })
+
   it("bounds the miss warning instead of listing every open ball", () => {
     // Measured on main: the warning names every open ball, so it grew from 877
     // chars at 20 balls to 16,757 at 400 — an unbounded response body on the

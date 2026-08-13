@@ -968,6 +968,37 @@ const ATTENTION_PENDING_BALL_LIMIT = 10
 /** Example balls named in a close-miss warning; the count carries the rest. */
 const MISS_WARNING_EXAMPLES = 5
 
+/** Ids one `tribe.pending` close batch may carry. See the batch branch. */
+const PENDING_CLOSE_BATCH_MAX = 100
+
+/**
+ * What a partly-successful batch close actually did.
+ *
+ * Deliberately NOT the single-id miss template: that text hardcodes
+ * "closed 0 rows" and takes a request id, so a batch could only feed it a
+ * count, and a drain that worked reported itself as a total failure. This
+ * states the real total first, then names the ids that matched nothing —
+ * bounded, because a stale drain can miss on many ids at once and the per-id
+ * `reason` rows in the response already carry the full detail.
+ */
+function pendingCloseBatchWarning(
+  owner: string,
+  submitted: number,
+  closed: number,
+  results: ReadonlyArray<{ request_id: string; closed: number }>,
+): string {
+  const missed = results.filter((row) => row.closed === 0).map((row) => row.request_id)
+  const shown = missed.slice(0, MISS_WARNING_EXAMPLES)
+  const elided = missed.length - shown.length
+  const more = elided > 0 ? `, and ${elided} more` : ""
+  const noun = missed.length === 1 ? "id" : "ids"
+  return (
+    `closed ${closed} of ${submitted} for ${owner}; ` +
+    `${missed.length} ${noun} matched no open ball: ${shown.join(", ")}${more} ` +
+    `(per-id detail in results)`
+  )
+}
+
 export type AttentionProjection = {
   actionable_unread: FetchEvent[]
   pending_balls: PendingBall[]
@@ -1159,6 +1190,13 @@ function pendingCloseMissWarning(
   const peerSet = peers ? new Set(peers) : null
   const now = Date.now()
   const fromRelevantPeer = (ball: PendingBall) => peerSet === null || peerSet.has(ball.sender)
+  // This read is unbounded: it fetches the owner's whole pile to produce the
+  // count below, so miss latency grows with the backlog — measured 0.07ms at
+  // 20 balls, 0.50ms at 400. It stays that way because half a millisecond on
+  // a miss is not worth the complexity of a bounded count-plus-sample, and
+  // for no other reason. In particular NOT to preserve the peer preference
+  // below: `peers` is undefined at the close call site, so that branch is
+  // inert there and only does work on the tracker/reply path.
   const allPending = pendingBallsForOwner(ctx, owner, now)
   const peerPending = allPending.filter(fromRelevantPeer)
   // An empty ball list is the *loudest* case, not the quiet one: the id matched
@@ -1335,17 +1373,42 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
         error: "tribe.pending: close accepts a request id or a non-empty list of non-empty request ids.",
       })
     }
+    // Capped. The whole batch runs inside ONE write transaction, on a branch
+    // whose subject is event-loop starvation — an unbounded list is a wedge
+    // waiting to be submitted. A 200-ball backlog takes two calls, which is
+    // still two round trips instead of two hundred.
+    if (closeBatch.length > PENDING_CLOSE_BATCH_MAX) {
+      return jsonResult({
+        error:
+          `tribe.pending: close batch of ${closeBatch.length} exceeds the ${PENDING_CLOSE_BATCH_MAX} id limit; ` +
+          `split it into batches of at most ${PENDING_CLOSE_BATCH_MAX}.`,
+      })
+    }
     const ids = closeBatch as string[]
-    // One transaction for the whole batch, but NOT all-or-nothing: an id that
-    // matches nothing is a reported result row, not a rollback of its peers.
+    // One transaction for the whole batch, but NOT all-or-nothing about
+    // MISSES: an id that matches nothing is a reported result row, not a
+    // rollback of its peers. A genuine ERROR mid-batch is different — it
+    // aborts the transaction, so nothing settles and the caller never sees a
+    // `results` array. That is deliberate: on error, no ball was closed.
     const results = ctx.db.transaction(() => ids.map((id) => closeOneBall(ctx, owner, id, now)))()
     const closed = results.reduce((total, row) => total + row.closed, 0)
-    // The miss context is read at most ONCE for the whole batch, not per id.
-    const warning =
-      closed < ids.length
-        ? pendingCloseMissWarning(ctx, owner, undefined, `${ids.length - closed} of ${ids.length}`)
-        : undefined
+    // The batch composes its OWN summary and never borrows the single-id miss
+    // template. That template's text hardcodes "closed 0 rows" and expects a
+    // request id where the batch could only supply a count, so a drain that
+    // WORKED announced "reply/close 3 of 4 closed 0 rows; owner owns no open
+    // balls" — a loud false failure on the primary path, fired precisely
+    // because the close succeeded.
+    const warning = closed === ids.length ? undefined : pendingCloseBatchWarning(owner, ids.length, closed, results)
     return jsonResult({ owner, closed, results, ...(warning ? { warning } : {}) })
+  }
+
+  // An empty string reached neither branch — not an array, and length 0 — so
+  // it fell through to the plain pending listing: a close that closed nothing
+  // and never said so. Refused here, symmetric with the batch's refusal above.
+  if (typeof a.close === "string" && a.close.length === 0) {
+    return jsonResult({
+      error: "tribe.pending: close requires a non-empty request id.",
+    })
   }
 
   const closeId = typeof a.close === "string" && a.close.length > 0 ? a.close : null
