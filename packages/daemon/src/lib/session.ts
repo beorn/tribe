@@ -379,17 +379,29 @@ export function registerSession(
   // `providerLaunchId::persona` (wire `persona-launch-identity.ts`), so an
   // older row carrying the same launch id is THIS seat registered over a
   // previous connection, not a second seat. The name-holder eviction above
-  // only catches it when the name still matches — when the daemon still
+  // only catches it while the name still matches — when the daemon still
   // believes the dead connection is live, this registration auto-suffixes and
   // the old row would otherwise linger forever as a durable-launch "wedge".
-  // A live registration arriving is positive evidence of replacement, so this
-  // never infers absence from a missing transport.
+  //
+  // Sibling transports of ONE launch never reach here: the dispatcher's
+  // same-launch fan-in adopts the holder's ctx and returns before
+  // registration, so all siblings share one session id and one row. What does
+  // reach here is a genuinely new session id for a launch that already has a
+  // row — a relaunch or a reconnect.
+  //
+  // The eviction fence is the same one the name-holder check above uses: a row
+  // whose session is still connected AND whose pid is still alive is a live
+  // session (e.g. one renamed since it registered, which the name-keyed fan-in
+  // misses) and is left alone. Only a disconnected row, or a connected row
+  // whose owning process is provably gone, is superseded.
   const launchIdentity = typeof launchId === "string" && launchId.trim().length > 0 ? launchId.trim() : null
   if (launchIdentity !== null) {
-    const superseded = ctx.db
-      .prepare("SELECT id FROM sessions WHERE launch_id = $launch_id AND id != $id")
-      .all({ $launch_id: launchIdentity, $id: ctx.sessionId }) as Array<{ id: string }>
-    for (const row of superseded) {
+    const sameLaunchRows = ctx.db
+      .prepare("SELECT id, pid FROM sessions WHERE launch_id = $launch_id AND id != $id")
+      .all({ $launch_id: launchIdentity, $id: ctx.sessionId }) as Array<{ id: string; pid: number }>
+    for (const row of sameLaunchRows) {
+      const rowActive = isActive ? isActive(row.id) : false
+      if (rowActive && isPidAlive(row.pid)) continue
       ctx.db.prepare("DELETE FROM room_members WHERE session_id = $id").run({ $id: row.id })
       ctx.db.prepare("DELETE FROM sessions WHERE id = $id").run({ $id: row.id })
       log.info?.(`superseded session row ${row.id} — launch ${launchIdentity} re-registered as "${finalName}"`)

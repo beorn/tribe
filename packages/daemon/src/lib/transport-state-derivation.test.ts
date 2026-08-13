@@ -339,6 +339,18 @@ describe("a live registration supersedes the dead one for the same launch_id", (
     expect(rows).toEqual([{ id: "new-connection", name: "@agent/6", launch_id: LAUNCH.id }])
   })
 
+  it("never supersedes a row that is still connected with a live pid", () => {
+    // Sibling transports of one launch share a session id via the dispatcher's
+    // same-launch fan-in and never reach registerSession, but a session RENAMED
+    // after it registered misses that name-keyed fan-in. If such a row were
+    // superseded, a live seat would lose its registration to its own reconnect.
+    addSession(db, stmts, "live-renamed", "@agent/6-renamed", process.pid, LAUNCH)
+    addSession(db, stmts, "new-connection", "@agent/6", process.pid, LAUNCH, (id) => id === "live-renamed")
+
+    const rows = db.prepare("SELECT id FROM sessions ORDER BY id").all() as Array<{ id: string }>
+    expect(rows).toEqual([{ id: "live-renamed" }, { id: "new-connection" }])
+  })
+
   it("does not report a superseded durable row as a transport wedge (specimen 2)", () => {
     addSession(db, stmts, "new-connection", "@agent/6-2", process.pid, LAUNCH)
     insertLegacyDurableRow(db, "old-connection", "@agent/6", LAUNCH)
