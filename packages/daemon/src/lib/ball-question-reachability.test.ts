@@ -169,6 +169,32 @@ describe("a ball never outlives its question (22844)", () => {
     expect(pending[0]).toHaveProperty("content", null)
   })
 
+  it("active pending snapshots recover question bodies from the archive", () => {
+    const { db, stmts } = setup()
+    const sender = makeContext(db, stmts, "@fable/1")
+    const body = "Archived question whose ball is still active."
+    sendMessage(
+      sender,
+      "@chief",
+      body,
+      "request",
+      undefined,
+      undefined,
+      "direct",
+      { summary: "archived active question" },
+      { request: "archived-active-question" },
+    )
+    const cutoff = Date.now() + 1_000
+    stmts.archiveExpiredMessages.run({ $cutoff: cutoff, $archived_at: cutoff })
+    stmts.deleteExpiredMessages.run({ $cutoff: cutoff })
+
+    const chief = makeContext(db, stmts, "@chief")
+    const res = parseToolJson(handleToolCall(chief, "tribe.pending", { owner: "@chief" }, makeOpts()))
+    const pending = (res.pending ?? []) as PendingRow[]
+    expect(pending).toHaveLength(1)
+    expect(pending[0]).toMatchObject({ request_id: "archived-active-question", content: body })
+  })
+
   it("the fleet-wide and expired views carry bodies too", () => {
     const { db, stmts } = setup()
     const sender = makeContext(db, stmts, "@fable/1")
