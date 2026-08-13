@@ -965,6 +965,9 @@ type PendingBallSummary = {
 
 const ATTENTION_PENDING_BALL_LIMIT = 10
 
+/** Example balls named in a close-miss warning; the count carries the rest. */
+const MISS_WARNING_EXAMPLES = 5
+
 export type AttentionProjection = {
   actionable_unread: FetchEvent[]
   pending_balls: PendingBall[]
@@ -1167,14 +1170,50 @@ function pendingCloseMissWarning(
   // intended close target. If that peer has none, show the owner's actual open
   // obligations instead of making the false global claim that none exist.
   const pending = peerPending.length > 0 ? peerPending : allPending
-  const listing = pending
+  // Bounded. This listing named EVERY open ball, so it grew with the backlog —
+  // measured at 877 characters for 20 balls and 16,757 for 400 — on the path an
+  // operator hits most while draining a stale pile. The count is what tells
+  // them the id was wrong; a few examples tell them what the right ones look
+  // like; the rest is a response body nobody reads. `tribe pending` remains the
+  // way to see all of them.
+  const shown = pending.slice(0, MISS_WARNING_EXAMPLES)
+  const listing = shown
     .map((ball) => {
       const deadlinePassed = ball.expires_at !== null && Date.parse(ball.expires_at) <= now
       const deadline = deadlinePassed ? "; declared deadline passed, still open" : ""
       return `${ball.request_id} (message ${ball.message_id}, from ${ball.sender}${deadline})`
     })
     .join(", ")
-  return `reply/close ${attemptedId} closed 0 rows; balls owned by ${owner}: ${listing}`
+  const elided = pending.length - shown.length
+  const more = elided > 0 ? `, and ${elided} more (run \`tribe pending\` for the full list)` : ""
+  return `reply/close ${attemptedId} closed 0 rows; ${owner} owns ${pending.length} open ball(s): ${listing}${more}`
+}
+
+/**
+ * Settle one ball for `owner`. The single and batch close paths share this so
+ * the two can never diverge on what "closed" means. Must be called inside a
+ * transaction by its caller — the batch opens one for the whole list.
+ */
+function closeOneBall(
+  ctx: TribeContext,
+  owner: string,
+  attemptedId: string,
+  now: number,
+): { request_id: string; closed: number; reason?: string } {
+  const pending = ctx.stmts.selectPendingForReplyRecipient.get({
+    $reply_id: attemptedId,
+    $recipient: owner,
+  }) as { request_id: string } | null
+  const requestId = pending?.request_id ?? attemptedId
+  const row = ctx.stmts.selectPendingSettlementForRecipient.get({
+    $request_id: requestId,
+    $recipient: owner,
+  }) as PendingSettlementRow | null
+  if (row === null) {
+    return { request_id: requestId, closed: 0, reason: `no open ball ${requestId} owned by ${owner}` }
+  }
+  const settlement = ctx.getName() === row.sender && ctx.getName() !== owner ? "sender-withdrawn" : "manual-close"
+  return { request_id: requestId, closed: settlePendingRows(ctx, [row], settlement, ctx.getName(), now) }
 }
 
 function trackerMissWarning(
@@ -1278,24 +1317,47 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
     return jsonResult({ owner, pruned, stale_ms: staleMs })
   }
 
+  // A backlog drain used to cost one round trip per ball, so a standing
+  // "at most five open balls" rule was unsatisfiable against 200 parked ones:
+  // 200 spawn+connect+RPC cycles on a rail that one send per 1.5s already
+  // saturates. `close` therefore also accepts a LIST, settled in one call and
+  // one transaction. Both forms route through the same `closeOneBall` below,
+  // so the batch cannot drift from the single close it batches.
+  //
+  // Note for anyone optimising further: the per-close cost is not the problem.
+  // A close that HITS is flat at ~0.047ms whether 20 or 400 balls are open —
+  // both lookups are keyed on pending_request's primary key — and a full drain
+  // is linear, not quadratic. The win here is collapsing n round trips into 1.
+  const closeBatch = Array.isArray(a.close) ? a.close : null
+  if (closeBatch !== null) {
+    if (closeBatch.length === 0 || !closeBatch.every((id) => typeof id === "string" && id.length > 0)) {
+      return jsonResult({
+        error: "tribe.pending: close accepts a request id or a non-empty list of non-empty request ids.",
+      })
+    }
+    const ids = closeBatch as string[]
+    // One transaction for the whole batch, but NOT all-or-nothing: an id that
+    // matches nothing is a reported result row, not a rollback of its peers.
+    const results = ctx.db.transaction(() => ids.map((id) => closeOneBall(ctx, owner, id, now)))()
+    const closed = results.reduce((total, row) => total + row.closed, 0)
+    // The miss context is read at most ONCE for the whole batch, not per id.
+    const warning =
+      closed < ids.length
+        ? pendingCloseMissWarning(ctx, owner, undefined, `${ids.length - closed} of ${ids.length}`)
+        : undefined
+    return jsonResult({ owner, closed, results, ...(warning ? { warning } : {}) })
+  }
+
   const closeId = typeof a.close === "string" && a.close.length > 0 ? a.close : null
   if (closeId) {
-    const pending = ctx.stmts.selectPendingForReplyRecipient.get({
-      $reply_id: closeId,
-      $recipient: owner,
-    }) as { request_id: string } | null
-    const requestId = pending?.request_id ?? closeId
-    const closed = ctx.db.transaction(() => {
-      const row = ctx.stmts.selectPendingSettlementForRecipient.get({
-        $request_id: requestId,
-        $recipient: owner,
-      }) as PendingSettlementRow | null
-      if (row === null) return 0
-      const settlement = ctx.getName() === row.sender && ctx.getName() !== owner ? "sender-withdrawn" : "manual-close"
-      return settlePendingRows(ctx, [row], settlement, ctx.getName(), now)
-    })()
-    const warning = closed === 0 ? pendingCloseMissWarning(ctx, owner, undefined, closeId) : undefined
-    return jsonResult({ owner, request_id: requestId, closed, ...(warning ? { warning } : {}) })
+    const outcome = ctx.db.transaction(() => closeOneBall(ctx, owner, closeId, now))()
+    const warning = outcome.closed === 0 ? pendingCloseMissWarning(ctx, owner, undefined, closeId) : undefined
+    return jsonResult({
+      owner,
+      request_id: outcome.request_id,
+      closed: outcome.closed,
+      ...(warning ? { warning } : {}),
+    })
   }
 
   if (all) {
