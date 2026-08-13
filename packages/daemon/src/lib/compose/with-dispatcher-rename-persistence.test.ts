@@ -459,6 +459,7 @@ function createDispatcherHarness(dir: string) {
         return 0
       },
       forgetTransportSessions() {},
+      onTransportDisconnected() {},
       getActiveSessionInfo() {
         return Array.from(clients.values()).map((c) => ({
           id: c.ctx.sessionId,

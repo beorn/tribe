@@ -671,6 +671,7 @@ function createDispatcherHarness() {
         return 0
       },
       forgetTransportSessions() {},
+      onTransportDisconnected() {},
       getActiveSessionInfo() {
         return Array.from(clients.values())
           .filter((client) => client.role === "member")

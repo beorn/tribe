@@ -79,6 +79,7 @@ import type { WithSocketServer } from "./with-socket-server.ts"
 import type { DirectDeliveryResolver } from "../delivery-resolution.ts"
 import { STARTUP_SHA, TRIBE_SOURCE_ROOT } from "../code-pin.ts"
 import { shouldLogSlowRequest } from "../slow-request-log.ts"
+import { derivedLaunchPrefixUpperBound } from "../launch-prefix-range.ts"
 
 const log = createLogger("tribe:dispatcher")
 
@@ -312,9 +313,18 @@ export function withDispatcher<
           errorMessage: "Managed inbox request requires a non-empty launch_id",
         }
       }
+      const derivedPrefix = `${launchId}::`
+      const derivedPrefixUpper = derivedLaunchPrefixUpperBound(derivedPrefix)
+      if (derivedPrefixUpper === null) {
+        // Unreachable: launchId is non-empty above, so the prefix is too. A
+        // null bound would silently widen or void the range, so refuse rather
+        // than run a query whose result would not mean what it claims.
+        return { errorCode: -32602, errorMessage: "Managed inbox request requires a non-empty launch_id" }
+      }
       const launchSessions = stmts.getSessionsByProviderLaunchId.all({
         $launch_id: launchId,
-        $derived_prefix: `${launchId}::`,
+        $derived_prefix: derivedPrefix,
+        $derived_prefix_upper: derivedPrefixUpper,
       }) as Array<{
         name: string
         launch_id: string

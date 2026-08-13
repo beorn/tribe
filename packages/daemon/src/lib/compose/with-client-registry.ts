@@ -97,6 +97,13 @@ export interface ClientRegistry {
   markTransportConnected(sessionId: string): void
   /** Start a fresh grace window after the last sibling transport closes. */
   markTransportDisconnected(sessionId: string, nowMs?: number): void
+  /**
+   * Observe transport death. `withRuntime` installs the collector here so a
+   * registration is retired by the same lifecycle that created it, instead of
+   * waiting for the six-hour sweep to notice. The registry stays DB-free: it
+   * reports the event and the listener owns the policy.
+   */
+  onTransportDisconnected(listener: (sessionId: string, nowMs: number) => void): void
   /** Protect startup adoption and bounded reconnect attempts from row reaping. */
   isReconnectGraceProtected(sessionId: string, nowMs: number): boolean
   /** Delay the first automatic reap until daemon-start adoption grace expires. */
@@ -114,6 +121,7 @@ export function withClientRegistry<T extends BaseTribe>(): (t: T) => T & WithCli
     const clients = new Map<string, ClientSession>()
     const socketToClient = new Map<NetSocket, string>()
     const disconnectedAtBySession = new Map<string, number>()
+    const transportDisconnectListeners: Array<(sessionId: string, nowMs: number) => void> = []
 
     const registry: ClientRegistry = {
       clients,
@@ -185,6 +193,10 @@ export function withClientRegistry<T extends BaseTribe>(): (t: T) => T & WithCli
       },
       markTransportDisconnected(sessionId, nowMs = Date.now()): void {
         disconnectedAtBySession.set(sessionId, nowMs)
+        for (const listener of transportDisconnectListeners) listener(sessionId, nowMs)
+      },
+      onTransportDisconnected(listener): void {
+        transportDisconnectListeners.push(listener)
       },
       isReconnectGraceProtected(sessionId, nowMs): boolean {
         const disconnectedAt = disconnectedAtBySession.get(sessionId) ?? t.startedAt

@@ -48,7 +48,7 @@ import {
 import { incidentKey, type IncidentIdentity } from "tribe-wire"
 import { gatherCodePin } from "./code-pin.ts"
 import { parseDbGrowthWarningBytes, projectHealthCadence } from "./health-cadence.ts"
-import { senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
+import { registeredTrustTierForTopic, senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
 import type { LifecycleStore, LifecycleSnapshotRecord } from "./lifecycle-store.ts"
 import { projectSessionLiveness, projectSessionTransportState } from "./session-transport-state.ts"
 import type { DirectDeliveryResolution, DirectDeliveryResolver } from "./delivery-resolution.ts"
@@ -2350,11 +2350,19 @@ type SnapshotFilters = {
 }
 
 function sessionRoster(ctx: TribeContext): SessionRoster {
-  return ctx.db.prepare("SELECT name, role FROM sessions").all() as Array<{ name: string; role: string | null }>
+  return ctx.stmts.sessionRoster.all() as Array<{ name: string; role: string | null }>
 }
 
 function filterRowsByTrust(ctx: TribeContext, rows: FetchRow[]): FetchRow[] {
   if (rows.length === 0) return rows
+  // `senderMayUseRegisteredTrustTopic` consults the roster only for a topic in
+  // the registered trust set, and returns true without reading it for every
+  // other topic. Reading the roster up front therefore compiled a statement
+  // and scanned the whole `sessions` table on every attention read, almost
+  // always to answer a question no row was asking. Materialise it only when a
+  // row actually carries a registered trust topic; the filter below is
+  // unchanged, so the admitted set is identical either way.
+  if (!rows.some((r) => registeredTrustTierForTopic(r.topic))) return rows
   const roster = sessionRoster(ctx)
   return rows.filter((r) => senderMayUseRegisteredTrustTopic(r.topic, r.sender, roster))
 }

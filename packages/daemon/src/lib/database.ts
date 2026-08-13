@@ -234,6 +234,17 @@ export function openDatabase(path: string): Database {
   db.run("CREATE INDEX IF NOT EXISTS idx_sessions_identity ON sessions(identity_token)")
   db.run("CREATE INDEX IF NOT EXISTS idx_sessions_launch_identity ON sessions(name, launch_id, launch_parent_pid)")
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts)")
+  // Leading-column index on launch_id. idx_sessions_launch_identity leads with
+  // `name`, so it cannot serve a launch_id predicate — managed-inbox routing
+  // scanned the whole sessions table on every request.
+  db.run("CREATE INDEX IF NOT EXISTS idx_sessions_launch_id ON sessions(launch_id)")
+  // No index is added for countDurableSessionRows. Measured: its plan is
+  // already "SCAN sessions USING COVERING INDEX idx_sessions_launch_identity",
+  // and a COUNT still visits every matching entry, so no index makes it
+  // sub-linear — a partial index was tried, was never chosen by the planner,
+  // and would only have added write amplification to every registration. The
+  // row count it walks is bounded by the disconnect-driven collection above
+  // instead. See the wedge report for the numbers.
   db.run("CREATE INDEX IF NOT EXISTS idx_coordination_project ON coordination(project_id)")
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_delivery_ts ON messages(delivery, ts)")
   db.run("DROP INDEX IF EXISTS idx_messages_plugin_kind_ts")
@@ -1324,9 +1335,21 @@ export function createStatements(db: Database) {
     getSessionsByLaunchId: db.prepare(
       "SELECT name, launch_parent_pid FROM sessions WHERE launch_id = $launch_id ORDER BY id",
     ),
+    // Trust roster. Prepared once here rather than re-compiled per attention
+    // read, which is where it used to live.
+    sessionRoster: db.prepare("SELECT name, role FROM sessions"),
+    // `substr(launch_id, 1, length($p)) = $p` wrapped the indexed column in a
+    // function, so SQLite had to compute it for every row: a full scan of
+    // `sessions` on every managed-inbox request, whose cost tracked the row
+    // count the register/die leak was inflating. The half-open range
+    // `$derived_prefix <= launch_id < $derived_prefix_upper` selects exactly
+    // the same rows — every string with that prefix sorts inside it under
+    // BINARY collation — while remaining a range scan idx_sessions_launch_id
+    // can serve. See derivedLaunchPrefixUpperBound for the upper bound.
     getSessionsByProviderLaunchId: db.prepare(
       "SELECT name, launch_id, launch_parent_pid FROM sessions " +
-        "WHERE launch_id = $launch_id OR substr(launch_id, 1, length($derived_prefix)) = $derived_prefix ORDER BY id",
+        "WHERE launch_id = $launch_id " +
+        "OR (launch_id >= $derived_prefix AND launch_id < $derived_prefix_upper) ORDER BY id",
     ),
     insertTurnStartReceipt: db.prepare(`
       INSERT OR IGNORE INTO turn_start_receipts (

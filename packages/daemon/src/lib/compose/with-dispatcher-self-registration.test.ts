@@ -1724,6 +1724,7 @@ function createDispatcherHarness(
         return 0
       },
       forgetTransportSessions() {},
+      onTransportDisconnected() {},
       getActiveSessionInfo() {
         const members = new Map<
           string,

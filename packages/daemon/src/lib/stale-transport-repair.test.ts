@@ -450,6 +450,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       isReconnectGraceProtected: () => false,
       startupReconnectGraceRemainingMs: () => 100,
       forgetTransportSessions: vi.fn(),
+      onTransportDisconnected: vi.fn(),
     }
     const shape = {
       scope,

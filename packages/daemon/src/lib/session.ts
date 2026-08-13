@@ -103,6 +103,19 @@ export type StaleTransportReapOpts = {
    * then durable rows are preserved exactly as before.
    */
   getActiveLaunchIds?: () => ReadonlySet<string>
+  /**
+   * Restrict the scan to these session ids. The periodic sweep omits it and
+   * examines every row; the disconnect-driven collection passes the sessions
+   * whose transports just died, so routine churn costs one indexed lookup per
+   * departed session instead of a full table scan per disconnect.
+   *
+   * Scoping changes only which rows are EXAMINED, never the policy applied to
+   * them: every fence below — active transport, lifetime classification,
+   * supersession, reconnect grace, and the re-read inside the transaction —
+   * runs identically either way, so a row can never be reaped on the scoped
+   * path that the sweep would have preserved.
+   */
+  onlySessionIds?: ReadonlySet<string>
 }
 
 /**
@@ -117,7 +130,16 @@ export type StaleTransportReapOpts = {
  */
 export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpts): StaleTransportReapReport {
   const nowMs = opts.nowMs ?? Date.now()
-  const rows = db.prepare("SELECT id, name, launch_id, launch_parent_pid FROM sessions ORDER BY id").all() as Array<{
+  const scoped = opts.onlySessionIds
+  const rows = (
+    scoped === undefined
+      ? db.prepare("SELECT id, name, launch_id, launch_parent_pid FROM sessions ORDER BY id").all()
+      : [...scoped].flatMap((sessionId) =>
+          db
+            .prepare("SELECT id, name, launch_id, launch_parent_pid FROM sessions WHERE id = $id")
+            .all({ $id: sessionId }),
+        )
+  ) as Array<{
     id: string
     name: string
     launch_id: string | null

@@ -31,7 +31,7 @@ import { loadPlugins } from "../plugin-loader.ts"
 import type { TribeClientApi, TribePluginApi } from "../plugin-api.ts"
 import type { BaseTribe } from "./base.ts"
 import type { WithBroadcast } from "./with-broadcast.ts"
-import type { WithClientRegistry } from "./with-client-registry.ts"
+import { DEFAULT_RECONNECT_GRACE_MS, type WithClientRegistry } from "./with-client-registry.ts"
 import type { WithConfig } from "./with-config.ts"
 import type { WithDaemonContext } from "./with-daemon-context.ts"
 import type { WithDispatcher } from "./with-dispatcher.ts"
@@ -142,13 +142,14 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
     opts.publishActivePluginNames(activePluginNames)
     opts.publishStopPlugins(stopPlugins)
 
-    const reapStaleTransports = () => {
+    const reapStaleTransports = (onlySessionIds?: ReadonlySet<string>) => {
       const nowMs = Date.now()
       const report = reapStaleTransportRows(t.db, {
         nowMs,
         hasActiveTransport: (sessionId) => t.registry.hasActiveTransport(sessionId),
         isReconnectGraceProtected: (sessionId) => t.registry.isReconnectGraceProtected(sessionId, nowMs),
         getActiveLaunchIds: () => activeLaunchIds(t.registry.getActiveSessionInfo()),
+        onlySessionIds,
       })
       const reapedIds = report.reaped_sessions.map((session) => session.member_id)
       t.registry.forgetTransportSessions(reapedIds)
@@ -158,9 +159,44 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
       return report
     }
 
+    // A registration is retired by the lifecycle that created it. Waiting for
+    // the six-hour sweep below meant a register/die cycle left its row behind
+    // for up to six hours, and only a later registration claiming the SAME
+    // NAME evicted it — so anonymous churn, which never collides, accumulated
+    // rows unboundedly and every full-table read paid for all of them.
+    //
+    // Collection is deferred to the end of the reconnect grace rather than run
+    // at disconnect: a pull-delivery seat has no socket between polls, and
+    // `isReconnectGraceProtected` deliberately protects it. Re-running the one
+    // reap policy after the grace expires means a seat that came back is
+    // simply still connected and its row is preserved by the existing
+    // `hasActiveTransport` fence — no second eviction rule, no new race.
+    //
+    // Departures are batched behind a single timer so a churn storm costs one
+    // scoped reap rather than one timer and one scan per dead connection.
+    const pendingReapSessionIds = new Set<string>()
+    let reapTimer: ReturnType<typeof setTimeout> | null = null
+    t.registry.onTransportDisconnected((sessionId) => {
+      pendingReapSessionIds.add(sessionId)
+      if (reapTimer !== null) return
+      reapTimer = setTimeout(() => {
+        reapTimer = null
+        const batch = new Set(pendingReapSessionIds)
+        pendingReapSessionIds.clear()
+        if (batch.size === 0) return
+        reapStaleTransports(batch)
+      }, DEFAULT_RECONNECT_GRACE_MS + 1_000)
+      reapTimer.unref?.()
+    })
+    t.scope.defer(() => {
+      if (reapTimer !== null) clearTimeout(reapTimer)
+    })
+
     // Cleanup tick — registers on root scope so disposal stops it. The normal
     // data-retention cleanup remains eager; stale transports wait for daemon
-    // startup reconnect grace, then share this existing six-hour cadence.
+    // startup reconnect grace, then share this existing six-hour cadence as
+    // the backstop for anything the disconnect-driven collection above missed
+    // (a daemon that died before its timer fired, rows from an older build).
     const cleanupInterval = setInterval(() => {
       cleanupOldData(t.daemonCtx)
       reapStaleTransports()
