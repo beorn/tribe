@@ -518,6 +518,31 @@ async function readStreamBounded(
 }
 
 /**
+ * Spawn with both pipes, or convert the failure into a typed command error.
+ *
+ * The return type is deliberately INFERRED rather than annotated. Bun types a
+ * subprocess's `stdout`/`stderr` from the stdio options it was given, so
+ * `{ stdout: "pipe", stderr: "pipe" }` yields `ReadableStream` on both. Writing
+ * `let child: ReturnType<typeof Bun.spawn>` discards that: `ReturnType` of the
+ * un-applied generic widens each pipe to `number | ReadableStream | undefined`
+ * — every stdio mode at once — and the `undefined` arm is what
+ * `readStreamBounded(stream: ReadableStream<Uint8Array> | null)` rejects. The
+ * annotation was needed only because `let` declared outside a try block has to
+ * be typed before assignment; returning from inside the try removes the need
+ * for it, so the concrete type survives and no cast is required.
+ */
+function spawnPipedOrThrow(argv: readonly string[]) {
+  try {
+    return Bun.spawn([...argv], { stderr: "pipe", stdout: "pipe" })
+  } catch (error) {
+    throw new ManagedSysmonCommandError({
+      kind: "spawn-failed",
+      message: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
+/**
  * Spawn `argv`, kill on wall-clock timeout or stdout/stderr oversize, never
  * materialise multi-GB streams into a single string.
  */
@@ -528,15 +553,7 @@ export async function runBoundedProcessCommand(
     maxOutputBytes: SYSMON_MAX_OUTPUT_BYTES,
   },
 ): Promise<ManagedSysmonCommandResult> {
-  let child: ReturnType<typeof Bun.spawn>
-  try {
-    child = Bun.spawn([...argv], { stderr: "pipe", stdout: "pipe" })
-  } catch (error) {
-    throw new ManagedSysmonCommandError({
-      kind: "spawn-failed",
-      message: error instanceof Error ? error.message : String(error),
-    })
-  }
+  const child = spawnPipedOrThrow(argv)
 
   let timedOut = false
   const timer = setTimeout(() => {
@@ -609,8 +626,7 @@ export function createHealthProcessSource(options: HealthProcessSourceOptions = 
   const circuitFailures = options.circuitFailures ?? SYSMON_CIRCUIT_FAILURES
   const circuitOpenMs = options.circuitOpenMs ?? SYSMON_CIRCUIT_OPEN_MS
   const runCommand =
-    options.runCommand ??
-    ((argv: readonly string[]) => runBoundedProcessCommand(argv, { timeoutMs, maxOutputBytes }))
+    options.runCommand ?? ((argv: readonly string[]) => runBoundedProcessCommand(argv, { timeoutMs, maxOutputBytes }))
 
   // Shared across read() and readScalars(): both walk the same state-root.
   let consecutiveHardFailures = 0
