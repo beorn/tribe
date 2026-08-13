@@ -1260,12 +1260,39 @@ export function createStatements(db: Database) {
 		ORDER BY p.opened_at ASC
 	`),
 
+    /** Full active pending surface for one owner. Unlike the attention query
+     *  above, this deliberately joins question bodies in the same statement
+     *  so snapshot cost does not grow by one query per ball. */
+    selectPendingForRecipientWithContent: db.prepare(`
+		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
+			COALESCE(m.summary, a.summary) AS summary,
+			COALESCE(m.content, a.content) AS content
+		FROM pending_request p
+		LEFT JOIN messages m ON m.id = p.message_id
+		LEFT JOIN messages_archive a ON a.id = p.message_id
+		WHERE p.recipient = $recipient
+		ORDER BY p.opened_at ASC
+	`),
+
     /** Fleet attention projection: every open request grouped by its current
      *  recipient owner. This reads the existing tracker; it is not a second
      *  queue or ownership store. */
     selectAllPendingRequests: db.prepare(`
 		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
 			COALESCE(m.summary, a.summary) AS summary
+		FROM pending_request p
+		LEFT JOIN messages m ON m.id = p.message_id
+		LEFT JOIN messages_archive a ON a.id = p.message_id
+		ORDER BY p.recipient ASC, p.opened_at ASC
+	`),
+
+    /** Full fleet-wide active pending surface. Health/attention consumers keep
+     *  using selectAllPendingRequests above; only the explicit pending read
+     *  pays to return bodies, and it does so in one bounded statement. */
+    selectAllPendingRequestsWithContent: db.prepare(`
+		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
+			COALESCE(m.summary, a.summary) AS summary,
+			COALESCE(m.content, a.content) AS content
 		FROM pending_request p
 		LEFT JOIN messages m ON m.id = p.message_id
 		LEFT JOIN messages_archive a ON a.id = p.message_id

@@ -915,6 +915,7 @@ type PendingBallRow = {
   message_id: string
   fanout: "first" | "all"
   summary: string | null
+  content?: string | null
 }
 
 type PendingBall = {
@@ -953,6 +954,8 @@ type PendingOutcomeBall = PendingBall & {
   backing: "live" | "journal"
 }
 
+type PendingBallWithContent = PendingBall & { content: string | null }
+
 type PendingReplyFactRow = {
   sender: string
   reply: string
@@ -987,6 +990,10 @@ function pendingBall(row: PendingBallRow, now: number): PendingBall {
   }
 }
 
+function pendingBallWithContent(row: PendingBallRow, now: number): PendingBallWithContent {
+  return { ...pendingBall(row, now), content: row.content ?? null }
+}
+
 function pendingOutcomeBall(
   fact: BallFactEvidence,
   now: number,
@@ -1013,6 +1020,11 @@ function pendingOutcomeBall(
 function pendingBallsForOwner(ctx: TribeContext, owner: string, now: number): PendingBall[] {
   const rows = ctx.stmts.selectPendingForRecipient.all({ $recipient: owner }) as PendingBallRow[]
   return sortPendingBalls(rows.map((row) => pendingBall(row, now)))
+}
+
+function pendingBallsForOwnerWithContent(ctx: TribeContext, owner: string, now: number): PendingBallWithContent[] {
+  const rows = ctx.stmts.selectPendingForRecipientWithContent.all({ $recipient: owner }) as PendingBallRow[]
+  return sortPendingBalls(rows.map((row) => pendingBallWithContent(row, now)))
 }
 
 /**
@@ -1202,6 +1214,11 @@ function allPendingBalls(ctx: TribeContext, now: number): PendingBall[] {
   return sortPendingBalls(rows.map((row) => pendingBall(row, now)))
 }
 
+function allPendingBallsWithContent(ctx: TribeContext, now: number): PendingBallWithContent[] {
+  const rows = ctx.stmts.selectAllPendingRequestsWithContent.all() as PendingBallRow[]
+  return sortPendingBalls(rows.map((row) => pendingBallWithContent(row, now)))
+}
+
 function sortPendingBalls<T extends PendingBall>(rows: readonly T[]): T[] {
   const statusRank = { expired: 0, unanswered: 1, active: 2 } as const
   return rows.toSorted((left, right) => {
@@ -1299,11 +1316,14 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
   }
 
   if (all) {
-    const rows = expired
-      ? expiredPendingBalls(ctx, now).filter((row) => !owed || row.backing === "live")
-      : allPendingBalls(ctx, now)
-    const filtered = staleMs === null ? rows : rows.filter((row) => row.age_ms >= staleMs)
-    const pending = withQuestionBodies(ctx, filtered)
+    const pending = expired
+      ? withQuestionBodies(
+          ctx,
+          expiredPendingBalls(ctx, now).filter(
+            (row) => (!owed || row.backing === "live") && (staleMs === null || row.age_ms >= staleMs),
+          ),
+        )
+      : allPendingBallsWithContent(ctx, now).filter((row) => staleMs === null || row.age_ms >= staleMs)
     const owners = pendingOwnerGroups(pending)
     return jsonResult({
       all: true,
@@ -1318,11 +1338,15 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
     })
   }
 
-  const rows = expired
-    ? expiredPendingBalls(ctx, now).filter((row) => row.recipient === owner && (!owed || row.backing === "live"))
-    : pendingBallsForOwner(ctx, owner, now)
-  const filtered = staleMs === null ? rows : rows.filter((row) => row.age_ms >= staleMs)
-  const pending = withQuestionBodies(ctx, filtered)
+  const pending = expired
+    ? withQuestionBodies(
+        ctx,
+        expiredPendingBalls(ctx, now).filter(
+          (row) =>
+            row.recipient === owner && (!owed || row.backing === "live") && (staleMs === null || row.age_ms >= staleMs),
+        ),
+      )
+    : pendingBallsForOwnerWithContent(ctx, owner, now).filter((row) => staleMs === null || row.age_ms >= staleMs)
   return jsonResult({ owner, expired, ...(owed ? { owed: true } : {}), pending, count: pending.length })
 }
 
