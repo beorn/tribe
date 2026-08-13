@@ -37,37 +37,107 @@ function cleanGit(cwd: string, ...args: string[]): string | null {
 
 describe("evaluateCodePin (pure decision)", () => {
   it("reports STALE when the running code differs from the on-disk checkout", () => {
-    const r = evaluateCodePin({ running: "aaaaaaaa1111", onDisk: "bbbbbbbb2222", superprojectPin: "bbbbbbbb2222" })
+    const r = evaluateCodePin({
+      running: "aaaaaaaa1111",
+      onDisk: "bbbbbbbb2222",
+      superprojectPin: "bbbbbbbb2222",
+      pinDirection: null,
+    })
     expect(r.stale).toBe(true)
     expect(r.reason).toMatch(/restart the daemon/)
     expect(r.reason).toContain("aaaaaaaa1111")
     expect(r.reason).toContain("bbbbbbbb2222")
   })
 
-  it("reports STALE when the checkout differs from the superproject pin", () => {
-    const r = evaluateCodePin({ running: "cccc", onDisk: "cccc", superprojectPin: "dddd" })
+  it("reports STALE when the checkout differs from the superproject pin, checkout-behind", () => {
+    const r = evaluateCodePin({
+      running: "cccc",
+      onDisk: "cccc",
+      superprojectPin: "dddd",
+      pinDirection: "checkout-behind",
+    })
     expect(r.stale).toBe(true)
     expect(r.reason).toMatch(/submodule update/)
+    expect(r.pin_direction).toBe("checkout-behind")
+  })
+
+  it("checkout-ahead of the pin must NOT emit the rollback remedy (live specimen 2026-08-13)", () => {
+    // Live specimen: on-disk/running were c15f7d1bb7aa, superproject_pin was
+    // 60a5c3c8816a, and 60a5c3c8816a was an ANCESTOR of c15f7d1bb7aa — the
+    // checkout was 6 commits AHEAD, not behind. The un-fixed code cannot tell
+    // direction apart from a raw SHA inequality and always emits the
+    // "run `git submodule update --init`" remedy, which would have rolled the
+    // running daemon backward by 6 commits and reintroduced a fixed bug.
+    const r = evaluateCodePin({
+      running: "c15f7d1bb7aa",
+      onDisk: "c15f7d1bb7aa",
+      superprojectPin: "60a5c3c8816a",
+      pinDirection: "checkout-ahead",
+    })
+    expect(r.stale).toBe(true)
+    expect(r.pin_direction).toBe("checkout-ahead")
+    // The old, dangerous IMPERATIVE ("run `git submodule update --init`
+    // for the tribe path") must be gone — but the fixed text is allowed,
+    // and expected, to name the command while explicitly warning against
+    // running it, so assert on the imperative phrasing, not the bare words.
+    expect(r.reason).not.toMatch(/run `git submodule update --init`/)
+    expect(r.reason).toMatch(/do not run `git submodule update`/i)
+    expect(r.reason).toMatch(/no daemon action/i)
+    expect(r.reason).toMatch(/lags/i)
+  })
+
+  it("divergent checkout vs pin recommends investigation, no command", () => {
+    const r = evaluateCodePin({
+      running: "1111",
+      onDisk: "1111",
+      superprojectPin: "2222",
+      pinDirection: "divergent",
+    })
+    expect(r.stale).toBe(true)
+    expect(r.pin_direction).toBe("divergent")
+    expect(r.reason).toMatch(/diverged/i)
+    expect(r.reason).not.toMatch(/run `git submodule update --init`/)
+    expect(r.reason).not.toMatch(/no daemon action/i)
+  })
+
+  it("unresolvable ancestry (unknown-object) fails loud instead of guessing", () => {
+    const r = evaluateCodePin({
+      running: "3333",
+      onDisk: "3333",
+      superprojectPin: "4444",
+      pinDirection: "unknown",
+    })
+    expect(r.stale).toBe(true)
+    expect(r.pin_direction).toBe("unknown")
+    expect(r.reason).toMatch(/unknown-direction/i)
+    expect(r.reason).not.toMatch(/run `git submodule update --init`/)
+    expect(r.reason).not.toMatch(/no daemon action/i)
   })
 
   it("is fresh when running == on-disk == pin", () => {
-    expect(evaluateCodePin({ running: "eeee", onDisk: "eeee", superprojectPin: "eeee" })).toEqual({
+    expect(evaluateCodePin({ running: "eeee", onDisk: "eeee", superprojectPin: "eeee", pinDirection: null })).toEqual({
       stale: false,
+      pin_direction: null,
       reason: null,
     })
   })
 
   it("reports UNKNOWN when a SHA is indeterminate (null)", () => {
-    expect(evaluateCodePin({ running: null, onDisk: "ffff", superprojectPin: null }).stale).toBeNull()
-    expect(evaluateCodePin({ running: "ffff", onDisk: null, superprojectPin: null }).stale).toBeNull()
+    expect(
+      evaluateCodePin({ running: null, onDisk: "ffff", superprojectPin: null, pinDirection: null }).stale,
+    ).toBeNull()
+    expect(
+      evaluateCodePin({ running: "ffff", onDisk: null, superprojectPin: null, pinDirection: null }).stale,
+    ).toBeNull()
   })
 
   it("reports UNKNOWN when health cannot resolve any code-pin operand", () => {
     // Live specimen: health.code_pin reported stale:false while all three
     // identity probes were NULL. Equality over unresolved operands is not a
     // freshness proof and must remain visible to the doctor.
-    expect(evaluateCodePin({ running: null, onDisk: null, superprojectPin: null })).toEqual({
+    expect(evaluateCodePin({ running: null, onDisk: null, superprojectPin: null, pinDirection: null })).toEqual({
       stale: null,
+      pin_direction: null,
       reason: "cannot compare daemon code identity: unresolved running, on_disk, superproject_pin",
     })
   })
@@ -172,5 +242,46 @@ describe("gatherCodePin (real git path, temp repo)", () => {
     expect(status.superproject_pin).toBeNull()
     expect(status.stale).toBeNull()
     expect(status.reason).toContain("unresolved superproject_pin")
+  })
+
+  it("resolves checkout-ahead end-to-end against a real submodule pin (live specimen 2026-08-13 shape)", () => {
+    // Build the real submodule topology the live specimen came from: a
+    // superproject that pins a submodule at commit A, whose checkout has
+    // since advanced locally to commit B (a descendant of A) without the
+    // superproject's pin being bumped yet — the exact "checkout ahead of
+    // pin" shape, constructed with real git rather than fabricated SHAs, to
+    // prove the resolvePinDirection wiring in gatherCodePin itself (not just
+    // the pure evaluateCodePin decision above).
+    const shaA = commit("submodule source, commit A")
+    const superRepo = mkdtempSync(join(tmpdir(), "code-pin-super-"))
+    try {
+      execFileSync("git", ["-C", superRepo, "init", "-q"], { encoding: "utf8" })
+      execFileSync("git", ["-C", superRepo, "config", "user.email", "t@example.com"], { encoding: "utf8" })
+      execFileSync("git", ["-C", superRepo, "config", "user.name", "t"], { encoding: "utf8" })
+      execFileSync(
+        "git",
+        ["-C", superRepo, "-c", "protocol.file.allow=always", "submodule", "add", repo, "vendor/sub"],
+        { encoding: "utf8" },
+      )
+      execFileSync("git", ["-C", superRepo, "commit", "-q", "-m", "add submodule pinned at A"], { encoding: "utf8" })
+
+      const subCheckout = join(superRepo, "vendor", "sub")
+      execFileSync("git", ["-C", subCheckout, "commit", "-q", "--allow-empty", "-m", "checkout advances to B"], {
+        encoding: "utf8",
+      })
+      const shaB = execFileSync("git", ["-C", subCheckout, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()
+      expect(shaB).not.toBe(shaA)
+
+      const status = gatherCodePin(subCheckout, shaB) // running == on-disk == B; superproject pin still A
+      expect(status.on_disk).toBe(shaB)
+      expect(status.superproject_pin).toBe(shaA)
+      expect(status.pin_direction).toBe("checkout-ahead")
+      expect(status.stale).toBe(true)
+      expect(status.reason).toMatch(/no daemon action/i)
+      expect(status.reason).not.toMatch(/run `git submodule update --init`/)
+    } finally {
+      const within = realpathSync(tmpdir())
+      safeRemoveSync(superRepo, { within, allowMissing: true })
+    }
   })
 })
