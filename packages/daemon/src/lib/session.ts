@@ -375,38 +375,27 @@ export function registerSession(
     }
   }
 
-  // Supersede this seat's earlier registration. `launch_id` is
-  // `providerLaunchId::persona` (wire `persona-launch-identity.ts`), so an
-  // older row carrying the same launch id is THIS seat registered over a
-  // previous connection, not a second seat. The name-holder eviction above
-  // only catches it while the name still matches — when the daemon still
-  // believes the dead connection is live, this registration auto-suffixes and
-  // the old row would otherwise linger forever as a durable-launch "wedge".
+  // Registration deliberately does NOT retire other rows sharing this
+  // `launch_id`. Two later mechanisms already cover a replaced registration,
+  // and both conclude replacement only from a transport that is PRESENT, so
+  // neither can race a registration still in flight:
   //
-  // Sibling transports of ONE launch never reach here: the dispatcher's
-  // same-launch fan-in adopts the holder's ctx and returns before
-  // registration, so all siblings share one session id and one row. What does
-  // reach here is a genuinely new session id for a launch that already has a
-  // row — a relaunch or a reconnect.
+  //   - the read-time projection in `handlers.ts` drops disconnected rows
+  //     whose launch id a live session holds, so a replaced row is invisible
+  //     to every consumer of `tribe.members` / `tribe.health`;
+  //   - `reapStaleTransportRows` physically removes it, behind a
+  //     `hasActiveTransport` check re-read inside the delete transaction.
   //
-  // The eviction fence is the same one the name-holder check above uses: a row
-  // whose session is still connected AND whose pid is still alive is a live
-  // session (e.g. one renamed since it registered, which the name-keyed fan-in
-  // misses) and is left alone. Only a disconnected row, or a connected row
-  // whose owning process is provably gone, is superseded.
-  const launchIdentity = typeof launchId === "string" && launchId.trim().length > 0 ? launchId.trim() : null
-  if (launchIdentity !== null) {
-    const sameLaunchRows = ctx.db
-      .prepare("SELECT id, pid FROM sessions WHERE launch_id = $launch_id AND id != $id")
-      .all({ $launch_id: launchIdentity, $id: ctx.sessionId }) as Array<{ id: string; pid: number }>
-    for (const row of sameLaunchRows) {
-      const rowActive = isActive ? isActive(row.id) : false
-      if (rowActive && isPidAlive(row.pid)) continue
-      ctx.db.prepare("DELETE FROM room_members WHERE session_id = $id").run({ $id: row.id })
-      ctx.db.prepare("DELETE FROM sessions WHERE id = $id").run({ $id: row.id })
-      log.info?.(`superseded session row ${row.id} — launch ${launchIdentity} re-registered as "${finalName}"`)
-    }
-  }
+  // A third cleanup at write time would buy only marginal latency on row
+  // removal, and it is the only one of the three with a race window: the
+  // dispatcher's same-launch fan-in normally adopts the holder's ctx so
+  // siblings share a session id, but it matches on session NAME, and
+  // concurrent adapters from one provider launch can pass through
+  // registration before any name-holder exists to fan in to. Deleting on
+  // `launch_id` here then destroys live siblings' rows — the three-adapter
+  // fan-in journey lost two of its three `transport_pids`. No fence closes
+  // it: a sibling mid-registration is not yet active and its pid is alive.
+  // Dropping the write-time pass is consolidation, not lost coverage.
 
   try {
     ctx.stmts.upsertSession.run({

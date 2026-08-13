@@ -99,41 +99,6 @@ function addSession(
   return ctx
 }
 
-/**
- * A stale durable row that a LIVE registration has already replaced.
- *
- * `registerSession` now supersedes this at write time, so the only way to hold
- * the state is to write it directly — which is the point: a running daemon's
- * DB carries rows written before the supersede fix shipped, and both the
- * read-time projections and `tribe.repair --reap-stale-transports` have to
- * cope with them. Inserting the row models that legacy DB honestly rather than
- * asserting against a state the current write path can no longer produce.
- */
-function insertLegacyDurableRow(
-  db: Database,
-  sessionId: string,
-  name: string,
-  launch: { id: string; parentPid: number },
-): void {
-  const now = Date.now()
-  db.prepare(
-    `INSERT INTO sessions (id, name, role, domains, pid, cwd, project_id, launch_id, launch_parent_pid, started_at, updated_at, delivery)
-     VALUES ($id, $name, 'member', '[]', $pid, '/repo', $project, $launch_id, $launch_parent_pid, $now, $now, 'pull')`,
-  ).run({
-    $id: sessionId,
-    $name: name,
-    $pid: mintDeadPid(),
-    $project: PROJECT_ID,
-    $launch_id: launch.id,
-    $launch_parent_pid: launch.parentPid,
-    $now: now,
-  })
-  db.prepare(
-    `INSERT INTO room_members (room_id, session_id, role, joined_at)
-     VALUES ($room, $id, 'member', $now)`,
-  ).run({ $room: `room:${PROJECT_ID}`, $id: sessionId, $now: now })
-}
-
 function activeInfoFor(
   id: string,
   name: string,
@@ -297,7 +262,7 @@ describe("transport state is derived from current evidence, not registration pre
   })
 })
 
-describe("a live registration supersedes the dead one for the same launch_id", () => {
+describe("a replaced registration is retired by projection and repair, never by the write path", () => {
   let tmpDir: string
   let db: Database
   let stmts: TribeStatements
@@ -323,12 +288,17 @@ describe("a live registration supersedes the dead one for the same launch_id", (
    *  never two different seats. */
   const LAUNCH = { id: "provider-launch-1::%40agent%2F6", parentPid: 4242 }
 
-  it("registration over a fresh connection supersedes the dead row for the same launch_id", () => {
-    const deadPid = mintDeadPid()
-    addSession(db, stmts, "old-connection", "@agent/6", deadPid, LAUNCH)
-    // The daemon still believes the dead connection is active, so the new
-    // registration cannot take the name and auto-suffixes.
-    addSession(db, stmts, "new-connection", "@agent/6", process.pid, LAUNCH, (id) => id === "old-connection")
+  it("stores both rows — registration retires nothing on a shared launch_id", () => {
+    // Registration must not delete rows keyed on launch_id. Deleting here
+    // destroys live sibling transports: the dispatcher's same-launch fan-in
+    // normally collapses siblings onto one session id, but it matches on
+    // NAME, and concurrent adapters from one provider launch can reach
+    // registration before any name-holder exists to fan in to. A write-time
+    // pass cost the three-adapter fan-in journey two of its three
+    // transport_pids, and no fence closes it — a sibling mid-registration is
+    // not yet active and its pid is alive. This is the regression guard.
+    addSession(db, stmts, "old-connection", "@agent/6", mintDeadPid(), LAUNCH)
+    addSession(db, stmts, "new-connection", "@agent/6-2", process.pid, LAUNCH)
 
     const rows = db.prepare("SELECT id, name, launch_id FROM sessions ORDER BY id").all() as Array<{
       id: string
@@ -336,24 +306,39 @@ describe("a live registration supersedes the dead one for the same launch_id", (
       launch_id: string | null
     }>
 
-    expect(rows).toEqual([{ id: "new-connection", name: "@agent/6", launch_id: LAUNCH.id }])
+    expect(rows).toEqual([
+      { id: "new-connection", name: "@agent/6-2", launch_id: LAUNCH.id },
+      { id: "old-connection", name: "@agent/6", launch_id: LAUNCH.id },
+    ])
   })
 
-  it("never supersedes a row that is still connected with a live pid", () => {
-    // Sibling transports of one launch share a session id via the dispatcher's
-    // same-launch fan-in and never reach registerSession, but a session RENAMED
-    // after it registered misses that name-keyed fan-in. If such a row were
-    // superseded, a live seat would lose its registration to its own reconnect.
-    addSession(db, stmts, "live-renamed", "@agent/6-renamed", process.pid, LAUNCH)
-    addSession(db, stmts, "new-connection", "@agent/6", process.pid, LAUNCH, (id) => id === "live-renamed")
+  it("projects only the live seat while both rows are stored", () => {
+    addSession(db, stmts, "old-connection", "@agent/6", mintDeadPid(), LAUNCH)
+    addSession(db, stmts, "new-connection", "@agent/6-2", process.pid, LAUNCH)
+    const ctx = makeContext(db, stmts, "operator", "@operator")
+    const opts = optsFor([activeInfoFor("new-connection", "@agent/6-2", process.pid, LAUNCH)])
 
-    const rows = db.prepare("SELECT id FROM sessions ORDER BY id").all() as Array<{ id: string }>
-    expect(rows).toEqual([{ id: "live-renamed" }, { id: "new-connection" }])
+    const members = parseToolJson(handleToolCall(ctx, "tribe.members", {}, opts)) as {
+      sessions: Array<Record<string, unknown>>
+      membership_discrepancy?: Record<string, unknown>
+    }
+    const diagnostic = parseToolJson(handleToolCall(ctx, "tribe.members", { all: true }, opts)) as {
+      sessions: Array<Record<string, unknown>>
+    }
+
+    // The default view is what consumers act on: only the live seat, and the
+    // replaced row raises no discrepancy.
+    expect(members.sessions.map((session) => session.name)).toEqual(["@agent/6-2"])
+    expect(members.membership_discrepancy).toBeUndefined()
+    // `all: true` is the deliberate full-DB diagnostic view, so the stored
+    // replaced row stays visible there — retired from the projection, not
+    // erased from the record.
+    expect(diagnostic.sessions.map((session) => session.name).toSorted()).toEqual(["@agent/6", "@agent/6-2"])
   })
 
   it("does not report a superseded durable row as a transport wedge (specimen 2)", () => {
+    addSession(db, stmts, "old-connection", "@agent/6", mintDeadPid(), LAUNCH)
     addSession(db, stmts, "new-connection", "@agent/6-2", process.pid, LAUNCH)
-    insertLegacyDurableRow(db, "old-connection", "@agent/6", LAUNCH)
     const ctx = makeContext(db, stmts, "operator", "@operator")
     const opts = optsFor([activeInfoFor("new-connection", "@agent/6-2", process.pid, LAUNCH)])
 
@@ -410,8 +395,8 @@ describe("the repair verb can reach a superseded durable registration", () => {
   const LAUNCH = { id: "provider-launch-3::%40agent%2F4", parentPid: 4004 }
 
   it("reaps a durable row whose launch_id a live transport has claimed", () => {
+    addSession(db, stmts, "old-connection", "@agent/4", mintDeadPid(), LAUNCH)
     addSession(db, stmts, "new-connection", "@agent/4-2", process.pid, LAUNCH)
-    insertLegacyDurableRow(db, "old-connection", "@agent/4", LAUNCH)
 
     const report = reapStaleTransportRows(db, {
       hasActiveTransport: (sessionId) => sessionId === "new-connection",
@@ -444,8 +429,8 @@ describe("the repair verb can reach a superseded durable registration", () => {
   })
 
   it("does not require the dead transport it is repairing", () => {
+    addSession(db, stmts, "old-connection", "@agent/4", mintDeadPid(), LAUNCH)
     addSession(db, stmts, "new-connection", "@agent/4-2", process.pid, LAUNCH)
-    insertLegacyDurableRow(db, "old-connection", "@agent/4", LAUNCH)
 
     // The dead connection is absent from the registry entirely — the repair
     // must still reach its row through the live claimant's launch_id.
