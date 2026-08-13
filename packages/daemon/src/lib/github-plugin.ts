@@ -19,6 +19,7 @@ import { createLogger } from "loggily"
 import { findBeadsDir } from "tribe-wire/lib/config"
 import { openGitHubCursorStore, resolveGitHubCursorPath } from "./github-cursor-store.ts"
 import { createTimers } from "./timers.ts"
+import { startSingleFlightTicker } from "./single-flight-ticker.ts"
 import type { TribePluginApi, TribeClientApi } from "./plugin-api.ts"
 
 const log = createLogger("tribe:github")
@@ -822,16 +823,29 @@ export const githubPlugin: TribePluginApi = {
       5 * 60 * 1000,
     )
 
+    // Single-flight: both pollers make network calls to the GitHub API, which
+    // can stall well past their cadence. A bare interval would start a fresh
+    // poll on top of every stalled one, accumulating in-flight requests for as
+    // long as the API is slow.
+    const eventsTicker = startSingleFlightTicker({
+      name: "github-events-poll",
+      intervalMs: pollIntervalSec * 1000,
+      run: pollEvents,
+      timers,
+      log: { warn: (message) => log.warn?.(message), error: (message) => log.error?.(message) },
+    })
+    const workflowsTicker = startSingleFlightTicker({
+      name: "github-workflows-poll",
+      intervalMs: 60_000,
+      run: pollWorkflows,
+      timers,
+      log: { warn: (message) => log.warn?.(message), error: (message) => log.error?.(message) },
+    })
+
     // Initial poll
-    void pollEvents()
-
-    // Regular polling
-    timers.setInterval(() => void pollEvents(), pollIntervalSec * 1000)
-
-    // Workflow polling (every 60s, separate endpoint)
-    timers.setInterval(() => void pollWorkflows(), 60_000)
+    eventsTicker.tick()
     // Initial workflow poll after short delay
-    timers.setTimeout(() => void pollWorkflows(), 5_000)
+    timers.setTimeout(() => workflowsTicker.tick(), 5_000)
 
     // Cleanup
     return () => {

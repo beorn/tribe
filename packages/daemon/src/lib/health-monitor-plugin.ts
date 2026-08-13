@@ -26,6 +26,7 @@ import { cpus, totalmem, freemem, loadavg } from "node:os"
 import { createLogger } from "loggily"
 import { isReaperExempt } from "tribe-wire"
 import { createTimers } from "./timers.ts"
+import { startSingleFlightTicker } from "./single-flight-ticker.ts"
 import type { TribePluginApi, TribeClientApi } from "./plugin-api.ts"
 import {
   createHealthProcessSource,
@@ -1999,11 +2000,25 @@ export const healthMonitorPlugin: TribePluginApi = {
       }
     }
 
-    // Initial sample after a short delay (let daemon finish startup)
-    timers.setTimeout(() => void sample(), 2_000)
+    // One sample at a time. `sample()` spawns `iostat -d -c 2 -w 1` (>=2s by
+    // construction), `lsof -n | wc -l`, a full `ps -axo` dump, a `hab sysmon
+    // snapshot` walk of the habitat journal and a network `gh api rate_limit`,
+    // none of them deadlined. A bare `setInterval(() => void sample(), 10s)`
+    // starts another sample every tick regardless, so any run that outlasts the
+    // interval leaves runs overlapping and every later tick piles another one
+    // on for as long as the slowness lasts — the accumulating wedge. Skipped
+    // ticks are counted and logged, never shed silently.
+    const sampleTicker = startSingleFlightTicker({
+      name: "health-sample",
+      intervalMs: pollIntervalSec * 1000,
+      run: sample,
+      timers,
+      log: { warn: (message) => log.warn?.(message), error: (message) => log.error?.(message) },
+    })
 
-    // Regular sampling
-    timers.setInterval(() => void sample(), pollIntervalSec * 1000)
+    // Initial sample after a short delay (let daemon finish startup). Routed
+    // through the same ticker so it cannot overlap the first interval tick.
+    timers.setTimeout(() => sampleTicker.tick(), 2_000)
 
     return () => ac.abort()
   },

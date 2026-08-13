@@ -54,6 +54,7 @@ import {
   type WorkspaceStateResult,
 } from "../../../../plugins/claude/recall/lib/rpc.ts"
 import { summarizeTail, type SummarizerMode } from "../../../../plugins/claude/recall/lib/summarizer.ts"
+import { createSingleFlightRunner } from "./single-flight-ticker.ts"
 // ---------------------------------------------------------------------------
 // Deep-recall engine — in-repo since the 19273 move (packages/recall)
 // ---------------------------------------------------------------------------
@@ -580,10 +581,19 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
   const focusPoller: NodeJS.Timeout = setInterval(refreshAllFocus, focusPollMs) as unknown as NodeJS.Timeout
   focusPoller.unref?.()
 
+  // Single-flight: a summarization pass makes model calls whose latency is not
+  // bounded by `summaryPollMs`, and a bare interval would start another pass on
+  // top of every slow one. Skipped passes are counted and logged, not dropped.
+  const summarizerRunner = createSingleFlightRunner({
+    name: "recall-summarizer",
+    intervalMs: summaryPollMs,
+    run: refreshSummariesOnce,
+    log: { warn: (message) => log.warn?.(message), error: (message) => log.error?.(message) },
+  })
   const summarizerPoller: NodeJS.Timeout | null =
     summarizerMode !== "off"
       ? (setInterval(() => {
-          void refreshSummariesOnce()
+          summarizerRunner.tick()
         }, summaryPollMs) as unknown as NodeJS.Timeout)
       : null
   summarizerPoller?.unref?.()
