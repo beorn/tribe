@@ -19,11 +19,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { findBeadsDir } from "tribe-wire/lib/config"
-import {
-  openGitHubCursorStore,
-  resolveLegacyGitHubCursorPath,
-  TRIBE_PROJECT_ROOT_ENV,
-} from "./github-cursor-store.ts"
+import { openGitHubCursorStore, resolveLegacyGitHubCursorPath, TRIBE_PROJECT_ROOT_ENV } from "./github-cursor-store.ts"
 
 let fixture: string
 let originalCwd: string
@@ -37,6 +33,13 @@ function plantStrayStub(root: string, lastEventId: string): string {
   const cursor = join(beads, "github-cursor.json")
   writeFileSync(cursor, JSON.stringify({ repos: { "o/r": { lastEventId, lastPollAt: "2026-08-13T00:00:00Z" } } }))
   return cursor
+}
+
+function readLastEventId(path: string): string | undefined {
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as {
+    repos?: Record<string, { lastEventId?: string }>
+  }
+  return parsed.repos?.["o/r"]?.lastEventId
 }
 
 beforeEach(() => {
@@ -98,7 +101,7 @@ describe("legacy GitHub cursor root resolution", () => {
     mkdirSync(stateDir, { recursive: true })
     const store = openGitHubCursorStore({ stateDir, legacyPath: resolved })
     expect(store.state.repos["o/r"]).toBeUndefined()
-    expect(JSON.parse(readFileSync(outerCursor, "utf8")).repos["o/r"].lastEventId).toBe("outer-1")
+    expect(readLastEventId(outerCursor)).toBe("outer-1")
   })
 
   it("treats a blank declared root as undeclared", () => {
@@ -134,6 +137,6 @@ describe("legacy GitHub cursor root resolution", () => {
     expect(store.state.repos["o/r"]?.lastEventId).toBe("real-cursor")
     // Not adopted, and — just as important — not deleted: the stub is not ours
     // to remove, and a daemon that silently ate it would be worse.
-    expect(JSON.parse(readFileSync(strayCursor, "utf8")).repos["o/r"].lastEventId).toBe("stray-conflicting")
+    expect(readLastEventId(strayCursor)).toBe("stray-conflicting")
   })
 })
