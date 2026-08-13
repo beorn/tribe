@@ -14,7 +14,7 @@
  *     replaying registered notification handlers.
  */
 
-import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs"
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync } from "node:fs"
 import { createConnection, type Socket } from "node:net"
 import { spawn } from "node:child_process"
 import { dirname, resolve } from "node:path"
@@ -232,6 +232,32 @@ function resolveWireCliScript(): string {
   return script
 }
 
+/**
+ * Where a DETACHED supervisor's own diagnostics go.
+ *
+ * A detached process has no terminal to inherit, so `stdio: "ignore"` meant the
+ * supervisor could describe a dying daemon perfectly and nobody would ever read
+ * it — the 2026-08-13 operator saw an empty log because there was no log. When
+ * the operator has named a log file (the existing LOG_FILE convention, which
+ * DEBUG_LOG maps onto), send the supervisor's stdout and stderr there.
+ *
+ * Returns "ignore" only when no log file was requested. Failing to honor one
+ * that WAS requested is reported, never silently downgraded.
+ */
+function resolveSupervisorLogFd(env: NodeJS.ProcessEnv): number | "ignore" {
+  const logPath = env.LOG_FILE ?? env.DEBUG_LOG
+  if (!logPath) return "ignore"
+  try {
+    return openSync(logPath, "a")
+  } catch (error) {
+    log.warn?.(
+      `cannot open ${logPath} for the daemon supervisor's log (${error instanceof Error ? error.message : String(error)}) — ` +
+        `the supervisor will run, but nothing will record why a daemon generation dies`,
+    )
+    return "ignore"
+  }
+}
+
 export function spawnStandaloneDaemonSupervisor(opts: StandaloneDaemonSupervisorOpts): ReturnType<typeof spawn> {
   const capability = opts.operatorCapability?.trim() || null
   const env = sanitizeStandaloneDaemonEnvironment(process.env)
@@ -246,11 +272,14 @@ export function spawnStandaloneDaemonSupervisor(opts: StandaloneDaemonSupervisor
     opts.daemonScript,
     ...(opts.daemonArgs ?? []),
   ]
+  const logFd = resolveSupervisorLogFd(process.env)
   const child = spawn(opts.runtimePath ?? process.execPath, supervisorArgs, {
     detached: true,
-    stdio: capability ? ["ignore", "ignore", "ignore", "pipe"] : "ignore",
+    stdio: capability ? ["ignore", logFd, logFd, "pipe"] : ["ignore", logFd, logFd],
     env,
   })
+  // The child holds its own duplicate of the descriptor from here on.
+  if (logFd !== "ignore") closeSync(logFd)
   if (capability) {
     const capabilityPipe = child.stdio[3]
     if (!capabilityPipe || !("end" in capabilityPipe)) {
