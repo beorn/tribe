@@ -1354,14 +1354,38 @@ type MembershipDiscrepancy = {
   meaning: "missing transport does not establish agent absence"
 }
 
+/**
+ * The launch ids a currently-connected session holds. `launch_id` is
+ * `providerLaunchId::persona` (wire `persona-launch-identity.ts`), so it names
+ * one seat of one provider launch — two rows sharing it are the same seat
+ * registered twice, never two different seats.
+ */
+function activeLaunchIdSet(rows: readonly MembershipSessionRow[], activeIds: ReadonlySet<string>): Set<string> {
+  const launchIds = new Set<string>()
+  for (const row of rows) {
+    if (!activeIds.has(row.id)) continue
+    if (typeof row.launch_id === "string" && row.launch_id.length > 0) launchIds.add(row.launch_id)
+  }
+  return launchIds
+}
+
 function latestDisconnectedSessionRows<T extends MembershipSessionRow>(
   rows: readonly T[],
   activeIds: ReadonlySet<string>,
 ): T[] {
   const activeNames = new Set(rows.filter((row) => activeIds.has(row.id)).map((row) => row.name))
+  // A seat that comes back while its old row still holds the name registers
+  // under an auto-suffixed name (session.ts `registerSession`), so the name
+  // check alone leaves the old row standing forever as a phantom wedge — 21
+  // of 23 durable launches read as a fleet outage that was not happening.
+  // A LIVE claimant for the same launch id is positive evidence that the old
+  // registration was replaced. This never concludes absence from a missing
+  // transport; it concludes supersession from a present one.
+  const supersededLaunchIds = activeLaunchIdSet(rows, activeIds)
   const latestByName = new Map<string, T>()
   for (const row of rows) {
     if (activeIds.has(row.id) || activeNames.has(row.name)) continue
+    if (typeof row.launch_id === "string" && supersededLaunchIds.has(row.launch_id)) continue
     const previous = latestByName.get(row.name)
     if (previous === undefined || row.updated_at > previous.updated_at) latestByName.set(row.name, row)
   }
@@ -1389,7 +1413,14 @@ function projectMembershipDiscrepancy(
   activeIds: ReadonlySet<string>,
   disconnectedRows: readonly MembershipSessionRow[],
 ): MembershipDiscrepancy | undefined {
-  const durableRows = rows.filter(isDurableMembershipSessionRow).filter((row) => !isUnidentifiedSessionName(row.name))
+  // Superseded rows are excluded from the denominator too, or a seat that
+  // re-registered under an auto-suffixed name counts as two known launches
+  // and reports "1 of 2 connected" about one live seat.
+  const supersededLaunchIds = activeLaunchIdSet(rows, activeIds)
+  const durableRows = rows
+    .filter(isDurableMembershipSessionRow)
+    .filter((row) => !isUnidentifiedSessionName(row.name))
+    .filter((row) => activeIds.has(row.id) || !supersededLaunchIds.has(row.launch_id))
   const knownNames = new Set(durableRows.map((row) => row.name))
   const connectedNames = new Set(durableRows.filter((row) => activeIds.has(row.id)).map((row) => row.name))
   const missing = disconnectedRows.filter(isDurableMembershipSessionRow).map((row) => ({
@@ -1479,21 +1510,26 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     const active = activeInfo.find((session) => session.id === r.id)
     const protocolVersions = active?.protocolVersions ?? []
     const transportConnected = activeIds.has(r.id)
-    const transport = projectSessionTransportState({ transportConnected })
     const transportPids = active?.transportPids ?? []
     // A registry entry can outlive the process it names — a dead transport
     // adapter, a session mid-restart whose old socket hasn't been pruned yet
-    // — so `alive` must be confirmed with a pid probe at read time, exactly
-    // like handleHealth already does, never read off transport-registry
-    // presence alone. Disconnected rows are deliberately NOT pid-probed: a
-    // DB-stored pid is reusable and proves nothing once the transport is
-    // gone (session.ts `isPidAlive` docstring) — transport_connected=false
-    // already yields alive=false through projectSessionLiveness below.
+    // — so BOTH `transport_state` and `alive` must be confirmed with a pid
+    // probe at read time, never read off transport-registry presence alone.
+    // Registry presence stays visible as `transport_registered`; it just no
+    // longer speaks for the transport. Disconnected rows are deliberately NOT
+    // pid-probed: a DB-stored pid is reusable and proves nothing once the
+    // transport is gone (session.ts `isPidAlive` docstring) —
+    // transport_connected=false already yields alive=false below.
+    const transportPidsAlive = transportPids.length === 0 || transportPids.some((pid) => pidStillAlive(pid))
+    const transport = projectSessionTransportState({
+      transportConnected,
+      transportPidsAlive: transportConnected ? transportPidsAlive : undefined,
+    })
     const agentPid = active ? (active.launchParentPid ?? active.pid) : null
     const liveness = transportConnected
       ? projectSessionLiveness({
           transportConnected: true,
-          pidAlive: transportPids.length === 0 || transportPids.some((pid) => pidStillAlive(pid)),
+          pidAlive: transportPidsAlive,
           agentPidAlive: agentPid ? pidStillAlive(agentPid) : true,
           lastSeenSec: Math.round((Date.now() - r.updated_at) / 1000),
         })
@@ -1868,7 +1904,6 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
   const members = liveSessions.map((s) => {
     const active = byId.get(s.id)
     if (active === undefined) throw new Error(`active session ${s.id} disappeared during membership projection`)
-    const transport = projectSessionTransportState({ transportConnected: true })
     // Find last message from this member
     const lastMsg = ctx.db
       .prepare("SELECT ts FROM messages WHERE sender = $name ORDER BY ts DESC LIMIT 1")
@@ -1891,11 +1926,16 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     if (!pidAlive) {
       warnings.push(`transport pids ${transportPids.join(",")} are dead — session is a zombie`)
     }
+    // The zombie warning above and `transport_state` used to disagree inside
+    // one row: the warning said the pids were dead while the projection still
+    // reported `connected` off registry presence. Feed the same probe into the
+    // projection so both read from one fact.
+    const transport = projectSessionTransportState({ transportConnected: true, transportPidsAlive: pidAlive })
     const agentPid = active.launchParentPid ?? active.pid
     const agentPidAlive = agentPid ? pidStillAlive(agentPid) : pidAlive
     const lastSeenSec = lastMsgAge ? Math.round(lastMsgAge / 1000) : Math.round((Date.now() - s.started_at) / 1000)
     const liveness = projectSessionLiveness({
-      transportConnected: transport.transport_state === "connected",
+      transportConnected: true,
       pidAlive,
       agentPidAlive,
       lastSeenSec,

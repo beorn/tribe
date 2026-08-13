@@ -67,6 +67,7 @@ export type StaleTransportReapReasonCounts = {
   durable_launch: number
   malformed_launch_identity: number
   reaped_connection_scoped: number
+  reaped_superseded_launch: number
 }
 
 export type StaleTransportReapReport = {
@@ -76,10 +77,32 @@ export type StaleTransportReapReport = {
   reaped_sessions: Array<{ member_id: string; name: string }>
 }
 
+/**
+ * The launch ids currently held by connected sessions — the supersession
+ * evidence the reaper and the read-time projections both need. Sessions with
+ * no launch id (legacy connection-scoped registrations) contribute nothing.
+ */
+export function activeLaunchIds(active: ReadonlyArray<{ launchId: string | null }>): Set<string> {
+  const launchIds = new Set<string>()
+  for (const session of active) {
+    const launchId = session.launchId?.trim()
+    if (launchId) launchIds.add(launchId)
+  }
+  return launchIds
+}
+
 export type StaleTransportReapOpts = {
   nowMs?: number
   hasActiveTransport: (sessionId: string) => boolean
   isReconnectGraceProtected: (sessionId: string, nowMs: number) => boolean
+  /**
+   * Launch ids currently held by a connected session. A durable-launch row
+   * whose launch id appears here has been provably replaced by a live
+   * registration, so the repair can reach it without ever consulting the dead
+   * transport it is repairing. Omitted means "no supersession evidence" —
+   * then durable rows are preserved exactly as before.
+   */
+  getActiveLaunchIds?: () => ReadonlySet<string>
 }
 
 /**
@@ -87,6 +110,10 @@ export type StaleTransportReapOpts = {
  * names, activity timestamps, or numeric PID existence. All classification is
  * synchronous, and active transport is checked again immediately before the
  * transaction deletes a row.
+ *
+ * Durable-launch rows are preserved unless a LIVE registration holds the same
+ * launch id: a missing transport still never establishes agent absence, so
+ * only positive evidence of replacement makes a durable row reapable.
  */
 export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpts): StaleTransportReapReport {
   const nowMs = opts.nowMs ?? Date.now()
@@ -102,8 +129,12 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
     durable_launch: 0,
     malformed_launch_identity: 0,
     reaped_connection_scoped: 0,
+    reaped_superseded_launch: 0,
   }
-  const candidates: typeof rows = []
+  const activeLaunchIds = opts.getActiveLaunchIds?.() ?? new Set<string>()
+  const isSupersededLaunch = (launchId: string | null): boolean =>
+    typeof launchId === "string" && launchId.length > 0 && activeLaunchIds.has(launchId)
+  const candidates: Array<(typeof rows)[number] & { superseded: boolean }> = []
 
   for (const row of rows) {
     if (opts.hasActiveTransport(row.id)) {
@@ -114,11 +145,12 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
       launchId: row.launch_id,
       launchParentPid: row.launch_parent_pid,
     })
-    if (lifetime === "durable-launch") {
+    const superseded = isSupersededLaunch(row.launch_id)
+    if (lifetime === "durable-launch" && !superseded) {
       reasonCounts.durable_launch++
       continue
     }
-    if (lifetime === "malformed-launch-identity") {
+    if (lifetime === "malformed-launch-identity" && !superseded) {
       reasonCounts.malformed_launch_identity++
       continue
     }
@@ -126,7 +158,7 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
       reasonCounts.reconnect_grace++
       continue
     }
-    candidates.push(row)
+    candidates.push({ ...row, superseded })
   }
 
   const reapedSessions: Array<{ member_id: string; name: string }> = []
@@ -154,11 +186,12 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
         launchId: current.launch_id,
         launchParentPid: current.launch_parent_pid,
       })
-      if (currentLifetime === "durable-launch") {
+      const currentSuperseded = isSupersededLaunch(current.launch_id)
+      if (currentLifetime === "durable-launch" && !currentSuperseded) {
         reasonCounts.durable_launch++
         continue
       }
-      if (currentLifetime === "malformed-launch-identity") {
+      if (currentLifetime === "malformed-launch-identity" && !currentSuperseded) {
         reasonCounts.malformed_launch_identity++
         continue
       }
@@ -169,7 +202,8 @@ export function reapStaleTransportRows(db: Database, opts: StaleTransportReapOpt
       deleteRoomMembers.run({ $id: current.id })
       const deleted = deleteSession.run({ $id: current.id })
       if (Number(deleted.changes ?? 0) === 1) {
-        reasonCounts.reaped_connection_scoped++
+        if (currentSuperseded) reasonCounts.reaped_superseded_launch++
+        else reasonCounts.reaped_connection_scoped++
         reapedSessions.push({ member_id: current.id, name: current.name })
       }
     }
@@ -338,6 +372,27 @@ export function registerSession(
           break
         }
       }
+    }
+  }
+
+  // Supersede this seat's earlier registration. `launch_id` is
+  // `providerLaunchId::persona` (wire `persona-launch-identity.ts`), so an
+  // older row carrying the same launch id is THIS seat registered over a
+  // previous connection, not a second seat. The name-holder eviction above
+  // only catches it when the name still matches — when the daemon still
+  // believes the dead connection is live, this registration auto-suffixes and
+  // the old row would otherwise linger forever as a durable-launch "wedge".
+  // A live registration arriving is positive evidence of replacement, so this
+  // never infers absence from a missing transport.
+  const launchIdentity = typeof launchId === "string" && launchId.trim().length > 0 ? launchId.trim() : null
+  if (launchIdentity !== null) {
+    const superseded = ctx.db
+      .prepare("SELECT id FROM sessions WHERE launch_id = $launch_id AND id != $id")
+      .all({ $launch_id: launchIdentity, $id: ctx.sessionId }) as Array<{ id: string }>
+    for (const row of superseded) {
+      ctx.db.prepare("DELETE FROM room_members WHERE session_id = $id").run({ $id: row.id })
+      ctx.db.prepare("DELETE FROM sessions WHERE id = $id").run({ $id: row.id })
+      log.info?.(`superseded session row ${row.id} — launch ${launchIdentity} re-registered as "${finalName}"`)
     }
   }
 

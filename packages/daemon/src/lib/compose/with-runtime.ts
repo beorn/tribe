@@ -26,7 +26,7 @@
 
 import { createLogger } from "loggily"
 import { sendMessage } from "../messaging.ts"
-import { cleanupOldData, backfillDefaultRoomMembers, reapStaleTransportRows } from "../session.ts"
+import { cleanupOldData, backfillDefaultRoomMembers, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
 import { loadPlugins } from "../plugin-loader.ts"
 import type { TribeClientApi, TribePluginApi } from "../plugin-api.ts"
 import type { BaseTribe } from "./base.ts"
@@ -148,6 +148,7 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
         nowMs,
         hasActiveTransport: (sessionId) => t.registry.hasActiveTransport(sessionId),
         isReconnectGraceProtected: (sessionId) => t.registry.isReconnectGraceProtected(sessionId, nowMs),
+        getActiveLaunchIds: () => activeLaunchIds(t.registry.getActiveSessionInfo()),
       })
       const reapedIds = report.reaped_sessions.map((session) => session.member_id)
       t.registry.forgetTransportSessions(reapedIds)

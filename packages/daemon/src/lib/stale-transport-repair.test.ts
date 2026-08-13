@@ -72,6 +72,7 @@ function emptyReasonCounts(): StaleTransportReapReport["reason_counts"] {
     durable_launch: 0,
     malformed_launch_identity: 0,
     reaped_connection_scoped: 0,
+    reaped_superseded_launch: 0,
   }
 }
 
@@ -371,6 +372,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       examined: 5,
       reaped: 1,
       reason_counts: {
+        reaped_superseded_launch: 0,
         active_transport: 1,
         reconnect_grace: 1,
         durable_launch: 1,

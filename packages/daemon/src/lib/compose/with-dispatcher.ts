@@ -59,7 +59,7 @@ import {
 import { createLifecycleStore } from "../lifecycle-store.ts"
 import { createInboxWaitManager } from "../inbox-wait.ts"
 import { logEvent, sendMessage } from "../messaging.ts"
-import { registerSession, NameConflictError, reapStaleTransportRows } from "../session.ts"
+import { registerSession, NameConflictError, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
 import {
   adoptByPidCwd,
   adoptIdentity,
@@ -504,6 +504,7 @@ export function withDispatcher<
         nowMs,
         hasActiveTransport: (sessionId) => registry.hasActiveTransport(sessionId),
         isReconnectGraceProtected: (sessionId) => registry.isReconnectGraceProtected(sessionId, nowMs),
+        getActiveLaunchIds: () => activeLaunchIds(registry.getActiveSessionInfo()),
       })
       registry.forgetTransportSessions(report.reaped_sessions.map((session) => session.member_id))
       return report

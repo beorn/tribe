@@ -120,11 +120,16 @@ describe("tribe.members derives alive from the pid, not stored transport-registr
     expect(members.sessions).toEqual([
       expect.objectContaining({
         name: "zombie-agent",
-        // Transport-registry presence is unchanged — the registry really
-        // does still have this connection open.
-        transport_state: "connected",
-        transport_alive: true,
-        // But the pid is provably dead, so alive must flip to false.
+        // The registry really does still have this connection open, and that
+        // fact keeps its own field. It no longer speaks for the transport:
+        // this row used to read `transport_state: "connected"` next to
+        // `pid_alive: false`, and on 2026-08-13 six such rows nearly sent a
+        // fleet-wide recovery after the wrong sessions.
+        transport_registered: true,
+        transport_state: "disconnected",
+        transport_alive: false,
+        transport_reason: "registered-transport-pids-dead",
+        // The pid is provably dead, so alive is false too.
         pid_alive: false,
         alive: false,
       }),
