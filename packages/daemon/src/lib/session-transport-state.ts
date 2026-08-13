@@ -26,6 +26,22 @@ export type SessionTransportProjection = {
   transport_reason: "registered-transport" | "registered-transport-pids-dead" | "owner-unknown-no-transport"
 }
 
+export type SessionAnswerCapability = "observed" | "not-observed"
+
+export type SessionTransportEvidence = SessionTransportProjection & {
+  alive: boolean
+  transport_alive: boolean
+  agent_alive: boolean
+  pid_alive: boolean
+  is_silent: boolean
+  answer_capability: SessionAnswerCapability
+  answer_reason:
+    | "connected-pid-live-transport"
+    | "registered-transport-pids-dead"
+    | "registered-owner-pid-dead"
+    | "owner-unknown-no-transport"
+}
+
 /** Probe OS process existence without turning an unfamiliar error into death. */
 export function probeProcessState(pid: number): OwnerState {
   if (!Number.isSafeInteger(pid) || pid <= 0) return "unknown"
@@ -105,5 +121,53 @@ export function projectSessionLiveness(input: {
     agent_alive,
     pid_alive,
     is_silent,
+  }
+}
+
+/**
+ * One PID-aware evidence projection shared by members, tracked-send admission,
+ * and pending. `answer_capability` is deliberately an observation about this
+ * transport snapshot, never a claim that the persona is permanently alive or
+ * dead. Silence remains visible in `alive` but does not make a connected,
+ * process-live transport unable to receive a new obligation.
+ */
+export function projectSessionTransportEvidence(input: {
+  transportConnected: boolean
+  transportPids: readonly number[]
+  agentPid: number | null
+  lastSeenSec?: number | null
+  maxSilenceSec?: number
+  probe?: (pid: number) => OwnerState
+}): SessionTransportEvidence {
+  const probe = input.probe ?? probeProcessState
+  const transportPidsAlive =
+    input.transportPids.length === 0 || input.transportPids.some((pid) => probe(pid) !== "dead")
+  const transport = projectSessionTransportState({
+    transportConnected: input.transportConnected,
+    transportPidsAlive: input.transportConnected ? transportPidsAlive : undefined,
+  })
+  const agentPidAlive = input.agentPid === null || probe(input.agentPid) !== "dead"
+  const liveness = input.transportConnected
+    ? projectSessionLiveness({
+        transportConnected: true,
+        pidAlive: transportPidsAlive,
+        agentPidAlive,
+        lastSeenSec: input.lastSeenSec,
+        maxSilenceSec: input.maxSilenceSec,
+      })
+    : projectSessionLiveness({ transportConnected: false })
+  const answerCapability = liveness.transport_alive && liveness.agent_alive
+  const answerReason: SessionTransportEvidence["answer_reason"] = answerCapability
+    ? "connected-pid-live-transport"
+    : !input.transportConnected
+      ? "owner-unknown-no-transport"
+      : !transportPidsAlive
+        ? "registered-transport-pids-dead"
+        : "registered-owner-pid-dead"
+  return {
+    ...transport,
+    ...liveness,
+    answer_capability: answerCapability ? "observed" : "not-observed",
+    answer_reason: answerReason,
   }
 }

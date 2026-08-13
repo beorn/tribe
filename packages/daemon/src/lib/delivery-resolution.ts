@@ -26,18 +26,18 @@ export type DirectDeliveryResolution =
 
 export interface DirectDeliveryResolutionInput {
   readonly recipient: string
-  readonly activeNames: ReadonlySet<string>
+  /** Names with an answer-capable transport in this admission snapshot. */
+  readonly answerableNames: ReadonlySet<string>
 }
 
 export type DirectDeliveryResolver = (input: DirectDeliveryResolutionInput) => DirectDeliveryResolution
 
-export interface PrefixDeliveryFallback {
-  readonly prefix: string
+export type DeliveryFallback = {
   readonly to: string
-}
+} & ({ readonly name: string; readonly prefix?: never } | { readonly prefix: string; readonly name?: never })
 
 /**
- * Parse one generic prefix-fallback table from an environment/config string.
+ * Parse one generic exact-name/prefix fallback table from environment/config.
  *
  * Concrete rows belong to the composing layer. Declared order wins; there is
  * no wildcard grammar or inferred hierarchy.
@@ -52,33 +52,42 @@ export function prefixFallbackDeliveryResolver(raw: string | undefined): DirectD
   }
   if (!Array.isArray(parsed)) throw new Error("TRIBE_DELIVERY_FALLBACKS must be a JSON array")
 
-  const rows = parsed.map((value, index): PrefixDeliveryFallback => {
+  const rows = parsed.map((value, index): DeliveryFallback => {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       throw new Error(`TRIBE_DELIVERY_FALLBACKS[${index}] must be an object`)
     }
     const row = value as Record<string, unknown>
-    const extra = Object.keys(row).filter((key) => key !== "prefix" && key !== "to")
+    const extra = Object.keys(row).filter((key) => key !== "name" && key !== "prefix" && key !== "to")
     if (extra.length > 0) {
       throw new Error(`TRIBE_DELIVERY_FALLBACKS[${index}] has unknown keys: ${extra.join(", ")}`)
     }
-    if (typeof row.prefix !== "string" || row.prefix.trim() === "") {
-      throw new Error(`TRIBE_DELIVERY_FALLBACKS[${index}].prefix must be a non-empty string`)
+    const hasName = Object.hasOwn(row, "name")
+    const hasPrefix = Object.hasOwn(row, "prefix")
+    if (hasName === hasPrefix) {
+      throw new Error(`TRIBE_DELIVERY_FALLBACKS[${index}] must have exactly one non-empty name or prefix`)
+    }
+    const matcher = hasName ? row.name : row.prefix
+    if (typeof matcher !== "string" || matcher.trim() === "") {
+      throw new Error(`TRIBE_DELIVERY_FALLBACKS[${index}].${hasName ? "name" : "prefix"} must be a non-empty string`)
     }
     if (typeof row.to !== "string" || row.to.trim() === "") {
       throw new Error(`TRIBE_DELIVERY_FALLBACKS[${index}].to must be a non-empty string`)
     }
-    return { prefix: row.prefix, to: row.to }
+    return hasName
+      ? { name: (matcher as string).trim(), to: row.to }
+      : { prefix: (matcher as string).trim(), to: row.to }
   })
+  const matcherKey = (row: DeliveryFallback): string => ("name" in row ? `name:${row.name}` : `prefix:${row.prefix}`)
   const duplicates = rows
-    .filter((row, index) => rows.findIndex((candidate) => candidate.prefix === row.prefix) !== index)
-    .map((row) => row.prefix)
+    .filter((row, index) => rows.findIndex((candidate) => matcherKey(candidate) === matcherKey(row)) !== index)
+    .map(matcherKey)
   if (duplicates.length > 0) {
-    throw new Error(`TRIBE_DELIVERY_FALLBACKS has duplicate prefixes: ${[...new Set(duplicates)].join(", ")}`)
+    throw new Error(`TRIBE_DELIVERY_FALLBACKS has duplicate matchers: ${[...new Set(duplicates)].join(", ")}`)
   }
 
-  return ({ recipient, activeNames }) => {
-    if (activeNames.has(recipient)) return { status: "accepted", state: "online" }
-    const fallback = rows.find((row) => recipient.startsWith(row.prefix))
+  return ({ recipient, answerableNames }) => {
+    if (answerableNames.has(recipient)) return { status: "accepted", state: "online" }
+    const fallback = rows.find((row) => ("name" in row ? recipient === row.name : recipient.startsWith(row.prefix)))
     if (fallback === undefined) return { status: "accepted", state: "offline" }
     if (fallback.to === recipient) {
       return {
@@ -90,7 +99,9 @@ export function prefixFallbackDeliveryResolver(raw: string | undefined): DirectD
       status: "accepted",
       state: "bounced",
       to: fallback.to,
-      reason: `no live transport for ${recipient}; matched prefix ${fallback.prefix}`,
+      reason:
+        `no answer-capable transport observed for ${recipient}; matched ` +
+        ("name" in fallback ? `exact name ${fallback.name}` : `prefix ${fallback.prefix}`),
     }
   }
 }

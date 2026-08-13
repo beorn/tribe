@@ -38,18 +38,31 @@ describe("generic direct-message delivery resolution", () => {
         { prefix: "@worker/", to: "@manager" },
       ]),
     )
-    expect(resolve?.({ recipient: "@worker/special/1", activeNames: new Set() })).toMatchObject({
+    expect(resolve?.({ recipient: "@worker/special/1", answerableNames: new Set() })).toMatchObject({
       status: "accepted",
       state: "bounced",
       to: "@special-manager",
     })
-    expect(resolve?.({ recipient: "@other/1", activeNames: new Set() })).toEqual({
+    expect(resolve?.({ recipient: "@other/1", answerableNames: new Set() })).toEqual({
       status: "accepted",
       state: "offline",
     })
-    expect(resolve?.({ recipient: "@worker/1", activeNames: new Set(["@worker/1"]) })).toEqual({
+    expect(resolve?.({ recipient: "@worker/1", answerableNames: new Set(["@worker/1"]) })).toEqual({
       status: "accepted",
       state: "online",
+    })
+  })
+
+  it("supports an exact-name fallback without matching descendants", () => {
+    const resolve = prefixFallbackDeliveryResolver(JSON.stringify([{ name: "@yrd", to: "@chief" }]))
+    expect(resolve?.({ recipient: "@yrd", answerableNames: new Set(["@chief"]) })).toMatchObject({
+      status: "accepted",
+      state: "bounced",
+      to: "@chief",
+    })
+    expect(resolve?.({ recipient: "@yrd/next", answerableNames: new Set(["@chief"]) })).toEqual({
+      status: "accepted",
+      state: "offline",
     })
   })
 
@@ -62,8 +75,9 @@ describe("generic direct-message delivery resolution", () => {
         { prefix: "@worker/", to: "@manager" },
         { prefix: "@worker/", to: "@other" },
       ]),
-      /duplicate prefixes/,
+      /duplicate matchers/,
     ],
+    [JSON.stringify([{ name: "@yrd", prefix: "@yrd/", to: "@chief" }]), /exactly one/],
   ])("fails loud on an invalid prefix fallback table", (raw, expected) => {
     expect(() => prefixFallbackDeliveryResolver(raw)).toThrow(expected)
   })
@@ -100,37 +114,37 @@ describe("generic direct-message delivery resolution", () => {
         {
           id: "sess-sender",
           name: "@sender",
-          pid: 1001,
+          pid: process.pid,
           cwd: "/repo",
           role: "member",
           claudeSessionId: null,
           registeredAt: 1,
           launchId: null,
           launchParentPid: null,
-          transportPids: [1001],
+          transportPids: [process.pid],
         },
         {
           id: "sess-manager",
           name: "@dev",
-          pid: 1002,
+          pid: process.pid,
           cwd: "/repo",
           role: "member",
           claudeSessionId: null,
           registeredAt: 1,
           launchId: null,
           launchParentPid: null,
-          transportPids: [1002],
+          transportPids: [process.pid],
         },
       ],
-      resolveDelivery: ({ recipient, activeNames }) =>
-        recipient.startsWith("@dev/") && !activeNames.has(recipient)
+      resolveDelivery: ({ recipient, answerableNames }) =>
+        recipient.startsWith("@dev/") && !answerableNames.has(recipient)
           ? {
               status: "accepted",
               state: "bounced",
               to: "@dev",
               reason: "declared child has no live transport",
             }
-          : { status: "accepted", state: activeNames.has(recipient) ? "online" : "offline" },
+          : { status: "accepted", state: answerableNames.has(recipient) ? "online" : "offline" },
     }
   }
 
@@ -243,6 +257,71 @@ describe("generic direct-message delivery resolution", () => {
     expect(refused.error).toContain(`${status} test target`)
     expect(db.prepare("SELECT id FROM messages WHERE kind = 'direct' AND content = 'nope'").get()).toBeNull()
     expect(db.prepare("SELECT request_id FROM pending_request").get()).toBeNull()
+  })
+
+  it("refuses a tracked offline owner, journals the terminal disposition, and preserves untracked offline mail", () => {
+    const refused = resultJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        {
+          to: "@ci",
+          message: "run the integration gate",
+          type: "request",
+          request: "req-offline-ci",
+          ref: "carrier-17",
+        },
+        opts(),
+      ),
+    )
+
+    expect(refused).toMatchObject({
+      error: expect.stringContaining('no connected, PID-live transport was observed for "@ci"'),
+      delivery_failure_id: expect.any(String),
+      observed_at: expect.any(String),
+    })
+    expect(refused.error).toContain("start or resume @ci, address a declared live holder, or retry later")
+    expect(db.prepare("SELECT request_id FROM pending_request WHERE request_id = 'req-offline-ci'").get()).toBeNull()
+    expect(
+      db.prepare("SELECT id FROM messages WHERE kind = 'direct' AND content = 'run the integration gate'").get(),
+    ).toBeNull()
+    expect(db.prepare("SELECT id, ref FROM messages WHERE type = 'event.message.delivery-failed'").get()).toEqual({
+      id: refused.delivery_failure_id,
+      ref: "carrier-17",
+    })
+
+    const offlineNotice = resultJson(
+      handleToolCall(sender, "tribe.send", { to: "@ci", message: "informational", type: "notify" }, opts()),
+    )
+    expect(offlineNotice).toMatchObject({ sent: true, delivery: { state: "offline", recipient: "@ci" } })
+    expect(db.prepare("SELECT id FROM messages WHERE kind = 'direct' AND content = 'informational'").get()).toEqual({
+      id: offlineNotice.id,
+    })
+  })
+
+  it("refuses instead of bouncing a tracked request to an unavailable fallback", () => {
+    const unavailableFallback = {
+      ...opts(),
+      getActiveSessionIds: () => new Set(["sess-sender"]),
+      hasActiveTransport: (sessionId: string) => sessionId === "sess-sender",
+      getActiveSessionInfo: () =>
+        opts()
+          .getActiveSessionInfo()
+          .filter((session) => session.name === "@sender"),
+    }
+    const refused = resultJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        { to: "@dev/gone", message: "do work", type: "request", request: "req-dead-fallback" },
+        unavailableFallback,
+      ),
+    )
+
+    expect(refused.error).toContain('configured fallback "@dev"')
+    expect(refused.error).toContain("no connected, PID-live transport")
+    expect(db.prepare("SELECT request_id FROM pending_request WHERE request_id = 'req-dead-fallback'").get()).toBeNull()
+    expect(db.prepare("SELECT id FROM messages WHERE kind = 'direct' AND content = 'do work'").get()).toBeNull()
   })
 
   it("preflights every multi-recipient target before persistence and reports each accepted disposition", () => {

@@ -24,7 +24,7 @@ export default {
       // unwired for hours and nothing could see that. Belt-and-braces: the daemon also defaults
       // to `never` on its own whenever HAB_SERVICE_NAME is present and no explicit knob is set.
       command: "bun vendor/tribe/packages/daemon/src/daemon.ts --idle-quit-after never",
-      env: { TRIBE_DELIVERY_FALLBACKS: '[{"prefix":"@dev/","to":"@dev"}]' },
+      env: { TRIBE_DELIVERY_FALLBACKS: '[{"name":"@yrd","to":"@chief"}]' },
       // oxfmt-ignore
       stateRoots: ["${TRIBE_DB:-${XDG_DATA_HOME:-$HOME/.local/share}/tribe/tribe.db}", "${TRIBE_SOCKET:-${XDG_RUNTIME_DIR:-$HOME/.local/share/tribe}/tribe.sock}"],
       health: { command: "tribe health" },

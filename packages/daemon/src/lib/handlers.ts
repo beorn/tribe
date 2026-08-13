@@ -50,7 +50,13 @@ import { gatherCodePin } from "./code-pin.ts"
 import { parseDbGrowthWarningBytes, projectHealthCadence } from "./health-cadence.ts"
 import { registeredTrustTierForTopic, senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
 import type { LifecycleStore, LifecycleSnapshotRecord } from "./lifecycle-store.ts"
-import { projectSessionLiveness, projectSessionTransportState } from "./session-transport-state.ts"
+import {
+  projectSessionLiveness,
+  projectSessionTransportEvidence,
+  projectSessionTransportState,
+  type OwnerState,
+  type SessionTransportEvidence,
+} from "./session-transport-state.ts"
 import type { DirectDeliveryResolution, DirectDeliveryResolver } from "./delivery-resolution.ts"
 import { isUnidentifiedSessionName } from "./resolve-name.ts"
 
@@ -298,6 +304,77 @@ export type HandlerOpts = {
   resolveDelivery?: DirectDeliveryResolver
 }
 
+type OwnerTransportReason = SessionTransportEvidence["answer_reason"] | "no-session-record"
+
+type OwnerTransportObservation = {
+  owner_transport_registered: boolean
+  owner_transport_state: "connected" | "disconnected"
+  owner_state: OwnerState
+  owner_answer_capability: "observed" | "not-observed"
+  owner_transport_reason: OwnerTransportReason
+  owner_transport_observed_at: string
+}
+
+function ownerTransportObservationProjector(ctx: TribeContext, opts: HandlerOpts, observedAt: number) {
+  const knownNames = new Set(
+    (
+      ctx.db.prepare("SELECT DISTINCT name FROM sessions").all() as Array<{
+        name: string
+      }>
+    ).map((row) => row.name),
+  )
+  const activeByName = new Map<string, ActiveSessionInfo[]>()
+  for (const info of opts.getActiveSessionInfo()) {
+    const siblings = activeByName.get(info.name) ?? []
+    siblings.push(info)
+    activeByName.set(info.name, siblings)
+  }
+  const observedAtIso = new Date(observedAt).toISOString()
+  const cache = new Map<string, OwnerTransportObservation>()
+
+  const observe = (name: string): OwnerTransportObservation => {
+    const cached = cache.get(name)
+    if (cached !== undefined) return cached
+    const evidence = (activeByName.get(name) ?? []).map((info) =>
+      projectSessionTransportEvidence({
+        transportConnected: true,
+        transportPids: info.transportPids,
+        agentPid: info.launchParentPid ?? info.pid,
+      }),
+    )
+    const selected =
+      evidence.find((row) => row.answer_capability === "observed") ??
+      evidence.find((row) => row.owner_state === "dead") ??
+      evidence[0]
+    const observation: OwnerTransportObservation = selected
+      ? {
+          owner_transport_registered: selected.transport_registered,
+          owner_transport_state: selected.transport_state,
+          owner_state: selected.owner_state,
+          owner_answer_capability: selected.answer_capability,
+          owner_transport_reason: selected.answer_reason,
+          owner_transport_observed_at: observedAtIso,
+        }
+      : {
+          owner_transport_registered: false,
+          owner_transport_state: "disconnected",
+          owner_state: "unknown",
+          owner_answer_capability: "not-observed",
+          owner_transport_reason: knownNames.has(name) ? "owner-unknown-no-transport" : "no-session-record",
+          owner_transport_observed_at: observedAtIso,
+        }
+    cache.set(name, observation)
+    return observation
+  }
+
+  return {
+    observe,
+    answerableNames: new Set(
+      [...activeByName.keys()].filter((name) => observe(name).owner_answer_capability === "observed"),
+    ),
+  }
+}
+
 type AcceptedDirectDeliveryResolution = Extract<DirectDeliveryResolution, { readonly status: "accepted" }>
 
 interface ResolvedDirectRecipient {
@@ -448,21 +525,20 @@ function normalizeRecipients(value: unknown): string | string[] | null {
   return unique
 }
 
-function activeBroadcastRecipients(ctx: TribeContext, opts: HandlerOpts): string[] {
-  const activeIds = [...opts.getActiveSessionIds()]
-  if (activeIds.length === 0) return []
-  const placeholders = activeIds.map(() => "?").join(", ")
+function activeBroadcastRecipients(ctx: TribeContext, answerableNames: ReadonlySet<string>): string[] {
+  const names = [...answerableNames].filter((name) => name !== ctx.getName())
+  if (names.length === 0) return []
+  const placeholders = names.map(() => "?").join(", ")
   const rows = ctx.db
     .prepare(`
       SELECT DISTINCT s.name
       FROM sessions s
       INNER JOIN room_members rm ON rm.session_id = s.id
-      WHERE s.id IN (${placeholders})
-        AND s.name != ?
+      WHERE s.name IN (${placeholders})
         AND s.role = 'member'
       ORDER BY s.name ASC
     `)
-    .all(...activeIds, ctx.getName()) as Array<{ name: string }>
+    .all(...names) as Array<{ name: string }>
   return rows.map((row) => row.name)
 }
 
@@ -611,9 +687,10 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     ...(delivery ? { delivery } : {}),
     ...(typeof messageIdArg === "string" ? { messageId: messageIdArg.trim() } : {}),
   }
-  const activeNames = new Set(opts.getActiveSessionInfo().map((session) => session.name))
-  const resolveRecipient = (recipient: string): DirectDeliveryResolution =>
-    resolveDirectDelivery(recipient, activeNames, opts.resolveDelivery)
+  const observedAt = Date.now()
+  const transport = ownerTransportObservationProjector(ctx, opts, observedAt)
+  const resolveRecipient = (recipient: string, tracked: boolean): DirectDeliveryResolution =>
+    resolveDirectDelivery(recipient, transport, opts.resolveDelivery, tracked)
   if (Array.isArray(recipients)) {
     return handleMultiSend({
       ctx,
@@ -633,17 +710,43 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       summaryDerived,
       truncation,
       resolveRecipient,
+      observedAt,
     })
   }
 
-  const resolution = resolveRecipient(recipients)
+  const broadcastOwners =
+    recipients === "*" && (requestFlag || requestId !== null)
+      ? activeBroadcastRecipients(ctx, transport.answerableNames)
+      : undefined
+  if (recipients === "*" && broadcastOwners !== undefined && broadcastOwners.length === 0) {
+    return trackedDeliveryFailure(ctx, {
+      recipients: [recipients],
+      reason:
+        `at admission snapshot ${new Date(observedAt).toISOString()}, no answer-capable broadcast owner was observed; ` +
+        "start or resume a recipient, address a declared live holder, or retry later",
+      observedAt,
+      args: a,
+      requestId,
+    })
+  }
+  const resolution =
+    recipients === "*"
+      ? ({ status: "accepted", state: broadcastOwners === undefined ? "offline" : "online" } as const)
+      : resolveRecipient(recipients, willTrack)
   if (resolution.status !== "accepted") {
+    if (willTrack) {
+      return trackedDeliveryFailure(ctx, {
+        recipients: [recipients],
+        reason: resolution.reason,
+        observedAt,
+        args: a,
+        requestId,
+      })
+    }
     return jsonResult({
       error: `tribe.send: ${resolution.status} recipient ${JSON.stringify(recipients)}: ${resolution.reason}`,
     })
   }
-  const broadcastOwners =
-    recipients === "*" && (requestFlag || requestId !== null) ? activeBroadcastRecipients(ctx, opts) : undefined
   const result = sendMessage(
     ctx,
     recipients,
@@ -719,15 +822,33 @@ function handleMultiSend(input: {
   summary: string
   summaryDerived: boolean
   truncation: SanitizedMessage
-  resolveRecipient: (recipient: string) => DirectDeliveryResolution
+  resolveRecipient: (recipient: string, tracked: boolean) => DirectDeliveryResolution
+  observedAt: number
 }): ToolResult {
-  const resolutions = resolveDirectRecipients(input.recipients, input.resolveRecipient)
-  if (resolutions instanceof Error) return jsonResult({ error: resolutions.message })
   const implicitlyTracked =
     AUTO_TRACK_TYPES_SET.has(input.msgType) && input.recipients.some((recipient) => recipient !== input.sender)
   const sharedRequestId = input.requestFlag
     ? randomUUID()
     : (input.requestId ?? (implicitlyTracked ? randomUUID() : null))
+  const explicitlyTracked = input.requestFlag || input.requestId !== null
+  const resolutions = resolveDirectRecipients(input.recipients, (recipient) =>
+    input.resolveRecipient(
+      recipient,
+      explicitlyTracked || (AUTO_TRACK_TYPES_SET.has(input.msgType) && recipient !== input.sender),
+    ),
+  )
+  if (resolutions instanceof Error) {
+    if (sharedRequestId !== null) {
+      return trackedDeliveryFailure(input.ctx, {
+        recipients: input.recipients,
+        reason: resolutions.message.replace(/^tribe\.send:\s*/u, ""),
+        observedAt: input.observedAt,
+        args: input.args,
+        requestId: sharedRequestId,
+      })
+    }
+    return jsonResult({ error: resolutions.message })
+  }
   const results = resolutions.map(({ recipient, resolution }) => {
     const result = sendMessage(
       input.ctx,
@@ -784,15 +905,68 @@ function handleMultiSend(input: {
 
 function resolveDirectDelivery(
   recipient: string,
-  activeNames: ReadonlySet<string>,
+  transport: ReturnType<typeof ownerTransportObservationProjector>,
   resolver: DirectDeliveryResolver | undefined,
+  tracked: boolean,
 ): DirectDeliveryResolution {
-  return (
-    resolver?.({ recipient, activeNames }) ?? {
-      status: "accepted",
-      state: activeNames.has(recipient) ? "online" : "offline",
+  const resolution = resolver?.({ recipient, answerableNames: transport.answerableNames }) ?? {
+    status: "accepted",
+    state: transport.answerableNames.has(recipient) ? "online" : "offline",
+  }
+  if (!tracked || resolution.status !== "accepted") return resolution
+  if (resolution.state === "online" && transport.answerableNames.has(recipient)) return resolution
+  if (resolution.state === "bounced" && transport.answerableNames.has(resolution.to)) return resolution
+
+  const original = transport.observe(recipient)
+  const snapshot = original.owner_transport_observed_at
+  if (resolution.state === "bounced") {
+    const fallback = transport.observe(resolution.to)
+    return {
+      status: "unresolved",
+      reason:
+        `at admission snapshot ${snapshot}, no connected, PID-live transport was observed for ` +
+        `${JSON.stringify(recipient)}; configured fallback ${JSON.stringify(resolution.to)} also had ` +
+        `no connected, PID-live transport (${fallback.owner_transport_reason}); start or resume ${recipient}, ` +
+        "address a declared live holder, or retry later",
     }
+  }
+  return {
+    status: "unresolved",
+    reason:
+      `at admission snapshot ${snapshot}, no connected, PID-live transport was observed for ` +
+      `${JSON.stringify(recipient)} (${original.owner_transport_reason}); start or resume ${recipient}, ` +
+      "address a declared live holder, or retry later",
+  }
+}
+
+function trackedDeliveryFailure(
+  ctx: TribeContext,
+  input: {
+    recipients: readonly string[]
+    reason: string
+    observedAt: number
+    args: ToolArgs
+    requestId: string | null
+  },
+): ToolResult {
+  const deliveryFailureId = logEvent(
+    ctx,
+    "message.delivery-failed",
+    input.args.bead as string | undefined,
+    {
+      schema_version: 1,
+      recipients: input.recipients,
+      reason: input.reason,
+      observed_at: input.observedAt,
+      ...(input.requestId === null ? {} : { request_id: input.requestId }),
+    },
+    { sender: ctx.getName(), ref: input.args.ref as string | undefined, ts: input.observedAt },
   )
+  return jsonResult({
+    error: `tribe.send: ${input.reason}`,
+    delivery_failure_id: deliveryFailureId,
+    observed_at: new Date(input.observedAt).toISOString(),
+  })
 }
 
 function resolveDirectRecipients(
@@ -934,6 +1108,8 @@ type PendingBall = {
    * on the attention preview, which stays summary-sized. */
   content?: string | null
 }
+
+type PendingBallWithOwnerTransport = PendingBall & OwnerTransportObservation
 
 type PendingOutcomeBall = PendingBall & {
   status: "expired" | "unanswered"
@@ -1311,7 +1487,7 @@ function pendingOwnerSummaries(pending: readonly PendingBall[]) {
   return pendingOwnerGroups(pending).map(({ pending: _pending, ...summary }) => summary)
 }
 
-function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): ToolResult {
+function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
   // Ball-tracker pending-query (@km/tribe/message-ball-tracker Phase 2a):
   // return open requests addressed to the given recipient (the "owner" of
   // the open ball). Default recipient is the caller's own session name.
@@ -1322,6 +1498,9 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
   const owed = a.owed === true
   const staleMs = typeof a.stale_ms === "number" ? a.stale_ms : null
   const now = Date.now()
+  const transport = ownerTransportObservationProjector(ctx, opts, now)
+  const withOwnerTransport = <T extends PendingBall>(rows: readonly T[]): Array<T & OwnerTransportObservation> =>
+    rows.map((row) => ({ ...row, ...transport.observe(row.recipient) }))
 
   if (all && typeof a.owner === "string") {
     return jsonResult({ error: "tribe.pending: all and owner are mutually exclusive." })
@@ -1428,7 +1607,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
       ? expiredPendingBalls(ctx, now).filter((row) => !owed || row.backing === "live")
       : allPendingBalls(ctx, now)
     const filtered = staleMs === null ? rows : rows.filter((row) => row.age_ms >= staleMs)
-    const pending = withQuestionBodies(ctx, filtered)
+    const pending: PendingBallWithOwnerTransport[] = withOwnerTransport(withQuestionBodies(ctx, filtered))
     const owners = pendingOwnerGroups(pending)
     return jsonResult({
       all: true,
@@ -1447,7 +1626,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, _opts: HandlerOpts): Tool
     ? expiredPendingBalls(ctx, now).filter((row) => row.recipient === owner && (!owed || row.backing === "live"))
     : pendingBallsForOwner(ctx, owner, now)
   const filtered = staleMs === null ? rows : rows.filter((row) => row.age_ms >= staleMs)
-  const pending = withQuestionBodies(ctx, filtered)
+  const pending: PendingBallWithOwnerTransport[] = withOwnerTransport(withQuestionBodies(ctx, filtered))
   return jsonResult({ owner, expired, ...(owed ? { owed: true } : {}), pending, count: pending.length })
 }
 
@@ -1645,20 +1824,14 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     // pid-probed: a DB-stored pid is reusable and proves nothing once the
     // transport is gone (session.ts `isPidAlive` docstring) —
     // transport_connected=false already yields alive=false below.
-    const transportPidsAlive = transportPids.length === 0 || transportPids.some((pid) => pidStillAlive(pid))
-    const transport = projectSessionTransportState({
-      transportConnected,
-      transportPidsAlive: transportConnected ? transportPidsAlive : undefined,
-    })
     const agentPid = active ? (active.launchParentPid ?? active.pid) : null
-    const liveness = transportConnected
-      ? projectSessionLiveness({
-          transportConnected: true,
-          pidAlive: transportPidsAlive,
-          agentPidAlive: agentPid ? pidStillAlive(agentPid) : true,
-          lastSeenSec: Math.round((Date.now() - r.updated_at) / 1000),
-        })
-      : projectSessionLiveness({ transportConnected: false })
+    const evidence = projectSessionTransportEvidence({
+      transportConnected,
+      transportPids,
+      agentPid,
+      lastSeenSec: Math.round((Date.now() - r.updated_at) / 1000),
+      probe: (pid) => (pidStillAlive(pid) ? "live" : "dead"),
+    })
     return {
       member_id: r.id,
       name: r.name,
@@ -1680,12 +1853,11 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
       cwd: r.cwd,
       claude_session_id: r.claude_session_id,
       claude_session_name: r.claude_session_name,
-      ...transport,
+      ...evidence,
       // `alive` (plus transport_alive/agent_alive/pid_alive/is_silent) is
       // derived above, never asserted from transport-registry presence — see
       // the comment on `liveness`. Kept as `alive` for wire compatibility;
       // the other fields are additive.
-      ...liveness,
       uptime_min: Math.round((Date.now() - r.started_at) / 60_000),
       last_seen_sec: Math.round((Date.now() - r.updated_at) / 1000),
       parent: parent && parent !== r.name ? parent : undefined,
