@@ -235,8 +235,11 @@ export type HandlerOpts = {
   setUserRenamed: (v: boolean) => void
   /**
    * Return ctx.sessionId of every currently-connected participating session —
-   * used to compute `alive` on DB-sourced session rows without a heartbeat
-   * timer. Excludes daemon / watch / pending sessions.
+   * the transport-registry half of `alive` on DB-sourced session rows
+   * (no heartbeat timer). Necessary but not sufficient: a registry entry can
+   * outlive the process it names, so `alive` also requires a pid probe
+   * (`pidStillAlive` + `projectSessionLiveness`) — never derived from this
+   * set alone. Excludes daemon / watch / pending sessions.
    */
   getActiveSessionIds: () => Set<string>
   /**
@@ -1475,19 +1478,37 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     const parent = r.claude_session_id ? parentMap.get(r.claude_session_id) : undefined
     const active = activeInfo.find((session) => session.id === r.id)
     const protocolVersions = active?.protocolVersions ?? []
-    const transport = projectSessionTransportState({
-      transportConnected: activeIds.has(r.id),
-    })
+    const transportConnected = activeIds.has(r.id)
+    const transport = projectSessionTransportState({ transportConnected })
+    const transportPids = active?.transportPids ?? []
+    // A registry entry can outlive the process it names — a dead transport
+    // adapter, a session mid-restart whose old socket hasn't been pruned yet
+    // — so `alive` must be confirmed with a pid probe at read time, exactly
+    // like handleHealth already does, never read off transport-registry
+    // presence alone. Disconnected rows are deliberately NOT pid-probed: a
+    // DB-stored pid is reusable and proves nothing once the transport is
+    // gone (session.ts `isPidAlive` docstring) — transport_connected=false
+    // already yields alive=false through projectSessionLiveness below.
+    const agentPid = active ? (active.launchParentPid ?? active.pid) : null
+    const liveness = transportConnected
+      ? projectSessionLiveness({
+          transportConnected: true,
+          pidAlive: transportPids.length === 0 || transportPids.some((pid) => pidStillAlive(pid)),
+          agentPidAlive: agentPid ? pidStillAlive(agentPid) : true,
+          lastSeenSec: Math.round((Date.now() - r.updated_at) / 1000),
+        })
+      : projectSessionLiveness({ transportConnected: false })
     return {
       member_id: r.id,
       name: r.name,
       role: r.role,
       domains: parseDomains(r.domains),
       pid: active?.pid ?? r.pid,
+      agent_pid: agentPid,
       launch_id: r.launch_id,
       launch_parent_pid: r.launch_parent_pid,
       delivery: r.delivery,
-      transport_pids: active?.transportPids ?? [],
+      transport_pids: transportPids,
       protocol_versions: protocolVersions,
       version_state:
         protocolVersions.length === 0
@@ -1499,9 +1520,11 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
       claude_session_id: r.claude_session_id,
       claude_session_name: r.claude_session_name,
       ...transport,
-      // Compatibility alias for existing clients. `transport_state` is the
-      // authority; never derive either fact on a separate code path.
-      alive: transport.transport_state === "connected",
+      // `alive` (plus transport_alive/agent_alive/pid_alive/is_silent) is
+      // derived above, never asserted from transport-registry presence — see
+      // the comment on `liveness`. Kept as `alive` for wire compatibility;
+      // the other fields are additive.
+      ...liveness,
       uptime_min: Math.round((Date.now() - r.started_at) / 60_000),
       last_seen_sec: Math.round((Date.now() - r.updated_at) / 1000),
       parent: parent && parent !== r.name ? parent : undefined,
