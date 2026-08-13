@@ -16,8 +16,12 @@ import { execSync } from "node:child_process"
 import { dirname, resolve } from "node:path"
 import { URLSearchParams } from "node:url"
 import { createLogger } from "loggily"
-import { findBeadsDir } from "tribe-wire/lib/config"
-import { openGitHubCursorStore, resolveGitHubCursorPath } from "./github-cursor-store.ts"
+import {
+  openGitHubCursorStore,
+  resolveGitHubCursorPath,
+  resolveLegacyGitHubCursorPath,
+  TRIBE_PROJECT_ROOT_ENV,
+} from "./github-cursor-store.ts"
 import { createTimers } from "./timers.ts"
 import { startSingleFlightTicker } from "./single-flight-ticker.ts"
 import type { TribePluginApi, TribeClientApi } from "./plugin-api.ts"
@@ -578,10 +582,18 @@ export const githubPlugin: TribePluginApi = {
     const workflowNotify = (process.env.GITHUB_WORKFLOW_NOTIFY ?? "failure") as "all" | "failure" | "success"
 
     const cursorPath = resolveGitHubCursorPath()
-    const beadsDir = findBeadsDir()
+    // Anchored, not searched — see resolveLegacyGitHubCursorPath. A daemon with
+    // no declared project root adopts nothing rather than probing its cwd.
+    const legacyPath = resolveLegacyGitHubCursorPath()
+    if (legacyPath === null) {
+      log.info?.(
+        `no ${TRIBE_PROJECT_ROOT_ENV} declared — skipping legacy .beads cursor adoption ` +
+          `(the daemon never probes its working directory for one)`,
+      )
+    }
     const cursorStore = openGitHubCursorStore({
       stateDir: dirname(cursorPath),
-      legacyPath: beadsDir === null ? null : resolve(beadsDir, "github-cursor.json"),
+      legacyPath,
     })
     const cursorState = cursorStore.state
 

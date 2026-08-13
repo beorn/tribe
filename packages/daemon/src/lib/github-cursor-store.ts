@@ -29,6 +29,30 @@ export function resolveGitHubCursorPath(env: CursorEnvironment = process.env): s
   return resolve(dataHome, "tribe", "github-cursor.json")
 }
 
+/** The one place a daemon may be told which project it belongs to. */
+export const TRIBE_PROJECT_ROOT_ENV = "TRIBE_PROJECT_ROOT"
+
+/**
+ * Locate the legacy project-local cursor to adopt, or null when there is
+ * nothing to adopt from.
+ *
+ * This is deliberately NOT a search. It used to be `findBeadsDir()` with no
+ * argument, which resolves from `process.cwd()` and walks up to the enclosing
+ * Git boundary — so the daemon adopted whatever `.beads/github-cursor.json`
+ * happened to sit above the directory its launcher started it in. Stale copies
+ * of the old writer are still scattered across machines and can mint more, so
+ * that search could hand the daemon a cursor from an unrelated project.
+ *
+ * The rule now: adopt only from an explicitly declared root, and look only at
+ * that root's own `.beads/`. No ancestor walk, and never `process.cwd()` — a
+ * daemon that was not told which project it serves does not guess.
+ */
+export function resolveLegacyGitHubCursorPath(env: CursorEnvironment = process.env): string | null {
+  const declaredRoot = env[TRIBE_PROJECT_ROOT_ENV]?.trim()
+  if (!declaredRoot) return null
+  return resolve(declaredRoot, ".beads", "github-cursor.json")
+}
+
 /**
  * Open the daemon cursor and adopt the legacy project-local carrier exactly
  * once. The migration is convergent: an interrupted copy leaves identical
