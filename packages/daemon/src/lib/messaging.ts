@@ -360,6 +360,9 @@ export function sendMessage(
       $id: id,
       $type: type,
       $sender: sender,
+      // Provenance (v26): the daemon's connection identity, not the caller's
+      // claim. Joins to sessions for pid / cwd / launch_id.
+      $session_id: ctx.sessionId,
       $recipient: recipient,
       $kind: resolvedKind,
       $content: content,
@@ -521,6 +524,10 @@ export function logEvent(
     $id: id,
     $type: `event.${type}`,
     $sender: options.sender ?? ctx.getName(),
+    // Stamped from the daemon's own connection context, never caller-asserted:
+    // `sender` is a self-reported name, this is not. An event attributed to
+    // "daemon" still records which connection provoked it.
+    $session_id: ctx.sessionId,
     $recipient: "*",
     $kind: "event",
     $content: data ? JSON.stringify(data) : "",

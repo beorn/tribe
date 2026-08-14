@@ -12,7 +12,7 @@ import { safeRemoveSync } from "removely"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { openDatabase } from "./database.ts"
+import { CURRENT_SCHEMA_VERSION, openDatabase } from "./database.ts"
 
 describe("session launch identity schema (migration chain from v18)", () => {
   let tmpDir: string
@@ -68,7 +68,7 @@ describe("session launch identity schema (migration chain from v18)", () => {
       expect(
         db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_sessions_launch_identity'").get(),
       ).toEqual({ name: "idx_sessions_launch_identity" })
-      expect(db.prepare("SELECT value FROM _schema_meta WHERE key='version'").get()).toEqual({ value: "25" })
+      expect(db.prepare("SELECT value FROM _schema_meta WHERE key='version'").get()).toEqual({ value: String(CURRENT_SCHEMA_VERSION) })
     } finally {
       db.close()
     }
