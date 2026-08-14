@@ -76,8 +76,11 @@ outcomes report `status: "unanswered"` plus `manual-close`,
 authoritative `answered` fact and removes that row from this view. Requests and
 queries default to a 20-minute escalation deadline; assignments have no
 reply-clock default. `--expires-in-ms` overrides the policy for one send.
-`--close <id>` records a typed non-reply settlement and closes one pending
-request without sending a reply — requires `--owner`. Example:
+Live rows expose `request_kind: "request" | "incident"`. Incidents are standing
+conditions with no reply deadline; only their emitter's `--incident-cleared`
+edge can settle them. `--close <id>` records a typed non-reply settlement and
+closes one ordinary pending request without sending a reply — requires
+`--owner` and refuses a typed incident. Example:
 
 ```bash
 tribe-wire pending --owner @alice --stale 15m
@@ -258,7 +261,7 @@ never mutates reply/ref state.
 the message's unique id (direct request/query/assign auto-track already).
 `--delivery pull` pins the send to the named recognized mailbox: a disconnected
 transport or disconnected configured fallback does not refuse it. Recognition
-comes from a complete managed launch record or journal activity inside the
+comes from any current session registration or journal activity inside the
 existing four-hour activity horizon; a never-seen name still fails loudly and
 opens no ball.
 Another non-empty value overrides the id or opts in a

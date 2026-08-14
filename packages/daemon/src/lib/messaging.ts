@@ -386,7 +386,8 @@ export function sendMessage(
     // before this transaction returns.
     if (resolvedKind === "direct") {
       if (requestId) {
-        ctx.stmts.openPendingRequest.run({
+        const openRequest = incidentRequestId === null ? ctx.stmts.openPendingRequest : ctx.stmts.openIncidentRequest
+        openRequest.run({
           $request_id: requestId,
           $recipient: ballTracker.owner ?? recipient,
           $sender: sender,
