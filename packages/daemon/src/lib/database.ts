@@ -1384,6 +1384,7 @@ export function createStatements(db: Database) {
      *  so snapshot cost does not grow by one query per ball. */
     selectPendingForRecipientWithContent: db.prepare(`
 		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
+			p.request_kind,
 			COALESCE(m.summary, a.summary) AS summary,
 			COALESCE(m.content, a.content) AS content
 		FROM pending_request p
@@ -1411,6 +1412,7 @@ export function createStatements(db: Database) {
      *  pays to return bodies, and it does so in one bounded statement. */
     selectAllPendingRequestsWithContent: db.prepare(`
 		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
+			p.request_kind,
 			COALESCE(m.summary, a.summary) AS summary,
 			COALESCE(m.content, a.content) AS content
 		FROM pending_request p

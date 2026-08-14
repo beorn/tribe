@@ -266,6 +266,17 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
           status: "active",
         }),
       ])
+      const listedAll = parseToolJson(handleToolCall(owner, "tribe.pending", { all: true }, makeOpts())) as {
+        pending: Array<Record<string, unknown>>
+      }
+      expect(listedAll.pending).toEqual([
+        expect.objectContaining({
+          request_id: incidentId,
+          request_kind: "incident",
+          expires_at: null,
+          status: "active",
+        }),
+      ])
       openBall(stmts, { id: "ordinary", recipient: "@chief", openedAt: Date.now(), sender: "@agent/2" })
 
       const batch = parseToolJson(
