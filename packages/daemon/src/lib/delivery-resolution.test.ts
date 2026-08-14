@@ -7,8 +7,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { handleToolCall, type HandlerOpts } from "./handlers.ts"
+import { logEvent } from "./messaging.ts"
 import { prefixFallbackDeliveryResolver } from "./delivery-resolution.ts"
 import { registerSession } from "./session.ts"
+import { DEFAULT_MAX_SILENCE_SEC } from "./session-transport-state.ts"
 
 const PROJECT_ID = "delivery-resolution"
 
@@ -290,6 +292,26 @@ describe("generic direct-message delivery resolution", () => {
       ref: "carrier-17",
     })
 
+    const refusedUnknownPull = resultJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        {
+          to: "@never-seen",
+          message: "do not create an unknown mailbox",
+          type: "request",
+          request: "req-unknown-pull",
+          delivery: "pull",
+        },
+        opts(),
+      ),
+    )
+    expect(refusedUnknownPull).toMatchObject({
+      error: expect.stringContaining('"@never-seen" (no-session-record)'),
+      delivery_failure_id: expect.any(String),
+    })
+    expect(db.prepare("SELECT request_id FROM pending_request WHERE request_id = 'req-unknown-pull'").get()).toBeNull()
+
     const offlineNotice = resultJson(
       handleToolCall(sender, "tribe.send", { to: "@ci", message: "informational", type: "notify" }, opts()),
     )
@@ -297,6 +319,127 @@ describe("generic direct-message delivery resolution", () => {
     expect(db.prepare("SELECT id FROM messages WHERE kind = 'direct' AND content = 'informational'").get()).toEqual({
       id: offlineNotice.id,
     })
+  })
+
+  it("accepts a tracked mailbox row for a disconnected recipient with recent journal activity", () => {
+    const recentRecipient = makeContext(db, stmts, "@fleet", "departed-fleet-session")
+    logEvent(recentRecipient, "session.left", undefined, { name: "@fleet", reason: "peer-close" })
+
+    const sent = resultJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        {
+          to: "@fleet",
+          message: "inspect the runtime alarm",
+          type: "request",
+          request: "req-recent-fleet",
+        },
+        opts(),
+      ),
+    )
+
+    expect(sent).toMatchObject({
+      sent: true,
+      request_id: "req-recent-fleet",
+      delivery: { state: "offline", recipient: "@fleet" },
+    })
+    expect(
+      db
+        .prepare("SELECT request_id, recipient, sender FROM pending_request WHERE request_id = ?")
+        .get("req-recent-fleet"),
+    ).toEqual({ request_id: "req-recent-fleet", recipient: "@fleet", sender: "@sender" })
+  })
+
+  it("accepts a tracked mailbox row for a durable launch without a connected transport", () => {
+    const durableRecipient = makeContext(db, stmts, "@durable", "departed-durable-session")
+    registerSession(
+      durableRecipient,
+      PROJECT_ID,
+      () => true,
+      null,
+      1003,
+      "pull",
+      "/repo",
+      null,
+      "codex",
+      "durable-launch",
+      2003,
+    )
+
+    const sent = resultJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        { to: "@durable", message: "read this on the next pull", type: "request", request: "req-durable" },
+        opts(),
+      ),
+    )
+
+    expect(sent).toMatchObject({
+      sent: true,
+      request_id: "req-durable",
+      delivery: { state: "offline", recipient: "@durable" },
+    })
+  })
+
+  it("keeps explicit pull on the named mailbox when its configured fallback is disconnected", () => {
+    const yrd = makeContext(db, stmts, "@yrd", "departed-yrd-session")
+    registerSession(yrd, PROJECT_ID, () => true, null, 1004, "pull", "/repo", null, "codex", "yrd-launch", 2004)
+    const pullOpts = {
+      ...opts(),
+      resolveDelivery: prefixFallbackDeliveryResolver(JSON.stringify([{ name: "@yrd", to: "@chief" }])),
+    }
+
+    const sent = resultJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        {
+          to: "@yrd",
+          message: "queue this for the named mailbox",
+          type: "request",
+          request: "req-pull-yrd",
+          delivery: "pull",
+        },
+        pullOpts,
+      ),
+    )
+
+    expect(sent).toMatchObject({
+      sent: true,
+      request_id: "req-pull-yrd",
+      delivery: { state: "offline", recipient: "@yrd" },
+    })
+    expect(db.prepare("SELECT recipient FROM pending_request WHERE request_id = ?").get("req-pull-yrd")).toEqual({
+      recipient: "@yrd",
+    })
+  })
+
+  it("does not treat stale journal activity as a live mailbox identity", () => {
+    const staleRecipient = makeContext(db, stmts, "@stale", "departed-stale-session")
+    logEvent(
+      staleRecipient,
+      "session.left",
+      undefined,
+      { name: "@stale", reason: "peer-close" },
+      { ts: Date.now() - (DEFAULT_MAX_SILENCE_SEC + 1) * 1_000 },
+    )
+
+    const refused = resultJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        { to: "@stale", message: "do not strand this", type: "request", request: "req-stale" },
+        opts(),
+      ),
+    )
+
+    expect(refused).toMatchObject({
+      error: expect.stringContaining('no connected, PID-live transport was observed for "@stale"'),
+      delivery_failure_id: expect.any(String),
+    })
+    expect(db.prepare("SELECT request_id FROM pending_request WHERE request_id = ?").get("req-stale")).toBeNull()
   })
 
   it("refuses instead of bouncing a tracked request to an unavailable fallback", () => {
