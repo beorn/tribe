@@ -1483,10 +1483,19 @@ export function withDispatcher<
             const operatorAuthorized = operatorVerdict === "authorized"
             if (!operatorAuthorized && !authenticatedName) {
               if (operatorVerdict === "unconfigured") {
+                // A refusal that does not name a working path is how a seat
+                // concludes its inbox is empty. Four seats lost hours to this
+                // one on 2026-08-13, each reading the refusal as "nothing to
+                // read" rather than "you cannot read THIS WAY".
                 return makeError(
                   id,
                   -32004,
-                  "could-not-evaluate inbox drain authority: an operator capability is not configured",
+                  "could-not-evaluate inbox drain authority: an operator capability is not configured. " +
+                    "This is inherited at launch and cannot be configured now — it will fail every time for this session. " +
+                    "YOUR MAIL IS NOT EMPTY, you are not reading it. Working reads: MCP tribe.fetch (projects attention AND advances the cursor); " +
+                    "`tribe inbox-status --session <seat>` for the unread count and oldest age; " +
+                    "`tribe inbox-wait --session <seat> --timeout 10m --json` to block until something arrives. " +
+                    "Do NOT substitute `tribe log --limit 10` — it is fleet-wide history with no attention projection and reaches back under a minute.",
                   { kind: "could-not-evaluate", reason: "operator-capability-unconfigured" },
                 )
               }

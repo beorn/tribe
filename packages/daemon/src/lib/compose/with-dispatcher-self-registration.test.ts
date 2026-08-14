@@ -1228,6 +1228,19 @@ describe("dispatcher bounded mailbox drain", () => {
       data: { kind: "could-not-evaluate", reason: "operator-capability-unconfigured" },
     })
 
+    // A refusal that does not name a working read is how a seat concludes its
+    // inbox is empty — four seats lost hours to exactly that on 2026-08-13, and
+    // the remedy being handed round was `tribe log --limit 10`, whose ten rows
+    // reach back 45 seconds of fleet-wide history with no attention projection.
+    // The refusal must route the reader somewhere that actually works, and must
+    // not send them to the one that reproduces the failure.
+    const refusal = (indeterminate as { message: string }).message
+    expect(refusal).toMatch(/tribe\.fetch/u)
+    expect(refusal).toMatch(/inbox-status/u)
+    expect(refusal).toMatch(/not empty/iu)
+    // `tribe log` may appear ONLY as a warning against it, never as the remedy.
+    expect(refusal).toMatch(/do not substitute[^.]*tribe log/iu)
+
     const status = parseResult<{ unread_count: number }>(
       await harness.dispatcher.handleRequest(
         {
