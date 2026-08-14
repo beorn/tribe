@@ -388,6 +388,96 @@ describe("20876 Tribe health cadence", () => {
     })
   })
 
+  it("combines a live actionable with an archived one for the same session, picking the oldest by sequence rather than timestamp", () => {
+    // Regression for the health-cadence union split (residual to 20876/c4e2526f):
+    // inboxLagProjection's three journal-CTE queries now run as a messages
+    // half plus a messages_archive half, recombined in TypeScript. This case
+    // is built so a wrong recombine would be visible two different ways:
+    //  - actionable_rows must SUM across both halves (1 + 1 = 2), not just
+    //    report whichever half happened to be checked.
+    //  - oldest_actionable must be picked by the smaller SEQ (messages.rowid
+    //    vs messages_archive.seq — one shared sequence space), which here is
+    //    deliberately the LIVE row even though the ARCHIVED row has the
+    //    smaller (older) ts. `actionable_oldest_age_ms` is a separate
+    //    MIN(ts) aggregate, unchanged by the split, so it correctly reports
+    //    the archived row's older ts — the two fields use different sort
+    //    keys in the pre-split original, and the split must keep them that
+    //    way rather than collapsing to a single "oldest" notion.
+    insertSession(db, { id: "sess-dev-9", name: "@dev/9", role: "member", now })
+
+    insertMessage(db, {
+      id: "dev9-live-small-seq",
+      type: "request",
+      sender: "@chief",
+      recipient: "@dev/9",
+      ts: now - HOUR,
+      request: "dev9-live-small-seq",
+    })
+    const liveRowid = (
+      db.prepare("SELECT rowid FROM messages WHERE id = 'dev9-live-small-seq'").get() as { rowid: number }
+    ).rowid
+
+    db.prepare(`
+      INSERT INTO messages_archive (
+        seq, id, type, sender, recipient, kind, content, ts, delivery, archived_at, request, summary
+      ) VALUES (
+        $seq, 'dev9-archived-large-seq', 'request', '@chief', '@dev/9', 'direct',
+        'archived actionable', $ts, 'push', $archived_at, 'dev9-archived-large-seq', 'dev9-archived-large-seq'
+      )
+    `).run({ $seq: liveRowid + 1000, $ts: now - 10 * HOUR, $archived_at: now - HOUR })
+
+    const row = projectHealthCadence(db, { now, connectedSessionNames: ["@dev/9"] }).inbox_lag[0]
+    expect(row).toMatchObject({
+      session: "@dev/9",
+      actionable_rows: 2,
+      actionable_oldest_age_ms: 10 * HOUR,
+      oldest_actionable: {
+        id: "dev9-live-small-seq",
+        type: "request",
+        sender: "@chief",
+      },
+    })
+  })
+
+  it("retires a live actionable whose reply already landed in the archive", () => {
+    // The retirement predicate (unretiredAttentionPredicateSql) always probes
+    // both messages AND messages_archive regardless of which table the
+    // OUTER candidate came from — that's what `relation: "journal"` selects,
+    // preserved by both new split statements. A recombine that accidentally
+    // passed `relation: "messages"` for the messages-half outer query would
+    // only probe messages for a reply, miss this archived one, and
+    // (wrongly) keep counting the request as open.
+    insertSession(db, { id: "sess-dev-11", name: "@dev/11", role: "member", now })
+
+    insertMessage(db, {
+      id: "dev11-request",
+      type: "request",
+      sender: "@chief",
+      recipient: "@dev/11",
+      ts: now - 2 * HOUR,
+      request: "dev11-request",
+    })
+    const requestRowid = (
+      db.prepare("SELECT rowid FROM messages WHERE id = 'dev11-request'").get() as { rowid: number }
+    ).rowid
+
+    db.prepare(`
+      INSERT INTO messages_archive (
+        seq, id, type, sender, recipient, kind, content, ts, delivery, archived_at, reply
+      ) VALUES (
+        $seq, 'dev11-reply', 'response', '@dev/11', '@chief', 'direct',
+        'archived reply', $ts, 'push', $archived_at, 'dev11-request'
+      )
+    `).run({ $seq: requestRowid + 1000, $ts: now - HOUR, $archived_at: now - 10 * MINUTE })
+
+    const row = projectHealthCadence(db, { now, connectedSessionNames: ["@dev/11"] }).inbox_lag[0]
+    expect(row).toMatchObject({
+      session: "@dev/11",
+      actionable_rows: 0,
+      oldest_actionable: null,
+    })
+  })
+
   it("surfaces the cadence projection and evidence-bearing warnings through tribe.health", () => {
     const ctx = createTribeContext({
       db,

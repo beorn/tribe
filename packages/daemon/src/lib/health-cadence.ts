@@ -170,6 +170,46 @@ function ageFrom(now: number, oldestTs: number | null): number {
   return oldestTs === null ? 0 : Math.max(0, now - oldestTs)
 }
 
+/**
+ * Recombines the messages/messages_archive halves of a `COUNT(*)`/`MIN(ts)`
+ * pair that used to run once against the `journal` CTE. `MIN` over an empty
+ * set is NULL in SQL, so a half with zero matching rows reports `oldest_ts:
+ * null`; the combined oldest_ts is null only when BOTH halves are — matching
+ * what `MIN(ts)` over the union would have produced.
+ */
+function combineJournalCount(messagesHalf: LagRow, archiveHalf: LagRow): LagRow {
+  const oldestCandidates = [messagesHalf.oldest_ts, archiveHalf.oldest_ts].filter((ts): ts is number => ts !== null)
+  return {
+    rows: messagesHalf.rows + archiveHalf.rows,
+    oldest_ts: oldestCandidates.length === 0 ? null : Math.min(...oldestCandidates),
+  }
+}
+
+type OldestActionableCandidate = {
+  id: string
+  type: string
+  sender: string
+  summary: string | null
+  ts: number
+  /** messages.rowid or messages_archive.seq — one shared monotonic space. */
+  seq: number
+}
+
+/**
+ * Picks the candidate with the smaller seq/rowid — "oldest" is position in
+ * the sequence space shared by messages.rowid and messages_archive.seq, the
+ * same thing `ORDER BY m.seq ASC LIMIT 1` picked when both halves were one
+ * statement against the CTE. This is deliberately NOT a `ts` comparison.
+ */
+function olderCandidate(
+  a: OldestActionableCandidate | null,
+  b: OldestActionableCandidate | null,
+): OldestActionableCandidate | null {
+  if (a === null) return b
+  if (b === null) return a
+  return a.seq <= b.seq ? a : b
+}
+
 function responseLatencyProjection(
   db: Database,
   now: number,
@@ -360,27 +400,54 @@ function inboxLagProjection(
   const attentionReceiptQuery = db.prepare(
     "SELECT last_attention_read_at FROM mailbox_cursors WHERE recipient = $session",
   )
-  const lagQuery = db.prepare(`
-    WITH journal AS (
-      SELECT rowid AS seq, type, sender, recipient, kind, ts FROM messages
-      UNION ALL
-      SELECT seq, type, sender, recipient, kind, ts FROM messages_archive
-    )
+
+  // Below, three statements that used to run once each against
+  // `WITH journal AS (messages UNION ALL messages_archive)` are split into a
+  // messages half and a messages_archive half, recombined in TypeScript by
+  // combineJournalCount()/olderCandidate() below. A CTE carries no indexes,
+  // so SQLite materialised the full union on every call — linear in journal
+  // size, and paid once per connected seat since this whole function runs
+  // inside the per-session map() below. Each half here is a plain indexed
+  // lookup against one physical table instead. See database.ts's
+  // `unretiredAttentionPredicateSql` (commit c4e2526f) for the retirement-
+  // check half of this same split, and for the measured numbers that first
+  // fix left as this file's residual.
+  //
+  // Both halves of a pair always share the identical WHERE clause, differing
+  // only in which physical table (and which column supplies the shared
+  // seq/rowid position) they read from.
+  const lagQueryMessages = db.prepare(`
     SELECT COUNT(*) AS rows, MIN(ts) AS oldest_ts
-    FROM journal
+    FROM messages
+    WHERE rowid > $cursor
+      AND kind != 'event'
+      AND sender != $session
+      AND (recipient = $session OR recipient = '*')
+  `)
+  const lagQueryArchive = db.prepare(`
+    SELECT COUNT(*) AS rows, MIN(ts) AS oldest_ts
+    FROM messages_archive
     WHERE seq > $cursor
       AND kind != 'event'
       AND sender != $session
       AND (recipient = $session OR recipient = '*')
   `)
-  const actionableLagQuery = db.prepare(`
-    WITH journal AS (
-      SELECT rowid AS seq, id, type, sender, recipient, kind, ts, request, reply FROM messages
-      UNION ALL
-      SELECT seq, id, type, sender, recipient, kind, ts, request, reply FROM messages_archive
-    )
+  const actionableLagQueryMessages = db.prepare(`
     SELECT COUNT(*) AS rows, MIN(ts) AS oldest_ts
-    FROM journal AS m
+    FROM messages AS m
+    WHERE m.rowid > COALESCE(
+      (SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $session),
+      0
+    )
+      AND m.recipient = $session
+      AND m.kind = 'direct'
+      AND m.sender != $session
+      AND m.type IN (${ACTIONABLE_TYPES_SQL})
+      AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "rowid" })}
+  `)
+  const actionableLagQueryArchive = db.prepare(`
+    SELECT COUNT(*) AS rows, MIN(ts) AS oldest_ts
+    FROM messages_archive AS m
     WHERE m.seq > COALESCE(
       (SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $session),
       0
@@ -391,14 +458,28 @@ function inboxLagProjection(
       AND m.type IN (${ACTIONABLE_TYPES_SQL})
       AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "seq" })}
   `)
-  const oldestActionableQuery = db.prepare(`
-    WITH journal AS (
-      SELECT rowid AS seq, id, type, sender, recipient, kind, ts, summary, request, reply FROM messages
-      UNION ALL
-      SELECT seq, id, type, sender, recipient, kind, ts, summary, request, reply FROM messages_archive
+  // Selects the shared seq/rowid position too (absent from the original
+  // SELECT list, which only ever needed it in ORDER BY against the single
+  // CTE) so olderCandidate() below can compare the two halves' candidates the
+  // same way `ORDER BY m.seq ASC LIMIT 1` did against the union.
+  const oldestActionableQueryMessages = db.prepare(`
+    SELECT m.id, m.type, m.sender, m.summary, m.ts, m.rowid AS seq
+    FROM messages AS m
+    WHERE m.rowid > COALESCE(
+      (SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $session),
+      0
     )
-    SELECT m.id, m.type, m.sender, m.summary, m.ts
-    FROM journal AS m
+      AND m.recipient = $session
+      AND m.kind = 'direct'
+      AND m.sender != $session
+      AND m.type IN (${ACTIONABLE_TYPES_SQL})
+      AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "rowid" })}
+    ORDER BY m.rowid ASC
+    LIMIT 1
+  `)
+  const oldestActionableQueryArchive = db.prepare(`
+    SELECT m.id, m.type, m.sender, m.summary, m.ts, m.seq AS seq
+    FROM messages_archive AS m
     WHERE m.seq > COALESCE(
       (SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $session),
       0
@@ -420,15 +501,26 @@ function inboxLagProjection(
     const receipt = attentionReceiptQuery.get({ $session: session }) as {
       last_attention_read_at: number | null
     } | null
-    const lag = lagQuery.get({ $cursor: cursor?.last_inbox_pull_seq ?? 0, $session: session }) as LagRow
-    const actionableLag = actionableLagQuery.get({ $session: session }) as LagRow
-    const oldestActionable = oldestActionableQuery.get({ $session: session }) as {
-      id: string
-      type: string
-      sender: string
-      summary: string | null
-      ts: number
-    } | null
+    const lagParams = { $cursor: cursor?.last_inbox_pull_seq ?? 0, $session: session }
+    const lag = combineJournalCount(lagQueryMessages.get(lagParams) as LagRow, lagQueryArchive.get(lagParams) as LagRow)
+    const actionableLag = combineJournalCount(
+      actionableLagQueryMessages.get({ $session: session }) as LagRow,
+      actionableLagQueryArchive.get({ $session: session }) as LagRow,
+    )
+    const oldestCandidate = olderCandidate(
+      oldestActionableQueryMessages.get({ $session: session }) as OldestActionableCandidate | null,
+      oldestActionableQueryArchive.get({ $session: session }) as OldestActionableCandidate | null,
+    )
+    const oldestActionable =
+      oldestCandidate === null
+        ? null
+        : {
+            id: oldestCandidate.id,
+            type: oldestCandidate.type,
+            sender: oldestCandidate.sender,
+            summary: oldestCandidate.summary,
+            ts: oldestCandidate.ts,
+          }
     const lastAttentionReadAt = receipt?.last_attention_read_at ?? null
     return {
       as_of_ms: now,
