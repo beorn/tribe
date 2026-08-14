@@ -522,6 +522,12 @@ describe("createReconnectingClient transport recovery", () => {
         createReconnectingClient({
           socketPath: sock,
           maxStartupAttempts: 1,
+          // 21089 — the initial connect now retries a registration failure
+          // on an established transport (same resilience a reconnect
+          // already had); this onConnect always rejects, so pin maxAttempts
+          // to keep the test fast and deterministic, exactly like "closes
+          // each reconnect candidate whose registration rejects" below.
+          maxAttempts: 1,
           onConnect: async () => {
             throw new Error("registration refused")
           },
@@ -533,6 +539,67 @@ describe("createReconnectingClient transport recovery", () => {
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }
   })
+
+  it("self-heals when the transport dies mid-handshake on the initial connect, instead of orphaning the client forever", async () => {
+    // 21089 / task/wire-reconnect-close-cto — onConnect commonly performs
+    // MULTIPLE sequential round trips before it resolves (e.g.
+    // stdio-adapter.ts's register, then tribe.members). Before this fix,
+    // if the transport died while a LATER round trip was still in flight —
+    // proven deterministically here, and reproduced as a ~14%-of-runs CI
+    // flake under 4-core contention on task/ci-deflake-version-skew-cto —
+    // the whole createReconnectingClient() call rejected outright and
+    // setupReconnect() never ran even once: no retry, no reconnect, ever
+    // again, even though the socket's own 'close' event fired correctly.
+    // Only the FIRST connection attempt loses the race here; the daemon is
+    // otherwise healthy, so a resilient client must retry into a live one.
+    const sock = join(tmpDir, "mid-handshake-race.sock")
+    let connectionCount = 0
+    const server = createServer((socket) => {
+      const myConnection = ++connectionCount
+      const parse = createLineParser((msg) => {
+        if (!isRequest(msg)) return
+        if (msg.method === "register") {
+          socket.write(makeResponse(msg.id, { ok: true }))
+          return
+        }
+        if (msg.method === "second-roundtrip") {
+          if (myConnection === 1) {
+            // Transport dies mid-handshake — NO response is ever sent for
+            // this call, on the first connection only.
+            socket.destroy()
+          } else {
+            socket.write(makeResponse(msg.id, { ok: true }))
+          }
+          return
+        }
+        socket.write(makeResponse(msg.id, { echoed: msg.params }))
+      })
+      socket.on("data", parse)
+      socket.on("error", () => {})
+    })
+    await new Promise<void>((resolve) => server.listen(sock, resolve))
+
+    try {
+      const client = await createReconnectingClient({
+        socketPath: sock,
+        noSpawn: true,
+        maxAttempts: 3,
+        async onConnect(c) {
+          await c.call("register", {})
+          await c.call("second-roundtrip", {})
+        },
+      })
+      // The bound this asserts: reconnect must fire (here, the initial
+      // connect's own retry) rather than hang for the caller's full
+      // maxAttempts/backoff budget or forever.
+      expect(connectionCount).toBe(2)
+      const result = await client.call("echo", { hi: true })
+      expect(result).toEqual({ echoed: { hi: true } })
+      client.close()
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  }, 10_000)
 
   it("closes each reconnect candidate whose registration rejects", async () => {
     const sock = join(tmpDir, "reconnect-registration-reject.sock")

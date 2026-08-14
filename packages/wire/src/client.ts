@@ -469,12 +469,56 @@ export type ReconnectingClientOpts = {
 }
 
 /**
+ * Tags a connectAndRegister() failure as "the transport connected fine but
+ * onConnect's registration handshake was cut off by a TRANSPORT-continuity
+ * problem" — as opposed to either (a) a failure to establish the transport
+ * at all, or (b) the daemon staying reachable and making a deliberate
+ * decision to refuse the request. Only the tagged case is safe to retry on
+ * the INITIAL connect (see connectInitialWithRetry below): retrying (a)
+ * cannot succeed with the same socketPath/opts, and retrying (b) gets the
+ * identical deliberate refusal every time (see isDeliberateDaemonRefusal).
+ */
+class RegistrationError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause })
+  }
+}
+
+/**
+ * True when `error` is a well-formed JSON-RPC error response the daemon
+ * itself sent back — see connectToDaemon's response handling:
+ * `p.reject(Object.assign(new Error(msg.error.message), { code:
+ * msg.error.code, ... }))`. JSON-RPC 2.0 requires `error.code` to be an
+ * integer, so a NUMERIC `.code` only ever comes from a daemon that received
+ * the request and chose to refuse it (a name conflict, a permission
+ * refusal, a protocol version the caller must renegotiate before retrying
+ * — stdio-adapter.ts's `isPersonaNameConflictError`/protocol-mismatch
+ * handling both key off exactly this shape). Retrying an IDENTICAL request
+ * against that gets the identical refusal every time, so it must propagate
+ * immediately — same as before this fix — not be swallowed into a silent
+ * retry loop. A genuine transport-continuity failure carries no numeric
+ * code: Node system errors use STRING codes ("ECONNREFUSED"), a call
+ * timeout's code is the string "TRIBE_DAEMON_CALL_TIMEOUT", and
+ * connectToDaemon's own close-triggered rejection ("Connection closed")
+ * carries no code at all.
+ */
+function isDeliberateDaemonRefusal(error: unknown): boolean {
+  return typeof (error as { code?: unknown } | null)?.code === "number"
+}
+
+/**
  * Create a client that auto-reconnects on disconnect.
  * Wraps connectOrStart + register/subscribe in a single reusable pattern.
  *
  * Notification handlers registered via `client.onNotification(handler)` are
  * persistent — they're replayed on every successful reconnect, so callers
  * never need to re-subscribe.
+ *
+ * The INITIAL connect retries a registration-handshake failure on an
+ * already-established transport, up to `maxAttempts` with the same backoff
+ * a reconnect uses, instead of rejecting outright on the first race lost —
+ * see the 21089 comment on connectInitialWithRetry. A transport failure (no
+ * daemon reachable and nothing to spawn) still rejects immediately.
  */
 export async function createReconnectingClient(opts: ReconnectingClientOpts): Promise<DaemonClient> {
   const {
@@ -496,13 +540,65 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
   // anonymous pipe, so a consumed/closed launch fd cannot silently strip
   // operator authority after a crash or restart.
   const readOperatorCapability = createOperatorCapabilityReader()
-  let current = await connectOrStartWithCapability(socketPath, startOpts, readOperatorCapability)
-  try {
-    if (onConnect) await onConnect(current)
-  } catch (error) {
-    current.close()
-    throw error
+
+  async function connectAndRegister(): Promise<DaemonClient> {
+    const candidate = await connectOrStartWithCapability(socketPath, startOpts, readOperatorCapability)
+    try {
+      if (onConnect) await onConnect(candidate)
+    } catch (error) {
+      candidate.close()
+      throw isDeliberateDaemonRefusal(error) ? error : new RegistrationError(error)
+    }
+    return candidate
   }
+
+  // 21089 — the initial connect used to be a single unretried
+  // connectAndRegister(): if the transport died mid-registration (a real
+  // production race — onConnect commonly performs several sequential round
+  // trips, e.g. stdio-adapter.ts's register then tribe.members, so there is
+  // a genuine, contention-widened window), the whole function rejected
+  // outright and setupReconnect() below never ran even once. setupReconnect
+  // installs the ONLY listener that ever drives a reconnect, and —
+  // transitively, via onDisconnect() — the only thing that arms the
+  // reconnectWatchdog backstop, so a lost race on the very first
+  // registration permanently orphaned the client: no retry, no reconnect,
+  // no watchdog, ever again, even though the socket's own 'close' event
+  // fires correctly at the OS level the whole time. Reproduced
+  // deterministically on task/wire-reconnect-close-cto (root-caused from
+  // task/ci-deflake-version-skew-cto's instrumented harness, which first
+  // surfaced this as a ~14%-of-runs CI flake under 4-core CPU contention):
+  // destroying the accepted socket while onConnect's second round trip is
+  // in flight rejects createReconnectingClient in ~7ms flat, with the raw
+  // socket's 'end'/'close' events observed firing on schedule throughout —
+  // the bug was never "close fails to fire", it was "nothing is listening
+  // yet when it does."
+  //
+  // Retrying a REGISTRATION failure exactly like a reconnect (same bounded
+  // backoff, same maxAttempts) closes the gap. A TRANSPORT failure (no
+  // daemon reachable, nothing to spawn) is deliberately NOT retried here —
+  // it propagates immediately, unchanged from before: retrying with the
+  // same options cannot succeed differently, and the "loud but soft"
+  // solo-degrade UX (km 19851, stdio-adapter-degrade.test.ts) depends on
+  // that fast, one-time signal rather than a long silent retry storm.
+  async function connectInitialWithRetry(): Promise<DaemonClient> {
+    const timers = createTimers(new AbortController().signal)
+    let lastError: unknown = new Error("Connect exhausted without an attempt")
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      // Attempt 0 never delays — the overwhelmingly common case (connects
+      // on the first try) must not pay an artificial startup tax.
+      if (attempt > 0) await timers.delay(Math.min(500 * 2 ** (attempt - 1), 10_000))
+      try {
+        return await connectAndRegister()
+      } catch (error) {
+        if (!(error instanceof RegistrationError)) throw error
+        lastError = error.cause
+        log.debug?.(`Initial registration attempt ${attempt + 1} failed`)
+      }
+    }
+    throw lastError
+  }
+
+  let current = await connectInitialWithRetry()
   let closed = false
   let reconnectAc: AbortController | null = null
   // Persistent notification handlers — replayed onto each new connection
@@ -527,20 +623,18 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
           }
           if (closed) return
           try {
-            const candidate = await connectOrStartWithCapability(socketPath, startOpts, readOperatorCapability)
-            try {
-              if (onConnect) await onConnect(candidate)
-            } catch (error) {
-              candidate.close()
-              throw error
-            }
+            const candidate = await connectAndRegister()
             current = candidate
             for (const h of notificationHandlers) candidate.onNotification(h)
             setupReconnect()
             onReconnect?.()
             return
           } catch (error) {
-            lastError = error
+            // Reconnects retry EITHER failure kind uniformly (unchanged
+            // from before RegistrationError existed) — only the initial
+            // connect distinguishes them. Unwrap so the reported error
+            // matches what onConnect/connectOrStart actually threw.
+            lastError = error instanceof RegistrationError ? error.cause : error
             log.debug?.(`Reconnect attempt ${attempt + 1} failed`)
           }
         }
