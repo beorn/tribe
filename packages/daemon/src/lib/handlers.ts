@@ -45,7 +45,7 @@ import {
   registerSession,
   type StaleTransportReapReport,
 } from "./session.ts"
-import { incidentKey, isIncidentKey, type IncidentIdentity } from "tribe-wire"
+import { incidentKey, type IncidentIdentity } from "tribe-wire"
 import { gatherCodePin } from "./code-pin.ts"
 import { parseDbGrowthWarningBytes, projectHealthCadence } from "./health-cadence.ts"
 import { registeredTrustTierForTopic, senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
@@ -317,23 +317,18 @@ type OwnerTransportObservation = {
 }
 
 function ownerTransportObservationProjector(ctx: TribeContext, opts: HandlerOpts, observedAt: number) {
-  const sessionRows = ctx.db.prepare("SELECT name, launch_id, launch_parent_pid FROM sessions").all() as Array<{
-    name: string
-    launch_id: string | null
-    launch_parent_pid: number | null
-  }>
+  const sessionRows = ctx.db.prepare("SELECT name FROM sessions").all() as Array<{ name: string }>
   const knownNames = new Set(sessionRows.map((row) => row.name))
-  const mailboxRecipientNames = new Set(
-    sessionRows
-      .filter(
-        (row) =>
-          classifySessionRegistrationLifetime({
-            launchId: row.launch_id,
-            launchParentPid: row.launch_parent_pid,
-          }) === "durable-launch",
-      )
-      .map((row) => row.name),
-  )
+  // Any currently-registered session has a live `sessions` row and therefore
+  // an addressable mailbox — durable-launch (hab-tracked) and plain
+  // connection-scoped registrations alike (e.g. a CLI-rail pull seat that
+  // joined without launch_id/launch_parent_pid). A tracked send to a known
+  // name always lands; `tribe.fetch`/`tribe pending` will surface it on the
+  // recipient's next drain regardless of how it registered. The union below
+  // additionally covers names that have since left `sessions` entirely
+  // (superseded/reaped rows) but were active recently enough to deserve a
+  // grace period.
+  const mailboxRecipientNames = new Set(knownNames)
   const recentSince = observedAt - DEFAULT_MAX_SILENCE_SEC * 1_000
   const recentActivity = ctx.db
     .prepare(
@@ -1122,6 +1117,7 @@ type PendingBallRow = {
   expires_at: number | null
   message_id: string
   fanout: "first" | "all"
+  request_kind: "request" | "incident"
   summary: string | null
 }
 
@@ -1134,6 +1130,9 @@ type PendingBall = {
   age_ms: number
   message_id: string
   fanout: "first" | "all"
+  /** Persisted ownership class. Missing only on historical journal outcomes
+   *  written before the discriminator existed. */
+  request_kind?: "request" | "incident"
   summary: string | null
   status: "active" | "expired" | "unanswered"
   /** Full question body, joined from the messages table on the pending
@@ -1226,6 +1225,7 @@ function pendingBall(row: PendingBallRow, now: number): PendingBall {
     age_ms: now - row.opened_at,
     message_id: row.message_id,
     fanout: row.fanout,
+    request_kind: row.request_kind,
     summary: row.summary,
     status: expired ? "expired" : "active",
   }
@@ -1469,7 +1469,15 @@ function pendingRequestIdForOwner(ctx: TribeContext, owner: string, attemptedId:
 }
 
 function incidentCloseRefusal(ctx: TribeContext, owner: string, attemptedIds: readonly string[]): string | undefined {
-  const incidentId = attemptedIds.map((id) => pendingRequestIdForOwner(ctx, owner, id)).find(isIncidentKey)
+  const incidentId = attemptedIds
+    .map((id) => pendingRequestIdForOwner(ctx, owner, id))
+    .find((requestId) => {
+      const row = ctx.stmts.selectPendingKindForRecipient.get({
+        $request_id: requestId,
+        $recipient: owner,
+      }) as { request_kind: "request" | "incident" } | null
+      return row?.request_kind === "incident"
+    })
   if (incidentId === undefined) return undefined
   return (
     `tribe.pending: refusing --close for incident ${JSON.stringify(incidentId)}; ` +

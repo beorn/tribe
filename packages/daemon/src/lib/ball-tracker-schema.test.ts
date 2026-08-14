@@ -73,6 +73,7 @@ describe("ball-tracker schema (migration v16)", () => {
           "expires_at",
           "message_id",
           "fanout",
+          "request_kind",
         ]),
       )
       const pkCols = cols
@@ -114,6 +115,36 @@ describe("ball-tracker schema (migration v16)", () => {
       expect(
         Number((db.prepare("SELECT value FROM _schema_meta WHERE key = 'version'").get() as { value: string }).value),
       ).toBeGreaterThanOrEqual(20)
+    } finally {
+      db.close()
+    }
+  })
+
+  it("upgrade from v25 preserves ambiguous legacy ids as ordinary requests", () => {
+    const dbPath = join(tmpDir, "tribe-v25.db")
+    const seedDb = new Database(dbPath, { create: true })
+    seedDb.run("CREATE TABLE _schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    seedDb.run("INSERT INTO _schema_meta (key, value) VALUES ('version', '25')")
+    seedDb.run(`CREATE TABLE pending_request (
+      request_id TEXT NOT NULL,
+      recipient TEXT NOT NULL,
+      sender TEXT NOT NULL,
+      opened_at INTEGER NOT NULL,
+      expires_at INTEGER,
+      message_id TEXT NOT NULL,
+      fanout TEXT NOT NULL DEFAULT 'first',
+      PRIMARY KEY (request_id, recipient)
+    )`)
+    seedDb.run(
+      "INSERT INTO pending_request VALUES ('bay-handoff-ready:v1:0123456789abcdef0123', '@chief', '@yrd', 1000, 2000, 'legacy-message', 'first')",
+    )
+    seedDb.close()
+
+    const db = openDatabase(dbPath)
+    try {
+      expect(
+        db.prepare("SELECT request_kind FROM pending_request WHERE request_id LIKE 'bay-handoff-ready:%'").get(),
+      ).toEqual({ request_kind: "request" })
     } finally {
       db.close()
     }
