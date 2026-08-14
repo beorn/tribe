@@ -301,6 +301,18 @@ describe("one ball per incident (habwire stage 2(d))", () => {
       expect(openKeys("@chief")).toHaveLength(0)
     })
 
+    it("refuses a reply deadline on an incident instead of silently discarding it", () => {
+      const watcher = makeContext(db, stmts, "@fleet")
+      const res = call(watcher, {
+        to: "@chief",
+        message: "wedged",
+        incident: INCIDENT,
+        expires_in_ms: 60_000,
+      })
+      expect(String(res.error)).toMatch(/incident.*deadline|expires_in_ms.*incident/i)
+      expect(openKeys("@chief")).toHaveLength(0)
+    })
+
     it("refuses a broadcast incident — a broadcast owns no ball", () => {
       const watcher = makeContext(db, stmts, "@fleet")
       const res = call(watcher, { to: "*", message: "wedged", incident: INCIDENT })

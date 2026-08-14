@@ -78,7 +78,8 @@ queries default to a 20-minute escalation deadline; assignments have no
 reply-clock default. `--expires-in-ms` overrides the policy for one send.
 Live rows expose `request_kind: "request" | "incident"`. Incidents are standing
 conditions with no reply deadline; only their emitter's `--incident-cleared`
-edge can settle them. `--close <id>` records a typed non-reply settlement and
+edge can settle them, and combining `--incident` with `--expires-in-ms` is
+refused. `--close <id>` records a typed non-reply settlement and
 closes one ordinary pending request without sending a reply — requires
 `--owner` and refuses a typed incident. Example:
 
