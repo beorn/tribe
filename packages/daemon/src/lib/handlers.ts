@@ -45,7 +45,7 @@ import {
   registerSession,
   type StaleTransportReapReport,
 } from "./session.ts"
-import { incidentKey, isIncidentKey, type IncidentIdentity } from "tribe-wire"
+import { incidentKey, type IncidentIdentity } from "tribe-wire"
 import { gatherCodePin } from "./code-pin.ts"
 import { parseDbGrowthWarningBytes, projectHealthCadence } from "./health-cadence.ts"
 import { registeredTrustTierForTopic, senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
@@ -1117,6 +1117,7 @@ type PendingBallRow = {
   expires_at: number | null
   message_id: string
   fanout: "first" | "all"
+  request_kind: "request" | "incident"
   summary: string | null
   content?: string | null
 }
@@ -1130,6 +1131,9 @@ type PendingBall = {
   age_ms: number
   message_id: string
   fanout: "first" | "all"
+  /** Persisted ownership class. Missing only on historical journal outcomes
+   *  written before the discriminator existed. */
+  request_kind?: "request" | "incident"
   summary: string | null
   status: "active" | "expired" | "unanswered"
   /** Full question body, joined from the messages table on the pending
@@ -1224,6 +1228,7 @@ function pendingBall(row: PendingBallRow, now: number): PendingBall {
     age_ms: now - row.opened_at,
     message_id: row.message_id,
     fanout: row.fanout,
+    request_kind: row.request_kind,
     summary: row.summary,
     status: expired ? "expired" : "active",
   }
@@ -1476,7 +1481,15 @@ function pendingRequestIdForOwner(ctx: TribeContext, owner: string, attemptedId:
 }
 
 function incidentCloseRefusal(ctx: TribeContext, owner: string, attemptedIds: readonly string[]): string | undefined {
-  const incidentId = attemptedIds.map((id) => pendingRequestIdForOwner(ctx, owner, id)).find(isIncidentKey)
+  const incidentId = attemptedIds
+    .map((id) => pendingRequestIdForOwner(ctx, owner, id))
+    .find((requestId) => {
+      const row = ctx.stmts.selectPendingKindForRecipient.get({
+        $request_id: requestId,
+        $recipient: owner,
+      }) as { request_kind: "request" | "incident" } | null
+      return row?.request_kind === "incident"
+    })
   if (incidentId === undefined) return undefined
   return (
     `tribe.pending: refusing --close for incident ${JSON.stringify(incidentId)}; ` +

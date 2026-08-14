@@ -255,6 +255,17 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
           incident,
         },
       )
+      const listed = parseToolJson(handleToolCall(owner, "tribe.pending", {}, makeOpts())) as {
+        pending: Array<Record<string, unknown>>
+      }
+      expect(listed.pending).toEqual([
+        expect.objectContaining({
+          request_id: incidentId,
+          request_kind: "incident",
+          expires_at: null,
+          status: "active",
+        }),
+      ])
       openBall(stmts, { id: "ordinary", recipient: "@chief", openedAt: Date.now(), sender: "@agent/2" })
 
       const batch = parseToolJson(
@@ -271,6 +282,22 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       expect(String(single.error)).toContain("--incident-cleared")
       expect(openIds(stmts, "@chief")).toEqual([incidentId, "ordinary"])
       expect(settlementFacts(db)).toEqual([])
+    } finally {
+      db.close()
+    }
+  })
+
+  it("closes an ordinary request whose explicit id has the same three-part spelling as an incident key", () => {
+    const { db, stmts } = setup()
+    try {
+      const owner = makeContext(db, stmts)
+      const requestId = "bay-handoff-ready:v1:0123456789abcdef0123"
+      openBall(stmts, { id: requestId, recipient: "@chief", openedAt: Date.now(), sender: "@yrd" })
+
+      const closed = parseToolJson(handleToolCall(owner, "tribe.pending", { close: requestId }, makeOpts()))
+
+      expect(closed).toMatchObject({ owner: "@chief", request_id: requestId, closed: 1 })
+      expect(openIds(stmts, "@chief")).toEqual([])
     } finally {
       db.close()
     }

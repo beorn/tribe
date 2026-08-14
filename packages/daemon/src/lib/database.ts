@@ -125,6 +125,7 @@ export function openDatabase(path: string): Database {
 		expires_at INTEGER,
 		message_id TEXT NOT NULL,
 		fanout     TEXT NOT NULL DEFAULT 'first',
+		request_kind TEXT NOT NULL DEFAULT 'request' CHECK (request_kind IN ('request', 'incident')),
 		PRIMARY KEY (request_id, recipient)
 	)`)
 
@@ -1077,6 +1078,28 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 26,
+    name: "pending-request-kind",
+    up(db) {
+      const table = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='pending_request'")
+        .get() as { name: string } | null
+      if (!table) return
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(pending_request)").all() as Array<{ name: string }>).map((row) => row.name),
+      )
+      // Existing rows cannot be classified safely from their id spelling:
+      // ordinary production requests already use three colon-separated parts.
+      // Preserve them as closable requests. A live incident's next assertion
+      // promotes its existing row through openIncidentRequest below.
+      if (!columns.has("request_kind")) {
+        db.run(
+          "ALTER TABLE pending_request ADD COLUMN request_kind TEXT NOT NULL DEFAULT 'request' CHECK (request_kind IN ('request', 'incident'))",
+        )
+      }
+    },
+  },
 ]
 
 // ---------------------------------------------------------------------------
@@ -1200,6 +1223,20 @@ export function createStatements(db: Database) {
 		ON CONFLICT(request_id, recipient) DO NOTHING
 	`),
 
+    /** Incident insert: the typed discriminator, not the request-id spelling,
+     *  owns emitter-only settlement. Reassertion promotes a legacy row after
+     *  migration and removes the request deadline; it deliberately preserves
+     *  the original opening instant and question message. */
+    openIncidentRequest: db.prepare(`
+		INSERT INTO pending_request (
+			request_id, recipient, sender, opened_at, expires_at, message_id, fanout, request_kind
+		)
+		VALUES ($request_id, $recipient, $sender, $opened_at, NULL, $message_id, $fanout, 'incident')
+		ON CONFLICT(request_id, recipient) DO UPDATE SET
+			request_kind = 'incident',
+			expires_at = NULL
+	`),
+
     /** Ball-tracker close: deletes pending_request rows for a given (request_id, recipient).
      *  In single-recipient and multi-target cases this matches one row; in broadcast cases
      *  with fanout='first' it deletes all rows for the request when ANY recipient replies. */
@@ -1268,13 +1305,21 @@ export function createStatements(db: Database) {
      *  recipient's row is still active and whether fanout='first' closes all
      *  or fanout='all' closes only the replying recipient. */
     selectPendingForReplyRecipient: db.prepare(`
-			SELECT request_id, fanout, expires_at, sender
+			SELECT request_id, fanout, expires_at, sender, request_kind
 			FROM pending_request
 			WHERE recipient = $recipient
 				AND (request_id = $reply_id OR message_id = $reply_id)
 			ORDER BY CASE WHEN request_id = $reply_id THEN 0 ELSE 1 END
 			LIMIT 1
 		`),
+
+    /** Exact persisted discriminator for recipient-side close authority. */
+    selectPendingKindForRecipient: db.prepare(`
+		SELECT request_kind
+		FROM pending_request
+		WHERE recipient = $recipient AND request_id = $request_id
+		LIMIT 1
+	`),
 
     /** Full evidence for one exact owner row before a non-reply settlement. */
     selectPendingSettlementForRecipient: db.prepare(`
@@ -1325,6 +1370,7 @@ export function createStatements(db: Database) {
      *  of the open ball). Sorted oldest-first so callers can act on the longest-pending. */
     selectPendingForRecipient: db.prepare(`
 		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
+			p.request_kind,
 			COALESCE(m.summary, a.summary) AS summary
 		FROM pending_request p
 		LEFT JOIN messages m ON m.id = p.message_id
@@ -1352,6 +1398,7 @@ export function createStatements(db: Database) {
      *  queue or ownership store. */
     selectAllPendingRequests: db.prepare(`
 		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
+			p.request_kind,
 			COALESCE(m.summary, a.summary) AS summary
 		FROM pending_request p
 		LEFT JOIN messages m ON m.id = p.message_id
