@@ -411,7 +411,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           close: {
             type: "string",
             description:
-              "Close one pending request without sending a reply. Mechanical cleanup only, after verified out-of-band completion.",
+              "Close one ordinary pending request without sending a reply, after verified out-of-band completion. Incident-keyed conditions refuse: only their emitter's --incident-cleared edge may settle them.",
           },
         },
       },
@@ -485,7 +485,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "close",
           flags: "--close <request_id>",
-          description: "Close one pending request for the owner after verified out-of-band completion",
+          description:
+            "Close one ordinary request after verified out-of-band completion; incidents require the emitter's --incident-cleared edge",
           requires: ["owner"],
         },
       ],

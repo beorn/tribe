@@ -45,7 +45,7 @@ import {
   registerSession,
   type StaleTransportReapReport,
 } from "./session.ts"
-import { incidentKey, type IncidentIdentity } from "tribe-wire"
+import { incidentKey, isIncidentKey, type IncidentIdentity } from "tribe-wire"
 import { gatherCodePin } from "./code-pin.ts"
 import { parseDbGrowthWarningBytes, projectHealthCadence } from "./health-cadence.ts"
 import { registeredTrustTierForTopic, senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
@@ -1448,11 +1448,7 @@ function closeOneBall(
   attemptedId: string,
   now: number,
 ): { request_id: string; closed: number; reason?: string } {
-  const pending = ctx.stmts.selectPendingForReplyRecipient.get({
-    $reply_id: attemptedId,
-    $recipient: owner,
-  }) as { request_id: string } | null
-  const requestId = pending?.request_id ?? attemptedId
+  const requestId = pendingRequestIdForOwner(ctx, owner, attemptedId)
   const row = ctx.stmts.selectPendingSettlementForRecipient.get({
     $request_id: requestId,
     $recipient: owner,
@@ -1462,6 +1458,25 @@ function closeOneBall(
   }
   const settlement = ctx.getName() === row.sender && ctx.getName() !== owner ? "sender-withdrawn" : "manual-close"
   return { request_id: requestId, closed: settlePendingRows(ctx, [row], settlement, ctx.getName(), now) }
+}
+
+function pendingRequestIdForOwner(ctx: TribeContext, owner: string, attemptedId: string): string {
+  const pending = ctx.stmts.selectPendingForReplyRecipient.get({
+    $reply_id: attemptedId,
+    $recipient: owner,
+  }) as { request_id: string } | null
+  return pending?.request_id ?? attemptedId
+}
+
+function incidentCloseRefusal(ctx: TribeContext, owner: string, attemptedIds: readonly string[]): string | undefined {
+  const incidentId = attemptedIds.map((id) => pendingRequestIdForOwner(ctx, owner, id)).find(isIncidentKey)
+  if (incidentId === undefined) return undefined
+  return (
+    `tribe.pending: refusing --close for incident ${JSON.stringify(incidentId)}; ` +
+    "only the incident emitter can clear it when the condition ends. " +
+    `From the emitter, run \`tribe send ${owner} 'incident cleared' --type notify --summary 'incident cleared' ` +
+    `--incident ${JSON.stringify(incidentId)} --incident-cleared\`.`
+  )
 }
 
 function trackerMissWarning(
@@ -1598,6 +1613,8 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
       })
     }
     const ids = closeBatch as string[]
+    const refusal = incidentCloseRefusal(ctx, owner, ids)
+    if (refusal !== undefined) return jsonResult({ error: refusal })
     // One transaction for the whole batch, but NOT all-or-nothing about
     // MISSES: an id that matches nothing is a reported result row, not a
     // rollback of its peers. A genuine ERROR mid-batch is different — it
@@ -1626,6 +1643,8 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
 
   const closeId = typeof a.close === "string" && a.close.length > 0 ? a.close : null
   if (closeId) {
+    const refusal = incidentCloseRefusal(ctx, owner, [closeId])
+    if (refusal !== undefined) return jsonResult({ error: refusal })
     const outcome = ctx.db.transaction(() => closeOneBall(ctx, owner, closeId, now))()
     const warning = outcome.closed === 0 ? pendingCloseMissWarning(ctx, owner, undefined, closeId) : undefined
     return jsonResult({

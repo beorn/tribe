@@ -16,6 +16,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { incidentKey } from "tribe-wire"
 
 import { createTribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
@@ -229,6 +230,47 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
           settled_by: "@chief",
         }),
       ])
+    } finally {
+      db.close()
+    }
+  })
+
+  it("refuses incident close before any batch row settles and names the emitter remedy", () => {
+    const { db, stmts } = setup()
+    try {
+      const emitter = makeContext(db, stmts, "@fleet")
+      const owner = makeContext(db, stmts)
+      const incident = { emitter: "health-monitor", subject: "@dev/5", condition: "transport-wedged" }
+      const incidentId = incidentKey(incident)
+      sendMessage(
+        emitter,
+        "@chief",
+        "transport remains wedged",
+        "notify",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        {
+          incident,
+        },
+      )
+      openBall(stmts, { id: "ordinary", recipient: "@chief", openedAt: Date.now(), sender: "@agent/2" })
+
+      const batch = parseToolJson(
+        handleToolCall(owner, "tribe.pending", { close: ["ordinary", incidentId] }, makeOpts()),
+      )
+      expect(String(batch.error)).toContain("only the incident emitter can clear it")
+      expect(String(batch.error)).toContain("--incident-cleared")
+      expect(String(batch.error)).toContain(incidentId)
+      expect(openIds(stmts, "@chief")).toEqual([incidentId, "ordinary"])
+      expect(settlementFacts(db)).toEqual([])
+
+      const single = parseToolJson(handleToolCall(owner, "tribe.pending", { close: incidentId }, makeOpts()))
+      expect(String(single.error)).toContain("only the incident emitter can clear it")
+      expect(String(single.error)).toContain("--incident-cleared")
+      expect(openIds(stmts, "@chief")).toEqual([incidentId, "ordinary"])
+      expect(settlementFacts(db)).toEqual([])
     } finally {
       db.close()
     }
