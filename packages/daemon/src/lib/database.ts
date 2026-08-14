@@ -254,6 +254,42 @@ export function openDatabase(path: string): Database {
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_seq ON messages_archive(seq)")
   db.run("CREATE INDEX IF NOT EXISTS idx_pending_recipient ON pending_request(recipient)")
   db.run("CREATE INDEX IF NOT EXISTS idx_pending_sender ON pending_request(sender)")
+  // The two indexes the attention projection needs. Every statement built on
+  // `unretiredAttentionPredicateSql` reads the journal twice over — once to
+  // find a seat's candidate messages, once per candidate to ask whether a
+  // reply already retired it — and without these both halves degraded into
+  // journal-wide scans. Measured on the live 105MB journal (105,167 messages,
+  // @chief holding 31,345 of them): ONE inbox-wait for @chief cost 590,084
+  // read syscalls, 2,059 MB of page reads and 326 ms of CPU, which held the
+  // daemon at ~623,000 reads/second and two thirds of a core indefinitely.
+  // Both drop to nil with these present. See attention-scan-bounded.test.ts,
+  // which pins each growth term with its own probe.
+  //
+  // Retirement lookup. The predicate is a correlated NOT EXISTS keyed on
+  // (sender, recipient, reply); the closest index was idx_messages_sender, so
+  // each candidate row re-scanned everything its counterpart had ever sent —
+  // the quadratic term, worst exactly on the busiest seat. Partial because
+  // only reply-bearing directs can retire anything: 2,600 of 105,167 rows
+  // live, so it costs almost nothing to carry and stays covering.
+  db.run(
+    "CREATE INDEX IF NOT EXISTS idx_messages_reply_retire ON messages(sender, recipient, reply) WHERE kind = 'direct' AND reply IS NOT NULL",
+  )
+  // Outer drive. Without a recipient-leading index the planner chose
+  // idx_messages_kind_ts and walked every direct message in the journal, then
+  // sorted through a temp B-tree so `ORDER BY rowid DESC LIMIT 1` could not
+  // short-circuit — a seat with no mail paid the same full walk as @chief.
+  // Trailing rowid makes each seat's slice already rowid-ordered, so the walk
+  // stops at the first hit. Deliberately NOT (recipient, kind, type): an
+  // `IN`-list on the last column iterates per value, which reintroduces the
+  // sort this exists to remove.
+  db.run("CREATE INDEX IF NOT EXISTS idx_messages_recipient_kind ON messages(recipient, kind)")
+  // The archive half of the same retirement lookup. A reply that has already
+  // been archived still retires its request, so the journal-sourced predicate
+  // probes both tables; without this the archived half stayed a full scan and
+  // simply moved the stall rather than removing it.
+  db.run(
+    "CREATE INDEX IF NOT EXISTS idx_messages_archive_reply_retire ON messages_archive(sender, recipient, reply) WHERE kind = 'direct' AND reply IS NOT NULL",
+  )
 
   return db
 }
@@ -1076,15 +1112,35 @@ export function unretiredAttentionPredicateSql(
   },
 ): string {
   const row = `${alias}.`
-  return `NOT EXISTS (
+  /** One "has a reply already landed?" probe against one physical table. */
+  const noReplyIn = (table: string, sequence: string, as: string) => `NOT EXISTS (
     SELECT 1
-    FROM ${source.relation} AS reply_message
-    WHERE reply_message.kind = 'direct'
-      AND reply_message.sender = ${row}recipient
-      AND reply_message.recipient = ${row}sender
-      AND reply_message.${source.sequence} > ${row}${source.sequence}
-      AND reply_message.reply = COALESCE(${row}request, ${row}id)
+    FROM ${table} AS ${as}
+    WHERE ${as}.kind = 'direct'
+      AND ${as}.sender = ${row}recipient
+      AND ${as}.recipient = ${row}sender
+      AND ${as}.${sequence} > ${row}${source.sequence}
+      AND ${as}.reply = COALESCE(${row}request, ${row}id)
   )`
+
+  if (source.relation === "messages") return noReplyIn("messages", "rowid", "reply_message")
+
+  // `journal` is a CTE — `messages UNION ALL messages_archive`. Probing it
+  // directly forced SQLite to MATERIALISE all ~158k rows and then scan that
+  // materialisation once per candidate row, because a CTE carries no indexes.
+  // Splitting the probe across the two base tables asks the same question —
+  // "no reply anywhere in the journal" is "no reply in messages AND none in
+  // the archive", and the two share one sequence space — but each half is now
+  // an index lookup. Measured on the live journal: projectHealthCadence across
+  // 30 sessions fell from 6,339 ms / 1,656,368 page reads to 456 ms / 364,091.
+  //
+  // The residue is the OUTER `FROM journal AS m`, which still materialises the
+  // union once per statement. That is linear in journal size rather than
+  // quadratic, and removing it means splitting three aggregate queries across
+  // both tables and recombining in TypeScript — a separate change against an
+  // on-demand path, not this one against the continuous burn.
+  return `${noReplyIn("messages", "rowid", "reply_message")}
+    AND ${noReplyIn("messages_archive", "seq", "reply_archived")}`
 }
 
 export type TribeStatements = ReturnType<typeof createStatements>
