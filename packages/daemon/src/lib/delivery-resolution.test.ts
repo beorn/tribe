@@ -442,6 +442,48 @@ describe("generic direct-message delivery resolution", () => {
     expect(db.prepare("SELECT request_id FROM pending_request WHERE request_id = ?").get("req-stale")).toBeNull()
   })
 
+  it("accepts a tracked mailbox row for a registered, connection-scoped pull seat quiet longer than the silence window", () => {
+    // CLI-rail seats (delivery=pull, no live push socket) join with a plain
+    // registration: no launch_id/launch_parent_pid (connection-scoped, not
+    // durable-launch). `registerSession` itself logs a "session.joined" event
+    // with sender = the new seat's own name, so a *freshly* joined seat rides
+    // the recent-activity union for free. The real gap is a seat that joined
+    // long ago and has done nothing tribe-visible since (a long-lived worker
+    // quietly running tool calls, never sending) — it ages out of the
+    // recent-activity union while still holding a live `sessions` row. It is
+    // nonetheless a currently-known session, so a tracked send must enqueue
+    // into its mailbox, not refuse.
+    const quietPull = makeContext(db, stmts, "@quiet-pull", "sess-quiet-pull")
+    registerSession(quietPull, PROJECT_ID, () => true, null, 1005, "pull", "/repo", null, "codex")
+    db.prepare("UPDATE messages SET ts = ? WHERE sender = ?").run(
+      Date.now() - (DEFAULT_MAX_SILENCE_SEC + 1) * 1_000,
+      "@quiet-pull",
+    )
+
+    const sent = resultJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        {
+          to: "@quiet-pull",
+          message: "first request in hours to this seat",
+          type: "request",
+          request: "req-quiet-pull",
+        },
+        opts(),
+      ),
+    )
+
+    expect(sent).toMatchObject({
+      sent: true,
+      request_id: "req-quiet-pull",
+      delivery: { state: "offline", recipient: "@quiet-pull" },
+    })
+    expect(
+      db.prepare("SELECT request_id, recipient FROM pending_request WHERE request_id = ?").get("req-quiet-pull"),
+    ).toEqual({ request_id: "req-quiet-pull", recipient: "@quiet-pull" })
+  })
+
   it("refuses instead of bouncing a tracked request to an unavailable fallback", () => {
     const unavailableFallback = {
       ...opts(),

@@ -317,23 +317,18 @@ type OwnerTransportObservation = {
 }
 
 function ownerTransportObservationProjector(ctx: TribeContext, opts: HandlerOpts, observedAt: number) {
-  const sessionRows = ctx.db.prepare("SELECT name, launch_id, launch_parent_pid FROM sessions").all() as Array<{
-    name: string
-    launch_id: string | null
-    launch_parent_pid: number | null
-  }>
+  const sessionRows = ctx.db.prepare("SELECT name FROM sessions").all() as Array<{ name: string }>
   const knownNames = new Set(sessionRows.map((row) => row.name))
-  const mailboxRecipientNames = new Set(
-    sessionRows
-      .filter(
-        (row) =>
-          classifySessionRegistrationLifetime({
-            launchId: row.launch_id,
-            launchParentPid: row.launch_parent_pid,
-          }) === "durable-launch",
-      )
-      .map((row) => row.name),
-  )
+  // Any currently-registered session has a live `sessions` row and therefore
+  // an addressable mailbox — durable-launch (hab-tracked) and plain
+  // connection-scoped registrations alike (e.g. a CLI-rail pull seat that
+  // joined without launch_id/launch_parent_pid). A tracked send to a known
+  // name always lands; `tribe.fetch`/`tribe pending` will surface it on the
+  // recipient's next drain regardless of how it registered. The union below
+  // additionally covers names that have since left `sessions` entirely
+  // (superseded/reaped rows) but were active recently enough to deserve a
+  // grace period.
+  const mailboxRecipientNames = new Set(knownNames)
   const recentSince = observedAt - DEFAULT_MAX_SILENCE_SEC * 1_000
   const recentActivity = ctx.db
     .prepare(
