@@ -11,6 +11,7 @@ import { logEvent } from "./messaging.ts"
 import { prefixFallbackDeliveryResolver } from "./delivery-resolution.ts"
 import { registerSession } from "./session.ts"
 import { DEFAULT_MAX_SILENCE_SEC } from "./session-transport-state.ts"
+import tribeHabModule from "../../../../hab.module.ts"
 
 const PROJECT_ID = "delivery-resolution"
 
@@ -66,6 +67,18 @@ describe("generic direct-message delivery resolution", () => {
       status: "accepted",
       state: "offline",
     })
+  })
+
+  it("routes both intentionally unstaffed coordinator roles to their declared holder", () => {
+    const raw = tribeHabModule.services.wire.env.TRIBE_DELIVERY_FALLBACKS
+    const resolve = prefixFallbackDeliveryResolver(raw)
+    for (const recipient of ["@ci", "@yrd"]) {
+      expect(resolve?.({ recipient, answerableNames: new Set(["@chief"]) })).toMatchObject({
+        status: "accepted",
+        state: "bounced",
+        to: "@chief",
+      })
+    }
   })
 
   it.each([
