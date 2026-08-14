@@ -473,6 +473,37 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     }
   }
 
+  /**
+   * `callLaunchToolWhenRegistered` only proves the ONE adapter it is called
+   * against has its own transport registered — it says nothing about whether
+   * the daemon's shared member record has also caught up with every OTHER
+   * concurrently (re)connecting transport for the same logical member. A
+   * multi-adapter convergence check (transport_pids containing every sibling
+   * adapter's pid) that fires right after a concurrent spawn, replace, or
+   * daemon-restart step races that catch-up window: the queried adapter can
+   * legitimately answer before a sibling's registration has committed.
+   * Poll the same call until `ready` accepts the parsed result instead of
+   * asserting on the first successful round trip (@km/tribe/ci-deflake-wire-daemon).
+   */
+  async function callLaunchToolUntil<T>(
+    adapter: { child: ChildProcessWithoutNullStreams; stdout: Record<string, unknown>[]; logPath: string },
+    firstId: number,
+    name: string,
+    args: Record<string, unknown>,
+    ready: (result: T) => boolean,
+    label: string,
+  ): Promise<T> {
+    const deadline = Date.now() + 30_000
+    let id = firstId
+    for (;;) {
+      const result = (await callLaunchToolWhenRegistered(adapter, id, name, args)) as T
+      if (ready(result)) return result
+      if (Date.now() >= deadline) throw new Error(`${label}: content never converged within deadline`)
+      id += 1_000
+      await Bun.sleep(250)
+    }
+  }
+
   async function runCli(
     args: string[],
     env: NodeJS.ProcessEnv,
@@ -1065,7 +1096,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       expect(result.sessions?.filter((session) => session.name === NAME && session.alive)).toHaveLength(1)
     }
 
-    const members = (await callLaunchToolWhenRegistered(launchAdapters[0]!, 20, "members", {})) as {
+    const members = await callLaunchToolUntil<{
       sessions?: Array<{
         name?: string
         member_id?: string
@@ -1073,7 +1104,16 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         launch_parent_pid?: number
         transport_pids?: number[]
       }>
-    }
+    }>(
+      launchAdapters[0]!,
+      20,
+      "members",
+      {},
+      (result) =>
+        (result.sessions?.find((session) => session.name === NAME)?.transport_pids?.length ?? 0) ===
+        launchAdapters.length,
+      "same-launch member transport_pids convergence",
+    )
     const member = members.sessions?.find((session) => session.name === NAME)
     expect(member).toMatchObject({
       launch_id: `${launchId}::${encodeURIComponent(NAME)}`,
@@ -1178,9 +1218,18 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     await once(launchAdapters[1]!.child, "exit")
     const replacement = await spawnLaunchAdapter(socketPath, "launch-adapter-2b.log", launchId)
     launchAdapters[1] = replacement
-    const afterReconnect = (await callLaunchToolWhenRegistered(replacement, 24, "members", {})) as {
+    const afterReconnect = await callLaunchToolUntil<{
       sessions?: Array<{ name?: string; member_id?: string; launch_id?: string; transport_pids?: number[] }>
-    }
+    }>(
+      replacement,
+      24,
+      "members",
+      {},
+      (result) =>
+        (result.sessions?.find((session) => session.name === NAME)?.transport_pids?.length ?? 0) ===
+        launchAdapters.length,
+      "post-replace member transport_pids convergence",
+    )
     expect(afterReconnect.sessions?.find((session) => session.name === NAME)).toMatchObject({
       member_id: initialMemberId,
       launch_id: `${launchId}::${encodeURIComponent(NAME)}`,
@@ -1195,8 +1244,25 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     await waitForCondition(() => !existsSync(socketPath), "old daemon socket removal")
     daemonProc = spawnDaemon(socketPath, dbPath)
     await waitForCondition(() => existsSync(socketPath), "restarted daemon socket")
+    // Each adapter reconnects and re-registers with the fresh daemon
+    // independently; Promise.all resolves each leg on its OWN transport_pids
+    // convergence, not merely on that adapter's own call succeeding, so a
+    // slower sibling can never be observed as still-missing.
     const afterDaemonRestart = await Promise.all(
-      launchAdapters.map((adapter, index) => callLaunchToolWhenRegistered(adapter, 30 + index, "members", {})),
+      launchAdapters.map((adapter, index) =>
+        callLaunchToolUntil<{
+          sessions?: Array<{ name?: string; member_id?: string; launch_id?: string; transport_pids?: number[] }>
+        }>(
+          adapter,
+          30 + index,
+          "members",
+          {},
+          (result) =>
+            (result.sessions?.find((session) => session.name === NAME)?.transport_pids?.length ?? 0) ===
+            launchAdapters.length,
+          `post-restart member transport_pids convergence (adapter ${index + 1})`,
+        ),
+      ),
     )
     expect(launchAdapters.map(({ child }) => child.exitCode)).toEqual([null, null, null])
     for (const result of afterDaemonRestart as Array<{

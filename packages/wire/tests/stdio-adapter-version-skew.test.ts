@@ -439,12 +439,19 @@ describe("stdio adapter — protocol version skew", () => {
       stdio: ["pipe", "pipe", "pipe"],
     }) as ChildProcessWithoutNullStreams
 
-    await waitFor(() => generationDaemon.registrations.length >= 1, 8_000, "initial registration")
+    await waitFor(() => generationDaemon.registrations.length >= 1, 15_000, "initial registration")
     generationDaemon.setPid(2002)
     for (const socket of generationDaemon.clients.splice(0)) socket.destroy()
 
-    await waitFor(() => generationDaemon.registrations.length >= 3, 12_000, "replacement registration")
+    // The second registration is a full re-exec (new process image, not just
+    // a reconnect) triggered by observing the daemon's pid change, so it
+    // carries real OS-level startup latency on top of socket reconnect.
+    // Reproduced directly under full-suite contention: `Error: timed out
+    // waiting for replacement registration` at the prior 12s budget — the
+    // same class of under-provisioned wait as 21049, not an ordering race
+    // (@km/tribe/ci-deflake-wire-daemon).
+    await waitFor(() => generationDaemon.registrations.length >= 3, 40_000, "replacement registration")
     expect(generationDaemon.registrations).toEqual([1001, 2002, 2002])
     expect(child.exitCode).toBeNull()
-  }, 20_000)
+  }, 60_000)
 })

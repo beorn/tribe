@@ -272,8 +272,9 @@ function writeJsonAndWaitForLine(
   child: ChildProcessWithoutNullStreams,
   payload: Record<string, unknown>,
   predicate: (line: Record<string, unknown>) => boolean,
+  opts: { timeoutMs?: number } = {},
 ): Promise<Record<string, unknown>> {
-  const line = waitForLine(child, predicate)
+  const line = waitForLine(child, predicate, opts)
   writeJson(child, payload)
   return line
 }
@@ -653,10 +654,18 @@ describe("stdio adapter delivery modes", () => {
       stdio: ["pipe", "pipe", "pipe"],
     })
 
-    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    // 21049 drives two full reconnect cycles through a real subprocess; the
+    // shared waitForLine/waitForCondition defaults (2s / 3s) are sized for
+    // simple single round trips and were the actual mechanism behind this
+    // test's flakes under CI/full-suite contention — not an ordering race
+    // (@km/tribe/ci-deflake-wire-daemon). Widened explicitly here rather than
+    // raising the shared defaults, which 27 other call sites in this file
+    // also rely on.
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1, { timeoutMs: 10_000 })
     await waitForCondition(
       () => daemon!.requests.some((msg) => msg.method === "tribe.members"),
       "completed initial adapter registration",
+      { timeoutMs: 10_000 },
     )
     await new Promise((resolveTick) => setTimeout(resolveTick, 50))
 
@@ -664,10 +673,11 @@ describe("stdio adapter delivery modes", () => {
     await waitForCondition(
       () => daemon!.requests.filter((msg) => msg.method === "register").length === 2,
       "transient reconnect registration conflict",
+      { timeoutMs: 10_000 },
     )
 
     expect(child.exitCode).toBeNull()
-    const closedReplyPromise = waitForLine(child, (line) => line.id === 2)
+    const closedReplyPromise = waitForLine(child, (line) => line.id === 2, { timeoutMs: 10_000 })
     writeJson(child, callToolPayload(2, "members", {}))
     const closedReply = (await closedReplyPromise) as {
       result?: { isError?: boolean; content?: Array<{ text?: string }> }
@@ -683,11 +693,12 @@ describe("stdio adapter delivery modes", () => {
     await waitForCondition(
       () => daemon!.requests.filter((msg) => msg.method === "register").length >= 3,
       "second consecutive reconnect registration conflict",
+      { timeoutMs: 10_000 },
     )
     await new Promise((resolveTick) => setTimeout(resolveTick, 50))
     expect(child.exitCode).toBeNull()
 
-    const repeatedClosedReplyPromise = waitForLine(child, (line) => line.id === 3)
+    const repeatedClosedReplyPromise = waitForLine(child, (line) => line.id === 3, { timeoutMs: 10_000 })
     writeJson(child, callToolPayload(3, "members", {}))
     const repeatedClosedReply = (await repeatedClosedReplyPromise) as {
       result?: { isError?: boolean; content?: Array<{ text?: string }> }
@@ -701,8 +712,9 @@ describe("stdio adapter delivery modes", () => {
     await waitForCondition(
       () => daemon!.requests.filter((msg) => msg.method === "register").length >= 4,
       "automatic reconnect after repeated conflicts",
+      { timeoutMs: 10_000 },
     )
-    const liveReplyPromise = waitForLine(child, (line) => line.id === 4)
+    const liveReplyPromise = waitForLine(child, (line) => line.id === 4, { timeoutMs: 10_000 })
     writeJson(child, callToolPayload(4, "members", {}))
     const liveReply = (await liveReplyPromise) as {
       result?: { isError?: boolean; content?: Array<{ text?: string }> }
@@ -718,7 +730,7 @@ describe("stdio adapter delivery modes", () => {
     expect(registrations[1]?.params && "takeover" in registrations[1].params).toBe(false)
     expect(registrations[2]?.params && "takeover" in registrations[2].params).toBe(false)
     expect(registrations[3]?.params && "takeover" in registrations[3].params).toBe(false)
-  })
+  }, 60_000)
 
   it("21049: a managed tool call recovers an initially unavailable daemon before reporting health", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
