@@ -238,7 +238,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(fetchEvents(b, opts)).toEqual([])
   })
 
-  it("refuses an obligation sent while its persona is stopped instead of stranding it for a successor", () => {
+  it("keeps a recently active mailbox addressable while its persona is stopped", () => {
     const stopped = connectAs("sess-stopped", NAME)
     const chief = connectAs("sess-chief", "@chief")
     disconnect("sess-stopped")
@@ -256,20 +256,31 @@ describe("19442 mailbox-cursor actionable recovery", () => {
         },
         opts,
       ),
-    ) as { error: string; delivery_failure_id: string }
+    ) as { id: string }
 
-    expect(sent.error).toContain(`no connected, PID-live transport was observed for "${NAME}"`)
-    expect(sent.delivery_failure_id).toEqual(expect.any(String))
-    expect(db.prepare("SELECT request_id FROM pending_request WHERE recipient = ?").get(NAME)).toBeNull()
-    expect(db.prepare("SELECT id FROM messages WHERE kind = 'direct' AND recipient = ?").get(NAME)).toBeNull()
+    expect(sent.id).toEqual(expect.any(String))
+    expect(db.prepare("SELECT request_id FROM pending_request WHERE recipient = ?").get(NAME)).toEqual({
+      request_id: sent.id,
+    })
+    expect(db.prepare("SELECT id FROM messages WHERE kind = 'direct' AND recipient = ?").get(NAME)).toEqual({
+      id: sent.id,
+    })
 
-    // A newly started process has no phantom ownership or addressed mail to
-    // inherit from the refused opening. The journal-only terminal fact stays
-    // ambient rather than masquerading as work for the successor.
+    // The successor inherits the durable addressed work through the mailbox,
+    // even though no transport was connected when the request was admitted.
     const successor = connectAs("sess-successor", NAME)
     const first = fetchJson(successor, opts).json
-    expect(first.attention?.actionable_unread).toEqual([])
-    expect(first.attention?.pending_balls).toEqual([])
+    expect(first.attention?.actionable_unread).toEqual([
+      expect.objectContaining({
+        id: sent.id,
+        type: "request",
+        from: "@chief",
+        content: "resume the durable review",
+      }),
+    ])
+    expect(first.attention?.pending_balls).toEqual([
+      expect.objectContaining({ request_id: sent.id, message_id: sent.id, sender: "@chief" }),
+    ])
   })
 
   it("recovers a response that closed its tracked ball while the requester was parked", () => {
