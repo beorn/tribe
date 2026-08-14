@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url"
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { connectToDaemon, type DaemonClient } from "../src/client.ts"
+import { deriveTribePersonaLaunchIdentity } from "../src/lib/persona-launch-identity.ts"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -21,6 +22,18 @@ const PLUGIN_SERVER = resolve(HERE, "../../../plugins/claude/server.ts")
 const STDIO_ADAPTER = resolve(HERE, "../src/stdio-adapter.ts")
 const BUN_BIN = process.versions.bun ? process.execPath : "bun"
 const PERSONA = "@agent/restart-test"
+// 7443489 ("fix(tribe): derive seat identity from persona", 2026-08-07) made
+// every named launch's reported launch_id the composite
+// `providerLaunchId::encodeURIComponent(persona)` (persona-launch-identity.ts)
+// — one provider launch can host more than one named seat, so the bare
+// provider launch id alone is no longer unique per seat. This file's
+// assertions predate that commit by a day and were never revisited
+// (@km/tribe/ci-green-round3). Deriving expected ids through the same
+// canonical function the production code uses (rather than hand-encoding a
+// string here) is what persona-launch-identity.ts's own docstring asks every
+// consumer to do.
+const personaLaunchId = (providerLaunchId: string, persona: string = PERSONA) =>
+  deriveTribePersonaLaunchIdentity(persona, providerLaunchId).launchId
 
 type JsonObject = Record<string, unknown>
 type Member = {
@@ -320,7 +333,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
     const firstMember = mcpToolJson(stdout, 2).sessions?.find((session) => session.name === PERSONA)
     expect(firstMember).toMatchObject({
       member_id: expect.any(String),
-      launch_id: "restart-journey-launch",
+      launch_id: personaLaunchId("restart-journey-launch"),
       launch_parent_pid: harnessParentPid,
       transport_state: "connected",
       owner_state: "live",
@@ -351,7 +364,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
 
     expect(rejoined).toMatchObject({
       member_id: firstMember?.member_id,
-      launch_id: "restart-journey-launch",
+      launch_id: personaLaunchId("restart-journey-launch"),
       launch_parent_pid: firstLaunchParentPid,
       transport_state: "connected",
       owner_state: "live",
@@ -394,7 +407,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
 
     expect(secondRejoined).toMatchObject({
       member_id: firstMember?.member_id,
-      launch_id: "restart-journey-launch",
+      launch_id: personaLaunchId("restart-journey-launch"),
       launch_parent_pid: firstLaunchParentPid,
       transport_state: "connected",
       owner_state: "live",
@@ -501,7 +514,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
     expect(plugin.exitCode).toBeNull()
     expect(restoredMember).toMatchObject({
       member_id: initialMember?.member_id,
-      launch_id: "adapter-crash-launch",
+      launch_id: personaLaunchId("adapter-crash-launch"),
       launch_parent_pid: process.pid,
       delivery: "pull",
       transport_state: "connected",
@@ -776,7 +789,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
     writeJson(adapter, callToolPayload(11, "members", { all: true }))
     await waitFor(() => stdout.some((line) => line.id === 11), "direct-adapter post-restart tool call")
     expect(mcpToolJson(stdout, 11).sessions?.find((session) => session.name === PERSONA)).toMatchObject({
-      launch_id: "restart-direct-launch",
+      launch_id: personaLaunchId("restart-direct-launch"),
       transport_state: "connected",
       owner_state: "live",
     })
@@ -939,7 +952,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
             {
               member_id: initialMembers.get(withheldPersona)?.member_id,
               name: withheldPersona,
-              launch_id: "restart-multi-2",
+              launch_id: personaLaunchId("restart-multi-2", withheldPersona),
               launch_parent_pid: initialMembers.get(withheldPersona)?.launch_parent_pid,
               state: "missing-transport",
             },

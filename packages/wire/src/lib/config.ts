@@ -104,10 +104,31 @@ export function parseSessionDomains(args: TribeArgs): string[] {
     .filter(Boolean)
 }
 
+/**
+ * Walk up from `path` to the nearest ancestor that exists on disk. `git -C`
+ * (what `findGitProjectRoot` shells out to) needs a real directory to chdir
+ * into — Node's `spawnSync` reports that as `result.error` before git ever
+ * runs, and `findGitProjectRoot` turns any such error into a throw by design
+ * (removely's own contract: "execution and repository errors throw"). A
+ * caller here may legitimately probe a *prospective* path — e.g. `findBeadsDir`
+ * discovering config for a directory that hasn't been created yet — so the
+ * git probe itself must run against real ground. Every absolute path's chain
+ * of ancestors terminates at the filesystem root, which always exists.
+ */
+function nearestExistingAncestor(path: string): string {
+  let candidate = path
+  while (!existsSync(candidate)) {
+    const parent = dirname(candidate)
+    if (parent === candidate) return candidate // filesystem root
+    candidate = parent
+  }
+  return candidate
+}
+
 /** Find .beads/ inside the current Git/superproject boundary. */
 export function findBeadsDir(from?: string): string | null {
   const start = resolve(from ?? process.cwd())
-  const boundary = findGitProjectRoot(start) ?? parse(start).root
+  const boundary = findGitProjectRoot(nearestExistingAncestor(start)) ?? parse(start).root
   const projectRoot = findAncestorWithin(start, boundary, (directory) => existsSync(resolve(directory, ".beads")))
   return projectRoot ? resolve(projectRoot, ".beads") : null
 }
