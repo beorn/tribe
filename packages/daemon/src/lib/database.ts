@@ -87,6 +87,7 @@ export function openDatabase(path: string): Database {
 		reply      TEXT,
 		correlated_reply_requester TEXT,
 		summary    TEXT,
+		session_id TEXT,
 		attention_required INTEGER NOT NULL DEFAULT 0
 	)`)
 
@@ -108,7 +109,9 @@ export function openDatabase(path: string): Database {
 		request     TEXT,
 		reply       TEXT,
 		correlated_reply_requester TEXT,
-		summary     TEXT
+		summary     TEXT,
+		session_id  TEXT,
+		attention_required INTEGER NOT NULL DEFAULT 0
 	)`)
 
   // Ball-tracker: per-(request_id, recipient) row for every open request.
@@ -1071,7 +1074,44 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 26,
+    name: "message-provenance",
+    /**
+     * A message row named its sender and nothing else — `sender` is a
+     * self-reported NAME, so no row could be traced to the process that wrote
+     * it. Identifying one noisy emitter meant reading source headers and a
+     * process listing by hand. `session_id` is stamped at insert from the
+     * daemon's own connection context (never caller-asserted), and `sessions`
+     * carries pid / cwd / launch_id, so one join answers "what wrote this".
+     *
+     * `attention_required` is added to the ARCHIVE half here as a bug fix:
+     * migration v24 added it to `messages` only, and `archiveExpiredMessages`
+     * uses an explicit column list — so every message's attention
+     * classification was silently dropped on archival, with no error. A new
+     * column would have inherited exactly that fate.
+     */
+    up(db) {
+      for (const table of ["messages", "messages_archive"]) {
+        const exists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='${table}'`).get() as {
+          name: string
+        } | null
+        if (!exists) continue
+        const columns = new Set(
+          (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name),
+        )
+        if (!columns.has("session_id")) db.run(`ALTER TABLE ${table} ADD COLUMN session_id TEXT`)
+        if (table === "messages_archive" && !columns.has("attention_required")) {
+          db.run("ALTER TABLE messages_archive ADD COLUMN attention_required INTEGER NOT NULL DEFAULT 0")
+        }
+      }
+    },
+  },
 ]
+
+/** The schema terminus `openDatabase` upgrades to — derived from the same
+ * `MIGRATIONS.at(-1)` it uses, so a test can never pin a stale literal. */
+export const CURRENT_SCHEMA_VERSION: number = MIGRATIONS.at(-1)!.version
 
 // ---------------------------------------------------------------------------
 // Prepared statements
@@ -1169,9 +1209,9 @@ export function createStatements(db: Database) {
 
     insertMessage: db.prepare(`
 		INSERT OR IGNORE INTO messages (id, type, sender, recipient, kind, content, bead_id, ref, ts,
-			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, attention_required)
+			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id, attention_required)
 		VALUES ($id, $type, $sender, $recipient, $kind, $content, $bead_id, $ref, $ts,
-			$delivery, $topic, $room_id, $request, $reply, $correlated_reply_requester, $summary,
+			$delivery, $topic, $room_id, $request, $reply, $correlated_reply_requester, $summary, $session_id,
 			CASE
 				WHEN $attention_required = 1 THEN 1
 				WHEN $kind = 'direct' AND $sender != $recipient AND $type = 'response' THEN 1
@@ -1572,14 +1612,23 @@ export function createStatements(db: Database) {
     // takeover bit reclaim a deliberately superseded persona (21049).
     cleanupDedup: db.prepare("DELETE FROM dedup WHERE ts < $cutoff AND key NOT LIKE 'launch-takeover:%'"),
 
+    /**
+     * Explicit column lists on BOTH sides, so a column added to `messages`
+     * without being added here is dropped on archival with no error — which is
+     * exactly what happened to `attention_required` between v24 and v26. When
+     * you add a column to `messages`, add it in three places: the CREATE, this
+     * SELECT, and this INSERT.
+     */
     archiveExpiredMessages: db.prepare(`
 		INSERT OR IGNORE INTO messages_archive (
 			seq, id, type, sender, recipient, kind, content, bead_id, ref, ts,
-			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, archived_at
+			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id,
+			attention_required, archived_at
 		)
 		SELECT
 			rowid, id, type, sender, recipient, kind, content, bead_id, ref, ts,
-			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, $archived_at
+			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id,
+			attention_required, $archived_at
 		FROM messages
 		WHERE ts < $cutoff
 	`),

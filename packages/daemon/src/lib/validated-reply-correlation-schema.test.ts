@@ -4,7 +4,7 @@ import { mkdtempSync, realpathSync } from "node:fs"
 import { safeRemoveSync } from "removely"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { openDatabase } from "./database.ts"
+import { CURRENT_SCHEMA_VERSION, openDatabase } from "./database.ts"
 
 const cleanupDirs: string[] = []
 
@@ -57,7 +57,7 @@ describe("validated reply correlation schema (migration v25)", () => {
         id: "old",
         correlated_reply_requester: null,
       })
-      expect(db.prepare("SELECT value FROM _schema_meta WHERE key='version'").get()).toEqual({ value: "25" })
+      expect(db.prepare("SELECT value FROM _schema_meta WHERE key='version'").get()).toEqual({ value: String(CURRENT_SCHEMA_VERSION) })
     } finally {
       db.close()
     }
