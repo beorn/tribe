@@ -378,7 +378,24 @@ describe("recall integration", () => {
         expect(typeof item.rank).toBe("number")
         expect(typeof item.snippet).toBe("string")
         expect(typeof item.sessionId).toBe("string")
-        expect(["message", "plan", "summary", "todo", "first_prompt", "vault"]).toContain(item.type)
+        // Full ContentType surface (history/types.ts): recall() searches messages,
+        // session-scoped content, and project-scoped content (bead/session_memory/
+        // project_memory/doc/claude_md/llm_research), plus vault FTS when a .km
+        // tree is present — any of these can rank #1 for a broad query like "function".
+        expect([
+          "message",
+          "plan",
+          "summary",
+          "todo",
+          "first_prompt",
+          "bead",
+          "session_memory",
+          "project_memory",
+          "doc",
+          "claude_md",
+          "llm_research",
+          "vault",
+        ]).toContain(item.type)
       }
     },
     15_000,
