@@ -616,13 +616,19 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         operator_capability: capability,
       }),
     ).resolves.toMatchObject({ session: "@chief", drained_count: 0 })
+    // A capability IS configured here (read from FD 3, "operator-lifecycle-
+    // secret" above) and this call supplies a different, wrong value — that
+    // is the "rejected" verdict, not "unconfigured". 0c2acf65 ("fix(tribe):
+    // distinguish unavailable inbox authority") deliberately split the old
+    // single generic message into these two; this assertion just never got
+    // updated to the new one (@km/tribe/ci-green-wire-codepin).
     await expect(
       first.client.call("cli_inbox_drain", {
         session: "@chief",
         limit: 1,
         operator_capability: "must-not-cross-the-spawn-boundary",
       }),
-    ).rejects.toThrow(/authenticated current session or the configured operator capability/i)
+    ).rejects.toThrow(/unauthenticated inbox drain: the operator capability was rejected/i)
 
     await first.client.call("tribe.restart", { reason: "operator capability lifecycle test" })
     first.client.close()

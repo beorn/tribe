@@ -222,6 +222,77 @@ describe("status-backed doctor checks", () => {
     expect(check.diagnosis).toContain("errno=ENOENT")
   })
 
+  // `--show-superproject-working-tree` exits 0 with empty output when the
+  // checkout is standalone (not embedded as a submodule) — CI's own checkout
+  // of tribe included. `probeGitValue` folds that into EMPTY_RESULT, distinct
+  // from every other probe failure. That is a fact about checkout shape, not
+  // an error, so identity must not go UNKNOWN over it — it reduces to
+  // running-vs-on-disk only.
+  test("no superproject (EMPTY_RESULT) with a matching checkout is OK, not UNKNOWN", () => {
+    const check = evaluateDoctorIdentity(
+      { cert: "abc123", root: "/repo/tribe" },
+      {
+        onDisk: success("abc123"),
+        superprojectPin: {
+          ok: false,
+          failure: {
+            path: "/repo/tribe",
+            operation: "git rev-parse --show-superproject-working-tree",
+            errno: "EMPTY_RESULT",
+            message: "git returned no value",
+          },
+        },
+      },
+      null,
+    )
+    expect(check).toMatchObject({ severity: "OK" })
+    expect(check.diagnosis).toContain("running=abc123 on_disk=abc123")
+    expect(check.diagnosis).toContain("pin=none")
+  })
+
+  test("no superproject (EMPTY_RESULT) with a running/on-disk mismatch is still CRITICAL", () => {
+    const check = evaluateDoctorIdentity(
+      { cert: "old123", root: "/repo/tribe" },
+      {
+        onDisk: success("new456"),
+        superprojectPin: {
+          ok: false,
+          failure: {
+            path: "/repo/tribe",
+            operation: "git rev-parse --show-superproject-working-tree",
+            errno: "EMPTY_RESULT",
+            message: "git returned no value",
+          },
+        },
+      },
+      null,
+    )
+    expect(check).toMatchObject({ severity: "CRITICAL" })
+    expect(check.diagnosis).toContain("running=old123 on_disk=new456")
+    expect(check.remedy).toContain("restarting will not help")
+  })
+
+  test("a non-EMPTY_RESULT superproject probe failure stays UNKNOWN", () => {
+    const check = evaluateDoctorIdentity(
+      { cert: "abc123", root: "/repo/tribe" },
+      {
+        onDisk: success("abc123"),
+        superprojectPin: {
+          ok: false,
+          failure: {
+            path: "/repo/tribe",
+            operation: "git rev-parse --show-superproject-working-tree",
+            errno: "ENOENT",
+            message: "git not found",
+          },
+        },
+      },
+      null,
+    )
+    expect(check).toMatchObject({ severity: "UNKNOWN" })
+    expect(check.diagnosis).toContain("errno=ENOENT")
+  })
+
   test("negotiated legacy transport is version-degraded WARNING, not healthy", () => {
     const check = evaluateDoctorVersions(10, [
       { name: "@dev/0", protocol_versions: [10], version_state: "current" },

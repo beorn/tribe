@@ -234,7 +234,14 @@ describe("gatherCodePin (real git path, temp repo)", () => {
     expect(result.live.running).toBe(expectedLiveSha)
     expect(result.live.on_disk).toBe(expectedLiveSha)
     expect(result.live.superproject_pin).toBe(expectedPin)
-    expect(result.live.stale).toBe(Boolean(expectedLiveSha && expectedPin && expectedLiveSha !== expectedPin))
+    // Mirrors the "is fresh when the process loaded the current on-disk
+    // commit" contract above: when there is no superproject pin to compare
+    // against (this checkout's own tree, like CI's, is standalone), staleness
+    // is unresolved (null), never a certified `false`. The old
+    // `Boolean(... && expectedPin && ...)` formula collapsed "unresolved"
+    // and "fresh" into the same `false`, which only matched by accident when
+    // a real pin happened to be present (@km/tribe/ci-green-wire-codepin).
+    expect(result.live.stale).toBe(expectedPin === null ? null : expectedLiveSha !== expectedPin)
 
     const status = result.requested
     expect(status.running).toBe(sourceSha)
@@ -266,6 +273,16 @@ describe("gatherCodePin (real git path, temp repo)", () => {
       execFileSync("git", ["-C", superRepo, "commit", "-q", "-m", "add submodule pinned at A"], { encoding: "utf8" })
 
       const subCheckout = join(superRepo, "vendor", "sub")
+      // `git submodule add` gives subCheckout its own embedded gitdir
+      // (superRepo/.git/modules/vendor/sub) — a separate local-config
+      // namespace from both `repo` (configured in beforeEach) and `superRepo`
+      // (configured just above). Without its own identity here, the commit
+      // below falls through to whatever global identity happens to be
+      // present in the environment — absent on a bare CI runner, which dies
+      // with "Author identity unknown" (@km/tribe/ci-green-wire-codepin).
+      // Repo-scoped only, never --global.
+      execFileSync("git", ["-C", subCheckout, "config", "user.email", "t@example.com"], { encoding: "utf8" })
+      execFileSync("git", ["-C", subCheckout, "config", "user.name", "t"], { encoding: "utf8" })
       execFileSync("git", ["-C", subCheckout, "commit", "-q", "--allow-empty", "-m", "checkout advances to B"], {
         encoding: "utf8",
       })

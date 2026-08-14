@@ -806,7 +806,32 @@ export function evaluateDoctorIdentity(
     return { severity: "UNKNOWN", diagnosis: probeFailure(resolved.onDisk) }
   }
   if (!resolved.superprojectPin.ok) {
-    return { severity: "UNKNOWN", diagnosis: probeFailure(resolved.superprojectPin) }
+    // `git rev-parse --show-superproject-working-tree` exits 0 with empty
+    // output when this checkout has no superproject — e.g. CI's own
+    // standalone checkout of tribe, or any bare `git clone`. That is a fact
+    // about the checkout shape, not a probe failure: `probeGitValue` folds
+    // it into EMPTY_RESULT specifically so callers can tell it apart from a
+    // genuine error (git missing, corrupt repo, permission denied — all of
+    // which keep their own distinct errno and still fall through to
+    // UNKNOWN below). With no pin to compare against, identity reduces to
+    // running-vs-on-disk only.
+    if (resolved.superprojectPin.failure.errno !== "EMPTY_RESULT") {
+      return { severity: "UNKNOWN", diagnosis: probeFailure(resolved.superprojectPin) }
+    }
+    if (reported.cert !== resolved.onDisk.value) {
+      return {
+        severity: "CRITICAL",
+        diagnosis:
+          `daemon code integrity mismatch running=${reported.cert} on_disk=${resolved.onDisk.value} ` +
+          "pin=none (standalone checkout, no superproject)",
+        remedy:
+          "the daemon is running a different module root; restarting will not help. Advance the daemon module root, then re-run `tribe doctor`",
+      }
+    }
+    return {
+      severity: "OK",
+      diagnosis: `running=${reported.cert} on_disk=${resolved.onDisk.value} pin=none (standalone checkout, no superproject)`,
+    }
   }
   const values = {
     running: reported.cert,
