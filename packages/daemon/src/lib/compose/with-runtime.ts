@@ -29,7 +29,7 @@
 
 import { createLogger } from "loggily"
 import { sendMessage } from "../messaging.ts"
-import { cleanupOldData, backfillDefaultRoomMembers, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
+import { cleanupOldData, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
 import { loadPlugins } from "../plugin-loader.ts"
 import type { TribeClientApi, TribePluginApi, TribePluginHandle } from "../plugin-api.ts"
 import type { BaseTribe } from "./base.ts"
@@ -255,17 +255,6 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
     }
     startupReapTimer.unref?.()
     t.scope.defer(() => clearTimeout(startupReapTimer as unknown as ReturnType<typeof setTimeout>))
-
-    // Matrix-shape invariant (km-tribe.matrix-shape): every row in `sessions`
-    // must have a corresponding row in `room_members` for its project's
-    // default room. registerSession() satisfies the invariant for new sessions;
-    // this backfill catches historic rows from before the invariant existed
-    // (DBs that migrated through v10 but haven't yet seen a registerSession on
-    // every row) and any code path that bypasses registerSession.
-    const backfilled = backfillDefaultRoomMembers(t.daemonCtx)
-    if (backfilled > 0) {
-      log.info?.(`backfilled ${backfilled} room_members row(s) at startup`)
-    }
 
     let exited = false
     function shutdown(): void {

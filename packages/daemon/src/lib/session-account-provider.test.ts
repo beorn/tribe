@@ -176,22 +176,10 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
       "unknown-fresh",
       "unknown-live-pid",
     ])
-    expect(
-      (
-        db.prepare("SELECT COUNT(*) AS count FROM room_members WHERE session_id IN ('s-old-dead')").get() as {
-          count: number
-        }
-      ).count,
-    ).toBe(0)
-    expect(
-      (
-        db
-          .prepare(
-            "SELECT COUNT(*) AS count FROM room_members WHERE session_id IN ('s-old-silvercode', 's-old-unknown', 's-old-cli')",
-          )
-          .get() as { count: number }
-      ).count,
-    ).toBe(3)
+    // The surviving session names above are the GC subject. Two room_members
+    // count assertions used to ride along here as a proxy for which rows were
+    // swept; rooms were deleted (@cto ruling 2026-08-13) and the sweep coverage
+    // is unchanged without them.
   })
 
   it("treats EPERM as alive/unknown and only ESRCH as positive PID death", () => {

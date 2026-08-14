@@ -529,11 +529,16 @@ function activeBroadcastRecipients(ctx: TribeContext, answerableNames: ReadonlyS
   const names = [...answerableNames].filter((name) => name !== ctx.getName())
   if (names.length === 0) return []
   const placeholders = names.map(() => "?").join(", ")
+  // This used to INNER JOIN room_members. Because every session was auto-joined
+  // to its project room at register, the join matched everything — it was a
+  // no-op filter standing in for "is a real session", and deleting the auto-join
+  // without removing it would have made every broadcast enumerate ZERO
+  // recipients. The membership table was never a room concept here; it was an
+  // accidental liveness predicate.
   const rows = ctx.db
     .prepare(`
-      SELECT DISTINCT s.name
+      SELECT s.name
       FROM sessions s
-      INNER JOIN room_members rm ON rm.session_id = s.id
       WHERE s.name IN (${placeholders})
         AND s.role = 'member'
       ORDER BY s.name ASC
@@ -1763,19 +1768,19 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
   // in-memory clients Map (no DB-level tri-state).
   const activeIds = opts.getActiveSessionIds()
   const activeInfo = opts.getActiveSessionInfo()
-  // INNER JOIN on room_members: a session that hasn't joined any room is not
-  // visible. The startup invariant + per-register backfill (joinDefaultRoom)
-  // guarantee every active session has a row, so this match is total in
-  // practice. Sessions appear once per room they belong to — DISTINCT collapses
-  // multi-room sessions to one row (future-proofs sub-room work without
-  // changing today's output shape).
+  // Sessions are read directly. This used to INNER JOIN room_members, which
+  // filtered the roster to sessions holding a membership row — and since every
+  // session was auto-joined at register, the filter matched everything and was
+  // a no-op that had become load-bearing by accident. Deleting the auto-join
+  // without this would have blinded `tribe members`: new sessions would have no
+  // membership row and the join would drop them. The DISTINCT went with it; it
+  // existed only to collapse a session appearing once per room.
   const rows = ctx.db
     .prepare(`
-      SELECT DISTINCT s.id, s.name, s.role, s.domains, s.pid, s.cwd,
+      SELECT s.id, s.name, s.role, s.domains, s.pid, s.cwd,
         s.claude_session_id, s.claude_session_name, s.started_at, s.updated_at,
         s.account, s.provider, s.launch_id, s.launch_parent_pid, s.delivery
       FROM sessions s
-      INNER JOIN room_members rm ON rm.session_id = s.id
       ORDER BY s.started_at
     `)
     .all() as Array<{

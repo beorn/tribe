@@ -414,7 +414,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
     expect(db.prepare("SELECT id FROM sessions WHERE id = 'racing'").get()).toEqual({ id: "racing" })
   })
 
-  it("rolls room membership back when session deletion aborts", () => {
+  it("rolls the whole transaction back when session deletion aborts", () => {
     addSession(db, stmts, "rollback", "legacy-rollback")
     db.run(`CREATE TRIGGER fail_stale_transport_delete
       BEFORE DELETE ON sessions WHEN OLD.id = 'rollback'
@@ -426,14 +426,11 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
         isReconnectGraceProtected: () => false,
       }),
     ).toThrow(/blocked session delete/)
+    // The session row surviving IS the rollback proof. This used to assert a
+    // room_members row survived alongside it; rooms were deleted (@cto ruling
+    // 2026-08-13) and the membership row was only ever the observable, never
+    // the subject. The atomicity coverage is unchanged.
     expect(db.prepare("SELECT id FROM sessions WHERE id = 'rollback'").get()).toEqual({ id: "rollback" })
-    expect(
-      (
-        db.prepare("SELECT COUNT(*) AS count FROM room_members WHERE session_id = 'rollback'").get() as {
-          count: number
-        }
-      ).count,
-    ).toBe(1)
   })
 
   it("automatically reaps the incident junk rows after startup reconnect grace and on the existing cadence", async () => {
