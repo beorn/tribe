@@ -547,12 +547,28 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
       const disconnected = makeContext(db, stmts, "@agent/disconnected")
       registerSession(live, PROJECT_ID, () => false, null, process.pid, "pull", "/repo", null, "codex")
       registerSession(disconnected, PROJECT_ID, () => false, null, 999_999_999, "pull", "/repo", null, "codex")
+      // One shared timestamp for all three balls: the assertion below (line
+      // ~599) requires the flat `all.pending` list — sorted by status, then
+      // opened_at, then request_id — to equal the owner-grouped
+      // `all.owners.flatMap(...)` list — sorted by owner name, then within
+      // each owner by the same tiebreak. With one ball per owner and matching
+      // status, that equality only holds when opened_at ties across all
+      // three, which only the request_id tiebreak then resolves identically
+      // in both orderings (both alphabetize to disconnected, live, unknown).
+      // A fresh `Date.now()` per loop iteration made that tie a race: under
+      // scheduler contention (e.g. other test files' real-daemon spawns
+      // competing for CPU in a full-suite run) the three calls could land on
+      // different milliseconds, breaking the tie and reordering the flat list
+      // by real open time while the grouped list stayed alphabetical —
+      // reproduced both by forcing a millisecond gap and, unforced, in an
+      // isolated daemon-package run (@km/tribe/ci-red-pending-ball-gc).
+      const openedAt = Date.now() - 1_000
       for (const [id, recipient] of [
         ["req-live", "@agent/live"],
         ["req-disconnected", "@agent/disconnected"],
         ["req-unknown", "@agent/unknown"],
       ] as const) {
-        openBall(stmts, { id, recipient, openedAt: Date.now() - 1_000 })
+        openBall(stmts, { id, recipient, openedAt })
       }
       const active: ActiveSessionInfo[] = [
         {
