@@ -772,11 +772,13 @@ describe("Claude plugin daemon-restart self-heal", () => {
     writeJson(adapter, initializePayload(10))
     await waitFor(() => stdout.some((line) => line.id === 10), "direct-adapter initialize")
     writeJson(adapter, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    let initialMember: Member | undefined
     await waitFor(async () => {
       const roster = parseToolJson(await firstDaemon.client.call("tribe.members", { all: true })).sessions ?? []
-      return roster.some(
+      initialMember = roster.find(
         (session) => session.name === PERSONA && session.transport_state === "connected" && session.transport_pids?.[0],
       )
+      return initialMember !== undefined
     }, "direct-adapter initial membership")
 
     await firstDaemon.client.call("tribe.restart", { reason: "22322 direct adapter restart acceptance" })

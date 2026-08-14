@@ -25,7 +25,7 @@ const REEXEC_JOINED_OFFSET = 1
 const GENERATION_REEXEC_OFFSET = 2
 const LAST_REEXEC_EXIT_CODE = REEXEC_EXIT_CODE + GENERATION_REEXEC_OFFSET + REEXEC_JOINED_OFFSET
 const REMEDY =
-  "tribe plugin adapter supervision exhausted its bounded restart budget; run /mcp reconnect after repairing the reported cause or reinstall the Tribe plugin."
+  "tribe plugin adapter refused a repeated deterministic replacement; run /mcp reconnect after repairing the reported cause or reinstall the Tribe plugin."
 const PROVIDER_PARENT_REMEDY =
   "tribe plugin wrapper requires valid provider-parent provenance from a complete live managed launch; restart the host session or reinstall the Tribe plugin."
 const LEGACY_PARENT_WARNING =
@@ -152,16 +152,24 @@ async function superviseAdapter(): Promise<void> {
       const reexecOffset = result.code - REEXEC_EXIT_CODE
       resumeJoined = reexecOffset % GENERATION_REEXEC_OFFSET === REEXEC_JOINED_OFFSET
       const generationChange = reexecOffset >= GENERATION_REEXEC_OFFSET
-      maxConsecutiveReexecs = generationChange ? undefined : 1
+      maxConsecutiveReexecs = generationChange ? Number.POSITIVE_INFINITY : 1
     } else {
       // The wrapper is the provider's stable stdio endpoint. An unexpected
       // adapter crash must not tear that endpoint down and require a human
       // /mcp reconnect. Preserve the adapter's last authoritative join state
-      // and apply the same bounded backoff used for daemon-generation
-      // replacements.
+      // and apply the same capped, jittered backoff used for daemon-generation
+      // replacements. The retry count is deliberately unbounded: this wrapper
+      // is the provider's only MCP endpoint, so exhausting it converts a child
+      // fault into a permanent `Transport closed` for the live host session.
       resumeJoined = reportedJoined
+      maxConsecutiveReexecs = Number.POSITIVE_INFINITY
     }
-    const decision = evaluateAdapterRestart(consecutiveReexecs, Date.now() - startedAt, maxConsecutiveReexecs)
+    const decision = evaluateAdapterRestart(
+      consecutiveReexecs,
+      Date.now() - startedAt,
+      maxConsecutiveReexecs,
+      Math.random(),
+    )
     consecutiveReexecs = decision.consecutiveReexecs
     if (!decision.retry) {
       const cause = result.error?.message ?? `exit=${String(result.code)} signal=${String(result.signal)}`
