@@ -680,6 +680,12 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       ...(fields.active === undefined ? {} : { active: fields.active as boolean }),
     }
   }
+  if (incident !== undefined && a.expires_in_ms !== undefined) {
+    return jsonResult({
+      error:
+        "tribe.send: `expires_in_ms` cannot be combined with `incident`; an incident is a standing condition cleared only by its emitter, not a reply deadline.",
+    })
+  }
   const sender = ctx.getName()
   const hasImplicitOwner = Array.isArray(recipients)
     ? recipients.some((recipient) => recipient !== sender)
