@@ -254,6 +254,12 @@ export function openDatabase(path: string): Database {
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_seq ON messages_archive(seq)")
   db.run("CREATE INDEX IF NOT EXISTS idx_pending_recipient ON pending_request(recipient)")
   db.run("CREATE INDEX IF NOT EXISTS idx_pending_sender ON pending_request(sender)")
+  // Journal retention's ball-tracker exclusion (retention.ts): before hard-
+  // deleting a messages_archive row, the sweep checks whether any open
+  // pending_request still points at it via message_id. Without a
+  // message_id-leading index that NOT EXISTS probe is a full table scan of
+  // pending_request per candidate row, once per sweep tick.
+  db.run("CREATE INDEX IF NOT EXISTS idx_pending_message_id ON pending_request(message_id)")
   // The two indexes the attention projection needs. Every statement built on
   // `unretiredAttentionPredicateSql` reads the journal twice over — once to
   // find a seat's candidate messages, once per candidate to ask whether a
@@ -1380,6 +1386,73 @@ export function createStatements(db: Database) {
     gcStalePendingForRecipient: db.prepare(
       "DELETE FROM pending_request WHERE recipient = $recipient AND opened_at < $cutoff",
     ),
+
+    // -------------------------------------------------------------------
+    // Journal retention (retention.ts) — additive statements only. The
+    // dynamic-length INSERT/DELETE ... WHERE id IN (...) batch operations
+    // are built at call time in retention.ts (ids per batch vary), mirroring
+    // reapStaleTransportRows's placeholder pattern above; only the
+    // fixed-shape reads live here.
+    // -------------------------------------------------------------------
+
+    /** Archive-move batch candidates: live messages old enough to move to
+     *  messages_archive, oldest-first, LIMIT-bounded so one sweep tick never
+     *  pays for a full-table pass. Same source predicate as the existing
+     *  unbounded archiveExpiredMessages (session.ts cleanupOldData, which
+     *  keeps running unchanged); this bounded, independently-configurable
+     *  batch is a defense-in-depth second mover, not a replacement. */
+    selectMessagesToArchiveBatch: db.prepare(`
+		SELECT rowid, id FROM messages WHERE ts < $cutoff ORDER BY rowid ASC LIMIT $limit
+	`),
+
+    /** Live-cursor floor, half 1: the oldest un-acknowledged actionable-
+     *  attention position recorded across every recipient's durable mailbox
+     *  cursor. A messages_archive row at or below this seq has been
+     *  acknowledged by every recipient who has ever acknowledged anything —
+     *  see unretiredAttentionPredicateSql's mailbox_cursors comparisons,
+     *  which this mirrors. NULL (no cursor rows at all, e.g. a fresh DB)
+     *  contributes no constraint; retention.ts treats that as "unbounded". */
+    selectMailboxCursorFloor: db.prepare("SELECT MIN(last_actionable_seq) AS floor FROM mailbox_cursors"),
+
+    /** Live-cursor floor, half 2: the oldest ambient inbox-pull position
+     *  recorded across every session row. mailbox_cursors alone only guards
+     *  direct actionable messages (see health-cadence.ts's
+     *  actionableLagQuery, scoped to kind='direct'); the ambient lag query
+     *  there also counts broadcast rows (recipient = '*') against each
+     *  session's own last_inbox_pull_seq, so retention takes the floor
+     *  across both cursor families rather than mailbox_cursors alone. */
+    selectSessionInboxCursorFloor: db.prepare("SELECT MIN(last_inbox_pull_seq) AS floor FROM sessions"),
+
+    /** Archive-delete batch candidates: archived rows old enough under the
+     *  (longer, independently configurable) delete window, at or below the
+     *  live-cursor floor, and not referenced by any open ball — a ball's
+     *  message_id must stay resolvable via the messages/messages_archive
+     *  LEFT JOIN pattern every pending* query already uses (@km/tribe/22844,
+     *  ae49897). Oldest-first, LIMIT-bounded. */
+    selectArchiveDeleteBatch: db.prepare(`
+		SELECT a.id, a.seq
+		FROM messages_archive a
+		WHERE a.ts < $cutoff
+			AND a.seq <= $cursor_floor
+			AND NOT EXISTS (SELECT 1 FROM pending_request p WHERE p.message_id = a.id)
+		ORDER BY a.seq ASC
+		LIMIT $limit
+	`),
+
+    /** Diagnostic companion to selectArchiveDeleteBatch: same age predicate,
+     *  reports how many rows the two exclusion rules are holding back so a
+     *  disabled-by-exclusion or otherwise ineffective sweep is debuggable
+     *  from its logged counts rather than silently doing nothing (NO SILENT
+     *  ERRORS). Bounded to the ts<cutoff slice via idx_messages_archive_ts —
+     *  not a full-table scan. */
+    selectArchiveDeleteDiagnostics: db.prepare(`
+		SELECT
+			COUNT(*) AS eligible_by_age,
+			SUM(CASE WHEN a.seq > $cursor_floor THEN 1 ELSE 0 END) AS excluded_by_cursor,
+			SUM(CASE WHEN EXISTS (SELECT 1 FROM pending_request p WHERE p.message_id = a.id) THEN 1 ELSE 0 END) AS excluded_by_pending
+		FROM messages_archive a
+		WHERE a.ts < $cutoff
+	`),
 
     allSessions: db.prepare(
       "SELECT id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, launch_id, launch_parent_pid, started_at, updated_at, filter_mode, filter_until, filter_mute, last_inbox_pull_seq, delivery FROM sessions",

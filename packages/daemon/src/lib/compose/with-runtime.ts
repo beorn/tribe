@@ -30,6 +30,7 @@
 import { createLogger } from "loggily"
 import { sendMessage } from "../messaging.ts"
 import { cleanupOldData, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
+import { resolveRetentionConfig, runRetentionSweep } from "../retention.ts"
 import { loadPlugins } from "../plugin-loader.ts"
 import type { TribeClientApi, TribePluginApi, TribePluginHandle } from "../plugin-api.ts"
 import type { BaseTribe } from "./base.ts"
@@ -240,15 +241,25 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
     // startup reconnect grace, then share this existing six-hour cadence as
     // the backstop for anything the disconnect-driven collection above missed
     // (a daemon that died before its timer fired, rows from an older build).
+    //
+    // Journal retention (@cto journal-retention) shares this same tick rather
+    // than owning a second timer: it is independently LIMIT-bounded and
+    // idempotent per call, so riding the existing cadence is strictly less
+    // moving-parts than a parallel interval. See retention.ts for the full
+    // archive-then-prune mechanism, its config surface (env-var only, no
+    // TribeConfig changes), and why the delete half ships default-off.
+    const retentionConfig = resolveRetentionConfig()
     const cleanupInterval = setInterval(() => {
       cleanupOldData(t.daemonCtx)
       reapStaleTransports()
+      runRetentionSweep(t.db, t.stmts, retentionConfig)
     }, cleanupIntervalMs) as unknown as {
       unref?: () => void
     }
     cleanupInterval.unref?.()
     t.scope.defer(() => clearInterval(cleanupInterval as unknown as ReturnType<typeof setInterval>))
     cleanupOldData(t.daemonCtx)
+    runRetentionSweep(t.db, t.stmts, retentionConfig)
     const startupReapDelayMs = t.registry.startupReconnectGraceRemainingMs(Date.now())
     const startupReapTimer = setTimeout(reapStaleTransports, startupReapDelayMs) as unknown as {
       unref?: () => void
