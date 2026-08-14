@@ -451,7 +451,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
     secondSuccessor.client.close()
   }, 45_000)
 
-  it("recovers adapter crashes within a bounded budget and reports exhaustion as membership degradation", async () => {
+  it("keeps the stable MCP endpoint alive through repeated adapter crashes", async () => {
     const dbPath = join(tmpDir, "tribe-adapter-crash.db")
     const daemonLog = join(tmpDir, "daemon-adapter-crash.log")
     const adapterLog = join(tmpDir, "adapter-crash.log")
@@ -530,7 +530,6 @@ describe("Claude plugin daemon-restart self-heal", () => {
     for (let crash = 2; crash <= 6; crash += 1) {
       process.kill(transportPid, "SIGKILL")
       await waitFor(() => !pidExists(transportPid), `crashed adapter ${crash} exit`)
-      if (crash === 6) break
 
       const priorTransportPid = transportPid
       let recoveredMember: Member | undefined
@@ -548,8 +547,8 @@ describe("Claude plugin daemon-restart self-heal", () => {
           }
           return false
         },
-        `bounded adapter recovery ${crash}`,
-        6_000,
+        `persistent adapter recovery ${crash}`,
+        crash === 6 ? 12_000 : 6_000,
       )
       if (crash === 2) {
         expect(recoveredMember).toMatchObject({
@@ -567,20 +566,25 @@ describe("Claude plugin daemon-restart self-heal", () => {
       }
     }
 
-    await waitFor(() => plugin.exitCode !== null, "bounded adapter retry exhaustion", 2_000)
-    expect(plugin.exitCode).toBe(2)
-    expect(pluginStderr).toContain("adapter supervision exhausted its bounded restart budget")
-    await waitFor(async () => {
-      const roster = parseToolJson(await generation.client.call("tribe.members", { all: true }))
-      return roster.membership_discrepancy?.status === "degraded"
-    }, "adapter retry exhaustion membership degradation")
-    const degradedRoster = parseToolJson(await generation.client.call("tribe.members", { all: true }))
-    expect(degradedRoster.membership_discrepancy).toMatchObject({
-      status: "degraded",
-      missing: [{ member_id: initialMember?.member_id, name: PERSONA }],
+    expect(plugin.pid).toBe(wrapperPid)
+    expect(plugin.exitCode).toBeNull()
+    expect(pluginStderr).toContain("adapter exited unexpectedly; retrying")
+    const recoveredRoster = parseToolJson(await generation.client.call("tribe.members", { all: true }))
+    expect(recoveredRoster.sessions?.find((session) => session.name === PERSONA)).toMatchObject({
+      member_id: initialMember?.member_id,
+      delivery: "push",
+      transport_state: "connected",
+      transport_pids: [transportPid],
+    })
+    writeJson(plugin, callToolPayload(23, "members", { all: true }))
+    await waitFor(() => stdout.some((line) => line.id === 23), "post-budget MCP tool call")
+    expect(mcpToolJson(stdout, 23).sessions?.find((session) => session.name === PERSONA)).toMatchObject({
+      member_id: initialMember?.member_id,
+      transport_state: "connected",
+      transport_pids: [transportPid],
     })
     generation.client.close()
-  }, 30_000)
+  }, 45_000)
 
   it.each([
     ["a malformed parent PID", "not-a-pid", "invalid-provider-parent-launch"],
