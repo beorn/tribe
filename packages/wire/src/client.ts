@@ -118,6 +118,24 @@ export function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts):
       socket.on("close", () => {
         rejectPending(new Error("Connection closed"))
       })
+      // task/wire-postreg-close-cto — a server-side socket.destroy() reliably delivers 'end' to
+      // this client (peer EOF), but under contention 'close' can simply
+      // never follow: reproduced directly on task/wire-postreg-close-cto —
+      // an instrumented run showed the accepted socket close on the
+      // daemon's side in under 10ms every time, while the client's raw
+      // socket fired 'connect' then 'end' and NOTHING else for the rest of
+      // a 40s window. Node's documented allowHalfOpen:false behavior is to
+      // auto-finish the writable side on EOF and tear the handle down,
+      // which should end in 'close' — Bun does not reliably complete that
+      // sequence under load. 'close' is the ONLY event this module (and
+      // createReconnectingClient's reconnect trigger, see setupReconnect
+      // below) reacts to, so a socket stuck half-open here is a socket
+      // that never gets noticed as dead. Forcing our own destroy() on
+      // 'end' makes closure unconditional on Bun's internal bookkeeping:
+      // once the peer says "no more data," the link is over.
+      socket.on("end", () => {
+        if (!socket.destroyed) socket.destroy()
+      })
 
       let timeouts = 0
       const client: DaemonClient = {
@@ -604,8 +622,27 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
   // Persistent notification handlers — replayed onto each new connection
   const notificationHandlers: Array<(method: string, params?: Record<string, unknown>) => void> = []
 
+  // task/wire-postreg-close-cto — setupReconnect used to ONLY attach a 'close' listener, on the
+  // assumption that the socket is still open at the moment it runs. That
+  // assumption breaks for the SAME connection setupReconnect is meant to
+  // watch: connectAndRegister() awaits onConnect(candidate), and a
+  // real-world onConnect commonly makes further round trips after
+  // registration succeeds (e.g. stdio-adapter.ts's post-register
+  // tribe.members call). If the transport dies DURING one of those calls,
+  // connectToDaemon's own close-triggered rejectPending is what unblocks
+  // the pending call (and, transitively, onConnect) — so the 'close' event
+  // this function needs to observe fires and finishes dispatching to its
+  // (already-attached) listeners BEFORE connectAndRegister/onConnect ever
+  // returns, which is the earliest point setupReconnect can run. Attaching
+  // a listener after an event already fired never sees it — EventEmitters
+  // don't replay history — so the reconnect loop silently never started.
+  // Reproduced deterministically on task/wire-postreg-close-cto.
+  //
+  // The fix: treat "the socket is already destroyed by the time we get
+  // here" as equivalent to "close just fired" and run the identical
+  // handler immediately, instead of only ever reacting to a future event.
   const setupReconnect = () => {
-    current.socket.on("close", () => {
+    const handleClose = () => {
       if (closed) return
       onDisconnect?.()
       reconnectAc?.abort()
@@ -641,7 +678,17 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
         if (onReconnectExhausted) onReconnectExhausted(lastError, maxAttempts)
         else log.error?.(`Failed to reconnect after ${maxAttempts} attempts`)
       })()
-    })
+    }
+    // Synchronous check-then-attach, no `await` between them: `destroyed`
+    // flips to true synchronously the instant destroy() runs (Node/Bun both
+    // guarantee this), strictly before 'close' is dispatched, so there is no
+    // gap in which the socket could transition between the check and the
+    // listener registration below.
+    if (current.socket.destroyed) {
+      handleClose()
+      return
+    }
+    current.socket.on("close", handleClose)
   }
   setupReconnect()
 

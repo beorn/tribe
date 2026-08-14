@@ -124,6 +124,36 @@ describe("connectToDaemon", () => {
     }
   })
 
+  it("treats a peer half-close ('end' with no following 'close') as connection death", async () => {
+    // task/wire-postreg-close-cto — reproduced under CPU contention
+    // (4-core taskset + oversubscribed load): a server-side socket.destroy()
+    // reliably fires the SERVER's own 'close' in under 10ms every time, but
+    // the CLIENT's raw socket was observed firing 'connect' then 'end' and
+    // NOTHING else for a full 40s window — no 'close', no 'error'. Node's
+    // documented allowHalfOpen:false contract is to auto-finish the
+    // writable side on peer EOF and tear the handle down, which should end
+    // in 'close'; Bun does not reliably complete that sequence under load.
+    // 'close' was the ONLY event this module reacted to, so a socket stuck
+    // half-open here was a socket that never got noticed as dead — every
+    // pending call, and transitively createReconnectingClient's
+    // close-driven reconnect trigger, waited on an event that might never
+    // come. Synthesizes exactly that gap (emit 'end', never 'close')
+    // instead of depending on the runtime's flaky timing to reproduce it.
+    const sock = join(tmpDir, "d.sock")
+    const { server } = await spawnFakeDaemon(sock)
+    try {
+      const client = await connectToDaemon(sock)
+      client.socket.emit("end")
+      const deadline = Date.now() + 1_000
+      while (!client.socket.destroyed && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 20))
+      }
+      expect(client.socket.destroyed).toBe(true)
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  }, 3_000)
+
   it("lets an explicit long-poll deadline outlive the generic call timeout", async () => {
     const sock = join(tmpDir, "d.sock")
     const { server } = await spawnFakeDaemon(sock)
@@ -597,6 +627,77 @@ describe("createReconnectingClient transport recovery", () => {
       expect(result).toEqual({ echoed: { hi: true } })
       client.close()
     } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  }, 10_000)
+
+  it("reconnects when the transport dies while onConnect is still doing later work after registration", async () => {
+    // task/wire-postreg-close-cto — a RESIDUAL variant of 21089, one
+    // step later in the same handshake. setupReconnect() only attaches its
+    // 'close' listener AFTER onConnect() fully resolves. A real onConnect
+    // commonly keeps working past registration itself — stdio-adapter.ts's
+    // post-register tribe.members round trip is the production example —
+    // and if the transport dies DURING that later work, the socket's
+    // 'close' event fires and finishes dispatching to whatever IS
+    // listening (connectToDaemon's own rejectPending) before setupReconnect
+    // ever runs. EventEmitters do not replay history: a listener attached
+    // after an event already fired never sees it, so the reconnect loop
+    // silently never started even though the transport had been fully dead
+    // the whole time. Evidence captured on tribe run 31784264058: adapter
+    // registered, "Startup banner failed" (a swallowed post-register
+    // tribe.members timeout) fired exactly 10s later, and no reconnect
+    // followed for the rest of the run.
+    const sock = join(tmpDir, "post-register-death.sock")
+    let registrations = 0
+    const clients: Socket[] = []
+    const server = createServer((socket) => {
+      clients.push(socket)
+      const parse = createLineParser((msg) => {
+        if (!isRequest(msg)) return
+        if (msg.method === "register") {
+          registrations += 1
+          socket.write(makeResponse(msg.id, { ok: true }))
+          return
+        }
+        socket.write(makeResponse(msg.id, { ok: true }))
+      })
+      socket.on("data", parse)
+      socket.on("error", () => {})
+    })
+    await new Promise<void>((resolve) => server.listen(sock, resolve))
+
+    try {
+      const client = await createReconnectingClient({
+        socketPath: sock,
+        noSpawn: true,
+        maxAttempts: 5,
+        async onConnect(c) {
+          await c.call("register", {})
+          if (clients.length === 1) {
+            // Kill the transport WHILE onConnect is still running — BEFORE
+            // createReconnectingClient's outer promise (and therefore
+            // setupReconnect()) can possibly resolve/run. createReconnectingClient
+            // does not resolve until the first onConnect call returns, so
+            // destroying AFTER that await (as opposed to from inside
+            // onConnect, here) would attach setupReconnect's listener
+            // before the kill and never exercise the race at all — only on
+            // the first connection, so the reconnect's own onConnect
+            // completes normally instead of looping.
+            clients[0]!.destroy()
+          }
+          // Mirrors stdio-adapter.ts doing further async work after
+          // registration succeeds (its post-register tribe.members round
+          // trip). The delay gives the close event time to fully fire and
+          // finish dispatching before this resolves and hands control back
+          // to createReconnectingClient — which is exactly what starves
+          // setupReconnect() of a listener to attach in time.
+          await new Promise((resolve) => setTimeout(resolve, 150))
+        },
+      })
+      await vi.waitFor(() => expect(registrations).toBe(2), { timeout: 5_000 })
+      client.close()
+    } finally {
+      for (const socket of clients) socket.destroy()
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }
   }, 10_000)
