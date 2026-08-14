@@ -310,6 +310,8 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     throw new Error(`timed out connecting to expected daemon pid: ${String(lastError)}`)
   }
 
+  const daemonStderr = new WeakMap<ChildProcessWithoutNullStreams, string[]>()
+
   function spawnDaemon(
     socketPath: string,
     dbPath: string,
@@ -330,8 +332,58 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         opts.operatorCapabilityFd === undefined
           ? ["pipe", "pipe", "pipe"]
           : ["pipe", "pipe", "pipe", opts.operatorCapabilityFd],
+    }) as ChildProcessWithoutNullStreams
+    // Boot failures were invisible: stderr is piped but was never read, and
+    // DEBUG_LOG only exists once the logger is up — a daemon that dies while
+    // bun is still loading its module graph leaves NO evidence anywhere.
+    // Collect stderr so waitForDaemonSocket can tell "crashed at boot" from
+    // "still booting" instead of reporting an evidence-free timeout.
+    const stderrChunks: string[] = []
+    proc.stderr.on("data", (chunk: Buffer | string) => {
+      stderrChunks.push(chunk.toString())
     })
-    return proc as ChildProcessWithoutNullStreams
+    daemonStderr.set(proc, stderrChunks)
+    return proc
+  }
+
+  /**
+   * CI flake, fourth rotating member (run 31771243082 attempt 1): the
+   * parked-name journey died at `timed out waiting for daemon socket` — the
+   * bare `existsSync(socketPath)` wait raced the daemon's cold start, before
+   * any adapter existed, so this is NOT the transport_pids convergence class
+   * the other members shared. The socket file only appears after bun loads
+   * the daemon's whole module graph and the config→database→recall pipeline
+   * initializes; under full-suite contention on a 4-vCPU runner that cold
+   * start can outlive the shared 30s waitForCondition budget (every
+   * neighboring test in the same run booted in 1-3s — this is tail latency,
+   * not steady state). A daemon that crashed at boot produces byte-identical
+   * evidence (no socket, ever), so the treatment is budget + instruments in
+   * one: a wider boot-only ceiling (the poll returns the instant the socket
+   * exists, so it is free when healthy), fail-fast the moment the daemon
+   * process exits instead of burning the remaining budget, and an error
+   * carrying exit code + stderr + DEBUG_LOG tail so slow-boot vs crashed-boot
+   * is classifiable from the failure itself next time.
+   */
+  async function waitForDaemonSocket(
+    proc: ChildProcessWithoutNullStreams,
+    socketPath: string,
+    label = "daemon socket",
+  ): Promise<void> {
+    const deadline = Date.now() + 60_000
+    while (Date.now() < deadline && proc.exitCode === null) {
+      if (existsSync(socketPath)) return
+      await new Promise((resolveTick) => setTimeout(resolveTick, 25))
+    }
+    if (existsSync(socketPath)) return
+    const logPath = join(tmpDir, "daemon.log")
+    const logTail = existsSync(logPath)
+      ? readFileSync(logPath, "utf8").split("\n").slice(-30).join("\n")
+      : "(no daemon log)"
+    const stderrTail = (daemonStderr.get(proc)?.join("") ?? "").slice(-4_000) || "(empty)"
+    throw new Error(
+      `${proc.exitCode === null ? `timed out waiting for ${label}` : `daemon exited before creating ${label}`}; ` +
+        `exit=${String(proc.exitCode)}\n--- daemon stderr ---\n${stderrTail}\n--- daemon log tail ---\n${logTail}`,
+    )
   }
 
   async function spawnAdapterAndJoin(
@@ -539,7 +591,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const socketPath = join(tmpDir, "notification-diet.sock")
     const dbPath = join(tmpDir, "notification-diet.db")
     daemonProc = spawnDaemon(socketPath, dbPath)
-    await waitForCondition(() => existsSync(socketPath), "daemon socket")
+    await waitForDaemonSocket(daemonProc, socketPath)
 
     const fleet = await spawnLaunchAdapter(socketPath, "notification-diet-fleet.log", "notification-diet-launch", {
       name: "@fleet",
@@ -603,7 +655,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     } finally {
       sender.close()
     }
-  }, 30_000)
+  }, 90_000)
 
   it("preserves daemon-owned operator authority through standalone hot reload", async () => {
     const socketPath = join(tmpDir, "operator-lifecycle.sock")
@@ -614,7 +666,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const capabilityFd = openSync(capabilityPath, "r")
     daemonProc = spawnDaemon(socketPath, dbPath, { operatorCapabilityFd: capabilityFd })
     closeSync(capabilityFd)
-    await waitForCondition(() => existsSync(socketPath), "operator lifecycle daemon socket")
+    await waitForDaemonSocket(daemonProc, socketPath, "operator lifecycle daemon socket")
 
     const child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/operator-test"], {
       cwd: tmpDir,
@@ -673,7 +725,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       }),
     ).resolves.toMatchObject({ session: "@chief", drained_count: 0 })
     successor.client.close()
-  }, 60_000)
+  }, 120_000)
 
   it("drains the managed launch mailbox instead of a foreign environment identity when MCP is unavailable", async () => {
     const socketPath = join(tmpDir, "managed-cli-inbox.sock")
@@ -689,7 +741,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const daemonCapabilityFd = openSync(capabilityPath, "r")
     daemonProc = spawnDaemon(socketPath, dbPath, { operatorCapabilityFd: daemonCapabilityFd })
     closeSync(daemonCapabilityFd)
-    await waitForCondition(() => existsSync(socketPath), "daemon socket")
+    await waitForDaemonSocket(daemonProc, socketPath)
 
     // This test process stands in for one long-lived provider parent. The MCP
     // adapter is its direct child, while the recovery CLI intentionally runs
@@ -795,7 +847,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         launch_id: `managed-cli-foreign-launch::${encodeURIComponent(foreignName)}`,
       },
     ])
-  }, 60_000)
+  }, 120_000)
 
   it("successor takeover closes the base role ball through daemon-derived launch ownership", async () => {
     const socketPath = join(tmpDir, "successor-reply.sock")
@@ -804,7 +856,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const requestId = "successor-reply-request"
 
     daemonProc = spawnDaemon(socketPath, dbPath)
-    await waitForCondition(() => existsSync(socketPath), "daemon socket")
+    await waitForDaemonSocket(daemonProc, socketPath)
 
     const successor = await spawnLaunchAdapter(socketPath, "successor-reply.log", launchId, {
       name: "@chief/next",
@@ -883,7 +935,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     db.close()
     expect(remaining.count).toBe(0)
     expect(attributed.sender).toBe("@chief")
-  }, 60_000)
+  }, 120_000)
 
   it("routes attributed CLI replies from two personas sharing one provider launch", async () => {
     const socketPath = join(tmpDir, "shared-launch-personas.sock")
@@ -892,16 +944,29 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const personas = ["@chief", "@cto"] as const
 
     daemonProc = spawnDaemon(socketPath, dbPath)
-    await waitForCondition(() => existsSync(socketPath), "shared-persona daemon socket")
+    await waitForDaemonSocket(daemonProc, socketPath, "shared-persona daemon socket")
 
     const seats = await Promise.all(
       personas.map((name) => spawnLaunchAdapter(socketPath, `shared-persona-${name.slice(1)}.log`, launchId, { name })),
     )
     const firstSeat = seats.at(0)
     if (firstSeat === undefined) throw new Error("shared-persona journey started no seats")
-    const members = (await callLaunchToolWhenRegistered(firstSeat, 80, "members", {})) as {
+    // Same first-round-trip class as the transport_pids races treated in the
+    // fans-three journey below: the two persona adapters spawned concurrently,
+    // and callLaunchToolWhenRegistered only proves the QUERIED seat's own
+    // registration — @cto's can still be in flight when @chief's first members
+    // call answers. Poll until the shared member record lists every persona
+    // before asserting on its contents.
+    const members = await callLaunchToolUntil<{
       sessions?: Array<{ name?: string; launch_id?: string; launch_parent_pid?: number }>
-    }
+    }>(
+      firstSeat,
+      80,
+      "members",
+      {},
+      (result) => personas.every((persona) => result.sessions?.some((session) => session.name === persona)),
+      "shared-launch persona registration convergence",
+    )
     for (const persona of personas) {
       expect(members.sessions?.find((session) => session.name === persona)).toMatchObject({
         launch_id: `${launchId}::${encodeURIComponent(persona)}`,
@@ -964,7 +1029,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     } finally {
       requester.close()
     }
-  }, 60_000)
+  }, 120_000)
 
   it("claiming a parked name forwards actionable and response attention without ambient replay", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
@@ -972,7 +1037,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     seedAttentionFixture(dbPath)
 
     daemonProc = spawnDaemon(socketPath, dbPath)
-    await waitForCondition(() => existsSync(socketPath), "daemon socket")
+    await waitForDaemonSocket(daemonProc, socketPath)
 
     // --- First adapter: the claim must recover both durable attention rows.
     const first = await spawnAdapterAndJoin(socketPath, "adapter-1.log")
@@ -997,13 +1062,13 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const second = await spawnAdapterAndJoin(socketPath, "adapter-2.log")
     await new Promise((resolveTick) => setTimeout(resolveTick, 700))
     expect(channelNotifications(second.stdout)).toHaveLength(0)
-  }, 60_000)
+  }, 120_000)
 
   it("keeps pull obligations readable while a managed persona transport is stopped", async () => {
     const socketPath = join(tmpDir, "stopped-persona.sock")
     const dbPath = join(tmpDir, "stopped-persona.db")
     daemonProc = spawnDaemon(socketPath, dbPath)
-    await waitForCondition(() => existsSync(socketPath), "daemon socket")
+    await waitForDaemonSocket(daemonProc, socketPath)
 
     const launchId = "stopped-persona-launch"
     const initial = await spawnLaunchAdapter(socketPath, "stopped-persona-initial.log", launchId, { name: NAME })
@@ -1051,13 +1116,13 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(fetched.attention?.pending_balls).toEqual([
       expect.objectContaining({ request_id: sent.id, message_id: sent.id, sender: "@chief" }),
     ])
-  }, 60_000)
+  }, 120_000)
 
   it("fans three native adapters from one provider launch into one live member", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const dbPath = join(tmpDir, "tribe.db")
     daemonProc = spawnDaemon(socketPath, dbPath)
-    await waitForCondition(() => existsSync(socketPath), "daemon socket")
+    await waitForDaemonSocket(daemonProc, socketPath)
 
     const launchId = "provider-launch-a"
     const launchAdapters = await Promise.all([
@@ -1092,7 +1157,22 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         () => adapter.stdout.some((line) => line.id === id),
         `adapter ${index + 1} members response`,
       )
-      const result = toolResult(adapter.stdout, id) as { sessions?: Array<{ name?: string; alive?: boolean }> }
+      // The concurrent id=2..4 calls above deliberately fire before any
+      // registration is proven (they double as the takeover provocation), so a
+      // first response can legitimately be the adapter's "awaiting daemon
+      // registration" gate error instead of a members payload — the same
+      // first-round-trip class as the transport_pids polls below. Re-ask
+      // through the registration-aware helper instead of failing on gate text.
+      let result: { sessions?: Array<{ name?: string; alive?: boolean }> }
+      try {
+        result = toolResult(adapter.stdout, id) as typeof result
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        const registrationPending =
+          message.includes("awaiting daemon registration") || message.includes("daemon connection closed; reconnecting")
+        if (!registrationPending) throw error
+        result = (await callLaunchToolWhenRegistered(adapter, 200 + index, "members", {})) as typeof result
+      }
       expect(result.sessions?.filter((session) => session.name === NAME && session.alive)).toHaveLength(1)
     }
 
@@ -1243,7 +1323,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     await once(daemonProc, "exit")
     await waitForCondition(() => !existsSync(socketPath), "old daemon socket removal")
     daemonProc = spawnDaemon(socketPath, dbPath)
-    await waitForCondition(() => existsSync(socketPath), "restarted daemon socket")
+    await waitForDaemonSocket(daemonProc, socketPath, "restarted daemon socket")
     // Each adapter reconnects and re-registers with the fresh daemon
     // independently; Promise.all resolves each leg on its OWN transport_pids
     // convergence, not merely on that adapter's own call succeeding, so a
@@ -1333,13 +1413,13 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(finalDaemonLog.match(/takeover: superseding live holder/g)).toHaveLength(1)
     // Heaviest journey: it drives a daemon restart + three transport re-execs +
     // respawns + a cross-launch takeover, each gated on real subprocess timing.
-  }, 120_000)
+  }, 180_000)
 
   it("fans three plugin-supervised MCP transports from one native provider without closing stdio", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const dbPath = join(tmpDir, "tribe.db")
     daemonProc = spawnDaemon(socketPath, dbPath)
-    await waitForCondition(() => existsSync(socketPath), "daemon socket")
+    await waitForDaemonSocket(daemonProc, socketPath)
 
     const launchId = "plugin-supervised-provider-launch"
     const first = await spawnLaunchAdapter(socketPath, "plugin-adapter-1.log", launchId, {
@@ -1353,23 +1433,34 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const third = await spawnLaunchAdapter(socketPath, "plugin-adapter-3.log", launchId, {
       throughPluginSupervisor: true,
     })
-    const members = (await callLaunchToolWhenRegistered(third, 4, "members", {})) as {
+    // This is the production topology that direct-adapter coverage misses:
+    // three host-spawned plugin wrappers must stay callable as transports of
+    // one launch, even though each wrapper has its own ephemeral PID. The old
+    // wait here closed over ONE parsed members snapshot, so its transport_pids
+    // predicate could never change value — a snapshot short of three pids
+    // meant a guaranteed hang into a bare outer timeout with no diagnostics.
+    // Poll the live call instead (the transport_pids convergence treatment),
+    // keeping the closed-predecessor disjunction so a dying wrapper still
+    // exits the wait into the loud exit-code assertion below.
+    const members = await callLaunchToolUntil<{
       sessions?: Array<{
         name?: string
         launch_id?: string
         launch_parent_pid?: number
         transport_pids?: number[]
       }>
-    }
-    const member = members.sessions?.find((session) => session.name === NAME)
-
-    // This is the production topology that direct-adapter coverage misses:
-    // three host-spawned plugin wrappers must stay callable as transports of
-    // one launch, even though each wrapper has its own ephemeral PID.
-    await waitForCondition(
-      () => first.child.exitCode !== null || second.child.exitCode !== null || member?.transport_pids?.length === 3,
+    }>(
+      third,
+      4,
+      "members",
+      {},
+      (result) =>
+        first.child.exitCode !== null ||
+        second.child.exitCode !== null ||
+        result.sessions?.find((session) => session.name === NAME)?.transport_pids?.length === 3,
       "three supervised transports or a closed predecessor",
     )
+    const member = members.sessions?.find((session) => session.name === NAME)
     const logs = [first, second, third]
       .map(({ logPath }) => (existsSync(logPath) ? readFileSync(logPath, "utf8") : ""))
       .join("\n--- plugin adapter ---\n")
@@ -1384,13 +1475,13 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     )
 
     await Promise.all([callLaunchTool(first, 5, "members", {}), callLaunchTool(second, 6, "members", {})])
-  }, 30_000)
+  }, 90_000)
 
   it("does not adopt a dead launch when a new provider inherits its stale launch id", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const dbPath = join(tmpDir, "tribe.db")
     daemonProc = spawnDaemon(socketPath, dbPath)
-    await waitForCondition(() => existsSync(socketPath), "daemon socket")
+    await waitForDaemonSocket(daemonProc, socketPath)
 
     const staleLaunchId = "stale-dead-provider-launch"
     const first = await spawnLaunchAdapter(socketPath, "stale-launch-1.log", staleLaunchId)
@@ -1414,5 +1505,5 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     })
     expect(inheritedMember?.member_id).toEqual(expect.any(String))
     expect(inheritedMember?.member_id).not.toBe(firstMemberId)
-  }, 60_000)
+  }, 120_000)
 })
