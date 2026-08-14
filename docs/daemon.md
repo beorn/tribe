@@ -63,10 +63,15 @@ exactly one matcher: `{"name":"...","to":"..."}` for one exact persona, or
 `{"prefix":"...","to":"..."}` for an explicitly declared family. When an
 untracked direct recipient has no answer-capable transport, the first matching
 row persists the original mail and routes an attention-bearing `dead-letter`
-copy to `to`. A tracked request is admitted only when the original recipient or
-its declared fallback has a connected, PID-live transport in the same snapshot;
-otherwise Tribe journals a correlated delivery-failure fact, creates no direct
-message or pending row, and returns a loud refusal. Concrete rows are
+copy to `to`. For ordinary tracked delivery, a declared fallback retains
+priority; without one, a disconnected recipient remains admissible when Tribe
+can recognize its durable mailbox from complete launch provenance or journal
+activity inside the existing four-hour activity horizon. Explicit
+`delivery: "pull"` always targets that named recognized mailbox and never
+refuses because its transport or configured fallback is disconnected. A name
+with neither connected transport, durable launch provenance, nor recent
+journal activity still journals a correlated delivery-failure fact, creates no
+direct message or pending row, and returns a loud refusal. Concrete rows are
 composition policy; Tribe never infers a parent from a name:
 
 ```bash

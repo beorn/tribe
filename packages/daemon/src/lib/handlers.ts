@@ -51,6 +51,7 @@ import { parseDbGrowthWarningBytes, projectHealthCadence } from "./health-cadenc
 import { registeredTrustTierForTopic, senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
 import type { LifecycleStore, LifecycleSnapshotRecord } from "./lifecycle-store.ts"
 import {
+  DEFAULT_MAX_SILENCE_SEC,
   projectSessionLiveness,
   projectSessionTransportEvidence,
   projectSessionTransportState,
@@ -316,13 +317,34 @@ type OwnerTransportObservation = {
 }
 
 function ownerTransportObservationProjector(ctx: TribeContext, opts: HandlerOpts, observedAt: number) {
-  const knownNames = new Set(
-    (
-      ctx.db.prepare("SELECT DISTINCT name FROM sessions").all() as Array<{
-        name: string
-      }>
-    ).map((row) => row.name),
+  const sessionRows = ctx.db.prepare("SELECT name, launch_id, launch_parent_pid FROM sessions").all() as Array<{
+    name: string
+    launch_id: string | null
+    launch_parent_pid: number | null
+  }>
+  const knownNames = new Set(sessionRows.map((row) => row.name))
+  const mailboxRecipientNames = new Set(
+    sessionRows
+      .filter(
+        (row) =>
+          classifySessionRegistrationLifetime({
+            launchId: row.launch_id,
+            launchParentPid: row.launch_parent_pid,
+          }) === "durable-launch",
+      )
+      .map((row) => row.name),
   )
+  const recentSince = observedAt - DEFAULT_MAX_SILENCE_SEC * 1_000
+  const recentActivity = ctx.db
+    .prepare(
+      `
+        SELECT sender AS name FROM messages WHERE ts >= $since
+        UNION
+        SELECT sender AS name FROM messages_archive WHERE ts >= $since
+      `,
+    )
+    .all({ $since: recentSince }) as Array<{ name: string }>
+  for (const row of recentActivity) mailboxRecipientNames.add(row.name)
   const activeByName = new Map<string, ActiveSessionInfo[]>()
   for (const info of opts.getActiveSessionInfo()) {
     const siblings = activeByName.get(info.name) ?? []
@@ -369,6 +391,7 @@ function ownerTransportObservationProjector(ctx: TribeContext, opts: HandlerOpts
 
   return {
     observe,
+    mailboxRecipientNames,
     answerableNames: new Set(
       [...activeByName.keys()].filter((name) => observe(name).owner_answer_capability === "observed"),
     ),
@@ -695,7 +718,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   const observedAt = Date.now()
   const transport = ownerTransportObservationProjector(ctx, opts, observedAt)
   const resolveRecipient = (recipient: string, tracked: boolean): DirectDeliveryResolution =>
-    resolveDirectDelivery(recipient, transport, opts.resolveDelivery, tracked)
+    resolveDirectDelivery(recipient, transport, opts.resolveDelivery, tracked, delivery)
   if (Array.isArray(recipients)) {
     return handleMultiSend({
       ctx,
@@ -913,14 +936,20 @@ function resolveDirectDelivery(
   transport: ReturnType<typeof ownerTransportObservationProjector>,
   resolver: DirectDeliveryResolver | undefined,
   tracked: boolean,
+  explicitDelivery: Delivery | undefined,
 ): DirectDeliveryResolution {
-  const resolution = resolver?.({ recipient, answerableNames: transport.answerableNames }) ?? {
+  const directMailboxResolution = {
     status: "accepted",
     state: transport.answerableNames.has(recipient) ? "online" : "offline",
-  }
+  } as const
+  const resolution =
+    explicitDelivery === "pull"
+      ? directMailboxResolution
+      : (resolver?.({ recipient, answerableNames: transport.answerableNames }) ?? directMailboxResolution)
   if (!tracked || resolution.status !== "accepted") return resolution
   if (resolution.state === "online" && transport.answerableNames.has(recipient)) return resolution
   if (resolution.state === "bounced" && transport.answerableNames.has(resolution.to)) return resolution
+  if (resolution.state === "offline" && transport.mailboxRecipientNames.has(recipient)) return resolution
 
   const original = transport.observe(recipient)
   const snapshot = original.owner_transport_observed_at

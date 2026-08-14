@@ -81,7 +81,11 @@ durably in SQLite and the session drains them explicitly.
 Senders never need to know any of this: `tribe.send({ to, message })` is
 transport-blind, and delivery mode is a per-recipient concern. A sender can
 also force one message to queue for inbox reads with
-`tribe.send({ ..., delivery: "pull" })`.
+`tribe.send({ ..., delivery: "pull" })`. A recognized managed launch or a seat
+with recent journal activity remains addressable between short-lived CLI
+connections; missing transport does not by itself refuse the send. A name with
+no transport, durable launch, or recent activity is still rejected as an
+unknown mailbox rather than opening a stranded tracked request.
 
 ## From a shell (no MCP)
 

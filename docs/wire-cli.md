@@ -256,6 +256,11 @@ or `--ref <value>` replacement. Remove the marker from content; message prose
 never mutates reply/ref state.
 `--request` and `--request true` opt any direct message into ball-tracking with
 the message's unique id (direct request/query/assign auto-track already).
+`--delivery pull` pins the send to the named recognized mailbox: a disconnected
+transport or disconnected configured fallback does not refuse it. Recognition
+comes from a complete managed launch record or journal activity inside the
+existing four-hour activity horizon; a never-seen name still fails loudly and
+opens no ball.
 Another non-empty value overrides the id or opts in a
 `notify`/`response`/`verdict`; the explicit id `true` is reserved and rejected
 by the daemon. `--fanout all` opens one ball per recipient on a multi-target

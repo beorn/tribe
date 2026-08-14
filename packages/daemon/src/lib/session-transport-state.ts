@@ -28,6 +28,9 @@ export type SessionTransportProjection = {
 
 export type SessionAnswerCapability = "observed" | "not-observed"
 
+/** Existing activity horizon used by the member liveness projection. */
+export const DEFAULT_MAX_SILENCE_SEC = 14_400
+
 export type SessionTransportEvidence = SessionTransportProjection & {
   alive: boolean
   transport_alive: boolean
@@ -111,7 +114,7 @@ export function projectSessionLiveness(input: {
   // rather than merely discouraged.
   const transport_alive = input.transportConnected && pid_alive
   const agent_alive = input.agentPidAlive ?? true
-  const maxSilenceSec = input.maxSilenceSec ?? 14400
+  const maxSilenceSec = input.maxSilenceSec ?? DEFAULT_MAX_SILENCE_SEC
   const is_silent = typeof input.lastSeenSec === "number" && input.lastSeenSec > maxSilenceSec
   const alive = transport_alive && pid_alive && agent_alive && !is_silent
 
