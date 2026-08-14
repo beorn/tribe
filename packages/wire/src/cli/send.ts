@@ -412,13 +412,38 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     truncated?: boolean
     original_length?: number
     tracker?: { request_id?: string; closed?: number }
+    delivery?: {
+      state?: string
+      original_target?: string
+      recipient?: string
+      reason?: string
+    }
   }
   if (typeof result.error === "string" && result.error.length > 0) {
     console.error(`tribe-wire send: ${result.error}`)
     process.exit(1)
   }
   if (input.reply && caller) reportCommittedReplyTracker(caller.name, input.reply, result.tracker)
-  console.log(`Sent message to ${input.to}`)
+  if (result.delivery?.state === "bounced") {
+    const { original_target: originalTarget, recipient, reason } = result.delivery
+    if (
+      typeof originalTarget !== "string" ||
+      originalTarget.length === 0 ||
+      typeof recipient !== "string" ||
+      recipient.length === 0 ||
+      typeof reason !== "string" ||
+      reason.length === 0
+    ) {
+      console.error(
+        `tribe-wire send: message DELIVERED, but the daemon returned malformed redirect proof for ${input.to}.`,
+      )
+      console.error("Inspect the recipient mailbox and daemon delivery policy before retrying.")
+      process.exit(3)
+    }
+    console.log(`Sent message to ${recipient} (redirected from ${originalTarget}: ${reason})`)
+  } else {
+    console.log(`Sent message to ${input.to}`)
+  }
   // Derive-not-reject: surface (no-silent) when the daemon derived a one-liner
   // because none was authored, so the sender learns to pass `--summary`.
   if (result.summary_derived) {

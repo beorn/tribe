@@ -1118,6 +1118,75 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     ])
   }, 120_000)
 
+  it("keeps a quiet connection-scoped pull mailbox readable after its transport leaves", async () => {
+    const socketPath = join(tmpDir, "quiet-pull.sock")
+    const dbPath = join(tmpDir, "quiet-pull.db")
+    daemonProc = spawnDaemon(socketPath, dbPath)
+    await waitForDaemonSocket(daemonProc, socketPath)
+
+    const chief = await spawnLaunchAdapter(socketPath, "quiet-pull-chief.log", "quiet-pull-chief", {
+      name: "@chief",
+    })
+    await callLaunchToolWhenRegistered(chief, 10, "members", {})
+
+    // No launch id means this is the CLI-rail lifetime: the real adapter
+    // registers a connection-scoped pull member, sends once, then leaves.
+    const quietName = "@quiet-pull"
+    const quiet = await spawnLaunchAdapter(socketPath, "quiet-pull-member.log", undefined, {
+      name: quietName,
+      delivery: "pull",
+    })
+    await callLaunchToolWhenRegistered(quiet, 20, "members", {})
+    await callLaunchTool(quiet, 21, "send", {
+      to: "@chief",
+      message: "connection-scoped mailbox is ready",
+      type: "notify",
+    })
+    quiet.child.kill("SIGTERM")
+    await once(quiet.child, "exit")
+
+    // Reproduce the actual missed case, not the fresh-join grace case: keep
+    // the current session registration but age every journal fact authored by
+    // the member beyond the recent-activity recognition window.
+    const db = openDatabase(dbPath)
+    try {
+      expect(
+        db.prepare("SELECT name, launch_id, launch_parent_pid, delivery FROM sessions WHERE name = ?").get(quietName),
+      ).toEqual({ name: quietName, launch_id: null, launch_parent_pid: null, delivery: "pull" })
+      db.prepare("UPDATE messages SET ts = ? WHERE sender = ?").run(Date.now() - 5 * 60 * 60_000, quietName)
+    } finally {
+      db.close()
+    }
+
+    const sent = (await callLaunchTool(chief, 30, "send", {
+      to: quietName,
+      message: "first request in hours to the quiet pull mailbox",
+      type: "request",
+      request: true,
+      delivery: "pull",
+    })) as { id?: string; delivery?: { state?: string; recipient?: string } }
+    expect(sent).toMatchObject({
+      id: expect.any(String),
+      delivery: { state: "offline", recipient: quietName },
+    })
+
+    const waitRun = await runCli(
+      ["inbox-wait", "--session", quietName, "--timeout", "0s", "--json"],
+      {
+        ...BASE_ENV,
+        TRIBE_SOCKET: socketPath,
+        TRIBE_NO_AUTOSTART: "1",
+      },
+      { throughParent: true },
+    )
+    expect(waitRun.exitCode, waitRun.stderr).toBe(0)
+    expect(JSON.parse(waitRun.stdout)).toMatchObject({
+      session: quietName,
+      unread_count: 1,
+      timed_out: false,
+    })
+  }, 120_000)
+
   it("fans three native adapters from one provider launch into one live member", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const dbPath = join(tmpDir, "tribe.db")

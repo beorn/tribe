@@ -197,6 +197,84 @@ describe("registerSendCommands", () => {
     expect(args[1]!.variadic).toBe(true)
   })
 
+  test("human send output names the effective holder and fails loud on malformed redirect proof", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-send-holder-"))
+    const socketPath = join(tmp, "tribe.sock")
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as { id: number; method: string; params?: { message?: string } }
+          const result =
+            request.method === "cli_inbox_status_by_launch_v1"
+              ? { session: "@dev/2", launch_id: "launch-dev2", launch_parent_pid: 123 }
+              : request.method === "register"
+                ? { name: "@dev/2", role: "member" }
+                : request.method === "tribe.send"
+                  ? {
+                      sent: true,
+                      delivery: {
+                        state: "bounced",
+                        original_target: "@ci",
+                        ...(request.params?.message === "malformed proof" ? {} : { recipient: "@chief" }),
+                        reason: "no answer-capable transport observed for @ci; matched exact name @ci",
+                      },
+                    }
+                  : { error: `unexpected call ${request.method}` }
+          socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`)
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const runSend = (message: string[]) =>
+        new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProcess) => {
+          const child = spawn(
+            BUN_BIN,
+            [CLI, "send", "@ci", ...message, "--type", "request", "--summary", "landing request"],
+            {
+              env: { ...process.env, TRIBE_SOCKET: socketPath, TRIBE_LAUNCH_ID: "launch-dev2" },
+              stdio: ["ignore", "pipe", "pipe"],
+            },
+          )
+          let stdout = ""
+          let stderr = ""
+          child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+          child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+          child.on("close", (code) => resolveProcess({ code, stdout, stderr }))
+        })
+
+      const sent = await runSend(["please", "land", "this"])
+
+      expect(sent).toMatchObject({ code: 0, stderr: "" })
+      expect(sent.stdout).toContain("Sent message to @chief")
+      expect(sent.stdout).toContain("redirected from @ci")
+      expect(sent.stdout).not.toContain("Sent message to @ci\n")
+
+      const malformed = await runSend(["malformed", "proof"])
+      expect(malformed.code).toBe(3)
+      expect(malformed.stdout).toBe("")
+      expect(malformed.stderr).toContain("message DELIVERED, but the daemon returned malformed redirect proof")
+      expect(malformed.stderr).toContain("Inspect the recipient mailbox and daemon delivery policy before retrying.")
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
+    }
+  })
+
   test("join verb declares <name> and accepts role, domain, delivery, and json flags", () => {
     const cmd = findCmd(buildProgram(), "join")
     expect(cmd).toBeDefined()
