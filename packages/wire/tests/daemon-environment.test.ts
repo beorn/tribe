@@ -6,14 +6,11 @@
  * @consumer root hab.yml wire service
  */
 
-import { closeSync, mkdtempSync, openSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { closeSync, openSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { describe, expect, test } from "vitest"
 import { sanitizeDaemonProcessEnvironment, sanitizeStandaloneDaemonEnvironment } from "../src/daemon-environment.ts"
-import { readSelfMailboxAuthorityFromInheritedFd } from "../src/lib/self-mailbox-authority.ts"
-import { safeRemoveSync } from "removely"
+import { readSelfMailboxAuthorityFromEnvironment } from "../src/lib/self-mailbox-authority.ts"
 
 const ambientIdentity = {
   TRIBE_ACCOUNT: "worker@example.test",
@@ -26,7 +23,7 @@ const ambientIdentity = {
   TRIBE_PLUGIN_RESUME_JOINED: "1",
   TRIBE_PROVIDER: "codex",
   TRIBE_ROLE: "worker",
-  TRIBE_SELF_MAILBOX_AUTHORITY_FD: "9",
+  AG_SESSION_AUTH: "a".repeat(43),
   TRIBE_SESSION_NAME: "@dev/7",
   TRIBE_SLA_ROLE: "worker",
   TRIBE_TAKEOVER: "1",
@@ -127,18 +124,9 @@ describe("Tribe daemon environment ownership", () => {
     expect(env).toEqual({})
   })
 
-  test("the self-mailbox descriptor is rereadable without sharing an offset", () => {
-    const root = mkdtempSync(join(tmpdir(), "tribe-self-mailbox-authority-"))
-    const path = join(root, "authority")
-    writeFileSync(path, "rereadable-session-secret", { mode: 0o600 })
-    const fd = openSync(path, "r")
-    try {
-      const env = { TRIBE_SELF_MAILBOX_AUTHORITY_FD: String(fd) }
-      expect(readSelfMailboxAuthorityFromInheritedFd(env)).toBe("rereadable-session-secret")
-      expect(readSelfMailboxAuthorityFromInheritedFd(env)).toBe("rereadable-session-secret")
-    } finally {
-      closeSync(fd)
-      safeRemoveSync(root, { within: tmpdir() })
-    }
+  test("the self-mailbox bearer is rereadable from inherited environment", () => {
+    const env = { AG_SESSION_AUTH: "a".repeat(43) }
+    expect(readSelfMailboxAuthorityFromEnvironment(env)).toBe("a".repeat(43))
+    expect(readSelfMailboxAuthorityFromEnvironment(env)).toBe("a".repeat(43))
   })
 })

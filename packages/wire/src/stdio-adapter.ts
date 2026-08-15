@@ -40,7 +40,7 @@ import {
 import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
 import { createReconnectWatchdog } from "./lib/reconnect-watchdog.ts"
 import { createHash } from "node:crypto"
-import { hashSelfMailboxAuthority, readSelfMailboxAuthorityFromInheritedFd } from "./lib/self-mailbox-authority.ts"
+import { hashSelfMailboxAuthority, readSelfMailboxAuthorityFromEnvironment } from "./lib/self-mailbox-authority.ts"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
@@ -312,7 +312,7 @@ const identityToken = createHash("sha256")
   .update(`${CLAUDE_SESSION_ID ?? ""}|${process.cwd()}|${args.role ?? "member"}`)
   .digest("hex")
   .slice(0, 16)
-const selfMailboxAuthority = readSelfMailboxAuthorityFromInheritedFd(process.env)
+const selfMailboxAuthority = readSelfMailboxAuthorityFromEnvironment(process.env)
 
 const baseRegisterParams = {
   ...(REGISTER_WITH_LAUNCH_NAME ? { name: LAUNCH_NAME } : {}),

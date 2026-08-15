@@ -12,7 +12,7 @@ import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js"
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { createHash, randomUUID } from "node:crypto"
-import { hashSelfMailboxAuthority, readSelfMailboxAuthorityFromInheritedFd } from "./lib/self-mailbox-authority.ts"
+import { hashSelfMailboxAuthority, readSelfMailboxAuthorityFromEnvironment } from "./lib/self-mailbox-authority.ts"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
@@ -73,7 +73,7 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
     .update(`${sessionId}|${opts.project ?? process.cwd()}|${myRole}`)
     .digest("hex")
     .slice(0, 16)
-  const selfMailboxAuthority = readSelfMailboxAuthorityFromInheritedFd(process.env)
+  const selfMailboxAuthority = readSelfMailboxAuthorityFromEnvironment(process.env)
 
   const daemon = await createReconnectingClient({
     socketPath,

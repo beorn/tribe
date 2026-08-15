@@ -30,10 +30,7 @@ import {
   type PinDirection,
 } from "../lib/code-identity.ts"
 import type { BallSettlementReason } from "../lib/ball-outcome.ts"
-import {
-  readSelfMailboxAuthorityFromInheritedFd,
-  TRIBE_SELF_MAILBOX_AUTHORITY_FD_ENV,
-} from "../lib/self-mailbox-authority.ts"
+import { AG_SESSION_AUTH_ENV, readSelfMailboxAuthorityFromEnvironment } from "../lib/self-mailbox-authority.ts"
 
 const PENDING_CLI = visibleCliProjectionForMcp("pending")
 const INBOX_WAIT_CLI = visibleCliProjectionForMcp("inbox.wait")
@@ -1292,11 +1289,9 @@ function printSelfInboxEvent(event: SelfInboxEvent): void {
 }
 
 async function cmdInbox(opts: { limit?: number; json?: boolean }): Promise<void> {
-  const authority = readSelfMailboxAuthorityFromInheritedFd(process.env)
+  const authority = readSelfMailboxAuthorityFromEnvironment(process.env)
   if (authority === null) {
-    throw new Error(
-      `${TRIBE_SELF_MAILBOX_AUTHORITY_FD_ENV} is missing; this managed session has no self-mailbox authority source`,
-    )
+    throw new Error(`${AG_SESSION_AUTH_ENV} is missing; this managed session has no self-mailbox authority source`)
   }
   const result = mcpJsonContent(
     await callDaemon("cli_self_inbox_v1", { authority, limit: opts.limit ?? 50 }),

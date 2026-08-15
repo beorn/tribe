@@ -122,12 +122,7 @@ async function superviseAdapter(): Promise<void> {
   while (!stopping) {
     const startedAt = Date.now()
     const canResumeJoined = resumeJoined && resumeName !== undefined
-    const selfMailboxAuthorityFd = Number(process.env.TRIBE_SELF_MAILBOX_AUTHORITY_FD)
     const stdio: Array<"inherit" | "ignore" | "ipc" | number> = ["inherit", "inherit", "inherit", "ipc"]
-    if (Number.isSafeInteger(selfMailboxAuthorityFd) && selfMailboxAuthorityFd >= 4) {
-      for (let fd = 4; fd < selfMailboxAuthorityFd; fd += 1) stdio[fd] = "ignore"
-      stdio[selfMailboxAuthorityFd] = selfMailboxAuthorityFd
-    }
     active = spawn(process.execPath, [fileURLToPath(import.meta.url), ...process.argv.slice(2)], {
       stdio,
       env: buildPluginAdapterEnvironment(

@@ -141,10 +141,11 @@ tribe-wire inbox [--limit <n>=50] [--json]
 
 Reads and acknowledges the calling managed session's mailbox through the same
 attention projection and cursor advance as MCP `tribe.fetch`. The target is
-derived only from the inherited `TRIBE_SELF_MAILBOX_AUTHORITY_FD`; names,
-launch ids, pids, and other caller-supplied identity hints cannot select a
-mailbox. A missing, rejected, or replaced authority fails loudly. `--json`
-returns the canonical MCP projection.
+derived only from the launcher-minted `AG_SESSION_AUTH` bearer inherited
+through the provider environment; names, launch ids, pids, and other
+caller-supplied identity hints cannot select a mailbox. The daemon stores only
+the bearer hash and binds it to one session. A missing, malformed, rejected, or
+replaced authority fails loudly. `--json` returns the canonical MCP projection.
 
 ### `inbox-drain`
 

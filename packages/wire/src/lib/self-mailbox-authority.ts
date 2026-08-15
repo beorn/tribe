@@ -1,35 +1,19 @@
 import { createHash } from "node:crypto"
-import { fstatSync, readSync } from "node:fs"
 
-export const TRIBE_SELF_MAILBOX_AUTHORITY_FD_ENV = "TRIBE_SELF_MAILBOX_AUTHORITY_FD"
+export const AG_SESSION_AUTH_ENV = "AG_SESSION_AUTH"
 
-const MAX_AUTHORITY_BYTES = 4_096
+const SESSION_AUTH_PATTERN = /^[A-Za-z0-9_-]{43}$/u
 
 /**
- * Read a session's self-mailbox authority without changing the inherited open
- * file description's offset. The same descriptor can therefore be read by the
- * adapter, a CLI child, and a later replacement child in any order.
+ * Read the launcher's per-session bearer from the one carrier unmodified
+ * provider binaries propagate to ordinary children. The daemon binds only its
+ * hash to one mailbox; the raw value never enters argv, logs, or durable plans.
  */
-export function readSelfMailboxAuthorityFromInheritedFd(env: Readonly<NodeJS.ProcessEnv>): string | null {
-  const raw = env[TRIBE_SELF_MAILBOX_AUTHORITY_FD_ENV]
+export function readSelfMailboxAuthorityFromEnvironment(env: Readonly<NodeJS.ProcessEnv>): string | null {
+  const raw = env[AG_SESSION_AUTH_ENV]
   if (raw === undefined) return null
-  const fd = Number(raw)
-  if (!Number.isSafeInteger(fd) || fd < 3) {
-    throw new Error(
-      `${TRIBE_SELF_MAILBOX_AUTHORITY_FD_ENV} must name an inherited fd >= 3, received ${JSON.stringify(raw)}`,
-    )
-  }
-  const size = fstatSync(fd).size
-  if (!Number.isSafeInteger(size) || size <= 0 || size > MAX_AUTHORITY_BYTES) {
-    throw new Error(
-      `${TRIBE_SELF_MAILBOX_AUTHORITY_FD_ENV} must contain 1-${MAX_AUTHORITY_BYTES} bytes, received ${String(size)}`,
-    )
-  }
-  const bytes = Buffer.alloc(size)
-  const read = readSync(fd, bytes, 0, bytes.length, 0)
-  const authority = bytes.subarray(0, read).toString("utf8").trim()
-  if (!authority) throw new Error(`${TRIBE_SELF_MAILBOX_AUTHORITY_FD_ENV} contained an empty authority`)
-  return authority
+  if (!SESSION_AUTH_PATTERN.test(raw)) throw new Error(`${AG_SESSION_AUTH_ENV} must be a 32-byte base64url bearer`)
+  return raw
 }
 
 export function hashSelfMailboxAuthority(authority: string): string {

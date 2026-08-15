@@ -54,11 +54,9 @@ process.exit(await child.exited)
 const CLI_PARENT_WRAPPER = `
 const { spawn } = await import("node:child_process")
 const command = JSON.parse(process.env.TRIBE_TEST_CHILD_COMMAND)
-const stdio = ["inherit", "inherit", "inherit"]
-for (let fd = 3; fd <= 9; fd += 1) stdio[fd] = "ignore"
-if (process.env.TRIBE_OPERATOR_CAPABILITY_FD === "3") stdio[3] = 3
-if (process.env.TRIBE_SELF_MAILBOX_AUTHORITY_FD === "9") stdio[9] = 9
-const child = spawn(command[0], command.slice(1), { env: process.env, stdio })
+const child = spawn(command[0], command.slice(1), { env: process.env })
+child.stdout.pipe(process.stdout)
+child.stderr.pipe(process.stderr)
 for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => child.kill(signal))
 process.exitCode = await new Promise((resolveExit) => child.once("exit", (code) => resolveExit(code ?? 1)))
 `
@@ -427,7 +425,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       throughPluginSupervisor?: boolean
       delivery?: "push" | "pull"
       filterMode?: "focus" | "normal" | "ambient"
-      selfMailboxAuthorityPath?: string
+      selfMailboxAuthority?: string
     } = {},
   ): Promise<{ child: ChildProcessWithoutNullStreams; stdout: Record<string, unknown>[]; logPath: string }> {
     const logPath = join(tmpDir, logName)
@@ -440,8 +438,6 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       "--name",
       name,
     ]
-    const selfMailboxAuthorityFd =
-      opts.selfMailboxAuthorityPath === undefined ? undefined : openSync(opts.selfMailboxAuthorityPath, "r")
     const child = spawn(
       BUN_BIN,
       opts.distinctProviderParent ? ["-e", PROVIDER_PARENT_WRAPPER] : adapterCommand.slice(1),
@@ -462,7 +458,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
           // A managed plugin wrapper preserves its explicit provider parent;
           // direct adapters ignore stale provenance without the child marker.
           TRIBE_PLUGIN_PROVIDER_PARENT_PID: opts.throughPluginSupervisor ? String(process.pid) : "1",
-          ...(selfMailboxAuthorityFd === undefined ? {} : { TRIBE_SELF_MAILBOX_AUTHORITY_FD: "9" }),
+          ...(opts.selfMailboxAuthority === undefined ? {} : { AG_SESSION_AUTH: opts.selfMailboxAuthority }),
           ...(opts.distinctProviderParent
             ? {
                 // Hostile/unsanitized nested launch: both identity inputs are
@@ -474,24 +470,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
           DEBUG: "tribe:*",
           DEBUG_LOG: logPath,
         },
-        stdio:
-          selfMailboxAuthorityFd === undefined
-            ? ["pipe", "pipe", "pipe"]
-            : [
-                "pipe",
-                "pipe",
-                "pipe",
-                "ignore",
-                "ignore",
-                "ignore",
-                "ignore",
-                "ignore",
-                "ignore",
-                selfMailboxAuthorityFd,
-              ],
+        stdio: ["pipe", "pipe", "pipe"],
       },
     ) as ChildProcessWithoutNullStreams
-    if (selfMailboxAuthorityFd !== undefined) closeSync(selfMailboxAuthorityFd)
     adapters.push(child)
     const stdout = collectStdoutJson(child)
     writeJson(child, initializePayload(1))
@@ -579,12 +560,10 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
   async function runCli(
     args: string[],
     env: NodeJS.ProcessEnv,
-    opts: { operatorCapabilityPath?: string; selfMailboxAuthorityPath?: string; throughParent?: boolean } = {},
+    opts: { operatorCapabilityPath?: string; selfMailboxAuthority?: string; throughParent?: boolean } = {},
   ): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
     const capabilityFd =
       opts.operatorCapabilityPath === undefined ? undefined : openSync(opts.operatorCapabilityPath, "r")
-    const selfMailboxAuthorityFd =
-      opts.selfMailboxAuthorityPath === undefined ? undefined : openSync(opts.selfMailboxAuthorityPath, "r")
     const command = [BUN_BIN, CLI, ...args]
     const child = spawn(BUN_BIN, opts.throughParent ? ["-e", CLI_PARENT_WRAPPER] : command.slice(1), {
       cwd: tmpDir,
@@ -592,28 +571,11 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         ...env,
         ...(opts.throughParent ? { TRIBE_TEST_CHILD_COMMAND: JSON.stringify(command) } : {}),
         ...(capabilityFd === undefined ? {} : { TRIBE_OPERATOR_CAPABILITY_FD: "3" }),
-        ...(selfMailboxAuthorityFd === undefined ? {} : { TRIBE_SELF_MAILBOX_AUTHORITY_FD: "9" }),
+        ...(opts.selfMailboxAuthority === undefined ? {} : { AG_SESSION_AUTH: opts.selfMailboxAuthority }),
       },
-      stdio:
-        selfMailboxAuthorityFd === undefined
-          ? capabilityFd === undefined
-            ? ["ignore", "pipe", "pipe"]
-            : ["ignore", "pipe", "pipe", capabilityFd]
-          : [
-              "ignore",
-              "pipe",
-              "pipe",
-              capabilityFd ?? "ignore",
-              "ignore",
-              "ignore",
-              "ignore",
-              "ignore",
-              "ignore",
-              selfMailboxAuthorityFd,
-            ],
+      stdio: capabilityFd === undefined ? ["ignore", "pipe", "pipe"] : ["ignore", "pipe", "pipe", capabilityFd],
     })
     if (capabilityFd !== undefined) closeSync(capabilityFd)
-    if (selfMailboxAuthorityFd !== undefined) closeSync(selfMailboxAuthorityFd)
     if (!child.stdout || !child.stderr) throw new Error("CLI test child did not expose piped output")
     let stdout = ""
     let stderr = ""
@@ -770,17 +732,14 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
   it("drains the managed launch mailbox instead of a foreign environment identity when MCP is unavailable", async () => {
     const socketPath = join(tmpDir, "managed-cli-inbox.sock")
     const dbPath = join(tmpDir, "managed-cli-inbox.db")
-    const ownAuthorityPath = join(tmpDir, "managed-cli-own-authority")
-    const successorAuthorityPath = join(tmpDir, "managed-cli-successor-authority")
-    const foreignAuthorityPath = join(tmpDir, "managed-cli-foreign-authority")
+    const ownAuthority = "managed-cli-own-secret-00000000000000000000"
+    const successorAuthority = "managed-cli-successor-secret-00000000000000"
+    const foreignAuthority = "managed-cli-foreign-secret-0000000000000000"
     const ownLaunchId = "managed-cli-own-launch"
     const spawnTimeName = "@agent/3-spawn"
     const runtimeName = "@agent/3-runtime"
     const foreignName = "@agent/foreign"
 
-    writeFileSync(ownAuthorityPath, "managed-cli-own-secret", { mode: 0o600 })
-    writeFileSync(successorAuthorityPath, "managed-cli-successor-secret", { mode: 0o600 })
-    writeFileSync(foreignAuthorityPath, "managed-cli-foreign-secret", { mode: 0o600 })
     daemonProc = spawnDaemon(socketPath, dbPath)
     await waitForDaemonSocket(daemonProc, socketPath)
 
@@ -793,11 +752,11 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const own = await spawnLaunchAdapter(socketPath, "managed-cli-own.log", ownLaunchId, {
       name: spawnTimeName,
       throughPluginSupervisor: true,
-      selfMailboxAuthorityPath: ownAuthorityPath,
+      selfMailboxAuthority: ownAuthority,
     })
     const foreign = await spawnLaunchAdapter(socketPath, "managed-cli-foreign.log", "managed-cli-foreign-launch", {
       name: foreignName,
-      selfMailboxAuthorityPath: foreignAuthorityPath,
+      selfMailboxAuthority: foreignAuthority,
     })
     await callLaunchToolWhenRegistered(own, 60, "members", {})
     await callLaunchToolWhenRegistered(foreign, 61, "members", {})
@@ -854,10 +813,10 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
 
     const absentAuthority = await runCli(["inbox", "--json"], cliEnv, { throughParent: true })
     expect(absentAuthority.exitCode).toBe(1)
-    expect(absentAuthority.stderr).toMatch(/TRIBE_SELF_MAILBOX_AUTHORITY_FD.*missing/i)
+    expect(absentAuthority.stderr).toMatch(/AG_SESSION_AUTH.*missing/i)
 
     const foreignRead = await runCli(["inbox", "--json"], cliEnv, {
-      selfMailboxAuthorityPath: foreignAuthorityPath,
+      selfMailboxAuthority: foreignAuthority,
       throughParent: true,
     })
     expect(foreignRead.exitCode, foreignRead.stderr).toBe(0)
@@ -872,7 +831,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     postForeignObserver.close()
 
     const drainRun = await runCli(["inbox", "--json"], cliEnv, {
-      selfMailboxAuthorityPath: ownAuthorityPath,
+      selfMailboxAuthority: ownAuthority,
       throughParent: true,
     })
     expect(drainRun.exitCode, drainRun.stderr).toBe(0)
@@ -886,7 +845,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(drained.events.some((event) => event.content === "foreign launch request")).toBe(false)
 
     const secondRead = await runCli(["inbox", "--json"], cliEnv, {
-      selfMailboxAuthorityPath: ownAuthorityPath,
+      selfMailboxAuthority: ownAuthority,
       throughParent: true,
     })
     expect(secondRead.exitCode, secondRead.stderr).toBe(0)
@@ -895,26 +854,26 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const successor = await spawnLaunchAdapter(socketPath, "managed-cli-successor.log", ownLaunchId, {
       name: spawnTimeName,
       throughPluginSupervisor: true,
-      selfMailboxAuthorityPath: successorAuthorityPath,
+      selfMailboxAuthority: successorAuthority,
     })
     await callLaunchToolWhenRegistered(successor, 63, "members", {})
 
     const revokedRead = await runCli(["inbox", "--json"], cliEnv, {
-      selfMailboxAuthorityPath: ownAuthorityPath,
+      selfMailboxAuthority: ownAuthority,
       throughParent: true,
     })
     expect(revokedRead.exitCode).toBe(1)
     expect(revokedRead.stderr).toMatch(/authority was rejected or revoked/i)
 
     const successorRead = await runCli(["inbox", "--json"], cliEnv, {
-      selfMailboxAuthorityPath: successorAuthorityPath,
+      selfMailboxAuthority: successorAuthority,
       throughParent: true,
     })
     expect(successorRead.exitCode, successorRead.stderr).toBe(0)
     expect(JSON.parse(successorRead.stdout)).toMatchObject({ attention: { actionable_unread: [] }, events: [] })
 
     const humanRead = await runCli(["inbox"], cliEnv, {
-      selfMailboxAuthorityPath: successorAuthorityPath,
+      selfMailboxAuthority: successorAuthority,
       throughParent: true,
     })
     expect(humanRead.exitCode, humanRead.stderr).toBe(0)
