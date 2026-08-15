@@ -246,12 +246,11 @@ export function withDispatcher<
       latest_message_id: string | null
       latest_type: string | null
     } {
-      const row = stmts.getUnreadDms.get({ $name: sessionName }) as { count: number; oldest_ts: number } | undefined
-      const latest = stmts.getLatestActionableAttention.get({ $name: sessionName }) as
-        | { rowid: number; id: string; type: string }
-        | undefined
-      const unread_count = row?.count ?? 0
-      const oldest_ts = row?.oldest_ts ?? 0
+      const { attentionRows } = readAttentionProjection(daemonCtx, sessionName)
+      const oldest = attentionRows[0]
+      const latest = attentionRows.at(-1)
+      const unread_count = attentionRows.length
+      const oldest_ts = oldest?.ts ?? 0
       const oldest_unread_age_min = oldest_ts > 0 ? Math.floor((Date.now() - oldest_ts) / 60_000) : 0
       return {
         session: sessionName,

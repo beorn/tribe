@@ -1255,6 +1255,26 @@ describe("dispatcher bounded mailbox drain", () => {
     expect(status.unread_count).toBe(1)
   })
 
+  it("counts attention-required responses through the canonical inbox projection", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    harness.sendAttentionResponse("@chief", "the requested verdict is ready")
+
+    const status = parseResult<{ unread_count: number; latest_type: string | null }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "chief-status-with-attention-response",
+          method: "cli_inbox_status",
+          params: { session: "@chief" },
+        },
+        "conn-untrusted",
+      ),
+    )
+
+    expect(status).toMatchObject({ unread_count: 1, latest_type: "response" })
+  })
+
   it("reports unauthenticated when an unregistered caller presents the wrong operator capability", async () => {
     const harness = createDispatcherHarness({ operatorCapability: "operator-test-secret" })
     cleanup = harness.dispose
@@ -1847,6 +1867,9 @@ function createDispatcherHarness(
     },
     sendActionable(recipient: string, content: string = "wake inbox wait") {
       return sendMessage(daemonCtx, recipient, content, "request", undefined, undefined, "direct")
+    },
+    sendAttentionResponse(recipient: string, content: string) {
+      return sendMessage(daemonCtx, recipient, content, "response", undefined, undefined, "direct")
     },
     sendWithRef(ref: string) {
       sendMessage(daemonCtx, "@fleet", `effect ${ref}`, "notify", undefined, ref, "direct")
