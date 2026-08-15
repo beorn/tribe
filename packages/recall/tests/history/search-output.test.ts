@@ -38,7 +38,7 @@ vi.mock("../../src/lib/refresh.ts", async (importOriginal) => {
   }
 })
 
-const { cmdSearch, resolveProjectScope } = await import("../../src/lib/search")
+const { cmdSearch, emitRefreshNote, resolveProjectScope } = await import("../../src/lib/search")
 const { closeDb, ftsSearchWithSnippet, getDb, setIndexMeta } = await import("../../src/history/db")
 const { _resetLlmBackendForTests } = await import("../../src/lib/llm-backend")
 
@@ -218,6 +218,21 @@ describe("recall search output", () => {
     // search.ts emitRefreshNote). It prints BEFORE the empty-results answer.
     expect(errors).toContain("stale — refreshed")
     expect(output).toContain('No results found for "nohits"')
+  })
+
+  test("a bounded refresh timeout names the abandoned command and deadline before continuing stale", () => {
+    emitRefreshNote({
+      refreshed: false,
+      reason: "error",
+      staleMs: 30 * 60 * 1_000,
+      error: '"bun" "recall" "index" "--incremental" exceeded 5000ms; sent SIGTERM then SIGKILL after 2000ms',
+    })
+
+    const errors = callsText(errSpy)
+    expect(errors).toContain('"bun" "recall" "index" "--incremental"')
+    expect(errors).toContain("5000ms")
+    expect(errors).toContain("auto-refresh failed")
+    expect(errors).toContain("proceeding with possibly-stale index")
   })
 
   test("empty results print without invoking auto-refresh when refresh is disabled", async () => {

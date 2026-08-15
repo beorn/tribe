@@ -6,7 +6,14 @@
  */
 import { describe, test, expect, afterEach } from "vitest"
 import { parseThreshold, getStaleThresholdMs, RECALL_STALE_THRESHOLD_DEFAULT } from "../src/lib/staleness"
-import { refreshIndexIfStaleWithDeps, type RefreshDeps } from "../src/lib/refresh"
+import {
+  makeRefreshDeps,
+  RECALL_REFRESH_KILL_GRACE_MS,
+  RECALL_REFRESH_TIMEOUT_MS,
+  refreshIndexIfStaleWithDeps,
+  type RefreshDeps,
+} from "../src/lib/refresh"
+import type { BoundedProcessBounds, BoundedProcessCommandResult } from "../src/lib/bounded-process"
 
 /** Build a deps bundle defaulting to "fresh / no spawn" for fast tests. */
 function makeFakeDeps(overrides: Partial<RefreshDeps> = {}): RefreshDeps {
@@ -79,6 +86,39 @@ describe("getStaleThresholdMs (env override)", () => {
   test('honors RECALL_STALE_THRESHOLD="1h"', () => {
     process.env.RECALL_STALE_THRESHOLD = "1h"
     expect(getStaleThresholdMs()).toBe(60 * 60 * 1000)
+  })
+})
+
+describe("makeRefreshDeps production process adapter", () => {
+  test("keeps RefreshDeps.spawnCmd stable while delegating to the bounded runner with the 5s/2s contract", async () => {
+    const calls: Array<{ argv: readonly string[]; bounds: BoundedProcessBounds }> = []
+    const runCommand = async (
+      argv: readonly string[],
+      bounds: BoundedProcessBounds,
+    ): Promise<BoundedProcessCommandResult> => {
+      calls.push({ argv, bounds })
+      return { exitCode: 0, stderr: "bounded stderr", stdout: "ignored stdout" }
+    }
+    const deps: RefreshDeps = makeRefreshDeps(() => null, runCommand)
+
+    await expect(deps.spawnCmd(["bun", "recall", "index", "--incremental"])).resolves.toEqual({
+      exitCode: 0,
+      stderr: "bounded stderr",
+    })
+    expect(calls).toEqual([
+      {
+        argv: ["bun", "recall", "index", "--incremental"],
+        bounds: {
+          timeoutMs: RECALL_REFRESH_TIMEOUT_MS,
+          killGraceMs: RECALL_REFRESH_KILL_GRACE_MS,
+          reapGraceMs: 2_000,
+          drainGraceMs: 2_500,
+          maxOutputBytes: 256 * 1024,
+        },
+      },
+    ])
+    expect(RECALL_REFRESH_TIMEOUT_MS).toBe(5_000)
+    expect(RECALL_REFRESH_KILL_GRACE_MS).toBe(2_000)
   })
 })
 

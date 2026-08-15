@@ -1,4 +1,9 @@
 import { dirname, join } from "node:path"
+import {
+  BoundedProcessCommandError,
+  runBoundedProcessCommand,
+  type BoundedProcessCommandResult,
+} from "../../../recall/src/lib/bounded-process.ts"
 
 const PROCESS_OBSERVATION_SCHEMA = "process-observation/1" as const
 const HOST_SCALAR_OBSERVATION_SCHEMA = "host-scalar-observation/1" as const
@@ -27,9 +32,12 @@ const OBSERVATION_QUERY = "latest exact process census with owner attribution"
  * how often we *attempt*; the circuit below stops re-attempting after failure.
  */
 export const SYSMON_COMMAND_TIMEOUT_MS = 2_500
+const SYSMON_KILL_GRACE_MS = 2_000
+const SYSMON_REAP_GRACE_MS = 2_000
+const SYSMON_DRAIN_GRACE_MS = 2_500
 /** One JSON line of process-observation/1; 256 KiB is already generous. */
 export const SYSMON_MAX_OUTPUT_BYTES = 256 * 1024
-/** Consecutive hard failures (timeout / oversized output) before opening the circuit. */
+/** Consecutive hard failures (timeout / oversized output / uncertain settlement) before opening the circuit. */
 export const SYSMON_CIRCUIT_FAILURES = 2
 /** How long the circuit stays open — 6× default 10s poll, not forever. */
 export const SYSMON_CIRCUIT_OPEN_MS = 60_000
@@ -183,17 +191,6 @@ export type HealthProcessSource =
       readonly readScalars: () => Promise<CanonicalHostScalarObservation>
     }
 
-export type ManagedSysmonCommandResult = {
-  readonly exitCode: number
-  readonly stderr: string
-  readonly stdout: string
-}
-
-export type ManagedSysmonCommandFailure = {
-  readonly kind: "timeout" | "output-too-large" | "spawn-failed"
-  readonly message: string
-}
-
 export interface HealthProcessSourceOptions {
   readonly env?: Readonly<Record<string, string | undefined>>
   readonly maxAgeMs?: number
@@ -204,20 +201,10 @@ export interface HealthProcessSourceOptions {
   readonly circuitFailures?: number
   readonly circuitOpenMs?: number
   /**
-   * Test seam. Production uses `runBoundedProcessCommand` which kills the child
-   * on timeout/oversize. Injected doubles may throw `ManagedSysmonCommandError`.
+   * Test seam. Production uses Tribe's shared bounded process-tree runner.
+   * Injected doubles may throw BoundedProcessCommandError.
    */
-  readonly runCommand?: (argv: readonly string[]) => Promise<ManagedSysmonCommandResult>
-}
-
-/** Thrown by the bounded runner (and accepted from injects) so callers map to typed unavailable reasons. */
-export class ManagedSysmonCommandError extends Error {
-  readonly failure: ManagedSysmonCommandFailure
-  constructor(failure: ManagedSysmonCommandFailure) {
-    super(failure.message)
-    this.name = "ManagedSysmonCommandError"
-    this.failure = failure
-  }
+  readonly runCommand?: (argv: readonly string[]) => Promise<BoundedProcessCommandResult>
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -480,128 +467,16 @@ function scalarUnavailable(
   }
 }
 
-async function readStreamBounded(
-  stream: ReadableStream<Uint8Array> | null,
-  maxBytes: number,
-): Promise<{ readonly text: string; readonly truncated: boolean }> {
-  if (stream === null) return { text: "", truncated: false }
-  const reader = stream.getReader()
-  const chunks: Uint8Array[] = []
-  let total = 0
-  try {
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      if (value === undefined) continue
-      total += value.byteLength
-      if (total > maxBytes) {
-        await reader.cancel().catch(() => {})
-        return { text: "", truncated: true }
-      }
-      chunks.push(value)
-    }
-  } finally {
-    try {
-      reader.releaseLock()
-    } catch {
-      // already cancelled or released
-    }
-  }
-  if (chunks.length === 0) return { text: "", truncated: false }
-  const merged = new Uint8Array(total)
-  let offset = 0
-  for (const chunk of chunks) {
-    merged.set(chunk, offset)
-    offset += chunk.byteLength
-  }
-  return { text: new TextDecoder().decode(merged), truncated: false }
-}
-
-/**
- * Spawn with both pipes, or convert the failure into a typed command error.
- *
- * The return type is deliberately INFERRED rather than annotated. Bun types a
- * subprocess's `stdout`/`stderr` from the stdio options it was given, so
- * `{ stdout: "pipe", stderr: "pipe" }` yields `ReadableStream` on both. Writing
- * `let child: ReturnType<typeof Bun.spawn>` discards that: `ReturnType` of the
- * un-applied generic widens each pipe to `number | ReadableStream | undefined`
- * — every stdio mode at once — and the `undefined` arm is what
- * `readStreamBounded(stream: ReadableStream<Uint8Array> | null)` rejects. The
- * annotation was needed only because `let` declared outside a try block has to
- * be typed before assignment; returning from inside the try removes the need
- * for it, so the concrete type survives and no cast is required.
- */
-function spawnPipedOrThrow(argv: readonly string[]) {
-  try {
-    return Bun.spawn([...argv], { stderr: "pipe", stdout: "pipe" })
-  } catch (error) {
-    throw new ManagedSysmonCommandError({
-      kind: "spawn-failed",
-      message: error instanceof Error ? error.message : String(error),
-    })
-  }
-}
-
-/**
- * Spawn `argv`, kill on wall-clock timeout or stdout/stderr oversize, never
- * materialise multi-GB streams into a single string.
- */
-export async function runBoundedProcessCommand(
-  argv: readonly string[],
-  bounds: { readonly timeoutMs: number; readonly maxOutputBytes: number } = {
-    timeoutMs: SYSMON_COMMAND_TIMEOUT_MS,
-    maxOutputBytes: SYSMON_MAX_OUTPUT_BYTES,
-  },
-): Promise<ManagedSysmonCommandResult> {
-  const child = spawnPipedOrThrow(argv)
-
-  let timedOut = false
-  const timer = setTimeout(() => {
-    timedOut = true
-    try {
-      child.kill()
-    } catch {
-      // already exited
-    }
-  }, bounds.timeoutMs)
-  ;(timer as { unref?: () => void }).unref?.()
-
-  try {
-    const [exitCode, stdoutRead, stderrRead] = await Promise.all([
-      child.exited,
-      readStreamBounded(child.stdout, bounds.maxOutputBytes),
-      readStreamBounded(child.stderr, bounds.maxOutputBytes),
-    ])
-    if (timedOut) {
-      throw new ManagedSysmonCommandError({
-        kind: "timeout",
-        message: `sysmon snapshot exceeded ${bounds.timeoutMs}ms (killed)`,
-      })
-    }
-    if (stdoutRead.truncated || stderrRead.truncated) {
-      try {
-        child.kill()
-      } catch {
-        // already exited
-      }
-      throw new ManagedSysmonCommandError({
-        kind: "output-too-large",
-        message: `sysmon snapshot exceeded ${bounds.maxOutputBytes} byte stdout/stderr bound (killed)`,
-      })
-    }
-    return { exitCode, stdout: stdoutRead.text, stderr: stderrRead.text }
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
 function mapCommandError(error: unknown): { reason: string; detail: string } {
-  if (error instanceof ManagedSysmonCommandError) {
+  if (error instanceof BoundedProcessCommandError) {
     if (error.failure.kind === "timeout") {
       return { reason: "source-command-timeout", detail: error.failure.message }
     }
     if (error.failure.kind === "output-too-large") {
       return { reason: "source-output-too-large", detail: error.failure.message }
+    }
+    if (error.failure.kind === "settlement-failed") {
+      return { reason: "source-command-settlement-failed", detail: error.failure.message }
     }
     return { reason: "source-command-failed", detail: error.failure.message }
   }
@@ -610,7 +485,11 @@ function mapCommandError(error: unknown): { reason: string; detail: string } {
 
 /** Hard failures that mean "do not re-pay multi-GB journal walks every poll". */
 function isCircuitFailure(reason: string): boolean {
-  return reason === "source-command-timeout" || reason === "source-output-too-large"
+  return (
+    reason === "source-command-timeout" ||
+    reason === "source-output-too-large" ||
+    reason === "source-command-settlement-failed"
+  )
 }
 
 export function createHealthProcessSource(options: HealthProcessSourceOptions = {}): HealthProcessSource {
@@ -626,7 +505,15 @@ export function createHealthProcessSource(options: HealthProcessSourceOptions = 
   const circuitFailures = options.circuitFailures ?? SYSMON_CIRCUIT_FAILURES
   const circuitOpenMs = options.circuitOpenMs ?? SYSMON_CIRCUIT_OPEN_MS
   const runCommand =
-    options.runCommand ?? ((argv: readonly string[]) => runBoundedProcessCommand(argv, { timeoutMs, maxOutputBytes }))
+    options.runCommand ??
+    ((argv: readonly string[]) =>
+      runBoundedProcessCommand(argv, {
+        timeoutMs,
+        maxOutputBytes,
+        killGraceMs: SYSMON_KILL_GRACE_MS,
+        reapGraceMs: SYSMON_REAP_GRACE_MS,
+        drainGraceMs: SYSMON_DRAIN_GRACE_MS,
+      }))
 
   // Shared across read() and readScalars(): both walk the same state-root.
   let consecutiveHardFailures = 0
@@ -635,7 +522,7 @@ export function createHealthProcessSource(options: HealthProcessSourceOptions = 
   function circuitBlocks(): string | null {
     const t = now()
     if (t < circuitOpenUntilMs) {
-      return `sysmon circuit open for ${Math.max(0, circuitOpenUntilMs - t)}ms after hard failures (timeout/oversize)`
+      return `sysmon circuit open for ${Math.max(0, circuitOpenUntilMs - t)}ms after hard failures (timeout/oversize/settlement)`
     }
     return null
   }
@@ -656,7 +543,7 @@ export function createHealthProcessSource(options: HealthProcessSourceOptions = 
 
   async function invoke(
     argv: readonly string[],
-  ): Promise<{ ok: true; result: ManagedSysmonCommandResult } | { ok: false; reason: string; detail: string }> {
+  ): Promise<{ ok: true; result: BoundedProcessCommandResult } | { ok: false; reason: string; detail: string }> {
     const blocked = circuitBlocks()
     if (blocked !== null) return { ok: false, reason: "source-circuit-open", detail: blocked }
     try {

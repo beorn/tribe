@@ -4,12 +4,28 @@
  * Split from search.ts (per @km/bearly/19244) so vitest unit tests can import
  * without dragging the search.ts transitive closure (`bun:sqlite`, indexer,
  * llm/agent → zod) into vitest's node runtime. search.ts wires productionDeps
- * (real getDb / getIndexMeta / Bun.spawn) when calling at runtime.
+ * (real getDb / getIndexMeta / bounded process runner) when calling at runtime.
  *
  * See @km/bearly/19216-recall-freshness-shrink-threshold for the feature.
  */
 
 import { getStaleThresholdMs, type RefreshResult } from "./staleness"
+import {
+  runBoundedProcessCommand,
+  type BoundedProcessBounds,
+  type BoundedProcessCommandResult,
+} from "./bounded-process"
+
+export const RECALL_REFRESH_TIMEOUT_MS = 5_000
+export const RECALL_REFRESH_KILL_GRACE_MS = 2_000
+const RECALL_REFRESH_REAP_GRACE_MS = 2_000
+const RECALL_REFRESH_DRAIN_GRACE_MS = 2_500
+const RECALL_REFRESH_MAX_OUTPUT_BYTES = 256 * 1024
+
+type RefreshCommandRunner = (
+  argv: readonly string[],
+  bounds: BoundedProcessBounds,
+) => Promise<BoundedProcessCommandResult>
 
 export type RefreshDeps = {
   /** Returns ISO 8601 timestamp of last index rebuild, or null if never indexed. Throws on DB errors. */
@@ -66,18 +82,25 @@ export async function refreshIndexIfStaleWithDeps(
   }
 }
 
-/** Default real-runtime deps for the threshold helper + Bun.spawn. The DB-bound
+/** Default real-runtime deps for the threshold helper + bounded runner. The DB-bound
  * `getLastRebuild` impl must be supplied by the caller (search.ts wires it). */
-export function makeRefreshDeps(getLastRebuild: () => string | null): RefreshDeps {
+export function makeRefreshDeps(
+  getLastRebuild: () => string | null,
+  runCommand: RefreshCommandRunner = runBoundedProcessCommand,
+): RefreshDeps {
   return {
     getLastRebuild,
     now: () => Date.now(),
     getThresholdMs: getStaleThresholdMs,
     spawnCmd: async (argv) => {
-      const proc = Bun.spawn(argv, { stdout: "ignore", stderr: "pipe" })
-      const stderr = await new Response(proc.stderr).text()
-      const exitCode = await proc.exited
-      return { exitCode, stderr }
+      const result = await runCommand(argv, {
+        timeoutMs: RECALL_REFRESH_TIMEOUT_MS,
+        killGraceMs: RECALL_REFRESH_KILL_GRACE_MS,
+        reapGraceMs: RECALL_REFRESH_REAP_GRACE_MS,
+        drainGraceMs: RECALL_REFRESH_DRAIN_GRACE_MS,
+        maxOutputBytes: RECALL_REFRESH_MAX_OUTPUT_BYTES,
+      })
+      return { exitCode: result.exitCode, stderr: result.stderr }
     },
   }
 }
