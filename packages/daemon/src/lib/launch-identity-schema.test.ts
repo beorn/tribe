@@ -68,7 +68,9 @@ describe("session launch identity schema (migration chain from v18)", () => {
       expect(
         db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_sessions_launch_identity'").get(),
       ).toEqual({ name: "idx_sessions_launch_identity" })
-      expect(db.prepare("SELECT value FROM _schema_meta WHERE key='version'").get()).toEqual({ value: String(CURRENT_SCHEMA_VERSION) })
+      expect(db.prepare("SELECT value FROM _schema_meta WHERE key='version'").get()).toEqual({
+        value: String(CURRENT_SCHEMA_VERSION),
+      })
     } finally {
       db.close()
     }

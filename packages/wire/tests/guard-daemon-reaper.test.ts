@@ -30,8 +30,7 @@ const LIVE_DAEMON =
   "/hh/vendor/tribe/packages/daemon/src/daemon.ts --socket /run/user/3001/tribe.sock --idle-quit-after never"
 
 /** Another agent's checkout, running its own suite against its own guard dir. */
-const PEER_CHECKOUT_DAEMON =
-  `3061114 /bin/bun /home/agent/other-clone/tribe/packages/daemon/src/daemon.ts --socket ${GUARD_ROOT}d9db1550/tribe.sock`
+const PEER_CHECKOUT_DAEMON = `3061114 /bin/bun /home/agent/other-clone/tribe/packages/daemon/src/daemon.ts --socket ${GUARD_ROOT}d9db1550/tribe.sock`
 
 describe("guard-socket reaper matching", () => {
   it("finds the leaked supervisor and its daemon", () => {

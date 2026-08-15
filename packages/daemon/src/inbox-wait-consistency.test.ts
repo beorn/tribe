@@ -88,5 +88,4 @@ describe("inbox wait payload self-consistency", () => {
     // fired never triggered an insert-wake. What it may NOT do is deny them.
     expect(result.unread_count).toBe(result.attention.actionable_unread.length)
   })
-
 })

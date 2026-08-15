@@ -113,9 +113,7 @@ for (const pile of PILE_SIZES) {
     samples.push(one.ms)
     chars = one.warningChars
   }
-  console.log(
-    `${String(pile).padStart(5)}|${median(samples).toFixed(4).padStart(9)}|${String(chars).padStart(14)}`,
-  )
+  console.log(`${String(pile).padStart(5)}|${median(samples).toFixed(4).padStart(9)}|${String(chars).padStart(14)}`)
   db.close()
 }
 
@@ -126,8 +124,7 @@ console.log("-----|------------------------------|-----------------------------|
 
 for (const pile of PILE_SIZES) {
   const { db, ctx } = build(pile)
-  const remaining = (): number =>
-    (db.prepare("SELECT count(*) AS c FROM pending_request").get() as { c: number }).c
+  const remaining = (): number => (db.prepare("SELECT count(*) AS c FROM pending_request").get() as { c: number }).c
   if (remaining() !== pile) throw new Error(`seed failed: ${remaining()} != ${pile}`)
 
   const samples: number[] = []
