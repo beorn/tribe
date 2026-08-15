@@ -1656,7 +1656,20 @@ export function createStatements(db: Database) {
     // ---------------- km-tribe.event-classification ----------------
 
     /** Pull pending inbox rows for a session — push + pull rows whose rowid
-     *  exceeds the session's pull cursor and whose recipient matches. */
+     *  exceeds the session's pull cursor and whose recipient matches.
+     *
+     *  The session's stored subscription (`tribe.filter`) is applied HERE, in
+     *  SQL, and this is the only place it can do any good: `shouldDeliver` in
+     *  with-broadcast.ts gates the push wakeup, and 62 of 63 sessions are
+     *  `delivery=pull`. Before this predicate existed, `@cto` had `mode: focus`
+     *  persisted on a pull session and it removed nothing — accepted, stored,
+     *  inert (NO SILENT ERRORS class).
+     *
+     *  It must be a predicate rather than a post-query filter so the cursor
+     *  passes over excluded rows the same way it already passes over
+     *  `kind = 'event'`. A row this seat unsubscribed from was never owed to it,
+     *  so skipping it is not the message loss that 19785 rejected for the
+     *  per-call `topics` snapshot — that one filters rows the seat IS owed. */
     getInboxRows: db.prepare(`
 		SELECT m.id, m.rowid, m.type, m.sender, m.recipient, m.content, m.bead_id, m.ref, m.ts,
 			m.delivery, m.topic, m.room_id, m.summary, m.attention_required
@@ -1665,6 +1678,27 @@ export function createStatements(db: Database) {
 			AND (m.recipient = $name OR m.recipient = '*')
 			AND m.kind != 'event'
 			AND m.sender != $name
+			AND (
+				$filter_mode = 'ambient'
+				OR ($filter_mode = 'focus' AND m.type IN (${ACTIONABLE_TYPES_SQL}))
+				OR ($filter_mode = 'normal' AND (
+					m.recipient = $name
+					OR $filter_until IS NULL
+					OR $filter_until <= $now
+					OR (
+						-- Malformed mute JSON falls through to "mute covers everything",
+						-- matching safeJsonArray + the !muted branch of shouldDeliver.
+						-- Without json_valid() SQLite would raise and take the whole
+						-- drain down instead.
+						json_valid(COALESCE($filter_mute, '[]'))
+						AND json_array_length(COALESCE($filter_mute, '[]')) > 0
+						AND (
+							m.topic IS NULL
+							OR NOT EXISTS (SELECT 1 FROM json_each($filter_mute) WHERE m.topic GLOB value)
+						)
+					)
+				))
+			)
 			AND (
 				NOT (m.recipient = $name AND m.kind = 'direct' AND (m.type IN (${ACTIONABLE_TYPES_SQL}) OR m.attention_required = 1))
 				OR ${unretiredAttentionPredicateSql("m")}
@@ -1681,6 +1715,19 @@ export function createStatements(db: Database) {
 		ORDER BY m.rowid ASC
 		LIMIT $limit
 	`),
+
+    /**
+     * Highest rowid in the journal, read BEFORE the inbox window so it can only
+     * be conservative — anything inserted afterwards is greater and is picked up
+     * on the next drain.
+     *
+     * A subscribed-away seat can have an entire window excluded by the predicate
+     * above, which returns zero rows and would leave the cursor parked while the
+     * excluded tail grows without bound — re-scanned on every fetch. When the
+     * window comes back short, the tail is exhausted and the cursor may safely
+     * jump to here. This is the same hot path that once cost 590k page reads.
+     */
+    getMaxMessageRowid: db.prepare("SELECT COALESCE(MAX(rowid), 0) AS max_rowid FROM messages"),
 
     /** Advance the per-session pull cursor — never decreases. */
     advanceInboxCursor: db.prepare(
