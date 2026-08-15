@@ -9,10 +9,9 @@ marketplace (`.claude-plugin/marketplace.json` at the repo root):
 ```
 
 This plugin is intentionally thin. It wires Claude Code to `tribe-wire`'s MCP
-stdio adapter and points that adapter at the in-repo `tribe-daemon`, which the
-host autostarts on first use. The `recall/` subdirectory holds the lore
-primitives the daemon's memory surface calls back into (socket, RPC, config,
-summarizer).
+stdio adapter, which connects to the in-repo `tribe-daemon` without taking over
+its lifecycle. The `recall/` subdirectory holds the lore primitives the
+daemon's memory surface calls back into (socket, RPC, config, summarizer).
 
 ## Components
 
@@ -20,9 +19,9 @@ summarizer).
 | ------------- | ---------------- | ----------------------------------------------------------------------- |
 | Wire client   | `tribe-wire`     | Protocol client, `tribe-wire` CLI, and `tribe-wire mcp` adapter         |
 | Daemon        | `tribe-daemon`   | Broker process, SQLite state, sessions, message journal, daemon plugins |
-| Claude plugin | `plugins/claude` | Claude Code MCP registration and daemon-script wiring                   |
+| Claude plugin | `plugins/claude` | Claude Code MCP registration and connect-only bridge supervision        |
 
-Project workflow conventions such as `@chief`, `@agent/N`, beads, worktrees,
+Project workflow conventions such as coordinator roles, worker numbering, task queues, branch assignments,
 and integration authority are outside this package. Those belong to the
 consumer's tent/SOP layer.
 
@@ -41,8 +40,36 @@ For a local project-level MCP config without plugin channels:
 }
 ```
 
-That direct `tribe-wire` route expects an existing or forwarded daemon socket.
-The plugin route owns daemon-script wiring through `tribe-daemon`.
+Both routes expect an existing or forwarded daemon socket.
+
+## Daemon-restart recovery
+
+The plugin entry point is a stable stdio supervisor. Its adapter child connects
+to the daemon socket and asks the supervisor for a current-disk replacement
+when it observes a new daemon generation, exhausts bounded reconnect, or
+remains reconnecting for 60 seconds while a fresh daemon RPC succeeds. Source
+changes and daemon reload notifications use that same wrapper-owned replacement
+path; adapters never spawn adapters. The wrapper—and therefore Claude Code's stdio
+channel—stays in place while the child changes.
+
+An unexpected adapter crash uses the same bounded exponential-backoff budget
+without replacing the wrapper or its stdio channel. A clean adapter exit still
+shuts the wrapper down. If repeated crashes exhaust the budget, the wrapper
+fails loudly and the durable launch remains visible instead of silently
+disappearing: addressable identities appear in `membership_discrepancy`, while
+retained unidentified `unknown-*` identities contribute to the bounded
+`anonymous_disconnected` health count.
+
+Claim-bound Hab launches give the wrapper the complete launcher-minted launch
+id and harness parent PID. The wrapper validates that live provenance once and
+forwards it unchanged to every replacement child. Standalone plugin launches
+with no managed provenance use the wrapper's actual provider parent. The
+adapter-child marker is wrapper-owned and is never placed on Claude itself.
+
+Updating the plugin on disk does not rewrite code already evaluated inside a
+running pre-supervisor process. Such sessions still require `/mcp` reconnect or
+a host-session restart once; newly launched/current-code plugin processes then
+self-heal through the supervisor.
 
 ## Boundary
 

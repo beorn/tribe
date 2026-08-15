@@ -1,103 +1,125 @@
-/**
- * Read/inspect verbs for the unified `tribe-wire` CLI.
- *
- * Family 1 of Phase A.2 verb-port — see
- * `@km/bearly/19231-tribe-cli-unify-phase-a2-verbs`. Each verb mirrors the
- * implementation in `vendor/tribe/tools/tribe-cli.ts` (which stays canonical
- * until the Phase C atomic-delete). The handlers here are pure ports — same
- * RPCs, same flags, same output shape — with the only changes being:
- *
- *   - Import paths are intra-package (`../lib/...`) instead of
- *     `tribe-wire/lib/...` (to avoid self-import).
- *   - The `activity-watch.ts` reader was copied into
- *     `../lib/activity-watch.ts` so this module has no `tools/` dependency.
- *   - The verbs are registered on a caller-supplied `Command` rather than
- *     created on a fresh `program` — the main dispatcher (`cli.ts`) calls
- *     `registerReadCommands(program)` to wire them up.
- *
- * Verbs in this family:
- *   - status        (line ~570 in tools/tribe-cli.ts)
- *   - sessions      (line ~575)
- *   - pending       (line ~596)
- *   - log           (line ~610)
- *   - health        (line ~617)
- *   - inbox-status  (line ~622)
- *   - inbox-drain   (bounded actionable drain without transient registration)
- *   - reload        (MCP/RPC tribe.reload hot-reload parity)
- *   - repair        (operator-bounded state repair)
- *   - activity      (line ~674)
- *
- * The legacy `tools/tribe-cli.ts` continues to ship these same verbs until
- * Phase C deletes it. There is no `members` verb in the source — it is
- * exposed via `tribe.members` MCP call only, not the CLI.
- */
+/** Read and inspect verbs for the canonical `tribe-wire` CLI. */
 
+import { readFileSync } from "node:fs"
 import { Command, int } from "@silvery/commander"
 import { cliOption, visibleCliProjectionForMcp } from "../command-descriptors.ts"
-import { DEFAULT_INBOX_WAIT_SESSION, resolveInboxWaitOptions } from "../lib/inbox-wait-options.ts"
-import { connectToDaemon, resolveSocketPath } from "../lib/socket.ts"
+import {
+  deriveInboxWaitCallTimeoutMs,
+  parseInboxWaitResult,
+  resolveInboxWaitControls,
+  type InboxWaitResult,
+} from "../lib/inbox-wait-options.ts"
+import {
+  connectToDaemon,
+  resolveSocketPath,
+  isSupportedProtocolVersion,
+  TRIBE_PROTOCOL_VERSION,
+  TRIBE_SUPPORTED_PROTOCOL_VERSIONS,
+  type DaemonClient,
+} from "../lib/socket.ts"
 import { watchActivity } from "../lib/activity-watch.ts"
 import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-exempt.ts"
+import { readTribeLaunchId } from "../launch-environment.ts"
+import { withCliDaemonClient } from "./daemon-client.ts"
+import { mcpJsonContent } from "./mcp-json-content.ts"
+import {
+  resolveCheckoutCodeIdentity,
+  resolvePinDirection,
+  type CheckoutCodeIdentity,
+  type GitProbe,
+  type PinDirection,
+} from "../lib/code-identity.ts"
+import type { BallSettlementReason } from "../lib/ball-outcome.ts"
+import { AG_SESSION_AUTH_ENV, readSelfMailboxAuthorityFromEnvironment } from "../lib/self-mailbox-authority.ts"
 
 const PENDING_CLI = visibleCliProjectionForMcp("pending")
 const INBOX_WAIT_CLI = visibleCliProjectionForMcp("inbox.wait")
 const REPAIR_CLI = visibleCliProjectionForMcp("repair")
+
+const STALE_MANAGED_INBOX_DAEMON_ERROR =
+  "Running Tribe daemon is stale and cannot resolve this managed inbox; update the module root before restarting the daemon. Use --session only for an explicit operator target."
+const INBOX_WAIT_PROTOCOL_MISMATCH = "TRIBE_INBOX_WAIT_PROTOCOL_MISMATCH"
+
+function writeStdoutLine(value: string): Promise<void> {
+  return new Promise((resolveWrite, rejectWrite) => {
+    process.stdout.write(`${value}\n`, (error) => {
+      if (error) rejectWrite(error)
+      else resolveWrite()
+    })
+  })
+}
 
 // ---------------------------------------------------------------------------
 // Daemon connection
 // ---------------------------------------------------------------------------
 
 async function callDaemon(method: string, params?: Record<string, unknown>): Promise<unknown> {
-  const socketPath = resolveSocketPath()
-  try {
-    const client = await connectToDaemon(socketPath)
+  return withCliDaemonClient(async (client) => {
     try {
-      const result = await client.call(method, params)
-      return result
-    } finally {
-      client.close()
+      return await client.call(method, params)
+    } catch (error) {
+      const code = (error as { code?: string | number }).code
+      if (code === -32601 && method.endsWith("_by_launch_v1")) {
+        throw new Error(STALE_MANAGED_INBOX_DAEMON_ERROR)
+      }
+      throw error
     }
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code
-    if (code === "ECONNREFUSED" || code === "ENOENT") {
-      console.error(`No daemon running (socket: ${socketPath})`)
-      console.error(`Start one with: bun tribe-daemon (package tribe-daemon), or let a host autostart it`)
-      process.exit(1)
-    }
-    throw err
-  }
+  })
 }
 
-/**
- * Unwrap an MCP tool result's JSON content (`content[0].text` → parsed), or
- * return the raw value when there is no parseable content. Shared by the read
- * verbs that consume MCP-formatted daemon replies (`health`, `doctor`) so the
- * unwrap is not re-derived per verb.
- */
-export function mcpJsonContent(raw: unknown): unknown {
-  const text = (raw as { content?: ReadonlyArray<{ text?: string }> })?.content?.[0]?.text
-  if (typeof text === "string") {
-    try {
-      return JSON.parse(text)
-    } catch {
-      /* not JSON — fall back to the raw value */
-    }
+function cliInboxTargetParams(session: string | undefined): Record<string, unknown> {
+  if (session !== undefined) return { session }
+  const launchId = readTribeLaunchId(process.env)
+  const persona = process.env.TRIBE_SESSION_NAME?.trim() || process.env.TRIBE_NAME?.trim()
+  if (launchId) {
+    return { launch_id: launchId, ...(persona === undefined ? {} : { persona }) }
   }
-  return raw
+  throw new Error(
+    "Managed inbox request requires provider launch identity; use --session for an explicit operator target",
+  )
 }
 
-interface ReloadResult {
+function cliInboxMethod(base: "status" | "wait" | "drain", session: string | undefined): string {
+  return session === undefined ? `cli_inbox_${base}_by_launch_v1` : `cli_inbox_${base}`
+}
+
+interface RestartResult {
   error?: string
-  reloading?: boolean
+  restarting?: boolean
   reason?: string
   pid?: number
 }
 
-export function formatReloadResult(result: ReloadResult): string {
+export function formatRestartResult(result: RestartResult): string {
   const pid = typeof result.pid === "number" ? ` (pid ${result.pid})` : ""
-  const reason = result.reason ?? "manual reload"
-  return `Reloading tribe daemon${pid}: ${reason}.`
+  const reason = result.reason ?? "manual restart"
+  return `Restarting tribe daemon${pid}: ${reason}.`
 }
+
+interface StopResult {
+  error?: string
+  stopping?: boolean
+  reason?: string
+  pid?: number
+}
+
+export function formatStopResult(result: StopResult): string {
+  const pid = typeof result.pid === "number" ? ` (pid ${result.pid})` : ""
+  const reason = result.reason ?? "manual stop"
+  return `Stopping tribe daemon${pid}: ${reason}. Clean exit 0 — no successor will be spawned.`
+}
+
+/** The hab supervisor context — hab stamps HAB_SERVICE_NAME into every
+ * service environment, so its own lifecycle tooling may stop the daemon
+ * without the --force ceremony. */
+export function isHabSupervisorContext(env: { HAB_SERVICE_NAME?: string }): boolean {
+  return typeof env.HAB_SERVICE_NAME === "string" && env.HAB_SERVICE_NAME.trim() !== ""
+}
+
+export const STOP_REFUSAL_MESSAGE =
+  "tribe stop: refusing to stop the shared coordination daemon — every registered session loses its rail. " +
+  "Pass --force if you mean it. (Runs without --force only from the hab supervisor context, " +
+  "i.e. HAB_SERVICE_NAME set.)"
 
 // ---------------------------------------------------------------------------
 // Formatting helpers (shared with the legacy CLI; same byte-for-byte output)
@@ -140,6 +162,13 @@ function fmtCwd(cwd: string | undefined, maxWidth: number = 30): string {
 // Types (subset of the daemon's reply shapes used by the read verbs)
 // ---------------------------------------------------------------------------
 
+/** Mirrors the daemon's TribePluginHandle — `error` present iff the load failed. */
+interface PluginStatus {
+  name: string
+  active: boolean
+  error?: string
+}
+
 interface SessionInfo {
   id: string
   name: string
@@ -173,18 +202,13 @@ interface Msg {
   recipient: string
   content: string
   bead_id: string | null
+  ref: string | null
+  request: string | null
+  reply: string | null
   ts: number
 }
 
-export type InboxWaitResult = {
-  session: string
-  unread_count: number
-  oldest_unread_age_min: number
-  oldest_unread_ts: number
-  waited_ms: number
-  timed_out: boolean
-  aborted: boolean
-}
+export type { InboxWaitResult } from "../lib/inbox-wait-options.ts"
 
 type InboxDrainResult = {
   session: string
@@ -199,25 +223,60 @@ type InboxDrainResult = {
   }>
 }
 
-type InboxWaitCall = (args: { session: string; timeoutMs: number }) => Promise<InboxWaitResult>
+type InboxWaitCall = (args: {
+  session?: string
+  timeoutMs: number
+  wakeOnCorrelatedReply: boolean
+  afterSeq?: number
+}) => Promise<InboxWaitChunkResult>
+
+type InboxWaitChunkResult = InboxWaitResult & {
+  /** Private daemon reconnect cursor; never exposed by the CLI. */
+  baseline_seq?: number
+}
 
 const INBOX_WAIT_CHUNK_MS = 30_000
 const INBOX_WAIT_RETRY_DELAY_MS = 250
+const INBOX_WAIT_MAX_RETRY_DELAY_MS = 5_000
 const INBOX_WAIT_UNAVAILABLE_GRACE_MS = 2_000
 
 // ---------------------------------------------------------------------------
-// Command implementations (ported verbatim from tools/tribe-cli.ts)
+// Command implementations
 // ---------------------------------------------------------------------------
+
+/**
+ * A plugin that refused to load is reported here and nowhere else the operator
+ * routinely looks. Printing it unconditionally — including when the session
+ * list is empty — is the point: the 2026-08-13 outage was a plugin failure that
+ * no status surface named.
+ */
+function printDegradedPlugins(plugins: PluginStatus[] | undefined): void {
+  const failed = (plugins ?? []).filter((plugin) => plugin.error !== undefined)
+  if (!failed.length) return
+  console.log(`\n  DEGRADED — ${failed.length} plugin${failed.length !== 1 ? "s" : ""} disabled by a load failure:`)
+  for (const plugin of failed) {
+    console.log(`    ${plugin.name}: ${plugin.error?.split("\n")[0] ?? "(no cause recorded)"}`)
+  }
+  console.log(`  Coordination is unaffected; these plugins' signals are NOT being observed.`)
+}
 
 async function cmdStatus(): Promise<void> {
   const result = (await callDaemon("cli_status")) as {
     sessions: SessionInfo[]
-    daemon: { pid: number; uptime: number; clients: number; dbPath: string; socketPath: string }
+    daemon: {
+      pid: number
+      uptime: number
+      clients: number
+      dbPath: string
+      socketPath: string
+      plugins?: PluginStatus[]
+    }
   }
   const { sessions, daemon } = result
 
   if (!sessions.length) {
     console.log("No active tribe sessions.")
+    printDegradedPlugins(daemon?.plugins)
     return
   }
 
@@ -239,6 +298,7 @@ async function cmdStatus(): Promise<void> {
     )
   }
   console.log(`\n  Daemon: pid=${daemon.pid}, uptime=${fmtDur(daemon.uptime * 1000)}, clients=${daemon.clients}`)
+  printDegradedPlugins(daemon.plugins)
 }
 
 async function cmdSessions(showAll: boolean): Promise<void> {
@@ -279,8 +339,9 @@ async function cmdSessions(showAll: boolean): Promise<void> {
  * `tribe.members` handler (the same reply the MCP tool returns), printed as
  * one JSON object: `{"sessions":[...]}`. Unlike the human `sessions` verb
  * (cli_status text table), every row carries `launch_id` — the 21049
- * supervisor-issued launch identity the session's environment advertised via
- * TRIBE_LAUNCH_ID at registration — plus `alive`, so a supervisor can match a
+ * claim-derived launch identity the session's adapter advertised at
+ * registration — plus daemon-authoritative transport and
+ * owner verdicts, so a supervisor can match a
  * spawn's epoch against the JOIN EVIDENCE ITSELF instead of inferring from
  * name/row counts (tent bootstrap-epoch, @ag/super/21075 blocker 3).
  */
@@ -300,9 +361,35 @@ function fmtMsg(m: Msg): void {
   console.log(`  ${fmtTime(m.ts)}  ${pad(`${m.sender} → ${to}`, 28)}  [${m.type}]${bead} "${txt}"`)
 }
 
-async function cmdLog(limit: number, follow: boolean): Promise<void> {
-  const result = (await callDaemon("cli_log", { limit })) as { messages: Msg[] }
+async function cmdLog(
+  limit: number,
+  all: boolean,
+  follow: boolean,
+  json: boolean,
+  refPrefix?: string,
+  replyPrefix?: string,
+): Promise<void> {
+  if (follow && json) {
+    console.error("tribe log: --follow and --json are mutually exclusive; omit --follow for one JSON snapshot")
+    process.exit(2)
+  }
+  if (follow && all) {
+    console.error("tribe log: --follow and --all are mutually exclusive; omit --all for a bounded follow snapshot")
+    process.exit(2)
+  }
+  const params: Record<string, unknown> = all ? { all: true } : { limit }
+  if (refPrefix) params.ref_prefix = refPrefix
+  if (replyPrefix) params.reply_prefix = replyPrefix
+  const result = (await callDaemon("cli_log", params)) as {
+    messages: Msg[]
+    query?: { all: boolean; ref_prefix: string | null; reply_prefix: string | null }
+  }
   const rows = result.messages
+
+  if (json) {
+    await writeStdoutLine(JSON.stringify({ messages: rows, query: result.query }))
+    return
+  }
 
   if (!follow) {
     if (!rows.length) {
@@ -345,7 +432,10 @@ async function cmdLog(limit: number, follow: boolean): Promise<void> {
   let lastTs = rows.length ? Math.max(...rows.map((m) => m.ts)) : Date.now()
   setInterval(async () => {
     try {
-      const newResult = (await client.call("cli_log", { limit: 50 })) as { messages: Msg[] }
+      const pollParams: Record<string, unknown> = { limit: 50 }
+      if (refPrefix) pollParams.ref_prefix = refPrefix
+      if (replyPrefix) pollParams.reply_prefix = replyPrefix
+      const newResult = (await client.call("cli_log", pollParams)) as { messages: Msg[] }
       const newMsgs = newResult.messages.filter((m) => m.ts > lastTs)
       for (const m of newMsgs) {
         fmtMsg(m)
@@ -389,49 +479,66 @@ function parseDurationMs(spec: string): number | undefined {
  * @km/tribe/message-ball-tracker Phase 2a. Used by §C1 chief loop step 0.5
  * (call with `--owner @chief --stale 15m` to surface dropped balls).
  */
+type PendingCliRow = {
+  request_id: string
+  recipient: string
+  sender: string
+  opened_at: string
+  age_ms: number
+  message_id: string
+  fanout: string
+  summary: string | null
+  status?: "active" | "expired" | "unanswered"
+  settlement?: BallSettlementReason | null
+  settled_at?: string | null
+  owner_transport_registered?: boolean
+  owner_transport_state?: "connected" | "disconnected"
+  owner_state?: "live" | "dead" | "unknown"
+  owner_answer_capability?: "observed" | "not-observed"
+  owner_transport_reason?: string
+  owner_transport_observed_at?: string
+}
+
+function pendingOwnerTransportWarning(row: PendingCliRow): string {
+  if (row.owner_answer_capability !== "not-observed") return ""
+  const observedAt = row.owner_transport_observed_at ?? "unknown observation time"
+  return (
+    `  DEGRADED — current owner has no connected, PID-live transport as of ${observedAt}` +
+    "; obligation remains open; no automatic close/reroute"
+  )
+}
+
 async function cmdPending(
   owner: string | undefined,
   all: boolean,
+  expired: boolean,
+  owed: boolean,
   json: boolean,
   staleMs: number | undefined,
   close: string | undefined,
 ): Promise<void> {
   const args: Record<string, unknown> = {}
   if (all) args.all = true
+  if (expired) args.expired = true
+  if (owed) args.owed = true
   if (owner) args.owner = owner
   if (staleMs !== undefined) args.stale_ms = staleMs
   if (close) args.close = close
   const result = (await callDaemon("tribe.pending", args)) as {
     content?: Array<{ type?: string; text?: string }>
     structuredContent?: {
+      error?: string
       all?: boolean
       owner?: string
       request_id?: string
       closed?: number
-      pending?: Array<{
-        request_id: string
-        recipient: string
-        sender: string
-        opened_at: string
-        age_ms: number
-        message_id: string
-        fanout: string
-        summary: string | null
-      }>
+      warning?: string
+      pending?: PendingCliRow[]
       owners?: Array<{
         owner: string
         count: number
         oldest_age_ms: number
-        pending: Array<{
-          request_id: string
-          recipient: string
-          sender: string
-          opened_at: string
-          age_ms: number
-          message_id: string
-          fanout: string
-          summary: string | null
-        }>
+        pending: PendingCliRow[]
       }>
       owner_count?: number
       oldest_age_ms?: number
@@ -443,45 +550,64 @@ async function cmdPending(
     console.log("No structured result returned.")
     return
   }
+  // A daemon refusal arrives as a SUCCESSFUL response carrying `error`, not as a
+  // thrown RPC fault, so callDaemon passes it straight through. Without this the
+  // refusal falls to `count ?? 0` below and prints "No pending requests" — a
+  // confident, well-formed wrong answer to a query the daemon actually rejected.
+  if (typeof payload.error === "string") {
+    console.error(`tribe pending: ${payload.error}`)
+    process.exit(2)
+  }
   if (json) {
-    console.log(JSON.stringify(payload, null, 2))
+    await writeStdoutLine(JSON.stringify(payload, null, 2))
     return
   }
   if (close) {
     console.log(
       `Closed ${payload.closed ?? 0} pending request(s) for ${payload.owner ?? owner ?? "(caller)"}: ${payload.request_id ?? close}`,
     )
+    if (payload.warning) console.warn(`Warning: ${payload.warning}`)
     return
   }
   const count = payload.count ?? 0
   if (all) {
     if (count === 0) {
-      console.log("No pending requests across all owners.")
+      console.log(`No ${expired ? "expired" : "pending"} requests across all owners.`)
       return
     }
     const groups = payload.owners ?? []
-    console.log(`${count} pending request(s) across ${payload.owner_count ?? groups.length} owner(s):`)
+    console.log(
+      `${count} ${expired ? "expired" : "pending"} request(s) across ${payload.owner_count ?? groups.length} owner(s):`,
+    )
     for (const group of groups) {
       const oldestSec = Math.floor(group.oldest_age_ms / 1000)
       const oldest = oldestSec >= 60 ? `${Math.floor(oldestSec / 60)}m` : `${oldestSec}s`
-      console.log(`  ${group.owner}: ${group.count} (oldest ${oldest} ago)`)
+      const ownerWarning = group.pending[0] ? pendingOwnerTransportWarning(group.pending[0]) : ""
+      console.log(`  ${group.owner}: ${group.count} (oldest ${oldest} ago)${ownerWarning}`)
       for (const p of group.pending) {
         const summary = p.summary?.trim() || "(no summary)"
-        console.log(`    ${p.request_id}  from ${p.sender}  to ${p.recipient}  ${summary}  (msg ${p.message_id})`)
+        const outcome = expired ? `  settlement=${p.settlement ?? "unsettled"}` : ""
+        console.log(
+          `    ${p.request_id}  from ${p.sender}  to ${p.recipient}  ${summary}${outcome}  (msg ${p.message_id})`,
+        )
       }
     }
     return
   }
   const displayOwner = payload.owner ?? owner ?? "(caller)"
   if (count === 0) {
-    console.log(`No pending requests for ${displayOwner}.`)
+    console.log(`No ${expired ? "expired" : "pending"} requests for ${displayOwner}.`)
     return
   }
-  console.log(`${count} pending request(s) for ${displayOwner}:`)
+  console.log(`${count} ${expired ? "expired" : "pending"} request(s) for ${displayOwner}:`)
   for (const p of payload.pending ?? []) {
     const ageSec = Math.floor(p.age_ms / 1000)
     const age = ageSec >= 60 ? `${Math.floor(ageSec / 60)}m` : `${ageSec}s`
-    console.log(`  ${p.request_id}  from ${p.sender}  ${age} ago  fanout=${p.fanout}  (msg ${p.message_id})`)
+    const outcome = expired ? `  settlement=${p.settlement ?? "unsettled"}` : ""
+    console.log(
+      `  ${p.request_id}  from ${p.sender}  ${age} ago  fanout=${p.fanout}${outcome}  ` +
+        `(msg ${p.message_id})${pendingOwnerTransportWarning(p)}`,
+    )
   }
 }
 
@@ -515,7 +641,6 @@ async function cmdHealth(): Promise<void> {
       const nW = Math.max(4, ...result.sessions.map((r) => r.name.length))
       const rW = Math.max(4, ...result.sessions.map((r) => r.role.length))
       const cwds = result.sessions.map((r) => fmtCwd(r.cwd))
-      const cW = Math.max(3, ...cwds.map((c) => c.length))
       console.log(
         `    ${pad("NAME", nW)}  ${pad("ROLE", rW)}  ${pad("PID", 7)}  ${pad("UPTIME", 10)}  ${pad("IDLE", 8)}  CWD`,
       )
@@ -555,20 +680,49 @@ async function cmdHealth(): Promise<void> {
  * contain it; the probe must live outside (here).
  */
 export interface DoctorVerdict {
-  stale: boolean
+  outcome: DoctorOutcome
+  severity: DoctorCheckVerdict
   /** Operator-facing remedy, or null when fresh. */
   reason: string | null
   /** running/on-disk/pin SHAs when the daemon could self-report, else null. */
   detail: { running: string | null; on_disk: string | null; superproject_pin: string | null } | null
 }
 
+export type DoctorCheckVerdict = "OK" | "WARNING" | "CRITICAL" | "UNKNOWN"
+export type DoctorFinalVerdict = "OK" | "FAIL" | "UNKNOWN"
+
+export interface DoctorOutcome {
+  verdict: DoctorFinalVerdict
+  exitCode: 0 | 1 | 2
+}
+
+/**
+ * Reduce every doctor check through one verdict algebra. UNKNOWN is worst:
+ * an unanswerable check can never be collapsed into an evidence-free green.
+ */
+export function deriveDoctorOutcome(checks: readonly DoctorCheckVerdict[]): DoctorOutcome {
+  if (checks.includes("UNKNOWN")) return { verdict: "UNKNOWN", exitCode: 2 }
+  if (checks.some((check) => check === "WARNING" || check === "CRITICAL")) {
+    return { verdict: "FAIL", exitCode: 1 }
+  }
+  return { verdict: "OK", exitCode: 0 }
+}
+
 interface DoctorHealthShape {
   code_pin?: {
-    stale: boolean
+    stale: boolean | null
     reason: string | null
     running: string | null
     on_disk: string | null
     superproject_pin: string | null
+    /**
+     * Ancestry direction of an on_disk-vs-pin mismatch (additive field; older
+     * daemons omit it). evaluateDoctor doesn't branch on it today — the
+     * daemon's own `reason` text is already direction-aware and is what's
+     * surfaced — but the shape is declared here so it isn't silently dropped
+     * by callers that log or forward the full payload.
+     */
+    pin_direction?: PinDirection | null
   }
 }
 
@@ -577,15 +731,330 @@ export function evaluateDoctor(health: DoctorHealthShape): DoctorVerdict {
   const cp = health.code_pin
   if (cp === undefined) {
     return {
-      stale: true,
+      outcome: deriveDoctorOutcome(["UNKNOWN"]),
+      severity: "UNKNOWN",
       reason:
         "running daemon predates the code_pin detector (@km/tribe/20033): its tribe.health() has no `code_pin` field, so it is too old to self-report. Stop it so the next autostart respawns from current source.",
       detail: null,
     }
   }
   const detail = { running: cp.running, on_disk: cp.on_disk, superproject_pin: cp.superproject_pin }
-  if (cp.stale) return { stale: true, reason: cp.reason, detail }
-  return { stale: false, reason: null, detail }
+  const unresolved = (Object.entries(detail) as Array<[keyof typeof detail, string | null]>)
+    .filter(([, value]) => value === null)
+    .map(([field]) => field)
+  if (unresolved.length > 0) {
+    return {
+      outcome: deriveDoctorOutcome(["UNKNOWN"]),
+      severity: "UNKNOWN",
+      reason: `cannot compare daemon code identity: unresolved ${unresolved.join(", ")}`,
+      detail,
+    }
+  }
+  if (cp.stale || cp.running !== cp.on_disk || cp.on_disk !== cp.superproject_pin) {
+    const severity = cp.running !== cp.on_disk ? "CRITICAL" : "WARNING"
+    return {
+      outcome: deriveDoctorOutcome([severity]),
+      severity,
+      reason:
+        cp.reason ??
+        (cp.running !== cp.on_disk
+          ? `running ${cp.running} != on_disk ${cp.on_disk} — restart the daemon from the on-disk source`
+          : `on_disk ${cp.on_disk} != superproject_pin ${cp.superproject_pin} — materialize the pinned Tribe checkout`),
+      detail,
+    }
+  }
+  return { outcome: deriveDoctorOutcome(["OK"]), severity: "OK", reason: null, detail }
+}
+
+export type DoctorRailCheck =
+  | { severity: "OK"; evidence: { messageId: string; waitedMs: number } }
+  | { severity: "CRITICAL"; diagnosis: string; remedy: string }
+
+export interface DoctorDiagnosticCheck {
+  severity: DoctorCheckVerdict
+  diagnosis: string
+  remedy?: string
+  values?: { running: string; on_disk: string; pin: string }
+}
+
+function probeFailure(probe: Exclude<GitProbe, { ok: true }>): string {
+  const { path, operation, errno, message } = probe.failure
+  return `${operation} failed path=${path} errno=${errno}: ${message}`
+}
+
+/**
+ * `pinDirection` is an INPUT, not derived here: resolving ancestry needs
+ * `git merge-base --is-ancestor` (IO), and this check is tested with
+ * fabricated GitProbe values, no live git — mirrors the same pure/impure
+ * split as code-pin.ts's evaluateCodePin. Callers (cmdDoctor) resolve
+ * direction via resolvePinDirection and pass the fact in; pass null when
+ * on_disk/pin don't differ (direction moot) or wasn't computed.
+ */
+export function evaluateDoctorIdentity(
+  reported: { cert: string | null; root: string } | undefined,
+  resolved: CheckoutCodeIdentity | undefined,
+  pinDirection: PinDirection | null,
+): DoctorDiagnosticCheck {
+  if (reported === undefined) {
+    return {
+      severity: "UNKNOWN",
+      diagnosis: "daemon status did not report code identity path=? errno=UNSUPPORTED_CODE_IDENTITY",
+      remedy: "materialize current Tribe code, reload the daemon, then re-run `tribe doctor`",
+    }
+  }
+  if (!reported.root || reported.cert === null) {
+    return {
+      severity: "UNKNOWN",
+      diagnosis: `daemon code identity is unresolved path=${reported.root || "?"} errno=UNREPORTED_CERT`,
+      remedy: "reload the daemon from a Git-backed Tribe checkout, then re-run `tribe doctor`",
+    }
+  }
+  if (resolved === undefined) {
+    return { severity: "UNKNOWN", diagnosis: `checkout identity was not resolved path=${reported.root} errno=NO_PROBE` }
+  }
+  if (!resolved.onDisk.ok) {
+    return { severity: "UNKNOWN", diagnosis: probeFailure(resolved.onDisk) }
+  }
+  if (!resolved.superprojectPin.ok) {
+    // `git rev-parse --show-superproject-working-tree` exits 0 with empty
+    // output when this checkout has no superproject — e.g. CI's own
+    // standalone checkout of tribe, or any bare `git clone`. That is a fact
+    // about the checkout shape, not a probe failure: `probeGitValue` folds
+    // it into EMPTY_RESULT specifically so callers can tell it apart from a
+    // genuine error (git missing, corrupt repo, permission denied — all of
+    // which keep their own distinct errno and still fall through to
+    // UNKNOWN below). With no pin to compare against, identity reduces to
+    // running-vs-on-disk only.
+    if (resolved.superprojectPin.failure.errno !== "EMPTY_RESULT") {
+      return { severity: "UNKNOWN", diagnosis: probeFailure(resolved.superprojectPin) }
+    }
+    if (reported.cert !== resolved.onDisk.value) {
+      return {
+        severity: "CRITICAL",
+        diagnosis:
+          `daemon code integrity mismatch running=${reported.cert} on_disk=${resolved.onDisk.value} ` +
+          "pin=none (standalone checkout, no superproject)",
+        remedy:
+          "the daemon is running a different module root; restarting will not help. Advance the daemon module root, then re-run `tribe doctor`",
+      }
+    }
+    return {
+      severity: "OK",
+      diagnosis: `running=${reported.cert} on_disk=${resolved.onDisk.value} pin=none (standalone checkout, no superproject)`,
+    }
+  }
+  const values = {
+    running: reported.cert,
+    on_disk: resolved.onDisk.value,
+    pin: resolved.superprojectPin.value,
+  }
+  if (values.running !== values.on_disk) {
+    return {
+      severity: "CRITICAL",
+      values,
+      diagnosis: `daemon code integrity mismatch running=${values.running} on_disk=${values.on_disk} pin=${values.pin}`,
+      remedy:
+        "the daemon is running a different module root; restarting will not help. Advance the daemon module root, then re-run `tribe doctor`",
+    }
+  }
+  if (values.on_disk !== values.pin) {
+    if (pinDirection === "checkout-ahead") {
+      return {
+        severity: "WARNING",
+        values,
+        diagnosis:
+          `Tribe checkout is ahead of its host pin running=${values.running} on_disk=${values.on_disk} pin=${values.pin} ` +
+          "(the pin lags the checkout; convergence pending elsewhere)",
+        remedy:
+          "no daemon action needed; do NOT materialize the submodule from this pin, it would roll the checkout " +
+          "backward. If the pin itself needs to move, that is a superproject change made upstream, not a `tribe doctor` remedy.",
+      }
+    }
+    if (pinDirection === "divergent") {
+      return {
+        severity: "WARNING",
+        values,
+        diagnosis:
+          `Tribe checkout and its host pin have diverged running=${values.running} on_disk=${values.on_disk} pin=${values.pin} ` +
+          "(neither is an ancestor of the other)",
+        remedy: "investigate before acting; no mechanical remedy applies here",
+      }
+    }
+    if (pinDirection === "checkout-behind") {
+      return {
+        severity: "WARNING",
+        values,
+        diagnosis: `Tribe checkout is behind its host pin running=${values.running} on_disk=${values.on_disk} pin=${values.pin}`,
+        remedy:
+          `resolve the superproject with \`git -C ${JSON.stringify(reported.root)} rev-parse --show-superproject-working-tree\`, ` +
+          "materialize its pinned Tribe submodule, then re-run `tribe doctor`",
+      }
+    }
+    return {
+      severity: "UNKNOWN",
+      values,
+      diagnosis:
+        `Tribe checkout differs from its host pin running=${values.running} on_disk=${values.on_disk} pin=${values.pin}, ` +
+        "but ancestry between them could not be resolved (unknown-direction)",
+      remedy: "do not guess; inspect both commits (e.g. fetch missing objects) before acting",
+    }
+  }
+  return {
+    severity: "OK",
+    values,
+    diagnosis: `running=${values.running} on_disk=${values.on_disk} pin=${values.pin}`,
+  }
+}
+
+type DoctorVersionRow = {
+  name: string
+  protocol_versions?: number[]
+  version_state?: "current" | "version-degraded" | "version-unknown" | string
+}
+
+export function evaluateDoctorVersions(
+  daemonProtocol: number | undefined,
+  sessions: readonly DoctorVersionRow[],
+): DoctorDiagnosticCheck {
+  if (daemonProtocol === undefined) {
+    return { severity: "UNKNOWN", diagnosis: "daemon protocol version is unresolved" }
+  }
+  const degraded = sessions
+    .filter((session) => session.version_state === "version-degraded")
+    .map(
+      (session) =>
+        `${session.name}=version-degraded(${(session.protocol_versions ?? []).map((v) => `v${v}`).join(",") || "unknown"})`,
+    )
+  if (daemonProtocol < TRIBE_PROTOCOL_VERSION) degraded.unshift(`daemon=version-degraded(v${daemonProtocol})`)
+  if (degraded.length > 0) {
+    return {
+      severity: "WARNING",
+      diagnosis: degraded.join(" "),
+      remedy: "finish the rolling Tribe restart so every daemon and seat negotiates the current wire version",
+    }
+  }
+  const unknown = sessions
+    .filter(
+      (session) =>
+        session.version_state === undefined ||
+        session.version_state === "version-unknown" ||
+        !Array.isArray(session.protocol_versions),
+    )
+    .map((session) => session.name)
+  if (unknown.length > 0) {
+    return { severity: "UNKNOWN", diagnosis: `wire version unresolved for ${unknown.join(", ")}` }
+  }
+  const seats = sessions.map(
+    (session) =>
+      `${session.name}:${(session.protocol_versions ?? []).map((version) => `v${version}`).join(",") || "none"}`,
+  )
+  return {
+    severity: "OK",
+    diagnosis: `daemon=v${daemonProtocol} seats=${seats.join(" ") || "none"}`,
+  }
+}
+
+type DoctorMembershipRow = { name: string; transport_state?: string }
+type DoctorMembershipDiscrepancy = { status?: string; missing?: Array<{ name: string; state: string }> }
+
+export function evaluateDoctorMembership(
+  sessions: readonly DoctorMembershipRow[],
+  discrepancy: DoctorMembershipDiscrepancy | undefined,
+): DoctorDiagnosticCheck {
+  const states = new Map(sessions.map((session) => [session.name, session.transport_state ?? "unknown"]))
+  for (const missing of discrepancy?.missing ?? []) states.set(missing.name, missing.state)
+  const evidence = [...states].map(([name, state]) => `${name}=${state}`).join(" ") || "seats=none"
+  if ([...states.values()].some((state) => state === "unknown")) {
+    return { severity: "UNKNOWN", diagnosis: `membership rail state unresolved: ${evidence}` }
+  }
+  if (discrepancy?.status === "degraded" || [...states.values()].some((state) => state !== "connected")) {
+    return {
+      severity: "WARNING",
+      diagnosis: `membership degraded: ${evidence}`,
+      remedy: "rejoin each disconnected or missing-transport seat, then re-run `tribe doctor`",
+    }
+  }
+  return { severity: "OK", diagnosis: `connected=${states.size} missing=0 ${evidence}` }
+}
+
+type DoctorConnect = typeof connectToDaemon
+
+/**
+ * Exercise the coordination rail through its ordinary write + long-poll
+ * paths. The pending sender and ephemeral receiver are isolated from every
+ * live seat identity; the receiver consumes the canary before disconnecting.
+ */
+export async function probeDoctorRail(
+  socketPath = resolveSocketPath(),
+  connect: DoctorConnect = connectToDaemon,
+): Promise<DoctorRailCheck> {
+  let receiver: DaemonClient | undefined
+  let sender: DaemonClient | undefined
+  try {
+    receiver = await connect(socketPath, { callTimeoutMs: 3_000 })
+    sender = await connect(socketPath, { callTimeoutMs: 3_000 })
+    const registered = mcpJsonContent(
+      await receiver.call("register", {
+        name: "tribe-doctor-canary",
+        role: "member",
+        domains: ["diagnostics"],
+        delivery: "pull",
+        project: process.cwd(),
+        projectName: process.cwd().split("/").filter(Boolean).at(-1) ?? "unknown",
+        pid: process.pid,
+        protocolVersion: TRIBE_PROTOCOL_VERSION - 1,
+        supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
+      }),
+    ) as { name?: unknown }
+    if (typeof registered.name !== "string" || registered.name.length === 0) {
+      throw new Error("daemon registration returned no canary mailbox name")
+    }
+    const mailbox = registered.name
+    // Both requests share one sender socket. JSON-RPC request ordering makes
+    // the wait arm before the send is dispatched, while the daemon's
+    // concurrent request callbacks let the send wake that pending wait.
+    const waitPromise = sender.call(
+      "cli_inbox_wait",
+      { session: mailbox, timeout_ms: 2_000 },
+      { timeoutMs: 2_500 },
+    ) as Promise<{ status?: unknown; timed_out?: unknown; waited_ms?: unknown }>
+    const sendPromise = sender.call("tribe.send", {
+      to: mailbox,
+      message: "tribe doctor coordination-rail canary",
+      type: "verdict",
+      delivery: "pull",
+      summary: "doctor rail canary",
+    })
+    const [waited, sentRaw] = await Promise.all([waitPromise, sendPromise])
+    const sent = mcpJsonContent(sentRaw) as { sent?: unknown; id?: unknown; error?: unknown }
+    if (sent.error !== undefined) throw new Error(String(sent.error))
+    if (sent.sent !== true || typeof sent.id !== "string") {
+      throw new Error("daemon send did not acknowledge the canary message")
+    }
+    if (waited.status !== "woken" || waited.timed_out !== false) {
+      throw new Error(`long-poll returned status=${String(waited.status)} timed_out=${String(waited.timed_out)}`)
+    }
+
+    await receiver.call("tribe.fetch", {})
+    return {
+      severity: "OK",
+      evidence: {
+        messageId: sent.id,
+        waitedMs: typeof waited.waited_ms === "number" ? waited.waited_ms : 0,
+      },
+    }
+  } catch (error) {
+    const code = (error as { code?: unknown }).code
+    const detail = error instanceof Error ? error.message : String(error)
+    return {
+      severity: "CRITICAL",
+      diagnosis: `rail canary failed${code === undefined ? "" : ` (${String(code)})`}: ${detail}`,
+      remedy: 'run `tribe restart --reason "doctor rail canary failed"`, then re-run `tribe doctor`',
+    }
+  } finally {
+    sender?.close()
+    receiver?.close()
+  }
 }
 
 /** Extract the health payload from a callDaemon result (MCP-wrapped or raw). */
@@ -593,49 +1062,157 @@ function parseDoctorHealth(raw: unknown): DoctorHealthShape {
   return (mcpJsonContent(raw) ?? {}) as DoctorHealthShape
 }
 
-async function cmdDoctor(opts: { fix?: boolean }): Promise<void> {
-  const health = parseDoctorHealth(await callDaemon("tribe.health"))
-  const verdict = evaluateDoctor(health)
+function inboxWaitProtocolMismatchError(daemonProtocolVersion: number | null, health: DoctorHealthShape): Error {
+  const pins = health.code_pin
+  return Object.assign(
+    new Error(
+      "Inbox-wait protocol version mismatch: " +
+        `client=${TRIBE_PROTOCOL_VERSION} daemon=${daemonProtocolVersion ?? "unsupported"}; ` +
+        `running=${pins?.running ?? "?"} on_disk=${pins?.on_disk ?? "?"} pin=${pins?.superproject_pin ?? "?"}. ` +
+        "Materialize the pinned Tribe checkout and restart the daemon before retrying.",
+    ),
+    { code: INBOX_WAIT_PROTOCOL_MISMATCH },
+  )
+}
 
-  console.log("TRIBE DOCTOR — daemon code-staleness check\n")
-  if (verdict.detail) {
-    const d = verdict.detail
-    console.log(`  running=${d.running ?? "?"}  on_disk=${d.on_disk ?? "?"}  pin=${d.superproject_pin ?? "?"}`)
+async function assertInboxWaitProtocol(client: DaemonClient, timeoutMs: number): Promise<void> {
+  let daemonProtocolVersion: number | null = null
+  try {
+    const result = (await client.call("cli_protocol", undefined, { timeoutMs })) as {
+      protocol_version?: unknown
+    }
+    if (typeof result.protocol_version === "number") {
+      daemonProtocolVersion = result.protocol_version
+    }
+  } catch (err) {
+    if ((err as { code?: unknown }).code !== -32601) throw err
   }
 
-  if (!verdict.stale) {
-    console.log("  OK — running daemon matches the on-disk + superproject-pinned tribe code.")
+  if (daemonProtocolVersion !== null && isSupportedProtocolVersion(daemonProtocolVersion)) return
+
+  let health: DoctorHealthShape = {}
+  try {
+    health = parseDoctorHealth(await client.call("tribe.health", undefined, { timeoutMs }))
+  } catch {
+    // The protocol verdict is already authoritative. Health is best-effort
+    // diagnostic enrichment for daemons too old to expose code-pin details.
+  }
+  throw inboxWaitProtocolMismatchError(daemonProtocolVersion, health)
+}
+
+async function cmdDoctor(opts: { fix?: boolean }): Promise<void> {
+  let status: {
+    sessions?: DoctorVersionRow[]
+    daemon?: {
+      protocol_version?: number
+      code_identity?: { cert: string | null; root: string }
+    }
+  } = {}
+  try {
+    status = (await callDaemon("cli_status")) as typeof status
+  } catch {
+    // Older daemons may not expose the status RPC. The missing identity is an
+    // UNKNOWN check below; the rail canary still runs independently.
+  }
+  let daemonProtocol = status.daemon?.protocol_version
+  if (daemonProtocol === undefined) {
+    try {
+      const protocol = (await callDaemon("cli_protocol")) as { protocol_version?: unknown }
+      if (typeof protocol.protocol_version === "number") daemonProtocol = protocol.protocol_version
+    } catch {
+      // evaluateDoctorVersions turns the unresolved value into UNKNOWN.
+    }
+  }
+  const rawReportedIdentity = status.daemon?.code_identity
+  const reportedIdentity =
+    rawReportedIdentity &&
+    typeof rawReportedIdentity.root === "string" &&
+    (typeof rawReportedIdentity.cert === "string" || rawReportedIdentity.cert === null)
+      ? rawReportedIdentity
+      : undefined
+  const resolvedIdentity =
+    reportedIdentity?.root && typeof reportedIdentity.root === "string"
+      ? resolveCheckoutCodeIdentity(reportedIdentity.root)
+      : undefined
+  // Same precondition as gatherCodePin: only worth resolving ancestry when
+  // on_disk and pin actually differ (and both resolved in the first place).
+  const identityPinDirection =
+    reportedIdentity?.root &&
+    resolvedIdentity?.onDisk.ok &&
+    resolvedIdentity.superprojectPin.ok &&
+    resolvedIdentity.onDisk.value !== resolvedIdentity.superprojectPin.value
+      ? resolvePinDirection(
+          reportedIdentity.root,
+          resolvedIdentity.onDisk.value,
+          resolvedIdentity.superprojectPin.value,
+        )
+      : null
+  const identity = evaluateDoctorIdentity(reportedIdentity, resolvedIdentity, identityPinDirection)
+  const versions = evaluateDoctorVersions(daemonProtocol, status.sessions ?? [])
+
+  let membership: DoctorDiagnosticCheck
+  try {
+    const members = mcpJsonContent(await callDaemon("tribe.members")) as {
+      sessions?: DoctorMembershipRow[]
+      membership_discrepancy?: DoctorMembershipDiscrepancy
+    }
+    if (members === null || typeof members !== "object" || !Array.isArray(members.sessions)) {
+      throw new Error(`daemon returned an unexpected members shape: ${JSON.stringify(members)}`)
+    }
+    membership = evaluateDoctorMembership(members.sessions, members.membership_discrepancy)
+  } catch (error) {
+    membership = {
+      severity: "UNKNOWN",
+      diagnosis: `membership query failed: ${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
+  const rail = await probeDoctorRail()
+  const outcome = deriveDoctorOutcome([identity.severity, versions.severity, membership.severity, rail.severity])
+
+  console.log("TRIBE DOCTOR — coordination rail + daemon code identity\n")
+  if (identity.severity === "OK") {
+    console.log(`  OK — code identity ${identity.diagnosis}`)
+  } else {
+    console.error(`  ${identity.severity} — code identity: ${identity.diagnosis}`)
+    if (identity.remedy) console.error(`  REMEDY — ${identity.remedy}`)
+  }
+  if (versions.severity === "OK") {
+    console.log(`  OK — wire versions ${versions.diagnosis}`)
+  } else {
+    console.error(`  ${versions.severity} — wire versions: ${versions.diagnosis}`)
+    if (versions.remedy) console.error(`  REMEDY — ${versions.remedy}`)
+  }
+  if (membership.severity === "OK") {
+    console.log(`  OK — membership ${membership.diagnosis}`)
+  } else {
+    console.error(`  ${membership.severity} — ${membership.diagnosis}`)
+    if (membership.remedy) console.error(`  REMEDY — ${membership.remedy}`)
+  }
+
+  if (rail.severity === "OK") {
+    console.log(`  OK — rail canary message=${rail.evidence.messageId} waited_ms=${rail.evidence.waitedMs}`)
+  } else {
+    console.error(`  CRITICAL — ${rail.diagnosis}`)
+    console.error(`  REMEDY — ${rail.remedy}`)
+  }
+
+  if (outcome.verdict === "OK") {
     return
   }
 
-  console.error(`  STALE — ${verdict.reason}`)
-  if (opts.fix) {
-    // Operator-gated only — never auto, never in the hot hook path. The actual
-    // restart is a lifecycle op (which lives in the tribe-daemon package, not
-    // this read-only CLI), so --fix prints the exact operator remedy rather
-    // than mutating live daemon state from here. Restart-execution wiring is
-    // the tracked lifecycle follow-up slice.
-    console.error(
-      "\n  --fix (operator-gated remedy):\n" +
-        "    1. if on_disk != pin: update the tribe submodule to its pin, then\n" +
-        "    2. stop the stale daemon (it idle-exits; or kill its `daemon.ts` pid)\n" +
-        "       so the next autostart respawns from current source, then\n" +
-        "    3. re-run `tribe doctor` to confirm OK.\n" +
-        "  (Automated restart is the tracked lifecycle follow-up; not wired here.)",
-    )
-  }
-  process.exit(1)
+  console.error(`\n  FINAL ${outcome.verdict} — derived from the worst doctor check.`)
+  if (opts.fix) console.error("  --fix is read-only; execute the diagnosis-specific REMEDY line(s) above.")
+  process.exitCode = outcome.exitCode
 }
 
 /**
  * Inbox status — count + age of actionable DMs the target session hasn't
  * drained via `tribe.fetch` yet. JSON when `--json` is set; otherwise a
  * human-readable summary. Used by `.claude/hooks/chief-drain-check.sh`.
- * Spec: @km/all/silent-errors-enforcement/chief-silent-watchdog-relay-pattern-detection (Layer 2).
+ * Delivery-attention lineage: @ag/tribe/21626-per-seat-inbox-staleness-alarm.
  */
 async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promise<void> {
-  const session = opts.session ?? "@chief"
-  const result = (await callDaemon("cli_inbox_status", { session })) as {
+  const result = (await callDaemon(cliInboxMethod("status", opts.session), cliInboxTargetParams(opts.session))) as {
     session: string
     unread_count: number
     oldest_unread_age_min: number
@@ -647,17 +1224,34 @@ async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promi
   }
   const n = result.unread_count
   if (n === 0) {
-    console.log(`${session}: inbox drained (0 unread actionable DMs).`)
+    console.log(`${result.session}: inbox drained (0 unread actionable DMs).`)
     return
   }
   console.log(
-    `${session}: ${n} unread actionable DM${n === 1 ? "" : "s"}, ` + `oldest ${result.oldest_unread_age_min}min ago.`,
+    `${result.session}: ${n} unread actionable DM${n === 1 ? "" : "s"}, ` +
+      `oldest ${result.oldest_unread_age_min}min ago.`,
   )
 }
 
+function readOperatorCapabilityFromInheritedFd(fdRaw: string | undefined): string | undefined {
+  if (fdRaw === undefined) return undefined
+  const fd = Number(fdRaw)
+  if (!Number.isSafeInteger(fd) || fd < 3) {
+    throw new Error(`TRIBE_OPERATOR_CAPABILITY_FD must name an inherited fd >= 3, received ${JSON.stringify(fdRaw)}`)
+  }
+  const capability = readFileSync(fd, "utf8").trim()
+  if (!capability) throw new Error("TRIBE_OPERATOR_CAPABILITY_FD contained an empty operator capability")
+  return capability
+}
+
 async function cmdInboxDrain(opts: { session?: string; limit?: number; json?: boolean }): Promise<void> {
-  const session = opts.session ?? DEFAULT_INBOX_WAIT_SESSION
-  const result = (await callDaemon("cli_inbox_drain", { session, limit: opts.limit ?? 10 })) as InboxDrainResult
+  const result = (await callDaemon(cliInboxMethod("drain", opts.session), {
+    ...cliInboxTargetParams(opts.session),
+    limit: opts.limit ?? 10,
+    // The fd number is public process metadata; the capability content never
+    // enters env/argv, where another same-user process could inspect it.
+    operator_capability: readOperatorCapabilityFromInheritedFd(process.env.TRIBE_OPERATOR_CAPABILITY_FD),
+  })) as InboxDrainResult
   if (opts.json) {
     console.log(JSON.stringify(result))
     return
@@ -667,9 +1261,91 @@ async function cmdInboxDrain(opts: { session?: string; limit?: number; json?: bo
     console.log(event.content)
   }
   console.log(
-    `${session}: drained ${result.drained_count} actionable DM${result.drained_count === 1 ? "" : "s"}; ` +
+    `${result.session}: drained ${result.drained_count} actionable DM${result.drained_count === 1 ? "" : "s"}; ` +
       `${result.unread_count} remaining.`,
   )
+}
+
+interface SelfInboxEvent {
+  id?: string
+  from?: string
+  type?: string
+  content?: string
+}
+
+interface SelfInboxResult {
+  attention?: {
+    actionable_unread?: SelfInboxEvent[]
+    pending_balls?: Array<{ request_id?: string; sender?: string; summary?: string }>
+    pending_balls_summary?: { total?: number }
+  }
+  events?: SelfInboxEvent[]
+  cursor?: number
+}
+
+function printSelfInboxEvent(event: SelfInboxEvent): void {
+  console.log(`${event.from ?? "unknown"} [${event.type ?? "message"}]`)
+  console.log(event.content ?? "")
+}
+
+async function cmdInbox(opts: { limit?: number; json?: boolean }): Promise<void> {
+  const authority = readSelfMailboxAuthorityFromEnvironment(process.env)
+  if (authority === null) {
+    throw new Error(`${AG_SESSION_AUTH_ENV} is missing; this managed session has no self-mailbox authority source`)
+  }
+  const result = mcpJsonContent(
+    await callDaemon("cli_self_inbox_v1", { authority, limit: opts.limit ?? 50 }),
+  ) as SelfInboxResult
+  if (opts.json) {
+    console.log(JSON.stringify(result))
+    return
+  }
+  const actionable = result.attention?.actionable_unread ?? []
+  const actionableIds = new Set(actionable.map((event) => event.id).filter((id): id is string => id !== undefined))
+  for (const event of actionable) printSelfInboxEvent(event)
+  for (const event of result.events ?? []) {
+    if (event.id !== undefined && actionableIds.has(event.id)) continue
+    printSelfInboxEvent(event)
+  }
+  const pending = result.attention?.pending_balls ?? []
+  for (const ball of pending) {
+    console.log(`pending from ${ball.sender ?? "unknown"} [${ball.request_id ?? "unidentified"}]`)
+    console.log(ball.summary ?? "")
+  }
+  const pendingTotal = result.attention?.pending_balls_summary?.total ?? pending.length
+  console.log(
+    `inbox: ${actionable.length} actionable unread; ${pendingTotal} pending ball(s); cursor ${result.cursor ?? 0}.`,
+  )
+}
+
+interface InboxDrainFailureProjection {
+  code: number | string | null
+  kind: string
+  message: string
+  reason: string
+}
+
+function projectInboxDrainFailure(error: unknown): InboxDrainFailureProjection {
+  const failure = error instanceof Error ? (error as Error & { code?: unknown; data?: unknown }) : undefined
+  const data =
+    typeof failure?.data === "object" && failure.data !== null ? (failure.data as Record<string, unknown>) : undefined
+  return {
+    code: typeof failure?.code === "number" || typeof failure?.code === "string" ? failure.code : null,
+    // An older daemon can return -32003 without saying whether it evaluated a
+    // credential. That evidence is indeterminate, never proof of rejection.
+    kind: typeof data?.kind === "string" ? data.kind : "could-not-evaluate",
+    message: failure?.message ?? String(error),
+    reason: typeof data?.reason === "string" ? data.reason : "unclassified-authority-failure",
+  }
+}
+
+function renderInboxDrainFailure(error: unknown, json: boolean): void {
+  const failure = projectInboxDrainFailure(error)
+  if (json) {
+    console.error(JSON.stringify({ error: failure }))
+    return
+  }
+  console.error(`tribe inbox-drain: ${failure.kind} — ${failure.message} (reason=${failure.reason})`)
 }
 
 type InboxWaitErrorKind = "transport-close" | "daemon-unavailable" | null
@@ -690,24 +1366,49 @@ export function isRetryableInboxWaitError(err: unknown): boolean {
   return inboxWaitErrorKind(err) !== null
 }
 
-function totalWaited(result: InboxWaitResult, startedAt: number, now: () => number): InboxWaitResult {
-  return { ...result, waited_ms: Math.max(result.waited_ms, Math.max(0, now() - startedAt)) }
-}
-
-function timeoutInboxWaitResult(session: string, startedAt: number, now: () => number): InboxWaitResult {
+function totalWaited(
+  result: InboxWaitChunkResult,
+  startedAt: number,
+  now: () => number,
+  effectiveTimeoutMs: number,
+): InboxWaitResult {
+  const publicResult = { ...result }
+  delete publicResult.baseline_seq
   return {
-    session,
-    unread_count: 0,
-    oldest_unread_age_min: 0,
-    oldest_unread_ts: 0,
-    waited_ms: Math.max(0, now() - startedAt),
-    timed_out: true,
-    aborted: false,
+    ...publicResult,
+    waited_ms: Math.max(result.waited_ms, Math.max(0, now() - startedAt)),
+    effective_timeout_ms: effectiveTimeoutMs,
   }
 }
 
+function logicalTimeoutInboxWaitResult(
+  latest: InboxWaitResult | undefined,
+  lastRetryableError: unknown,
+  startedAt: number,
+  now: () => number,
+  effectiveTimeoutMs: number,
+): InboxWaitResult {
+  if (latest === undefined) {
+    if (lastRetryableError !== undefined) throw lastRetryableError
+    throw new Error("Inbox wait ended without an authoritative daemon result")
+  }
+  if (latest.aborted) {
+    return totalWaited(latest, startedAt, now, effectiveTimeoutMs)
+  }
+  return totalWaited(
+    {
+      ...latest,
+      status: "timeout",
+      timed_out: true,
+    },
+    startedAt,
+    now,
+    effectiveTimeoutMs,
+  )
+}
+
 export async function waitForInboxWithReconnect(opts: {
-  session: string
+  session?: string
   timeoutMs: number
   call: InboxWaitCall
   now?: () => number
@@ -715,89 +1416,210 @@ export async function waitForInboxWithReconnect(opts: {
   maxChunkMs?: number
   retryDelayMs?: number
   unavailableGraceMs?: number
+  wakeOnCorrelatedReply?: boolean
 }): Promise<InboxWaitResult> {
   const now = opts.now ?? Date.now
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
   const maxChunkMs = opts.maxChunkMs ?? INBOX_WAIT_CHUNK_MS
-  const retryDelayMs = opts.retryDelayMs ?? INBOX_WAIT_RETRY_DELAY_MS
+  const retryDelayMs = Math.max(0, opts.retryDelayMs ?? INBOX_WAIT_RETRY_DELAY_MS)
   const unavailableGraceMs = opts.unavailableGraceMs ?? INBOX_WAIT_UNAVAILABLE_GRACE_MS
+  const controls = resolveInboxWaitControls({
+    timeout_ms: opts.timeoutMs,
+    wake_on_correlated_reply: opts.wakeOnCorrelatedReply,
+  })
   const startedAt = now()
-  const deadline = startedAt + Math.max(0, opts.timeoutMs)
+  const deadline = startedAt + controls.timeoutMs
+  let latestResult: InboxWaitResult | undefined
+  let lastRetryableError: unknown
+  let attempted = false
+  let afterSeq: number | undefined
+  let consecutiveRetryableErrors = 0
 
   while (true) {
     const remainingMs = Math.max(0, deadline - now())
-    if (remainingMs <= 0) return timeoutInboxWaitResult(opts.session, startedAt, now)
+    if (attempted && remainingMs <= 0) {
+      return logicalTimeoutInboxWaitResult(latestResult, lastRetryableError, startedAt, now, controls.timeoutMs)
+    }
 
     try {
-      const result = await opts.call({ session: opts.session, timeoutMs: Math.min(maxChunkMs, remainingMs) })
-      if (result.unread_count > 0) return totalWaited(result, startedAt, now)
-      if (result.aborted || result.timed_out) {
-        if (now() >= deadline) return timeoutInboxWaitResult(opts.session, startedAt, now)
+      attempted = true
+      const result = await opts.call({
+        session: opts.session,
+        timeoutMs: Math.min(maxChunkMs, remainingMs),
+        wakeOnCorrelatedReply: controls.wakeOnCorrelatedReply,
+        ...(afterSeq === undefined ? {} : { afterSeq }),
+      })
+      consecutiveRetryableErrors = 0
+      if (Number.isSafeInteger(result.baseline_seq) && Number(result.baseline_seq) >= 0) {
+        afterSeq = Number(result.baseline_seq)
+      }
+      latestResult = result
+      lastRetryableError = undefined
+      if (result.reconnect === true) {
         continue
       }
-      return totalWaited(result, startedAt, now)
+      if (result.aborted) {
+        return totalWaited(result, startedAt, now, controls.timeoutMs)
+      }
+      if (!result.timed_out) {
+        return totalWaited(result, startedAt, now, controls.timeoutMs)
+      }
+      if (now() >= deadline) {
+        return logicalTimeoutInboxWaitResult(result, lastRetryableError, startedAt, now, controls.timeoutMs)
+      }
+      continue
     } catch (err) {
       const kind = inboxWaitErrorKind(err)
       if (!kind) throw err
-      if (kind === "daemon-unavailable" && now() - startedAt >= unavailableGraceMs) throw err
+      lastRetryableError = err
+      if (kind === "daemon-unavailable" && latestResult === undefined && now() - startedAt >= unavailableGraceMs) {
+        throw err
+      }
       const afterErrorRemainingMs = Math.max(0, deadline - now())
-      if (afterErrorRemainingMs <= 0) return timeoutInboxWaitResult(opts.session, startedAt, now)
-      const pauseMs = Math.min(retryDelayMs, afterErrorRemainingMs)
+      if (afterErrorRemainingMs <= 0) {
+        return logicalTimeoutInboxWaitResult(latestResult, lastRetryableError, startedAt, now, controls.timeoutMs)
+      }
+      const retryBackoffMs = Math.min(
+        INBOX_WAIT_MAX_RETRY_DELAY_MS,
+        retryDelayMs * 2 ** Math.min(consecutiveRetryableErrors, 30),
+      )
+      consecutiveRetryableErrors += 1
+      const pauseMs = Math.min(retryBackoffMs, afterErrorRemainingMs)
       if (pauseMs > 0) await sleep(pauseMs)
     }
   }
 }
 
-async function callInboxWaitChunk(session: string, timeoutMs: number): Promise<InboxWaitResult> {
+async function callInboxWaitChunk(
+  method: string,
+  target: Record<string, unknown>,
+  timeoutMs: number,
+  wakeOnCorrelatedReply: boolean,
+  afterSeq?: number,
+): Promise<InboxWaitChunkResult> {
   const socketPath = resolveSocketPath()
-  const client = await connectToDaemon(socketPath, { callTimeoutMs: Math.max(10_000, timeoutMs + 5_000) })
+  const callTimeoutMs = deriveInboxWaitCallTimeoutMs(timeoutMs)
+  const client = await connectToDaemon(socketPath, { callTimeoutMs })
   try {
-    return (await client.call("cli_inbox_wait", { session, timeout_ms: timeoutMs })) as InboxWaitResult
+    await assertInboxWaitProtocol(client, deriveInboxWaitCallTimeoutMs(0))
+    const raw = await client.call(
+      method,
+      {
+        ...target,
+        timeout_ms: timeoutMs,
+        ...(wakeOnCorrelatedReply ? { wake_on_correlated_reply: true } : {}),
+        ...(afterSeq === undefined ? {} : { after_seq: afterSeq }),
+      },
+      { timeoutMs: callTimeoutMs },
+    )
+    const parsed = parseInboxWaitResult(raw)
+    const baselineSeq = (raw as { baseline_seq?: unknown }).baseline_seq
+    if (!Number.isSafeInteger(baselineSeq) || Number(baselineSeq) < 0) {
+      throw new Error("Inbox-wait daemon omitted the private reconnect baseline")
+    }
+    return { ...parsed, baseline_seq: Number(baselineSeq) }
+  } catch (err) {
+    if ((err as { code?: unknown }).code === -32601 && method.endsWith("_by_launch_v1")) {
+      throw new Error(STALE_MANAGED_INBOX_DAEMON_ERROR)
+    }
+    throw err
   } finally {
     client.close()
   }
 }
 
-async function cmdInboxWait(opts: { session?: string; timeoutMs?: number; json?: boolean }): Promise<void> {
-  const { session, timeoutMs } = resolveInboxWaitOptions(
-    { session: opts.session, timeoutMs: opts.timeoutMs },
-    { defaultSession: DEFAULT_INBOX_WAIT_SESSION },
-  )
-  const result = await waitForInboxWithReconnect({
-    session,
-    timeoutMs,
-    call: ({ session: chunkSession, timeoutMs: chunkTimeoutMs }) => callInboxWaitChunk(chunkSession, chunkTimeoutMs),
+async function cmdInboxWait(opts: {
+  session?: string
+  timeoutMs?: number
+  wakeOnCorrelatedReply?: boolean
+  json?: boolean
+}): Promise<void> {
+  const controls = resolveInboxWaitControls({
+    timeout_ms: opts.timeoutMs,
+    wake_on_correlated_reply: opts.wakeOnCorrelatedReply,
   })
+  const target = cliInboxTargetParams(opts.session)
+  let result: InboxWaitResult
+  try {
+    result = await waitForInboxWithReconnect({
+      session: opts.session,
+      timeoutMs: controls.timeoutMs,
+      wakeOnCorrelatedReply: controls.wakeOnCorrelatedReply,
+      call: ({ timeoutMs: chunkTimeoutMs, wakeOnCorrelatedReply, afterSeq }) =>
+        callInboxWaitChunk(
+          cliInboxMethod("wait", opts.session),
+          target,
+          chunkTimeoutMs,
+          wakeOnCorrelatedReply,
+          afterSeq,
+        ),
+    })
+  } catch (err) {
+    if ((err as { code?: unknown }).code !== INBOX_WAIT_PROTOCOL_MISMATCH) throw err
+    console.error(`tribe inbox-wait: ${(err as Error).message}`)
+    process.exitCode = 1
+    return
+  }
   if (opts.json) {
     console.log(JSON.stringify(result))
     return
   }
   if (result.aborted) {
-    console.log(`${session}: inbox wait aborted.`)
+    console.log(`${result.session}: inbox wait aborted.`)
     return
   }
-  if (result.timed_out || result.unread_count === 0) {
-    console.log(`${session}: no actionable DMs within ${Math.round(timeoutMs / 1000)}s.`)
+  if (result.timed_out) {
+    console.log(`${result.session}: no actionable DMs within ${Math.round(controls.timeoutMs / 1000)}s.`)
     process.exitCode = 64
+    return
+  }
+  if (result.unread_count === 0) {
+    console.log(`${result.session}: actionable inbox attention is available.`)
     return
   }
   const n = result.unread_count
   console.log(
-    `${session}: ${n} unread actionable DM${n === 1 ? "" : "s"}, ` +
+    `${result.session}: ${n} unread actionable DM${n === 1 ? "" : "s"}, ` +
       `oldest ${result.oldest_unread_age_min}min ago (waited ${Math.round(result.waited_ms / 1000)}s).`,
   )
 }
 
-async function cmdRepair(opts: { session?: string; inboxCursor?: string; json?: boolean }): Promise<void> {
-  const session = opts.session ?? "@chief"
+export type RepairCliOptions = {
+  session?: string
+  inboxCursor?: string
+  reapStaleTransports?: boolean
+  json?: boolean
+}
+
+export function resolveRepairOptions(
+  opts: RepairCliOptions,
+):
+  | { params: { session: string; inbox_cursor: string; reap_stale_transports?: never } }
+  | { params: { reap_stale_transports: true; session?: never; inbox_cursor?: never } }
+  | { error: string } {
+  if (opts.inboxCursor !== undefined && opts.reapStaleTransports === true) {
+    return { error: "--inbox-cursor and --reap-stale-transports are mutually exclusive" }
+  }
+  if (opts.reapStaleTransports === true) {
+    return { params: { reap_stale_transports: true } }
+  }
+
   const inboxCursor = opts.inboxCursor ?? "tail"
   const allowedInboxCursors = cliOption(REPAIR_CLI, "inbox-cursor").enum ?? []
   if (!allowedInboxCursors.includes(inboxCursor)) {
-    console.error(`tribe repair: bad --inbox-cursor '${inboxCursor}' (expected ${allowedInboxCursors.join("|")})`)
+    return { error: `bad --inbox-cursor '${inboxCursor}' (expected ${allowedInboxCursors.join("|")})` }
+  }
+  return { params: { session: opts.session ?? "@chief", inbox_cursor: inboxCursor } }
+}
+
+async function cmdRepair(opts: RepairCliOptions): Promise<void> {
+  const resolved = resolveRepairOptions(opts)
+  if ("error" in resolved) {
+    console.error(`tribe repair: ${resolved.error}`)
     process.exit(2)
   }
 
-  const result = mcpJsonContent(await callDaemon("tribe.repair", { session, inbox_cursor: inboxCursor })) as {
+  const result = mcpJsonContent(await callDaemon("tribe.repair", resolved.params)) as {
     error?: string
     repaired?: boolean
     session?: string
@@ -805,6 +1627,9 @@ async function cmdRepair(opts: { session?: string; inboxCursor?: string; json?: 
     cursor_before?: number
     cursor_after?: number
     tail?: number
+    examined?: number
+    reaped?: number
+    reason_counts?: Record<string, number>
   }
 
   if (opts.json) {
@@ -816,38 +1641,70 @@ async function cmdRepair(opts: { session?: string; inboxCursor?: string; json?: 
     process.exit(1)
   }
 
+  if (result.repair === "reap_stale_transports") {
+    const reasons = Object.entries(result.reason_counts ?? {})
+      .map(([reason, count]) => `${reason}=${count}`)
+      .join(" ")
+    console.log(
+      `Reaped ${result.reaped ?? 0}/${result.examined ?? 0} stale transport rows${reasons ? ` (${reasons})` : ""}.`,
+    )
+    return
+  }
+
   console.log(
-    `Repaired ${result.session ?? session}: inbox cursor ` +
+    `Repaired ${result.session ?? opts.session ?? "@chief"}: inbox cursor ` +
       `${result.cursor_before ?? "?"} -> ${result.cursor_after ?? "?"} (tail ${result.tail ?? "?"}).`,
   )
 }
 
-async function cmdReload(opts: { reason?: string; json?: boolean }): Promise<void> {
+async function cmdRestart(opts: { reason?: string; json?: boolean }): Promise<void> {
   const params: Record<string, unknown> = opts.reason ? { reason: opts.reason } : {}
-  const result = mcpJsonContent(await callDaemon("tribe.reload", params)) as ReloadResult
+  const result = mcpJsonContent(await callDaemon("tribe.restart", params)) as RestartResult
 
   if (opts.json) {
     console.log(JSON.stringify(result))
     return
   }
   if (result.error) {
-    console.error(`tribe reload: ${result.error}`)
+    console.error(`tribe restart: ${result.error}`)
     process.exit(1)
   }
 
-  console.log(formatReloadResult(result))
+  console.log(formatRestartResult(result))
+}
+
+/**
+ * `tribe stop` — clean daemon shutdown via RPC `tribe.stop` (drain, close
+ * socket, exit 0; no SIGHUP/lifecycle-owner successor). Guarded twice, same
+ * rule: this CLI refuses locally without --force outside the hab supervisor
+ * context, and the daemon independently refuses the RPC without `force: true`
+ * so a raw socket caller cannot stop the rail casually either.
+ */
+async function cmdStop(opts: { force?: boolean; reason?: string; json?: boolean }): Promise<void> {
+  if (!opts.force && !isHabSupervisorContext({ HAB_SERVICE_NAME: process.env.HAB_SERVICE_NAME })) {
+    console.error(STOP_REFUSAL_MESSAGE)
+    process.exit(2)
+  }
+  const params: Record<string, unknown> = { force: true, ...(opts.reason ? { reason: opts.reason } : {}) }
+  const result = mcpJsonContent(await callDaemon("tribe.stop", params)) as StopResult
+
+  if (opts.json) {
+    console.log(JSON.stringify(result))
+    return
+  }
+  if (result.error) {
+    console.error(`tribe stop: ${result.error}`)
+    process.exit(1)
+  }
+
+  console.log(formatStopResult(result))
 }
 
 // ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
-/**
- * Register read/inspect verbs (Family 1 of Phase A.2 verb-port).
- * Each verb mirrors the implementation in `vendor/tribe/tools/tribe-cli.ts`.
- *
- * Bead: @km/bearly/19231-tribe-cli-unify-phase-a2-verbs
- */
+/** Register the CLI's read and inspect verbs. */
 export function registerReadCommands(program: Command): void {
   program
     .command("status")
@@ -862,13 +1719,15 @@ export function registerReadCommands(program: Command): void {
 
   program
     .command("members")
-    .description("List member sessions as JSON (tribe.members reply: includes launch_id + alive per row)")
-    .option("-a, --all", "Include historical (disconnected) sessions")
+    .description("List member sessions as JSON with transport and owner verdicts")
+    .option("-a, --all", "Include disconnected durable session rows")
     .action((opts: { all?: boolean }) => void cmdMembers(!!opts.all))
 
   const pendingOwner = cliOption(PENDING_CLI, "owner")
   const pendingAll = cliOption(PENDING_CLI, "all")
   const pendingJson = cliOption(PENDING_CLI, "json")
+  const pendingExpired = cliOption(PENDING_CLI, "expired")
+  const pendingOwed = cliOption(PENDING_CLI, "owed")
   const pendingStale = cliOption(PENDING_CLI, "stale")
   const pendingClose = cliOption(PENDING_CLI, "close")
   program
@@ -876,38 +1735,71 @@ export function registerReadCommands(program: Command): void {
     .description(PENDING_CLI.description)
     .option(pendingAll.flags, pendingAll.description)
     .option(pendingJson.flags, pendingJson.description)
+    .option(pendingExpired.flags, pendingExpired.description)
+    .option(pendingOwed.flags, pendingOwed.description)
     .option(pendingOwner.flags, pendingOwner.description)
     .option(pendingStale.flags, pendingStale.description)
     .option(pendingClose.flags, pendingClose.description)
-    .action((opts: { all?: boolean; json?: boolean; owner?: string; stale?: string; close?: string }) => {
-      const stale = opts.stale ? parseStaleMs(opts.stale) : undefined
-      if (opts.stale && stale === undefined) {
-        console.error(`tribe pending: bad --stale '${opts.stale}' (expected NNs|NNm|NNh)`)
-        process.exit(2)
-      }
-      if (opts.close && pendingClose.requires?.includes("owner") && !opts.owner) {
-        console.error(
-          "tribe pending: --close requires --owner because one-shot CLI callers are not a registered session",
-        )
-        process.exit(2)
-      }
-      if (opts.all && opts.owner) {
-        console.error("tribe pending: --all and --owner are mutually exclusive")
-        process.exit(2)
-      }
-      if (opts.all && opts.close) {
-        console.error("tribe pending: --all is read-only; --close requires --owner")
-        process.exit(2)
-      }
-      void cmdPending(opts.owner, !!opts.all, !!opts.json, stale, opts.close)
-    })
+    .action(
+      async (opts: {
+        all?: boolean
+        expired?: boolean
+        owed?: boolean
+        json?: boolean
+        owner?: string
+        stale?: string
+        close?: string
+      }) => {
+        const stale = opts.stale ? parseStaleMs(opts.stale) : undefined
+        if (opts.stale && stale === undefined) {
+          console.error(`tribe pending: bad --stale '${opts.stale}' (expected NNs|NNm|NNh)`)
+          process.exit(2)
+        }
+        if (opts.close && pendingClose.requires?.includes("owner") && !opts.owner) {
+          console.error(
+            "tribe pending: --close requires --owner because one-shot CLI callers are not a registered session",
+          )
+          process.exit(2)
+        }
+        if (opts.all && opts.owner) {
+          console.error("tribe pending: --all and --owner are mutually exclusive")
+          process.exit(2)
+        }
+        if (opts.all && opts.close) {
+          console.error("tribe pending: --all is read-only; --close requires --owner")
+          process.exit(2)
+        }
+        if (opts.expired && opts.close) {
+          console.error("tribe pending: --expired is read-only; --close is not allowed")
+          process.exit(2)
+        }
+        // `--owed` without `--expired` is deliberately NOT re-validated here: the
+        // daemon already owns that rule and refuses loudly, and the refusal now
+        // reaches the user (see cmdPending). Duplicating it would be a second
+        // authority for one invariant, free to drift from the first.
+        await cmdPending(opts.owner, !!opts.all, !!opts.expired, !!opts.owed, !!opts.json, stale, opts.close)
+      },
+    )
 
   program
     .command("log")
     .description("Show recent messages")
     .option("-n, --limit <n>", "Number of messages", int, 20)
+    .option("-a, --all", "Return every message in the selected correlation-prefix scope")
     .option("-f, --follow", "Follow live — stream new messages")
-    .action((opts: { limit?: number; follow?: boolean }) => void cmdLog(opts.limit ?? 20, !!opts.follow))
+    .option("--json", "Print one machine-readable JSON snapshot")
+    .option("--ref-prefix <prefix>", "Only messages whose durable ref starts with this literal prefix")
+    .option("--reply-prefix <prefix>", "Also include messages whose tracked reply id starts with this literal prefix")
+    .action(
+      async (opts: {
+        limit?: number
+        all?: boolean
+        follow?: boolean
+        json?: boolean
+        refPrefix?: string
+        replyPrefix?: string
+      }) => cmdLog(opts.limit ?? 20, !!opts.all, !!opts.follow, !!opts.json, opts.refPrefix, opts.replyPrefix),
+    )
 
   program
     .command("health")
@@ -921,55 +1813,96 @@ export function registerReadCommands(program: Command): void {
     .action((opts: { fix?: boolean }) => void cmdDoctor(opts))
 
   program
+    .command("inbox")
+    .description("Read and acknowledge this managed session's canonical mailbox")
+    .option("--limit <n>", "Maximum events to return (max 500)", int, 50)
+    .option("--json", "Emit the canonical machine-readable attention projection")
+    .action(async (opts: { limit?: number; json?: boolean }) => {
+      try {
+        await cmdInbox(opts)
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : String(error))
+        process.exitCode = 1
+      }
+    })
+
+  program
     .command("inbox-drain")
-    .description("Drain a bounded actionable mailbox page without registering a transient session")
-    .option("--session <name>", "Role mailbox to drain (default: @chief)", DEFAULT_INBOX_WAIT_SESSION)
+    .description("Drain a managed or explicit mailbox with the inherited operator capability")
+    .option(
+      "--session <name>",
+      "Explicit role mailbox to drain with the inherited TRIBE_OPERATOR_CAPABILITY_FD capability",
+    )
     .option("--limit <n>", "Maximum actionable DMs to return and acknowledge (max 100)", int, 10)
     .option("--json", "Emit machine-readable JSON")
-    .action((opts: { session?: string; limit?: number; json?: boolean }) => void cmdInboxDrain(opts))
+    .action(async (opts: { session?: string; limit?: number; json?: boolean }) => {
+      try {
+        await cmdInboxDrain(opts)
+      } catch (error) {
+        renderInboxDrainFailure(error, !!opts.json)
+        process.exitCode = 1
+      }
+    })
 
   program
     .command("inbox-status")
-    .description("Show actionable DMs the target session hasn't drained yet (chief-silent watchdog Layer 2)")
-    .option("--session <name>", "Session to inspect (default: @chief)", "@chief")
+    .description("Show actionable DMs for the current managed launch or an explicit session")
+    .option("--session <name>", "Explicit session to inspect")
     .option("--json", "Emit machine-readable JSON (for hooks)")
     .action((opts: { session?: string; json?: boolean }) => void cmdInboxStatus(opts))
 
   const inboxWaitSession = cliOption(INBOX_WAIT_CLI, "session")
   const inboxWaitTimeout = cliOption(INBOX_WAIT_CLI, "timeout")
+  const inboxWaitWakeOnCorrelatedReply = cliOption(INBOX_WAIT_CLI, "wake-on-correlated-reply")
   const inboxWaitJson = cliOption(INBOX_WAIT_CLI, "json")
   program
     .command(INBOX_WAIT_CLI.name)
     .description(INBOX_WAIT_CLI.description)
     .option(inboxWaitSession.flags, inboxWaitSession.description, inboxWaitSession.default)
     .option(inboxWaitTimeout.flags, inboxWaitTimeout.description, inboxWaitTimeout.default)
+    .option(inboxWaitWakeOnCorrelatedReply.flags, inboxWaitWakeOnCorrelatedReply.description)
     .option(inboxWaitJson.flags, inboxWaitJson.description)
-    .action((opts: { session?: string; timeout?: string; json?: boolean }) => {
+    .action((opts: { session?: string; timeout?: string; wakeOnCorrelatedReply?: boolean; json?: boolean }) => {
       const timeoutMs = opts.timeout ? parseDurationMs(opts.timeout) : undefined
       if (opts.timeout && timeoutMs === undefined) {
         console.error(`tribe inbox-wait: bad --timeout '${opts.timeout}' (expected NNs|NNm|NNh)`)
         process.exit(2)
       }
-      void cmdInboxWait({ session: opts.session, timeoutMs, json: opts.json })
+      void cmdInboxWait({
+        session: opts.session,
+        timeoutMs,
+        wakeOnCorrelatedReply: opts.wakeOnCorrelatedReply,
+        json: opts.json,
+      })
     })
 
   const repairSession = cliOption(REPAIR_CLI, "session")
   const repairInboxCursor = cliOption(REPAIR_CLI, "inbox-cursor")
+  const repairReapStaleTransports = cliOption(REPAIR_CLI, "reap-stale-transports")
   const repairJson = cliOption(REPAIR_CLI, "json")
   program
     .command(REPAIR_CLI.name)
     .description(REPAIR_CLI.description)
     .option(repairSession.flags, repairSession.description, repairSession.default)
-    .option(repairInboxCursor.flags, repairInboxCursor.description, repairInboxCursor.default)
+    .option(repairInboxCursor.flags, repairInboxCursor.description)
+    .option(repairReapStaleTransports.flags, repairReapStaleTransports.description)
     .option(repairJson.flags, repairJson.description)
-    .action((opts: { session?: string; inboxCursor?: string; json?: boolean }) => void cmdRepair(opts))
+    .action((opts: RepairCliOptions) => void cmdRepair(opts))
 
   program
-    .command("reload")
-    .description("Hot-reload the tribe daemon via RPC tribe.reload")
-    .option("--reason <text>", "Why the reload is needed (logged by the daemon)")
+    .command("restart")
+    .description("Restart the tribe daemon from the same pinned module root via RPC tribe.restart")
+    .option("--reason <text>", "Why the restart is needed (logged by the daemon)")
     .option("--json", "Emit machine-readable JSON")
-    .action((opts: { reason?: string; json?: boolean }) => void cmdReload(opts))
+    .action((opts: { reason?: string; json?: boolean }) => void cmdRestart(opts))
+
+  program
+    .command("stop")
+    .description("Stop the tribe daemon cleanly via RPC tribe.stop (drain, close socket, exit 0; no restart)")
+    .option("--force", "Confirm stopping the shared daemon (required outside the hab supervisor context)")
+    .option("--reason <text>", "Why the stop is needed (logged by the daemon)")
+    .option("--json", "Emit machine-readable JSON")
+    .action((opts: { force?: boolean; reason?: string; json?: boolean }) => void cmdStop(opts))
 
   program
     .command("activity")

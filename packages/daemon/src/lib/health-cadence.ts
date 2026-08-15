@@ -1,17 +1,50 @@
 import type { Database } from "bun:sqlite"
+import { ACTIONABLE_TYPES_SQL, unretiredAttentionPredicateSql } from "./database.ts"
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
 const DAY = 24 * HOUR
 const RESPONSE_WARNING_MS = 30 * MINUTE
 const CURSOR_WARNING_MS = 30 * MINUTE
-const CHIEF_ACTIONABLE_RESPONSE_TARGET_MS = MINUTE
-const ACTIONABLE_TYPES_SQL = "'request', 'query', 'verdict', 'assign'"
+const DEFAULT_SLA_TARGET_MS = MINUTE
+
+// ---------------------------------------------------------------------------
+// Actionable-response SLA — OPT-IN, host-agnostic.
+//
+// A coordination fleet (e.g. hh's chief/agent tribe) can track how promptly a
+// specific coordinator seat answers actionable work by naming that seat in the
+// `TRIBE_SLA_ROLE` env var (value is a session NAME, e.g. `@chief`). When it is
+// unset the whole `role_actionable_response` projection — and its threshold
+// warnings — are ABSENT from tribe.health(), so the daemon stays free of any
+// project-specific workflow concept (matches packages/daemon/README.md §
+// Boundary).
+//
+// `TRIBE_SLA_SECONDS` optionally overrides the default 60s target.
+// ---------------------------------------------------------------------------
+const INBOX_LAG_EVIDENCE = {
+  source: "tribe-mailbox-cursors",
+  scope: "connected-session cursor backlog",
+  excludes: ["pane", "turn", "seat-liveness"],
+  verdict: "projection-only",
+} as const
 
 export type HealthCadenceOptions = {
   now: number
-  liveSessionNames: string[]
+  connectedSessionNames: string[]
   dbGrowthWarningBytes?: number | null
+  /**
+   * Session NAME whose actionable-response SLA to project (e.g. `@chief`).
+   * `undefined` → fall back to `process.env.TRIBE_SLA_ROLE`; `null`/empty →
+   * feature off. This is the injection seam that keeps tests deterministic
+   * without touching the process environment.
+   */
+  slaRole?: string | null
+  /** Explicit SLA target in ms; `undefined` → `TRIBE_SLA_SECONDS` or the 60s default. */
+  slaTargetMs?: number | null
+}
+
+type ProjectionStamp = {
+  as_of_ms: number
 }
 
 type LatencySummary = {
@@ -26,36 +59,61 @@ type ResponseLatencyGroup = LatencySummary & {
   message_type: string
 }
 
-export type HealthCadenceProjection = {
-  chief_actionable_response: {
-    target_ms: number
-    status: "ok" | "breached"
-    completed: LatencySummary & {
-      within_target: number
-      missed_target: number
+type ActionableCompletedSummary = LatencySummary & {
+  within_target: number
+  missed_target: number
+}
+
+type ActionableOpenSummary = {
+  count: number
+  oldest_age_ms: number
+  over_target_count: number
+}
+
+export type RoleActionableResponseProjection = ProjectionStamp & {
+  role: string
+  target_ms: number
+  status: "ok" | "breached"
+  completed: ActionableCompletedSummary
+  open: ActionableOpenSummary
+}
+
+export type HealthCadenceProjection = ProjectionStamp & {
+  /** Present only when an actionable-response SLA role is configured (opt-in). */
+  role_actionable_response?: RoleActionableResponseProjection
+  response_latency: ProjectionStamp &
+    LatencySummary & {
+      window_ms: number
+      by_role_and_type: ResponseLatencyGroup[]
     }
-    open: {
-      count: number
-      oldest_age_ms: number
-      over_target_count: number
-    }
-  }
-  response_latency: LatencySummary & {
-    window_ms: number
-    by_role_and_type: ResponseLatencyGroup[]
-  }
-  open_balls: {
+  open_balls: ProjectionStamp & {
     count: number
     oldest_age_ms: number
   }
-  inbox_lag: Array<{
-    session: string
-    rows: number
-    oldest_age_ms: number
-    actionable_rows: number
-    actionable_oldest_age_ms: number
-  }>
-  database: {
+  inbox_lag: Array<
+    ProjectionStamp & {
+      session: string
+      rows: number
+      oldest_age_ms: number
+      actionable_rows: number
+      actionable_oldest_age_ms: number
+      /** When this connected seat began being observable for read silence. */
+      tracking_since_ms: number
+      /** Null until the seat receives a canonical fetch/inbox-wait attention projection. */
+      last_attention_read_at_ms: number | null
+      last_attention_read_age_ms: number | null
+      /** Bounded literal identity of the oldest unread actionable, never a log parse. */
+      oldest_actionable: {
+        id: string
+        type: string
+        sender: string
+        summary: string | null
+        ts_ms: number
+      } | null
+      evidence: typeof INBOX_LAG_EVIDENCE
+    }
+  >
+  database: ProjectionStamp & {
     bytes: number
     message_rows: number
     archive_rows: number
@@ -71,6 +129,7 @@ export type HealthCadenceProjection = {
 
 type ResponseLatencyRow = {
   role: string
+  sender: string
   message_type: string
   latency_ms: number
 }
@@ -102,8 +161,53 @@ function durationLabel(ms: number): string {
   return `${Math.floor(ms / 1_000)}s`
 }
 
+/** SLA targets are naturally sub-minute, so render them in whole seconds. */
+function targetLabel(ms: number): string {
+  return `${Math.round(ms / 1_000)}s`
+}
+
 function ageFrom(now: number, oldestTs: number | null): number {
   return oldestTs === null ? 0 : Math.max(0, now - oldestTs)
+}
+
+/**
+ * Recombines the messages/messages_archive halves of a `COUNT(*)`/`MIN(ts)`
+ * pair that used to run once against the `journal` CTE. `MIN` over an empty
+ * set is NULL in SQL, so a half with zero matching rows reports `oldest_ts:
+ * null`; the combined oldest_ts is null only when BOTH halves are — matching
+ * what `MIN(ts)` over the union would have produced.
+ */
+function combineJournalCount(messagesHalf: LagRow, archiveHalf: LagRow): LagRow {
+  const oldestCandidates = [messagesHalf.oldest_ts, archiveHalf.oldest_ts].filter((ts): ts is number => ts !== null)
+  return {
+    rows: messagesHalf.rows + archiveHalf.rows,
+    oldest_ts: oldestCandidates.length === 0 ? null : Math.min(...oldestCandidates),
+  }
+}
+
+type OldestActionableCandidate = {
+  id: string
+  type: string
+  sender: string
+  summary: string | null
+  ts: number
+  /** messages.rowid or messages_archive.seq — one shared monotonic space. */
+  seq: number
+}
+
+/**
+ * Picks the candidate with the smaller seq/rowid — "oldest" is position in
+ * the sequence space shared by messages.rowid and messages_archive.seq, the
+ * same thing `ORDER BY m.seq ASC LIMIT 1` picked when both halves were one
+ * statement against the CTE. This is deliberately NOT a `ts` comparison.
+ */
+function olderCandidate(
+  a: OldestActionableCandidate | null,
+  b: OldestActionableCandidate | null,
+): OldestActionableCandidate | null {
+  if (a === null) return b
+  if (b === null) return a
+  return a.seq <= b.seq ? a : b
 }
 
 function responseLatencyProjection(
@@ -111,7 +215,7 @@ function responseLatencyProjection(
   now: number,
 ): {
   summary: HealthCadenceProjection["response_latency"]
-  chiefCompleted: HealthCadenceProjection["chief_actionable_response"]["completed"]
+  rows: ResponseLatencyRow[]
   warnings: string[]
 } {
   const rows = db
@@ -123,6 +227,7 @@ function responseLatencyProjection(
       )
       SELECT
         COALESCE(s.role, 'unknown') AS role,
+        response_message.sender AS sender,
         request_message.type AS message_type,
         response_message.ts - request_message.ts AS latency_ms
       FROM journal response_message
@@ -152,33 +257,52 @@ function responseLatencyProjection(
       message_type: group.messageType,
       ...summarizeLatencies(group.values),
     }))
-  const warnings = byRoleAndType
-    .filter((group) => group.p95_ms !== null && group.p95_ms > RESPONSE_WARNING_MS)
-    .map(
-      (group) =>
-        `response latency role=${group.role} type=${group.message_type} p95=${Math.floor(group.p95_ms! / MINUTE)}m exceeds 30m (n=${group.count})`,
-    )
-  const chiefLatencies = rows.filter((row) => row.role === "chief").map((row) => row.latency_ms)
+  const warnings = byRoleAndType.flatMap((group) => {
+    const p95 = group.p95_ms
+    return p95 !== null && p95 > RESPONSE_WARNING_MS
+      ? [
+          `response latency role=${group.role} type=${group.message_type} p95=${Math.floor(p95 / MINUTE)}m exceeds 30m (n=${group.count})`,
+        ]
+      : []
+  })
 
   return {
     summary: {
+      as_of_ms: now,
       window_ms: DAY,
       ...summarizeLatencies(rows.map((row) => row.latency_ms)),
       by_role_and_type: byRoleAndType,
     },
-    chiefCompleted: {
-      ...summarizeLatencies(chiefLatencies),
-      within_target: chiefLatencies.filter((latency) => latency < CHIEF_ACTIONABLE_RESPONSE_TARGET_MS).length,
-      missed_target: chiefLatencies.filter((latency) => latency >= CHIEF_ACTIONABLE_RESPONSE_TARGET_MS).length,
-    },
+    rows,
     warnings,
   }
 }
 
-function chiefOpenActionableProjection(
-  db: Database,
-  now: number,
-): HealthCadenceProjection["chief_actionable_response"]["open"] {
+/**
+ * Completed actionable responses SENT BY the SLA role in the 24h window.
+ *
+ * Keyed on the responder's session NAME (`row.sender === role`) so the completed
+ * and open halves both pivot on the single `TRIBE_SLA_ROLE` name — the open half
+ * matches `recipient = role`. (The pre-parameterization code keyed completed on
+ * the `sessions.role` column string `"chief"` while open matched the recipient
+ * name `"@chief"`; those two encodings can't be driven by one env var, so they
+ * are reconciled onto the name. For `@chief` this yields identical numbers,
+ * since the chief seat both is named `@chief` and holds role `chief`.)
+ */
+function actionableCompletedSummary(
+  rows: ResponseLatencyRow[],
+  role: string,
+  targetMs: number,
+): ActionableCompletedSummary {
+  const latencies = rows.filter((row) => row.sender === role).map((row) => row.latency_ms)
+  return {
+    ...summarizeLatencies(latencies),
+    within_target: latencies.filter((latency) => latency < targetMs).length,
+    missed_target: latencies.filter((latency) => latency >= targetMs).length,
+  }
+}
+
+function actionableOpenSummary(db: Database, now: number, role: string, targetMs: number): ActionableOpenSummary {
   const row = db
     .prepare(`
       SELECT
@@ -188,9 +312,9 @@ function chiefOpenActionableProjection(
           CASE WHEN $now - opened_at >= $target THEN 1 ELSE 0 END
         ), 0) AS over_target_count
       FROM pending_request
-      WHERE recipient = '@chief'
+      WHERE recipient = $role
     `)
-    .get({ $now: now, $target: CHIEF_ACTIONABLE_RESPONSE_TARGET_MS }) as {
+    .get({ $now: now, $target: targetMs, $role: role }) as {
     count: number
     oldest_opened_at: number | null
     over_target_count: number
@@ -202,31 +326,37 @@ function chiefOpenActionableProjection(
   }
 }
 
-function chiefActionableResponseProjection(
+function roleActionableResponseProjection(
   db: Database,
   now: number,
-  completed: HealthCadenceProjection["chief_actionable_response"]["completed"],
+  rows: ResponseLatencyRow[],
+  role: string,
+  targetMs: number,
 ): {
-  projection: HealthCadenceProjection["chief_actionable_response"]
+  projection: RoleActionableResponseProjection
   warnings: string[]
 } {
-  const open = chiefOpenActionableProjection(db, now)
+  const completed = actionableCompletedSummary(rows, role, targetMs)
+  const open = actionableOpenSummary(db, now, role, targetMs)
   const warnings: string[] = []
+  const target = targetLabel(targetMs)
   if (completed.missed_target > 0) {
     warnings.push(
-      `Chief actionable response completed p95=${durationLabel(completed.p95_ms ?? 0)}; ` +
-        `target <60s missed=${completed.missed_target}/${completed.count}`,
+      `${role} actionable response completed p95=${durationLabel(completed.p95_ms ?? 0)}; ` +
+        `target <${target} missed=${completed.missed_target}/${completed.count}`,
     )
   }
   if (open.over_target_count > 0) {
     warnings.push(
-      `Chief actionable response open oldest=${durationLabel(open.oldest_age_ms)}; ` +
-        `target <60s overdue=${open.over_target_count}/${open.count}`,
+      `${role} actionable response open oldest=${durationLabel(open.oldest_age_ms)}; ` +
+        `target <${target} overdue=${open.over_target_count}/${open.count}`,
     )
   }
   return {
     projection: {
-      target_ms: CHIEF_ACTIONABLE_RESPONSE_TARGET_MS,
+      as_of_ms: now,
+      role,
+      target_ms: targetMs,
       status: warnings.length === 0 ? "ok" : "breached",
       completed,
       open,
@@ -236,11 +366,17 @@ function chiefActionableResponseProjection(
 }
 
 function openBallProjection(db: Database, now: number): HealthCadenceProjection["open_balls"] {
-  const row = db.prepare("SELECT COUNT(*) AS count, MIN(opened_at) AS oldest_opened_at FROM pending_request").get() as {
+  const row = db
+    .prepare(`
+      SELECT COUNT(*) AS count, MIN(opened_at) AS oldest_opened_at
+      FROM pending_request
+    `)
+    .get() as {
     count: number
     oldest_opened_at: number | null
   }
   return {
+    as_of_ms: now,
     count: row.count,
     oldest_age_ms: ageFrom(now, row.oldest_opened_at),
   }
@@ -249,55 +385,164 @@ function openBallProjection(db: Database, now: number): HealthCadenceProjection[
 function inboxLagProjection(
   db: Database,
   now: number,
-  liveSessionNames: string[],
+  connectedSessionNames: string[],
 ): {
   rows: HealthCadenceProjection["inbox_lag"]
   warnings: string[]
 } {
-  const cursorQuery = db.prepare(
-    "SELECT last_inbox_pull_seq FROM sessions WHERE name = $session ORDER BY updated_at DESC LIMIT 1",
+  const cursorQuery = db.prepare(`
+    SELECT last_inbox_pull_seq, started_at
+    FROM sessions
+    WHERE name = $session
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `)
+  const attentionReceiptQuery = db.prepare(
+    "SELECT last_attention_read_at FROM mailbox_cursors WHERE recipient = $session",
   )
-  const lagQuery = db.prepare(`
-    WITH journal AS (
-      SELECT rowid AS seq, type, sender, recipient, kind, ts FROM messages
-      UNION ALL
-      SELECT seq, type, sender, recipient, kind, ts FROM messages_archive
-    )
+
+  // Below, three statements that used to run once each against
+  // `WITH journal AS (messages UNION ALL messages_archive)` are split into a
+  // messages half and a messages_archive half, recombined in TypeScript by
+  // combineJournalCount()/olderCandidate() below. A CTE carries no indexes,
+  // so SQLite materialised the full union on every call — linear in journal
+  // size, and paid once per connected seat since this whole function runs
+  // inside the per-session map() below. Each half here is a plain indexed
+  // lookup against one physical table instead. See database.ts's
+  // `unretiredAttentionPredicateSql` (commit c4e2526f) for the retirement-
+  // check half of this same split, and for the measured numbers that first
+  // fix left as this file's residual.
+  //
+  // Both halves of a pair always share the identical WHERE clause, differing
+  // only in which physical table (and which column supplies the shared
+  // seq/rowid position) they read from.
+  const lagQueryMessages = db.prepare(`
     SELECT COUNT(*) AS rows, MIN(ts) AS oldest_ts
-    FROM journal
+    FROM messages
+    WHERE rowid > $cursor
+      AND kind != 'event'
+      AND sender != $session
+      AND (recipient = $session OR recipient = '*')
+  `)
+  const lagQueryArchive = db.prepare(`
+    SELECT COUNT(*) AS rows, MIN(ts) AS oldest_ts
+    FROM messages_archive
     WHERE seq > $cursor
       AND kind != 'event'
       AND sender != $session
       AND (recipient = $session OR recipient = '*')
   `)
-  const actionableLagQuery = db.prepare(`
-    WITH journal AS (
-      SELECT rowid AS seq, type, sender, recipient, kind, ts FROM messages
-      UNION ALL
-      SELECT seq, type, sender, recipient, kind, ts FROM messages_archive
-    )
+  const actionableLagQueryMessages = db.prepare(`
     SELECT COUNT(*) AS rows, MIN(ts) AS oldest_ts
-    FROM journal
-    WHERE seq > COALESCE(
+    FROM messages AS m
+    WHERE m.rowid > COALESCE(
       (SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $session),
       0
     )
-      AND recipient = $session
-      AND kind = 'direct'
-      AND sender != $session
-      AND type IN (${ACTIONABLE_TYPES_SQL})
+      AND m.recipient = $session
+      AND m.kind = 'direct'
+      AND m.sender != $session
+      AND m.type IN (${ACTIONABLE_TYPES_SQL})
+      AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "rowid" })}
+  `)
+  const actionableLagQueryArchive = db.prepare(`
+    SELECT COUNT(*) AS rows, MIN(ts) AS oldest_ts
+    FROM messages_archive AS m
+    WHERE m.seq > COALESCE(
+      (SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $session),
+      0
+    )
+      AND m.recipient = $session
+      AND m.kind = 'direct'
+      AND m.sender != $session
+      AND m.type IN (${ACTIONABLE_TYPES_SQL})
+      AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "seq" })}
+  `)
+  // Selects the shared seq/rowid position too (absent from the original
+  // SELECT list, which only ever needed it in ORDER BY against the single
+  // CTE) so olderCandidate() below can compare the two halves' candidates the
+  // same way `ORDER BY m.seq ASC LIMIT 1` did against the union.
+  const oldestActionableQueryMessages = db.prepare(`
+    SELECT m.id, m.type, m.sender, m.summary, m.ts, m.rowid AS seq
+    FROM messages AS m
+    WHERE m.rowid > COALESCE(
+      (SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $session),
+      0
+    )
+      AND m.recipient = $session
+      AND m.kind = 'direct'
+      AND m.sender != $session
+      AND m.type IN (${ACTIONABLE_TYPES_SQL})
+      AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "rowid" })}
+    ORDER BY m.rowid ASC
+    LIMIT 1
+  `)
+  const oldestActionableQueryArchive = db.prepare(`
+    SELECT m.id, m.type, m.sender, m.summary, m.ts, m.seq AS seq
+    FROM messages_archive AS m
+    WHERE m.seq > COALESCE(
+      (SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $session),
+      0
+    )
+      AND m.recipient = $session
+      AND m.kind = 'direct'
+      AND m.sender != $session
+      AND m.type IN (${ACTIONABLE_TYPES_SQL})
+      AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "seq" })}
+    ORDER BY m.seq ASC
+    LIMIT 1
   `)
 
-  const rows = [...new Set(liveSessionNames)].sort().map((session) => {
-    const cursor = cursorQuery.get({ $session: session }) as { last_inbox_pull_seq: number } | null
-    const lag = lagQuery.get({ $cursor: cursor?.last_inbox_pull_seq ?? 0, $session: session }) as LagRow
-    const actionableLag = actionableLagQuery.get({ $session: session }) as LagRow
+  const rows = [...new Set(connectedSessionNames)].sort().map((session) => {
+    const cursor = cursorQuery.get({ $session: session }) as {
+      last_inbox_pull_seq: number
+      started_at: number
+    } | null
+    const receipt = attentionReceiptQuery.get({ $session: session }) as {
+      last_attention_read_at: number | null
+    } | null
+    const lagParams = { $cursor: cursor?.last_inbox_pull_seq ?? 0, $session: session }
+    const lag = combineJournalCount(lagQueryMessages.get(lagParams) as LagRow, lagQueryArchive.get(lagParams) as LagRow)
+    const actionableLag = combineJournalCount(
+      actionableLagQueryMessages.get({ $session: session }) as LagRow,
+      actionableLagQueryArchive.get({ $session: session }) as LagRow,
+    )
+    const oldestCandidate = olderCandidate(
+      oldestActionableQueryMessages.get({ $session: session }) as OldestActionableCandidate | null,
+      oldestActionableQueryArchive.get({ $session: session }) as OldestActionableCandidate | null,
+    )
+    const oldestActionable =
+      oldestCandidate === null
+        ? null
+        : {
+            id: oldestCandidate.id,
+            type: oldestCandidate.type,
+            sender: oldestCandidate.sender,
+            summary: oldestCandidate.summary,
+            ts: oldestCandidate.ts,
+          }
+    const lastAttentionReadAt = receipt?.last_attention_read_at ?? null
     return {
+      as_of_ms: now,
       session,
       rows: lag.rows,
       oldest_age_ms: ageFrom(now, lag.oldest_ts),
       actionable_rows: actionableLag.rows,
       actionable_oldest_age_ms: ageFrom(now, actionableLag.oldest_ts),
+      tracking_since_ms: cursor?.started_at ?? now,
+      last_attention_read_at_ms: lastAttentionReadAt,
+      last_attention_read_age_ms: lastAttentionReadAt === null ? null : Math.max(0, now - lastAttentionReadAt),
+      oldest_actionable:
+        oldestActionable === null
+          ? null
+          : {
+              id: oldestActionable.id,
+              type: oldestActionable.type,
+              sender: oldestActionable.sender,
+              summary: oldestActionable.summary,
+              ts_ms: oldestActionable.ts,
+            },
+      evidence: INBOX_LAG_EVIDENCE,
     }
   })
   const warnings = rows
@@ -308,8 +553,10 @@ function inboxLagProjection(
     )
     .map(
       (row) =>
-        `inbox lag ${row.session}: ${row.rows} row(s), oldest ${durationLabel(row.oldest_age_ms)}; ` +
-        `${row.actionable_rows} actionable row(s), oldest ${durationLabel(row.actionable_oldest_age_ms)} exceeds 30m`,
+        `inbox cursor projection ${row.session} as-of ${new Date(row.as_of_ms).toISOString()}: ` +
+        `${row.rows} row(s), oldest ${durationLabel(row.oldest_age_ms)}; ` +
+        `${row.actionable_rows} actionable row(s), oldest ${durationLabel(row.actionable_oldest_age_ms)}; ` +
+        `projection-only, pane/turn liveness excluded (threshold 30m)`,
     )
   return { rows, warnings }
 }
@@ -363,6 +610,7 @@ function databaseProjection(
     estimated_bytes: number
   }
   const projection = {
+    as_of_ms: now,
     bytes: pageCount * pageSize,
     message_rows: counts.message_rows,
     archive_rows: counts.archive_rows,
@@ -389,22 +637,55 @@ export function parseDbGrowthWarningBytes(raw: string | undefined): number | nul
   return Number.isFinite(value) && value >= 0 ? Math.floor(value) : null
 }
 
+/** Parse the opt-in `TRIBE_SLA_ROLE` env value into a session name or null. */
+export function parseSlaRole(raw: string | undefined): string | null {
+  if (raw === undefined) return null
+  const trimmed = raw.trim()
+  return trimmed === "" ? null : trimmed
+}
+
+/** Parse the optional `TRIBE_SLA_SECONDS` override into a positive ms target, else null. */
+export function parseSlaTargetMs(raw: string | undefined): number | null {
+  if (raw === undefined || raw.trim() === "") return null
+  const seconds = Number(raw)
+  return Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds * 1_000) : null
+}
+
+function resolveSlaRole(option: string | null | undefined): string | null {
+  if (option !== undefined) return parseSlaRole(option ?? undefined)
+  return parseSlaRole(process.env.TRIBE_SLA_ROLE)
+}
+
+function resolveSlaTargetMs(option: number | null | undefined): number {
+  if (option !== undefined && option !== null) return option
+  return parseSlaTargetMs(process.env.TRIBE_SLA_SECONDS) ?? DEFAULT_SLA_TARGET_MS
+}
+
 export function projectHealthCadence(db: Database, options: HealthCadenceOptions): HealthCadenceProjection {
-  const responseLatency = responseLatencyProjection(db, options.now)
-  const chiefActionableResponse = chiefActionableResponseProjection(db, options.now, responseLatency.chiefCompleted)
-  const inboxLag = inboxLagProjection(db, options.now, options.liveSessionNames)
-  const database = databaseProjection(db, options.now, options.dbGrowthWarningBytes ?? null)
+  const { now } = options
+  const responseLatency = responseLatencyProjection(db, now)
+  const inboxLag = inboxLagProjection(db, now, options.connectedSessionNames)
+  const database = databaseProjection(db, now, options.dbGrowthWarningBytes ?? null)
+
+  const slaRole = resolveSlaRole(options.slaRole)
+  const sla =
+    slaRole === null
+      ? null
+      : roleActionableResponseProjection(
+          db,
+          now,
+          responseLatency.rows,
+          slaRole,
+          resolveSlaTargetMs(options.slaTargetMs),
+        )
+
   return {
-    chief_actionable_response: chiefActionableResponse.projection,
+    as_of_ms: now,
+    ...(sla ? { role_actionable_response: sla.projection } : {}),
     response_latency: responseLatency.summary,
-    open_balls: openBallProjection(db, options.now),
+    open_balls: openBallProjection(db, now),
     inbox_lag: inboxLag.rows,
     database: database.projection,
-    warnings: [
-      ...responseLatency.warnings,
-      ...chiefActionableResponse.warnings,
-      ...inboxLag.warnings,
-      ...database.warnings,
-    ],
+    warnings: [...responseLatency.warnings, ...(sla ? sla.warnings : []), ...inboxLag.warnings, ...database.warnings],
   }
 }

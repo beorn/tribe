@@ -41,6 +41,9 @@ export type MessageInsertedInfo = {
   topic: string | null
   /** Matrix-shape room scope; null until populated by the room-aware path. */
   roomId: string | null
+  /** Canonical tracked-request correlation, present only when this message
+   *  closed a still-open reply target owned by `requester`. */
+  correlatedReply: { requestId: string; requester: string } | null
 }
 
 export type TribeContext = {

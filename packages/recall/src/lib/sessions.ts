@@ -8,17 +8,7 @@ import * as readline from "readline"
 import { getDb, closeDb, PROJECTS_DIR, getAllSessionTitles, getSessionTitle } from "../history/db"
 import { rebuildIndex, findSessionFiles } from "../history/indexer"
 import type { JsonlRecord } from "../history/types"
-import {
-  THIRTY_DAYS_MS,
-  formatBytes,
-  formatRelativeTime,
-  displayProjectPath,
-  formatSessionId,
-  matchProjectGlob,
-  BOLD,
-  RESET,
-  DIM,
-} from "./format"
+import { THIRTY_DAYS_MS, formatBytes, displayProjectPath, matchProjectGlob } from "./format"
 import * as os from "os"
 
 // ============================================================================

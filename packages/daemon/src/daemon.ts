@@ -3,10 +3,16 @@
  * Tribe Daemon — single process per project, sessions connect via Unix socket.
  *
  * Usage:
- *   bun tribe-daemon.ts                    # Auto-discover socket path
- *   bun tribe-daemon.ts --socket /path     # Explicit socket path
- *   bun tribe-daemon.ts --quit-timeout 0   # Quit immediately when last client disconnects
- *   bun tribe-daemon.ts --fd 3             # Inherit socket fd (for hot-reload re-exec)
+ *   bun tribe-daemon.ts                         # Auto-discover socket path
+ *   bun tribe-daemon.ts --socket /path          # Explicit socket path
+ *   bun tribe-daemon.ts --idle-quit-after never # Never idle-quit (also: 30m, 6h, 1800, 0)
+ *   bun tribe-daemon.ts --fd 3                  # Inherit socket fd (for hot-reload re-exec)
+ *   (--quit-timeout <seconds> still parses as a hidden deprecated alias)
+ *
+ * Setup automation (dispatch-and-exit, never boots the daemon pipe below):
+ *   bun tribe-daemon.ts install [--dry-run] [--autostart daemon|library|never]
+ *   bun tribe-daemon.ts uninstall [--dry-run]
+ *   bun tribe-daemon.ts doctor              # is the Claude Code integration wired up?
  *
  * The boot sequence reads top-down through the pipe(...) call below — that IS
  * the architecture. Each `withX` factory adds one capability to the daemon
@@ -14,13 +20,15 @@
  * full strategy.
  */
 
+import { parseArgs } from "node:util"
 import { createLogger } from "loggily"
 import { pipe, withTool, withTools, createScope, formatRuntimeId } from "tribe-wire"
+import type { TribeAutostart } from "./lib/autostart-config.ts"
 import { gitPlugin } from "./lib/git-plugin.ts"
-import { beadsPlugin } from "./lib/beads-plugin.ts"
 import { githubPlugin } from "./lib/github-plugin.ts"
 import { healthMonitorPlugin } from "./lib/health-monitor-plugin.ts"
 import { accountlyPlugin } from "./lib/accountly-plugin.ts"
+import type { TribePluginHandle } from "./lib/plugin-api.ts"
 
 import {
   createBaseTribe,
@@ -34,6 +42,7 @@ import {
   withDatabase,
   withDispatcher,
   withHotReload,
+  reloadReplacementForEnvironment,
   withIdleQuit,
   withRecall,
   withMCPServer,
@@ -44,14 +53,17 @@ import {
 } from "./lib/compose/index.ts"
 import { TOOLS_LIST } from "tribe-wire/lib/tools-list"
 import { pruneOldActivityLogs } from "./lib/activity-log.ts"
+import { countDurableSessionRows } from "./lib/session.ts"
 import { gatherCodePin, STARTUP_SHA } from "./lib/code-pin.ts"
+import { prefixFallbackDeliveryResolver } from "./lib/delivery-resolution.ts"
+import { sanitizeDaemonProcessEnvironment } from "../../wire/src/daemon-environment.ts"
 
 // ---------------------------------------------------------------------------
 // `daemon.ts hook <event>` — Claude Code hook entry point. This is the
 // command `tribe install` plants in ~/.claude/settings.json (see
 // lib/install.ts TRIBE_HOOK_MARKER). It must dispatch and EXIT before the
 // daemon pipe below boots: a hook invocation never starts a broker
-// in-process — dispatchHook owns detached autostart itself.
+// in-process — dispatchHook owns standalone supervisor autostart itself.
 // ---------------------------------------------------------------------------
 
 if (process.argv[2] === "hook") {
@@ -65,6 +77,78 @@ if (process.argv[2] === "hook") {
   await dispatchHook(event)
   process.exit(0)
 }
+
+// ---------------------------------------------------------------------------
+// `daemon.ts install|uninstall|doctor` — Claude Code setup automation. Wires
+// the hooks `daemon.ts hook <event>` command into `~/.claude/settings.json`,
+// the `tribe` MCP server into the project's `.mcp.json`, and the autostart
+// mode file — see lib/install.ts for the plan/apply/doctor split (pure plan,
+// then a separate write step so `--dry-run` is trivial). Same shape as the
+// `hook` block above: dispatch and exit before the daemon pipe boots.
+//
+// This is a distinct diagnostic from `tribe-wire doctor` (which checks
+// whether a RUNNING daemon's code is stale vs on-disk/pin). `doctor` here
+// checks whether the Claude Code integration (hooks, MCP entry, autostart
+// config) is wired up correctly — a different question, answered by
+// lib/install.ts's doctorReport, that nothing else in this repo answers.
+// ---------------------------------------------------------------------------
+
+if (process.argv[2] === "install" || process.argv[2] === "uninstall" || process.argv[2] === "doctor") {
+  const sub = process.argv[2]
+  const { values: installArgs } = parseArgs({
+    args: process.argv.slice(3),
+    options: {
+      "dry-run": { type: "boolean", default: false },
+      autostart: { type: "string" },
+    },
+    strict: false,
+  })
+
+  const {
+    defaultInstallEnv,
+    planInstall,
+    applyInstall,
+    formatInstallPlan,
+    planUninstall,
+    applyUninstall,
+    formatUninstallPlan,
+    doctorReport,
+    formatDoctorReport,
+  } = await import("./lib/install.ts")
+  const { VALID_AUTOSTART_MODES } = await import("./lib/autostart-config.ts")
+
+  const env = defaultInstallEnv()
+  const dryRun = Boolean(installArgs["dry-run"])
+
+  if (sub === "install") {
+    const autostartRaw = installArgs.autostart as string | undefined
+    if (autostartRaw !== undefined && !VALID_AUTOSTART_MODES.includes(autostartRaw as TribeAutostart)) {
+      process.stderr.write(
+        `tribe-daemon install: --autostart must be one of ${VALID_AUTOSTART_MODES.join("|")}, got "${autostartRaw}"\n`,
+      )
+      process.exit(2)
+    }
+    const plan = planInstall(env, { autostart: autostartRaw as TribeAutostart | undefined })
+    console.log(formatInstallPlan(plan, dryRun))
+    if (!dryRun) applyInstall(plan)
+    process.exit(0)
+  }
+
+  if (sub === "uninstall") {
+    const plan = planUninstall(env)
+    console.log(formatUninstallPlan(plan, dryRun))
+    if (!dryRun) applyUninstall(plan)
+    process.exit(0)
+  }
+
+  // doctor — read-only, exits non-zero when any check fails (loud by design;
+  // scriptable in CI/health checks without parsing stdout).
+  const report = await doctorReport(env)
+  console.log(formatDoctorReport(report))
+  process.exit(report.hasFailures ? 1 : 0)
+}
+
+sanitizeDaemonProcessEnvironment(process.env)
 
 const log = createLogger("tribe:daemon")
 
@@ -127,6 +211,7 @@ try {
 
 const refs = {
   activePluginNames: [] as string[],
+  pluginStatus: [] as TribePluginHandle[],
   stopPlugins: () => {},
   shutdown: () => {},
 }
@@ -157,12 +242,20 @@ void socketBinding
   })
 const withIdleQuitShape = withIdleQuit<typeof withSocketShape>({
   triggerShutdown: () => refs.shutdown(),
+  // The census's DB half: registered sessions of any delivery mode count as
+  // clients for the idle-quit decision (2026-08-12 — a fully-populated pull
+  // fleet read as "no clients" and the rail self-quit).
+  countDurableSessions: () => countDurableSessionRows(withSocketShape.db),
 })(withSocketShape)
 const withDispatcherShape = withDispatcher<typeof withIdleQuitShape>({
   onActiveClient: () => withIdleQuitShape.idleQuit.markActive(),
   onIdle: () => withIdleQuitShape.idleQuit.markIdle(),
   getActivePluginNames: () => refs.activePluginNames,
-  getQuitTimeoutSec: () => withSocketShape.config.quitTimeoutSec,
+  getPluginStatus: () => refs.pluginStatus,
+  getIdleQuitAfterSec: () => withSocketShape.config.idleQuitAfterSec,
+  // tribe.stop: clean shutdown (drain, close socket, exit 0), no successor.
+  triggerShutdown: () => refs.shutdown(),
+  resolveDelivery: prefixFallbackDeliveryResolver(process.env.TRIBE_DELIVERY_FALLBACKS),
 })(withIdleQuitShape)
 // MCP-spec surface — reads the tool registry, registers initialize / tools/list
 // / tools/call on the dispatcher. tools/call routes through the dispatcher's
@@ -179,7 +272,7 @@ const withMCPShape = withMCPServer<typeof withDispatcherShape>({
     outputSchema: t.outputSchema,
   })),
   dispatch: async (toolName, args, ctx) => {
-    // Route every registered tool through the dispatcher's handleRequest.
+    // Route every other registered tool through the dispatcher's handleRequest.
     // The dispatcher's tribe.* / recall cases own connection context; for
     // unknown methods it returns -32601 which we surface as an MCP error.
     if (!withDispatcherShape.tools.has(toolName)) return undefined
@@ -201,6 +294,7 @@ const withMCPShape = withMCPServer<typeof withDispatcherShape>({
 const withHotReloadShape = withHotReload<typeof withMCPShape>({
   stopPlugins: () => refs.stopPlugins(),
   triggerShutdown: () => refs.shutdown(),
+  replaceProcess: reloadReplacementForEnvironment(process.env, () => refs.shutdown()),
 })(withMCPShape)
 // Confirm withMCPShape carries the MCP server handle (for tests / status).
 log.debug?.(
@@ -212,11 +306,12 @@ const withSignalsShape = withSignals<typeof withHotReloadShape>({
   onReload: () => withHotReloadShape.hotReload.reload(),
 })(withHotReloadShape)
 const tribe = withRuntime<typeof withSignalsShape>({
-  plugins: process.env.TRIBE_NO_PLUGINS
-    ? []
-    : [gitPlugin, beadsPlugin, githubPlugin, healthMonitorPlugin, accountlyPlugin],
+  plugins: process.env.TRIBE_NO_PLUGINS ? [] : [gitPlugin, githubPlugin, healthMonitorPlugin, accountlyPlugin],
   publishActivePluginNames: (n) => {
     refs.activePluginNames = n
+  },
+  publishPluginStatus: (handles) => {
+    refs.pluginStatus = handles
   },
   publishStopPlugins: (fn) => {
     refs.stopPlugins = fn

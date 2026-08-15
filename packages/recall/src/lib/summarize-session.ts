@@ -8,7 +8,7 @@
 import * as fs from "fs"
 import * as path from "path"
 import * as os from "os"
-import { extractSessionContent, type SessionExtract } from "./extract"
+import { extractSessionContent } from "./extract"
 import { loadLlm } from "./llm-backend.ts"
 
 // ============================================================================
@@ -234,7 +234,7 @@ export async function summarizeSessionBatch(
   log(`processing ${sessions.length} sessions (concurrency=${concurrency})`)
 
   // Run with bounded concurrency
-  const results = new Array<SessionSummary>(sessions.length)
+  const results: SessionSummary[] = []
   let nextIdx = 0
   let completed = 0
 

@@ -5,15 +5,7 @@
 
 import * as fs from "fs"
 import * as os from "os"
-import {
-  getDb,
-  closeDb,
-  DB_PATH,
-  getActiveSessionsInWindow,
-  getActivitySummary,
-  getIndexMeta,
-  getAllSessionTitles,
-} from "../history/db"
+import { getDb, closeDb, DB_PATH, getActiveSessionsInWindow, getActivitySummary, getIndexMeta } from "../history/db"
 import { reviewMemorySystem } from "../history/recall"
 import { formatCost } from "./llm-backend.ts"
 import { discoverActiveSession, renderDiscoveryDiagnostics } from "./session-discovery.ts"
@@ -22,7 +14,6 @@ import {
   BOLD,
   RESET,
   DIM,
-  CYAN,
   YELLOW,
   GREEN,
   RED,
@@ -35,7 +26,6 @@ import {
   formatBytes,
   formatRelativeTime,
   displayProjectPath,
-  formatSessionId,
 } from "./format"
 
 export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Promise<void> {
@@ -122,7 +112,6 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
 
     // ── Active Now ────────────────────────────────────────────────────────
     const active = getActiveSessionsInWindow(db, FIVE_MINUTES_MS)
-    const sessionTitles = getAllSessionTitles()
 
     if (active.length > 0) {
       console.log(`${BOLD}Active Now${RESET}`)

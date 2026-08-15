@@ -25,6 +25,9 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "scripts": {
+    "emit-summary": "bun tools/emit-summary.ts"
+  },
   "dependencies": {
     "loggily": "^0.10.2"
   }

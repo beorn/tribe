@@ -86,6 +86,7 @@ export type ReconnectingClientOpts = {
   onReconnect?: () => void
   maxAttempts?: number
   callTimeoutMs?: number
+  noSpawn?: boolean
   dbPath?: string
 }
 
@@ -116,6 +117,7 @@ export function createReconnectingClient(opts: ReconnectingClientOpts): Promise<
     onReconnect: opts.onReconnect,
     maxAttempts: opts.maxAttempts,
     callTimeoutMs: opts.callTimeoutMs ?? LORE_DEFAULT_CALL_TIMEOUT_MS,
+    noSpawn: opts.noSpawn,
     daemonScript: defaultDaemonScript(),
     daemonArgs: opts.dbPath ? ["--lore-db", opts.dbPath] : undefined,
   }

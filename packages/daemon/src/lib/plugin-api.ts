@@ -1,18 +1,18 @@
 /**
  * Tribe plugin boundary — the clean interface that separates optional observer
- * plugins (git, beads, github, health, accountly) from the coordination daemon
+ * plugins (git, GitHub, health, account quotas) from the coordination daemon
  * core (tribe-daemon.ts).
  *
- * Plugins observe external signals (git commits, bead state, GitHub API,
- * system health, account quotas) and push messages onto the tribe wire. They
+ * Plugins observe external signals (git commits, GitHub API, system health,
+ * account quotas) and push messages onto the tribe wire. They
  * are NOT part of the daemon's core coordination responsibilities — a daemon
  * with zero plugins is a complete coordination server.
  *
  * Scope of this interface:
  *   - A plugin identifies itself with a stable `name` (also used as the sender
  *     when it broadcasts).
- *   - A plugin reports `available()` so the daemon can skip it silently when
- *     its dependencies (git repo, .beads/, gh auth, accountly config, …) are
+ *   - A plugin reports `available()` so the daemon can skip it when its
+ *     dependencies (git repo, gh auth, account configuration, …) are
  *     absent.
  *   - `start(api)` wires the plugin to the tribe wire via `TribeClientApi`
  *     and returns a cleanup closure.
@@ -28,6 +28,8 @@
  * dedup primitive, and an optional members roster for targeted alerts.
  */
 
+import type { IncidentIdentity } from "tribe-wire"
+
 export interface TribePluginApi {
   /** Stable identifier — also the sender name when broadcasting. */
   readonly name: string
@@ -38,6 +40,14 @@ export interface TribePluginApi {
   /** Start observing. Returns a disposer called on daemon shutdown / hot-reload. */
   start(api: TribeClientApi): (() => void) | void
 
+  /**
+   * Opt in to fatal load semantics: a throw from `available()`/`start()` stops
+   * the daemon instead of disabling just this plugin. Default (absent/false) is
+   * the observer contract — the daemon serves without it. Only set this if
+   * coordination is genuinely incorrect when the plugin is missing.
+   */
+  readonly loadBearing?: boolean
+
   /** Optional text appended to the MCP system prompt for connected sessions. */
   instructions?(): string
 }
@@ -46,6 +56,12 @@ export interface TribePluginApi {
 export interface TribePluginHandle {
   readonly name: string
   readonly active: boolean
+  /**
+   * Present iff the plugin FAILED to load — the verbatim cause. Its absence on
+   * an `active: false` handle means the plugin was merely unavailable
+   * (dependency absent), which is a different, expected state.
+   */
+  readonly error?: string
 }
 
 /**
@@ -58,15 +74,31 @@ export interface TribePluginHandle {
  * `(kind, recipient, senderRole)`.
  */
 export type EventClassification = {
-  /** push = actionable channel-delivered; pull = ambient inbox-only */
+  /** push = eligible for per-session channel admission; pull = inbox-only */
   delivery?: "push" | "pull"
   /** Stable event topic (e.g. `git:commit`); used by tribe.filter mute globs. */
   topic?: string
 }
 
 export interface TribeClientApi {
-  /** Direct message to a single recipient (name) or the daemon's dispatcher. */
-  send(recipient: string, content: string, type: string, beadId?: string, classification?: EventClassification): void
+  /**
+   * Direct message to a single recipient (name) or the daemon's dispatcher.
+   *
+   * `incident` is the habwire stage 2(d) rail for WATCHERS: a plugin that
+   * fires every tick passes the identity of the condition it observed, and the
+   * daemon holds ONE obligation for as long as that condition holds instead of
+   * one per observation. `active: false` is the clearing edge and closes it.
+   * Without it, a ticking plugin can only emit telemetry nobody owes a reply
+   * to — which is visibility, not a reader.
+   */
+  send(
+    recipient: string,
+    content: string,
+    type: string,
+    beadId?: string,
+    classification?: EventClassification,
+    incident?: IncidentIdentity & { active?: boolean },
+  ): void
 
   /** Broadcast to all connected sessions (recipient = '*'). */
   broadcast(content: string, type: string, beadId?: string, classification?: EventClassification): void
@@ -100,13 +132,12 @@ export interface TribeClientApi {
   /**
    * Count + oldest-timestamp of actionable DMs addressed to `sessionName` that
    * the session has NOT drained via `tribe.fetch` yet (rowid > last_inbox_pull_seq).
-   * Actionable = `type IN (request, query, verdict, assign)` and `kind='direct'`.
+   * Actionable = `type IN (request, query, verdict, assign)` and
+   * `kind='direct'`.
    * Returns `{count: 0, oldestTs: 0}` when no unread or the session is unknown.
    *
-   * Used by the chief-silent watchdog (chief-silent-watchdog-relay-pattern-detection):
-   * push delivery puts a message in the session's MCP context but does NOT advance
-   * the pull cursor — only an explicit `tribe.fetch` does. A long-lagging pull
-   * cursor is the relay-pattern signal we want to catch.
+   * Used by the no-live-chief authority watchdog. Generic online inbox
+   * staleness consumes the richer `health.cadence.inbox_lag` projection.
    */
   getUnreadDms(sessionName: string): { count: number; oldestTs: number }
 }

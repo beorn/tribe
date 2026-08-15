@@ -13,9 +13,14 @@
  *   recall sessions [id]              # List sessions or show details
  *   recall files [pattern]            # List/search file writes
  *   recall files --restore <file>     # Recover file content
+ *   recall export [session|--all]      # Export transcript markdown for qmd
  *
- * Internal (hook system):
- *   recall remember                   # SessionEnd (stdin JSON)
+ * Internal/manual (hook-shaped, but NOT hook-dispatched):
+ *   recall remember                   # daily summarization, stdin-JSON shaped
+ *                                      # like SessionEnd, but dispatchHook()
+ *                                      # never calls it — manual-only by
+ *                                      # design (see hooks.ts docstring on
+ *                                      # cmdRemember + docs/recall.md).
  *
  * Note: SessionStart, UserPromptSubmit, and SessionEnd hooks are dispatched
  * via `tribe hook <event>` — not recall CLI — as of @bearly/tribe 0.10.0.
@@ -28,6 +33,7 @@ import { cmdSessions, cmdIndex } from "./lib/sessions"
 import { cmdFiles } from "./lib/files"
 import { cmdRemember } from "./lib/hooks"
 import { cmdSummarize, cmdWeekly, cmdShow } from "./lib/summarize-daily"
+import { cmdExport } from "./qmd-export"
 
 // ============================================================================
 // CLI
@@ -38,6 +44,7 @@ const SUBCOMMANDS = new Set([
   "status",
   "sessions",
   "files",
+  "export",
   "remember",
   "summarize",
   "weekly",
@@ -60,6 +67,18 @@ program
   .configureOutput({
     writeErr: (str) => console.error(str.trimEnd()),
   })
+  .addHelpText(
+    "after",
+    `\nExit codes:\n` +
+      `  0  clean success — synthesized answer, --raw results, or a genuine\n` +
+      `     "no results found" (an empty search is not a failure)\n` +
+      `  1  hard failure — an unexpected crash, not the degraded path below\n` +
+      `  2  CLI usage error (bad flags, removed subcommand)\n` +
+      `  3  degraded — lexical search found results but LLM synthesis failed;\n` +
+      `     the results still print, below a labeled failure report — never\n` +
+      `     silently dropped. Only reachable from the default search/synthesis\n` +
+      `     path, never from --raw, index, status, sessions, files, or export.\n`,
+  )
 
 // ── Default: search ─────────────────────────────────────────────────────
 program
@@ -134,10 +153,23 @@ program
     await cmdFiles(opts.pattern, opts)
   })
 
+// ── qmd transcript export adapter ──────────────────────────────────────
+program
+  .command("export")
+  .argument("[session]", "Session ID or transcript JSONL path")
+  .description("Export Claude Code transcripts as quality-gated markdown for qmd")
+  .option("--all", "Export every transcript")
+  .option("--force", "Rewrite existing exports")
+  .option("--catchup", "Export only missing transcripts")
+  .option("--hook", "Read SessionEnd input and emit a valid hook response")
+  .actionMerged((opts: { session?: string; all?: boolean; force?: boolean; catchup?: boolean; hook?: boolean }) => {
+    cmdExport(opts)
+  })
+
 // ── remember (internal) ─────────────────────────────────────────────────
 program
   .command("remember", { hidden: true })
-  .description("SessionEnd hook (reads stdin JSON)")
+  .description("Manual daily summarization, SessionEnd-stdin-JSON-shaped but NOT hook-dispatched (see docs/recall.md)")
   .option("--json", "Output as JSON")
   .action(async (opts: { json?: boolean }) => {
     await cmdRemember(opts)

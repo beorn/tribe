@@ -9,6 +9,9 @@
     "url": "git+https://github.com/beorn/tribe.git",
     "directory": "packages/recall"
   },
+  "bin": {
+    "recall": "./src/cli.ts"
+  },
   "files": [
     "src",
     "README.md"
@@ -20,6 +23,7 @@
   },
   "dependencies": {
     "@silvery/commander": "^0.19.2",
+    "@tobilu/qmd": "2.5.3",
     "loggily": "^0.10.2",
     "zod": "^4.3.6"
   }

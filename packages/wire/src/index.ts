@@ -18,8 +18,21 @@ export { isNotification, isRequest, isResponse, makeError, makeNotification, mak
 export { createLineParser } from "./parser.ts"
 
 // Daemon client
-export type { ConnectOrStartOpts, ConnectToDaemonOpts, DaemonClient, ReconnectingClientOpts } from "./client.ts"
-export { connectOrStart, connectToDaemon, createReconnectingClient, isSocketAlive } from "./client.ts"
+export type {
+  ConnectOrStartOpts,
+  ConnectToDaemonOpts,
+  DaemonCallOpts,
+  DaemonClient,
+  ReconnectingClientOpts,
+  StandaloneDaemonSupervisorOpts,
+} from "./client.ts"
+export {
+  connectOrStart,
+  connectToDaemon,
+  createReconnectingClient,
+  isSocketAlive,
+  spawnStandaloneDaemonSupervisor,
+} from "./client.ts"
 
 // Deadline-bounded call (hook-friendly)
 export type { DaemonCallOutcome, WithDaemonCallOpts } from "./util.ts"
@@ -27,6 +40,16 @@ export { withDaemonCall } from "./util.ts"
 
 // Socket path discovery
 export { resolvePeerSocketPath, resolveSocketPath } from "./paths.ts"
+
+// Process-boundary projection for a neutral launchId. Tribe owns its private
+// environment representation; launchers pass only the structural value.
+export type { TribeLaunchEnvironment } from "./launch-environment.ts"
+export {
+  projectTribeLaunchEnvironment,
+  readTribeLaunchId,
+  tribeLaunchEnvironmentNames,
+  withTribeLaunchEnvironment,
+} from "./launch-environment.ts"
 
 // Reaper-exempt markers — exempt a PID from the health-reaper auto-kill (gap 1)
 export type { ReaperExemptEntry } from "./reaper-exempt.ts"
@@ -61,11 +84,53 @@ export { startTribeHttpMcpServer } from "./http-adapter.ts"
 // Join delivery resolution (require-join-before-push contract, c6071f3 + 333193c).
 export { resolveJoinDelivery } from "./lib/delivery.ts"
 
+// Pending-ball deadline and settlement replay facts. The daemon and wire
+// reports share this parser so malformed evidence cannot mean different things
+// on different read surfaces.
+export {
+  BALL_SETTLEMENT_REASONS,
+  NON_REPLY_BALL_SETTLEMENT_REASONS,
+  parseBallOutcomeFact,
+  type BallDeadlineFact,
+  type BallDeadlineObservationPayload,
+  type BallFactEvidence,
+  type BallOutcomeFactRow,
+  type BallSettlementFact,
+  type BallSettlementReason,
+} from "./lib/ball-outcome.ts"
+
+// One-ball-per-incident identity, shared by the CLI (which parses the
+// `--incident` key) and the daemon (which keys the ball on it). One
+// definition, so the wire and the tracker cannot disagree about what a
+// well-formed identity is.
+export {
+  incidentKey,
+  parseIncidentKey,
+  isIncidentKey,
+  INCIDENT_KEY_SEPARATOR,
+  type IncidentIdentity,
+} from "./lib/incident.ts"
+
 // Inbox-wait option parsing shared by CLI and MCP/raw daemon call paths.
-export type { InboxWaitOptions, InboxWaitOptionSource } from "./lib/inbox-wait-options.ts"
+export type {
+  InboxWaitAttention,
+  InboxWaitHostCeilingSource,
+  InboxWaitHostCutResult,
+  InboxWaitOptions,
+  InboxWaitOptionSource,
+  InboxWaitResult,
+  InboxWaitTerminalStatus,
+  InboxWaitToolResult,
+} from "./lib/inbox-wait-options.ts"
 export {
   DEFAULT_INBOX_WAIT_SESSION,
   DEFAULT_INBOX_WAIT_TIMEOUT_MS,
+  DEFAULT_MCP_INBOX_WAIT_TIMEOUT_MS,
+  MAX_INBOX_WAIT_TIMEOUT_MS,
+  MCP_INBOX_WAIT_HOST_CEILING_MS,
+  MCP_INBOX_WAIT_HOST_CEILING_SOURCE,
+  deriveInboxWaitCallTimeoutMs,
+  inboxWaitHostCutResult,
   parseInboxWaitTimeoutMs,
   resolveInboxWaitOptions,
 } from "./lib/inbox-wait-options.ts"
@@ -96,3 +161,4 @@ export {
 // Runtime identity — `<version>+<sha>` for `tribe-wire --version` + daemon startup
 // (@km/infra/20359, vendor-local; mirrors code-pin's running-code visibility).
 export { formatRuntimeId, gitShortHead, tribeWireRuntimeId, wireVersion } from "./runtime-id.ts"
+export { deriveTribePersonaLaunchIdentity, type TribePersonaLaunchIdentity } from "./lib/persona-launch-identity.ts"

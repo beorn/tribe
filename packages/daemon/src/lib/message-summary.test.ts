@@ -51,6 +51,7 @@ function makeOpts(): HandlerOpts {
     userRenamed: false,
     setUserRenamed: () => undefined,
     getActiveSessionIds: () => new Set([SENDER_ID, RECIPIENT_ID]),
+    hasActiveTransport: (sessionId) => sessionId === SENDER_ID || sessionId === RECIPIENT_ID,
     getActiveSessionInfo: () => [],
   }
 }

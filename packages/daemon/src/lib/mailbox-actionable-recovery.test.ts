@@ -1,15 +1,15 @@
 /**
- * 19442 undead reframe — durable per-recipient actionable mailbox.
+ * 19442 / 21757 — durable per-recipient attention mailbox.
  *
- * Name-claim recovery must select the EXACT missed actionable directs
- * (request / query / verdict / assign addressed to the name) without
+ * Name-claim recovery must select the EXACT missed durable-attention directs
+ * (actionables plus newly classified responses addressed to the name) without
  * traversing unrelated history. The old mechanism — rewinding the session's
  * `last_inbox_pull_seq` — replayed every intervening ambient broadcast into
  * the model transcript (the 97-row flood: 49 joins + 48 health + 1 direct).
  *
  * The reframe: a `mailbox_cursors` row keyed by RECIPIENT (not session)
- * records the highest actionable rowid acknowledged for that mailbox. The
- * normal default-drain fetch injects unacked actionables ahead of the
+ * records the highest durable-attention rowid acknowledged for that mailbox.
+ * The normal default-drain fetch injects unacked attention ahead of the
  * ambient window and acknowledges what it returns. Rename / rejoin /
  * takeover retain the mailbox; the ambient session cursor is never rewound.
  *
@@ -20,7 +20,7 @@ import { Database } from "bun:sqlite"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
@@ -40,6 +40,7 @@ type FetchJson = ToolJson & {
   attention?: {
     actionable_unread?: FetchEvent[]
     pending_balls?: AttentionBall[]
+    pending_balls_summary?: { total: number; oldest_age_ms: number }
   }
   events?: FetchEvent[]
   cursor?: number
@@ -58,13 +59,33 @@ function makeContext(db: Database, stmts: TribeStatements, sessionId: string, in
   })
 }
 
-function makeOpts(activeIds: () => Set<string>): HandlerOpts {
+function makeOpts(activeIds: () => Set<string>, db: Database): HandlerOpts {
   return {
     cleanup: () => {},
     userRenamed: false,
     setUserRenamed: () => {},
     getActiveSessionIds: activeIds,
-    getActiveSessionInfo: () => [],
+    hasActiveTransport: (sessionId) => activeIds().has(sessionId),
+    getActiveSessionInfo: () =>
+      [...activeIds()].flatMap((id) => {
+        const row = db.prepare("SELECT name FROM sessions WHERE id = ?").get(id) as { name: string } | null
+        return row === null
+          ? []
+          : [
+              {
+                id,
+                name: row.name,
+                pid: process.pid,
+                cwd: "/repo",
+                role: "member",
+                claudeSessionId: null,
+                registeredAt: Date.now(),
+                launchId: null,
+                launchParentPid: null,
+                transportPids: [process.pid],
+              },
+            ]
+      }),
   }
 }
 
@@ -158,7 +179,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
    * fresh-row branch registers the session AND resets its delivery offsets to
    * the journal tail — the same tail-reset a real connect performs — so the
    * ambient window starts empty and anything older is reachable only through
-   * the actionable mailbox.
+   * the attention mailbox.
    */
   function connectAs(sessionId: string, name: string): TribeContext {
     const ctx = makeContext(db, stmts, sessionId, `boot-${sessionId}`)
@@ -176,7 +197,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     db = openDatabase(join(tmpDir, "tribe.db"))
     stmts = createStatements(db)
     active = new Set()
-    opts = makeOpts(() => active)
+    opts = makeOpts(() => active, db)
   })
 
   afterEach(() => {
@@ -217,6 +238,257 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(fetchEvents(b, opts)).toEqual([])
   })
 
+  it("keeps a recently active mailbox addressable while its persona is stopped", () => {
+    const stopped = connectAs("sess-stopped", NAME)
+    const chief = connectAs("sess-chief", "@chief")
+    disconnect("sess-stopped")
+    void stopped
+
+    const sent = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        {
+          to: NAME,
+          message: "resume the durable review",
+          type: "request",
+          request: true,
+        },
+        opts,
+      ),
+    ) as { id: string }
+
+    expect(sent.id).toEqual(expect.any(String))
+    expect(db.prepare("SELECT request_id FROM pending_request WHERE recipient = ?").get(NAME)).toEqual({
+      request_id: sent.id,
+    })
+    expect(db.prepare("SELECT id FROM messages WHERE kind = 'direct' AND recipient = ?").get(NAME)).toEqual({
+      id: sent.id,
+    })
+
+    // The successor inherits the durable addressed work through the mailbox,
+    // even though no transport was connected when the request was admitted.
+    const successor = connectAs("sess-successor", NAME)
+    const first = fetchJson(successor, opts).json
+    expect(first.attention?.actionable_unread).toEqual([
+      expect.objectContaining({
+        id: sent.id,
+        type: "request",
+        from: "@chief",
+        content: "resume the durable review",
+      }),
+    ])
+    expect(first.attention?.pending_balls).toEqual([
+      expect.objectContaining({ request_id: sent.id, message_id: sent.id, sender: "@chief" }),
+    ])
+  })
+
+  it("recovers a response that closed its tracked ball while the requester was parked", () => {
+    const requester = connectAs("sess-requester", NAME)
+    const chief = connectAs("sess-chief", "@chief")
+    const request = parseToolJson(
+      handleToolCall(
+        requester,
+        "tribe.send",
+        {
+          to: "@chief",
+          message: "choose the implementation seam",
+          type: "request",
+          request: true,
+        },
+        opts,
+      ),
+    ) as { id: string }
+
+    disconnect("sess-requester")
+    const response = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        {
+          to: NAME,
+          message: "use the durable attention seam",
+          type: "response",
+          reply: request.id,
+        },
+        opts,
+      ),
+    ) as { id: string; tracker?: { request_id: string; closed: number } }
+
+    expect(response.tracker).toEqual({ request_id: request.id, closed: 1 })
+    expect(db.prepare("SELECT id, attention_required FROM messages WHERE id = ?").get(response.id)).toEqual({
+      id: response.id,
+      attention_required: 1,
+    })
+    expect(stmts.getUnreadDms.get({ $name: NAME })).toMatchObject({ count: 0 })
+
+    // A real reconnect resets the successor's chronological cursor to the
+    // journal tail. The semantic response must therefore ride durable
+    // attention/recovery even though it intentionally stays quiet for the
+    // default actionable-only inbox wait.
+    const successor = connectAs("sess-successor", NAME)
+    const first = fetchJson(successor, opts).json
+    expect(first.attention?.actionable_unread).toEqual([
+      expect.objectContaining({
+        id: response.id,
+        type: "response",
+        from: "@chief",
+        content: "use the durable attention seam",
+      }),
+    ])
+    expect(first.events?.map((event) => event.id)).toEqual([response.id])
+
+    const second = fetchJson(successor, opts).json
+    expect(second.attention?.actionable_unread).toEqual([])
+    expect(second.events).toEqual([])
+  })
+
+  it("retires a replied-to direct from the recipient's next actionable read", () => {
+    const worker = connectAs("sess-reply-worker", NAME)
+    const chief = connectAs("sess-reply-chief", "@chief")
+    const request = parseToolJson(
+      handleToolCall(chief, "tribe.send", { to: NAME, message: "take the assignment", type: "request" }, opts),
+    ) as { id: string }
+
+    const response = parseToolJson(
+      handleToolCall(
+        worker,
+        "tribe.send",
+        { to: "@chief", message: "accepted", type: "response", reply: request.id },
+        opts,
+      ),
+    ) as { tracker?: { request_id: string; closed: number } }
+    expect(response.tracker).toEqual({ request_id: request.id, closed: 1 })
+
+    const fetched = fetchJson(worker, opts).json
+    expect(fetched.attention?.actionable_unread).toEqual([])
+    expect(fetched.events?.map((event) => event.id)).not.toContain(request.id)
+  })
+
+  it("reply retirement does not advance the mailbox cursor or hide an unrelated older actionable", () => {
+    const worker = connectAs("sess-reply-cursor-worker", NAME)
+    const chief = connectAs("sess-reply-cursor-chief", "@chief")
+    const older = parseToolJson(
+      handleToolCall(chief, "tribe.send", { to: NAME, message: "older independent work", type: "request" }, opts),
+    ) as { id: string }
+    const replied = parseToolJson(
+      handleToolCall(chief, "tribe.send", { to: NAME, message: "newer answered work", type: "request" }, opts),
+    ) as { id: string }
+    const before = stmts.getMailboxCursor.get({ $recipient: NAME })
+
+    parseToolJson(
+      handleToolCall(
+        worker,
+        "tribe.send",
+        { to: "@chief", message: "newer work answered", type: "response", reply: replied.id },
+        opts,
+      ),
+    )
+
+    expect(stmts.getMailboxCursor.get({ $recipient: NAME })).toEqual(before)
+    const fetched = fetchJson(worker, opts).json
+    expect(fetched.attention?.actionable_unread?.map((event) => event.id)).toEqual([older.id])
+    expect(fetched.events?.map((event) => event.id)).toEqual([older.id])
+  })
+
+  it("keeps a push-delivered response in attention until the parked seat fetches it", () => {
+    const requester = connectAs("sess-push-parked", NAME)
+    const chief = connectAs("sess-push-chief", "@chief")
+    const request = parseToolJson(
+      handleToolCall(requester, "tribe.send", { to: "@chief", message: "choose", type: "request" }, opts),
+    ) as { id: string }
+    const response = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        { to: NAME, message: "use seam B", type: "response", reply: request.id },
+        opts,
+      ),
+    ) as { id: string }
+    const persisted = db.prepare("SELECT rowid FROM messages WHERE id = ?").get(response.id) as { rowid: number }
+
+    // Socket fanout records transport delivery, not model surfacing. A parked
+    // provider has not acknowledged attention until its canonical fetch.
+    stmts.updateLastDelivered.run({ $id: "sess-push-parked", $ts: now, $seq: persisted.rowid })
+    expect(stmts.getLastDelivered.get({ $id: "sess-push-parked" })).toMatchObject({
+      last_delivered_seq: persisted.rowid,
+    })
+
+    const fetched = fetchJson(requester, opts).json
+    expect(fetched.attention?.actionable_unread).toEqual([
+      expect.objectContaining({ id: response.id, type: "response", content: "use seam B" }),
+    ])
+    expect(fetchJson(requester, opts).json.attention?.actionable_unread).toEqual([])
+  })
+
+  it("projects a response ahead of a full ambient page without replaying it after acknowledgement", () => {
+    const live = connectAs("sess-live-response", NAME)
+    for (let i = 0; i < 75; i++) {
+      insertRow(stmts, {
+        id: `response-flood-${i}`,
+        type: "health:daemon:warn",
+        sender: "daemon",
+        recipient: "*",
+        kind: "broadcast",
+        content: `ambient health ${i}`,
+        ts: now + i,
+      })
+    }
+    const responseRowid = insertRow(stmts, {
+      id: "decision-response",
+      type: "response",
+      sender: "@chief",
+      recipient: NAME,
+      kind: "direct",
+      content: "take seam B",
+      ts: now + 100,
+    })
+
+    const first = fetchJson(live, opts).json
+    expect(first.events).toHaveLength(50)
+    expect(first.events?.some((event) => event.id === "decision-response")).toBe(false)
+    expect(first.attention?.actionable_unread).toEqual([
+      expect.objectContaining({ id: "decision-response", rowid: responseRowid, type: "response" }),
+    ])
+
+    const second = fetchJson(live, opts).json
+    expect(second.attention?.actionable_unread).toEqual([])
+    expect(second.events).toHaveLength(25)
+    expect(second.events?.some((event) => event.id === "decision-response")).toBe(false)
+  })
+
+  it("acknowledges every attention row returned by an explicit advancing fetch", () => {
+    const live = connectAs("sess-explicit-advance", NAME)
+    const requestRowid = insertRow(stmts, {
+      id: "explicit-request",
+      type: "request",
+      sender: "@chief",
+      recipient: NAME,
+      kind: "direct",
+      content: "pick a seam",
+      ts: now + 1,
+    })
+    const responseRowid = insertRow(stmts, {
+      id: "explicit-response",
+      type: "response",
+      sender: "@chief",
+      recipient: NAME,
+      kind: "direct",
+      content: "use seam B",
+      ts: now + 2,
+    })
+
+    const explicit = fetchJson(live, opts, { since: requestRowid - 1, advance: true }).json
+    expect(explicit.attention).toBeUndefined()
+    expect(explicit.events?.map((event) => event.id)).toEqual(["explicit-request", "explicit-response"])
+    expect(db.prepare("SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = ?").get(NAME)).toEqual({
+      last_actionable_seq: responseRowid,
+    })
+
+    const canonical = fetchJson(live, opts).json
+    expect(canonical.attention?.actionable_unread).toEqual([])
+  })
+
   it("projects a later actionable plus owed ball ahead of a full ambient page", () => {
     const live = connectAs("sess-live", NAME)
 
@@ -248,6 +520,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       $recipient: NAME,
       $sender: "@ci",
       $opened_at: now + 100,
+      $expires_at: null,
       $message_id: "critical-revise",
       $fanout: "first",
     })
@@ -300,7 +573,42 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     ])
   })
 
-  it("delivery acknowledgement cannot erase a verdict's semantic response obligation", () => {
+  it("caps pending-ball attention to the oldest 10 with a lossless summary while explicit pending stays complete", () => {
+    const live = connectAs("sess-cap", NAME)
+    const total = 320
+
+    for (let i = 0; i < total; i++) {
+      stmts.openPendingRequest.run({
+        $request_id: `cap-${i}`,
+        $recipient: NAME,
+        $sender: "@chief",
+        $opened_at: now - (total - i) * 1_000,
+        $expires_at: null,
+        $message_id: `cap-message-${i}`,
+        $fanout: "first",
+      })
+    }
+
+    const fetched = fetchJson(live, opts).json
+    expect(fetched.attention?.pending_balls?.map((ball) => ball.request_id)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `cap-${i}`),
+    )
+    expect(fetched.attention?.pending_balls_summary).toEqual({
+      total,
+      oldest_age_ms: expect.any(Number),
+    })
+    expect(fetched.attention?.pending_balls_summary?.oldest_age_ms).toBeGreaterThanOrEqual(total * 1_000)
+    expect(new TextEncoder().encode(JSON.stringify(fetched.attention)).byteLength).toBeLessThan(4_096)
+
+    const explicit = parseToolJson(handleToolCall(live, "tribe.pending", {}, opts)) as {
+      count?: number
+      pending?: AttentionBall[]
+    }
+    expect(explicit.count).toBe(total)
+    expect(explicit.pending).toHaveLength(total)
+  })
+
+  it("delivery acknowledgement cannot erase an explicitly tracked verdict obligation", () => {
     const author = connectAs("sess-author", NAME)
     const reviewer = connectAs("sess-reviewer", "@ci")
     const review = parseToolJson(
@@ -327,6 +635,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
           message: "REVISE exact candidate before the next execute step",
           type: "verdict",
           reply: review.id,
+          request: true,
         },
         opts,
       ),
@@ -352,6 +661,27 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       count?: number
     }
     expect(reviewerPending.count).toBe(0)
+  })
+
+  it("records an empty canonical attention read without advancing the actionable cursor", () => {
+    const live = connectAs("sess-attention-read", NAME)
+    const receiptAt = now + 5_000
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(receiptAt)
+    try {
+      const filtered = fetchJson(live, opts, { from: "@chief" }).json
+      expect(filtered.attention).toBeUndefined()
+      expect(db.prepare("SELECT last_attention_read_at FROM mailbox_cursors WHERE recipient = ?").get(NAME)).toBeNull()
+
+      const canonical = fetchJson(live, opts, { advance: false }).json
+      expect(canonical.attention?.actionable_unread).toEqual([])
+      expect(
+        db
+          .prepare("SELECT last_actionable_seq, last_attention_read_at FROM mailbox_cursors WHERE recipient = ?")
+          .get(NAME),
+      ).toEqual({ last_actionable_seq: 0, last_attention_read_at: receiptAt })
+    } finally {
+      nowSpy.mockRestore()
+    }
   })
 
   it("reports the recovered count on the join result and never a rewound cursor", () => {
@@ -428,9 +758,8 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(fetchEvents(b, opts).map((e) => e.id)).toEqual(["a1"])
   })
 
-  it("takeover of an ACTIVE holder retains the mailbox — an unacked actionable survives to the taker", () => {
+  it("an ACTIVE holder keeps both its name and mailbox when a second live session tries to join", () => {
     const b = connectAs("sess-b", NAME)
-    void b
     // Request lands while b holds the name but never fetches.
     insertRow(stmts, {
       id: "r-live",
@@ -441,9 +770,18 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       content: "unacked while held",
       ts: now - 60_000,
     })
-    // Explicit join takeover from a second live session (stale-adapter case).
-    const d = connectAs("sess-d", NAME)
-    expect(fetchEvents(d, opts).map((e) => e.id)).toEqual(["r-live"])
+    // A second connected session cannot DB-tombstone the holder behind its
+    // live context/socket. Explicit whole-transport takeover is a dispatcher
+    // operation; ordinary tribe.join fails loud and leaves the mailbox put.
+    const d = makeContext(db, stmts, "sess-d", "boot-sess-d")
+    active.add("sess-d")
+    const joined = parseToolJson(handleToolCall(d, "tribe.join", { name: NAME, delivery: "pull" }, opts))
+
+    expect(joined.error).toContain(`Name "${NAME}" is already taken`)
+    expect(fetchEvents(d, opts)).toEqual([])
+    expect(fetchEvents(b, opts).map((e) => e.id)).toEqual(["r-live"])
+    expect(db.prepare("SELECT name FROM sessions WHERE id = 'sess-b'").get()).toEqual({ name: NAME })
+    expect(db.prepare(`SELECT name FROM sessions WHERE name LIKE '${NAME}-dead-%'`).all()).toEqual([])
   })
 
   it("normal live fetch acknowledges in-window actionables so a successor does not re-recover them", () => {
@@ -596,5 +934,31 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     const rejoin = parseToolJson(handleToolCall(b, "tribe.join", { name: NAME, delivery: "pull" }, opts))
     expect(rejoin.recovered_actionables).toBeUndefined()
     expect(fetchEvents(b, opts)).toEqual([])
+  })
+
+  it("repair reconcile mode rewinds mailbox cursor when an open request sits below the cursor (22203)", () => {
+    const b = connectAs("sess-b", NAME)
+    insertRow(stmts, {
+      id: "req-1",
+      type: "request",
+      sender: "@chief",
+      recipient: NAME,
+      kind: "direct",
+      content: "open request needing repair",
+      ts: now - 60_000,
+    })
+    db.prepare(
+      "INSERT INTO pending_request (request_id, recipient, sender, opened_at, expires_at, message_id, fanout) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).run("req-1", NAME, "@chief", now - 60_000, null, "req-1", "first")
+    // Advance mailbox cursor past req-1 to simulate cursor jump
+    stmts.advanceMailboxCursor.run({ $recipient: NAME, $seq: 9999, $now: Date.now() })
+
+    const repairResult = parseToolJson(handleToolCall(b, "tribe.repair", { inbox_cursor: "reconcile" }, opts))
+    expect(repairResult.repaired).toBe(true)
+    expect(repairResult.mailbox_reconciled).toBe(true)
+    expect(repairResult.mailbox_cursor_after).toBeLessThan(9999)
+
+    const fetchRes = fetchJson(b, opts)
+    expect(fetchRes.json.attention?.actionable_unread?.map((e) => e.id)).toContain("req-1")
   })
 })

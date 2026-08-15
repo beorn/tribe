@@ -14,7 +14,14 @@ import {
   getAllSessionTitles,
   type MessageSearchOptions,
 } from "../history/db"
-import { recall, type RecallOptions, type RecallResult, type RecallSearchResult } from "../history/recall"
+import {
+  recall,
+  suggestRetryTimeoutMs,
+  type RecallOptions,
+  type RecallResult,
+  type RecallSearchResult,
+  type SynthesisDiagnostics,
+} from "../history/recall"
 import type { AgentRecallOptions, AgentRecallResult } from "./agent.ts"
 import type { QueryPlan } from "./plan.ts"
 import { searchLiveSession } from "../history/search"
@@ -27,11 +34,11 @@ import {
   CYAN,
   YELLOW,
   GREEN,
+  RED,
   MAGENTA,
   THIRTY_DAYS_MS,
   parseTime,
   parseInclude,
-  formatBytes,
   formatTime,
   formatRelativeTime,
   displayProjectPath,
@@ -77,6 +84,26 @@ export interface SearchOptions {
   refresh?: boolean
 }
 
+/**
+ * Default searches to the current repository family. Linked worktrees keep
+ * their conventional `-wtN` suffix, so `km`, `km-wt0`, and `km-wt7` all map
+ * to the same `km` substring already understood by the shared DB queries.
+ * An explicit --project remains the narrower caller-owned filter.
+ */
+export function resolveProjectScope(project: string | undefined, cwd = process.cwd()): string | undefined {
+  if (project !== undefined) return project.replace(/\*/g, "").trim() || undefined
+
+  let root = cwd
+  const gitRoot = Bun.spawnSync(["git", "-C", cwd, "rev-parse", "--show-toplevel"], {
+    stdout: "pipe",
+    stderr: "ignore",
+  })
+  if (gitRoot.exitCode === 0) root = gitRoot.stdout.toString().trim() || cwd
+
+  const name = path.basename(root).replace(/-wt\d+$/, "")
+  return name || undefined
+}
+
 // ============================================================================
 // Stale-index auto-refresh — see @km/bearly/19216-recall-freshness-shrink-threshold
 // ============================================================================
@@ -85,7 +112,7 @@ export interface SearchOptions {
 // live in staleness.ts so unit tests can import them without dragging the search.ts
 // transitive closure (bun:sqlite, indexer, llm/agent → zod) into vitest's node runtime.
 export { RECALL_STALE_THRESHOLD_DEFAULT, parseThreshold, getStaleThresholdMs, type RefreshResult } from "./staleness"
-import { getStaleThresholdMs, type RefreshResult } from "./staleness"
+import type { RefreshResult } from "./staleness"
 
 /**
  * Check if the FTS5 index is stale and, if so, run `bun recall index --incremental`
@@ -123,7 +150,7 @@ export async function refreshIndexIfStale(
   /** Test seam — override deps for unit testing. Production callers omit. */
   deps?: Partial<RefreshDeps>,
 ): Promise<RefreshResult> {
-  const merged = { ...makeRefreshDeps(readLastRebuild), ...(deps ?? {}) }
+  const merged = { ...makeRefreshDeps(readLastRebuild), ...deps }
   return refreshIndexIfStaleWithDeps(options, merged)
 }
 
@@ -138,7 +165,6 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
     since,
     limit: limitStr,
     timeout: timeoutStr,
-    project,
     grep: regexMode,
     question,
     response,
@@ -146,6 +172,7 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
     session,
     include,
   } = options
+  const project = resolveProjectScope(options.project)
 
   // Auto-refresh stale FTS5 index BEFORE search runs (so results reflect the last
   // few minutes of work). See @km/bearly/19216-recall-freshness-shrink-threshold.
@@ -181,6 +208,7 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
   if (impliedRaw) {
     await rawSearch(query, {
       ...options,
+      project,
       limit: limitStr ? parseInt(limitStr, 10) : 10,
     })
     return
@@ -218,6 +246,7 @@ async function runAgentSearch(query: string, options: SearchOptions, base: Recal
   }
 
   const result = await recallAgent(query, agentOpts)
+  requireSynthesizedAnswer(result)
 
   if (options.json) {
     console.log(JSON.stringify(result, null, 2))
@@ -230,7 +259,6 @@ async function runAgentSearch(query: string, options: SearchOptions, base: Recal
   if (result.results.length === 0) {
     const rawProbe = probeLiteralRawMatches(query, base)
     if (rawProbe && rawProbe.result.results.length > 0) {
-      emitSearchPrelude(base.projectFilter)
       console.log(
         `${YELLOW}⚠ recall: agent variants missed literal raw matches; showing raw hits for "${rawProbe.token}".${RESET}\n`,
       )
@@ -459,21 +487,6 @@ function printAgentTrace(result: AgentRecallResult, debugPlan: boolean): void {
 // ============================================================================
 
 /**
- * NO SILENT ERRORS — recall output prelude.
- *
- * Per `docs/principles.md` § "Fail Loud, Fail Now" + @km/all/silent-errors-enforcement
- * violations #3, #4, #5: search results MUST surface what was searched, where we
- * looked, and what was excluded. Prepends warnings to result output:
- *
- *   #5 — stale index: when last_rebuild > 1h ago, warn that recent sessions
- *        may not be in the FTS index yet. Status command already says "(stale)";
- *        search results need the same warn so users don't trust empty results.
- *   #3 — project scope: when no --project filter passed AND sibling -wtN dirs
- *        exist in ~/.claude/projects, warn that those sessions are NOT excluded
- *        by default (the filter only narrows; absence means "all projects").
- *        This catches the "silent empty when wrong scope expected" failure mode.
- */
-/**
  * Print a one-line note about the auto-refresh attempt to stderr.
  * Silent on the "fresh" path (the happy path — no need to spam users every search).
  */
@@ -493,55 +506,22 @@ export function emitRefreshNote(r: RefreshResult): void {
   // "fresh" | "no-meta" | "opt-out" — silent (happy path or intentional).
 }
 
-function emitSearchPrelude(projectFilter: string | undefined): void {
-  // Stale-index check moved to cmdSearch's refreshIndexIfStale (auto-refresh
-  // path + emitRefreshNote). The prior in-prelude check duplicated the work
-  // for the fresh case and only fired meaningfully when the auto-refresh
-  // failed or was opted-out — that path is now owned by emitRefreshNote, so
-  // the prelude focuses on the orthogonal worktree-scope warning below.
-  // See @km/bearly/19243 + @km/bearly/19216-recall-freshness-shrink-threshold.
-
-  // sibling -wtN project dirs check
-  try {
-    const home = process.env.HOME ?? ""
-    const projectsDir = path.join(home, ".claude", "projects")
-    if (fs.existsSync(projectsDir)) {
-      const cwd = process.cwd()
-      const cwdSlug = "-" + cwd.slice(1).replace(/\//g, "-")
-      const matchesCwd = fs.existsSync(path.join(projectsDir, cwdSlug))
-      if (matchesCwd) {
-        // Find sibling dirs that share the base name (e.g., -...-km-wt0 alongside -...-km)
-        const siblings = fs
-          .readdirSync(projectsDir)
-          .filter(
-            (d) =>
-              d.startsWith(cwdSlug + "-wt") ||
-              (d.startsWith(cwdSlug) && d !== cwdSlug && /^-wt\d+/.test(d.slice(cwdSlug.length))),
-          )
-        if (siblings.length > 0 && !projectFilter) {
-          const basename = cwd.split("/").pop() ?? "project"
-          console.error(
-            `${YELLOW}⚠ recall: ${siblings.length} sibling worktree project dir(s) detected (${siblings.slice(0, 3).join(", ")}${siblings.length > 3 ? "…" : ""}).${RESET}\n` +
-              `  Default scope = ALL projects (no current-project narrowing), but if the\n` +
-              `  planner-generated variants are project-context-scoped, sibling -wtN\n` +
-              `  sessions may be missed. Pass \`--project '*${basename}*'\` to aggregate.`,
-          )
-        }
-      }
-    }
-  } catch {
-    // Best-effort — never break search on prelude errors.
-  }
-}
-
 function formatRecallOutput(result: RecallResult, options: { json?: boolean }): void {
+  // Check FIRST, before requireSynthesizedAnswer would throw a generic
+  // "no synthesized answer" error that discards the rich diagnostic report
+  // recall() already built. A synthesis failure with lexical results in
+  // hand is a distinct, better-understood case than "nothing came back."
+  if (result.synthesisFailure) {
+    renderSynthesisFailure(result, result.synthesisFailure, options)
+    return
+  }
+
+  requireSynthesizedAnswer(result)
+
   if (options.json) {
     console.log(JSON.stringify(result, null, 2))
     return
   }
-
-  // NO SILENT ERRORS — surface stale-index + worktree-scope warnings BEFORE result.
-  emitSearchPrelude((result as RecallResult & { projectFilter?: string }).projectFilter)
 
   if (result.results.length === 0) {
     // #4 — agent zero-result lie. When agent mode returns 0 but the literal
@@ -560,32 +540,33 @@ function formatRecallOutput(result: RecallResult, options: { json?: boolean }): 
     return
   }
 
-  if (result.synthesis) {
-    console.log(result.synthesis)
-    console.log()
-    const uniqueSessions = new Set(result.results.map((r) => r.sessionId)).size
-    const timingParts = [`${result.durationMs}ms`]
-    if (result.timing) {
-      timingParts.push(`search=${result.timing.searchMs}ms`)
-      if (result.timing.llmMs !== undefined) timingParts.push(`llm=${result.timing.llmMs}ms`)
-    }
-    console.log(
-      `${DIM}${result.results.length} results from ${uniqueSessions} sessions (${timingParts.join(", ")})${RESET}`,
-    )
-    if (result.llmCost !== undefined && result.llmCost > 0) {
-      console.log(`${DIM}LLM cost: $${result.llmCost.toFixed(4)}${RESET}`)
-    }
-    return
+  console.log(result.synthesis)
+  console.log()
+  const uniqueSessions = new Set(result.results.map((r) => r.sessionId)).size
+  const timingParts = [`${result.durationMs}ms`]
+  if (result.timing) {
+    timingParts.push(`search=${result.timing.searchMs}ms`)
+    if (result.timing.llmMs !== undefined) timingParts.push(`llm=${result.timing.llmMs}ms`)
   }
-
-  // Fallback: synthesis failed/aborted, show raw results
-  formatRawRecallResults(result)
+  console.log(
+    `${DIM}${result.results.length} results from ${uniqueSessions} sessions (${timingParts.join(", ")})${RESET}`,
+  )
+  if (result.llmCost !== undefined && result.llmCost > 0) {
+    console.log(`${DIM}LLM cost: $${result.llmCost.toFixed(4)}${RESET}`)
+  }
 }
 
-function formatRawRecallResults(result: RecallResult): void {
-  console.log(`${BOLD}${result.results.length} results${RESET} for "${result.query}":\n`)
+function requireSynthesizedAnswer(result: RecallResult): void {
+  if (result.results.length === 0 || result.synthesis) return
+  throw new Error(
+    "Recall synthesis failed or is unavailable; no synthesized answer was produced. " +
+      "Configure TRIBE_LLM_DIR and provider credentials, or rerun with --raw for lexical results.",
+  )
+}
 
-  for (const r of result.results) {
+/** Shared per-result renderer — used by raw mode and by the synthesis-failure report, so failed synthesis never has to throw its lexical hits away. */
+function printResultEntries(results: RecallSearchResult[]): void {
+  for (const r of results) {
     const date = new Date(r.timestamp)
       .toISOString()
       .replace("T", " ")
@@ -603,6 +584,11 @@ function formatRawRecallResults(result: RecallResult): void {
     console.log(indented)
     console.log()
   }
+}
+
+function formatRawRecallResults(result: RecallResult): void {
+  console.log(`${BOLD}${result.results.length} results${RESET} for "${result.query}":\n`)
+  printResultEntries(result.results)
 
   const timingParts = [`${result.durationMs}ms`]
   if (result.timing) {
@@ -610,6 +596,109 @@ function formatRawRecallResults(result: RecallResult): void {
     if (result.timing.llmMs !== undefined) timingParts.push(`llm=${result.timing.llmMs}ms`)
   }
   console.log(`${DIM}(${timingParts.join(", ")})${RESET}`)
+}
+
+/**
+ * The tool is BROKEN, not empty — lexical search succeeded but the LLM
+ * synthesis step didn't. Render a report that's impossible to mistake for
+ * "no prior work exists": an unambiguous banner, per-attempt provider
+ * detail, budget accounting, what got excluded and why, what DID work
+ * (the lexical hits, printed below, never dropped), and a concrete retry
+ * command naming a provider that's actually available on this host.
+ *
+ * Exit code 3 (distinct from 0=full success, 1=hard crash, 2=CLI usage
+ * error already used elsewhere in this CLI) — a caller or script must be
+ * able to tell "search worked, synthesis degraded" apart from both a clean
+ * run and a total failure. Silently returning 0 here would be its own
+ * silent-failure variant: real, unsummarized results sitting behind a
+ * green exit code nobody double-checks.
+ */
+function renderSynthesisFailure(result: RecallResult, diag: SynthesisDiagnostics, options: { json?: boolean }): void {
+  process.exitCode = 3
+
+  if (options.json) {
+    console.log(JSON.stringify(result, null, 2))
+    return
+  }
+
+  console.log(`${BOLD}${RED}⚠ RECALL SYNTHESIS FAILED — THE TOOL IS BROKEN, NOT EMPTY${RESET}`)
+  console.log(
+    `${BOLD}Lexical search found ${result.results.length} result(s) for "${result.query}" — the LLM step that summarizes them did not complete.${RESET}`,
+  )
+  console.log(diag.summary)
+  console.log()
+
+  // Budget accounting — total, per-batch allocation vs actual spend, and
+  // what was left over. This is the exact detail (e.g. "8265ms then only
+  // 1735ms left") that made the original provider-starvation bug diagnosable.
+  console.log(`${BOLD}Budget:${RESET} ${diag.totalBudgetMs}ms total`)
+  if (diag.batches.length === 0 && diag.excludedProviders.length > 0) {
+    console.log(`  (no batch was ever raced — see "Excluded before racing" below)`)
+  } else if (diag.batches.length === 0) {
+    console.log(`  (no batch was ever raced — see the summary above)`)
+  }
+  for (const b of diag.batches) {
+    const leftAfter = Math.max(0, b.budgetAtStartMs - b.elapsedMs)
+    console.log(
+      `  [${b.modelIds.join(", ")}] given ${b.allocatedMs}ms (of ${b.budgetAtStartMs}ms remaining) → ` +
+        `took ${b.elapsedMs}ms${b.timedOut ? " (hit its share timeout)" : ""} → ${leftAfter}ms left for the next batch`,
+    )
+  }
+  console.log()
+
+  // Per-model attempt detail — model, provider, why it failed, timing.
+  if (diag.attempts.length > 0) {
+    console.log(`${BOLD}Attempts:${RESET}`)
+    for (const a of diag.attempts) {
+      const reason = a.error ?? a.status
+      console.log(
+        `  ${a.modelId} (${a.provider}): ${a.status} — ${reason} — ${a.elapsedMs}ms of ${a.timeoutMs}ms given`,
+      )
+    }
+    console.log()
+  }
+
+  // Excluded providers — key missing vs key present but flagged dead.
+  if (diag.excludedProviders.length > 0) {
+    console.log(`${BOLD}Excluded before racing:${RESET}`)
+    for (const e of diag.excludedProviders) {
+      console.log(`  ${e.provider} (${e.modelId}) — ${e.reason}`)
+    }
+    console.log()
+  }
+
+  // What DID work — never let a synthesis failure imply the search failed too.
+  const searchMs = result.timing?.searchMs
+  console.log(
+    `${GREEN}Lexical search: OK${RESET} — found ${result.results.length} result(s)${searchMs !== undefined ? ` in ${searchMs}ms` : ""} (shown below).`,
+  )
+  console.log()
+
+  // Concrete next action — name providers that actually work on THIS host,
+  // not the ones already known dead (they're in "Excluded" above).
+  console.log(`${BOLD}Next steps:${RESET}`)
+  const q = JSON.stringify(result.query)
+  console.log(`  • See the lexical results without needing an LLM: bun recall ${q} --raw`)
+  if (diag.consideredProviders.length > 0) {
+    const suggestedTimeout = suggestRetryTimeoutMs(diag.totalBudgetMs, diag.attempts)
+    const providers = [...new Set(diag.consideredProviders)].join(", ")
+    console.log(`  • Retry with more time for ${providers}: bun recall ${q} --timeout ${suggestedTimeout}`)
+  } else if (diag.excludedProviders.length > 0) {
+    console.log(`  • No provider was available to try — check API key env vars, or see "Excluded before racing" above.`)
+  } else {
+    console.log(`  • No provider was available to try — see the summary above (likely TRIBE_LLM_DIR is unset).`)
+  }
+  console.log(
+    `  • Provider exclusions live in .envrc.local (RECALL_LLM_DENY_PROVIDERS) — edit it if an excluded provider is actually working now.`,
+  )
+  console.log()
+
+  printResultEntries(result.results)
+
+  if (diag.rawStack) {
+    console.log(`${DIM}raw error (debugging only, not the primary signal):${RESET}`)
+    console.log(`${DIM}${diag.rawStack}${RESET}`)
+  }
 }
 
 function formatType(type: string): string {

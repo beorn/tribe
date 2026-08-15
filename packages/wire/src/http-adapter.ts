@@ -12,8 +12,18 @@ import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js"
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { createHash, randomUUID } from "node:crypto"
+import { hashSelfMailboxAuthority, readSelfMailboxAuthorityFromEnvironment } from "./lib/self-mailbox-authority.ts"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
-import { resolveSocketPath, createReconnectingClient, TRIBE_PROTOCOL_VERSION, type DaemonClient } from "./lib/socket.ts"
+import { callTribeTool } from "./lib/tool-daemon-call.ts"
+import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
+import { deriveTribePersonaLaunchIdentity } from "./lib/persona-launch-identity.ts"
+import {
+  resolveSocketPath,
+  createReconnectingClient,
+  TRIBE_PROTOCOL_VERSION,
+  TRIBE_SUPPORTED_PROTOCOL_VERSIONS,
+  type DaemonClient,
+} from "./lib/socket.ts"
 import {
   deliveryCapabilityInstruction,
   resolveDeliveryCapability,
@@ -47,9 +57,10 @@ export type StartTribeHttpMcpServerOptions = {
 
 export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptions = {}): Promise<TribeHttpMcpServer> {
   const socketPath = resolveSocketPath(opts.socketPath)
+  const initialFilterMode = initialFilterModeFromEnv(process.env.TRIBE_FILTER_MODE)
   const requireJoin = opts.requireJoin !== false
   const initialName = opts.name?.trim() || undefined
-  const launchId = opts.launchId?.trim() || undefined
+  const providerLaunchId = opts.launchId?.trim() || undefined
   const deliveryCapability = resolveDeliveryCapability({
     delivery: opts.delivery ?? "pull",
     channel: false,
@@ -62,12 +73,19 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
     .update(`${sessionId}|${opts.project ?? process.cwd()}|${myRole}`)
     .digest("hex")
     .slice(0, 16)
+  const selfMailboxAuthority = readSelfMailboxAuthorityFromEnvironment(process.env)
 
   const daemon = await createReconnectingClient({
     socketPath,
     maxAttempts: 30,
+    noSpawn: true,
     async onConnect(client) {
       const registerName = myName !== "pending" ? myName : !requireJoin ? initialName : undefined
+      const identityPersona = registerName ?? initialName
+      const launchId =
+        providerLaunchId !== undefined && identityPersona !== undefined
+          ? deriveTribePersonaLaunchIdentity(identityPersona, providerLaunchId).launchId
+          : providerLaunchId
       const reg = (await client.call("register", {
         ...(registerName !== undefined ? { name: registerName } : {}),
         role: myRole,
@@ -75,12 +93,17 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
         project: opts.project ?? process.cwd(),
         projectName: opts.projectName ?? process.cwd().split("/").pop() ?? "silvercode",
         projectId: opts.projectId,
-        protocolVersion: TRIBE_PROTOCOL_VERSION,
+        protocolVersion: TRIBE_PROTOCOL_VERSION - 1,
+        supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
         peerSocket: null,
         pid: process.pid,
         identityToken,
+        ...(selfMailboxAuthority === null
+          ? {}
+          : { mailboxAuthorityHash: hashSelfMailboxAuthority(selfMailboxAuthority) }),
         ...(launchId !== undefined ? { launchId, launchParentPid: process.pid } : {}),
         delivery: requireJoin ? "pull" : deliveryCapability.delivery,
+        ...(initialFilterMode === undefined ? {} : { filterMode: initialFilterMode }),
       })) as { name?: string; role?: string }
       if (reg.name) myName = reg.name
       if (reg.role) myRole = reg.role
@@ -90,10 +113,15 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
   const http = Bun.serve({
     hostname: "127.0.0.1",
     port: opts.port ?? 0,
-    async fetch(req) {
+    async fetch(req, server) {
       const url = new URL(req.url)
       if (url.pathname === "/health") return Response.json({ ok: true, name: myName })
       if (url.pathname !== "/mcp") return new Response("not found", { status: 404 })
+
+      // Tribe preflights MCP inbox.wait against the measured host ceiling.
+      // Disable Bun's separate per-request idle timeout so it cannot create a
+      // second, ambiguous cutoff below the typed host_cut/wait contract.
+      server.timeout(req, 0)
 
       const mcp = createMcpServer({
         daemon,
@@ -169,7 +197,7 @@ function createMcpServer(opts: {
           }
         : a
     try {
-      const result = await opts.daemon.call(`tribe.${name}`, payload)
+      const result = await callTribeTool(opts.daemon, name, payload)
       if (name === "join" || name === "rename") {
         const r = result as { content?: Array<{ text?: string }> }
         try {

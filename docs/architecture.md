@@ -25,19 +25,28 @@ commands fail loudly and tell the caller how to start or install a daemon.
 - SQLite state and message journal
 - session registry and delivery modes
 - daemon plugin runtime
-- Git/GitHub/health/beads-style event emitters where those are generic
+- Git/GitHub/health/issue-tracker-style event emitters where those are generic
+
+Daemon runtime state is machine-local. The GitHub poller stores its cursor at
+`$XDG_DATA_HOME/tribe/github-cursor.json` (falling back to
+`$HOME/.local/share/tribe/github-cursor.json`), never in a project's `.beads/`
+tree. On first start it adopts a legacy `.beads/github-cursor.json` under a
+process-shared lock. Corrupt or conflicting source/destination state fails
+loudly; identical dual state converges to the XDG-owned carrier.
 
 ### Host Plugins
 
 Host plugins wire Tribe into an agent runtime. The Claude Code plugin owns MCP
-registration and autostart hooks for that host. Other hosts can add their own
-plugins without changing wire or daemon packages.
+registration and connect-only bridge supervision for that host. Explicit
+lifecycle hooks live with the daemon install path. Other hosts can add their
+own plugins without changing wire or daemon packages.
 
-## Non-Goal: Tent Workflow
+## Non-Goal: Team Workflow Policy
 
-Project workflow is not reusable Tribe infrastructure. Concepts like `@chief`,
-`@agent/N`, worktree slots, bead queues, and integration authority belong in a
-tent/SOP layer in the consuming project. Tribe transports messages; it does not
+Project workflow is not reusable Tribe infrastructure. Concepts like named
+coordinator roles, worker numbering, branch/worktree assignment, task queues,
+and merge authority belong in the consuming project's own workflow layer.
+Tribe transports messages; it does not
 decide who is allowed to make a project-specific decision.
 
 ## Dependency Rule
@@ -45,7 +54,7 @@ decide who is allowed to make a project-specific decision.
 ```text
 host plugin -> tribe-wire -> tribe-daemon protocol
 daemon plugin -> tribe-wire primitives
-tent/SOP -> tribe messages
+project workflow layer -> tribe messages
 ```
 
-Reusable packages must not import project-specific tent/SOP code.
+Reusable packages must not import project-specific workflow code.

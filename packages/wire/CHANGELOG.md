@@ -2,6 +2,82 @@
 
 ## Unreleased
 
+### Added
+
+- **Reconnect-stable inbox-wait baselines.** Protocol v10 gives the installed
+  CLI a private durable cursor across its 30-second transport chunks while
+  keeping that cursor out of public MCP and CLI results. A fresh logical wait
+  is level-triggered by current unacknowledged default actionables or opted-in
+  validated replies; reconnect chunks are edge-triggered from the original
+  baseline, including rows inserted and acknowledged while the socket is down.
+- **Typed MCP host-ceiling refusal and CLI/daemon version preflight.** Protocol
+  v9 adds `status` to completed waits, returns `host_cut` before an MCP request
+  reaches the measured 10,000ms native-host ceiling, uses a host-safe 5,000ms
+  MCP default, and routes steady-state waits to the CLI without model-driven
+  chunk/re-arm polling. The one-shot CLI now probes
+  `cli_protocol` and names the running, on-disk, and superproject pins before it
+  can parse a stale daemon reply.
+- **Honor one full bounded inbox-wait window across every transport.** Protocol
+  v8 caps logical waits at 30 minutes, reports `effective_timeout_ms`, preserves
+  that deadline through CLI reconnects plus stdio/HTTP MCP forwarding, and lets
+  callers opt into validated `response` / `status` replies to their own tracked
+  requests without changing the default actionable-only wake policy.
+- **Daemon-authoritative transport verdicts.** `tribe.members({ all: true })`
+  now separates `transport_state` (`connected` / `disconnected`) from
+  `owner_state` (`live` / `dead` / `unknown`) and includes a diagnostic
+  `transport_reason`. The legacy `alive` field remains a derived compatibility
+  alias; `last_seen_sec` remains activity age, not liveness.
+- **Stuck-reconnect watchdog.** A supervised Claude adapter that remains in
+  reconnecting state for 60 seconds while the daemon answers a fresh RPC asks
+  its stable wrapper to reload current disk code.
+- **Bounded stale-transport repair.** `tribe repair
+--reap-stale-transports` and the matching MCP mode remove only disconnected
+  connection-scoped registrations after reconnect grace, with structured
+  examined/reaped reason counts. Automatic cleanup uses the same classifier.
+
+### Fixed
+
+- Keep retained disconnected `unknown-*` launch rows observable under the
+  bounded `anonymous_disconnected` health count without manufacturing
+  addressable transport wedges or membership discrepancies.
+- Keep every standalone daemon generation under one stable lifecycle owner.
+  Client/hook autostart detaches the supervisor rather than the daemon, strips
+  ambient seat identity before launch, and preserves that same owner across
+  manual reloads. A directly launched daemon adopts the supervisor before
+  replacement instead of self-detaching its successor.
+- Keep inbox-wait terminal outcomes daemon-authoritative. Current
+  unacknowledged qualifying work wakes a fresh wait; the private baseline is
+  the authority only after a logical wait has begun and reconnects.
+- Survive rapid daemon-generation bursts in the stable plugin supervisor with
+  bounded exponential replacement backoff and a stability reset. `members`
+  and `health` now expose missing durable-launch transports in-band without
+  letting connection-scoped sessions inflate the durable-launch comparison.
+- Pin the real daemon close/unlink/fresh-bind journey: the host stdio channel
+  remains open, the adapter child is replaced, the persisted logical member
+  rejoins, and post-restart tool calls succeed without human keystrokes.
+- Keep direct MCP adapters alive after they successfully re-register with a
+  new daemon generation. An unsupervised Codex-style `tribe-wire mcp` process
+  no longer exits merely to request a host replacement that does not exist.
+- Preserve explicit-join delivery across reconnects and supervised adapter
+  replacements: joined channel clients return as push, while never-joined
+  clients remain pull-gated.
+- Route daemon generation changes, reconnect exhaustion/watchdog trips, source
+  changes, and reload notifications through the one stable plugin supervisor;
+  allow rapid legitimate restart bursts with five bounded, exponentially
+  backed-off replacements instead of dying on the second generation, while
+  retaining the one-retry fail-loud path for other replacement reasons.
+- Close connected candidates when registration rejects, and terminate an
+  adapter when its host stdin closes, preventing stranded sockets/processes.
+- Stop treating existence of a recycled numeric PID as proof that a
+  disconnected registration's original owner is live. Unbound owners now
+  report `unknown`; health keeps durable launch rows with missing transport
+  loud while legacy connection-scoped litter is reaped safely.
+
+- **Register launch-declared notification filters atomically.** MCP adapters
+  accept `TRIBE_FILTER_MODE=focus|normal|ambient` and declare it in protocol v7
+  registration, so a focus-mode session cannot receive an ambient wake before
+  its durable preference is applied. Suppressed rows remain fetchable.
+
 ## 0.1.4 — 2026-05-27
 
 ### Fixed

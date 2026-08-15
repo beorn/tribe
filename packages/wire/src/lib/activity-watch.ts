@@ -8,56 +8,11 @@
  * Crosses day boundaries: when polling and the local date rolls, the
  * watcher reopens at the new day's filename automatically. This pairs with
  * the daily-rotation behavior in the daemon-side activity-log module.
- *
- * Ported into `tribe-wire` (Phase A.2 of
- * `@km/bearly/tribe-cli-unify-phase-a2-verbs`) from the original location at
- * `tools/lib/tribe/activity-watch.ts`. The `activityLogDir` /
- * `activityLogFilename` / `ActivityEntry` symbols were inlined here (rather
- * than re-imported from the daemon-side `activity-log.ts`) so this module
- * stays inside the published package — the daemon-side log is the writer,
- * this is the reader.
  */
 
 import { readFileSync, existsSync, statSync } from "node:fs"
 import { join } from "node:path"
-
-// ---------------------------------------------------------------------------
-// Types & helpers (inlined from tools/lib/tribe/activity-log.ts — reader-side)
-// ---------------------------------------------------------------------------
-
-/** Activity kinds recorded by the daemon writer. */
-export type ActivityKind = "dm" | "broadcast" | "event" | "session" | "rename" | "inject" | "gate"
-export type ActivitySource = "tribe" | "recall" | "gate"
-
-export interface ActivityEntry {
-  ts: number
-  source: ActivitySource
-  kind: ActivityKind
-  session: string
-  peer?: string
-  type?: string
-  preview?: string
-  chars?: number
-  id?: string
-  bead_id?: string | null
-  meta?: Record<string, unknown>
-}
-
-const DEFAULT_DIR_SUFFIX = "/.local/share/tribe"
-
-/** Return the directory containing activity-* files. */
-export function activityLogDir(): string {
-  const home = process.env.HOME ?? ""
-  return `${home}${DEFAULT_DIR_SUFFIX}`
-}
-
-/** Per-day filename for an arbitrary date. */
-export function activityLogFilename(date: Date): string {
-  const y = date.getFullYear()
-  const m = String(date.getMonth() + 1).padStart(2, "0")
-  const d = String(date.getDate()).padStart(2, "0")
-  return `activity-${y}-${m}-${d}.jsonl`
-}
+import { activityLogDir, activityLogFilename, type ActivityEntry } from "../activity-log-contract.ts"
 
 // ---------------------------------------------------------------------------
 // Watcher

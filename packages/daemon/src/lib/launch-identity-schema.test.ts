@@ -1,18 +1,20 @@
 /**
  * 21049 — launch-scoped MCP fan-in schema compatibility.
  *
- * A daemon upgrade must add launch identity to an existing v18 sessions
- * table without losing the durable member row used for reconnect adoption.
+ * A daemon upgrade must run the v19 launch-identity migration on an existing
+ * v18 database before advancing through later schema versions, without losing
+ * the durable member row used for reconnect adoption.
  */
 
 import { Database } from "bun:sqlite"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, realpathSync } from "node:fs"
+import { safeRemoveSync } from "removely"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { openDatabase } from "./database.ts"
+import { CURRENT_SCHEMA_VERSION, openDatabase } from "./database.ts"
 
-describe("session launch identity schema (migration v19)", () => {
+describe("session launch identity schema (migration chain from v18)", () => {
   let tmpDir: string
 
   beforeEach(() => {
@@ -20,7 +22,7 @@ describe("session launch identity schema (migration v19)", () => {
   })
 
   afterEach(() => {
-    rmSync(tmpDir, { recursive: true, force: true })
+    safeRemoveSync(tmpDir, { within: realpathSync(tmpdir()), allowMissing: true })
   })
 
   it("adds launch identity to a v18 database without losing the member row", () => {
@@ -66,7 +68,9 @@ describe("session launch identity schema (migration v19)", () => {
       expect(
         db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_sessions_launch_identity'").get(),
       ).toEqual({ name: "idx_sessions_launch_identity" })
-      expect(db.prepare("SELECT value FROM _schema_meta WHERE key='version'").get()).toEqual({ value: "19" })
+      expect(db.prepare("SELECT value FROM _schema_meta WHERE key='version'").get()).toEqual({
+        value: String(CURRENT_SCHEMA_VERSION),
+      })
     } finally {
       db.close()
     }

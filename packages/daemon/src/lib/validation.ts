@@ -2,6 +2,8 @@
  * Tribe input validation — name format and message sanitization.
  */
 
+import { isTribeNameShape, TRIBE_NAME_SHAPE_ERROR } from "tribe-wire/lib/persona-name"
+
 // ---------------------------------------------------------------------------
 // Surrogate-safe string helpers
 // ---------------------------------------------------------------------------
@@ -54,23 +56,67 @@ export function truncateSurrogateSafe(text: string, maxCodeUnits: number): strin
 
 export function validateName(name: string): string | null {
   // Sigil-prefixed agent names (e.g. `@agent/2`) match slot-bead lease IDs.
-  // The `@` is optional and only meaningful at position 0; the `/` is allowed
-  // inside the body alongside dots/dashes/underscores.
-  if (!/^@?[a-z0-9][a-z0-9_./-]{0,31}$/.test(name)) {
-    return "Name must be 1-32 chars: lowercase letters, digits, hyphens, underscores, dots, slashes. Optional `@` prefix. Must start with letter or digit."
-  }
+  // 21768 — this shares ONE grammar with the adapter's register-time pre-seed:
+  // when the two disagreed, a successor persona the adapter refused to seed was
+  // also refused here, so the seat could not even rename itself into being
+  // addressable. The `@` is per-segment, so nested role paths like
+  // `@chief/@ci/next` resolve; `/` is a separator, not a body character.
+  if (!isTribeNameShape(name)) return TRIBE_NAME_SHAPE_ERROR
   return null
 }
 
-export function sanitizeMessage(content: string): string {
+/** Hard cap on a tribe message, in UTF-16 code units. Content past it is cut. */
+export const MESSAGE_MAX_LENGTH = 4096
+
+/** Appended to a message the cap cut, so the recipient can see it is partial. */
+const TRUNCATION_MARKER = "..."
+
+/**
+ * A sanitized message plus the fact of whether sanitizing dropped content.
+ *
+ * The `truncated` flag exists because the cut used to be invisible: the daemon
+ * returned a bare string, so `tribe.send` reported `sent: true` on a mutilated
+ * message and the sender had no way to learn the tail was gone
+ * (@ag/tribe/22497). Carrying the fact in the return type is what makes it
+ * impossible to drop by accident — docs/principles.md § "Fail Loud, Fail Now".
+ */
+export type SanitizedMessage = {
+  /** Sanitized content: control chars stripped, capped, surrogate-safe. */
+  readonly content: string
+  /** True iff the cap dropped characters — `content` is a prefix, not the whole message. */
+  readonly truncated: boolean
+  /**
+   * The length the cap was measured against: the input after control-char
+   * stripping, before capping. This is the number directly comparable to
+   * `MESSAGE_MAX_LENGTH`, so `originalLength - MESSAGE_MAX_LENGTH` is how much
+   * a truncated send lost. It is not the raw argument's length when the input
+   * carried control characters, which are removed before the cap applies.
+   */
+  readonly originalLength: number
+}
+
+/**
+ * Sanitize `content` **and report whether the cap cut it**.
+ *
+ * There is deliberately no string-returning variant: the truncation fact has
+ * exactly one way out of this module, so no caller can drop it by writing the
+ * shorter call. A surface that says "sent" while silently discarding the tail
+ * of the message is the defect this function exists to close.
+ */
+export function sanitizeMessageWithReport(content: string): SanitizedMessage {
   // Strip control chars except newlines
-  let cleaned = content.replace(/[\x00-\x09\x0B-\x1F\x7F]/g, "")
-  // Cap at 4096 chars — surrogate-safe so the cut never lands mid-pair.
-  if (cleaned.length > 4096) {
-    cleaned = truncateSurrogateSafe(cleaned, 4093) + "..."
-  }
+  // oxlint-disable-next-line no-control-regex -- the sanitizer intentionally removes C0 controls.
+  const cleaned = content.replace(/[\u0000-\u0009\u000B-\u001F\u007F]/g, "")
+  const originalLength = cleaned.length
+  const truncated = originalLength > MESSAGE_MAX_LENGTH
+  // Cap — surrogate-safe so the cut never lands mid-pair. The marker occupies
+  // the tail of the budget, so a capped message is exactly MESSAGE_MAX_LENGTH
+  // code units (one fewer when the cut dropped a half-pair).
+  const capped = truncated
+    ? truncateSurrogateSafe(cleaned, MESSAGE_MAX_LENGTH - TRUNCATION_MARKER.length) + TRUNCATION_MARKER
+    : cleaned
   // Defensive net: replace any lone surrogate (from this or any upstream
   // truncation, or malformed input) with U+FFFD so the message can never
   // poison a downstream JSON serialization.
-  return stripLoneSurrogates(cleaned)
+  return { content: stripLoneSurrogates(capped), truncated, originalLength }
 }

@@ -14,28 +14,23 @@ import {
   type TribeDeliveryCapability,
 } from "./delivery.ts"
 
-function inboxWaitDescription(capability: TribeDeliveryCapability): string {
-  const base =
-    "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. Direct notify/status/response rows are inbox-visible but do not wake this wait. Defaults to the caller's session."
-  if (capability.idleStrategy === "cli-inbox-wait") {
-    return `${deliveryCapabilityInstruction(capability)} ${base} This MCP tool remains callable for short diagnostic waits, but the advertised idle wait primitive is CLI because this host may cap long-running MCP calls.`
-  }
+function inboxWaitDescription(base: string, capability: TribeDeliveryCapability): string {
   if (capability.idleStrategy === "host-stream") {
     return `${deliveryCapabilityInstruction(capability)} ${base} This MCP tool remains callable for diagnostics, but the advertised idle wait primitive is the host Tribe stream.`
   }
   if (capability.idleStrategy === "channel") {
     return `${deliveryCapabilityInstruction(capability)} ${base} This MCP tool remains callable for diagnostics, but the advertised idle wait primitive is channel delivery.`
   }
-  return `${deliveryCapabilityInstruction(capability)} ${base}`
+  return `${deliveryCapabilityInstruction(capability)} ${base} This MCP tool remains callable for short diagnostic waits, but the advertised idle wait primitive is CLI because this host may cap long-running MCP calls.`
 }
 
 function projectMcpTool(tool: TribeMcpTool, capability: TribeDeliveryCapability): TribeMcpTool {
   if (tool.name !== "inbox.wait") return tool
   return {
     ...tool,
-    description: inboxWaitDescription(capability),
+    description: inboxWaitDescription(tool.description, capability),
     _meta: {
-      ...(tool._meta ?? {}),
+      ...tool._meta,
       "tribe.deliveryCapability": capability,
     },
   }

@@ -41,6 +41,7 @@ function makeOpts(): HandlerOpts {
     userRenamed: false,
     setUserRenamed: () => {},
     getActiveSessionIds: () => new Set<string>(),
+    hasActiveTransport: () => false,
     getActiveSessionInfo: () => [],
   }
 }
@@ -50,10 +51,17 @@ function parse(result: unknown): Record<string, unknown> {
   return JSON.parse(text) as Record<string, unknown>
 }
 
-type MsgRow = { type: string; content: string; topic: string | null; recipient: string; delivery: string }
+type MsgRow = {
+  type: string
+  sender: string
+  content: string
+  topic: string | null
+  recipient: string
+  delivery: string
+}
 
 function row(db: Database, id: string): MsgRow | null {
-  return (db.query("SELECT type, content, topic, recipient, delivery FROM messages WHERE id = ?").get(id) ??
+  return (db.query("SELECT type, sender, content, topic, recipient, delivery FROM messages WHERE id = ?").get(id) ??
     null) as MsgRow | null
 }
 
@@ -92,6 +100,7 @@ describe("km @ag/super/20327 — tribe.health.publish (lateral recovery channel)
     const r = row(db, res.id as string)
     expect(r?.topic).toBe("health:recovery") // the diagnostics adapter filters event.topic startsWith "health:"
     expect(r?.type).toBe("health:recovery") // ...and type startsWith "health:" (mirrors accountly's health:* broadcasts)
+    expect(r?.sender).toBe("daemon") // health:* is daemon-trusted and must remain visible through tribe.fetch.
     expect(r?.recipient).toBe("*") // broadcast — chief/deck both observe it
     expect(r?.delivery).toBe("pull") // ambient (health visibility), not a push DM
     expect(r?.content).toContain("@agent/3 recovery #1")

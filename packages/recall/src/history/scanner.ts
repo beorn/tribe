@@ -24,7 +24,6 @@ import type { RecallSearchResult } from "./recall-shared.ts"
 import { runInjectDelta, createTmpfileSeenStore } from "../lib/inject-core.ts"
 import { recall, parseTimeToMs } from "./search.ts"
 import { SYNTHESIS_PROMPT, raceLlmModels, formatResultsForLlm, type LlmRaceModelResult } from "./synthesize.ts"
-import { ensureProjectSourcesIndexed } from "./project-sources.ts"
 
 // ============================================================================
 // Transcript extraction
@@ -652,8 +651,24 @@ export function checkHookConfig(projectRoot: string, recommendations: string[]):
   if (userPromptSubmitConfigured && !recallHookConfigured) {
     recommendations.push("UserPromptSubmit hook exists but doesn't call recall.ts hook")
   }
+  // NOT a defect, and NOT a recommendation: `cmdRemember` is manual-only BY DESIGN.
+  // `dispatchHook` deliberately never calls it (c954ecba4, 2026-07-17) because it runs
+  // an untimed LLM call, a git spawn, and retro-bead creation with NO per-day lock —
+  // wiring it to SessionEnd would fire all three on every session exit. That commit
+  // also fixed the docstrings that used to claim it was hook-driven, and pinned the
+  // real event->command table with tests, precisely so this stays visible.
+  //
+  // Reporting it as a shortfall costs real time: on 2026-08-01 a chief read this row
+  // plus the "0 session memory files" one below as evidence that recall was broken,
+  // and spent part of a migration investigating a deliberate design decision.
+  // Say what is true — it is off on purpose, and the precondition for turning it on
+  // is cost + locking, not configuration.
   if (sessionEndConfigured && !rememberHookConfigured) {
-    recommendations.push("SessionEnd hook exists but doesn't call recall.ts remember")
+    recommendations.push(
+      "SessionEnd does not call recall.ts remember — MANUAL-ONLY BY DESIGN (c954ecba4: " +
+        "untimed LLM call + git spawn + retro-bead creation, no per-day lock). " +
+        "Rewiring requires addressing cost + locking first. No action needed.",
+    )
   }
 
   // Count session memory files
@@ -668,8 +683,17 @@ export function checkHookConfig(projectRoot: string, recommendations: string[]):
     }
   }
 
+  // Zero here is the EXPECTED steady state, not a symptom. Session memory files are
+  // written only by `cmdRemember`, which is manual-only by design (see the note above),
+  // so "SessionEnd hook may not be firing" was a confident wrong diagnosis: the hook
+  // fires, it simply never had this job. Report the fact and its cause together —
+  // a count without its explanation is what sends a reader chasing a non-defect.
   if (sessionMemoryFiles === 0) {
-    recommendations.push("No session memory files found — SessionEnd hook may not be firing")
+    recommendations.push(
+      "0 session memory files — EXPECTED: they are written only by `recall remember`, " +
+        "which is manual-only (c954ecba4). Run it by hand to produce one; the SessionEnd " +
+        "hook is not supposed to.",
+    )
   }
 
   return {

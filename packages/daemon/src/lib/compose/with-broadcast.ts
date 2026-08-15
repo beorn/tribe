@@ -9,25 +9,26 @@
  *      message log is the bus; push only tells clients to fetch it.
  *   2. Ad-hoc `broadcastNotification(method, params, exclude)` — writes a
  *      JSON-RPC notification to every connected socket (excluding `exclude`).
- *   3. `broadcastLog(msg, type)` — writes daemon warn/error log lines onto
- *      the wire so all sessions see degraded daemon state. The loggily writer
- *      that pipes warn/error log lines through this is also installed here.
+ *   3. `broadcastLog(msg, type)` — admits explicit daemon health diagnostics
+ *      through a bounded, model-safe persistence gate.
  *
  * The broadcast scrubber (regex + optional Haiku rewrite) lives in
  * `broadcast-scrubber.ts` so it stays unit-testable independently of the
  * daemon plumbing.
  *
- * Cleanup: the loggily writer is installed once-per-process via `addWriter`,
- * which has no remove API. We gate it behind a Scope-cleared flag so a
- * disposed scope's writer goes silent. (Survives the hot-reload re-exec because
- * the new process has a fresh module-level `currentBroadcast`.)
+ * Raw loggily warn/error records intentionally stay on loggily's local sinks.
+ * They do not automatically re-enter Tribe's durable coordination journal.
+ * Callers that need a fleet-visible health diagnostic use `Broadcast.log`,
+ * whose window state and final suppression summary are owned by this scope.
  */
 
-import { addWriter, createLogger } from "loggily"
-import { type MessageInsertedInfo, type TribeContext } from "../context.ts"
+import { createLogger } from "loggily"
+import { type MessageInsertedInfo } from "../context.ts"
 import { activityFromMessage, writeActivity } from "../activity-log.ts"
 import { createCoalescer, type PendingBroadcast } from "../broadcast-coalescer.ts"
-import { deriveReplyHint, sendMessage, type ReplyHint } from "../messaging.ts"
+import { ACTIONABLE_TYPES_SET } from "../database.ts"
+import { createHealthLogAdmission } from "../health-log-admission.ts"
+import { deriveReplyHint, sendMessage, type MessageKind, type ReplyHint } from "../messaging.ts"
 import { makeNotification } from "tribe-wire/lib/socket"
 import { hasInjectionTrigger, rewriteViaHaiku, scrubInjectionShape } from "../broadcast-scrubber.ts"
 import type { BaseTribe } from "./base.ts"
@@ -76,16 +77,30 @@ type SessionFilter = {
   filter_mute: string | null
 }
 
-function shouldDeliver(
-  info: { replyHint: ReplyHint; topic: string | null },
+export function shouldDeliver(
+  info: { kind: MessageKind; type: string; replyHint: ReplyHint; topic: string | null },
   filter: SessionFilter | undefined,
 ): boolean {
   if (!filter) return true // No session row yet — default-allow
   const mode = filter.filter_mode || "normal"
   if (mode === "ambient") return true
   if (mode === "focus") {
-    return info.replyHint === "yes"
+    // Only the canonical actionable classes wake the seat. Plain direct
+    // notify/response traffic is informational even though its legacy reply
+    // hint is "yes".
+    //
+    // This used to say focus was "an opt-in push diet, not a durability filter:
+    // every row stays fetchable". That is no longer true, and saying so was the
+    // bug: 62 of 63 sessions are delivery=pull, so a filter that only quieted
+    // the wakeup quieted nothing. The same policy now also governs what a drain
+    // RETURNS, as a predicate in getInboxRows. Rows are still durable and still
+    // reachable through an explicit history read; they are not delivered.
+    //
+    // The two copies must agree — delivery-policy-parity.test.ts is what keeps
+    // them honest.
+    return ACTIONABLE_TYPES_SET.has(info.type)
   }
+  if (info.kind === "direct") return true
   // mode === 'normal' — apply the time-bounded mute when active
   const now = Date.now()
   if (!filter.filter_until || filter.filter_until <= now) return true
@@ -115,24 +130,6 @@ function globMatch(pattern: string, value: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Process-wide loggily writer — installed once at module load, reads the
-// active broadcast handle from a swap slot. Hot-reload re-execs the process,
-// so the next daemon's broadcast handle replaces the previous one.
-// ---------------------------------------------------------------------------
-
-let currentBroadcastLog: ((msg: string, type: string) => void) | null = null
-
-addWriter((formatted, level) => {
-  if (level !== "warn" && level !== "error") return
-  const fn = currentBroadcastLog
-  if (!fn) return
-  // Strip ANSI codes and trim for clean tribe messages
-  const clean = formatted.replace(/\x1b\[[0-9;]*m/g, "").trim()
-  if (clean.length === 0) return
-  fn(clean, level === "error" ? "health:daemon:error" : "health:daemon:warn")
-})
-
-// ---------------------------------------------------------------------------
 // Broadcast capability surface
 // ---------------------------------------------------------------------------
 
@@ -145,7 +142,7 @@ export interface Broadcast {
   persistDeliveredCursor(sessionId: string, ts: number, seq: number): void
   /** Synchronous fanout — invoked by the messageTap on every message insert. */
   toConnected(info: MessageInsertedInfo): Promise<void>
-  /** Daemon warn/error log line → ambient broadcast on the wire. */
+  /** Explicit daemon health diagnostic → bounded ambient durable row. */
   log(msg: string, type: string): void
   /** Flush + discard a connection's coalescer state on disconnect. */
   flushConnection(connId: string): void
@@ -168,7 +165,7 @@ export function withBroadcast<T extends BaseTribe & WithDatabase & WithDaemonCon
   t: T,
 ) => T & WithBroadcast {
   return (t) => {
-    const { db, stmts, daemonCtx, registry } = t
+    const { stmts, daemonCtx, registry } = t
     const { clients } = registry
 
     function notify(method: string, params?: Record<string, unknown>, exclude?: string): void {
@@ -283,12 +280,13 @@ export function withBroadcast<T extends BaseTribe & WithDatabase & WithDaemonCon
           if (recipientDelivery?.delivery === "pull") continue
         }
 
-        // km-tribe.filter-collapse: per-session unified filter
-        // (mode + time-bounded mute + per-topic globs). Direct messages bypass
-        // the mute/until dimensions — only `mode: focus` filters DMs.
-        if (info.kind !== "direct" && !isWatch) {
+        // km-tribe.filter-collapse: per-session unified filter. Direct messages
+        // bypass normal mute/until; opted-in focus seats keep actionable DMs
+        // while notification-only topics remain durable pull history.
+        if (!isWatch) {
           const sessionFilter = stmts.getSessionFilter.get({ $id: client.ctx.sessionId }) as SessionFilter | undefined
-          if (!shouldDeliver({ replyHint, topic: info.topic }, sessionFilter)) continue
+          if (!shouldDeliver({ kind: info.kind, type: info.type, replyHint, topic: info.topic }, sessionFilter))
+            continue
         }
 
         // Direct messages bypass coalescing — they're time-sensitive.
@@ -306,12 +304,14 @@ export function withBroadcast<T extends BaseTribe & WithDatabase & WithDaemonCon
       }
     }
 
-    const broadcastLogFn = (msg: string, type: string): void => {
+    const persistHealthLog = (msg: string, type: string): void => {
       sendMessage(daemonCtx, "*", msg, type, undefined, undefined, "broadcast", {
         delivery: "pull",
         topic: type,
       })
     }
+    const healthLogAdmission = createHealthLogAdmission(persistHealthLog)
+    const broadcastLogFn = (msg: string, type: string): void => healthLogAdmission.accept(msg, type)
 
     // Install the activity-log + fanout tap on the daemon's ctx so logActivity()
     // and the health-monitor / plugin writers all flow through it.
@@ -323,15 +323,12 @@ export function withBroadcast<T extends BaseTribe & WithDatabase & WithDaemonCon
     }
     daemonCtx.onMessageInserted = messageTap
 
-    // Wire the process-wide loggily writer to this broadcast's log fn. On
-    // scope close (shutdown), reset the slot so the writer goes silent.
-    currentBroadcastLog = broadcastLogFn
     t.scope.defer(() => {
-      if (currentBroadcastLog === broadcastLogFn) currentBroadcastLog = null
+      healthLogAdmission.flush()
       daemonCtx.onMessageInserted = undefined
     })
 
-    log.info?.("broadcast pipeline ready (coalescer + scrubber + log writer)")
+    log.info?.("broadcast pipeline ready (coalescer + scrubber + bounded health admission)")
 
     const broadcast: Broadcast = {
       notify,

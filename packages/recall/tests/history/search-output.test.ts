@@ -7,11 +7,13 @@ process.env.RECALL_DB_PATH = ":memory:"
 
 const mockAgent: {
   result: Awaited<typeof import("../../src/lib/agent")>["recallAgent"] | null
-} = { result: null }
+  options: unknown
+} = { result: null, options: null }
 
 vi.mock("../../src/lib/agent.ts", () => ({
   recallAgent: (query: string, options: unknown) => {
     if (!mockAgent.result) throw new Error("Test did not install a mock recallAgent")
+    mockAgent.options = options
     return mockAgent.result(query, options as never)
   },
 }))
@@ -36,23 +38,37 @@ vi.mock("../../src/lib/refresh.ts", async (importOriginal) => {
   }
 })
 
-const { cmdSearch } = await import("../../src/lib/search")
-const { closeDb, getDb, setIndexMeta } = await import("../../src/history/db")
+const { cmdSearch, resolveProjectScope } = await import("../../src/lib/search")
+const { closeDb, ftsSearchWithSnippet, getDb, setIndexMeta } = await import("../../src/history/db")
+const { _resetLlmBackendForTests } = await import("../../src/lib/llm-backend")
 
-function seedMessage(content: string): void {
+function seedMessage(content: string, id = "a", projectPath = "/test/km"): void {
   const db = getDb()
   const now = Date.now()
   db.prepare(
     `INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run("sess-a", "/test/km", "/tmp/sess-a.jsonl", now - 60_000, now, 1, "Session A")
+  ).run(`sess-${id}`, projectPath, `/tmp/sess-${id}.jsonl`, now - 60_000, now, 1, `Session ${id}`)
   db.prepare(`INSERT INTO messages (uuid, session_id, type, content, timestamp) VALUES (?, ?, ?, ?, ?)`).run(
-    "msg-a",
-    "sess-a",
+    `msg-${id}`,
+    `sess-${id}`,
     "user",
     content,
     now,
   )
+}
+
+function seedRankedMessage(id: string, content: string, toolName: string | null): void {
+  const db = getDb()
+  const now = Date.now()
+  db.prepare(
+    `INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(`sess-${id}`, "/test/km", `/tmp/sess-${id}.jsonl`, now - 60_000, now, 1, `Session ${id}`)
+  db.prepare(
+    `INSERT INTO messages (uuid, session_id, type, content, tool_name, file_paths, timestamp)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(`msg-${id}`, `sess-${id}`, "assistant", content, toolName, null, now)
 }
 
 function zeroAgentResult(query: string) {
@@ -88,18 +104,81 @@ function callsText(spy: ReturnType<typeof vi.spyOn>): string {
 describe("recall search output", () => {
   let logSpy: ReturnType<typeof vi.spyOn>
   let errSpy: ReturnType<typeof vi.spyOn>
+  let stderrWriteSpy: ReturnType<typeof vi.spyOn>
 
   beforeEach(() => {
     closeDb()
     mockAgent.result = null
+    mockAgent.options = null
     logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
     errSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+    stderrWriteSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
   })
 
   afterEach(() => {
+    _resetLlmBackendForTests()
     logSpy.mockRestore()
     errSpy.mockRestore()
+    stderrWriteSpy.mockRestore()
     closeDb()
+  })
+
+  test("reports a loud tool-broken failure — with the lexical hits, clearly labeled, never silently dropped — when default synthesis is unavailable", async () => {
+    const previousLlmDir = process.env.TRIBE_LLM_DIR
+    const previousExitCode = process.exitCode
+    delete process.env.TRIBE_LLM_DIR
+    _resetLlmBackendForTests()
+    seedMessage("synthesisneedle fixture must show up labeled as a lexical hit, never as a synthesized answer")
+
+    try {
+      // Must NOT throw — a synthesis failure with real lexical results in
+      // hand is a distinct, reportable outcome, not a crash. Throwing here
+      // is exactly the defect this test used to encode: it discards the
+      // results recall() already found.
+      await expect(cmdSearch("synthesisneedle", { refresh: false, project: "*" })).resolves.toBeUndefined()
+    } finally {
+      if (previousLlmDir === undefined) delete process.env.TRIBE_LLM_DIR
+      else process.env.TRIBE_LLM_DIR = previousLlmDir
+    }
+
+    const output = callsText(logSpy)
+    // Unmistakable banner — must not read as "no prior work exists".
+    expect(output).toContain("RECALL SYNTHESIS FAILED")
+    expect(output).toContain("THE TOOL IS BROKEN, NOT EMPTY")
+    // The lexical hit is present, but labeled — never masquerading as a
+    // synthesized answer (it's under "Lexical search: OK", not printed as
+    // if it were `result.synthesis`). The matched term is ANSI-highlighted
+    // inline, so assert on the unhighlighted tail of the snippet.
+    expect(output).toContain("fixture must show up labeled as a lexical hit")
+    expect(output).toContain("Lexical search: OK")
+    // Concrete diagnostics: this failure mode (no LLM backend configured at
+    // all) has no per-provider exclusions to list — there's nothing to
+    // evaluate providers against — so the summary line carries the "why",
+    // and it must say so, not silently print an empty report.
+    expect(output).toContain("No LLM backend configured")
+    expect(output).toContain("TRIBE_LLM_DIR")
+    expect(output).toContain("--raw")
+    // Distinct exit code — degraded-but-has-results is neither a clean 0
+    // nor the generic 1 a hard crash would use.
+    expect(process.exitCode).toBe(3)
+
+    process.exitCode = previousExitCode
+  })
+
+  test("normalizes repo and worktree names while preserving explicit narrowing", () => {
+    expect(resolveProjectScope(undefined, "/repos/km")).toBe("km")
+    expect(resolveProjectScope(undefined, "/repos/km-wt7")).toBe("km")
+    expect(resolveProjectScope("*km-wt7*", "/repos/km-wt1")).toBe("km-wt7")
+  })
+
+  test("ranks prose above matching tool-call payloads", () => {
+    const terms = "streaming chunk boundary markdown split list items transcript"
+    seedRankedMessage("prose", `We fixed the ${terms} bug by carrying parser state across chunks.`, null)
+    seedRankedMessage("tool", Array(8).fill(terms).join(" "), "Bash")
+
+    const result = ftsSearchWithSnippet(getDb(), terms, { limit: 2 })
+
+    expect(result.results.map((row) => row.session_id)).toEqual(["sess-prose", "sess-tool"])
   })
 
   test("agent zero-results raw-probes literal tokens before printing authoritative no-results", async () => {
@@ -108,6 +187,7 @@ describe("recall search output", () => {
 
     await cmdSearch("how should we debug barenode", {
       agent: true,
+      project: "km",
       limit: "5",
       round2: "off",
       refresh: false,
@@ -165,16 +245,15 @@ describe("recall search output", () => {
     expect(output).toContain('No results found for "nohits"')
   })
 
-  test("sibling worktree warning prints before empty results when no project filter narrows scope", async () => {
+  test("defaults search to the current repo family across sibling worktrees", async () => {
     const prevHome = process.env.HOME
     const prevCwd = process.cwd()
     const home = mkdtempSync(join(tmpdir(), "recall-home-"))
-    const project = mkdtempSync(join(tmpdir(), "km-"))
+    const parent = mkdtempSync(join(tmpdir(), "recall-projects-"))
+    const project = join(parent, "km-wt1")
+    mkdirSync(project)
     process.env.HOME = home
     process.chdir(project)
-    const projectSlug = "-" + process.cwd().slice(1).replace(/\//g, "-")
-    mkdirSync(join(home, ".claude", "projects", projectSlug), { recursive: true })
-    mkdirSync(join(home, ".claude", "projects", `${projectSlug}-wt1`), { recursive: true })
     mockAgent.result = async (query) => zeroAgentResult(query) as never
 
     try {
@@ -189,12 +268,35 @@ describe("recall search output", () => {
       if (prevHome === undefined) delete process.env.HOME
       else process.env.HOME = prevHome
       rmSync(home, { recursive: true, force: true })
-      rmSync(project, { recursive: true, force: true })
+      rmSync(parent, { recursive: true, force: true })
     }
 
     const errors = callsText(errSpy)
     const output = callsText(logSpy)
-    expect(errors).toContain("sibling worktree project dir(s) detected")
+    expect(mockAgent.options).toMatchObject({ projectFilter: "km" })
+    expect(errors).not.toContain("sibling worktree project dir(s) detected")
     expect(output).toContain('No results found for "nohits"')
+  })
+
+  test("default raw search includes sibling worktrees but excludes unrelated repos", async () => {
+    const prevCwd = process.cwd()
+    const parent = mkdtempSync(join(tmpdir(), "recall-projects-"))
+    const project = join(parent, "km-wt1")
+    mkdirSync(project)
+    process.chdir(project)
+    seedMessage("familyscope marker", "sibling", "/repos/km-wt7")
+    seedMessage("familyscope marker", "unrelated", "/repos/elsewhere")
+
+    try {
+      await cmdSearch("familyscope", { raw: true, refresh: false })
+    } finally {
+      process.chdir(prevCwd)
+      rmSync(parent, { recursive: true, force: true })
+    }
+
+    const output = callsText(logSpy)
+    expect(output).toContain("Found 1 matches")
+    expect(output).toContain("/repos/km/wt7")
+    expect(output).not.toContain("elsewhere")
   })
 })

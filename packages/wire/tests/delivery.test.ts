@@ -52,6 +52,15 @@ describe("resolveDeliveryCapability", () => {
     })
   })
 
+  it("routes MCP-only pull hosts to the CLI idle rail", () => {
+    expect(resolveDeliveryCapability({ delivery: "pull", channel: false })).toMatchObject({
+      delivery: "pull",
+      pullTransport: "mcp",
+      idleStrategy: "cli-inbox-wait",
+      command: "tribe inbox-wait --session <name> --timeout <duration>",
+    })
+  })
+
   it("supports host-stream as a pull transport for hosts with their own stream", () => {
     expect(resolveDeliveryCapability({ delivery: "pull", channel: false, pullTransport: "host-stream" })).toMatchObject(
       {

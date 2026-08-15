@@ -17,9 +17,9 @@
  * JSON). We must not swallow errors or rewrite output — just dispatch.
  *
  * Before forwarding, we consult the autostart config and (if configured)
- * ensure the unified tribe daemon is running. The spawn is detached +
- * unref'd so it never blocks the hook; the overall 300 ms budget guarantees
- * Claude Code never waits on us.
+ * ensure the unified tribe daemon is running. The stable standalone owner is
+ * detached + unref'd while the daemon remains its child, so the overall
+ * 300 ms budget guarantees Claude Code never waits on us.
  *
  * km-bear.unified-daemon Phase 5d: collapsed from two parallel probes
  * (lore + tribe) to one — the unified daemon hosts both surfaces.
@@ -49,6 +49,14 @@ const log = createLogger("tribe:hook-dispatch")
 
 // Typed off the REAL in-repo modules (`typeof import` is type-only; runtime
 // loading stays lazy + dynamic below so the hook process starts light).
+//
+// Deliberately excludes `cmdRemember`: it can make a real synchronous LLM
+// call + `git log` spawn + retro-bead creation with no per-day lock, so it
+// stays manual-only (`recall remember` / `recall summarize`) rather than
+// hook-dispatched. See the docstring on `cmdRemember`
+// (packages/recall/src/lib/hooks.ts) and docs/recall.md § "Automatic
+// injection" before adding it here — this exclusion is pinned by
+// hook-dispatch.test.ts.
 type HookEngine = {
   cmdSessionStart: (typeof import("../../../recall/src/lib/hooks.ts"))["cmdSessionStart"]
   cmdSessionEnd: (typeof import("../../../recall/src/lib/hooks.ts"))["cmdSessionEnd"]

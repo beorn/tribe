@@ -25,6 +25,7 @@ function spawnFakeDaemon(
     fetchAttention?: {
       actionable_unread?: Array<Record<string, unknown>>
       pending_balls?: Array<Record<string, unknown>>
+      pending_balls_summary?: { total: number; oldest_age_ms: number }
     }
     inboxWaitResult?: Record<string, unknown>
     registerError?: { code: number; message: string; data?: unknown }
@@ -94,24 +95,25 @@ function spawnFakeDaemon(
         }
         if (msg.method === "tribe.inbox.wait") {
           socket.write(
-            makeResponse(msg.id, {
-              content: [
-                {
-                  type: "text",
-                  text: JSON.stringify(
-                    opts.inboxWaitResult ?? {
-                      session: "@agent/test",
-                      unread_count: 0,
-                      oldest_unread_age_min: 0,
-                      oldest_unread_ts: 0,
-                      waited_ms: 0,
-                      timed_out: true,
-                      aborted: false,
-                    },
-                  ),
+            makeResponse(
+              msg.id,
+              opts.inboxWaitResult ?? {
+                status: "timeout",
+                session: "@agent/test",
+                unread_count: 0,
+                oldest_unread_age_min: 0,
+                oldest_unread_ts: 0,
+                waited_ms: 0,
+                effective_timeout_ms: 30_000,
+                timed_out: true,
+                aborted: false,
+                attention: {
+                  actionable_unread: [],
+                  pending_balls: [],
+                  pending_balls_summary: { total: 0, oldest_age_ms: 0 },
                 },
-              ],
-            }),
+              },
+            ),
           )
           return
         }
@@ -270,8 +272,9 @@ function writeJsonAndWaitForLine(
   child: ChildProcessWithoutNullStreams,
   payload: Record<string, unknown>,
   predicate: (line: Record<string, unknown>) => boolean,
+  opts: { timeoutMs?: number } = {},
 ): Promise<Record<string, unknown>> {
-  const line = waitForLine(child, predicate)
+  const line = waitForLine(child, predicate, opts)
   writeJson(child, payload)
   return line
 }
@@ -399,6 +402,143 @@ describe("stdio adapter delivery modes", () => {
     expect(register?.params?.delivery).toBe("pull")
   })
 
+  it("21768: seeds a nested successor persona at initial register", async () => {
+    // Live 2026-07-22: `@chief/@ci/next` failed the pre-seed predicate at the
+    // SECOND sigil, so the seat registered unnamed and sat as `unknown-cmayz`
+    // for 4m17s while everything addressed to its persona was dropped.
+    // `$up @role/next` is a first-class launch surface, so every successor
+    // rotation carried that blind window.
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath)
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_NAME: "@chief/@ci/next",
+        TRIBE_REQUIRE_JOIN: "1",
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+
+    const register = daemon.requests.find((msg) => msg.method === "register") as
+      | { params?: { name?: string } }
+      | undefined
+    expect(register?.params?.name).toBe("@chief/@ci/next")
+  })
+
+  it("21768: a well-formed sigil-less launch name still registers unnamed, not fatally", async () => {
+    // The fail-loud line is MALFORMED vs. merely sigil-less. A bare name is a
+    // legitimate unidentified session (the daemon accepts `ci`, `agent/7`), so
+    // it must keep the old behaviour: not pre-seeded under require-join, joins
+    // from inside. Drawing the line at "not an @persona" instead broke the
+    // degrade and version-skew suites, which launch as `degrade-test` /
+    // `skew-test`.
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath)
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "degrade-test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_REQUIRE_JOIN: "1",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+
+    const register = daemon.requests.find((msg) => msg.method === "register") as
+      | { params?: { name?: string } }
+      | undefined
+    expect(register).toBeDefined()
+    expect(register?.params?.name).toBeUndefined()
+  })
+
+  it("21768: fails loudly when an explicitly requested launch name is malformed", async () => {
+    // A name that could never be a valid tribe name is an operator error: the
+    // daemon would reject it at register/join anyway, so degrading to an
+    // `unknown-<rand>` placeholder only converts a fixable startup error into
+    // minutes of silently dropped messages.
+    const socketPath = join(tmpDir, "tribe.sock")
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_NAME: "@Chief Next",
+        TRIBE_REQUIRE_JOIN: "1",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stderr = new Promise<string>((resolveStderr) => {
+      let output = ""
+      child!.stderr.on("data", (chunk: Buffer | string) => {
+        output += chunk.toString()
+      })
+      child!.stderr.on("close", () => resolveStderr(output))
+    })
+
+    const [exit, errorText] = await Promise.all([waitForExit(child), stderr])
+    expect(exit.code).not.toBe(0)
+    expect(errorText).toContain('Invalid TRIBE_NAME="@Chief Next"')
+  })
+
+  it("declares a configured notification filter during initial registration", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath)
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@fleet"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_FILTER_MODE: "focus",
+        TRIBE_NO_AUTOSTART: "1",
+        TRIBE_REQUIRE_JOIN: "0",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+
+    const register = daemon.requests.find((msg) => msg.method === "register") as
+      | { params?: { name?: string; delivery?: string; filterMode?: string } }
+      | undefined
+    expect(register?.params).toMatchObject({ name: "@fleet", delivery: "push", filterMode: "focus" })
+  })
+
+  it("fails loudly on an invalid launch notification filter", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@fleet"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_FILTER_MODE: "everything",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stderr = new Promise<string>((resolveStderr) => {
+      let output = ""
+      child!.stderr.on("data", (chunk: Buffer | string) => {
+        output += chunk.toString()
+      })
+      child!.stderr.on("close", () => resolveStderr(output))
+    })
+
+    const [exit, errorText] = await Promise.all([waitForExit(child), stderr])
+    expect(exit.code).not.toBe(0)
+    expect(errorText).toContain('Invalid TRIBE_FILTER_MODE="everything"; expected focus|normal|ambient')
+  })
+
   it("21049: explicit persona registration carries launch identity with takeover", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath)
@@ -422,7 +562,7 @@ describe("stdio adapter delivery modes", () => {
       | undefined
     expect(register?.params?.name).toBe("@agent/9")
     expect(register?.params?.takeover).toBe(true)
-    expect(register?.params?.launchId).toBe("provider-launch-a")
+    expect(register?.params?.launchId).toBe("provider-launch-a::%40agent%2F9")
     expect(register?.params?.launchParentPid).toBe(process.pid)
   })
 
@@ -514,10 +654,18 @@ describe("stdio adapter delivery modes", () => {
       stdio: ["pipe", "pipe", "pipe"],
     })
 
-    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    // 21049 drives two full reconnect cycles through a real subprocess; the
+    // shared waitForLine/waitForCondition defaults (2s / 3s) are sized for
+    // simple single round trips and were the actual mechanism behind this
+    // test's flakes under CI/full-suite contention — not an ordering race
+    // (@km/tribe/ci-deflake-wire-daemon). Widened explicitly here rather than
+    // raising the shared defaults, which 27 other call sites in this file
+    // also rely on.
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1, { timeoutMs: 10_000 })
     await waitForCondition(
       () => daemon!.requests.some((msg) => msg.method === "tribe.members"),
       "completed initial adapter registration",
+      { timeoutMs: 10_000 },
     )
     await new Promise((resolveTick) => setTimeout(resolveTick, 50))
 
@@ -525,10 +673,11 @@ describe("stdio adapter delivery modes", () => {
     await waitForCondition(
       () => daemon!.requests.filter((msg) => msg.method === "register").length === 2,
       "transient reconnect registration conflict",
+      { timeoutMs: 10_000 },
     )
 
     expect(child.exitCode).toBeNull()
-    const closedReplyPromise = waitForLine(child, (line) => line.id === 2)
+    const closedReplyPromise = waitForLine(child, (line) => line.id === 2, { timeoutMs: 10_000 })
     writeJson(child, callToolPayload(2, "members", {}))
     const closedReply = (await closedReplyPromise) as {
       result?: { isError?: boolean; content?: Array<{ text?: string }> }
@@ -544,11 +693,12 @@ describe("stdio adapter delivery modes", () => {
     await waitForCondition(
       () => daemon!.requests.filter((msg) => msg.method === "register").length >= 3,
       "second consecutive reconnect registration conflict",
+      { timeoutMs: 10_000 },
     )
     await new Promise((resolveTick) => setTimeout(resolveTick, 50))
     expect(child.exitCode).toBeNull()
 
-    const repeatedClosedReplyPromise = waitForLine(child, (line) => line.id === 3)
+    const repeatedClosedReplyPromise = waitForLine(child, (line) => line.id === 3, { timeoutMs: 10_000 })
     writeJson(child, callToolPayload(3, "members", {}))
     const repeatedClosedReply = (await repeatedClosedReplyPromise) as {
       result?: { isError?: boolean; content?: Array<{ text?: string }> }
@@ -562,8 +712,9 @@ describe("stdio adapter delivery modes", () => {
     await waitForCondition(
       () => daemon!.requests.filter((msg) => msg.method === "register").length >= 4,
       "automatic reconnect after repeated conflicts",
+      { timeoutMs: 10_000 },
     )
-    const liveReplyPromise = waitForLine(child, (line) => line.id === 4)
+    const liveReplyPromise = waitForLine(child, (line) => line.id === 4, { timeoutMs: 10_000 })
     writeJson(child, callToolPayload(4, "members", {}))
     const liveReply = (await liveReplyPromise) as {
       result?: { isError?: boolean; content?: Array<{ text?: string }> }
@@ -579,7 +730,7 @@ describe("stdio adapter delivery modes", () => {
     expect(registrations[1]?.params && "takeover" in registrations[1].params).toBe(false)
     expect(registrations[2]?.params && "takeover" in registrations[2].params).toBe(false)
     expect(registrations[3]?.params && "takeover" in registrations[3].params).toBe(false)
-  })
+  }, 60_000)
 
   it("21049: a managed tool call recovers an initially unavailable daemon before reporting health", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
@@ -593,6 +744,7 @@ describe("stdio adapter delivery modes", () => {
         TRIBE_LAUNCH_ID: "provider-launch-a",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: logPath,
+        LOG_LEVEL: "warn",
       },
       stdio: ["pipe", "pipe", "pipe"],
     })
@@ -704,13 +856,20 @@ describe("stdio adapter delivery modes", () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath, {
       inboxWaitResult: {
+        status: "woken",
         session: "@agent/test",
         unread_count: 2,
         oldest_unread_age_min: 1,
         oldest_unread_ts: 123,
         waited_ms: 17,
+        effective_timeout_ms: 5_000,
         timed_out: false,
         aborted: false,
+        attention: {
+          actionable_unread: [{ id: "request-1", content: "review this" }],
+          pending_balls: [{ request_id: "request-1", recipient: "@agent/test" }],
+          pending_balls_summary: { total: 1, oldest_age_ms: 500 },
+        },
       },
     })
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
@@ -739,30 +898,73 @@ describe("stdio adapter delivery modes", () => {
       pullTransport: "cli",
     })
 
-    writeJson(child, callToolPayload(3, "inbox.wait", { session: "@agent/test", timeout_ms: 17 }))
+    writeJson(
+      child,
+      callToolPayload(3, "inbox.wait", {
+        session: "@agent/test",
+        timeout_ms: 5_000,
+        wake_on_correlated_reply: true,
+      }),
+    )
     const call = await waitForLine(child, (line) => line.id === 3)
     const content = ((call.result as { content?: Array<{ text?: string }> } | undefined)?.content ?? []) as Array<{
       text?: string
     }>
     const parsed = JSON.parse(content[0]?.text ?? "{}") as {
+      status?: string
       session?: string
       unread_count?: number
       waited_ms?: number
+      effective_timeout_ms?: number
       timed_out?: boolean
       aborted?: boolean
+      attention?: {
+        actionable_unread?: Array<{ id?: string }>
+        pending_balls?: Array<{ request_id?: string }>
+        pending_balls_summary?: { total?: number; oldest_age_ms?: number }
+      }
     }
     expect(parsed).toMatchObject({
+      status: "woken",
       session: "@agent/test",
       unread_count: 2,
       waited_ms: 17,
+      effective_timeout_ms: 5_000,
       timed_out: false,
       aborted: false,
+      attention: {
+        actionable_unread: [{ id: "request-1" }],
+        pending_balls: [{ request_id: "request-1" }],
+        pending_balls_summary: { total: 1, oldest_age_ms: 500 },
+      },
     })
+    expect((call.result as { structuredContent?: unknown }).structuredContent).toMatchObject(parsed)
 
     const daemonRequest = daemon.requests.find((msg) => msg.method === "tribe.inbox.wait") as
-      | { params?: { session?: string; timeout_ms?: number } }
+      | { params?: { session?: string; timeout_ms?: number; wake_on_correlated_reply?: boolean } }
       | undefined
-    expect(daemonRequest?.params).toMatchObject({ session: "@agent/test", timeout_ms: 17 })
+    expect(daemonRequest?.params).toMatchObject({
+      session: "@agent/test",
+      timeout_ms: 5_000,
+      wake_on_correlated_reply: true,
+    })
+
+    writeJson(child, callToolPayload(4, "inbox.wait", { session: "@agent/test", timeout_ms: 600_000 }))
+    const cutCall = await waitForLine(child, (line) => line.id === 4)
+    const cutContent = ((cutCall.result as { content?: Array<{ text?: string }> } | undefined)?.content ??
+      []) as Array<{
+      text?: string
+    }>
+    const hostCut = JSON.parse(cutContent[0]?.text ?? "{}") as Record<string, unknown>
+    expect(hostCut).toEqual({
+      status: "host_cut",
+      requested_ms: 600_000,
+      ceiling_ms: 10_000,
+      ceiling_source: "measured",
+      advice: "cli_wait",
+    })
+    expect((cutCall.result as { structuredContent?: unknown }).structuredContent).toEqual(hostCut)
+    expect(daemon.requests.filter((msg) => msg.method === "tribe.inbox.wait")).toHaveLength(1)
   })
 
   it("push delivery registers explicit persona as pull and suppresses channel notifications until tribe.join", async () => {
@@ -965,17 +1167,47 @@ describe("stdio adapter delivery modes", () => {
     expect(channels.indexOf(verdict!)).toBe(0)
   })
 
-  it("forwards a pending-only ball when its original actionable was already read", async () => {
+  it("forwards one compact pending-ball summary on every wakeup", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath, {
       fetchAttention: {
         actionable_unread: [],
+        pending_balls_summary: {
+          total: 108,
+          oldest_age_ms: 9 * 24 * 60 * 60 * 1_000,
+        },
         pending_balls: [
           {
             request_id: "review-r3",
             sender: "@chief",
             message_id: "original-review-request",
             fanout: "first",
+            age_ms: 2 * 60 * 60 * 1_000,
+            summary: "Review the architecture revision",
+          },
+          {
+            request_id: "query-r4",
+            sender: "@agent/4",
+            message_id: "second-query",
+            fanout: "first",
+            age_ms: 70 * 60 * 1_000,
+            summary: "Confirm the migration invariant",
+          },
+          {
+            request_id: "assign-r5",
+            sender: "@chief",
+            message_id: "third-assignment",
+            fanout: "first",
+            age_ms: 30 * 60 * 1_000,
+            summary: "Run the focused verification",
+          },
+          {
+            request_id: "request-r6",
+            sender: "@agent/6",
+            message_id: "fourth-request",
+            fanout: "first",
+            age_ms: 10 * 60 * 1_000,
+            summary: "This fourth summary must be omitted",
           },
         ],
       },
@@ -997,15 +1229,16 @@ describe("stdio adapter delivery modes", () => {
     await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
     daemon.clients[0]?.write(makeNotification("wakeup", {}))
 
-    await waitForStdout(child, stdout, () =>
-      stdout.some((line) => JSON.stringify(line).includes("Pending tracked request review-r3")),
-    )
+    const summaryText =
+      "You own 108 balls, oldest 9d. Top: Review the architecture revision | Confirm the migration invariant | Run the focused verification"
+    await waitForStdout(child, stdout, () => stdout.some((line) => JSON.stringify(line).includes(summaryText)))
 
-    const pending = stdout
-      .filter((line) => line.method === "notifications/claude/channel")
-      .find((line) => JSON.stringify(line).includes("original-review-request"))
-    expect(pending).toBeDefined()
-    expect(JSON.stringify(pending)).toContain('"type":"request"')
+    const pending = stdout.filter(
+      (line) => line.method === "notifications/claude/channel" && JSON.stringify(line).includes(summaryText),
+    )
+    expect(pending).toHaveLength(1)
+    expect(JSON.stringify(pending[0])).toContain('"type":"attention:pending-balls"')
+    expect(JSON.stringify(pending[0])).not.toContain("This fourth summary must be omitted")
 
     const fetchesBeforeSecondWake = daemon.requests.filter((request) => request.method === "tribe.fetch").length
     daemon.clients[0]?.write(makeNotification("wakeup", {}))
@@ -1013,10 +1246,13 @@ describe("stdio adapter delivery modes", () => {
       () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > fetchesBeforeSecondWake,
       "second pending-ball fetch",
     )
-    expect(
-      stdout
-        .filter((line) => line.method === "notifications/claude/channel")
-        .filter((line) => JSON.stringify(line).includes("Pending tracked request review-r3")),
-    ).toHaveLength(1)
+    await waitForStdout(
+      child,
+      stdout,
+      () =>
+        stdout.filter(
+          (line) => line.method === "notifications/claude/channel" && JSON.stringify(line).includes(summaryText),
+        ).length === 2,
+    )
   })
 })

@@ -19,6 +19,8 @@
  *   - `onIdle()` — invoked when the registry empties on disconnect. Wired
  *     to `withIdleQuit.markIdle()`.
  *   - `getActivePluginNames()` — surfaced via `cli_status` for UI.
+ *   - `getPluginStatus()` — the same, plus the plugins that failed to load and
+ *     the cause, so `tribe status` names a disabled plugin instead of omitting it.
  *   - `getCliDaemonExtras()` / `getCliStatusExtras()` — late-bound
  *     introspection that needs runtime knobs (quitTimeout, etc.).
  *   - `suppressWindowMs` — join/leave broadcast window after hot-reload.
@@ -27,34 +29,48 @@
  * via `server.on("connection", handler)`.
  */
 
-import { randomUUID } from "node:crypto"
+import { randomUUID, timingSafeEqual } from "node:crypto"
 import { type Socket as NetSocket } from "node:net"
 import { createLogger } from "loggily"
 import { DEFAULT_INBOX_WAIT_SESSION, resolveInboxWaitOptions } from "tribe-wire"
+import { deriveTribePersonaLaunchIdentity } from "tribe-wire/lib/persona-launch-identity"
+import { hashSelfMailboxAuthority } from "tribe-wire/lib/self-mailbox-authority"
 import {
   createLineParser,
   isRequest,
   makeError,
   makeResponse,
+  negotiateProtocolVersion,
+  supportedProtocolVersionsFromAdvertisement,
+  TRIBE_SUPPORTED_PROTOCOL_VERSIONS,
   TRIBE_PROTOCOL_VERSION,
   type JsonRpcMessage,
   type JsonRpcRequest,
 } from "tribe-wire/lib/socket"
+import { protocolVersionMismatchMessage } from "../../../../wire/src/lib/protocol-mismatch.ts"
 import { detectRole, resolveProjectId, type TribeRole } from "tribe-wire/lib/config"
 import { createTribeContext, type MessageInsertedInfo, type TribeContext } from "../context.ts"
 import {
   fetchEvent,
   handleToolCall,
   isRemovedTribeMethod,
+  readAttentionProjection,
   removedTribeMethodMessage,
   TRIBE_COORD_METHODS,
   type FetchRow,
 } from "../handlers.ts"
 import { createLifecycleStore } from "../lifecycle-store.ts"
+import type { TribePluginHandle } from "../plugin-api.ts"
 import { createInboxWaitManager } from "../inbox-wait.ts"
 import { logEvent, sendMessage } from "../messaging.ts"
-import { registerSession, NameConflictError } from "../session.ts"
-import { adoptByPidCwd, adoptIdentity, resolveName, type PriorSession } from "../resolve-name.ts"
+import { registerSession, NameConflictError, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
+import {
+  adoptByPidCwd,
+  adoptIdentity,
+  isTombstonedSessionName,
+  resolveName,
+  type PriorSession,
+} from "../resolve-name.ts"
 import { type RecallConnState } from "../recall-handlers.ts"
 import type { BaseTribe } from "./base.ts"
 import type { WithBroadcast } from "./with-broadcast.ts"
@@ -64,6 +80,10 @@ import type { WithDaemonContext } from "./with-daemon-context.ts"
 import type { WithDatabase } from "./with-database.ts"
 import type { WithRecall } from "./with-recall.ts"
 import type { WithSocketServer } from "./with-socket-server.ts"
+import type { DirectDeliveryResolver } from "../delivery-resolution.ts"
+import { STARTUP_SHA, TRIBE_SOURCE_ROOT } from "../code-pin.ts"
+import { shouldLogSlowRequest } from "../slow-request-log.ts"
+import { derivedLaunchPrefixUpperBound } from "../launch-prefix-range.ts"
 
 const log = createLogger("tribe:dispatcher")
 
@@ -74,10 +94,21 @@ export interface DispatcherRuntimeHooks {
   onIdle?: () => void
   /** Plugin names surfaced via cli_status. Default: empty array. */
   getActivePluginNames?: () => string[]
-  /** Quit-timeout (seconds) returned by cli_daemon. Default: -1. */
-  getQuitTimeoutSec?: () => number
+  /**
+   * Per-plugin load outcome surfaced via cli_status, INCLUDING plugins that
+   * failed to start and why. Default: empty array. Without this a plugin that
+   * refused to load is indistinguishable from one that was never configured.
+   */
+  getPluginStatus?: () => TribePluginHandle[]
+  /** Idle-quit delay (seconds) returned by cli_daemon (wire key `quitTimeout`). Default: -1. */
+  getIdleQuitAfterSec?: () => number
+  /** Clean daemon shutdown for `tribe.stop`. Default: absent — the handler
+   * then refuses loudly instead of pretending to stop anything. */
+  triggerShutdown?: () => void
   /** Suppress-window for join/leave broadcasts. Default: 10000ms (0 disables). */
   suppressWindowMs?: number
+  /** Generic direct-message delivery policy supplied by the composing layer. */
+  resolveDelivery?: DirectDeliveryResolver
 }
 
 /**
@@ -123,6 +154,8 @@ export interface Dispatcher {
    * throws.
    */
   register: (method: string, handler: MethodHandler) => void
+  /** Answer pending long-polls before the daemon closes client sockets. */
+  shutdown: () => void
 }
 
 export interface WithDispatcher {
@@ -150,10 +183,44 @@ export function withDispatcher<
     const onActiveClient = hooks.onActiveClient ?? (() => {})
     const onIdle = hooks.onIdle ?? (() => {})
     const getActivePluginNames = hooks.getActivePluginNames ?? (() => [])
-    const getQuitTimeoutSec = hooks.getQuitTimeoutSec ?? (() => -1)
+    const getPluginStatus = hooks.getPluginStatus ?? (() => [] as TribePluginHandle[])
+    const getIdleQuitAfterSec = hooks.getIdleQuitAfterSec ?? (() => -1)
     const suppressWindowMs = hooks.suppressWindowMs ?? (process.env.TRIBE_NO_SUPPRESS ? 0 : 10_000)
     const sessionAnnounceGate = createSessionAnnounceGate(suppressWindowMs)
     const channelJoinAnnounced = new Set<string>()
+
+    function identityLogFields(client: ClientSession): {
+      connection_id: string
+      member_id: string
+      name: string
+      role: TribeRole
+      pid: number
+      launch_id: string | null
+      launch_parent_pid: number | null
+    } {
+      return {
+        connection_id: client.id,
+        member_id: client.ctx.sessionId,
+        name: client.name,
+        role: client.role,
+        pid: client.pid,
+        launch_id: client.launchId,
+        launch_parent_pid: client.launchParentPid,
+      }
+    }
+
+    function connectionLogIdentity(
+      client: ClientSession | undefined,
+      connId: string,
+    ): ReturnType<typeof identityLogFields> | { connection_id: string } {
+      if (!client || client.role === "pending") return { connection_id: connId }
+      return identityLogFields(client)
+    }
+
+    function errorCode(error: Error): string {
+      const code = (error as NodeJS.ErrnoException).code
+      return typeof code === "string" && code.length > 0 ? code : "UNKNOWN"
+    }
 
     const methodHandlers = new Map<string, MethodHandler>()
     function register(method: string, handler: MethodHandler): void {
@@ -175,8 +242,14 @@ export function withDispatcher<
       unread_count: number
       oldest_unread_age_min: number
       oldest_unread_ts: number
+      latest_actionable_seq: number | null
+      latest_message_id: string | null
+      latest_type: string | null
     } {
       const row = stmts.getUnreadDms.get({ $name: sessionName }) as { count: number; oldest_ts: number } | undefined
+      const latest = stmts.getLatestActionableAttention.get({ $name: sessionName }) as
+        | { rowid: number; id: string; type: string }
+        | undefined
       const unread_count = row?.count ?? 0
       const oldest_ts = row?.oldest_ts ?? 0
       const oldest_unread_age_min = oldest_ts > 0 ? Math.floor((Date.now() - oldest_ts) / 60_000) : 0
@@ -185,10 +258,159 @@ export function withDispatcher<
         unread_count,
         oldest_unread_age_min,
         oldest_unread_ts: oldest_ts,
+        latest_actionable_seq: latest?.rowid ?? null,
+        latest_message_id: latest?.id ?? null,
+        latest_type: latest?.type ?? null,
       }
     }
 
-    const inboxWait = createInboxWaitManager(readInboxStatus)
+    type OperatorCapabilityVerdict = "authorized" | "unconfigured" | "rejected"
+
+    function operatorCapabilityVerdict(value: unknown): OperatorCapabilityVerdict {
+      const configured = t.config.operatorCapability?.trim()
+      if (!configured) return "unconfigured"
+      const supplied = typeof value === "string" ? value : ""
+      if (supplied.length !== configured.length) return "rejected"
+      return timingSafeEqual(Buffer.from(supplied), Buffer.from(configured)) ? "authorized" : "rejected"
+    }
+
+    function requiredNonEmptyString(value: unknown): string | null {
+      return typeof value === "string" && value.trim().length > 0 ? value.trim() : null
+    }
+
+    type InboxTargetResolution =
+      | { sessionName: string; launchId?: string; launchParentPid?: number }
+      | { errorCode: number; errorMessage: string }
+
+    /**
+     * Resolve an inbox target from durable daemon authority. Session names are
+     * accepted only as explicit operator/read targets; a managed one-shot CLI
+     * supplies its launch-scoped correlation id, never mutable name hints from
+     * env. The daemon derives the parent-pid half of the authoritative
+     * tuple from its own persisted session row and fails closed on ambiguity.
+     */
+    function resolveInboxTarget(
+      params: Record<string, unknown>,
+      opts: { mode: "launch" } | { mode: "explicit"; defaultSession?: string },
+    ): InboxTargetResolution {
+      const hasSession = Object.prototype.hasOwnProperty.call(params, "session")
+      const hasLaunchId = Object.prototype.hasOwnProperty.call(params, "launch_id")
+      const hasLaunchParentPid = Object.prototype.hasOwnProperty.call(params, "launch_parent_pid")
+      const hasLaunchParentPids = Object.prototype.hasOwnProperty.call(params, "launch_parent_pids")
+      const hasPersona = Object.prototype.hasOwnProperty.call(params, "persona")
+      if (opts.mode === "explicit") {
+        if (hasLaunchId || hasLaunchParentPid || hasLaunchParentPids) {
+          return { errorCode: -32602, errorMessage: "Explicit inbox request accepts session, not launch identity" }
+        }
+        if (hasSession) return { sessionName: String(params.session) }
+        if (opts.defaultSession !== undefined) return { sessionName: opts.defaultSession }
+        return { errorCode: -32602, errorMessage: "Explicit inbox request requires session" }
+      }
+
+      if (hasSession || hasLaunchParentPid || hasLaunchParentPids) {
+        return {
+          errorCode: -32602,
+          errorMessage: "Managed inbox request accepts only launch_id; parent identity is daemon-derived",
+        }
+      }
+      if (!hasLaunchId) {
+        return { errorCode: -32602, errorMessage: "Managed inbox request requires a non-empty launch_id" }
+      }
+
+      const launchId = String(params.launch_id ?? "").trim()
+      if (launchId.length === 0) {
+        return {
+          errorCode: -32602,
+          errorMessage: "Managed inbox request requires a non-empty launch_id",
+        }
+      }
+      const derivedPrefix = `${launchId}::`
+      const derivedPrefixUpper = derivedLaunchPrefixUpperBound(derivedPrefix)
+      if (derivedPrefixUpper === null) {
+        // Unreachable: launchId is non-empty above, so the prefix is too. A
+        // null bound would silently widen or void the range, so refuse rather
+        // than run a query whose result would not mean what it claims.
+        return { errorCode: -32602, errorMessage: "Managed inbox request requires a non-empty launch_id" }
+      }
+      const launchSessions = stmts.getSessionsByProviderLaunchId.all({
+        $launch_id: launchId,
+        $derived_prefix: derivedPrefix,
+        $derived_prefix_upper: derivedPrefixUpper,
+      }) as Array<{
+        name: string
+        launch_id: string
+        launch_parent_pid: number | null
+      }>
+      // Tombstones retain journal addressability but no longer own routing.
+      // A disconnected canonical row remains valid for managed CLI recovery.
+      const routableLaunchSessions = launchSessions.filter((session) => !isTombstonedSessionName(session.name))
+      const persona = hasPersona && typeof params.persona === "string" ? params.persona.trim() : ""
+      if (hasPersona && persona.length === 0) {
+        return { errorCode: -32602, errorMessage: "Managed inbox persona must be a non-empty string" }
+      }
+      // A launch can legitimately host distinct named bridges. Launch
+      // authority remains the trust boundary; persona only narrows an
+      // otherwise ambiguous set already proven to belong to that launch. For
+      // a sole session, ignore a stale spawn-time persona so runtime rename
+      // recovery retains the launch-only behavior.
+      const resolvedLaunchSessions =
+        routableLaunchSessions.length > 1 && persona.length > 0
+          ? routableLaunchSessions.filter(
+              (session) =>
+                session.launch_id === deriveTribePersonaLaunchIdentity(persona, launchId).launchId ||
+                (session.launch_id === launchId && session.name === persona),
+            )
+          : routableLaunchSessions
+      const launchSession = resolvedLaunchSessions[0]
+      if (resolvedLaunchSessions.length !== 1 || launchSession === undefined) {
+        return {
+          errorCode: -32003,
+          errorMessage:
+            `Inbox launch identity resolved to ${routableLaunchSessions.length} sessions (${launchSessions.length} stored)` +
+            (persona.length > 0 ? `; persona ${persona} matched ${resolvedLaunchSessions.length}` : "") +
+            "; exactly one routable session is required",
+        }
+      }
+      if (!Number.isSafeInteger(launchSession.launch_parent_pid) || Number(launchSession.launch_parent_pid) <= 0) {
+        return { errorCode: -32003, errorMessage: "Inbox launch identity has no authoritative parent pid" }
+      }
+      const persistedRename = stmts.getLaunchRename.get({
+        $launch_id: launchId,
+        $launch_parent_pid: launchSession.launch_parent_pid,
+      }) as { name: string } | null
+      if (persistedRename && persistedRename.name !== launchSession.name) {
+        return {
+          errorCode: -32003,
+          errorMessage: "Inbox launch authorities disagree; refusing ambiguous mailbox",
+        }
+      }
+      return {
+        sessionName: launchSession.name,
+        launchId: launchSession.launch_id,
+        launchParentPid: Number(launchSession.launch_parent_pid),
+      }
+    }
+
+    const inboxWait = createInboxWaitManager(
+      readInboxStatus,
+      (sessionName) => readAttentionProjection(daemonCtx, sessionName).attention,
+      (sessionName, wakeOnCorrelatedReply) => {
+        const latest = stmts.getLatestInboxWaitMessage.get({
+          $name: sessionName,
+          $include_correlated_replies: wakeOnCorrelatedReply ? 1 : 0,
+          $unacknowledged_only: 0,
+        }) as { rowid: number } | undefined
+        return latest?.rowid ?? 0
+      },
+      (sessionName, wakeOnCorrelatedReply) => {
+        const current = stmts.getLatestInboxWaitMessage.get({
+          $name: sessionName,
+          $include_correlated_replies: wakeOnCorrelatedReply ? 1 : 0,
+          $unacknowledged_only: 1,
+        }) as { rowid: number } | undefined
+        return current?.rowid ?? 0
+      },
+    )
     const previousOnMessageInserted = daemonCtx.onMessageInserted
     const onMessageInserted = (info: MessageInsertedInfo) => {
       previousOnMessageInserted?.(info)
@@ -257,17 +479,27 @@ export function withDispatcher<
           resources: [] as string[],
           parent: parent && parent !== member.name ? parent : undefined,
           lifecycle: lifecycleStore.get(member.name) ?? null,
+          protocol_versions: [...new Set(transports.flatMap((client) => client.protocolVersion ?? []))].sort(
+            (a, b) => b - a,
+          ),
+          version_state: transports.some(
+            (client) => typeof client.protocolVersion === "number" && client.protocolVersion < TRIBE_PROTOCOL_VERSION,
+          )
+            ? ("version-degraded" as const)
+            : transports.some((client) => typeof client.protocolVersion === "number")
+              ? ("current" as const)
+              : ("version-unknown" as const),
         }
       })
     }
 
     /**
-     * Actionable-recovery nudge (19442) — when handleJoin / handleRename
-     * detects unacknowledged actionable directs waiting in the claimed name's
+     * Attention-recovery nudge (19442, 21757) — when handleJoin / handleRename
+     * detects unacknowledged attention directs waiting in the claimed name's
      * durable mailbox, fire an MCP `wakeup` notification at the claiming
      * session's live socket so push-mode clients drain immediately instead of
      * waiting for the next turn-start `tribe.fetch` (whose default drain
-     * injects + acknowledges the recovered actionables). Pull-mode clients
+     * injects + acknowledges the recovered attention). Pull-mode clients
      * pick them up on their next poll regardless — the wakeup is
      * opportunistic, not load-bearing.
      */
@@ -288,16 +520,34 @@ export function withDispatcher<
       })
     }
 
+    const reapStaleTransports = () => {
+      const nowMs = Date.now()
+      const report = reapStaleTransportRows(db, {
+        nowMs,
+        hasActiveTransport: (sessionId) => registry.hasActiveTransport(sessionId),
+        isReconnectGraceProtected: (sessionId) => registry.isReconnectGraceProtected(sessionId, nowMs),
+        getActiveLaunchIds: () => activeLaunchIds(registry.getActiveSessionInfo()),
+      })
+      registry.forgetTransportSessions(report.reaped_sessions.map((session) => session.member_id))
+      return report
+    }
+
     /** No-op handler opts for daemon-side tool calls. */
     const DAEMON_HANDLER_OPTS = {
       cleanup: () => {},
       userRenamed: false,
       setUserRenamed: () => {},
       getActiveSessionIds: () => registry.getActiveSessionIds(),
+      hasActiveTransport: (sessionId: string) => registry.hasActiveTransport(sessionId),
       getActiveSessionInfo: () => registry.getActiveSessionInfo(),
       getLifecycleStore: () => lifecycleStore,
       inboxWait,
       notifyWakeupForReplay,
+      reapStaleTransports,
+      resolveDelivery: hooks.resolveDelivery,
+      // tribe.stop actuator — absent (handler refuses loudly) unless the
+      // composing daemon supplied its shutdown.
+      triggerStop: hooks.triggerShutdown,
       getDebugState: () => ({
         clients: Array.from(clients.values()).map((c) => ({
           member_id: c.ctx.sessionId,
@@ -324,23 +574,14 @@ export function withDispatcher<
       }),
     } as const
 
-    /** Generate a unique member-<pid> name, with random suffix if taken */
-    function generateMemberName(pid: number, connId: string): string {
-      const pidName = `member-${pid || connId.slice(0, 6)}`
-      const taken = db.prepare("SELECT id FROM sessions WHERE name = ?").get(pidName)
-      return taken ? `member-${pid}-${Math.random().toString(36).slice(2, 5)}` : pidName
-    }
-    void generateMemberName // currently unused but kept for parity
-
     function deduplicateName(name: string): string {
       const live = Array.from(clients.values())
       const holder = live.find((c) => c.name === name)
       if (!holder) return name
       // No silent fallback. Surface the conflict so the caller picks a fresh
-      // name explicitly. The list of taken names + the live PID of the holder
-      // go on the error so the caller doesn't need a separate
-      // tribe.sessions round-trip AND can verify the conflict is real
-      // (`isPidAlive(holder_pid)` on the caller side).
+      // name explicitly. The connected-clients map proves the conflict; the
+      // holder PID is diagnostic metadata only and must not be reused as
+      // disconnected-owner identity by callers.
       const connectedNames = live.map((c) => c.name).sort()
       throw new NameConflictError(name, connectedNames, holder.pid || null)
     }
@@ -350,7 +591,80 @@ export function withDispatcher<
       return Array.from(clients.values()).find((c) => c.id !== connId && c.name === name && c.pid === clientPid) ?? null
     }
 
-    function retireReplacedClient(client: ClientSession): void {
+    type LaunchIdentity = { id: string; parentPid: number }
+
+    function claimLaunchTakeover(name: string, launch: LaunchIdentity, connId: string): boolean {
+      const result = stmts.claimDedup.run({
+        $key: `launch-takeover:${JSON.stringify([name, launch.id, launch.parentPid])}`,
+        $session_id: connId,
+        $ts: Date.now(),
+      })
+      return result.changes > 0
+    }
+
+    function findLaunchFanIn(
+      name: string,
+      clientPid: number,
+      launchIdentity: LaunchIdentity | null,
+      connId: string,
+    ): { holder: ClientSession; launch: LaunchIdentity; transportClass: string } | null {
+      for (const holder of clients.values()) {
+        if (holder.id === connId || holder.name !== name) continue
+
+        const holderLaunch =
+          holder.launchId !== null && holder.launchParentPid !== null
+            ? { id: holder.launchId, parentPid: holder.launchParentPid }
+            : null
+        if (
+          launchIdentity !== null &&
+          holderLaunch !== null &&
+          holderLaunch.id === launchIdentity.id &&
+          holderLaunch.parentPid === launchIdentity.parentPid
+        ) {
+          return { holder, launch: launchIdentity, transportClass: "same-launch-fan-in" }
+        }
+
+        const launchChildFoundLegacyParent =
+          launchIdentity !== null && holderLaunch === null && holder.pid === launchIdentity.parentPid
+        if (launchChildFoundLegacyParent) {
+          return { holder, launch: launchIdentity, transportClass: "provider-parent-fan-in" }
+        }
+
+        const legacyParentFoundLaunchChild = launchIdentity === null && clientPid === holderLaunch?.parentPid
+        if (legacyParentFoundLaunchChild) {
+          return { holder, launch: holderLaunch, transportClass: "provider-parent-fan-in" }
+        }
+      }
+      return null
+    }
+
+    function promoteSessionLaunchIdentity(
+      sessionId: string,
+      launch: LaunchIdentity,
+      identityToken: string | null,
+    ): void {
+      const result = stmts.promoteSessionLaunchIdentity.run({
+        $id: sessionId,
+        $identity_token: identityToken,
+        $launch_id: launch.id,
+        $launch_parent_pid: launch.parentPid,
+        $now: Date.now(),
+      })
+      if (result.changes !== 1) {
+        throw new Error(`refusing launch fan-in for ${sessionId}: persisted launch identity disagrees`)
+      }
+      for (const sibling of clients.values()) {
+        if (sibling.ctx.sessionId !== sessionId) continue
+        sibling.launchId = launch.id
+        sibling.launchParentPid = launch.parentPid
+      }
+    }
+
+    function retireReplacedClient(client: ClientSession, reason: TransportRetirementReason): void {
+      log.debug?.("transport.retired", {
+        ...identityLogFields(client),
+        reason,
+      })
       broadcast.flushConnection(client.id)
       broadcast.discardConnection(client.id)
       channelJoinAnnounced.delete(client.id)
@@ -375,9 +689,11 @@ export function withDispatcher<
         claudeSessionId: string | null
         peerSocket: string | null
         ctx: TribeContext
+        protocolVersion: number | null
       },
     ): ClientSession {
-      const existing = clients.get(connId)!
+      const existing = clients.get(connId)
+      if (existing === undefined) throw new Error(`cannot apply unknown client ${connId}`)
       const client: ClientSession = {
         socket: existing.socket,
         id: connId,
@@ -397,6 +713,7 @@ export function withDispatcher<
         registeredAt: Date.now(),
         lastActivityAt: Date.now(),
         recall: existing.recall,
+        protocolVersion: fields.protocolVersion,
       }
       clients.set(connId, client)
       onActiveClient()
@@ -428,7 +745,37 @@ export function withDispatcher<
       channelJoinAnnounced.add(client.id)
     }
 
+    /**
+     * Times every request and names the slow ones, then delegates. This wraps
+     * the router rather than sitting at a call site because there are two
+     * entry points: the socket line-parser below, and `tools/call` from the
+     * MCP surface, which reaches the same router directly (daemon.ts). Timing
+     * only the socket path left MCP untimed — and MCP `members` was one of the
+     * calls observed timing out, so the transport whose slowness was reported
+     * was the one the log could not see.
+     */
     async function handleRequest(req: JsonRpcRequest, connId: string): Promise<string> {
+      const startedAt = Date.now()
+      try {
+        return await dispatchRequest(req, connId)
+      } finally {
+        // Clients give up on a fixed 10s timer (wire client.ts) and can report
+        // only that the call did not return, so from the outside every wedge
+        // looks alike. A stack walk cannot settle it either — yama
+        // ptrace_scope blocks strace/perf on this host — which leaves the
+        // daemon's own log as the evidence that survives.
+        const elapsed = Date.now() - startedAt
+        if (shouldLogSlowRequest(req.method, elapsed)) {
+          log.warn?.("operation.slow", {
+            ...connectionLogIdentity(clients.get(connId), connId),
+            operation: operationLogName(req.method),
+            duration_ms: elapsed,
+          })
+        }
+      }
+    }
+
+    async function dispatchRequest(req: JsonRpcRequest, connId: string): Promise<string> {
       const { method, params, id } = req
       const p = (params ?? {}) as Record<string, unknown>
 
@@ -437,13 +784,47 @@ export function withDispatcher<
       // Spec: @km/tribe/15588-tribe-list-sessions.
       const liveClient = clients.get(connId)
       if (liveClient) liveClient.lastActivityAt = Date.now()
+      if (liveClient && liveClient.role !== "pending" && method !== "register") {
+        log.info?.("operation.received", {
+          ...identityLogFields(liveClient),
+          direction: "inbound",
+          operation: operationLogName(method),
+        })
+      }
 
       try {
         switch (method) {
           case "register": {
+            const clientProtocolVersion = p.protocolVersion === undefined ? undefined : Number(p.protocolVersion)
+            const clientProtocolVersions = supportedProtocolVersionsFromAdvertisement(
+              p.supportedProtocolVersions,
+              clientProtocolVersion,
+            )
+            const negotiatedProtocolVersion =
+              clientProtocolVersion === undefined && p.supportedProtocolVersions === undefined
+                ? undefined
+                : negotiateProtocolVersion(clientProtocolVersions)
+            if (negotiatedProtocolVersion === null) {
+              return makeError(
+                id,
+                -32006,
+                protocolVersionMismatchMessage(clientProtocolVersions, TRIBE_SUPPORTED_PROTOCOL_VERSIONS),
+              )
+            }
+            const filterMode = p.filterMode
+            if (filterMode !== undefined && !isSessionFilterMode(filterMode)) {
+              return makeError(id, -32602, "register filterMode must be one of focus|normal|ambient")
+            }
             const claudeSessionName = (p.claudeSessionName as string) ?? null
             const claudeSessionId = (p.claudeSessionId as string) ?? null
             const identityToken = (p.identityToken as string) ?? null
+            const mailboxAuthorityHash =
+              typeof p.mailboxAuthorityHash === "string" && /^[a-f0-9]{64}$/u.test(p.mailboxAuthorityHash)
+                ? p.mailboxAuthorityHash
+                : null
+            if (p.mailboxAuthorityHash !== undefined && mailboxAuthorityHash === null) {
+              return makeError(id, -32602, "register mailboxAuthorityHash must be a lowercase SHA-256 hex digest")
+            }
             const hasLaunchId = p.launchId !== undefined && p.launchId !== null
             const hasLaunchParentPid = p.launchParentPid !== undefined && p.launchParentPid !== null
             if (hasLaunchId !== hasLaunchParentPid) {
@@ -528,7 +909,7 @@ export function withDispatcher<
             // identityToken still stands — only the strictly-stable (pid,
             // cwd) form gets to override the name).
             const pForResolve = pidCwdAdopted ? { ...p, name: pidCwdAdopted.name } : p
-            const resolvedName = resolveName({
+            let resolvedName = resolveName({
               db,
               p: pForResolve,
               adopted,
@@ -538,23 +919,56 @@ export function withDispatcher<
               isActive,
               projectId,
               takenNames,
-              clientPid,
             })
-            const launch = launchIdentity
-            const sameLaunchHolder = launch
-              ? (Array.from(clients.values()).find(
-                  (client) =>
-                    client.id !== connId &&
-                    client.name === resolvedName &&
-                    client.launchId === launch.id &&
-                    client.launchParentPid === launch.parentPid,
-                ) ?? null)
-              : null
-            if (sameLaunchHolder && launch) {
+            // 21454 — re-apply a persisted runtime rename. tribe.rename /
+            // explicit tribe.join wrote the session's chosen name through to
+            // `launch_renames` keyed by launch identity; the adapter's register
+            // params still carry the frozen SPAWN-TIME name, so without this a
+            // reconnect or daemon-restart re-register silently reverts the
+            // identity (three chief-rename losses, 2026-07-17). Guard: never
+            // adopt a name held by a LIVE session of a DIFFERENT launch — a
+            // demoted predecessor reconnecting must not displace the current
+            // legitimate holder.
+            if (launchIdentity) {
+              const persistedRename = stmts.getLaunchRename.get({
+                $launch_id: launchIdentity.id,
+                $launch_parent_pid: launchIdentity.parentPid,
+              }) as { name: string } | null
+              if (persistedRename && persistedRename.name !== resolvedName) {
+                const liveHolder = Array.from(clients.values()).find(
+                  (client) => client.id !== connId && client.name === persistedRename.name,
+                )
+                const differentLaunchHolder =
+                  liveHolder !== undefined &&
+                  !(
+                    liveHolder.launchId === launchIdentity.id && liveHolder.launchParentPid === launchIdentity.parentPid
+                  )
+                if (differentLaunchHolder) {
+                  log.warn?.(
+                    `persisted rename "${persistedRename.name}" for launch ${launchIdentity.id} is held by a live different-launch session; registering as "${resolvedName}"`,
+                  )
+                } else {
+                  log.info?.(
+                    `re-applied persisted runtime rename: ${resolvedName} → ${persistedRename.name} (launch ${launchIdentity.id})`,
+                  )
+                  resolvedName = persistedRename.name
+                }
+              }
+            }
+            const launchFanIn = findLaunchFanIn(resolvedName, clientPid, launchIdentity, connId)
+            if (launchFanIn) {
+              const { holder, launch, transportClass } = launchFanIn
+              // Backfill the durable one-shot fence when multiple transports
+              // from a launch fan in before any cross-launch contention.
+              if (p.takeover === true && typeof p.name === "string") {
+                claimLaunchTakeover(resolvedName, launch, connId)
+              }
+              promoteSessionLaunchIdentity(holder.ctx.sessionId, launch, identityToken)
+              if (filterMode !== undefined) applyLaunchDeclaredFilter(holder.ctx, filterMode)
               const client = applyClient(connId, {
-                name: sameLaunchHolder.name,
-                role: sameLaunchHolder.role,
-                domains: sameLaunchHolder.domains,
+                name: holder.name,
+                role: holder.role,
+                domains: holder.domains,
                 project,
                 projectName,
                 projectId,
@@ -563,11 +977,15 @@ export function withDispatcher<
                 launchParentPid: launch.parentPid,
                 claudeSessionId,
                 peerSocket,
-                ctx: sameLaunchHolder.ctx,
+                ctx: holder.ctx,
+                protocolVersion: negotiatedProtocolVersion ?? null,
               })
-              log.info?.(
-                `launch fan-in: ${resolvedName} member=${client.ctx.sessionId} transport pid=${clientPid} launch=${launch.id}`,
-              )
+              registry.markTransportConnected(client.ctx.sessionId)
+              log.debug?.("transport.attached", {
+                ...identityLogFields(client),
+                operation: "register",
+                transport_class: transportClass,
+              })
               const coordState = db
                 .prepare("SELECT key, value FROM coordination WHERE project_id = ?")
                 .all(projectId) as Array<{ key: string; value: string | null }>
@@ -575,7 +993,8 @@ export function withDispatcher<
                 sessionId: client.ctx.sessionId,
                 name: client.name,
                 role: client.role,
-                protocolVersion: TRIBE_PROTOCOL_VERSION,
+                protocolVersion: negotiatedProtocolVersion ?? TRIBE_PROTOCOL_VERSION,
+                supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
                 coordinationState: coordState,
                 daemon: { pid: process.pid, uptime: Math.floor((Date.now() - socket.startedAt) / 1000) },
               })
@@ -587,7 +1006,7 @@ export function withDispatcher<
                 role = samePidHolder.role
               }
               log.info?.(`Replacing live self-registration for ${resolvedName} pid=${clientPid}`)
-              retireReplacedClient(samePidHolder)
+              retireReplacedClient(samePidHolder, "self-registration-replaced")
             }
 
             // 20703 — explicit-persona takeover. A managed respawn (adapter sends
@@ -601,11 +1020,18 @@ export function withDispatcher<
             // semantics via deduplicateName. Guarded on an explicit requested name
             // so auto-named sessions can never steal.
             if (p.takeover === true && typeof p.name === "string") {
+              // TRIBE_TAKEOVER is inherited by every MCP adapter in one
+              // provider launch. Treat it as a launch-scoped, durable
+              // capability: the first registration consumes it, including a
+              // no-contention registration. Otherwise a fresh adapter from a
+              // displaced launch can replay the env bit and steal the persona
+              // back from its deliberate successor (21049).
+              const takeoverAuthorized = !launchIdentity || claimLaunchTakeover(resolvedName, launchIdentity, connId)
               const holders = Array.from(clients.values()).filter(
                 (client) => client.id !== connId && client.name === resolvedName,
               )
               const holder = holders[0]
-              if (holder) {
+              if (holder && takeoverAuthorized) {
                 const oldPids = [...new Set(holders.map((client) => client.pid))]
                 log.warn?.(
                   `takeover: superseding live holder of "${resolvedName}" (old pid ${holder.pid}, old pids ${oldPids.join(",")}, old session ${holder.ctx.sessionId}, new pid ${clientPid})`,
@@ -617,7 +1043,11 @@ export function withDispatcher<
                   new_pid: clientPid,
                   reason: "explicit-persona takeover (20703)",
                 })
-                for (const replaced of holders) retireReplacedClient(replaced)
+                for (const replaced of holders) retireReplacedClient(replaced, "explicit-takeover")
+              } else if (holder) {
+                log.warn?.(
+                  `takeover replay refused for "${resolvedName}" (launch ${launchIdentity?.id ?? "legacy"}, holder pid ${holder.pid}, claimant pid ${clientPid})`,
+                )
               }
             }
 
@@ -647,20 +1077,13 @@ export function withDispatcher<
                     new_pid: clientPid,
                     reason: "identity displacement of token-less holder (21052)",
                   })
-                  retireReplacedClient(holder)
+                  retireReplacedClient(holder, "identity-displacement")
                 }
               }
             }
 
             const name = deduplicateName(resolvedName)
             const pid = Number(p.pid ?? 0)
-
-            const clientProtocolVersion = p.protocolVersion ? Number(p.protocolVersion) : undefined
-            if (clientProtocolVersion !== undefined && clientProtocolVersion !== TRIBE_PROTOCOL_VERSION) {
-              log.info?.(
-                `Protocol version mismatch: client=${clientProtocolVersion}, daemon=${TRIBE_PROTOCOL_VERSION} (session=${name})`,
-              )
-            }
 
             const clientCtx = createTribeContext({
               db,
@@ -686,7 +1109,7 @@ export function withDispatcher<
             registerSession(
               clientCtx,
               projectId,
-              (sid) => registry.getActiveSessionIds().has(sid),
+              (sid) => registry.hasActiveTransport(sid),
               identityToken,
               pid,
               delivery,
@@ -695,7 +1118,13 @@ export function withDispatcher<
               provider,
               launchIdentity?.id ?? null,
               launchIdentity?.parentPid ?? null,
+              mailboxAuthorityHash,
             )
+            // Apply launch-declared admission before applyClient makes this
+            // session visible to the broadcast fanout. Omission preserves a
+            // reconnecting session's stored preference; an explicit mode is
+            // authoritative and clears stale time/topic dimensions.
+            if (filterMode !== undefined) applyLaunchDeclaredFilter(clientCtx, filterMode)
 
             const client = applyClient(connId, {
               name,
@@ -710,10 +1139,16 @@ export function withDispatcher<
               claudeSessionId,
               peerSocket,
               ctx: clientCtx,
+              protocolVersion: negotiatedProtocolVersion ?? null,
             })
+            registry.markTransportConnected(client.ctx.sessionId)
 
             resetOffsetsToTail(client)
             announceJoin(client)
+            log.info?.("session.identified", {
+              ...identityLogFields(client),
+              operation: "register",
+            })
 
             const coordState = db
               .prepare("SELECT key, value FROM coordination WHERE project_id = ?")
@@ -723,9 +1158,82 @@ export function withDispatcher<
               sessionId: clientCtx.sessionId,
               name,
               role,
-              protocolVersion: TRIBE_PROTOCOL_VERSION,
+              protocolVersion: negotiatedProtocolVersion ?? TRIBE_PROTOCOL_VERSION,
+              supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
               coordinationState: coordState,
               daemon: { pid: process.pid, uptime: Math.floor((Date.now() - socket.startedAt) / 1000) },
+            })
+          }
+
+          case "host_turn_started_v1": {
+            const client = clients.get(connId)
+            if (client?.role !== "member" || client.launchId === null || client.launchParentPid === null) {
+              return makeError(id, -32003, "Turn-start receipt requires a launch-authenticated member connection")
+            }
+            if (
+              Object.prototype.hasOwnProperty.call(p, "session") ||
+              Object.prototype.hasOwnProperty.call(p, "session_name") ||
+              Object.prototype.hasOwnProperty.call(p, "launch_id") ||
+              Object.prototype.hasOwnProperty.call(p, "launch_parent_pid")
+            ) {
+              return makeError(id, -32602, "Turn-start receipt session and launch identity are daemon-derived")
+            }
+            const controllerSessionId = requiredNonEmptyString(p.controller_session_id)
+            const providerSessionId = requiredNonEmptyString(p.provider_session_id)
+            const providerTurnId = requiredNonEmptyString(p.provider_turn_id)
+            const startedAt = p.started_at
+            if (controllerSessionId === null || providerSessionId === null || providerTurnId === null) {
+              return makeError(
+                id,
+                -32602,
+                "Turn-start receipt requires non-empty controller_session_id, provider_session_id, and provider_turn_id",
+              )
+            }
+            if (!Number.isSafeInteger(startedAt) || Number(startedAt) < 0) {
+              return makeError(id, -32602, "Turn-start receipt started_at must be a non-negative safe integer")
+            }
+            const receivedAt = Date.now()
+            const inserted = stmts.insertTurnStartReceipt.run({
+              $session: client.name,
+              $launch_id: client.launchId,
+              $launch_parent_pid: client.launchParentPid,
+              $controller_session_id: controllerSessionId,
+              $provider_session_id: providerSessionId,
+              $provider_turn_id: providerTurnId,
+              $started_at: Number(startedAt),
+              $received_at: receivedAt,
+            })
+            return makeResponse(id, {
+              recorded: true,
+              duplicate: inserted.changes === 0,
+              session: client.name,
+              launch_id: client.launchId,
+              launch_parent_pid: client.launchParentPid,
+              received_at: receivedAt,
+            })
+          }
+
+          case "cli_turn_start_receipt_by_launch_v1": {
+            const target = resolveInboxTarget(p, { mode: "launch" })
+            if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage)
+            if (target.launchId === undefined || target.launchParentPid === undefined) {
+              return makeError(id, -32003, "Turn-start receipt launch authority is incomplete")
+            }
+            const receipt = stmts.getLatestTurnStartReceipt.get({
+              $session: target.sessionName,
+              $launch_id: target.launchId,
+              $launch_parent_pid: target.launchParentPid,
+            }) as Record<string, unknown> | null
+            return makeResponse(id, {
+              session: target.sessionName,
+              launch_id: target.launchId,
+              launch_parent_pid: target.launchParentPid,
+              receipt_seq: receipt?.receipt_seq ?? null,
+              controller_session_id: receipt?.controller_session_id ?? null,
+              provider_session_id: receipt?.provider_session_id ?? null,
+              provider_turn_id: receipt?.provider_turn_id ?? null,
+              started_at: receipt?.started_at ?? null,
+              received_at: receipt?.received_at ?? null,
             })
           }
 
@@ -735,7 +1243,8 @@ export function withDispatcher<
           case TRIBE_COORD_METHODS.rename:
           case TRIBE_COORD_METHODS.join:
           case TRIBE_COORD_METHODS.health:
-          case TRIBE_COORD_METHODS.reload:
+          case TRIBE_COORD_METHODS.restart:
+          case TRIBE_COORD_METHODS.stop:
           case TRIBE_COORD_METHODS.retro:
           case TRIBE_COORD_METHODS.debug:
           case TRIBE_COORD_METHODS.repair:
@@ -746,12 +1255,19 @@ export function withDispatcher<
           case TRIBE_COORD_METHODS.pending: {
             const client = clients.get(connId)
             const ctx = client?.ctx ?? daemonCtx
-            const result = await handleToolCall(ctx, method, p, DAEMON_HANDLER_OPTS)
+            const result = await handleToolCall(ctx, method, p, DAEMON_HANDLER_OPTS, connId)
             if ((method === TRIBE_COORD_METHODS.join || method === TRIBE_COORD_METHODS.rename) && client) {
               client.name = ctx.getName()
               client.role = ctx.getRole()
             }
             return makeResponse(id, result)
+          }
+
+          case "cli_protocol": {
+            return makeResponse(id, {
+              protocol_version: TRIBE_PROTOCOL_VERSION,
+              supported_protocol_versions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
+            })
           }
 
           case "cli_status": {
@@ -766,6 +1282,9 @@ export function withDispatcher<
                 dbPath: t.config.dbPath,
                 socketPath: socket.socketPath,
                 resources: getActivePluginNames(),
+                plugins: getPluginStatus(),
+                code_identity: { cert: STARTUP_SHA, root: TRIBE_SOURCE_ROOT },
+                protocol_version: TRIBE_PROTOCOL_VERSION,
               },
             })
           }
@@ -808,35 +1327,288 @@ export function withDispatcher<
             })
           }
 
+          // A one-shot CLI cannot own persistent membership. The historical
+          // register -> tribe.join -> close sequence created a disposable
+          // cli-join-* member, announced it fleet-wide, and immediately
+          // announced it left. Checkpoint the native holder instead; provider
+          // adapters remain the only membership authority.
+          case "cli_join": {
+            const name = typeof p.name === "string" ? p.name.trim() : ""
+            if (name.length === 0) {
+              return makeResponse(id, {
+                joined: false,
+                observed: false,
+                error: "join requires a non-empty persistent persona name",
+              })
+            }
+            const holders = canonicalSessionRows(Date.now()).filter((session) => session.name === name)
+            if (holders.length === 0) {
+              return makeResponse(id, {
+                joined: false,
+                observed: false,
+                error:
+                  `one-shot CLI cannot establish persistent membership for ${name}; ` +
+                  "submit a native Tribe join to the live provider pane",
+              })
+            }
+            if (holders.length !== 1) {
+              return makeResponse(id, {
+                joined: false,
+                observed: false,
+                error: `contradictory live membership for ${name}: ${holders.length} logical holders`,
+              })
+            }
+            const holder = holders[0]!
+            const row = db.prepare("SELECT delivery FROM sessions WHERE id = ?").get(holder.id) as {
+              delivery: string
+            } | null
+            if (!row) {
+              throw new Error(
+                `live holder ${name} has no durable session row; restart that provider session before retrying tribe join`,
+              )
+            }
+            return makeResponse(id, {
+              joined: true,
+              observed: true,
+              name: holder.name,
+              role: holder.role,
+              domains: holder.domains,
+              delivery: row.delivery,
+              memberId: holder.id,
+              transportPids: holder.transportPids,
+            })
+          }
+
           case "cli_log": {
             const limit = Number(p.limit ?? 20)
-            const rows = db.prepare("SELECT * FROM messages ORDER BY ts DESC LIMIT ?").all(limit)
-            return makeResponse(id, { messages: (rows as unknown[]).reverse() })
+            const all = p.all === true
+            const refPrefix = typeof p.ref_prefix === "string" && p.ref_prefix.length > 0 ? p.ref_prefix : null
+            const replyPrefix = typeof p.reply_prefix === "string" && p.reply_prefix.length > 0 ? p.reply_prefix : null
+            const filters: string[] = []
+            const values: Array<string | number> = []
+            if (refPrefix) {
+              filters.push("substr(ref, 1, length(?)) = ?")
+              values.push(refPrefix, refPrefix)
+            }
+            if (replyPrefix) {
+              filters.push("substr(reply, 1, length(?)) = ?")
+              values.push(replyPrefix, replyPrefix)
+            }
+            const where = filters.length > 0 ? ` WHERE ${filters.join(" OR ")}` : ""
+            const limitSql = all ? "" : " LIMIT ?"
+            if (!all) values.push(limit)
+            // Keep the established cli_log payload stable now that `rowid` is
+            // an explicit AUTOINCREMENT column rather than SQLite's hidden
+            // alias. The monotonic cursor is exposed only through the bounded
+            // structural status API above, not as an accidental log field.
+            const rows = db
+              .prepare(
+                `SELECT id, type, sender, recipient, kind, content, bead_id, ref,
+                        ts, delivery, topic, room_id, request, reply, summary
+                 FROM messages${where} ORDER BY ts DESC${limitSql}`,
+              )
+              .all(...values)
+            return makeResponse(id, {
+              messages: (rows as unknown[]).reverse(),
+              query: { all, ref_prefix: refPrefix, reply_prefix: replyPrefix },
+            })
           }
 
           /**
-           * Chief-silent watchdog Layer 2 — inbox status for any session
-           * (default `@chief`). Returns the count + age of actionable DMs
-           * the session hasn't drained via tribe.fetch.
-           * See @km/all/silent-errors-enforcement/chief-silent-watchdog-relay-pattern-detection.
+           * Delivery-attention status for any session (default `@chief`).
+           * Returns the count + age of actionable DMs the session hasn't
+           * drained via tribe.fetch. See
+           * @ag/tribe/21626-per-seat-inbox-staleness-alarm.
            */
-          case "cli_inbox_status": {
-            const sessionName = String(p.session ?? "@chief")
-            return makeResponse(id, readInboxStatus(sessionName))
+          case "cli_inbox_status":
+          case "cli_inbox_status_by_launch_v1": {
+            const target = resolveInboxTarget(
+              p,
+              method === "cli_inbox_status_by_launch_v1"
+                ? { mode: "launch" }
+                : { mode: "explicit", defaultSession: "@chief" },
+            )
+            if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage)
+            // Round-trip the daemon-authoritative launch tuple so a managed
+            // one-shot CLI can register its send connection under the SAME
+            // (launch_id, launch_parent_pid) as the live seat and fan in to it
+            // (attributed, no takeover) instead of colliding on the persona
+            // name. Explicit-mode (`cli_inbox_status`) carries no launch
+            // identity, so these stay absent there. Mirrors
+            // cli_inbox_delivery_by_launch_v1's response shape.
+            return makeResponse(id, {
+              ...readInboxStatus(target.sessionName),
+              ...(target.launchId === undefined ? {} : { launch_id: target.launchId }),
+              ...(target.launchParentPid === undefined ? {} : { launch_parent_pid: target.launchParentPid }),
+            })
           }
 
           /**
-           * Bounded, name-keyed actionable drain for long-lived hosts whose
-           * current tool bridge cannot expose `tribe.fetch`. This advances the
-           * same durable mailbox cursor as fetch without registering, joining,
-           * renaming, or otherwise creating a transient session row.
+           * OOB payload half of the declared-await delivery adapter. Status
+           * remains structural; only a caller that presents the exact
+           * launch-resolved sequence/id pair receives the corresponding
+           * still-actionable envelope. This raw daemon method is deliberately
+           * absent from MCP tools so a wedged MCP transport is not load-bearing.
            */
-          case "cli_inbox_drain": {
-            const sessionName = String(p.session ?? DEFAULT_INBOX_WAIT_SESSION)
+          case "cli_inbox_delivery_by_launch_v1": {
+            const target = resolveInboxTarget(p, { mode: "launch" })
+            if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage)
+            const messageSeq = p.message_seq
+            const messageId = requiredNonEmptyString(p.message_id)
+            if (!Number.isSafeInteger(messageSeq) || Number(messageSeq) <= 0 || messageId === null) {
+              return makeError(
+                id,
+                -32602,
+                "Inbox delivery requires a positive safe message_seq and non-empty message_id",
+              )
+            }
+            const message = stmts.getActionableAttentionDelivery.get({
+              $name: target.sessionName,
+              $seq: Number(messageSeq),
+              $id: messageId,
+            }) as Record<string, unknown> | null
+            return makeResponse(id, {
+              session: target.sessionName,
+              launch_id: target.launchId,
+              launch_parent_pid: target.launchParentPid,
+              message,
+            })
+          }
+
+          /**
+           * Canonical self-mailbox read for a one-shot CLI. The bearer maps to
+           * one persisted session; no caller-supplied name, launch id, or pid
+           * participates in target selection. Once authenticated, dispatch
+           * enters the same tribe.fetch handler used by MCP.
+           */
+          case "cli_self_inbox_v1": {
+            if (
+              ["session", "name", "launch_id", "launch_parent_pid", "pid"].some((key) =>
+                Object.prototype.hasOwnProperty.call(p, key),
+              )
+            ) {
+              return makeError(
+                id,
+                -32602,
+                "Self inbox derives its mailbox from authority; target overrides are forbidden",
+              )
+            }
+            const supplied = requiredNonEmptyString(p.authority)
+            if (supplied === null) {
+              return makeError(id, -32004, "self mailbox authority is missing", {
+                kind: "could-not-evaluate",
+                reason: "self-mailbox-authority-missing",
+              })
+            }
+            const row = db
+              .prepare(
+                `SELECT id, name, role, domains, claude_session_id, claude_session_name
+                 FROM sessions WHERE mailbox_authority_hash = $hash`,
+              )
+              .get({ $hash: hashSelfMailboxAuthority(supplied) }) as {
+              id: string
+              name: string
+              role: TribeRole
+              domains: string
+              claude_session_id: string | null
+              claude_session_name: string | null
+            } | null
+            if (row === null) {
+              return makeError(id, -32003, "self mailbox authority was rejected or revoked", {
+                kind: "unauthenticated",
+                reason: "self-mailbox-authority-rejected",
+              })
+            }
+            const domains = JSON.parse(row.domains) as unknown
+            if (!Array.isArray(domains) || domains.some((domain) => typeof domain !== "string")) {
+              return makeError(id, -32603, `stored domains for ${row.name} are invalid`)
+            }
+            const authorityCtx = createTribeContext({
+              db,
+              stmts,
+              sessionId: row.id,
+              sessionRole: row.role,
+              initialName: row.name,
+              domains,
+              claudeSessionId: row.claude_session_id,
+              claudeSessionName: row.claude_session_name,
+              onMessageInserted,
+            })
+            const result = await handleToolCall(
+              authorityCtx,
+              TRIBE_COORD_METHODS.fetch,
+              { limit: p.limit },
+              DAEMON_HANDLER_OPTS,
+              connId,
+            )
+            return makeResponse(id, result)
+          }
+
+          /**
+           * Bounded actionable drain. An authenticated client may mutate only
+           * its own mailbox and may not self-assert a `session` target. A
+           * separately configured operator capability may either select a
+           * mailbox explicitly or correlate a one-shot CLI to the daemon's
+           * persisted launch authority. Correlation never authenticates the
+           * caller by itself, and the CLI never registers a transient member.
+           */
+          case "cli_inbox_drain":
+          case "cli_inbox_drain_by_launch_v1": {
+            const client = clients.get(connId)
+            const authenticatedName =
+              client && client.role !== "pending" && client.role !== "watch" ? client.name : null
+            const operatorVerdict = operatorCapabilityVerdict(p.operator_capability)
+            const operatorAuthorized = operatorVerdict === "authorized"
+            if (!operatorAuthorized && !authenticatedName) {
+              if (operatorVerdict === "unconfigured") {
+                // A refusal that does not name a working path is how a seat
+                // concludes its inbox is empty. Four seats lost hours to this
+                // one on 2026-08-13, each reading the refusal as "nothing to
+                // read" rather than "you cannot read THIS WAY".
+                return makeError(
+                  id,
+                  -32004,
+                  "could-not-evaluate inbox drain authority: an operator capability is not configured. " +
+                    "This is inherited at launch and cannot be configured now — it will fail every time for this session. " +
+                    "YOUR MAIL IS NOT EMPTY, you are not reading it. Working reads: MCP tribe.fetch (projects attention AND advances the cursor); " +
+                    "`tribe inbox-status --session <seat>` for the unread count and oldest age; " +
+                    "`tribe inbox-wait --session <seat> --timeout 10m --json` to block until something arrives. " +
+                    "Do NOT substitute `tribe log --limit 10` — it is fleet-wide history with no attention projection and reaches back under a minute.",
+                  { kind: "could-not-evaluate", reason: "operator-capability-unconfigured" },
+                )
+              }
+              return makeError(id, -32003, "unauthenticated inbox drain: the operator capability was rejected", {
+                kind: "unauthenticated",
+                reason: "operator-capability-rejected",
+              })
+            }
+            if (
+              !operatorAuthorized &&
+              ["session", "launch_id", "launch_parent_pid", "launch_parent_pids"].some((key) =>
+                Object.prototype.hasOwnProperty.call(p, key),
+              )
+            ) {
+              return makeError(
+                id,
+                -32003,
+                `Inbox drain is bound to the authenticated current session ${authenticatedName}; session override or launch target override is forbidden`,
+              )
+            }
+            let sessionName = authenticatedName ?? ""
+            if (operatorAuthorized) {
+              const target = resolveInboxTarget(
+                p,
+                method === "cli_inbox_drain_by_launch_v1"
+                  ? { mode: "launch" }
+                  : { mode: "explicit", defaultSession: DEFAULT_INBOX_WAIT_SESSION },
+              )
+              if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage)
+              sessionName = target.sessionName
+            }
             const requestedLimit = Number(p.limit ?? 10)
             const limit = Number.isFinite(requestedLimit) ? Math.min(100, Math.max(1, Math.trunc(requestedLimit))) : 10
             const tail = stmts.getMessageTailSeq.get() as { seq: number } | null
-            const rows = stmts.selectUnackedActionables.all({
+            const rows = stmts.selectUnackedAttention.all({
               $name: sessionName,
               $upto: tail?.seq ?? 0,
               $limit: limit,
@@ -852,19 +1624,52 @@ export function withDispatcher<
             })
           }
 
-          case "cli_inbox_wait": {
-            const { session: sessionName, timeoutMs } = resolveInboxWaitOptions(p, {
-              defaultSession: DEFAULT_INBOX_WAIT_SESSION,
+          case "cli_inbox_wait":
+          case "cli_inbox_wait_by_launch_v1": {
+            const target = resolveInboxTarget(
+              p,
+              method === "cli_inbox_wait_by_launch_v1"
+                ? { mode: "launch" }
+                : { mode: "explicit", defaultSession: DEFAULT_INBOX_WAIT_SESSION },
+            )
+            if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage)
+            const { timeoutMs, wakeOnCorrelatedReply } = resolveInboxWaitOptions(p)
+            const sessionName = target.sessionName
+            const afterSeqRaw = p.after_seq
+            if (afterSeqRaw !== undefined && (!Number.isSafeInteger(afterSeqRaw) || Number(afterSeqRaw) < 0)) {
+              return makeError(id, -32602, "Inbox wait after_seq must be a non-negative safe integer")
+            }
+            const result = await inboxWait.wait(sessionName, connId, timeoutMs, {
+              wakeOnCorrelatedReply,
+              ...(afterSeqRaw === undefined ? {} : { afterSeq: Number(afterSeqRaw) }),
             })
-            return makeResponse(id, await inboxWait.wait(sessionName, connId, timeoutMs))
+            // The launch-correlated form proves which managed mailbox is
+            // reading. The explicit operator form observes another mailbox
+            // and must never forge that seat's receipt.
+            if (method === "cli_inbox_wait_by_launch_v1") {
+              stmts.touchMailboxAttentionRead.run({ $recipient: sessionName, $now: Date.now() })
+            }
+            return makeResponse(id, result)
           }
 
           case "tribe.inbox.wait": {
             const client = clients.get(connId)
-            const { session: sessionName, timeoutMs } = resolveInboxWaitOptions(p, {
+            const {
+              session: sessionName,
+              timeoutMs,
+              wakeOnCorrelatedReply,
+            } = resolveInboxWaitOptions(p, {
               defaultSession: client?.name ?? DEFAULT_INBOX_WAIT_SESSION,
             })
-            return makeResponse(id, await inboxWait.wait(sessionName, connId, timeoutMs))
+            const result = await inboxWait.wait(sessionName, connId, timeoutMs, { wakeOnCorrelatedReply })
+            if (client?.role === "member") {
+              // Attribute the read to the authenticated caller, never to an
+              // explicit target supplied in params.
+              stmts.touchMailboxAttentionRead.run({ $recipient: client.name, $now: Date.now() })
+            }
+            const publicResult: Record<string, unknown> = { ...result }
+            delete publicResult.baseline_seq
+            return makeResponse(id, publicResult)
           }
 
           /**
@@ -889,7 +1694,7 @@ export function withDispatcher<
             const row = db
               .prepare("SELECT value FROM coordination WHERE project_id = ? AND key = ?")
               .get("", "alarm.active") as { value: string | null } | undefined
-            if (!row || !row.value) {
+            if (!row?.value) {
               return makeResponse(id, { active: false })
             }
             try {
@@ -922,7 +1727,9 @@ export function withDispatcher<
               dbPath: t.config.dbPath,
               socketPath: socket.socketPath,
               startedAt: socket.startedAt,
-              quitTimeout: getQuitTimeoutSec(),
+              // Wire key kept as `quitTimeout` for external readers; the
+              // value is the effective idle-quit delay in seconds.
+              quitTimeout: getIdleQuitAfterSec(),
             })
           }
 
@@ -1041,19 +1848,37 @@ export function withDispatcher<
           })
         }
         const msg = err instanceof Error ? err.message : String(err)
-        log.info?.(`Error handling ${method}: ${msg}`)
+        const failedClient = clients.get(connId)
+        log.warn?.("operation.failed", {
+          ...connectionLogIdentity(failedClient, connId),
+          operation: operationLogName(method),
+          error_type: err instanceof Error ? err.name : "NonError",
+          error_code: err instanceof Error ? errorCode(err) : "UNKNOWN",
+        })
         return makeError(id, -32603, msg)
       }
     }
 
     function handleConnection(sock: NetSocket): void {
       const connId = randomUUID()
-      log.info?.(`Client connected: ${connId.slice(0, 8)}`)
+      const pendingName = `pending-${connId}`
+      const pendingCtx = createTribeContext({
+        db,
+        stmts,
+        sessionId: connId,
+        sessionRole: "pending",
+        initialName: pendingName,
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+        onMessageInserted,
+      })
+      log.debug?.("connection.accepted", { connection_id: connId })
 
       const placeholder: ClientSession = {
         socket: sock,
         id: connId,
-        name: `pending-${connId.slice(0, 6)}`,
+        name: pendingName,
         role: "pending",
         domains: [],
         project: process.cwd(),
@@ -1065,10 +1890,11 @@ export function withDispatcher<
         claudeSessionId: null,
         peerSocket: null,
         conn: "",
-        ctx: daemonCtx,
+        ctx: pendingCtx,
         registeredAt: Date.now(),
         lastActivityAt: Date.now(),
         recall: { sessionId: null, claudePid: null },
+        protocolVersion: null,
       }
       clients.set(connId, placeholder)
       socketToClient.set(sock, connId)
@@ -1076,6 +1902,8 @@ export function withDispatcher<
 
       const parse = createLineParser(async (msg: JsonRpcMessage) => {
         if (isRequest(msg)) {
+          // Slow-method timing lives inside handleRequest so this path and the
+          // MCP tools/call path are covered by one implementation.
           const response = await handleRequest(msg, connId)
           try {
             sock.write(response)
@@ -1087,17 +1915,28 @@ export function withDispatcher<
 
       sock.on("data", parse)
 
-      sock.on("close", () => {
+      sock.on("close", (hadError = false) => {
         const client = clients.get(connId)
+        const connectionFields = {
+          ...connectionLogIdentity(client, connId),
+          reason: hadError ? "socket-error" : "peer-close",
+        }
         if (client && client.role !== "pending") {
           const hadChannelJoin = channelJoinAnnounced.delete(connId)
           const siblingTransport = Array.from(clients.values()).some(
             (candidate) => candidate.id !== connId && candidate.ctx.sessionId === client.ctx.sessionId,
           )
+          if (hadError && !siblingTransport && client.launchId) {
+            broadcast.log(
+              `tribe:dispatcher: managed bridge lost after socket error ` +
+                `(name=${client.name}, launch=${client.launchId}, parent_pid=${String(client.launchParentPid)})`,
+              "health:daemon:warn",
+            )
+          }
           if (siblingTransport) {
-            log.debug?.(`Transport disconnected: ${client.name} pid=${client.pid}`)
+            log.debug?.("transport.disconnected", connectionFields)
           } else {
-            log.info?.(`Client disconnected: ${client.name}`)
+            log.info?.("session.disconnected", connectionFields)
             // Durable history stays lossless even when the channel projection
             // coalesces a churn storm or suppresses daemon-start noise.
             logEvent(client.ctx, "session.left", undefined, {
@@ -1111,18 +1950,30 @@ export function withDispatcher<
               logActivity("session", `${client.name} left`)
             }
           }
+        } else if (client) {
+          log.debug?.("connection.disconnected", connectionFields)
         }
         broadcast.flushConnection(connId)
         broadcast.discardConnection(connId)
         inboxWait.cancelConnection(connId)
         clients.delete(connId)
         socketToClient.delete(sock)
+        if (client && client.role !== "pending" && !registry.hasActiveTransport(client.ctx.sessionId)) {
+          registry.markTransportDisconnected(client.ctx.sessionId)
+        }
         if (recallHandlers && client) recallHandlers.dropConn(client.recall.sessionId)
         if (clients.size === 0) onIdle()
       })
 
       sock.on("error", (err) => {
-        log.info?.(`Client error (${connId.slice(0, 8)}): ${err.message}`)
+        const code = errorCode(err)
+        const client = clients.get(connId)
+        log.warn?.("connection.error", {
+          ...connectionLogIdentity(client, connId),
+          reason: "socket-error",
+          error_code: code,
+          error_type: err.name,
+        })
         sock.destroy()
       })
     }
@@ -1137,7 +1988,34 @@ export function withDispatcher<
 
     return {
       ...t,
-      dispatcher: { handleConnection, handleRequest, register },
+      dispatcher: {
+        handleConnection,
+        handleRequest,
+        register,
+        shutdown: inboxWait.shutdown,
+      },
     }
   }
+}
+
+type TransportRetirementReason = "self-registration-replaced" | "explicit-takeover" | "identity-displacement"
+
+function operationLogName(value: unknown): string {
+  return typeof value === "string" && /^[-A-Za-z0-9._/:$]{1,128}$/.test(value) ? value : "<invalid>"
+}
+
+type SessionFilterMode = "focus" | "normal" | "ambient"
+
+function isSessionFilterMode(value: unknown): value is SessionFilterMode {
+  return value === "focus" || value === "normal" || value === "ambient"
+}
+
+function applyLaunchDeclaredFilter(ctx: TribeContext, mode: SessionFilterMode): void {
+  ctx.stmts.setSessionFilter.run({
+    $id: ctx.sessionId,
+    $mode: mode,
+    $until: null,
+    $mute: null,
+    $now: Date.now(),
+  })
 }

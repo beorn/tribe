@@ -55,7 +55,35 @@ bun tools/recall.ts files --restore <file>
 # Daily/weekly summaries
 bun tools/recall.ts summarize
 bun tools/recall.ts weekly
+
+# Export quality-gated transcript markdown for qmd
+bun tools/recall.ts export --all
+bun tools/recall.ts export --catchup --hook
 ```
+
+## qmd runtime and native ABI repair
+
+Recall search is FTS-backed; qmd is pinned at `2.5.3` only for the transcript
+export/index workflow. The package root trusts `better-sqlite3` so Bun installs
+the native addon that qmd's Node launcher will load. The hh checkout exposes
+that exact package through `tools/installed/qmd`; it never falls back to an
+unmanaged global qmd cache.
+
+The 2026-08-01 failure was a mixed-runtime install: the native addon had Bun's
+embedded Node ABI while the qmd launcher used system Node. Repair the repo-owned
+installation with one install/runtime pair, then verify the actual search seam:
+
+```bash
+bun install --force
+qmd doctor
+qmd search "<known term>"
+```
+
+After a Node or qmd upgrade, compare `process.versions.modules` in Node and Bun
+instead of hard-coding an ABI number, rerun the install, and require the native
+load plus isolated `qmd search` tests to pass. Do not repair this by installing
+qmd globally: that recreates the cache/runtime ambiguity that caused the
+incident.
 
 ## How it works
 

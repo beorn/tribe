@@ -451,12 +451,29 @@ export async function cmdHook(): Promise<void> {
 }
 
 // ============================================================================
-// Remember command — SessionEnd
+// Remember command — manual daily summarization (NOT hook-dispatched)
 // ============================================================================
 
 /**
- * SessionEnd hook: trigger daily summarization for any unprocessed past days.
- * No per-session LLM call — daily summaries are more useful and less noisy.
+ * Daily summarization for any unprocessed past days (delegates to
+ * `summarizeUnprocessedDays`). Despite the hook-shaped name and the
+ * stdin-JSON protocol below, this is NOT dispatched by any Claude Code hook
+ * today: `packages/daemon/src/lib/hook-dispatch.ts`'s `dispatchHook()`
+ * routes `session-end` to `cmdSessionEnd` only (cheap, detached index
+ * refresh) — it never references this function, and its `HookEngine` type
+ * doesn't even name it.
+ *
+ * That's deliberate, not an oversight. `summarizeUnprocessedDays` can
+ * perform a real synchronous LLM call, a `git log` spawn, and retro-bead
+ * creation whenever a day is unprocessed, with no per-day lock — firing it
+ * unconditionally on every SessionEnd would risk blocking the hook and
+ * racing duplicate summarize/retro-bead work when multiple sessions end near
+ * the same day boundary. Manual-only is the fix: reach this via `recall
+ * remember` (hidden CLI subcommand — mirrors the SessionEnd stdin-JSON shape
+ * for scripted/manual invocation) or the public `recall summarize` verb;
+ * both call the same underlying engine. Full rationale + event flow:
+ * docs/recall.md § "Automatic injection — hook-driven, not tool-driven".
+ * Dispatch-table pin: `packages/daemon/src/lib/hook-dispatch.test.ts`.
  */
 export async function cmdRemember(opts: { json?: boolean }): Promise<void> {
   const startTime = Date.now()

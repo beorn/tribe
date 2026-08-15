@@ -3,10 +3,12 @@
  */
 
 import type { Database } from "bun:sqlite"
+import { acquireFlockBlocking } from "@bearly/flock"
 import { createHash } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs"
-import { basename, dirname, resolve } from "node:path"
+import { basename, dirname, parse, resolve } from "node:path"
 import { parseArgs } from "node:util"
+import { findAncestorWithin, findGitProjectRoot } from "removely"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -68,6 +70,11 @@ export type TribeArgs = {
   provider?: string
 }
 
+export type ResolveDbPathOptions = {
+  /** Defer legacy migration so a caller can hold the lock through DB creation. */
+  migrateLegacy?: boolean
+}
+
 // ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
@@ -97,15 +104,33 @@ export function parseSessionDomains(args: TribeArgs): string[] {
     .filter(Boolean)
 }
 
-/** Find .beads/ directory by walking up from cwd (returns null if not found) */
-export function findBeadsDir(from?: string): string | null {
-  let dir = from ?? process.cwd()
-  while (dir !== "/") {
-    const candidate = resolve(dir, ".beads")
-    if (existsSync(candidate)) return candidate
-    dir = dirname(dir)
+/**
+ * Walk up from `path` to the nearest ancestor that exists on disk. `git -C`
+ * (what `findGitProjectRoot` shells out to) needs a real directory to chdir
+ * into — Node's `spawnSync` reports that as `result.error` before git ever
+ * runs, and `findGitProjectRoot` turns any such error into a throw by design
+ * (removely's own contract: "execution and repository errors throw"). A
+ * caller here may legitimately probe a *prospective* path — e.g. `findBeadsDir`
+ * discovering config for a directory that hasn't been created yet — so the
+ * git probe itself must run against real ground. Every absolute path's chain
+ * of ancestors terminates at the filesystem root, which always exists.
+ */
+function nearestExistingAncestor(path: string): string {
+  let candidate = path
+  while (!existsSync(candidate)) {
+    const parent = dirname(candidate)
+    if (parent === candidate) return candidate // filesystem root
+    candidate = parent
   }
-  return null
+  return candidate
+}
+
+/** Find .beads/ inside the current Git/superproject boundary. */
+export function findBeadsDir(from?: string): string | null {
+  const start = resolve(from ?? process.cwd())
+  const boundary = findGitProjectRoot(nearestExistingAncestor(start)) ?? parse(start).root
+  const projectRoot = findAncestorWithin(start, boundary, (directory) => existsSync(resolve(directory, ".beads")))
+  return projectRoot ? resolve(projectRoot, ".beads") : null
 }
 
 /** Resolve project name from .beads/ config or directory name.
@@ -115,21 +140,17 @@ export function resolveProjectName(cwd?: string): string {
   const beadsDir = findBeadsDir(dir)
   if (beadsDir) {
     const projectRoot = dirname(beadsDir)
-    // Only use .beads/ if it's nearby (skip ~/.beads/ found far up the tree)
-    const depth = dir.replace(projectRoot, "").split("/").filter(Boolean).length
-    if (depth <= 2) {
-      const configPath = resolve(beadsDir, "config.yaml")
-      if (existsSync(configPath)) {
-        try {
-          const content = readFileSync(configPath, "utf-8")
-          const match = content.match(/^project:\s*["']?(\w+)["']?/m)
-          if (match?.[1]) return match[1].toLowerCase()
-        } catch {
-          /* fallback */
-        }
+    const configPath = resolve(beadsDir, "config.yaml")
+    if (existsSync(configPath)) {
+      try {
+        const content = readFileSync(configPath, "utf-8")
+        const match = content.match(/^project:\s*["']?(\w+)["']?/m)
+        if (match?.[1]) return match[1].toLowerCase()
+      } catch {
+        /* fallback */
       }
-      return basename(projectRoot).toLowerCase()
     }
+    return basename(projectRoot).toLowerCase()
   }
   // No nearby .beads/ — use cwd directory name
   return basename(dir).toLowerCase()
@@ -149,7 +170,7 @@ export function resolveProjectName(cwd?: string): string {
  * `--db > TRIBE_DB > .beads/tribe.db > XDG`, which conflated tribe with bd:
  * a repo couldn't delete `.beads/` without taking tribe down with it.
  */
-export function resolveDbPath(args: TribeArgs): string {
+export function resolveDbPath(args: TribeArgs, options: ResolveDbPathOptions = {}): string {
   if (args.db) return String(args.db)
   if (process.env.TRIBE_DB) return process.env.TRIBE_DB
 
@@ -157,23 +178,38 @@ export function resolveDbPath(args: TribeArgs): string {
   const tribeDir = resolve(xdgData, "tribe")
   const xdgDbPath = resolve(tribeDir, "tribe.db")
 
-  // Migration: if an XDG DB doesn't exist yet but a legacy `.beads/tribe.db`
-  // does, move it forward. This is a one-time copy — subsequent startups find
-  // the XDG path and skip.
-  if (!existsSync(xdgDbPath)) {
-    const beadsDir = findBeadsDir()
-    if (beadsDir) {
-      const legacyDb = resolve(beadsDir, "tribe.db")
-      if (existsSync(legacyDb)) {
-        mkdirSync(tribeDir, { recursive: true })
-        migrateLegacyTribeDb(legacyDb, xdgDbPath)
-        return xdgDbPath
-      }
-    }
-  }
-
   mkdirSync(tribeDir, { recursive: true })
+  if (options.migrateLegacy !== false) {
+    return withDbPathLock(xdgDbPath, () => {
+      migrateLegacyTribeDbIfNeeded(xdgDbPath)
+      return xdgDbPath
+    })
+  }
   return xdgDbPath
+}
+
+/**
+ * Hold the process-shared migration lock for one DB-path operation.
+ *
+ * The daemon uses this around both migration and `new Database(create:true)`.
+ * A resolver that sees a legacy DB therefore cannot rename over a fresh DB
+ * created by another startup between the existence check and rename.
+ */
+export function withDbPathLock<Result>(dbPath: string, operation: () => Result): Result {
+  mkdirSync(dirname(dbPath), { recursive: true })
+  const lockPath = `${dbPath}.migration.lock`
+  using _lock = acquireFlockBlocking(lockPath)
+  return operation()
+}
+
+/** Re-check and migrate the legacy DB while the caller holds the DB-path lock. */
+export function migrateLegacyTribeDbIfNeeded(xdgDbPath: string, from?: string): void {
+  if (existsSync(xdgDbPath)) return
+  const beadsDir = findBeadsDir(from)
+  if (!beadsDir) return
+  const legacyDb = resolve(beadsDir, "tribe.db")
+  if (!existsSync(legacyDb)) return
+  migrateLegacyTribeDb(legacyDb, xdgDbPath)
 }
 
 /**

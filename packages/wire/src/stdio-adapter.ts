@@ -24,11 +24,28 @@ import {
   resolveProjectName,
   resolveProjectId,
 } from "./lib/config.ts"
-import { resolveSocketPath, createReconnectingClient, TRIBE_PROTOCOL_VERSION, type DaemonClient } from "./lib/socket.ts"
+import {
+  resolveSocketPath,
+  connectToDaemon,
+  createReconnectingClient,
+  isSupportedProtocolVersion,
+  negotiateProtocolVersion,
+  protocolVersionAdvertisement,
+  protocolVersionsFromMismatch,
+  reconnectRegistrationJitterMs,
+  TRIBE_PROTOCOL_VERSION,
+  TRIBE_SUPPORTED_PROTOCOL_VERSIONS,
+  type DaemonClient,
+} from "./lib/socket.ts"
 import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
-import { spawn } from "node:child_process"
-import { createHash, randomUUID } from "node:crypto"
+import { createReconnectWatchdog } from "./lib/reconnect-watchdog.ts"
+import { createHash } from "node:crypto"
+import { hashSelfMailboxAuthority, readSelfMailboxAuthorityFromEnvironment } from "./lib/self-mailbox-authority.ts"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
+import { callTribeTool } from "./lib/tool-daemon-call.ts"
+import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
+import { isExplicitTribePersonaName, isTribeNameShape, TRIBE_NAME_SHAPE_ERROR } from "./lib/persona-name.ts"
+import { deriveTribePersonaLaunchIdentity } from "./lib/persona-launch-identity.ts"
 import { createLogger, setSuppressConsole } from "loggily"
 import { createTimers } from "./timers.ts"
 import { defangModelInput } from "./lib/defang.ts"
@@ -40,6 +57,7 @@ import {
   resolveJoinDelivery,
   type TribeDeliveryCapability,
 } from "./lib/delivery.ts"
+import { readTribeLaunchId } from "./launch-environment.ts"
 
 // stdout IS the MCP wire — a single non-JSON line (a loggily INFO banner)
 // poisons the host's JSON-RPC parser and the session silently loses its
@@ -76,26 +94,76 @@ const DELIVERY_CAPABILITY = resolveDeliveryCapability({
   pullTransport: process.env.TRIBE_PULL_TRANSPORT ?? process.env.TRIBE_WAIT_TRANSPORT,
 })
 const TRIBE_TOOLS_LIST = toolListForDeliveryCapability(DELIVERY_CAPABILITY)
+
+// A launch controller may declare one existing daemon filter as session
+// configuration. The adapter forwards it on register so the session is never
+// push-eligible under the default mode, even for one event-loop turn.
+const INITIAL_FILTER_MODE = initialFilterModeFromEnv(process.env.TRIBE_FILTER_MODE)
 // c6071f3: a connected MCP adapter is NOT a push-delivered tribe member until
 // the model explicitly calls tribe.join. Keep pre-join delivery pull-only, but
 // seed explicit @personas at register time so configured Codex identities
 // (`TRIBE_NAME=@chief`, `@agent/N`, etc.) never surface as unknown-*.
 const REQUIRE_EXPLICIT_JOIN = process.env.TRIBE_REQUIRE_JOIN !== "0"
 const LAUNCH_NAME = typeof args.name === "string" && args.name.trim().length > 0 ? args.name.trim() : undefined
+// 21768 — a MALFORMED launch name is an operator error, not a hint to fall back
+// on. The daemon would reject it at register/join anyway, so degrading to an
+// `unknown-<rand>` placeholder only converts a fixable startup error into
+// minutes of silently dropped messages. Fail at launch, naming the string.
+//
+// The line is malformed vs. merely sigil-less. A well-formed bare name
+// (`degrade-test`) is a legitimate unidentified session: it is still not
+// pre-seeded under require-join and still joins from inside, exactly as before.
+// Only a name that could never be a valid tribe name is fatal.
+if (LAUNCH_NAME !== undefined && !isTribeNameShape(LAUNCH_NAME)) {
+  throw new Error(
+    `Invalid TRIBE_NAME=${JSON.stringify(LAUNCH_NAME)}; ${TRIBE_NAME_SHAPE_ERROR} ` +
+      "Refusing to register under an unaddressable unknown-<rand> placeholder.",
+  )
+}
 const REGISTER_WITH_LAUNCH_NAME =
   LAUNCH_NAME !== undefined && (!REQUIRE_EXPLICIT_JOIN || isExplicitTribePersonaName(LAUNCH_NAME))
+let joined = !REQUIRE_EXPLICIT_JOIN || process.env.TRIBE_PLUGIN_RESUME_JOINED === "1"
 // 20703 — managed spawns set TRIBE_TAKEOVER=1 so an explicit-persona
 // respawn can supersede a stale live holder once. The capability is consumed
 // after the first successful registration; replaying it on reconnect lets two
 // displaced adapters evict each other forever (21049).
 const TAKEOVER = REGISTER_WITH_LAUNCH_NAME && process.env.TRIBE_TAKEOVER === "1"
-const LAUNCH_ID_RAW = process.env.TRIBE_LAUNCH_ID?.trim() ?? ""
+const LAUNCH_ID_RAW = readTribeLaunchId(process.env) ?? ""
+const PLUGIN_ADAPTER_CHILD = process.env.TRIBE_PLUGIN_ADAPTER_CHILD === "1"
+const PLUGIN_PROVIDER_PARENT_PID_RAW = process.env.TRIBE_PLUGIN_PROVIDER_PARENT_PID?.trim() ?? ""
+
+function reportSupervisedIdentity(name: string): void {
+  if (!PLUGIN_ADAPTER_CHILD || !isTribeNameShape(name)) return
+  process.send?.({ tribePluginIdentity: { name, joined } })
+}
+
+function resolveLaunchParentPid(): number {
+  if (!PLUGIN_ADAPTER_CHILD) return process.ppid
+  const providerParentPid = Number(PLUGIN_PROVIDER_PARENT_PID_RAW)
+  if (!/^[1-9]\d*$/u.test(PLUGIN_PROVIDER_PARENT_PID_RAW) || !Number.isSafeInteger(providerParentPid)) {
+    throw new Error(
+      "tribe plugin adapter child is missing valid provider-parent provenance; restart the host session or reinstall the Tribe plugin",
+    )
+  }
+  return providerParentPid
+}
+
 // 21049 — adapters forward a complete launcher-minted identity or nothing.
-// They never mint/default the id themselves. Parent provenance comes from the
-// actual process tree, NOT another inherited env var: an unsanitized nested
-// provider may inherit a stale launch id, but its adapter has a different OS
-// parent and therefore cannot fan into the old launch.
-const LAUNCH_IDENTITY = LAUNCH_ID_RAW.length > 0 ? { id: LAUNCH_ID_RAW, parentPid: process.ppid } : null
+// They never mint/default the id themselves. A direct adapter uses its actual
+// OS parent. A plugin-supervised adapter uses the provider parent validated by
+// its stable wrapper: either the complete Hab launcher tuple or, for standalone
+// plugins, the wrapper's actual OS parent. Thus child replacements preserve one
+// launch owner without treating ambient adapter env as authoritative.
+const LAUNCH_IDENTITY =
+  LAUNCH_ID_RAW.length > 0
+    ? {
+        id:
+          REGISTER_WITH_LAUNCH_NAME && LAUNCH_NAME !== undefined
+            ? deriveTribePersonaLaunchIdentity(LAUNCH_NAME, LAUNCH_ID_RAW).launchId
+            : LAUNCH_ID_RAW,
+        parentPid: resolveLaunchParentPid(),
+      }
+    : null
 
 // km 19442 — connect-time replay flood backstop. The wakeup→drain path is capped
 // by selectReplayEvents, but a stale/old daemon that still pushes message BODIES
@@ -123,7 +191,6 @@ log.info?.(`Connecting to daemon at ${SOCKET_PATH}`)
 
 let myName = "pending"
 let myRole = "member"
-const mySessionId = randomUUID()
 const PROJECT_NAME = resolveProjectName()
 
 // MCP server reference — constructed + connected to Claude Code BEFORE the
@@ -143,9 +210,6 @@ let daemonReady: Promise<DaemonClient>
 // MCP handshake answered, every tribe tool returns ONE clear sentence, and the
 // degrade is announced exactly once (log + channel), never once per call.
 let daemonDegradedReason: string | null = null
-// Version-skew guard (km 19851): warn exactly once per process, not on
-// every reconnect.
-let versionSkewWarned = false
 
 /**
  * Forward a channel notification to Claude Code.
@@ -207,7 +271,12 @@ type TribeFetchResult = {
       age_ms?: number
       message_id?: string
       fanout?: string
+      summary?: string
     }>
+    pending_balls_summary?: {
+      total?: number
+      oldest_age_ms?: number
+    }
   }
   events?: Array<{
     id?: string
@@ -243,6 +312,7 @@ const identityToken = createHash("sha256")
   .update(`${CLAUDE_SESSION_ID ?? ""}|${process.cwd()}|${args.role ?? "member"}`)
   .digest("hex")
   .slice(0, 16)
+const selfMailboxAuthority = readSelfMailboxAuthorityFromEnvironment(process.env)
 
 const baseRegisterParams = {
   ...(REGISTER_WITH_LAUNCH_NAME ? { name: LAUNCH_NAME } : {}),
@@ -251,7 +321,6 @@ const baseRegisterParams = {
   project: process.cwd(),
   projectName: PROJECT_NAME,
   projectId: resolveProjectId(),
-  protocolVersion: TRIBE_PROTOCOL_VERSION,
   // Peer-direct messaging was removed (km-tribe DM-body-drop bug): a DM
   // delivered socket-to-socket bypassed the daemon journal, so the body row
   // never landed in `messages` and pull/reconnect readers lost it. All sends
@@ -261,8 +330,9 @@ const baseRegisterParams = {
   claudeSessionId: CLAUDE_SESSION_ID,
   claudeSessionName: CLAUDE_SESSION_NAME,
   identityToken,
+  ...(selfMailboxAuthority === null ? {} : { mailboxAuthorityHash: hashSelfMailboxAuthority(selfMailboxAuthority) }),
   ...(LAUNCH_IDENTITY ? { launchId: LAUNCH_IDENTITY.id, launchParentPid: LAUNCH_IDENTITY.parentPid } : {}),
-  delivery: REQUIRE_EXPLICIT_JOIN ? "pull" : DELIVERY,
+  ...(INITIAL_FILTER_MODE === undefined ? {} : { filterMode: INITIAL_FILTER_MODE }),
   // @km/infra/15641 Phase 1 — per-session account/provider label sourced
   // from `ag` via TRIBE_ACCOUNT / TRIBE_PROVIDER env vars (which ag sets
   // at backend-launch time). Tribe stores them; quota visibility lives in
@@ -271,6 +341,9 @@ const baseRegisterParams = {
   ...(args.provider ? { provider: args.provider } : {}),
 }
 let hasRegistered = false
+let hasAttemptedRegistration = false
+let selectedProtocolVersion = TRIBE_PROTOCOL_VERSION - 1
+let protocolMismatchReason: string | null = null
 
 type RequiredMcpTransportStatus = "advertised" | "live" | "closed"
 
@@ -280,6 +353,7 @@ interface RequiredMcpTransportHealth {
 }
 
 let managedRegistrationConflicts = 0
+let registeredDaemonPid: number | null = null
 let requiredMcpTransportHealth: RequiredMcpTransportHealth = {
   status: "advertised",
   reason: "awaiting daemon registration",
@@ -305,19 +379,24 @@ function requiredMcpTransportFailureResult(): {
         text:
           `required MCP tribe status=${requiredMcpTransportHealth.status}; ` +
           `stop_reason=${requiredMcpTransportHealth.reason}; ` +
-          `launch_id=${launchId}; launch_parent_pid=${process.ppid}; transport_pid=${process.pid}; ${recovery}`,
+          `launch_id=${launchId}; launch_parent_pid=${LAUNCH_IDENTITY?.parentPid ?? process.ppid}; ` +
+          `transport_pid=${process.pid}; ${recovery}`,
       },
     ],
     isError: true,
   }
 }
 
-function registerParamsForConnection(): typeof baseRegisterParams & { takeover?: true } {
-  return TAKEOVER && !hasRegistered ? { ...baseRegisterParams, takeover: true } : baseRegisterParams
-}
-
-function isExplicitTribePersonaName(name: string): boolean {
-  return /^@[a-z0-9][a-z0-9_./-]{0,31}$/.test(name)
+function registerParamsForConnection(): typeof baseRegisterParams & {
+  delivery: "push" | "pull"
+  takeover?: true
+} {
+  return {
+    ...baseRegisterParams,
+    ...protocolVersionAdvertisement(selectedProtocolVersion),
+    delivery: joined ? DELIVERY : "pull",
+    ...(TAKEOVER && !hasRegistered ? { takeover: true as const } : {}),
+  }
 }
 
 function errorMessage(err: unknown): string {
@@ -346,6 +425,72 @@ function failManagedPersonaRegistration(err: unknown): never {
   process.exit()
 }
 
+function reportProtocolVersion(reason: string): void {
+  log.warn?.(`tribe protocol version mismatch; staying degraded until it is repaired: ${reason}`)
+}
+
+function pluginReexecExitCode(): number | null {
+  const supervisedExitCode = Number(process.env.TRIBE_PLUGIN_REEXEC_EXIT_CODE)
+  if (Number.isSafeInteger(supervisedExitCode) && supervisedExitCode > 0 && supervisedExitCode <= 252) {
+    return supervisedExitCode
+  }
+  return null
+}
+
+function supervisedReexecExitCode(reasonOffset = 0): number | null {
+  const baseExitCode = pluginReexecExitCode()
+  return baseExitCode === null ? null : baseExitCode + reasonOffset + (joined ? 1 : 0)
+}
+
+function requestPluginReexec(reason: string, supervisedExitCode = supervisedReexecExitCode()): never {
+  daemon?.close()
+  proxyAc.abort()
+  if (supervisedExitCode !== null) {
+    log.warn?.(`tribe plugin requesting current-disk re-exec: ${reason}`)
+    process.exitCode = supervisedExitCode
+    process.exit()
+  }
+  process.stderr.write(
+    `tribe plugin reconnect failed: ${reason}; restart the host session or reinstall the Tribe plugin.\n`,
+  )
+  process.exitCode = 2
+  process.exit()
+}
+
+function handleDaemonGenerationChange(reason: string): void {
+  const supervisedExitCode = supervisedReexecExitCode(2)
+  if (supervisedExitCode !== null) requestPluginReexec(reason, supervisedExitCode)
+  log.info?.(`tribe direct adapter re-registered without a host re-exec supervisor: ${reason}`)
+}
+
+const reconnectWatchdog = createReconnectWatchdog({
+  timers,
+  thresholdMs: 60_000,
+  retryMs: 5_000,
+  now: () => Date.now(),
+  async probeDaemon() {
+    let probe: DaemonClient | undefined
+    try {
+      probe = await connectToDaemon(SOCKET_PATH, { callTimeoutMs: 1_000 })
+      await probe.call("cli_daemon")
+      return true
+    } catch {
+      return false
+    } finally {
+      probe?.close()
+    }
+  },
+  onStuck({ reconnectingMs }) {
+    if (protocolMismatchReason !== null) {
+      reportProtocolVersion(`${protocolMismatchReason}; retrying without host re-exec`)
+      return
+    }
+    requestPluginReexec(
+      `primary transport remained reconnecting for ${reconnectingMs}ms while the daemon answered a fresh connection`,
+    )
+  },
+})
+
 // NON-BLOCKING: the daemon connect runs in the background. We do NOT await
 // it here — module evaluation continues straight through to `mcp.connect()`
 // so the MCP `initialize` handshake is answered immediately. Without this, a
@@ -356,7 +501,14 @@ function failManagedPersonaRegistration(err: unknown): never {
 function startDaemonConnection(): Promise<DaemonClient> {
   return createReconnectingClient({
     socketPath: SOCKET_PATH,
+    // Provider-owned bridges reconnect to the singleton; they never own it.
+    // Lifecycle belongs to an explicit daemon install or Hab supervision.
+    noSpawn: true,
     async onConnect(client) {
+      if (hasAttemptedRegistration) {
+        await timers.delay(reconnectRegistrationJitterMs())
+      }
+      hasAttemptedRegistration = true
       // km 19442 — open a fresh connect-replay window so a stale daemon's body-push
       // burst on (re)connect is bounded (see connectReplayGate + the `channel` handler).
       connectReplayGate.reset(Date.now())
@@ -366,10 +518,23 @@ function startDaemonConnection(): Promise<DaemonClient> {
         role: string
         chief: string
         protocolVersion?: number
+        daemon?: { pid?: number }
       }
       try {
         reg = (await client.call("register", registerParamsForConnection())) as typeof reg
       } catch (err) {
+        const reason = errorMessage(err)
+        if (/protocol version mismatch/i.test(reason)) {
+          protocolMismatchReason = reason
+          const daemonVersions = protocolVersionsFromMismatch(reason)
+          const negotiatedVersion = negotiateProtocolVersion(TRIBE_SUPPORTED_PROTOCOL_VERSIONS, daemonVersions)
+          if (negotiatedVersion !== null) {
+            selectedProtocolVersion = negotiatedVersion
+            reportProtocolVersion(`${reason}; retrying protocol=${negotiatedVersion}`)
+          } else {
+            reportProtocolVersion(`${reason}; no compatible version in the shipped window; retrying slowly`)
+          }
+        }
         // Legacy adapters launched without a logical launch id cannot tell a
         // transient reconnect race from another adapter in the same provider
         // launch. Closing their provider-owned stdio leaves native Codex with
@@ -385,28 +550,32 @@ function startDaemonConnection(): Promise<DaemonClient> {
         }
         throw err
       }
+      const nextDaemonPid = typeof reg.daemon?.pid === "number" ? reg.daemon.pid : null
+      if (
+        hasRegistered &&
+        registeredDaemonPid !== null &&
+        nextDaemonPid !== null &&
+        nextDaemonPid !== registeredDaemonPid
+      ) {
+        handleDaemonGenerationChange(`daemon generation changed from pid ${registeredDaemonPid} to ${nextDaemonPid}`)
+      }
+      registeredDaemonPid = nextDaemonPid
       hasRegistered = true
+      protocolMismatchReason = null
       managedRegistrationConflicts = 0
       setRequiredMcpTransportHealth("live", "registered with tribe daemon")
+      reconnectWatchdog.markConnected()
       daemonDegradedReason = null
       myName = reg.name
+      reportSupervisedIdentity(myName)
       myRole = reg.role
       log.info?.(`Registered as ${myName} (${myRole})`)
-      // Version-skew guard (km 19851): with the daemon embedded in host
-      // binaries, two host versions can share one daemon — the first-started
-      // binary's daemon serves the rest. Skew is warn-once, never a block:
-      // the daemon already tolerates older clients, and a hard fail would
-      // break exactly the zero-config flow the embedding exists for.
-      if (
-        !versionSkewWarned &&
-        typeof reg.protocolVersion === "number" &&
-        reg.protocolVersion !== TRIBE_PROTOCOL_VERSION
-      ) {
-        versionSkewWarned = true
-        log.warn?.(
-          `tribe protocol version skew: this session speaks v${TRIBE_PROTOCOL_VERSION}, daemon speaks v${reg.protocolVersion}. ` +
-            `Coordination continues; restart the daemon (or the older sessions) to align.`,
-        )
+      if (typeof reg.protocolVersion === "number") {
+        if (isSupportedProtocolVersion(reg.protocolVersion)) {
+          selectedProtocolVersion = reg.protocolVersion
+        } else {
+          reportProtocolVersion(`session=${TRIBE_PROTOCOL_VERSION}, daemon=${reg.protocolVersion}`)
+        }
       }
       void client.call("subscribe").catch(() => {})
 
@@ -414,9 +583,15 @@ function startDaemonConnection(): Promise<DaemonClient> {
       try {
         const membersResult = (await client.call("tribe.members", {})) as { content: Array<{ text: string }> }
         const membersData = JSON.parse(membersResult.content?.[0]?.text ?? "{}") as {
-          sessions?: Array<{ name: string; role: string; alive: boolean; uptime_min: number; delivery?: string }>
+          sessions?: Array<{
+            name: string
+            role: string
+            transport_state: "connected" | "disconnected"
+            uptime_min: number
+            delivery?: string
+          }>
         }
-        const sessions = (membersData.sessions ?? []).filter((s: { alive: boolean }) => s.alive)
+        const sessions = (membersData.sessions ?? []).filter((session) => session.transport_state === "connected")
         const chief = reg.chief || sessions.find((s: { role: string }) => s.role === "chief")?.name || "(none)"
         const peers =
           sessions
@@ -433,6 +608,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
       }
     },
     onDisconnect() {
+      reconnectWatchdog.markReconnecting()
       if (REGISTER_WITH_LAUNCH_NAME) {
         setRequiredMcpTransportHealth("advertised", "daemon connection closed; reconnecting")
       }
@@ -443,6 +619,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
       // km 19442 — a reconnect can replay the daemon's pending body-push burst; rebound it.
       connectReplayGate.reset(Date.now())
     },
+    maxAttempts: Number.POSITIVE_INFINITY,
   }).then((client) => {
     daemon = client
     // A successful (re)connect clears the degrade — the session is live again.
@@ -519,7 +696,7 @@ armDegradeNotice(daemonReady)
 const joinInstruction = `If you receive a stdio-adapter auto-identify message, just call tribe.join with a short name for your focus area. Omit the role parameter — the daemon registers every session as a plain "member"; it does NOT assign "chief" by connect order. "chief" is a bead-lease hat (claimed via /up / the bead lease system), not a daemon-assigned role. No need to call tribe.members or tribe.fetch afterward — just join silently and continue.`
 const deliveryInstruction = deliveryCapabilityInstruction(DELIVERY_CAPABILITY)
 const attentionProjectionInstruction =
-  "- Default fetch exposes `attention.actionable_unread` and `attention.pending_balls` ahead of ambient events; both are facts projected from the existing mailbox and ball tracker, not another queue."
+  "- Default fetch exposes `attention.actionable_unread` (request/query/verdict/assign plus direct responses) and the 10 oldest `attention.pending_balls` ahead of ambient events; `attention.pending_balls_summary` reports the full total/oldest age and `tribe.pending` returns the full pile. Responses remain quiet for default inbox waits. These are facts projected from the existing mailbox and ball tracker, not another queue."
 
 // Shared turn-start inbox guidance for every role variant. Kept deliberately
 // SMALL: the turn-start call is a small catch-up drain, NOT a full replay. The
@@ -729,8 +906,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             ...(a.provider === undefined && args.provider ? { provider: args.provider } : {}),
           }
         : a
-    // Tool names are bare verbs ("send", "fetch"); daemon wire methods use "tribe." prefix
-    const daemonMethod = `tribe.${name}`
     // Still degraded after the retry → one clear sentence per call, never the
     // raw connect error (km 19851 loud-but-soft).
     if (daemonDegradedReason !== null && daemon === undefined) {
@@ -746,14 +921,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     // A tool call may arrive before the background daemon connect resolves
     // (the daemon block is non-blocking) — await `daemonReady` in that case.
     const d = daemon ?? (await daemonReady)
-    const result = await d.call(daemonMethod, payload)
+    const result = await callTribeTool(d, name, payload)
     // Update local name/role after join/rename
     if (name === "join") joined = true
     if (name === "join" || name === "rename") {
       const r = result as { content: Array<{ type: string; text: string }> }
       try {
         const data = JSON.parse(r.content[0]?.text ?? "{}") as Record<string, string>
-        if (data.name) myName = data.name
+        if (data.name) {
+          myName = data.name
+          reportSupervisedIdentity(myName)
+        }
         if (data.role) myRole = data.role
       } catch {
         /* parse error, ignore */
@@ -780,10 +958,7 @@ using _reload = setupHotReload({
   logActivity: (type, content) => {
     daemon?.call("log_event", { type, content }).catch(() => {})
   },
-  onReload: () => {
-    proxyAc.abort()
-    daemon?.close()
-  },
+  replaceProcess: (reason) => requestPluginReexec(reason),
 })
 
 const shutdown = () => {
@@ -793,6 +968,8 @@ const shutdown = () => {
 }
 process.on("SIGINT", shutdown)
 process.on("SIGTERM", shutdown)
+process.stdin.once("end", shutdown)
+process.stdin.once("close", shutdown)
 
 // Connect MCP to Claude Code
 await mcp.connect(new StdioServerTransport())
@@ -818,7 +995,6 @@ if (CWD_EVAL.kind === "warn" || CWD_EVAL.kind === "refuse") {
 
 // Watch transcript file for /rename slug changes and auto-sync to tribe
 import { resolveTranscriptPath, readTranscriptSlug } from "./lib/transcript.ts"
-import { watch as fsWatch } from "node:fs"
 {
   const transcriptPath = resolveTranscriptPath(CLAUDE_SESSION_ID)
   if (transcriptPath) {
@@ -834,7 +1010,10 @@ import { watch as fsWatch } from "node:fs"
           const r = result as { content: Array<{ type: string; text: string }> }
           try {
             const data = JSON.parse(r.content[0]?.text ?? "{}") as Record<string, string>
-            if (data.name) myName = data.name
+            if (data.name) {
+              myName = data.name
+              reportSupervisedIdentity(myName)
+            }
             log.info?.(`auto-renamed from /rename slug: ${myName}`)
           } catch {
             /* ignore */
@@ -852,7 +1031,6 @@ import { watch as fsWatch } from "node:fs"
 // Auto-rename: when this session claims a bead, rename to the bead scope
 // e.g., claiming "km-storage.foo" renames session to "km-storage"
 let autoRenamed = false
-let joined = !REQUIRE_EXPLICIT_JOIN
 function tryAutoRenameOnClaim(content: string): void {
   if (autoRenamed) return
   // Only auto-rename if session still has auto-generated name (km-N-XXX pattern)
@@ -874,7 +1052,10 @@ function tryAutoRenameOnClaim(content: string): void {
       const r = result as { content: Array<{ type: string; text: string }> }
       try {
         const data = JSON.parse(r.content[0]?.text ?? "{}") as Record<string, string>
-        if (data.name) myName = data.name
+        if (data.name) {
+          myName = data.name
+          reportSupervisedIdentity(myName)
+        }
       } catch {
         /* ignore */
       }
@@ -896,30 +1077,36 @@ function forwardFetchedEvent(event: NonNullable<TribeFetchResult["events"]>[numb
   })
 }
 
-function forwardPendingBall(
-  ball: NonNullable<NonNullable<TribeFetchResult["attention"]>["pending_balls"]>[number],
+function formatPendingBallAge(ageMs: number): string {
+  const minutes = Math.max(0, Math.floor(ageMs / 60_000))
+  if (minutes < 1) return "<1m"
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h`
+  return `${Math.floor(hours / 24)}d`
+}
+
+function forwardPendingBallSummary(
+  balls: NonNullable<NonNullable<TribeFetchResult["attention"]>["pending_balls"]>,
+  summary?: NonNullable<TribeFetchResult["attention"]>["pending_balls_summary"],
 ): void {
-  const requestId = String(ball.request_id ?? "unknown")
-  const sender = String(ball.sender ?? "unknown")
-  const messageId = String(ball.message_id ?? "unknown")
-  const fanout = String(ball.fanout ?? "first")
-  sendChannel(
-    `Pending tracked request ${requestId} from ${sender} remains open (message ${messageId}; fanout ${fanout}).`,
-    {
-      from: sender,
-      type: "request",
-      message_id: messageId,
-      request_id: requestId,
-    },
-  )
+  const total = summary?.total ?? balls.length
+  if (total === 0) return
+  const ordered = [...balls].sort((left, right) => (right.age_ms ?? 0) - (left.age_ms ?? 0))
+  const oldest = formatPendingBallAge(summary?.oldest_age_ms ?? ordered[0]?.age_ms ?? 0)
+  const top = ordered
+    .map((ball) => ball.summary?.trim())
+    .filter((summary): summary is string => Boolean(summary))
+    .slice(0, 3)
+  const topText = top.length > 0 ? ` Top: ${top.join(" | ")}` : ""
+  sendChannel(`You own ${total} ${total === 1 ? "ball" : "balls"}, oldest ${oldest}.${topText}`, {
+    from: "tribe",
+    type: "attention:pending-balls",
+  })
 }
 
 let drainInFlight = false
 let drainAgain = false
-// Presentation-only dedupe. The ball tracker remains authoritative; this set
-// merely prevents one still-open ball from being re-injected on every ambient
-// wakeup. A closed/disappeared id is removed and can surface again if reopened.
-const surfacedPendingBallIds = new Set<string>()
 
 function drainDaemonInbox(): void {
   if (drainInFlight) {
@@ -943,25 +1130,15 @@ function drainDaemonInbox(): void {
         const attentionIds = new Set(attentionEvents.map((event) => event.id).filter(Boolean))
         for (const event of attentionEvents) forwardFetchedEvent(event)
         const currentPendingBalls = result?.attention?.pending_balls ?? []
-        const currentPendingIds = new Set(
-          currentPendingBalls.map((ball) => ball.request_id).filter((id): id is string => id !== undefined),
-        )
-        for (const requestId of surfacedPendingBallIds) {
-          if (!currentPendingIds.has(requestId)) surfacedPendingBallIds.delete(requestId)
-        }
-        const pendingBalls = currentPendingBalls.filter(
-          (ball) =>
-            (!ball.message_id || !attentionIds.has(ball.message_id)) &&
-            (!ball.request_id || !surfacedPendingBallIds.has(ball.request_id)),
-        )
-        for (const ball of pendingBalls) forwardPendingBall(ball)
-        for (const requestId of currentPendingIds) surfacedPendingBallIds.add(requestId)
+        const currentPendingBallSummary = result?.attention?.pending_balls_summary
+        const currentPendingBallTotal = currentPendingBallSummary?.total ?? currentPendingBalls.length
+        forwardPendingBallSummary(currentPendingBalls, currentPendingBallSummary)
         const events = (result?.events ?? []).filter((event) => !event.id || !attentionIds.has(event.id))
         const { forward, skippedOld, capped } = selectReplayEvents(events, { now: Date.now() })
         for (const event of forward) forwardFetchedEvent(event)
         if (skippedOld > 0 || capped > 0) {
           log.warn?.(
-            `tribe drain: surfaced ${attentionEvents.length} actionable + ${pendingBalls.length} pending + ${forward.length}/${events.length} event(s) (skipped ${skippedOld} older than 1d, ${capped} over cap ${MAX_REPLAY_EVENTS}); rest drained but not replayed`,
+            `tribe drain: surfaced ${attentionEvents.length} actionable + ${currentPendingBalls.length}/${currentPendingBallTotal} pending + ${forward.length}/${events.length} event(s) (skipped ${skippedOld} older than 1d, ${capped} over cap ${MAX_REPLAY_EVENTS}); rest drained but not replayed`,
           )
         }
       } while (drainAgain)
@@ -1015,11 +1192,7 @@ void daemonReady
       } else if (method === "reload") {
         log.info?.(`Daemon requests reload: ${params?.reason}`)
         timers.setTimeout(() => {
-          d.close()
-          spawn(process.execPath, process.argv.slice(1), { stdio: "inherit", env: process.env }).on(
-            "exit",
-            (code: number | null) => process.exit(code ?? 0),
-          )
+          requestPluginReexec(`daemon requested reload: ${String(params?.reason ?? "unspecified")}`)
         }, 500)
       }
     }),

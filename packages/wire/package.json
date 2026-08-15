@@ -1,6 +1,6 @@
 {
   "name": "tribe-wire",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "Tribe wire client — Unix-socket IPC, JSON-RPC protocol, reconnecting client, MCP stdio adapter, and the `tribe-wire` protocol CLI",
   "keywords": [
     "claude-code",
@@ -42,7 +42,11 @@
     "./lib/hot-reload": "./src/lib/hot-reload.ts",
     "./lib/transcript": "./src/lib/transcript.ts",
     "./lib/defang": "./src/lib/defang.ts",
+    "./lib/persona-name": "./src/lib/persona-name.ts",
+    "./lib/persona-launch-identity": "./src/lib/persona-launch-identity.ts",
     "./lib/spawn-pin-gate": "./src/lib/spawn-pin-gate.ts",
+    "./lib/code-identity": "./src/lib/code-identity.ts",
+    "./lib/self-mailbox-authority": "./src/lib/self-mailbox-authority.ts",
     "./http": "./src/http-adapter.ts"
   },
   "publishConfig": {
@@ -89,6 +93,30 @@
       "./lib/defang": {
         "types": "./dist/lib/defang.d.mts",
         "import": "./dist/lib/defang.mjs"
+      },
+      "./lib/persona-name": {
+        "types": "./dist/lib/persona-name.d.mts",
+        "import": "./dist/lib/persona-name.mjs"
+      },
+      "./lib/persona-launch-identity": {
+        "types": "./dist/lib/persona-launch-identity.d.mts",
+        "import": "./dist/lib/persona-launch-identity.mjs"
+      },
+      "./lib/spawn-pin-gate": {
+        "types": "./dist/lib/spawn-pin-gate.d.mts",
+        "import": "./dist/lib/spawn-pin-gate.mjs"
+      },
+      "./lib/code-identity": {
+        "types": "./dist/lib/code-identity.d.mts",
+        "import": "./dist/lib/code-identity.mjs"
+      },
+      "./lib/self-mailbox-authority": {
+        "types": "./dist/lib/self-mailbox-authority.d.mts",
+        "import": "./dist/lib/self-mailbox-authority.mjs"
+      },
+      "./http": {
+        "types": "./dist/http-adapter.d.mts",
+        "import": "./dist/http-adapter.mjs"
       }
     }
   },
@@ -98,9 +126,11 @@
     "prepack": "bun run build"
   },
   "dependencies": {
+    "@bearly/flock": "0.1.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@silvery/commander": "^0.19.2",
-    "loggily": "^0.10.2"
+    "loggily": "^0.10.2",
+    "removely": "^0.1.0"
   },
   "devDependencies": {
     "tsdown": "^0.21.7",
@@ -119,7 +149,13 @@
       "src/lib/cwd-guardrail.ts",
       "src/lib/hot-reload.ts",
       "src/lib/transcript.ts",
-      "src/lib/defang.ts"
+      "src/lib/defang.ts",
+      "src/lib/persona-name.ts",
+      "src/lib/persona-launch-identity.ts",
+      "src/lib/spawn-pin-gate.ts",
+      "src/lib/code-identity.ts",
+      "src/lib/self-mailbox-authority.ts",
+      "src/http-adapter.ts"
     ],
     "format": "esm"
   },

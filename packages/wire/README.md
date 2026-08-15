@@ -36,19 +36,63 @@ to participate in a tribe without bundling the daemon itself.
 ```bash
 tribe-wire --help                                 # full Commander help + addHelpText MCP-adapter hint
 tribe-wire status                                 # active sessions with uptime + last-seen
-tribe-wire send '@chief' 'task X done' --type=notify
+tribe-wire members --all                          # JSON transport + owner verdicts, including disconnected rows
+tribe-wire repair --reap-stale-transports --json # bounded stale connection-row repair with reason counts
+tribe-wire send '@alice' 'task X done' --type=notify --anonymous
+tribe-wire send '@ci' 'R656 failed; see journal evidence' --type=notify --delivery=pull --anonymous
 tribe-wire retro --since 2h --format markdown
-tribe-wire mcp --name '@agent/3' --role member    # argv-forwarded; what .mcp.json invokes
+tribe-wire mcp --name '@bob' --role member    # argv-forwarded; what .mcp.json invokes
 ```
+
+`send --delivery push|pull` classifies one message independently of the
+recipient session's delivery mode. `push` is the default and permits live
+channel fanout; `pull` persists the message for inbox reads without a channel
+wakeup. Delivery classification is orthogonal to semantic ball tracking: only
+the message type and `--request` decide whether a pending ball opens.
+The shell examples opt into `--anonymous` because no managed launch identity is
+present; anonymous sends are limited to untracked messages. Managed provider
+seats omit the flag and are attributed through daemon launch authority.
+
+Launch controllers can set `TRIBE_FILTER_MODE=focus|normal|ambient` on the MCP
+stdio or loopback-HTTP adapter. The preference is persisted during registration,
+before the session becomes eligible for push fanout. `focus` keeps every message fetchable but
+only wakes for the canonical actionable types: `request`, `query`, `assign`,
+and `verdict`. This is a generic session preference; role policy belongs to the
+launch controller, not the Tribe daemon.
 
 ### Library exports
 
 ```ts
 import { connectToDaemon, resolveSocketPath } from "tribe-wire/lib/socket"
 import { TRIBE_PROTOCOL_VERSION } from "tribe-wire/lib/socket"
+import { deriveTribePersonaLaunchIdentity } from "tribe-wire/lib/persona-launch-identity"
 ```
 
-JSON-RPC client, reconnecting client, line parser, composition primitives (pipe / Scope / Tool registry). See `src/lib/socket.ts`.
+JSON-RPC client, reconnecting client, line parser, composition primitives (pipe / Scope / Tool registry), and the canonical provider-launch + persona derivation shared by wire and durable writer consumers. See `src/lib/socket.ts` and `src/lib/persona-launch-identity.ts`.
+
+`members --all` is the daemon-side rejoin verdict. `transport_state` is derived
+from the authenticated socket registry; `owner_state` is separate process
+evidence. `last_seen_sec` reports activity age only. A host MCP dialog may say
+connected while the daemon reports the member disconnected, so host UI state is
+not a substitute for this projection. After disconnect, a stored numeric PID
+without launch-bound process evidence reports owner `unknown` even if that PID
+currently exists: the OS may have recycled it. Health keeps addressable
+complete-launch rows with no transport loud, while connection-scoped no-launch
+rows are reaped only after reconnect grace.
+
+When known addressable durable launch rows have no authenticated transport,
+both `members` and `health` include `membership_discrepancy` with the connected
+durable-launch, known durable-launch, and missing counts plus the affected
+launch identities. `health` reports retained disconnected `unknown-*` launch
+rows separately as the bounded `anonymous_disconnected` count; they do not
+inflate the addressable wedge or membership projections. Connection-scoped
+sessions do not inflate either comparison. The projection deliberately says
+`missing-transport`: it does not infer that the agent itself is absent.
+
+This is deliberately a projection fix. Refusing unnamed registration would
+silently remove Tribe from legitimate manual launches, while reaping retained
+launch rows would discard durable provenance and introduce a second lifetime
+policy. Launchers that should not join Tribe must suppress the join upstream.
 
 ## Surface delineation — protocol vs dev tooling
 
@@ -62,7 +106,7 @@ The protocol verbs above are sufficient for any external agent that wants to
 participate in a tribe; daemon lifecycle, install, and hook integration move
 to daemon/plugin surfaces.
 
-See [`@km/bearly/19231-tribe-cli-unify-phase-a2-verbs`](https://github.com/beorn/km/blob/main/%40km/bearly/19231-tribe-cli-unify-phase-a2-verbs.md) for the architectural decision (chief verdict 2026-05-26 — "Q3 approved").
+The read/send/descriptor verb split follows an internal May 2026 CLI-unification decision; `command-descriptors.ts` keeps the CLI and MCP tool list in lockstep.
 
 ## License
 

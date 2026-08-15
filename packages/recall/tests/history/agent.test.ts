@@ -10,6 +10,7 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest"
 import { buildMockQueryModel, buildPlanJson, alwaysAvailable } from "../helpers/llm-mock.ts"
 import type { LlmBackend } from "../../src/lib/llm-backend.ts"
+import { SynthesisFailure } from "../../src/history/recall-shared.ts"
 
 process.env.RECALL_DB_PATH = ":memory:"
 
@@ -168,6 +169,49 @@ describe("recallAgent — short-circuit", () => {
 })
 
 describe("recallAgent — speculative synth", () => {
+  test("propagates a speculative synthesis failure instead of returning a null answer", async () => {
+    const plan = buildPlanJson({ keywords: ["alpha"] })
+    mockHolder.fn = async (opts) => {
+      if (opts.systemPrompt?.toLowerCase().includes("query planner")) {
+        return {
+          response: {
+            model: opts.model,
+            content: plan,
+            durationMs: 10,
+          },
+        }
+      }
+      return {
+        response: {
+          model: opts.model,
+          content: "",
+          durationMs: 10,
+          error: "synthesis provider failed",
+        },
+      }
+    }
+    seedCorpus({
+      sessions: [{ id: "sess-a", title: "A", messages: ["alpha content"] }],
+    })
+
+    // The failure must propagate (not collapse into a null answer), but the
+    // one-sentence .message is now deliberately tight (no per-attempt error
+    // text embedded — see synthesize.ts's buildFailureSummary). The
+    // underlying provider detail still has to survive somewhere: it's on
+    // SynthesisFailure.diagnostics.attempts, checked separately below.
+    let caught: unknown
+    try {
+      await recallAgent("q", { limit: 3, round2: "off" })
+      expect.unreachable("expected recallAgent to reject")
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeInstanceOf(SynthesisFailure)
+    const failure = caught as SynthesisFailure
+    expect(failure.message).toMatch(/Synthesis failed/)
+    expect(failure.diagnostics.attempts.some((a) => a.error?.includes("synthesis provider failed"))).toBe(true)
+  })
+
   test("uses speculative round-1 when round 2 adds no new top-K docs", async () => {
     // Round 1 plan with few variants so short-circuit doesn't fire
     const round1Plan = buildPlanJson({ keywords: ["alpha"], phrases: [] })
@@ -241,7 +285,10 @@ describe("recallAgent — empty plan handling", () => {
       sessions: [{ id: "sess-a", title: "A", messages: ["content"] }],
     })
 
-    const result = await recallAgent("q", { limit: 3 })
+    // This test exercises planner fallthrough, not synthesis. Raw mode keeps
+    // the fallback hermetic when a developer's live session or vault happens
+    // to contain the deliberately broad query.
+    const result = await recallAgent("q", { limit: 3, raw: true })
 
     expect(result.fellThrough).toBe(true)
     expect(result.trace.rounds[0]!.planner.error).toMatch(/parse-failed/)
@@ -337,7 +384,7 @@ describe("recallAgent — fallthrough", () => {
       sessions: [{ id: "sess-a", title: "A", messages: ["alpha"] }],
     })
 
-    const result = await recallAgent("q", { limit: 3 })
+    const result = await recallAgent("q", { limit: 3, raw: true })
 
     expect(result.fellThrough).toBe(true)
     expect(result.trace.rounds[0]!.planner.error).toBe("empty-plan")

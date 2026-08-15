@@ -1,7 +1,7 @@
 /**
  * Tribe autostart — probe-and-spawn helpers for zero-ceremony daemon lifecycle.
  *
- * Pairs with the daemon's own idle `--quit-timeout` exit: the daemon quits
+ * Pairs with the daemon's own `--idle-quit-after` exit: the daemon quits
  * itself when unused, this module spawns it back on first demand. Net effect
  * for the user: no lifecycle ceremony at all.
  *
@@ -14,19 +14,14 @@
  * swallowed with a single stderr line, and the hook proceeds to its library
  * fallback.
  *
- * km-bear.unified-daemon Phase 5c: the standalone lore daemon was deleted.
- * There is now a single daemon — the tribe daemon — that hosts both the
- * coordination and memory RPC surfaces. The legacy export names
- * (`ensureDaemonIfConfigured`, `ensureAllDaemonsIfConfigured`, ...) are kept
- * as aliases so external callers (e.g. the lore MCP proxy) don't break, but
- * they all resolve to the tribe-daemon path.
+ * The tribe daemon hosts both coordination and memory RPC surfaces.
  */
 
 import { createConnection } from "node:net"
 import { existsSync } from "node:fs"
-import { spawn } from "node:child_process"
 import { dirname, resolve } from "node:path"
 import { createLogger } from "loggily"
+import { spawnStandaloneDaemonSupervisor } from "tribe-wire"
 import { resolveAutostart, type TribeAutostart } from "./autostart-config.ts"
 import { resolveSocketPath as resolveTribeSocketPath } from "tribe-wire/lib/socket"
 
@@ -81,7 +76,7 @@ export function isDaemonAlive(socketPath: string, timeoutMs = 200): Promise<bool
 }
 
 // ---------------------------------------------------------------------------
-// Detached spawn
+// Standalone lifecycle-owner spawn
 // ---------------------------------------------------------------------------
 
 /** Location of the tribe coordination daemon script (relative to this file). */
@@ -91,21 +86,12 @@ export function resolveTribeDaemonScriptPath(): string {
   return resolve(thisDir, "..", "daemon.ts")
 }
 
-/**
- * Legacy alias — pre-Phase-5c callers expected a lore-specific daemon script.
- * The unified daemon hosts both surfaces, so this resolves to the tribe
- * daemon script. Kept for callers that still import the legacy helper.
- */
-export function resolveDaemonScriptPath(): string {
-  return resolveTribeDaemonScriptPath()
-}
-
 export type SpawnResult = { ok: true; pid: number } | { ok: false; error: string }
 
 /**
- * Spawn the tribe daemon as a detached, unref'd child. Stdout/stderr are
- * discarded. Returns the child PID on success, an error on failure. Never
- * throws.
+ * Spawn the tribe daemon through the stable standalone lifecycle owner.
+ * Stdout/stderr are discarded. Returns the owner PID on success, an error on
+ * failure. Never throws.
  *
  * The spawn is fire-and-forget: we don't wait for the socket to be ready.
  * Hook dispatch proceeds to the library fallback for this one turn, and
@@ -127,18 +113,17 @@ export function spawnTribeDaemonDetached(
   if (opts.socketPath) args.push("--socket", opts.socketPath)
 
   try {
-    const child = spawn(bunPath, args, {
-      detached: true,
-      stdio: "ignore",
-      env: process.env,
+    const child = spawnStandaloneDaemonSupervisor({
+      daemonScript: args[0]!,
+      daemonArgs: args.slice(1),
+      runtimePath: bunPath,
     })
-    child.unref()
     const pid = child.pid
     if (typeof pid !== "number") {
       return { ok: false, error: "spawn returned no pid" }
     }
     const logFn = opts.log ?? defaultLog
-    logFn(`spawned ${label} daemon (pid=${pid})`)
+    logFn(`spawned ${label} daemon lifecycle owner (pid=${pid})`)
     return { ok: true, pid }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -147,12 +132,6 @@ export function spawnTribeDaemonDetached(
     return { ok: false, error: msg }
   }
 }
-
-/**
- * Legacy alias — callers that asked for `spawnDaemonDetached` (lore-specific)
- * now get the unified tribe daemon. Kept so external imports don't break.
- */
-export const spawnDaemonDetached = spawnTribeDaemonDetached
 
 function defaultLog(msg: string): void {
   // Routed through loggily so hook contexts can suppress + redirect via
@@ -188,9 +167,9 @@ export type EnsureDaemonOutcome =
 
 /**
  * Ensure the unified tribe daemon is alive. Probes the socket; if dead and
- * mode=daemon, spawns a detached replacement. Returns quickly — the whole
- * operation is bounded by `budgetMs` (default 300ms) so it can never delay
- * a hook. Never throws.
+ * mode=daemon, detaches a stable standalone owner which starts the daemon as
+ * its child. Returns quickly — the whole operation is bounded by `budgetMs`
+ * (default 300ms) so it can never delay a hook. Never throws.
  */
 export async function ensureTribeDaemonIfConfigured(deps: EnsureDaemonDeps = {}): Promise<EnsureDaemonOutcome> {
   const budgetMs = deps.budgetMs ?? 300
@@ -225,26 +204,4 @@ export async function ensureTribeDaemonIfConfigured(deps: EnsureDaemonDeps = {})
   const result = spawnFn({ socketPath })
   if (result.ok) return { action: "spawned", pid: result.pid }
   return { action: "spawn-failed", error: result.error }
-}
-
-/**
- * Legacy alias — pre-Phase-5c callers spawned a lore-specific daemon. The
- * unified daemon hosts both surfaces now, so both names resolve to the same
- * function. Kept for the lore MCP proxy and any external importers.
- */
-export const ensureDaemonIfConfigured = ensureTribeDaemonIfConfigured
-
-/**
- * Legacy alias — pre-Phase-5c this spawned lore + tribe in parallel. The
- * unified daemon is the whole thing now, so this is just
- * `ensureTribeDaemonIfConfigured` returning the outcome twice (once under
- * `lore`, once under `tribe`) for back-compat with existing tests.
- */
-export async function ensureAllDaemonsIfConfigured(
-  deps: EnsureDaemonDeps = {},
-): Promise<{ lore: EnsureDaemonOutcome; tribe: EnsureDaemonOutcome }> {
-  const outcome = await ensureTribeDaemonIfConfigured(deps)
-  // Return the same outcome under both keys — the daemon is unified, so
-  // "lore is alive" and "tribe is alive" are the same statement.
-  return { lore: outcome, tribe: outcome }
 }

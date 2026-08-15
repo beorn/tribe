@@ -9,6 +9,7 @@
 import { execSync } from "node:child_process"
 import { createLogger } from "loggily"
 import { createTimers } from "./timers.ts"
+import { startSingleFlightTicker } from "./single-flight-ticker.ts"
 import type { TribePluginApi, TribeClientApi } from "./plugin-api.ts"
 
 const log = createLogger("tribe:git")
@@ -36,35 +37,44 @@ export const gitPlugin: TribePluginApi = {
     const ac = new AbortController()
     const timers = createTimers(ac.signal)
 
-    timers.setInterval(async () => {
-      try {
-        const proc = Bun.spawn(["git", "log", "--oneline", "-1", "HEAD"], {
-          cwd: process.cwd(),
-          stdout: "pipe",
-          stderr: "ignore",
-        })
-        const out = await new Response(proc.stdout).text()
-        const line = out.trim()
-        const head = line.split(" ")[0] ?? ""
-        if (head && lastHead && head !== lastHead) {
-          // Atomic dedup: first observer to claim this commit hash wins
-          if (api.claimDedup(`commit:${head}`)) {
-            // km-tribe.event-classification: commits are ambient — informational
-            // for the tribe but no agent needs to react. Land in inbox only.
-            api.broadcast(`Committed: ${line}`, "status", undefined, {
-              delivery: "pull",
-              topic: "git:commit",
-            })
+    // Single-flight: `git log` against a busy or locked repository can outlast
+    // the 30s cadence, and an async callback handed straight to setInterval
+    // would start another poll on top of it every tick.
+    startSingleFlightTicker({
+      name: "git-poll",
+      intervalMs: 30_000,
+      timers,
+      log: { warn: (message) => log.warn?.(message), error: (message) => log.error?.(message) },
+      run: async () => {
+        try {
+          const proc = Bun.spawn(["git", "log", "--oneline", "-1", "HEAD"], {
+            cwd: process.cwd(),
+            stdout: "pipe",
+            stderr: "ignore",
+          })
+          const out = await new Response(proc.stdout).text()
+          const line = out.trim()
+          const head = line.split(" ")[0] ?? ""
+          if (head && lastHead && head !== lastHead) {
+            // Atomic dedup: first observer to claim this commit hash wins
+            if (api.claimDedup(`commit:${head}`)) {
+              // km-tribe.event-classification: commits are ambient — informational
+              // for the tribe but no agent needs to react. Land in inbox only.
+              api.broadcast(`Committed: ${line}`, "status", undefined, {
+                delivery: "pull",
+                topic: "git:commit",
+              })
+            }
+            // Hot-reload on tribe code changes is handled by the daemon's own
+            // source watcher (tribe-daemon.ts — onSourceChange). No explicit
+            // trigger needed from plugins.
           }
-          // Hot-reload on tribe code changes is handled by the daemon's own
-          // source watcher (tribe-daemon.ts — onSourceChange). No explicit
-          // trigger needed from plugins.
+          if (head) lastHead = head
+        } catch (err) {
+          log.error?.(`git poll error: ${err instanceof Error ? err.message : err}`)
         }
-        if (head) lastHead = head
-      } catch (err) {
-        log.error?.(`git poll error: ${err instanceof Error ? err.message : err}`)
-      }
-    }, 30_000)
+      },
+    })
 
     return () => ac.abort()
   },

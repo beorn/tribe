@@ -42,6 +42,7 @@ function makeOpts(store: LifecycleStore): HandlerOpts {
     userRenamed: false,
     setUserRenamed: () => {},
     getActiveSessionIds: () => new Set<string>(),
+    hasActiveTransport: () => false,
     getActiveSessionInfo: () => [],
     getLifecycleStore: () => store,
   }

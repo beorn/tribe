@@ -2,6 +2,9 @@ import { describe, test, expect, beforeAll } from "vitest"
 import * as fs from "fs"
 import { parseTimeToMs, setRecallLogging, boostedRank, expandQueryVariants } from "../../src/history/recall"
 import type { RecallResult } from "../../src/history/recall"
+import { synthesizeResults } from "../../src/history/synthesize"
+import { SynthesisFailure } from "../../src/history/recall-shared"
+import type { LlmBackend, LlmModel } from "../../src/lib/llm-backend"
 import { toFts5Query, DB_PATH } from "../../src/history/db"
 
 // Suppress verbose [recall] logging during tests
@@ -302,11 +305,6 @@ describe("recall integration", () => {
     return mod.recall
   }
 
-  async function getCloseDb(): Promise<() => void> {
-    const mod = await import("../../src/history/db")
-    return mod.closeDb
-  }
-
   test.skipIf(!dbExists)(
     "returns RecallResult shape in raw mode",
     async () => {
@@ -380,7 +378,24 @@ describe("recall integration", () => {
         expect(typeof item.rank).toBe("number")
         expect(typeof item.snippet).toBe("string")
         expect(typeof item.sessionId).toBe("string")
-        expect(["message", "plan", "summary", "todo", "first_prompt", "vault"]).toContain(item.type)
+        // Full ContentType surface (history/types.ts): recall() searches messages,
+        // session-scoped content, and project-scoped content (bead/session_memory/
+        // project_memory/doc/claude_md/llm_research), plus vault FTS when a .km
+        // tree is present — any of these can rank #1 for a broad query like "function".
+        expect([
+          "message",
+          "plan",
+          "summary",
+          "todo",
+          "first_prompt",
+          "bead",
+          "session_memory",
+          "project_memory",
+          "doc",
+          "claude_md",
+          "llm_research",
+          "vault",
+        ]).toContain(item.type)
       }
     },
     15_000,
@@ -428,4 +443,196 @@ describe("recall integration", () => {
     },
     15_000,
   )
+})
+
+describe("synthesizeResults", () => {
+  test("filters provider availability before limiting the synthesis race", async () => {
+    const models: LlmModel[] = [
+      { provider: "openai", modelId: "openai-cheap" },
+      { provider: "anthropic", modelId: "anthropic-cheap" },
+      { provider: "xai", modelId: "xai-cheap" },
+      { provider: "openrouter", modelId: "openrouter-cheap" },
+    ]
+    const queried: string[] = []
+    let requestedMax = 0
+    const llm: LlmBackend = {
+      queryModel: async ({ model }) => {
+        queried.push(model.modelId)
+        return { response: { content: `answer from ${model.modelId}` } }
+      },
+      getModel: (id) => models.find((model) => model.modelId === id),
+      getCheapModel: () => models[0],
+      getCheapModels: (max = 2) => {
+        requestedMax = max
+        return models.slice(0, max)
+      },
+      estimateCost: () => 0,
+      isProviderAvailable: (provider) => provider === "xai" || provider === "openrouter",
+    }
+
+    const result = await synthesizeResults(
+      "provider selection",
+      [
+        {
+          type: "message",
+          sessionId: "session-a",
+          sessionTitle: "Session A",
+          timestamp: Date.now(),
+          snippet: "provider selection evidence",
+          rank: 1,
+        },
+      ],
+      1_000,
+      llm,
+    )
+
+    expect(requestedMax).toBeGreaterThan(2)
+    expect(queried).toEqual(["xai-cheap", "openrouter-cheap"])
+    expect(result.text).toMatch(/^answer from (xai|openrouter)-cheap$/)
+  })
+
+  test("reports provider errors when every synthesis model fails", async () => {
+    const models: LlmModel[] = [
+      { provider: "openai", modelId: "openai-cheap" },
+      { provider: "xai", modelId: "xai-cheap" },
+    ]
+    const llm: LlmBackend = {
+      queryModel: async ({ model }) => ({ response: { error: `${model.provider} quota exhausted` } }),
+      getModel: (id) => models.find((model) => model.modelId === id),
+      getCheapModel: () => models[0],
+      getCheapModels: () => models,
+      estimateCost: () => 0,
+      isProviderAvailable: () => true,
+    }
+
+    // The one-sentence .message is deliberately tight now (no per-model
+    // error text embedded — see synthesize.ts's buildFailureSummary); the
+    // per-provider "openai-cheap: openai quota exhausted" / "xai-cheap: xai
+    // quota exhausted" detail this test exists to catch now lives on
+    // SynthesisFailure.diagnostics.attempts instead of the message.
+    let caught: unknown
+    try {
+      await synthesizeResults(
+        "provider failure",
+        [
+          {
+            type: "message",
+            sessionId: "session-a",
+            sessionTitle: "Session A",
+            timestamp: Date.now(),
+            snippet: "provider failure evidence",
+            rank: 1,
+          },
+        ],
+        1_000,
+        llm,
+      )
+      expect.unreachable("expected synthesizeResults to reject")
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeInstanceOf(SynthesisFailure)
+    const failure = caught as SynthesisFailure
+    expect(failure.diagnostics.attempts.map((a) => `${a.modelId}: ${a.error}`)).toEqual([
+      "openai-cheap: openai quota exhausted",
+      "xai-cheap: xai quota exhausted",
+    ])
+  })
+
+  test("tries the next available provider batch when the first race fails", async () => {
+    const models: LlmModel[] = [
+      { provider: "openai", modelId: "openai-cheap" },
+      { provider: "xai", modelId: "xai-cheap" },
+      { provider: "openrouter", modelId: "openrouter-cheap" },
+    ]
+    const queried: string[] = []
+    const llm: LlmBackend = {
+      queryModel: async ({ model }) => {
+        queried.push(model.modelId)
+        if (model.provider === "openrouter") return { response: { content: "fallback synthesis" } }
+        return { response: { error: `${model.provider} unavailable` } }
+      },
+      getModel: (id) => models.find((model) => model.modelId === id),
+      getCheapModel: () => models[0],
+      getCheapModels: () => models,
+      estimateCost: () => 0,
+      isProviderAvailable: () => true,
+    }
+
+    const result = await synthesizeResults(
+      "provider fallback",
+      [
+        {
+          type: "message",
+          sessionId: "session-a",
+          sessionTitle: "Session A",
+          timestamp: Date.now(),
+          snippet: "provider fallback evidence",
+          rank: 1,
+        },
+      ],
+      1_000,
+      llm,
+    )
+
+    expect(queried).toEqual(["openai-cheap", "xai-cheap", "openrouter-cheap"])
+    expect(result.text).toBe("fallback synthesis")
+  })
+
+  test("fair-shares the timeout budget across batches so a hanging batch cannot starve a later one", async () => {
+    // Regression for the real 2026-08-05 recall failure: two dead
+    // providers (openai, xai) raced first, took 8.2s of a 10s budget to
+    // fail, and left the one live provider (openrouter) 1.7s —
+    // structurally unwinnable. Here "dead-1"/"dead-2" only settle when
+    // aborted (like a real fetch() honoring AbortSignal on a hung
+    // request), so this proves the batch timeout is a genuine per-batch
+    // SHARE of the budget, not the whole remaining deadline handed to
+    // whichever batch races first.
+    const models: LlmModel[] = [
+      { provider: "openai", modelId: "dead-1" },
+      { provider: "xai", modelId: "dead-2" },
+      { provider: "openrouter", modelId: "good" },
+    ]
+    const queried: string[] = []
+    const llm: LlmBackend = {
+      queryModel: async ({ model, abortSignal }) => {
+        queried.push(model.modelId)
+        if (model.modelId === "good") {
+          await new Promise((resolve) => setTimeout(resolve, 20))
+          return { response: { content: "fallback synthesis" } }
+        }
+        // Hangs until the race's AbortController fires — never resolves
+        // on its own, exactly like a stalled real HTTP call.
+        return new Promise((resolve) => {
+          abortSignal?.addEventListener("abort", () => resolve({ response: { error: `${model.provider} aborted` } }), {
+            once: true,
+          })
+        })
+      },
+      getModel: (id) => models.find((model) => model.modelId === id),
+      getCheapModel: () => models[0],
+      getCheapModels: () => models,
+      estimateCost: () => 0,
+      isProviderAvailable: () => true,
+    }
+
+    const result = await synthesizeResults(
+      "budget fairness",
+      [
+        {
+          type: "message",
+          sessionId: "session-a",
+          sessionTitle: "Session A",
+          timestamp: Date.now(),
+          snippet: "budget fairness evidence",
+          rank: 1,
+        },
+      ],
+      200,
+      llm,
+    )
+
+    expect(queried).toEqual(["dead-1", "dead-2", "good"])
+    expect(result.text).toBe("fallback synthesis")
+  }, 2_000)
 })

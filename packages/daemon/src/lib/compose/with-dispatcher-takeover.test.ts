@@ -23,6 +23,7 @@ import { join } from "node:path"
 import type { Server, Socket as NetSocket } from "node:net"
 import type { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import { getLogLevel, setLogLevel } from "loggily"
 import { createScope } from "tribe-wire"
 import { TRIBE_PROTOCOL_VERSION, type JsonRpcRequest } from "tribe-wire/lib/socket"
 import type { TribeRole } from "tribe-wire/lib/config"
@@ -163,10 +164,10 @@ describe("dispatcher explicit-persona takeover (@ag/tribe/20703)", () => {
     )
 
     harness.addPendingClient("conn-taker")
-    // The takeover branch logs a loud recovery line via log.warn (routes to
-    // console.warn through loggily) — some runners (e.g. the hh vendor-project
-    // vitest setup) fail any test that produces console output, so the spy
-    // both captures the line for assertion and suppresses it from stdout.
+    // Pin the level: the parent shell's LOG_LEVEL must not decide whether this
+    // behavior assertion sees the warning.
+    const previousLogLevel = getLogLevel()
+    setLogLevel("warn")
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
     try {
       const taker = parseResult<RegisterResult>(
@@ -205,6 +206,7 @@ describe("dispatcher explicit-persona takeover (@ag/tribe/20703)", () => {
       expect(takeoverLine).toContain("new pid 4002")
     } finally {
       warnSpy.mockRestore()
+      setLogLevel(previousLogLevel)
     }
   })
 
@@ -240,6 +242,180 @@ describe("dispatcher explicit-persona takeover (@ag/tribe/20703)", () => {
     expect(agentSessions).toHaveLength(1)
     expect(agentSessions[0]?.pid).toBe(5001)
     expect(harness.supersededEvents("@agent/79")).toHaveLength(0)
+  })
+
+  it("consumes takeover once per launch so a displaced launch cannot reclaim the persona", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    harness.addPendingClient("conn-launch-a")
+    parseResult<RegisterResult>(
+      await harness.register("conn-launch-a", {
+        name: "@agent/84",
+        pid: 8401,
+        project: "/tmp/km-wt9-launch-a",
+        launchId: "provider-launch-a",
+        launchParentPid: 84,
+        takeover: true,
+      }),
+    )
+    harness.db
+      .prepare("INSERT INTO dedup (key, session_id, ts) VALUES (?, ?, ?)")
+      .run("short-lived:test-key", "daemon-test", 0)
+    harness.cleanupDedup(Number.MAX_SAFE_INTEGER)
+    expect(harness.db.prepare("SELECT key FROM dedup ORDER BY key").all()).toEqual([
+      { key: 'launch-takeover:["@agent/84","provider-launch-a",84]' },
+    ])
+
+    harness.addPendingClient("conn-launch-b")
+    parseResult<RegisterResult>(
+      await harness.register("conn-launch-b", {
+        name: "@agent/84",
+        pid: 8402,
+        project: "/tmp/km-wt9-launch-b",
+        launchId: "provider-launch-b",
+        launchParentPid: 85,
+        takeover: true,
+      }),
+    )
+
+    harness.addPendingClient("conn-launch-a-replay")
+    const replay = parseError(
+      await harness.register("conn-launch-a-replay", {
+        name: "@agent/84",
+        pid: 8403,
+        project: "/tmp/km-wt9-launch-a",
+        launchId: "provider-launch-a",
+        launchParentPid: 84,
+        takeover: true,
+      }),
+    )
+    expect(replay.message).toBe('Name "@agent/84" is already taken by live pid 8402')
+
+    const status = parseResult<CliStatusResult>(await harness.cliStatus())
+    expect(status.sessions.filter((session) => session.name === "@agent/84")).toEqual([
+      expect.objectContaining({ pid: 8402 }),
+    ])
+    expect(harness.supersededEvents("@agent/84")).toHaveLength(1)
+  })
+})
+
+describe("provider-parent transport fan-in (@ag/tribe/22631)", () => {
+  it("attaches a legacy parent publisher and its launch-bearing MCP child without mutual takeover", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const parentSocket = harness.addPendingClient("conn-parent-publisher")
+    const parent = parseResult<RegisterResult>(
+      await harness.register("conn-parent-publisher", {
+        name: "@dev/2",
+        pid: 48829,
+        project: "/tmp/hh-wt2",
+        takeover: true,
+      }),
+    )
+
+    const mcpSocket = harness.addPendingClient("conn-mcp-adapter")
+    const mcp = parseResult<RegisterResult>(
+      await harness.register("conn-mcp-adapter", {
+        name: "@dev/2",
+        pid: 49853,
+        project: "/tmp/hh-wt2",
+        takeover: true,
+        identityToken: "tok-dev-2",
+        launchId: "hab-dev-2-g7-a1",
+        launchParentPid: 48829,
+      }),
+    )
+
+    const reconnectedParentSocket = harness.addPendingClient("conn-parent-publisher-reconnect")
+    const reconnectedParent = parseResult<RegisterResult>(
+      await harness.register("conn-parent-publisher-reconnect", {
+        name: "@dev/2",
+        pid: 48829,
+        project: "/tmp/hh-wt2",
+        takeover: true,
+      }),
+    )
+
+    expect(mcp.sessionId).toBe(parent.sessionId)
+    expect(reconnectedParent.sessionId).toBe(parent.sessionId)
+    expect(parentSocket.destroyedByDispatcher).toBe(false)
+    expect(mcpSocket.destroyedByDispatcher).toBe(false)
+    expect(reconnectedParentSocket.destroyedByDispatcher).toBe(false)
+    expect(harness.supersededEvents("@dev/2")).toHaveLength(0)
+
+    harness.dropClient("conn-parent-publisher")
+    harness.dropClient("conn-mcp-adapter")
+    harness.dropClient("conn-parent-publisher-reconnect")
+
+    const restartedParentSocket = harness.addPendingClient("conn-parent-after-daemon-restart")
+    const restartedParent = parseResult<RegisterResult>(
+      await harness.register("conn-parent-after-daemon-restart", {
+        name: "@dev/2",
+        pid: 48829,
+        project: "/tmp/hh-wt2",
+        takeover: true,
+      }),
+    )
+    expect(restartedParent.sessionId).toBe(parent.sessionId)
+    expect(restartedParentSocket.destroyedByDispatcher).toBe(false)
+
+    const persisted = harness.db
+      .prepare("SELECT pid, identity_token, launch_id, launch_parent_pid FROM sessions WHERE id = ?")
+      .get(parent.sessionId) as {
+      pid: number
+      identity_token: string | null
+      launch_id: string | null
+      launch_parent_pid: number | null
+    }
+    expect(persisted).toEqual({
+      pid: 48829,
+      identity_token: "tok-dev-2",
+      launch_id: "hab-dev-2-g7-a1",
+      launch_parent_pid: 48829,
+    })
+  })
+
+  it("keeps a different full launch on the explicit takeover path", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const holderSocket = harness.addPendingClient("conn-launch-holder")
+    const holder = parseResult<RegisterResult>(
+      await harness.register("conn-launch-holder", {
+        name: "@dev/2",
+        pid: 49853,
+        project: "/tmp/hh-wt2",
+        takeover: true,
+        identityToken: "tok-dev-2-old",
+        launchId: "hab-dev-2-g7-a1",
+        launchParentPid: 48829,
+      }),
+    )
+
+    harness.addPendingClient("conn-foreign-launch")
+    const foreign = parseResult<RegisterResult>(
+      await harness.register("conn-foreign-launch", {
+        name: "@dev/2",
+        pid: 50999,
+        project: "/tmp/hh-wt2",
+        takeover: true,
+        identityToken: "tok-dev-2-new",
+        launchId: "hab-dev-2-g8-a1",
+        launchParentPid: 49853,
+      }),
+    )
+
+    expect(foreign.sessionId).not.toBe(holder.sessionId)
+    expect(holderSocket.destroyedByDispatcher).toBe(true)
+    expect(harness.supersededEvents("@dev/2")).toEqual([
+      expect.objectContaining({
+        old_pid: 49853,
+        new_pid: 50999,
+        reason: "explicit-persona takeover (20703)",
+      }),
+    ])
   })
 })
 
@@ -344,6 +520,92 @@ describe("asymmetric identity displacement (@ag/tribe/21052)", () => {
   })
 })
 
+describe("one-shot CLI join checkpoint (@ag/tribe/22429)", () => {
+  it("observes the live native holder without claiming, renaming, or retiring it", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const holderSocket = harness.addPendingClient("conn-native-holder")
+    const holder = parseResult<RegisterResult>(
+      await harness.register("conn-native-holder", {
+        name: "@agent/8",
+        pid: 8801,
+        project: "/tmp/km-wt8",
+        launchId: "provider-launch-agent-8",
+        launchParentPid: 88,
+        takeover: true,
+      }),
+    )
+    const sessionLinesBefore = harness.sessionLines()
+
+    const checkpoint = parseResult<{
+      joined: boolean
+      observed: boolean
+      name: string
+      memberId: string
+      transportPids: number[]
+    }>(
+      await harness.request("cli_join", {
+        name: "@agent/8",
+        role: "member",
+        domains: ["test-lean"],
+        delivery: "pull",
+      }),
+    )
+
+    expect(checkpoint).toMatchObject({
+      joined: true,
+      observed: true,
+      name: "@agent/8",
+      memberId: holder.sessionId,
+      transportPids: [8801],
+    })
+    expect(holderSocket.destroyedByDispatcher).toBe(false)
+    expect(parseResult<CliStatusResult>(await harness.cliStatus()).sessions).toEqual([
+      expect.objectContaining({ name: "@agent/8", pid: 8801 }),
+    ])
+    expect(harness.sessionLines()).toBe(sessionLinesBefore)
+  })
+
+  it("fails loud when no persistent native holder can own the requested persona", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    const result = parseResult<{ joined: boolean; observed: boolean; error: string }>(
+      await harness.request("cli_join", { name: "@agent/8", role: "member", domains: [], delivery: "pull" }),
+    )
+
+    expect(result).toMatchObject({ joined: false, observed: false })
+    expect(result.error).toContain("one-shot CLI cannot establish persistent membership")
+    expect(parseResult<CliStatusResult>(await harness.cliStatus()).sessions).toEqual([])
+  })
+
+  it("does not mistake a surviving watch transport for a persistent member", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+
+    harness.addPendingClient("conn-native-holder")
+    const holder = parseResult<RegisterResult>(
+      await harness.register("conn-native-holder", {
+        name: "@agent/8",
+        pid: 8801,
+        project: "/tmp/km-wt8",
+        takeover: true,
+      }),
+    )
+    harness.addWatchTransport("conn-watch", holder.sessionId)
+    harness.dropClient("conn-native-holder")
+
+    const result = parseResult<{ joined: boolean; observed: boolean; error: string }>(
+      await harness.request("cli_join", { name: "@agent/8" }),
+    )
+
+    expect(result).toMatchObject({ joined: false, observed: false })
+    expect(result.error).toContain("one-shot CLI cannot establish persistent membership")
+    expect(parseResult<CliStatusResult>(await harness.cliStatus()).sessions).toEqual([])
+  })
+})
+
 function createDispatcherHarness() {
   const tempDir = mkdtempSync(join(tmpdir(), "tribe-dispatcher-takeover-"))
   const scope = createScope("dispatcher-takeover-test")
@@ -377,7 +639,8 @@ function createDispatcherHarness() {
       socketPath: join(tempDir, "tribe.sock"),
       dbPath: join(tempDir, "tribe.sqlite"),
       recallDbPath: join(tempDir, "recall.sqlite"),
-      quitTimeoutSec: -1,
+      idleQuitAfterSec: -1,
+      idleQuitSource: "flag" as const,
       inheritFd: null,
       focusPollMs: 60_000,
       summaryPollMs: 120_000,
@@ -394,19 +657,36 @@ function createDispatcherHarness() {
       getActiveSessionIds(): Set<string> {
         return new Set(Array.from(clients.values(), (c) => c.ctx.sessionId))
       },
+      hasActiveTransport(sessionId: string): boolean {
+        return Array.from(clients.values()).some(
+          (client) => client.role !== "pending" && client.ctx.sessionId === sessionId,
+        )
+      },
+      markTransportConnected() {},
+      markTransportDisconnected() {},
+      isReconnectGraceProtected(): boolean {
+        return false
+      },
+      startupReconnectGraceRemainingMs(): number {
+        return 0
+      },
+      forgetTransportSessions() {},
+      onTransportDisconnected() {},
       getActiveSessionInfo() {
-        return Array.from(clients.values()).map((c) => ({
-          id: c.ctx.sessionId,
-          name: c.name,
-          pid: c.pid,
-          cwd: c.project,
-          role: c.role,
-          claudeSessionId: c.claudeSessionId,
-          registeredAt: c.registeredAt,
-          launchId: c.launchId,
-          launchParentPid: c.launchParentPid,
-          transportPids: c.pid > 0 ? [c.pid] : [],
-        }))
+        return Array.from(clients.values())
+          .filter((client) => client.role === "member")
+          .map((client) => ({
+            id: client.ctx.sessionId,
+            name: client.name,
+            pid: client.pid,
+            cwd: client.project,
+            role: client.role,
+            claudeSessionId: client.claudeSessionId,
+            registeredAt: client.registeredAt,
+            launchId: client.launchId,
+            launchParentPid: client.launchParentPid,
+            transportPids: client.pid > 0 ? [client.pid] : [],
+          }))
       },
     },
     broadcast: {
@@ -454,6 +734,38 @@ function createDispatcherHarness() {
         "conn-status-probe",
       )
     },
+    request(method: string, params: Record<string, unknown>) {
+      return daemon.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: `request-${method}`, method, params },
+        `conn-${method}-probe`,
+      )
+    },
+    dropClient(connId: string): void {
+      const client = clients.get(connId)
+      if (client) socketToClient.delete(client.socket)
+      clients.delete(connId)
+    },
+    addWatchTransport(connId: string, sessionId: string): TestSocket {
+      const member = Array.from(clients.values()).find(
+        (client) => client.role === "member" && client.ctx.sessionId === sessionId,
+      )
+      if (!member) throw new Error(`cannot attach watch transport: member session ${sessionId} is not connected`)
+      const socket = createTestSocket()
+      clients.set(connId, {
+        ...member,
+        socket,
+        id: connId,
+        role: "watch",
+        conn: "test-watch",
+        registeredAt: Date.now(),
+        lastActivityAt: Date.now(),
+      })
+      socketToClient.set(socket, connId)
+      return socket
+    },
+    cleanupDedup(cutoff: number): void {
+      stmts.cleanupDedup.run({ $cutoff: cutoff })
+    },
     /** Direct journal-row read — `event.session.superseded` rows written by logEvent(). */
     supersededEvents(name: string): Array<{ name: string; old_pid: number; new_pid: number; reason: string }> {
       const rows = db
@@ -463,12 +775,30 @@ function createDispatcherHarness() {
         .map((r) => JSON.parse(r.content) as { name: string; old_pid: number; new_pid: number; reason: string })
         .filter((e) => e.name === name)
     },
+    sessionLines(): string {
+      const rows = db.prepare("SELECT content FROM messages WHERE type = 'session' ORDER BY ts ASC").all() as Array<{
+        content: string
+      }>
+      return rows.map((row) => row.content).join("\n")
+    },
     addPendingClient(connId: string): TestSocket {
       const socket = createTestSocket()
+      const pendingName = `pending-${connId}`
+      const pendingCtx = createTribeContext({
+        db,
+        stmts,
+        sessionId: connId,
+        sessionRole: "pending",
+        initialName: pendingName,
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+        onMessageInserted: daemonCtx.onMessageInserted,
+      })
       clients.set(connId, {
         socket,
         id: connId,
-        name: `pending-${connId}`,
+        name: pendingName,
         role: "pending",
         domains: [],
         project: "/tmp/km-wt9",
@@ -480,7 +810,7 @@ function createDispatcherHarness() {
         claudeSessionId: null,
         peerSocket: null,
         conn: "test",
-        ctx: daemonCtx,
+        ctx: pendingCtx,
         registeredAt: Date.now(),
         lastActivityAt: Date.now(),
         recall: { sessionId: null, claudePid: null },

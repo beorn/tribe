@@ -87,7 +87,7 @@ Every emitter must declare its source as one of the
 - `tribe` — channel messages from other Claude sessions
 - `telegram` — telegram bot inbound
 - `github` — github notifications / PR comments / issue events
-- `beads` — beads claim/closure broadcast
+- `beads` — issue-tracker (bead) claim/closure broadcast
 - `mcp` — MCP server instructions
 - `system-reminder` — system-reminder content from harness
 

@@ -15,7 +15,7 @@ Cross-session coordination. Parse the subcommand from ARGUMENTS.
 | `/tribe status`                | `tribe.members()` + `tribe.health()` — full dashboard                                                                                                               |
 | `/tribe health`                | `tribe.health()` — warnings, silent members, unread counts                                                                                                          |
 | `/tribe sessions`              | `tribe.members()` — list active sessions                                                                                                                            |
-| `/tribe sessions --all`        | `tribe.members(all=true)` — include dead sessions                                                                                                                   |
+| `/tribe sessions --all`        | `tribe.members(all=true)` — include disconnected durable rows with separate transport and owner verdicts                                                            |
 | `/tribe send <to> <message>`   | `tribe.send(to, message)` — send notify message                                                                                                                     |
 | `/tribe assign <to> <message>` | `tribe.send(to, message, type="assign")` — assign work                                                                                                              |
 | `/tribe query <to> <message>`  | `tribe.send(to, message, type="query")` — ask a question                                                                                                            |
@@ -42,12 +42,12 @@ Broadcast this message to all members:
 Sync check: report your current status.
 
 1. Your session name (/rename) and Claude session ID (echo $CLAUDE_SESSION_ID)
-2. What you're working on — beads/tasks created, updated, closed this session
+2. What you're working on — tasks/issues created, updated, closed this session
 3. BLOCKERS: anything you're blocked on, what's blocking, and what would unblock
 4. NEEDS: anything another member could help with (review, info, shared resources)
 5. INFRASTRUCTURE: active worktrees, in-flight refactors, running test suites, unpublished packages, or shared config changes
 
-Reply to chief with your summary.
+Reply to the requesting coordinator with your summary.
 ```
 
 After responses come in:
@@ -63,7 +63,7 @@ After responses come in:
 Broadcast this message:
 
 ```
-Roll call: please report your current session name (/rename), what you're working on, and your status (idle/busy/blocked). Reply with tribe.send to chief.
+Roll call: please report your current session name (/rename), what you're working on, and your status (idle/busy/blocked). Reply with tribe.send to the coordinator who asked.
 ```
 
 Collect responses and present as a table.
@@ -92,7 +92,13 @@ Each session declares a delivery mode at join time. The daemon routes broadcasts
 TRIBE_DELIVERY = "pull"
 ```
 
-**Draining in pull mode.** `tribe.fetch()` is the canonical "give me my events" call. Default drain returns a read-only `attention` projection first (`actionable_unread` from the existing mailbox plus `pending_balls` from the existing tracker), followed by the bounded chronological `events`, and advances the existing cursors. Filtered reads remain snapshots and omit `attention`.
+MCP `inbox.wait` is diagnostic-only: it defaults to a host-safe 5,000ms and the
+measured native-host ceiling is 10,000ms. Requests at or above that ceiling
+return typed `host_cut` with `advice: "cli_wait"` before the daemon wait starts.
+Use one bounded `tribe inbox-wait` CLI call for longer idle waits; never re-arm
+short MCP calls as a polling loop.
+
+**Draining in pull mode.** `tribe.fetch()` is the canonical "give me my events" call. Default drain returns a read-only `attention` projection first (`actionable_unread` contains request/query/verdict/assign plus direct responses from the existing mailbox; responses remain quiet for default waits), plus the 10 oldest `pending_balls` and a lossless `pending_balls_summary` from the existing tracker, followed by the bounded chronological `events`, and advances the existing cursors. Use `tribe.pending` for the full ball pile. Filtered reads remain snapshots and omit `attention`.
 
 **Watch clients** (`tribe-watch`, `tribe-cli` log/events) always receive push regardless of the recipient's declared mode — the per-session toggle only gates _agent-bound_ fanout.
 

@@ -28,34 +28,18 @@
 import { appendFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { createLogger, type ConditionalLogger } from "loggily"
+import {
+  activityLogDir,
+  activityLogFilename,
+  type ActivityEntry,
+  type ActivityKind,
+} from "../../../wire/src/activity-log-contract.ts"
 import { stripLoneSurrogates, truncateSurrogateSafe } from "./validation.ts"
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-export type ActivityKind = "dm" | "broadcast" | "event" | "session" | "rename" | "inject" | "gate"
-export type ActivitySource = "tribe" | "recall" | "gate"
-
-export interface ActivityEntry {
-  ts: number
-  source: ActivitySource
-  kind: ActivityKind
-  session: string
-  peer?: string
-  type?: string
-  preview?: string
-  chars?: number
-  id?: string
-  bead_id?: string | null
-  meta?: Record<string, unknown>
-}
 
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
-const DEFAULT_DIR_SUFFIX = "/.local/share/tribe"
 const DEFAULT_RETAIN_DAYS = 30
 
 /**
@@ -69,20 +53,6 @@ export function activityLogPath(now: Date = new Date()): string {
   const override = process.env.TRIBE_ACTIVITY_LOG
   if (override && override !== "off") return override
   return join(activityLogDir(), activityLogFilename(now))
-}
-
-/** Return the directory containing activity-* files. */
-export function activityLogDir(): string {
-  const home = process.env.HOME ?? ""
-  return `${home}${DEFAULT_DIR_SUFFIX}`
-}
-
-/** Per-day filename for an arbitrary date. Exported for the watch CLI. */
-export function activityLogFilename(date: Date): string {
-  const y = date.getFullYear()
-  const m = String(date.getMonth() + 1).padStart(2, "0")
-  const d = String(date.getDate()).padStart(2, "0")
-  return `activity-${y}-${m}-${d}.jsonl`
 }
 
 /**

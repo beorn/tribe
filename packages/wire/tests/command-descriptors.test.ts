@@ -48,7 +48,7 @@ describe("Tribe command descriptors", () => {
     }
   })
 
-  test("project the approved CLI/MCP parity slice from one descriptor", () => {
+  test("project the approved CLI surface from its related MCP descriptors", () => {
     const pairs = [
       ["send", "send"],
       ["join", "join"],
@@ -63,7 +63,8 @@ describe("Tribe command descriptors", () => {
       const cli = visibleCliProjection(descriptor!)
       expect(cli.name).toBe(cliName)
       expect(cli.mapsToMcp).toBe(mcpName)
-      expect(cli.description).toBe(descriptor!.description)
+      if (mcpName === "inbox.wait" || mcpName === "join") expect(cli.description).not.toBe(descriptor!.description)
+      else expect(cli.description).toBe(descriptor!.description)
       expect(cli.lifetime).toBe("one-shot")
     }
   })
@@ -91,7 +92,12 @@ describe("Tribe command descriptors", () => {
     expect(send.options?.find((option) => option.name === "type")?.default).toBe("notify")
     expect(send.options?.find((option) => option.name === "fanout")?.enum).toEqual(["first", "all"])
     expect(send.options?.find((option) => option.name === "fanout")?.default).toBe("first")
-
+    expect(send.options?.find((option) => option.name === "expires-in-ms")?.mapsTo).toBe("expires_in_ms")
+    expect(sendDescriptor.mcp.inputSchema.properties?.expires_in_ms).toMatchObject({
+      type: "integer",
+      minimum: 1,
+      maximum: 86_400_000,
+    })
     const join = visibleCliProjection(commandDescriptorByMcpName("join")!)
     expect(join.arguments?.map((arg) => arg.name)).toEqual(["name"])
     expect(join.options?.find((option) => option.name === "delivery")?.enum).toEqual(["push", "pull"])
@@ -100,17 +106,70 @@ describe("Tribe command descriptors", () => {
     const pending = visibleCliProjection(commandDescriptorByMcpName("pending")!)
     expect(pending.options?.find((option) => option.name === "stale")?.mapsTo).toBe("stale_ms")
     expect(pending.options?.find((option) => option.name === "stale")?.transform).toBe("duration-ms")
+    expect(pending.options?.find((option) => option.name === "expired")?.flags).toBe("--expired")
     expect(pending.options?.find((option) => option.name === "close")?.requires).toEqual(["owner"])
 
     const repair = visibleCliProjection(commandDescriptorByMcpName("repair")!)
     expect(repair.options?.find((option) => option.name === "inbox-cursor")?.mapsTo).toBe("inbox_cursor")
-    expect(repair.options?.find((option) => option.name === "inbox-cursor")?.enum).toEqual(["tail"])
-    expect(repair.options?.find((option) => option.name === "inbox-cursor")?.default).toBe("tail")
+    expect(repair.options?.find((option) => option.name === "inbox-cursor")?.enum).toEqual(["tail", "reconcile"])
+    expect(repair.options?.find((option) => option.name === "inbox-cursor")?.default).toBeUndefined()
+    expect(repair.options?.find((option) => option.name === "reap-stale-transports")?.mapsTo).toBe(
+      "reap_stale_transports",
+    )
+    expect(commandDescriptorByMcpName("repair")?.mcp.inputSchema.oneOf).toEqual([
+      { required: ["inbox_cursor"] },
+      { required: ["reap_stale_transports"] },
+    ])
 
     const inboxWait = visibleCliProjection(commandDescriptorByMcpName("inbox.wait")!)
     expect(inboxWait.options?.find((option) => option.name === "timeout")?.mapsTo).toBe("timeout_ms")
     expect(inboxWait.options?.find((option) => option.name === "timeout")?.transform).toBe("duration-ms")
     expect(inboxWait.options?.find((option) => option.name === "timeout")?.default).toBe("30s")
+    expect(inboxWait.options?.find((option) => option.name === "wake-on-correlated-reply")?.mapsTo).toBe(
+      "wake_on_correlated_reply",
+    )
+    expect(commandDescriptorByMcpName("inbox.wait")?.mcp.inputSchema.properties?.wake_on_correlated_reply).toEqual({
+      type: "boolean",
+      description: expect.any(String),
+    })
+    expect(commandDescriptorByMcpName("inbox.wait")?.mcp.inputSchema.properties?.timeout_ms).toMatchObject({
+      type: "number",
+      default: 5_000,
+    })
+    expect(commandDescriptorByMcpName("inbox.wait")?.mcp.outputSchema.properties?.effective_timeout_ms).toEqual({
+      type: "number",
+      description: expect.any(String),
+    })
+    expect(commandDescriptorByMcpName("inbox.wait")?.mcp.outputSchema.properties?.status).toEqual({
+      type: "string",
+      enum: ["woken", "timeout", "aborted", "host_cut"],
+      description: expect.any(String),
+    })
+    expect(commandDescriptorByMcpName("inbox.wait")?.mcp.outputSchema.oneOf).toContainEqual({
+      properties: { status: { type: "string", enum: ["woken", "timeout", "aborted"] } },
+      required: [
+        "status",
+        "session",
+        "unread_count",
+        "oldest_unread_age_min",
+        "oldest_unread_ts",
+        "waited_ms",
+        "effective_timeout_ms",
+        "timed_out",
+        "aborted",
+        "attention",
+      ],
+    })
+    expect(commandDescriptorByMcpName("inbox.wait")?.mcp.outputSchema.oneOf).toContainEqual({
+      properties: { status: { type: "string", enum: ["host_cut"] } },
+      required: ["status", "requested_ms", "ceiling_ms", "ceiling_source", "advice"],
+    })
+    expect(commandDescriptorByMcpName("inbox.wait")?.mcp.description).toContain("host_cut")
+    expect(inboxWait.description).not.toContain("host_cut")
+    expect(inboxWait.description).not.toContain("MCP")
+    expect(commandDescriptorByMcpName("inbox.wait")?.mcp.outputSchema.properties?.attention).toMatchObject({
+      type: "object",
+    })
   })
 
   test("matches descriptor-backed CLI projections to the actual Commander program", () => {
@@ -144,10 +203,18 @@ describe("Tribe command descriptors", () => {
     expect(fetch).toBeDefined()
     expect(fetch!.mcp.outputSchema.properties?.attention).toMatchObject({
       type: "object",
-      required: ["actionable_unread", "pending_balls"],
+      required: ["actionable_unread", "pending_balls", "pending_balls_summary"],
       properties: {
         actionable_unread: { type: "array" },
         pending_balls: { type: "array" },
+        pending_balls_summary: {
+          type: "object",
+          required: ["total", "oldest_age_ms"],
+          properties: {
+            total: { type: "number" },
+            oldest_age_ms: { type: "number" },
+          },
+        },
       },
     })
     const cli = hiddenCliProjection(fetch!)
@@ -158,26 +225,54 @@ describe("Tribe command descriptors", () => {
   test("pins semantic actionable ownership without inventing a delivery-ack surface", () => {
     const send = commandDescriptorByMcpName("send")!
     expect(send.mcp.inputSchema.properties?.request).toMatchObject({
-      oneOf: expect.arrayContaining([{ type: "boolean" }, { type: "string" }]),
+      oneOf: [
+        { type: "string", minLength: 1, not: { const: "true" } },
+        { type: "boolean", const: true },
+      ],
+    })
+    expect(send.mcp.inputSchema.properties?.delivery).toMatchObject({
+      type: "string",
+      enum: ["push", "pull"],
     })
     expect(JSON.stringify(send.mcp.inputSchema.properties?.request)).toMatch(/automatically open/i)
+    expect(visibleCliProjection(send).options?.find((option) => option.name === "delivery")?.enum).toEqual([
+      "push",
+      "pull",
+    ])
 
     const pending = commandDescriptorByMcpName("pending")!
     expect(pending.mcp.inputSchema.properties?.all).toMatchObject({ type: "boolean" })
+    expect(pending.mcp.inputSchema.properties?.expired).toMatchObject({
+      type: "boolean",
+      description: expect.stringMatching(/deadline-passed.*historical unanswered/i),
+    })
+    const expiredDescription = (
+      pending.mcp.inputSchema.properties?.expired as { readonly description?: string } | undefined
+    )?.description
+    expect(expiredDescription).toMatch(/default.*deadline-passed.*remain.*visible/i)
+    expect(expiredDescription).not.toMatch(/default view omits|lapsed request is invisible/i)
+    expect(pending.mcp.inputSchema.properties?.prune).toMatchObject({
+      type: "boolean",
+      description: expect.stringMatching(/stale_ms/i),
+    })
     expect(pending.mcp.outputSchema.properties).toMatchObject({
       all: { type: "boolean" },
       owners: { type: "array" },
       owner_count: { type: "number" },
       oldest_age_ms: { type: "number" },
+      warning: { type: "string", description: expect.stringMatching(/closed 0|matching.*ball/i) },
     })
     expect(visibleCliProjection(pending).options?.map((option) => option.name)).toEqual(
-      expect.arrayContaining(["all", "json"]),
+      expect.arrayContaining(["all", "expired", "json"]),
     )
 
     const health = commandDescriptorByMcpName("health")!
     expect(health.mcp.outputSchema.properties).toMatchObject({
       pending_balls: { type: "object" },
       issues: { type: "array" },
+    })
+    expect(health.mcp.outputSchema.properties?.members).toMatchObject({
+      description: expect.stringMatching(/is_silent/),
     })
     const fetch = commandDescriptorByMcpName("fetch")!
     expect(fetch.mcp.outputSchema.properties).not.toHaveProperty("delivery_ack")

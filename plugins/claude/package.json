@@ -11,6 +11,7 @@
   },
   "files": [
     "server.ts",
+    "supervisor-policy.ts",
     "skills",
     "README.md",
     "CHANGELOG.md",

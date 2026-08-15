@@ -14,6 +14,7 @@ import {
 } from "../src/client.ts"
 import { createLineParser } from "../src/parser.ts"
 import { isRequest, makeNotification, makeResponse } from "../src/rpc.ts"
+import { callTribeTool } from "../src/lib/tool-daemon-call.ts"
 
 /** errno-tagged error, like the ones node:net throws on connect failures. */
 function errno(code: string): Error {
@@ -42,6 +43,11 @@ function spawnFakeDaemon(socketPath: string): Promise<{ server: Server; clients:
         if (isRequest(msg)) {
           if (msg.method === "echo") {
             socket.write(makeResponse(msg.id, { echoed: msg.params }))
+          } else if (msg.method === "slow") {
+            setTimeout(() => socket.write(makeResponse(msg.id, { delayed: true })), 30)
+          } else if (msg.method === "never") {
+            // Intentionally leave the request pending so the client deadline
+            // owns the outcome.
           } else if (msg.method === "ping") {
             socket.write(makeResponse(msg.id, { pong: true }))
             socket.write(makeNotification("pushed", { from: "ping" }))
@@ -118,9 +124,230 @@ describe("connectToDaemon", () => {
     }
   })
 
+  it("treats a peer half-close ('end' with no following 'close') as connection death", async () => {
+    // task/wire-postreg-close-cto — reproduced under CPU contention
+    // (4-core taskset + oversubscribed load): a server-side socket.destroy()
+    // reliably fires the SERVER's own 'close' in under 10ms every time, but
+    // the CLIENT's raw socket was observed firing 'connect' then 'end' and
+    // NOTHING else for a full 40s window — no 'close', no 'error'. Node's
+    // documented allowHalfOpen:false contract is to auto-finish the
+    // writable side on peer EOF and tear the handle down, which should end
+    // in 'close'; Bun does not reliably complete that sequence under load.
+    // 'close' was the ONLY event this module reacted to, so a socket stuck
+    // half-open here was a socket that never got noticed as dead — every
+    // pending call, and transitively createReconnectingClient's
+    // close-driven reconnect trigger, waited on an event that might never
+    // come. Synthesizes exactly that gap (emit 'end', never 'close')
+    // instead of depending on the runtime's flaky timing to reproduce it.
+    const sock = join(tmpDir, "d.sock")
+    const { server } = await spawnFakeDaemon(sock)
+    try {
+      const client = await connectToDaemon(sock)
+      client.socket.emit("end")
+      const deadline = Date.now() + 1_000
+      while (!client.socket.destroyed && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 20))
+      }
+      expect(client.socket.destroyed).toBe(true)
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  }, 3_000)
+
+  it("lets an explicit long-poll deadline outlive the generic call timeout", async () => {
+    const sock = join(tmpDir, "d.sock")
+    const { server } = await spawnFakeDaemon(sock)
+    let client: DaemonClient | undefined
+    try {
+      client = await connectToDaemon(sock, { callTimeoutMs: 5 })
+      await expect(client.call("slow", {}, { timeoutMs: 100 })).resolves.toEqual({ delayed: true })
+    } finally {
+      client?.close()
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  })
+
+  it("releases an explicit long-poll deadline as soon as the response arrives", async () => {
+    const sock = join(tmpDir, "d.sock")
+    const { server } = await spawnFakeDaemon(sock)
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout")
+    let client: DaemonClient | undefined
+    try {
+      client = await connectToDaemon(sock)
+      clearTimeoutSpy.mockClear()
+      await expect(client.call("echo", { early: true }, { timeoutMs: 30 * 60_000 })).resolves.toEqual({
+        echoed: { early: true },
+      })
+      expect(clearTimeoutSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      client?.close()
+      await new Promise<void>((r) => server.close(() => r()))
+      clearTimeoutSpy.mockRestore()
+    }
+  })
+
+  it("does not classify explicit long-poll expiry as three daemon failures", async () => {
+    const sock = join(tmpDir, "d.sock")
+    const { server } = await spawnFakeDaemon(sock)
+    let client: DaemonClient | undefined
+    try {
+      client = await connectToDaemon(sock, { callTimeoutMs: 100 })
+      for (let i = 0; i < 3; i++) {
+        await expect(client.call("never", {}, { timeoutMs: 5 })).rejects.toThrow("timed out")
+      }
+      await expect(client.call("echo", { still: "connected" })).resolves.toEqual({
+        echoed: { still: "connected" },
+      })
+    } finally {
+      client?.close()
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  })
+
+  it("rejects a silent daemon call with typed deadline context", async () => {
+    const sock = join(tmpDir, "d.sock")
+    const { server } = await spawnFakeDaemon(sock)
+    let client: DaemonClient | undefined
+    try {
+      client = await connectToDaemon(sock)
+      await expect(client.call("never", {}, { timeoutMs: 5 })).rejects.toMatchObject({
+        name: "DaemonCallTimeoutError",
+        code: "TRIBE_DAEMON_CALL_TIMEOUT",
+        method: "never",
+        timeoutMs: 5,
+      })
+    } finally {
+      client?.close()
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+    }
+  })
+
   it("rejects with ENOENT when the socket file does not exist", async () => {
     const missing = join(tmpDir, "nope.sock")
     await expect(connectToDaemon(missing)).rejects.toMatchObject({ code: "ENOENT" })
+  })
+})
+
+describe("callTribeTool", () => {
+  const canonicalInboxWaitResult = {
+    status: "timeout",
+    session: "@agent/test",
+    unread_count: 0,
+    oldest_unread_age_min: 0,
+    oldest_unread_ts: 0,
+    waited_ms: 5_000,
+    effective_timeout_ms: 5_000,
+    timed_out: true,
+    aborted: false,
+    attention: {
+      actionable_unread: [],
+      pending_balls: [],
+      pending_balls_summary: { total: 0, oldest_age_ms: 0 },
+    },
+  }
+
+  it.each([10_000, 10_001, 600_000])(
+    "refuses a wait at or beyond the measured MCP host ceiling before calling the daemon: %dms",
+    async (requestedMs) => {
+      const call = vi.fn(async () => canonicalInboxWaitResult)
+      const client = { call } as unknown as DaemonClient
+
+      const result = await callTribeTool(client, "inbox.wait", { timeout_ms: requestedMs })
+      const hostCut = {
+        status: "host_cut",
+        requested_ms: requestedMs,
+        ceiling_ms: 10_000,
+        ceiling_source: "measured",
+        advice: "cli_wait",
+      }
+
+      expect(call).not.toHaveBeenCalled()
+      expect(result).toEqual({
+        content: [{ type: "text", text: JSON.stringify(hostCut) }],
+        structuredContent: hostCut,
+      })
+    },
+  )
+
+  it("allows 9,999ms and gives it the full requested window plus transport margin", async () => {
+    const call = vi.fn(async () => canonicalInboxWaitResult)
+    const client = { call } as unknown as DaemonClient
+
+    const result = await callTribeTool(client, "inbox.wait", {
+      timeout_ms: 9_999,
+      wake_on_correlated_reply: true,
+    })
+
+    expect(call).toHaveBeenCalledWith(
+      "tribe.inbox.wait",
+      {
+        timeout_ms: 9_999,
+        wake_on_correlated_reply: true,
+      },
+      { timeoutMs: 14_999 },
+    )
+    expect(result).toMatchObject({ structuredContent: canonicalInboxWaitResult })
+  })
+
+  it("rejects an oversized send before it reaches the daemon and gives a file+SHA remedy", async () => {
+    const call = vi.fn(async () => ({ sent: true }))
+    const client = { call } as unknown as DaemonClient
+
+    const result = await callTribeTool(client, "send", {
+      to: "@agent/test",
+      message: "x".repeat(4_097),
+    })
+
+    expect(call).not.toHaveBeenCalled()
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: { error: expect.stringContaining("4097") },
+    })
+    expect(JSON.stringify(result)).toMatch(/file.*sha256/i)
+  })
+
+  it("uses a host-safe diagnostic window when MCP omits timeout_ms", async () => {
+    const call = vi.fn(async () => canonicalInboxWaitResult)
+    const client = { call } as unknown as DaemonClient
+
+    const result = await callTribeTool(client, "inbox.wait", {})
+
+    expect(call).toHaveBeenCalledWith("tribe.inbox.wait", { timeout_ms: 5_000 }, { timeoutMs: 10_000 })
+    expect(result).toMatchObject({ structuredContent: canonicalInboxWaitResult })
+  })
+
+  it("keeps the daemon terminal reason authoritative when old attention remains visible", async () => {
+    const legacyResult = {
+      ...canonicalInboxWaitResult,
+      attention: {
+        ...canonicalInboxWaitResult.attention,
+        actionable_unread: [{ id: "response-at-deadline", type: "response" }],
+      },
+    }
+    const client = { call: vi.fn(async () => legacyResult) } as unknown as DaemonClient
+
+    const result = await callTribeTool(client, "inbox.wait", { timeout_ms: 1_000 })
+
+    expect(result).toMatchObject({
+      structuredContent: {
+        status: "timeout",
+        timed_out: true,
+        aborted: false,
+        attention: legacyResult.attention,
+      },
+    })
+  })
+
+  it.each([
+    { label: "incomplete raw object", value: { ok: true } },
+    { label: "legacy wrapped content", value: { content: [{ type: "text", text: "{}" }] } },
+    { label: "inconsistent terminal discriminant", value: { ...canonicalInboxWaitResult, status: "woken" } },
+  ])("rejects a noncanonical inbox-wait result: $label", async ({ value }) => {
+    const client = { call: vi.fn(async () => value) } as unknown as DaemonClient
+
+    await expect(callTribeTool(client, "inbox.wait", { timeout_ms: 1_000 })).rejects.toThrow(
+      "invalid canonical InboxWaitResult",
+    )
   })
 })
 
@@ -304,6 +531,205 @@ describe("createReconnectingClient transport recovery", () => {
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
+  it("refuses daemon autostart when a reconnecting host is connect-only", async () => {
+    const sock = join(tmpDir, "connect-only-absent.sock")
+    await expect(
+      createReconnectingClient({
+        socketPath: sock,
+        daemonScript: join(tmpDir, "must-not-start.ts"),
+        noSpawn: true,
+        maxStartupAttempts: 1,
+      }),
+    ).rejects.toThrow("(noSpawn)")
+    expect(existsSync(sock)).toBe(false)
+  })
+
+  it("closes an initial candidate when registration rejects", async () => {
+    const sock = join(tmpDir, "initial-registration-reject.sock")
+    const { server, clients } = await spawnFakeDaemon(sock)
+    try {
+      await expect(
+        createReconnectingClient({
+          socketPath: sock,
+          maxStartupAttempts: 1,
+          // 21089 — the initial connect now retries a registration failure
+          // on an established transport (same resilience a reconnect
+          // already had); this onConnect always rejects, so pin maxAttempts
+          // to keep the test fast and deterministic, exactly like "closes
+          // each reconnect candidate whose registration rejects" below.
+          maxAttempts: 1,
+          onConnect: async () => {
+            throw new Error("registration refused")
+          },
+        }),
+      ).rejects.toThrow("registration refused")
+      await vi.waitFor(() => expect(clients[0]?.destroyed).toBe(true))
+    } finally {
+      for (const socket of clients) socket.destroy()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  it("self-heals when the transport dies mid-handshake on the initial connect, instead of orphaning the client forever", async () => {
+    // 21089 / task/wire-reconnect-close-cto — onConnect commonly performs
+    // MULTIPLE sequential round trips before it resolves (e.g.
+    // stdio-adapter.ts's register, then tribe.members). Before this fix,
+    // if the transport died while a LATER round trip was still in flight —
+    // proven deterministically here, and reproduced as a ~14%-of-runs CI
+    // flake under 4-core contention on task/ci-deflake-version-skew-cto —
+    // the whole createReconnectingClient() call rejected outright and
+    // setupReconnect() never ran even once: no retry, no reconnect, ever
+    // again, even though the socket's own 'close' event fired correctly.
+    // Only the FIRST connection attempt loses the race here; the daemon is
+    // otherwise healthy, so a resilient client must retry into a live one.
+    const sock = join(tmpDir, "mid-handshake-race.sock")
+    let connectionCount = 0
+    const server = createServer((socket) => {
+      const myConnection = ++connectionCount
+      const parse = createLineParser((msg) => {
+        if (!isRequest(msg)) return
+        if (msg.method === "register") {
+          socket.write(makeResponse(msg.id, { ok: true }))
+          return
+        }
+        if (msg.method === "second-roundtrip") {
+          if (myConnection === 1) {
+            // Transport dies mid-handshake — NO response is ever sent for
+            // this call, on the first connection only.
+            socket.destroy()
+          } else {
+            socket.write(makeResponse(msg.id, { ok: true }))
+          }
+          return
+        }
+        socket.write(makeResponse(msg.id, { echoed: msg.params }))
+      })
+      socket.on("data", parse)
+      socket.on("error", () => {})
+    })
+    await new Promise<void>((resolve) => server.listen(sock, resolve))
+
+    try {
+      const client = await createReconnectingClient({
+        socketPath: sock,
+        noSpawn: true,
+        maxAttempts: 3,
+        async onConnect(c) {
+          await c.call("register", {})
+          await c.call("second-roundtrip", {})
+        },
+      })
+      // The bound this asserts: reconnect must fire (here, the initial
+      // connect's own retry) rather than hang for the caller's full
+      // maxAttempts/backoff budget or forever.
+      expect(connectionCount).toBe(2)
+      const result = await client.call("echo", { hi: true })
+      expect(result).toEqual({ echoed: { hi: true } })
+      client.close()
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  }, 10_000)
+
+  it("reconnects when the transport dies while onConnect is still doing later work after registration", async () => {
+    // task/wire-postreg-close-cto — a RESIDUAL variant of 21089, one
+    // step later in the same handshake. setupReconnect() only attaches its
+    // 'close' listener AFTER onConnect() fully resolves. A real onConnect
+    // commonly keeps working past registration itself — stdio-adapter.ts's
+    // post-register tribe.members round trip is the production example —
+    // and if the transport dies DURING that later work, the socket's
+    // 'close' event fires and finishes dispatching to whatever IS
+    // listening (connectToDaemon's own rejectPending) before setupReconnect
+    // ever runs. EventEmitters do not replay history: a listener attached
+    // after an event already fired never sees it, so the reconnect loop
+    // silently never started even though the transport had been fully dead
+    // the whole time. Evidence captured on tribe run 31784264058: adapter
+    // registered, "Startup banner failed" (a swallowed post-register
+    // tribe.members timeout) fired exactly 10s later, and no reconnect
+    // followed for the rest of the run.
+    const sock = join(tmpDir, "post-register-death.sock")
+    let registrations = 0
+    const clients: Socket[] = []
+    const server = createServer((socket) => {
+      clients.push(socket)
+      const parse = createLineParser((msg) => {
+        if (!isRequest(msg)) return
+        if (msg.method === "register") {
+          registrations += 1
+          socket.write(makeResponse(msg.id, { ok: true }))
+          return
+        }
+        socket.write(makeResponse(msg.id, { ok: true }))
+      })
+      socket.on("data", parse)
+      socket.on("error", () => {})
+    })
+    await new Promise<void>((resolve) => server.listen(sock, resolve))
+
+    try {
+      const client = await createReconnectingClient({
+        socketPath: sock,
+        noSpawn: true,
+        maxAttempts: 5,
+        async onConnect(c) {
+          await c.call("register", {})
+          if (clients.length === 1) {
+            // Kill the transport WHILE onConnect is still running — BEFORE
+            // createReconnectingClient's outer promise (and therefore
+            // setupReconnect()) can possibly resolve/run. createReconnectingClient
+            // does not resolve until the first onConnect call returns, so
+            // destroying AFTER that await (as opposed to from inside
+            // onConnect, here) would attach setupReconnect's listener
+            // before the kill and never exercise the race at all — only on
+            // the first connection, so the reconnect's own onConnect
+            // completes normally instead of looping.
+            clients[0]!.destroy()
+          }
+          // Mirrors stdio-adapter.ts doing further async work after
+          // registration succeeds (its post-register tribe.members round
+          // trip). The delay gives the close event time to fully fire and
+          // finish dispatching before this resolves and hands control back
+          // to createReconnectingClient — which is exactly what starves
+          // setupReconnect() of a listener to attach in time.
+          await new Promise((resolve) => setTimeout(resolve, 150))
+        },
+      })
+      await vi.waitFor(() => expect(registrations).toBe(2), { timeout: 5_000 })
+      client.close()
+    } finally {
+      for (const socket of clients) socket.destroy()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  }, 10_000)
+
+  it("closes each reconnect candidate whose registration rejects", async () => {
+    const sock = join(tmpDir, "reconnect-registration-reject.sock")
+    const { server, clients } = await spawnFakeDaemon(sock)
+    let registrations = 0
+    let exhausted = false
+    const client = await createReconnectingClient({
+      socketPath: sock,
+      maxAttempts: 1,
+      maxStartupAttempts: 1,
+      onConnect: async () => {
+        registrations += 1
+        if (registrations > 1) throw new Error("reconnect registration refused")
+      },
+      onReconnectExhausted: () => {
+        exhausted = true
+      },
+    })
+    try {
+      clients[0]?.destroy()
+      await vi.waitFor(() => expect(exhausted).toBe(true))
+      await vi.waitFor(() => expect(clients[1]?.destroyed).toBe(true))
+    } finally {
+      client.close()
+      for (const socket of clients) socket.destroy()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
   it("re-arms callbacks and notifications after one client transport closes while the daemon stays healthy", async () => {
     const sock = join(tmpDir, "d.sock")
     const { server, clients } = await spawnFakeDaemon(sock)
@@ -331,6 +757,37 @@ describe("createReconnectingClient transport recovery", () => {
     } finally {
       client.close()
       await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  it("reports bounded reconnect exhaustion with the final error", async () => {
+    const sock = join(tmpDir, "exhausted.sock")
+    const { server, clients } = await spawnFakeDaemon(sock)
+    let exhausted: { error: unknown; attempts: number } | undefined
+    const client = await createReconnectingClient({
+      socketPath: sock,
+      daemonScript: join(tmpDir, "must-not-restart.ts"),
+      noSpawn: true,
+      maxAttempts: 1,
+      maxStartupAttempts: 1,
+      onReconnectExhausted: (error, attempts) => {
+        exhausted = { error, attempts }
+      },
+    })
+
+    for (const socket of clients) socket.destroy()
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    try {
+      await vi.waitFor(() => {
+        const result = exhausted
+        expect(result).toBeDefined()
+        if (!result) throw new Error("reconnect exhaustion callback has not fired")
+        expect(result.attempts).toBe(1)
+        expect(result.error).toBeInstanceOf(Error)
+        expect((result.error as Error).message).toContain("(noSpawn)")
+      })
+    } finally {
+      client.close()
     }
   })
 

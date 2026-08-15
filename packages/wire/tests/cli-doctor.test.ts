@@ -10,7 +10,14 @@
  */
 
 import { describe, expect, test } from "vitest"
-import { evaluateDoctor, mcpJsonContent } from "../src/cli/read.ts"
+import {
+  deriveDoctorOutcome,
+  evaluateDoctor,
+  evaluateDoctorIdentity,
+  evaluateDoctorMembership,
+  evaluateDoctorVersions,
+} from "../src/cli/read.ts"
+import { mcpJsonContent } from "../src/cli/mcp-json-content.ts"
 
 describe("mcpJsonContent (MCP tool-result unwrap, shared by health + doctor)", () => {
   test("MCP-wrapped JSON content → parsed object", () => {
@@ -35,9 +42,9 @@ describe("mcpJsonContent (MCP tool-result unwrap, shared by health + doctor)", (
 })
 
 describe("evaluateDoctor (@km/tribe/20033 daemon staleness probe)", () => {
-  test("missing code_pin field → stale (bootstrap gap: daemon too old to self-report)", () => {
+  test("missing code_pin field → UNKNOWN (bootstrap gap: daemon too old to self-report)", () => {
     const v = evaluateDoctor({})
-    expect(v.stale).toBe(true)
+    expect(v.outcome).toEqual({ verdict: "UNKNOWN", exitCode: 2 })
     expect(v.reason).toMatch(/predates the code_pin detector/)
     // No SHAs available — the daemon could not self-report.
     expect(v.detail).toBeNull()
@@ -53,7 +60,7 @@ describe("evaluateDoctor (@km/tribe/20033 daemon staleness probe)", () => {
         superproject_pin: "def456",
       },
     })
-    expect(v.stale).toBe(true)
+    expect(v.outcome).toEqual({ verdict: "FAIL", exitCode: 1 })
     expect(v.reason).toBe("running abc123 != on_disk def456 — restart the daemon")
     expect(v.detail).toEqual({ running: "abc123", on_disk: "def456", superproject_pin: "def456" })
   })
@@ -62,16 +69,253 @@ describe("evaluateDoctor (@km/tribe/20033 daemon staleness probe)", () => {
     const v = evaluateDoctor({
       code_pin: { stale: false, reason: null, running: "abc123", on_disk: "abc123", superproject_pin: "abc123" },
     })
-    expect(v.stale).toBe(false)
+    expect(v.outcome).toEqual({ verdict: "OK", exitCode: 0 })
     expect(v.reason).toBeNull()
     expect(v.detail).toEqual({ running: "abc123", on_disk: "abc123", superproject_pin: "abc123" })
   })
 
-  test("null code_pin SHAs (standalone / no-git) but not stale → reported as fresh, SHAs surfaced as null", () => {
+  test.each(["running", "on_disk", "superproject_pin"] as const)(
+    "an unresolved %s operand makes equality UNKNOWN and never OK",
+    (field) => {
+      const codePin = {
+        stale: false,
+        reason: null,
+        running: "abc123" as string | null,
+        on_disk: "abc123" as string | null,
+        superproject_pin: "abc123" as string | null,
+      }
+      codePin[field] = null
+      const v = evaluateDoctor({ code_pin: codePin })
+
+      expect(v.outcome).toEqual({ verdict: "UNKNOWN", exitCode: 2 })
+      expect(v.reason).toContain(field)
+      expect(v.detail).toEqual({
+        running: codePin.running,
+        on_disk: codePin.on_disk,
+        superproject_pin: codePin.superproject_pin,
+      })
+    },
+  )
+
+  test("all unresolved code_pin operands cannot certify a standalone / no-git daemon", () => {
     const v = evaluateDoctor({
-      code_pin: { stale: false, reason: null, running: null, on_disk: null, superproject_pin: null },
+      code_pin: {
+        stale: null,
+        reason: "cannot compare daemon code identity: unresolved running, on_disk, superproject_pin",
+        running: null,
+        on_disk: null,
+        superproject_pin: null,
+      },
     })
-    expect(v.stale).toBe(false)
+    expect(v.outcome).toEqual({ verdict: "UNKNOWN", exitCode: 2 })
+    expect(v.reason).toContain("running")
+    expect(v.reason).toContain("on_disk")
+    expect(v.reason).toContain("superproject_pin")
     expect(v.detail).toEqual({ running: null, on_disk: null, superproject_pin: null })
+  })
+})
+
+describe("deriveDoctorOutcome (worst-of verdict algebra)", () => {
+  test.each([
+    { checks: ["OK", "OK"], expected: { verdict: "OK", exitCode: 0 } },
+    { checks: ["OK", "WARNING"], expected: { verdict: "FAIL", exitCode: 1 } },
+    { checks: ["OK", "CRITICAL"], expected: { verdict: "FAIL", exitCode: 1 } },
+    { checks: ["CRITICAL", "UNKNOWN"], expected: { verdict: "UNKNOWN", exitCode: 2 } },
+  ] as const)("derives $expected.verdict from $checks", ({ checks, expected }) => {
+    expect(deriveDoctorOutcome(checks)).toEqual(expected)
+  })
+})
+
+describe("status-backed doctor checks", () => {
+  const success = (value: string) => ({ ok: true as const, value })
+
+  test("three equal certs are the only green identity result", () => {
+    const check = evaluateDoctorIdentity(
+      { cert: "abc123", root: "/repo/vendor/tribe" },
+      { onDisk: success("abc123"), superprojectPin: success("abc123") },
+      null,
+    )
+    expect(check).toMatchObject({ severity: "OK", values: { running: "abc123", on_disk: "abc123", pin: "abc123" } })
+  })
+
+  test("running vs disk mismatch is CRITICAL with a diagnosis-derived restart remedy", () => {
+    const check = evaluateDoctorIdentity(
+      { cert: "old123", root: "/repo/vendor/tribe" },
+      { onDisk: success("new456"), superprojectPin: success("new456") },
+      null,
+    )
+    expect(check).toMatchObject({ severity: "CRITICAL" })
+    expect(check.diagnosis).toContain("running=old123 on_disk=new456")
+    expect(check.remedy).toContain("restarting will not help")
+    expect(check.remedy).toContain("daemon module root")
+  })
+
+  test("disk vs superproject pin mismatch is WARNING with the exact source root, checkout-behind", () => {
+    const check = evaluateDoctorIdentity(
+      { cert: "old123", root: "/repo/vendor/tribe" },
+      { onDisk: success("old123"), superprojectPin: success("new456") },
+      "checkout-behind",
+    )
+    expect(check).toMatchObject({ severity: "WARNING" })
+    expect(check.diagnosis).toContain("on_disk=old123 pin=new456")
+    expect(check.diagnosis).toMatch(/behind/i)
+    expect(check.remedy).toContain("/repo/vendor/tribe")
+  })
+
+  test("checkout AHEAD of its host pin must NOT emit the rollback remedy (live specimen 2026-08-13)", () => {
+    // Same live specimen as code-pin.test.ts: on_disk c15f7d1bb7aa was 6
+    // commits ahead of pin 60a5c3c8816a. The un-fixed evaluateDoctorIdentity
+    // treats any on_disk!=pin mismatch as "checkout is behind" and tells the
+    // operator to materialize the (older) pin — a rollback dressed as a fix.
+    const check = evaluateDoctorIdentity(
+      { cert: "c15f7d1bb7aa", root: "/repo/vendor/tribe" },
+      { onDisk: success("c15f7d1bb7aa"), superprojectPin: success("60a5c3c8816a") },
+      "checkout-ahead",
+    )
+    expect(check.severity).not.toBe("UNKNOWN")
+    expect(check.diagnosis).not.toMatch(/is behind/i)
+    expect(check.diagnosis).toMatch(/ahead/i)
+    expect(check.remedy).not.toContain("materialize its pinned Tribe submodule")
+    expect(check.remedy).toMatch(/no daemon action/i)
+  })
+
+  test("diverged checkout and pin recommend investigation, no mechanical remedy", () => {
+    const check = evaluateDoctorIdentity(
+      { cert: "1111", root: "/repo/vendor/tribe" },
+      { onDisk: success("1111"), superprojectPin: success("2222") },
+      "divergent",
+    )
+    expect(check.diagnosis).toMatch(/diverged/i)
+    expect(check.remedy).not.toContain("materialize its pinned Tribe submodule")
+  })
+
+  test("unresolvable ancestry (unknown-object) is UNKNOWN, never guessed toward a remedy", () => {
+    const check = evaluateDoctorIdentity(
+      { cert: "3333", root: "/repo/vendor/tribe" },
+      { onDisk: success("3333"), superprojectPin: success("4444") },
+      "unknown",
+    )
+    expect(check.severity).toBe("UNKNOWN")
+    expect(check.diagnosis).toMatch(/unknown-direction/i)
+    expect(check.remedy).not.toContain("materialize its pinned Tribe submodule")
+  })
+
+  test("an unresolvable disk probe is UNKNOWN with path and errno", () => {
+    const check = evaluateDoctorIdentity(
+      { cert: "abc123", root: "/missing/tribe" },
+      {
+        onDisk: {
+          ok: false,
+          failure: {
+            path: "/missing/tribe",
+            operation: "git rev-parse HEAD",
+            errno: "ENOENT",
+            message: "not found",
+          },
+        },
+        superprojectPin: success("abc123"),
+      },
+      null,
+    )
+    expect(check).toMatchObject({ severity: "UNKNOWN" })
+    expect(check.diagnosis).toContain("path=/missing/tribe")
+    expect(check.diagnosis).toContain("errno=ENOENT")
+  })
+
+  // `--show-superproject-working-tree` exits 0 with empty output when the
+  // checkout is standalone (not embedded as a submodule) — CI's own checkout
+  // of tribe included. `probeGitValue` folds that into EMPTY_RESULT, distinct
+  // from every other probe failure. That is a fact about checkout shape, not
+  // an error, so identity must not go UNKNOWN over it — it reduces to
+  // running-vs-on-disk only.
+  test("no superproject (EMPTY_RESULT) with a matching checkout is OK, not UNKNOWN", () => {
+    const check = evaluateDoctorIdentity(
+      { cert: "abc123", root: "/repo/tribe" },
+      {
+        onDisk: success("abc123"),
+        superprojectPin: {
+          ok: false,
+          failure: {
+            path: "/repo/tribe",
+            operation: "git rev-parse --show-superproject-working-tree",
+            errno: "EMPTY_RESULT",
+            message: "git returned no value",
+          },
+        },
+      },
+      null,
+    )
+    expect(check).toMatchObject({ severity: "OK" })
+    expect(check.diagnosis).toContain("running=abc123 on_disk=abc123")
+    expect(check.diagnosis).toContain("pin=none")
+  })
+
+  test("no superproject (EMPTY_RESULT) with a running/on-disk mismatch is still CRITICAL", () => {
+    const check = evaluateDoctorIdentity(
+      { cert: "old123", root: "/repo/tribe" },
+      {
+        onDisk: success("new456"),
+        superprojectPin: {
+          ok: false,
+          failure: {
+            path: "/repo/tribe",
+            operation: "git rev-parse --show-superproject-working-tree",
+            errno: "EMPTY_RESULT",
+            message: "git returned no value",
+          },
+        },
+      },
+      null,
+    )
+    expect(check).toMatchObject({ severity: "CRITICAL" })
+    expect(check.diagnosis).toContain("running=old123 on_disk=new456")
+    expect(check.remedy).toContain("restarting will not help")
+  })
+
+  test("a non-EMPTY_RESULT superproject probe failure stays UNKNOWN", () => {
+    const check = evaluateDoctorIdentity(
+      { cert: "abc123", root: "/repo/tribe" },
+      {
+        onDisk: success("abc123"),
+        superprojectPin: {
+          ok: false,
+          failure: {
+            path: "/repo/tribe",
+            operation: "git rev-parse --show-superproject-working-tree",
+            errno: "ENOENT",
+            message: "git not found",
+          },
+        },
+      },
+      null,
+    )
+    expect(check).toMatchObject({ severity: "UNKNOWN" })
+    expect(check.diagnosis).toContain("errno=ENOENT")
+  })
+
+  test("negotiated legacy transport is version-degraded WARNING, not healthy", () => {
+    const check = evaluateDoctorVersions(10, [
+      { name: "@dev/0", protocol_versions: [10], version_state: "current" },
+      { name: "@dev/1", protocol_versions: [9], version_state: "version-degraded" },
+    ])
+    expect(check).toMatchObject({ severity: "WARNING" })
+    expect(check.diagnosis).toContain("@dev/1=version-degraded(v9)")
+  })
+
+  test("membership discrepancy is WARNING and names every per-seat rail state", () => {
+    const check = evaluateDoctorMembership(
+      [
+        { name: "@dev/0", transport_state: "connected" },
+        { name: "@dev/1", transport_state: "disconnected" },
+      ],
+      {
+        status: "degraded",
+        missing: [{ name: "@dev/2", state: "missing-transport" }],
+      },
+    )
+    expect(check).toMatchObject({ severity: "WARNING" })
+    expect(check.diagnosis).toContain("@dev/0=connected")
+    expect(check.diagnosis).toContain("@dev/1=disconnected")
+    expect(check.diagnosis).toContain("@dev/2=missing-transport")
   })
 })

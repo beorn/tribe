@@ -1,28 +1,17 @@
 /**
  * Send/messaging verbs for the unified `tribe-wire` CLI.
  *
- * Family 2 of Phase A.2 verb-port — see
- * `@km/bearly/19231-tribe-cli-unify-phase-a2-verbs`. Each verb mirrors the
- * implementation in `vendor/tribe/tools/tribe-cli.ts` (which stays canonical
- * until the Phase C atomic-delete). The handlers here are pure ports — same
- * RPCs, same flags, same output shape — with the only changes being:
- *
- *   - Import paths are intra-package (`../lib/...`) instead of
- *     `tribe-wire/lib/...` (to avoid self-import).
- *   - The `retro.ts` module was copied into `../lib/retro.ts` so this module
- *     has no `tools/` dependency. It still uses DB-direct access (read-only
- *     `bun:sqlite`) — straddles client/daemon boundary; Phase C may revisit.
- *   - The verbs are registered on a caller-supplied `Command` rather than
- *     created on a fresh `program` — the main dispatcher (`cli.ts`) calls
- *     `registerSendCommands(program)` to wire them up.
+ * This is the shipping implementation for the send/messaging command family.
+ * The unified dispatcher (`cli.ts`) registers these handlers on its shared
+ * `Command` instance.
  *
  * Verbs in this family:
- *   - send          (line ~581 in tools/tribe-cli.ts)
- *   - join          one-shot CLI join/rejoin checkpoint
- *   - alarm <reason>(line ~629)
- *   - alarm-status  (line ~635)
- *   - alarm-ack     (line ~641)
- *   - retro         (line ~646)
+ *   - send
+ *   - join          observe/checkpoint a persistent native join
+ *   - alarm <reason>
+ *   - alarm-status
+ *   - alarm-ack
+ *   - retro
  */
 
 import { existsSync } from "node:fs"
@@ -34,57 +23,110 @@ import {
   TRIBE_FANOUTS,
   TRIBE_MESSAGE_TYPES,
   visibleCliProjectionForMcp,
+  type TribeDeliveryMode as Delivery,
   type TribeFanout as Fanout,
   type TribeMessageType as MessageType,
 } from "../command-descriptors.ts"
-import { connectToDaemon, resolveSocketPath, TRIBE_PROTOCOL_VERSION } from "../lib/socket.ts"
+import { TRIBE_PROTOCOL_VERSION, TRIBE_SUPPORTED_PROTOCOL_VERSIONS } from "../lib/socket.ts"
 import { resolveDbPath } from "../lib/config.ts"
+import { INCIDENT_KEY_SEPARATOR, parseIncidentKey, type IncidentIdentity } from "../lib/incident.ts"
 import { formatMarkdown, generateRetro, parseDuration } from "../lib/retro.ts"
+import { readTribeLaunchId } from "../launch-environment.ts"
+import { withCliDaemonClient } from "./daemon-client.ts"
+import { mcpJsonContent } from "./mcp-json-content.ts"
+import { oversizedMessageError } from "../lib/send-validation.ts"
 
 const SEND_CLI = visibleCliProjectionForMcp("send")
 const JOIN_CLI = visibleCliProjectionForMcp("join")
 
 // ---------------------------------------------------------------------------
-// Daemon connection (shared shape with read.ts — kept local per
-// intra-module rule; Phase C may extract to ../lib/daemon-call.ts)
+// Identity-aware calls over the shared CLI daemon-client lifecycle
 // ---------------------------------------------------------------------------
 
-async function callDaemon(method: string, params?: Record<string, unknown>): Promise<unknown> {
-  const socketPath = resolveSocketPath()
-  try {
-    const client = await connectToDaemon(socketPath)
-    try {
-      const result = await client.call(method, params)
-      return result
-    } finally {
-      client.close()
+/**
+ * Decide what the one-shot CLI does when the daemon did not grant the identity
+ * it asked for. The daemon never lets a CLI steal a name held by a live session
+ * — it dedupes to a different one — so a tracked reply sent under the deduped
+ * identity DELIVERS the message but closes ZERO tracker rows. That silent
+ * half-success (peer sees the answer, ball stays open forever) is the failure
+ * this guards; a tracked reply must abort instead.
+ */
+export function classifyIdentityGrant(
+  requested: string,
+  assigned: string | undefined,
+  requireIdentity: boolean,
+): { ok: true } | { ok: false; fatal: boolean; message: string } {
+  if (assigned === requested) return { ok: true }
+  const who = assigned === undefined || assigned.length === 0 ? "an anonymous session" : `"${assigned}"`
+  const base = `tribe-wire: could not take the identity "${requested}" — the daemon assigned ${who}, because that name is held by a live session.`
+  if (requireIdentity) {
+    return {
+      ok: false,
+      fatal: true,
+      message:
+        `${base}\nA tracked reply must be sent BY the ball's owner, so nothing was sent and the ball is still open.\n` +
+        `Answer from that live session's own Tribe MCP (tribe.send with the reply field) instead of the one-shot CLI.`,
     }
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code
-    if (code === "ECONNREFUSED" || code === "ENOENT") {
-      console.error(`No daemon running (socket: ${socketPath})`)
-      console.error(`Start one with: bun tribe-daemon (package tribe-daemon), or let a host autostart it`)
-      process.exit(1)
-    }
-    throw err
   }
+  return { ok: false, fatal: false, message: `${base} This message is attributed to ${who}.` }
 }
 
 /**
- * Unwrap an MCP tool result's JSON content (`content[0].text` -> parsed), or
- * return the raw value when there is no parseable content. Local copy for the
- * send/messaging verb family until the CLI-daemon seam is extracted.
+ * The identity a one-shot CLI send registers under. `name` is the resolved
+ * session/persona; for a MANAGED launch, `launchId`/`launchParentPid` carry the
+ * daemon-authoritative launch tuple so the connection fans into the live seat
+ * of that launch instead of colliding on the name. A bare TRIBE_NAME caller
+ * omits the launch fields.
  */
-function mcpJsonContent(raw: unknown): unknown {
-  const text = (raw as { content?: ReadonlyArray<{ text?: string }> })?.content?.[0]?.text
-  if (typeof text === "string") {
-    try {
-      return JSON.parse(text)
-    } catch {
-      /* not JSON - fall back to the raw value */
+type SendCaller = { name: string; launchId?: string; launchParentPid?: number }
+
+async function callDaemon(
+  method: string,
+  params?: Record<string, unknown>,
+  as?: SendCaller | null,
+  requireIdentity = false,
+): Promise<unknown> {
+  return withCliDaemonClient(async (client) => {
+    // One-shot identity: register under the caller's session name BEFORE the
+    // call so the daemon attributes the message (and can close ball-tracker
+    // rows owned by that name) instead of an anonymous pending-* session.
+    //
+    // When the caller is a MANAGED launch, resolveSendCaller carries the
+    // daemon-authoritative (launch_id, launch_parent_pid) tuple; forwarding
+    // it lets the daemon fan this connection into the live seat of the same
+    // launch (attributed, no takeover) rather than colliding on the persona
+    // name. A one-shot cannot mint that tuple itself — the daemon minted it —
+    // so this never lets an unrelated caller steal a name. For a bare
+    // TRIBE_NAME caller (no launch), we omit it; the grant check below then
+    // decides between fail-loud abort (tracked reply) and attributed warn.
+    if (as) {
+      const registered = mcpJsonContent(
+        await client.call("register", {
+          name: as.name,
+          role: "member",
+          domains: [],
+          delivery: "pull",
+          project: process.cwd(),
+          projectName: process.cwd().split("/").filter(Boolean).at(-1) ?? "unknown",
+          pid: process.pid,
+          protocolVersion: TRIBE_PROTOCOL_VERSION - 1,
+          supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
+          ...(as.launchId !== undefined && as.launchParentPid !== undefined
+            ? { launchId: as.launchId, launchParentPid: as.launchParentPid }
+            : {}),
+        }),
+      ) as { name?: string }
+      const grant = classifyIdentityGrant(as.name, registered?.name, requireIdentity)
+      if (!grant.ok) {
+        if (grant.fatal) {
+          console.error(grant.message)
+          process.exit(1)
+        }
+        console.warn(grant.message)
+      }
     }
-  }
-  return raw
+    return client.call(method, params)
+  })
 }
 
 /** Thin wrapper so `retro` uses the same DB resolution as the daemon. */
@@ -93,8 +135,7 @@ function resolveDbPathFromCli(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Message-type contract — shared with the daemon validator (kept in lockstep
-// with the legacy `tools/tribe-cli.ts` definition; do not drift).
+// Message-type contract — shared with the daemon validator; do not drift.
 // ---------------------------------------------------------------------------
 
 type SendPayloadInput = {
@@ -102,9 +143,19 @@ type SendPayloadInput = {
   message: string
   type?: MessageType
   summary?: string
+  messageId?: string
+  delivery?: Delivery
+  ref?: string
   request?: boolean | string
   reply?: string
+  /** CLI control only; never forwarded to the daemon payload. */
+  anonymous?: boolean
   fanout?: Fanout
+  expiresInMs?: number
+  /** Raw `--incident emitter:subject:condition` value. */
+  incident?: string
+  /** `--incident-cleared`: the condition no longer holds. */
+  incidentCleared?: boolean
 }
 
 type SendPayload = {
@@ -112,29 +163,54 @@ type SendPayload = {
   message: string
   type: MessageType
   summary?: string
+  message_id?: string
+  delivery?: Delivery
+  ref?: string
   request?: true | string
   reply?: string
   fanout?: Fanout
-  sender?: string
+  expires_in_ms?: number
+  incident?: IncidentIdentity & { active?: boolean }
 }
 
-export function buildSendPayload(input: SendPayloadInput, sender?: string | null): SendPayload {
+export function buildSendPayload(input: SendPayloadInput): SendPayload {
   const payload: SendPayload = {
     to: input.to,
     message: input.message,
     type: input.type ?? "notify",
   }
   if (input.summary) payload.summary = input.summary
+  if (input.messageId) payload.message_id = input.messageId
+  if (input.delivery) payload.delivery = input.delivery
+  if (input.ref) payload.ref = input.ref
   if (input.request !== undefined && input.request !== false) payload.request = input.request
   if (input.reply) payload.reply = input.reply
   if (input.fanout) payload.fanout = input.fanout
-  if (sender) payload.sender = sender
+  if (input.expiresInMs !== undefined) payload.expires_in_ms = input.expiresInMs
+  if (input.incident !== undefined) {
+    // Parsed here rather than split inline so the CLI and the daemon share one
+    // definition of a well-formed identity. A bad key fails at the CLI with the
+    // shape named, instead of reaching the daemon as a mystery refusal.
+    const identity = parseIncidentKey(input.incident)
+    if (identity === null) {
+      throw new Error(
+        `--incident must be emitter${INCIDENT_KEY_SEPARATOR}subject${INCIDENT_KEY_SEPARATOR}condition with all three parts non-empty (got ${JSON.stringify(input.incident)})`,
+      )
+    }
+    payload.incident = input.incidentCleared === true ? { ...identity, active: false } : identity
+  } else if (input.incidentCleared === true) {
+    // Clearing needs to know WHAT cleared; silently ignoring this would look
+    // like a successful close while the ball stayed open.
+    throw new Error(
+      "--incident-cleared requires --incident <emitter:subject:condition> naming the condition that cleared",
+    )
+  }
   return payload
 }
 
 type PendingListResult = {
   error?: string
-  pending?: Array<{ request_id?: string }>
+  pending?: Array<{ request_id?: string; message_id?: string }>
 }
 
 function replyOwnerFromEnv(env: NodeJS.ProcessEnv = process.env): string | null {
@@ -142,13 +218,78 @@ function replyOwnerFromEnv(env: NodeJS.ProcessEnv = process.env): string | null 
   return name.length > 0 ? name : null
 }
 
-function sendCallerFromEnv(env: NodeJS.ProcessEnv = process.env): string | null {
-  return replyOwnerFromEnv(env)
+function rejectUnstructuredMessageIntent(input: SendPayloadInput): void {
+  const intent = /^\s*(reply|ref)=(\S+)/u.exec(input.message)
+  if (intent === null) return
+  const field = intent[1] === "reply" ? "reply" : "ref"
+  const value = intent[2] ?? ""
+
+  console.error(
+    `tribe-wire send: message content begins with ${field}=${value}; structured intent must not be encoded as prose.`,
+  )
+  console.error(`Use --${field} ${value} and remove ${field}=${value} from the message content.`)
+  process.exit(2)
 }
 
-function requireReplyOwner(reply: string): string {
+async function resolveSendCaller(reply?: string, anonymous = false): Promise<SendCaller | null> {
+  if (anonymous) return null
+  const launchId = readTribeLaunchId(process.env)
+  if (launchId) {
+    let failure: string
+    try {
+      const persona = replyOwnerFromEnv()
+      const status = mcpJsonContent(
+        await callDaemon("cli_inbox_status_by_launch_v1", {
+          launch_id: launchId,
+          ...(persona === null ? {} : { persona }),
+        }),
+      ) as {
+        session?: unknown
+        launch_id?: unknown
+        launch_parent_pid?: unknown
+      }
+      if (typeof status.session === "string" && status.session.length > 0) {
+        const caller: SendCaller = { name: status.session }
+        // The daemon owns the (launch_id, launch_parent_pid) tuple; forward it
+        // verbatim so callDaemon can fan into the live seat of this launch.
+        if (typeof status.launch_id === "string" && status.launch_id.length > 0) caller.launchId = status.launch_id
+        if (
+          typeof status.launch_parent_pid === "number" &&
+          Number.isSafeInteger(status.launch_parent_pid) &&
+          status.launch_parent_pid > 0
+        ) {
+          caller.launchParentPid = status.launch_parent_pid
+        }
+        return caller
+      }
+      failure = `daemon launch authority returned no current session for launch id ${launchId}`
+    } catch (error) {
+      failure = `cannot resolve launch identity ${launchId}: ${error instanceof Error ? error.message : String(error)}`
+    }
+    console.error(`tribe-wire send: ${failure}; not sending${reply ? ` --reply ${reply}` : ""}.`)
+    console.error(
+      reply
+        ? `A tracked reply must be sent by the ball's owner. Inspect with: tribe pending --owner <owner>`
+        : "Restore the managed seat identity, or pass --anonymous for an intentionally unattributed untracked message.",
+    )
+    process.exit(1)
+  }
+
+  // No launch authority. TRIBE_NAME / TRIBE_SESSION_NAME is a caller-authored
+  // hint, never validated provenance (21717), so a plain send must not forward
+  // it as identity — it stays an anonymous pending-* sender. Only --reply needs
+  // it, to name the ball owner the response must close; register there so the
+  // daemon can attribute the closure (a live holder still dedupes fail-loud, so
+  // a running seat is never stolen by a one-shot).
+  if (!reply) {
+    console.error("tribe-wire send: no daemon-validated launch identity is available; not sending.")
+    console.error(
+      "Send from a managed Tribe seat, or pass --anonymous for an intentionally unattributed untracked message.",
+    )
+    process.exit(1)
+  }
   const owner = replyOwnerFromEnv()
-  if (owner) return owner
+  if (owner) return { name: owner }
   console.error(
     `tribe-wire send: --reply ${reply} requires TRIBE_NAME or TRIBE_SESSION_NAME so the one-shot CLI can close the pending owner.`,
   )
@@ -157,46 +298,70 @@ function requireReplyOwner(reply: string): string {
   process.exit(2)
 }
 
-async function verifyPendingReplyOwner(owner: string, reply: string): Promise<void> {
+/**
+ * Advisory only (22844): closing a ball and delivering its answer must never
+ * be one coupled operation. A reply whose id is no longer owned STILL SENDS —
+ * a seat that waited hours must get the content even when the bookkeeping
+ * half has expired, been settled out-of-band, or aged past the tracker. The
+ * close outcome is reported separately after delivery.
+ */
+async function warnPendingReplyOwner(owner: string, reply: string): Promise<void> {
   const pending = mcpJsonContent(await callDaemon("tribe.pending", { owner })) as PendingListResult
   if (pending.error) {
-    console.error(`tribe-wire send: cannot verify pending request ${reply} for ${owner}: ${pending.error}`)
-    console.error(`Not sending response. Check with: tribe pending --owner ${owner}`)
-    process.exit(1)
+    console.error(`tribe-wire send: note — cannot verify pending request ${reply} for ${owner}: ${pending.error}`)
+    console.error(`Sending anyway; the close outcome is reported after delivery.`)
+    return
   }
-  const hasRequest = (pending.pending ?? []).some((p) => p.request_id === reply)
+  const hasRequest = (pending.pending ?? []).some((p) => p.request_id === reply || p.message_id === reply)
   if (!hasRequest) {
-    console.error(`tribe-wire send: no pending request ${reply} is owned by ${owner}; not sending response.`)
-    console.error(`Check the owner with: tribe pending --owner ${owner}`)
-    process.exit(1)
+    console.error(`tribe-wire send: note — no pending request ${reply} is currently owned by ${owner}; sending anyway.`)
+    console.error(`The close will report 0 rows; the recipient still gets the message.`)
   }
 }
 
+/**
+ * Runs strictly AFTER delivery (22844): every branch here reports on the
+ * bookkeeping half of an already-sent response, so none may read as a
+ * delivery failure. Exit 3 = delivered, close not confirmed — distinct from
+ * 1 (not delivered) and 2 (identity/usage).
+ */
 function reportCommittedReplyTracker(
   owner: string,
   reply: string,
   tracker: { request_id?: string; closed?: number } | undefined,
 ): void {
   if (tracker === undefined) {
-    console.error(`tribe-wire send: response sent, but the daemon returned no committed tracker proof for ${reply}.`)
-    console.error(`Verify current state with: tribe pending --owner ${owner}`)
-    process.exit(1)
-  }
-  const closed = tracker.closed
-  if (tracker.request_id !== reply || typeof closed !== "number" || !Number.isSafeInteger(closed) || closed < 0) {
     console.error(
-      `tribe-wire send: response sent, but the daemon returned malformed committed tracker proof for ${reply} ` +
-        `(expected request_id=${reply} and a non-negative integer closed count).`,
+      `tribe-wire send: response DELIVERED, but the daemon returned no committed tracker proof for ${reply}.`,
     )
     console.error(`Verify current state with: tribe pending --owner ${owner}`)
-    process.exit(1)
+    process.exit(3)
+  }
+  const closed = tracker.closed
+  const canonicalRequestId = tracker.request_id
+  if (
+    typeof canonicalRequestId !== "string" ||
+    canonicalRequestId.length === 0 ||
+    typeof closed !== "number" ||
+    !Number.isSafeInteger(closed) ||
+    closed < 0
+  ) {
+    console.error(
+      `tribe-wire send: response DELIVERED, but the daemon returned malformed committed tracker proof for ${reply} ` +
+        `(expected a canonical request_id and a non-negative integer closed count).`,
+    )
+    console.error(`Verify current state with: tribe pending --owner ${owner}`)
+    process.exit(3)
   }
   if (closed < 1) {
-    console.error(`tribe-wire send: response sent, but its committed tracker result closed 0 rows for ${reply}.`)
+    console.error(
+      `tribe-wire send: response DELIVERED, but its committed tracker result closed 0 rows for ${canonicalRequestId} ` +
+        `(ball not currently owned — expired, settled out-of-band, or never tracked).`,
+    )
     console.error(`Verify current state with: tribe pending --owner ${owner}`)
-    process.exit(1)
+    process.exit(3)
   }
-  console.log(`Closed ${closed} pending request row(s) for ${owner}: ${reply}`)
+  console.log(`Closed ${closed} pending request row(s) for ${owner}: ${canonicalRequestId}`)
 }
 
 function collectDomain(value: string, previous: string[]): string[] {
@@ -211,30 +376,86 @@ function parseDomains(values: string[] | undefined): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// Command implementations (ported verbatim from tools/tribe-cli.ts)
+// Command implementations
 // ---------------------------------------------------------------------------
 
 async function cmdSend(input: SendPayloadInput): Promise<void> {
-  const replyOwner = input.reply ? requireReplyOwner(input.reply) : null
-  if (input.reply && replyOwner) await verifyPendingReplyOwner(replyOwner, input.reply)
+  rejectUnstructuredMessageIntent(input)
+  const oversized = oversizedMessageError(input.message)
+  if (oversized !== null) {
+    console.error(`tribe-wire send: ${oversized}`)
+    process.exit(2)
+  }
+  const type = input.type ?? "notify"
+  const anonymousWouldTrack =
+    input.reply !== undefined ||
+    input.request !== undefined ||
+    input.incident !== undefined ||
+    input.incidentCleared === true ||
+    type === "request" ||
+    type === "query" ||
+    type === "assign"
+  if (input.anonymous && anonymousWouldTrack) {
+    console.error(
+      "tribe-wire send: --anonymous is limited to untracked messages; it cannot be combined with reply/request/incident tracking or request, query, or assign types.",
+    )
+    process.exit(2)
+  }
+  const caller = await resolveSendCaller(input.reply, input.anonymous)
+  if (input.reply && caller) await warnPendingReplyOwner(caller.name, input.reply)
 
-  const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input, sendCallerFromEnv()))) as {
+  const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input), caller, !input.anonymous)) as {
     error?: string
     summary?: string
     summary_derived?: boolean
     warning?: string
+    truncated?: boolean
+    original_length?: number
     tracker?: { request_id?: string; closed?: number }
+    delivery?: {
+      state?: string
+      original_target?: string
+      recipient?: string
+      reason?: string
+    }
   }
   if (typeof result.error === "string" && result.error.length > 0) {
     console.error(`tribe-wire send: ${result.error}`)
     process.exit(1)
   }
-  if (input.reply && replyOwner) reportCommittedReplyTracker(replyOwner, input.reply, result.tracker)
-  console.log(`Sent message to ${input.to}`)
+  if (input.reply && caller) reportCommittedReplyTracker(caller.name, input.reply, result.tracker)
+  if (result.delivery?.state === "bounced") {
+    const { original_target: originalTarget, recipient, reason } = result.delivery
+    if (
+      typeof originalTarget !== "string" ||
+      originalTarget.length === 0 ||
+      typeof recipient !== "string" ||
+      recipient.length === 0 ||
+      typeof reason !== "string" ||
+      reason.length === 0
+    ) {
+      console.error(
+        `tribe-wire send: message DELIVERED, but the daemon returned malformed redirect proof for ${input.to}.`,
+      )
+      console.error("Inspect the recipient mailbox and daemon delivery policy before retrying.")
+      process.exit(3)
+    }
+    console.log(`Sent message to ${recipient} (redirected from ${originalTarget}: ${reason})`)
+  } else {
+    console.log(`Sent message to ${input.to}`)
+  }
   // Derive-not-reject: surface (no-silent) when the daemon derived a one-liner
   // because none was authored, so the sender learns to pass `--summary`.
   if (result.summary_derived) {
     console.warn(`  no --summary given; derived one-liner: "${result.summary ?? ""}"`)
+  }
+  // @ag/tribe/22497: the daemon caps messages and used to cut them silently, so
+  // "Sent message to X" above could describe a mutilated send. Same no-silent
+  // rule as the derived summary — the sender learns from its own terminal.
+  if (result.truncated) {
+    console.warn(
+      `  message TRUNCATED: only the first 4096 of ${result.original_length ?? "?"} chars were delivered; resend the remainder or link the full text`,
+    )
   }
 }
 
@@ -248,64 +469,39 @@ async function cmdJoin(
     process.exit(2)
   }
 
-  const cwd = process.cwd()
   const role = opts.role ?? "member"
   const domains = parseDomains(opts.domain)
-  const socketPath = resolveSocketPath()
-  const ephemeralName = `cli-join-${process.pid}-${Date.now()}`
-  let result: {
+  const result = (await callDaemon("cli_join", { name, role, domains, delivery })) as {
     joined?: boolean
+    observed?: boolean
     name?: string
     role?: string
     domains?: string[]
     delivery?: string
-    previous_name?: string
+    memberId?: string
+    transportPids?: number[]
     error?: string
   }
-  try {
-    const client = await connectToDaemon(socketPath)
-    try {
-      await client.call("register", {
-        name: ephemeralName,
-        role: "member",
-        domains: [],
-        delivery,
-        project: cwd,
-        projectName: cwd.split("/").filter(Boolean).at(-1) ?? "unknown",
-        pid: process.pid,
-        protocolVersion: TRIBE_PROTOCOL_VERSION,
-      })
-      result = mcpJsonContent(await client.call("tribe.join", { name, role, domains, delivery })) as typeof result
-    } finally {
-      client.close()
-    }
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code
-    if (code === "ECONNREFUSED" || code === "ENOENT") {
-      console.error(`No daemon running (socket: ${socketPath})`)
-      console.error(`Start one with: bun tribe-daemon (package tribe-daemon), or let a host autostart it`)
-      process.exit(1)
-    }
-    throw err
-  }
 
-  if (opts.json) {
-    console.log(JSON.stringify(result))
-    return
-  }
   if (result.error) {
     console.error(`tribe-wire join: ${result.error}`)
     process.exit(1)
   }
-  console.log(`Joined ${result.name ?? name} as ${result.role ?? role} (delivery=${result.delivery ?? delivery}).`)
-  if (result.previous_name) console.log(`  previous: ${result.previous_name}`)
+  if (opts.json) {
+    console.log(JSON.stringify(result))
+    return
+  }
+  console.log(
+    `Verified ${result.name ?? name} is persistently joined as ${result.role ?? role} ` +
+      `(delivery=${result.delivery ?? delivery}).`,
+  )
 }
 
 /**
  * Andon-pull alarm — `tribe alarm <reason>` sets a project-wide stop-the-line
  * flag. The chief-drain-check.sh PreToolUse hook reads it and HARD-BLOCKS
  * chief's tool calls until `tribe alarm-ack` clears it.
- * Spec: @km/all/silent-errors-enforcement/chief-silent-watchdog-relay-pattern-detection (Layer 3).
+ * Delivery-attention lineage: @ag/tribe/21626-per-seat-inbox-staleness-alarm.
  */
 async function cmdAlarmSet(reason: string, opts: { by?: string }): Promise<void> {
   const by = opts.by ?? process.env.USER ?? "anonymous"
@@ -378,8 +574,7 @@ async function cmdRetro(opts: { since?: string; format: string; db?: string }): 
 // ---------------------------------------------------------------------------
 
 /**
- * Register send/messaging verbs (Family 2 of Phase A.2 verb-port).
- * Each verb mirrors the implementation in `vendor/tribe/tools/tribe-cli.ts`.
+ * Register the shipping send/messaging verbs on the unified dispatcher.
  *
  * Bead: @km/bearly/19231-tribe-cli-unify-phase-a2-verbs
  */
@@ -388,9 +583,16 @@ export function registerSendCommands(program: Command): void {
   const sendMessage = cliArgument(SEND_CLI, "message")
   const sendType = cliOption(SEND_CLI, "type")
   const sendSummary = cliOption(SEND_CLI, "summary")
+  const sendMessageId = cliOption(SEND_CLI, "message-id")
+  const sendDelivery = cliOption(SEND_CLI, "delivery")
+  const sendRef = cliOption(SEND_CLI, "ref")
   const sendReply = cliOption(SEND_CLI, "reply")
+  const sendAnonymous = cliOption(SEND_CLI, "anonymous")
   const sendRequest = cliOption(SEND_CLI, "request")
   const sendFanout = cliOption(SEND_CLI, "fanout")
+  const sendExpiresInMs = cliOption(SEND_CLI, "expires-in-ms")
+  const sendIncident = cliOption(SEND_CLI, "incident")
+  const sendIncidentCleared = cliOption(SEND_CLI, "incident-cleared")
   program
     .command(SEND_CLI.name)
     .description(SEND_CLI.description)
@@ -398,19 +600,45 @@ export function registerSendCommands(program: Command): void {
     .argument(`<${sendMessage.name}...>`, sendMessage.description)
     .option(sendType.flags, sendType.description)
     .option(sendSummary.flags, sendSummary.description)
+    .option(sendMessageId.flags, sendMessageId.description)
+    .option(sendDelivery.flags, sendDelivery.description)
+    .option(sendRef.flags, sendRef.description)
     .option(sendReply.flags, sendReply.description)
+    .option(sendAnonymous.flags, sendAnonymous.description)
     .option(sendRequest.flags, sendRequest.description)
     .option(sendFanout.flags, sendFanout.description)
+    .option(sendExpiresInMs.flags, sendExpiresInMs.description)
+    .option(sendIncident.flags, sendIncident.description)
+    .option(sendIncidentCleared.flags, sendIncidentCleared.description)
     .action(
       (
         to: string,
         message: string[],
-        opts: { type?: string; summary?: string; request?: boolean | string; reply?: string; fanout?: string },
+        opts: {
+          type?: string
+          summary?: string
+          messageId?: string
+          delivery?: string
+          ref?: string
+          request?: boolean | string
+          reply?: string
+          anonymous?: boolean
+          fanout?: string
+          expiresInMs?: string
+          incident?: string
+          incidentCleared?: boolean
+        },
       ) => {
         const type = opts.type ?? "notify"
         if (!(TRIBE_MESSAGE_TYPES as readonly string[]).includes(type)) {
           console.error(
             `tribe-wire send: invalid --type '${type}' — expected one of: ${TRIBE_MESSAGE_TYPES.join(", ")}`,
+          )
+          process.exit(2)
+        }
+        if (opts.delivery !== undefined && !(TRIBE_DELIVERY_MODES as readonly string[]).includes(opts.delivery)) {
+          console.error(
+            `tribe-wire send: invalid --delivery '${opts.delivery}' — expected one of: ${TRIBE_DELIVERY_MODES.join(", ")}`,
           )
           process.exit(2)
         }
@@ -420,14 +648,40 @@ export function registerSendCommands(program: Command): void {
           )
           process.exit(2)
         }
+        const expiresInMs = opts.expiresInMs === undefined ? undefined : Number(opts.expiresInMs)
+        if (expiresInMs !== undefined && !Number.isSafeInteger(expiresInMs)) {
+          console.error(`tribe-wire send: invalid --expires-in-ms '${opts.expiresInMs}' — expected an integer`)
+          process.exit(2)
+        }
+        // Validated here as well as in buildSendPayload so a malformed key
+        // exits 2 with the shape named, rather than surfacing as a stack trace.
+        if (opts.incident !== undefined && parseIncidentKey(opts.incident) === null) {
+          console.error(
+            `tribe-wire send: invalid --incident '${opts.incident}' — expected emitter${INCIDENT_KEY_SEPARATOR}subject${INCIDENT_KEY_SEPARATOR}condition with all three parts non-empty`,
+          )
+          process.exit(2)
+        }
+        if (opts.incidentCleared === true && opts.incident === undefined) {
+          console.error(
+            "tribe-wire send: --incident-cleared requires --incident <emitter:subject:condition> naming the condition that cleared",
+          )
+          process.exit(2)
+        }
         void cmdSend({
           to,
           message: message.join(" "),
           type: type as MessageType,
           summary: opts.summary,
-          request: opts.request === false ? undefined : opts.request,
+          messageId: opts.messageId,
+          delivery: opts.delivery as Delivery | undefined,
+          ref: opts.ref,
+          request: opts.request === "true" ? true : opts.request === false ? undefined : opts.request,
           reply: opts.reply,
+          anonymous: opts.anonymous,
           fanout: opts.fanout as Fanout | undefined,
+          expiresInMs,
+          incident: opts.incident,
+          incidentCleared: opts.incidentCleared,
         })
       },
     )

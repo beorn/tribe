@@ -1,11 +1,10 @@
 /**
- * @failure @km/tribe/20988-send-identity
+ * @failure @ag/tribe/21717-identity-by-directory-not-claimed-field, @pm/infra/20925-ci-pending-ball-triage
  * @level unit
- * @consumer tribe CLI one-shot peer sends
+ * @consumer Tribe daemon socket senders
  *
- * One-shot `tribe send` calls connect through the daemon context, but their
- * authored message must retain the caller identity from TRIBE_NAME /
- * TRIBE_SESSION_NAME. Daemon-origin journal rows remain ambient.
+ * Sender identity comes from the connection context; a caller-provided field
+ * is never authoritative. Daemon-origin journal rows remain ambient.
  */
 
 import type { Database } from "bun:sqlite"
@@ -40,13 +39,26 @@ function makeContext(
   })
 }
 
-function makeOpts(activeIds: readonly string[] = []): HandlerOpts {
+function makeOpts(activeNames: readonly string[] = []): HandlerOpts {
   return {
     cleanup: () => undefined,
     userRenamed: false,
     setUserRenamed: () => undefined,
-    getActiveSessionIds: () => new Set(activeIds),
-    getActiveSessionInfo: () => [],
+    getActiveSessionIds: () => new Set(activeNames.map((name) => `sess-${name}`)),
+    hasActiveTransport: (sessionId) => activeNames.some((name) => sessionId === `sess-${name}`),
+    getActiveSessionInfo: () =>
+      activeNames.map((name) => ({
+        id: `sess-${name}`,
+        name,
+        pid: process.pid,
+        cwd: "/repo",
+        role: "member",
+        claudeSessionId: null,
+        registeredAt: Date.now(),
+        launchId: null,
+        launchParentPid: null,
+        transportPids: [process.pid],
+      })),
   }
 }
 
@@ -55,7 +67,7 @@ function parseToolJson(result: ReturnType<typeof handleToolCall>): Record<string
   return JSON.parse(text) as Record<string, unknown>
 }
 
-describe("tribe.send attribution", () => {
+describe("tribe.send attribution and delivery", () => {
   let tmpDir: string
   let db: Database
   let stmts: TribeStatements
@@ -71,7 +83,7 @@ describe("tribe.send attribution", () => {
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  it("uses the CLI caller identity for peer sends but keeps daemon journal events ambient", () => {
+  it("ignores a claimed sender for daemon-context sends and keeps daemon journal events ambient", () => {
     const inserted: MessageInsertedInfo[] = []
     const daemon = makeContext(db, stmts, "daemon", "sess-daemon", "daemon", (info) => inserted.push(info))
 
@@ -86,7 +98,7 @@ describe("tribe.send attribution", () => {
           request: true,
           sender: "@chief",
         },
-        makeOpts(),
+        makeOpts(["@agent/7"]),
       ),
     )
 
@@ -99,7 +111,7 @@ describe("tribe.send attribution", () => {
       request: string | null
     }
     expect(message).toEqual({
-      sender: "@chief",
+      sender: "daemon",
       recipient: "@agent/7",
       kind: "direct",
       request: messageId,
@@ -114,14 +126,14 @@ describe("tribe.send attribution", () => {
       message_id: string
     }
     expect(pending).toEqual({
-      sender: "@chief",
+      sender: "daemon",
       recipient: "@agent/7",
       request_id: messageId,
       message_id: messageId,
     })
     expect(inserted[0]).toMatchObject({
-      sender: "@chief",
-      senderRole: "member",
+      sender: "daemon",
+      senderRole: "daemon",
       recipient: "@agent/7",
       kind: "direct",
     })
@@ -157,5 +169,54 @@ describe("tribe.send attribution", () => {
     expect(res.sent).toBe(true)
     const row = db.prepare("SELECT sender FROM messages WHERE id = ?").get(res.id as string) as { sender: string }
     expect(row.sender).toBe("@agent/8")
+  })
+
+  it.each([
+    { route: "single", to: "@ci", recipients: ["@ci"] },
+    { route: "multi", to: ["@ci", "@cto"], recipients: ["@ci", "@cto"] },
+  ])("persists an explicit pull classification for $route recipients without opening a ball", ({ to, recipients }) => {
+    const inserted: MessageInsertedInfo[] = []
+    const daemon = makeContext(db, stmts, "daemon", "sess-daemon", "daemon", (info) => inserted.push(info))
+
+    const res = parseToolJson(
+      handleToolCall(
+        daemon,
+        "tribe.send",
+        {
+          to,
+          message: "R656 failed; evidence is in the journal",
+          type: "notify",
+          delivery: "pull",
+          sender: "yrd",
+        },
+        makeOpts(),
+      ),
+    )
+
+    expect(res.sent).toBe(true)
+    const rows = db
+      .prepare("SELECT recipient, delivery, request FROM messages WHERE kind = 'direct' ORDER BY recipient")
+      .all()
+    expect(rows).toEqual(recipients.map((recipient) => ({ recipient, delivery: "pull", request: null })))
+    expect(inserted.filter((info) => info.kind === "direct")).toEqual(
+      recipients.map((recipient) => expect.objectContaining({ recipient, delivery: "pull" })),
+    )
+    expect(db.prepare("SELECT COUNT(*) AS count FROM pending_request").get()).toEqual({ count: 0 })
+  })
+
+  it("rejects an invalid per-message delivery classification instead of silently pushing", () => {
+    const daemon = makeContext(db, stmts, "daemon", "sess-daemon", "daemon")
+
+    const res = parseToolJson(
+      handleToolCall(
+        daemon,
+        "tribe.send",
+        { to: "@ci", message: "evidence", type: "notify", delivery: "later", sender: "yrd" },
+        makeOpts(),
+      ),
+    )
+
+    expect(res.error).toMatch(/delivery.*push.*pull/i)
+    expect(db.prepare("SELECT COUNT(*) AS count FROM messages").get()).toEqual({ count: 0 })
   })
 })
