@@ -74,11 +74,11 @@ describe("registerReadCommands", () => {
     expect(optionFlags(cmd!)).toEqual(expect.arrayContaining(["--all"]))
   })
 
-  test("members verb accepts --all and documents transport verdicts", () => {
+  test("members verb accepts --all and documents transport plus mailbox-read verdicts", () => {
     const cmd = findCmd(buildProgram(), "members")
     expect(cmd).toBeDefined()
     expect(optionFlags(cmd!)).toContain("--all")
-    expect(cmd!.description()).toMatch(/transport|owner/i)
+    expect(cmd!.description()).toMatch(/transport.*owner.*mailbox-read/i)
   })
 
   test("pending verb accepts --all, --json, --owner, --stale, and --close", () => {

@@ -55,9 +55,29 @@ function makeContext(db: Database, stmts: TribeStatements, sessionId: string, na
   })
 }
 
-function addSession(db: Database, stmts: TribeStatements, sessionId: string, name: string, pid: number): void {
+function addSession(
+  db: Database,
+  stmts: TribeStatements,
+  sessionId: string,
+  name: string,
+  pid: number,
+  mailboxAuthorityHash: string | null = null,
+): void {
   const ctx = makeContext(db, stmts, sessionId, name)
-  registerSession(ctx, PROJECT_ID, () => false, null, pid, "pull", "/repo", null, "codex", null, null)
+  registerSession(
+    ctx,
+    PROJECT_ID,
+    () => false,
+    null,
+    pid,
+    "pull",
+    "/repo",
+    null,
+    "codex",
+    null,
+    null,
+    mailboxAuthorityHash,
+  )
 }
 
 function parseToolJson(result: ReturnType<typeof handleToolCall>): Record<string, unknown> {
@@ -160,6 +180,75 @@ describe("tribe.members derives alive from the pid, not stored transport-registr
         alive: true,
       }),
     ])
+  })
+
+  it("distinguishes a transport-live deaf seat from a bearer-backed seat in members and health", () => {
+    addSession(db, stmts, "legacy-live", "legacy-live-agent", process.pid)
+    addSession(db, stmts, "readable-live", "readable-live-agent", process.pid, "a".repeat(64))
+    db.prepare("UPDATE sessions SET launch_id = $launch_id, launch_parent_pid = $launch_parent_pid WHERE id = $id").run(
+      { $id: "legacy-live", $launch_id: "legacy-live-launch", $launch_parent_pid: process.pid },
+    )
+    db.prepare("UPDATE sessions SET launch_id = $launch_id, launch_parent_pid = $launch_parent_pid WHERE id = $id").run(
+      { $id: "readable-live", $launch_id: "readable-live-launch", $launch_parent_pid: process.pid },
+    )
+    const ctx = makeContext(db, stmts, "operator", "@operator")
+    const opts = {
+      cleanup: () => {},
+      userRenamed: false,
+      setUserRenamed: () => {},
+      getActiveSessionIds: () => new Set(["legacy-live", "readable-live"]),
+      hasActiveTransport: (sessionId: string) => sessionId === "legacy-live" || sessionId === "readable-live",
+      getActiveSessionInfo: () => [
+        activeInfoFor("legacy-live", "legacy-live-agent", process.pid),
+        activeInfoFor("readable-live", "readable-live-agent", process.pid),
+      ],
+    } as HandlerOpts
+
+    const members = parseToolJson(handleToolCall(ctx, "tribe.members", {}, opts)) as {
+      sessions: Array<Record<string, unknown>>
+    }
+    expect(members.sessions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "legacy-live-agent",
+          transport_state: "connected",
+          mailbox_read_capability: {
+            state: "unavailable",
+            evidence_kind: "observed",
+            reason: "self-mailbox-authority-missing",
+          },
+        }),
+        expect.objectContaining({
+          name: "readable-live-agent",
+          transport_state: "connected",
+          mailbox_read_capability: {
+            state: "available",
+            evidence_kind: "observed",
+            reason: "self-mailbox-authority-registered",
+          },
+        }),
+      ]),
+    )
+
+    const health = parseToolJson(handleToolCall(ctx, "tribe.health", {}, opts)) as {
+      members: Array<Record<string, unknown>>
+      issues: string[]
+    }
+    expect(health.members).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "legacy-live-agent",
+          mailbox_read_capability: expect.objectContaining({ state: "unavailable", evidence_kind: "observed" }),
+        }),
+        expect.objectContaining({
+          name: "readable-live-agent",
+          mailbox_read_capability: expect.objectContaining({ state: "available", evidence_kind: "observed" }),
+        }),
+      ]),
+    )
+    expect(health.issues).toContain(
+      "mailbox read unavailable for legacy-live-agent: self-mailbox-authority-missing; replace the session-root owner (rearm/resume preserves it)",
+    )
   })
 
   it("never probes a disconnected row's stale DB-stored pid — transport absence alone is enough", () => {
