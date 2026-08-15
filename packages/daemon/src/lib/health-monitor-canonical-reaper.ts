@@ -28,14 +28,32 @@ export interface CanonicalReaperSuspect {
   samples: number
 }
 
+/**
+ * Consecutive healthy observations required before an active source condition
+ * clears and becomes announceable again.
+ *
+ * Hysteresis is the point. The previous design reset its dedup on the FIRST
+ * healthy observation, so a source flapping between healthy and unavailable
+ * re-announced itself on every cycle — 2,031 broadcasts of ~19 distinct strings
+ * on the live journal, read by all 25 seats.
+ */
+export const SOURCE_RECOVERY_SAMPLES = 3
+
 export interface CanonicalReaperState {
   readonly suspects: Map<string, CanonicalReaperSuspect>
+  /**
+   * Source conditions currently believed active, keyed by a STABLE condition
+   * key — never the rendered diagnostic, whose detail carries volatile text
+   * (ages in ms, epoch/sequence numbers) that makes every observation unique.
+   */
+  readonly activeSourceConditions: Set<string>
+  /** Consecutive healthy observations since the last active condition. */
+  healthySourceSamples: number
   lastObservation?: { readonly epoch: string; readonly observedAt: number; readonly sequence: number }
-  lastSourceDiagnostic?: string
 }
 
 export function createCanonicalReaperState(): CanonicalReaperState {
-  return { suspects: new Map() }
+  return { activeSourceConditions: new Set(), healthySourceSamples: 0, suspects: new Map() }
 }
 
 function identityKey(row: ProcessObservationRow): string {
@@ -69,6 +87,50 @@ function sendUnknown(api: TribeClientApi, message: string): void {
     delivery: "push",
     topic: "health:reaper:unknown",
   })
+}
+
+function sendRecovered(api: TribeClientApi, message: string): void {
+  api.broadcast(message, "health:reaper:recovered", undefined, {
+    delivery: "push",
+    topic: "health:reaper:recovered",
+  })
+}
+
+/**
+ * Announce a source condition on its RISING EDGE only.
+ *
+ * `key` must be stable for the condition — `unavailable:<reason>`, `regressed` —
+ * never the rendered diagnostic. The diagnostic embeds ages in milliseconds and
+ * epoch/sequence numbers, so keying on it makes every observation a new
+ * condition and every observation a broadcast.
+ */
+function noteSourceCondition(
+  state: CanonicalReaperState,
+  api: TribeClientApi,
+  key: string,
+  message: string,
+): void {
+  state.healthySourceSamples = 0
+  if (state.activeSourceConditions.has(key)) return
+  state.activeSourceConditions.add(key)
+  sendUnknown(api, message)
+}
+
+/**
+ * Count a genuinely new healthy observation, and announce recovery once the
+ * source has been healthy long enough to believe it.
+ *
+ * The hysteresis is load-bearing: clearing on the first healthy observation is
+ * what let a flapping source re-arm and re-announce on every cycle.
+ */
+function noteSourceHealthy(state: CanonicalReaperState, api: TribeClientApi): void {
+  if (state.activeSourceConditions.size === 0) return
+  state.healthySourceSamples += 1
+  if (state.healthySourceSamples < SOURCE_RECOVERY_SAMPLES) return
+  const cleared = [...state.activeSourceConditions].sort().join(", ")
+  state.activeSourceConditions.clear()
+  state.healthySourceSamples = 0
+  sendRecovered(api, `health:reaper: canonical process source recovered; cleared ${cleared}`)
 }
 
 function unavailableDiagnostic(observation: Extract<CanonicalProcessObservation, { kind: "unavailable" }>): string {
@@ -125,11 +187,12 @@ export function checkCanonicalReaper(
 ): void {
   if (!thresholds.reaperEnabled) return
   if (observation.kind === "unavailable") {
-    const diagnostic = unavailableDiagnostic(observation)
-    if (state.lastSourceDiagnostic !== diagnostic) {
-      state.lastSourceDiagnostic = diagnostic
-      sendUnknown(api, `health:reaper: canonical process source unavailable; ${diagnostic}`)
-    }
+    noteSourceCondition(
+      state,
+      api,
+      `unavailable:${observation.reason}`,
+      `health:reaper: canonical process source unavailable; ${unavailableDiagnostic(observation)}`,
+    )
     state.suspects.clear()
     return
   }
@@ -138,15 +201,13 @@ export function checkCanonicalReaper(
   const previous = state.lastObservation
   if (previous?.epoch === observation.source.epoch) {
     if (observation.source.sequence === previous.sequence) {
-      state.lastSourceDiagnostic = undefined
+      // The same census re-delivered. No new observation means no new evidence
+      // of health, so this must not count toward recovery.
       return
     }
     if (observation.source.sequence < previous.sequence || observation.observedAt < previous.observedAt) {
       const diagnostic = `canonical process source regressed from ${previous.epoch}/${previous.sequence}@${previous.observedAt} to ${observation.source.epoch}/${observation.source.sequence}@${observation.observedAt}; ${diagnosticContext(observation)}`
-      if (state.lastSourceDiagnostic !== diagnostic) {
-        state.lastSourceDiagnostic = diagnostic
-        sendUnknown(api, `health:reaper: ${diagnostic}`)
-      }
+      noteSourceCondition(state, api, "regressed", `health:reaper: ${diagnostic}`)
       state.suspects.clear()
       return
     }
@@ -158,7 +219,7 @@ export function checkCanonicalReaper(
     observedAt: observation.observedAt,
     sequence: observation.source.sequence,
   }
-  state.lastSourceDiagnostic = undefined
+  noteSourceHealthy(state, api)
 
   const seen = new Set<string>()
   const rowsByKey = new Map<string, ProcessObservationRow>()
