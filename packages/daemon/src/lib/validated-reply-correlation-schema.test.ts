@@ -57,7 +57,9 @@ describe("validated reply correlation schema (migration v25)", () => {
         id: "old",
         correlated_reply_requester: null,
       })
-      expect(db.prepare("SELECT value FROM _schema_meta WHERE key='version'").get()).toEqual({ value: String(CURRENT_SCHEMA_VERSION) })
+      expect(db.prepare("SELECT value FROM _schema_meta WHERE key='version'").get()).toEqual({
+        value: String(CURRENT_SCHEMA_VERSION),
+      })
     } finally {
       db.close()
     }
