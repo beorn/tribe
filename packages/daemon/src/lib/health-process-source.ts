@@ -505,15 +505,7 @@ export function createHealthProcessSource(options: HealthProcessSourceOptions = 
   const circuitFailures = options.circuitFailures ?? SYSMON_CIRCUIT_FAILURES
   const circuitOpenMs = options.circuitOpenMs ?? SYSMON_CIRCUIT_OPEN_MS
   const runCommand =
-    options.runCommand ??
-    ((argv: readonly string[]) =>
-      runBoundedProcessCommand(argv, {
-        timeoutMs,
-        maxOutputBytes,
-        killGraceMs: SYSMON_KILL_GRACE_MS,
-        reapGraceMs: SYSMON_REAP_GRACE_MS,
-        drainGraceMs: SYSMON_DRAIN_GRACE_MS,
-      }))
+    options.runCommand ?? ((argv: readonly string[]) => runHealthProcessCommand(argv, timeoutMs, maxOutputBytes))
 
   // Shared across read() and readScalars(): both walk the same state-root.
   let consecutiveHardFailures = 0
@@ -627,4 +619,18 @@ export function createHealthProcessSource(options: HealthProcessSourceOptions = 
       )
     },
   }
+}
+
+function runHealthProcessCommand(
+  argv: readonly string[],
+  timeoutMs: number,
+  maxOutputBytes: number,
+): Promise<BoundedProcessCommandResult> {
+  return runBoundedProcessCommand(argv, {
+    timeoutMs,
+    maxOutputBytes,
+    killGraceMs: SYSMON_KILL_GRACE_MS,
+    reapGraceMs: SYSMON_REAP_GRACE_MS,
+    drainGraceMs: SYSMON_DRAIN_GRACE_MS,
+  })
 }

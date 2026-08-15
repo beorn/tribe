@@ -84,23 +84,26 @@ export async function refreshIndexIfStaleWithDeps(
 
 /** Default real-runtime deps for the threshold helper + bounded runner. The DB-bound
  * `getLastRebuild` impl must be supplied by the caller (search.ts wires it). */
-export function makeRefreshDeps(
-  getLastRebuild: () => string | null,
-  runCommand: RefreshCommandRunner = runBoundedProcessCommand,
-): RefreshDeps {
+export function makeRefreshDeps(getLastRebuild: () => string | null, runCommand?: RefreshCommandRunner): RefreshDeps {
   return {
     getLastRebuild,
     now: () => Date.now(),
     getThresholdMs: getStaleThresholdMs,
-    spawnCmd: async (argv) => {
-      const result = await runCommand(argv, {
-        timeoutMs: RECALL_REFRESH_TIMEOUT_MS,
-        killGraceMs: RECALL_REFRESH_KILL_GRACE_MS,
-        reapGraceMs: RECALL_REFRESH_REAP_GRACE_MS,
-        drainGraceMs: RECALL_REFRESH_DRAIN_GRACE_MS,
-        maxOutputBytes: RECALL_REFRESH_MAX_OUTPUT_BYTES,
-      })
-      return { exitCode: result.exitCode, stderr: result.stderr }
-    },
+    spawnCmd: (argv) => runRefreshCommand(argv, runCommand),
   }
+}
+
+async function runRefreshCommand(
+  argv: readonly string[],
+  runCommand?: RefreshCommandRunner,
+): Promise<{ exitCode: number; stderr: string }> {
+  const bounds = {
+    timeoutMs: RECALL_REFRESH_TIMEOUT_MS,
+    killGraceMs: RECALL_REFRESH_KILL_GRACE_MS,
+    reapGraceMs: RECALL_REFRESH_REAP_GRACE_MS,
+    drainGraceMs: RECALL_REFRESH_DRAIN_GRACE_MS,
+    maxOutputBytes: RECALL_REFRESH_MAX_OUTPUT_BYTES,
+  }
+  const result = await (runCommand === undefined ? runBoundedProcessCommand(argv, bounds) : runCommand(argv, bounds))
+  return { exitCode: result.exitCode, stderr: result.stderr }
 }
