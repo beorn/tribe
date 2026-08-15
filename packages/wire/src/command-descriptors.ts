@@ -694,7 +694,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           sessions: {
             type: "array",
             description:
-              "Per-session rows include the registered delivery mode (push|pull), daemon-authoritative transport_state/transport_alive (connected|disconnected), separate owner_state (live|dead|unknown), transport_reason, agent_alive, pid_alive, and silence-derived is_silent — pid-probed at read time for connected rows, never asserted from transport-registry presence alone; legacy alive is their conservative conjunction. transport_registered reports the raw registry fact on its own: a registration whose transport pids are provably dead reads transport_registered true with transport_state disconnected and transport_reason registered-transport-pids-dead, so no row ever pairs a connected transport with a dead pid. Disconnected rows are never pid-probed (a stored PID is reusable and proves nothing once transport is gone), so their pid_alive/agent_alive read true by default while alive stays false. Also carries transport_pids, uptime_min, and activity-only last_seen_sec. A disconnected numeric PID without identity-bound process evidence reports owner unknown.",
+              "Per-session rows include the registered delivery mode (push|pull), daemon-authoritative transport_state/transport_alive (connected|disconnected), separate owner_state (live|dead|unknown), mailbox_read_capability (available|unavailable with observed evidence and reason), transport_reason, agent_alive, pid_alive, and silence-derived is_silent — pid-probed at read time for connected rows, never asserted from transport-registry presence alone; legacy alive is their conservative conjunction. transport_registered reports the raw registry fact on its own: a registration whose transport pids are provably dead reads transport_registered true with transport_state disconnected and transport_reason registered-transport-pids-dead, so no row ever pairs a connected transport with a dead pid. Disconnected rows are never pid-probed (a stored PID is reusable and proves nothing once transport is gone), so their pid_alive/agent_alive read true by default while alive stays false. Also carries transport_pids, uptime_min, and activity-only last_seen_sec. A disconnected numeric PID without identity-bound process evidence reports owner unknown.",
             items: { type: "object", additionalProperties: true },
           },
           membership_discrepancy: {
@@ -709,7 +709,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     },
     cli: available({
       name: "members",
-      description: "List member sessions as JSON with transport and owner verdicts",
+      description: "List member sessions as JSON with transport, owner, and mailbox-read verdicts",
       lifetime: "one-shot",
       mapsToMcp: "members",
       options: [

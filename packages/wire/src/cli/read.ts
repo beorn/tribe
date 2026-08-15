@@ -33,6 +33,7 @@ import type { BallSettlementReason } from "../lib/ball-outcome.ts"
 import { AG_SESSION_AUTH_ENV, readSelfMailboxAuthorityFromEnvironment } from "../lib/self-mailbox-authority.ts"
 
 const PENDING_CLI = visibleCliProjectionForMcp("pending")
+const MEMBERS_CLI = visibleCliProjectionForMcp("members")
 const INBOX_WAIT_CLI = visibleCliProjectionForMcp("inbox.wait")
 const REPAIR_CLI = visibleCliProjectionForMcp("repair")
 
@@ -1717,10 +1718,11 @@ export function registerReadCommands(program: Command): void {
     .option("-a, --all", "Include historical (disconnected) sessions")
     .action((opts: { all?: boolean }) => void cmdSessions(!!opts.all))
 
+  const membersAll = cliOption(MEMBERS_CLI, "all")
   program
-    .command("members")
-    .description("List member sessions as JSON with transport, owner, and mailbox-read verdicts")
-    .option("-a, --all", "Include disconnected durable session rows")
+    .command(MEMBERS_CLI.name)
+    .description(MEMBERS_CLI.description)
+    .option(membersAll.flags, membersAll.description)
     .action((opts: { all?: boolean }) => void cmdMembers(!!opts.all))
 
   const pendingOwner = cliOption(PENDING_CLI, "owner")
