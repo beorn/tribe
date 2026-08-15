@@ -12,6 +12,7 @@ import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js"
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { createHash, randomUUID } from "node:crypto"
+import { hashSelfMailboxAuthority, readSelfMailboxAuthorityFromInheritedFd } from "./lib/self-mailbox-authority.ts"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
@@ -72,6 +73,7 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
     .update(`${sessionId}|${opts.project ?? process.cwd()}|${myRole}`)
     .digest("hex")
     .slice(0, 16)
+  const selfMailboxAuthority = readSelfMailboxAuthorityFromInheritedFd(process.env)
 
   const daemon = await createReconnectingClient({
     socketPath,
@@ -96,6 +98,9 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
         peerSocket: null,
         pid: process.pid,
         identityToken,
+        ...(selfMailboxAuthority === null
+          ? {}
+          : { mailboxAuthorityHash: hashSelfMailboxAuthority(selfMailboxAuthority) }),
         ...(launchId !== undefined ? { launchId, launchParentPid: process.pid } : {}),
         delivery: requireJoin ? "pull" : deliveryCapability.delivery,
         ...(initialFilterMode === undefined ? {} : { filterMode: initialFilterMode }),

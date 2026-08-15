@@ -40,6 +40,7 @@ import {
 import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
 import { createReconnectWatchdog } from "./lib/reconnect-watchdog.ts"
 import { createHash } from "node:crypto"
+import { hashSelfMailboxAuthority, readSelfMailboxAuthorityFromInheritedFd } from "./lib/self-mailbox-authority.ts"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
@@ -311,6 +312,7 @@ const identityToken = createHash("sha256")
   .update(`${CLAUDE_SESSION_ID ?? ""}|${process.cwd()}|${args.role ?? "member"}`)
   .digest("hex")
   .slice(0, 16)
+const selfMailboxAuthority = readSelfMailboxAuthorityFromInheritedFd(process.env)
 
 const baseRegisterParams = {
   ...(REGISTER_WITH_LAUNCH_NAME ? { name: LAUNCH_NAME } : {}),
@@ -328,6 +330,7 @@ const baseRegisterParams = {
   claudeSessionId: CLAUDE_SESSION_ID,
   claudeSessionName: CLAUDE_SESSION_NAME,
   identityToken,
+  ...(selfMailboxAuthority === null ? {} : { mailboxAuthorityHash: hashSelfMailboxAuthority(selfMailboxAuthority) }),
   ...(LAUNCH_IDENTITY ? { launchId: LAUNCH_IDENTITY.id, launchParentPid: LAUNCH_IDENTITY.parentPid } : {}),
   ...(INITIAL_FILTER_MODE === undefined ? {} : { filterMode: INITIAL_FILTER_MODE }),
   // @km/infra/15641 Phase 1 — per-session account/provider label sourced

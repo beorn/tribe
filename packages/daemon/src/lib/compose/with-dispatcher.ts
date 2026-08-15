@@ -34,6 +34,7 @@ import { type Socket as NetSocket } from "node:net"
 import { createLogger } from "loggily"
 import { DEFAULT_INBOX_WAIT_SESSION, resolveInboxWaitOptions } from "tribe-wire"
 import { deriveTribePersonaLaunchIdentity } from "tribe-wire/lib/persona-launch-identity"
+import { hashSelfMailboxAuthority } from "tribe-wire/lib/self-mailbox-authority"
 import {
   createLineParser,
   isRequest,
@@ -817,6 +818,13 @@ export function withDispatcher<
             const claudeSessionName = (p.claudeSessionName as string) ?? null
             const claudeSessionId = (p.claudeSessionId as string) ?? null
             const identityToken = (p.identityToken as string) ?? null
+            const mailboxAuthorityHash =
+              typeof p.mailboxAuthorityHash === "string" && /^[a-f0-9]{64}$/u.test(p.mailboxAuthorityHash)
+                ? p.mailboxAuthorityHash
+                : null
+            if (p.mailboxAuthorityHash !== undefined && mailboxAuthorityHash === null) {
+              return makeError(id, -32602, "register mailboxAuthorityHash must be a lowercase SHA-256 hex digest")
+            }
             const hasLaunchId = p.launchId !== undefined && p.launchId !== null
             const hasLaunchParentPid = p.launchParentPid !== undefined && p.launchParentPid !== null
             if (hasLaunchId !== hasLaunchParentPid) {
@@ -1110,6 +1118,7 @@ export function withDispatcher<
               provider,
               launchIdentity?.id ?? null,
               launchIdentity?.parentPid ?? null,
+              mailboxAuthorityHash,
             )
             // Apply launch-declared admission before applyClient makes this
             // session visible to the broadcast fanout. Omission preserves a
@@ -1464,6 +1473,75 @@ export function withDispatcher<
               launch_parent_pid: target.launchParentPid,
               message,
             })
+          }
+
+          /**
+           * Canonical self-mailbox read for a one-shot CLI. The bearer maps to
+           * one persisted session; no caller-supplied name, launch id, or pid
+           * participates in target selection. Once authenticated, dispatch
+           * enters the same tribe.fetch handler used by MCP.
+           */
+          case "cli_self_inbox_v1": {
+            if (
+              ["session", "name", "launch_id", "launch_parent_pid", "pid"].some((key) =>
+                Object.prototype.hasOwnProperty.call(p, key),
+              )
+            ) {
+              return makeError(
+                id,
+                -32602,
+                "Self inbox derives its mailbox from authority; target overrides are forbidden",
+              )
+            }
+            const supplied = requiredNonEmptyString(p.authority)
+            if (supplied === null) {
+              return makeError(id, -32004, "self mailbox authority is missing", {
+                kind: "could-not-evaluate",
+                reason: "self-mailbox-authority-missing",
+              })
+            }
+            const row = db
+              .prepare(
+                `SELECT id, name, role, domains, claude_session_id, claude_session_name
+                 FROM sessions WHERE mailbox_authority_hash = $hash`,
+              )
+              .get({ $hash: hashSelfMailboxAuthority(supplied) }) as {
+              id: string
+              name: string
+              role: TribeRole
+              domains: string
+              claude_session_id: string | null
+              claude_session_name: string | null
+            } | null
+            if (row === null) {
+              return makeError(id, -32003, "self mailbox authority was rejected or revoked", {
+                kind: "unauthenticated",
+                reason: "self-mailbox-authority-rejected",
+              })
+            }
+            const domains = JSON.parse(row.domains) as unknown
+            if (!Array.isArray(domains) || domains.some((domain) => typeof domain !== "string")) {
+              return makeError(id, -32603, `stored domains for ${row.name} are invalid`)
+            }
+            const authorityCtx = createTribeContext({
+              db,
+              stmts,
+              sessionId: row.id,
+              sessionRole: row.role,
+              initialName: row.name,
+              domains,
+              claudeSessionId: row.claude_session_id,
+              claudeSessionName: row.claude_session_name,
+              onMessageInserted,
+            })
+            const result = await handleToolCall(
+              authorityCtx,
+              TRIBE_COORD_METHODS.fetch,
+              { limit: p.limit },
+              DAEMON_HANDLER_OPTS,
+              connId,
+            )
+            return makeResponse(id, result)
           }
 
           /**

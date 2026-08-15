@@ -133,6 +133,19 @@ Count + age of actionable DMs the target session hasn't drained yet. Without
 `--session`, resolves the caller's own managed launch via `TRIBE_LAUNCH_ID`
 (throws if that's unset and no `--session` was given).
 
+### `inbox`
+
+```bash
+tribe-wire inbox [--limit <n>=50] [--json]
+```
+
+Reads and acknowledges the calling managed session's mailbox through the same
+attention projection and cursor advance as MCP `tribe.fetch`. The target is
+derived only from the inherited `TRIBE_SELF_MAILBOX_AUTHORITY_FD`; names,
+launch ids, pids, and other caller-supplied identity hints cannot select a
+mailbox. A missing, rejected, or replaced authority fails loudly. `--json`
+returns the canonical MCP projection.
+
 ### `inbox-drain`
 
 ```bash
@@ -142,7 +155,8 @@ tribe-wire inbox-drain [--session <name>] [--limit <n>=10] [--json]
 Drains (returns + acknowledges) actionable DMs for a managed or explicit
 mailbox, using the operator capability inherited via the
 `TRIBE_OPERATOR_CAPABILITY_FD` file descriptor (never via env/argv — the
-capability content never touches process-inspectable state).
+capability content never touches process-inspectable state). This is an
+operator repair surface; ordinary managed sessions use `inbox`.
 
 ### `inbox-wait`
 

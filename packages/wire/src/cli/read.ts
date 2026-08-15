@@ -30,6 +30,10 @@ import {
   type PinDirection,
 } from "../lib/code-identity.ts"
 import type { BallSettlementReason } from "../lib/ball-outcome.ts"
+import {
+  readSelfMailboxAuthorityFromInheritedFd,
+  TRIBE_SELF_MAILBOX_AUTHORITY_FD_ENV,
+} from "../lib/self-mailbox-authority.ts"
 
 const PENDING_CLI = visibleCliProjectionForMcp("pending")
 const INBOX_WAIT_CLI = visibleCliProjectionForMcp("inbox.wait")
@@ -1265,6 +1269,60 @@ async function cmdInboxDrain(opts: { session?: string; limit?: number; json?: bo
   )
 }
 
+interface SelfInboxEvent {
+  id?: string
+  from?: string
+  type?: string
+  content?: string
+}
+
+interface SelfInboxResult {
+  attention?: {
+    actionable_unread?: SelfInboxEvent[]
+    pending_balls?: Array<{ request_id?: string; sender?: string; summary?: string }>
+    pending_balls_summary?: { total?: number }
+  }
+  events?: SelfInboxEvent[]
+  cursor?: number
+}
+
+function printSelfInboxEvent(event: SelfInboxEvent): void {
+  console.log(`${event.from ?? "unknown"} [${event.type ?? "message"}]`)
+  console.log(event.content ?? "")
+}
+
+async function cmdInbox(opts: { limit?: number; json?: boolean }): Promise<void> {
+  const authority = readSelfMailboxAuthorityFromInheritedFd(process.env)
+  if (authority === null) {
+    throw new Error(
+      `${TRIBE_SELF_MAILBOX_AUTHORITY_FD_ENV} is missing; this managed session has no self-mailbox authority source`,
+    )
+  }
+  const result = mcpJsonContent(
+    await callDaemon("cli_self_inbox_v1", { authority, limit: opts.limit ?? 50 }),
+  ) as SelfInboxResult
+  if (opts.json) {
+    console.log(JSON.stringify(result))
+    return
+  }
+  const actionable = result.attention?.actionable_unread ?? []
+  const actionableIds = new Set(actionable.map((event) => event.id).filter((id): id is string => id !== undefined))
+  for (const event of actionable) printSelfInboxEvent(event)
+  for (const event of result.events ?? []) {
+    if (event.id !== undefined && actionableIds.has(event.id)) continue
+    printSelfInboxEvent(event)
+  }
+  const pending = result.attention?.pending_balls ?? []
+  for (const ball of pending) {
+    console.log(`pending from ${ball.sender ?? "unknown"} [${ball.request_id ?? "unidentified"}]`)
+    console.log(ball.summary ?? "")
+  }
+  const pendingTotal = result.attention?.pending_balls_summary?.total ?? pending.length
+  console.log(
+    `inbox: ${actionable.length} actionable unread; ${pendingTotal} pending ball(s); cursor ${result.cursor ?? 0}.`,
+  )
+}
+
 interface InboxDrainFailureProjection {
   code: number | string | null
   kind: string
@@ -1745,7 +1803,7 @@ export function registerReadCommands(program: Command): void {
         json?: boolean
         refPrefix?: string
         replyPrefix?: string
-      }) => await cmdLog(opts.limit ?? 20, !!opts.all, !!opts.follow, !!opts.json, opts.refPrefix, opts.replyPrefix),
+      }) => cmdLog(opts.limit ?? 20, !!opts.all, !!opts.follow, !!opts.json, opts.refPrefix, opts.replyPrefix),
     )
 
   program
@@ -1758,6 +1816,20 @@ export function registerReadCommands(program: Command): void {
     .description("Check whether the running daemon is serving stale code (@km/tribe/20033)")
     .option("--fix", "Print the operator-gated remedy for a stale daemon (does not auto-restart)")
     .action((opts: { fix?: boolean }) => void cmdDoctor(opts))
+
+  program
+    .command("inbox")
+    .description("Read and acknowledge this managed session's canonical mailbox")
+    .option("--limit <n>", "Maximum events to return (max 500)", int, 50)
+    .option("--json", "Emit the canonical machine-readable attention projection")
+    .action(async (opts: { limit?: number; json?: boolean }) => {
+      try {
+        await cmdInbox(opts)
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : String(error))
+        process.exitCode = 1
+      }
+    })
 
   program
     .command("inbox-drain")

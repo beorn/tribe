@@ -334,6 +334,7 @@ export function registerSession(
   provider?: string | null,
   launchId?: string | null,
   launchParentPid?: number | null,
+  mailboxAuthorityHash?: string | null,
 ): void {
   const desiredName = ctx.getName()
   const now = Date.now()
@@ -431,6 +432,7 @@ export function registerSession(
       $claude_session_id: ctx.claudeSessionId,
       $claude_session_name: ctx.claudeSessionName,
       $identity_token: identityToken ?? null,
+      $mailbox_authority_hash: mailboxAuthorityHash ?? null,
       $launch_id: launchId ?? null,
       $launch_parent_pid: launchParentPid ?? null,
       $now: now,

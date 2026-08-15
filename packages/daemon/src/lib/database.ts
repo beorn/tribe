@@ -25,6 +25,7 @@ export function openDatabase(path: string): Database {
 		claude_session_id TEXT,
 		claude_session_name TEXT,
 		identity_token TEXT,
+		mailbox_authority_hash TEXT,
 		launch_id TEXT,
 		launch_parent_pid INTEGER,
 		started_at INTEGER NOT NULL,
@@ -236,6 +237,9 @@ export function openDatabase(path: string): Database {
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_kind_ts ON messages(kind, ts)")
   db.run("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at)")
   db.run("CREATE INDEX IF NOT EXISTS idx_sessions_identity ON sessions(identity_token)")
+  db.run(
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_mailbox_authority ON sessions(mailbox_authority_hash) WHERE mailbox_authority_hash IS NOT NULL",
+  )
   db.run("CREATE INDEX IF NOT EXISTS idx_sessions_launch_identity ON sessions(name, launch_id, launch_parent_pid)")
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts)")
   // Leading-column index on launch_id. idx_sessions_launch_identity leads with
@@ -1136,6 +1140,21 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 28,
+    name: "session-self-mailbox-authority",
+    up(db) {
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>).map((row) => row.name),
+      )
+      if (!columns.has("mailbox_authority_hash")) {
+        db.run("ALTER TABLE sessions ADD COLUMN mailbox_authority_hash TEXT")
+      }
+      db.run(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_mailbox_authority ON sessions(mailbox_authority_hash) WHERE mailbox_authority_hash IS NOT NULL",
+      )
+    },
+  },
 ]
 
 /** The schema terminus `openDatabase` upgrades to — derived from the same
@@ -1221,13 +1240,14 @@ export function createStatements(db: Database) {
     // adopted durable member must retain the provenance that child promoted.
     // Explicit non-null values still replace the prior identity.
     upsertSession: db.prepare(`
-		INSERT INTO sessions (id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, identity_token, launch_id, launch_parent_pid, started_at, updated_at, delivery, account, provider)
-		VALUES ($id, $name, $role, $domains, $pid, $cwd, $project_id, $claude_session_id, $claude_session_name, $identity_token, $launch_id, $launch_parent_pid, $now, $now, COALESCE($delivery, 'push'), $account, $provider)
+		INSERT INTO sessions (id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, identity_token, mailbox_authority_hash, launch_id, launch_parent_pid, started_at, updated_at, delivery, account, provider)
+		VALUES ($id, $name, $role, $domains, $pid, $cwd, $project_id, $claude_session_id, $claude_session_name, $identity_token, $mailbox_authority_hash, $launch_id, $launch_parent_pid, $now, $now, COALESCE($delivery, 'push'), $account, $provider)
 		ON CONFLICT(id) DO UPDATE SET
 			name = $name, role = $role, domains = $domains,
 			pid = $pid, cwd = $cwd, project_id = $project_id, claude_session_id = $claude_session_id,
 			claude_session_name = $claude_session_name,
 			identity_token = COALESCE($identity_token, identity_token),
+			mailbox_authority_hash = COALESCE($mailbox_authority_hash, mailbox_authority_hash),
 			launch_id = COALESCE($launch_id, launch_id),
 			launch_parent_pid = COALESCE($launch_parent_pid, launch_parent_pid),
 			started_at = $now, updated_at = $now,
