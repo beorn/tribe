@@ -44,13 +44,14 @@ function insertMessage(
     ts: number
     request?: string
     reply?: string
+    attentionRequired?: number
   },
 ): void {
   db.prepare(`
     INSERT INTO messages (
-      id, type, sender, recipient, kind, content, ts, delivery, request, reply, summary
+      id, type, sender, recipient, kind, content, ts, delivery, request, reply, summary, attention_required
     ) VALUES (
-      $id, $type, $sender, $recipient, 'direct', $id, $ts, 'push', $request, $reply, $id
+      $id, $type, $sender, $recipient, 'direct', $id, $ts, 'push', $request, $reply, $id, $attention_required
     )
   `).run({
     $id: message.id,
@@ -60,6 +61,7 @@ function insertMessage(
     $ts: message.ts,
     $request: message.request ?? null,
     $reply: message.reply ?? null,
+    $attention_required: message.attentionRequired ?? 0,
   })
 }
 
@@ -353,6 +355,30 @@ describe("20876 Tribe health cadence", () => {
       last_attention_read_at_ms: now - 12 * MINUTE,
       last_attention_read_age_ms: 12 * MINUTE,
       oldest_actionable: null,
+    })
+  })
+
+  it("projects attention-required responses for the fleet WATCH consumer", () => {
+    insertSession(db, { id: "sess-dev-5", name: "@dev/5", role: "member", now })
+    insertMessage(db, {
+      id: "dev-5-verdict-response",
+      type: "response",
+      sender: "@cto",
+      recipient: "@dev/5",
+      ts: now - 12 * MINUTE,
+      attentionRequired: 1,
+    })
+
+    const row = projectHealthCadence(db, { now, connectedSessionNames: ["@dev/5"] }).inbox_lag[0]
+    expect(row).toMatchObject({
+      session: "@dev/5",
+      actionable_rows: 1,
+      actionable_oldest_age_ms: 12 * MINUTE,
+      oldest_actionable: {
+        id: "dev-5-verdict-response",
+        type: "response",
+        sender: "@cto",
+      },
     })
   })
 

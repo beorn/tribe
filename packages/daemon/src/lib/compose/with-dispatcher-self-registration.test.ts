@@ -1235,8 +1235,8 @@ describe("dispatcher bounded mailbox drain", () => {
     // The refusal must route the reader somewhere that actually works, and must
     // not send them to the one that reproduces the failure.
     const refusal = (indeterminate as { message: string }).message
-    expect(refusal).toMatch(/tribe\.fetch/u)
-    expect(refusal).toMatch(/inbox-status/u)
+    expect(refusal).toMatch(/`tribe inbox --json`/u)
+    expect(refusal).not.toMatch(/MCP tribe\.fetch/u)
     expect(refusal).toMatch(/not empty/iu)
     // `tribe log` may appear ONLY as a warning against it, never as the remedy.
     expect(refusal).toMatch(/do not substitute[^.]*tribe log/iu)
@@ -1253,6 +1253,26 @@ describe("dispatcher bounded mailbox drain", () => {
       ),
     )
     expect(status.unread_count).toBe(1)
+  })
+
+  it("counts attention-required responses through the canonical inbox projection", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    harness.sendAttentionResponse("@chief", "the requested verdict is ready")
+
+    const status = parseResult<{ unread_count: number; latest_type: string | null }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "chief-status-with-attention-response",
+          method: "cli_inbox_status",
+          params: { session: "@chief" },
+        },
+        "conn-untrusted",
+      ),
+    )
+
+    expect(status).toMatchObject({ unread_count: 1, latest_type: "response" })
   })
 
   it("reports unauthenticated when an unregistered caller presents the wrong operator capability", async () => {
@@ -1847,6 +1867,9 @@ function createDispatcherHarness(
     },
     sendActionable(recipient: string, content: string = "wake inbox wait") {
       return sendMessage(daemonCtx, recipient, content, "request", undefined, undefined, "direct")
+    },
+    sendAttentionResponse(recipient: string, content: string) {
+      return sendMessage(daemonCtx, recipient, content, "response", undefined, undefined, "direct")
     },
     sendWithRef(ref: string) {
       sendMessage(daemonCtx, "@fleet", `effect ${ref}`, "notify", undefined, ref, "direct")

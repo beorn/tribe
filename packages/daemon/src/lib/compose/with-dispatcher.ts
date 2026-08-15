@@ -246,12 +246,11 @@ export function withDispatcher<
       latest_message_id: string | null
       latest_type: string | null
     } {
-      const row = stmts.getUnreadDms.get({ $name: sessionName }) as { count: number; oldest_ts: number } | undefined
-      const latest = stmts.getLatestActionableAttention.get({ $name: sessionName }) as
-        | { rowid: number; id: string; type: string }
-        | undefined
-      const unread_count = row?.count ?? 0
-      const oldest_ts = row?.oldest_ts ?? 0
+      const { attentionRows } = readAttentionProjection(daemonCtx, sessionName)
+      const oldest = attentionRows[0]
+      const latest = attentionRows.at(-1)
+      const unread_count = attentionRows.length
+      const oldest_ts = oldest?.ts ?? 0
       const oldest_unread_age_min = oldest_ts > 0 ? Math.floor((Date.now() - oldest_ts) / 60_000) : 0
       return {
         session: sessionName,
@@ -1520,7 +1519,7 @@ export function withDispatcher<
               })
             }
             const domains = JSON.parse(row.domains) as unknown
-            if (!Array.isArray(domains) || domains.some((domain) => typeof domain !== "string")) {
+            if (!Array.isArray(domains) || !domains.every((domain): domain is string => typeof domain === "string")) {
               return makeError(id, -32603, `stored domains for ${row.name} are invalid`)
             }
             const authorityCtx = createTribeContext({
@@ -1570,9 +1569,8 @@ export function withDispatcher<
                   -32004,
                   "could-not-evaluate inbox drain authority: an operator capability is not configured. " +
                     "This is inherited at launch and cannot be configured now — it will fail every time for this session. " +
-                    "YOUR MAIL IS NOT EMPTY, you are not reading it. Working reads: MCP tribe.fetch (projects attention AND advances the cursor); " +
-                    "`tribe inbox-status --session <seat>` for the unread count and oldest age; " +
-                    "`tribe inbox-wait --session <seat> --timeout 10m --json` to block until something arrives. " +
+                    "YOUR MAIL IS NOT EMPTY, you are not reading it. Working read: `tribe inbox --json` " +
+                    "projects your session's canonical attention and advances its cursor. " +
                     "Do NOT substitute `tribe log --limit 10` — it is fleet-wide history with no attention projection and reaches back under a minute.",
                   { kind: "could-not-evaluate", reason: "operator-capability-unconfigured" },
                 )
