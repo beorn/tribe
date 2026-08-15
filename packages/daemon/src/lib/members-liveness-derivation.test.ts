@@ -229,6 +229,7 @@ describe("tribe.members derives alive from the pid, not stored transport-registr
         }),
       ]),
     )
+    expect(JSON.stringify(members)).not.toContain("a".repeat(64))
 
     const health = parseToolJson(handleToolCall(ctx, "tribe.health", {}, opts)) as {
       members: Array<Record<string, unknown>>
@@ -249,6 +250,7 @@ describe("tribe.members derives alive from the pid, not stored transport-registr
     expect(health.issues).toContain(
       "mailbox read unavailable for legacy-live-agent: self-mailbox-authority-missing; replace the session-root owner (rearm/resume preserves it)",
     )
+    expect(JSON.stringify(health)).not.toContain("a".repeat(64))
   })
 
   it("never probes a disconnected row's stale DB-stored pid — transport absence alone is enough", () => {
