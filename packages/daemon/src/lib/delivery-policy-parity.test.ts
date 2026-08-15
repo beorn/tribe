@@ -105,22 +105,46 @@ describe("push filter and pull predicate agree on every subscription case", () =
     return got.some((r) => r.id === id)
   }
 
-  it("returns the same verdict for every row × filter combination", () => {
+  it("agrees on every FLEET row — that is the traffic the subscription exists for", () => {
     const disagreements: string[] = []
     let index = 0
     for (const filter of FILTERS) {
-      for (const row of ROWS) {
+      for (const row of ROWS.filter((r) => r.kind === "broadcast")) {
         index += 1
         const push = shouldDeliver({ kind: row.kind, type: row.type, replyHint: "no", topic: row.topic }, filter)
         const pull = sqlAdmits(row, filter, index)
         if (push !== pull) {
           disagreements.push(
-            `mode=${filter.filter_mode} until=${filter.filter_until ? (filter.filter_until > Date.now() ? "active" : "expired") : "none"} mute=${filter.filter_mute ?? "none"} | ${row.kind}/${row.type}/${row.topic ?? "no-topic"} → push=${push} pull=${pull}`,
+            `mode=${filter.filter_mode} mute=${filter.filter_mute ?? "none"} | ${row.type}/${row.topic ?? "no-topic"} → push=${push} pull=${pull}`,
           )
         }
       }
     }
     expect(disagreements).toEqual([])
+  })
+
+  /**
+   * Directs are where the two paths are MEANT to differ, and conflating them
+   * was a real bug in this branch: the first cut of the pull predicate dropped
+   * non-actionable directs in focus mode, which deleted a seat's own mail from
+   * its drain. The 19442 journey test caught it against a live daemon.
+   *
+   * The two answer different questions. Push asks "does this interrupt you?" —
+   * a notify addressed to you does not. Pull asks "is this yours to read?" — it
+   * always is. Filtering fleet noise is the goal; filtering your own mail never
+   * was.
+   */
+  it("diverges on directs by design: push may skip the wakeup, pull always delivers", () => {
+    const direct: Row = { kind: "direct", topic: null, type: "notify" }
+    const focus: Filter = { filter_mode: "focus", filter_mute: null, filter_until: null }
+
+    expect(shouldDeliver({ ...direct, replyHint: "no" }, focus)).toBe(false)
+    expect(sqlAdmits(direct, focus, 2000)).toBe(true)
+
+    // A muted-everything window must not swallow a direct either.
+    const mutedAll: Filter = { filter_mode: "normal", filter_mute: "[]", filter_until: ACTIVE_UNTIL }
+    expect(shouldDeliver({ ...direct, replyHint: "no" }, mutedAll)).toBe(true)
+    expect(sqlAdmits(direct, mutedAll, 2001)).toBe(true)
   })
 
   it("agrees that an absent session filter admits everything", () => {

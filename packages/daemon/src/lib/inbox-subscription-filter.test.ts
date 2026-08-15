@@ -174,6 +174,21 @@ describe("stored subscription governs the pull drain", () => {
     expect((drain(ctx, opts).events ?? []).map((e) => e.content)).toEqual(["ordinary news"])
   })
 
+  it("focus never removes a direct — it diets fleet traffic, not your own mail", () => {
+    const ctx = makeContext(db, stmts)
+    const opts = makeOpts()
+    registerSession(ctx, PROJECT_ID, () => true, null, 1234, "pull", "/repo", null, "codex")
+
+    parse(handleToolCall(ctx, "tribe.filter", { mode: "focus" }, opts))
+    // Exactly the 19442 journey case: a non-actionable direct to a focused seat.
+    insert(stmts, { content: "notification-only diet row", kind: "direct", recipient: NAME, type: "notify" })
+    insert(stmts, { content: "fleet noise", type: "status" })
+
+    const raw = JSON.stringify(drain(ctx, opts))
+    expect(raw).toContain("notification-only diet row")
+    expect(raw).not.toContain("fleet noise")
+  })
+
   it("never filters a message addressed to this seat by name", () => {
     const ctx = makeContext(db, stmts)
     const opts = makeOpts()

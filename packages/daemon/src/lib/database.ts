@@ -1680,7 +1680,14 @@ export function createStatements(db: Database) {
 			AND m.sender != $name
 			AND (
 				$filter_mode = 'ambient'
-				OR ($filter_mode = 'focus' AND m.type IN (${ACTIONABLE_TYPES_SQL}))
+				-- Focus diets FLEET traffic, never your own mail. A row addressed
+				-- to this seat by name stays fetchable in every mode: the point of
+				-- the subscription is that not everyone needs to know everything,
+				-- and a direct IS the right agent being told. Push may still skip
+				-- the WAKEUP for a non-actionable direct (shouldDeliver's diet) —
+				-- that is a different question from whether the row is delivered,
+				-- and the two paths are meant to differ here.
+				OR ($filter_mode = 'focus' AND (m.recipient = $name OR m.type IN (${ACTIONABLE_TYPES_SQL})))
 				OR ($filter_mode = 'normal' AND (
 					m.recipient = $name
 					OR $filter_until IS NULL
