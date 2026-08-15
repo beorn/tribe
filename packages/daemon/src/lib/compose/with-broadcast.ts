@@ -85,10 +85,19 @@ export function shouldDeliver(
   const mode = filter.filter_mode || "normal"
   if (mode === "ambient") return true
   if (mode === "focus") {
-    // Focus is an opt-in push diet, not a durability filter: every row stays
-    // fetchable, but only the canonical actionable classes wake the seat. Plain
-    // direct notify/response traffic is informational even though its legacy
-    // reply hint is "yes".
+    // Only the canonical actionable classes wake the seat. Plain direct
+    // notify/response traffic is informational even though its legacy reply
+    // hint is "yes".
+    //
+    // This used to say focus was "an opt-in push diet, not a durability filter:
+    // every row stays fetchable". That is no longer true, and saying so was the
+    // bug: 62 of 63 sessions are delivery=pull, so a filter that only quieted
+    // the wakeup quieted nothing. The same policy now also governs what a drain
+    // RETURNS, as a predicate in getInboxRows. Rows are still durable and still
+    // reachable through an explicit history read; they are not delivered.
+    //
+    // The two copies must agree — delivery-policy-parity.test.ts is what keeps
+    // them honest.
     return ACTIONABLE_TYPES_SET.has(info.type)
   }
   if (info.kind === "direct") return true

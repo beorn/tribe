@@ -1059,12 +1059,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     id: "tribe.filter",
     title: "Filter",
     description:
-      "Per-session filter for incoming channel events. mode controls focus level; mute stores topic globs to silence until the optional timestamp. Empty args clears the filter.",
+      "Per-session subscription. Governs BOTH the push wakeup and what a tribe.fetch drain returns, so it is the lever for protecting your own context. mode controls focus level: focus = addressed + actionable only; normal = everything minus active mutes; ambient = everything. mute stores topic globs to silence until the optional timestamp. Filtered rows stay durable and remain reachable through an explicit history read (from/with/since) — they are not delivered. Empty args clears the filter.",
     lifetime: "live-session",
     mcp: {
       name: "filter",
       description:
-        "Per-session filter for incoming channel events. mode controls focus level; mute stores topic globs to silence until the optional timestamp. Empty args clears the filter.",
+        "Per-session subscription. Governs BOTH the push wakeup and what a tribe.fetch drain returns, so it is the lever for protecting your own context. mode controls focus level: focus = addressed + actionable only; normal = everything minus active mutes; ambient = everything. mute stores topic globs to silence until the optional timestamp. Filtered rows stay durable and remain reachable through an explicit history read (from/with/since) — they are not delivered. Empty args clears the filter.",
       inputSchema: {
         type: "object",
         properties: {
