@@ -1235,8 +1235,8 @@ describe("dispatcher bounded mailbox drain", () => {
     // The refusal must route the reader somewhere that actually works, and must
     // not send them to the one that reproduces the failure.
     const refusal = (indeterminate as { message: string }).message
-    expect(refusal).toMatch(/tribe\.fetch/u)
-    expect(refusal).toMatch(/inbox-status/u)
+    expect(refusal).toMatch(/`tribe inbox --json`/u)
+    expect(refusal).not.toMatch(/MCP tribe\.fetch/u)
     expect(refusal).toMatch(/not empty/iu)
     // `tribe log` may appear ONLY as a warning against it, never as the remedy.
     expect(refusal).toMatch(/do not substitute[^.]*tribe log/iu)
