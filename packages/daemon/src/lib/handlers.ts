@@ -2830,6 +2830,31 @@ function rowMatchesSnapshotFilters(row: FetchRow, filters: Omit<SnapshotFilters,
   return true
 }
 
+/**
+ * The session's stored subscription, as bound parameters for `getInboxRows`.
+ *
+ * Deliberately mirrors `shouldDeliver` in with-broadcast.ts, which governs the
+ * push wakeup — the two must agree or a seat's subscription would mean one thing
+ * when pushed and another when pulled. A session with no row yet defaults to
+ * `normal` with no mute, matching that function's `if (!filter) return true`.
+ */
+function inboxFilterParams(ctx: TribeContext): {
+  $filter_mode: string
+  $filter_mute: string | null
+  $filter_until: number | null
+  $now: number
+} {
+  const filter = ctx.stmts.getSessionFilter.get({ $id: ctx.sessionId }) as
+    | { filter_mode: string | null; filter_mute: string | null; filter_until: number | null }
+    | undefined
+  return {
+    $filter_mode: filter?.filter_mode || "normal",
+    $filter_mute: filter?.filter_mute ?? null,
+    $filter_until: filter?.filter_until ?? null,
+    $now: Date.now(),
+  }
+}
+
 function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
   const limit = typeof a.limit === "number" && a.limit > 0 && a.limit <= 500 ? a.limit : 50
   const topics = normalizeStringArray(a.topics)
@@ -2855,6 +2880,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
   let attentionRows: FetchRow[] = []
   let attention: AttentionProjection | null = null
   let shouldAdvance = false
+  let exhaustedTo: number | null = null
   let cursorBase = cursor?.last_inbox_pull_seq ?? 0
   const since = typeof a.since === "number" ? a.since : null
   if (since !== null) cursorBase = since
@@ -2906,14 +2932,22 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
       $limit: limit,
     }) as FetchRow[]
     const windowBudget = limit - recovered.length
+    // Read the high-water mark BEFORE the window so it can only be
+    // conservative: a row inserted between the two reads is above it and is
+    // picked up on the next drain rather than skipped.
+    const highWater = (ctx.stmts.getMaxMessageRowid.get() as { max_rowid: number }).max_rowid
     const windowRows =
       windowBudget > 0
         ? (ctx.stmts.getInboxRows.all({
             $since: cursorBase,
             $name: currentName,
             $limit: windowBudget,
+            ...inboxFilterParams(ctx),
           }) as FetchRow[])
         : []
+    // A short window means the predicate exhausted the tail: every row above the
+    // cursor is either in this result or excluded by this seat's subscription.
+    if (windowBudget > 0 && windowRows.length < windowBudget) exhaustedTo = highWater
     rows = [...recovered, ...windowRows]
     shouldAdvance = !topicsAreSnapshot && a.advance !== false
   }
@@ -2924,10 +2958,13 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
   const cursorRows = topics && topics.length > 0 ? visibleRows.filter((r) => matchesGlob(topics, r.topic)) : visibleRows
   let outputCursor = Math.max(cursorBase, filtered.at(-1)?.rowid ?? cursorBase)
 
-  if (cursorRows.length > 0 && shouldAdvance) {
-    const last = cursorRows.at(-1)
-    if (last) {
-      const seq = Math.max(cursorBase, last.rowid)
+  if (shouldAdvance) {
+    let seq = Math.max(cursorBase, cursorRows.at(-1)?.rowid ?? cursorBase)
+    // Excluded rows still advance the cursor. Parking it on a seat whose whole
+    // window was filtered would leave the excluded tail to be re-scanned on
+    // every fetch — unbounded growth on the hot path.
+    if (exhaustedTo !== null) seq = Math.max(seq, exhaustedTo)
+    if (seq > cursorBase) {
       ctx.stmts.advanceInboxCursor.run({ $id: ctx.sessionId, $seq: seq, $now: Date.now() })
       outputCursor = seq
     }

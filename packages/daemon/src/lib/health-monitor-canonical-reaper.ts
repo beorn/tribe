@@ -104,12 +104,7 @@ function sendRecovered(api: TribeClientApi, message: string): void {
  * epoch/sequence numbers, so keying on it makes every observation a new
  * condition and every observation a broadcast.
  */
-function noteSourceCondition(
-  state: CanonicalReaperState,
-  api: TribeClientApi,
-  key: string,
-  message: string,
-): void {
+function noteSourceCondition(state: CanonicalReaperState, api: TribeClientApi, key: string, message: string): void {
   state.healthySourceSamples = 0
   if (state.activeSourceConditions.has(key)) return
   state.activeSourceConditions.add(key)

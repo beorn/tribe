@@ -8,7 +8,11 @@
 import { describe, expect, it, vi } from "vitest"
 import type { TribeClientApi } from "./plugin-api.ts"
 import type { CanonicalProcessObservation, ProcessRoutingAttribution } from "./health-process-source.ts"
-import { checkCanonicalReaper, createCanonicalReaperState, SOURCE_RECOVERY_SAMPLES } from "./health-monitor-canonical-reaper.ts"
+import {
+  checkCanonicalReaper,
+  createCanonicalReaperState,
+  SOURCE_RECOVERY_SAMPLES,
+} from "./health-monitor-canonical-reaper.ts"
 import { defaultThresholds } from "./health-monitor-plugin.ts"
 
 function observation(
@@ -306,7 +310,13 @@ describe("canonical source conditions announce edges, not observations", () => {
     // The production flap, verbatim.
     for (let i = 0; i < 8; i++) {
       checkCanonicalReaper(unavailable("process-census-incomplete"), thresholds, state, sink.client, sessions)
-      checkCanonicalReaper(unavailable("process-fact-invalid", "process fact is from the future"), thresholds, state, sink.client, sessions)
+      checkCanonicalReaper(
+        unavailable("process-fact-invalid", "process fact is from the future"),
+        thresholds,
+        state,
+        sink.client,
+        sessions,
+      )
     }
 
     expect(sink.broadcasts).toHaveLength(2)
@@ -358,7 +368,13 @@ describe("canonical source conditions announce edges, not observations", () => {
     const state = createCanonicalReaperState()
     const sink = api()
 
-    checkCanonicalReaper(observation({ kind: "owned", ownerId: "@dev/3", via: "pgid" }, { sequence: 9 }), thresholds, state, sink.client, sessions)
+    checkCanonicalReaper(
+      observation({ kind: "owned", ownerId: "@dev/3", via: "pgid" }, { sequence: 9 }),
+      thresholds,
+      state,
+      sink.client,
+      sessions,
+    )
     // Each regression carries different sequence/timestamp text, so a
     // string-keyed dedup announces every one of them.
     for (let i = 0; i < 5; i++) {

@@ -106,7 +106,13 @@ describe("@km/tribe/20032 - pull cursor monotonicity across same-session join", 
 
     const afterRejoin = parseToolJson(handleToolCall(ctx, "tribe.fetch", { limit: 50 }, opts)) as FetchJson
     expect(afterRejoin.events).toEqual([])
-    expect(afterRejoin.cursor).toBe(drainedRowid)
+    // The cursor may now sit AHEAD of the last delivered row. The rejoin itself
+    // writes an `event.session.joined` row, which no seat can ever drain — it is
+    // `kind = 'event'`, and self-sent besides — so once the window is exhausted
+    // the cursor passes it instead of re-examining it on every future fetch.
+    // What this test guards is that the cursor never goes BACKWARDS and that
+    // nothing is replayed; both still hold, and monotonicity holds more strongly.
+    expect(afterRejoin.cursor).toBeGreaterThanOrEqual(drainedRowid)
   })
 
   it("operator repair can advance a regressed named inbox cursor to the journal tail", () => {
