@@ -1519,7 +1519,7 @@ export function withDispatcher<
               })
             }
             const domains = JSON.parse(row.domains) as unknown
-            if (!Array.isArray(domains) || domains.some((domain) => typeof domain !== "string")) {
+            if (!Array.isArray(domains) || !domains.every((domain): domain is string => typeof domain === "string")) {
               return makeError(id, -32603, `stored domains for ${row.name} are invalid`)
             }
             const authorityCtx = createTribeContext({
