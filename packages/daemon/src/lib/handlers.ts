@@ -1736,6 +1736,40 @@ type DurableMembershipSessionRow = MembershipSessionRow & {
   launch_parent_pid: number
 }
 
+type MailboxReadCapability = {
+  state: "available" | "unavailable"
+  evidence_kind: "observed"
+  reason: "self-mailbox-authority-registered" | "self-mailbox-authority-missing" | "self-mailbox-authority-invalid"
+}
+
+/**
+ * Project the daemon's stored self-mailbox authority fact without exposing the
+ * bearer hash. Transport liveness cannot answer this question: legacy seats
+ * can send and heartbeat while remaining unable to read their own canonical
+ * inbox. A malformed stored hash is unavailable, never an optimistic unknown.
+ */
+function projectMailboxReadCapability(mailboxAuthorityHash: string | null): MailboxReadCapability {
+  if (mailboxAuthorityHash === null) {
+    return {
+      state: "unavailable",
+      evidence_kind: "observed",
+      reason: "self-mailbox-authority-missing",
+    }
+  }
+  if (!/^[a-f0-9]{64}$/u.test(mailboxAuthorityHash)) {
+    return {
+      state: "unavailable",
+      evidence_kind: "observed",
+      reason: "self-mailbox-authority-invalid",
+    }
+  }
+  return {
+    state: "available",
+    evidence_kind: "observed",
+    reason: "self-mailbox-authority-registered",
+  }
+}
+
 type MembershipDiscrepancy = {
   status: "degraded"
   connected_durable_launches: number
@@ -1867,7 +1901,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     .prepare(`
       SELECT s.id, s.name, s.role, s.domains, s.pid, s.cwd,
         s.claude_session_id, s.claude_session_name, s.started_at, s.updated_at,
-        s.account, s.provider, s.launch_id, s.launch_parent_pid, s.delivery
+        s.account, s.provider, s.mailbox_authority_hash, s.launch_id, s.launch_parent_pid, s.delivery
       FROM sessions s
       ORDER BY s.started_at
     `)
@@ -1884,6 +1918,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     updated_at: number
     account: string | null
     provider: string | null
+    mailbox_authority_hash: string | null
     launch_id: string | null
     launch_parent_pid: number | null
     delivery: "push" | "pull"
@@ -1946,6 +1981,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
       cwd: r.cwd,
       claude_session_id: r.claude_session_id,
       claude_session_name: r.claude_session_name,
+      mailbox_read_capability: projectMailboxReadCapability(r.mailbox_authority_hash),
       ...evidence,
       // `alive` (plus transport_alive/agent_alive/pid_alive/is_silent) is
       // derived above, never asserted from transport-registry presence — see
@@ -2261,6 +2297,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     pid: number
     started_at: number
     updated_at: number
+    mailbox_authority_hash: string | null
     launch_id: string | null
     launch_parent_pid: number | null
   }>
@@ -2344,6 +2381,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
       launch_id: active.launchId,
       launch_parent_pid: active.launchParentPid,
       transport_pids: transportPids,
+      mailbox_read_capability: projectMailboxReadCapability(s.mailbox_authority_hash),
       ...transport,
       ...liveness,
       last_message: lastMsgAge ? `${Math.round(lastMsgAge / 60_000)} min ago` : "never",
@@ -2397,6 +2435,20 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     connectedSessionNames: liveSessions.map((session) => session.name),
     dbGrowthWarningBytes: parseDbGrowthWarningBytes(process.env.TRIBE_HEALTH_DB_GROWTH_WARN_BYTES),
   })
+  const mailboxReadIssues = liveSessions.flatMap((session) => {
+    // Connection-scoped tools and legacy diagnostic rows are not managed
+    // seats. Only a durable launch is required to carry the launcher-minted
+    // self-read bearer, so keep health loud without manufacturing incidents
+    // for processes that have no canonical seat mailbox to read.
+    if (!isDurableMembershipSessionRow(session)) return []
+    const capability = projectMailboxReadCapability(session.mailbox_authority_hash)
+    return capability.state === "available"
+      ? []
+      : [
+          `mailbox read unavailable for ${session.name}: ${capability.reason}; ` +
+            "replace the session-root owner (rearm/resume preserves it)",
+        ]
+  })
 
   // Stale-code detector (@km/tribe/20033): surface whether the running daemon
   // is provably older than the on-disk / superproject-pinned tribe code, so a
@@ -2426,6 +2478,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
         (wedge) =>
           `transport wedge ${wedge.name}: transport_state=${wedge.transport_state} owner_state=${wedge.owner_state} reason=${wedge.wedge_reason}`,
       ),
+      ...mailboxReadIssues,
       ...pendingIssues,
       ...cadence.warnings,
     ],

@@ -55,10 +55,14 @@ tribe-wire members [-a|--all]
 
 Machine-readable JSON (`{"sessions": [...]}`) — the same reply
 `tribe.members` returns over MCP, including `launch_id`, `transport_state`, and
-`owner_state` per row. A disconnected row without process-identity binding
-reports owner `unknown`; bare numeric PID existence is never proof that the
-original registrant is alive. This is the row-level counterpart to the
-human-formatted `sessions` table.
+`owner_state` per row. `mailbox_read_capability` separately reports whether
+the daemon observed a valid launcher-registered self-mailbox authority; a
+transport-live row can therefore be explicitly `unavailable` instead of
+looking healthy because it can still send. The bearer hash itself is never
+exposed. A disconnected row without process-identity binding reports owner
+`unknown`; bare numeric PID existence is never proof that the original
+registrant is alive. This is the row-level counterpart to the human-formatted
+`sessions` table.
 
 ### `pending`
 
@@ -106,8 +110,11 @@ tribe-wire health
 
 Diagnostics: issues list, a live roster table (from the dispatcher's in-memory
 client map, not the DB), durable-launch rows missing transport, and daemon
-pid/uptime/clients. Disconnected connection-scoped legacy rows are repairable
-litter, not process-live wedges. No options.
+pid/uptime/clients. A live durable launch without self-mailbox authority is an
+issue and names owner replacement as the remedy; rearm/resume preserves the
+pre-fix session-root process and cannot mint the missing capability.
+Disconnected connection-scoped legacy rows are repairable litter, not
+process-live wedges. No options.
 
 ### `doctor`
 

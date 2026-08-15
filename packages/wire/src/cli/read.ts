@@ -1719,7 +1719,7 @@ export function registerReadCommands(program: Command): void {
 
   program
     .command("members")
-    .description("List member sessions as JSON with transport and owner verdicts")
+    .description("List member sessions as JSON with transport, owner, and mailbox-read verdicts")
     .option("-a, --all", "Include disconnected durable session rows")
     .action((opts: { all?: boolean }) => void cmdMembers(!!opts.all))
 
