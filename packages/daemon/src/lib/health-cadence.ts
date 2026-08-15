@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite"
-import { ACTIONABLE_TYPES_SQL, unretiredAttentionPredicateSql } from "./database.ts"
+import { ATTENTION_PREDICATE_SQL, unretiredAttentionPredicateSql } from "./database.ts"
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
@@ -442,7 +442,7 @@ function inboxLagProjection(
       AND m.recipient = $session
       AND m.kind = 'direct'
       AND m.sender != $session
-      AND m.type IN (${ACTIONABLE_TYPES_SQL})
+      AND ${ATTENTION_PREDICATE_SQL}
       AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "rowid" })}
   `)
   const actionableLagQueryArchive = db.prepare(`
@@ -455,7 +455,7 @@ function inboxLagProjection(
       AND m.recipient = $session
       AND m.kind = 'direct'
       AND m.sender != $session
-      AND m.type IN (${ACTIONABLE_TYPES_SQL})
+      AND ${ATTENTION_PREDICATE_SQL}
       AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "seq" })}
   `)
   // Selects the shared seq/rowid position too (absent from the original
@@ -472,7 +472,7 @@ function inboxLagProjection(
       AND m.recipient = $session
       AND m.kind = 'direct'
       AND m.sender != $session
-      AND m.type IN (${ACTIONABLE_TYPES_SQL})
+      AND ${ATTENTION_PREDICATE_SQL}
       AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "rowid" })}
     ORDER BY m.rowid ASC
     LIMIT 1
@@ -487,7 +487,7 @@ function inboxLagProjection(
       AND m.recipient = $session
       AND m.kind = 'direct'
       AND m.sender != $session
-      AND m.type IN (${ACTIONABLE_TYPES_SQL})
+      AND ${ATTENTION_PREDICATE_SQL}
       AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "seq" })}
     ORDER BY m.seq ASC
     LIMIT 1
