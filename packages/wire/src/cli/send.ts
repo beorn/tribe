@@ -210,7 +210,14 @@ export function buildSendPayload(input: SendPayloadInput): SendPayload {
 
 type PendingListResult = {
   error?: string
-  pending?: Array<{ request_id?: string; message_id?: string }>
+  pending?: Array<{
+    request_id?: string
+    message_id?: string
+    recipient?: string
+    sender?: string
+    summary?: string
+    status?: string
+  }>
 }
 
 function replyOwnerFromEnv(env: NodeJS.ProcessEnv = process.env): string | null {
@@ -320,6 +327,55 @@ async function warnPendingReplyOwner(owner: string, reply: string): Promise<void
 }
 
 /**
+ * Advisory only (22990): warn when a seat sends to someone who holds an open
+ * ball THAT SEAT OWNS, without `--reply`.
+ *
+ * This tests a SHAPE, never content: "you owe this recipient an answer and
+ * this message is not marked as one". It makes no judgement about whether the
+ * text answers anything, which is exactly why it is safe — an auto-detect-a-
+ * reply design could silently close a live obligation, and this cannot. Do not
+ * "improve" it by inspecting the message.
+ *
+ * WARN, never refuse. Legitimate sends to someone you owe exist: a mid-work
+ * status, an unrelated topic. Refusing there teaches people to route around
+ * the check, which is worse than no check at all.
+ *
+ * HONEST SCOPE: this catches answered-but-never-released. It does nothing for
+ * never-answered-at-all, which was the larger share of the ten overdue balls
+ * on 2026-08-19. Latency and flag discipline are different failures.
+ */
+async function warnUnreleasedBallToRecipient(sender: string, recipient: string): Promise<void> {
+  // A broadcast is not a targeted send; warning on every fan-out would fire
+  // constantly once a seat is behind, which is when a warning is least welcome
+  // and most likely to be tuned out.
+  if (recipient === "*") return
+
+  const pending = mcpJsonContent(await callDaemon("tribe.pending", { owner: sender })) as PendingListResult
+  if (pending.error !== undefined && pending.error.length > 0) {
+    // Stay quiet rather than cry wolf: an unreadable tracker is not evidence
+    // of an unreleased ball. The reply path already reports read failures on
+    // the branch where the answer depends on them.
+    return
+  }
+
+  const owed = (pending.pending ?? []).filter((row) => row.sender === recipient && row.recipient === sender)
+  if (owed.length === 0) return
+
+  console.error(
+    `tribe-wire send: note — you hold ${owed.length} open ball(s) from ${recipient} and this message carries no --reply.`,
+  )
+  for (const row of owed) {
+    const id = row.request_id ?? row.message_id
+    if (id === undefined || id.length === 0) continue
+    const summary = row.summary !== undefined && row.summary.length > 0 ? row.summary : "(no summary recorded)"
+    const expired = row.status === "expired" ? " [EXPIRED]" : ""
+    console.error(`  ${id}${expired}  ${summary}`)
+    console.error(`    close with: tribe send ${recipient} --type response --reply ${id} <your answer>`)
+  }
+  console.error(`Sending anyway — this is a note, not a refusal; a send to someone you owe is often legitimate.`)
+}
+
+/**
  * Runs strictly AFTER delivery (22844): every branch here reports on the
  * bookkeeping half of an already-sent response, so none may read as a
  * delivery failure. Exit 3 = delivered, close not confirmed — distinct from
@@ -403,6 +459,7 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
   }
   const caller = await resolveSendCaller(input.reply, input.anonymous)
   if (input.reply && caller) await warnPendingReplyOwner(caller.name, input.reply)
+  else if (!input.reply && caller && !input.anonymous) await warnUnreleasedBallToRecipient(caller.name, input.to)
 
   const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input), caller, !input.anonymous)) as {
     error?: string

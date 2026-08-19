@@ -988,3 +988,165 @@ describe("registerSendCommands", () => {
     }
   })
 })
+
+/**
+ * Bead: @i/5-no-wedged-agents/22990 — the sender is blind to the ball it owes.
+ *
+ * The check is SHAPE-only: "you owe this recipient and this message is not
+ * marked as an answer". It never inspects the message, so it can never decide
+ * some text looks like a reply and close a live obligation.
+ */
+describe("send warns when it should have been a reply (22990)", () => {
+  const runAgainstPending = async (
+    pendingRows: unknown[],
+    args: string[],
+    pendingError?: string,
+  ): Promise<{ code: number | null; stdout: string; stderr: string }> => {
+    const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-send-owed-"))
+    const socketPath = join(tmp, "tribe.sock")
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as { id: number; method: string; params?: Record<string, unknown> }
+          let result: unknown
+          if (request.method === "tribe.pending") {
+            result = {
+              content: [
+                {
+                  text: JSON.stringify(
+                    pendingError === undefined
+                      ? { owner: "@chief", count: pendingRows.length, pending: pendingRows }
+                      : { error: pendingError },
+                  ),
+                },
+              ],
+            }
+          } else if (request.method === "cli_inbox_status_by_launch_v1") {
+            // A send WITHOUT --reply refuses outright unless the daemon
+            // validates a launch identity, so the fixture must grant one or
+            // every case below exits 1 before reaching the check.
+            result = { session: "@chief", launch_id: "launch-22990", launch_parent_pid: 4242 }
+          } else if (request.method === "register") {
+            result = { name: (request.params?.name as string) ?? "@chief", role: "member" }
+          } else if (request.method === "tribe.send") {
+            result = { sent: true }
+          } else {
+            result = { error: "unexpected call " + request.method }
+          }
+          socket.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\n")
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      return await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProc) => {
+        const child = spawn(BUN_BIN, [CLI, ...args], {
+          env: {
+            ...process.env,
+            TRIBE_SOCKET: socketPath,
+            TRIBE_SESSION_NAME: "@chief",
+            TRIBE_LAUNCH_ID: "launch-22990",
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+        let stdout = ""
+        let stderr = ""
+        child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+        child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+        child.on("close", (code) => resolveProc({ code, stdout, stderr }))
+      })
+    } finally {
+      server.close()
+      safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
+    }
+  }
+
+  const OWED_TO_AGENT3 = [
+    {
+      request_id: "req-owed",
+      message_id: "msg-owed",
+      recipient: "@chief",
+      sender: "@agent/3",
+      summary: "please rule on the recut",
+      status: "active",
+    },
+  ]
+
+  test("warns with the ball id, its summary and a pasteable closing command — and still sends", async () => {
+    const res = await runAgainstPending(OWED_TO_AGENT3, ["send", "@agent/3", "unrelated status"])
+
+    expect(res.code).toBe(0)
+    expect(res.stderr).toContain("you hold 1 open ball(s) from @agent/3")
+    expect(res.stderr).toContain("req-owed")
+    // The reader must see WHICH obligation they are walking past.
+    expect(res.stderr).toContain("please rule on the recut")
+    // Remediation is a paste, not a lookup.
+    expect(res.stderr).toContain("tribe send @agent/3 --type response --reply req-owed")
+    // WARN, never refuse.
+    expect(res.stderr).toContain("this is a note, not a refusal")
+  })
+
+  test("marks an expired ball so the warning distinguishes late from merely open", async () => {
+    const res = await runAgainstPending(
+      [{ ...OWED_TO_AGENT3[0], status: "expired" }],
+      ["send", "@agent/3", "unrelated status"],
+    )
+
+    expect(res.code).toBe(0)
+    expect(res.stderr).toContain("[EXPIRED]")
+  })
+
+  // POSITIVE CONTROLS. Without these the assertions above could pass while the
+  // check fired indiscriminately, which would be a warning nobody reads.
+  test("POSITIVE CONTROL: silent when the ball is owed to a DIFFERENT seat", async () => {
+    const res = await runAgainstPending(OWED_TO_AGENT3, ["send", "@agent/9", "hello"])
+
+    expect(res.code).toBe(0)
+    expect(res.stderr).not.toContain("open ball(s) from")
+  })
+
+  test("POSITIVE CONTROL: silent when the sender owes nothing", async () => {
+    const res = await runAgainstPending([], ["send", "@agent/3", "hello"])
+
+    expect(res.code).toBe(0)
+    expect(res.stderr).not.toContain("open ball(s) from")
+  })
+
+  test("scoped to balls the SENDER owns — a ball the recipient owes ME does not warn", async () => {
+    const res = await runAgainstPending(
+      [{ request_id: "req-theirs", recipient: "@agent/3", sender: "@chief", summary: "they owe me", status: "active" }],
+      ["send", "@agent/3", "nudge"],
+    )
+
+    expect(res.code).toBe(0)
+    expect(res.stderr).not.toContain("open ball(s) from")
+  })
+
+  test("silent on a broadcast — fan-out would fire on every send once a seat is behind", async () => {
+    const res = await runAgainstPending(OWED_TO_AGENT3, ["send", "*", "fleet notice"])
+
+    expect(res.code).toBe(0)
+    expect(res.stderr).not.toContain("open ball(s) from")
+  })
+
+  test("an unreadable tracker stays quiet rather than crying wolf", async () => {
+    const res = await runAgainstPending([], ["send", "@agent/3", "hello"], "tracker unavailable")
+
+    expect(res.code).toBe(0)
+    expect(res.stderr).not.toContain("open ball(s) from")
+  })
+})
