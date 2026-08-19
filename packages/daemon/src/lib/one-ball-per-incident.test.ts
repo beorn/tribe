@@ -318,6 +318,26 @@ describe("one ball per incident (habwire stage 2(d))", () => {
       const res = call(watcher, { to: "*", message: "wedged", incident: INCIDENT })
       expect(String(res.error)).toMatch(/exactly one recipient/i)
     })
+
+    // @hh/pm/@i/5-no-wedged-agents/22964: openIncidentRequest's ON CONFLICT clause used to
+    // update only request_kind/expires_at, leaving message_id — and therefore every
+    // reader's displayed content — frozen at whichever tick first opened the ball.
+    // opened_at staying frozen is correct (rung-5 escalation's demand instant); content
+    // staying frozen is not — a re-evaluating watcher ticking correctly for days still
+    // showed a reader the FIRST tick's counts/ages/refs forever.
+    it("reassertion refreshes the displayed content to the latest tick, not the first", () => {
+      const watcher = makeContext(db, stmts, "@fleet")
+      call(watcher, { to: "@chief", message: "1 waiting, oldest 2m", incident: INCIDENT })
+      call(watcher, { to: "@chief", message: "1 waiting, oldest 55m", incident: INCIDENT })
+
+      const result = handleToolCall(makeContext(db, stmts, "@chief"), "tribe.pending", { owner: "@chief" }, makeOpts())
+      const text = (result as { content: Array<{ text: string }> }).content[0]?.text ?? "{}"
+      const parsed = JSON.parse(text) as { pending: Array<{ request_id: string; content: string | null }> }
+      const row = parsed.pending.find((p) => p.request_id === incidentKey(INCIDENT))
+
+      expect(row?.content).toBe("1 waiting, oldest 55m")
+      expect(row?.content).not.toBe("1 waiting, oldest 2m")
+    })
   })
 
   it("the open ball is addressable as its identity — the pile reads as current conditions", () => {

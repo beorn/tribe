@@ -1285,8 +1285,23 @@ export function createStatements(db: Database) {
 
     /** Incident insert: the typed discriminator, not the request-id spelling,
      *  owns emitter-only settlement. Reassertion promotes a legacy row after
-     *  migration and removes the request deadline; it deliberately preserves
-     *  the original opening instant and question message. */
+     *  migration and removes the request deadline. `opened_at` is DELIBERATELY
+     *  preserved across reassertion — it is the demand instant the rung-5
+     *  escalation fold measures standing duration against (@hab/core
+     *  wait-watch.ts: "the daemon upserts never touch it"); resetting it on
+     *  every tick would make every incident look freshly opened forever and
+     *  escalation could never fire.
+     *
+     *  `message_id` is NOT preserved (@hh/pm/@i/5-no-wedged-agents/22964,
+     *  2026-08-19 — was previously frozen alongside opened_at, undocumented
+     *  and untested): it is repointed at the reasserting tick's own message
+     *  on every upsert, so a reader's displayed content (counts, ages,
+     *  example refs) reflects THIS tick rather than whichever tick first
+     *  opened the ball. Measured before this fix: a re-evaluating watcher
+     *  could tick correctly for days while `tribe pending` still showed text
+     *  frozen at first-open — one incident named a specific ball as still
+     *  waiting five minutes after that exact ball had been closed, with its
+     *  age frozen at the ball's original two-day-old open time. */
     openIncidentRequest: db.prepare(`
 		INSERT INTO pending_request (
 			request_id, recipient, sender, opened_at, expires_at, message_id, fanout, request_kind
@@ -1294,7 +1309,8 @@ export function createStatements(db: Database) {
 		VALUES ($request_id, $recipient, $sender, $opened_at, NULL, $message_id, $fanout, 'incident')
 		ON CONFLICT(request_id, recipient) DO UPDATE SET
 			request_kind = 'incident',
-			expires_at = NULL
+			expires_at = NULL,
+			message_id = excluded.message_id
 	`),
 
     /** Ball-tracker close: deletes pending_request rows for a given (request_id, recipient).
