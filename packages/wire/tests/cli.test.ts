@@ -151,7 +151,10 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       await new Promise<void>((resolveClose) => daemon.once("close", () => resolveClose()))
       rmSync(dir, { recursive: true, force: true })
     }
-  })
+    // The canary deliberately gives its real CLI subprocess 10s. Vitest's
+    // implicit 5s ceiling can otherwise kill the surrounding test first on a
+    // loaded runner, turning a healthy rail into an unclassified bare timeout.
+  }, 30_000)
 
   it("refuses a legacy inbox-wait daemon before parsing its stale result and names the served pins", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-wait-skew-"))
