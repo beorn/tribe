@@ -694,6 +694,20 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
 
   return new Proxy(current, {
     get(_, prop) {
+      if (prop === "call")
+        return (...args: Parameters<DaemonClient["call"]>) => {
+          // 22994 — after a disconnect, `current` still names the retired
+          // client until the bounded reconnect loop installs its successor.
+          // Writing a request to that destroyed socket creates a pending call
+          // that can only expire at the generic 10s deadline. Fail before the
+          // write so MCP callers receive the reconnect state immediately and
+          // can retry. Never replay a call that was written before transport
+          // death: a mutating request may already have committed remotely.
+          if (current.socket.destroyed) {
+            return Promise.reject(new Error("daemon connection closed; reconnecting"))
+          }
+          return current.call(...args)
+        }
       if (prop === "close")
         return () => {
           closed = true

@@ -760,6 +760,37 @@ describe("createReconnectingClient transport recovery", () => {
     }
   })
 
+  it("fails a call loudly while the current transport is dead instead of timing out on the retired socket (22994)", async () => {
+    const sock = join(tmpDir, "dead-current-call.sock")
+    const { server, clients } = await spawnFakeDaemon(sock)
+    const client = await createReconnectingClient({
+      socketPath: sock,
+      noSpawn: true,
+      maxAttempts: 3,
+      maxStartupAttempts: 1,
+    })
+
+    try {
+      clients[0]?.destroy()
+      await vi.waitFor(() => expect(client.socket.destroyed).toBe(true))
+
+      const callOutcome = client.call("echo", { after: "disconnect" }).then(
+        () => "unexpected response",
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      )
+      const observed = await Promise.race([
+        callOutcome,
+        new Promise<string>((resolve) => setTimeout(() => resolve("hung on retired socket"), 100)),
+      ])
+
+      expect(observed).toBe("daemon connection closed; reconnecting")
+    } finally {
+      client.close()
+      for (const socket of clients) socket.destroy()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
   it("reports bounded reconnect exhaustion with the final error", async () => {
     const sock = join(tmpDir, "exhausted.sock")
     const { server, clients } = await spawnFakeDaemon(sock)
