@@ -1150,3 +1150,53 @@ describe("send warns when it should have been a reply (22990)", () => {
     expect(res.stderr).not.toContain("open ball(s) from")
   })
 })
+
+describe("a second recipient must never be absorbed into the message body", () => {
+  /**
+   * `send` takes exactly one `<to>` followed by a variadic `<message...>`, so
+   * `tribe send @a @b "text"` silently made `@b` the FIRST WORD OF THE BODY,
+   * delivered to `@a` only, printed `Sent message to @a`, and exited 0. The
+   * dropped recipient was indistinguishable from success.
+   *
+   * The MCP surface over the same protocol accepts `to` as an array with
+   * `fanout`, so the CLI is strictly narrower — and was silent about it.
+   *
+   * This refuses rather than adding array support: widening `<to>` is a public
+   * API change. Failing loud is a bug fix.
+   */
+  function runSend(args: string[]): Promise<{ code: number | null; stderr: string }> {
+    return new Promise((resolveProcess) => {
+      const child = spawn(BUN_BIN, [CLI, ...args], {
+        cwd: TEST_ROOT,
+        stdio: ["ignore", "pipe", "pipe"],
+      })
+      let stderr = ""
+      child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+      child.on("close", (code) => resolveProcess({ code, stderr }))
+    })
+  }
+
+  test("refuses when the first message word is a bare seat name, naming both recipients", async () => {
+    const res = await runSend(["send", "@cto", "@chief", "the", "actual", "message"])
+
+    expect(res.code).toBe(2)
+    // Names BOTH, so the reader sees exactly what would have been swallowed.
+    expect(res.stderr).toContain("@cto")
+    expect(res.stderr).toContain("@chief")
+    // Says what would have happened, not merely that something is invalid.
+    expect(res.stderr).toMatch(/message body|absorbed|swallow/iu)
+  })
+
+  test("does not fire when the message is one quoted argument — the normal correct form", async () => {
+    const res = await runSend(["send", "@cto", "@chief please look at this"])
+
+    // May fail later for lack of a daemon; it must NOT fail as a recipient error.
+    expect(res.stderr).not.toMatch(/second recipient|absorbed into the message/iu)
+  })
+
+  test("does not fire on a single-word message that happens to be a seat name", async () => {
+    const res = await runSend(["send", "@cto", "@chief"])
+
+    expect(res.stderr).not.toMatch(/second recipient|absorbed into the message/iu)
+  })
+})

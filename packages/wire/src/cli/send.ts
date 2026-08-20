@@ -693,6 +693,38 @@ export function registerSendCommands(program: Command): void {
           )
           process.exit(2)
         }
+        // A SECOND RECIPIENT MUST NEVER BECOME MESSAGE TEXT.
+        //
+        // `send` is `<to>` plus a variadic `<message...>`, so `tribe send @a @b
+        // "text"` made `@b` the first WORD OF THE BODY, delivered to `@a`
+        // alone, printed "Sent message to @a" and exited 0. The dropped
+        // recipient was indistinguishable from success — the exact shape the
+        // NO SILENT ERRORS rule exists to stop.
+        //
+        // The discriminator is deliberately narrow: a BARE seat token as the
+        // first word AND a body the shell split into several arguments. Normal
+        // correct usage quotes the message into one argument, so prose that
+        // legitimately opens with "@chief ..." does not trip this.
+        //
+        // This refuses rather than accepting a recipient list: the daemon and
+        // the MCP surface do take `to` as an array with `fanout`, but widening
+        // `<to>` here is a public API change. Failing loud is the bug fix.
+        const swallowedRecipient = message.length > 1 ? (message[0] ?? "") : ""
+        if (/^@[A-Za-z0-9_/-]+$/u.test(swallowedRecipient)) {
+          console.error(
+            `tribe-wire send: refusing — '${swallowedRecipient}' looks like a second recipient, but this command ` +
+              `takes exactly one. It would have been absorbed into the message body and delivered to '${to}' alone, ` +
+              `with '${swallowedRecipient}' silently receiving nothing.`,
+          )
+          console.error(`Send to each recipient separately:`)
+          console.error(`  tribe send ${to} "<message>"`)
+          console.error(`  tribe send ${swallowedRecipient} "<message>"`)
+          console.error(`Or broadcast with: tribe send '*' "<message>"`)
+          console.error(
+            `If '${swallowedRecipient}' really is the first word of your message, quote the whole message as one argument.`,
+          )
+          process.exit(2)
+        }
         if (opts.delivery !== undefined && !(TRIBE_DELIVERY_MODES as readonly string[]).includes(opts.delivery)) {
           console.error(
             `tribe-wire send: invalid --delivery '${opts.delivery}' — expected one of: ${TRIBE_DELIVERY_MODES.join(", ")}`,
