@@ -11,7 +11,7 @@ import { logEvent } from "./messaging.ts"
 import { prefixFallbackDeliveryResolver } from "./delivery-resolution.ts"
 import { registerSession } from "./session.ts"
 import { DEFAULT_MAX_SILENCE_SEC } from "./session-transport-state.ts"
-import tribeHabModule from "../../../../hab.module.ts"
+import tribeHabModule from "../../../../hab.projects.ts"
 
 const PROJECT_ID = "delivery-resolution"
 
