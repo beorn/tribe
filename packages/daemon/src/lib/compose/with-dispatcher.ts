@@ -1536,7 +1536,7 @@ export function withDispatcher<
             const result = await handleToolCall(
               authorityCtx,
               TRIBE_COORD_METHODS.fetch,
-              { limit: p.limit },
+              { limit: p.limit, advance: p.peek === true ? false : undefined },
               DAEMON_HANDLER_OPTS,
               connId,
             )
@@ -1612,7 +1612,7 @@ export function withDispatcher<
               $limit: limit,
             }) as FetchRow[]
             const last = rows.at(-1)
-            if (last) {
+            if (last && p.peek !== true) {
               stmts.advanceMailboxCursor.run({ $recipient: sessionName, $seq: last.rowid, $now: Date.now() })
             }
             return makeResponse(id, {

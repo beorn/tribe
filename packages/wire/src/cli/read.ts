@@ -1245,15 +1245,26 @@ function readOperatorCapabilityFromInheritedFd(fdRaw: string | undefined): strin
   return capability
 }
 
-async function cmdInboxDrain(opts: { session?: string; limit?: number; json?: boolean }): Promise<void> {
+async function cmdInboxDrain(opts: {
+  session?: string
+  limit?: number
+  json?: boolean
+  peek?: boolean
+}): Promise<void> {
   const result = (await callDaemon(cliInboxMethod("drain", opts.session), {
     ...cliInboxTargetParams(opts.session),
     limit: opts.limit ?? 10,
+    peek: opts.peek,
     // The fd number is public process metadata; the capability content never
     // enters env/argv, where another same-user process could inspect it.
     operator_capability: readOperatorCapabilityFromInheritedFd(process.env.TRIBE_OPERATOR_CAPABILITY_FD),
   })) as InboxDrainResult
   if (opts.json) {
+    if (!opts.peek) {
+      console.error(
+        `tribe inbox-drain: read was destructive; messages consumed and cursor advanced. Use --peek to read without consuming.`,
+      )
+    }
     console.log(JSON.stringify(result))
     return
   }
@@ -1261,10 +1272,20 @@ async function cmdInboxDrain(opts: { session?: string; limit?: number; json?: bo
     console.log(`${event.from} [${event.type}]`)
     console.log(event.content)
   }
-  console.log(
-    `${result.session}: drained ${result.drained_count} actionable DM${result.drained_count === 1 ? "" : "s"}; ` +
-      `${result.unread_count} remaining.`,
-  )
+  if (opts.peek) {
+    console.log(
+      `${result.session} (PEEK): viewed ${result.drained_count} actionable DM${result.drained_count === 1 ? "" : "s"}; ` +
+        `${result.unread_count} remaining.`,
+    )
+  } else {
+    console.log(
+      `[CONSUMED] ${result.session}: drained ${result.drained_count} actionable DM${result.drained_count === 1 ? "" : "s"}; ` +
+        `${result.unread_count} remaining.`,
+    )
+    console.log(
+      `\n(Note: this drain consumed the messages and advanced the cursor. Use --peek to read without consuming.)`,
+    )
+  }
 }
 
 interface SelfInboxEvent {
@@ -1289,15 +1310,20 @@ function printSelfInboxEvent(event: SelfInboxEvent): void {
   console.log(event.content ?? "")
 }
 
-async function cmdInbox(opts: { limit?: number; json?: boolean }): Promise<void> {
+async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean }): Promise<void> {
   const authority = readSelfMailboxAuthorityFromEnvironment(process.env)
   if (authority === null) {
     throw new Error(`${AG_SESSION_AUTH_ENV} is missing; this managed session has no self-mailbox authority source`)
   }
   const result = mcpJsonContent(
-    await callDaemon("cli_self_inbox_v1", { authority, limit: opts.limit ?? 50 }),
+    await callDaemon("cli_self_inbox_v1", { authority, limit: opts.limit ?? 50, peek: opts.peek }),
   ) as SelfInboxResult
   if (opts.json) {
+    if (!opts.peek) {
+      console.error(
+        `tribe inbox: read was destructive; messages consumed and cursor advanced. Use --peek to read without consuming.`,
+      )
+    }
     console.log(JSON.stringify(result))
     return
   }
@@ -1314,9 +1340,19 @@ async function cmdInbox(opts: { limit?: number; json?: boolean }): Promise<void>
     console.log(ball.summary ?? "")
   }
   const pendingTotal = result.attention?.pending_balls_summary?.total ?? pending.length
-  console.log(
-    `inbox: ${actionable.length} actionable unread; ${pendingTotal} pending ball(s); cursor ${result.cursor ?? 0}.`,
-  )
+
+  if (opts.peek) {
+    console.log(
+      `inbox (PEEK): ${actionable.length} actionable unread; ${pendingTotal} pending ball(s); cursor ${result.cursor ?? 0}.`,
+    )
+  } else {
+    console.log(
+      `[CONSUMED] inbox: ${actionable.length} actionable unread; ${pendingTotal} pending ball(s); cursor ${result.cursor ?? 0}.`,
+    )
+    console.log(
+      `\n(Note: this read consumed the messages and advanced the cursor. Use --peek to read without consuming.)`,
+    )
+  }
 }
 
 interface InboxDrainFailureProjection {
@@ -1819,7 +1855,8 @@ export function registerReadCommands(program: Command): void {
     .description("Read and acknowledge this managed session's canonical mailbox")
     .option("--limit <n>", "Maximum events to return (max 500)", int, 50)
     .option("--json", "Emit the canonical machine-readable attention projection")
-    .action(async (opts: { limit?: number; json?: boolean }) => {
+    .option("--peek", "Read the inbox without consuming messages or advancing the cursor")
+    .action(async (opts: { limit?: number; json?: boolean; peek?: boolean }) => {
       try {
         await cmdInbox(opts)
       } catch (error) {
@@ -1837,7 +1874,8 @@ export function registerReadCommands(program: Command): void {
     )
     .option("--limit <n>", "Maximum actionable DMs to return and acknowledge (max 100)", int, 10)
     .option("--json", "Emit machine-readable JSON")
-    .action(async (opts: { session?: string; limit?: number; json?: boolean }) => {
+    .option("--peek", "Read the inbox without consuming messages or advancing the cursor")
+    .action(async (opts: { session?: string; limit?: number; json?: boolean; peek?: boolean }) => {
       try {
         await cmdInboxDrain(opts)
       } catch (error) {
