@@ -11,6 +11,7 @@ import * as path from "path"
 import * as fs from "fs"
 import * as readline from "readline"
 import * as os from "os"
+import { spawnSync } from "node:child_process"
 import {
   PROJECTS_DIR,
   MAX_CONTENT_SIZE,
@@ -734,28 +735,87 @@ function indexProjectMemory(db: Database, projectRoot: string, projectPath: stri
   return count
 }
 
+interface ProjectDocumentationRoot {
+  readonly root: string
+  readonly sourcePrefix: "doc:" | "doc:container:"
+  readonly displayPrefix: "" | "container:"
+}
+
+function gitEnvironmentWithoutRootOverrides(): NodeJS.ProcessEnv {
+  const env = { ...process.env }
+  delete env.GIT_DIR
+  delete env.GIT_WORK_TREE
+  delete env.GIT_INDEX_FILE
+  return env
+}
+
+function gitAbsolutePath(directory: string, args: readonly string[]): string | null {
+  const result = spawnSync("git", ["-C", directory, ...args], {
+    encoding: "utf8",
+    env: gitEnvironmentWithoutRootOverrides(),
+  })
+  if (result.status !== 0) return null
+  const output = (result.stdout ?? "").trim()
+  return output === "" ? null : output
+}
+
 /**
- * Index documentation files from docs/ and docs/lessons/
+ * Discover documentation owned by this project and by an enclosing container
+ * repository. The latter is the general nested-repository shape used by hh:
+ * a code Git worktree lives below a separate Git repository that owns agent
+ * documentation. Requiring both Git identities prevents an arbitrary ancestor
+ * `docs/` directory from entering Recall.
  */
+function projectDocumentationRoots(projectRoot: string): readonly ProjectDocumentationRoot[] {
+  const roots: ProjectDocumentationRoot[] = []
+  const projectDocs = path.join(projectRoot, "docs")
+  if (fs.existsSync(projectDocs)) roots.push({ root: projectDocs, sourcePrefix: "doc:", displayPrefix: "" })
+
+  const commonDir = gitAbsolutePath(projectRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+  if (commonDir === null) {
+    if (fs.existsSync(path.join(projectRoot, ".git"))) {
+      throw new Error(`recall docs index: cannot resolve Git common directory for project ${projectRoot}`)
+    }
+    return roots
+  }
+  const codeMainRoot = path.dirname(commonDir)
+  const containerRoot = path.dirname(codeMainRoot)
+  if (containerRoot === codeMainRoot) return roots
+  const containerGitRoot = gitAbsolutePath(containerRoot, ["rev-parse", "--show-toplevel"])
+  const containerDocs = path.join(containerRoot, "docs")
+  if (fs.existsSync(containerDocs) && fs.existsSync(path.join(containerRoot, ".git")) && containerGitRoot === null) {
+    throw new Error(`recall docs index: cannot resolve enclosing container Git root at ${containerRoot}`)
+  }
+  if (
+    containerGitRoot !== null &&
+    path.resolve(containerGitRoot) === path.resolve(containerRoot) &&
+    fs.existsSync(containerDocs) &&
+    path.resolve(containerDocs) !== path.resolve(projectDocs)
+  ) {
+    roots.push({ root: containerDocs, sourcePrefix: "doc:container:", displayPrefix: "container:" })
+  }
+  return roots
+}
+
+/** Index code-owned and enclosing-container documentation without source-id collisions. */
 function indexDocs(db: Database, projectRoot: string, projectPath: string): number {
-  const docsDir = path.join(projectRoot, "docs")
-  if (!fs.existsSync(docsDir)) return 0
-
   let count = 0
+  const activeSourceIds = new Set<string>()
 
-  function indexDir(dir: string): void {
+  function indexDir(source: ProjectDocumentationRoot, dir: string): void {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       if (entry.isDirectory()) {
-        indexDir(path.join(dir, entry.name))
+        indexDir(source, path.join(dir, entry.name))
         continue
       }
       if (!entry.isFile() || !entry.name.endsWith(".md")) continue
 
       const filePath = path.join(dir, entry.name)
-      const relPath = path.relative(projectRoot, filePath)
+      const relPath = `docs/${path.relative(source.root, filePath)}`
       const stats = fs.statSync(filePath)
-      const sourceId = `doc:${relPath}`
+      const sourceId = `${source.sourcePrefix}${relPath}`
       const metaKey = `mtime:doc:${sourceId}`
+      activeSourceIds.add(sourceId)
 
       if (!hasChanged(db, metaKey, stats.mtime.getTime())) continue
 
@@ -763,17 +823,27 @@ function indexDocs(db: Database, projectRoot: string, projectPath: string): numb
         const content = fs.readFileSync(filePath, "utf8")
         if (!content.trim()) continue
 
-        const title = extractMarkdownTitle(content, relPath)
+        const title = extractMarkdownTitle(content, `${source.displayPrefix}${relPath}`)
         upsertContent(db, "doc", sourceId, projectPath, title, content, stats.mtime.getTime())
         recordMtime(db, metaKey, stats.mtime.getTime())
         count++
-      } catch {
-        // Skip unreadable files
+      } catch (error) {
+        throw new Error(`recall docs index: cannot read or index ${filePath}`, { cause: error })
       }
     }
   }
 
-  indexDir(docsDir)
+  for (const source of projectDocumentationRoots(projectRoot)) indexDir(source, source.root)
+
+  // Incremental indexing used to leave deleted/moved docs searchable forever.
+  // Reconcile only this project's doc rows after every successful complete walk.
+  const existing = db
+    .query("SELECT source_id FROM content WHERE content_type = 'doc' AND project_path = ?")
+    .all(projectPath) as Array<{ source_id: string }>
+  const remove = db.prepare("DELETE FROM content WHERE content_type = 'doc' AND source_id = ? AND project_path = ?")
+  for (const { source_id: sourceId } of existing) {
+    if (!activeSourceIds.has(sourceId)) remove.run(sourceId, projectPath)
+  }
   return count
 }
 
