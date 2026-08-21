@@ -741,6 +741,15 @@ interface ProjectDocumentationRoot {
   readonly displayPrefix: "" | "container:"
 }
 
+function projectDocumentationSourceId(
+  sourcePrefix: ProjectDocumentationRoot["sourcePrefix"],
+  projectPath: string,
+  relativePath: string,
+): string {
+  const projectScope = createHash("sha256").update(path.resolve(projectPath)).digest("hex")
+  return `${sourcePrefix}${projectScope}:${relativePath}`
+}
+
 function gitEnvironmentWithoutRootOverrides(): NodeJS.ProcessEnv {
   const env = { ...process.env }
   delete env.GIT_DIR
@@ -813,7 +822,12 @@ function indexDocs(db: Database, projectRoot: string, projectPath: string): numb
       const filePath = path.join(dir, entry.name)
       const relPath = `docs/${path.relative(source.root, filePath)}`
       const stats = fs.statSync(filePath)
-      const sourceId = `${source.sourcePrefix}${relPath}`
+      // The content table's identity is globally unique on
+      // (content_type, source_id), while project_path is only searchable
+      // metadata. Scope every doc identity (and therefore its mtime key) to
+      // the nested code project so two worktrees/projects that share one
+      // container docs tree cannot steal each other's rows.
+      const sourceId = projectDocumentationSourceId(source.sourcePrefix, projectPath, relPath)
       const metaKey = `mtime:doc:${sourceId}`
       activeSourceIds.add(sourceId)
 

@@ -31,6 +31,13 @@ function habitatFixture(): { container: string; code: string } {
   return { container, code }
 }
 
+function addCodeProject(container: string, name: string): string {
+  const code = join(container, name)
+  mkdirSync(join(code, "docs"), { recursive: true })
+  execFileSync("git", ["init", "-q", code])
+  return code
+}
+
 afterEach(() => {
   for (const fixture of fixtures.splice(0)) {
     safeRemoveSync(fixture, { within: realpathSync(tmpdir()), allowMissing: true })
@@ -46,12 +53,44 @@ describe("Recall project documentation roots", () => {
     initSchema(db)
 
     expect(indexProjectSources(db, code).docs).toBe(2)
-    expect(
-      db.query("SELECT source_id, content FROM content WHERE content_type = 'doc' ORDER BY source_id").all(),
-    ).toEqual([
-      { source_id: "doc:container:docs/shared.md", content: "# Agent shared\n\ncontainer-only phrase\n" },
-      { source_id: "doc:docs/shared.md", content: "# Product shared\n\ncode-only phrase\n" },
+    const rows = db
+      .query("SELECT source_id, content FROM content WHERE content_type = 'doc' ORDER BY content")
+      .all() as Array<{ source_id: string; content: string }>
+    expect(rows.map(({ content }) => content)).toEqual([
+      "# Agent shared\n\ncontainer-only phrase\n",
+      "# Product shared\n\ncode-only phrase\n",
     ])
+    expect(new Set(rows.map(({ source_id: sourceId }) => sourceId)).size).toBe(2)
+    expect(rows[0]?.source_id).toMatch(/^doc:container:[a-f0-9]{64}:docs\/shared\.md$/u)
+    expect(rows[1]?.source_id).toMatch(/^doc:[a-f0-9]{64}:docs\/shared\.md$/u)
+    db.close()
+  })
+
+  test("keeps shared container docs searchable from every nested code project", () => {
+    const { container, code } = habitatFixture()
+    const sibling = addCodeProject(container, "other")
+    writeFileSync(join(container, "docs", "shared.md"), "# Agent shared\n\ncontainer-only phrase\n")
+    writeFileSync(join(code, "docs", "product.md"), "# First product\n")
+    writeFileSync(join(sibling, "docs", "product.md"), "# Second product\n")
+    const db = new Database(":memory:")
+    initSchema(db)
+
+    expect(indexProjectSources(db, code).docs).toBe(2)
+    expect(indexProjectSources(db, sibling).docs).toBe(2)
+
+    for (const projectPath of [code, sibling]) {
+      expect(
+        db
+          .query("SELECT title, content FROM content WHERE content_type = 'doc' AND project_path = ? ORDER BY title")
+          .all(projectPath),
+      ).toEqual([
+        { title: "Agent shared", content: "# Agent shared\n\ncontainer-only phrase\n" },
+        {
+          title: projectPath === code ? "First product" : "Second product",
+          content: projectPath === code ? "# First product\n" : "# Second product\n",
+        },
+      ])
+    }
     db.close()
   })
 
@@ -67,9 +106,11 @@ describe("Recall project documentation roots", () => {
     writeFileSync(join(container, "docs", "moved.md"), "# After move\n")
     indexProjectSources(db, code)
 
-    expect(db.query("SELECT source_id FROM content WHERE content_type = 'doc' ORDER BY source_id").all()).toEqual([
-      { source_id: "doc:container:docs/moved.md" },
-    ])
+    const rows = db.query("SELECT source_id FROM content WHERE content_type = 'doc'").all() as Array<{
+      source_id: string
+    }>
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.source_id).toMatch(/^doc:container:[a-f0-9]{64}:docs\/moved\.md$/u)
     db.close()
   })
 
