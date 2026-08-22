@@ -6,7 +6,7 @@
  * returns. One is TypeScript, one is SQL, and neither can call the other — so
  * the only thing standing between them and silent divergence is this table.
  *
- * Case Study 7 in docs/lessons/refactoring.md is exactly this shape: a copy that
+ * Case Study 7 in /hh/docs/lessons/refactoring.md is exactly this shape: a copy that
  * compiles, passes tests, and is invisible until someone audits by hand. A
  * duplicated policy raises no type error when one half changes.
  *
