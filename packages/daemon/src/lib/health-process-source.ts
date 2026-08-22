@@ -564,7 +564,7 @@ export function createHealthProcessSource(options: HealthProcessSourceOptions = 
           const parsed = parseObservation(JSON.parse(line))
           if (parsed !== undefined && (result.exitCode === 0 || parsed.kind === "unavailable")) return parsed
         } catch {
-          // The typed unavailable below preserves the source boundary.
+          // silent-fallback-allow: parse failure falls through to typed unavailable
         }
       }
       if (result.exitCode !== 0) {
@@ -604,7 +604,7 @@ export function createHealthProcessSource(options: HealthProcessSourceOptions = 
           const parsed = parseScalarObservation(JSON.parse(line))
           if (parsed !== undefined && (result.exitCode === 0 || parsed.kind === "unavailable")) return parsed
         } catch {
-          // The typed unavailable below preserves the source boundary.
+          // silent-fallback-allow: parse failure falls through to typed unavailable
         }
       }
       if (result.exitCode !== 0) {

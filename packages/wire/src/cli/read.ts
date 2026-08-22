@@ -1112,8 +1112,7 @@ async function cmdDoctor(opts: { fix?: boolean }): Promise<void> {
   try {
     status = (await callDaemon("cli_status")) as typeof status
   } catch {
-    // Older daemons may not expose the status RPC. The missing identity is an
-    // UNKNOWN check below; the rail canary still runs independently.
+    // silent-fallback-allow: older daemons omit cli_status; doctor marks UNKNOWN
   }
   let daemonProtocol = status.daemon?.protocol_version
   if (daemonProtocol === undefined) {
@@ -1121,7 +1120,7 @@ async function cmdDoctor(opts: { fix?: boolean }): Promise<void> {
       const protocol = (await callDaemon("cli_protocol")) as { protocol_version?: unknown }
       if (typeof protocol.protocol_version === "number") daemonProtocol = protocol.protocol_version
     } catch {
-      // evaluateDoctorVersions turns the unresolved value into UNKNOWN.
+      // silent-fallback-allow: cli_protocol unresolved → doctor UNKNOWN, not a fake version
     }
   }
   const rawReportedIdentity = status.daemon?.code_identity
