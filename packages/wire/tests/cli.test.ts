@@ -1131,10 +1131,13 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         operatorCapability: "fd-only-operator-secret",
       })
 
-      for (const cli of [status, drain]) {
-        expect(cli).toMatchObject({ code: 0, stderr: "" })
-        expect(JSON.parse(cli.stdout)).toMatchObject({ ...result, waited_ms: expect.any(Number) })
-      }
+      expect(status).toMatchObject({ code: 0, stderr: "" })
+      expect(JSON.parse(status.stdout)).toMatchObject({ ...result, waited_ms: expect.any(Number) })
+      expect(drain).toMatchObject({ code: 0 })
+      expect(drain.stderr).toContain(
+        "tribe inbox-drain: read was destructive; messages consumed and cursor advanced. Use --peek to read without consuming.",
+      )
+      expect(JSON.parse(drain.stdout)).toMatchObject({ ...result, waited_ms: expect.any(Number) })
       expect(wait).toMatchObject({ code: 0, stderr: "" })
       expect(JSON.parse(wait.stdout)).toEqual({ ...waitResult, waited_ms: expect.any(Number) })
 
