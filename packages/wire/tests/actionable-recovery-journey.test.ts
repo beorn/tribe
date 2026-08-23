@@ -79,6 +79,7 @@ const BASE_ENV: NodeJS.ProcessEnv = (() => {
   delete env.CLAUDE_SESSION_ID
   delete env.CLAUDE_SESSION_NAME
   delete env.BD_ACTOR
+  delete env.AG_SESSION_AUTH
   return env
 })()
 
@@ -729,7 +730,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     successor.client.close()
   }, 120_000)
 
-  it("drains the managed launch mailbox instead of a foreign environment identity when MCP is unavailable", async () => {
+  it("binds managed one-shot inbox and pending-close mutations to the launch authority", async () => {
     const socketPath = join(tmpDir, "managed-cli-inbox.sock")
     const dbPath = join(tmpDir, "managed-cli-inbox.db")
     const ownAuthority = "managed-cli-own-secret-00000000000000000000"
@@ -761,6 +762,20 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     await callLaunchToolWhenRegistered(own, 60, "members", {})
     await callLaunchToolWhenRegistered(foreign, 61, "members", {})
     await callLaunchTool(own, 62, "rename", { new_name: runtimeName })
+    const withdrawal = (await callLaunchToolWhenRegistered(own, 63, "send", {
+      to: foreignName,
+      message: "withdraw this managed CLI request",
+      type: "request",
+      summary: "managed CLI sender withdrawal",
+    })) as { id: string }
+    expect(withdrawal.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u)
+    const ownerClosure = (await callLaunchToolWhenRegistered(own, 64, "send", {
+      to: foreignName,
+      message: "close this managed CLI request as its owner",
+      type: "request",
+      summary: "managed CLI owner close",
+    })) as { id: string }
+    expect(ownerClosure.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u)
 
     // Simulate the reported recovery state: the managed launch remains in the
     // daemon's durable authority store, but its MCP transport is unavailable.
@@ -851,12 +866,82 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(secondRead.exitCode, secondRead.stderr).toBe(0)
     expect(JSON.parse(secondRead.stdout)).toMatchObject({ attention: { actionable_unread: [] }, events: [] })
 
+    const pendingBeforeClose = await runCli(["pending", "--owner", foreignName, "--json"], cliEnv, {
+      throughParent: true,
+    })
+    expect(pendingBeforeClose.exitCode, pendingBeforeClose.stderr).toBe(0)
+    const pendingSnapshot = JSON.parse(pendingBeforeClose.stdout) as {
+      owner: string
+      pending: Array<{ request_id: string; sender: string }>
+    }
+    expect(pendingSnapshot.owner).toBe(foreignName)
+    expect(pendingSnapshot.pending).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ request_id: withdrawal.id, sender: runtimeName }),
+        expect.objectContaining({ request_id: ownerClosure.id, sender: runtimeName }),
+      ]),
+    )
+
+    const senderClose = await runCli(["pending", "--owner", foreignName, "--close", withdrawal.id, "--json"], cliEnv, {
+      selfMailboxAuthority: ownAuthority,
+      throughParent: true,
+    })
+    expect(senderClose.exitCode, senderClose.stderr).toBe(0)
+    expect(JSON.parse(senderClose.stdout)).toMatchObject({
+      owner: foreignName,
+      request_id: withdrawal.id,
+      closed: 1,
+    })
+
+    const ownerClose = await runCli(["pending", "--owner", foreignName, "--close", ownerClosure.id, "--json"], cliEnv, {
+      selfMailboxAuthority: foreignAuthority,
+      throughParent: true,
+    })
+    expect(ownerClose.exitCode, ownerClose.stderr).toBe(0)
+    expect(JSON.parse(ownerClose.stdout)).toMatchObject({
+      owner: foreignName,
+      request_id: ownerClosure.id,
+      closed: 1,
+    })
+
+    const settlementDb = openDatabase(dbPath)
+    const remainingWithdrawal = settlementDb
+      .prepare("SELECT COUNT(*) AS count FROM pending_request WHERE recipient = ? AND request_id = ?")
+      .get(foreignName, withdrawal.id) as { count: number }
+    const settlementRow = settlementDb
+      .prepare(
+        "SELECT content FROM messages WHERE kind = 'event' AND type = 'event.ball.settled' AND ref = ? ORDER BY ts DESC LIMIT 1",
+      )
+      .get(withdrawal.id) as { content: string } | null
+    const ownerSettlementRow = settlementDb
+      .prepare(
+        "SELECT content FROM messages WHERE kind = 'event' AND type = 'event.ball.settled' AND ref = ? ORDER BY ts DESC LIMIT 1",
+      )
+      .get(ownerClosure.id) as { content: string } | null
+    settlementDb.close()
+    expect(remainingWithdrawal.count).toBe(0)
+    expect(settlementRow).not.toBeNull()
+    expect(JSON.parse(settlementRow!.content)).toMatchObject({
+      request_id: withdrawal.id,
+      recipient: foreignName,
+      sender: runtimeName,
+      settlement: "sender-withdrawn",
+      settled_by: runtimeName,
+    })
+    expect(ownerSettlementRow).not.toBeNull()
+    expect(JSON.parse(ownerSettlementRow!.content)).toMatchObject({
+      request_id: ownerClosure.id,
+      recipient: foreignName,
+      settlement: "manual-close",
+      settled_by: foreignName,
+    })
+
     const successor = await spawnLaunchAdapter(socketPath, "managed-cli-successor.log", ownLaunchId, {
       name: spawnTimeName,
       throughPluginSupervisor: true,
       selfMailboxAuthority: successorAuthority,
     })
-    await callLaunchToolWhenRegistered(successor, 63, "members", {})
+    await callLaunchToolWhenRegistered(successor, 65, "members", {})
 
     const revokedRead = await runCli(["inbox", "--json"], cliEnv, {
       selfMailboxAuthority: ownAuthority,

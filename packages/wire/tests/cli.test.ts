@@ -364,7 +364,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     expect(stderr).toMatch(/invalid --delivery 'later'/)
   })
 
-  it("pending --close requires an explicit owner for one-shot CLI identity", () => {
+  it("pending --close requires an explicit owner to select the pending projection", () => {
     const { stderr, code } = runCli(["pending", "--close", "req-123"])
     expect(code).toBe(2)
     expect(stderr).toMatch(/--close requires --owner/)

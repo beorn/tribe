@@ -277,6 +277,60 @@ export function withDispatcher<
       return typeof value === "string" && value.trim().length > 0 ? value.trim() : null
     }
 
+    type ManagedSessionCapability = "inbox-ack" | "pending-close" | "pending-prune"
+
+    type ManagedSessionAuthorityResolution =
+      | { kind: "authenticated"; context: TribeContext; capability: ManagedSessionCapability }
+      | { kind: "missing" }
+      | { kind: "rejected" }
+      | { kind: "invalid-domains"; name: string }
+
+    /**
+     * Resolve the one launcher-minted bearer to the one durable session that
+     * owns it. Capability adapters share this identity derivation; they still
+     * dispatch through their canonical handlers for operation authorization.
+     */
+    function resolveManagedSessionAuthority(
+      rawAuthority: unknown,
+      capability: ManagedSessionCapability,
+    ): ManagedSessionAuthorityResolution {
+      const supplied = requiredNonEmptyString(rawAuthority)
+      if (supplied === null) return { kind: "missing" }
+      const row = db
+        .prepare(
+          `SELECT id, name, role, domains, claude_session_id, claude_session_name
+           FROM sessions WHERE mailbox_authority_hash = $hash`,
+        )
+        .get({ $hash: hashSelfMailboxAuthority(supplied) }) as {
+        id: string
+        name: string
+        role: TribeRole
+        domains: string
+        claude_session_id: string | null
+        claude_session_name: string | null
+      } | null
+      if (row === null) return { kind: "rejected" }
+      const domains = JSON.parse(row.domains) as unknown
+      if (!Array.isArray(domains) || !domains.every((domain): domain is string => typeof domain === "string")) {
+        return { kind: "invalid-domains", name: row.name }
+      }
+      return {
+        kind: "authenticated",
+        capability,
+        context: createTribeContext({
+          db,
+          stmts,
+          sessionId: row.id,
+          sessionRole: row.role,
+          initialName: row.name,
+          domains,
+          claudeSessionId: row.claude_session_id,
+          claudeSessionName: row.claude_session_name,
+          onMessageInserted,
+        }),
+      }
+    }
+
     type InboxTargetResolution =
       | { sessionName: string; launchId?: string; launchParentPid?: number }
       | { errorCode: number; errorMessage: string }
@@ -1492,51 +1546,71 @@ export function withDispatcher<
                 "Self inbox derives its mailbox from authority; target overrides are forbidden",
               )
             }
-            const supplied = requiredNonEmptyString(p.authority)
-            if (supplied === null) {
+            const authority = resolveManagedSessionAuthority(p.authority, "inbox-ack")
+            if (authority.kind === "missing") {
               return makeError(id, -32004, "self mailbox authority is missing", {
                 kind: "could-not-evaluate",
                 reason: "self-mailbox-authority-missing",
               })
             }
-            const row = db
-              .prepare(
-                `SELECT id, name, role, domains, claude_session_id, claude_session_name
-                 FROM sessions WHERE mailbox_authority_hash = $hash`,
-              )
-              .get({ $hash: hashSelfMailboxAuthority(supplied) }) as {
-              id: string
-              name: string
-              role: TribeRole
-              domains: string
-              claude_session_id: string | null
-              claude_session_name: string | null
-            } | null
-            if (row === null) {
+            if (authority.kind === "rejected") {
               return makeError(id, -32003, "self mailbox authority was rejected or revoked", {
                 kind: "unauthenticated",
                 reason: "self-mailbox-authority-rejected",
               })
             }
-            const domains = JSON.parse(row.domains) as unknown
-            if (!Array.isArray(domains) || !domains.every((domain): domain is string => typeof domain === "string")) {
-              return makeError(id, -32603, `stored domains for ${row.name} are invalid`)
+            if (authority.kind === "invalid-domains") {
+              return makeError(id, -32603, `stored domains for ${authority.name} are invalid`)
             }
-            const authorityCtx = createTribeContext({
-              db,
-              stmts,
-              sessionId: row.id,
-              sessionRole: row.role,
-              initialName: row.name,
-              domains,
-              claudeSessionId: row.claude_session_id,
-              claudeSessionName: row.claude_session_name,
-              onMessageInserted,
-            })
             const result = await handleToolCall(
-              authorityCtx,
+              authority.context,
               TRIBE_COORD_METHODS.fetch,
               { limit: p.limit, advance: p.peek === true ? false : undefined },
+              DAEMON_HANDLER_OPTS,
+              connId,
+            )
+            return makeResponse(id, result)
+          }
+
+          /**
+           * Authenticated one-shot close for the public pending CLI. `owner`
+           * selects the row; the bearer alone selects the caller context.
+           * Authorization remains in the canonical pending handler.
+           */
+          case "cli_session_pending_close_v1": {
+            const unexpected = Object.keys(p).filter((key) => !["authority", "owner", "close"].includes(key))
+            if (unexpected.length > 0) {
+              return makeError(
+                id,
+                -32602,
+                `Managed pending close accepts only authority, owner, and close; unexpected: ${unexpected.join(", ")}`,
+              )
+            }
+            const owner = requiredNonEmptyString(p.owner)
+            const close = requiredNonEmptyString(p.close)
+            if (owner === null || close === null) {
+              return makeError(id, -32602, "Managed pending close requires non-empty owner and close")
+            }
+            const authority = resolveManagedSessionAuthority(p.authority, "pending-close")
+            if (authority.kind === "missing") {
+              return makeError(id, -32004, "managed session authority is missing", {
+                kind: "could-not-evaluate",
+                reason: "managed-session-authority-missing",
+              })
+            }
+            if (authority.kind === "rejected") {
+              return makeError(id, -32003, "managed session authority was rejected or revoked", {
+                kind: "unauthenticated",
+                reason: "managed-session-authority-rejected",
+              })
+            }
+            if (authority.kind === "invalid-domains") {
+              return makeError(id, -32603, `stored domains for ${authority.name} are invalid`)
+            }
+            const result = await handleToolCall(
+              authority.context,
+              TRIBE_COORD_METHODS.pending,
+              { owner, close },
               DAEMON_HANDLER_OPTS,
               connId,
             )

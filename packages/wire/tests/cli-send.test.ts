@@ -538,11 +538,13 @@ describe("registerSendCommands", () => {
           resolveListen()
         })
       })
+      const cliEnv = { ...process.env }
+      delete cliEnv.AG_SESSION_AUTH
       const runCli = (args: string[]) =>
         new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProc) => {
           const child = spawn(BUN_BIN, [CLI, ...args], {
             env: {
-              ...process.env,
+              ...cliEnv,
               TRIBE_SOCKET: socketPath,
               TRIBE_SESSION_NAME: "@chief",
               TRIBE_LAUNCH_ID: "",
@@ -577,6 +579,8 @@ describe("registerSendCommands", () => {
       const manualClose = await runCli(["pending", "--owner", "@chief", "--close", "req-123"])
       expect(manualClose.code).toBe(0)
       expect(manualClose.stdout).toContain("Closed 0 pending request(s) for @chief: req-123")
+      expect(manualClose.stderr).toContain("LEGACY UNATTRIBUTED CLOSE")
+      expect(manualClose.stderr).toContain("AG_SESSION_AUTH is missing")
       expect(manualClose.stderr).toContain(
         "reply/close req-123 closed 0 rows; balls owned by @chief: req-other (message msg-other, from @agent/4)",
       )

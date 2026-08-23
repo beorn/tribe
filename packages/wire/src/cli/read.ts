@@ -525,7 +525,20 @@ async function cmdPending(
   if (owner) args.owner = owner
   if (staleMs !== undefined) args.stale_ms = staleMs
   if (close) args.close = close
-  const result = (await callDaemon("tribe.pending", args)) as {
+  let method = "tribe.pending"
+  if (close) {
+    const authority = readSelfMailboxAuthorityFromEnvironment(process.env)
+    if (authority === null) {
+      console.error(
+        `tribe pending: LEGACY UNATTRIBUTED CLOSE — ${AG_SESSION_AUTH_ENV} is missing; ` +
+          "the daemon cannot record which managed session settled this row. This compatibility path will be removed.",
+      )
+    } else {
+      method = "cli_session_pending_close_v1"
+      args.authority = authority
+    }
+  }
+  const result = (await callDaemon(method, args)) as {
     content?: Array<{ type?: string; text?: string }>
     structuredContent?: {
       error?: string
@@ -1794,7 +1807,7 @@ export function registerReadCommands(program: Command): void {
         }
         if (opts.close && pendingClose.requires?.includes("owner") && !opts.owner) {
           console.error(
-            "tribe pending: --close requires --owner because one-shot CLI callers are not a registered session",
+            "tribe pending: --close requires --owner to select the pending projection; managed authority supplies caller identity separately",
           )
           process.exit(2)
         }

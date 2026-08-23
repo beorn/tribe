@@ -85,7 +85,11 @@ conditions with no reply deadline; only their emitter's `--incident-cleared`
 edge can settle them, and combining `--incident` with `--expires-in-ms` is
 refused. `--close <id>` records a typed non-reply settlement and
 closes one ordinary pending request without sending a reply — requires
-`--owner` and refuses a typed incident. Example:
+`--owner` and refuses a typed incident. In a managed session, the CLI presents
+the launcher-minted `AG_SESSION_AUTH` bearer and the daemon records the exact
+authenticated owner (`manual-close`) or original sender (`sender-withdrawn`).
+An absent bearer currently enters a loud legacy unattributed compatibility
+path; it never silently claims attribution. Example:
 
 ```bash
 tribe-wire pending --owner @alice --stale 15m
