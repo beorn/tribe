@@ -25,7 +25,14 @@ function spawnFakeDaemon(
     fetchAttention?: {
       actionable_unread?: Array<Record<string, unknown>>
       pending_balls?: Array<Record<string, unknown>>
-      pending_balls_summary?: { total: number; oldest_age_ms: number }
+      pending_balls_summary?: {
+        total: number
+        oldest_age_ms: number
+        withheld?: {
+          total: number
+          by_kind: { request: number; incident: number }
+        }
+      }
     }
     inboxWaitResult?: Record<string, unknown>
     registerError?: { code: number; message: string; data?: unknown }
@@ -1175,6 +1182,10 @@ describe("stdio adapter delivery modes", () => {
         pending_balls_summary: {
           total: 108,
           oldest_age_ms: 9 * 24 * 60 * 60 * 1_000,
+          withheld: {
+            total: 98,
+            by_kind: { request: 8, incident: 90 },
+          },
         },
         pending_balls: [
           {
@@ -1230,7 +1241,7 @@ describe("stdio adapter delivery modes", () => {
     daemon.clients[0]?.write(makeNotification("wakeup", {}))
 
     const summaryText =
-      "You own 108 balls, oldest 9d. Top: Review the architecture revision | Confirm the migration invariant | Run the focused verification"
+      "You own 108 balls, oldest 9d. Top: Review the architecture revision | Confirm the migration invariant | Run the focused verification Preview withheld 98 (8 request, 90 incident)."
     await waitForStdout(child, stdout, () => stdout.some((line) => JSON.stringify(line).includes(summaryText)))
 
     const pending = stdout.filter(

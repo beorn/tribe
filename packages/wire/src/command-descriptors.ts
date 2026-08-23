@@ -98,7 +98,7 @@ const ATTENTION_SCHEMA = {
     pending_balls: {
       type: "array",
       description:
-        "The 10 oldest open tracked requests this recipient owns: request_id, sender, opened_at, age_ms, message_id, fanout.",
+        "Up to 10 open tracked obligations, with peer requests ordered ahead of watcher incidents so machine rows cannot hide human/agent work.",
       items: { type: "object", additionalProperties: true },
     },
     pending_balls_summary: {
@@ -108,6 +108,24 @@ const ATTENTION_SCHEMA = {
       properties: {
         total: { type: "number", description: "Total open tracked requests this recipient owns." },
         oldest_age_ms: { type: "number", description: "Age of the oldest open tracked request in milliseconds." },
+        withheld: {
+          type: "object",
+          description: "Present when the preview is truncated; names the omitted total and request/incident split.",
+          required: ["total", "by_kind"],
+          properties: {
+            total: { type: "number" },
+            by_kind: {
+              type: "object",
+              required: ["request", "incident"],
+              properties: {
+                request: { type: "number" },
+                incident: { type: "number" },
+              },
+              additionalProperties: false,
+            },
+          },
+          additionalProperties: false,
+        },
       },
       additionalProperties: false,
     },
@@ -530,12 +548,19 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
                 "Terminal outcome for the wait or its preflight refusal; timeout means no qualifying row arrived after the wait baseline.",
             },
             session: { type: "string", description: "The session that was waited on." },
-            unread_count: { type: "number", description: "Actionable unread direct-message count at return time." },
+            unread_count: {
+              type: "number",
+              description:
+                "Actionable attention count at return time: unread direct messages plus still-owed tracked balls, de-duplicated by message.",
+            },
             oldest_unread_age_min: {
               type: "number",
-              description: "Age of the oldest actionable unread DM, in minutes.",
+              description: "Age of the oldest unread direct message or still-owed tracked ball, in minutes.",
             },
-            oldest_unread_ts: { type: "number", description: "Oldest actionable unread DM timestamp (unix ms)." },
+            oldest_unread_ts: {
+              type: "number",
+              description: "Oldest unread direct message or still-owed tracked ball timestamp (unix ms).",
+            },
             waited_ms: { type: "number", description: "How long the wait lasted." },
             effective_timeout_ms: {
               type: "number",

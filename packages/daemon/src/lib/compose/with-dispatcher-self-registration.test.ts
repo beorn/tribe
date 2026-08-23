@@ -1083,7 +1083,7 @@ describe("dispatcher bounded mailbox drain", () => {
     expect(status.session).toBe(name)
   })
 
-  it("advances the durable role cursor without creating a transient registration", async () => {
+  it("advances the durable role cursor while keeping tracked obligations visible", async () => {
     const harness = createDispatcherHarness({ operatorCapability: "operator-test-secret" })
     cleanup = harness.dispose
 
@@ -1107,7 +1107,7 @@ describe("dispatcher bounded mailbox drain", () => {
       "second historical request",
     ])
     expect(first.drained_count).toBe(2)
-    expect(first.unread_count).toBe(1)
+    expect(first.unread_count).toBe(3)
 
     const second = parseResult<InboxDrainResult>(
       await harness.dispatcher.handleRequest(
@@ -1121,7 +1121,20 @@ describe("dispatcher bounded mailbox drain", () => {
       ),
     )
     expect(second.events.map((event) => event.content)).toEqual(["third historical request"])
-    expect(second.unread_count).toBe(0)
+    expect(second.unread_count).toBe(3)
+
+    const status = parseResult<{ unread_count: number }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "status-after-drain",
+          method: "cli_inbox_status",
+          params: { session: "@chief" },
+        },
+        "conn-drain",
+      ),
+    )
+    expect(status.unread_count).toBe(3)
 
     const wait = parseResult<InboxWaitResult>(
       await harness.dispatcher.handleRequest(
@@ -1134,8 +1147,8 @@ describe("dispatcher bounded mailbox drain", () => {
         "conn-drain",
       ),
     )
-    expect(wait.timed_out).toBe(true)
-    expect(wait.unread_count).toBe(0)
+    expect(wait.timed_out).toBe(false)
+    expect(wait.unread_count).toBe(3)
     expect(wait.attention.actionable_unread).toEqual([])
     expect(wait.attention.pending_balls).toHaveLength(3)
     expect(harness.sessionCount("@chief")).toBe(0)

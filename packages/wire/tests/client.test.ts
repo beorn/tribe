@@ -289,6 +289,36 @@ describe("callTribeTool", () => {
     expect(result).toMatchObject({ structuredContent: canonicalInboxWaitResult })
   })
 
+  it("preserves truncated pending-ball metadata in the validated inbox-wait result", async () => {
+    const truncatedResult = {
+      ...canonicalInboxWaitResult,
+      status: "woken",
+      unread_count: 11,
+      timed_out: false,
+      attention: {
+        ...canonicalInboxWaitResult.attention,
+        pending_balls_summary: {
+          total: 11,
+          oldest_age_ms: 18 * 60_000,
+          withheld: { total: 1, by_kind: { request: 0, incident: 1 } },
+        },
+      },
+    }
+    const client = { call: vi.fn(async () => truncatedResult) } as unknown as DaemonClient
+
+    const result = await callTribeTool(client, "inbox.wait", { timeout_ms: 1_000 })
+
+    expect(result).toMatchObject({
+      structuredContent: {
+        attention: {
+          pending_balls_summary: {
+            withheld: { total: 1, by_kind: { request: 0, incident: 1 } },
+          },
+        },
+      },
+    })
+  })
+
   it("rejects an oversized send before it reaches the daemon and gives a file+SHA remedy", async () => {
     const call = vi.fn(async () => ({ sent: true }))
     const client = { call } as unknown as DaemonClient

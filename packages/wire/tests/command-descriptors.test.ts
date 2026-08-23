@@ -213,6 +213,17 @@ describe("Tribe command descriptors", () => {
           properties: {
             total: { type: "number" },
             oldest_age_ms: { type: "number" },
+            withheld: {
+              type: "object",
+              required: ["total", "by_kind"],
+              properties: {
+                total: { type: "number" },
+                by_kind: {
+                  type: "object",
+                  required: ["request", "incident"],
+                },
+              },
+            },
           },
         },
       },

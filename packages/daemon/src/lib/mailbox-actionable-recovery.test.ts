@@ -35,6 +35,7 @@ type AttentionBall = {
   sender: string
   message_id: string
   fanout: string
+  request_kind?: "request" | "incident"
 }
 type FetchJson = ToolJson & {
   attention?: {
@@ -596,6 +597,10 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(fetched.attention?.pending_balls_summary).toEqual({
       total,
       oldest_age_ms: expect.any(Number),
+      withheld: {
+        total: 310,
+        by_kind: { request: 310, incident: 0 },
+      },
     })
     expect(fetched.attention?.pending_balls_summary?.oldest_age_ms).toBeGreaterThanOrEqual(total * 1_000)
     expect(new TextEncoder().encode(JSON.stringify(fetched.attention)).byteLength).toBeLessThan(4_096)
@@ -606,6 +611,64 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     }
     expect(explicit.count).toBe(total)
     expect(explicit.pending).toHaveLength(total)
+  })
+
+  it("keeps a fresh peer request visible when ten older incidents fill the attention preview", () => {
+    const live = connectAs("sess-priority-owner", NAME)
+    const watcher = connectAs("sess-priority-watcher", "@fleet")
+    const chief = connectAs("sess-priority-chief", "@chief")
+
+    const incidentIds = Array.from({ length: 10 }, (_, i) => {
+      const sent = parseToolJson(
+        handleToolCall(
+          watcher,
+          "tribe.send",
+          {
+            to: NAME,
+            message: `stopped seat ${i} is not draining`,
+            incident: {
+              emitter: "wait-watch",
+              subject: `@dev/${i}`,
+              condition: "stopped-not-draining",
+            },
+          },
+          opts,
+        ),
+      ) as { request_id: string }
+      db.prepare("UPDATE pending_request SET opened_at = ? WHERE request_id = ?").run(
+        now - (18 - i) * 60_000,
+        sent.request_id,
+      )
+      return sent.request_id
+    })
+    const peer = parseToolJson(
+      handleToolCall(
+        chief,
+        "tribe.send",
+        {
+          to: NAME,
+          message: "please answer this peer request",
+          type: "request",
+          request: "peer-request",
+        },
+        opts,
+      ),
+    ) as { request_id: string }
+    db.prepare("UPDATE pending_request SET opened_at = ? WHERE request_id = ?").run(now - 8 * 60_000, peer.request_id)
+
+    const fetched = fetchJson(live, opts).json
+    expect(fetched.attention?.pending_balls?.map((ball) => ball.request_id)).toEqual([
+      peer.request_id,
+      ...incidentIds.slice(0, 9),
+    ])
+    expect(fetched.attention?.pending_balls_summary).toEqual({
+      total: 11,
+      oldest_age_ms: expect.any(Number),
+      withheld: {
+        total: 1,
+        by_kind: { request: 0, incident: 1 },
+      },
+    })
   })
 
   it("delivery acknowledgement cannot erase an explicitly tracked verdict obligation", () => {

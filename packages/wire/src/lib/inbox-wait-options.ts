@@ -32,6 +32,13 @@ export type InboxWaitAttention = {
   readonly pending_balls_summary: {
     readonly total: number
     readonly oldest_age_ms: number
+    readonly withheld?: {
+      readonly total: number
+      readonly by_kind: {
+        readonly request: number
+        readonly incident: number
+      }
+    }
   }
 }
 
@@ -109,7 +116,8 @@ export function parseInboxWaitResult(value: unknown): InboxWaitResult {
     !isRecordArray(attention.pending_balls) ||
     !isRecord(attention.pending_balls_summary) ||
     !isFiniteNumber(attention.pending_balls_summary.total) ||
-    !isFiniteNumber(attention.pending_balls_summary.oldest_age_ms)
+    !isFiniteNumber(attention.pending_balls_summary.oldest_age_ms) ||
+    !isValidWithheldSummary(attention.pending_balls_summary.withheld)
   ) {
     throw invalidInboxWaitResult()
   }
@@ -133,9 +141,20 @@ export function parseInboxWaitResult(value: unknown): InboxWaitResult {
       pending_balls_summary: {
         total: attention.pending_balls_summary.total,
         oldest_age_ms: attention.pending_balls_summary.oldest_age_ms,
+        ...(attention.pending_balls_summary.withheld === undefined
+          ? {}
+          : { withheld: attention.pending_balls_summary.withheld }),
       },
     },
   }
+}
+
+type InboxWaitWithheldSummary = NonNullable<InboxWaitAttention["pending_balls_summary"]["withheld"]>
+
+function isValidWithheldSummary(value: unknown): value is InboxWaitWithheldSummary | undefined {
+  if (value === undefined) return true
+  if (!isRecord(value) || !isFiniteNumber(value.total) || !isRecord(value.by_kind)) return false
+  return isFiniteNumber(value.by_kind.request) && isFiniteNumber(value.by_kind.incident)
 }
 
 export function resolveInboxWaitOptions(

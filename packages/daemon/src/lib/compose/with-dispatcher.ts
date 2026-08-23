@@ -246,17 +246,22 @@ export function withDispatcher<
       latest_message_id: string | null
       latest_type: string | null
     } {
-      const { attentionRows } = readAttentionProjection(daemonCtx, sessionName)
+      const { attentionRows, pendingBalls, actionableCount } = readAttentionProjection(daemonCtx, sessionName)
       const oldest = attentionRows[0]
       const latest = attentionRows.at(-1)
-      const unread_count = attentionRows.length
-      const oldest_ts = oldest?.ts ?? 0
-      const oldest_unread_age_min = oldest_ts > 0 ? Math.floor((Date.now() - oldest_ts) / 60_000) : 0
+      const oldestPendingTs = pendingBalls.reduce(
+        (oldestTs, ball) => Math.min(oldestTs, Date.parse(ball.opened_at)),
+        Number.POSITIVE_INFINITY,
+      )
+      const unread_count = actionableCount
+      const oldestTs = Math.min(oldest?.ts ?? Number.POSITIVE_INFINITY, oldestPendingTs)
+      const oldest_unread_ts = Number.isFinite(oldestTs) ? oldestTs : 0
+      const oldest_unread_age_min = oldest_unread_ts > 0 ? Math.floor((Date.now() - oldest_unread_ts) / 60_000) : 0
       return {
         session: sessionName,
         unread_count,
         oldest_unread_age_min,
-        oldest_unread_ts: oldest_ts,
+        oldest_unread_ts,
         latest_actionable_seq: latest?.rowid ?? null,
         latest_message_id: latest?.id ?? null,
         latest_type: latest?.type ?? null,
@@ -516,13 +521,13 @@ export function withDispatcher<
         }) as { rowid: number } | undefined
         return latest?.rowid ?? 0
       },
-      (sessionName, wakeOnCorrelatedReply) => {
+      (sessionName, wakeOnCorrelatedReply, status) => {
         const current = stmts.getLatestInboxWaitMessage.get({
           $name: sessionName,
           $include_correlated_replies: wakeOnCorrelatedReply ? 1 : 0,
           $unacknowledged_only: 1,
         }) as { rowid: number } | undefined
-        return current?.rowid ?? 0
+        return current?.rowid ?? (status.unread_count > 0 ? 1 : 0)
       },
     )
     const previousOnMessageInserted = daemonCtx.onMessageInserted

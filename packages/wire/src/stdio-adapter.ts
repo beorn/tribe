@@ -276,6 +276,10 @@ type TribeFetchResult = {
     pending_balls_summary?: {
       total?: number
       oldest_age_ms?: number
+      withheld?: {
+        total?: number
+        by_kind?: { request?: number; incident?: number }
+      }
     }
   }
   events?: Array<{
@@ -696,7 +700,7 @@ armDegradeNotice(daemonReady)
 const joinInstruction = `If you receive a stdio-adapter auto-identify message, just call tribe.join with a short name for your focus area. Omit the role parameter — the daemon registers every session as a plain "member"; it does NOT assign "chief" by connect order. "chief" is a bead-lease hat (claimed via /up / the bead lease system), not a daemon-assigned role. No need to call tribe.members or tribe.fetch afterward — just join silently and continue.`
 const deliveryInstruction = deliveryCapabilityInstruction(DELIVERY_CAPABILITY)
 const attentionProjectionInstruction =
-  "- Default fetch exposes `attention.actionable_unread` (request/query/verdict/assign plus direct responses) and the 10 oldest `attention.pending_balls` ahead of ambient events; `attention.pending_balls_summary` reports the full total/oldest age and `tribe.pending` returns the full pile. Responses remain quiet for default inbox waits. These are facts projected from the existing mailbox and ball tracker, not another queue."
+  "- Default fetch exposes `attention.actionable_unread` (request/query/verdict/assign plus direct responses) and up to 10 `attention.pending_balls`, prioritizing peer requests over watcher incidents, ahead of ambient events; `attention.pending_balls_summary` reports the full total/oldest age and any omitted request/incident counts, while `tribe.pending` returns the full pile. Responses remain quiet for default inbox waits. These are facts projected from the existing mailbox and ball tracker, not another queue."
 
 // Shared turn-start inbox guidance for every role variant. Kept deliberately
 // SMALL: the turn-start call is a small catch-up drain, NOT a full replay. The
@@ -1099,7 +1103,12 @@ function forwardPendingBallSummary(
     .filter((summary): summary is string => Boolean(summary))
     .slice(0, 3)
   const topText = top.length > 0 ? ` Top: ${top.join(" | ")}` : ""
-  sendChannel(`You own ${total} ${total === 1 ? "ball" : "balls"}, oldest ${oldest}.${topText}`, {
+  const withheld = summary?.withheld
+  const withheldText =
+    withheld && (withheld.total ?? 0) > 0
+      ? ` Preview withheld ${withheld.total} (${withheld.by_kind?.request ?? 0} request, ${withheld.by_kind?.incident ?? 0} incident).`
+      : ""
+  sendChannel(`You own ${total} ${total === 1 ? "ball" : "balls"}, oldest ${oldest}.${topText}${withheldText}`, {
     from: "tribe",
     type: "attention:pending-balls",
   })

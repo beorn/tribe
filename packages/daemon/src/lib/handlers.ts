@@ -1179,6 +1179,13 @@ type PendingReplyFactRow = {
 type PendingBallSummary = {
   total: number
   oldest_age_ms: number
+  withheld?: {
+    total: number
+    by_kind: {
+      request: number
+      incident: number
+    }
+  }
 }
 
 const ATTENTION_PENDING_BALL_LIMIT = 10
@@ -2815,17 +2822,44 @@ export function readAttentionProjection(
   ctx: TribeContext,
   owner: string,
   now = Date.now(),
-): { attentionRows: FetchRow[]; attention: AttentionProjection } {
+): {
+  attentionRows: FetchRow[]
+  pendingBalls: PendingBall[]
+  actionableCount: number
+  attention: AttentionProjection
+} {
   const attentionRows = filterRowsByTrust(ctx, ctx.stmts.selectAttention.all({ $name: owner }) as FetchRow[])
   const pendingBalls = pendingBallsForOwner(ctx, owner, now)
+  const attentionMessageIds = new Set(attentionRows.map((row) => row.id))
+  const actionableCount =
+    attentionRows.length + pendingBalls.filter((ball) => !attentionMessageIds.has(ball.message_id)).length
+  const prioritizedPendingBalls = pendingBalls.toSorted((left, right) => {
+    const leftRank = left.request_kind === "incident" ? 1 : 0
+    const rightRank = right.request_kind === "incident" ? 1 : 0
+    return leftRank - rightRank
+  })
+  const pendingPreview = prioritizedPendingBalls.slice(0, ATTENTION_PENDING_BALL_LIMIT)
+  const withheld = prioritizedPendingBalls.slice(ATTENTION_PENDING_BALL_LIMIT)
+  const withheldRequests = withheld.filter((ball) => ball.request_kind !== "incident").length
+  const withheldIncidents = withheld.length - withheldRequests
   return {
     attentionRows,
+    pendingBalls,
+    actionableCount,
     attention: {
       actionable_unread: attentionRows.map(fetchEvent),
-      pending_balls: pendingBalls.slice(0, ATTENTION_PENDING_BALL_LIMIT),
+      pending_balls: pendingPreview,
       pending_balls_summary: {
         total: pendingBalls.length,
-        oldest_age_ms: pendingBalls[0]?.age_ms ?? 0,
+        oldest_age_ms: pendingBalls.reduce((oldest, ball) => Math.max(oldest, ball.age_ms), 0),
+        ...(withheld.length === 0
+          ? {}
+          : {
+              withheld: {
+                total: withheld.length,
+                by_kind: { request: withheldRequests, incident: withheldIncidents },
+              },
+            }),
       },
     },
   }
