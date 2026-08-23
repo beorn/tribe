@@ -7,7 +7,7 @@
  *  - periodic auto-GC in `cleanupOldData` (ball never outlives its message's 7d
  *    retention);
  *  - the scoped `gcStalePendingForRecipient` engine behind the explicit
- *    `tribe.pending` prune/close (safe chief-recovery repair — scoped).
+ *    scoped `tribe.pending` prune/close operations.
  * Neither deletes message history; each production path records a typed
  * non-reply settlement before removing the ball-tracker row.
  */

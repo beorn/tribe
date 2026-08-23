@@ -747,7 +747,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     recipients === "*" && (requestFlag || requestId !== null)
       ? activeBroadcastRecipients(ctx, transport.answerableNames)
       : undefined
-  if (recipients === "*" && broadcastOwners !== undefined && broadcastOwners.length === 0) {
+  if (recipients === "*" && broadcastOwners?.length === 0) {
     return trackedDeliveryFailure(ctx, {
       recipients: [recipients],
       reason:
@@ -1595,8 +1595,8 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
     return jsonResult({ error: "tribe.pending: owed filters the expired view; pass expired: true." })
   }
 
-  // Explicit repair path (@km/tribe/20008): prune stale balls for `owner`. Safe
-  // to run during chief recovery — it REQUIRES a stale_ms threshold so it can
+  // Explicit bounded repair path (@km/tribe/20008): prune stale balls for
+  // `owner`. It REQUIRES a stale_ms threshold so it can
   // only ever settle balls older than that age (fresh request/reply balls and
   // other recipients are untouched). It records full gc-expired evidence before
   // removing active ownership and never deletes message history.

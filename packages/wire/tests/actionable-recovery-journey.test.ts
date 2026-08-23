@@ -79,8 +79,22 @@ const BASE_ENV: NodeJS.ProcessEnv = (() => {
   delete env.CLAUDE_SESSION_ID
   delete env.CLAUDE_SESSION_NAME
   delete env.BD_ACTOR
+  delete env.AG_SESSION_AUTH
   return env
 })()
+
+function settlementFacts(dbPath: string): Array<Record<string, unknown>> {
+  const db = openDatabase(dbPath)
+  try {
+    return (
+      db
+        .prepare("SELECT content FROM messages WHERE kind = 'event' AND type = 'event.ball.settled' ORDER BY ts, id")
+        .all() as Array<{ content: string }>
+    ).map((row) => JSON.parse(row.content) as Record<string, unknown>)
+  } finally {
+    db.close()
+  }
+}
 
 function readLifecycleRows(dbPath: string): Array<{ type: string; sender: string; content: string }> {
   const db = openDatabase(dbPath)
@@ -987,6 +1001,129 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     db.close()
     expect(remaining.count).toBe(0)
     expect(attributed.sender).toBe("@chief")
+  }, 120_000)
+
+  it("attributes managed CLI pending closes through the session authority bearer", async () => {
+    const socketPath = join(tmpDir, "managed-cli-pending-close.sock")
+    const dbPath = join(tmpDir, "managed-cli-pending-close.db")
+    const owner = "@agent/pending-owner"
+    const sender = "@agent/pending-sender"
+    const ownerAuthority = "o".repeat(43)
+    const senderAuthority = "s".repeat(43)
+
+    daemonProc = spawnDaemon(socketPath, dbPath)
+    await waitForDaemonSocket(daemonProc, socketPath)
+
+    const ownerAdapter = await spawnLaunchAdapter(socketPath, "managed-cli-pending-owner.log", "pending-owner-launch", {
+      name: owner,
+      selfMailboxAuthority: ownerAuthority,
+    })
+    const senderAdapter = await spawnLaunchAdapter(
+      socketPath,
+      "managed-cli-pending-sender.log",
+      "pending-sender-launch",
+      { name: sender, selfMailboxAuthority: senderAuthority },
+    )
+    await callLaunchToolWhenRegistered(ownerAdapter, 70, "members", {})
+    await callLaunchToolWhenRegistered(senderAdapter, 71, "members", {})
+
+    const open = async (id: number, requestId: string) => {
+      const result = (await callLaunchToolWhenRegistered(senderAdapter, id, "send", {
+        to: owner,
+        message: `tracked ${requestId}`,
+        type: "request",
+        summary: `tracked ${requestId}`,
+        request: requestId,
+      })) as { sent?: boolean }
+      expect(result.sent).toBe(true)
+    }
+    const cliEnv = {
+      ...BASE_ENV,
+      TRIBE_SOCKET: socketPath,
+      TRIBE_NAME: "@agent/hostile-hint",
+      TRIBE_SESSION_NAME: "@agent/hostile-hint",
+      TRIBE_LAUNCH_ID: "hostile-launch-hint",
+      TRIBE_NO_AUTOSTART: "1",
+    }
+
+    await open(72, "owner-close-full-uuid")
+    const ownerClose = await runCli(
+      ["pending", "--owner", owner, "--close", "owner-close-full-uuid", "--json"],
+      cliEnv,
+      {
+        selfMailboxAuthority: ownerAuthority,
+        throughParent: true,
+      },
+    )
+    expect(ownerClose.exitCode, ownerClose.stderr).toBe(0)
+    expect(JSON.parse(ownerClose.stdout)).toMatchObject({
+      owner,
+      request_id: "owner-close-full-uuid",
+      closed: 1,
+    })
+
+    await open(73, "sender-close-full-uuid")
+    const senderClose = await runCli(
+      ["pending", "--owner", owner, "--close", "sender-close-full-uuid", "--json"],
+      cliEnv,
+      { selfMailboxAuthority: senderAuthority, throughParent: true },
+    )
+    expect(senderClose.exitCode, senderClose.stderr).toBe(0)
+    expect(JSON.parse(senderClose.stdout)).toMatchObject({
+      owner,
+      request_id: "sender-close-full-uuid",
+      closed: 1,
+    })
+
+    await open(74, "rejected-authority-full-uuid")
+    const rejectedClose = await runCli(
+      ["pending", "--owner", owner, "--close", "rejected-authority-full-uuid", "--json"],
+      cliEnv,
+      { selfMailboxAuthority: "x".repeat(43), throughParent: true },
+    )
+    expect(rejectedClose.exitCode).toBe(1)
+    expect(rejectedClose.stdout).toBe("")
+    expect(rejectedClose.stderr).toMatch(/current session authority was rejected or revoked/i)
+
+    const overrideProbe = await connectToDaemon(socketPath)
+    try {
+      await expect(
+        overrideProbe.call("cli_session_pending_close_v1", {
+          authority: ownerAuthority,
+          owner,
+          close: "rejected-authority-full-uuid",
+          prune: true,
+        }),
+      ).rejects.toThrow(/identity and non-close operation overrides are forbidden/i)
+    } finally {
+      overrideProbe.close()
+    }
+
+    expect(settlementFacts(dbPath)).toEqual([
+      expect.objectContaining({
+        request_id: "owner-close-full-uuid",
+        recipient: owner,
+        sender,
+        settlement: "manual-close",
+        settled_by: owner,
+      }),
+      expect.objectContaining({
+        request_id: "sender-close-full-uuid",
+        recipient: owner,
+        sender,
+        settlement: "sender-withdrawn",
+        settled_by: sender,
+      }),
+    ])
+    const db = openDatabase(dbPath)
+    try {
+      const remaining = db
+        .prepare("SELECT request_id FROM pending_request WHERE recipient = ? ORDER BY request_id")
+        .all(owner) as Array<{ request_id: string }>
+      expect(remaining).toEqual([{ request_id: "rejected-authority-full-uuid" }])
+    } finally {
+      db.close()
+    }
   }, 120_000)
 
   it("routes attributed CLI replies from two personas sharing one provider launch", async () => {

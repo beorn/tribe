@@ -277,6 +277,121 @@ export function withDispatcher<
       return typeof value === "string" && value.trim().length > 0 ? value.trim() : null
     }
 
+    type AuthenticatedSessionCapability =
+      | { kind: "inbox-ack"; limit: unknown; peek: boolean }
+      | { kind: "pending-close"; owner: string; close: string | string[] }
+      | { kind: "pending-prune"; owner: string; staleMs: number }
+
+    type SessionAuthorityResolution =
+      | { context: TribeContext }
+      | { errorCode: number; errorMessage: string; errorData: Record<string, unknown> }
+
+    /**
+     * Resolve the launcher-minted bearer exactly once for every authenticated
+     * one-shot operation. The capability union above is deliberately closed:
+     * extending what this bearer may do requires a new typed member and its
+     * own boundary test, never a caller-supplied method name.
+     */
+    function resolveSessionAuthority(value: unknown): SessionAuthorityResolution {
+      const supplied = requiredNonEmptyString(value)
+      if (supplied === null) {
+        return {
+          errorCode: -32004,
+          errorMessage: "current session authority is missing",
+          errorData: { kind: "could-not-evaluate", reason: "session-authority-missing" },
+        }
+      }
+      const row = db
+        .prepare(
+          `SELECT id, name, role, domains, claude_session_id, claude_session_name
+           FROM sessions WHERE mailbox_authority_hash = $hash`,
+        )
+        .get({ $hash: hashSelfMailboxAuthority(supplied) }) as {
+        id: string
+        name: string
+        role: TribeRole
+        domains: string
+        claude_session_id: string | null
+        claude_session_name: string | null
+      } | null
+      if (row === null) {
+        return {
+          errorCode: -32003,
+          errorMessage: "current session authority was rejected or revoked",
+          errorData: { kind: "unauthenticated", reason: "session-authority-rejected" },
+        }
+      }
+      const domains = JSON.parse(row.domains) as unknown
+      if (!Array.isArray(domains) || !domains.every((domain): domain is string => typeof domain === "string")) {
+        return {
+          errorCode: -32603,
+          errorMessage: `stored domains for ${row.name} are invalid`,
+          errorData: { kind: "invalid-state", reason: "session-authority-domains-invalid" },
+        }
+      }
+      return {
+        context: createTribeContext({
+          db,
+          stmts,
+          sessionId: row.id,
+          sessionRole: row.role,
+          initialName: row.name,
+          domains,
+          claudeSessionId: row.claude_session_id,
+          claudeSessionName: row.claude_session_name,
+          onMessageInserted,
+        }),
+      }
+    }
+
+    async function dispatchAuthenticatedSessionCapability(
+      authority: unknown,
+      capability: AuthenticatedSessionCapability,
+      connId: string,
+    ): Promise<
+      | { result: Awaited<ReturnType<typeof handleToolCall>> }
+      | { errorCode: number; errorMessage: string; errorData: Record<string, unknown> }
+    > {
+      const resolution = resolveSessionAuthority(authority)
+      if (!("context" in resolution)) return resolution
+      switch (capability.kind) {
+        case "inbox-ack":
+          return {
+            result: await handleToolCall(
+              resolution.context,
+              TRIBE_COORD_METHODS.fetch,
+              { limit: capability.limit, advance: capability.peek ? false : undefined },
+              DAEMON_HANDLER_OPTS,
+              connId,
+            ),
+          }
+        case "pending-close":
+          return {
+            result: await handleToolCall(
+              resolution.context,
+              TRIBE_COORD_METHODS.pending,
+              { owner: capability.owner, close: capability.close },
+              DAEMON_HANDLER_OPTS,
+              connId,
+            ),
+          }
+        case "pending-prune":
+          return {
+            result: await handleToolCall(
+              resolution.context,
+              TRIBE_COORD_METHODS.pending,
+              { owner: capability.owner, prune: true, stale_ms: capability.staleMs },
+              DAEMON_HANDLER_OPTS,
+              connId,
+            ),
+          }
+        default: {
+          const unreachable: never = capability
+          throw new Error(`unhandled authenticated session capability: ${JSON.stringify(unreachable)}`)
+        }
+      }
+    }
+
     type InboxTargetResolution =
       | { sessionName: string; launchId?: string; launchParentPid?: number }
       | { errorCode: number; errorMessage: string }
@@ -1492,55 +1607,54 @@ export function withDispatcher<
                 "Self inbox derives its mailbox from authority; target overrides are forbidden",
               )
             }
-            const supplied = requiredNonEmptyString(p.authority)
-            if (supplied === null) {
-              return makeError(id, -32004, "self mailbox authority is missing", {
-                kind: "could-not-evaluate",
-                reason: "self-mailbox-authority-missing",
-              })
-            }
-            const row = db
-              .prepare(
-                `SELECT id, name, role, domains, claude_session_id, claude_session_name
-                 FROM sessions WHERE mailbox_authority_hash = $hash`,
-              )
-              .get({ $hash: hashSelfMailboxAuthority(supplied) }) as {
-              id: string
-              name: string
-              role: TribeRole
-              domains: string
-              claude_session_id: string | null
-              claude_session_name: string | null
-            } | null
-            if (row === null) {
-              return makeError(id, -32003, "self mailbox authority was rejected or revoked", {
-                kind: "unauthenticated",
-                reason: "self-mailbox-authority-rejected",
-              })
-            }
-            const domains = JSON.parse(row.domains) as unknown
-            if (!Array.isArray(domains) || !domains.every((domain): domain is string => typeof domain === "string")) {
-              return makeError(id, -32603, `stored domains for ${row.name} are invalid`)
-            }
-            const authorityCtx = createTribeContext({
-              db,
-              stmts,
-              sessionId: row.id,
-              sessionRole: row.role,
-              initialName: row.name,
-              domains,
-              claudeSessionId: row.claude_session_id,
-              claudeSessionName: row.claude_session_name,
-              onMessageInserted,
-            })
-            const result = await handleToolCall(
-              authorityCtx,
-              TRIBE_COORD_METHODS.fetch,
-              { limit: p.limit, advance: p.peek === true ? false : undefined },
-              DAEMON_HANDLER_OPTS,
+            const outcome = await dispatchAuthenticatedSessionCapability(
+              p.authority,
+              { kind: "inbox-ack", limit: p.limit, peek: p.peek === true },
               connId,
             )
-            return makeResponse(id, result)
+            if (!("result" in outcome)) {
+              return makeError(id, outcome.errorCode, outcome.errorMessage, outcome.errorData)
+            }
+            return makeResponse(id, outcome.result)
+          }
+
+          /**
+           * Authenticated one-shot pending close. `owner` selects the
+           * recipient-owned row; it never selects caller identity. The bearer
+           * resolves the caller context, then the canonical pending handler
+           * performs the one close implementation shared with MCP.
+           */
+          case "cli_session_pending_close_v1": {
+            if (
+              ["session", "name", "launch_id", "launch_parent_pid", "pid", "prune", "stale_ms", "all", "expired"].some(
+                (key) => Object.prototype.hasOwnProperty.call(p, key),
+              )
+            ) {
+              return makeError(
+                id,
+                -32602,
+                "Pending close derives caller identity from authority; identity and non-close operation overrides are forbidden",
+              )
+            }
+            const owner = requiredNonEmptyString(p.owner)
+            const close =
+              typeof p.close === "string"
+                ? p.close
+                : Array.isArray(p.close) && p.close.every((value): value is string => typeof value === "string")
+                  ? p.close
+                  : null
+            if (owner === null || close === null) {
+              return makeError(id, -32602, "Authenticated pending close requires owner and close")
+            }
+            const outcome = await dispatchAuthenticatedSessionCapability(
+              p.authority,
+              { kind: "pending-close", owner, close },
+              connId,
+            )
+            if (!("result" in outcome)) {
+              return makeError(id, outcome.errorCode, outcome.errorMessage, outcome.errorData)
+            }
+            return makeResponse(id, outcome.result)
           }
 
           /**

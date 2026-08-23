@@ -1504,10 +1504,9 @@ export function createStatements(db: Database) {
      *  untouched. Global form drives the periodic cleanup. */
     gcStalePendingRequests: db.prepare("DELETE FROM pending_request WHERE opened_at < $cutoff"),
 
-    /** Ball-tracker GC scoped to one recipient — the EXPLICIT repair path
-     *  (tribe.pending prune) safe to run during chief recovery: only deletes the
-     *  owner's balls older than the cutoff; fresh balls + other recipients are
-     *  untouched. */
+    /** Ball-tracker GC scoped to one recipient. `tribe.pending prune` deletes
+     *  only the selected owner's balls older than the cutoff; fresh balls and
+     *  other recipients are untouched. Authorization belongs to the handler. */
     gcStalePendingForRecipient: db.prepare(
       "DELETE FROM pending_request WHERE recipient = $recipient AND opened_at < $cutoff",
     ),

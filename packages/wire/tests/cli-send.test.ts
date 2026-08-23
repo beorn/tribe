@@ -16,6 +16,7 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { buildSendPayload, registerSendCommands } from "../src/cli/send.ts"
+import { AG_SESSION_AUTH_ENV } from "../src/lib/self-mailbox-authority.ts"
 import { oversizedMessageError } from "../src/lib/send-validation.ts"
 import { safeRemoveSync } from "removely"
 
@@ -505,6 +506,16 @@ describe("registerSendCommands", () => {
                   : {}),
               },
             }
+          } else if (request.method === "cli_session_pending_close_v1" && request.params?.close === "req-123") {
+            const closed = pendingOpen ? 1 : 0
+            pendingOpen = false
+            result = {
+              structuredContent: {
+                owner: "@chief",
+                request_id: "req-123",
+                closed,
+              },
+            }
           } else if (request.method === "register") {
             // Mirror the real daemon's grant: the one-shot --reply register gets
             // the requested name back (no live holder in this fixture).
@@ -538,15 +549,18 @@ describe("registerSendCommands", () => {
           resolveListen()
         })
       })
-      const runCli = (args: string[]) =>
+      const runCli = (args: string[], authority?: string) =>
         new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProc) => {
+          const env: NodeJS.ProcessEnv = {
+            ...process.env,
+            TRIBE_SOCKET: socketPath,
+            TRIBE_SESSION_NAME: "@chief",
+            TRIBE_LAUNCH_ID: "",
+          }
+          delete env[AG_SESSION_AUTH_ENV]
+          if (authority !== undefined) env[AG_SESSION_AUTH_ENV] = authority
           const child = spawn(BUN_BIN, [CLI, ...args], {
-            env: {
-              ...process.env,
-              TRIBE_SOCKET: socketPath,
-              TRIBE_SESSION_NAME: "@chief",
-              TRIBE_LAUNCH_ID: "",
-            },
+            env,
             stdio: ["ignore", "pipe", "pipe"],
           })
           let stdout = ""
@@ -580,6 +594,15 @@ describe("registerSendCommands", () => {
       expect(manualClose.stderr).toContain(
         "reply/close req-123 closed 0 rows; balls owned by @chief: req-other (message msg-other, from @agent/4)",
       )
+      expect(manualClose.stderr).toContain(
+        `${AG_SESSION_AUTH_ENV} is missing; using the temporary unattributed pending-close path`,
+      )
+
+      pendingOpen = true
+      const authority = "a".repeat(43)
+      const authenticatedClose = await runCli(["pending", "--owner", "@chief", "--close", "req-123"], authority)
+      expect(authenticatedClose).toMatchObject({ code: 0, stderr: "" })
+      expect(authenticatedClose.stdout).toContain("Closed 1 pending request(s) for @chief: req-123")
 
       // 22844: every branch below reports on the bookkeeping half of an
       // ALREADY-DELIVERED response — exit 3 (delivered, close unconfirmed),
@@ -612,6 +635,12 @@ describe("registerSendCommands", () => {
 
       const closes = calls.filter((call) => call.method === "tribe.pending" && call.params.close !== undefined)
       expect(closes).toEqual([{ method: "tribe.pending", params: { owner: "@chief", close: "req-123" } }])
+      expect(calls.filter((call) => call.method === "cli_session_pending_close_v1")).toEqual([
+        {
+          method: "cli_session_pending_close_v1",
+          params: { owner: "@chief", close: "req-123", authority },
+        },
+      ])
       expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(5)
     } finally {
       server.close()

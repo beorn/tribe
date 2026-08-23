@@ -525,7 +525,20 @@ async function cmdPending(
   if (owner) args.owner = owner
   if (staleMs !== undefined) args.stale_ms = staleMs
   if (close) args.close = close
-  const result = (await callDaemon("tribe.pending", args)) as {
+  let method = "tribe.pending"
+  if (close) {
+    const authority = readSelfMailboxAuthorityFromEnvironment(process.env)
+    if (authority === null) {
+      console.warn(
+        `Warning: ${AG_SESSION_AUTH_ENV} is missing; using the temporary unattributed pending-close path. ` +
+          "Managed callers must inherit current-session authority before the legacy path is removed.",
+      )
+    } else {
+      method = "cli_session_pending_close_v1"
+      args.authority = authority
+    }
+  }
+  const result = (await callDaemon(method, args)) as {
     content?: Array<{ type?: string; text?: string }>
     structuredContent?: {
       error?: string
