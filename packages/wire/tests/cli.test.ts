@@ -21,6 +21,10 @@ const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "../src/cli.ts")
 const DAEMON = resolve(dirname(fileURLToPath(import.meta.url)), "../../daemon/src/daemon.ts")
 const TRIBE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..")
 const TRIBE_SHA = execFileSync("git", ["-C", TRIBE_ROOT, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()
+const SUPERPROJECT_ROOT = execFileSync("git", ["-C", TRIBE_ROOT, "rev-parse", "--show-superproject-working-tree"], {
+  encoding: "utf8",
+}).trim()
+const EXPECTED_HOST_PIN = SUPERPROJECT_ROOT === "" ? "none (standalone checkout, no superproject)" : TRIBE_SHA
 const BUN_BIN = process.env.BUN_EXECUTABLE ?? "bun"
 
 // Strip ANSI SGR sequences (Commander colorizes its help output, which
@@ -140,7 +144,9 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
 
       expect(result, result.stderr).toMatchObject({ code: 0 })
       expect(result.stdout).toMatch(/OK — rail canary message=[0-9a-f-]+ waited_ms=\d+/)
-      expect(result.stdout).toContain(`OK — code identity running=${TRIBE_SHA} on_disk=${TRIBE_SHA} pin=${TRIBE_SHA}`)
+      expect(result.stdout).toContain(
+        `OK — code identity running=${TRIBE_SHA} on_disk=${TRIBE_SHA} pin=${EXPECTED_HOST_PIN}`,
+      )
     } finally {
       daemon.kill("SIGTERM")
       await new Promise<void>((resolveClose) => daemon.once("close", () => resolveClose()))
@@ -886,7 +892,9 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       })
 
       expect(result.code).toBe(1)
-      expect(result.stdout).toContain(`OK — code identity running=${TRIBE_SHA} on_disk=${TRIBE_SHA} pin=${TRIBE_SHA}`)
+      expect(result.stdout).toContain(
+        `OK — code identity running=${TRIBE_SHA} on_disk=${TRIBE_SHA} pin=${EXPECTED_HOST_PIN}`,
+      )
       expect(result.stderr).toContain("CRITICAL — rail canary failed: long-poll returned status=timeout timed_out=true")
       expect(result.stderr).toContain(
         'REMEDY — run `tribe restart --reason "doctor rail canary failed"`, then re-run `tribe doctor`',
@@ -949,7 +957,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       expect(result.code).toBe(1)
       expect(result.stderr).toContain(
         `CRITICAL — code identity: daemon code integrity mismatch running=deadbeef on_disk=${TRIBE_SHA} ` +
-          `pin=${TRIBE_SHA}`,
+          `pin=${EXPECTED_HOST_PIN}`,
       )
       expect(result.stderr).toContain(
         "REMEDY — the daemon is running a different module root; restarting will not help. Advance the daemon module root, then re-run `tribe doctor`",
