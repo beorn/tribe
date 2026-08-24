@@ -9,6 +9,7 @@ const mockAgent: {
   result: Awaited<typeof import("../../src/lib/agent")>["recallAgent"] | null
   options: unknown
 } = { result: null, options: null }
+let mockRefreshSpawnError: string | null = null
 
 vi.mock("../../src/lib/agent.ts", () => ({
   recallAgent: (query: string, options: unknown) => {
@@ -33,12 +34,15 @@ vi.mock("../../src/lib/refresh.ts", async (importOriginal) => {
       getLastRebuild,
       now: () => Date.now(),
       getThresholdMs: () => 5 * 60 * 1000,
-      spawnCmd: async () => ({ exitCode: 0 }),
+      spawnCmd: async () => {
+        if (mockRefreshSpawnError) throw new Error(mockRefreshSpawnError)
+        return { exitCode: 0 }
+      },
     }),
   }
 })
 
-const { cmdSearch, emitRefreshNote, resolveProjectScope } = await import("../../src/lib/search")
+const { cmdSearch, resolveProjectScope } = await import("../../src/lib/search")
 const { closeDb, ftsSearchWithSnippet, getDb, setIndexMeta } = await import("../../src/history/db")
 const { _resetLlmBackendForTests } = await import("../../src/lib/llm-backend")
 
@@ -110,6 +114,7 @@ describe("recall search output", () => {
     closeDb()
     mockAgent.result = null
     mockAgent.options = null
+    mockRefreshSpawnError = null
     logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
     errSpy = vi.spyOn(console, "error").mockImplementation(() => {})
     stderrWriteSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
@@ -220,19 +225,30 @@ describe("recall search output", () => {
     expect(output).toContain('No results found for "nohits"')
   })
 
-  test("a bounded refresh timeout names the abandoned command and deadline before continuing stale", () => {
-    emitRefreshNote({
-      refreshed: false,
-      reason: "error",
-      staleMs: 30 * 60 * 1_000,
-      error: '"bun" "recall" "index" "--incremental" exceeded 5000ms; sent SIGTERM then SIGKILL after 2000ms',
-    })
+  test("a bounded refresh timeout cannot produce authoritative empty JSON", async () => {
+    setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
+    mockRefreshSpawnError =
+      '"bun" "recall" "index" "--incremental" exceeded 5000ms; sent SIGTERM then SIGKILL after 2000ms'
+    const previousExitCode = process.exitCode
+    process.exitCode = 0
 
-    const errors = callsText(errSpy)
-    expect(errors).toContain('"bun" "recall" "index" "--incremental"')
-    expect(errors).toContain("5000ms")
-    expect(errors).toContain("auto-refresh failed")
-    expect(errors).toContain("proceeding with possibly-stale index")
+    try {
+      await cmdSearch("nohits", { raw: true, json: true, project: "*", limit: "5" })
+
+      const jsonOutput = logSpy.mock.calls.at(-1)?.[0]
+      expect(jsonOutput).toBeTypeOf("string")
+      const payload = JSON.parse(String(jsonOutput)) as {
+        provenance?: string
+        total: number | null
+        results: unknown[] | null
+      }
+      expect(process.exitCode).toBe(3)
+      expect(payload.provenance).toBe("stale")
+      expect(payload.total).toBeNull()
+      expect(payload.results).toBeNull()
+    } finally {
+      process.exitCode = previousExitCode
+    }
   })
 
   test("empty results print without invoking auto-refresh when refresh is disabled", async () => {
