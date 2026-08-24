@@ -22,7 +22,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Server, Socket as NetSocket } from "node:net"
 import type { Database } from "bun:sqlite"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { getLogLevel, setLogLevel } from "loggily"
 import { createScope } from "tribe-wire"
 import { TRIBE_PROTOCOL_VERSION, type JsonRpcRequest } from "tribe-wire/lib/socket"
@@ -31,6 +31,12 @@ import { createTribeContext } from "../context.ts"
 import { openDatabase, createStatements } from "../database.ts"
 import type { ClientSession } from "./with-client-registry.ts"
 import { withDispatcher } from "./with-dispatcher.ts"
+
+beforeEach(() => {
+  // Takeover specimens intentionally exercise the dispatcher's loud ownership
+  // handoff diagnostics; behavioral assertions below prove the displacement.
+  vi.spyOn(console, "warn").mockImplementation(() => {})
+})
 
 type TestSocket = NetSocket & {
   destroyedByDispatcher: boolean

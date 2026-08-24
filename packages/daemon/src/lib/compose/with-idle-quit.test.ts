@@ -14,7 +14,7 @@
  * serve those registered sessions' next poll anyway (squatting is the bug there).
  */
 
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createScope } from "tribe-wire"
 import { createBaseTribe } from "./base.ts"
 import { withClientRegistry, type ClientSession } from "./with-client-registry.ts"
@@ -22,6 +22,12 @@ import { withIdleQuit, type IdleQuitOpts } from "./with-idle-quit.ts"
 import type { TribeConfig } from "./with-config.ts"
 
 const THIRTY_MIN_MS = 1800 * 1000
+
+beforeEach(() => {
+  // These specimens deliberately reach the loud arm/stop diagnostics while
+  // asserting the underlying deadline and shutdown state directly.
+  vi.spyOn(console, "warn").mockImplementation(() => {})
+})
 
 function makeConfig(overrides: Partial<TribeConfig> = {}): TribeConfig {
   return {

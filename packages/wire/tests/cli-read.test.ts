@@ -111,7 +111,7 @@ describe("registerReadCommands", () => {
   test("inbox verb exposes no caller-selected mailbox target", () => {
     const cmd = findCmd(buildProgram(), "inbox")
     expect(cmd).toBeDefined()
-    expect(optionFlags(cmd!)).toEqual(["--limit", "--json"])
+    expect(optionFlags(cmd!)).toEqual(["--limit", "--json", "--peek"])
   })
 
   test("inbox-drain verb accepts --session, --limit, and --json", () => {

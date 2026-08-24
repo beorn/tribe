@@ -19,7 +19,7 @@
  * standalone daemons keep 1800s.
  */
 
-import { afterEach, describe, expect, test } from "vitest"
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 import { parseIdleQuitAfterSec, resolveIdleQuit, withConfig } from "./with-config.ts"
 
 const ENV_KEYS = [
@@ -31,6 +31,11 @@ const ENV_KEYS = [
 ] as const
 
 const saved = new Map<string, string | undefined>()
+
+beforeEach(() => {
+  // Deprecated-flag specimens intentionally prove the operator warning path.
+  vi.spyOn(console, "warn").mockImplementation(() => {})
+})
 function setEnv(key: string, value: string | undefined): void {
   if (!saved.has(key)) saved.set(key, process.env[key])
   if (value === undefined) delete process.env[key]

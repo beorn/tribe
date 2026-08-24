@@ -207,20 +207,38 @@ describe("Claude plugin daemon-restart self-heal", () => {
     logPath: string
     name: string
     launchId: string
+    claudeSessionId?: string
+    sessionAuth?: string
     providerParentPid?: string
+    providerShim?: boolean
     delivery: "push" | "pull"
     requireJoin: boolean
   }): ChildProcessWithoutNullStreams {
-    const child = spawn(BUN_BIN, [PLUGIN_SERVER, "--socket", socketPath, "--name", opts.name], {
+    const pluginArgv = [PLUGIN_SERVER, "--socket", socketPath, "--name", opts.name]
+    const providerShim = `
+const argv = JSON.parse(process.env.TRIBE_TEST_PLUGIN_ARGV ?? "[]")
+const child = Bun.spawn(argv, {
+  env: { ...process.env, TRIBE_PLUGIN_PROVIDER_PARENT_PID: String(process.pid) },
+  stdin: "inherit",
+  stdout: "inherit",
+  stderr: "inherit",
+})
+for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => child.kill(signal))
+process.exit(await child.exited)
+`
+    const child = spawn(BUN_BIN, opts.providerShim === true ? ["-e", providerShim] : pluginArgv, {
       cwd: tmpDir,
       env: {
         ...process.env,
+        ...(opts.providerShim === true ? { TRIBE_TEST_PLUGIN_ARGV: JSON.stringify([BUN_BIN, ...pluginArgv]) } : {}),
         TRIBE_DB: opts.dbPath,
         TRIBE_DELIVERY: opts.delivery,
         ...(opts.delivery === "pull" ? { TRIBE_PULL_TRANSPORT: "mcp" } : {}),
         ...(opts.requireJoin ? {} : { TRIBE_REQUIRE_JOIN: "0" }),
         TRIBE_TAKEOVER: "1",
         TRIBE_LAUNCH_ID: opts.launchId,
+        ...(opts.claudeSessionId === undefined ? {} : { CLAUDE_SESSION_ID: opts.claudeSessionId }),
+        ...(opts.sessionAuth === undefined ? {} : { AG_SESSION_AUTH: opts.sessionAuth }),
         TRIBE_PLUGIN_ADAPTER_CHILD: "",
         ...(opts.providerParentPid === undefined
           ? { TRIBE_PLUGIN_PROVIDER_PARENT_PID: "" }
@@ -867,39 +885,57 @@ describe("Claude plugin daemon-restart self-heal", () => {
     daemonPids.add(generation.pid)
 
     const personas = ["@agent/restart-a", "@agent/restart-b", "@agent/restart-c"]
-    const harnesses = personas.map((persona, index) => {
-      const adapterLog = join(tmpDir, `adapter-${index}.log`)
-      const child = spawnTestPlugin({
-        dbPath,
-        logPath: adapterLog,
-        name: persona,
-        launchId: `restart-multi-${index}`,
-        providerParentPid: String(process.pid),
-        delivery: "pull",
-        requireJoin: false,
-      })
-      child.stderr.resume()
-      const stdout = collectJsonLines(child)
-      writeJson(child, initializePayload(index + 1))
-      return { child, persona, stdout }
-    })
-    await waitFor(
-      () => harnesses.every(({ stdout }, index) => stdout.some((line) => line.id === index + 1)),
-      "multi-seat plugin initialization",
-    )
-    for (const { child } of harnesses) {
-      writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
-    }
-
+    const harnesses: Array<{
+      child: ChildProcessWithoutNullStreams
+      persona: string
+      stdout: JsonObject[]
+      stderr: () => string
+      logPath: string
+    }> = []
     const initialMembers = new Map<string, Member>()
-    await waitFor(async () => {
-      const roster = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
-      for (const persona of personas) {
-        const member = roster.find((session) => session.name === persona && session.transport_state === "connected")
-        if (member) initialMembers.set(persona, member)
+    try {
+      // Spawn each independent provider seat only after the preceding seat
+      // owns its durable membership. The wrapper registers before MCP
+      // initialization, so merely serializing notifications still races the
+      // three durable name claims.
+      for (const [index, persona] of personas.entries()) {
+        const adapterLog = join(tmpDir, `adapter-${index}.log`)
+        const child = spawnTestPlugin({
+          dbPath,
+          logPath: adapterLog,
+          name: persona,
+          launchId: `restart-multi-${index}`,
+          claudeSessionId: `restart-multi-session-${index}`,
+          sessionAuth: `${"A".repeat(42)}${String(index)}`,
+          providerShim: true,
+          delivery: "pull",
+          requireJoin: false,
+        })
+        let stderr = ""
+        child.stderr.on("data", (chunk: Buffer | string) => {
+          stderr += chunk.toString()
+        })
+        const stdout = collectJsonLines(child)
+        harnesses.push({ child, persona, stdout, stderr: () => stderr, logPath: adapterLog })
+        writeJson(child, initializePayload(index + 1))
+        await waitFor(() => stdout.some((line) => line.id === index + 1), `plugin initialization for ${persona}`)
+        writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+        await waitFor(async () => {
+          const roster = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
+          const member = roster.find((session) => session.name === persona && session.transport_state === "connected")
+          if (member) initialMembers.set(persona, member)
+          return member !== undefined
+        }, `initial membership for ${persona}`)
       }
-      return initialMembers.size === personas.length
-    }, "all multi-seat initial memberships")
+    } catch (error) {
+      const roster = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
+      const diagnostics = harnesses
+        .map(({ persona, stderr, logPath }) => `${persona}: stderr=${stderr()} log=${readFileSync(logPath, "utf8")}`)
+        .join("\n")
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}\nroster=${JSON.stringify(roster)}\n${diagnostics}`,
+      )
+    }
 
     let priorTransportPids = new Map(
       personas.map((persona) => [persona, initialMembers.get(persona)!.transport_pids![0]!]),

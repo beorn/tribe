@@ -268,7 +268,7 @@ describe("gatherCodePin (real git path, temp repo)", () => {
       execFileSync(
         "git",
         ["-C", superRepo, "-c", "protocol.file.allow=always", "submodule", "add", repo, "vendor/sub"],
-        { encoding: "utf8" },
+        { encoding: "utf8", stdio: "pipe" },
       )
       execFileSync("git", ["-C", superRepo, "commit", "-q", "-m", "add submodule pinned at A"], { encoding: "utf8" })
 
