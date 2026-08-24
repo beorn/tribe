@@ -16,7 +16,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createScope } from "tribe-wire"
-import { describe, expect, it, vi } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 import { createTribeContext } from "./context.ts"
 import { createStatements, openDatabase } from "./database.ts"
 import { withRuntime } from "./compose/with-runtime.ts"
@@ -38,6 +38,14 @@ const stubApi = {
 const CURSOR_REFUSAL =
   "GitHub cursor open failed after inspecting XDG destination /x/github-cursor.json and legacy source " +
   "/y/.beads/github-cursor.json: adoption changed state while copying the legacy cursor"
+
+beforeEach(() => {
+  // Every failure-path specimen below deliberately exercises the loader's
+  // loud operator diagnostic. The dedicated logging assertion proves its
+  // full cause text; keep the root no-unexpected-console gate focused on
+  // output these tests did not intentionally trigger.
+  vi.spyOn(console, "error").mockImplementation(() => {})
+})
 
 function plugin(name: string, overrides: Partial<TribePluginApi> = {}): TribePluginApi {
   return { name, available: () => true, start: () => () => {}, ...overrides }

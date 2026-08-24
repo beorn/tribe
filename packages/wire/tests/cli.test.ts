@@ -140,12 +140,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
 
       expect(result, result.stderr).toMatchObject({ code: 0 })
       expect(result.stdout).toMatch(/OK — rail canary message=[0-9a-f-]+ waited_ms=\d+/)
-      // Test's own checkout (like CI's) is standalone — no superproject, so
-      // there is no pin to certify against; see evaluateDoctorIdentity's
-      // EMPTY_RESULT branch in read.ts.
-      expect(result.stdout).toContain(
-        `OK — code identity running=${TRIBE_SHA} on_disk=${TRIBE_SHA} pin=none (standalone checkout, no superproject)`,
-      )
+      expect(result.stdout).toContain(`OK — code identity running=${TRIBE_SHA} on_disk=${TRIBE_SHA} pin=${TRIBE_SHA}`)
     } finally {
       daemon.kill("SIGTERM")
       await new Promise<void>((resolveClose) => daemon.once("close", () => resolveClose()))
@@ -891,12 +886,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       })
 
       expect(result.code).toBe(1)
-      // Test's own checkout (like CI's) is standalone — no superproject, so
-      // there is no pin to certify against; see evaluateDoctorIdentity's
-      // EMPTY_RESULT branch in read.ts.
-      expect(result.stdout).toContain(
-        `OK — code identity running=${TRIBE_SHA} on_disk=${TRIBE_SHA} pin=none (standalone checkout, no superproject)`,
-      )
+      expect(result.stdout).toContain(`OK — code identity running=${TRIBE_SHA} on_disk=${TRIBE_SHA} pin=${TRIBE_SHA}`)
       expect(result.stderr).toContain("CRITICAL — rail canary failed: long-poll returned status=timeout timed_out=true")
       expect(result.stderr).toContain(
         'REMEDY — run `tribe restart --reason "doctor rail canary failed"`, then re-run `tribe doctor`',
@@ -957,12 +947,9 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       })
 
       expect(result.code).toBe(1)
-      // Standalone checkout again (see the OK-case comment above) — the
-      // mismatch is still CRITICAL on running-vs-on-disk alone; there is no
-      // pin to report.
       expect(result.stderr).toContain(
         `CRITICAL — code identity: daemon code integrity mismatch running=deadbeef on_disk=${TRIBE_SHA} ` +
-          "pin=none (standalone checkout, no superproject)",
+          `pin=${TRIBE_SHA}`,
       )
       expect(result.stderr).toContain(
         "REMEDY — the daemon is running a different module root; restarting will not help. Advance the daemon module root, then re-run `tribe doctor`",
@@ -1131,8 +1118,13 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         operatorCapability: "fd-only-operator-secret",
       })
 
+      expect(status).toMatchObject({ code: 0, stderr: "" })
+      expect(drain).toMatchObject({
+        code: 0,
+        stderr:
+          "tribe inbox-drain: read was destructive; messages consumed and cursor advanced. Use --peek to read without consuming.\n",
+      })
       for (const cli of [status, drain]) {
-        expect(cli).toMatchObject({ code: 0, stderr: "" })
         expect(JSON.parse(cli.stdout)).toMatchObject({ ...result, waited_ms: expect.any(Number) })
       }
       expect(wait).toMatchObject({ code: 0, stderr: "" })
