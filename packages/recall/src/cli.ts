@@ -70,14 +70,13 @@ program
   .addHelpText(
     "after",
     `\nExit codes:\n` +
-      `  0  clean success — synthesized answer, --raw results, or a genuine\n` +
-      `     "no results found" (an empty search is not a failure)\n` +
+      `  0  clean success — the index provenance is complete; an empty result\n` +
+      `     is authoritative\n` +
       `  1  hard failure — an unexpected crash, not the degraded path below\n` +
       `  2  CLI usage error (bad flags, removed subcommand)\n` +
-      `  3  degraded — lexical search found results but LLM synthesis failed;\n` +
-      `     the results still print, below a labeled failure report — never\n` +
-      `     silently dropped. Only reachable from the default search/synthesis\n` +
-      `     path, never from --raw, index, status, sessions, files, or export.\n`,
+      `  3  degraded — index provenance is stale, missing, or unknown, or LLM\n` +
+      `     synthesis failed. Positive hits still print; degraded empty JSON is\n` +
+      `     discriminated with results:null and total:null, never []/0.\n`,
   )
 
 // ── Default: search ─────────────────────────────────────────────────────
@@ -105,7 +104,7 @@ program
   .option("--no-speculative-synth", "Disable speculative synthesis on round-1 (runs synth only after round 2 merge)")
   .option(
     "--no-refresh",
-    "Skip auto-refresh of stale FTS5 index before search (RECALL_STALE_THRESHOLD env, default 5m)",
+    "Skip auto-refresh; index provenance is unknown and search exits 3 (RECALL_STALE_THRESHOLD default 5m)",
   )
   .actionMerged(async (opts) => {
     const searchOpts = opts as unknown as SearchOptions & { query: string }
@@ -249,7 +248,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   }
 
   // If first arg isn't a known subcommand, treat as `search <query> [opts]`
-  if (!SUBCOMMANDS.has(argv[0]!)) {
+  const firstArg = argv[0]
+  if (firstArg === undefined || !SUBCOMMANDS.has(firstArg)) {
     argv = ["search", ...argv]
   }
 

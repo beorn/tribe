@@ -191,9 +191,10 @@ bun packages/recall/src/cli.ts show week
 
 **Freshness.** Before searching, the CLI checks the index age and auto-runs an
 incremental refresh if it is older than `RECALL_STALE_THRESHOLD` (default `5m`),
-printing a one-line stderr note. It never silently returns stale-empty results;
-on refresh failure it warns and searches the existing index. Skip the refresh
-with `--no-refresh`.
+printing a one-line stderr note. Every result envelope identifies index
+`provenance`. On refresh failure, positive stale hits are preserved with exit 3;
+a degraded empty response is `results: null`, `total: null`, never `[]`/`0`.
+`--no-refresh` skips the subprocess but reports `unknown` provenance and exits 3.
 
 **LLM vs no-LLM.** Raw FTS5 search, file recovery, and session listing work with
 zero configuration. The synthesized default ("pointer mode") and the `--agent`

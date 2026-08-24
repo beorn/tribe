@@ -17,6 +17,7 @@ import {
 import {
   recall,
   suggestRetryTimeoutMs,
+  type IndexProvenance,
   type RecallOptions,
   type RecallResult,
   type RecallSearchResult,
@@ -154,6 +155,29 @@ export async function refreshIndexIfStale(
   return refreshIndexIfStaleWithDeps(options, merged)
 }
 
+function provenanceFromRefresh(result: RefreshResult): IndexProvenance {
+  if (result.refreshed || result.reason === "fresh") return "complete"
+  if (result.reason === "no-meta") return "missing"
+  if (result.reason === "opt-out") return "unknown"
+  if (result.reason === "error") {
+    return Number.isFinite(result.staleMs) && result.staleMs > 0 ? "stale" : "unknown"
+  }
+  return "unknown"
+}
+
+function unprovenSuffix(provenance: IndexProvenance): string {
+  return provenance === "complete" ? "" : ` — UNPROVEN (${provenance} index)`
+}
+
+function recallJsonEnvelope(result: RecallResult): Omit<RecallResult, "results"> & {
+  results: RecallSearchResult[] | null
+} {
+  if (result.provenance !== "complete" && result.results.length === 0) {
+    return { ...result, results: null }
+  }
+  return result
+}
+
 // ============================================================================
 // Main search command
 // ============================================================================
@@ -178,7 +202,9 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
   // few minutes of work). See @km/bearly/19216-recall-freshness-shrink-threshold.
   // Skipped silently for JSON output (programmatic consumers shouldn't see prelude noise).
   const refresh = await refreshIndexIfStale(options)
+  const provenance = provenanceFromRefresh(refresh)
   if (!json) emitRefreshNote(refresh)
+  if (!regexMode && provenance !== "complete") process.exitCode = 3
 
   // Power-user flags imply raw mode. --snippets is an explicit alias for
   // --raw — surfaces the vocabulary used by the accountly side ("snippet vs
@@ -206,12 +232,17 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
 
   // If raw/implied-raw with query → direct FTS5 search (old `bun history` behavior)
   if (impliedRaw) {
-    await rawSearch(query, {
+    rawSearch(query, {
       ...options,
       project,
+      provenance,
       limit: limitStr ? parseInt(limitStr, 10) : 10,
     })
     return
+  }
+
+  if (query === undefined) {
+    throw new Error("Recall search reached synthesis mode without a query")
   }
 
   // Default: LLM synthesis mode via recall()
@@ -222,15 +253,16 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
     limit: limitStr ? parseInt(limitStr, 10) : 10,
     timeout: timeoutStr ? parseInt(timeoutStr, 10) : 10000,
     projectFilter: project,
+    provenance,
   }
 
   const agentEnabled = !!options.agent || !!options.debugPlan || process.env.RECALL_AGENT === "1"
   if (agentEnabled) {
-    await runAgentSearch(query!, options, recallOpts)
+    await runAgentSearch(query, options, recallOpts)
     return
   }
 
-  const result = await recall(query!, recallOpts)
+  const result = await recall(query, recallOpts)
   formatRecallOutput(result, { json })
 }
 
@@ -249,7 +281,7 @@ async function runAgentSearch(query: string, options: SearchOptions, base: Recal
   requireSynthesizedAnswer(result)
 
   if (options.json) {
-    console.log(JSON.stringify(result, null, 2))
+    console.log(JSON.stringify(recallJsonEnvelope(result), null, 2))
     return
   }
 
@@ -392,6 +424,7 @@ function probeLiteralRawMatches(query: string, base: RecallOptions): { token: st
         token,
         result: {
           query: token,
+          provenance: base.provenance ?? "unknown",
           synthesis: null,
           results,
           durationMs,
@@ -410,7 +443,7 @@ function describeSynthPath(trace: AgentRecallResult["trace"]): string {
 
   const calls = synthCallsUsed ?? 1
   const callsLabel = calls === 2 ? "2 synth calls (1 WASTED)" : "1 synth call"
-  const round2Ran = rounds.length >= 2 && rounds[1]!.variants.length > 0
+  const round2Ran = (rounds[1]?.variants.length ?? 0) > 0
 
   // Four honest outcomes:
   if (!round2Ran) {
@@ -519,7 +552,7 @@ function formatRecallOutput(result: RecallResult, options: { json?: boolean }): 
   requireSynthesizedAnswer(result)
 
   if (options.json) {
-    console.log(JSON.stringify(result, null, 2))
+    console.log(JSON.stringify(recallJsonEnvelope(result), null, 2))
     return
   }
 
@@ -529,7 +562,11 @@ function formatRecallOutput(result: RecallResult, options: { json?: boolean }): 
     // returned 0 and suggest --raw fallback. The previous "No results found"
     // looked authoritative when it wasn't — raw mode with the same token
     // may return matches (variant-construction bug class).
-    console.log(`No results found for "${result.query}"`)
+    if (result.provenance === "complete") {
+      console.log(`No results found for "${result.query}"`)
+    } else {
+      console.log(`0 results${unprovenSuffix(result.provenance)} for "${result.query}"`)
+    }
     if (result.query.trim().length > 0) {
       const probeToken = literalRawProbeTokens(result.query)[0] ?? result.query.split(/\s+/)[0]
       console.log(
@@ -549,7 +586,7 @@ function formatRecallOutput(result: RecallResult, options: { json?: boolean }): 
     if (result.timing.llmMs !== undefined) timingParts.push(`llm=${result.timing.llmMs}ms`)
   }
   console.log(
-    `${DIM}${result.results.length} results from ${uniqueSessions} sessions (${timingParts.join(", ")})${RESET}`,
+    `${DIM}${result.results.length} results${unprovenSuffix(result.provenance)} from ${uniqueSessions} sessions (${timingParts.join(", ")})${RESET}`,
   )
   if (result.llmCost !== undefined && result.llmCost > 0) {
     console.log(`${DIM}LLM cost: $${result.llmCost.toFixed(4)}${RESET}`)
@@ -587,7 +624,9 @@ function printResultEntries(results: RecallSearchResult[]): void {
 }
 
 function formatRawRecallResults(result: RecallResult): void {
-  console.log(`${BOLD}${result.results.length} results${RESET} for "${result.query}":\n`)
+  console.log(
+    `${BOLD}${result.results.length} results${unprovenSuffix(result.provenance)}${RESET} for "${result.query}":\n`,
+  )
   printResultEntries(result.results)
 
   const timingParts = [`${result.durationMs}ms`]
@@ -617,13 +656,13 @@ function renderSynthesisFailure(result: RecallResult, diag: SynthesisDiagnostics
   process.exitCode = 3
 
   if (options.json) {
-    console.log(JSON.stringify(result, null, 2))
+    console.log(JSON.stringify(recallJsonEnvelope(result), null, 2))
     return
   }
 
   console.log(`${BOLD}${RED}⚠ RECALL SYNTHESIS FAILED — THE TOOL IS BROKEN, NOT EMPTY${RESET}`)
   console.log(
-    `${BOLD}Lexical search found ${result.results.length} result(s) for "${result.query}" — the LLM step that summarizes them did not complete.${RESET}`,
+    `${BOLD}Lexical search found ${result.results.length} result(s)${unprovenSuffix(result.provenance)} for "${result.query}" — the LLM step that summarizes them did not complete.${RESET}`,
   )
   console.log(diag.summary)
   console.log()
@@ -734,10 +773,11 @@ function formatType(type: string): string {
 
 interface RawSearchOptions extends Omit<SearchOptions, "limit"> {
   limit: number
+  provenance: IndexProvenance
 }
 
-async function rawSearch(query: string | undefined, options: RawSearchOptions): Promise<void> {
-  const { include, question, response, tool, since, project, session, limit, json } = options
+function rawSearch(query: string | undefined, options: RawSearchOptions): void {
+  const { include, question, response, tool, since, project, session, limit, json, provenance } = options
 
   // Parse time filter
   let sinceTime: number | undefined
@@ -925,7 +965,20 @@ async function rawSearch(query: string | undefined, options: RawSearchOptions): 
         rank: r.rank,
       })),
     ]
-    console.log(JSON.stringify({ query, total, durationMs: duration, results: allResults }, null, 2))
+    const unprovenEmpty = provenance !== "complete" && total === 0
+    console.log(
+      JSON.stringify(
+        {
+          query,
+          provenance,
+          total: unprovenEmpty ? null : total,
+          durationMs: duration,
+          results: unprovenEmpty ? null : allResults,
+        },
+        null,
+        2,
+      ),
+    )
     closeDb()
     return
   }
@@ -936,13 +989,17 @@ async function rawSearch(query: string | undefined, options: RawSearchOptions): 
 
   if (totalWithLive === 0) {
     const queryPart = query ? ` for "${query}"` : ""
-    console.log(`No matches found${queryPart} (searched in ${duration}ms)`)
+    if (provenance === "complete") {
+      console.log(`No matches found${queryPart} (searched in ${duration}ms)`)
+    } else {
+      console.log(`0 matches${unprovenSuffix(provenance)}${queryPart} (searched in ${duration}ms)`)
+    }
     closeDb()
     return
   }
 
   const queryPart = query ? ` for "${query}"` : ""
-  console.log(`Found ${totalWithLive} matches${queryPart} in ${duration}ms:\n`)
+  console.log(`Found ${totalWithLive} matches${unprovenSuffix(provenance)}${queryPart} in ${duration}ms:\n`)
 
   // Display live session results first
   if (liveResults.length > 0) {
@@ -965,7 +1022,8 @@ async function rawSearch(query: string | undefined, options: RawSearchOptions): 
     const bySession = groupBy(messageResults.results, (r) => r.session_id)
 
     for (const [sessionId, sessionResults] of bySession) {
-      const first = sessionResults[0]!
+      const first = sessionResults[0]
+      if (first === undefined) continue
       const displayProject = displayProjectPath(first.project_path)
       const relTime = formatRelativeTime(first.timestamp)
       const sessionDisplay = formatSessionId(sessionId, sessionTitles)
@@ -1123,7 +1181,8 @@ async function cmdGrep(pattern: string, options: { project?: string; limit?: num
   const bySession = groupBy(matches, (m) => m.sessionId)
 
   for (const [sessionId, sessionMatches] of bySession) {
-    const firstMatch = sessionMatches[0]!
+    const firstMatch = sessionMatches[0]
+    if (firstMatch === undefined) continue
     const displayProject = displayProjectPath(firstMatch.sessionFile.split(path.sep)[0] || "")
     const date = firstMatch.timestamp
       ? new Date(firstMatch.timestamp)

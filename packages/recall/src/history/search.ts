@@ -16,7 +16,13 @@ import {
 import type { ContentType } from "./types.ts"
 import { synthesizeResults } from "./synthesize.ts"
 import { log, ONE_HOUR_MS, ONE_DAY_MS, THIRTY_DAYS_MS, SynthesisFailure } from "./recall-shared.ts"
-import type { RecallOptions, RecallResult, RecallSearchResult, SynthesisDiagnostics } from "./recall-shared.ts"
+import type {
+  IndexProvenance,
+  RecallOptions,
+  RecallResult,
+  RecallSearchResult,
+  SynthesisDiagnostics,
+} from "./recall-shared.ts"
 
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
@@ -24,7 +30,7 @@ import { searchVault, getVaultDbPath } from "./vault-fts.ts"
 
 // Re-export shared items so existing internal imports continue to work
 export { setRecallLogging, log, ONE_HOUR_MS, ONE_DAY_MS, THIRTY_DAYS_MS } from "./recall-shared.ts"
-export type { RecallOptions, RecallResult, RecallSearchResult } from "./recall-shared.ts"
+export type { IndexProvenance, RecallOptions, RecallResult, RecallSearchResult } from "./recall-shared.ts"
 
 // ============================================================================
 // Time parsing
@@ -49,7 +55,9 @@ export function parseTimeToMs(timeStr: string): number | undefined {
   // Handle relative time formats: 1h, 2d, 3w
   const match = str.match(/^(\d+)([hdw])$/)
   if (match) {
-    const amount = parseInt(match[1]!, 10)
+    const amountText = match[1]
+    if (amountText === undefined) return undefined
+    const amount = parseInt(amountText, 10)
     const unit = match[2]
     switch (unit) {
       case "h":
@@ -122,7 +130,8 @@ export function expandQueryVariants(query: string): string[] | null {
   // Find which words have synonyms
   const expansions: { wordIdx: number; synonyms: string[] }[] = []
   for (let i = 0; i < words.length; i++) {
-    const word = words[i]!
+    const word = words[i]
+    if (word === undefined) continue
     if (word.startsWith("-") || word.startsWith('"')) continue
     const cleaned = word.replace(/[?!.,;]+$/, "")
     const syns = SYNONYMS[cleaned]
@@ -191,7 +200,8 @@ export function searchLiveSession(query: string, limit: number): RecallSearchRes
     if (terms.length === 0) return []
 
     // Use grep for fast pre-filtering — much faster than reading 40MB into memory
-    const grepPattern = terms[0]!
+    const grepPattern = terms[0]
+    if (grepPattern === undefined) return []
     const proc = Bun.spawnSync(["grep", "-i", "-n", grepPattern, jsonlPath], {
       stdout: "pipe",
       stderr: "ignore",
@@ -204,7 +214,8 @@ export function searchLiveSession(query: string, limit: number): RecallSearchRes
 
     // Process from end (most recent matches first)
     for (let i = matchingLines.length - 1; i >= 0 && results.length < limit; i--) {
-      const line = matchingLines[i]!
+      const line = matchingLines[i]
+      if (line === undefined) continue
       const colonIdx = line.indexOf(":")
       if (colonIdx < 0) continue
       const jsonStr = line.slice(colonIdx + 1)
@@ -316,6 +327,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     projectFilter,
     excludeCurrentSession = false,
   } = options
+  const provenance: IndexProvenance = options.provenance ?? "unknown"
   const currentSessionId = excludeCurrentSession ? process.env.CLAUDE_SESSION_ID : undefined
 
   const startTime = Date.now()
@@ -333,6 +345,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         log(`invalid time filter: "${since}"`)
         return {
           query,
+          provenance,
           synthesis: null,
           results: [],
           durationMs: Date.now() - startTime,
@@ -595,7 +608,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     const TOP_N = Math.min(5, deduped.length)
     let contextExpanded = 0
     for (let i = 0; i < TOP_N; i++) {
-      const result = deduped[i]!
+      const result = deduped[i]
+      if (result === undefined) continue
       if (result.type !== "message") continue
 
       const neighbors = getSessionContext(db, result.sessionId, result.timestamp, 5)
@@ -627,6 +641,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       log(`no results found (${Date.now() - startTime}ms total)`)
       return {
         query,
+        provenance,
         synthesis: null,
         results: [],
         durationMs: Date.now() - startTime,
@@ -638,6 +653,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       log(`raw mode — returning ${deduped.length} results without synthesis (${Date.now() - startTime}ms total)`)
       return {
         query,
+        provenance,
         synthesis: null,
         results: deduped,
         durationMs: Date.now() - startTime,
@@ -663,6 +679,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       )
       return {
         query,
+        provenance,
         synthesis: null,
         results: deduped,
         durationMs: totalMs,
@@ -679,6 +696,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
 
     return {
       query,
+      provenance,
       synthesis: synthesis.text,
       results: deduped,
       durationMs: totalMs,

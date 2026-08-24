@@ -98,9 +98,9 @@ The FTS5 index is rebuilt by the SessionStart hook on session entry, but during 
 
 - Default threshold: **5m** (matches Anthropic's prompt-cache TTL).
 - Override: `RECALL_STALE_THRESHOLD=10m` (or `1h`, `30s`, `500ms`, bare number = minutes).
-- Opt out per-call: `bun recall "query" --no-refresh` (skips the subprocess).
+- Opt out per-call: `bun recall "query" --no-refresh` (skips the subprocess, reports `unknown` provenance, and exits 3).
 
-On auto-refresh the search prints a one-line note to stderr: `[recall] index was Nm stale — refreshed (Xms) before search`. On refresh failure it warns and proceeds with the possibly-stale index (never breaks the search).
+Every search result envelope includes top-level `provenance`: `complete`, `stale`, `missing`, or `unknown`. On auto-refresh the search prints a one-line note to stderr: `[recall] index was Nm stale — refreshed (Xms) before search`. If refresh fails, positive stale hits remain available but the command exits 3. A degraded empty JSON response uses `results: null` and `total: null`; human output labels the count `UNPROVEN`. Only a `complete` empty response uses `results: []`, `total: 0`, and exit 0.
 
 The same threshold gates the SessionStart hook's background index rebuild — one knob covers both paths.
 

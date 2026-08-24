@@ -302,7 +302,10 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
     const useSpeculative = speculativeSynthPromise !== null && (!round2Ran || newDocsInTop < ROUND2_NEW_DOCS_THRESHOLD)
 
     if (useSpeculative) {
-      const speculative = await speculativeSynthPromise!
+      if (speculativeSynthPromise === null) {
+        throw new Error("recall agent selected speculative synthesis without starting it")
+      }
+      const speculative = await speculativeSynthPromise
       if ("error" in speculative) throw speculative.error
       const specResult = speculative.result
       synthesis = { text: specResult.text, cost: specResult.cost }
@@ -350,6 +353,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
 
   const result: AgentRecallResult = {
     query,
+    provenance: options.provenance ?? "unknown",
     synthesis: synthesis.text,
     results: finalFanout.results,
     durationMs: totalMs,

@@ -28,6 +28,9 @@ export const THIRTY_DAYS_MS = 30 * ONE_DAY_MS
 // Types
 // ============================================================================
 
+/** Whether the FTS index can support an authoritative absence claim. */
+export type IndexProvenance = "complete" | "stale" | "missing" | "unknown"
+
 export interface RecallOptions {
   limit?: number // Max results to include (default 10)
   raw?: boolean // Return raw results without LLM synthesis
@@ -37,10 +40,13 @@ export interface RecallOptions {
   snippetTokens?: number // Snippet window size (default 200)
   projectFilter?: string // Project filter
   excludeCurrentSession?: boolean // Drop matches from CLAUDE_SESSION_ID (default false)
+  /** Index state established by the caller; direct library calls default to unknown. */
+  provenance?: IndexProvenance
 }
 
 export interface RecallResult {
   query: string
+  provenance: IndexProvenance
   synthesis: string | null // LLM synthesis (null if raw mode, no results, or synthesis failed)
   results: RecallSearchResult[]
   durationMs: number

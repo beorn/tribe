@@ -75,9 +75,10 @@ function seedRankedMessage(id: string, content: string, toolName: string | null)
   ).run(`msg-${id}`, `sess-${id}`, "assistant", content, toolName, null, now)
 }
 
-function zeroAgentResult(query: string) {
+function zeroAgentResult(query: string, options?: { provenance?: "complete" | "stale" | "missing" | "unknown" }) {
   return {
     query,
+    provenance: options?.provenance ?? "unknown",
     synthesis: null,
     results: [],
     durationMs: 12,
@@ -103,6 +104,12 @@ function zeroAgentResult(query: string) {
 
 function callsText(spy: ReturnType<typeof vi.spyOn>): string {
   return spy.mock.calls.map((args: unknown[]) => args.join(" ")).join("\n")
+}
+
+function lastJsonLog<T>(spy: ReturnType<typeof vi.spyOn>): T {
+  const jsonOutput = spy.mock.calls.at(-1)?.[0]
+  expect(jsonOutput).toBeTypeOf("string")
+  return JSON.parse(String(jsonOutput)) as T
 }
 
 describe("recall search output", () => {
@@ -188,7 +195,7 @@ describe("recall search output", () => {
 
   test("agent zero-results raw-probes literal tokens before printing authoritative no-results", async () => {
     seedMessage("The prior session mentioned barenode in the architecture notes.")
-    mockAgent.result = async (query) => zeroAgentResult(query) as never
+    mockAgent.result = async (query, options) => zeroAgentResult(query, options) as never
 
     await cmdSearch("how should we debug barenode", {
       agent: true,
@@ -208,7 +215,7 @@ describe("recall search output", () => {
   test("stale index auto-refreshes before empty results", async () => {
     setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
 
-    mockAgent.result = async (query) => zeroAgentResult(query) as never
+    mockAgent.result = async (query, options) => zeroAgentResult(query, options) as never
 
     await cmdSearch("nohits", {
       agent: true,
@@ -235,13 +242,11 @@ describe("recall search output", () => {
     try {
       await cmdSearch("nohits", { raw: true, json: true, project: "*", limit: "5" })
 
-      const jsonOutput = logSpy.mock.calls.at(-1)?.[0]
-      expect(jsonOutput).toBeTypeOf("string")
-      const payload = JSON.parse(String(jsonOutput)) as {
+      const payload = lastJsonLog<{
         provenance?: string
         total: number | null
         results: unknown[] | null
-      }
+      }>(logSpy)
       expect(process.exitCode).toBe(3)
       expect(payload.provenance).toBe("stale")
       expect(payload.total).toBeNull()
@@ -251,8 +256,100 @@ describe("recall search output", () => {
     }
   })
 
+  test("degraded index provenance preserves useful positive JSON hits", async () => {
+    seedMessage("stalepositive evidence remains useful even when freshness is degraded")
+    setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
+    mockRefreshSpawnError =
+      '"bun" "recall" "index" "--incremental" exceeded 5000ms; sent SIGTERM then SIGKILL after 2000ms'
+    const previousExitCode = process.exitCode
+    process.exitCode = 0
+
+    try {
+      await cmdSearch("stalepositive", { raw: true, json: true, project: "*", limit: "5" })
+
+      const payload = lastJsonLog<{ provenance?: string; total: number | null; results: unknown[] | null }>(logSpy)
+      expect(process.exitCode).toBe(3)
+      expect(payload.provenance).toBe("stale")
+      expect(payload.total).toBe(1)
+      expect(payload.results).toHaveLength(1)
+    } finally {
+      process.exitCode = previousExitCode
+    }
+  })
+
+  test("degraded default JSON discriminates an unproven empty result", async () => {
+    setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
+    mockRefreshSpawnError =
+      '"bun" "recall" "index" "--incremental" exceeded 5000ms; sent SIGTERM then SIGKILL after 2000ms'
+    const previousExitCode = process.exitCode
+    process.exitCode = 0
+
+    try {
+      await cmdSearch("nohits", { json: true, project: "*", limit: "5" })
+
+      const payload = lastJsonLog<{ provenance?: string; results: unknown[] | null }>(logSpy)
+      expect(process.exitCode).toBe(3)
+      expect(payload.provenance).toBe("stale")
+      expect(payload.results).toBeNull()
+    } finally {
+      process.exitCode = previousExitCode
+    }
+  })
+
+  test("degraded agent JSON discriminates an unproven empty result", async () => {
+    setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
+    mockRefreshSpawnError =
+      '"bun" "recall" "index" "--incremental" exceeded 5000ms; sent SIGTERM then SIGKILL after 2000ms'
+    mockAgent.result = async (query, options) => zeroAgentResult(query, options) as never
+    const previousExitCode = process.exitCode
+    process.exitCode = 0
+
+    try {
+      await cmdSearch("nohits", { agent: true, json: true, project: "*", limit: "5", round2: "off" })
+
+      const payload = lastJsonLog<{ provenance?: string; results: unknown[] | null }>(logSpy)
+      expect(process.exitCode).toBe(3)
+      expect(payload.provenance).toBe("stale")
+      expect(payload.results).toBeNull()
+    } finally {
+      process.exitCode = previousExitCode
+    }
+  })
+
+  test("no-refresh cannot launder unknown index provenance", async () => {
+    const previousExitCode = process.exitCode
+    process.exitCode = 0
+
+    try {
+      await cmdSearch("nohits", { raw: true, refresh: false, project: "*", limit: "5" })
+
+      expect(process.exitCode).toBe(3)
+      expect(callsText(logSpy)).toContain('0 matches — UNPROVEN (unknown index) for "nohits"')
+    } finally {
+      process.exitCode = previousExitCode
+    }
+  })
+
+  test("successful refresh marks empty JSON as complete and authoritative", async () => {
+    setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
+    const previousExitCode = process.exitCode
+    process.exitCode = 0
+
+    try {
+      await cmdSearch("nohits", { raw: true, json: true, project: "*", limit: "5" })
+
+      const payload = lastJsonLog<{ provenance?: string; total: number | null; results: unknown[] | null }>(logSpy)
+      expect(process.exitCode).toBe(0)
+      expect(payload.provenance).toBe("complete")
+      expect(payload.total).toBe(0)
+      expect(payload.results).toEqual([])
+    } finally {
+      process.exitCode = previousExitCode
+    }
+  })
+
   test("empty results print without invoking auto-refresh when refresh is disabled", async () => {
-    mockAgent.result = async (query) => zeroAgentResult(query) as never
+    mockAgent.result = async (query, options) => zeroAgentResult(query, options) as never
     const prevHome = process.env.HOME
     const home = mkdtempSync(join(tmpdir(), "recall-home-"))
 
@@ -273,7 +370,7 @@ describe("recall search output", () => {
     const errors = callsText(errSpy)
     const output = callsText(logSpy)
     expect(errors).toBe("")
-    expect(output).toContain('No results found for "nohits"')
+    expect(output).toContain('0 results — UNPROVEN (unknown index) for "nohits"')
   })
 
   test("defaults search to the current repo family across sibling worktrees", async () => {
@@ -285,7 +382,7 @@ describe("recall search output", () => {
     mkdirSync(project)
     process.env.HOME = home
     process.chdir(project)
-    mockAgent.result = async (query) => zeroAgentResult(query) as never
+    mockAgent.result = async (query, options) => zeroAgentResult(query, options) as never
 
     try {
       await cmdSearch("nohits", {
@@ -306,7 +403,7 @@ describe("recall search output", () => {
     const output = callsText(logSpy)
     expect(mockAgent.options).toMatchObject({ projectFilter: "km" })
     expect(errors).not.toContain("sibling worktree project dir(s) detected")
-    expect(output).toContain('No results found for "nohits"')
+    expect(output).toContain('0 results — UNPROVEN (unknown index) for "nohits"')
   })
 
   test("default raw search includes sibling worktrees but excludes unrelated repos", async () => {

@@ -19,6 +19,7 @@ export {
   type RecallOptions,
   type RecallResult,
   type RecallSearchResult,
+  type IndexProvenance,
 } from "./search.ts"
 
 // recall-shared.ts — synthesis failure diagnostics (surfaced on RecallResult.synthesisFailure)
