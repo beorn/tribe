@@ -9,7 +9,7 @@
  * boundary. Firing it unconditionally from every SessionEnd would risk
  * blocking the hook and racing duplicate summarize/retro-bead work, unlike
  * `cmdSessionEnd`'s cheap detached index refresh. The decision (see the
- * docstring on `cmdRemember` + docs/recall.md § "Automatic injection —
+ * docstring on `cmdRemember` + /hh/docs/reference/tribe/recall.md § "Automatic injection —
  * hook-driven, not tool-driven") is to keep it manual-only (`recall
  * remember` / `recall summarize`), never hook-dispatched.
  *

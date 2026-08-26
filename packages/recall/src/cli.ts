@@ -20,7 +20,8 @@
  *                                      # like SessionEnd, but dispatchHook()
  *                                      # never calls it — manual-only by
  *                                      # design (see hooks.ts docstring on
- *                                      # cmdRemember + docs/recall.md).
+ *                                      # cmdRemember +
+ *                                      # /hh/docs/reference/tribe/recall.md).
  *
  * Note: SessionStart, UserPromptSubmit, and SessionEnd hooks are dispatched
  * via `tribe hook <event>` — not recall CLI — as of @bearly/tribe 0.10.0.
@@ -168,7 +169,9 @@ program
 // ── remember (internal) ─────────────────────────────────────────────────
 program
   .command("remember", { hidden: true })
-  .description("Manual daily summarization, SessionEnd-stdin-JSON-shaped but NOT hook-dispatched (see docs/recall.md)")
+  .description(
+    "Manual daily summarization, SessionEnd-stdin-JSON-shaped but NOT hook-dispatched (see /hh/docs/reference/tribe/recall.md)",
+  )
   .option("--json", "Output as JSON")
   .action(async (opts: { json?: boolean }) => {
     await cmdRemember(opts)

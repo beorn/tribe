@@ -54,7 +54,7 @@ const log = createLogger("tribe:hook-dispatch")
 // call + `git log` spawn + retro-bead creation with no per-day lock, so it
 // stays manual-only (`recall remember` / `recall summarize`) rather than
 // hook-dispatched. See the docstring on `cmdRemember`
-// (packages/recall/src/lib/hooks.ts) and docs/recall.md § "Automatic
+// (packages/recall/src/lib/hooks.ts) and /hh/docs/reference/tribe/recall.md § "Automatic
 // injection" before adding it here — this exclusion is pinned by
 // hook-dispatch.test.ts.
 type HookEngine = {

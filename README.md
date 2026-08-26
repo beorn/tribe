@@ -372,8 +372,6 @@ packages/
   injection-envelope/   # tribe-injection-envelope — prompt-injection defense
 plugins/
   claude/               # Claude Code marketplace plugin (tribe@tribe)
-docs/
-  architecture.md       # layer stack, boundaries, dependency rule
 ```
 
 ---
@@ -391,16 +389,16 @@ bun run fmt:check   # oxfmt --check
 
 ## Documentation
 
-- [docs/architecture.md](docs/architecture.md) — the three reusable layers, the
+- [/hh/docs/reference/tribe/architecture.md](/hh/docs/reference/tribe/architecture.md) — the three reusable layers, the
   workflow-policy non-goal, and the dependency rule.
-- [docs/install.md](docs/install.md) — both install paths in detail, plus
+- [/hh/docs/reference/tribe/install.md](/hh/docs/reference/tribe/install.md) — both install paths in detail, plus
   verifying the daemon.
-- [docs/loops.md](docs/loops.md) — keeping sessions responsive: message loops
+- [/hh/docs/reference/tribe/loops.md](/hh/docs/reference/tribe/loops.md) — keeping sessions responsive: message loops
   for Claude Code (push) and Codex / MCP-only hosts (pull).
-- [docs/recall.md](docs/recall.md) — recall's CLI, index, hooks, and the
+- [/hh/docs/reference/tribe/recall.md](/hh/docs/reference/tribe/recall.md) — recall's CLI, index, hooks, and the
   injection-envelope defense.
-- [docs/wire-cli.md](docs/wire-cli.md) — full `tribe-wire` verb reference.
-- [docs/daemon.md](docs/daemon.md) — daemon lifecycle: autostart, election,
+- [/hh/docs/reference/tribe/wire-cli.md](/hh/docs/reference/tribe/wire-cli.md) — full `tribe-wire` verb reference.
+- [/hh/docs/reference/tribe/daemon.md](/hh/docs/reference/tribe/daemon.md) — daemon lifecycle: autostart, election,
   hot-reload, troubleshooting.
 - [packages/wire/README.md](packages/wire/README.md) — the full `tribe-wire` CLI
   verb reference and library exports.

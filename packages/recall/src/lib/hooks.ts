@@ -472,7 +472,8 @@ export async function cmdHook(): Promise<void> {
  * remember` (hidden CLI subcommand — mirrors the SessionEnd stdin-JSON shape
  * for scripted/manual invocation) or the public `recall summarize` verb;
  * both call the same underlying engine. Full rationale + event flow:
- * docs/recall.md § "Automatic injection — hook-driven, not tool-driven".
+ * /hh/docs/reference/tribe/recall.md § "Automatic injection — hook-driven,
+ * not tool-driven".
  * Dispatch-table pin: `packages/daemon/src/lib/hook-dispatch.test.ts`.
  */
 export async function cmdRemember(opts: { json?: boolean }): Promise<void> {
