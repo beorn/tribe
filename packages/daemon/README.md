@@ -35,7 +35,7 @@ Provider bridges do not autostart this daemon. Explicit hook/install lifecycle
 paths may detach the repo-local standalone supervisor, which owns the daemon as
 its child; Hab supplies the owner in managed deployments. A missing daemon
 stays visible and actionable to callers.
-Lifecycle details: [docs/daemon.md](../../docs/daemon.md).
+Lifecycle details: [/hh/docs/reference/tribe/daemon.md](/hh/docs/reference/tribe/daemon.md).
 
 ## Boundary
 

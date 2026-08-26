@@ -151,7 +151,7 @@ const REMOVED_TRIBE_METHODS = new Set([
   "tribe.release-chief",
   "tribe.reload",
 ])
-const REMOVED_TRIBE_METHOD_HINT = "use send/fetch/filter — see docs/architecture.md"
+const REMOVED_TRIBE_METHOD_HINT = "use send/fetch/filter — see /hh/docs/reference/tribe/architecture.md"
 
 export function isRemovedTribeMethod(name: string): boolean {
   return REMOVED_TRIBE_METHODS.has(name)
