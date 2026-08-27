@@ -14,6 +14,9 @@
     "plugins/*"
   ],
   "type": "module",
+  "exports": {
+    "./hab-projects": "./hab.projects.ts"
+  },
   "scripts": {
     "build": "bun run --filter '*' build",
     "typecheck": "tsc --noEmit",
