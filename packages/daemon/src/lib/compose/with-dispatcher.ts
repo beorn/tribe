@@ -34,7 +34,7 @@ import { type Socket as NetSocket } from "node:net"
 import { createLogger } from "loggily"
 import { DEFAULT_INBOX_WAIT_SESSION, resolveInboxWaitOptions } from "tribe-wire"
 import { deriveTribePersonaLaunchIdentity } from "tribe-wire/lib/persona-launch-identity"
-import { hashSelfMailboxAuthority } from "tribe-wire/lib/self-mailbox-authority"
+import { AG_SESSION_AUTH_ENV, hashSelfMailboxAuthority } from "tribe-wire/lib/self-mailbox-authority"
 import {
   createLineParser,
   isRequest,
@@ -302,7 +302,7 @@ export function withDispatcher<
       if (supplied === null) {
         return {
           errorCode: -32004,
-          errorMessage: "current session authority is missing",
+          errorMessage: `current session authority is missing; ${AG_SESSION_AUTH_ENV} must be inherited from the managed launch`,
           errorData: { kind: "could-not-evaluate", reason: "session-authority-missing" },
         }
       }
@@ -322,7 +322,7 @@ export function withDispatcher<
       if (row === null) {
         return {
           errorCode: -32003,
-          errorMessage: "current session authority was rejected or revoked",
+          errorMessage: `current session authority was rejected or revoked; ${AG_SESSION_AUTH_ENV} did not match a live managed session`,
           errorData: { kind: "unauthenticated", reason: "session-authority-rejected" },
         }
       }
@@ -358,7 +358,35 @@ export function withDispatcher<
       | { errorCode: number; errorMessage: string; errorData: Record<string, unknown> }
     > {
       const resolution = resolveSessionAuthority(authority)
-      if (!("context" in resolution)) return resolution
+      if (!("context" in resolution)) {
+        if (capability.kind === "pending-close" || capability.kind === "pending-prune") {
+          const closeIds =
+            capability.kind === "pending-close"
+              ? Array.isArray(capability.close)
+                ? capability.close
+                : [capability.close]
+              : undefined
+          const refusalEventId = logEvent(
+            daemonCtx,
+            "session.capability-refused",
+            undefined,
+            {
+              capability: capability.kind,
+              reason: resolution.errorData.reason,
+              authority_env: AG_SESSION_AUTH_ENV,
+              owner: capability.owner,
+              ...(capability.kind === "pending-prune" ? { stale_ms: capability.staleMs } : { attempted_ids: closeIds }),
+              pending_mutation: "none",
+            },
+            { sender: "daemon", ref: closeIds?.[0] },
+          )
+          return {
+            ...resolution,
+            errorData: { ...resolution.errorData, refusal_event_id: refusalEventId },
+          }
+        }
+        return resolution
+      }
       switch (capability.kind) {
         case "inbox-ack":
           return {

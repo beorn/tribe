@@ -528,15 +528,10 @@ async function cmdPending(
   let method = "tribe.pending"
   if (close) {
     const authority = readSelfMailboxAuthorityFromEnvironment(process.env)
-    if (authority === null) {
-      console.warn(
-        `Warning: ${AG_SESSION_AUTH_ENV} is missing; using the temporary unattributed pending-close path. ` +
-          "Managed callers must inherit current-session authority before the legacy path is removed.",
-      )
-    } else {
-      method = "cli_session_pending_close_v1"
-      args.authority = authority
-    }
+    method = "cli_session_pending_close_v1"
+    // Null is deliberate: the daemon records the refused capability attempt
+    // and returns a typed -32004 without ever reaching pending-row mutation.
+    args.authority = authority
   }
   const result = (await callDaemon(method, args)) as {
     content?: Array<{ type?: string; text?: string }>

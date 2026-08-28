@@ -64,21 +64,38 @@ describe("closing a ball backlog in one call", () => {
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  function openBall(requestId: string, recipient = OWNER): void {
+  function openBall(requestId: string, recipient = OWNER, sender = "@fleet"): void {
     db.prepare(
       "INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, summary, request) " +
-        "VALUES ($mid, 'request', '@fleet', $recipient, 'direct', 'q', 1000, 'push', 'sum', $rid)",
-    ).run({ $mid: `msg-${requestId}`, $recipient: recipient, $rid: requestId })
+        "VALUES ($mid, 'request', $sender, $recipient, 'direct', 'q', 1000, 'push', 'sum', $rid)",
+    ).run({ $mid: `msg-${requestId}`, $sender: sender, $recipient: recipient, $rid: requestId })
     db.prepare(
       "INSERT INTO pending_request (request_id, recipient, sender, opened_at, expires_at, message_id, fanout) " +
-        "VALUES ($rid, $recipient, '@fleet', 1000, NULL, $mid, 'first')",
-    ).run({ $rid: requestId, $recipient: recipient, $mid: `msg-${requestId}` })
+        "VALUES ($rid, $recipient, $sender, 1000, NULL, $mid, 'first')",
+    ).run({ $rid: requestId, $recipient: recipient, $sender: sender, $mid: `msg-${requestId}` })
+  }
+
+  function caller(name: string): TribeContext {
+    return createTribeContext({
+      db,
+      stmts,
+      sessionId: `caller-${name}`,
+      sessionRole: "member",
+      initialName: name,
+      domains: [],
+      claudeSessionId: null,
+      claudeSessionName: null,
+    })
+  }
+
+  function callCloseAs(context: TribeContext, close: unknown): Record<string, unknown> {
+    const result = handleToolCall(context, "tribe.pending", { owner: OWNER, close }, opts)
+    const text = (result as { content: Array<{ text: string }> }).content[0]?.text ?? "{}"
+    return JSON.parse(text) as Record<string, unknown>
   }
 
   function callClose(close: unknown): Record<string, unknown> {
-    const result = handleToolCall(ctx, "tribe.pending", { owner: OWNER, close }, opts)
-    const text = (result as { content: Array<{ text: string }> }).content[0]?.text ?? "{}"
-    return JSON.parse(text) as Record<string, unknown>
+    return callCloseAs(ctx, close)
   }
 
   const openCount = (): number => (db.prepare("SELECT count(*) AS c FROM pending_request").get() as { c: number }).c
@@ -147,6 +164,42 @@ describe("closing a ball backlog in one call", () => {
     expect(
       (db.prepare("SELECT count(*) AS c FROM pending_request WHERE recipient = '@dev/1'").get() as { c: number }).c,
     ).toBe(1)
+  })
+
+  it("refuses the whole batch before mutation when one existing row is outside sender authority", () => {
+    openBall("req-sender-can-withdraw", OWNER, "@fleet")
+    openBall("req-third-persona-cannot-close", OWNER, "@agent/7")
+
+    const payload = callCloseAs(caller("@fleet"), ["req-sender-can-withdraw", "req-third-persona-cannot-close"])
+
+    expect(payload).toMatchObject({
+      refusal: {
+        kind: "pending-close-caller-unauthorized",
+        caller: "@fleet",
+        owner: OWNER,
+        request_id: "req-third-persona-cannot-close",
+        original_sender: "@agent/7",
+        batch_size: 2,
+      },
+      refusal_event_id: expect.any(String),
+    })
+    expect(String(payload.error)).toContain("the entire 2-id close batch remains open")
+    expect(openCount()).toBe(2)
+    expect(
+      (db.prepare("SELECT COUNT(*) AS c FROM messages WHERE type = 'event.ball.settled'").get() as { c: number }).c,
+    ).toBe(0)
+    const event = db
+      .prepare("SELECT id, kind, content FROM messages WHERE type = 'event.ball.close-refused'")
+      .get() as { id: string; kind: string; content: string }
+    expect(event.id).toBe(payload.refusal_event_id)
+    expect(event.kind).toBe("event")
+    expect(JSON.parse(event.content)).toMatchObject({
+      reason: "caller-not-owner-or-original-sender",
+      caller: "@fleet",
+      owner: OWNER,
+      request_id: "req-third-persona-cannot-close",
+      pending_mutation: "none",
+    })
   })
 
   it("keeps the single-id response shape unchanged", () => {
