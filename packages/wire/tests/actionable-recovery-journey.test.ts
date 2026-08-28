@@ -1008,8 +1008,15 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const dbPath = join(tmpDir, "managed-cli-pending-close.db")
     const owner = "@agent/pending-owner"
     const sender = "@agent/pending-sender"
+    const thirdPersona = "@agent/pending-third"
     const ownerAuthority = "o".repeat(43)
     const senderAuthority = "s".repeat(43)
+    const thirdPersonaAuthority = "t".repeat(43)
+    const ownerRequestId = "11111111-1111-4111-8111-111111111111"
+    const senderRequestId = "22222222-2222-4222-8222-222222222222"
+    const thirdPersonaRequestId = "33333333-3333-4333-8333-333333333333"
+    const missingAuthorityRequestId = "44444444-4444-4444-8444-444444444444"
+    const rejectedAuthorityRequestId = "55555555-5555-4555-8555-555555555555"
 
     daemonProc = spawnDaemon(socketPath, dbPath)
     await waitForDaemonSocket(daemonProc, socketPath)
@@ -1024,8 +1031,15 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       "pending-sender-launch",
       { name: sender, selfMailboxAuthority: senderAuthority },
     )
+    const thirdPersonaAdapter = await spawnLaunchAdapter(
+      socketPath,
+      "managed-cli-pending-third.log",
+      "pending-third-launch",
+      { name: thirdPersona, selfMailboxAuthority: thirdPersonaAuthority },
+    )
     await callLaunchToolWhenRegistered(ownerAdapter, 70, "members", {})
     await callLaunchToolWhenRegistered(senderAdapter, 71, "members", {})
+    await callLaunchToolWhenRegistered(thirdPersonaAdapter, 72, "members", {})
 
     const open = async (id: number, requestId: string) => {
       const result = (await callLaunchToolWhenRegistered(senderAdapter, id, "send", {
@@ -1046,44 +1060,73 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       TRIBE_NO_AUTOSTART: "1",
     }
 
-    await open(72, "owner-close-full-uuid")
-    const ownerClose = await runCli(
-      ["pending", "--owner", owner, "--close", "owner-close-full-uuid", "--json"],
-      cliEnv,
-      {
-        selfMailboxAuthority: ownerAuthority,
-        throughParent: true,
-      },
-    )
+    await open(73, ownerRequestId)
+    const beforeOwnerClose = await runCli(["pending", "--owner", owner, "--json"], cliEnv, { throughParent: true })
+    expect(beforeOwnerClose.exitCode, beforeOwnerClose.stderr).toBe(0)
+    expect(JSON.parse(beforeOwnerClose.stdout)).toMatchObject({
+      owner,
+      pending: [expect.objectContaining({ request_id: ownerRequestId, sender, recipient: owner })],
+    })
+    const ownerClose = await runCli(["pending", "--owner", owner, "--close", ownerRequestId, "--json"], cliEnv, {
+      selfMailboxAuthority: ownerAuthority,
+      throughParent: true,
+    })
     expect(ownerClose.exitCode, ownerClose.stderr).toBe(0)
     expect(JSON.parse(ownerClose.stdout)).toMatchObject({
       owner,
-      request_id: "owner-close-full-uuid",
+      request_id: ownerRequestId,
       closed: 1,
     })
 
-    await open(73, "sender-close-full-uuid")
-    const senderClose = await runCli(
-      ["pending", "--owner", owner, "--close", "sender-close-full-uuid", "--json"],
-      cliEnv,
-      { selfMailboxAuthority: senderAuthority, throughParent: true },
-    )
+    await open(74, senderRequestId)
+    const senderClose = await runCli(["pending", "--owner", owner, "--close", senderRequestId, "--json"], cliEnv, {
+      selfMailboxAuthority: senderAuthority,
+      throughParent: true,
+    })
     expect(senderClose.exitCode, senderClose.stderr).toBe(0)
     expect(JSON.parse(senderClose.stdout)).toMatchObject({
       owner,
-      request_id: "sender-close-full-uuid",
+      request_id: senderRequestId,
       closed: 1,
     })
 
-    await open(74, "rejected-authority-full-uuid")
+    await open(75, thirdPersonaRequestId)
+    const thirdPersonaClose = await runCli(["pending", "--owner", owner, "--close", thirdPersonaRequestId], cliEnv, {
+      selfMailboxAuthority: thirdPersonaAuthority,
+      throughParent: true,
+    })
+    expect(thirdPersonaClose.exitCode).toBe(2)
+    expect(thirdPersonaClose.stdout).toBe("")
+    expect(thirdPersonaClose.stderr).toBe(
+      `tribe pending: tribe.pending: refusing --close before mutation: authenticated caller ${JSON.stringify(thirdPersona)} ` +
+        `is neither owner ${JSON.stringify(owner)} nor original sender ${JSON.stringify(sender)} for ball ` +
+        `${JSON.stringify(thirdPersonaRequestId)}. Allowed closers are the owner (manual-close) or original sender ` +
+        `(sender-withdrawn); ball ${JSON.stringify(thirdPersonaRequestId)} remains open, and no pending row was mutated.\n`,
+    )
+
+    await open(76, missingAuthorityRequestId)
+    const missingClose = await runCli(
+      ["pending", "--owner", owner, "--close", missingAuthorityRequestId, "--json"],
+      cliEnv,
+      { throughParent: true },
+    )
+    expect(missingClose.exitCode).toBe(1)
+    expect(missingClose.stdout).toBe("")
+    expect(missingClose.stderr).toContain(
+      `current session authority is missing; AG_SESSION_AUTH must be inherited from the managed launch`,
+    )
+
+    await open(77, rejectedAuthorityRequestId)
     const rejectedClose = await runCli(
-      ["pending", "--owner", owner, "--close", "rejected-authority-full-uuid", "--json"],
+      ["pending", "--owner", owner, "--close", rejectedAuthorityRequestId, "--json"],
       cliEnv,
       { selfMailboxAuthority: "x".repeat(43), throughParent: true },
     )
     expect(rejectedClose.exitCode).toBe(1)
     expect(rejectedClose.stdout).toBe("")
-    expect(rejectedClose.stderr).toMatch(/current session authority was rejected or revoked/i)
+    expect(rejectedClose.stderr).toContain(
+      `current session authority was rejected or revoked; AG_SESSION_AUTH did not match a live managed session`,
+    )
 
     const overrideProbe = await connectToDaemon(socketPath)
     try {
@@ -1091,7 +1134,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         overrideProbe.call("cli_session_pending_close_v1", {
           authority: ownerAuthority,
           owner,
-          close: "rejected-authority-full-uuid",
+          close: rejectedAuthorityRequestId,
           prune: true,
         }),
       ).rejects.toThrow(/identity and non-close operation overrides are forbidden/i)
@@ -1101,14 +1144,14 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
 
     expect(settlementFacts(dbPath)).toEqual([
       expect.objectContaining({
-        request_id: "owner-close-full-uuid",
+        request_id: ownerRequestId,
         recipient: owner,
         sender,
         settlement: "manual-close",
         settled_by: owner,
       }),
       expect.objectContaining({
-        request_id: "sender-close-full-uuid",
+        request_id: senderRequestId,
         recipient: owner,
         sender,
         settlement: "sender-withdrawn",
@@ -1120,7 +1163,58 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       const remaining = db
         .prepare("SELECT request_id FROM pending_request WHERE recipient = ? ORDER BY request_id")
         .all(owner) as Array<{ request_id: string }>
-      expect(remaining).toEqual([{ request_id: "rejected-authority-full-uuid" }])
+      expect(remaining).toEqual([
+        { request_id: thirdPersonaRequestId },
+        { request_id: missingAuthorityRequestId },
+        { request_id: rejectedAuthorityRequestId },
+      ])
+      const refusedEvents = db
+        .prepare(
+          "SELECT type, sender, ref, content FROM messages " +
+            "WHERE type IN ('event.ball.close-refused', 'event.session.capability-refused') ORDER BY rowid",
+        )
+        .all() as Array<{ type: string; sender: string; ref: string | null; content: string }>
+      expect(refusedEvents.map((event) => ({ ...event, content: JSON.parse(event.content) }))).toEqual([
+        {
+          type: "event.ball.close-refused",
+          sender: thirdPersona,
+          ref: thirdPersonaRequestId,
+          content: expect.objectContaining({
+            reason: "caller-not-owner-or-original-sender",
+            caller: thirdPersona,
+            owner,
+            request_id: thirdPersonaRequestId,
+            original_sender: sender,
+            pending_mutation: "none",
+          }),
+        },
+        {
+          type: "event.session.capability-refused",
+          sender: "daemon",
+          ref: missingAuthorityRequestId,
+          content: expect.objectContaining({
+            capability: "pending-close",
+            reason: "session-authority-missing",
+            authority_env: "AG_SESSION_AUTH",
+            owner,
+            attempted_ids: [missingAuthorityRequestId],
+            pending_mutation: "none",
+          }),
+        },
+        {
+          type: "event.session.capability-refused",
+          sender: "daemon",
+          ref: rejectedAuthorityRequestId,
+          content: expect.objectContaining({
+            capability: "pending-close",
+            reason: "session-authority-rejected",
+            authority_env: "AG_SESSION_AUTH",
+            owner,
+            attempted_ids: [rejectedAuthorityRequestId],
+            pending_mutation: "none",
+          }),
+        },
+      ])
     } finally {
       db.close()
     }

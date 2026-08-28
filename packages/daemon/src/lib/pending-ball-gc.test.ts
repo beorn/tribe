@@ -386,6 +386,40 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
     }
   })
 
+  it("refuses public prune from a third persona before mutation and journals only the attempt", () => {
+    const { db, stmts } = setup()
+    try {
+      const now = Date.now()
+      openBall(stmts, { id: "chief-stale", recipient: "@chief", openedAt: now - 3 * DAY, sender: "@agent/2" })
+      const thirdPersona = makeContext(db, stmts, "@agent/9")
+
+      const result = parseToolJson(
+        handleToolCall(thirdPersona, "tribe.pending", { owner: "@chief", prune: true, stale_ms: DAY }, makeOpts()),
+      )
+
+      expect(result).toMatchObject({
+        refusal: { kind: "pending-prune-caller-unauthorized", caller: "@agent/9", owner: "@chief" },
+        refusal_event_id: expect.any(String),
+      })
+      expect(String(result.error)).toContain("Public prune is owner-only")
+      expect(openIds(stmts, "@chief")).toEqual(["chief-stale"])
+      expect(settlementFacts(db)).toEqual([])
+      const event = db
+        .prepare("SELECT id, kind, content FROM messages WHERE type = 'event.ball.prune-refused'")
+        .get() as { id: string; kind: string; content: string }
+      expect(event.id).toBe(result.refusal_event_id)
+      expect(event.kind).toBe("event")
+      expect(JSON.parse(event.content)).toMatchObject({
+        reason: "caller-not-owner",
+        caller: "@agent/9",
+        owner: "@chief",
+        pending_mutation: "none",
+      })
+    } finally {
+      db.close()
+    }
+  })
+
   it("explicit close miss warns with every open ball owned by the target", () => {
     const { db, stmts } = setup()
     try {

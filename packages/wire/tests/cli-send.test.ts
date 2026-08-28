@@ -507,6 +507,25 @@ describe("registerSendCommands", () => {
               },
             }
           } else if (request.method === "cli_session_pending_close_v1" && request.params?.close === "req-123") {
+            if (request.params.authority == null) {
+              socket.write(
+                JSON.stringify({
+                  jsonrpc: "2.0",
+                  id: request.id,
+                  error: {
+                    code: -32004,
+                    message:
+                      "current session authority is missing; AG_SESSION_AUTH must be inherited from the managed launch",
+                    data: {
+                      kind: "could-not-evaluate",
+                      reason: "session-authority-missing",
+                      refusal_event_id: "refused-missing-authority",
+                    },
+                  },
+                }) + "\n",
+              )
+              continue
+            }
             const closed = pendingOpen ? 1 : 0
             pendingOpen = false
             result = {
@@ -585,20 +604,15 @@ describe("registerSendCommands", () => {
       expect(res.stdout).toContain("Sent message to @agent/3")
       expect(res.stderr).not.toContain("did not close")
 
-      // Literal 2026-07-12 repro: the reply already closed @chief's ball.
-      // A later explicit/manual close therefore returns 0; that must not make
-      // the earlier reply CLI retroactively print a false failure.
-      const manualClose = await runCli(["pending", "--owner", "@chief", "--close", "req-123"])
-      expect(manualClose.code).toBe(0)
-      expect(manualClose.stdout).toContain("Closed 0 pending request(s) for @chief: req-123")
-      expect(manualClose.stderr).toContain(
-        "reply/close req-123 closed 0 rows; balls owned by @chief: req-other (message msg-other, from @agent/4)",
-      )
-      expect(manualClose.stderr).toContain(
-        `${AG_SESSION_AUTH_ENV} is missing; using the temporary unattributed pending-close path`,
-      )
-
+      // Carrier 2: an unmanaged explicit close reaches the daemon without a
+      // session authority, is refused there, and leaves the open row intact.
       pendingOpen = true
+      const missingAuthorityClose = await runCli(["pending", "--owner", "@chief", "--close", "req-123"])
+      expect(missingAuthorityClose.code).toBe(1)
+      expect(missingAuthorityClose.stdout).toBe("")
+      expect(missingAuthorityClose.stderr).toContain(`${AG_SESSION_AUTH_ENV} must be inherited from the managed launch`)
+      expect(pendingOpen).toBe(true)
+
       const authority = "a".repeat(43)
       const authenticatedClose = await runCli(["pending", "--owner", "@chief", "--close", "req-123"], authority)
       expect(authenticatedClose).toMatchObject({ code: 0, stderr: "" })
@@ -634,8 +648,12 @@ describe("registerSendCommands", () => {
       expect(malformed.stderr).toContain("Verify current state with: tribe pending --owner @chief")
 
       const closes = calls.filter((call) => call.method === "tribe.pending" && call.params.close !== undefined)
-      expect(closes).toEqual([{ method: "tribe.pending", params: { owner: "@chief", close: "req-123" } }])
+      expect(closes).toEqual([])
       expect(calls.filter((call) => call.method === "cli_session_pending_close_v1")).toEqual([
+        {
+          method: "cli_session_pending_close_v1",
+          params: { owner: "@chief", close: "req-123", authority: null },
+        },
         {
           method: "cli_session_pending_close_v1",
           params: { owner: "@chief", close: "req-123", authority },

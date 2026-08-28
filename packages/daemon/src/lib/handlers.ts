@@ -1493,6 +1493,104 @@ function pendingRequestIdForOwner(ctx: TribeContext, owner: string, attemptedId:
   return pending?.request_id ?? attemptedId
 }
 
+interface PendingCloseAuthorityRefusal {
+  readonly caller: string
+  readonly owner: string
+  readonly attemptedIds: readonly string[]
+  readonly requestId: string
+  readonly originalSender: string
+}
+
+/**
+ * Preflight every existing row before a close transaction starts. Misses keep
+ * their established per-id proof, but one existing row outside the caller's
+ * owner/original-sender authority refuses the whole batch.
+ */
+function pendingCloseAuthorityRefusal(
+  ctx: TribeContext,
+  owner: string,
+  attemptedIds: readonly string[],
+): PendingCloseAuthorityRefusal | undefined {
+  const caller = ctx.getName()
+  if (caller === owner) return undefined
+  for (const attemptedId of attemptedIds) {
+    const requestId = pendingRequestIdForOwner(ctx, owner, attemptedId)
+    const row = ctx.stmts.selectPendingSettlementForRecipient.get({
+      $request_id: requestId,
+      $recipient: owner,
+    }) as PendingSettlementRow | null
+    if (row !== null && caller !== row.sender) {
+      return { caller, owner, attemptedIds, requestId, originalSender: row.sender }
+    }
+  }
+  return undefined
+}
+
+function pendingCloseAuthorityRefusalResult(
+  ctx: TribeContext,
+  owner: string,
+  attemptedIds: readonly string[],
+  now: number,
+): ToolResult | undefined {
+  const refusal = pendingCloseAuthorityRefusal(ctx, owner, attemptedIds)
+  if (refusal === undefined) return undefined
+  const refusalEventId = logEvent(
+    ctx,
+    "ball.close-refused",
+    undefined,
+    {
+      reason: "caller-not-owner-or-original-sender",
+      caller: refusal.caller,
+      owner: refusal.owner,
+      request_id: refusal.requestId,
+      original_sender: refusal.originalSender,
+      attempted_ids: refusal.attemptedIds,
+      pending_mutation: "none",
+    },
+    { ref: refusal.requestId, ts: now },
+  )
+  const remainsOpen =
+    attemptedIds.length > 1
+      ? `the entire ${attemptedIds.length}-id close batch remains open`
+      : `ball ${JSON.stringify(refusal.requestId)} remains open`
+  const error =
+    `tribe.pending: refusing --close before mutation: authenticated caller ${JSON.stringify(refusal.caller)} ` +
+    `is neither owner ${JSON.stringify(refusal.owner)} nor original sender ${JSON.stringify(refusal.originalSender)} ` +
+    `for ball ${JSON.stringify(refusal.requestId)}. Allowed closers are the owner (manual-close) or original sender ` +
+    `(sender-withdrawn); ${remainsOpen}, and no pending row was mutated.`
+  return jsonResult({
+    error,
+    refusal: {
+      kind: "pending-close-caller-unauthorized",
+      caller: refusal.caller,
+      owner: refusal.owner,
+      request_id: refusal.requestId,
+      original_sender: refusal.originalSender,
+      batch_size: attemptedIds.length,
+    },
+    refusal_event_id: refusalEventId,
+  })
+}
+
+function pendingPruneAuthorityRefusalResult(ctx: TribeContext, owner: string, now: number): ToolResult | undefined {
+  const caller = ctx.getName()
+  if (caller === owner) return undefined
+  const refusalEventId = logEvent(
+    ctx,
+    "ball.prune-refused",
+    undefined,
+    { reason: "caller-not-owner", caller, owner, pending_mutation: "none" },
+    { ts: now },
+  )
+  return jsonResult({
+    error:
+      `tribe.pending: refusing prune before mutation: authenticated caller ${JSON.stringify(caller)} is not ` +
+      `owner ${JSON.stringify(owner)}. Public prune is owner-only; no pending row was mutated.`,
+    refusal: { kind: "pending-prune-caller-unauthorized", caller, owner },
+    refusal_event_id: refusalEventId,
+  })
+}
+
 function incidentCloseRefusal(ctx: TribeContext, owner: string, attemptedIds: readonly string[]): string | undefined {
   const incidentId = attemptedIds
     .map((id) => pendingRequestIdForOwner(ctx, owner, id))
@@ -1608,6 +1706,8 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
   // other recipients are untouched). It records full gc-expired evidence before
   // removing active ownership and never deletes message history.
   if (a.prune === true) {
+    const authorityRefusal = pendingPruneAuthorityRefusalResult(ctx, owner, now)
+    if (authorityRefusal !== undefined) return authorityRefusal
     if (staleMs === null) {
       return jsonResult({ error: "prune requires stale_ms (the minimum ball age, in ms, to GC)." })
     }
@@ -1651,6 +1751,8 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
       })
     }
     const ids = closeBatch as string[]
+    const authorityRefusal = pendingCloseAuthorityRefusalResult(ctx, owner, ids, now)
+    if (authorityRefusal !== undefined) return authorityRefusal
     const refusal = incidentCloseRefusal(ctx, owner, ids)
     if (refusal !== undefined) return jsonResult({ error: refusal })
     // One transaction for the whole batch, but NOT all-or-nothing about
@@ -1681,6 +1783,8 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
 
   const closeId = typeof a.close === "string" && a.close.length > 0 ? a.close : null
   if (closeId) {
+    const authorityRefusal = pendingCloseAuthorityRefusalResult(ctx, owner, [closeId], now)
+    if (authorityRefusal !== undefined) return authorityRefusal
     const refusal = incidentCloseRefusal(ctx, owner, [closeId])
     if (refusal !== undefined) return jsonResult({ error: refusal })
     const outcome = ctx.db.transaction(() => closeOneBall(ctx, owner, closeId, now))()
