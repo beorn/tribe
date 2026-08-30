@@ -36,6 +36,10 @@ jobs:
             *) echo "Unknown tag pattern: $TAG"; exit 1 ;;
           esac
 
+          if [ "$PKG_DIR" = "packages/wire" ]; then
+            (cd "$PKG_DIR" && bun run build)
+          fi
+
           echo "== publint: $PKG_DIR =="
           (cd "$PKG_DIR" && npx --yes publint .)
 
