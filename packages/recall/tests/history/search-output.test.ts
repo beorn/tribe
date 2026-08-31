@@ -9,7 +9,7 @@ const mockAgent: {
   result: Awaited<typeof import("../../src/lib/agent")>["recallAgent"] | null
   options: unknown
 } = { result: null, options: null }
-let mockRefreshSpawnError: string | null = null
+let mockRefreshSpawnCalls = 0
 
 vi.mock("../../src/lib/agent.ts", () => ({
   recallAgent: (query: string, options: unknown) => {
@@ -19,13 +19,9 @@ vi.mock("../../src/lib/agent.ts", () => ({
   },
 }))
 
-// Stale-index auto-refresh shells out to `bun recall index --incremental` as a
-// real subprocess. In-process tests must NOT spawn it — it indexes the user's
-// actual recall DB and hangs the test (10s timeout). Replace only the spawn
-// dep with an instant no-op; the real staleness-decision logic in
-// `refreshIndexIfStaleWithDeps` still runs (so the stale → refreshed note path
-// is exercised). The subprocess itself is covered by refresh.ts's own
-// dep-injected unit tests.
+// Regression seam for @i/20-search-and-memory/23189: search must never import
+// this query-refresh capability. If it is wired back in, the stale-search test
+// observes the attempted incremental-index spawn without touching the user's DB.
 vi.mock("../../src/lib/refresh.ts", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../../src/lib/refresh.ts")>()
   return {
@@ -35,7 +31,7 @@ vi.mock("../../src/lib/refresh.ts", async (importOriginal) => {
       now: () => Date.now(),
       getThresholdMs: () => 5 * 60 * 1000,
       spawnCmd: async () => {
-        if (mockRefreshSpawnError) throw new Error(mockRefreshSpawnError)
+        mockRefreshSpawnCalls++
         return { exitCode: 0 }
       },
     }),
@@ -121,7 +117,7 @@ describe("recall search output", () => {
     closeDb()
     mockAgent.result = null
     mockAgent.options = null
-    mockRefreshSpawnError = null
+    mockRefreshSpawnCalls = 0
     logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
     errSpy = vi.spyOn(console, "error").mockImplementation(() => {})
     stderrWriteSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
@@ -212,30 +208,36 @@ describe("recall search output", () => {
     expect(output).not.toContain('No results found for "how should we debug barenode"')
   })
 
-  test("stale index auto-refreshes before empty results", async () => {
+  test("concurrent stale searches report unproven without starting index refreshes", async () => {
     setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
 
     mockAgent.result = async (query, options) => zeroAgentResult(query, options) as never
+    const previousExitCode = process.exitCode
+    process.exitCode = 0
 
-    await cmdSearch("nohits", {
-      agent: true,
-      limit: "5",
-      round2: "off",
-    })
+    try {
+      await Promise.all(
+        ["nohits-a", "nohits-b"].map((query) =>
+          cmdSearch(query, {
+            agent: true,
+            limit: "5",
+            round2: "off",
+          }),
+        ),
+      )
 
-    const errors = callsText(errSpy)
-    const output = callsText(logSpy)
-    // A ~2h-stale index triggers the auto-refresh note (the prior warn-only
-    // "FTS5 index last rebuilt" behavior was superseded by auto-refresh —
-    // search.ts emitRefreshNote). It prints BEFORE the empty-results answer.
-    expect(errors).toContain("stale — refreshed")
-    expect(output).toContain('No results found for "nohits"')
+      expect(mockRefreshSpawnCalls).toBe(0)
+      expect(callsText(errSpy)).not.toContain("auto-refresh")
+      expect(callsText(logSpy)).toContain('0 results — UNPROVEN (stale index) for "nohits-a"')
+      expect(callsText(logSpy)).toContain('0 results — UNPROVEN (stale index) for "nohits-b"')
+      expect(process.exitCode).toBe(3)
+    } finally {
+      process.exitCode = previousExitCode
+    }
   })
 
-  test("a bounded refresh timeout cannot produce authoritative empty JSON", async () => {
+  test("a stale index cannot produce authoritative empty JSON", async () => {
     setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
-    mockRefreshSpawnError =
-      '"bun" "recall" "index" "--incremental" exceeded 5000ms; sent SIGTERM then SIGKILL after 2000ms'
     const previousExitCode = process.exitCode
     process.exitCode = 0
 
@@ -259,8 +261,6 @@ describe("recall search output", () => {
   test("degraded index provenance preserves useful positive JSON hits", async () => {
     seedMessage("stalepositive evidence remains useful even when freshness is degraded")
     setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
-    mockRefreshSpawnError =
-      '"bun" "recall" "index" "--incremental" exceeded 5000ms; sent SIGTERM then SIGKILL after 2000ms'
     const previousExitCode = process.exitCode
     process.exitCode = 0
 
@@ -279,8 +279,6 @@ describe("recall search output", () => {
 
   test("degraded default JSON discriminates an unproven empty result", async () => {
     setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
-    mockRefreshSpawnError =
-      '"bun" "recall" "index" "--incremental" exceeded 5000ms; sent SIGTERM then SIGKILL after 2000ms'
     const previousExitCode = process.exitCode
     process.exitCode = 0
 
@@ -298,8 +296,6 @@ describe("recall search output", () => {
 
   test("degraded agent JSON discriminates an unproven empty result", async () => {
     setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
-    mockRefreshSpawnError =
-      '"bun" "recall" "index" "--incremental" exceeded 5000ms; sent SIGTERM then SIGKILL after 2000ms'
     mockAgent.result = async (query, options) => zeroAgentResult(query, options) as never
     const previousExitCode = process.exitCode
     process.exitCode = 0
@@ -330,8 +326,8 @@ describe("recall search output", () => {
     }
   })
 
-  test("successful refresh marks empty JSON as complete and authoritative", async () => {
-    setIndexMeta(getDb(), "last_rebuild", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
+  test("a fresh index marks empty JSON as complete and authoritative", async () => {
+    setIndexMeta(getDb(), "last_rebuild", new Date().toISOString())
     const previousExitCode = process.exitCode
     process.exitCode = 0
 
@@ -348,7 +344,7 @@ describe("recall search output", () => {
     }
   })
 
-  test("empty results print without invoking auto-refresh when refresh is disabled", async () => {
+  test("the no-refresh compatibility flag preserves unknown provenance", async () => {
     mockAgent.result = async (query, options) => zeroAgentResult(query, options) as never
     const prevHome = process.env.HOME
     const home = mkdtempSync(join(tmpdir(), "recall-home-"))

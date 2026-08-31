@@ -78,9 +78,8 @@ export interface SearchOptions {
    */
   speculativeSynth?: boolean
   /**
-   * Commander maps --no-refresh to refresh:false. Default (undefined) = auto-refresh
-   * the FTS5 index before search when stale. Pass --no-refresh for batch/scripted
-   * use that doesn't want the subprocess side-effect.
+   * Commander maps --no-refresh to refresh:false. Retained for compatibility:
+   * it skips the read-only freshness classification and reports unknown provenance.
    */
   refresh?: boolean
 }
@@ -106,38 +105,23 @@ export function resolveProjectScope(project: string | undefined, cwd = process.c
 }
 
 // ============================================================================
-// Stale-index auto-refresh — see @km/bearly/19216-recall-freshness-shrink-threshold
+// Read-only index provenance — see @i/20-search-and-memory/23189
 // ============================================================================
 
 // Pure helpers (parseThreshold/getStaleThresholdMs/RefreshResult/RECALL_STALE_THRESHOLD_DEFAULT)
 // live in staleness.ts so unit tests can import them without dragging the search.ts
 // transitive closure (bun:sqlite, indexer, llm/agent → zod) into vitest's node runtime.
 export { RECALL_STALE_THRESHOLD_DEFAULT, parseThreshold, getStaleThresholdMs, type RefreshResult } from "./staleness"
-import type { RefreshResult } from "./staleness"
+import { getStaleThresholdMs, type RefreshResult } from "./staleness"
 
-/**
- * Check if the FTS5 index is stale and, if so, run `bun recall index --incremental`
- * as a subprocess to refresh it before the search proceeds.
- *
- * Best-effort: on subprocess failure, returns { refreshed: false, reason: "error" }
- * with the error message — never throws, so a transient refresh problem doesn't
- * break search. Caller is responsible for printing a one-line note from the result.
- *
- * Honors RECALL_STALE_THRESHOLD env var (e.g. "5m", "1h", "30s") and the
- * `--no-refresh` opt-out flag (mapped to options.refresh === false by commander).
- */
-/** Read `last_rebuild` index meta — returns null if missing, throws on DB access errors.
- *  This is the only DB-bound piece of the refresh path; everything else lives in
- *  `./refresh.ts` (pure / deps-injected) for vitest reachability. See @km/bearly/19244. */
+/** Read `last_rebuild` index meta — returns null if missing, throws on DB access errors. */
 function readLastRebuild(): string | null {
   // Read the meta off the SHARED getDb() singleton and leave it open — the
-  // search that immediately follows reuses the same connection. The previous
+  // search that immediately follows reuses the same connection. Calling
   // `closeDb()` here was actively harmful: it tore down the app-wide singleton
-  // on every search (a needless reconnect for a file DB) and DESTROYED the data
+  // on every search (a needless reconnect for a file DB) and destroyed the data
   // for an in-memory DB (`:memory:` lives in the connection, so closing it
-  // wiped seeded rows before the search ran — the recall raw-probe + stale
-  // tests regressed exactly this way). WAL readers already see a concurrent
-  // index subprocess's committed writes, so no reconnect is needed for freshness.
+  // wipes seeded rows before the search runs).
   const db = getDb()
   return getIndexMeta(db, "last_rebuild") ?? null
 }
@@ -145,7 +129,7 @@ function readLastRebuild(): string | null {
 import { refreshIndexIfStaleWithDeps, makeRefreshDeps, type RefreshDeps } from "./refresh"
 export { refreshIndexIfStaleWithDeps, type RefreshDeps } from "./refresh"
 
-/** Public surface — wires the DB-bound dep and delegates to the pure core. */
+/** Compatibility surface for direct callers. Search no longer invokes it. */
 export async function refreshIndexIfStale(
   options: { refresh?: boolean },
   /** Test seam — override deps for unit testing. Production callers omit. */
@@ -155,14 +139,18 @@ export async function refreshIndexIfStale(
   return refreshIndexIfStaleWithDeps(options, merged)
 }
 
-function provenanceFromRefresh(result: RefreshResult): IndexProvenance {
-  if (result.refreshed || result.reason === "fresh") return "complete"
-  if (result.reason === "no-meta") return "missing"
-  if (result.reason === "opt-out") return "unknown"
-  if (result.reason === "error") {
-    return Number.isFinite(result.staleMs) && result.staleMs > 0 ? "stale" : "unknown"
+function readIndexProvenance(options: { refresh?: boolean }): IndexProvenance {
+  if (options.refresh === false) return "unknown"
+
+  try {
+    const lastRebuild = readLastRebuild()
+    if (!lastRebuild) return "missing"
+    const rebuiltAt = new Date(lastRebuild).getTime()
+    if (!Number.isFinite(rebuiltAt)) return "unknown"
+    return Date.now() - rebuiltAt <= getStaleThresholdMs() ? "complete" : "stale"
+  } catch {
+    return "unknown"
   }
-  return "unknown"
 }
 
 function unprovenSuffix(provenance: IndexProvenance): string {
@@ -198,12 +186,9 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
   } = options
   const project = resolveProjectScope(options.project)
 
-  // Auto-refresh stale FTS5 index BEFORE search runs (so results reflect the last
-  // few minutes of work). See @km/bearly/19216-recall-freshness-shrink-threshold.
-  // Skipped silently for JSON output (programmatic consumers shouldn't see prelude noise).
-  const refresh = await refreshIndexIfStale(options)
-  const provenance = provenanceFromRefresh(refresh)
-  if (!json) emitRefreshNote(refresh)
+  // Search is a read path: classify the index without starting index work.
+  // Session lifecycle hooks own incremental indexing cadence.
+  const provenance = readIndexProvenance(options)
   if (!regexMode && provenance !== "complete") process.exitCode = 3
 
   // Power-user flags imply raw mode. --snippets is an explicit alias for
@@ -519,10 +504,7 @@ function printAgentTrace(result: AgentRecallResult, debugPlan: boolean): void {
 // Recall output (synthesis mode)
 // ============================================================================
 
-/**
- * Print a one-line note about the auto-refresh attempt to stderr.
- * Silent on the "fresh" path (the happy path — no need to spam users every search).
- */
+/** Compatibility surface for direct refresh callers. Search no longer emits refresh notes. */
 export function emitRefreshNote(r: RefreshResult): void {
   if (r.refreshed) {
     const staleMin = Math.max(1, Math.round(r.staleMs / 60_000))
@@ -534,9 +516,7 @@ export function emitRefreshNote(r: RefreshResult): void {
       `${YELLOW}⚠ recall: auto-refresh failed (${r.error}) — proceeding with possibly-stale index.${RESET}\n` +
         `  Pass \`--no-refresh\` to skip this attempt, or run \`bun recall index --incremental\` manually.`,
     )
-    return
   }
-  // "fresh" | "no-meta" | "opt-out" — silent (happy path or intentional).
 }
 
 function formatRecallOutput(result: RecallResult, options: { json?: boolean }): void {

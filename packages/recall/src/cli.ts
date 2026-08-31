@@ -105,7 +105,7 @@ program
   .option("--no-speculative-synth", "Disable speculative synthesis on round-1 (runs synth only after round 2 merge)")
   .option(
     "--no-refresh",
-    "Skip auto-refresh; index provenance is unknown and search exits 3 (RECALL_STALE_THRESHOLD default 5m)",
+    "Compatibility flag: skip freshness classification; index provenance is unknown and search exits 3",
   )
   .actionMerged(async (opts) => {
     const searchOpts = opts as unknown as SearchOptions & { query: string }

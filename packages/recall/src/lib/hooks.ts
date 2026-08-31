@@ -90,7 +90,7 @@ import { getStaleThresholdMs } from "./staleness"
 
 /**
  * SessionStart/End auto-refresh threshold — shares RECALL_STALE_THRESHOLD env
- * + 5m default with the search-time auto-refresh path (see search.ts).
+ * + 5m default with search's read-only provenance classification (see search.ts).
  * Per @km/bearly/19216-recall-freshness-shrink-threshold: 1h was too coarse
  * for active sessions (chief recall'd 6h-stale design discussions and got
  * "no results"); 5m matches Anthropic's prompt-cache TTL.
@@ -197,7 +197,7 @@ export async function cmdSessionStart(): Promise<void> {
       daemonStatus = await registerWithRecallDaemon({ claudePid, sessionId, transcriptPath, cwd })
     }
 
-    // If the FTS5 index is stale (>1h since last rebuild), kick off an
+    // If the FTS5 index is older than the configured threshold, kick off an
     // incremental refresh in the background. Never blocks session startup.
     let indexStatus = "fresh"
     if (process.env.RECALL_NO_BG_INDEX !== "1" && indexIsStale(getStaleThresholdMs())) {
