@@ -943,10 +943,13 @@ function resolveDirectDelivery(
     status: "accepted",
     state: transport.answerableNames.has(recipient) ? "online" : "offline",
   } as const
+  const policyResolution = resolver?.({ recipient, answerableNames: transport.answerableNames })
   const resolution =
-    explicitDelivery === "pull"
-      ? directMailboxResolution
-      : (resolver?.({ recipient, answerableNames: transport.answerableNames }) ?? directMailboxResolution)
+    policyResolution?.status === "refused"
+      ? policyResolution
+      : explicitDelivery === "pull"
+        ? directMailboxResolution
+        : (policyResolution ?? directMailboxResolution)
   if (!tracked || resolution.status !== "accepted") return resolution
   if (resolution.state === "online" && transport.answerableNames.has(recipient)) return resolution
   if (resolution.state === "bounced" && transport.answerableNames.has(resolution.to)) return resolution

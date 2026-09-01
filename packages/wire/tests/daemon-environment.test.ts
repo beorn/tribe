@@ -65,12 +65,14 @@ describe("Tribe daemon environment ownership", () => {
         PATH: "/bin",
         TRIBE_DAEMON_RELOAD_EXIT_CODE: "75",
         TRIBE_DAEMON_SUPERVISOR_PID: "123",
+        TRIBE_DELIVERY_FALLBACKS: '[{"name":"@fleet","to":"@chief","action":"refuse"}]',
         TRIBE_OPERATOR_CAPABILITY: "must-not-cross-env",
         TRIBE_OPERATOR_CAPABILITY_FD: "3",
         TRIBE_SOCKET: "/tmp/tribe.sock",
       }),
     ).toEqual({
       PATH: "/bin",
+      TRIBE_DELIVERY_FALLBACKS: '[{"name":"@fleet","to":"@chief","action":"refuse"}]',
       TRIBE_SOCKET: "/tmp/tribe.sock",
     })
   })

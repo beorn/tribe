@@ -20,7 +20,7 @@ export type DirectDeliveryResolution =
       readonly reason: string
     }
   | {
-      readonly status: "invalid" | "unresolved"
+      readonly status: "invalid" | "refused" | "unresolved"
       readonly reason: string
     }
 
@@ -34,13 +34,16 @@ export type DirectDeliveryResolver = (input: DirectDeliveryResolutionInput) => D
 
 export type DeliveryFallback = {
   readonly to: string
+  readonly action?: "bounce" | "refuse"
 } & ({ readonly name: string; readonly prefix?: never } | { readonly prefix: string; readonly name?: never })
 
 /**
- * Parse one generic exact-name/prefix fallback table from environment/config.
+ * Parse one generic exact-name/prefix delivery-disposition table from environment/config.
  *
- * Concrete rows belong to the composing layer. Declared order wins; there is
- * no wildcard grammar or inferred hierarchy.
+ * Rows bounce by default. `action: "refuse"` makes an exact retired identity
+ * terminal before transport liveness or explicit-pull handling, while `to`
+ * names the successor in the refusal. Concrete rows belong to the composing
+ * layer. Declared order wins; there is no wildcard grammar or inferred hierarchy.
  */
 export function prefixFallbackDeliveryResolver(raw: string | undefined): DirectDeliveryResolver | undefined {
   if (raw === undefined || raw.trim() === "") return undefined
@@ -57,7 +60,9 @@ export function prefixFallbackDeliveryResolver(raw: string | undefined): DirectD
       throw new Error(`TRIBE_DELIVERY_FALLBACKS[${index}] must be an object`)
     }
     const row = value as Record<string, unknown>
-    const extra = Object.keys(row).filter((key) => key !== "name" && key !== "prefix" && key !== "to")
+    const extra = Object.keys(row).filter(
+      (key) => key !== "name" && key !== "prefix" && key !== "to" && key !== "action",
+    )
     if (extra.length > 0) {
       throw new Error(`TRIBE_DELIVERY_FALLBACKS[${index}] has unknown keys: ${extra.join(", ")}`)
     }
@@ -73,9 +78,15 @@ export function prefixFallbackDeliveryResolver(raw: string | undefined): DirectD
     if (typeof row.to !== "string" || row.to.trim() === "") {
       throw new Error(`TRIBE_DELIVERY_FALLBACKS[${index}].to must be a non-empty string`)
     }
+    if (row.action !== undefined && row.action !== "bounce" && row.action !== "refuse") {
+      throw new Error(`TRIBE_DELIVERY_FALLBACKS[${index}].action must be 'bounce' or 'refuse'`)
+    }
+    if (row.action === "refuse" && !hasName) {
+      throw new Error(`TRIBE_DELIVERY_FALLBACKS[${index}] refuse action requires an exact name matcher`)
+    }
     return hasName
-      ? { name: (matcher as string).trim(), to: row.to }
-      : { prefix: (matcher as string).trim(), to: row.to }
+      ? { name: (matcher as string).trim(), to: row.to.trim(), action: row.action }
+      : { prefix: (matcher as string).trim(), to: row.to.trim(), action: row.action }
   })
   const matcherKey = (row: DeliveryFallback): string => ("name" in row ? `name:${row.name}` : `prefix:${row.prefix}`)
   const duplicates = rows
@@ -86,8 +97,14 @@ export function prefixFallbackDeliveryResolver(raw: string | undefined): DirectD
   }
 
   return ({ recipient, answerableNames }) => {
-    if (answerableNames.has(recipient)) return { status: "accepted", state: "online" }
     const fallback = rows.find((row) => ("name" in row ? recipient === row.name : recipient.startsWith(row.prefix)))
+    if (fallback?.action === "refuse") {
+      return {
+        status: "refused",
+        reason: `${JSON.stringify(recipient)} is retired; send to successor ${JSON.stringify(fallback.to)}`,
+      }
+    }
+    if (answerableNames.has(recipient)) return { status: "accepted", state: "online" }
     if (fallback === undefined) return { status: "accepted", state: "offline" }
     if (fallback.to === recipient) {
       return {

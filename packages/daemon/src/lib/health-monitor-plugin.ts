@@ -1005,7 +1005,7 @@ export function checkChiefAbsent(
       severity: "critical",
       message:
         `STOP-THE-LINE: @chief is absent with ${unread.count} actionable DM${unread.count === 1 ? "" : "s"} ` +
-        `waiting. Delivery has no live authority; a live @cto or @fleet must assume authority, ` +
+        `waiting. Delivery has no live authority; a live @cto must assume authority, ` +
         `or notify the user, then reconcile @chief attention before work continues.`,
       metrics: {},
       topOffenders: [],
