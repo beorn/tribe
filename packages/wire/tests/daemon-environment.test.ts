@@ -9,6 +9,7 @@
 import { closeSync, openSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { describe, expect, test } from "vitest"
+import tribeProject from "../../../hab.projects.ts"
 import { sanitizeDaemonProcessEnvironment, sanitizeStandaloneDaemonEnvironment } from "../src/daemon-environment.ts"
 import { readSelfMailboxAuthorityFromEnvironment } from "../src/lib/self-mailbox-authority.ts"
 
@@ -30,6 +31,10 @@ const ambientIdentity = {
 } as const
 
 describe("Tribe daemon environment ownership", () => {
+  test("the portable Hab declaration names the accountable owner", () => {
+    expect(tribeProject.services.wire.owner).toBe("@chief")
+  })
+
   test("a Hab-owned daemon deletes ambient seat identity and capability in place", () => {
     const env: NodeJS.ProcessEnv = {
       ...ambientIdentity,

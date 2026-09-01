@@ -2,6 +2,7 @@ export default {
   name: "tribe",
   services: {
     wire: {
+      owner: "@chief",
       // --idle-quit-after never: this daemon never stops itself. Set 2026-08-11
       // (as `--quit-timeout -1`; flag renamed 2026-08-12, old name still parses).
       //
