@@ -26,7 +26,8 @@ export default {
       // to `never` on its own whenever HAB_SERVICE_NAME is present and no explicit knob is set.
       command: "bun vendor/tribe/packages/daemon/src/daemon.ts --idle-quit-after never",
       env: {
-        TRIBE_DELIVERY_FALLBACKS: '[{"name":"@ci","to":"@chief"},{"name":"@yrd","to":"@chief"}]',
+        TRIBE_DELIVERY_FALLBACKS:
+          '[{"name":"@fleet","to":"@chief","action":"refuse"},{"name":"@ci","to":"@chief"},{"name":"@yrd","to":"@chief"}]',
       },
       // oxfmt-ignore
       stateRoots: ["${TRIBE_DB:-${XDG_DATA_HOME:-$HOME/.local/share}/tribe/tribe.db}", "${TRIBE_SOCKET:-${XDG_RUNTIME_DIR:-$HOME/.local/share/tribe}/tribe.sock}"],

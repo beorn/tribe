@@ -40,7 +40,7 @@ describe("health alert delivery", () => {
     expect(check(false)).toMatchObject({
       type: "chief-absent",
       severity: "critical",
-      message: expect.stringMatching(/@chief is absent.*live @cto or @fleet.*user/iu),
+      message: expect.stringMatching(/@chief is absent.*live @cto.*user/iu),
     })
     expect(check(false)).toBeNull()
     expect(check(true)).toBeNull()

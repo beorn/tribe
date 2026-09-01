@@ -56,8 +56,10 @@ describe("generic direct-message delivery resolution", () => {
     })
   })
 
-  it("supports an exact-name fallback without matching descendants", () => {
-    const resolve = prefixFallbackDeliveryResolver(JSON.stringify([{ name: "@yrd", to: "@chief" }]))
+  it("supports and trims an exact-name fallback without matching descendants", () => {
+    const resolve = prefixFallbackDeliveryResolver(
+      JSON.stringify([{ name: " @yrd ", to: " @chief ", action: "bounce" }]),
+    )
     expect(resolve?.({ recipient: "@yrd", answerableNames: new Set(["@chief"]) })).toMatchObject({
       status: "accepted",
       state: "bounced",
@@ -81,6 +83,15 @@ describe("generic direct-message delivery resolution", () => {
     }
   })
 
+  it("refuses the retired Fleet identity even when a stale transport is answer-capable", () => {
+    const raw = tribeHabModule.services.wire.env.TRIBE_DELIVERY_FALLBACKS
+    const resolve = prefixFallbackDeliveryResolver(raw)
+    expect(resolve?.({ recipient: "@fleet", answerableNames: new Set(["@fleet", "@chief"]) })).toEqual({
+      status: "refused",
+      reason: '"@fleet" is retired; send to successor "@chief"',
+    })
+  })
+
   it.each([
     ["not-json", /must be JSON/],
     [JSON.stringify({ prefix: "@worker/", to: "@manager" }), /JSON array/],
@@ -93,6 +104,8 @@ describe("generic direct-message delivery resolution", () => {
       /duplicate matchers/,
     ],
     [JSON.stringify([{ name: "@yrd", prefix: "@yrd/", to: "@chief" }]), /exactly one/],
+    [JSON.stringify([{ name: "@fleet", to: "@chief", action: "drop" }]), /action must be/],
+    [JSON.stringify([{ prefix: "@fleet", to: "@chief", action: "refuse" }]), /exact name/],
   ])("fails loud on an invalid prefix fallback table", (raw, expected) => {
     expect(() => prefixFallbackDeliveryResolver(raw)).toThrow(expected)
   })
@@ -274,6 +287,37 @@ describe("generic direct-message delivery resolution", () => {
     expect(db.prepare("SELECT request_id FROM pending_request").get()).toBeNull()
   })
 
+  it.each(["invalid", "unresolved"] as const)("keeps explicit pull overriding a generic %s policy result", (status) => {
+    const request = `req-pull-${status}`
+    const sent = resultJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        {
+          to: "@dev",
+          message: `explicit pull despite ${status}`,
+          type: "request",
+          request,
+          delivery: "pull",
+        },
+        {
+          ...opts(),
+          resolveDelivery: () => ({ status, reason: `${status} policy result` }),
+        },
+      ),
+    )
+
+    expect(sent).toMatchObject({
+      sent: true,
+      request_id: request,
+      delivery: { state: "online", recipient: "@dev" },
+    })
+    expect(db.prepare("SELECT request_id, recipient FROM pending_request WHERE request_id = ?").get(request)).toEqual({
+      request_id: request,
+      recipient: "@dev",
+    })
+  })
+
   it("refuses a tracked offline owner, journals the terminal disposition, and preserves untracked offline mail", () => {
     const refused = resultJson(
       handleToolCall(
@@ -334,19 +378,98 @@ describe("generic direct-message delivery resolution", () => {
     })
   })
 
+  it.each([undefined, "pull"] as const)(
+    "refuses retired Fleet before persisting tracked mail (delivery=%s)",
+    (delivery) => {
+      const recentRecipient = makeContext(db, stmts, "@fleet", "departed-fleet-session")
+      logEvent(recentRecipient, "session.left", undefined, { name: "@fleet", reason: "peer-close" })
+
+      const resolveDelivery = prefixFallbackDeliveryResolver(tribeHabModule.services.wire.env.TRIBE_DELIVERY_FALLBACKS)
+
+      const refused = resultJson(
+        handleToolCall(
+          sender,
+          "tribe.send",
+          {
+            to: "@fleet",
+            message: "inspect the runtime alarm",
+            type: "request",
+            request: "req-recent-fleet",
+            ...(delivery === undefined ? {} : { delivery }),
+          },
+          { ...opts(), resolveDelivery },
+        ),
+      )
+
+      expect(refused.error).toContain('"@fleet" is retired; send to successor "@chief"')
+      expect(
+        db.prepare("SELECT request_id FROM pending_request WHERE request_id = ?").get("req-recent-fleet"),
+      ).toBeNull()
+      expect(
+        db.prepare("SELECT id FROM messages WHERE kind = 'direct' AND content = ?").get("inspect the runtime alarm"),
+      ).toBeNull()
+    },
+  )
+
+  it("refuses untracked Fleet mail before creating a direct-message row", () => {
+    const resolveDelivery = prefixFallbackDeliveryResolver(tribeHabModule.services.wire.env.TRIBE_DELIVERY_FALLBACKS)
+    const refused = resultJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        { to: "@fleet", message: "retired notify", type: "notify" },
+        { ...opts(), resolveDelivery },
+      ),
+    )
+
+    expect(refused.error).toContain('"@fleet" is retired; send to successor "@chief"')
+    expect(db.prepare("SELECT id FROM messages WHERE kind = 'direct' AND content = ?").get("retired notify")).toBeNull()
+  })
+
+  it.each([
+    ["request", ["@fleet", "@dev"]],
+    ["request", ["@dev", "@fleet"]],
+    ["notify", ["@fleet", "@dev"]],
+    ["notify", ["@dev", "@fleet"]],
+  ] as const)("refuses mixed %s recipients atomically in order %j", (type, to) => {
+    const content = `mixed retired ${type} ${to.join(" then ")}`
+    const request = `req-mixed-${type}-${to[0] === "@fleet" ? "retired-first" : "retired-last"}`
+    const resolveDelivery = prefixFallbackDeliveryResolver(tribeHabModule.services.wire.env.TRIBE_DELIVERY_FALLBACKS)
+    const refused = resultJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        {
+          to: [...to],
+          message: content,
+          type,
+          ...(type === "request" ? { request } : {}),
+        },
+        { ...opts(), resolveDelivery },
+      ),
+    )
+
+    expect(refused.error).toContain('refused recipient "@fleet"')
+    expect(refused.error).toContain('"@fleet" is retired; send to successor "@chief"')
+    expect(
+      db.prepare("SELECT COUNT(*) AS count FROM messages WHERE kind = 'direct' AND content = ?").get(content),
+    ).toEqual({ count: 0 })
+    expect(db.prepare("SELECT COUNT(*) AS count FROM pending_request").get()).toEqual({ count: 0 })
+  })
+
   it("accepts a tracked mailbox row for a disconnected recipient with recent journal activity", () => {
-    const recentRecipient = makeContext(db, stmts, "@fleet", "departed-fleet-session")
-    logEvent(recentRecipient, "session.left", undefined, { name: "@fleet", reason: "peer-close" })
+    const recentRecipient = makeContext(db, stmts, "@recent", "departed-recent-session")
+    logEvent(recentRecipient, "session.left", undefined, { name: "@recent", reason: "peer-close" })
 
     const sent = resultJson(
       handleToolCall(
         sender,
         "tribe.send",
         {
-          to: "@fleet",
+          to: "@recent",
           message: "inspect the runtime alarm",
           type: "request",
-          request: "req-recent-fleet",
+          request: "req-recent-recipient",
         },
         opts(),
       ),
@@ -354,14 +477,14 @@ describe("generic direct-message delivery resolution", () => {
 
     expect(sent).toMatchObject({
       sent: true,
-      request_id: "req-recent-fleet",
-      delivery: { state: "offline", recipient: "@fleet" },
+      request_id: "req-recent-recipient",
+      delivery: { state: "offline", recipient: "@recent" },
     })
     expect(
       db
         .prepare("SELECT request_id, recipient, sender FROM pending_request WHERE request_id = ?")
-        .get("req-recent-fleet"),
-    ).toEqual({ request_id: "req-recent-fleet", recipient: "@fleet", sender: "@sender" })
+        .get("req-recent-recipient"),
+    ).toEqual({ request_id: "req-recent-recipient", recipient: "@recent", sender: "@sender" })
   })
 
   it("accepts a tracked mailbox row for a durable launch without a connected transport", () => {
