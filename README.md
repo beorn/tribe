@@ -189,12 +189,13 @@ bun packages/recall/src/cli.ts summarize
 bun packages/recall/src/cli.ts show week
 ```
 
-**Freshness.** Before searching, the CLI checks the index age and auto-runs an
-incremental refresh if it is older than `RECALL_STALE_THRESHOLD` (default `5m`),
-printing a one-line stderr note. Every result envelope identifies index
-`provenance`. On refresh failure, positive stale hits are preserved with exit 3;
-a degraded empty response is `results: null`, `total: null`, never `[]`/`0`.
-`--no-refresh` skips the subprocess but reports `unknown` provenance and exits 3.
+**Freshness.** SessionStart starts a detached incremental index when the index
+is older than `RECALL_STALE_THRESHOLD` (default `5m`), and SessionEnd starts one
+after new transcript content. Search itself is read-only: every result envelope
+identifies index `provenance`, and a stale or unavailable index exits 3 while
+preserving positive hits. A degraded empty response is `results: null`,
+`total: null`, never `[]`/`0`. The legacy `--no-refresh` flag skips freshness
+classification, reports `unknown` provenance, and exits 3.
 
 **LLM vs no-LLM.** Raw FTS5 search, file recovery, and session listing work with
 zero configuration. The synthesized default ("pointer mode") and the `--agent`
@@ -336,7 +337,7 @@ custom paths, and observability.
 | `TRIBE_DB`                                             | daemon             | Override the SQLite database path                                                                                                                                                                                        |
 | `TRIBE_DELIVERY`                                       | wire (MCP adapter) | `push` or `pull` — threaded into the join call on start                                                                                                                                                                  |
 | `TRIBE_LLM_DIR`                                        | recall, injection  | Directory exposing `lib/types.ts`, `lib/research.ts`, `lib/providers.ts`. Enables LLM synthesis, the query planner, and session summaries. Without it, those features degrade to their documented no-LLM paths — loudly. |
-| `RECALL_STALE_THRESHOLD`                               | recall             | Index-freshness window before an auto-refresh (default `5m`; accepts `10m`, `1h`, `30s`, bare number = minutes)                                                                                                          |
+| `RECALL_STALE_THRESHOLD`                               | recall             | Index-freshness window for search provenance and SessionStart indexing (default `5m`; accepts `10m`, `1h`, `30s`, bare number = minutes)                                                                                 |
 | `TRIBE_LOG`                                            | recall MCP         | Set `1` to un-silence recall engine logging over MCP stderr                                                                                                                                                              |
 | `TRIBE_NO_DAEMON`                                      | recall MCP         | Set `1` to force in-process library mode (skip the daemon)                                                                                                                                                               |
 | `LOGGILY_FILE`, `DEBUG`                                | injection          | Wire a JSONL observability file and namespace filter (e.g. `DEBUG='injection:*'`)                                                                                                                                        |
