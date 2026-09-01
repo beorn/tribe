@@ -517,7 +517,7 @@ process.on("unhandledRejection", (reason) => {
   process.stderr.write(`[lore] unhandledRejection: ${reason instanceof Error ? reason.stack : String(reason)}\n`)
 })
 
-// Support `--help` / `--list-tools` for the /complete criteria + humans
+// Support `--help` / `--list-tools` for the /verify criteria + humans
 const arg = process.argv[2]
 if (arg === "--help" || arg === "-h") {
   process.stdout.write(`/tribe (lore) — MCP server. Tools:\n`)

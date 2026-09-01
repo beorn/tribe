@@ -47,7 +47,7 @@ const EXPLICIT_ALIASES: ReadonlyArray<string> = [
  * at this").
  */
 const SHORT_EXPLICIT_ALIASES: ReadonlySet<string> = new Set([
-  "tdd", // .claude/skills/tdd/SKILL.md — test-driven dev
+  "tdd", // .claude/skills/tests/SKILL.md — test-driven development
   "csw", // .claude/skills/csw/SKILL.md — complete staff work
 ])
 
