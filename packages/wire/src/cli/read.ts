@@ -1217,7 +1217,8 @@ async function cmdDoctor(opts: { fix?: boolean }): Promise<void> {
  * Inbox status — count + age of unanswered actionable attention: unread
  * attention messages plus open balls without an owner TAKING receipt. JSON
  * when `--json` is set; otherwise a human-readable summary. Used by
- * `.claude/hooks/chief-drain-check.sh`.
+ * `tools/agent-rig/hooks/chief-drain-check.sh` and its installed
+ * `.agents/hooks` twin.
  * Delivery-attention lineage: @ag/tribe/21626-per-seat-inbox-staleness-alarm.
  */
 async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promise<void> {
