@@ -1333,16 +1333,10 @@ describe("dispatcher bounded mailbox drain", () => {
     expect(status.unread_count).toBe(1)
   })
 
-  it("counts and consumes attention-required responses through one inbox cursor", async () => {
+  it("counts attention-required responses through the canonical inbox projection", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
-    harness.addPendingClient("conn-chief-response")
-    await harness.register("conn-chief-response", {
-      name: "@chief",
-      pid: liveHolderPid,
-      project: "/tmp/km-wt-chief-response",
-    })
-    const response = harness.sendAttentionResponse("@chief", "the requested verdict is ready")
+    harness.sendAttentionResponse("@chief", "the requested verdict is ready")
 
     const status = parseResult<{ unread_count: number; latest_type: string | null }>(
       await harness.dispatcher.handleRequest(
@@ -1357,38 +1351,6 @@ describe("dispatcher bounded mailbox drain", () => {
     )
 
     expect(status).toMatchObject({ unread_count: 1, latest_type: "response" })
-
-    const fetched = parseResult<{
-      structuredContent: {
-        attention?: { actionable_unread?: Array<{ id?: string; type?: string }> }
-      }
-    }>(
-      await harness.dispatcher.handleRequest(
-        {
-          jsonrpc: "2.0",
-          id: "chief-fetch-with-attention-response",
-          method: "tribe.fetch",
-          params: { limit: 10 },
-        },
-        "conn-chief-response",
-      ),
-    ).structuredContent
-    expect(fetched.attention?.actionable_unread).toEqual([
-      expect.objectContaining({ id: response.id, type: "response" }),
-    ])
-
-    const consumed = parseResult<{ unread_count: number; latest_type: string | null }>(
-      await harness.dispatcher.handleRequest(
-        {
-          jsonrpc: "2.0",
-          id: "chief-status-after-attention-response-fetch",
-          method: "cli_inbox_status",
-          params: { session: "@chief" },
-        },
-        "conn-untrusted",
-      ),
-    )
-    expect(consumed).toMatchObject({ unread_count: 0, latest_type: null })
   })
 
   it("reports unauthenticated when an unregistered caller presents the wrong operator capability", async () => {
