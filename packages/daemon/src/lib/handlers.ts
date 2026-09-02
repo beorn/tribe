@@ -258,6 +258,8 @@ export type HandlerOpts = {
   isReconnectGraceProtected?: (sessionId: string, nowMs: number) => boolean
   /** Realtime snapshot of connected sessions (daemon clients Map). */
   getActiveSessionInfo: () => ActiveSessionInfo[]
+  /** Exact identities retired by explicit composing-layer policy. */
+  retiredNames?: ReadonlySet<string>
   /** Optional: dump daemon internals for `tribe.debug`. Daemon-only (tests using
    *  handlers directly can omit this — `tribe.debug` then returns a minimal
    *  snapshot synthesized from the other accessors). */
@@ -1957,6 +1959,7 @@ function projectMembershipDiscrepancy(
   rows: readonly MembershipSessionRow[],
   activeIds: ReadonlySet<string>,
   disconnectedRows: readonly MembershipSessionRow[],
+  retiredNames: ReadonlySet<string>,
 ): MembershipDiscrepancy | undefined {
   // Superseded rows are excluded from the denominator too, or a seat that
   // re-registered under an auto-suffixed name counts as two known launches
@@ -1966,6 +1969,7 @@ function projectMembershipDiscrepancy(
     .filter(isDurableMembershipSessionRow)
     .filter((row) => !isUnidentifiedSessionName(row.name))
     .filter((row) => activeIds.has(row.id) || !supersededLaunchIds.has(row.launch_id))
+    .filter((row) => activeIds.has(row.id) || !retiredNames.has(row.name))
   const knownNames = new Set(durableRows.map((row) => row.name))
   const connectedNames = new Set(durableRows.filter((row) => activeIds.has(row.id)).map((row) => row.name))
   const missing = disconnectedRows.filter(isDurableMembershipSessionRow).map((row) => ({
@@ -2004,6 +2008,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
   // in-memory clients Map (no DB-level tri-state).
   const activeIds = opts.getActiveSessionIds()
   const activeInfo = opts.getActiveSessionInfo()
+  const retiredNames = opts.retiredNames ?? new Set<string>()
   // Sessions are read directly. This used to INNER JOIN room_members, which
   // filtered the roster to sessions holding a membership row — and since every
   // session was auto-joined at register, the filter matched everything and was
@@ -2112,7 +2117,8 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     }
   })
   const disconnected = projectDisconnectedSessionRows(rows, activeIds)
-  const membershipDiscrepancy = projectMembershipDiscrepancy(rows, activeIds, disconnected.diagnostic)
+  const diagnosticDisconnected = disconnected.diagnostic.filter((row) => !retiredNames.has(row.name))
+  const membershipDiscrepancy = projectMembershipDiscrepancy(rows, activeIds, diagnosticDisconnected, retiredNames)
   return jsonResult({
     sessions,
     ...(membershipDiscrepancy === undefined ? {} : { membership_discrepancy: membershipDiscrepancy }),
@@ -2402,6 +2408,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
   // Liveness comes from the daemon's in-memory clients Map. Dead sessions
   // are simply absent from activeSessionInfo — no DB pruning required.
   const activeInfo = opts.getActiveSessionInfo()
+  const retiredNames = opts.retiredNames ?? new Set<string>()
   const byId = new Map(activeInfo.map((s) => [s.id, s]))
   const rows = ctx.stmts.allSessions.all() as Array<{
     id: string
@@ -2418,7 +2425,8 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
   const liveSessions = rows.filter((r) => byId.has(r.id))
   const activeIds = new Set(byId.keys())
   const disconnected = projectDisconnectedSessionRows(rows, activeIds)
-  const transportWedges = disconnected.diagnostic.flatMap((session) => {
+  const diagnosticDisconnected = disconnected.diagnostic.filter((session) => !retiredNames.has(session.name))
+  const transportWedges = diagnosticDisconnected.flatMap((session) => {
     const lifetime = classifySessionRegistrationLifetime({
       launchId: session.launch_id,
       launchParentPid: session.launch_parent_pid,
@@ -2440,7 +2448,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
       },
     ]
   })
-  const membershipDiscrepancy = projectMembershipDiscrepancy(rows, activeIds, disconnected.diagnostic)
+  const membershipDiscrepancy = projectMembershipDiscrepancy(rows, activeIds, diagnosticDisconnected, retiredNames)
 
   const members = liveSessions.map((s) => {
     const active = byId.get(s.id)
@@ -2456,6 +2464,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
       warnings.push(`no message in ${Math.round(lastMsgAge / 60_000)} min`)
     }
     if (!lastMsg) warnings.push("never sent a message")
+    if (retiredNames.has(s.name)) warnings.push("retired identity is connected")
 
     // Spawn-time identity binding (@km/tribe/spawn-time-identity-binding):
     // a session whose stored PID is dead is a structural zombie — the
@@ -2544,6 +2553,9 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
       : [
           `${stalePending.length} stale pending ${stalePending.length === 1 ? "ball" : "balls"} across ${staleOwnerCount} ${staleOwnerCount === 1 ? "owner" : "owners"}; oldest is ${Math.floor(oldestStaleAgeMs / 60_000)}m old`,
         ]
+  const retiredMemberIssues = [...new Set(liveSessions.map((session) => session.name))]
+    .filter((name) => retiredNames.has(name))
+    .map((name) => `retired member connected ${name}`)
   const cadence = projectHealthCadence(ctx.db, {
     now,
     connectedSessionNames: liveSessions.map((session) => session.name),
@@ -2593,6 +2605,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
           `transport wedge ${wedge.name}: transport_state=${wedge.transport_state} owner_state=${wedge.owner_state} reason=${wedge.wedge_reason}`,
       ),
       ...mailboxReadIssues,
+      ...retiredMemberIssues,
       ...pendingIssues,
       ...cadence.warnings,
     ],

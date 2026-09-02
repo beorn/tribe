@@ -280,12 +280,18 @@ export function sweepDeadSessionRows(
  * poll, so between polls it has a row and no socket. On 2026-08-12 thirteen
  * such rows read as "no clients" and idle-quit stopped the fleet rail.
  * Connection-scoped rows are excluded: their liveness IS their socket, which
- * the in-memory client registry already counts.
+ * the in-memory client registry already counts. Exact identities retired by
+ * composing-layer policy remain stored as history but no longer keep the
+ * daemon alive as a registered-seat workload.
  */
-export function countDurableSessionRows(db: Database): number {
+export function countDurableSessionRows(db: Database, retiredNames: ReadonlySet<string> = new Set()): number {
+  const retired = [...retiredNames]
+  const exclusion = retired.length === 0 ? "" : ` AND name NOT IN (${retired.map(() => "?").join(", ")})`
   const row = db
-    .query("SELECT COUNT(*) AS n FROM sessions WHERE launch_id IS NOT NULL OR launch_parent_pid IS NOT NULL")
-    .get() as { n: number }
+    .query(
+      `SELECT COUNT(*) AS n FROM sessions WHERE (launch_id IS NOT NULL OR launch_parent_pid IS NOT NULL)${exclusion}`,
+    )
+    .get(...retired) as { n: number }
   return row.n
 }
 

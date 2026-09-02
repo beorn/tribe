@@ -8,7 +8,7 @@ import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { handleToolCall, type HandlerOpts } from "./handlers.ts"
 import { logEvent } from "./messaging.ts"
-import { prefixFallbackDeliveryResolver } from "./delivery-resolution.ts"
+import { parseDeliveryFallbackPolicy, prefixFallbackDeliveryResolver } from "./delivery-resolution.ts"
 import { registerSession } from "./session.ts"
 import { DEFAULT_MAX_SILENCE_SEC } from "./session-transport-state.ts"
 import tribeHabModule from "../../../../hab.projects.ts"
@@ -89,6 +89,27 @@ describe("generic direct-message delivery resolution", () => {
     expect(resolve?.({ recipient: "@fleet", answerableNames: new Set(["@fleet", "@chief"]) })).toEqual({
       status: "refused",
       reason: '"@fleet" is retired; send to successor "@chief"',
+    })
+  })
+
+  it("projects only exact refused identities as retired", () => {
+    const policy = parseDeliveryFallbackPolicy(
+      JSON.stringify([
+        { name: " @fleet ", to: " @chief ", action: "refuse" },
+        { name: "@yrd", to: "@chief", action: "bounce" },
+        { prefix: "@dev/", to: "@dev" },
+      ]),
+    )
+
+    expect([...policy!.retiredNames]).toEqual(["@fleet"])
+    expect(policy!.resolveDelivery({ recipient: "@fleet", answerableNames: new Set(["@fleet"]) })).toEqual({
+      status: "refused",
+      reason: '"@fleet" is retired; send to successor "@chief"',
+    })
+    expect(policy!.resolveDelivery({ recipient: "@yrd", answerableNames: new Set() })).toMatchObject({
+      status: "accepted",
+      state: "bounced",
+      to: "@chief",
     })
   })
 

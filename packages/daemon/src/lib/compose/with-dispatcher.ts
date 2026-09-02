@@ -109,6 +109,8 @@ export interface DispatcherRuntimeHooks {
   suppressWindowMs?: number
   /** Generic direct-message delivery policy supplied by the composing layer. */
   resolveDelivery?: DirectDeliveryResolver
+  /** Exact identities explicitly retired by the composing layer. */
+  retiredNames?: ReadonlySet<string>
 }
 
 /**
@@ -692,6 +694,7 @@ export function withDispatcher<
       notifyWakeupForReplay,
       reapStaleTransports,
       resolveDelivery: hooks.resolveDelivery,
+      retiredNames: hooks.retiredNames,
       // tribe.stop actuator — absent (handler refuses loudly) unless the
       // composing daemon supplied its shutdown.
       triggerStop: hooks.triggerShutdown,

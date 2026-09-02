@@ -37,6 +37,12 @@ export type DeliveryFallback = {
   readonly action?: "bounce" | "refuse"
 } & ({ readonly name: string; readonly prefix?: never } | { readonly prefix: string; readonly name?: never })
 
+export interface DeliveryFallbackPolicy {
+  readonly resolveDelivery: DirectDeliveryResolver
+  /** Exact identities made terminal by an explicit `action: "refuse"` row. */
+  readonly retiredNames: ReadonlySet<string>
+}
+
 /**
  * Parse one generic exact-name/prefix delivery-disposition table from environment/config.
  *
@@ -45,7 +51,7 @@ export type DeliveryFallback = {
  * names the successor in the refusal. Concrete rows belong to the composing
  * layer. Declared order wins; there is no wildcard grammar or inferred hierarchy.
  */
-export function prefixFallbackDeliveryResolver(raw: string | undefined): DirectDeliveryResolver | undefined {
+export function parseDeliveryFallbackPolicy(raw: string | undefined): DeliveryFallbackPolicy | undefined {
   if (raw === undefined || raw.trim() === "") return undefined
   let parsed: unknown
   try {
@@ -96,7 +102,7 @@ export function prefixFallbackDeliveryResolver(raw: string | undefined): DirectD
     throw new Error(`TRIBE_DELIVERY_FALLBACKS has duplicate matchers: ${[...new Set(duplicates)].join(", ")}`)
   }
 
-  return ({ recipient, answerableNames }) => {
+  const resolveDelivery: DirectDeliveryResolver = ({ recipient, answerableNames }) => {
     const fallback = rows.find((row) => ("name" in row ? recipient === row.name : recipient.startsWith(row.prefix)))
     if (fallback?.action === "refuse") {
       return {
@@ -121,4 +127,14 @@ export function prefixFallbackDeliveryResolver(raw: string | undefined): DirectD
         ("name" in fallback ? `exact name ${fallback.name}` : `prefix ${fallback.prefix}`),
     }
   }
+  const retiredNames = new Set<string>()
+  for (const row of rows) {
+    if ("name" in row && row.name !== undefined && row.action === "refuse") retiredNames.add(row.name)
+  }
+  return { resolveDelivery, retiredNames }
+}
+
+/** Backward-compatible resolver-only projection for callers without health state. */
+export function prefixFallbackDeliveryResolver(raw: string | undefined): DirectDeliveryResolver | undefined {
+  return parseDeliveryFallbackPolicy(raw)?.resolveDelivery
 }

@@ -17,7 +17,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { handleToolCall, type HandlerOpts } from "./handlers.ts"
-import { reapStaleTransportRows, registerSession, type StaleTransportReapReport } from "./session.ts"
+import {
+  countDurableSessionRows,
+  reapStaleTransportRows,
+  registerSession,
+  type StaleTransportReapReport,
+} from "./session.ts"
 import { DEFAULT_RECONNECT_GRACE_MS, withClientRegistry } from "./compose/with-client-registry.ts"
 import { withRuntime } from "./compose/with-runtime.ts"
 
@@ -261,6 +266,99 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
     }
     expect(members.sessions).toEqual([expect.objectContaining({ name: "legacy-health" })])
     expect(members.membership_discrepancy).toEqual(health.membership_discrepancy)
+  })
+
+  it("keeps disconnected retired registrations as history without reporting a live-seat outage", () => {
+    addSession(db, stmts, "retired-fleet", "@fleet", { id: "launch-fleet", parentPid: 7001 })
+    addSession(db, stmts, "durable-health", "@agent/6", { id: "launch-health", parentPid: 6006 })
+    addSession(db, stmts, "malformed-health", "malformed-health")
+    db.prepare("UPDATE sessions SET launch_id = 'partial-only' WHERE id = 'malformed-health'").run()
+    const ctx = makeContext(db, stmts, "operator", "@operator")
+    const retiredNames = new Set(["@fleet"])
+    const opts = {
+      cleanup: () => {},
+      userRenamed: false,
+      setUserRenamed: () => {},
+      getActiveSessionIds: () => new Set<string>(),
+      hasActiveTransport: () => false,
+      getActiveSessionInfo: () => [],
+      retiredNames,
+    } as HandlerOpts
+
+    const health = parseToolJson(handleToolCall(ctx, "tribe.health", {}, opts)) as {
+      membership_discrepancy: { missing: Array<Record<string, unknown>> }
+      transport_wedges: Array<Record<string, unknown>>
+      issues: string[]
+    }
+    expect(health.membership_discrepancy.missing).toEqual([
+      expect.objectContaining({ member_id: "durable-health", name: "@agent/6" }),
+    ])
+    expect(health.transport_wedges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ member_id: "durable-health", wedge_reason: "durable-launch-no-transport" }),
+        expect.objectContaining({ member_id: "malformed-health", wedge_reason: "malformed-launch-identity" }),
+      ]),
+    )
+    expect(health.transport_wedges).toHaveLength(2)
+    expect(health.issues.some((issue) => issue.includes("@fleet"))).toBe(false)
+
+    const members = parseToolJson(handleToolCall(ctx, "tribe.members", { all: true }, opts)) as {
+      sessions: Array<Record<string, unknown>>
+      membership_discrepancy: { missing: Array<Record<string, unknown>> }
+    }
+    expect(members.sessions).toContainEqual(
+      expect.objectContaining({
+        member_id: "retired-fleet",
+        name: "@fleet",
+        transport_state: "disconnected",
+      }),
+    )
+    expect(members.membership_discrepancy).toEqual(health.membership_discrepancy)
+    expect(countDurableSessionRows(db)).toBe(3)
+    expect(countDurableSessionRows(db, retiredNames)).toBe(2)
+  })
+
+  it("keeps a connected retired identity loud", () => {
+    addSession(db, stmts, "retired-fleet", "@fleet", { id: "launch-fleet", parentPid: process.pid })
+    const ctx = makeContext(db, stmts, "operator", "@operator")
+    const opts = {
+      cleanup: () => {},
+      userRenamed: false,
+      setUserRenamed: () => {},
+      getActiveSessionIds: () => new Set(["retired-fleet"]),
+      hasActiveTransport: (sessionId: string) => sessionId === "retired-fleet",
+      getActiveSessionInfo: () => [
+        {
+          id: "retired-fleet",
+          name: "@fleet",
+          pid: process.pid,
+          cwd: "/repo",
+          role: "member",
+          claudeSessionId: null,
+          registeredAt: Date.now(),
+          launchId: "launch-fleet",
+          launchParentPid: process.pid,
+          transportPids: [process.pid],
+        },
+      ],
+      retiredNames: new Set(["@fleet"]),
+    } as HandlerOpts
+
+    const health = parseToolJson(handleToolCall(ctx, "tribe.health", {}, opts)) as {
+      members: Array<{ name: string; warnings: string[] }>
+      membership_discrepancy?: Record<string, unknown>
+      transport_wedges: Array<Record<string, unknown>>
+      issues: string[]
+    }
+    expect(health.members).toEqual([
+      expect.objectContaining({
+        name: "@fleet",
+        warnings: expect.arrayContaining(["retired identity is connected"]),
+      }),
+    ])
+    expect(health.transport_wedges).toEqual([])
+    expect(health.membership_discrepancy).toBeUndefined()
+    expect(health.issues).toContain("retired member connected @fleet")
   })
 
   it("reports disconnected unidentified launches without polluting named health", () => {

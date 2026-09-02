@@ -55,7 +55,7 @@ import { TOOLS_LIST } from "tribe-wire/lib/tools-list"
 import { pruneOldActivityLogs } from "./lib/activity-log.ts"
 import { countDurableSessionRows } from "./lib/session.ts"
 import { gatherCodePin, STARTUP_SHA } from "./lib/code-pin.ts"
-import { prefixFallbackDeliveryResolver } from "./lib/delivery-resolution.ts"
+import { parseDeliveryFallbackPolicy } from "./lib/delivery-resolution.ts"
 import { sanitizeDaemonProcessEnvironment } from "../../wire/src/daemon-environment.ts"
 
 // ---------------------------------------------------------------------------
@@ -151,6 +151,7 @@ if (process.argv[2] === "install" || process.argv[2] === "uninstall" || process.
 sanitizeDaemonProcessEnvironment(process.env)
 
 const log = createLogger("tribe:daemon")
+const deliveryFallbackPolicy = parseDeliveryFallbackPolicy(process.env.TRIBE_DELIVERY_FALLBACKS)
 
 // ---------------------------------------------------------------------------
 // Sync portion of the pipe — config, db, daemonCtx, recall, tools, registry,
@@ -245,7 +246,7 @@ const withIdleQuitShape = withIdleQuit<typeof withSocketShape>({
   // The census's DB half: registered sessions of any delivery mode count as
   // clients for the idle-quit decision (2026-08-12 — a fully-populated pull
   // fleet read as "no clients" and the rail self-quit).
-  countDurableSessions: () => countDurableSessionRows(withSocketShape.db),
+  countDurableSessions: () => countDurableSessionRows(withSocketShape.db, deliveryFallbackPolicy?.retiredNames),
 })(withSocketShape)
 const withDispatcherShape = withDispatcher<typeof withIdleQuitShape>({
   onActiveClient: () => withIdleQuitShape.idleQuit.markActive(),
@@ -255,7 +256,8 @@ const withDispatcherShape = withDispatcher<typeof withIdleQuitShape>({
   getIdleQuitAfterSec: () => withSocketShape.config.idleQuitAfterSec,
   // tribe.stop: clean shutdown (drain, close socket, exit 0), no successor.
   triggerShutdown: () => refs.shutdown(),
-  resolveDelivery: prefixFallbackDeliveryResolver(process.env.TRIBE_DELIVERY_FALLBACKS),
+  resolveDelivery: deliveryFallbackPolicy?.resolveDelivery,
+  retiredNames: deliveryFallbackPolicy?.retiredNames,
 })(withIdleQuitShape)
 // MCP-spec surface — reads the tool registry, registers initialize / tools/list
 // / tools/call on the dispatcher. tools/call routes through the dispatcher's
