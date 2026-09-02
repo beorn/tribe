@@ -42,6 +42,11 @@
  *     still-open ball's row would silently turn `content` null out from
  *     under it (@km/tribe/22844's "a ball never outlives its question").
  *
+ *   - A reciprocal `status + ref` TAKING receipt for an OPEN pending_request
+ *     is likewise retained. The receipt is the durable authority that removes
+ *     a taken ball from idle attention; deleting it while the ball remains
+ *     open would silently make the obligation actionable again.
+ *
  *   - A messages_archive row at or above the fleet's live-cursor floor is
  *     never deleted. Two cursor families reach into messages_archive
  *     through the `journal` UNION (health-cadence.ts): mailbox_cursors'

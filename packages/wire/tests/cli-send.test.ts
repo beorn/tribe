@@ -1157,6 +1157,21 @@ describe("send warns when it should have been a reply (22990)", () => {
     expect(res.stderr).toContain("[EXPIRED]")
   })
 
+  test("accepts an exact status + ref TAKING receipt without urging immediate settlement", async () => {
+    const res = await runAgainstPending(OWED_TO_AGENT3, [
+      "send",
+      "@agent/3",
+      "TAKING — recut",
+      "--type",
+      "status",
+      "--ref",
+      "req-owed",
+    ])
+
+    expect(res.code).toBe(0)
+    expect(res.stderr).not.toContain("open ball(s) from")
+  })
+
   // POSITIVE CONTROLS. Without these the assertions above could pass while the
   // check fired indiscriminately, which would be a warning nobody reads.
   test("POSITIVE CONTROL: silent when the ball is owed to a DIFFERENT seat", async () => {

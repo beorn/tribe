@@ -1129,13 +1129,34 @@ describe("dispatcher bounded mailbox drain", () => {
     expect(status.session).toBe(name)
   })
 
-  it("advances the durable role cursor while keeping tracked obligations visible", async () => {
+  it("keeps taken obligations open without counting them as idle attention", async () => {
     const harness = createDispatcherHarness({ operatorCapability: "operator-test-secret" })
     cleanup = harness.dispose
+    const readStatus = async (id: string) =>
+      parseResult<{ unread_count: number; oldest_unread_age_min: number; oldest_unread_ts: number }>(
+        await harness.dispatcher.handleRequest(
+          { jsonrpc: "2.0", id, method: "cli_inbox_status", params: { session: "@chief" } },
+          "conn-drain",
+        ),
+      )
 
-    harness.sendActionable("@chief", "first historical request")
-    harness.sendActionable("@chief", "second historical request")
-    harness.sendActionable("@chief", "third historical request")
+    const firstRequest = harness.sendActionable("@chief", "first historical request", "first-request")
+    const secondRequest = harness.sendActionable("@chief", "second historical request")
+    const thirdRequest = harness.sendActionable("@chief", "third historical request", "third-request")
+    harness.sendTakingStatus("@chief", "fourth-request")
+    const fourthRequest = harness.sendActionable("@chief", "fourth historical request", "fourth-request")
+    harness.setPendingOpenedAt("first-request", 1_000)
+    harness.setPendingOpenedAt(secondRequest.id, 2_000)
+    harness.setPendingOpenedAt("third-request", 3_000)
+    harness.setPendingOpenedAt("fourth-request", 4_000)
+
+    harness.sendTakingStatus("@dev/2", firstRequest.id)
+    expect((await readStatus("wrong-owner-status")).unread_count).toBe(4)
+    harness.sendTakingStatus("@chief", firstRequest.id)
+    expect(await readStatus("taken-oldest-is-not-actionable")).toMatchObject({
+      unread_count: 3,
+      oldest_unread_ts: 2_000,
+    })
 
     const first = parseResult<InboxDrainResult>(
       await harness.dispatcher.handleRequest(
@@ -1149,8 +1170,8 @@ describe("dispatcher bounded mailbox drain", () => {
       ),
     )
     expect(first.events.map((event) => event.content)).toEqual([
-      "first historical request",
       "second historical request",
+      "third historical request",
     ])
     expect(first.drained_count).toBe(2)
     expect(first.unread_count).toBe(3)
@@ -1166,21 +1187,19 @@ describe("dispatcher bounded mailbox drain", () => {
         "conn-drain",
       ),
     )
-    expect(second.events.map((event) => event.content)).toEqual(["third historical request"])
+    expect(second.events.map((event) => event.content)).toEqual(["fourth historical request"])
+    expect(second.drained_count).toBe(1)
     expect(second.unread_count).toBe(3)
 
-    const status = parseResult<{ unread_count: number }>(
-      await harness.dispatcher.handleRequest(
-        {
-          jsonrpc: "2.0",
-          id: "status-after-drain",
-          method: "cli_inbox_status",
-          params: { session: "@chief" },
-        },
-        "conn-drain",
-      ),
-    )
-    expect(status.unread_count).toBe(3)
+    const clockRollbackReceipt = harness.sendTakingStatus("@chief", secondRequest.id)
+    harness.setMessageTimestamp(clockRollbackReceipt.id, 1)
+    harness.sendTakingStatus("@chief", "third-request")
+    harness.sendTakingStatus("@chief", fourthRequest.id)
+    expect(await readStatus("status-after-drain")).toMatchObject({
+      unread_count: 0,
+      oldest_unread_age_min: 0,
+      oldest_unread_ts: 0,
+    })
 
     const wait = parseResult<InboxWaitResult>(
       await harness.dispatcher.handleRequest(
@@ -1193,10 +1212,10 @@ describe("dispatcher bounded mailbox drain", () => {
         "conn-drain",
       ),
     )
-    expect(wait.timed_out).toBe(false)
-    expect(wait.unread_count).toBe(3)
+    expect(wait.timed_out).toBe(true)
+    expect(wait.unread_count).toBe(0)
     expect(wait.attention.actionable_unread).toEqual([])
-    expect(wait.attention.pending_balls).toHaveLength(3)
+    expect(wait.attention.pending_balls).toHaveLength(4)
     expect(harness.sessionCount("@chief")).toBe(0)
     expect(harness.sessionAnnouncements("@chief")).toEqual([])
   })
@@ -1932,8 +1951,38 @@ function createDispatcherHarness(
       }
       return daemon.dispatcher.handleRequest(req, connId)
     },
-    sendActionable(recipient: string, content: string = "wake inbox wait") {
-      return sendMessage(daemonCtx, recipient, content, "request", undefined, undefined, "direct")
+    sendActionable(recipient: string, content: string = "wake inbox wait", request?: string) {
+      return sendMessage(
+        daemonCtx,
+        recipient,
+        content,
+        "request",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        request === undefined ? {} : { request },
+      )
+    },
+    sendTakingStatus(owner: string, ref: string) {
+      const ownerCtx = createTribeContext({
+        db,
+        stmts,
+        sessionId: `taking-${owner}`,
+        sessionRole: "member",
+        initialName: owner,
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+        onMessageInserted: undefined,
+      })
+      return sendMessage(ownerCtx, daemonCtx.getName(), `taking ${ref}`, "status", undefined, ref, "direct")
+    },
+    setMessageTimestamp(id: string, ts: number) {
+      db.prepare("UPDATE messages SET ts = ? WHERE id = ?").run(ts, id)
+    },
+    setPendingOpenedAt(requestId: string, openedAt: number) {
+      db.prepare("UPDATE pending_request SET opened_at = ? WHERE request_id = ?").run(openedAt, requestId)
     },
     sendAttentionResponse(recipient: string, content: string) {
       return sendMessage(daemonCtx, recipient, content, "response", undefined, undefined, "direct")

@@ -190,7 +190,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
               "Per-message delivery class. 'push' fans the durable row out to live channels; 'pull' keeps it inbox-only. Defaults to push.",
           },
           bead: { type: "string", description: "Associated bead ID (optional)" },
-          ref: { type: "string", description: "Durable correlation reference stored with the message (optional)" },
+          ref: {
+            type: "string",
+            description:
+              "Durable non-closing correlation reference. Pair status + ref with a request or message id for a TAKING receipt.",
+          },
           request: {
             oneOf: [
               { type: "string", minLength: 1, not: { const: "true" } },
@@ -201,7 +205,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           },
           reply: {
             type: "string",
-            description: "Ball-tracker: close the tracked request with the given id. Releases the ball.",
+            description:
+              "Ball-tracker settlement reference. Pair response + reply for final disposition; tracker.closed proves release.",
           },
           fanout: {
             type: "string",
@@ -342,12 +347,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "ref",
           flags: "--ref <reference>",
-          description: "Durable correlation reference stored with the message",
+          description: "Non-closing correlation; pair status + ref for a TAKING receipt",
         },
         {
           name: "reply",
           flags: "--reply <request_id>",
-          description: "Ball-tracker: close the tracked request with this id",
+          description: "Settlement reference; pair response + reply for final disposition",
         },
         {
           name: "anonymous",
@@ -534,7 +539,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           wake_on_correlated_reply: {
             type: "boolean",
             description:
-              "Also wake when a response or status closes one of this session's validated tracked requests. Defaults to false.",
+              "Also wake when a response or status carries a validated reply settlement for one of this session's tracked requests. A status + ref TAKING receipt is non-closing. Defaults to false.",
           },
         },
       },
@@ -551,15 +556,15 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             unread_count: {
               type: "number",
               description:
-                "Actionable attention count at return time: unread direct messages plus still-owed tracked balls, de-duplicated by message.",
+                "Unanswered actionable count at return time: unread attention messages plus open balls without a later owner status + ref TAKING receipt, de-duplicated by message.",
             },
             oldest_unread_age_min: {
               type: "number",
-              description: "Age of the oldest unread direct message or still-owed tracked ball, in minutes.",
+              description: "Age of the oldest item counted by unread_count, in minutes.",
             },
             oldest_unread_ts: {
               type: "number",
-              description: "Oldest unread direct message or still-owed tracked ball timestamp (unix ms).",
+              description: "Timestamp of the oldest item counted by unread_count (unix ms).",
             },
             waited_ms: { type: "number", description: "How long the wait lasted." },
             effective_timeout_ms: {
@@ -618,7 +623,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     cli: available({
       name: "inbox-wait",
       description:
-        "Long-poll the actionable inbox until a request/query/assign/verdict direct message arrives or the timeout elapses. This is the steady-state bounded-wait rail. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the daemon-resolved launch identity.",
+        "Long-poll until unanswered actionable attention exists or the timeout elapses. This is the steady-state bounded-wait rail. Direct notify/status/response rows do not wake by default; callers may opt into reply settlements correlated to their own tracked requests. Defaults to the daemon-resolved launch identity.",
       lifetime: "one-shot",
       mapsToMcp: "inbox.wait",
       options: [
@@ -638,7 +643,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "wake-on-correlated-reply",
           flags: "--wake-on-correlated-reply",
-          description: "Also wake on a validated reply to one of this session's tracked requests",
+          description: "Also wake on a validated reply settlement to one of this session's tracked requests",
           mapsTo: "wake_on_correlated_reply",
         },
         { name: "json", flags: "--json", description: "Emit machine-readable JSON (for hooks)" },

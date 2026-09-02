@@ -122,22 +122,27 @@ name, then they exchange messages through the shared daemon.
 
 ```text
 tribe.join({ name: "alice", role: "member" })
-tribe.send({ to: "bob", message: "starting on the parser refactor", type: "notify" })
+tribe.send({ to: "bob", message: "take the parser tests", type: "assign", request: "parser-tests" })
 ```
 
 **Session B:**
 
 ```text
 tribe.join({ name: "bob", role: "member" })
-tribe.fetch({ limit: 10 })          // drains alice's message from the inbox
-tribe.send({ to: "alice", message: "ack — I'll take the tests", type: "notify" })
+tribe.fetch({ limit: 10 })
+tribe.send({ to: "alice", message: "TAKING — parser tests", type: "status", ref: "parser-tests" })
+// ...work...
+tribe.send({ to: "alice", message: "parser tests done", type: "response", reply: "parser-tests" })
 ```
 
 `tribe.members()` in either session lists who's online. `tribe.send` with
 `type: "request"` (or `query`/`assign`) opens a **pending ball** the recipient
 owns until they reply — `tribe.pending()` shows the open pile, and
-`tribe.fetch()` surfaces an `attention` projection (actionable unread +
-oldest open balls) ahead of the chronological event log.
+`tribe.fetch()` surfaces an `attention` projection (actionable unread + oldest
+open balls) ahead of the chronological event log. An owner `status` whose
+`ref` matches the request or message id is a non-closing TAKING receipt: it
+removes that ball from idle/wait attention but keeps it visible in pending.
+Only a structured `response` whose `reply` matches the id settles the ball.
 
 The same flow from a terminal, without Claude Code (a daemon must be running):
 
@@ -304,10 +309,13 @@ tracking — only message type and `request` decide whether a pending ball opens
 opens exactly one recipient-owned "ball"; other types open one only when asked.
 The ball stores ownership, age, and fanout. Tracked requests and queries receive
 a 20-minute escalation deadline; assignments have no reply-clock default.
-`expires_in_ms` overrides the class policy for one send. A reply closes the
-original ownership row. `tribe.fetch()` returns a
-read-only `attention` projection — actionable unread plus the oldest open balls
-— ahead of the chronological events; `tribe.pending()` returns the full pile.
+`expires_in_ms` overrides the class policy for one send. `status + ref` is a
+non-closing TAKING receipt from the owner: it removes the ball from idle/wait
+attention without resetting its deadline or removing it from the pending pile.
+`response + reply` is final settlement and closes the original ownership row.
+`tribe.fetch()` returns a read-only `attention` projection — actionable unread
+plus the oldest open balls — ahead of the chronological events;
+`tribe.pending()` returns the full pile, including taken balls.
 Deadline passage changes presentation, never membership: the ball becomes
 `expired`, sorts first, and remains in the owner's pile. Reads compare the live
 deadline directly, so they stay authoritative even if the durable

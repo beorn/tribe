@@ -288,6 +288,9 @@ export function openDatabase(path: string): Database {
   db.run(
     "CREATE INDEX IF NOT EXISTS idx_messages_reply_retire ON messages(sender, recipient, reply) WHERE kind = 'direct' AND reply IS NOT NULL",
   )
+  db.run(
+    "CREATE INDEX IF NOT EXISTS idx_messages_status_ref_retire ON messages(sender, recipient, ref) WHERE kind = 'direct' AND type = 'status' AND ref IS NOT NULL",
+  )
   // Outer drive. Without a recipient-leading index the planner chose
   // idx_messages_kind_ts and walked every direct message in the journal, then
   // sorted through a temp B-tree so `ORDER BY rowid DESC LIMIT 1` could not
@@ -303,6 +306,9 @@ export function openDatabase(path: string): Database {
   // simply moved the stall rather than removing it.
   db.run(
     "CREATE INDEX IF NOT EXISTS idx_messages_archive_reply_retire ON messages_archive(sender, recipient, reply) WHERE kind = 'direct' AND reply IS NOT NULL",
+  )
+  db.run(
+    "CREATE INDEX IF NOT EXISTS idx_messages_archive_status_ref_retire ON messages_archive(sender, recipient, ref) WHERE kind = 'direct' AND type = 'status' AND ref IS NOT NULL",
   )
 
   return db
@@ -1187,8 +1193,29 @@ export const CORRELATED_REPLY_TYPES_SQL = CORRELATED_REPLY_TYPES.map((type) => `
  * plus rows atomically classified at insertion (currently direct responses). */
 export const ATTENTION_PREDICATE_SQL = `(type IN (${ACTIONABLE_TYPES_SQL}) OR attention_required = 1)`
 
+type TakingStatusSubjectSql = {
+  readonly owner: string
+  readonly requester: string
+}
+
+function takingStatusSubjectMatchSql(receipt: string, subject: TakingStatusSubjectSql): string {
+  return `${receipt}.kind = 'direct'
+      AND ${receipt}.type = 'status'
+      AND ${receipt}.sender = ${subject.owner}
+      AND ${receipt}.recipient = ${subject.requester}`
+}
+
+/** Structured owner receipt: status threads the request without settling its ball. */
+function takingStatusMatchSql(receipt: string, subject: TakingStatusSubjectSql, ref: string): string {
+  return `${takingStatusSubjectMatchSql(receipt, subject)}
+      AND ${receipt}.ref IS NOT NULL
+      AND ${receipt}.ref = ${ref}`
+}
+
 /**
- * Selective reply retirement over the existing durable message correlation.
+ * Selective reply/taking retirement over the existing durable message
+ * correlation. A taking status retires attention but never the open ball;
+ * only a structured reply settles that tracker row.
  * A recipient-wide cursor cannot express this safely: advancing it for one
  * reply could swallow an unrelated older actionable row.
  */
@@ -1210,8 +1237,27 @@ export function unretiredAttentionPredicateSql(
       AND ${as}.${sequence} > ${row}${source.sequence}
       AND ${as}.reply = COALESCE(${row}request, ${row}id)
   )`
+  const noTakingStatusRefIn = (table: string, sequence: string, as: string, ref: string) => `NOT EXISTS (
+    SELECT 1
+    FROM ${table} AS ${as}
+    WHERE ${takingStatusMatchSql(
+      as,
+      {
+        owner: `${row}recipient`,
+        requester: `${row}sender`,
+      },
+      ref,
+    )}
+      AND ${as}.${sequence} > ${row}${source.sequence}
+  )`
+  const noTakingStatusIn = (table: string, sequence: string, suffix: string) =>
+    `${noTakingStatusRefIn(table, sequence, `taking_request_${suffix}`, `${row}request`)}
+    AND ${noTakingStatusRefIn(table, sequence, `taking_message_${suffix}`, `${row}id`)}`
+  const noRetirementIn = (table: string, sequence: string, suffix: string) =>
+    `${noReplyIn(table, sequence, `reply_${suffix}`)}
+    AND ${noTakingStatusIn(table, sequence, suffix)}`
 
-  if (source.relation === "messages") return noReplyIn("messages", "rowid", "reply_message")
+  if (source.relation === "messages") return noRetirementIn("messages", "rowid", "message")
 
   // `journal` is a CTE — `messages UNION ALL messages_archive`. Probing it
   // directly forced SQLite to MATERIALISE all ~158k rows and then scan that
@@ -1227,8 +1273,47 @@ export function unretiredAttentionPredicateSql(
   // quadratic, and removing it means splitting three aggregate queries across
   // both tables and recombining in TypeScript — a separate change against an
   // on-demand path, not this one against the continuous burn.
-  return `${noReplyIn("messages", "rowid", "reply_message")}
-    AND ${noReplyIn("messages_archive", "seq", "reply_archived")}`
+  return `${noRetirementIn("messages", "rowid", "message")}
+    AND ${noRetirementIn("messages_archive", "seq", "archived")}`
+}
+
+function untakenPendingBallPredicateSql(alias: string, originalSequence: string): string {
+  const subject = {
+    owner: `${alias}.recipient`,
+    requester: `${alias}.sender`,
+  }
+  const noTakingStatusRefIn = (table: string, receipt: string, sequence: string, ref: string) => `NOT EXISTS (
+    SELECT 1
+    FROM ${table} AS ${receipt}
+    WHERE ${takingStatusMatchSql(receipt, subject, ref)}
+      AND ${receipt}.${sequence} > ${originalSequence}
+  )`
+  const noTakingStatusIn = (table: string, sequence: string, suffix: string) =>
+    `${noTakingStatusRefIn(table, `taking_request_${suffix}`, sequence, `${alias}.request_id`)}
+    AND ${noTakingStatusRefIn(table, `taking_message_${suffix}`, sequence, `${alias}.message_id`)}`
+  return `${noTakingStatusIn("messages", "rowid", "message")}
+    AND ${noTakingStatusIn("messages_archive", "seq", "archived")}`
+}
+
+/** A TAKING receipt is durable evidence for an open ball. Keep it through
+ * archive retention until the structured reply removes the pending row. */
+function takingStatusProtectsOpenBallPredicateSql(receipt: string, receiptSequence: string): string {
+  const pending = "taking_pending"
+  const originalMessage = "taking_original_message"
+  const originalArchive = "taking_original_archive"
+  return `${receipt}.kind = 'direct'
+    AND ${receipt}.type = 'status'
+    AND ${receipt}.ref IS NOT NULL
+    AND EXISTS (
+      SELECT 1
+      FROM pending_request AS ${pending}
+      LEFT JOIN messages AS ${originalMessage} ON ${originalMessage}.id = ${pending}.message_id
+      LEFT JOIN messages_archive AS ${originalArchive} ON ${originalArchive}.id = ${pending}.message_id
+      WHERE ${receipt}.sender = ${pending}.recipient
+        AND ${receipt}.recipient = ${pending}.sender
+        AND (${receipt}.ref = ${pending}.request_id OR ${receipt}.ref = ${pending}.message_id)
+        AND ${receipt}.${receiptSequence} > COALESCE(${originalMessage}.rowid, ${originalArchive}.seq)
+    )`
 }
 
 export type TribeStatements = ReturnType<typeof createStatements>
@@ -1455,6 +1540,19 @@ export function createStatements(db: Database) {
 		ORDER BY p.opened_at ASC
 	`),
 
+    /** Open balls that still need an owner receipt. A later status ref marks
+     *  the ball taken for attention only; the pending_request row remains the
+     *  delivery/deadline authority until a structured reply settles it. */
+    selectUntakenPendingForRecipient: db.prepare(`
+		SELECT p.request_id
+		FROM pending_request p
+		LEFT JOIN messages pending_message ON pending_message.id = p.message_id
+		LEFT JOIN messages_archive pending_archive ON pending_archive.id = p.message_id
+		WHERE p.recipient = $recipient
+			AND ${untakenPendingBallPredicateSql("p", "COALESCE(pending_message.rowid, pending_archive.seq)")}
+		ORDER BY p.opened_at ASC
+	`),
+
     /** Full active pending surface for one owner. Unlike the attention query
      *  above, this deliberately joins question bodies in the same statement
      *  so snapshot cost does not grow by one query per ball. */
@@ -1549,22 +1647,23 @@ export function createStatements(db: Database) {
 
     /** Archive-delete batch candidates: archived rows old enough under the
      *  (longer, independently configurable) delete window, at or below the
-     *  live-cursor floor, and not referenced by any open ball — a ball's
-     *  message_id must stay resolvable via the messages/messages_archive
-     *  LEFT JOIN pattern every pending* query already uses (@km/tribe/22844,
-     *  ae49897). Oldest-first, LIMIT-bounded. */
+     *  live-cursor floor, and not evidence for an open ball. Both its question
+     *  body and TAKING receipt remain durable until settlement, so a ball
+     *  neither outlives its question nor silently becomes actionable again.
+     *  Oldest-first, LIMIT-bounded. */
     selectArchiveDeleteBatch: db.prepare(`
 		SELECT a.id, a.seq
 		FROM messages_archive a
 		WHERE a.ts < $cutoff
 			AND a.seq <= $cursor_floor
 			AND NOT EXISTS (SELECT 1 FROM pending_request p WHERE p.message_id = a.id)
+			AND NOT (${takingStatusProtectsOpenBallPredicateSql("a", "seq")})
 		ORDER BY a.seq ASC
 		LIMIT $limit
 	`),
 
     /** Diagnostic companion to selectArchiveDeleteBatch: same age predicate,
-     *  reports how many rows the two exclusion rules are holding back so a
+     *  reports how many rows the cursor/open-ball rules are holding back so a
      *  disabled-by-exclusion or otherwise ineffective sweep is debuggable
      *  from its logged counts rather than silently doing nothing (NO SILENT
      *  ERRORS). Bounded to the ts<cutoff slice via idx_messages_archive_ts —
@@ -1573,7 +1672,8 @@ export function createStatements(db: Database) {
 		SELECT
 			COUNT(*) AS eligible_by_age,
 			SUM(CASE WHEN a.seq > $cursor_floor THEN 1 ELSE 0 END) AS excluded_by_cursor,
-			SUM(CASE WHEN EXISTS (SELECT 1 FROM pending_request p WHERE p.message_id = a.id) THEN 1 ELSE 0 END) AS excluded_by_pending
+			SUM(CASE WHEN EXISTS (SELECT 1 FROM pending_request p WHERE p.message_id = a.id)
+				OR (${takingStatusProtectsOpenBallPredicateSql("a", "seq")}) THEN 1 ELSE 0 END) AS excluded_by_pending
 		FROM messages_archive a
 		WHERE a.ts < $cutoff
 	`),

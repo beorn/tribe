@@ -1284,6 +1284,13 @@ function pendingBallsForOwner(ctx: TribeContext, owner: string, now: number): Pe
   return sortPendingBalls(rows.map((row) => pendingBall(row, now)))
 }
 
+function untakenPendingRequestIds(ctx: TribeContext, owner: string): ReadonlySet<string> {
+  const rows = ctx.stmts.selectUntakenPendingForRecipient.all({ $recipient: owner }) as Array<{
+    request_id: string
+  }>
+  return new Set(rows.map((row) => row.request_id))
+}
+
 function pendingBallsForOwnerWithContent(ctx: TribeContext, owner: string, now: number): PendingBallWithContent[] {
   const rows = ctx.stmts.selectPendingForRecipientWithContent.all({ $recipient: owner }) as PendingBallRow[]
   return sortPendingBalls(rows.map((row) => pendingBallWithContent(row, now)))
@@ -2944,15 +2951,17 @@ export function readAttentionProjection(
   now = Date.now(),
 ): {
   attentionRows: FetchRow[]
-  pendingBalls: PendingBall[]
+  untakenPendingBalls: PendingBall[]
   actionableCount: number
   attention: AttentionProjection
 } {
   const attentionRows = filterRowsByTrust(ctx, ctx.stmts.selectAttention.all({ $name: owner }) as FetchRow[])
   const pendingBalls = pendingBallsForOwner(ctx, owner, now)
+  const untakenRequestIds = untakenPendingRequestIds(ctx, owner)
+  const untakenPendingBalls = pendingBalls.filter((ball) => untakenRequestIds.has(ball.request_id))
   const attentionMessageIds = new Set(attentionRows.map((row) => row.id))
   const actionableCount =
-    attentionRows.length + pendingBalls.filter((ball) => !attentionMessageIds.has(ball.message_id)).length
+    attentionRows.length + untakenPendingBalls.filter((ball) => !attentionMessageIds.has(ball.message_id)).length
   const prioritizedPendingBalls = pendingBalls.toSorted((left, right) => {
     const leftRank = left.request_kind === "incident" ? 1 : 0
     const rightRank = right.request_kind === "incident" ? 1 : 0
@@ -2964,7 +2973,7 @@ export function readAttentionProjection(
   const withheldIncidents = withheld.length - withheldRequests
   return {
     attentionRows,
-    pendingBalls,
+    untakenPendingBalls,
     actionableCount,
     attention: {
       actionable_unread: attentionRows.map(fetchEvent),

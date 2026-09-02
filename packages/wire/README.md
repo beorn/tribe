@@ -49,6 +49,10 @@ recipient session's delivery mode. `push` is the default and permits live
 channel fanout; `pull` persists the message for inbox reads without a channel
 wakeup. Delivery classification is orthogonal to semantic ball tracking: only
 the message type and `--request` decide whether a pending ball opens.
+For tracked work, `--type status --ref <request-or-message-id>` records a
+non-closing TAKING receipt and removes the ball from idle/wait attention while
+leaving it open. Final disposition is `--type response --reply <id>`; the
+reported tracker `closed` count proves settlement.
 The shell examples opt into `--anonymous` because no managed launch identity is
 present; anonymous sends are limited to untracked messages. Managed provider
 seats omit the flag and are attributed through daemon launch authority.

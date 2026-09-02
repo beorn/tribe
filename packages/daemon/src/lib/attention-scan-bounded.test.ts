@@ -12,11 +12,12 @@
  *
  * Two independent defects produced that, and this file pins both:
  *
- *  1. `unretiredAttentionPredicateSql` is a correlated NOT EXISTS keyed on
- *     (sender, recipient, reply). No index led with those columns, so the only
- *     candidate was idx_messages_sender(sender), and EVERY outer candidate row
- *     re-scanned everything its counterpart had ever sent. That is the
- *     quadratic term, and it is why the busiest seat was the slowest.
+ *  1. `unretiredAttentionPredicateSql` uses correlated NOT EXISTS probes keyed
+ *     on (sender, recipient, reply) and (sender, recipient, status ref). No
+ *     index led with those columns, so the only candidate was
+ *     idx_messages_sender(sender), and EVERY outer candidate row re-scanned
+ *     everything its counterpart had ever sent. That is the quadratic term,
+ *     and it is why the busiest seat was the slowest.
  *
  *  2. No index led on `recipient` while preserving rowid order, so the planner
  *     drove the outer loop off idx_messages_kind_ts(kind) — a walk of every
@@ -172,6 +173,7 @@ describe("attention projection resolves retirement through an index", () => {
     // idx_messages_sender as the subquery's index IS the quadratic plan: it
     // means "scan everything this sender ever sent", once per candidate row.
     expect(plan).toContain("idx_messages_reply_retire")
+    expect(plan).toContain("idx_messages_status_ref_retire")
     expect(plan).not.toContain("idx_messages_sender")
   })
 

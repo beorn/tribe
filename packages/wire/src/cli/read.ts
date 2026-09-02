@@ -1214,9 +1214,10 @@ async function cmdDoctor(opts: { fix?: boolean }): Promise<void> {
 }
 
 /**
- * Inbox status — count + age of actionable DMs the target session hasn't
- * drained via `tribe.fetch` yet. JSON when `--json` is set; otherwise a
- * human-readable summary. Used by `.claude/hooks/chief-drain-check.sh`.
+ * Inbox status — count + age of unanswered actionable attention: unread
+ * attention messages plus open balls without an owner TAKING receipt. JSON
+ * when `--json` is set; otherwise a human-readable summary. Used by
+ * `.claude/hooks/chief-drain-check.sh`.
  * Delivery-attention lineage: @ag/tribe/21626-per-seat-inbox-staleness-alarm.
  */
 async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promise<void> {
@@ -1232,11 +1233,11 @@ async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promi
   }
   const n = result.unread_count
   if (n === 0) {
-    console.log(`${result.session}: inbox drained (0 unread actionable DMs).`)
+    console.log(`${result.session}: no unanswered actionables.`)
     return
   }
   console.log(
-    `${result.session}: ${n} unread actionable DM${n === 1 ? "" : "s"}, ` +
+    `${result.session}: ${n} unanswered actionable item${n === 1 ? "" : "s"}, ` +
       `oldest ${result.oldest_unread_age_min}min ago.`,
   )
 }
@@ -1613,7 +1614,7 @@ async function cmdInboxWait(opts: {
     return
   }
   if (result.timed_out) {
-    console.log(`${result.session}: no actionable DMs within ${Math.round(controls.timeoutMs / 1000)}s.`)
+    console.log(`${result.session}: no unanswered actionables within ${Math.round(controls.timeoutMs / 1000)}s.`)
     process.exitCode = 64
     return
   }
@@ -1623,7 +1624,7 @@ async function cmdInboxWait(opts: {
   }
   const n = result.unread_count
   console.log(
-    `${result.session}: ${n} unread actionable DM${n === 1 ? "" : "s"}, ` +
+    `${result.session}: ${n} unanswered actionable item${n === 1 ? "" : "s"}, ` +
       `oldest ${result.oldest_unread_age_min}min ago (waited ${Math.round(result.waited_ms / 1000)}s).`,
   )
 }
@@ -1893,7 +1894,7 @@ export function registerReadCommands(program: Command): void {
 
   program
     .command("inbox-status")
-    .description("Show actionable DMs for the current managed launch or an explicit session")
+    .description("Show unanswered actionable attention for the current managed launch or an explicit session")
     .option("--session <name>", "Explicit session to inspect")
     .option("--json", "Emit machine-readable JSON (for hooks)")
     .action((opts: { session?: string; json?: boolean }) => void cmdInboxStatus(opts))

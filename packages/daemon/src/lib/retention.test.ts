@@ -115,13 +115,30 @@ describe("journal retention sweep", () => {
    *  by sending + archiving real messages one at a time. */
   function insertArchived(
     db: ReturnType<typeof openDatabase>,
-    o: { id: string; seq: number; ts: number; recipient?: string; sender?: string },
+    o: {
+      id: string
+      seq: number
+      ts: number
+      recipient?: string
+      sender?: string
+      type?: string
+      ref?: string
+    },
   ): void {
     db.prepare(
       `INSERT INTO messages_archive
-        (seq, id, type, sender, recipient, kind, content, ts, delivery, archived_at)
-       VALUES (?, ?, 'notify', ?, ?, 'direct', 'body', ?, 'push', ?)`,
-    ).run(o.seq, o.id, o.sender ?? "@sender", o.recipient ?? "@chief", o.ts, Date.now())
+        (seq, id, type, sender, recipient, kind, content, ref, ts, delivery, archived_at)
+       VALUES (?, ?, ?, ?, ?, 'direct', 'body', ?, ?, 'push', ?)`,
+    ).run(
+      o.seq,
+      o.id,
+      o.type ?? "notify",
+      o.sender ?? "@sender",
+      o.recipient ?? "@chief",
+      o.ref ?? null,
+      o.ts,
+      Date.now(),
+    )
   }
 
   function archivedIds(db: ReturnType<typeof openDatabase>): string[] {
@@ -334,7 +351,6 @@ describe("journal retention sweep", () => {
           $message_id: "owed-msg",
           $fanout: "first",
         })
-
         const config = enabledConfig({ deleteWindowMs: 90 * DAY })
         const result = runRetentionSweep(db, stmts, config)
 
@@ -511,6 +527,18 @@ describe("journal retention sweep", () => {
           $message_id: "pending-protected",
           $fanout: "first",
         })
+        // A TAKING receipt is durable attention state while the ball remains
+        // open. Deleting it would make an indefinite assignment actionable
+        // again after the archive window.
+        insertArchived(db, {
+          id: "taking-protected",
+          seq: 21,
+          ts: Date.now() - 200 * DAY,
+          sender: "@chief",
+          recipient: "@fable/1",
+          type: "status",
+          ref: "req-1",
+        })
         // Cursor-excluded: old, unreferenced, but past the mailbox cursor.
         insertArchived(db, { id: "cursor-protected", seq: 30, ts: Date.now() - 200 * DAY, recipient: "@chief" })
         db.prepare(
@@ -521,11 +549,14 @@ describe("journal retention sweep", () => {
 
         const result = runRetentionSweep(db, stmts, enabledConfig({ deleteWindowMs: 90 * DAY }))
 
-        expect(result.archiveDelete.eligibleByAge).toBe(3) // excludes too-fresh
-        expect(result.archiveDelete.excludedByPending).toBe(1)
+        expect(result.archiveDelete.eligibleByAge).toBe(4) // excludes too-fresh
+        expect(result.archiveDelete.excludedByPending).toBe(2)
         expect(result.archiveDelete.excludedByCursor).toBe(1)
         expect(result.archiveDelete.deleted).toBe(1)
-        expect(archivedIds(db).sort()).toEqual(["cursor-protected", "pending-protected", "too-fresh"].sort())
+        expect(archivedIds(db).sort()).toEqual(
+          ["cursor-protected", "pending-protected", "taking-protected", "too-fresh"].sort(),
+        )
+        expect(stmts.selectUntakenPendingForRecipient.all({ $recipient: "@chief" })).toEqual([])
       } finally {
         db.close()
       }

@@ -248,10 +248,10 @@ export function withDispatcher<
       latest_message_id: string | null
       latest_type: string | null
     } {
-      const { attentionRows, pendingBalls, actionableCount } = readAttentionProjection(daemonCtx, sessionName)
+      const { attentionRows, untakenPendingBalls, actionableCount } = readAttentionProjection(daemonCtx, sessionName)
       const oldest = attentionRows[0]
       const latest = attentionRows.at(-1)
-      const oldestPendingTs = pendingBalls.reduce(
+      const oldestPendingTs = untakenPendingBalls.reduce(
         (oldestTs, ball) => Math.min(oldestTs, Date.parse(ball.opened_at)),
         Number.POSITIVE_INFINITY,
       )
@@ -1566,8 +1566,8 @@ export function withDispatcher<
 
           /**
            * Delivery-attention status for any session (default `@chief`).
-           * Returns the count + age of actionable DMs the session hasn't
-           * drained via tribe.fetch. See
+           * Returns the count + age of unread attention messages and open
+           * balls without an owner TAKING receipt. See
            * @ag/tribe/21626-per-seat-inbox-staleness-alarm.
            */
           case "cli_inbox_status":

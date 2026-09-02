@@ -336,15 +336,16 @@ async function warnPendingReplyOwner(owner: string, reply: string): Promise<void
  * reply design could silently close a live obligation, and this cannot. Do not
  * "improve" it by inspecting the message.
  *
- * WARN, never refuse. Legitimate sends to someone you owe exist: a mid-work
- * status, an unrelated topic. Refusing there teaches people to route around
- * the check, which is worse than no check at all.
+ * WARN, never refuse. A structured `status --ref` matching an owed ball is the
+ * explicit non-closing TAKING receipt and stays silent; unrelated status or
+ * topic sends still warn. Refusing there teaches people to route around the
+ * check, which is worse than no check at all.
  *
  * HONEST SCOPE: this catches answered-but-never-released. It does nothing for
  * never-answered-at-all, which was the larger share of the ten overdue balls
  * on 2026-08-19. Latency and flag discipline are different failures.
  */
-async function warnUnreleasedBallToRecipient(sender: string, recipient: string): Promise<void> {
+async function warnUnreleasedBallToRecipient(sender: string, recipient: string, takingRef?: string): Promise<void> {
   // A broadcast is not a targeted send; warning on every fan-out would fire
   // constantly once a seat is behind, which is when a warning is least welcome
   // and most likely to be tuned out.
@@ -360,6 +361,9 @@ async function warnUnreleasedBallToRecipient(sender: string, recipient: string):
 
   const owed = (pending.pending ?? []).filter((row) => row.sender === recipient && row.recipient === sender)
   if (owed.length === 0) return
+  if (takingRef !== undefined && owed.some((row) => row.request_id === takingRef || row.message_id === takingRef)) {
+    return
+  }
 
   console.error(
     `tribe-wire send: note — you hold ${owed.length} open ball(s) from ${recipient} and this message carries no --reply.`,
@@ -459,7 +463,9 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
   }
   const caller = await resolveSendCaller(input.reply, input.anonymous)
   if (input.reply && caller) await warnPendingReplyOwner(caller.name, input.reply)
-  else if (!input.reply && caller && !input.anonymous) await warnUnreleasedBallToRecipient(caller.name, input.to)
+  else if (!input.reply && caller && !input.anonymous) {
+    await warnUnreleasedBallToRecipient(caller.name, input.to, type === "status" ? input.ref : undefined)
+  }
 
   const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input), caller, !input.anonymous)) as {
     error?: string
