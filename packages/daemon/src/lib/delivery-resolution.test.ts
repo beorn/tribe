@@ -113,6 +113,22 @@ describe("generic direct-message delivery resolution", () => {
     })
   })
 
+  it("does not retire an exact refusal shadowed by an earlier matching prefix", () => {
+    const policy = parseDeliveryFallbackPolicy(
+      JSON.stringify([
+        { prefix: "@", to: "@chief" },
+        { name: "@fleet", to: "@chief", action: "refuse" },
+      ]),
+    )
+
+    expect([...policy!.retiredNames]).toEqual([])
+    expect(policy!.resolveDelivery({ recipient: "@fleet", answerableNames: new Set() })).toMatchObject({
+      status: "accepted",
+      state: "bounced",
+      to: "@chief",
+    })
+  })
+
   it.each([
     ["not-json", /must be JSON/],
     [JSON.stringify({ prefix: "@worker/", to: "@manager" }), /JSON array/],

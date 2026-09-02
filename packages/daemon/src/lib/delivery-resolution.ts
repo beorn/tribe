@@ -39,7 +39,7 @@ export type DeliveryFallback = {
 
 export interface DeliveryFallbackPolicy {
   readonly resolveDelivery: DirectDeliveryResolver
-  /** Exact identities made terminal by an explicit `action: "refuse"` row. */
+  /** Exact identities made terminal by the first matching `action: "refuse"` row. */
   readonly retiredNames: ReadonlySet<string>
 }
 
@@ -101,9 +101,11 @@ export function parseDeliveryFallbackPolicy(raw: string | undefined): DeliveryFa
   if (duplicates.length > 0) {
     throw new Error(`TRIBE_DELIVERY_FALLBACKS has duplicate matchers: ${[...new Set(duplicates)].join(", ")}`)
   }
+  const matches = (row: DeliveryFallback, recipient: string): boolean =>
+    "name" in row ? recipient === row.name : recipient.startsWith(row.prefix)
 
   const resolveDelivery: DirectDeliveryResolver = ({ recipient, answerableNames }) => {
-    const fallback = rows.find((row) => ("name" in row ? recipient === row.name : recipient.startsWith(row.prefix)))
+    const fallback = rows.find((row) => matches(row, recipient))
     if (fallback?.action === "refuse") {
       return {
         status: "refused",
@@ -129,7 +131,9 @@ export function parseDeliveryFallbackPolicy(raw: string | undefined): DeliveryFa
   }
   const retiredNames = new Set<string>()
   for (const row of rows) {
-    if ("name" in row && row.name !== undefined && row.action === "refuse") retiredNames.add(row.name)
+    if (!("name" in row) || row.name === undefined || row.action !== "refuse") continue
+    const name = row.name
+    if (rows.find((candidate) => matches(candidate, name)) === row) retiredNames.add(name)
   }
   return { resolveDelivery, retiredNames }
 }

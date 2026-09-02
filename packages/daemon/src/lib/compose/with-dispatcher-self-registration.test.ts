@@ -121,6 +121,52 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
     expect(harness.sessionFilter("@fleet")).toEqual({ mode: "focus", until: null, mute: null })
   })
 
+  it("carries retired identity policy through the dispatcher health seam", async () => {
+    const harness = createDispatcherHarness({ retiredNames: new Set(["@fleet"]) })
+    cleanup = harness.dispose
+    const fleet = harness.connectClient()
+    await harness.register(fleet.connId, {
+      name: "@fleet",
+      pid: process.pid,
+      project: "/tmp/km",
+      launchId: "retired-fleet-launch",
+      launchParentPid: process.pid,
+    })
+    const operator = harness.connectClient()
+    await harness.register(operator.connId, {
+      name: "@operator",
+      pid: process.pid,
+      project: "/tmp/km",
+    })
+    fleet.socket.emitClose()
+
+    const health = parseResult<{
+      structuredContent: {
+        transport_wedges: Array<{ name: string }>
+        membership_discrepancy?: { missing: Array<{ name: string }> }
+        issues: string[]
+      }
+    }>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "retired-health", method: "tribe.health", params: {} },
+        operator.connId,
+      ),
+    ).structuredContent
+    expect(health.transport_wedges.some((row) => row.name === "@fleet")).toBe(false)
+    expect(health.membership_discrepancy?.missing.some((row) => row.name === "@fleet") ?? false).toBe(false)
+    expect(health.issues.some((issue) => issue.includes("@fleet"))).toBe(false)
+
+    const members = parseResult<{
+      structuredContent: { sessions: Array<{ name: string; transport_state: string }> }
+    }>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "retired-members", method: "tribe.members", params: { all: true } },
+        operator.connId,
+      ),
+    ).structuredContent.sessions
+    expect(members).toContainEqual(expect.objectContaining({ name: "@fleet", transport_state: "disconnected" }))
+  })
+
   it("preserves or overrides the stored notification filter when another transport fans in", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
@@ -1703,7 +1749,12 @@ describe("dispatcher inbox-wait parsing", () => {
 })
 
 function createDispatcherHarness(
-  options: { suppressWindowMs?: number; socketStartedAt?: number; operatorCapability?: string } = {},
+  options: {
+    suppressWindowMs?: number
+    socketStartedAt?: number
+    operatorCapability?: string
+    retiredNames?: ReadonlySet<string>
+  } = {},
 ) {
   const tempDir = mkdtempSync(join(tmpdir(), "tribe-dispatcher-"))
   const scope = createScope("dispatcher-self-registration-test")
@@ -1847,7 +1898,10 @@ function createDispatcherHarness(
       handedOff: false,
     },
   }
-  const daemon = withDispatcher({ suppressWindowMs: options.suppressWindowMs ?? Number.MAX_SAFE_INTEGER })(shape)
+  const daemon = withDispatcher({
+    suppressWindowMs: options.suppressWindowMs ?? Number.MAX_SAFE_INTEGER,
+    retiredNames: options.retiredNames,
+  })(shape)
 
   return {
     socketPath: shape.config.socketPath,
