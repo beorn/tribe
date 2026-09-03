@@ -1173,8 +1173,8 @@ export const CURRENT_SCHEMA_VERSION: number = MIGRATIONS.at(-1)!.version
 
 /**
  * The default-wake/stop-line message types — the ONE canonical set (19442). A
- * DIRECT message of one of these types addressed to a name is "actionable": it
- * opens work the recipient must act on. `inbox.wait` gates on it and the
+ * A message of one of these types is "actionable" when it is either direct or
+ * an untaken tracked actionable broadcast owned by the mailbox. `inbox.wait` gates on it and the
  * chief-absence watchdog counts it. Durable attention additionally carries
  * newly classified direct responses without making them default wakeups.
  */
@@ -1293,6 +1293,36 @@ function untakenPendingBallPredicateSql(alias: string, originalSequence: string)
     AND ${noTakingStatusRefIn(table, `taking_message_${suffix}`, sequence, `${alias}.message_id`)}`
   return `${noTakingStatusIn("messages", "rowid", "message")}
     AND ${noTakingStatusIn("messages_archive", "seq", "archived")}`
+}
+
+const TRACKED_BROADCAST_SEQUENCE_SQL = "COALESCE(m.rowid, a.seq)"
+const TRACKED_BROADCAST_MESSAGE_JOIN_SQL = `FROM pending_request AS p INDEXED BY idx_pending_recipient
+  LEFT JOIN messages AS m ON m.id = p.message_id
+  LEFT JOIN messages_archive AS a ON a.id = p.message_id`
+const TRACKED_BROADCAST_FETCH_COLUMNS_SQL = `COALESCE(m.id, a.id) AS id,
+  ${TRACKED_BROADCAST_SEQUENCE_SQL} AS rowid,
+  COALESCE(m.type, a.type) AS type,
+  COALESCE(m.sender, a.sender) AS sender,
+  COALESCE(m.recipient, a.recipient) AS recipient,
+  COALESCE(m.content, a.content) AS content,
+  COALESCE(m.bead_id, a.bead_id) AS bead_id,
+  COALESCE(m.ref, a.ref) AS ref,
+  COALESCE(m.ts, a.ts) AS ts,
+  COALESCE(m.delivery, a.delivery) AS delivery,
+  COALESCE(m.topic, a.topic) AS topic,
+  COALESCE(m.room_id, a.room_id) AS room_id,
+  COALESCE(m.summary, a.summary) AS summary,
+  COALESCE(m.attention_required, a.attention_required) AS attention_required`
+
+/** A tracked broadcast belongs to a mailbox only through its existing
+ * pending_request owner row. Drive from pending_request.recipient and resolve
+ * the question from either retention tier, keeping direct-mail scans on their
+ * recipient-leading index instead of introducing a multi-index OR + sort. */
+function trackedBroadcastAttentionPredicateSql(ownerParameter = "$name"): string {
+  return `p.recipient = ${ownerParameter}
+    AND COALESCE(m.recipient, a.recipient) = '*'
+    AND COALESCE(m.kind, a.kind) = 'broadcast'
+    AND ${untakenPendingBallPredicateSql("p", TRACKED_BROADCAST_SEQUENCE_SQL)}`
 }
 
 /** A TAKING receipt is durable evidence for an open ball. Keep it through
@@ -1801,6 +1831,16 @@ export function createStatements(db: Database) {
         AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
     `),
 
+    getUnreadTrackedBroadcasts: db.prepare(`
+      SELECT
+        COUNT(*) AS count,
+        COALESCE(MIN(COALESCE(m.ts, a.ts)), 0) AS oldest_ts
+      ${TRACKED_BROADCAST_MESSAGE_JOIN_SQL}
+      WHERE ${trackedBroadcastAttentionPredicateSql()}
+        AND COALESCE(m.sender, a.sender) != $name
+        AND COALESCE(m.type, a.type) IN (${ACTIONABLE_TYPES_SQL})
+    `),
+
     /** Structural tail of the same actionable-mailbox projection. Await
      * supervisors use this cursor/id/type tuple to plan delivery without
      * copying message content across the control plane. */
@@ -1844,6 +1884,15 @@ export function createStatements(db: Database) {
       LIMIT 1
     `),
 
+    getLatestTrackedBroadcastInboxWaitMessage: db.prepare(`
+      SELECT MAX(${TRACKED_BROADCAST_SEQUENCE_SQL}) AS rowid
+      ${TRACKED_BROADCAST_MESSAGE_JOIN_SQL}
+      WHERE ${trackedBroadcastAttentionPredicateSql()}
+        AND COALESCE(m.sender, a.sender) != $name
+        AND COALESCE(m.type, a.type) IN (${ACTIONABLE_TYPES_SQL})
+      HAVING COUNT(*) > 0
+    `),
+
     /** Exact OOB delivery envelope selected by the structural cursor. This is
      * read-only and remains launch/session constrained in the dispatcher; the
      * caller must present both cursor and message id so a racing tail cannot
@@ -1860,6 +1909,26 @@ export function createStatements(db: Database) {
         AND m.rowid = $seq
         AND m.id = $id
         AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+      LIMIT 1
+    `),
+
+    getTrackedBroadcastAttentionDelivery: db.prepare(`
+      SELECT ${TRACKED_BROADCAST_SEQUENCE_SQL} AS seq,
+             COALESCE(m.id, a.id) AS id,
+             COALESCE(m.type, a.type) AS type,
+             COALESCE(m.sender, a.sender) AS sender,
+             COALESCE(m.content, a.content) AS content,
+             COALESCE(m.bead_id, a.bead_id) AS bead_id,
+             COALESCE(m.ref, a.ref) AS ref,
+             COALESCE(m.request, a.request) AS request,
+             COALESCE(m.reply, a.reply) AS reply,
+             COALESCE(m.ts, a.ts) AS ts
+      ${TRACKED_BROADCAST_MESSAGE_JOIN_SQL}
+      WHERE ${trackedBroadcastAttentionPredicateSql()}
+        AND COALESCE(m.sender, a.sender) != $name
+        AND COALESCE(m.type, a.type) IN (${ACTIONABLE_TYPES_SQL})
+        AND ${TRACKED_BROADCAST_SEQUENCE_SQL} = $seq
+        AND COALESCE(m.id, a.id) = $id
       LIMIT 1
     `),
 
@@ -1899,6 +1968,16 @@ export function createStatements(db: Database) {
     getLastDelivered: db.prepare("SELECT last_delivered_ts, last_delivered_seq FROM sessions WHERE id = $id"),
 
     getMessageTailSeq: db.prepare("SELECT COALESCE(MAX(rowid), 0) AS seq FROM messages"),
+
+    /** Highest durable journal sequence across both retention tiers. Attention
+     * drains use this bound because an owned open ball can outlive its hot
+     * message row. Ambient delivery continues to use the live-table tail. */
+    getAttentionTailSeq: db.prepare(`
+      SELECT MAX(
+        COALESCE((SELECT MAX(rowid) FROM messages), 0),
+        COALESCE((SELECT MAX(seq) FROM messages_archive), 0)
+      ) AS seq
+    `),
 
     resetSessionDeliveryOffsets: db.prepare(`
       UPDATE sessions
@@ -2040,8 +2119,8 @@ export function createStatements(db: Database) {
     `),
 
     /**
-     * The attention-only recovery view (19442, 21757): unacknowledged DIRECT
-     * attention rows addressed to a mailbox, oldest first. `$upto` bounds the
+     * The attention-only recovery view (19442, 21757): unacknowledged attention
+     * rows owned by a mailbox, oldest first. `$upto` bounds the
      * scan to rows the ambient window will NOT return (rowid <= the session's
      * pull cursor) so default-drain injection never duplicates a window row.
      * NO age horizon — recovery is lossless by design; only a mailbox-cursor
@@ -2062,11 +2141,29 @@ export function createStatements(db: Database) {
       LIMIT $limit
     `),
 
+    selectUnackedTrackedBroadcastAttention: db.prepare(`
+      SELECT ${TRACKED_BROADCAST_FETCH_COLUMNS_SQL}
+      ${TRACKED_BROADCAST_MESSAGE_JOIN_SQL}
+      WHERE ${trackedBroadcastAttentionPredicateSql()}
+        AND COALESCE(m.sender, a.sender) != $name
+        AND (
+          COALESCE(m.type, a.type) IN (${ACTIONABLE_TYPES_SQL})
+          OR COALESCE(m.attention_required, a.attention_required) = 1
+        )
+        AND ${TRACKED_BROADCAST_SEQUENCE_SQL} > COALESCE(
+          (SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name),
+          0
+        )
+        AND ${TRACKED_BROADCAST_SEQUENCE_SQL} <= $upto
+      ORDER BY ${TRACKED_BROADCAST_SEQUENCE_SQL} ASC
+      LIMIT $limit
+    `),
+
     /**
      * Read-only turn-attention view (17199, 21757): every unacknowledged
-     * actionable direct plus newly classified direct response for the
-     * recipient, independent of the ambient inbox window. The normal fetch
-     * limit still bounds chronological `events`; this projection prevents a
+     * actionable direct, owned untaken tracked actionable broadcast, plus newly classified direct
+     * response for the recipient, independent of the ambient inbox window. The
+     * normal fetch limit still bounds chronological `events`; this projection prevents a
      * later verdict/request/response from sitting behind that ambient page. It
      * reuses the recipient mailbox cursor — no second queue, cursor, or store.
      */
@@ -2083,6 +2180,17 @@ export function createStatements(db: Database) {
       ORDER BY m.rowid ASC
     `),
 
+    selectTrackedBroadcastAttention: db.prepare(`
+      SELECT ${TRACKED_BROADCAST_FETCH_COLUMNS_SQL}
+      ${TRACKED_BROADCAST_MESSAGE_JOIN_SQL}
+      WHERE ${trackedBroadcastAttentionPredicateSql()}
+        AND COALESCE(m.sender, a.sender) != $name
+        AND (
+          COALESCE(m.type, a.type) IN (${ACTIONABLE_TYPES_SQL})
+          OR COALESCE(m.attention_required, a.attention_required) = 1
+        )
+    `),
+
     /** Count-only form of the recovery view — join/rename recovery reporting. */
     countUnackedAttention: db.prepare(`
       SELECT COUNT(*) AS count
@@ -2093,6 +2201,17 @@ export function createStatements(db: Database) {
         AND (m.type IN (${ACTIONABLE_TYPES_SQL}) OR m.attention_required = 1)
         AND ${unretiredAttentionPredicateSql("m")}
         AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
+    `),
+
+    countUnackedTrackedBroadcastAttention: db.prepare(`
+      SELECT COUNT(*) AS count
+      ${TRACKED_BROADCAST_MESSAGE_JOIN_SQL}
+      WHERE ${trackedBroadcastAttentionPredicateSql()}
+        AND COALESCE(m.sender, a.sender) != $name
+        AND (
+          COALESCE(m.type, a.type) IN (${ACTIONABLE_TYPES_SQL})
+          OR COALESCE(m.attention_required, a.attention_required) = 1
+        )
     `),
 
     /**

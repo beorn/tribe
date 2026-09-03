@@ -976,7 +976,7 @@ export function formatStaleLockMessage(lock: GitLockInfo, sessionName: string | 
 }
 
 /**
- * Chief-authority watchdog: fail loud immediately when actionable DMs have no
+ * Chief-authority watchdog: fail loud immediately when actionable messages have no
  * live @chief recipient. Online inbox staleness is deliberately absent here:
  * the generic Tribe cadence facts + Hab policy + WATCH reducer own it for
  * every managed seat, including @chief.
@@ -1004,7 +1004,7 @@ export function checkChiefAbsent(
       type: "chief-absent",
       severity: "critical",
       message:
-        `STOP-THE-LINE: @chief is absent with ${unread.count} actionable DM${unread.count === 1 ? "" : "s"} ` +
+        `STOP-THE-LINE: @chief is absent with ${unread.count} actionable message${unread.count === 1 ? "" : "s"} ` +
         `waiting. Delivery has no live authority; a live @cto must assume authority, ` +
         `or notify the user, then reconcile @chief attention before work continues.`,
       metrics: {},

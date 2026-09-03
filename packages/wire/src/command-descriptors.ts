@@ -86,13 +86,13 @@ const OBJ = (properties: JsonObject, description: string): JsonSchemaObject => (
 
 const ATTENTION_SCHEMA = {
   type: "object",
-  description: "Current unread direct attention and open response balls for the addressed persona.",
+  description: "Current unread actionable attention and open response balls for the addressed persona.",
   required: ["actionable_unread", "pending_balls", "pending_balls_summary"],
   properties: {
     actionable_unread: {
       type: "array",
       description:
-        "All unacknowledged direct request/query/verdict/assign/response messages for this recipient, independent of the event limit. Responses stay quiet for default inbox waits.",
+        "All unacknowledged direct request/query/verdict/assign/response messages plus explicitly tracked actionable broadcasts still awaiting this owner's TAKING or settlement, independent of the event limit. Responses stay quiet for default inbox waits.",
       items: { type: "object", additionalProperties: true },
     },
     pending_balls: {
@@ -205,7 +205,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
               { type: "boolean", const: true },
             ],
             description:
-              'Direct request/query/assign messages automatically open a recipient-owned ball. Pass `true` to track any direct type, or a string other than "true" to set the id. Ownership and closing rules: /tribe.',
+              'Direct request/query/assign messages automatically open a recipient-owned ball. Pass `true` to explicitly track any eligible message, including a broadcast, or a string other than "true" to set the id. Ownership and closing rules: /tribe.',
           },
           reply: {
             type: "string",
@@ -523,11 +523,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     id: "tribe.inbox.wait",
     title: "Inbox Wait",
     description:
-      "Long-poll the actionable inbox for a session until a request/query/assign/verdict direct message arrives or the timeout elapses. MCP requests at or above the measured host ceiling return host_cut immediately with advice=cli_wait; use the CLI for longer waits. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the caller's session.",
+      "Long-poll the actionable inbox for a session until a direct request/query/assign/verdict or an owned tracked actionable broadcast arrives, or the timeout elapses. MCP requests at or above the measured host ceiling return host_cut immediately with advice=cli_wait; use the CLI for longer waits. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the caller's session.",
     lifetime: "live-session",
     mcp: {
       name: "inbox.wait",
-      description: `Short diagnostic wait for actionable inbox activity; defaults to the caller's session. The MCP default is ${DEFAULT_MCP_INBOX_WAIT_TIMEOUT_MS}ms and requests at or above the ${MCP_INBOX_WAIT_HOST_CEILING_MS}ms host ceiling return host_cut with advice=cli_wait, so use \`tribe inbox-wait\` for longer waits. Only request/query/assign/verdict wake it — notify/status/response are inbox-visible and never wake by default. See /tribe.`,
+      description: `Short diagnostic wait for actionable inbox activity; defaults to the caller's session. The MCP default is ${DEFAULT_MCP_INBOX_WAIT_TIMEOUT_MS}ms and requests at or above the ${MCP_INBOX_WAIT_HOST_CEILING_MS}ms host ceiling return host_cut with advice=cli_wait, so use \`tribe inbox-wait\` for longer waits. Direct or owned tracked-broadcast request/query/assign/verdict rows wake it — notify/status/response are inbox-visible and never wake by default. See /tribe.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -627,7 +627,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     cli: available({
       name: "inbox-wait",
       description:
-        "Long-poll until unanswered actionable attention exists or the timeout elapses. This is the steady-state bounded-wait rail. Direct notify/status/response rows do not wake by default; callers may opt into reply settlements correlated to their own tracked requests. Defaults to the daemon-resolved launch identity.",
+        "Long-poll until unanswered actionable attention exists or the timeout elapses. This is the steady-state bounded-wait rail. Direct actionables and owned tracked actionable broadcasts wake it; notify/status/response rows do not wake by default. Callers may opt into reply settlements correlated to their own tracked requests. Defaults to the daemon-resolved launch identity.",
       lifetime: "one-shot",
       mapsToMcp: "inbox.wait",
       options: [

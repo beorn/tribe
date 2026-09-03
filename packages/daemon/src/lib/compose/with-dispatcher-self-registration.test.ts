@@ -11,6 +11,7 @@ import { deriveTribePersonaLaunchIdentity } from "tribe-wire/lib/persona-launch-
 import { createTribeContext } from "../context.ts"
 import { openDatabase, createStatements } from "../database.ts"
 import { sendMessage } from "../messaging.ts"
+import { runRetentionSweep } from "../retention.ts"
 import { STARTUP_SHA, TRIBE_SOURCE_ROOT } from "../code-pin.ts"
 import type { ClientSession } from "./with-client-registry.ts"
 import { withDispatcher } from "./with-dispatcher.ts"
@@ -1578,6 +1579,287 @@ describe("dispatcher inbox-wait parsing", () => {
     expect(result.attention.pending_balls).toEqual([expect.objectContaining({ recipient: "@agent/wait" })])
   })
 
+  it("projects one tracked broadcast request consistently across every inbox surface", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const recipientLaunchId = "tracked-broadcast-launch"
+
+    for (const [connId, name] of [
+      ["conn-sender", "@agent/sender"],
+      ["conn-recipient", "@agent/recipient"],
+      ["conn-other", "@agent/other"],
+    ] as const) {
+      harness.addPendingClient(connId)
+      if (name === "@agent/recipient") {
+        parseResult(
+          await harness.register(connId, {
+            name,
+            pid: liveHolderPid,
+            project: "/tmp/km-wt6",
+            launchId: recipientLaunchId,
+            launchParentPid: process.pid,
+          }),
+        )
+      } else {
+        await registerMember(harness, connId, name)
+      }
+    }
+
+    const wait = harness.dispatcher.handleRequest(
+      {
+        jsonrpc: "2.0",
+        id: "broadcast-wait",
+        method: "tribe.inbox.wait",
+        params: { session: "@agent/recipient", timeoutMs: 100 },
+      },
+      "conn-recipient",
+    )
+
+    await new Promise((resolveWait) => setTimeout(resolveWait, 20))
+    const sent = parseResult<{ structuredContent: SendResult }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "broadcast-send",
+          method: "tribe.send",
+          params: {
+            to: "*",
+            message: "tracked broadcast work",
+            type: "request",
+            request: "tracked-broadcast",
+          },
+        },
+        "conn-sender",
+      ),
+    ).structuredContent
+    harness.archiveMessage(sent.id)
+
+    const status = parseResult<{
+      unread_count: number
+      latest_actionable_seq: number
+      latest_message_id: string
+      latest_type: string
+    }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "broadcast-status",
+          method: "cli_inbox_status_by_launch_v1",
+          params: { launch_id: recipientLaunchId },
+        },
+        "conn-untrusted",
+      ),
+    )
+    const waited = parseResult<InboxWaitResult>(await wait)
+    const delivery = parseResult<{ message: Record<string, unknown> | null }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "broadcast-delivery",
+          method: "cli_inbox_delivery_by_launch_v1",
+          params: {
+            launch_id: recipientLaunchId,
+            message_seq: status.latest_actionable_seq,
+            message_id: status.latest_message_id,
+          },
+        },
+        "conn-untrusted",
+      ),
+    )
+    const drained = parseResult<InboxDrainResult>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "broadcast-drain",
+          method: "cli_inbox_drain",
+          params: { limit: 50 },
+        },
+        "conn-recipient",
+      ),
+    )
+    const fetched = parseResult<{
+      structuredContent: {
+        attention: {
+          actionable_unread: Array<{ id: string; content: string }>
+          pending_balls: Array<{ request_id: string; recipient: string }>
+        }
+      }
+    }>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "broadcast-fetch", method: "tribe.fetch", params: { limit: 50 } },
+        "conn-recipient",
+      ),
+    ).structuredContent
+    const pending = parseResult<{
+      structuredContent: { pending: Array<{ request_id: string; recipient: string }> }
+    }>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "broadcast-pending", method: "tribe.pending", params: {} },
+        "conn-recipient",
+      ),
+    ).structuredContent
+    const secondFetch = parseResult<{
+      structuredContent: {
+        attention: {
+          actionable_unread: Array<{ id: string }>
+          pending_balls: Array<{ request_id: string; recipient: string }>
+        }
+      }
+    }>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "broadcast-second-fetch", method: "tribe.fetch", params: { limit: 50 } },
+        "conn-recipient",
+      ),
+    ).structuredContent
+    const statusAfterDelivery = parseResult<{ unread_count: number }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "broadcast-status-after-delivery",
+          method: "cli_inbox_status",
+          params: { session: "@agent/recipient" },
+        },
+        "conn-untrusted",
+      ),
+    )
+
+    expect(status.unread_count).toBe(1)
+    expect(status).toMatchObject({
+      latest_message_id: sent.id,
+      latest_type: "request",
+    })
+    expect(status.latest_actionable_seq).toBeGreaterThan(0)
+    expect(delivery.message).toMatchObject({
+      seq: status.latest_actionable_seq,
+      id: sent.id,
+      type: "request",
+      sender: "@agent/sender",
+      content: "tracked broadcast work",
+    })
+    expect(waited).toMatchObject({ status: "woken", unread_count: 1, timed_out: false })
+    expect(waited.attention.actionable_unread).toEqual([expect.objectContaining({ content: "tracked broadcast work" })])
+    expect(drained.events).toEqual([expect.objectContaining({ content: "tracked broadcast work" })])
+    expect(fetched.attention.actionable_unread).toEqual([
+      expect.objectContaining({ content: "tracked broadcast work" }),
+    ])
+    expect(fetched.attention.pending_balls).toEqual([
+      expect.objectContaining({ request_id: "tracked-broadcast", recipient: "@agent/recipient" }),
+    ])
+    expect(pending.pending).toEqual([
+      expect.objectContaining({ request_id: "tracked-broadcast", recipient: "@agent/recipient" }),
+    ])
+    expect(statusAfterDelivery.unread_count).toBe(1)
+    expect(secondFetch.attention.actionable_unread).toEqual([
+      expect.objectContaining({ content: "tracked broadcast work" }),
+    ])
+    expect(secondFetch.attention.pending_balls).toEqual([
+      expect.objectContaining({ request_id: "tracked-broadcast", recipient: "@agent/recipient" }),
+    ])
+
+    parseResult(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "broadcast-taking",
+          method: "tribe.send",
+          params: {
+            to: "@agent/sender",
+            message: "TAKING — owner=@agent/recipient",
+            type: "status",
+            ref: "tracked-broadcast",
+          },
+        },
+        "conn-recipient",
+      ),
+    )
+    const statusAfterTaking = parseResult<{ unread_count: number }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "broadcast-status-after-taking",
+          method: "cli_inbox_status",
+          params: { session: "@agent/recipient" },
+        },
+        "conn-untrusted",
+      ),
+    )
+    const otherStatusAfterTaking = parseResult<{ unread_count: number }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "other-broadcast-status-after-taking",
+          method: "cli_inbox_status",
+          params: { session: "@agent/other" },
+        },
+        "conn-untrusted",
+      ),
+    )
+    const otherAfterTaking = parseResult<{
+      structuredContent: { attention: { actionable_unread: Array<{ content: string }> } }
+    }>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "other-broadcast-fetch-after-taking", method: "tribe.fetch", params: { limit: 50 } },
+        "conn-other",
+      ),
+    ).structuredContent
+    const afterTaking = parseResult<{
+      structuredContent: {
+        attention: {
+          actionable_unread: Array<{ id: string }>
+          pending_balls: Array<{ request_id: string; recipient: string }>
+        }
+      }
+    }>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "broadcast-fetch-after-taking", method: "tribe.fetch", params: { limit: 50 } },
+        "conn-recipient",
+      ),
+    ).structuredContent
+
+    expect(statusAfterTaking.unread_count).toBe(0)
+    expect(afterTaking.attention.actionable_unread).toEqual([])
+    expect(afterTaking.attention.pending_balls).toEqual([
+      expect.objectContaining({ request_id: "tracked-broadcast", recipient: "@agent/recipient" }),
+    ])
+    expect(otherStatusAfterTaking.unread_count).toBe(1)
+    expect(otherAfterTaking.attention.actionable_unread).toEqual([
+      expect.objectContaining({ content: "tracked broadcast work" }),
+    ])
+
+    const duplicateWait = harness.dispatcher.handleRequest(
+      {
+        jsonrpc: "2.0",
+        id: "duplicate-broadcast-wait",
+        method: "tribe.inbox.wait",
+        params: { session: "@agent/recipient", timeoutMs: 40 },
+      },
+      "conn-recipient",
+    )
+    await new Promise((resolveWait) => setTimeout(resolveWait, 10))
+    parseResult(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "duplicate-broadcast-send",
+          method: "tribe.send",
+          params: {
+            to: "*",
+            message: "duplicate tracked broadcast id",
+            type: "request",
+            request: "tracked-broadcast",
+          },
+        },
+        "conn-sender",
+      ),
+    )
+
+    await expect(duplicateWait.then(parseResult<InboxWaitResult>)).resolves.toMatchObject({
+      status: "timeout",
+      unread_count: 0,
+      timed_out: true,
+    })
+  })
+
   it("caps the full MCP window and wakes only an opted-in requester on its validated reply", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
@@ -1980,6 +2262,24 @@ function createDispatcherHarness(
     },
     setMessageTimestamp(id: string, ts: number) {
       db.prepare("UPDATE messages SET ts = ? WHERE id = ?").run(ts, id)
+    },
+    archiveMessage(id: string) {
+      const liveBefore = (db.prepare("SELECT COUNT(*) AS count FROM messages").get() as { count: number }).count
+      db.prepare("UPDATE messages SET ts = ?").run(Date.now() - 10_000)
+      const result = runRetentionSweep(db, stmts, {
+        archiveWindowMs: 1,
+        deleteWindowMs: 60_000,
+        deleteEnabled: false,
+        batchSize: Math.max(liveBefore, 1),
+      })
+      const target = db.prepare("SELECT id FROM messages_archive WHERE id = ?").get(id)
+      const liveAfter = (db.prepare("SELECT COUNT(*) AS count FROM messages").get() as { count: number }).count
+      if (result.archiveMove.moved !== liveBefore || target === null || liveAfter !== 0) {
+        throw new Error(
+          `expected retention to empty the ${liveBefore}-row hot journal and archive ${JSON.stringify(id)}; ` +
+            `moved=${result.archiveMove.moved} target_found=${target !== null} live_after=${liveAfter}`,
+        )
+      }
     },
     setPendingOpenedAt(requestId: string, openedAt: number) {
       db.prepare("UPDATE pending_request SET opened_at = ? WHERE request_id = ?").run(openedAt, requestId)

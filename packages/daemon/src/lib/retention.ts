@@ -214,11 +214,13 @@ function archiveMoveBatch(db: Database, ids: readonly string[], archivedAt: numb
     db.prepare(
       `INSERT OR IGNORE INTO messages_archive (
 				seq, id, type, sender, recipient, kind, content, bead_id, ref, ts,
-				delivery, topic, room_id, request, reply, correlated_reply_requester, summary, archived_at
+				delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id,
+				attention_required, archived_at
 			)
 			SELECT
 				rowid, id, type, sender, recipient, kind, content, bead_id, ref, ts,
-				delivery, topic, room_id, request, reply, correlated_reply_requester, summary, ?
+				delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id,
+				attention_required, ?
 			FROM messages WHERE id IN (${placeholders})`,
     ).run(archivedAt, ...ids)
     const res = db.prepare(`DELETE FROM messages WHERE id IN (${placeholders})`).run(...ids)

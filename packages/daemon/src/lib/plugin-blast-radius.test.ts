@@ -283,3 +283,128 @@ describe("a disabled plugin reaches the status surface", () => {
     }
   })
 })
+
+describe("default plugin API attention projection", () => {
+  it("counts direct and tracked broadcast actionables under their distinct retirement rules", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "plugin-unread-projection-"))
+    const db = openDatabase(join(tmpDir, "tribe.db"))
+    const stmts = createStatements(db)
+    const scope = createScope("plugin-unread-projection-test")
+    const owner = "@chief"
+    const messageBase = Date.now() + 60_000
+    let capturedApi: TribeClientApi | null = null
+
+    try {
+      const insert = db.prepare(`
+        INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, request, ref)
+        VALUES ($id, $type, $sender, $recipient, $kind, $id, $ts, 'push', $request, $ref)
+      `)
+      insert.run({
+        $id: "direct-request",
+        $type: "request",
+        $sender: "@dev/1",
+        $recipient: owner,
+        $kind: "direct",
+        $ts: messageBase - 1_000,
+        $request: "direct-request",
+        $ref: null,
+      })
+      insert.run({
+        $id: "broadcast-request",
+        $type: "request",
+        $sender: "@dev/2",
+        $recipient: "*",
+        $kind: "broadcast",
+        $ts: messageBase - 2_000,
+        $request: "broadcast-request",
+        $ref: null,
+      })
+      stmts.openPendingRequest.run({
+        $request_id: "broadcast-request",
+        $recipient: owner,
+        $sender: "@dev/2",
+        $opened_at: messageBase - 2_000,
+        $expires_at: null,
+        $message_id: "broadcast-request",
+        $fanout: "first",
+      })
+
+      const shape = {
+        scope,
+        daemonSessionId: "daemon",
+        startedAt: messageBase,
+        daemonVersion: "test",
+        daemonPid: process.pid,
+        config: {},
+        db,
+        stmts,
+        daemonCtx: createTribeContext({
+          db,
+          stmts,
+          sessionId: "daemon",
+          sessionRole: "member",
+          initialName: "daemon",
+          domains: [],
+          claudeSessionId: null,
+          claudeSessionName: null,
+        }),
+        recall: null,
+        registry: {
+          clients: new Map(),
+          socketToClient: new Map(),
+          getActiveSessionIds: () => new Set<string>(),
+          getActiveSessionInfo: () => [],
+          hasActiveTransport: () => false,
+          isReconnectGraceProtected: () => false,
+          startupReconnectGraceRemainingMs: () => 60_000,
+          forgetTransportSessions: vi.fn(),
+          onTransportDisconnected: vi.fn(),
+        },
+        broadcast: {},
+        socket: {},
+      }
+
+      withRuntime({
+        plugins: [
+          plugin("capture-default-api", {
+            start(api) {
+              capturedApi = api
+            },
+          }),
+        ],
+        cleanupIntervalMs: 10_000_000,
+        publishActivePluginNames: () => {},
+        publishStopPlugins: () => {},
+        publishShutdown: () => {},
+      })(shape as never)
+
+      const api = capturedApi as TribeClientApi | null
+      if (api === null) throw new Error("default plugin API was not delivered to the probe plugin")
+      expect(api.getUnreadDms(owner)).toEqual({ count: 2, oldestTs: messageBase - 2_000 })
+
+      const tail = (db.prepare("SELECT MAX(rowid) AS seq FROM messages").get() as { seq: number }).seq
+      db.prepare("INSERT INTO mailbox_cursors (recipient, last_actionable_seq, updated_at) VALUES (?, ?, ?)").run(
+        owner,
+        tail,
+        messageBase,
+      )
+      expect(api.getUnreadDms(owner)).toEqual({ count: 1, oldestTs: messageBase - 2_000 })
+
+      insert.run({
+        $id: "broadcast-taking",
+        $type: "status",
+        $sender: owner,
+        $recipient: "@dev/2",
+        $kind: "direct",
+        $ts: messageBase + 1,
+        $request: null,
+        $ref: "broadcast-request",
+      })
+      expect(api.getUnreadDms(owner)).toEqual({ count: 0, oldestTs: 0 })
+    } finally {
+      await scope[Symbol.asyncDispose]()
+      db.close()
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+})

@@ -41,6 +41,9 @@ export type MessageInsertedInfo = {
   topic: string | null
   /** Matrix-shape room scope; null until populated by the room-aware path. */
   roomId: string | null
+  /** Mailboxes that received an open pending row for this tracked broadcast.
+   * Absent for direct, untracked broadcast, and journal-only messages. */
+  pendingOwners?: readonly string[]
   /** Canonical tracked-request correlation, present only when this message
    *  closed a still-open reply target owned by `requester`. */
   correlatedReply: { requestId: string; requester: string } | null

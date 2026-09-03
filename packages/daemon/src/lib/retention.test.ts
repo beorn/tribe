@@ -185,6 +185,37 @@ describe("journal retention sweep", () => {
       }
     })
 
+    it("preserves provenance and explicit attention for an archived tracked broadcast", () => {
+      const { db, stmts } = setup()
+      try {
+        const ctx = makeContext(db, stmts)
+        const sent = sendMessage(
+          ctx,
+          "*",
+          "archived attention broadcast",
+          "notify",
+          undefined,
+          undefined,
+          "broadcast",
+          { summary: "archived attention broadcast", attentionRequired: true },
+          { request: "archived-attention-broadcast", owners: ["@chief"], fanout: "all" },
+        )
+        setMessageTs(db, sent.id, Date.now() - 20 * DAY)
+
+        const result = runRetentionSweep(db, stmts, enabledConfig({ archiveWindowMs: 14 * DAY }))
+
+        expect(result.archiveMove.moved).toBe(1)
+        expect(
+          db.prepare("SELECT attention_required, session_id FROM messages_archive WHERE id = ?").get(sent.id),
+        ).toEqual({ attention_required: 1, session_id: "sess-fable-1" })
+        expect(stmts.selectTrackedBroadcastAttention.all({ $name: "@chief" })).toEqual([
+          expect.objectContaining({ id: sent.id, content: "archived attention broadcast", attention_required: 1 }),
+        ])
+      } finally {
+        db.close()
+      }
+    })
+
     it("leaves a message younger than the archive window in the live table", () => {
       const { db, stmts } = setup()
       try {

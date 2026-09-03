@@ -102,14 +102,15 @@ export type TribeCoordMethod = (typeof TRIBE_COORD_METHODS)[keyof typeof TRIBE_C
  * the one reliable injection point for the convention (works for silvercode,
  * raw Claude Code, codex, anything that speaks tribe MCP). The text teaches:
  *
- *   1. Notifications (`from: daemon`, broadcasts `to: "*"`) are AMBIENT —
- *      surface them in fetch reads but never act on them.
+ *   1. Notifications (`from: daemon`) and untracked broadcasts (`to: "*"`)
+ *      are AMBIENT — surface them in fetch reads but never act on them.
  *   2. `assign` / `query` / `request` / `verdict` messages are the ACTIONABLE
  *      channel. Direct `notify` / `status` / `response` rows are inbox-visible,
  *      but do not wake `inbox.wait` by default; callers may opt into validated
  *      `status` / `response` replies to their own tracked requests.
  *   3. Every non-self direct assign/query/request automatically opens one
- *      semantic response ball. Verdict stays actionable and wakeable without
+ *      semantic response ball. An explicitly tracked broadcast opens one per
+ *      snapshotted owner. Verdict stays actionable and wakeable without
  *      automatically minting another obligation. Answer
  *      or explicitly defer tracked work with the structured MCP
  *      `reply: "<request-id>"` field (CLI: `--reply <request-id>`), never a
@@ -120,11 +121,12 @@ export type TribeCoordMethod = (typeof TRIBE_COORD_METHODS)[keyof typeof TRIBE_C
  */
 export const TRIBE_JOIN_PRIMER =
   "Tribe notification semantics: messages from `from: daemon` (github:push, " +
-  'session events, health) and broadcasts (`to: "*"`) are AMBIENT awareness ' +
-  "only — surface in `tribe.fetch` reads but DO NOT act on them. Direct " +
+  'session events, health) and untracked broadcasts (`to: "*"`) are AMBIENT ' +
+  "awareness only — surface in `tribe.fetch` reads but DO NOT act on them. Direct " +
   "`type: assign`/`query`/`request` messages are actionable, wake `inbox.wait`, " +
   "and automatically open a semantic response ball. Direct `type: verdict` is " +
   "also actionable and wakeable, but does not automatically open another ball. " +
+  "An explicitly tracked actionable broadcast is wakeable for each recipient owner until TAKING or settlement. " +
   "Direct `notify`/`status`/`response` rows are inbox-visible and not wakeable by default; " +
   "a waiter may explicitly opt into validated `status`/`response` replies to its own tracked requests. " +
   "Answer or explicitly defer each actionable with the structured MCP " +
@@ -2965,7 +2967,27 @@ function filterRowsByTrust(ctx: TribeContext, rows: FetchRow[]): FetchRow[] {
   return rows.filter((r) => senderMayUseRegisteredTrustTopic(r.topic, r.sender, roster))
 }
 
-/** One canonical attention projection for fetch and inbox-wait carriage. */
+function mergeAttentionRows(...groups: FetchRow[][]): FetchRow[] {
+  return groups.flat().toSorted((left, right) => left.rowid - right.rowid)
+}
+
+function readUnackedDirectAttentionRows(ctx: TribeContext, owner: string, upto: number, limit: number): FetchRow[] {
+  return ctx.stmts.selectUnackedAttention.all({ $name: owner, $upto: upto, $limit: limit }) as FetchRow[]
+}
+
+export function readUnackedAttentionRows(ctx: TribeContext, owner: string, upto: number, limit: number): FetchRow[] {
+  const direct = readUnackedDirectAttentionRows(ctx, owner, upto, limit)
+  const trackedBroadcasts = ctx.stmts.selectUnackedTrackedBroadcastAttention.all({
+    $name: owner,
+    $upto: upto,
+    $limit: limit,
+  }) as FetchRow[]
+  return mergeAttentionRows(direct, trackedBroadcasts).slice(0, limit)
+}
+
+/** One canonical attention projection for fetch and inbox-wait carriage.
+ * Direct rows retire on delivery acknowledgement; owned tracked broadcasts
+ * remain until their pending owner sends TAKING or settles the ball. */
 export function readAttentionProjection(
   ctx: TribeContext,
   owner: string,
@@ -2976,7 +2998,14 @@ export function readAttentionProjection(
   actionableCount: number
   attention: AttentionProjection
 } {
-  const attentionRows = filterRowsByTrust(ctx, ctx.stmts.selectAttention.all({ $name: owner }) as FetchRow[])
+  const params = { $name: owner }
+  const attentionRows = filterRowsByTrust(
+    ctx,
+    mergeAttentionRows(
+      ctx.stmts.selectAttention.all(params) as FetchRow[],
+      ctx.stmts.selectTrackedBroadcastAttention.all(params) as FetchRow[],
+    ),
+  )
   const pendingBalls = pendingBallsForOwner(ctx, owner, now)
   const untakenRequestIds = untakenPendingRequestIds(ctx, owner)
   const untakenPendingBalls = pendingBalls.filter((ball) => untakenRequestIds.has(ball.request_id))
@@ -3160,15 +3189,12 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
       attention = projected.attention
     }
     // 19442 / 21757 — inject unacknowledged attention directs (the durable mailbox)
-    // ahead of the ambient window. Recovery rows are bounded to rowid <=
-    // cursorBase, so they can never duplicate a window row, and the ambient
-    // session cursor is never rewound — a claim/rename floods nothing. See
-    // selectUnackedAttention in database.ts.
-    const recovered = ctx.stmts.selectUnackedAttention.all({
-      $name: currentName,
-      $upto: cursorBase,
-      $limit: limit,
-    }) as FetchRow[]
+    // ahead of the ambient window. Owned tracked broadcasts already remain in
+    // actionable_unread until TAKING/settlement; reinjecting one below the
+    // ambient cursor would duplicate its event after an explicit advancing
+    // snapshot. Operator inbox-drain has no separate attention projection and
+    // therefore includes them through readUnackedAttentionRows's default.
+    const recovered = readUnackedDirectAttentionRows(ctx, currentName, cursorBase, limit)
     const windowBudget = limit - recovered.length
     // Read the high-water mark BEFORE the window so it can only be
     // conservative: a row inserted between the two reads is above it and is
@@ -3210,13 +3236,16 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
 
   // 19442 / 21757 — acknowledge every canonical attention row this fetch
   // returns. Default drains carry the full attention projection; explicit
-  // since+advance reads carry their returned rows. The persisted classifier
+  // since+advance reads acknowledge their returned direct rows. Owned tracked
+  // broadcasts remain actionable until TAKING/settlement and retain ambient
+  // delivery progress on the separate session cursor. The persisted classifier
   // keeps newly surfaced responses distinct from legacy ambient responses.
   if (shouldAdvance) {
     let lastAttention = 0
+    const projectedAttentionIds = new Set(attentionRows.map((row) => row.id))
     for (const row of [...attentionRows, ...filtered]) {
       if (
-        row.recipient === currentName &&
+        (row.recipient === currentName || (row.recipient === "*" && projectedAttentionIds.has(row.id))) &&
         row.sender !== currentName &&
         (ACTIONABLE_TYPES_SET.has(row.type) || row.attention_required === 1)
       ) {

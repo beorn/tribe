@@ -490,6 +490,42 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(canonical.attention?.actionable_unread).toEqual([])
   })
 
+  it("advances ambient delivery without replaying an owned tracked broadcast event", () => {
+    const live = connectAs("sess-explicit-broadcast", NAME)
+    const broadcastRowid = insertRow(stmts, {
+      id: "explicit-broadcast",
+      type: "request",
+      sender: "@chief",
+      recipient: "*",
+      kind: "broadcast",
+      content: "take one owned broadcast task",
+      ts: now + 1,
+    })
+    stmts.openPendingRequest.run({
+      $request_id: "explicit-broadcast-request",
+      $recipient: NAME,
+      $sender: "@chief",
+      $opened_at: now + 1,
+      $expires_at: null,
+      $message_id: "explicit-broadcast",
+      $fanout: "all",
+    })
+
+    const explicit = fetchJson(live, opts, { since: broadcastRowid - 1, advance: true }).json
+    expect(explicit.attention).toBeUndefined()
+    expect(explicit.events?.map((event) => event.id)).toEqual(["explicit-broadcast"])
+    expect(db.prepare("SELECT last_inbox_pull_seq FROM sessions WHERE id = ?").get("sess-explicit-broadcast")).toEqual({
+      last_inbox_pull_seq: broadcastRowid,
+    })
+    expect(db.prepare("SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = ?").get(NAME)).toBeNull()
+
+    const canonical = fetchJson(live, opts).json
+    expect(canonical.events).toEqual([])
+    expect(canonical.attention?.actionable_unread).toEqual([
+      expect.objectContaining({ id: "explicit-broadcast", rowid: broadcastRowid, type: "request" }),
+    ])
+  })
+
   it("projects a later actionable plus owed ball ahead of a full ambient page", () => {
     const live = connectAs("sess-live", NAME)
 

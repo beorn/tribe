@@ -122,9 +122,12 @@ export function createInboxWaitManager(
   }
 
   function onMessageInserted(info: MessageInsertedInfo): void {
-    if (info.kind !== "direct") return
+    if (info.kind === "event") return
     for (const waiter of Array.from(waiters)) {
-      if (waiter.session !== info.recipient) continue
+      const directForWaiter = info.kind === "direct" && waiter.session === info.recipient
+      const trackedBroadcastForWaiter =
+        info.kind === "broadcast" && info.pendingOwners?.includes(waiter.session) === true
+      if (!directForWaiter && !trackedBroadcastForWaiter) continue
       if (info.rowid <= waiter.baselineSeq) continue
       if (
         waiter.wakeOnCorrelatedReply &&
@@ -135,7 +138,7 @@ export function createInboxWaitManager(
         settle(waiter, { timedOut: false, aborted: false })
         continue
       }
-      // Default-wake on every actionable direct addressed to this waiter.
+      // Default-wake on every actionable direct or owned tracked actionable broadcast.
       // Do NOT require readStatus().unread_count > 0 here: that projection can
       // lag the insert (cursor race / concurrent ack) and swallow a live assign
       // while the seat remains armed — CTO residual 2026-07-25 on 21420

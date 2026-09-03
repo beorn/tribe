@@ -130,10 +130,10 @@ export interface TribeClientApi {
   getSessionNames(): string[]
 
   /**
-   * Count + oldest-timestamp of actionable DMs addressed to `sessionName` that
-   * the session has NOT drained via `tribe.fetch` yet (rowid > last_inbox_pull_seq).
-   * Actionable = `type IN (request, query, verdict, assign)` and
-   * `kind='direct'`.
+   * Count + oldest-timestamp of actionable messages owned by `sessionName`:
+   * direct messages remain until the mailbox cursor acknowledges them, while
+   * tracked broadcasts remain until that owner sends TAKING or settles the ball.
+   * Actionable = `type IN (request, query, verdict, assign)`.
    * Returns `{count: 0, oldestTs: 0}` when no unread or the session is unknown.
    *
    * Used by the no-live-chief authority watchdog. Generic online inbox

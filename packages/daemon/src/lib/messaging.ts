@@ -299,7 +299,8 @@ export function sendMessage(
   // tracker survives that acknowledgement until the recipient explicitly
   // replies/defer-closes it. This is not a transport ACK and introduces no new
   // queue: it reuses the existing pending_request authority. Self-directed and
-  // broadcast actionables remain untracked because neither has a peer owner.
+  // broadcast actionables remain untracked unless the caller explicitly
+  // supplies their recipient-owner snapshot.
   const autoTrackActionable = resolvedKind === "direct" && sender !== recipient && AUTO_TRACK_TYPES_SET.has(type)
   const explicitRequest = typeof ballTracker.request === "string" ? ballTracker.request.trim() : ballTracker.request
   if (typeof explicitRequest === "string" && explicitRequest.length === 0) {
@@ -346,6 +347,7 @@ export function sendMessage(
   // mandatory response ball failed to open. The fanout callback runs only
   // after this transaction commits.
   const persist = ctx.db.transaction(() => {
+    const openedOwners: string[] = []
     const pendingReply =
       replyId && resolvedKind === "direct"
         ? (ctx.stmts.selectPendingForReplyRecipient.get({
@@ -381,7 +383,7 @@ export function sendMessage(
     if (result.changes === 0) {
       const existing = ctx.stmts.selectMessageById.get({ $id: id }) as { rowid: number; ts: number } | undefined
       if (existing === undefined) throw new Error(`message idempotency row disappeared for ${id}`)
-      return { rowid: existing.rowid, ts: existing.ts, deduplicated: true as const }
+      return { rowid: existing.rowid, ts: existing.ts, openedOwners, deduplicated: true as const }
     }
     const rowid = Number(result.lastInsertRowid)
     // sendMessage knows one durable recipient string. Explicit broadcast
@@ -440,7 +442,7 @@ export function sendMessage(
     }
     if (resolvedKind === "broadcast" && requestId) {
       for (const owner of ballTracker.owners ?? []) {
-        ctx.stmts.openPendingRequest.run({
+        const opened = ctx.stmts.openPendingRequest.run({
           $request_id: requestId,
           $recipient: owner,
           $sender: sender,
@@ -449,11 +451,12 @@ export function sendMessage(
           $message_id: id,
           $fanout: ballTracker.fanout ?? "first",
         })
+        if (opened.changes > 0) openedOwners.push(owner)
       }
     }
-    return { rowid, ts, tracker, correlatedReply }
+    return { rowid, ts, tracker, correlatedReply, openedOwners }
   })
-  const { rowid, ts: persistedTs, tracker, correlatedReply, deduplicated } = persist()
+  const { rowid, ts: persistedTs, tracker, correlatedReply, openedOwners, deduplicated } = persist()
   if (deduplicated) return { id, ts: persistedTs, rowid, deduplicated: true }
   ctx.onMessageInserted?.({
     id,
@@ -469,6 +472,7 @@ export function sendMessage(
     delivery,
     topic: classification.topic ?? null,
     roomId: classification.roomId ?? null,
+    ...(resolvedKind === "broadcast" && requestId !== null ? { pendingOwners: openedOwners } : {}),
     correlatedReply,
   })
   return { id, ts: persistedTs, rowid, ...(tracker ? { tracker } : {}) }
@@ -492,14 +496,16 @@ export function sendMessage(
  * The reframe: recovery never touches the ambient session cursor. A durable
  * `mailbox_cursors` row keyed by the RECIPIENT NAME tracks the highest
  * acknowledged durable-attention rowid; `handleFetch`'s default drain injects
- * unacknowledged actionables plus newly classified direct responses ahead of
+ * unacknowledged owned actionables plus newly classified direct responses ahead of
  * the ambient window and acknowledges exactly what it returns.
  * Join/rename/takeover only need to COUNT the outstanding attention rows
  * (below) and nudge the client to drain.
  */
 export function countUnackedAttention(ctx: TribeContext, recipient: string): number {
-  const row = ctx.stmts.countUnackedAttention.get({ $name: recipient }) as { count: number } | undefined
-  return row?.count ?? 0
+  const params = { $name: recipient }
+  const direct = ctx.stmts.countUnackedAttention.get(params) as { count: number } | undefined
+  const trackedBroadcasts = ctx.stmts.countUnackedTrackedBroadcastAttention.get(params) as { count: number } | undefined
+  return (direct?.count ?? 0) + (trackedBroadcasts?.count ?? 0)
 }
 
 /**

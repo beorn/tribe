@@ -55,9 +55,9 @@ import {
   handleToolCall,
   isRemovedTribeMethod,
   readAttentionProjection,
+  readUnackedAttentionRows,
   removedTribeMethodMessage,
   TRIBE_COORD_METHODS,
-  type FetchRow,
 } from "../handlers.ts"
 import { createLifecycleStore } from "../lifecycle-store.ts"
 import type { TribePluginHandle } from "../plugin-api.ts"
@@ -268,6 +268,25 @@ export function withDispatcher<
         latest_message_id: latest?.id ?? null,
         latest_type: latest?.type ?? null,
       }
+    }
+
+    function latestInboxWaitMessage(
+      sessionName: string,
+      includeCorrelatedReplies: boolean,
+      unacknowledgedOnly: boolean,
+    ): { rowid: number } | null {
+      const params = {
+        $name: sessionName,
+        $include_correlated_replies: includeCorrelatedReplies ? 1 : 0,
+        $unacknowledged_only: unacknowledgedOnly ? 1 : 0,
+      }
+      const direct = stmts.getLatestInboxWaitMessage.get(params) as { rowid: number } | null
+      const trackedBroadcast = stmts.getLatestTrackedBroadcastInboxWaitMessage.get({ $name: sessionName }) as {
+        rowid: number
+      } | null
+      if (direct === null) return trackedBroadcast
+      if (trackedBroadcast === null) return direct
+      return direct.rowid >= trackedBroadcast.rowid ? direct : trackedBroadcast
     }
 
     type OperatorCapabilityVerdict = "authorized" | "unconfigured" | "rejected"
@@ -575,19 +594,11 @@ export function withDispatcher<
       readInboxStatus,
       (sessionName) => readAttentionProjection(daemonCtx, sessionName).attention,
       (sessionName, wakeOnCorrelatedReply) => {
-        const latest = stmts.getLatestInboxWaitMessage.get({
-          $name: sessionName,
-          $include_correlated_replies: wakeOnCorrelatedReply ? 1 : 0,
-          $unacknowledged_only: 0,
-        }) as { rowid: number } | undefined
+        const latest = latestInboxWaitMessage(sessionName, wakeOnCorrelatedReply, false)
         return latest?.rowid ?? 0
       },
       (sessionName, wakeOnCorrelatedReply, status) => {
-        const current = stmts.getLatestInboxWaitMessage.get({
-          $name: sessionName,
-          $include_correlated_replies: wakeOnCorrelatedReply ? 1 : 0,
-          $unacknowledged_only: 1,
-        }) as { rowid: number } | undefined
+        const current = latestInboxWaitMessage(sessionName, wakeOnCorrelatedReply, true)
         return current?.rowid ?? (status.unread_count > 0 ? 1 : 0)
       },
     )
@@ -1643,11 +1654,14 @@ export function withDispatcher<
                 "Inbox delivery requires a positive safe message_seq and non-empty message_id",
               )
             }
-            const message = stmts.getActionableAttentionDelivery.get({
+            const params = {
               $name: target.sessionName,
               $seq: Number(messageSeq),
               $id: messageId,
-            }) as Record<string, unknown> | null
+            }
+            const message =
+              (stmts.getActionableAttentionDelivery.get(params) as Record<string, unknown> | null) ??
+              (stmts.getTrackedBroadcastAttentionDelivery.get(params) as Record<string, unknown> | null)
             return makeResponse(id, {
               session: target.sessionName,
               launch_id: target.launchId,
@@ -1822,12 +1836,8 @@ export function withDispatcher<
             }
             const requestedLimit = Number(p.limit ?? 10)
             const limit = Number.isFinite(requestedLimit) ? Math.min(100, Math.max(1, Math.trunc(requestedLimit))) : 10
-            const tail = stmts.getMessageTailSeq.get() as { seq: number } | null
-            const rows = stmts.selectUnackedAttention.all({
-              $name: sessionName,
-              $upto: tail?.seq ?? 0,
-              $limit: limit,
-            }) as FetchRow[]
+            const tail = stmts.getAttentionTailSeq.get() as { seq: number } | null
+            const rows = readUnackedAttentionRows(daemonCtx, sessionName, tail?.seq ?? 0, limit)
             const last = rows.at(-1)
             if (last && p.peek !== true) {
               stmts.advanceMailboxCursor.run({ $recipient: sessionName, $seq: last.rowid, $now: Date.now() })
