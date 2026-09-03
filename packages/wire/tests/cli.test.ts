@@ -756,6 +756,113 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     }
   })
 
+  it("members --all flushes snapshots larger than the stdout pipe buffer", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-members-all-large-"))
+    const socketPath = join(dir, "tribe.sock")
+    const snapshot = {
+      sessions: [
+        {
+          id: "member-large",
+          name: "@agent/large",
+          launch_id: "launch-large",
+          detail: "x".repeat(400_000),
+        },
+      ],
+    }
+    const expectedOutput = `${JSON.stringify(snapshot)}\n`
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        const newline = buffer.indexOf("\n")
+        if (newline < 0) return
+        const request = JSON.parse(buffer.slice(0, newline)) as { id: number }
+        const result = { content: [{ type: "text", text: JSON.stringify(snapshot) }] }
+        socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`)
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const result = await runCliAsync(["members", "--all"], {
+        ...process.env,
+        TRIBE_SOCKET: socketPath,
+        TRIBE_NO_AUTOSTART: "1",
+      })
+
+      expect(result).toMatchObject({ code: 0, stderr: "" })
+      expect(result.stdout).toHaveLength(expectedOutput.length)
+      expect(result.stdout).toBe(expectedOutput)
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("members --all exits nonzero and diagnoses a consumer that closes stdout", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-members-closed-stdout-"))
+    const socketPath = join(dir, "tribe.sock")
+    const snapshot = {
+      sessions: [{ id: "member-large", name: "@agent/large", detail: "x".repeat(4_000_000) }],
+    }
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        const newline = buffer.indexOf("\n")
+        if (newline < 0) return
+        const request = JSON.parse(buffer.slice(0, newline)) as { id: number }
+        const result = { content: [{ type: "text", text: JSON.stringify(snapshot) }] }
+        socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`)
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const result = await new Promise<{ code: number | null; stderr: string }>((resolveRun) => {
+        const child = spawn(
+          "bash",
+          [
+            "-o",
+            "pipefail",
+            "-c",
+            '"$1" "$2" members --all | head -c 0 >/dev/null',
+            "tribe-members-closed-stdout",
+            BUN_BIN,
+            CLI,
+          ],
+          {
+            env: { ...process.env, TRIBE_SOCKET: socketPath, TRIBE_NO_AUTOSTART: "1" },
+            stdio: ["ignore", "ignore", "pipe"],
+            timeout: 5_000,
+          },
+        )
+        let stderr = ""
+        child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+        child.on("close", (code) => resolveRun({ code, stderr: stripAnsi(stderr) }))
+      })
+
+      expect(result.code).not.toBe(0)
+      expect(result.stderr).toContain("failed to write complete JSON payload to stdout")
+      expect(result.stderr.trim().split("\n")).toHaveLength(1)
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it("21049: read-only diagnostics never register an inherited managed persona", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-diagnostics-"))
     const socketPath = join(dir, "tribe.sock")
@@ -1169,7 +1276,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       attention: {
         actionable_unread: [],
         pending_balls: [],
-        pending_balls_summary: { total: 0, oldest_age_ms: 0 },
+        pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
       },
     }
     const result = {
@@ -1346,7 +1453,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     const attention = {
       actionable_unread: [{ id: "response-at-deadline", type: "response" }],
       pending_balls: [],
-      pending_balls_summary: { total: 0, oldest_age_ms: 0 },
+      pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
     }
     const server = createServer((socket) => {
       let buffer = ""

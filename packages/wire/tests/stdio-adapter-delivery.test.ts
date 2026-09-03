@@ -28,6 +28,7 @@ function spawnFakeDaemon(
       pending_balls_summary?: {
         total: number
         oldest_age_ms: number
+        truncated: boolean
         withheld?: {
           total: number
           by_kind: { request: number; incident: number }
@@ -117,7 +118,7 @@ function spawnFakeDaemon(
                 attention: {
                   actionable_unread: [],
                   pending_balls: [],
-                  pending_balls_summary: { total: 0, oldest_age_ms: 0 },
+                  pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
                 },
               },
             ),
@@ -875,7 +876,7 @@ describe("stdio adapter delivery modes", () => {
         attention: {
           actionable_unread: [{ id: "request-1", content: "review this" }],
           pending_balls: [{ request_id: "request-1", recipient: "@agent/test" }],
-          pending_balls_summary: { total: 1, oldest_age_ms: 500 },
+          pending_balls_summary: { total: 1, oldest_age_ms: 500, truncated: false },
         },
       },
     })
@@ -928,7 +929,7 @@ describe("stdio adapter delivery modes", () => {
       attention?: {
         actionable_unread?: Array<{ id?: string }>
         pending_balls?: Array<{ request_id?: string }>
-        pending_balls_summary?: { total?: number; oldest_age_ms?: number }
+        pending_balls_summary?: { total?: number; oldest_age_ms?: number; truncated?: boolean }
       }
     }
     expect(parsed).toMatchObject({
@@ -942,7 +943,7 @@ describe("stdio adapter delivery modes", () => {
       attention: {
         actionable_unread: [{ id: "request-1" }],
         pending_balls: [{ request_id: "request-1" }],
-        pending_balls_summary: { total: 1, oldest_age_ms: 500 },
+        pending_balls_summary: { total: 1, oldest_age_ms: 500, truncated: false },
       },
     })
     expect((call.result as { structuredContent?: unknown }).structuredContent).toMatchObject(parsed)
@@ -1182,6 +1183,7 @@ describe("stdio adapter delivery modes", () => {
         pending_balls_summary: {
           total: 108,
           oldest_age_ms: 9 * 24 * 60 * 60 * 1_000,
+          truncated: true,
           withheld: {
             total: 98,
             by_kind: { request: 8, incident: 90 },

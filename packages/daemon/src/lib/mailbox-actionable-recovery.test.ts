@@ -41,7 +41,7 @@ type FetchJson = ToolJson & {
   attention?: {
     actionable_unread?: FetchEvent[]
     pending_balls?: AttentionBall[]
-    pending_balls_summary?: { total: number; oldest_age_ms: number }
+    pending_balls_summary?: { total: number; oldest_age_ms: number; truncated: boolean }
   }
   events?: FetchEvent[]
   cursor?: number
@@ -597,6 +597,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(fetched.attention?.pending_balls_summary).toEqual({
       total,
       oldest_age_ms: expect.any(Number),
+      truncated: true,
       withheld: {
         total: 310,
         by_kind: { request: 310, incident: 0 },
@@ -664,6 +665,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(fetched.attention?.pending_balls_summary).toEqual({
       total: 11,
       oldest_age_ms: expect.any(Number),
+      truncated: true,
       withheld: {
         total: 1,
         by_kind: { request: 0, incident: 1 },

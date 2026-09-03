@@ -21,6 +21,7 @@ import { watchActivity } from "../lib/activity-watch.ts"
 import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-exempt.ts"
 import { readTribeLaunchId } from "../launch-environment.ts"
 import { withCliDaemonClient } from "./daemon-client.ts"
+import { writeJsonStdout } from "./json-output.ts"
 import { mcpJsonContent } from "./mcp-json-content.ts"
 import {
   resolveCheckoutCodeIdentity,
@@ -87,15 +88,6 @@ function invalidAuthenticatedPendingSnapshot(
     return true
   }
   return payload.count !== payload.pending.length
-}
-
-function writeStdoutLine(value: string): Promise<void> {
-  return new Promise((resolveWrite, rejectWrite) => {
-    process.stdout.write(`${value}\n`, (error) => {
-      if (error) rejectWrite(error)
-      else resolveWrite()
-    })
-  })
 }
 
 // ---------------------------------------------------------------------------
@@ -403,7 +395,7 @@ async function cmdMembers(showAll: boolean): Promise<void> {
     console.error(`tribe members: daemon returned an unexpected reply shape: ${JSON.stringify(result)}`)
     process.exit(1)
   }
-  console.log(JSON.stringify(result))
+  await writeJsonStdout(result)
 }
 
 function fmtMsg(m: Msg): void {
@@ -439,7 +431,7 @@ async function cmdLog(
   const rows = result.messages
 
   if (json) {
-    await writeStdoutLine(JSON.stringify({ messages: rows, query: result.query }))
+    await writeJsonStdout({ messages: rows, query: result.query })
     return
   }
 
@@ -647,7 +639,7 @@ async function cmdPending(
     return
   }
   if (json) {
-    await writeStdoutLine(JSON.stringify(payload, null, 2))
+    await writeJsonStdout(payload, 2)
     return
   }
   if (close) {
@@ -746,7 +738,7 @@ async function cmdHealth(): Promise<void> {
     }
   } catch {
     // Fallback: just print the raw result
-    console.log(JSON.stringify(result, null, 2))
+    await writeJsonStdout(result, 2)
   }
 }
 
@@ -1308,7 +1300,7 @@ async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promi
     oldest_unread_ts: number
   }
   if (opts.json) {
-    console.log(JSON.stringify(result))
+    await writeJsonStdout(result)
     return
   }
   const n = result.unread_count
@@ -1353,7 +1345,7 @@ async function cmdInboxDrain(opts: {
         `tribe inbox-drain: read was destructive; messages consumed and cursor advanced. Use --peek to read without consuming.`,
       )
     }
-    console.log(JSON.stringify(result))
+    await writeJsonStdout(result)
     return
   }
   for (const event of result.events) {
@@ -1412,7 +1404,7 @@ async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean }
         `tribe inbox: read was destructive; messages consumed and cursor advanced. Use --peek to read without consuming.`,
       )
     }
-    console.log(JSON.stringify(result))
+    await writeJsonStdout(result)
     return
   }
   const actionable = result.attention?.actionable_unread ?? []
@@ -1686,7 +1678,7 @@ async function cmdInboxWait(opts: {
     return
   }
   if (opts.json) {
-    console.log(JSON.stringify(result))
+    await writeJsonStdout(result)
     return
   }
   if (result.aborted) {
@@ -1758,7 +1750,7 @@ async function cmdRepair(opts: RepairCliOptions): Promise<void> {
   }
 
   if (opts.json) {
-    console.log(JSON.stringify(result))
+    await writeJsonStdout(result)
     return
   }
   if (result.error) {
@@ -1787,7 +1779,7 @@ async function cmdRestart(opts: { reason?: string; json?: boolean }): Promise<vo
   const result = mcpJsonContent(await callDaemon("tribe.restart", params)) as RestartResult
 
   if (opts.json) {
-    console.log(JSON.stringify(result))
+    await writeJsonStdout(result)
     return
   }
   if (result.error) {
@@ -1814,7 +1806,7 @@ async function cmdStop(opts: { force?: boolean; reason?: string; json?: boolean 
   const result = mcpJsonContent(await callDaemon("tribe.stop", params)) as StopResult
 
   if (opts.json) {
-    console.log(JSON.stringify(result))
+    await writeJsonStdout(result)
     return
   }
   if (result.error) {
@@ -1847,7 +1839,7 @@ export function registerReadCommands(program: Command): void {
     .command(MEMBERS_CLI.name)
     .description(MEMBERS_CLI.description)
     .option(membersAll.flags, membersAll.description)
-    .action((opts: { all?: boolean }) => void cmdMembers(!!opts.all))
+    .action((opts: { all?: boolean }) => cmdMembers(!!opts.all))
 
   const pendingOwner = cliOption(PENDING_CLI, "owner")
   const pendingAll = cliOption(PENDING_CLI, "all")
@@ -1930,7 +1922,7 @@ export function registerReadCommands(program: Command): void {
   program
     .command("health")
     .description("Run health diagnostics")
-    .action(() => void cmdHealth())
+    .action(() => cmdHealth())
 
   program
     .command("doctor")
@@ -1977,7 +1969,7 @@ export function registerReadCommands(program: Command): void {
     .description("Show unanswered actionable attention for the current managed launch or an explicit session")
     .option("--session <name>", "Explicit session to inspect")
     .option("--json", "Emit machine-readable JSON (for hooks)")
-    .action((opts: { session?: string; json?: boolean }) => void cmdInboxStatus(opts))
+    .action((opts: { session?: string; json?: boolean }) => cmdInboxStatus(opts))
 
   const inboxWaitSession = cliOption(INBOX_WAIT_CLI, "session")
   const inboxWaitTimeout = cliOption(INBOX_WAIT_CLI, "timeout")
@@ -1990,13 +1982,13 @@ export function registerReadCommands(program: Command): void {
     .option(inboxWaitTimeout.flags, inboxWaitTimeout.description, inboxWaitTimeout.default)
     .option(inboxWaitWakeOnCorrelatedReply.flags, inboxWaitWakeOnCorrelatedReply.description)
     .option(inboxWaitJson.flags, inboxWaitJson.description)
-    .action((opts: { session?: string; timeout?: string; wakeOnCorrelatedReply?: boolean; json?: boolean }) => {
+    .action(async (opts: { session?: string; timeout?: string; wakeOnCorrelatedReply?: boolean; json?: boolean }) => {
       const timeoutMs = opts.timeout ? parseDurationMs(opts.timeout) : undefined
       if (opts.timeout && timeoutMs === undefined) {
         console.error(`tribe inbox-wait: bad --timeout '${opts.timeout}' (expected NNs|NNm|NNh)`)
         process.exit(2)
       }
-      void cmdInboxWait({
+      await cmdInboxWait({
         session: opts.session,
         timeoutMs,
         wakeOnCorrelatedReply: opts.wakeOnCorrelatedReply,
@@ -2015,14 +2007,14 @@ export function registerReadCommands(program: Command): void {
     .option(repairInboxCursor.flags, repairInboxCursor.description)
     .option(repairReapStaleTransports.flags, repairReapStaleTransports.description)
     .option(repairJson.flags, repairJson.description)
-    .action((opts: RepairCliOptions) => void cmdRepair(opts))
+    .action((opts: RepairCliOptions) => cmdRepair(opts))
 
   program
     .command("restart")
     .description("Restart the tribe daemon from the same pinned module root via RPC tribe.restart")
     .option("--reason <text>", "Why the restart is needed (logged by the daemon)")
     .option("--json", "Emit machine-readable JSON")
-    .action((opts: { reason?: string; json?: boolean }) => void cmdRestart(opts))
+    .action((opts: { reason?: string; json?: boolean }) => cmdRestart(opts))
 
   program
     .command("stop")
@@ -2030,7 +2022,7 @@ export function registerReadCommands(program: Command): void {
     .option("--force", "Confirm stopping the shared daemon (required outside the hab supervisor context)")
     .option("--reason <text>", "Why the stop is needed (logged by the daemon)")
     .option("--json", "Emit machine-readable JSON")
-    .action((opts: { force?: boolean; reason?: string; json?: boolean }) => void cmdStop(opts))
+    .action((opts: { force?: boolean; reason?: string; json?: boolean }) => cmdStop(opts))
 
   program
     .command("activity")

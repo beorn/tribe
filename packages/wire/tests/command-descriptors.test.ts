@@ -209,10 +209,11 @@ describe("Tribe command descriptors", () => {
         pending_balls: { type: "array" },
         pending_balls_summary: {
           type: "object",
-          required: ["total", "oldest_age_ms"],
+          required: ["total", "oldest_age_ms", "truncated"],
           properties: {
             total: { type: "number" },
             oldest_age_ms: { type: "number" },
+            truncated: { type: "boolean" },
             withheld: {
               type: "object",
               required: ["total", "by_kind"],

@@ -22,7 +22,7 @@ function status(session: string, unread: number, oldestTs = Date.now() - 120_000
 const EMPTY_ATTENTION = {
   actionable_unread: [],
   pending_balls: [],
-  pending_balls_summary: { total: 0, oldest_age_ms: 0 },
+  pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
 }
 
 function createTestInboxWaitManager(readStatus: (session: string) => InboxStatus) {
@@ -115,7 +115,7 @@ describe("createInboxWaitManager", () => {
     const attention = {
       actionable_unread: [{ id: "actionable-1" }],
       pending_balls: [{ request_id: "request-1" }],
-      pending_balls_summary: { total: 1, oldest_age_ms: 5_000 },
+      pending_balls_summary: { total: 1, oldest_age_ms: 5_000, truncated: false },
     }
     const manager = createInboxWaitManager(
       (session) => status(session, 3),
@@ -138,7 +138,7 @@ describe("createInboxWaitManager", () => {
     const attention = {
       actionable_unread: [],
       pending_balls: [{ request_id: "request-1" }],
-      pending_balls_summary: { total: 1, oldest_age_ms: 5_000 },
+      pending_balls_summary: { total: 1, oldest_age_ms: 5_000, truncated: false },
     }
     const manager = createInboxWaitManager(
       (session) => status(session, 0),
@@ -616,7 +616,7 @@ describe("createInboxWaitManager", () => {
     const attention = {
       actionable_unread: [{ id: "response-at-deadline", type: "response" }],
       pending_balls: [],
-      pending_balls_summary: { total: 0, oldest_age_ms: 0 },
+      pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
     }
     const manager = createInboxWaitManager(
       (session) => status(session, 0),

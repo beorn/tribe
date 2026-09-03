@@ -242,7 +242,7 @@ describe("callTribeTool", () => {
     attention: {
       actionable_unread: [],
       pending_balls: [],
-      pending_balls_summary: { total: 0, oldest_age_ms: 0 },
+      pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
     },
   }
 
@@ -300,6 +300,7 @@ describe("callTribeTool", () => {
         pending_balls_summary: {
           total: 11,
           oldest_age_ms: 18 * 60_000,
+          truncated: true,
           withheld: { total: 1, by_kind: { request: 0, incident: 1 } },
         },
       },
@@ -312,6 +313,7 @@ describe("callTribeTool", () => {
       structuredContent: {
         attention: {
           pending_balls_summary: {
+            truncated: true,
             withheld: { total: 1, by_kind: { request: 0, incident: 1 } },
           },
         },

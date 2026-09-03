@@ -32,6 +32,7 @@ export type InboxWaitAttention = {
   readonly pending_balls_summary: {
     readonly total: number
     readonly oldest_age_ms: number
+    readonly truncated: boolean
     readonly withheld?: {
       readonly total: number
       readonly by_kind: {
@@ -117,6 +118,7 @@ export function parseInboxWaitResult(value: unknown): InboxWaitResult {
     !isRecord(attention.pending_balls_summary) ||
     !isFiniteNumber(attention.pending_balls_summary.total) ||
     !isFiniteNumber(attention.pending_balls_summary.oldest_age_ms) ||
+    typeof attention.pending_balls_summary.truncated !== "boolean" ||
     !isValidWithheldSummary(attention.pending_balls_summary.withheld)
   ) {
     throw invalidInboxWaitResult()
@@ -141,6 +143,7 @@ export function parseInboxWaitResult(value: unknown): InboxWaitResult {
       pending_balls_summary: {
         total: attention.pending_balls_summary.total,
         oldest_age_ms: attention.pending_balls_summary.oldest_age_ms,
+        truncated: attention.pending_balls_summary.truncated,
         ...(attention.pending_balls_summary.withheld === undefined
           ? {}
           : { withheld: attention.pending_balls_summary.withheld }),

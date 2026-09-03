@@ -33,6 +33,7 @@ import { INCIDENT_KEY_SEPARATOR, parseIncidentKey, type IncidentIdentity } from 
 import { formatMarkdown, generateRetro, parseDuration } from "../lib/retro.ts"
 import { readTribeLaunchId } from "../launch-environment.ts"
 import { withCliDaemonClient } from "./daemon-client.ts"
+import { writeJsonStdout } from "./json-output.ts"
 import { mcpJsonContent } from "./mcp-json-content.ts"
 import { oversizedMessageError } from "../lib/send-validation.ts"
 
@@ -551,7 +552,7 @@ async function cmdJoin(
     process.exit(1)
   }
   if (opts.json) {
-    console.log(JSON.stringify(result))
+    await writeJsonStdout(result)
     return
   }
   console.log(
@@ -583,7 +584,7 @@ async function cmdAlarmStatus(opts: { json?: boolean }): Promise<void> {
     | { active: false }
     | { active: true; reason: string; by: string; ts: number; age_min: number }
   if (opts.json) {
-    console.log(JSON.stringify(result))
+    await writeJsonStdout(result)
     return
   }
   if (!result.active) {
@@ -628,7 +629,11 @@ async function cmdRetro(opts: { since?: string; format: string; db?: string }): 
     }
   }
   const report = generateRetro(db, sinceMs)
-  console.log(opts.format === "json" ? JSON.stringify(report, null, 2) : formatMarkdown(report))
+  if (opts.format === "json") {
+    await writeJsonStdout(report, 2)
+  } else {
+    console.log(formatMarkdown(report))
+  }
   db.close()
 }
 
@@ -794,9 +799,8 @@ export function registerSendCommands(program: Command): void {
     .option(joinDomain.flags, joinDomain.description, collectDomain, [] as string[])
     .option(joinDelivery.flags, joinDelivery.description, joinDelivery.default)
     .option(joinJson.flags, joinJson.description)
-    .action(
-      (name: string, opts: { role?: string; domain?: string[]; delivery?: string; json?: boolean }) =>
-        void cmdJoin(name, opts),
+    .action((name: string, opts: { role?: string; domain?: string[]; delivery?: string; json?: boolean }) =>
+      cmdJoin(name, opts),
     )
 
   program
@@ -809,7 +813,7 @@ export function registerSendCommands(program: Command): void {
     .command("alarm-status")
     .description("Show current andon-pull alarm state (active reason + age, or 'no alarm active')")
     .option("--json", "Emit machine-readable JSON (for hooks)")
-    .action((opts: { json?: boolean }) => void cmdAlarmStatus(opts))
+    .action((opts: { json?: boolean }) => cmdAlarmStatus(opts))
 
   program
     .command("alarm-ack")
@@ -822,8 +826,7 @@ export function registerSendCommands(program: Command): void {
     .option("-s, --since <duration>", "Time window (e.g. 2h, 30m, 1d)")
     .option("-f, --format <fmt>", "Output format: markdown or json", "markdown")
     .option("--db <path>", "Path to tribe.db (default: auto-detect)")
-    .action(
-      (opts: { since?: string; format?: string; db?: string }) =>
-        void cmdRetro({ since: opts.since, format: opts.format ?? "markdown", db: opts.db }),
+    .action((opts: { since?: string; format?: string; db?: string }) =>
+      cmdRetro({ since: opts.since, format: opts.format ?? "markdown", db: opts.db }),
     )
 }

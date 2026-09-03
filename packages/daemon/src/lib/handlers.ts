@@ -1184,6 +1184,7 @@ type PendingReplyFactRow = {
 type PendingBallSummary = {
   total: number
   oldest_age_ms: number
+  truncated: boolean
   withheld?: {
     total: number
     by_kind: {
@@ -3001,6 +3002,7 @@ export function readAttentionProjection(
       pending_balls_summary: {
         total: pendingBalls.length,
         oldest_age_ms: pendingBalls.reduce((oldest, ball) => Math.max(oldest, ball.age_ms), 0),
+        truncated: withheld.length > 0,
         ...(withheld.length === 0
           ? {}
           : {

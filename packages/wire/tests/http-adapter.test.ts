@@ -81,7 +81,7 @@ describe("HTTP MCP adapter", () => {
         attention: {
           actionable_unread: [],
           pending_balls: [],
-          pending_balls_summary: { total: 0, oldest_age_ms: 0 },
+          pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
         },
       }
     })
@@ -97,8 +97,9 @@ describe("HTTP MCP adapter", () => {
       }) as unknown as typeof Bun.serve
       if (!Reflect.set(Bun, "serve", fakeServe)) throw new Error("could not replace Bun.serve for HTTP adapter test")
       bridge = await startTribeHttpMcpServer({ socketPath, name: "@agent/http", requireJoin: false })
-      if (!Reflect.set(Bun, "serve", originalServe))
+      if (!Reflect.set(Bun, "serve", originalServe)) {
         throw new Error("could not restore Bun.serve after HTTP adapter test")
+      }
       if (!handleFetch) throw new Error("HTTP adapter did not register a fetch handler")
       const request = new Request(bridge.url, {
         method: "POST",

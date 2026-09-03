@@ -27,7 +27,7 @@ function attentionWith(rowCount: number) {
   return {
     actionable_unread: Array.from({ length: rowCount }, (_, i) => ({ id: `row-${i}` })) as never,
     pending_balls: [],
-    pending_balls_summary: { total: 0, oldest_age_ms: 0 },
+    pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
   }
 }
 

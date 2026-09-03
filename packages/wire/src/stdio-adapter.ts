@@ -276,6 +276,7 @@ type TribeFetchResult = {
     pending_balls_summary?: {
       total?: number
       oldest_age_ms?: number
+      truncated?: boolean
       withheld?: {
         total?: number
         by_kind?: { request?: number; incident?: number }

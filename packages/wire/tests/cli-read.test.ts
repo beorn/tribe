@@ -231,7 +231,7 @@ describe("waitForInboxWithReconnect", () => {
   const EMPTY_ATTENTION = {
     actionable_unread: [],
     pending_balls: [],
-    pending_balls_summary: { total: 0, oldest_age_ms: 0 },
+    pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
   }
 
   test("retries retryable transport close without losing the original absolute deadline", async () => {
@@ -590,7 +590,7 @@ describe("waitForInboxWithReconnect", () => {
     const oldAttention = {
       actionable_unread: [{ id: "verdict-before-wait", type: "verdict" }],
       pending_balls: [],
-      pending_balls_summary: { total: 0, oldest_age_ms: 0 },
+      pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
     }
     const result = await waitForInboxWithReconnect({
       session: "@dev/1",
@@ -652,7 +652,7 @@ describe("waitForInboxWithReconnect", () => {
     const attention = {
       actionable_unread: [{ id: "response-visible", type: "response" }],
       pending_balls: [{ request_id: "request-visible" }],
-      pending_balls_summary: { total: 1, oldest_age_ms: 500 },
+      pending_balls_summary: { total: 1, oldest_age_ms: 500, truncated: false },
     }
     const result = await waitForInboxWithReconnect({
       session: "@ci",
@@ -694,7 +694,7 @@ describe("waitForInboxWithReconnect", () => {
     const attention = {
       actionable_unread: [{ id: "unrelated-response", type: "response" }],
       pending_balls: [],
-      pending_balls_summary: { total: 0, oldest_age_ms: 0 },
+      pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
     }
     const result = await waitForInboxWithReconnect({
       session: "@ci",
@@ -738,7 +738,7 @@ describe("waitForInboxWithReconnect", () => {
     const attention = {
       actionable_unread: [{ id: "request-before-reload" }],
       pending_balls: [{ request_id: "request-before-reload" }],
-      pending_balls_summary: { total: 1, oldest_age_ms: 750 },
+      pending_balls_summary: { total: 1, oldest_age_ms: 750, truncated: false },
     }
     const result = await waitForInboxWithReconnect({
       session: "@ci",

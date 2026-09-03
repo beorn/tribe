@@ -104,10 +104,14 @@ const ATTENTION_SCHEMA = {
     pending_balls_summary: {
       type: "object",
       description: "Lossless size and oldest-age summary for the full pending-ball set.",
-      required: ["total", "oldest_age_ms"],
+      required: ["total", "oldest_age_ms", "truncated"],
       properties: {
         total: { type: "number", description: "Total open tracked requests this recipient owns." },
         oldest_age_ms: { type: "number", description: "Age of the oldest open tracked request in milliseconds." },
+        truncated: {
+          type: "boolean",
+          description: "True when pending_balls is only a bounded preview of the total set.",
+        },
         withheld: {
           type: "object",
           description: "Present when the preview is truncated; names the omitted total and request/incident split.",
