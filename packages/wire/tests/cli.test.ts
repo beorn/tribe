@@ -89,6 +89,49 @@ function runCliAsync(
   })
 }
 
+type OneShotRpcRequest = { id: number; method: string; params?: Record<string, unknown> }
+type OneShotRpcOutcome = { result: unknown } | { error: { code: number; message: string } }
+
+async function runManagedPendingCliAgainst(outcomeFor: (request: OneShotRpcRequest) => OneShotRpcOutcome): Promise<{
+  result: Awaited<ReturnType<typeof runCliAsync>>
+  calls: Array<{ method: string; params?: Record<string, unknown> }>
+}> {
+  const dir = mkdtempSync(join(tmpdir(), "tribe-wire-pending-response-"))
+  const socketPath = join(dir, "tribe.sock")
+  const calls: Array<{ method: string; params?: Record<string, unknown> }> = []
+  const server = createServer((socket) => {
+    let buffer = ""
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8")
+      const newline = buffer.indexOf("\n")
+      if (newline < 0) return
+      const request = JSON.parse(buffer.slice(0, newline)) as OneShotRpcRequest
+      calls.push({ method: request.method, params: request.params })
+      socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, ...outcomeFor(request) })}\n`)
+    })
+  })
+
+  try {
+    await new Promise<void>((resolveListen, rejectListen) => {
+      server.once("error", rejectListen)
+      server.listen(socketPath, () => {
+        server.off("error", rejectListen)
+        resolveListen()
+      })
+    })
+    const result = await runCliAsync(["pending", "--json"], {
+      ...process.env,
+      TRIBE_SOCKET: socketPath,
+      TRIBE_NO_AUTOSTART: "1",
+      AG_SESSION_AUTH: "a".repeat(43),
+    })
+    return { result, calls }
+  } finally {
+    await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 async function waitForSocket(socketPath: string, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -381,60 +424,62 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
   })
 
   it("managed pending reads name a stale daemon and exit through the CLI error contract", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-pending-stale-"))
-    const socketPath = join(dir, "tribe.sock")
-    const calls: Array<{ method: string; params?: Record<string, unknown> }> = []
-    const server = createServer((socket) => {
-      let buffer = ""
-      socket.on("data", (chunk) => {
-        buffer += chunk.toString("utf8")
-        const newline = buffer.indexOf("\n")
-        if (newline < 0) return
-        const request = JSON.parse(buffer.slice(0, newline)) as {
-          id: number
-          method: string
-          params?: Record<string, unknown>
-        }
-        calls.push({ method: request.method, params: request.params })
-        socket.write(
-          `${JSON.stringify({
-            jsonrpc: "2.0",
-            id: request.id,
-            error: { code: -32601, message: `Method not found: ${request.method}` },
-          })}\n`,
-        )
-      })
+    const authority = "a".repeat(43)
+    const { result, calls } = await runManagedPendingCliAgainst((request) => ({
+      error: { code: -32601, message: `Method not found: ${request.method}` },
+    }))
+
+    expect(result).toEqual({
+      code: 2,
+      signal: null,
+      stdout: "",
+      stderr:
+        "tribe pending: Running Tribe daemon is stale and cannot resolve this managed pending owner; " +
+        "update the module root before restarting the daemon. Use --owner only for an explicit recovery or audit target. " +
+        "No pending query ran. For an explicit recovery or audit read, run " +
+        "'tribe pending --owner <seat> --json'.\n",
     })
+    expect(calls).toEqual([{ method: "cli_session_pending_read_v1", params: { authority } }])
+  })
 
-    try {
-      await new Promise<void>((resolveListen, rejectListen) => {
-        server.once("error", rejectListen)
-        server.listen(socketPath, () => {
-          server.off("error", rejectListen)
-          resolveListen()
-        })
-      })
-      const authority = "a".repeat(43)
-      const result = await runCliAsync(["pending", "--json"], {
-        ...process.env,
-        TRIBE_SOCKET: socketPath,
-        TRIBE_NO_AUTOSTART: "1",
-        AG_SESSION_AUTH: authority,
-      })
+  it("managed pending reads preserve non-identity RPC remedies", async () => {
+    const { result } = await runManagedPendingCliAgainst(() => ({
+      error: {
+        code: -32603,
+        message: "pending snapshot storage failed for @dev/2; run 'tribe doctor repair'",
+      },
+    }))
 
-      expect(result).toEqual({
-        code: 2,
-        signal: null,
-        stdout: "",
-        stderr:
-          "tribe pending: Running Tribe daemon is stale and cannot resolve this managed pending owner; " +
-          "update the module root before restarting the daemon. Use --owner only for an explicit recovery or audit target.\n",
-      })
-      expect(calls).toEqual([{ method: "cli_session_pending_read_v1", params: { authority } }])
-    } finally {
-      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
-      rmSync(dir, { recursive: true, force: true })
-    }
+    expect(result).toEqual({
+      code: 2,
+      signal: null,
+      stdout: "",
+      stderr: "tribe pending: pending snapshot storage failed for @dev/2; run 'tribe doctor repair'\n",
+    })
+  })
+
+  it("managed pending reads refuse contradictory success snapshots instead of reporting zero", async () => {
+    const authority = "a".repeat(43)
+    const { result, calls } = await runManagedPendingCliAgainst(() => ({
+      result: {
+        structuredContent: {
+          owner: "@dev/2",
+          count: 0,
+          pending: [{ recipient: "@dev/2" }],
+        },
+      },
+    }))
+
+    expect(result).toEqual({
+      code: 2,
+      signal: null,
+      stdout: "",
+      stderr:
+        "tribe pending: daemon returned an invalid authenticated pending snapshot; expected non-empty owner, " +
+        "a pending array, and non-negative integer count matching its length. Run 'tribe doctor' to compare the running daemon " +
+        "with this checkout before retrying.\n",
+    })
+    expect(calls).toEqual([{ method: "cli_session_pending_read_v1", params: { authority } }])
   })
 
   it("pending --all renders every owner and --json preserves the typed snapshot", async () => {

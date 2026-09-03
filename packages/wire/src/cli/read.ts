@@ -43,6 +43,52 @@ const STALE_MANAGED_PENDING_DAEMON_ERROR =
   "Running Tribe daemon is stale and cannot resolve this managed pending owner; update the module root before restarting the daemon. Use --owner only for an explicit recovery or audit target."
 const INBOX_WAIT_PROTOCOL_MISMATCH = "TRIBE_INBOX_WAIT_PROTOCOL_MISMATCH"
 
+function pendingReadRecoveryCommand(expired: boolean, owed: boolean, staleMs: number | undefined): string {
+  return [
+    "tribe pending --owner <seat>",
+    expired ? "--expired" : "",
+    owed ? "--owed" : "",
+    staleMs === undefined ? "" : `--stale ${staleMs / 1000}s`,
+    "--json",
+  ]
+    .filter((part) => part.length > 0)
+    .join(" ")
+}
+
+function pendingReadCliError(method: string, error: unknown, recoveryCommand: string): string {
+  const message = error instanceof Error ? error.message : String(error)
+  const code = (error as { code?: unknown }).code
+  const recoverableIdentityFailure =
+    code === -32004 ||
+    code === -32003 ||
+    message === STALE_MANAGED_PENDING_DAEMON_ERROR ||
+    message.startsWith(`${AG_SESSION_AUTH_ENV} must be`)
+  if (method !== "cli_session_pending_read_v1" || !recoverableIdentityFailure) return message
+  const punctuation = message.endsWith(".") ? "" : "."
+  return (
+    `${message}${punctuation} No pending query ran. ` +
+    `For an explicit recovery or audit read, run '${recoveryCommand}'.`
+  )
+}
+
+function invalidAuthenticatedPendingSnapshot(
+  method: string,
+  payload: { owner?: string; count?: number; pending?: PendingCliRow[] },
+): boolean {
+  if (method !== "cli_session_pending_read_v1") return false
+  if (
+    typeof payload.owner !== "string" ||
+    payload.owner.length === 0 ||
+    typeof payload.count !== "number" ||
+    !Number.isSafeInteger(payload.count) ||
+    payload.count < 0 ||
+    !Array.isArray(payload.pending)
+  ) {
+    return true
+  }
+  return payload.count !== payload.pending.length
+}
+
 function writeStdoutLine(value: string): Promise<void> {
   return new Promise((resolveWrite, rejectWrite) => {
     process.stdout.write(`${value}\n`, (error) => {
@@ -530,6 +576,7 @@ async function cmdPending(
   if (owner) args.owner = owner
   if (staleMs !== undefined) args.stale_ms = staleMs
   if (close) args.close = close
+  const explicitRecoveryCommand = pendingReadRecoveryCommand(expired, owed, staleMs)
   let method = "tribe.pending"
   let rawResult: unknown
   try {
@@ -550,7 +597,7 @@ async function cmdPending(
     }
     rawResult = await callDaemon(method, args)
   } catch (error) {
-    console.error(`tribe pending: ${error instanceof Error ? error.message : String(error)}`)
+    console.error(`tribe pending: ${pendingReadCliError(method, error, explicitRecoveryCommand)}`)
     process.exitCode = 2
     return
   }
@@ -577,7 +624,10 @@ async function cmdPending(
   }
   const payload = result.structuredContent ?? (mcpJsonContent(result) as NonNullable<typeof result.structuredContent>)
   if (!payload) {
-    console.log("No structured result returned.")
+    console.error(
+      "tribe pending: daemon returned no structured pending result. Run 'tribe doctor' to compare the running daemon with this checkout before retrying.",
+    )
+    process.exitCode = 2
     return
   }
   // A daemon refusal arrives as a SUCCESSFUL response carrying `error`, not as a
@@ -586,6 +636,13 @@ async function cmdPending(
   // confident, well-formed wrong answer to a query the daemon actually rejected.
   if (typeof payload.error === "string") {
     console.error(`tribe pending: ${payload.error}`)
+    process.exitCode = 2
+    return
+  }
+  if (invalidAuthenticatedPendingSnapshot(method, payload)) {
+    console.error(
+      "tribe pending: daemon returned an invalid authenticated pending snapshot; expected non-empty owner, a pending array, and non-negative integer count matching its length. Run 'tribe doctor' to compare the running daemon with this checkout before retrying.",
+    )
     process.exitCode = 2
     return
   }

@@ -1109,7 +1109,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(missingAuthority.exitCode).toBe(2)
     expect(missingAuthority.stdout).toBe("")
     expect(missingAuthority.stderr).toBe(
-      "tribe pending: current session authority is missing; AG_SESSION_AUTH must be inherited from the managed launch\n",
+      "tribe pending: current session authority is missing; AG_SESSION_AUTH must be inherited from the managed launch. " +
+        "No pending query ran. For an explicit recovery or audit read, run " +
+        "'tribe pending --owner <seat> --expired --owed --json'.\n",
     )
 
     const rejectedAuthority = await runCli(["pending", "--expired", "--owed", "--json"], cliEnv, {
@@ -1119,7 +1121,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(rejectedAuthority.exitCode).toBe(2)
     expect(rejectedAuthority.stdout).toBe("")
     expect(rejectedAuthority.stderr).toBe(
-      "tribe pending: current session authority was rejected or revoked; AG_SESSION_AUTH did not match a live managed session\n",
+      "tribe pending: current session authority was rejected or revoked; AG_SESSION_AUTH did not match a live managed session. " +
+        "No pending query ran. For an explicit recovery or audit read, run " +
+        "'tribe pending --owner <seat> --expired --owed --json'.\n",
     )
 
     const malformedAuthority = await runCli(["pending", "--expired", "--owed", "--json"], cliEnv, {
@@ -1128,7 +1132,11 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     })
     expect(malformedAuthority.exitCode).toBe(2)
     expect(malformedAuthority.stdout).toBe("")
-    expect(malformedAuthority.stderr).toBe("tribe pending: AG_SESSION_AUTH must be a 32-byte base64url bearer\n")
+    expect(malformedAuthority.stderr).toBe(
+      "tribe pending: AG_SESSION_AUTH must be a 32-byte base64url bearer. No pending query ran. " +
+        "For an explicit recovery or audit read, run " +
+        "'tribe pending --owner <seat> --expired --owed --json'.\n",
+    )
 
     const ownerClose = await runCli(["pending", "--owner", owner, "--close", ownerRequestId, "--json"], cliEnv, {
       selfMailboxAuthority: ownerAuthority,
@@ -1223,6 +1231,19 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         error: "tribe.pending: owed filters the expired view; pass expired: true.",
       })
       expect(invalidFilter.structuredContent).not.toHaveProperty("count")
+
+      for (const [field, value, message] of [
+        ["expired", "yes", "Authenticated pending read filter 'expired' must be boolean"],
+        ["owed", 1, "Authenticated pending read filter 'owed' must be boolean"],
+        ["stale_ms", -1, "Authenticated pending read filter 'stale_ms' must be a finite non-negative number"],
+      ] as const) {
+        await expect(
+          overrideProbe.call("cli_session_pending_read_v1", {
+            authority: ownerAuthority,
+            [field]: value,
+          }),
+        ).rejects.toThrow(message)
+      }
 
       await expect(
         overrideProbe.call("cli_session_pending_read_v1", {

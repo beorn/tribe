@@ -294,6 +294,22 @@ export function withDispatcher<
       | { context: TribeContext }
       | { errorCode: number; errorMessage: string; errorData: Record<string, unknown> }
 
+    function invalidPendingReadFilter(params: Record<string, unknown>): string | undefined {
+      if (params.expired !== undefined && typeof params.expired !== "boolean") {
+        return "Authenticated pending read filter 'expired' must be boolean"
+      }
+      if (params.owed !== undefined && typeof params.owed !== "boolean") {
+        return "Authenticated pending read filter 'owed' must be boolean"
+      }
+      if (
+        params.stale_ms !== undefined &&
+        (typeof params.stale_ms !== "number" || !Number.isFinite(params.stale_ms) || params.stale_ms < 0)
+      ) {
+        return "Authenticated pending read filter 'stale_ms' must be a finite non-negative number"
+      }
+      return undefined
+    }
+
     /**
      * Resolve the launcher-minted bearer exactly once for every authenticated
      * one-shot operation. The capability union above is deliberately closed:
@@ -1687,14 +1703,8 @@ export function withDispatcher<
                 "Pending read derives owner identity from authority; owner override is forbidden",
               )
             }
-            if (
-              (p.expired !== undefined && typeof p.expired !== "boolean") ||
-              (p.owed !== undefined && typeof p.owed !== "boolean") ||
-              (p.stale_ms !== undefined &&
-                (typeof p.stale_ms !== "number" || !Number.isFinite(p.stale_ms) || p.stale_ms < 0))
-            ) {
-              return makeError(id, -32602, "Authenticated pending read received invalid filter parameters")
-            }
+            const invalidFilter = invalidPendingReadFilter(p)
+            if (invalidFilter !== undefined) return makeError(id, -32602, invalidFilter)
             const outcome = await dispatchAuthenticatedSessionCapability(
               p.authority,
               {
