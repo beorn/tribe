@@ -46,7 +46,8 @@ branch assignments, or merge authority.
 ## Pending-ball deadline facts
 
 Direct `request`, `query`, and `assign` messages open one recipient-owned ball;
-other message types open one only when explicitly requested. The
+other messages, including broadcasts, open recipient-owned balls only when
+explicitly requested. The
 `pending_request` row stores active ownership, age, and fanout. Tracked requests
 and queries receive a 20-minute escalation deadline; assignments have no
 reply-clock default. `expires_in_ms` overrides that policy for one send.
