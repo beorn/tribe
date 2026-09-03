@@ -12,7 +12,7 @@
  * together; a slip in any one of the three fails here first.
  */
 
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
@@ -26,11 +26,18 @@ type WirePackageJson = {
 }
 
 const packageDir = join(dirname(fileURLToPath(import.meta.url)), "..")
+const repoDir = join(packageDir, "..", "..")
 const pkg = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8")) as WirePackageJson
 
 const devExports = pkg.exports
 const publishedExports = pkg.publishConfig.exports
 const tsdownEntries = pkg.tsdown.entry
+
+const workflowDir = join(repoDir, ".github", "workflows")
+const setupBunWorkflows = readdirSync(workflowDir)
+  .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"))
+  .map((name) => ({ name, source: readFileSync(join(workflowDir, name), "utf8") }))
+  .filter(({ source }) => source.includes("oven-sh/setup-bun@"))
 
 /** `"./src/lib/socket.ts"` / `"src/lib/socket.ts"` -> `"src/lib/socket.ts"` */
 function stripLeadingDotSlash(path: string): string {
@@ -108,5 +115,21 @@ describe("packages/wire package.json export manifest consistency", () => {
       }
     }
     expect(mismatches).toEqual([])
+  })
+})
+
+describe("repository Bun runtime manifest consistency", () => {
+  it("declares one exact repository Bun version", () => {
+    const versionPath = join(repoDir, ".bun-version")
+    expect(existsSync(versionPath), ".bun-version must declare the hosted-tooling Bun runtime").toBe(true)
+    if (!existsSync(versionPath)) return
+
+    const version = readFileSync(versionPath, "utf8").trim()
+    expect(version).toMatch(/^\d+\.\d+\.\d+$/)
+  })
+
+  it.each(setupBunWorkflows)("$name installs the repository Bun version", ({ source }) => {
+    expect(source.match(/^\s*bun-version-file:\s*["']?\.bun-version["']?\s*$/gm)).toHaveLength(1)
+    expect(source).not.toMatch(/^\s*bun-version:\s/m)
   })
 })
