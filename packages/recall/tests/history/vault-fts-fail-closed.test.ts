@@ -59,6 +59,7 @@ function seedKmVaultDb(db: Database): void {
     CREATE TABLE nodes (
       rowid INTEGER PRIMARY KEY,
       id TEXT,
+      parent_id TEXT,
       fs_path TEXT,
       name TEXT,
       title TEXT,
@@ -79,9 +80,12 @@ function seedKmVaultDb(db: Database): void {
       VALUES (new.rowid, new.id, new.name, new.title, new.content);
     END;
   `)
-  const insert = db.prepare("INSERT INTO nodes (id, fs_path, name, title, content) VALUES (?, ?, ?, ?, ?)")
+  const insert = db.prepare(
+    "INSERT INTO nodes (id, parent_id, fs_path, name, title, content) VALUES (?, ?, ?, ?, ?, ?)",
+  )
   insert.run(
     "@km/tribe/12345-termless",
+    null,
     "hub/@km/tribe/12345-termless.md",
     "12345-termless",
     "Termless headless terminal harness",
@@ -89,6 +93,7 @@ function seedKmVaultDb(db: Database): void {
   )
   insert.run(
     "@km/docs/architecture",
+    null,
     "docs/architecture.md",
     "architecture",
     "Architecture",
@@ -361,6 +366,87 @@ describe("vault-fts fail-closed guards", () => {
 
       // The read-only handle refuses writes.
       expect(() => db!.exec("INSERT INTO nodes (id, name, title, content) VALUES ('x', 'x', 'x', 'x')")).toThrow()
+    } finally {
+      resetVaultDbCacheForTests()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // Regression for @i/20-search-and-memory/23189: searchVault() used to
+  // require `fs_path IS NOT NULL OR title IS NOT NULL` in its WHERE clause,
+  // which silently discarded every body-only node — the km knode model puts
+  // most real prose there (mdsection/list-item/table-row content), not on
+  // the file/folder node itself. Measured on the live vault, that filter
+  // took a real 4-token query from 71 matches to 0 while `searchVault`
+  // logged the false "0 matches" the caller cannot tell from a true zero.
+  test("projects body-only matches to their file source and dedupes sibling hits", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-vault-guard-body-"))
+    const dbPath = join(dir, "state.db")
+    try {
+      const db = new Database(dbPath)
+      seedKmVaultDb(db)
+      const insert = db.prepare(
+        "INSERT INTO nodes (id, parent_id, fs_path, name, title, content) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      insert.run(
+        "01VAULTNEEDLEBODYONLYROW0",
+        "@km/tribe/12345-termless",
+        null,
+        null,
+        null,
+        "vaultneedle appears only in this nested body row",
+      )
+      insert.run(
+        "01VAULTNEEDLEBODYONLYROW1",
+        "@km/tribe/12345-termless",
+        null,
+        null,
+        null,
+        "a sibling repeats vaultneedle in the same source file",
+      )
+      db.close()
+
+      process.env.KM_VAULT_DB = dbPath
+      resetVaultDbCacheForTests()
+
+      const hits = searchVault("vaultneedle", 5)
+      expect(hits).toHaveLength(1)
+      expect(hits[0]?.id).toMatch(/^01VAULTNEEDLEBODYONLYROW[01]$/)
+      expect(hits[0]?.fsPath).toBe("hub/@km/tribe/12345-termless.md")
+      expect(hits[0]?.title).toBe("Termless headless terminal harness")
+      expect(hits[0]?.snippet).toContain("vaultneedle")
+    } finally {
+      resetVaultDbCacheForTests()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("FAIL LOUD: an explicitly configured vault with an invalid schema names repair commands", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-vault-guard-invalid-"))
+    const dbPath = join(dir, "state.db")
+    try {
+      const db = new Database(dbPath)
+      db.exec("CREATE TABLE unrelated (id TEXT)")
+      db.close()
+
+      process.env.KM_VAULT_DB = dbPath
+      resetVaultDbCacheForTests()
+
+      expect(() => searchVault("termless", 5)).toThrowError(/KM_VAULT_DB=.*Run 'km sync'.*unset KM_VAULT_DB/)
+    } finally {
+      resetVaultDbCacheForTests()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("FAIL LOUD: a missing explicit KM_VAULT_DB does not fall through to discovery", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-vault-guard-missing-"))
+    const dbPath = join(dir, "missing.db")
+    try {
+      process.env.KM_VAULT_DB = dbPath
+      resetVaultDbCacheForTests()
+
+      expect(() => getVaultDb()).toThrowError(/KM_VAULT_DB=.*does not exist.*Run 'km sync'.*unset KM_VAULT_DB/)
     } finally {
       resetVaultDbCacheForTests()
       rmSync(dir, { recursive: true, force: true })

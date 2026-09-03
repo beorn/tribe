@@ -291,7 +291,7 @@ function describeSynthesisError(err: unknown): string {
  * SynthesisFailure) still gets a minimal, honest one rather than being
  * silently dropped.
  */
-function diagnosticsFromSynthesisError(err: unknown, timeoutMs: number): SynthesisDiagnostics {
+export function synthesisDiagnosticsFromError(err: unknown, timeoutMs: number): SynthesisDiagnostics {
   if (err instanceof SynthesisFailure) {
     return { ...err.diagnostics, rawStack: err.stack }
   }
@@ -684,7 +684,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         results: deduped,
         durationMs: totalMs,
         timing: { searchMs, llmMs },
-        synthesisFailure: diagnosticsFromSynthesisError(err, timeout),
+        synthesisFailure: synthesisDiagnosticsFromError(err, timeout),
       }
     }
     const llmMs = Date.now() - llmStart

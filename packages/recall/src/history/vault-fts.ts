@@ -24,7 +24,13 @@ let resolveAttempted = false
 
 function findVaultDb(): string | null {
   const fromEnv = process.env.KM_VAULT_DB
-  if (fromEnv && existsSync(fromEnv)) return fromEnv
+  if (fromEnv) {
+    const configuredPath = resolve(fromEnv)
+    if (!existsSync(configuredPath)) {
+      throw vaultDbError(configuredPath, "does not exist")
+    }
+    return configuredPath
+  }
 
   let dir = process.cwd()
   for (let i = 0; i < 8; i++) {
@@ -40,20 +46,22 @@ function findVaultDb(): string | null {
 export function getVaultDb(): Database | null {
   if (cachedDb) return cachedDb
   if (resolveAttempted) return null
-  resolveAttempted = true
 
   const path = findVaultDb()
-  if (!path) return null
+  if (!path) {
+    resolveAttempted = true
+    return null
+  }
 
   try {
     const db = new Database(path, { readonly: true })
     db.exec("PRAGMA query_only = ON")
     cachedDb = db
     cachedPath = path
+    resolveAttempted = true
     return db
-  } catch {
-    // silent-fallback-allow: unavailable vault FTS DB disables vault search integration.
-    return null
+  } catch (error) {
+    throw vaultDbError(path, `could not be opened read-only (${errorMessage(error)})`)
   }
 }
 
@@ -91,6 +99,23 @@ export interface VaultMatch {
   title: string | null
   snippet: string
   rank: number
+}
+
+interface VaultRow {
+  id: string
+  parent_id: string | null
+  fs_path: string | null
+  name: string | null
+  title: string | null
+  snippet: string | null
+  rank: number
+}
+
+interface VaultAncestor {
+  id: string
+  fs_path: string | null
+  name: string | null
+  title: string | null
 }
 
 // Common English / chat stopwords — words too generic to be salient
@@ -221,8 +246,10 @@ export function extractProbeTokens(prompt: string, max = 6): string[] {
  * file-backed content (beads, docs) over body-only nodes.
  *
  * Rank shape mirrors the existing message FTS — bm25 negative numbers,
- * smaller is better. We boost titled+pathed results so a bead beats a
- * random list-item that happens to share a token.
+ * smaller is better. Body nodes inherit source metadata from their nearest
+ * ancestors, then results are boosted, sorted, and deduplicated by source.
+ * This keeps nested markdown searchable without emitting opaque node IDs.
+ * @i/20-search-and-memory/23189
  *
  * `mode` controls how the prompt is converted to an FTS query:
  *  - `"phrase"` (default): existing behavior — AND-join every token via
@@ -232,6 +259,7 @@ export function extractProbeTokens(prompt: string, max = 6): string[] {
  *    long sentences.
  */
 export function searchVault(query: string, limit: number, mode: "phrase" | "any-of-anchors" = "phrase"): VaultMatch[] {
+  if (limit <= 0) return []
   const db = getVaultDb()
   if (!db) return []
 
@@ -253,6 +281,7 @@ export function searchVault(query: string, limit: number, mode: "phrase" | "any-
     const rows = db
       .prepare(
         `SELECT n.id,
+                n.parent_id,
                 n.fs_path,
                 n.name,
                 n.title,
@@ -261,40 +290,73 @@ export function searchVault(query: string, limit: number, mode: "phrase" | "any-
            FROM nodes_fts
            JOIN nodes n ON nodes_fts.id = n.id
           WHERE nodes_fts MATCH ?
-            AND (n.fs_path IS NOT NULL OR n.title IS NOT NULL)
           ORDER BY rank
           LIMIT ?`,
       )
-      .all(ftsQuery, limit * 2) as Array<{
-      id: string
-      fs_path: string | null
-      name: string | null
-      title: string | null
-      snippet: string
-      rank: number
-    }>
+      .all(ftsQuery, limit * 4) as VaultRow[]
 
-    const out: VaultMatch[] = []
+    const ancestorsFor = db.prepare(
+      `WITH RECURSIVE ancestors(id, parent_id, fs_path, name, title, depth, path) AS (
+         SELECT id, parent_id, fs_path, name, title, 0, char(31) || id || char(31)
+           FROM nodes
+          WHERE id = ?
+         UNION ALL
+         SELECT parent.id,
+                parent.parent_id,
+                parent.fs_path,
+                parent.name,
+                parent.title,
+                ancestors.depth + 1,
+                ancestors.path || parent.id || char(31)
+           FROM ancestors
+           JOIN nodes parent ON parent.id = ancestors.parent_id
+          WHERE ancestors.depth < 1000
+            AND instr(ancestors.path, char(31) || parent.id || char(31)) = 0
+       )
+       SELECT id, fs_path, name, title
+         FROM ancestors
+        ORDER BY depth`,
+    )
+
+    const bestBySource = new Map<string, VaultMatch>()
     for (const r of rows) {
-      // Boost titled+pathed (beads/docs) above body-only nodes.
-      const titleBoost = r.title ? 1.4 : 1.0
-      const pathBoost = r.fs_path ? 1.2 : 1.0
-      out.push({
+      const ancestors = ancestorsFor.all(r.id) as VaultAncestor[]
+      const pathSource = ancestors.find((ancestor) => ancestor.fs_path !== null)
+      const titleSource = ancestors.find((ancestor) => ancestor.title !== null)
+      const nameSource = ancestors.find((ancestor) => ancestor.name !== null)
+      const fsPath = r.fs_path ?? pathSource?.fs_path ?? null
+      const title = r.title ?? titleSource?.title ?? null
+      const name = r.name ?? nameSource?.name ?? null
+      const sourceKey = fsPath ?? titleSource?.id ?? nameSource?.id ?? r.id
+      const titleBoost = title ? 1.4 : 1.0
+      const pathBoost = fsPath ? 1.2 : 1.0
+      const match: VaultMatch = {
         id: r.id,
-        fsPath: r.fs_path,
-        name: r.name,
-        title: r.title,
+        fsPath,
+        name,
+        title,
         // FTS5 snippet() can return null when the matched column is empty
         // (e.g. a node titled but with no body). Fall back to title or
         // path so downstream cleanSnippet/render get a non-null string.
-        snippet: r.snippet ?? r.title ?? r.fs_path ?? "",
+        snippet: r.snippet ?? title ?? fsPath ?? "",
         rank: r.rank * titleBoost * pathBoost,
-      })
-      if (out.length >= limit) break
+      }
+      const current = bestBySource.get(sourceKey)
+      if (!current || match.rank < current.rank) bestBySource.set(sourceKey, match)
     }
-    return out
-  } catch {
-    // silent-fallback-allow: failed vault FTS query contributes no vault recall hits.
-    return []
+    return [...bestBySource.values()].sort((a, b) => a.rank - b.rank).slice(0, limit)
+  } catch (error) {
+    throw vaultDbError(getVaultDbPath() ?? "unknown", `FTS query failed (${errorMessage(error)})`)
   }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function vaultDbError(path: string, reason: string): Error {
+  return new Error(
+    `Vault index KM_VAULT_DB=${path} ${reason}. ` +
+      `Run 'km sync' in the vault root to repair it, or unset KM_VAULT_DB to disable vault search.`,
+  )
 }

@@ -15,10 +15,10 @@
  */
 
 import { getDb, closeDb } from "../history/db.ts"
-import { parseTimeToMs, recall } from "../history/search.ts"
+import { parseTimeToMs, recall, synthesisDiagnosticsFromError } from "../history/search.ts"
 import { synthesizeResults, type SynthesisResult } from "../history/synthesize.ts"
 import { log, THIRTY_DAYS_MS } from "../history/recall-shared.ts"
-import type { RecallOptions, RecallResult, RecallSearchResult } from "../history/recall-shared.ts"
+import type { RecallOptions, RecallResult, RecallSearchResult, SynthesisDiagnostics } from "../history/recall-shared.ts"
 import { buildQueryContext, renderContextPrompt, type QueryContext } from "./context.ts"
 import { planQuery, planVariants, type PlanCall } from "./plan.ts"
 import { fanoutSearch, mergeFanouts, type FanoutResult } from "./fanout.ts"
@@ -294,52 +294,59 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
   let synthPath: NonNullable<AgentRecallResult["trace"]["synthPath"]> = "none"
   let synthCallsUsed = 0
   let round1ShortCircuited = false
+  let synthesisFailure: SynthesisDiagnostics | undefined
 
-  if (finalFanout.results.length > 0) {
-    const round2Ran = finalFanout !== fanoutR1
-    const newDocsInTop = round2Ran ? countNewDocsInTopK(fanoutR1.results, finalFanout.results, limit) : 0
+  try {
+    if (finalFanout.results.length > 0) {
+      const round2Ran = finalFanout !== fanoutR1
+      const newDocsInTop = round2Ran ? countNewDocsInTopK(fanoutR1.results, finalFanout.results, limit) : 0
 
-    const useSpeculative = speculativeSynthPromise !== null && (!round2Ran || newDocsInTop < ROUND2_NEW_DOCS_THRESHOLD)
+      const useSpeculative =
+        speculativeSynthPromise !== null && (!round2Ran || newDocsInTop < ROUND2_NEW_DOCS_THRESHOLD)
 
-    if (useSpeculative) {
-      if (speculativeSynthPromise === null) {
-        throw new Error("recall agent selected speculative synthesis without starting it")
+      if (useSpeculative) {
+        if (speculativeSynthPromise === null) {
+          throw new Error("recall agent selected speculative synthesis without starting it")
+        }
+        synthCallsUsed = 1
+        const speculative = await speculativeSynthPromise
+        if ("error" in speculative) throw speculative.error
+        const specResult = speculative.result
+        synthesis = { text: specResult.text, cost: specResult.cost }
+        synthPath = round2Ran ? "speculative-round1" : "single-pass"
+        round1ShortCircuited = true
+        const saved = Date.now() - speculativeSynthStart
+        log(
+          `agent: using speculative synth on round 1 (${round2Ran ? `r2 added ${newDocsInTop}<${ROUND2_NEW_DOCS_THRESHOLD} new top-K` : "no round 2"}, elapsed=${saved}ms, 1 synth call)`,
+        )
+      } else {
+        // Fresh synth on merged results. Await the speculative synth too
+        // (usually already done) to capture its cost — it was a real billed
+        // call whose result we're abandoning, and our cost + synth-count
+        // report should reflect that honestly.
+        synthCallsUsed = speculativeSynthPromise ? 2 : 1
+        const [freshResult, abandonedSpeculative] = await Promise.all([
+          synthesizeResults(query, finalFanout.results, timeout, llm),
+          speculativeSynthPromise,
+        ])
+        const abandonedSpec =
+          abandonedSpeculative && "result" in abandonedSpeculative ? abandonedSpeculative.result : null
+        synthesis = {
+          text: freshResult.text,
+          cost: (freshResult.cost ?? 0) + (abandonedSpec?.cost ?? 0),
+        }
+        synthPath = round2Ran ? "fresh-merged" : "single-pass"
+        round1ShortCircuited = false
+        log(
+          `agent: using fresh synth on ${round2Ran ? `merged results (r2 added ${newDocsInTop} new top-K)` : "round 1 results (speculative disabled)"} — ${synthCallsUsed} synth call${synthCallsUsed === 1 ? "" : "s"}${
+            abandonedSpec?.cost ? ` (abandoned spec cost $${abandonedSpec.cost.toFixed(4)})` : ""
+          }`,
+        )
       }
-      const speculative = await speculativeSynthPromise
-      if ("error" in speculative) throw speculative.error
-      const specResult = speculative.result
-      synthesis = { text: specResult.text, cost: specResult.cost }
-      synthPath = round2Ran ? "speculative-round1" : "single-pass"
-      synthCallsUsed = 1
-      round1ShortCircuited = true
-      const saved = Date.now() - speculativeSynthStart
-      log(
-        `agent: using speculative synth on round 1 (${round2Ran ? `r2 added ${newDocsInTop}<${ROUND2_NEW_DOCS_THRESHOLD} new top-K` : "no round 2"}, elapsed=${saved}ms, 1 synth call)`,
-      )
-    } else {
-      // Fresh synth on merged results. Await the speculative synth too
-      // (usually already done) to capture its cost — it was a real billed
-      // call whose result we're abandoning, and our cost + synth-count
-      // report should reflect that honestly.
-      const [freshResult, abandonedSpeculative] = await Promise.all([
-        synthesizeResults(query, finalFanout.results, timeout, llm),
-        speculativeSynthPromise,
-      ])
-      const abandonedSpec =
-        abandonedSpeculative && "result" in abandonedSpeculative ? abandonedSpeculative.result : null
-      synthesis = {
-        text: freshResult.text,
-        cost: (freshResult.cost ?? 0) + (abandonedSpec?.cost ?? 0),
-      }
-      synthPath = round2Ran ? "fresh-merged" : "single-pass"
-      synthCallsUsed = speculativeSynthPromise ? 2 : 1
-      round1ShortCircuited = false
-      log(
-        `agent: using fresh synth on ${round2Ran ? `merged results (r2 added ${newDocsInTop} new top-K)` : "round 1 results (speculative disabled)"} — ${synthCallsUsed} synth call${synthCallsUsed === 1 ? "" : "s"}${
-          abandonedSpec?.cost ? ` (abandoned spec cost $${abandonedSpec.cost.toFixed(4)})` : ""
-        }`,
-      )
     }
+  } catch (err) {
+    synthesisFailure = synthesisDiagnosticsFromError(err, timeout)
+    log(`agent: synthesis FAILED — keeping ${finalFanout.results.length} lexical results: ${synthesisFailure.summary}`)
   }
   const synthMs = Date.now() - synthStart
 
@@ -362,6 +369,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
       searchMs: fanoutElapsed.reduce((a, b) => a + b, 0),
       llmMs: planElapsed.reduce((a, b) => a + b, 0) + synthMs,
     },
+    ...(synthesisFailure ? { synthesisFailure } : {}),
     trace: { rounds, decision, contextChars, synthPath, synthCallsUsed, round1ShortCircuited },
   }
 

@@ -26,6 +26,7 @@ import {
 import type { AgentRecallOptions, AgentRecallResult } from "./agent.ts"
 import type { QueryPlan } from "./plan.ts"
 import { searchLiveSession } from "../history/search"
+import { searchVault, type VaultMatch } from "../history/vault-fts.ts"
 import { findSessionFiles, extractTextContent } from "../history/indexer"
 import type { ContentType, ContentRecord, MessageRecord, JsonlRecord } from "../history/types"
 import {
@@ -263,6 +264,20 @@ async function runAgentSearch(query: string, options: SearchOptions, base: Recal
   }
 
   const result = await recallAgent(query, agentOpts)
+
+  // Check FIRST, before requireSynthesizedAnswer would throw a generic "no
+  // synthesized answer" error that discards the lexical hits recallAgent()
+  // already found — mirrors formatRecallOutput's own ordering on the
+  // non-agent path (same reasoning, see its comment). Agent mode used to
+  // skip straight to requireSynthesizedAnswer and let it throw uncaught,
+  // which discarded the found results and exited 1 (generic crash) instead
+  // of the documented 3 (degraded-but-useful).
+  // @i/20-search-and-memory/agent-mode-skips-exit-3
+  if (result.synthesisFailure) {
+    renderSynthesisFailure(result, result.synthesisFailure, { json: options.json })
+    return
+  }
+
   requireSynthesizedAnswer(result)
 
   if (options.json) {
@@ -892,7 +907,13 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     })
   }
 
-  const total = messageResults.total + contentResults.total
+  // The vault has no message role/tool/session metadata or Recall content
+  // type, so omit it when those filters are active rather than returning
+  // rows that cannot honor the caller's constraint.
+  const vaultFilterActive = question || response || tool !== undefined || session !== undefined || include !== undefined
+  const vaultMatches: VaultMatch[] = query && !vaultFilterActive ? searchVault(query, limit) : []
+
+  const total = messageResults.total + contentResults.total + vaultMatches.length
   const duration = Date.now() - startTime
   const sessionTitles = getAllSessionTitles()
 
@@ -943,6 +964,19 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
         timestamp: r.timestamp,
         snippet: r.snippet,
         rank: r.rank,
+      })),
+      ...vaultMatches.map((v) => ({
+        contentType: "vault" as const,
+        sourceId: v.fsPath ?? v.id,
+        projectPath: null,
+        title: v.title ?? v.fsPath ?? v.name ?? null,
+        // Vault docs are persistent project knowledge, not a transcript
+        // moment — there is no message timestamp to report. Explicit null,
+        // never a fabricated "now", so a machine consumer can tell the two
+        // apart rather than silently sorting a vault hit as freshly-written.
+        timestamp: null,
+        snippet: v.snippet,
+        rank: v.rank,
       })),
     ]
     const unprovenEmpty = provenance !== "complete" && total === 0
@@ -1067,7 +1101,33 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     }
   }
 
-  const shownCount = messageResults.results.length + contentResults.results.length
+  // Display vault results (beads/docs/CLAUDE.md from the km vault) — see the
+  // comment above `vaultMatches` for why raw mode needs this bucket too.
+  if (vaultMatches.length > 0) {
+    if (messageResults.results.length > 0 || contentResults.results.length > 0) {
+      console.log(`\n${"─".repeat(60)}`)
+    }
+    console.log(`${BOLD}Vault${RESET}\n`)
+
+    for (const v of vaultMatches) {
+      const titleDisplay = v.title || v.name || v.fsPath || v.id
+      const pathPart = v.fsPath ? ` ${DIM}${v.fsPath}${RESET}` : ""
+
+      console.log(`\u{1F4D6} ${BOLD}${titleDisplay}${RESET}${pathPart}`)
+
+      // vault-fts.ts's snippet() uses «»…, not the >>>/<<< markers content/
+      // message snippets use — different delimiters, same highlight intent.
+      const highlighted = v.snippet.replace(/«/g, "\x1b[1m\x1b[33m").replace(/»/g, "\x1b[0m")
+      const indentedSnippet = highlighted
+        .split("\n")
+        .map((line) => `   ${line}`)
+        .join("\n")
+      console.log(indentedSnippet)
+      console.log()
+    }
+  }
+
+  const shownCount = messageResults.results.length + contentResults.results.length + vaultMatches.length
   if (total > limit) {
     console.log(`${DIM}(showing ${shownCount} of ${total} matches, use -n/--limit <num> to see more)${RESET}`)
   } else if (shownCount === limit && total === limit) {

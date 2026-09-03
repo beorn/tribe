@@ -1,6 +1,7 @@
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { Database } from "bun:sqlite"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 
 process.env.RECALL_DB_PATH = ":memory:"
@@ -40,6 +41,7 @@ vi.mock("../../src/lib/refresh.ts", async (importOriginal) => {
 
 const { cmdSearch, resolveProjectScope } = await import("../../src/lib/search")
 const { closeDb, ftsSearchWithSnippet, getDb, setIndexMeta } = await import("../../src/history/db")
+const { resetVaultDbCacheForTests } = await import("../../src/history/vault-fts.ts")
 const { _resetLlmBackendForTests } = await import("../../src/lib/llm-backend")
 
 function seedMessage(content: string, id = "a", projectPath = "/test/km"): void {
@@ -71,6 +73,47 @@ function seedRankedMessage(id: string, content: string, toolName: string | null)
   ).run(`msg-${id}`, `sess-${id}`, "assistant", content, toolName, null, now)
 }
 
+// Minimal km vault db (`.km/state.db` shape) — mirrors
+// vault-fts-fail-closed.test.ts's seedKmVaultDb. A single titled/pathed
+// node is enough to prove rawSearch() reaches the vault at all.
+function seedVaultDb(dbPath: string, content: string, secondContent?: string): void {
+  const db = new Database(dbPath)
+  db.exec(`
+    CREATE TABLE nodes (
+      rowid INTEGER PRIMARY KEY,
+      id TEXT,
+      parent_id TEXT,
+      fs_path TEXT,
+      name TEXT,
+      title TEXT,
+      content TEXT
+    );
+    CREATE VIRTUAL TABLE nodes_fts USING fts5(
+      id, name, title, content,
+      content='nodes',
+      content_rowid='rowid',
+      prefix='2,3,4',
+      tokenize='unicode61 tokenchars ''@#+~'''
+    );
+    CREATE TRIGGER nodes_ai AFTER INSERT ON nodes BEGIN
+      INSERT INTO nodes_fts(rowid, id, name, title, content)
+      VALUES (new.rowid, new.id, new.name, new.title, new.content);
+    END;
+  `)
+  const insert = db.prepare("INSERT INTO nodes (id, fs_path, name, title, content) VALUES (?, ?, ?, ?, ?)")
+  insert.run("@i/vault-raw-fixture", "hub/vault-raw-fixture.md", "vault-raw-fixture", "Vault raw-mode fixture", content)
+  if (secondContent !== undefined) {
+    insert.run(
+      "@i/vault-raw-fixture-2",
+      "hub/vault-raw-fixture-2.md",
+      "vault-raw-fixture-2",
+      "Vault raw-mode fixture two",
+      secondContent,
+    )
+  }
+  db.close()
+}
+
 function zeroAgentResult(query: string, options?: { provenance?: "complete" | "stale" | "missing" | "unknown" }) {
   return {
     query,
@@ -87,6 +130,61 @@ function zeroAgentResult(query: string, options?: { provenance?: "complete" | "s
           plan: { keywords: ["missed-token"], phrases: [], concepts: [], paths: [], errors: [], bead_ids: [] },
           variants: ["missed-token"],
           stats: { totalQueries: 1, rawHits: 0, uniqueDocs: 0, topCoverage: 0, medianCoverage: 0, msTotal: 1 },
+        },
+      ],
+      decision: { round2Mode: "off", reason: "test" },
+      synthPath: "none",
+      synthCallsUsed: 0,
+      round1ShortCircuited: false,
+    },
+    fellThrough: false,
+  }
+}
+
+// Same shape as zeroAgentResult, but with a real lexical hit and a populated
+// synthesisFailure — the "search succeeded, synthesis didn't" case that used
+// to reach requireSynthesizedAnswer() directly and throw uncaught, discarding
+// the result and exiting 1 instead of the documented 3. provenance defaults
+// to "complete" so a passing test proves the fix, not a coincidental exit-3
+// from cmdSearch's separate top-of-function provenance check.
+// @i/20-search-and-memory/agent-mode-skips-exit-3
+function synthesisFailureAgentResult(
+  query: string,
+  options?: { provenance?: "complete" | "stale" | "missing" | "unknown" },
+) {
+  return {
+    query,
+    provenance: options?.provenance ?? "complete",
+    synthesis: null,
+    results: [
+      {
+        type: "message" as const,
+        sessionId: "sess-agentfail",
+        sessionTitle: "Agent synthesis-failure fixture",
+        timestamp: Date.now(),
+        snippet: "agentsynthneedle must survive a failed synthesis, not be discarded",
+        rank: -1,
+      },
+    ],
+    durationMs: 42,
+    synthesisFailure: {
+      summary:
+        "No LLM provider is available (see Excluded below for why). 1 lexical result found; rerun with --raw to see them without an LLM.",
+      totalBudgetMs: 10000,
+      attempts: [],
+      batches: [],
+      excludedProviders: [],
+      consideredProviders: [],
+    },
+    trace: {
+      rounds: [
+        {
+          round: 1,
+          mode: "off",
+          planner: { model: "mock", elapsedMs: 1 },
+          plan: { keywords: ["agentsynthneedle"], phrases: [], concepts: [], paths: [], errors: [], bead_ids: [] },
+          variants: ["agentsynthneedle"],
+          stats: { totalQueries: 1, rawHits: 1, uniqueDocs: 1, topCoverage: 1, medianCoverage: 1, msTotal: 1 },
         },
       ],
       decision: { round2Mode: "off", reason: "test" },
@@ -187,6 +285,106 @@ describe("recall search output", () => {
     const result = ftsSearchWithSnippet(getDb(), terms, { limit: 2 })
 
     expect(result.results.map((row) => row.session_id)).toEqual(["sess-prose", "sess-tool"])
+  })
+
+  // Regression for @i/20-search-and-memory/23189/recall-bay-scope-empty:
+  // rawSearch() (the `--raw` path) predates vault search and never called
+  // searchVault() — a --raw query silently never saw beads/docs/CLAUDE.md
+  // even though the default synthesis path does. This is the exact shape
+  // the operator's repro used: `bun recall "..." --raw --since 120d`.
+  test("raw mode includes vault matches (beads/docs), not just transcript hits", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-raw-vault-"))
+    const dbPath = join(dir, "state.db")
+    const previousVaultDb = process.env.KM_VAULT_DB
+    try {
+      seedVaultDb(dbPath, "vaultrawneedle only lives in the km vault, never in a session transcript")
+      process.env.KM_VAULT_DB = dbPath
+      resetVaultDbCacheForTests()
+
+      await cmdSearch("vaultrawneedle", { raw: true, project: "*" })
+
+      const output = callsText(logSpy)
+      expect(output).toContain("Vault")
+      expect(output).toContain("Vault raw-mode fixture")
+      expect(output).toContain("vaultrawneedle")
+    } finally {
+      resetVaultDbCacheForTests()
+      if (previousVaultDb === undefined) delete process.env.KM_VAULT_DB
+      else process.env.KM_VAULT_DB = previousVaultDb
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('raw mode JSON includes vault matches with contentType "vault"', async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-raw-vault-json-"))
+    const dbPath = join(dir, "state.db")
+    const previousVaultDb = process.env.KM_VAULT_DB
+    try {
+      seedVaultDb(dbPath, "vaultrawjsonneedle only lives in the km vault")
+      process.env.KM_VAULT_DB = dbPath
+      resetVaultDbCacheForTests()
+
+      await cmdSearch("vaultrawjsonneedle", { raw: true, json: true, project: "*" })
+
+      const payload = lastJsonLog<{ results: Array<{ contentType: string; snippet: string }> | null }>(logSpy)
+      expect(payload.results).not.toBeNull()
+      const vaultRow = payload.results!.find((r) => r.contentType === "vault")
+      expect(vaultRow).toBeDefined()
+      expect(vaultRow!.snippet).toContain("vaultrawjsonneedle")
+    } finally {
+      resetVaultDbCacheForTests()
+      if (previousVaultDb === undefined) delete process.env.KM_VAULT_DB
+      else process.env.KM_VAULT_DB = previousVaultDb
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("raw mode applies limit to vault results", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-raw-vault-limit-"))
+    const dbPath = join(dir, "state.db")
+    const previousVaultDb = process.env.KM_VAULT_DB
+    try {
+      seedVaultDb(dbPath, "vaultlimitneedle first", "vaultlimitneedle second")
+      process.env.KM_VAULT_DB = dbPath
+      resetVaultDbCacheForTests()
+
+      await cmdSearch("vaultlimitneedle", { raw: true, json: true, limit: "1", project: "*" })
+
+      const payload = lastJsonLog<{ results: Array<{ contentType: string }> | null }>(logSpy)
+      expect(payload.results?.filter((result) => result.contentType === "vault")).toHaveLength(1)
+    } finally {
+      resetVaultDbCacheForTests()
+      if (previousVaultDb === undefined) delete process.env.KM_VAULT_DB
+      else process.env.KM_VAULT_DB = previousVaultDb
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test.each([
+    ["--question", { question: true }],
+    ["--response", { response: true }],
+    ["--tool", { tool: "Read" }],
+    ["--session", { session: "session-filter" }],
+    ["--include messages", { include: "messages" }],
+  ])("raw mode excludes unfilterable vault rows with %s", async (_label, filter) => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-raw-vault-filter-"))
+    const dbPath = join(dir, "state.db")
+    const previousVaultDb = process.env.KM_VAULT_DB
+    try {
+      seedVaultDb(dbPath, "vaultfilterneedle only lives in the km vault")
+      process.env.KM_VAULT_DB = dbPath
+      resetVaultDbCacheForTests()
+
+      await cmdSearch("vaultfilterneedle", { raw: true, json: true, project: "*", ...filter })
+
+      const payload = lastJsonLog<{ results: Array<{ contentType: string }> | null }>(logSpy)
+      expect(payload.results?.some((result) => result.contentType === "vault") ?? false).toBe(false)
+    } finally {
+      resetVaultDbCacheForTests()
+      if (previousVaultDb === undefined) delete process.env.KM_VAULT_DB
+      else process.env.KM_VAULT_DB = previousVaultDb
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   test("agent zero-results raw-probes literal tokens before printing authoritative no-results", async () => {
@@ -307,6 +505,52 @@ describe("recall search output", () => {
       expect(process.exitCode).toBe(3)
       expect(payload.provenance).toBe("stale")
       expect(payload.results).toBeNull()
+    } finally {
+      process.exitCode = previousExitCode
+    }
+  })
+
+  // Regression for @i/20-search-and-memory/agent-mode-skips-exit-3: agent
+  // mode used to call requireSynthesizedAnswer() directly and let it throw
+  // uncaught on a search-succeeded-synthesis-failed result, discarding the
+  // lexical hits and exiting 1 (generic crash) instead of 3
+  // (degraded-but-useful). Mirrors the non-agent "reports a loud
+  // tool-broken failure" test above.
+  test("agent mode preserves lexical results and exits 3 on synthesis failure, instead of discarding them and exiting 1", async () => {
+    mockAgent.result = async (query, options) => synthesisFailureAgentResult(query, options) as never
+    const previousExitCode = process.exitCode
+    process.exitCode = 0
+
+    try {
+      // Must NOT throw — see the non-agent test above for why.
+      await expect(cmdSearch("agentsynthneedle", { agent: true, project: "*", round2: "off" })).resolves.toBeUndefined()
+
+      const output = callsText(logSpy)
+      expect(output).toContain("RECALL SYNTHESIS FAILED")
+      expect(output).toContain("THE TOOL IS BROKEN, NOT EMPTY")
+      expect(output).toContain("agentsynthneedle must survive a failed synthesis")
+      expect(output).toContain("Lexical search: OK")
+      // Distinct exit code — degraded-but-has-results is neither a clean 0
+      // nor the generic 1 an uncaught throw used to produce.
+      expect(process.exitCode).toBe(3)
+    } finally {
+      process.exitCode = previousExitCode
+    }
+  })
+
+  test("agent mode JSON preserves lexical results on synthesis failure instead of throwing uncaught", async () => {
+    mockAgent.result = async (query, options) => synthesisFailureAgentResult(query, options) as never
+    const previousExitCode = process.exitCode
+    process.exitCode = 0
+
+    try {
+      await expect(
+        cmdSearch("agentsynthneedle", { agent: true, json: true, project: "*", round2: "off" }),
+      ).resolves.toBeUndefined()
+
+      const payload = lastJsonLog<{ results: unknown[] | null }>(logSpy)
+      expect(process.exitCode).toBe(3)
+      expect(payload.results).toHaveLength(1)
     } finally {
       process.exitCode = previousExitCode
     }
