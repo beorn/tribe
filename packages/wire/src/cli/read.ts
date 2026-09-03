@@ -39,6 +39,8 @@ const REPAIR_CLI = visibleCliProjectionForMcp("repair")
 
 const STALE_MANAGED_INBOX_DAEMON_ERROR =
   "Running Tribe daemon is stale and cannot resolve this managed inbox; update the module root before restarting the daemon. Use --session only for an explicit operator target."
+const STALE_MANAGED_PENDING_DAEMON_ERROR =
+  "Running Tribe daemon is stale and cannot resolve this managed pending owner; update the module root before restarting the daemon. Use --owner only for an explicit recovery or audit target."
 const INBOX_WAIT_PROTOCOL_MISMATCH = "TRIBE_INBOX_WAIT_PROTOCOL_MISMATCH"
 
 function writeStdoutLine(value: string): Promise<void> {
@@ -62,6 +64,9 @@ async function callDaemon(method: string, params?: Record<string, unknown>): Pro
       const code = (error as { code?: string | number }).code
       if (code === -32601 && method.endsWith("_by_launch_v1")) {
         throw new Error(STALE_MANAGED_INBOX_DAEMON_ERROR)
+      }
+      if (code === -32601 && method === "cli_session_pending_read_v1") {
+        throw new Error(STALE_MANAGED_PENDING_DAEMON_ERROR)
       }
       throw error
     }
@@ -526,14 +531,30 @@ async function cmdPending(
   if (staleMs !== undefined) args.stale_ms = staleMs
   if (close) args.close = close
   let method = "tribe.pending"
-  if (close) {
-    const authority = readSelfMailboxAuthorityFromEnvironment(process.env)
-    method = "cli_session_pending_close_v1"
-    // Null is deliberate: the daemon records the refused capability attempt
-    // and returns a typed -32004 without ever reaching pending-row mutation.
-    args.authority = authority
+  let rawResult: unknown
+  try {
+    if (close) {
+      const authority = readSelfMailboxAuthorityFromEnvironment(process.env)
+      method = "cli_session_pending_close_v1"
+      // Null is deliberate: the daemon records the refused capability attempt
+      // and returns a typed -32004 without ever reaching pending-row mutation.
+      args.authority = authority
+    } else if (!all && owner === undefined) {
+      // A one-shot CLI socket starts life under a pending-* placeholder. An
+      // implicit owner must therefore come from the launcher-minted current-
+      // session authority, never from that transport context (or name hints).
+      // Null is deliberate: the daemon returns a typed, named refusal when the
+      // managed-session bearer is absent instead of answering count:0 for nobody.
+      method = "cli_session_pending_read_v1"
+      args.authority = readSelfMailboxAuthorityFromEnvironment(process.env)
+    }
+    rawResult = await callDaemon(method, args)
+  } catch (error) {
+    console.error(`tribe pending: ${error instanceof Error ? error.message : String(error)}`)
+    process.exitCode = 2
+    return
   }
-  const result = (await callDaemon(method, args)) as {
+  const result = rawResult as {
     content?: Array<{ type?: string; text?: string }>
     structuredContent?: {
       error?: string
@@ -565,7 +586,8 @@ async function cmdPending(
   // confident, well-formed wrong answer to a query the daemon actually rejected.
   if (typeof payload.error === "string") {
     console.error(`tribe pending: ${payload.error}`)
-    process.exit(2)
+    process.exitCode = 2
+    return
   }
   if (json) {
     await writeStdoutLine(JSON.stringify(payload, null, 2))

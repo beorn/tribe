@@ -1684,16 +1684,36 @@ function pendingOwnerSummaries(pending: readonly PendingBall[]) {
   return pendingOwnerGroups(pending).map(({ pending: _pending, ...summary }) => summary)
 }
 
+function pendingExplicitOwner(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined
+}
+
 function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
   // Ball-tracker pending-query (@km/tribe/message-ball-tracker Phase 2a):
   // return open requests addressed to the given recipient (the "owner" of
   // the open ball). Default recipient is the caller's own session name.
   // Optional `stale_ms` filters to requests older than that threshold.
-  const owner = (a.owner as string) ?? ctx.getName()
+  const explicitOwner = pendingExplicitOwner(a.owner)
+  const owner = explicitOwner ?? ctx.getName()
   const all = a.all === true
   const expired = a.expired === true
   const owed = a.owed === true
   const staleMs = typeof a.stale_ms === "number" ? a.stale_ms : null
+
+  // Every accepted socket begins under a pending-* placeholder until it
+  // authenticates/registers. That transport identity is never a seat and can
+  // never own a ball, so an implicit read under it would manufacture the most
+  // dangerous possible answer: a well-formed count:0 for nobody. Explicit
+  // owner and fleet-wide reads remain valid recovery/diagnostic surfaces.
+  if (!all && explicitOwner === undefined && ctx.sessionRole === "pending") {
+    return jsonResult({
+      owner,
+      error:
+        `tribe.pending: implicit owner resolved to an unauthenticated one-shot session ${JSON.stringify(owner)}; ` +
+        "invoke from a managed launch carrying AG_SESSION_AUTH, or run 'tribe pending --owner <seat>' with the same filters",
+    })
+  }
+
   const now = Date.now()
   const transport = ownerTransportObservationProjector(ctx, opts, now)
   const withOwnerTransport = <T extends PendingBall>(rows: readonly T[]): Array<T & OwnerTransportObservation> =>
@@ -1709,7 +1729,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
     return jsonResult({ error: "tribe.pending: expired is a read-only diagnostic view." })
   }
   if (owed && !expired) {
-    return jsonResult({ error: "tribe.pending: owed filters the expired view; pass expired: true." })
+    return jsonResult({ owner, error: "tribe.pending: owed filters the expired view; pass expired: true." })
   }
 
   // Explicit bounded repair path (@km/tribe/20008): prune stale balls for

@@ -608,9 +608,11 @@ describe("registerSendCommands", () => {
       // session authority, is refused there, and leaves the open row intact.
       pendingOpen = true
       const missingAuthorityClose = await runCli(["pending", "--owner", "@chief", "--close", "req-123"])
-      expect(missingAuthorityClose.code).toBe(1)
+      expect(missingAuthorityClose.code).toBe(2)
       expect(missingAuthorityClose.stdout).toBe("")
-      expect(missingAuthorityClose.stderr).toContain(`${AG_SESSION_AUTH_ENV} must be inherited from the managed launch`)
+      expect(missingAuthorityClose.stderr).toBe(
+        `tribe pending: current session authority is missing; ${AG_SESSION_AUTH_ENV} must be inherited from the managed launch\n`,
+      )
       expect(pendingOpen).toBe(true)
 
       const authority = "a".repeat(43)

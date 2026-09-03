@@ -1003,7 +1003,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(attributed.sender).toBe("@chief")
   }, 120_000)
 
-  it("attributes managed CLI pending closes through the session authority bearer", async () => {
+  it("authenticates managed CLI pending reads and closes through the session authority bearer", async () => {
     const socketPath = join(tmpDir, "managed-cli-pending-close.sock")
     const dbPath = join(tmpDir, "managed-cli-pending-close.db")
     const owner = "@agent/pending-owner"
@@ -1061,12 +1061,75 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     }
 
     await open(73, ownerRequestId)
-    const beforeOwnerClose = await runCli(["pending", "--owner", owner, "--json"], cliEnv, { throughParent: true })
+    const expiryDb = openDatabase(dbPath)
+    try {
+      expiryDb.prepare("UPDATE pending_request SET expires_at = 0 WHERE request_id = ?").run(ownerRequestId)
+    } finally {
+      expiryDb.close()
+    }
+
+    // Regression-class detector: every implicit seat-scoped one-shot read
+    // resolves the authenticated current session or refuses; it never answers
+    // for the transport's pending-* placeholder identity.
+    // retire-when: one-shot CLI transports cannot acquire a pending-* context
+    // before current-session authentication by construction.
+    //
+    // @ag/tribe/expired-pending-loses-identity: the exact managed-seat
+    // reproduction has no --owner. Only daemon-authenticated current-session
+    // resolution can return the owner's known expired ball instead of a
+    // plausible count:0 for nobody.
+    const implicitOwner = await runCli(["pending", "--expired", "--owed", "--json"], cliEnv, {
+      selfMailboxAuthority: ownerAuthority,
+      throughParent: true,
+    })
+    expect(implicitOwner.exitCode, implicitOwner.stderr).toBe(0)
+    expect(JSON.parse(implicitOwner.stdout)).toMatchObject({
+      owner,
+      expired: true,
+      owed: true,
+      count: 1,
+      pending: [expect.objectContaining({ request_id: ownerRequestId, recipient: owner, backing: "live" })],
+    })
+
+    const beforeOwnerClose = await runCli(["pending", "--owner", owner, "--expired", "--owed", "--json"], cliEnv, {
+      throughParent: true,
+    })
     expect(beforeOwnerClose.exitCode, beforeOwnerClose.stderr).toBe(0)
     expect(JSON.parse(beforeOwnerClose.stdout)).toMatchObject({
       owner,
-      pending: [expect.objectContaining({ request_id: ownerRequestId, sender, recipient: owner })],
+      expired: true,
+      owed: true,
+      count: 1,
+      pending: [expect.objectContaining({ request_id: ownerRequestId, sender, recipient: owner, backing: "live" })],
     })
+
+    const missingAuthority = await runCli(["pending", "--expired", "--owed", "--json"], cliEnv, {
+      throughParent: true,
+    })
+    expect(missingAuthority.exitCode).toBe(2)
+    expect(missingAuthority.stdout).toBe("")
+    expect(missingAuthority.stderr).toBe(
+      "tribe pending: current session authority is missing; AG_SESSION_AUTH must be inherited from the managed launch\n",
+    )
+
+    const rejectedAuthority = await runCli(["pending", "--expired", "--owed", "--json"], cliEnv, {
+      selfMailboxAuthority: "x".repeat(43),
+      throughParent: true,
+    })
+    expect(rejectedAuthority.exitCode).toBe(2)
+    expect(rejectedAuthority.stdout).toBe("")
+    expect(rejectedAuthority.stderr).toBe(
+      "tribe pending: current session authority was rejected or revoked; AG_SESSION_AUTH did not match a live managed session\n",
+    )
+
+    const malformedAuthority = await runCli(["pending", "--expired", "--owed", "--json"], cliEnv, {
+      selfMailboxAuthority: "bad",
+      throughParent: true,
+    })
+    expect(malformedAuthority.exitCode).toBe(2)
+    expect(malformedAuthority.stdout).toBe("")
+    expect(malformedAuthority.stderr).toBe("tribe pending: AG_SESSION_AUTH must be a 32-byte base64url bearer\n")
+
     const ownerClose = await runCli(["pending", "--owner", owner, "--close", ownerRequestId, "--json"], cliEnv, {
       selfMailboxAuthority: ownerAuthority,
       throughParent: true,
@@ -1110,10 +1173,10 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       cliEnv,
       { throughParent: true },
     )
-    expect(missingClose.exitCode).toBe(1)
+    expect(missingClose.exitCode).toBe(2)
     expect(missingClose.stdout).toBe("")
-    expect(missingClose.stderr).toContain(
-      `current session authority is missing; AG_SESSION_AUTH must be inherited from the managed launch`,
+    expect(missingClose.stderr).toBe(
+      `tribe pending: current session authority is missing; AG_SESSION_AUTH must be inherited from the managed launch\n`,
     )
 
     await open(77, rejectedAuthorityRequestId)
@@ -1122,14 +1185,53 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       cliEnv,
       { selfMailboxAuthority: "x".repeat(43), throughParent: true },
     )
-    expect(rejectedClose.exitCode).toBe(1)
+    expect(rejectedClose.exitCode).toBe(2)
     expect(rejectedClose.stdout).toBe("")
-    expect(rejectedClose.stderr).toContain(
-      `current session authority was rejected or revoked; AG_SESSION_AUTH did not match a live managed session`,
+    expect(rejectedClose.stderr).toBe(
+      `tribe pending: current session authority was rejected or revoked; AG_SESSION_AUTH did not match a live managed session\n`,
     )
 
     const overrideProbe = await connectToDaemon(socketPath)
     try {
+      const placeholderRead = (await overrideProbe.call("tribe.pending", {
+        expired: true,
+        owed: true,
+      })) as { structuredContent?: { owner?: string; error?: string; count?: number } }
+      expect(placeholderRead.structuredContent).toMatchObject({
+        owner: expect.stringMatching(/^pending-/u),
+        error: expect.stringContaining("implicit owner resolved to an unauthenticated one-shot session"),
+      })
+      expect(placeholderRead.structuredContent).not.toHaveProperty("count")
+
+      const nullOwnerRead = (await overrideProbe.call("tribe.pending", {
+        owner: null,
+        expired: true,
+        owed: true,
+      })) as { structuredContent?: { owner?: string; error?: string; count?: number } }
+      expect(nullOwnerRead.structuredContent).toMatchObject({
+        owner: expect.stringMatching(/^pending-/u),
+        error: expect.stringContaining("implicit owner resolved to an unauthenticated one-shot session"),
+      })
+      expect(nullOwnerRead.structuredContent).not.toHaveProperty("count")
+
+      const invalidFilter = (await overrideProbe.call("cli_session_pending_read_v1", {
+        authority: ownerAuthority,
+        owed: true,
+      })) as { structuredContent?: { owner?: string; error?: string; count?: number } }
+      expect(invalidFilter.structuredContent).toMatchObject({
+        owner,
+        error: "tribe.pending: owed filters the expired view; pass expired: true.",
+      })
+      expect(invalidFilter.structuredContent).not.toHaveProperty("count")
+
+      await expect(
+        overrideProbe.call("cli_session_pending_read_v1", {
+          authority: ownerAuthority,
+          owner: sender,
+          expired: true,
+          owed: true,
+        }),
+      ).rejects.toThrow(/pending read derives owner identity from authority; owner override is forbidden/i)
       await expect(
         overrideProbe.call("cli_session_pending_close_v1", {
           authority: ownerAuthority,

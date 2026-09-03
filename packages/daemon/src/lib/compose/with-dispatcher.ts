@@ -286,6 +286,7 @@ export function withDispatcher<
 
     type AuthenticatedSessionCapability =
       | { kind: "inbox-ack"; limit: unknown; peek: boolean }
+      | { kind: "pending-read"; expired: boolean; owed: boolean; staleMs?: number }
       | { kind: "pending-close"; owner: string; close: string | string[] }
       | { kind: "pending-prune"; owner: string; staleMs: number }
 
@@ -396,6 +397,20 @@ export function withDispatcher<
               resolution.context,
               TRIBE_COORD_METHODS.fetch,
               { limit: capability.limit, advance: capability.peek ? false : undefined },
+              DAEMON_HANDLER_OPTS,
+              connId,
+            ),
+          }
+        case "pending-read":
+          return {
+            result: await handleToolCall(
+              resolution.context,
+              TRIBE_COORD_METHODS.pending,
+              {
+                ...(capability.expired ? { expired: true } : {}),
+                ...(capability.owed ? { owed: true } : {}),
+                ...(capability.staleMs === undefined ? {} : { stale_ms: capability.staleMs }),
+              },
               DAEMON_HANDLER_OPTS,
               connId,
             ),
@@ -1646,6 +1661,48 @@ export function withDispatcher<
             const outcome = await dispatchAuthenticatedSessionCapability(
               p.authority,
               { kind: "inbox-ack", limit: p.limit, peek: p.peek === true },
+              connId,
+            )
+            if (!("result" in outcome)) {
+              return makeError(id, outcome.errorCode, outcome.errorMessage, outcome.errorData)
+            }
+            return makeResponse(id, outcome.result)
+          }
+
+          /**
+           * Authenticated current-session pending read for a one-shot CLI.
+           * The bearer resolves the owner context; caller-supplied identity
+           * selectors are forbidden, then the canonical pending handler owns
+           * filtering, expiry folding, and the response shape.
+           */
+          case "cli_session_pending_read_v1": {
+            if (
+              ["session", "name", "launch_id", "launch_parent_pid", "pid", "owner", "all", "close", "prune"].some(
+                (key) => Object.prototype.hasOwnProperty.call(p, key),
+              )
+            ) {
+              return makeError(
+                id,
+                -32602,
+                "Pending read derives owner identity from authority; owner override is forbidden",
+              )
+            }
+            if (
+              (p.expired !== undefined && typeof p.expired !== "boolean") ||
+              (p.owed !== undefined && typeof p.owed !== "boolean") ||
+              (p.stale_ms !== undefined &&
+                (typeof p.stale_ms !== "number" || !Number.isFinite(p.stale_ms) || p.stale_ms < 0))
+            ) {
+              return makeError(id, -32602, "Authenticated pending read received invalid filter parameters")
+            }
+            const outcome = await dispatchAuthenticatedSessionCapability(
+              p.authority,
+              {
+                kind: "pending-read",
+                expired: p.expired === true,
+                owed: p.owed === true,
+                ...(typeof p.stale_ms === "number" ? { staleMs: p.stale_ms } : {}),
+              },
               connId,
             )
             if (!("result" in outcome)) {

@@ -380,6 +380,63 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     expect(stdout).toMatch(/all owners/i)
   })
 
+  it("managed pending reads name a stale daemon and exit through the CLI error contract", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-pending-stale-"))
+    const socketPath = join(dir, "tribe.sock")
+    const calls: Array<{ method: string; params?: Record<string, unknown> }> = []
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        const newline = buffer.indexOf("\n")
+        if (newline < 0) return
+        const request = JSON.parse(buffer.slice(0, newline)) as {
+          id: number
+          method: string
+          params?: Record<string, unknown>
+        }
+        calls.push({ method: request.method, params: request.params })
+        socket.write(
+          `${JSON.stringify({
+            jsonrpc: "2.0",
+            id: request.id,
+            error: { code: -32601, message: `Method not found: ${request.method}` },
+          })}\n`,
+        )
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const authority = "a".repeat(43)
+      const result = await runCliAsync(["pending", "--json"], {
+        ...process.env,
+        TRIBE_SOCKET: socketPath,
+        TRIBE_NO_AUTOSTART: "1",
+        AG_SESSION_AUTH: authority,
+      })
+
+      expect(result).toEqual({
+        code: 2,
+        signal: null,
+        stdout: "",
+        stderr:
+          "tribe pending: Running Tribe daemon is stale and cannot resolve this managed pending owner; " +
+          "update the module root before restarting the daemon. Use --owner only for an explicit recovery or audit target.\n",
+      })
+      expect(calls).toEqual([{ method: "cli_session_pending_read_v1", params: { authority } }])
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it("pending --all renders every owner and --json preserves the typed snapshot", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-pending-all-"))
     const socketPath = join(dir, "tribe.sock")
