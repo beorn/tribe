@@ -67,6 +67,7 @@ describe("remember model selection", () => {
       explainUnavailable: vi.fn(() => "OPENAI_API_KEY unset"),
     }
     loadLlmMock.mockResolvedValue(llm)
+    vi.spyOn(console, "error").mockImplementation(() => undefined)
 
     const result = await remember({ transcriptPath, sessionId: "session-12345678", memoryDir })
 
@@ -89,6 +90,7 @@ describe("remember model selection", () => {
       explainUnavailable: vi.fn((provider) => `${provider.toUpperCase()}_API_KEY unset`),
     }
     loadLlmMock.mockResolvedValue(llm)
+    vi.spyOn(console, "error").mockImplementation(() => undefined)
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
 
     const result = await remember({ transcriptPath, sessionId: "session-12345678", memoryDir })
