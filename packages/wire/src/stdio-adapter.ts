@@ -1133,9 +1133,21 @@ function drainDaemonInbox(): void {
         // a claim/rename floods nothing by construction. The replay cap below
         // is the STALE-DAEMON BACKSTOP: a legacy daemon that still rewinds
         // cursors can dump a large backlog, and only a recent, capped subset
-        // may reach the model as <channel> envelopes. Excess rows are still
-        // drained (the cursor moves past them) — just not replayed.
-        const result = parseToolText<TribeFetchResult>(await daemon?.call("tribe.fetch", { limit: 500 }))
+        // may reach the model as <channel> envelopes. Excess AMBIENT rows are
+        // still drained (the session cursor moves past them) — just not
+        // replayed.
+        //
+        // 21757: `receipt:false` — no model is behind this read. sendChannel
+        // below is a fire-and-forget notification the host may never render
+        // (a dark pane), so this drain must not acknowledge the mailbox
+        // cursor or count as the seat's attention read. The attention rows it
+        // forwards stay in actionable_unread until the model's own in-turn
+        // read (MCP fetch or `tribe inbox`) returns them — that read is the
+        // receipt. On 2026-09-02 eight officer rows were drained, acked here,
+        // and never seen; this is the line that lost them.
+        const result = parseToolText<TribeFetchResult>(
+          await daemon?.call("tribe.fetch", { limit: 500, receipt: false }),
+        )
         const attentionEvents = result?.attention?.actionable_unread ?? []
         const attentionIds = new Set(attentionEvents.map((event) => event.id).filter(Boolean))
         for (const event of attentionEvents) forwardFetchedEvent(event)

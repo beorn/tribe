@@ -276,6 +276,22 @@ function sessionDeliveryOffsets(
   }
 }
 
+/** 21757 — the recipient's durable mailbox cursor and its attention-read
+ *  receipt, straight from SQLite; null when no read or ack ever happened. */
+function mailboxCursor(
+  dbPath: string,
+  name: string,
+): { last_actionable_seq: number; last_attention_read_at: number | null } | null {
+  const db = openDatabase(dbPath)
+  try {
+    return db
+      .prepare("SELECT last_actionable_seq, last_attention_read_at FROM mailbox_cursors WHERE recipient = ?")
+      .get(name) as { last_actionable_seq: number; last_attention_read_at: number | null } | null
+  } finally {
+    db.close()
+  }
+}
+
 describe("19442 actionable-recovery journey (real daemon + real adapter)", () => {
   let tmpDir: string
   let daemonProc: ChildProcessWithoutNullStreams | undefined
@@ -403,6 +419,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
   async function spawnAdapterAndJoin(
     socketPath: string,
     logName: string,
+    opts: { delivery?: "push" | "pull" } = {},
   ): Promise<{ child: ChildProcessWithoutNullStreams; stdout: Record<string, unknown>[] }> {
     const child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath], {
       cwd: tmpDir,
@@ -411,7 +428,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         TRIBE_LAUNCH_ID: "",
         TRIBE_NAME: "",
         TRIBE_SESSION_NAME: "",
-        TRIBE_DELIVERY: "push",
+        // 21757: a pull adapter still receives the daemon's wakeup and still
+        // runs the full drain, but sendChannel no-ops — the dark pane.
+        TRIBE_DELIVERY: opts.delivery ?? "push",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, logName),
       },
@@ -1476,13 +1495,85 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(payloads.some((p) => p.includes("log-redacted"))).toBe(false)
     expect(forwarded).toHaveLength(2)
 
-    // --- Second adapter (fresh process = reconnect/reclaim): mailbox is acked,
-    // so NOTHING is forwarded.
+    // --- Second adapter (fresh process = reconnect/reclaim). 21757: the first
+    // adapter's drain forwarded fire-and-forget and was not a model read, so
+    // the mailbox is NOT acknowledged — both rows are forwarded again. Before
+    // 21757 this asserted toHaveLength(0): the drain had acked rows no model
+    // had seen, which is how eight officer rows were lost on 2026-09-02.
     first.child.kill("SIGTERM")
+    expect(mailboxCursor(dbPath, NAME)?.last_actionable_seq ?? 0).toBe(0)
     const second = await spawnAdapterAndJoin(socketPath, "adapter-2.log")
+    await waitForCondition(
+      () => channelNotifications(second.stdout).length >= 2,
+      "re-forwarded attention after an un-receipted drain",
+    )
+    await new Promise((resolveTick) => setTimeout(resolveTick, 500))
+    expect(channelNotifications(second.stdout)).toHaveLength(2)
+
+    // --- The model's own read through the second adapter IS the receipt: an
+    // MCP fetch (CallTool) delivers the rows into its context and acknowledges.
+    writeJson(second.child, callToolPayload(3, "fetch", {}))
+    await waitForCondition(() => second.stdout.some((line) => line.id === 3), "model fetch response")
+    expect(mailboxCursor(dbPath, NAME)?.last_actionable_seq ?? 0).toBeGreaterThan(0)
+
+    // --- Third adapter: acknowledged by a model read, so NOTHING is forwarded.
+    second.child.kill("SIGTERM")
+    const third = await spawnAdapterAndJoin(socketPath, "adapter-3.log")
     await new Promise((resolveTick) => setTimeout(resolveTick, 700))
-    expect(channelNotifications(second.stdout)).toHaveLength(0)
+    expect(channelNotifications(third.stdout)).toHaveLength(0)
   }, 120_000)
+
+  it("a dark pane drains without acknowledging: the rows stay owed, visible to the idle gate, until the model's own read (21757)", async () => {
+    // The 2026-09-02 class: the adapter receives the daemon's wakeup, drains,
+    // and forwards into a pane that never renders. A pull adapter reproduces
+    // it with zero daemon changes — it gets the wakeup and runs the full
+    // drain while sendChannel no-ops.
+    const socketPath = join(tmpDir, "tribe.sock")
+    const dbPath = join(tmpDir, "tribe.db")
+    seedAttentionFixture(dbPath)
+    daemonProc = spawnDaemon(socketPath, dbPath)
+    await waitForDaemonSocket(daemonProc, socketPath)
+
+    const dark = await spawnAdapterAndJoin(socketPath, "adapter-dark.log", { delivery: "pull" })
+    // Positive control that the drain actually ran: its fetch advances the
+    // AMBIENT session cursor past the seeded broadcasts. Without this the
+    // assertions below pass trivially on an adapter that ignored the wakeup.
+    await waitForCondition(
+      () => sessionDeliveryOffsets(dbPath, NAME).last_inbox_pull_seq > 0,
+      "dark adapter's drain advanced the ambient cursor",
+    )
+    await new Promise((resolveTick) => setTimeout(resolveTick, 500))
+    expect(channelNotifications(dark.stdout)).toHaveLength(0)
+    // Not acknowledged and not a read receipt.
+    const afterDrain = mailboxCursor(dbPath, NAME)
+    expect(afterDrain?.last_actionable_seq ?? 0).toBe(0)
+    expect(afterDrain?.last_attention_read_at ?? null).toBeNull()
+    // The idle gate's half of the bug: the Stop hook reads inbox-status
+    // unread_count, and it must still see both rows.
+    const statusEnv = { ...BASE_ENV, TRIBE_SOCKET: socketPath, TRIBE_NO_AUTOSTART: "1" }
+    const statusRun = await runCli(["inbox-status", "--session", NAME, "--json"], statusEnv)
+    expect(statusRun.exitCode, statusRun.stderr).toBe(0)
+    expect(JSON.parse(statusRun.stdout)).toMatchObject({ session: NAME, unread_count: 2 })
+
+    // A live pane claiming the name is forwarded both rows.
+    dark.child.kill("SIGTERM")
+    const lit = await spawnAdapterAndJoin(socketPath, "adapter-lit.log", { delivery: "push" })
+    await waitForCondition(() => channelNotifications(lit.stdout).length >= 2, "forwarded after the dark drain")
+    await new Promise((resolveTick) => setTimeout(resolveTick, 500))
+    expect(channelNotifications(lit.stdout)).toHaveLength(2)
+
+    // The model's own read acknowledges; the third adapter and the idle gate see nothing.
+    writeJson(lit.child, callToolPayload(3, "fetch", {}))
+    await waitForCondition(() => lit.stdout.some((line) => line.id === 3), "model fetch response")
+    expect(mailboxCursor(dbPath, NAME)?.last_actionable_seq ?? 0).toBeGreaterThan(0)
+    lit.child.kill("SIGTERM")
+    const third = await spawnAdapterAndJoin(socketPath, "adapter-third.log")
+    await new Promise((resolveTick) => setTimeout(resolveTick, 700))
+    expect(channelNotifications(third.stdout)).toHaveLength(0)
+    const statusAfter = await runCli(["inbox-status", "--session", NAME, "--json"], statusEnv)
+    expect(statusAfter.exitCode, statusAfter.stderr).toBe(0)
+    expect(JSON.parse(statusAfter.stdout)).toMatchObject({ session: NAME, unread_count: 0 })
+  }, 150_000)
 
   it("keeps pull obligations readable while a managed persona transport is stopped", async () => {
     const socketPath = join(tmpDir, "stopped-persona.sock")

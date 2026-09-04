@@ -1173,6 +1173,19 @@ describe("stdio adapter delivery modes", () => {
     const verdict = channels.find((line) => JSON.stringify(line).includes("late-verdict"))
     expect(verdict).toBeDefined()
     expect(channels.indexOf(verdict!)).toBe(0)
+
+    // 21757 — the wake-up drain is not a model read. Every fetch it sends
+    // carries receipt:false, so the daemon neither acknowledges the mailbox
+    // nor stamps an attention read; the verdict above stays owed to the
+    // model's own in-turn read. Positive control: the drain DID fetch.
+    const drainFetches = daemon.requests.filter((msg) => msg.method === "tribe.fetch") as Array<{
+      params?: { limit?: number; receipt?: unknown }
+    }>
+    expect(drainFetches.length).toBeGreaterThanOrEqual(1)
+    for (const fetch of drainFetches) {
+      expect(fetch.params?.limit).toBe(500)
+      expect(fetch.params?.receipt).toBe(false)
+    }
   })
 
   it("forwards one compact pending-ball summary on every wakeup", async () => {

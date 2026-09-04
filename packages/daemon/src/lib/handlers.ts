@@ -3094,6 +3094,20 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
   // in the gap — message loss (NO SILENT ERRORS class). An explicit
   // advance:true with topics would be that loss on request — reject it loudly.
   const topicsAreSnapshot = topics !== null && topics.length > 0
+  // 21757 — `receipt:false` says no model is behind this read: an adapter
+  // wake-up drain or a host-stream relay that forwards fire-and-forget and
+  // can never know the model saw a row. Such a read still returns the
+  // attention projection and may advance the AMBIENT cursor (delivery
+  // progress for events), but it must not acknowledge the mailbox cursor
+  // and must not count as the seat's attention read: acknowledgement is
+  // reserved for a read that delivers rows into the context of the model
+  // that will act on them, and the read receipt is what health:inbox-stale
+  // measures a dark seat by. Default true: every model-initiated read is a
+  // receipt, as before.
+  if (a.receipt !== undefined && typeof a.receipt !== "boolean") {
+    return jsonResult({ error: "receipt must be a boolean when given (21757)." })
+  }
+  const isReceipt = a.receipt !== false
   if (topicsAreSnapshot && a.advance === true) {
     return jsonResult({
       error: "topics reads are snapshots and never advance the cursor — drain without topics to advance (19785).",
@@ -3199,7 +3213,9 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
   // broadcasts remain actionable until TAKING/settlement and retain ambient
   // delivery progress on the separate session cursor. The persisted classifier
   // keeps newly surfaced responses distinct from legacy ambient responses.
-  if (shouldAdvance) {
+  // 21757 — a receipt:false read never acknowledges: the rows it returns stay
+  // in actionable_unread until the model's own read returns them.
+  if (shouldAdvance && isReceipt) {
     let lastAttention = 0
     const projectedAttentionIds = new Set(attentionRows.map((row) => row.id))
     for (const row of [...attentionRows, ...filtered]) {
@@ -3219,7 +3235,11 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
   // 21626 — only the canonical, identity-bound attention projection is a
   // mailbox-read receipt. Filtered/snapshot fetches omit attention and do not
   // let a narrow history query masquerade as checking the owned inbox.
-  if (attention !== null) {
+  // 21757 — and only a read a model is behind (receipt:true) is one: a
+  // wake-up drain that touched this stamp would reset the staleness clock
+  // health:inbox-stale pages a dark seat by, and would clear a prune notice
+  // no model ever saw.
+  if (attention !== null && isReceipt) {
     ctx.stmts.touchMailboxAttentionRead.run({ $recipient: currentName, $now: Date.now() })
     // 21757 — the prune notice was delivered in this canonical read (it rides
     // the projection built above); one notice per pruning episode.

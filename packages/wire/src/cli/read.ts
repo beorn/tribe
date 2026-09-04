@@ -1115,7 +1115,9 @@ export async function probeDoctorRail(
       throw new Error(`long-poll returned status=${String(waited.status)} timed_out=${String(waited.timed_out)}`)
     }
 
-    await receiver.call("tribe.fetch", {})
+    // 21757 — no model is behind the doctor's canary read; do not let a
+    // health probe acknowledge a mailbox or stamp an attention read.
+    await receiver.call("tribe.fetch", { receipt: false })
     return {
       severity: "OK",
       evidence: {

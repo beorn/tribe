@@ -1015,6 +1015,73 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(fetchEvents(b, opts)).toEqual([])
   })
 
+  it("receipt:false returns attention, advances the ambient cursor, but neither acknowledges the mailbox nor stamps an attention read (21757)", () => {
+    // The adapter wake-up drain and the host-stream relay forward fire-and-
+    // forget; no model is behind their read. Before 21757 that read acked
+    // the mailbox cursor in the same RPC that carried the rows, and on
+    // 2026-09-02 eight officer rows were drained into a dark pane and never
+    // seen. A receipt:false read must leave the rows in actionable_unread
+    // for the model's own read, and must not touch the read receipt that
+    // health:inbox-stale measures a dark seat by.
+    const a = connectAs("sess-a", NAME)
+    disconnect("sess-a")
+    void a
+    insertRow(stmts, {
+      id: "drained-verdict",
+      type: "verdict",
+      sender: "@cto",
+      recipient: NAME,
+      kind: "direct",
+      content: "a verdict the pane never rendered",
+      ts: now - 60_000,
+    })
+    const b = connectAs("sess-b", NAME)
+    const before = db
+      .prepare("SELECT last_actionable_seq, last_attention_read_at FROM mailbox_cursors WHERE recipient = ?")
+      .get(NAME)
+
+    const drained = fetchJson(b, opts, { limit: 500, receipt: false }).json
+    expect((drained.attention?.actionable_unread ?? []).map((e) => e.id)).toEqual(["drained-verdict"])
+    // Not acknowledged, not a read receipt.
+    expect(
+      db
+        .prepare("SELECT last_actionable_seq, last_attention_read_at FROM mailbox_cursors WHERE recipient = ?")
+        .get(NAME),
+    ).toEqual(before)
+    // Still owed to the model: the seat's own read returns it, and THAT read acknowledges.
+    expect(fetchEvents(b, opts).map((e) => e.id)).toEqual(["drained-verdict"])
+    expect(fetchEvents(b, opts)).toEqual([])
+    expect(
+      (
+        db.prepare("SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = ?").get(NAME) as {
+          last_actionable_seq: number
+        }
+      ).last_actionable_seq,
+    ).toBeGreaterThan(0)
+  })
+
+  it("receipt:false leaves a retention prune notice for the model's own read (21757)", () => {
+    const live = connectAs("sess-live", NAME)
+    db.prepare(
+      "INSERT INTO mailbox_prunes (recipient, pruned_count, pruned_before, recorded_at) VALUES (?, 3, ?, ?)",
+    ).run(NAME, now - 86_400_000, now)
+    const drained = fetchJson(live, opts, { limit: 500, receipt: false }).json
+    expect((drained.attention as { pruned?: { count: number } } | undefined)?.pruned?.count).toBe(3)
+    expect(db.prepare("SELECT pruned_count FROM mailbox_prunes WHERE recipient = ?").get(NAME)).toEqual({
+      pruned_count: 3,
+    })
+    const canonical = fetchJson(live, opts, {}).json
+    expect((canonical.attention as { pruned?: { count: number } } | undefined)?.pruned?.count).toBe(3)
+    expect(db.prepare("SELECT pruned_count FROM mailbox_prunes WHERE recipient = ?").get(NAME)).toBeNull()
+  })
+
+  it("rejects a non-boolean receipt loudly (21757)", () => {
+    const live = connectAs("sess-live", NAME)
+    expect(fetchJson(live, opts, { receipt: "no" }).json).toEqual({
+      error: "receipt must be a boolean when given (21757).",
+    })
+  })
+
   it("the actionable view is DIRECT-only: broadcast requests and self-sent requests never recover", () => {
     const a = connectAs("sess-a", NAME)
     disconnect("sess-a")

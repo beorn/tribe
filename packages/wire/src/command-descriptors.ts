@@ -689,6 +689,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             type: "boolean",
             description: "Advance the session cursor after a since/default scan. Default: true only for default drain.",
           },
+          receipt: {
+            type: "boolean",
+            description:
+              "Whether a model is behind this read (default true). Pass false from a relay that forwards fire-and-forget and cannot know the model saw a row — an adapter wake-up drain, a host-stream bridge: the read returns attention and may advance the ambient cursor, but never acknowledges the mailbox cursor and never counts as the seat's attention read, so the rows stay in actionable_unread until the model's own read returns them (21757). A model-initiated read is always a receipt; do not pass false from one.",
+          },
         },
       },
       outputSchema: OBJ(
