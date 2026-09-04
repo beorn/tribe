@@ -18,7 +18,6 @@ import {
   type DaemonClient,
 } from "../lib/socket.ts"
 import { watchActivity } from "../lib/activity-watch.ts"
-import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-exempt.ts"
 import { readTribeLaunchId } from "../launch-environment.ts"
 import { withCliDaemonClient } from "./daemon-client.ts"
 import { writeJsonStdout } from "./json-output.ts"
@@ -2047,41 +2046,5 @@ export function registerReadCommands(program: Command): void {
         console.error(`tribe activity: ${err instanceof Error ? err.message : String(err)}`)
         process.exit(1)
       }
-    })
-
-  // @km/infra/reaper-and-cwd-guard-hardening-followons gap 1 — mark a PID exempt
-  // from the health-reaper so a live #undead repro is never auto-killed.
-  program
-    .command("reaper-exempt [pid]")
-    .description("Exempt a PID from the health-reaper auto-kill (a live repro); --clear removes, --list shows all")
-    .option("--clear", "remove the exemption instead of adding it")
-    .option("--list", "list all current exemptions")
-    .option("--reason <text>", "why it is exempt (stored for --list)")
-    .action((pid: string | undefined, opts: { clear?: boolean; list?: boolean; reason?: string }) => {
-      if (opts.list) {
-        const entries = listReaperExempt()
-        if (entries.length === 0) {
-          console.log("No reaper exemptions.")
-          return
-        }
-        console.log(`${entries.length} reaper exemption(s):`)
-        for (const e of entries) console.log(`  PID ${e.pid}${e.reason ? `  — ${e.reason}` : ""}`)
-        return
-      }
-      const n = Number(pid)
-      if (!pid || !Number.isInteger(n) || n <= 0) {
-        console.error("tribe reaper-exempt: a positive <pid> is required (or pass --list)")
-        process.exit(2)
-      }
-      if (opts.clear) {
-        console.log(
-          clearReaperExempt(n) ? `Cleared reaper exemption for PID ${n}.` : `No reaper exemption for PID ${n}.`,
-        )
-        return
-      }
-      setReaperExempt(n, opts.reason ?? "")
-      console.log(
-        `PID ${n} is now reaper-exempt${opts.reason ? ` (${opts.reason})` : ""} — the health-reaper will not auto-kill it.`,
-      )
     })
 }

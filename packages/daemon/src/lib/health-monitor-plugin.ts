@@ -13,18 +13,12 @@
  *   HEALTH_DISK_CRITICAL   — disk usage % for critical (default: 95)
  *   HEALTH_WORKTREE_WARNING — open worktree count for warning (default: 5)
  *   HEALTH_GH_RATELIMIT_WARNING — GitHub API remaining % for warning (default: 20)
- *   HEALTH_FD_WARNING      — fd usage % for warning (default: 70)
  *   HEALTH_DISK_IO_WARNING — combined read+write MB/s for warning (default: 500)
- *   HEALTH_REAPER_ENABLED     — enable process reaper (default: "1")
- *   HEALTH_REAPER_CPU_THRESHOLD — CPU % threshold for suspect (default: 80)
- *   HEALTH_REAPER_AGE_MINUTES  — minimum process age in minutes (default: 30)
- *   HEALTH_REAPER_GRACE_SAMPLES — samples to wait after asking before kill (default: 6)
  */
 
 import { existsSync, readdirSync, statSync, unlinkSync } from "node:fs"
 import { cpus, totalmem, freemem, loadavg } from "node:os"
 import { createLogger } from "loggily"
-import { isReaperExempt } from "tribe-wire"
 import { createTimers } from "./timers.ts"
 import { startSingleFlightTicker } from "./single-flight-ticker.ts"
 import type { TribePluginApi, TribeClientApi } from "./plugin-api.ts"
@@ -34,11 +28,6 @@ import {
   type CanonicalProcessObservation,
   type HealthProcessSource,
 } from "./health-process-source.ts"
-import {
-  checkCanonicalReaper,
-  createCanonicalReaperState,
-  type CanonicalReaperState,
-} from "./health-monitor-canonical-reaper.ts"
 
 const log = createLogger("tribe:health")
 const CPU_ALERT_COOLDOWN_MS = 5 * 60_000
@@ -70,11 +59,6 @@ export interface HealthMetrics {
   disk?: CanonicalDiskCapacity
   diskIo?: {
     readWriteMBps: number
-  }
-  fdCount?: {
-    total: number
-    perSession: Array<{ name: string; count: number }>
-    limit: number
   }
   ghRateLimit?: {
     remaining: number
@@ -117,9 +101,7 @@ export interface HealthAlert {
     | "disk"
     | "disk-io"
     | "worktree"
-    | "fd-count"
     | "gh-rate-limit"
-    | "reaper"
     | "chief-absent"
   severity: "warning" | "critical"
   message: string
@@ -136,17 +118,6 @@ export interface HealthProcess {
   command: string
 }
 
-export interface ReaperSuspect {
-  firstSeen: number
-  samples: number
-  asked: boolean
-  /** One-shot flag: unclaimed escalation broadcast already sent (kill arm off). */
-  escalated?: boolean
-  command: string
-  cpu: number
-  etime: string
-}
-
 // ---------------------------------------------------------------------------
 // Thresholds
 // ---------------------------------------------------------------------------
@@ -160,21 +131,12 @@ export interface HealthThresholds {
   diskWarningPercent: number
   diskCriticalPercent: number
   worktreeWarning: number
-  fdWarningPercent: number
   /** Alert when combined read+write exceeds this MB/s sustained */
   diskIoWarningMBps: number
   /** Alert when GitHub API remaining % drops below this (default: 20) */
   ghRateLimitWarning: number
   /** How many consecutive samples above threshold before alerting */
   sustainedSamples: number
-  /** Reaper: enabled (default: true) */
-  reaperEnabled: boolean
-  /** Reaper: CPU % threshold for suspect detection (default: 80) */
-  reaperCpuThreshold: number
-  /** Reaper: minimum process age in minutes before suspect (default: 30) */
-  reaperAgeMinutes: number
-  /** Reaper: samples to wait after asking before escalating (default: 6, i.e. 60s at 10s interval) */
-  reaperGraceSamples: number
 }
 
 export function defaultThresholds(): HealthThresholds {
@@ -187,15 +149,10 @@ export function defaultThresholds(): HealthThresholds {
     diskWarningPercent: parseInt(process.env.HEALTH_DISK_WARNING ?? "85", 10),
     diskCriticalPercent: parseInt(process.env.HEALTH_DISK_CRITICAL ?? "95", 10),
     worktreeWarning: parseInt(process.env.HEALTH_WORKTREE_WARNING ?? "5", 10),
-    fdWarningPercent: parseInt(process.env.HEALTH_FD_WARNING ?? "70", 10),
     diskIoWarningMBps: parseInt(process.env.HEALTH_DISK_IO_WARNING ?? "500", 10),
     ghRateLimitWarning: parseInt(process.env.HEALTH_GH_RATELIMIT_WARNING ?? "20", 10),
     // At 10s interval, 3 samples = 30s sustained
     sustainedSamples: 3,
-    reaperEnabled: process.env.HEALTH_REAPER_ENABLED !== "0",
-    reaperCpuThreshold: parseInt(process.env.HEALTH_REAPER_CPU_THRESHOLD ?? "80", 10),
-    reaperAgeMinutes: parseInt(process.env.HEALTH_REAPER_AGE_MINUTES ?? "30", 10),
-    reaperGraceSamples: parseInt(process.env.HEALTH_REAPER_GRACE_SAMPLES ?? "6", 10),
   }
 }
 
@@ -647,22 +604,6 @@ export function ownerForLockHolder(
   return null
 }
 
-async function checkCollectedProcessReaper(
-  observation: CollectedProcessObservation,
-  metrics: HealthMetrics,
-  pidToParent: Map<number, number>,
-  sessions: HealthSession[],
-  thresholds: HealthThresholds,
-  state: AlertState,
-  api: TribeClientApi,
-): Promise<void> {
-  if (observation.kind === "standalone-os") {
-    await checkReaper(metrics.cpu.topProcesses, pidToParent, sessions, thresholds, state, api)
-    return
-  }
-  checkCanonicalReaper(observation, thresholds, state.canonicalReaper, api, sessions)
-}
-
 /** Parse `git worktree list` output to count worktrees. */
 export function parseWorktreeList(output: string): number {
   const trimmed = output.trim()
@@ -692,29 +633,6 @@ export function parseGhRateLimit(jsonOutput: string): { remaining: number; limit
   } catch {
     // silent-fallback-allow: malformed gh rate-limit JSON disables optional GitHub quota telemetry.
     return null
-  }
-}
-
-// ---------------------------------------------------------------------------
-// File descriptor monitoring
-// ---------------------------------------------------------------------------
-
-/** Parse the system file descriptor limit from `ulimit -n` output. */
-export function parseUlimitOutput(output: string): number {
-  const n = parseInt(output.trim(), 10)
-  return isNaN(n) ? 0 : n
-}
-
-/** Compute fd usage info from a total count and ulimit. */
-export function parseFdInfo(
-  lsofCount: number,
-  ulimitN: number,
-): { total: number; limit: number; usagePercent: number } {
-  const limit = ulimitN > 0 ? ulimitN : 1 // Avoid division by zero
-  return {
-    total: lsofCount,
-    limit,
-    usagePercent: Math.round((lsofCount / limit) * 100),
   }
 }
 
@@ -931,10 +849,6 @@ export interface AlertState {
   lockFirstSeen: Map<string, number>
   /** Track which locks have had their stale warning sent */
   lockStaleWarned: Set<string>
-  /** Reaper: tracked suspect PIDs with detection state */
-  reaperSuspects: Map<number, ReaperSuspect>
-  /** Managed reaper state is incarnation-keyed and never shared with the standalone ps path. */
-  canonicalReaper: CanonicalReaperState
   /** Last canonical scalar fact evaluated for sustained thresholds. */
   lastScalarFact?: string
 }
@@ -951,8 +865,6 @@ export function createAlertState(): AlertState {
     gitLockDetected: false,
     lockFirstSeen: new Map(),
     lockStaleWarned: new Set(),
-    reaperSuspects: new Map(),
-    canonicalReaper: createCanonicalReaperState(),
   }
 }
 
@@ -1273,209 +1185,7 @@ export function evaluateAlerts(
     state.firedAlerts.delete("worktree:warning")
   }
 
-  // --- File descriptors ---
-  if (metrics.fdCount) {
-    const usagePercent = (metrics.fdCount.total / metrics.fdCount.limit) * 100
-    if (usagePercent > thresholds.fdWarningPercent) {
-      if (!state.firedAlerts.has("fd-count:warning")) {
-        state.firedAlerts.add("fd-count:warning")
-        alerts.push({
-          type: "fd-count",
-          severity: "warning",
-          message: `FD count warning: ${metrics.fdCount.total} open fds (${Math.round(usagePercent)}% of ${metrics.fdCount.limit} limit)`,
-          metrics: {},
-          topOffenders: [],
-        })
-      }
-    } else {
-      state.firedAlerts.delete("fd-count:warning")
-    }
-  }
-
   return alerts
-}
-
-// ---------------------------------------------------------------------------
-// Process reaper — auto-kill stuck bun/node processes
-// ---------------------------------------------------------------------------
-
-/**
- * Parse `ps` etime field to minutes.
- * Formats: "MM:SS", "HH:MM:SS", "D-HH:MM:SS", or just seconds.
- */
-export function parseEtime(etime: string): number {
-  const trimmed = etime.trim()
-  if (!trimmed) return 0
-
-  // Format: D-HH:MM:SS
-  const dayMatch = trimmed.match(/^(\d+)-(\d+):(\d+):(\d+)$/)
-  if (dayMatch) {
-    const days = parseInt(dayMatch[1] ?? "0", 10)
-    const hours = parseInt(dayMatch[2] ?? "0", 10)
-    const mins = parseInt(dayMatch[3] ?? "0", 10)
-    return days * 24 * 60 + hours * 60 + mins
-  }
-
-  // Format: HH:MM:SS
-  const hmsMatch = trimmed.match(/^(\d+):(\d+):(\d+)$/)
-  if (hmsMatch) {
-    const hours = parseInt(hmsMatch[1] ?? "0", 10)
-    const mins = parseInt(hmsMatch[2] ?? "0", 10)
-    return hours * 60 + mins
-  }
-
-  // Format: MM:SS
-  const msMatch = trimmed.match(/^(\d+):(\d+)$/)
-  if (msMatch) {
-    return parseInt(msMatch[1] ?? "0", 10)
-  }
-
-  return 0
-}
-
-/**
- * Check for stuck bun/node processes and manage the reaper lifecycle:
- * 1. Detect suspects (>cpuThreshold% CPU, >ageMinutes old, bun/node)
- * 2. Track for 3 consecutive samples before asking
- * 3. Ask sessions to claim ownership (broadcast query)
- * 4. Kill unclaimed after graceSamples more samples
- */
-export async function checkReaper(
-  topProcesses: Array<{ pid: number; cpu: number; command: string }>,
-  pidToParent: Map<number, number>,
-  sessions: Array<{ name: string; pid: number; role: string }>,
-  thresholds: HealthThresholds,
-  state: AlertState,
-  api: TribeClientApi,
-  // gap 1: a PID an operator marked exempt (a live #undead repro) is never reaped.
-  // Injected for tests; production reads the on-disk exempt markers.
-  isExempt: (pid: number) => boolean = isReaperExempt,
-): Promise<void> {
-  if (!thresholds.reaperEnabled) return
-
-  const now = Date.now()
-  const seenPids = new Set<number>()
-
-  // Find high-CPU bun/node processes
-  const highCpuProcs = topProcesses.filter(
-    (p) => p.cpu > thresholds.reaperCpuThreshold && /\b(bun|node)\b/.test(p.command),
-  )
-
-  for (const proc of highCpuProcs) {
-    seenPids.add(proc.pid)
-
-    // Skip processes owned by active sessions
-    const owner = attributeToSession(proc.pid, pidToParent, sessions)
-    if (owner) continue
-
-    // gap 1: never even track an operator-exempted PID as a reaper suspect.
-    if (isExempt(proc.pid)) continue
-
-    // Check process age via ps -p <pid> -o etime=
-    let etime = ""
-    let ageMinutes = 0
-    try {
-      const etimeProc = Bun.spawn(["ps", "-p", String(proc.pid), "-o", "etime="], {
-        stdout: "pipe",
-        stderr: "ignore",
-      })
-      etime = (await new Response(etimeProc.stdout).text()).trim()
-      ageMinutes = parseEtime(etime)
-    } catch {
-      continue // Can't determine age — skip
-    }
-
-    if (ageMinutes < thresholds.reaperAgeMinutes) continue
-
-    // Track or update suspect
-    const existing = state.reaperSuspects.get(proc.pid)
-    if (existing) {
-      existing.samples++
-      existing.cpu = proc.cpu
-      existing.etime = etime
-    } else {
-      state.reaperSuspects.set(proc.pid, {
-        firstSeen: now,
-        samples: 1,
-        asked: false,
-        command: proc.command.slice(0, 80),
-        cpu: proc.cpu,
-        etime,
-      })
-    }
-  }
-
-  // Prune suspects no longer in the high-CPU list
-  for (const [pid] of state.reaperSuspects) {
-    if (!seenPids.has(pid)) {
-      state.reaperSuspects.delete(pid)
-    }
-  }
-
-  // Process suspects through the lifecycle
-  for (const [pid, suspect] of state.reaperSuspects) {
-    // gap 1: an exemption can land AFTER a PID was tracked — honor it at the
-    // decision point too, so an exempt repro is never asked about or escalated.
-    if (isExempt(pid)) {
-      log.info?.(`reaper: PID ${pid} is reaper-exempt — skipping (live repro / under investigation)`)
-      state.reaperSuspects.delete(pid)
-      continue
-    }
-
-    // After 3 samples: ask sessions to claim
-    if (suspect.samples >= 3 && !suspect.asked) {
-      suspect.asked = true
-      const consequence = "Reply to claim it; unclaimed processes are escalated to the operator."
-      const msg = `health:reaper: PID ${pid} (${suspect.command}) at ${suspect.cpu}% CPU for ${suspect.etime}. Is this yours? ${consequence}`
-      log.info?.(`reaper: asking about PID ${pid}`)
-      api.broadcast(msg, "health:reaper:query", undefined, {
-        delivery: "push",
-        topic: "health:reaper:query",
-      })
-    }
-
-    // After 3 + graceSamples: check for claims, then escalate
-    if (suspect.asked && suspect.samples >= 3 + thresholds.reaperGraceSamples) {
-      // Check if anyone claimed this PID
-      const claimed = api.hasRecentMessage(`reaper:claim PID ${pid}`)
-      if (claimed) {
-        log.info?.(`reaper: PID ${pid} claimed by a session, removing from suspects`)
-        state.reaperSuspects.delete(pid)
-        continue
-      }
-
-      // Verify the process still exists before escalating.
-      let stillAlive = false
-      try {
-        const checkProc = Bun.spawn(["ps", "-p", String(pid), "-o", "pid="], {
-          stdout: "pipe",
-          stderr: "ignore",
-        })
-        const checkOutput = (await new Response(checkProc.stdout).text()).trim()
-        stillAlive = checkOutput.length > 0
-      } catch {
-        stillAlive = false
-      }
-
-      if (!stillAlive) {
-        state.reaperSuspects.delete(pid)
-        continue
-      }
-
-      // Intervention is an operator decision, never automatic. Escalate ONCE
-      // per suspect and keep tracking so a later claim or exit still clears it.
-      if (!suspect.escalated) {
-        suspect.escalated = true
-        const escMsg = `health:reaper: PID ${pid} (${suspect.command}) unclaimed after ${thresholds.reaperGraceSamples * 10}s at ${suspect.cpu}% CPU for ${suspect.etime} — operator decision required (reply "reaper:claim PID ${pid}" to clear)`
-        log.info?.(`reaper: escalating unclaimed PID ${pid}`)
-        api.broadcast(escMsg, "health:reaper:unclaimed", undefined, {
-          delivery: "push",
-          topic: "health:reaper:unclaimed",
-        })
-      }
-      continue
-    }
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1617,7 +1327,6 @@ export async function collectFullMetrics(
   let swapUsedMB = 0
   let pidToParent = new Map<number, number>()
   let worktrees = 0
-  let fdCount: HealthMetrics["fdCount"]
   if (processObservation.kind === "available") {
     const totalBytes =
       scalarObservation.kind === "available" && scalarObservation.values.memory.kind === "supported"
@@ -1631,19 +1340,6 @@ export async function collectFullMetrics(
 
   try {
     const wtProc = Bun.spawn(["git", "worktree", "list"], { stdout: "pipe", stderr: "ignore" })
-    const fdCountOutputPromise =
-      processObservation.kind === "standalone-os"
-        ? new Response(
-            Bun.spawn(["sh", "-c", "lsof -n 2>/dev/null | wc -l"], {
-              stdout: "pipe",
-              stderr: "ignore",
-            }).stdout,
-          ).text()
-        : Promise.resolve("0")
-    const ulimitOutputPromise =
-      processObservation.kind === "standalone-os"
-        ? new Response(Bun.spawn(["sh", "-c", "ulimit -n"], { stdout: "pipe", stderr: "ignore" }).stdout).text()
-        : Promise.resolve("0")
     const psOutput =
       processObservation.kind === "standalone-os"
         ? new Response(
@@ -1653,12 +1349,7 @@ export async function collectFullMetrics(
             }).stdout,
           ).text()
         : Promise.resolve("")
-    const [observedPs, wtOutput, fdCountOutput, ulimitOutput] = await Promise.all([
-      psOutput,
-      new Response(wtProc.stdout).text().catch(() => ""),
-      fdCountOutputPromise.catch(() => "0"),
-      ulimitOutputPromise.catch(() => "0"),
-    ])
+    const [observedPs, wtOutput] = await Promise.all([psOutput, new Response(wtProc.stdout).text().catch(() => "")])
     if (processObservation.kind === "standalone-os") {
       const processMetrics = deriveProcessMetricsFromSnapshot(observedPs, process.pid)
       topProcesses = processMetrics.topProcesses
@@ -1666,14 +1357,6 @@ export async function collectFullMetrics(
       pidToParent = processMetrics.pidToParent
     }
     worktrees = parseWorktreeList(wtOutput)
-
-    // File descriptor count
-    const lsofCount = parseInt(fdCountOutput.trim(), 10) || 0
-    const ulimitN = parseUlimitOutput(ulimitOutput)
-    if (ulimitN > 0) {
-      const fdInfo = parseFdInfo(lsofCount, ulimitN)
-      fdCount = { total: fdInfo.total, perSession: [], limit: fdInfo.limit }
-    }
   } catch (err) {
     log.debug?.(`health metric collection failed: ${err instanceof Error ? err.message : String(err)}`)
   }
@@ -1731,7 +1414,6 @@ export async function collectFullMetrics(
           }),
       disk: hostMetrics.disk,
       diskIo: hostMetrics.diskIo,
-      fdCount,
       ...(bunProcesses === undefined ? {} : { bunProcesses }),
       processObservation:
         processObservation.kind === "standalone-os"
@@ -1841,17 +1523,6 @@ export const healthMonitorPlugin: TribePluginApi = {
             log.error?.(`chief-absence check failed: ${err instanceof Error ? err.message : String(err)}`)
           }
         }
-
-        // --- Process reaper ---
-        await checkCollectedProcessReaper(
-          processObservation,
-          metrics,
-          pidToParent,
-          sessions,
-          thresholds,
-          alertState,
-          api,
-        )
 
         // --- Git lock detection (main repo + submodules) ---
         const gitDir = `${process.cwd()}/.git`
@@ -2001,7 +1672,7 @@ export const healthMonitorPlugin: TribePluginApi = {
     }
 
     // One sample at a time. `sample()` spawns `iostat -d -c 2 -w 1` (>=2s by
-    // construction), `lsof -n | wc -l`, a full `ps -axo` dump, a `hab sysmon
+    // construction), a full `ps -axo` dump, a `hab sysmon
     // snapshot` walk of the habitat journal and a network `gh api rate_limit`,
     // none of them deadlined. A bare `setInterval(() => void sample(), 10s)`
     // starts another sample every tick regardless, so any run that outlasts the
@@ -2024,6 +1695,6 @@ export const healthMonitorPlugin: TribePluginApi = {
   },
 
   instructions() {
-    return "- Health monitoring active: CPU, memory, process count, disk space, disk I/O, worktree count, file descriptor count, GitHub API rate limit, git lock alerts, and process reaper are broadcast automatically. To claim a process the reaper is targeting, reply with 'reaper:claim PID <pid>'."
+    return "- Health monitoring active: CPU, memory, process count, disk space, disk I/O, worktree count, GitHub API rate limit, and git lock alerts are broadcast automatically."
   },
 }
