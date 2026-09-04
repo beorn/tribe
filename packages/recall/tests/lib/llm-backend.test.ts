@@ -6,7 +6,7 @@
 
 import { describe, test, expect, vi } from "vitest"
 import { spawnSync } from "node:child_process"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -239,6 +239,28 @@ describe("selectAvailableCheapModels", () => {
     expect(selection.order).toBe("getCheapModel() first, then remaining getCheapModels() registry order")
   })
 
+  test("can restrict selection to caller candidates for model-specific features", () => {
+    const haiku = { modelId: "claude-haiku", provider: "anthropic" }
+    const unrelated = { modelId: "gpt-cheap", provider: "openai" }
+    const llm = selectionBackend({
+      preferred: unrelated,
+      candidates: [unrelated, haiku],
+      available: ["openai"],
+      reasons: { anthropic: "fresh auth refusal" },
+    })
+
+    const selection = selectAvailableCheapModels(llm, {
+      candidates: [haiku],
+      includeRegistryFallback: false,
+      limit: 1,
+      order: "registry",
+    })
+
+    expect(selection.models).toEqual([])
+    expect(selection.rejected).toEqual([{ ...haiku, reason: "fresh auth refusal" }])
+    expect(selection.order).toBe("caller candidates only")
+  })
+
   test("projects the selected backend and exhaustive failure for single-model callers", () => {
     const preferred = { modelId: "dead-openai", provider: "openai" }
     const fallback = { modelId: "live-anthropic", provider: "anthropic" }
@@ -271,6 +293,36 @@ describe("selectAvailableCheapModels", () => {
 })
 
 describe("loadLlm shared provider-health surface", () => {
+  test("rejects an incomplete public barrel with every missing capability named", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "recall-llm-incomplete-"))
+    const backendModule = pathToFileURL(resolve(import.meta.dirname, "../../src/lib/llm-backend.ts")).href
+    writeFileSync(join(fixture, "index.ts"), "export const getCheapModels = () => []\n")
+    const childScript = `
+      const { loadLlm } = await import(process.env.LLM_BACKEND_MODULE)
+      const llm = await loadLlm()
+      console.log(JSON.stringify({ loaded: llm !== null }))
+    `
+
+    try {
+      const child = spawnSync("bun", ["-e", childScript], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          LLM_BACKEND_MODULE: backendModule,
+          TRIBE_LLM_DIR: fixture,
+        },
+      })
+      expect(child.status, child.stderr).toBe(0)
+      expect(JSON.parse(child.stdout)).toEqual({ loaded: false })
+      expect(child.stderr).toContain("public barrel is missing required function exports")
+      expect(child.stderr).toContain("createProviderObservationStore")
+      expect(child.stderr).toContain("selectModels")
+      expect(child.stderr).toContain("describeDispatchFailure")
+    } finally {
+      rmSync(fixture, { recursive: true, force: true })
+    }
+  })
+
   test("loads Bearly through its public barrel and turns the host deny list into selector exclusions", () => {
     const home = mkdtempSync(join(tmpdir(), "recall-llm-health-"))
     const backendModule = pathToFileURL(resolve(import.meta.dirname, "../../src/lib/llm-backend.ts")).href

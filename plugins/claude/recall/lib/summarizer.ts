@@ -19,7 +19,12 @@ export type SummarizerMode = "off" | "haiku" | "local"
 // mode was explicitly requested — an enabled-but-impossible mode is a
 // misconfiguration, never a silent no-op.
 
-import { loadLlm, type LlmBackend, type LlmModel as Model } from "../../../../packages/recall/src/lib/llm-backend.ts"
+import {
+  loadLlm,
+  selectAvailableCheapModels,
+  type LlmBackend,
+  type LlmModel as Model,
+} from "../../../../packages/recall/src/lib/llm-backend.ts"
 
 let llmWarned = false
 
@@ -51,16 +56,36 @@ export function resolveSummarizerMode(raw?: string): SummarizerMode {
 export function pickSummaryModel(mode: SummarizerMode, llm: LlmBackend): Model | null {
   if (mode === "off") return null
   if (mode === "haiku") {
-    const haiku =
-      llm.getCheapModels(8).find((m) => /haiku/i.test(m.modelId) && llm.isProviderAvailable(m.provider)) ??
-      llm.getCheapModel()
-    if (!haiku || !llm.isProviderAvailable(haiku.provider)) return null
-    return haiku
+    const haikuCandidates = llm.getCheapModels(Number.MAX_SAFE_INTEGER).filter((model) => /haiku/i.test(model.modelId))
+    const haiku = selectAvailableCheapModels(llm, {
+      candidates: haikuCandidates,
+      includeRegistryFallback: false,
+      limit: 1,
+      order: "registry",
+    }).models[0]
+    if (haiku) return haiku
+    const preferred = llm.getCheapModel()
+    if (!preferred) return null
+    return (
+      selectAvailableCheapModels(llm, {
+        candidates: [preferred],
+        includeRegistryFallback: false,
+        limit: 1,
+        order: "registry",
+      }).models[0] ?? null
+    )
   }
   // mode === "local" — prefer any ollama-backed model; extend when we add
   // lmstudio to the provider enum.
-  const local = llm.getCheapModels(8).find((m) => m.provider === "ollama" && llm.isProviderAvailable(m.provider))
-  return local ?? null
+  const localCandidates = llm.getCheapModels(Number.MAX_SAFE_INTEGER).filter((model) => model.provider === "ollama")
+  return (
+    selectAvailableCheapModels(llm, {
+      candidates: localCandidates,
+      includeRegistryFallback: false,
+      limit: 1,
+      order: "registry",
+    }).models[0] ?? null
+  )
 }
 
 const SYSTEM_PROMPT = `You are a terse session summarizer. Given the recent tail of a Claude Code

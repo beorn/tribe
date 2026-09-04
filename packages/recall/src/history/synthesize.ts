@@ -58,8 +58,8 @@ export interface LlmRaceResult {
 }
 
 /**
- * Turn a raw failure into one actionable line via the SAME classifier /pro
- * uses for its own leg errors (bearly's formatLegDispatchError, bridged
+ * Turn a raw failure into one actionable line via the SAME structured owner
+ * /pro uses for its own leg errors (bearly's describeDispatchFailure, bridged
  * through llm.formatProviderError) — so recall and /pro never give
  * conflicting advice for the same underlying failure (quota exhausted,
  * model renamed, timeout: none of these are "check your credentials").
@@ -218,18 +218,20 @@ export async function synthesizeResults(
     })
   }
 
-  // Full candidate list BEFORE filtering — kept around so a failure report
-  // can name every provider that was considered, not just the ones that
-  // survived isProviderAvailable.
-  const candidates = llm.getCheapModels(Number.MAX_SAFE_INTEGER)
-  const models = candidates.filter((model) => llm.isProviderAvailable(model.provider))
-  const excludedProviders: ExcludedProvider[] = candidates
-    .filter((model) => !llm.isProviderAvailable(model.provider))
-    .map((model) => ({
-      provider: model.provider,
-      modelId: model.modelId,
-      reason: llm.explainUnavailable?.(model.provider) ?? "unavailable (this LLM backend gives no further detail)",
-    }))
+  // Use the same shared fact + policy selector as every other Recall caller.
+  // The legacy boolean intentionally remains a credential-presence check, so
+  // filtering it here would silently discard explicit selector exclusions and
+  // fresh refusing observations before the user-visible synthesis race.
+  const selection = selectAvailableCheapModels(llm, {
+    limit: Number.MAX_SAFE_INTEGER,
+    order: "registry",
+  })
+  const models = selection.models
+  const excludedProviders: ExcludedProvider[] = selection.rejected.map((model) => ({
+    provider: model.provider,
+    modelId: model.modelId,
+    reason: model.reason,
+  }))
 
   if (models.length === 0) {
     log(`no LLM providers available for synthesis`)

@@ -23,7 +23,7 @@
  */
 
 import { createLogger } from "loggily"
-import { loadLlm } from "../../../recall/src/lib/llm-backend.ts"
+import { loadLlm, selectAvailableCheapModels } from "../../../recall/src/lib/llm-backend.ts"
 
 const log = createLogger("tribe:broadcast")
 
@@ -176,7 +176,12 @@ export async function rewriteViaHaiku(content: string, signal?: AbortSignal): Pr
     return content
   }
   try {
-    const haiku = llm.getCheapModels(8).find((m) => /haiku/i.test(m.modelId) && llm.isProviderAvailable(m.provider))
+    const haiku = selectAvailableCheapModels(llm, {
+      candidates: llm.getCheapModels(Number.MAX_SAFE_INTEGER).filter((model) => /haiku/i.test(model.modelId)),
+      includeRegistryFallback: false,
+      limit: 1,
+      order: "registry",
+    }).models[0]
     if (!haiku) {
       if (!haikuRewriterWarned) {
         haikuRewriterWarned = true

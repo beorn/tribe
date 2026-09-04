@@ -446,6 +446,66 @@ describe("recall integration", () => {
 })
 
 describe("synthesizeResults", () => {
+  test("uses the shared provider selector so explicit exclusions never reach the synthesis race", async () => {
+    const models: LlmModel[] = [
+      { provider: "openai", modelId: "openai-cheap" },
+      { provider: "xai", modelId: "xai-cheap" },
+      { provider: "openrouter", modelId: "openrouter-cheap" },
+    ]
+    const queried: string[] = []
+    const providerFacts = models.map((model) => ({
+      provider: model.provider,
+      status: "unknown" as const,
+      source: "test",
+      reason: "never observed",
+    }))
+    const llm: LlmBackend = {
+      queryModel: async ({ model }) => {
+        queried.push(model.modelId)
+        return { response: { content: `answer from ${model.modelId}` } }
+      },
+      getModel: (id) => models.find((model) => model.modelId === id),
+      getCheapModel: () => models[0],
+      getCheapModels: () => models,
+      estimateCost: () => 0,
+      // Compatibility meaning stays credential-presence only. The shared
+      // selector is the authority for explicit policy exclusions.
+      isProviderAvailable: () => true,
+      providerFacts,
+      selectModels: ({ candidates = models }) => ({
+        candidates: [...candidates],
+        selected: [models[2]!],
+        excluded: models.slice(0, 2).map((model) => ({
+          model,
+          provider: model.provider,
+          status: "excluded" as const,
+          source: "caller-exclusion",
+          reason: "excluded by caller",
+        })),
+        evidence: providerFacts,
+      }),
+    }
+
+    const result = await synthesizeResults(
+      "provider exclusion",
+      [
+        {
+          type: "message",
+          sessionId: "session-a",
+          sessionTitle: "Session A",
+          timestamp: Date.now(),
+          snippet: "provider exclusion evidence",
+          rank: 1,
+        },
+      ],
+      1_000,
+      llm,
+    )
+
+    expect(queried).toEqual(["openrouter-cheap"])
+    expect(result.text).toBe("answer from openrouter-cheap")
+  })
+
   test("filters provider availability before limiting the synthesis race", async () => {
     const models: LlmModel[] = [
       { provider: "openai", modelId: "openai-cheap" },

@@ -96,8 +96,8 @@ export type LlmBackend = {
   explainUnavailable?: (provider: string) => string
   /**
    * Optional shared error-classification voice — bearly's
-   * `formatLegDispatchError`, the SAME formatter /pro uses for its own leg
-   * failures. Turns a raw provider error (insufficient_quota, model
+   * `describeDispatchFailure`, the SAME structured owner /pro uses for its
+   * own leg failures. Turns a raw provider error (insufficient_quota, model
    * renamed, timeout, ...) into one actionable line. Routing recall's
    * per-attempt errors through this means /pro and recall never give
    * conflicting advice for the same underlying failure — recall no longer
@@ -135,7 +135,12 @@ export type CheapModelResolution =
  */
 export function selectAvailableCheapModels(
   llm: LlmBackend,
-  opts: { limit?: number; order?: CheapModelSelectionOrder } = {},
+  opts: {
+    limit?: number
+    order?: CheapModelSelectionOrder
+    candidates?: readonly LlmModel[]
+    includeRegistryFallback?: boolean
+  } = {},
 ): CheapModelSelection {
   const limit = opts.limit ?? 1
   if (!Number.isInteger(limit) || limit < 1) {
@@ -143,10 +148,16 @@ export function selectAvailableCheapModels(
   }
 
   const selectionOrder = opts.order ?? "preferred"
-  const order =
+  const includeRegistryFallback = opts.includeRegistryFallback ?? true
+  const baseOrder =
     selectionOrder === "preferred"
       ? "getCheapModel() first, then remaining getCheapModels() registry order"
       : "getCheapModels() registry order"
+  const order = opts.candidates
+    ? includeRegistryFallback
+      ? `caller candidates first, then ${baseOrder}`
+      : "caller candidates only"
+    : baseOrder
   const candidates: LlmModel[] = []
   const seenProviders = new Set<string>()
   const add = (model: LlmModel | undefined): void => {
@@ -155,8 +166,11 @@ export function selectAvailableCheapModels(
     candidates.push(model)
   }
 
-  if (selectionOrder === "preferred") add(llm.getCheapModel())
-  for (const model of llm.getCheapModels(Number.MAX_SAFE_INTEGER)) add(model)
+  for (const model of opts.candidates ?? []) add(model)
+  if (includeRegistryFallback) {
+    if (selectionOrder === "preferred") add(llm.getCheapModel())
+    for (const model of llm.getCheapModels(Number.MAX_SAFE_INTEGER)) add(model)
+  }
 
   const hasSharedSelector = llm.selectModels !== undefined
   const hasSharedFacts = llm.providerFacts !== undefined
@@ -252,10 +266,31 @@ type LlmBarrelModule = Pick<
     options: { store: unknown; now: number; env?: Readonly<Record<string, string | undefined>> },
   ) => Promise<LlmProviderAvailabilityFact>
   selectModels: NonNullable<LlmBackend["selectModels"]>
-  describeDispatchFailure?: (
+  describeDispatchFailure: (
     error: unknown,
     target: { modelId: string; provider: string; displayName: string },
   ) => { message: string }
+}
+
+const REQUIRED_LLM_BARREL_FUNCTIONS = [
+  "queryModel",
+  "getModel",
+  "getCheapModel",
+  "getCheapModels",
+  "estimateCost",
+  "isProviderAvailable",
+  "createProviderObservationStore",
+  "readProviderAvailability",
+  "selectModels",
+  "describeDispatchFailure",
+] as const
+
+function assertLlmBarrel(module: unknown): asserts module is LlmBarrelModule {
+  const record = module && typeof module === "object" ? (module as Record<string, unknown>) : {}
+  const missing = REQUIRED_LLM_BARREL_FUNCTIONS.filter((name) => typeof record[name] !== "function")
+  if (missing.length > 0) {
+    throw new Error(`@bearly/llm public barrel is missing required function exports: ${missing.join(", ")}`)
+  }
 }
 
 /**
@@ -327,7 +362,8 @@ export async function loadLlm(): Promise<LlmBackend | null> {
       return null
     }
     try {
-      const bearly = (await import(`${dir}/index.ts`)) as LlmBarrelModule
+      const bearly: unknown = await import(`${dir}/index.ts`)
+      assertLlmBarrel(bearly)
       const denied = parseDeniedProviders(process.env.RECALL_LLM_DENY_PROVIDERS)
       if (denied.size > 0) {
         process.stderr.write(`[recall:llm-backend] RECALL_LLM_DENY_PROVIDERS excludes: ${[...denied].join(", ")}\n`)
@@ -404,8 +440,8 @@ export async function requireLlm(feature: string): Promise<LlmBackend> {
   if (!llm) {
     throw new Error(
       `${feature} requires an LLM backend, but none is available. ` +
-        `Point TRIBE_LLM_DIR at a directory exposing lib/types.ts, lib/research.ts, lib/providers.ts ` +
-        `(e.g. bearly's plugins/llm/src).`,
+        `Point TRIBE_LLM_DIR at @bearly/llm's src directory exposing its public index.ts barrel ` +
+        `(queryModel, provider facts/store, selectModels, and describeDispatchFailure).`,
     )
   }
   return llm

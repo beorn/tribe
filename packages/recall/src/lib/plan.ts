@@ -10,7 +10,7 @@
  *   - deeper: strong round-1 cluster → mine entities from top snippets
  */
 
-import { loadLlm, type LlmBackend, type LlmModel } from "./llm-backend.ts"
+import { loadLlm, selectAvailableCheapModels, type LlmBackend, type LlmModel } from "./llm-backend.ts"
 import type { RecallSearchResult } from "../history/recall-shared.ts"
 import { log } from "../history/recall-shared.ts"
 import type { QueryContext } from "./context.ts"
@@ -268,12 +268,12 @@ export function planVariants(plan: QueryPlan): string[] {
 const PLANNER_PREFERENCE = ["claude-haiku-4-5-20251001", "gemini-2.0-flash-lite", "gpt-5-nano", "grok-3-fast"]
 
 function plannerModels(llm: LlmBackend): LlmModel[] {
-  const models: LlmModel[] = []
+  const candidates: LlmModel[] = []
   const providers = new Set<string>()
   const add = (model: LlmModel | undefined): void => {
-    if (!model || providers.has(model.provider) || !llm.isProviderAvailable(model.provider)) return
+    if (!model || providers.has(model.provider)) return
     providers.add(model.provider)
-    models.push(model)
+    candidates.push(model)
   }
 
   for (const id of PLANNER_PREFERENCE) {
@@ -282,7 +282,11 @@ function plannerModels(llm: LlmBackend): LlmModel[] {
 
   add(llm.getCheapModel())
   for (const model of llm.getCheapModels(Number.MAX_SAFE_INTEGER)) add(model)
-  return models
+  return selectAvailableCheapModels(llm, {
+    candidates,
+    limit: Number.MAX_SAFE_INTEGER,
+    order: "registry",
+  }).models
 }
 
 function providerError(llm: LlmBackend, model: LlmModel, error: unknown): string {
