@@ -208,7 +208,7 @@ describe("journal retention sweep", () => {
         expect(
           db.prepare("SELECT attention_required, session_id FROM messages_archive WHERE id = ?").get(sent.id),
         ).toEqual({ attention_required: 1, session_id: "sess-fable-1" })
-        expect(stmts.selectTrackedBroadcastAttention.all({ $name: "@chief" })).toEqual([
+        expect(stmts.selectAttention.all({ $name: "@chief" })).toEqual([
           expect.objectContaining({ id: sent.id, content: "archived attention broadcast", attention_required: 1 }),
         ])
       } finally {

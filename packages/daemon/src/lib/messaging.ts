@@ -502,10 +502,8 @@ export function sendMessage(
  * (below) and nudge the client to drain.
  */
 export function countUnackedAttention(ctx: TribeContext, recipient: string): number {
-  const params = { $name: recipient }
-  const direct = ctx.stmts.countUnackedAttention.get(params) as { count: number } | undefined
-  const trackedBroadcasts = ctx.stmts.countUnackedTrackedBroadcastAttention.get(params) as { count: number } | undefined
-  return (direct?.count ?? 0) + (trackedBroadcasts?.count ?? 0)
+  const attention = ctx.stmts.countUnackedAttention.get({ $name: recipient }) as { count: number } | undefined
+  return attention?.count ?? 0
 }
 
 /**

@@ -251,12 +251,12 @@ export function withDispatcher<
       const { attentionRows, untakenPendingBalls, actionableCount } = readAttentionProjection(daemonCtx, sessionName)
       const oldest = attentionRows[0]
       const latest = attentionRows.at(-1)
-      const oldestPendingTs = untakenPendingBalls.reduce(
-        (oldestTs, ball) => Math.min(oldestTs, Date.parse(ball.opened_at)),
-        Number.POSITIVE_INFINITY,
-      )
+      const attentionMessageIds = new Set(attentionRows.map((row) => row.id))
+      const oldestTrackedTs = untakenPendingBalls
+        .filter((ball) => ball.request_kind !== "incident" && attentionMessageIds.has(ball.message_id))
+        .reduce((oldestTs, ball) => Math.min(oldestTs, Date.parse(ball.opened_at)), Number.POSITIVE_INFINITY)
       const unread_count = actionableCount
-      const oldestTs = Math.min(oldest?.ts ?? Number.POSITIVE_INFINITY, oldestPendingTs)
+      const oldestTs = Math.min(oldest?.ts ?? Number.POSITIVE_INFINITY, oldestTrackedTs)
       const oldest_unread_ts = Number.isFinite(oldestTs) ? oldestTs : 0
       const oldest_unread_age_min = oldest_unread_ts > 0 ? Math.floor((Date.now() - oldest_unread_ts) / 60_000) : 0
       return {
@@ -281,12 +281,12 @@ export function withDispatcher<
         $unacknowledged_only: unacknowledgedOnly ? 1 : 0,
       }
       const direct = stmts.getLatestInboxWaitMessage.get(params) as { rowid: number } | null
-      const trackedBroadcast = stmts.getLatestTrackedBroadcastInboxWaitMessage.get({ $name: sessionName }) as {
+      const tracked = stmts.getLatestTrackedInboxWaitMessage.get({ $name: sessionName }) as {
         rowid: number
       } | null
-      if (direct === null) return trackedBroadcast
-      if (trackedBroadcast === null) return direct
-      return direct.rowid >= trackedBroadcast.rowid ? direct : trackedBroadcast
+      if (direct === null) return tracked
+      if (tracked === null) return direct
+      return direct.rowid >= tracked.rowid ? direct : tracked
     }
 
     type OperatorCapabilityVerdict = "authorized" | "unconfigured" | "rejected"
@@ -1661,7 +1661,7 @@ export function withDispatcher<
             }
             const message =
               (stmts.getActionableAttentionDelivery.get(params) as Record<string, unknown> | null) ??
-              (stmts.getTrackedBroadcastAttentionDelivery.get(params) as Record<string, unknown> | null)
+              (stmts.getTrackedAttentionDelivery.get(params) as Record<string, unknown> | null)
             return makeResponse(id, {
               session: target.sessionName,
               launch_id: target.launchId,

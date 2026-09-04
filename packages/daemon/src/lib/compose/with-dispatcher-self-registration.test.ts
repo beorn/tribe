@@ -1738,7 +1738,7 @@ describe("dispatcher inbox-wait parsing", () => {
     })
     expect(waited).toMatchObject({ status: "woken", unread_count: 1, timed_out: false })
     expect(waited.attention.actionable_unread).toEqual([expect.objectContaining({ content: "tracked broadcast work" })])
-    expect(drained.events).toEqual([expect.objectContaining({ content: "tracked broadcast work" })])
+    expect(drained.events).toEqual([])
     expect(fetched.attention.actionable_unread).toEqual([
       expect.objectContaining({ content: "tracked broadcast work" }),
     ])

@@ -92,7 +92,7 @@ const ATTENTION_SCHEMA = {
     actionable_unread: {
       type: "array",
       description:
-        "All unacknowledged direct request/query/verdict/assign/response messages plus explicitly tracked actionable broadcasts still awaiting this owner's TAKING or settlement, independent of the event limit. Responses stay quiet for default inbox waits.",
+        "All unacknowledged direct request/query/verdict/assign/response messages plus tracked actionable direct or broadcast messages still awaiting this owner's TAKING or settlement, independent of the event limit. Incident notifications remain pending-only. Responses stay quiet for default inbox waits.",
       items: { type: "object", additionalProperties: true },
     },
     pending_balls: {
@@ -560,7 +560,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             unread_count: {
               type: "number",
               description:
-                "Unanswered actionable count at return time: unread attention messages plus open balls without a later owner status + ref TAKING receipt, de-duplicated by message.",
+                "Unanswered actionable message count at return time: unread attention plus tracked actionable direct or broadcast messages without a later owner status + ref TAKING receipt, de-duplicated by message. Incident balls are excluded.",
             },
             oldest_unread_age_min: {
               type: "number",
@@ -1029,7 +1029,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             type: "string",
             enum: ["tail", "reconcile"],
             description:
-              'Use "tail" to advance the inbox cursor to the current journal tail, or "reconcile" to reconcile attention cursors.',
+              'Use "tail" to advance only the ambient inbox cursor to the current journal tail. Use "reconcile" to verify the actionable mailbox cursor remains advance-only; tracked actionables are projected from pending ownership, so this mode never rewinds it.',
           },
           reap_stale_transports: {
             type: "boolean",
@@ -1051,6 +1051,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           mailbox_cursor_before: { type: "number" },
           mailbox_cursor_after: { type: "number" },
           mailbox_reconciled: { type: "boolean" },
+          mailbox_reconcile_reason: { type: "string" },
           examined: { type: "number" },
           reaped: { type: "number" },
           reason_counts: { type: "object", additionalProperties: { type: "number" } },
@@ -1075,7 +1076,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         {
           name: "inbox-cursor",
           flags: "--inbox-cursor <mode>",
-          description: "Inbox cursor repair mode ('tail' or 'reconcile')",
+          description:
+            "Cursor mode: 'tail' advances the ambient inbox cursor; 'reconcile' verifies the mailbox cursor without rewinding it",
           mapsTo: "inbox_cursor",
           enum: ["tail", "reconcile"],
         },

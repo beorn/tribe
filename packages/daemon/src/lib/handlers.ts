@@ -32,12 +32,7 @@ import {
   type Delivery,
   type PendingSettlementRow,
 } from "./messaging.ts"
-import {
-  ACTIONABLE_TYPES_SET,
-  ACTIONABLE_TYPES_SQL,
-  AUTO_TRACK_TYPES_SET,
-  unretiredAttentionPredicateSql,
-} from "./database.ts"
+import { ACTIONABLE_TYPES_SET, AUTO_TRACK_TYPES_SET } from "./database.ts"
 import {
   classifySessionRegistrationLifetime,
   isPidAlive as pidStillAlive,
@@ -2542,24 +2537,10 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     }
   })
 
-  // Default-wake/stop-line unread direct-message count per recipient. Direct
-  // responses can ride durable attention without becoming health backlog when
-  // pending(owner) is empty; ambient notify/status DMs remain awareness only.
-  const unread = ctx.db
-    .prepare(`
-				SELECT m.recipient, COUNT(*) as count FROM messages m
-				WHERE m.recipient != '*'
-				AND m.kind = 'direct'
-				AND m.sender != m.recipient
-				AND m.type IN (${ACTIONABLE_TYPES_SQL})
-				AND ${unretiredAttentionPredicateSql("m")}
-				AND m.rowid > COALESCE(
-					(SELECT c.last_actionable_seq FROM mailbox_cursors c WHERE c.recipient = m.recipient),
-					0
-				)
-				GROUP BY m.recipient
-			`)
-    .all() as Array<{ recipient: string; count: number }>
+  // Default-wake/stop-line count is the same projection inbox status/fetch use:
+  // unread direct actionables plus untaken tracked direct/broadcast actionables.
+  // Pending-only incidents remain visible below without inflating this count.
+  const unread = ctx.stmts.getAllUnreadDms.all() as Array<{ recipient: string; count: number }>
 
   const stats = {
     messages: (ctx.db.prepare("SELECT COUNT(*) as n FROM messages").get() as { n: number } | undefined)?.n ?? 0,
@@ -2815,52 +2796,22 @@ function handleRepair(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
         last_actionable_seq: number
       } | null
     )?.last_actionable_seq ?? 0
-
-  const minOpenReqRow = ctx.db
-    .prepare(
-      `
-    SELECT MIN(m.rowid) AS min_seq
-    FROM messages m
-    JOIN pending_request p ON p.message_id = m.id
-    WHERE p.recipient = ?
-  `,
-    )
-    .get(sessionName) as { min_seq: number | null } | null
-  const minOpenReqSeq = minOpenReqRow?.min_seq ?? null
-
-  let mbTarget = mbCurrent
-  if (minOpenReqSeq !== null && mbCurrent >= minOpenReqSeq) {
-    mbTarget = Math.max(0, minOpenReqSeq - 1)
-  }
-
-  let mbReconciled = false
-  if (mbTarget !== mbCurrent) {
-    const now = Date.now()
-    ctx.db
-      .prepare(
-        `
-      INSERT INTO mailbox_cursors (recipient, last_actionable_seq, updated_at)
-      VALUES (?, ?, ?)
-      ON CONFLICT(recipient) DO UPDATE SET
-        last_actionable_seq = ?,
-        updated_at = ?
-    `,
-      )
-      .run(sessionName, mbTarget, now, mbTarget, now)
-    mbReconciled = true
-  }
+  const cursorAfter = after?.last_inbox_pull_seq ?? row.last_inbox_pull_seq
+  const repaired = createdSession || cursorAfter > row.last_inbox_pull_seq
 
   return jsonResult({
-    repaired: true,
+    repaired,
     created_session: createdSession,
     session: sessionName,
     repair: repairMode === "tail" ? "inbox_cursor_to_tail" : "inbox_cursor_reconcile",
     cursor_before: row.last_inbox_pull_seq,
-    cursor_after: after?.last_inbox_pull_seq ?? row.last_inbox_pull_seq,
+    cursor_after: cursorAfter,
     tail,
     mailbox_cursor_before: mbCurrent,
-    mailbox_cursor_after: mbTarget,
-    mailbox_reconciled: mbReconciled,
+    mailbox_cursor_after: mbCurrent,
+    mailbox_reconciled: false,
+    mailbox_reconcile_reason:
+      "mailbox cursor is advance-only; untaken tracked actionables are projected from pending ownership",
   })
 }
 
@@ -2967,27 +2918,18 @@ function filterRowsByTrust(ctx: TribeContext, rows: FetchRow[]): FetchRow[] {
   return rows.filter((r) => senderMayUseRegisteredTrustTopic(r.topic, r.sender, roster))
 }
 
-function mergeAttentionRows(...groups: FetchRow[][]): FetchRow[] {
-  return groups.flat().toSorted((left, right) => left.rowid - right.rowid)
-}
-
 function readUnackedDirectAttentionRows(ctx: TribeContext, owner: string, upto: number, limit: number): FetchRow[] {
   return ctx.stmts.selectUnackedAttention.all({ $name: owner, $upto: upto, $limit: limit }) as FetchRow[]
 }
 
 export function readUnackedAttentionRows(ctx: TribeContext, owner: string, upto: number, limit: number): FetchRow[] {
-  const direct = readUnackedDirectAttentionRows(ctx, owner, upto, limit)
-  const trackedBroadcasts = ctx.stmts.selectUnackedTrackedBroadcastAttention.all({
-    $name: owner,
-    $upto: upto,
-    $limit: limit,
-  }) as FetchRow[]
-  return mergeAttentionRows(direct, trackedBroadcasts).slice(0, limit)
+  return readUnackedDirectAttentionRows(ctx, owner, upto, limit)
 }
 
 /** One canonical attention projection for fetch and inbox-wait carriage.
- * Direct rows retire on delivery acknowledgement; owned tracked broadcasts
- * remain until their pending owner sends TAKING or settles the ball. */
+ * Untracked direct rows retire on delivery acknowledgement. Every owned
+ * tracked actionable remains until its pending owner sends TAKING or settles
+ * the ball. Incident notifications stay visible only in pending_balls. */
 export function readAttentionProjection(
   ctx: TribeContext,
   owner: string,
@@ -2999,19 +2941,11 @@ export function readAttentionProjection(
   attention: AttentionProjection
 } {
   const params = { $name: owner }
-  const attentionRows = filterRowsByTrust(
-    ctx,
-    mergeAttentionRows(
-      ctx.stmts.selectAttention.all(params) as FetchRow[],
-      ctx.stmts.selectTrackedBroadcastAttention.all(params) as FetchRow[],
-    ),
-  )
+  const attentionRows = filterRowsByTrust(ctx, ctx.stmts.selectAttention.all(params) as FetchRow[])
   const pendingBalls = pendingBallsForOwner(ctx, owner, now)
   const untakenRequestIds = untakenPendingRequestIds(ctx, owner)
   const untakenPendingBalls = pendingBalls.filter((ball) => untakenRequestIds.has(ball.request_id))
-  const attentionMessageIds = new Set(attentionRows.map((row) => row.id))
-  const actionableCount =
-    attentionRows.length + untakenPendingBalls.filter((ball) => !attentionMessageIds.has(ball.message_id)).length
+  const actionableCount = attentionRows.length
   const prioritizedPendingBalls = pendingBalls.toSorted((left, right) => {
     const leftRank = left.request_kind === "incident" ? 1 : 0
     const rightRank = right.request_kind === "incident" ? 1 : 0

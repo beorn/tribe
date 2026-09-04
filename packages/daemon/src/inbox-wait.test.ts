@@ -857,7 +857,7 @@ describe("createInboxWaitManager", () => {
     }
   })
 
-  it("re-armed wait still wakes when the gap assign was acknowledged before reconnect", async () => {
+  it("re-armed wait keeps tracked gap work actionable after delivery acknowledgement", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "tribe-inbox-wait-gap-ack-"))
     const db = openDatabase(join(tmpDir, "tribe.db"))
     const stmts = createStatements(db)
@@ -877,7 +877,7 @@ describe("createInboxWaitManager", () => {
       sendMessage(chief, seat, "assign while between chunks", "assign", undefined, undefined, "direct")
       const latest = stmts.getLatestActionableAttention.get({ $name: seat }) as { rowid: number }
       stmts.advanceMailboxCursor.run({ $recipient: seat, $seq: latest.rowid, $now: Date.now() })
-      expect(readStatus(seat).unread_count).toBe(0)
+      expect(readStatus(seat).unread_count).toBe(1)
 
       await expect(
         manager.wait(seat, "conn-after-ack", 5_000, { afterSeq: baseline.baseline_seq }),
@@ -886,7 +886,7 @@ describe("createInboxWaitManager", () => {
         session: seat,
         timed_out: false,
         aborted: false,
-        unread_count: 0,
+        unread_count: 1,
         waited_ms: immediateWakeMs,
       })
     } finally {

@@ -24,7 +24,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
-import { handleToolCall, type HandlerOpts } from "./handlers.ts"
+import { handleToolCall, readAttentionProjection, type HandlerOpts } from "./handlers.ts"
 
 const NAME = "@agent/3"
 
@@ -589,25 +589,37 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(json.attention?.actionable_unread?.some((event) => event.type.startsWith("health:"))).toBe(false)
     expect(raw.indexOf('"attention"')).toBeLessThan(raw.indexOf('"events"'))
 
-    // The actionable mailbox is the single unread authority. Projecting and
-    // acknowledging the verdict must re-arm inbox.wait immediately even though
-    // the chronological ambient cursor has not paged through all 75 health rows.
+    // Delivery acknowledgement is not a TAKING receipt. The tracked verdict
+    // remains actionable even though the chronological ambient cursor has not
+    // paged through all 75 health rows.
     const unreadAfterAttention = stmts.getUnreadDms.get({ $name: NAME }) as {
       count: number
       oldest_ts: number
     }
-    expect(unreadAfterAttention.count).toBe(0)
+    expect(unreadAfterAttention.count).toBe(1)
     const healthAfterAttention = parseToolJson(handleToolCall(live, "tribe.health", {}, opts)) as {
       unread?: Array<{ recipient: string; count: number }>
     }
-    expect(healthAfterAttention.unread?.some((row) => row.recipient === NAME)).toBe(false)
+    expect(healthAfterAttention.unread).toEqual([expect.objectContaining({ recipient: NAME, count: 1 })])
 
     const afterDelivery = fetchJson(live, opts).json
-    expect(afterDelivery.attention?.actionable_unread).toEqual([])
+    expect(afterDelivery.attention?.actionable_unread).toEqual([
+      expect.objectContaining({ id: "critical-revise", type: "verdict" }),
+    ])
     expect(afterDelivery.events?.some((event) => event.id === "critical-revise")).toBe(false)
     expect(afterDelivery.attention?.pending_balls).toEqual([
       expect.objectContaining({ request_id: "review-r3", message_id: "critical-revise" }),
     ])
+
+    parseToolJson(
+      handleToolCall(
+        live,
+        "tribe.send",
+        { to: "@ci", message: "TAKING — reviewing", type: "status", ref: "review-r3" },
+        opts,
+      ),
+    )
+    expect(fetchJson(live, opts).json.attention?.actionable_unread).toEqual([])
   })
 
   it("caps pending-ball attention to the oldest 10 with a lossless summary while explicit pending stays complete", () => {
@@ -750,7 +762,9 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     ])
 
     const afterDeliveryAck = fetchJson(author, opts).json
-    expect(afterDeliveryAck.attention?.actionable_unread).toEqual([])
+    expect(afterDeliveryAck.attention?.actionable_unread).toEqual([
+      expect.objectContaining({ id: verdict.id, type: "verdict", from: "@ci" }),
+    ])
     expect(afterDeliveryAck.attention?.pending_balls).toEqual([
       expect.objectContaining({
         request_id: verdict.id,
@@ -758,6 +772,15 @@ describe("19442 mailbox-cursor actionable recovery", () => {
         message_id: verdict.id,
       }),
     ])
+    parseToolJson(
+      handleToolCall(
+        author,
+        "tribe.send",
+        { to: "@ci", message: "TAKING — revising", type: "status", ref: verdict.id },
+        opts,
+      ),
+    )
+    expect(fetchJson(author, opts).json.attention?.actionable_unread).toEqual([])
     const reviewerPending = parseToolJson(handleToolCall(reviewer, "tribe.pending", {}, opts)) as {
       count?: number
     }
@@ -1037,7 +1060,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(fetchEvents(b, opts)).toEqual([])
   })
 
-  it("repair reconcile mode rewinds mailbox cursor when an open request sits below the cursor (22203)", () => {
+  it("keeps an untaken direct request actionable without rewinding its mailbox cursor (22203)", () => {
     const b = connectAs("sess-b", NAME)
     insertRow(stmts, {
       id: "req-1",
@@ -1054,12 +1077,52 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     // Advance mailbox cursor past req-1 to simulate cursor jump
     stmts.advanceMailboxCursor.run({ $recipient: NAME, $seq: 9999, $now: Date.now() })
 
+    const beforeRepair = readAttentionProjection(b, NAME)
+    expect(beforeRepair.attention.actionable_unread.map((event) => event.id)).toContain("req-1")
+
     const repairResult = parseToolJson(handleToolCall(b, "tribe.repair", { inbox_cursor: "reconcile" }, opts))
-    expect(repairResult.repaired).toBe(true)
-    expect(repairResult.mailbox_reconciled).toBe(true)
-    expect(repairResult.mailbox_cursor_after).toBeLessThan(9999)
+    expect(repairResult.repaired).toBe(false)
+    expect(repairResult.mailbox_reconciled).toBe(false)
+    expect(repairResult.mailbox_cursor_after).toBe(9999)
 
     const fetchRes = fetchJson(b, opts)
     expect(fetchRes.json.attention?.actionable_unread?.map((e) => e.id)).toContain("req-1")
   })
+
+  it.each(["tail", "reconcile"] as const)(
+    "keeps incident balls pending but out of unread attention after %s repair and drain",
+    (repairMode) => {
+      const owner = connectAs(`sess-${repairMode}-owner`, NAME)
+      const watcher = connectAs(`sess-${repairMode}-watcher`, "wait-watch")
+      const sent = parseToolJson(
+        handleToolCall(
+          watcher,
+          "tribe.send",
+          {
+            to: NAME,
+            message: "seat is deliberately parked",
+            incident: {
+              emitter: "wait-watch",
+              subject: "seat @dev/9",
+              condition: "busy-not-draining",
+            },
+          },
+          opts,
+        ),
+      ) as { request_id: string }
+      stmts.advanceMailboxCursor.run({ $recipient: NAME, $seq: 9999, $now: Date.now() })
+
+      const repair = parseToolJson(handleToolCall(owner, "tribe.repair", { inbox_cursor: repairMode }, opts))
+      expect(repair.mailbox_cursor_before).toBe(9999)
+      expect(repair.mailbox_cursor_after).toBe(9999)
+      expect(repair.mailbox_reconciled).toBe(false)
+
+      const drained = fetchJson(owner, opts).json
+      expect(drained.attention?.actionable_unread).toEqual([])
+      expect(drained.attention?.pending_balls).toEqual([
+        expect.objectContaining({ request_id: sent.request_id, request_kind: "incident" }),
+      ])
+      expect(readAttentionProjection(owner, NAME).actionableCount).toBe(0)
+    },
+  )
 })

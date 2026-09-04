@@ -129,14 +129,10 @@ function defaultBuildPluginApi<T extends RuntimeShape>(t: T): TribeClientApi {
     },
     getUnreadDms(sessionName) {
       const params = { $name: sessionName }
-      const direct = stmts.getUnreadDms.get(params) as { count: number; oldest_ts: number } | undefined
-      const trackedBroadcasts = stmts.getUnreadTrackedBroadcasts.get(params) as
-        | { count: number; oldest_ts: number }
-        | undefined
-      const oldestTs = [direct?.oldest_ts ?? 0, trackedBroadcasts?.oldest_ts ?? 0].filter((ts) => ts > 0)
+      const attention = stmts.getUnreadDms.get(params) as { count: number; oldest_ts: number } | undefined
       return {
-        count: (direct?.count ?? 0) + (trackedBroadcasts?.count ?? 0),
-        oldestTs: oldestTs.length > 0 ? Math.min(...oldestTs) : 0,
+        count: attention?.count ?? 0,
+        oldestTs: attention?.oldest_ts ?? 0,
       }
     },
   }

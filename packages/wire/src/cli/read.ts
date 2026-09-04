@@ -1744,6 +1744,9 @@ async function cmdRepair(opts: RepairCliOptions): Promise<void> {
     cursor_before?: number
     cursor_after?: number
     tail?: number
+    mailbox_cursor_before?: number
+    mailbox_cursor_after?: number
+    mailbox_reconcile_reason?: string
     examined?: number
     reaped?: number
     reason_counts?: Record<string, number>
@@ -1768,9 +1771,12 @@ async function cmdRepair(opts: RepairCliOptions): Promise<void> {
     return
   }
 
+  const verb = result.repaired === true ? "Repaired" : "Checked"
   console.log(
-    `Repaired ${result.session ?? opts.session ?? "@chief"}: inbox cursor ` +
-      `${result.cursor_before ?? "?"} -> ${result.cursor_after ?? "?"} (tail ${result.tail ?? "?"}).`,
+    `${verb} ${result.session ?? opts.session ?? "@chief"}: inbox cursor ` +
+      `${result.cursor_before ?? "?"} -> ${result.cursor_after ?? "?"} (tail ${result.tail ?? "?"}); ` +
+      `mailbox cursor ${result.mailbox_cursor_before ?? "?"} -> ${result.mailbox_cursor_after ?? "?"}` +
+      `${result.mailbox_reconcile_reason ? ` — ${result.mailbox_reconcile_reason}` : ""}.`,
   )
 }
 

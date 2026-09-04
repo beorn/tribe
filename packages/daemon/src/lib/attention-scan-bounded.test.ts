@@ -200,54 +200,15 @@ describe("attention projection drives off the recipient, not the whole journal",
     expect(plan).not.toContain("USE TEMP B-TREE")
   })
 
-  it("drives tracked broadcast attention and wait reads off the recipient's pending rows", () => {
+  it("drives tracked attention reads off the recipient's pending rows", () => {
     const fixture = buildJournal(200, 200)
-    for (const statement of [
-      fixture.stmts.selectTrackedBroadcastAttention,
-      fixture.stmts.getLatestTrackedBroadcastInboxWaitMessage,
-    ]) {
-      const sql = (statement as unknown as { toString(): string }).toString()
-      const plan = (fixture.db.query(`EXPLAIN QUERY PLAN ${sql}`).all({ $name: HUB }) as Array<{ detail: string }>)
-        .map((row) => row.detail)
-        .join("\n")
+    const sql = (fixture.stmts.selectAttention as unknown as { toString(): string }).toString()
+    const plan = (fixture.db.query(`EXPLAIN QUERY PLAN ${sql}`).all({ $name: HUB }) as Array<{ detail: string }>)
+      .map((row) => row.detail)
+      .join("\n")
 
-      expect(plan).toContain("SEARCH p USING INDEX idx_pending_recipient")
-      expect(plan).not.toContain("SCAN p")
-      expect(plan).not.toContain("USE TEMP B-TREE")
-    }
-  })
-
-  it("bounds tracked broadcast recovery before rows reach the caller", () => {
-    const { db, stmts } = buildJournal(0, 0)
-    const insert = db.prepare(`
-      INSERT INTO messages (id, type, sender, recipient, kind, content, ts, request)
-      VALUES ($id, 'request', '@dev/sender', '*', 'broadcast', $id, $ts, $id)
-    `)
-
-    for (let index = 0; index < 3; index++) {
-      const id = `broadcast-${index}`
-      insert.run({ $id: id, $ts: 10_000 + index })
-    }
-    for (const index of [2, 1, 0]) {
-      const id = `broadcast-${index}`
-      stmts.openPendingRequest.run({
-        $request_id: id,
-        $recipient: HUB,
-        $sender: "@dev/sender",
-        $opened_at: 10_000 + index,
-        $expires_at: null,
-        $message_id: id,
-        $fanout: "first",
-      })
-    }
-
-    const rows = stmts.selectUnackedTrackedBroadcastAttention.all({
-      $name: HUB,
-      $upto: Number.MAX_SAFE_INTEGER,
-      $limit: 2,
-    }) as Array<{ id: string }>
-
-    expect(rows.map((row) => row.id)).toEqual(["broadcast-0", "broadcast-1"])
+    expect(plan).toContain("SEARCH p USING INDEX idx_pending_recipient")
+    expect(plan).not.toContain("SCAN p")
   })
 
   it("costs a seat with no mail nothing, however large the journal", () => {
