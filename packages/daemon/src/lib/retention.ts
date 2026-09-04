@@ -81,6 +81,7 @@
 import type { Database } from "bun:sqlite"
 import { createLogger } from "loggily"
 import type { TribeStatements } from "./database.ts"
+import { CURSOR_WARNING_MS } from "./health-cadence.ts"
 
 const log = createLogger("tribe:retention")
 
@@ -103,11 +104,23 @@ export interface RetentionConfig {
   readonly deleteEnabled: boolean
   /** Max rows moved/deleted per phase per sweep tick. Default 500. */
   readonly batchSize: number
+  /** 21757 — the retention live window. A recipient that read its mailbox
+   *  inside this window is live: its unread direct actionables are never
+   *  archived and its cursor holds the fleet-wide delete floor. A recipient
+   *  outside it is dormant: it does not hold the floor, its unread rows
+   *  archive by age, and the loss is recorded in mailbox_prunes so the seat
+   *  is told on its next read. One fleet-wide constant (storage policy),
+   *  deliberately NOT the per-seat inbox-stale threshold (attention policy):
+   *  coupling them would let one seat's tuning change what the journal
+   *  keeps. Must be at least CURSOR_WARNING_MS (asserted at resolve).
+   *  Default 7d. */
+  readonly liveWindowMs: number
 }
 
 const DEFAULT_ARCHIVE_WINDOW_MS = 14 * DAY_MS
 const DEFAULT_DELETE_WINDOW_MS = 90 * DAY_MS
 const DEFAULT_BATCH_SIZE = 500
+export const DEFAULT_LIVE_WINDOW_MS = 7 * DAY_MS
 
 /** Parse a required-positive-integer env var. Throws on garbage rather than
  *  silently coercing to NaN/0 — an unparseable retention window must fail
@@ -153,7 +166,22 @@ export function resolveRetentionConfig(env: NodeJS.ProcessEnv = process.env): Re
     ),
     deleteEnabled: boolEnv(env.TRIBE_RETENTION_DELETE_ENABLED, false),
     batchSize: positiveIntEnv(env.TRIBE_RETENTION_BATCH_SIZE, DEFAULT_BATCH_SIZE, "TRIBE_RETENTION_BATCH_SIZE"),
+    liveWindowMs: liveWindowEnv(env.TRIBE_RETENTION_LIVE_WINDOW_MS),
   }
+}
+
+/** The live window must not be shorter than the daemon's own cursor-staleness
+ *  warning: a seat the cadence facts still call merely late must never be
+ *  treated as dormant by retention. Fails loud at resolve, never clamps. */
+function liveWindowEnv(raw: string | undefined): number {
+  const ms = positiveIntEnv(raw, DEFAULT_LIVE_WINDOW_MS, "TRIBE_RETENTION_LIVE_WINDOW_MS")
+  if (ms < CURSOR_WARNING_MS) {
+    throw new Error(
+      `TRIBE_RETENTION_LIVE_WINDOW_MS=${ms} is shorter than the cursor-staleness warning (${CURSOR_WARNING_MS}ms): ` +
+        `retention would archive unread rows of a seat the cadence facts still call live. Raise it to at least ${CURSOR_WARNING_MS}.`,
+    )
+  }
+  return ms
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +196,8 @@ export type RetentionStatements = Pick<
   | "selectSessionInboxCursorFloor"
   | "selectArchiveDeleteBatch"
   | "selectArchiveDeleteDiagnostics"
+  | "selectArchiveMoveAttentionLossSql"
+  | "upsertMailboxPrune"
 >
 
 // ---------------------------------------------------------------------------
@@ -180,6 +210,11 @@ export interface ArchiveMovePhaseResult {
   readonly cutoff: number
   readonly candidates: number
   readonly moved: number
+  /** 21757 — unread direct actionables this batch took out of attention,
+   *  per dormant recipient, recorded in mailbox_prunes. Live recipients'
+   *  rows never enter the batch, so every entry here is a seat that will be
+   *  told on its next read. */
+  readonly attentionLoss: ReadonlyArray<{ recipient: string; lost: number; before_ts: number }>
 }
 
 export interface ArchiveDeletePhaseResult {
@@ -248,28 +283,68 @@ function runArchiveMovePhase(
   now: number,
 ): ArchiveMovePhaseResult {
   const cutoff = now - config.archiveWindowMs
-  const candidates = stmts.selectMessagesToArchiveBatch.all({ $cutoff: cutoff, $limit: config.batchSize }) as Array<{
+  const liveCutoff = now - config.liveWindowMs
+  const candidates = stmts.selectMessagesToArchiveBatch.all({
+    $cutoff: cutoff,
+    $limit: config.batchSize,
+    $live_cutoff: liveCutoff,
+  }) as Array<{
     rowid: number
     id: string
   }>
   if (candidates.length === 0) {
     log.debug?.(`archive-move: nothing eligible (cutoff=${new Date(cutoff).toISOString()})`)
-    return { cutoff, candidates: 0, moved: 0 }
+    return { cutoff, candidates: 0, moved: 0, attentionLoss: [] }
   }
-  const moved = archiveMoveBatch(
-    db,
-    candidates.map((c) => c.id),
-    now,
-  )
+  const ids = candidates.map((c) => c.id)
+  // Record the attention loss BEFORE the move, while the rows are still in
+  // `messages`: selectAttention's untracked branch reads that table only, so
+  // once moved these rows are invisible to their recipient's projection.
+  const attentionLoss = recordArchiveAttentionLoss(db, stmts, ids, now)
+  const moved = archiveMoveBatch(db, ids, now)
+  const lossNote =
+    attentionLoss.length === 0
+      ? ""
+      : `; attention loss recorded for ${attentionLoss.length} dormant recipient(s): ${attentionLoss
+          .map((l) => `${l.recipient}=${l.lost}`)
+          .join(", ")}`
   log.info?.(
-    `archive-move: moved ${moved}/${candidates.length} message(s) older than ${config.archiveWindowMs}ms to messages_archive (batch cap ${config.batchSize})`,
+    `archive-move: moved ${moved}/${candidates.length} message(s) older than ${config.archiveWindowMs}ms to messages_archive (batch cap ${config.batchSize})${lossNote}`,
   )
-  return { cutoff, candidates: candidates.length, moved }
+  return { cutoff, candidates: candidates.length, moved, attentionLoss }
 }
 
-function computeCursorFloor(stmts: RetentionStatements): number {
-  const mailbox = stmts.selectMailboxCursorFloor.get() as { floor: number | null } | null
-  const session = stmts.selectSessionInboxCursorFloor.get() as { floor: number | null } | null
+/** 21757 — for every dormant recipient whose unread direct actionables are
+ *  in this batch, upsert a prune notice (count accumulates across batches,
+ *  before_ts keeps the newest lost row's timestamp). Exported for the
+ *  cleanupOldData mover in session.ts, which archives on the same rule. */
+export function recordArchiveAttentionLoss(
+  db: Database,
+  stmts: Pick<RetentionStatements, "selectArchiveMoveAttentionLossSql" | "upsertMailboxPrune">,
+  ids: readonly string[],
+  now: number,
+): Array<{ recipient: string; lost: number; before_ts: number }> {
+  if (ids.length === 0) return []
+  const placeholders = ids.map(() => "?").join(",")
+  const loss = db.prepare(stmts.selectArchiveMoveAttentionLossSql(placeholders)).all(...ids) as Array<{
+    recipient: string
+    lost: number
+    before_ts: number
+  }>
+  for (const row of loss) {
+    stmts.upsertMailboxPrune.run({ $recipient: row.recipient, $count: row.lost, $before: row.before_ts, $now: now })
+  }
+  return loss
+}
+
+/** 21757 — the floor is taken over LIVE recipients only (read inside the
+ *  live window). A dormant seat's cursor no longer holds deletion down for
+ *  the fleet; its unread rows are archived by age with a prune notice. */
+function computeCursorFloor(stmts: RetentionStatements, liveCutoff: number): number {
+  const mailbox = stmts.selectMailboxCursorFloor.get({ $live_cutoff: liveCutoff }) as { floor: number | null } | null
+  const session = stmts.selectSessionInboxCursorFloor.get({ $live_cutoff: liveCutoff }) as {
+    floor: number | null
+  } | null
   const values = [mailbox?.floor, session?.floor].filter((v): v is number => v !== null && v !== undefined)
   // No cursor rows anywhere (fresh DB, or a DB with no mailbox/session
   // history at all) — nothing to protect against, so this half of the
@@ -299,7 +374,7 @@ function runArchiveDeletePhase(
     }
   }
 
-  const cursorFloor = computeCursorFloor(stmts)
+  const cursorFloor = computeCursorFloor(stmts, now - config.liveWindowMs)
   const diag = stmts.selectArchiveDeleteDiagnostics.get({ $cutoff: cutoff, $cursor_floor: cursorFloor }) as {
     eligible_by_age: number | null
     excluded_by_cursor: number | null

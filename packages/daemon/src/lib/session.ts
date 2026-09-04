@@ -10,6 +10,7 @@ import { probeProcessState } from "./session-transport-state.ts"
 
 const log = createLogger("tribe:session")
 import { sendMessage, logEvent, settlePendingRows, type PendingSettlementRow } from "./messaging.ts"
+import { DEFAULT_LIVE_WINDOW_MS } from "./retention.ts"
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -545,13 +546,39 @@ export function persistRuntimeRename(ctx: TribeContext, name: string): void {
 /** Archive old messages before trimming the hot log. `event_log` was merged
  *  into `messages WHERE kind='event'` by migration v8, so this retention path
  *  covers both direct/broadcast traffic and journal events. */
-export function cleanupOldData(ctx: TribeContext): void {
+export function cleanupOldData(ctx: TribeContext, options: { readonly liveWindowMs?: number } = {}): void {
   const SHORT_TTL = 7 * 24 * 60 * 60 * 1000 // 7 days
   const now_ms = Date.now()
   const cutoff = now_ms - SHORT_TTL
+  // 21757 — the same live window retention.ts uses (one fleet-wide storage
+  // constant): a recipient that read inside it keeps its unread direct
+  // actionables in `messages`, where attention can still see them; a dormant
+  // recipient's are archived by age and the loss is recorded so the seat is
+  // told on its next read instead of finding an empty inbox.
+  const liveCutoff = now_ms - (options.liveWindowMs ?? DEFAULT_LIVE_WINDOW_MS)
 
-  const archived = ctx.stmts.archiveExpiredMessages.run({ $cutoff: cutoff, $archived_at: now_ms })
-  const msgsDel = ctx.stmts.deleteExpiredMessages.run({ $cutoff: cutoff })
+  const attentionLoss = ctx.stmts.selectExpiredAttentionLoss.all({
+    $cutoff: cutoff,
+    $live_cutoff: liveCutoff,
+  }) as Array<{
+    recipient: string
+    lost: number
+    before_ts: number
+  }>
+  for (const row of attentionLoss) {
+    ctx.stmts.upsertMailboxPrune.run({
+      $recipient: row.recipient,
+      $count: row.lost,
+      $before: row.before_ts,
+      $now: now_ms,
+    })
+  }
+  const archived = ctx.stmts.archiveExpiredMessages.run({
+    $cutoff: cutoff,
+    $archived_at: now_ms,
+    $live_cutoff: liveCutoff,
+  })
+  const msgsDel = ctx.stmts.deleteExpiredMessages.run({ $cutoff: cutoff, $live_cutoff: liveCutoff })
   // Clean short-lived poll/event dedup keys older than 1 day. The prepared
   // statement preserves durable authority namespaces such as launch takeover.
   ctx.stmts.cleanupDedup.run({ $cutoff: now_ms - 24 * 60 * 60 * 1000 })
@@ -570,9 +597,15 @@ export function cleanupOldData(ctx: TribeContext): void {
   // comfortably outlives any seat; the table stays a handful of rows.
   ctx.stmts.gcOldLaunchRenames.run({ $cutoff: now_ms - 30 * 24 * 60 * 60 * 1000 })
 
-  if ((msgsDel.changes ?? 0) > 0 || pendingDel > 0) {
+  if ((msgsDel.changes ?? 0) > 0 || pendingDel > 0 || attentionLoss.length > 0) {
+    const lossNote =
+      attentionLoss.length === 0
+        ? ""
+        : `, attention loss recorded for ${attentionLoss.length} dormant recipient(s): ${attentionLoss
+            .map((l) => `${l.recipient}=${l.lost}`)
+            .join(", ")}`
     log.info?.(
-      `cleanup: ${archived.changes ?? 0} msgs archived, ${msgsDel.changes ?? 0} msgs deleted, ${pendingDel} stale pending balls GC'd`,
+      `cleanup: ${archived.changes ?? 0} msgs archived, ${msgsDel.changes ?? 0} msgs deleted, ${pendingDel} stale pending balls GC'd${lossNote}`,
     )
   }
 }

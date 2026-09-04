@@ -251,7 +251,7 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
     // TribeConfig changes), and why the delete half ships default-off.
     const retentionConfig = resolveRetentionConfig()
     const cleanupInterval = setInterval(() => {
-      cleanupOldData(t.daemonCtx)
+      cleanupOldData(t.daemonCtx, { liveWindowMs: retentionConfig.liveWindowMs })
       reapStaleTransports()
       runRetentionSweep(t.db, t.stmts, retentionConfig)
     }, cleanupIntervalMs) as unknown as {
@@ -259,7 +259,7 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
     }
     cleanupInterval.unref?.()
     t.scope.defer(() => clearInterval(cleanupInterval as unknown as ReturnType<typeof setInterval>))
-    cleanupOldData(t.daemonCtx)
+    cleanupOldData(t.daemonCtx, { liveWindowMs: retentionConfig.liveWindowMs })
     runRetentionSweep(t.db, t.stmts, retentionConfig)
     const startupReapDelayMs = t.registry.startupReconnectGraceRemainingMs(Date.now())
     const startupReapTimer = setTimeout(reapStaleTransports, startupReapDelayMs) as unknown as {

@@ -9,7 +9,8 @@ const MINUTE = 60_000
 const HOUR = 60 * MINUTE
 const DAY = 24 * HOUR
 const RESPONSE_WARNING_MS = 30 * MINUTE
-const CURSOR_WARNING_MS = 30 * MINUTE
+/** Exported for retention.ts, whose live window must not undercut it (21757). */
+export const CURSOR_WARNING_MS = 30 * MINUTE
 const DEFAULT_SLA_TARGET_MS = MINUTE
 
 // ---------------------------------------------------------------------------

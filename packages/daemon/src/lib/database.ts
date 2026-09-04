@@ -178,6 +178,21 @@ export function openDatabase(path: string): Database {
 		UNIQUE (launch_id, launch_parent_pid, provider_session_id, provider_turn_id)
 	)`)
 
+  // 21757 — retention's prune notice. When the archive-move phase takes an
+  // unread direct actionable away from a recipient that has not read its
+  // mailbox inside the retention live window, the loss is recorded here per
+  // recipient and surfaced on that recipient's next canonical attention
+  // read, then cleared. A returning seat is told how many rows it can no
+  // longer see in attention and before which timestamp; it never starts
+  // silently at a new floor. Written by retention.ts, read and cleared by
+  // handlers.ts readAttentionProjection.
+  db.run(`CREATE TABLE IF NOT EXISTS mailbox_prunes (
+		recipient      TEXT PRIMARY KEY,
+		pruned_count   INTEGER NOT NULL,
+		pruned_before  INTEGER NOT NULL,
+		recorded_at    INTEGER NOT NULL
+	)`)
+
   db.run(`CREATE TABLE IF NOT EXISTS retros (
 		id          TEXT PRIMARY KEY,
 		tribe_start INTEGER NOT NULL,
@@ -1161,6 +1176,22 @@ const MIGRATIONS: readonly Migration[] = [
       )
     },
   },
+  {
+    version: 29,
+    name: "mailbox-prunes",
+    up(db) {
+      // 21757 — retention's per-recipient prune notice (see the top-of-file
+      // CREATE for the contract). Version 23 appears twice above (:954 and
+      // :1038, a pre-existing defect recorded on the bead); this entry is 29
+      // so it sorts after every applied version on a live database.
+      db.run(`CREATE TABLE IF NOT EXISTS mailbox_prunes (
+			recipient      TEXT PRIMARY KEY,
+			pruned_count   INTEGER NOT NULL,
+			pruned_before  INTEGER NOT NULL,
+			recorded_at    INTEGER NOT NULL
+      )`)
+    },
+  },
 ]
 
 /** The schema terminus `openDatabase` upgrades to — derived from the same
@@ -1232,6 +1263,32 @@ function takingStatusMatchSql(receipt: string, subject: TakingStatusSubjectSql, 
  * A recipient-wide cursor cannot express this safely: advancing it for one
  * reply could swallow an unrelated older actionable row.
  */
+/** 21757 — `alias` is a direct actionable row its recipient has not read:
+ *  actionable by type or flag, not retired by a later reply or TAKING, and
+ *  above the recipient's mailbox cursor. This is the untracked branch of
+ *  selectAttention restated for one row, so retention and attention agree on
+ *  what "unread" means. */
+export function unreadDirectActionablePredicateSql(alias: string): string {
+  return `${alias}.kind = 'direct'
+      AND (${alias}.type IN (${ACTIONABLE_TYPES_SQL}) OR ${alias}.attention_required = 1)
+      AND ${unretiredAttentionPredicateSql(alias)}
+      AND ${alias}.rowid > COALESCE((SELECT c.last_actionable_seq FROM mailbox_cursors c WHERE c.recipient = ${alias}.recipient), 0)`
+}
+
+/** 21757 — an unread direct actionable whose recipient is live (read its
+ *  mailbox inside the retention live window). The archive-move batch never
+ *  takes such a row: moving it would drop it from `actionable_unread`
+ *  without a read, which is the defect class 21757 exists to close. A
+ *  recipient with no cursor row has never read and is not live. */
+export function protectedUnreadAttentionPredicateSql(alias: string): string {
+  return `${unreadDirectActionablePredicateSql(alias)}
+      AND EXISTS (
+        SELECT 1 FROM mailbox_cursors live
+        WHERE live.recipient = ${alias}.recipient
+          AND COALESCE(live.last_attention_read_at, live.updated_at) >= $live_cutoff
+      )`
+}
+
 export function unretiredAttentionPredicateSql(
   alias: string,
   source: { readonly relation: "messages" | "journal"; readonly sequence: "rowid" | "seq" } = {
@@ -1671,17 +1728,55 @@ export function createStatements(db: Database) {
      *  keeps running unchanged); this bounded, independently-configurable
      *  batch is a defense-in-depth second mover, not a replacement. */
     selectMessagesToArchiveBatch: db.prepare(`
-		SELECT rowid, id FROM messages WHERE ts < $cutoff ORDER BY rowid ASC LIMIT $limit
+		SELECT rowid, id FROM messages AS m
+		WHERE m.ts < $cutoff
+			AND NOT (${protectedUnreadAttentionPredicateSql("m")})
+		ORDER BY m.rowid ASC LIMIT $limit
 	`),
 
+    /** 21757 — the unread direct actionables an archive-move batch is about
+     *  to take out of attention, grouped by recipient. selectAttention's
+     *  untracked branch reads `messages` only, so moving such a row hides it
+     *  from `actionable_unread` without any read having happened. Rows for
+     *  recipients inside the live window never reach this query (the batch
+     *  excludes them); rows for dormant recipients do, and retention records
+     *  the loss in mailbox_prunes so the recipient is told on its next read.
+     *  Built per batch because the id list varies; see retention.ts. */
+    selectArchiveMoveAttentionLossSql: (placeholders: string): string => `
+		SELECT m.recipient AS recipient, COUNT(*) AS lost, MAX(m.ts) AS before_ts
+		FROM messages AS m
+		WHERE m.id IN (${placeholders})
+			AND ${unreadDirectActionablePredicateSql("m")}
+		GROUP BY m.recipient
+	`,
+
+    upsertMailboxPrune: db.prepare(`
+		INSERT INTO mailbox_prunes (recipient, pruned_count, pruned_before, recorded_at)
+		VALUES ($recipient, $count, $before, $now)
+		ON CONFLICT(recipient) DO UPDATE SET
+			pruned_count = pruned_count + excluded.pruned_count,
+			pruned_before = MAX(pruned_before, excluded.pruned_before),
+			recorded_at = excluded.recorded_at
+	`),
+    selectMailboxPrune: db.prepare(
+      "SELECT recipient, pruned_count, pruned_before, recorded_at FROM mailbox_prunes WHERE recipient = $recipient",
+    ),
+    deleteMailboxPrune: db.prepare("DELETE FROM mailbox_prunes WHERE recipient = $recipient"),
+
     /** Live-cursor floor, half 1: the oldest un-acknowledged actionable-
-     *  attention position recorded across every recipient's durable mailbox
-     *  cursor. A messages_archive row at or below this seq has been
-     *  acknowledged by every recipient who has ever acknowledged anything —
-     *  see unretiredAttentionPredicateSql's mailbox_cursors comparisons,
-     *  which this mirrors. NULL (no cursor rows at all, e.g. a fresh DB)
-     *  contributes no constraint; retention.ts treats that as "unbounded". */
-    selectMailboxCursorFloor: db.prepare("SELECT MIN(last_actionable_seq) AS floor FROM mailbox_cursors"),
+     *  attention position across every recipient that read its mailbox
+     *  inside the retention live window ($live_cutoff = now - liveWindowMs,
+     *  21757). A recipient that has not read in that window is dormant and
+     *  does not hold the fleet-wide floor; its unread rows are archived by
+     *  age with a prune notice (mailbox_prunes) instead. Before 21757 this
+     *  was a bare MIN over every row, and retention.ts's own header named
+     *  the cost: one dormant seat held the floor down for the whole fleet.
+     *  NULL (no live cursor rows, e.g. a fresh DB) contributes no
+     *  constraint; retention.ts treats that as "unbounded". */
+    selectMailboxCursorFloor: db.prepare(`
+		SELECT MIN(last_actionable_seq) AS floor FROM mailbox_cursors
+		WHERE COALESCE(last_attention_read_at, updated_at) >= $live_cutoff
+	`),
 
     /** Live-cursor floor, half 2: the oldest ambient inbox-pull position
      *  recorded across every session row. mailbox_cursors alone only guards
@@ -1690,7 +1785,10 @@ export function createStatements(db: Database) {
      *  there also counts broadcast rows (recipient = '*') against each
      *  session's own last_inbox_pull_seq, so retention takes the floor
      *  across both cursor families rather than mailbox_cursors alone. */
-    selectSessionInboxCursorFloor: db.prepare("SELECT MIN(last_inbox_pull_seq) AS floor FROM sessions"),
+    selectSessionInboxCursorFloor: db.prepare(`
+		SELECT MIN(last_inbox_pull_seq) AS floor FROM sessions
+		WHERE MAX(updated_at, COALESCE(last_delivered_ts, 0)) >= $live_cutoff
+	`),
 
     /** Archive-delete batch candidates: archived rows old enough under the
      *  (longer, independently configurable) delete window, at or below the
@@ -2002,11 +2100,34 @@ export function createStatements(db: Database) {
 			rowid, id, type, sender, recipient, kind, content, bead_id, ref, ts,
 			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id,
 			attention_required, $archived_at
-		FROM messages
-		WHERE ts < $cutoff
+		FROM messages AS m
+		WHERE m.ts < $cutoff
+			AND NOT (${protectedUnreadAttentionPredicateSql("m")})
 	`),
 
-    deleteExpiredMessages: db.prepare("DELETE FROM messages WHERE ts < $cutoff"),
+    /** Must carry exactly the archive statement's predicate: a row the
+     *  archive skipped as protected but the delete took would be gone
+     *  unarchived — worse than the 21757 defect this protection closes. */
+    deleteExpiredMessages: db.prepare(`
+		DELETE FROM messages
+		WHERE rowid IN (
+			SELECT m.rowid FROM messages AS m
+			WHERE m.ts < $cutoff
+				AND NOT (${protectedUnreadAttentionPredicateSql("m")})
+		)
+	`),
+
+    /** 21757 — what cleanupOldData's unbounded mover is about to take out of
+     *  attention, per dormant recipient (live recipients are protected, so
+     *  every row here belongs to a seat that will be told on its next read). */
+    selectExpiredAttentionLoss: db.prepare(`
+		SELECT m.recipient AS recipient, COUNT(*) AS lost, MAX(m.ts) AS before_ts
+		FROM messages AS m
+		WHERE m.ts < $cutoff
+			AND ${unreadDirectActionablePredicateSql("m")}
+			AND NOT (${protectedUnreadAttentionPredicateSql("m")})
+		GROUP BY m.recipient
+	`),
 
     updateLastDelivered: db.prepare(
       "UPDATE sessions SET last_delivered_ts = $ts, last_delivered_seq = $seq, updated_at = $ts WHERE id = $id",

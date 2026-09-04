@@ -1228,6 +1228,11 @@ function pendingCloseBatchWarning(
 }
 
 export type AttentionProjection = {
+  /** 21757 — present when retention archived unread direct actionables of
+   *  this owner while it was dormant: how many, and the newest timestamp
+   *  among them. Cleared by the owner's next canonical read. Rows stay
+   *  fetchable by id or history (`ids:` / `with:` union the archive). */
+  pruned?: { count: number; before: string; recorded_at: string }
   actionable_unread: FetchEvent[]
   pending_balls: PendingBall[]
   pending_balls_summary: PendingBallSummary
@@ -2955,11 +2960,31 @@ export function readAttentionProjection(
   const withheld = prioritizedPendingBalls.slice(ATTENTION_PENDING_BALL_LIMIT)
   const withheldRequests = withheld.filter((ball) => ball.request_kind !== "incident").length
   const withheldIncidents = withheld.length - withheldRequests
+  // 21757 — retention's prune notice rides every projection of this owner's
+  // attention until a canonical read clears it (handleFetch, at the
+  // touchMailboxAttentionRead site). A dormant seat that returns is told
+  // what it can no longer see; it never starts silently at a new floor.
+  const prune = ctx.stmts.selectMailboxPrune.get({ $recipient: owner }) as {
+    pruned_count: number
+    pruned_before: number
+    recorded_at: number
+  } | null
+  const pruned =
+    prune === null
+      ? {}
+      : {
+          pruned: {
+            count: prune.pruned_count,
+            before: new Date(prune.pruned_before).toISOString(),
+            recorded_at: new Date(prune.recorded_at).toISOString(),
+          },
+        }
   return {
     attentionRows,
     untakenPendingBalls,
     actionableCount,
     attention: {
+      ...pruned,
       actionable_unread: attentionRows.map(fetchEvent),
       pending_balls: pendingPreview,
       pending_balls_summary: {
@@ -3196,6 +3221,9 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
   // let a narrow history query masquerade as checking the owned inbox.
   if (attention !== null) {
     ctx.stmts.touchMailboxAttentionRead.run({ $recipient: currentName, $now: Date.now() })
+    // 21757 — the prune notice was delivered in this canonical read (it rides
+    // the projection built above); one notice per pruning episode.
+    if (attention.pruned !== undefined) ctx.stmts.deleteMailboxPrune.run({ $recipient: currentName })
   }
 
   const events = filtered.map(fetchEvent)

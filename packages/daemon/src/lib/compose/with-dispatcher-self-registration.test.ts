@@ -2271,6 +2271,7 @@ function createDispatcherHarness(
         deleteWindowMs: 60_000,
         deleteEnabled: false,
         batchSize: Math.max(liveBefore, 1),
+        liveWindowMs: 7 * 24 * 60 * 60 * 1000,
       })
       const target = db.prepare("SELECT id FROM messages_archive WHERE id = ?").get(id)
       const liveAfter = (db.prepare("SELECT COUNT(*) AS count FROM messages").get() as { count: number }).count

@@ -1377,6 +1377,8 @@ interface SelfInboxEvent {
 
 interface SelfInboxResult {
   attention?: {
+    /** 21757 — retention archived unread actionables while this seat was dormant. */
+    pruned?: { count?: number; before?: string; recorded_at?: string }
     actionable_unread?: SelfInboxEvent[]
     pending_balls?: Array<{ request_id?: string; sender?: string; summary?: string }>
     pending_balls_summary?: { total?: number }
@@ -1409,6 +1411,16 @@ async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean }
   }
   const actionable = result.attention?.actionable_unread ?? []
   const actionableIds = new Set(actionable.map((event) => event.id).filter((id): id is string => id !== undefined))
+  const pruned = result.attention?.pruned
+  if (pruned !== undefined) {
+    // 21757 — loud by design: this seat was dormant past the retention live
+    // window and lost attention rows to archival. They are not gone: the
+    // archive is fetchable by id or history.
+    console.log(
+      `PRUNED: ${pruned.count ?? "?"} unread actionable row(s) addressed to you were archived before ${pruned.before ?? "?"} while this seat was dormant (recorded ${pruned.recorded_at ?? "?"}). ` +
+        `They no longer appear in attention. Recover with: tribe log --json (history) or the MCP fetch with:<peer>. This notice is shown once.`,
+    )
+  }
   for (const event of actionable) printSelfInboxEvent(event)
   for (const event of result.events ?? []) {
     if (event.id !== undefined && actionableIds.has(event.id)) continue
