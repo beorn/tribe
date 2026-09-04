@@ -12,6 +12,7 @@
 
 import { loadLlm, type LlmBackend, type LlmModel } from "./llm-backend.ts"
 import type { RecallSearchResult } from "../history/recall-shared.ts"
+import { log } from "../history/recall-shared.ts"
 import type { QueryContext } from "./context.ts"
 import { renderContextPrompt } from "./context.ts"
 
@@ -124,8 +125,9 @@ export interface PlanOptions {
 }
 
 /**
- * Run the planner. Returns `plan: null` if no provider is available or the
- * model response can't be parsed — callers should fall back gracefully.
+ * Run the planner. Provider failures fall through to the next available
+ * provider within one shared timeout. Returns `plan: null` only when all
+ * candidates fail, so callers can fall back to lexical recall.
  */
 export async function planQuery(query: string, context: QueryContext, options: PlanOptions): Promise<PlanCall> {
   const { round, mode, priorPlan, priorResults = [], priorVariants = [], timeoutMs = 2500 } = options
@@ -139,8 +141,8 @@ export async function planQuery(query: string, context: QueryContext, options: P
       error: "no-llm-backend-available",
     }
   }
-  const model = options.model ?? pickPlannerModel(llm)
-  if (!model) {
+  const models = options.model ? [options.model] : plannerModels(llm)
+  if (models.length === 0) {
     return {
       plan: null,
       elapsedMs: Date.now() - startedAt,
@@ -155,51 +157,74 @@ export async function planQuery(query: string, context: QueryContext, options: P
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
-
   let rawResponse = ""
   let cost: number | undefined
+  let lastModel: LlmModel | undefined
+  const failures: Array<{ modelId: string; error: string }> = []
+
   try {
-    const result = await llm.queryModel({
-      question: userPrompt,
-      model,
-      systemPrompt,
-      abortSignal: controller.signal,
-    })
-    clearTimeout(timer)
+    for (const model of models) {
+      if (controller.signal.aborted) break
+      lastModel = model
 
-    if (result.response.error) {
-      return {
-        plan: null,
-        model: model.modelId,
-        elapsedMs: Date.now() - startedAt,
-        error: result.response.error,
+      let result
+      try {
+        result = await llm.queryModel({
+          question: userPrompt,
+          model,
+          systemPrompt,
+          abortSignal: controller.signal,
+        })
+      } catch (error) {
+        const message = providerError(llm, model, error)
+        log(`planner: ${model.modelId} failed (${message})`)
+        failures.push({ modelId: model.modelId, error: message })
+        continue
       }
-    }
 
-    rawResponse = result.response.content ?? ""
-    const usage = result.response.usage
-    if (usage) {
-      cost = llm.estimateCost(model, usage.promptTokens, usage.completionTokens)
+      const usage = result.response.usage
+      if (usage) {
+        cost = (cost ?? 0) + llm.estimateCost(model, usage.promptTokens, usage.completionTokens)
+      }
+      if (result.response.error) {
+        const message = providerError(llm, model, result.response.error)
+        log(`planner: ${model.modelId} failed (${message})`)
+        failures.push({ modelId: model.modelId, error: message })
+        continue
+      }
+
+      rawResponse = result.response.content ?? ""
+
+      const parsed = parsePlanResult(rawResponse)
+      if (parsed.plan) {
+        return {
+          plan: parsed.plan,
+          model: model.modelId,
+          elapsedMs: Date.now() - startedAt,
+          cost,
+          rawResponse,
+        }
+      }
+      const reason = parsed.reason ?? "empty-plan"
+      log(`planner: ${model.modelId} returned no usable plan (${reason})`)
+      failures.push({ modelId: model.modelId, error: reason })
     }
-  } catch (err) {
+  } finally {
     clearTimeout(timer)
-    return {
-      plan: null,
-      model: model.modelId,
-      elapsedMs: Date.now() - startedAt,
-      error: err instanceof Error ? err.message : String(err),
-      rawResponse,
-    }
   }
 
-  const parsed = parsePlanResult(rawResponse)
   return {
-    plan: parsed.plan,
-    model: model.modelId,
+    plan: null,
+    model: lastModel?.modelId,
     elapsedMs: Date.now() - startedAt,
     cost,
     rawResponse,
-    error: parsed.plan ? undefined : parsed.reason,
+    error:
+      failures.length === 1
+        ? failures[0]?.error
+        : failures.length > 1
+          ? failures.map((failure) => `${failure.modelId}: ${failure.error}`).join("; ")
+          : "planner-timeout",
   }
 }
 
@@ -242,20 +267,26 @@ export function planVariants(plan: QueryPlan): string[] {
 // planner-sized prompts (~2s vs 5s+) in current testing.
 const PLANNER_PREFERENCE = ["claude-haiku-4-5-20251001", "gemini-2.0-flash-lite", "gpt-5-nano", "grok-3-fast"]
 
-function pickPlannerModel(llm: LlmBackend): LlmModel | undefined {
+function plannerModels(llm: LlmBackend): LlmModel[] {
+  const models: LlmModel[] = []
+  const providers = new Set<string>()
+  const add = (model: LlmModel | undefined): void => {
+    if (!model || providers.has(model.provider) || !llm.isProviderAvailable(model.provider)) return
+    providers.add(model.provider)
+    models.push(model)
+  }
+
   for (const id of PLANNER_PREFERENCE) {
-    const m = llm.getModel(id)
-    if (m && llm.isProviderAvailable(m.provider)) return m
+    add(llm.getModel(id))
   }
 
-  // Fallback: any available cheap model.
-  const cheap = llm.getCheapModel()
-  if (cheap && llm.isProviderAvailable(cheap.provider)) return cheap
+  add(llm.getCheapModel())
+  for (const model of llm.getCheapModels(Number.MAX_SAFE_INTEGER)) add(model)
+  return models
+}
 
-  for (const m of llm.getCheapModels(5)) {
-    if (llm.isProviderAvailable(m.provider)) return m
-  }
-  return undefined
+function providerError(llm: LlmBackend, model: LlmModel, error: unknown): string {
+  return llm.formatProviderError?.(model, error) ?? (error instanceof Error ? error.message : String(error))
 }
 
 function buildUserPrompt(
