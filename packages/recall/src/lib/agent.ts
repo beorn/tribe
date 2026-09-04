@@ -17,7 +17,7 @@
 import { getDb, closeDb } from "../history/db.ts"
 import { parseTimeToMs, recall, synthesisDiagnosticsFromError } from "../history/search.ts"
 import { synthesizeResults, type SynthesisResult } from "../history/synthesize.ts"
-import { log, THIRTY_DAYS_MS } from "../history/recall-shared.ts"
+import { DEFAULT_SYNTHESIS_TIMEOUT_MS, log, THIRTY_DAYS_MS } from "../history/recall-shared.ts"
 import type { RecallOptions, RecallResult, RecallSearchResult, SynthesisDiagnostics } from "../history/recall-shared.ts"
 import { buildQueryContext, renderContextPrompt, type QueryContext } from "./context.ts"
 import { planQuery, planVariants, type PlanCall } from "./plan.ts"
@@ -80,7 +80,6 @@ export interface AgentRecallResult extends RecallResult {
 // ============================================================================
 
 const DEFAULT_PLAN_TIMEOUT_MS = 8000
-const DEFAULT_SYNTH_TIMEOUT_MS = 4000
 const DEFAULT_LIMIT = 10
 
 // Round-2 decision thresholds
@@ -108,7 +107,7 @@ export async function recallAgent(query: string, options: AgentRecallOptions = {
     limit = DEFAULT_LIMIT,
     since,
     projectFilter,
-    timeout = DEFAULT_SYNTH_TIMEOUT_MS,
+    timeout = DEFAULT_SYNTHESIS_TIMEOUT_MS,
     planTimeoutMs = DEFAULT_PLAN_TIMEOUT_MS,
     maxRounds = 2,
     round2 = "auto",

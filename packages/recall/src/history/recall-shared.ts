@@ -23,6 +23,7 @@ export function log(msg: string): void {
 export const ONE_HOUR_MS = 60 * 60 * 1000
 export const ONE_DAY_MS = 24 * ONE_HOUR_MS
 export const THIRTY_DAYS_MS = 30 * ONE_DAY_MS
+export const DEFAULT_SYNTHESIS_TIMEOUT_MS = 20_000
 
 // ============================================================================
 // Types
@@ -36,7 +37,7 @@ export interface RecallOptions {
   raw?: boolean // Return raw results without LLM synthesis
   since?: string // Time filter (1h, 1d, 1w, etc.)
   json?: boolean // Return structured JSON
-  timeout?: number // Total timeout in ms (default 4000)
+  timeout?: number // Total timeout in ms (default DEFAULT_SYNTHESIS_TIMEOUT_MS)
   snippetTokens?: number // Snippet window size (default 200)
   projectFilter?: string // Project filter
   excludeCurrentSession?: boolean // Drop matches from CLAUDE_SESSION_ID (default false)

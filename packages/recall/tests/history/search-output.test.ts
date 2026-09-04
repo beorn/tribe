@@ -264,6 +264,8 @@ describe("recall search output", () => {
     expect(output).toContain("No LLM backend configured")
     expect(output).toContain("TRIBE_LLM_DIR")
     expect(output).toContain("--raw")
+    expect(output).toContain("RECALL_LLM_DENY_PROVIDERS in the current environment")
+    expect(output).not.toContain(".envrc.local")
     // Distinct exit code — degraded-but-has-results is neither a clean 0
     // nor the generic 1 a hard crash would use.
     expect(process.exitCode).toBe(3)
@@ -644,6 +646,19 @@ describe("recall search output", () => {
     expect(mockAgent.options).toMatchObject({ projectFilter: "km" })
     expect(errors).not.toContain("sibling worktree project dir(s) detected")
     expect(output).toContain('0 results — UNPROVEN (unknown index) for "nohits"')
+  })
+
+  test("gives synthesis a 20 second default budget while preserving an explicit timeout", async () => {
+    // Accepted requirement: the default covers the measured live-provider
+    // latency. Existing synthesis tests pass explicit budgets, so they cannot
+    // detect the CLI continuing to inject its old 10 second value.
+    mockAgent.result = async (query, options) => zeroAgentResult(query, options) as never
+
+    await cmdSearch("defaultbudget", { agent: true, project: "*", refresh: false })
+    expect(mockAgent.options).toMatchObject({ timeout: 20_000 })
+
+    await cmdSearch("explicitbudget", { agent: true, project: "*", refresh: false, timeout: "45000" })
+    expect(mockAgent.options).toMatchObject({ timeout: 45_000 })
   })
 
   test("default raw search includes sibling worktrees but excludes unrelated repos", async () => {

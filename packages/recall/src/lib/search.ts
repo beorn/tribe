@@ -23,6 +23,7 @@ import {
   type RecallSearchResult,
   type SynthesisDiagnostics,
 } from "../history/recall"
+import { DEFAULT_SYNTHESIS_TIMEOUT_MS } from "../history/recall-shared.ts"
 import type { AgentRecallOptions, AgentRecallResult } from "./agent.ts"
 import type { QueryPlan } from "./plan.ts"
 import { searchLiveSession } from "../history/search"
@@ -237,7 +238,7 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
     json: json,
     since,
     limit: limitStr ? parseInt(limitStr, 10) : 10,
-    timeout: timeoutStr ? parseInt(timeoutStr, 10) : 10000,
+    timeout: timeoutStr ? parseInt(timeoutStr, 10) : DEFAULT_SYNTHESIS_TIMEOUT_MS,
     projectFilter: project,
     provenance,
   }
@@ -723,7 +724,7 @@ function renderSynthesisFailure(result: RecallResult, diag: SynthesisDiagnostics
     console.log(`  • No provider was available to try — see the summary above (likely TRIBE_LLM_DIR is unset).`)
   }
   console.log(
-    `  • Provider exclusions live in .envrc.local (RECALL_LLM_DENY_PROVIDERS) — edit it if an excluded provider is actually working now.`,
+    `  • Provider exclusions come from RECALL_LLM_DENY_PROVIDERS in the current environment — change the environment source that exports it if an excluded provider is working now.`,
   )
   console.log()
 

@@ -15,7 +15,14 @@ import {
 } from "./db.ts"
 import type { ContentType } from "./types.ts"
 import { synthesizeResults } from "./synthesize.ts"
-import { log, ONE_HOUR_MS, ONE_DAY_MS, THIRTY_DAYS_MS, SynthesisFailure } from "./recall-shared.ts"
+import {
+  DEFAULT_SYNTHESIS_TIMEOUT_MS,
+  log,
+  ONE_HOUR_MS,
+  ONE_DAY_MS,
+  THIRTY_DAYS_MS,
+  SynthesisFailure,
+} from "./recall-shared.ts"
 import type {
   IndexProvenance,
   RecallOptions,
@@ -322,7 +329,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     limit = 10,
     raw = false,
     since,
-    timeout = 4000,
+    timeout = DEFAULT_SYNTHESIS_TIMEOUT_MS,
     snippetTokens = 200,
     projectFilter,
     excludeCurrentSession = false,

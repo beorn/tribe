@@ -28,6 +28,7 @@
  */
 
 import { Command, CommanderError, int, uint } from "@silvery/commander"
+import { DEFAULT_SYNTHESIS_TIMEOUT_MS } from "./history/recall-shared"
 import { cmdSearch, type SearchOptions } from "./lib/search"
 import { cmdStatus } from "./lib/status"
 import { cmdSessions, cmdIndex } from "./lib/sessions"
@@ -89,7 +90,7 @@ program
   .option("--json", "JSON output")
   .option("-s, --since <time>", "Time filter: 1h, 1d, 1w, today, yesterday (default: 30d)")
   .option("-n, --limit <num>", "Max results (default: 10)", int)
-  .option("--timeout <ms>", "LLM timeout in ms (default: 4000)", uint)
+  .option("--timeout <ms>", `LLM timeout in ms (default: ${DEFAULT_SYNTHESIS_TIMEOUT_MS})`, uint)
   .option("-p, --project <glob>", "Project filter")
   .option("-g, --grep", "Regex mode (slower, scans files)")
   .option("-q, --question", "User messages only (implies --raw)")
