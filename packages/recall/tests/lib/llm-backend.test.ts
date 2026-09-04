@@ -5,6 +5,11 @@
  */
 
 import { describe, test, expect, vi } from "vitest"
+import { spawnSync } from "node:child_process"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join, resolve } from "node:path"
+import { pathToFileURL } from "node:url"
 import {
   parseDeniedProviders,
   resolveAvailableCheapModel,
@@ -12,6 +17,7 @@ import {
   withProviderDenyList,
   type LlmBackend,
   type LlmModel,
+  type LlmProviderAvailabilityFact,
 } from "../../src/lib/llm-backend"
 
 // ============================================================================
@@ -99,6 +105,69 @@ function selectionBackend(opts: {
 }
 
 describe("selectAvailableCheapModels", () => {
+  test("uses shared provider facts and selector output instead of the legacy boolean when both are available", () => {
+    const openai = { modelId: "gpt-cheap", provider: "openai" }
+    const openrouter = { modelId: "deepseek-cheap", provider: "openrouter" }
+    const providerFacts: LlmProviderAvailabilityFact[] = [
+      {
+        provider: "openai",
+        status: "refusing" as const,
+        kind: "quota",
+        source: "dispatch",
+        reason: "quota exhausted",
+        observedAt: 1,
+        expiresAt: Number.MAX_SAFE_INTEGER,
+      },
+      {
+        provider: "openrouter",
+        status: "available" as const,
+        source: "dispatch",
+        reason: "successful completion",
+        observedAt: 2,
+        expiresAt: Number.MAX_SAFE_INTEGER,
+      },
+    ]
+    const selectModels: NonNullable<LlmBackend["selectModels"]> = vi.fn(() => ({
+      candidates: [openai, openrouter],
+      selected: [openrouter],
+      evidence: providerFacts,
+      excluded: [
+        {
+          model: openai,
+          provider: "openai",
+          status: "refusing" as const,
+          kind: "quota" as const,
+          source: "dispatch",
+          reason: "quota exhausted",
+          ageMs: 99,
+        },
+      ],
+    }))
+    const llm: LlmBackend = {
+      ...selectionBackend({ candidates: [openai, openrouter], available: [] }),
+      isProviderAvailable: vi.fn(() => {
+        throw new Error("legacy boolean must not run")
+      }),
+      providerFacts,
+      selectModels,
+    }
+
+    const selection = selectAvailableCheapModels(llm, { limit: 2, order: "registry" })
+
+    expect(selection.models).toEqual([openrouter])
+    expect(selection.rejected).toEqual([
+      { ...openai, reason: "quota exhausted", status: "refusing", kind: "quota", ageMs: 99 },
+    ])
+    expect(selectModels).toHaveBeenCalledWith(
+      expect.objectContaining({
+        candidates: [openai, openrouter],
+        facts: providerFacts,
+        distinctProviders: true,
+        limit: 2,
+      }),
+    )
+  })
+
   test("advances from an unavailable preferred model to the next live provider", () => {
     const openai = { modelId: "gpt-cheap", provider: "openai" }
     const anthropic = { modelId: "claude-cheap", provider: "anthropic" }
@@ -198,5 +267,53 @@ describe("selectAvailableCheapModels", () => {
       failure:
         "No cheap LLM provider is available; tried in getCheapModel() first, then remaining getCheapModels() registry order: dead-openai (openai): OPENAI_API_KEY unset; live-anthropic (anthropic): ANTHROPIC_API_KEY unset",
     })
+  })
+})
+
+describe("loadLlm shared provider-health surface", () => {
+  test("loads Bearly through its public barrel and turns the host deny list into selector exclusions", () => {
+    const home = mkdtempSync(join(tmpdir(), "recall-llm-health-"))
+    const backendModule = pathToFileURL(resolve(import.meta.dirname, "../../src/lib/llm-backend.ts")).href
+    const bearlyDir = resolve(import.meta.dirname, "../../../../../bearly/plugins/llm/src")
+    const childScript = `
+      const { loadLlm, selectAvailableCheapModels } = await import(process.env.LLM_BACKEND_MODULE)
+      const llm = await loadLlm()
+      if (!llm) throw new Error("loadLlm returned null")
+      const selection = selectAvailableCheapModels(llm, { limit: 6, order: "registry" })
+      console.log(JSON.stringify({
+        hasFacts: Array.isArray(llm.providerFacts),
+        hasSelector: typeof llm.selectModels === "function",
+        legacyOpenAI: llm.isProviderAvailable("openai"),
+        rejected: selection.rejected,
+      }))
+    `
+
+    try {
+      const child = spawnSync("bun", ["-e", childScript], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HOME: home,
+          LLM_BACKEND_MODULE: backendModule,
+          TRIBE_LLM_DIR: bearlyDir,
+          OPENAI_API_KEY: "configured-for-test",
+          RECALL_LLM_DENY_PROVIDERS: "openai",
+        },
+      })
+      expect(child.status, child.stderr).toBe(0)
+      expect(child.stderr).toContain("RECALL_LLM_DENY_PROVIDERS excludes: openai")
+      const result = JSON.parse(child.stdout) as {
+        hasFacts: boolean
+        hasSelector: boolean
+        legacyOpenAI: boolean
+        rejected: Array<{ provider: string; status?: string; reason: string }>
+      }
+      expect(result).toMatchObject({ hasFacts: true, hasSelector: true, legacyOpenAI: true })
+      expect(result.rejected).toContainEqual(
+        expect.objectContaining({ provider: "openai", status: "excluded", reason: "excluded by caller" }),
+      )
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 })

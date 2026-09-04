@@ -16,7 +16,33 @@
  * resolve into a repo that may not be checked out.
  */
 
-export type LlmModel = { provider: string; modelId: string }
+export type LlmModel = { provider: string; modelId: string; typicalLatencyMs?: number }
+
+export type LlmProviderAvailabilityFact = {
+  provider: string
+  status: "available" | "refusing" | "unknown"
+  source: string
+  reason: string
+  kind?: "credential-missing" | "auth" | "quota" | "rate-limited" | "transport" | "server-error"
+  observedAt?: number
+  expiresAt?: number
+  retryAt?: number
+}
+
+export type LlmModelSelectionResult = {
+  candidates: LlmModel[]
+  selected: LlmModel[]
+  excluded: Array<{
+    model: LlmModel
+    provider: string
+    status: "refusing" | "excluded"
+    source: string
+    reason: string
+    kind?: LlmProviderAvailabilityFact["kind"]
+    ageMs?: number
+  }>
+  evidence: LlmProviderAvailabilityFact[]
+}
 
 export type LlmUsage = {
   promptTokens: number
@@ -47,6 +73,17 @@ export type LlmBackend = {
   getCheapModels: (max?: number) => LlmModel[]
   estimateCost: (model: LlmModel, inputTokens?: number, outputTokens?: number) => number
   isProviderAvailable: (provider: string) => boolean
+  /** Resolved provider facts loaded from Bearly's shared observation store. */
+  providerFacts?: readonly LlmProviderAvailabilityFact[]
+  /** Bearly's pure availability-then-latency selector. Paired with providerFacts. */
+  selectModels?: (options: {
+    candidates?: readonly LlmModel[]
+    facts: readonly LlmProviderAvailabilityFact[]
+    now: number
+    exclude?: Iterable<string>
+    distinctProviders?: boolean
+    limit: number
+  }) => LlmModelSelectionResult
   /**
    * Optional richer diagnostic for WHY `isProviderAvailable(provider)` is
    * false — "no API key" vs "key present but explicitly denied via
@@ -72,7 +109,12 @@ export type LlmBackend = {
 
 export type CheapModelSelectionOrder = "preferred" | "registry"
 
-export type RejectedCheapModel = LlmModel & { reason: string }
+export type RejectedCheapModel = LlmModel & {
+  reason: string
+  status?: "refusing" | "excluded"
+  kind?: LlmProviderAvailabilityFact["kind"]
+  ageMs?: number
+}
 
 export type CheapModelSelection = {
   models: LlmModel[]
@@ -115,6 +157,41 @@ export function selectAvailableCheapModels(
 
   if (selectionOrder === "preferred") add(llm.getCheapModel())
   for (const model of llm.getCheapModels(Number.MAX_SAFE_INTEGER)) add(model)
+
+  const hasSharedSelector = llm.selectModels !== undefined
+  const hasSharedFacts = llm.providerFacts !== undefined
+  if (hasSharedSelector !== hasSharedFacts) {
+    throw new Error(
+      `LLM backend provider-health surface is incomplete: selectModels=${String(hasSharedSelector)}, providerFacts=${String(hasSharedFacts)}`,
+    )
+  }
+  if (llm.selectModels && llm.providerFacts) {
+    const shared = llm.selectModels({
+      candidates,
+      facts: llm.providerFacts,
+      now: Date.now(),
+      distinctProviders: true,
+      limit,
+    })
+    const models = shared.selected
+    const rejected: RejectedCheapModel[] = shared.excluded.map((entry) => ({
+      ...entry.model,
+      reason: entry.reason,
+      status: entry.status,
+      ...(entry.kind !== undefined ? { kind: entry.kind } : {}),
+      ...(entry.ageMs !== undefined ? { ageMs: entry.ageMs } : {}),
+    }))
+    const sharedOrder = `${order}; shared facts rank available before unknown, then typicalLatencyMs`
+    const failure =
+      models.length > 0
+        ? null
+        : candidates.length === 0
+          ? `No cheap LLM provider is available; no candidates were returned (queried in ${sharedOrder})`
+          : `No cheap LLM provider is available; tried in ${sharedOrder}: ${rejected
+              .map((model) => `${model.modelId} (${model.provider}): ${model.reason}`)
+              .join("; ")}`
+    return { models, rejected, order: sharedOrder, failure }
+  }
 
   const models: LlmModel[] = []
   const rejected: RejectedCheapModel[] = []
@@ -162,18 +239,23 @@ export function resolveAvailableCheapModel(llm: LlmBackend | null): CheapModelRe
 let probe: Promise<LlmBackend | null> | undefined
 let warned = false
 
-// Structural shapes for the three TRIBE_LLM_DIR modules — the import
-// specifiers are runtime-variable (see the docstring above), so TS can't
-// infer these; typing the destructure explicitly is what keeps the object
-// literal below from going `any` end-to-end.
-type TypesModule = Pick<LlmBackend, "getModel" | "getCheapModel" | "getCheapModels" | "estimateCost">
-type ResearchModule = Pick<LlmBackend, "queryModel">
-type ProvidersModule = {
+// Structural shape for @bearly/llm's public barrel. The import specifier is
+// runtime-variable (see the docstring above), so TS cannot infer it.
+type LlmBarrelModule = Pick<
+  LlmBackend,
+  "queryModel" | "getModel" | "getCheapModel" | "getCheapModels" | "estimateCost"
+> & {
   isProviderAvailable: (provider: string) => boolean
-  getProviderEnvVar?: (provider: string) => string
-}
-type DispatchSafetyModule = {
-  formatLegDispatchError?: (model: { modelId: string; provider: string; displayName: string }, error: unknown) => string
+  createProviderObservationStore: () => unknown
+  readProviderAvailability: (
+    provider: string,
+    options: { store: unknown; now: number; env?: Readonly<Record<string, string | undefined>> },
+  ) => Promise<LlmProviderAvailabilityFact>
+  selectModels: NonNullable<LlmBackend["selectModels"]>
+  describeDispatchFailure?: (
+    error: unknown,
+    target: { modelId: string; provider: string; displayName: string },
+  ) => { message: string }
 }
 
 /**
@@ -194,9 +276,11 @@ export function parseDeniedProviders(raw: string | undefined): ReadonlySet<strin
 const EMPTY_DENY_SET: ReadonlySet<string> = new Set()
 
 /**
- * Wrap a raw `isProviderAvailable` so denied providers always read as
- * unavailable, regardless of key presence. A no-op wrapper (identity) when
- * the deny set is empty, so the common case pays no extra indirection.
+ * Compatibility helper for older injected backends. Production Recall now
+ * passes the deny set as explicit `selectModels` exclusions and leaves the
+ * legacy boolean byte-compatible.
+ *
+ * @deprecated Use providerFacts plus selectModels exclusions.
  */
 export function withProviderDenyList(
   isProviderAvailable: (provider: string) => boolean,
@@ -207,24 +291,21 @@ export function withProviderDenyList(
 }
 
 /**
- * Bridge bearly's `formatLegDispatchError` (shared with /pro) into recall's
- * `LlmModel` shape — `displayName` isn't part of recall's model type, but
- * `formatLegDispatchError` doesn't read it, so `modelId` is a safe stand-in.
- * Returns undefined when the dispatch-safety module didn't load (older
- * TRIBE_LLM_DIR, or the best-effort import failed) — callers fall back to
- * their own message.
+ * Bridge Bearly's public structured failure describer into Recall's model
+ * shape. `displayName` is not part of Recall's model type, so modelId is a
+ * safe stand-in for the compatibility renderer.
  */
 export function buildFormatProviderError(
   mod: {
-    formatLegDispatchError?: (
-      model: { modelId: string; provider: string; displayName: string },
+    describeDispatchFailure?: (
       error: unknown,
-    ) => string
+      model: { modelId: string; provider: string; displayName: string },
+    ) => { message: string }
   } | null,
 ): ((model: LlmModel, error: unknown) => string) | undefined {
-  const format = mod?.formatLegDispatchError
-  if (!format) return undefined
-  return (model: LlmModel, error: unknown): string => format({ ...model, displayName: model.modelId }, error)
+  const describe = mod?.describeDispatchFailure
+  if (!describe) return undefined
+  return (model: LlmModel, error: unknown): string => describe(error, { ...model, displayName: model.modelId }).message
 }
 
 /**
@@ -232,14 +313,10 @@ export function buildFormatProviderError(
  * Returns null (with a one-time stderr warning) when the backend is absent
  * or fails to load — callers take their documented no-LLM degrade path.
  *
- * `isProviderAvailable` from the underlying backend only checks key
- * presence, not whether the account actually works (quota-exhausted,
- * revoked, auth-broken keys all read as "available"). Recall has no live
- * health-probe to distinguish those cases, so `RECALL_LLM_DENY_PROVIDERS`
- * (comma-separated provider ids, e.g. "openai,xai") is an explicit,
- * host-set opt-out — every synthesis/plan/summarize model-selection path in
- * this package goes through this one `isProviderAvailable`, so setting it
- * once here fixes them all instead of each call site guessing.
+ * Provider facts are loaded from Bearly's public barrel and shared
+ * observation store. `RECALL_LLM_DENY_PROVIDERS` remains a temporary host
+ * policy input, but is passed to the selector as an explicit exclusion set;
+ * it no longer falsifies the source-compatible credential-presence boolean.
  */
 export async function loadLlm(): Promise<LlmBackend | null> {
   if (probe !== undefined) return probe
@@ -250,39 +327,50 @@ export async function loadLlm(): Promise<LlmBackend | null> {
       return null
     }
     try {
-      const [types, research, providers] = (await Promise.all([
-        import(`${dir}/lib/types.ts`),
-        import(`${dir}/lib/research.ts`),
-        import(`${dir}/lib/providers.ts`),
-      ])) as [TypesModule, ResearchModule, ProvidersModule]
-      // Best-effort, separate from the Promise.all above — its absence must
-      // degrade to no shared-voice formatting, never break the base backend.
-      const dispatchSafety = (await import(`${dir}/lib/dispatch-safety.ts`).catch(
-        () => null,
-      )) as DispatchSafetyModule | null
+      const bearly = (await import(`${dir}/index.ts`)) as LlmBarrelModule
       const denied = parseDeniedProviders(process.env.RECALL_LLM_DENY_PROVIDERS)
       if (denied.size > 0) {
         process.stderr.write(`[recall:llm-backend] RECALL_LLM_DENY_PROVIDERS excludes: ${[...denied].join(", ")}\n`)
       }
+      const candidates = bearly.getCheapModels(Number.MAX_SAFE_INTEGER)
+      const providers = [...new Set(candidates.map((model) => model.provider))]
+      const observationStore = bearly.createProviderObservationStore()
+      const providerFacts = await Promise.all(
+        providers.map((provider) =>
+          bearly.readProviderAvailability(provider, {
+            store: observationStore,
+            now: Date.now(),
+          }),
+        ),
+      )
+      const refreshProviderFact = async (provider: string): Promise<void> => {
+        const fact = await bearly.readProviderAvailability(provider, {
+          store: observationStore,
+          now: Date.now(),
+        })
+        const index = providerFacts.findIndex((candidate) => candidate.provider === provider)
+        if (index === -1) providerFacts.push(fact)
+        else providerFacts[index] = fact
+      }
       return {
-        queryModel: research.queryModel,
-        getModel: types.getModel,
-        getCheapModel: types.getCheapModel,
-        getCheapModels: types.getCheapModels,
-        estimateCost: types.estimateCost,
-        isProviderAvailable: withProviderDenyList(providers.isProviderAvailable, denied),
-        // `isProviderAvailable` is a two-state boolean over a three-state
-        // reality (present-and-live / present-and-dead / absent) — the SAME
-        // "cannot observe" collapsed into "no credential" defect class
-        // documented in hub/ag/2026-08-01-accounts-plateau.md's P0 finding
-        // (ag-accounts' isLoggedIn/deriveAuthState). That doc's fix
-        // (a distinguishable "cannot determine" state, never conflated with
-        // "absent") applies here too but is out of scope for this seam —
-        // the deny list below is the interim: it doesn't make
-        // isProviderAvailable three-state, it just lets a host say "I know
-        // this one is dead" so recall stops trusting key-presence alone.
-        // The real fix still belongs at vendor/bearly/plugins/llm/src/lib/providers.ts:129,
-        // shared by every consumer (/pro, ask, deep, debate), not just recall.
+        queryModel: async (options) => {
+          const result = await bearly.queryModel(options)
+          await refreshProviderFact(options.model.provider)
+          return result
+        },
+        getModel: bearly.getModel,
+        getCheapModel: bearly.getCheapModel,
+        getCheapModels: bearly.getCheapModels,
+        estimateCost: bearly.estimateCost,
+        isProviderAvailable: bearly.isProviderAvailable,
+        providerFacts,
+        selectModels: (options) =>
+          bearly.selectModels({
+            ...options,
+            exclude: new Set([...(options.exclude ?? []), ...denied]),
+          }),
+        // Legacy compatibility only. Shared selection reads providerFacts;
+        // this explanation keeps older injected backends loud.
         explainUnavailable: (provider: string): string => {
           const lower = provider.toLowerCase()
           if (denied.has(lower)) {
@@ -291,10 +379,10 @@ export async function loadLlm(): Promise<LlmBackend | null> {
               `(host override — the API key may be present, but this provider was flagged broken on this host)`
             )
           }
-          const envVar = providers.getProviderEnvVar?.(provider)
-          return envVar ? `no API key configured (${envVar} unset)` : `no API key configured for provider "${provider}"`
+          const fact = providerFacts.find((candidate) => candidate.provider === provider)
+          return fact?.reason ?? `no provider fact available for "${provider}"`
         },
-        formatProviderError: buildFormatProviderError(dispatchSafety),
+        formatProviderError: buildFormatProviderError(bearly),
       } as LlmBackend
     } catch (err) {
       warnOnce(`backend FAILED to load from TRIBE_LLM_DIR=${dir}: ${err instanceof Error ? err.message : String(err)}`)
