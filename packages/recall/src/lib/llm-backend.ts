@@ -70,6 +70,95 @@ export type LlmBackend = {
   formatProviderError?: (model: LlmModel, error: unknown) => string
 }
 
+export type CheapModelSelectionOrder = "preferred" | "registry"
+
+export type RejectedCheapModel = LlmModel & { reason: string }
+
+export type CheapModelSelection = {
+  models: LlmModel[]
+  rejected: RejectedCheapModel[]
+  order: string
+  failure: string | null
+}
+
+export type CheapModelResolution =
+  | { backend: LlmBackend; model: LlmModel; failure: null }
+  | { backend: null; model: null; failure: string }
+
+/**
+ * Select live cheap models without letting an unavailable leader hide later
+ * candidates. Singular callers retain the existing getCheapModel() preference;
+ * race callers retain getCheapModels() registry order. The result limit is
+ * applied only after every registered candidate has been availability-checked.
+ */
+export function selectAvailableCheapModels(
+  llm: LlmBackend,
+  opts: { limit?: number; order?: CheapModelSelectionOrder } = {},
+): CheapModelSelection {
+  const limit = opts.limit ?? 1
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new RangeError(`Cheap model selection limit must be a positive integer; received ${limit}`)
+  }
+
+  const selectionOrder = opts.order ?? "preferred"
+  const order =
+    selectionOrder === "preferred"
+      ? "getCheapModel() first, then remaining getCheapModels() registry order"
+      : "getCheapModels() registry order"
+  const candidates: LlmModel[] = []
+  const seenProviders = new Set<string>()
+  const add = (model: LlmModel | undefined): void => {
+    if (!model || seenProviders.has(model.provider)) return
+    seenProviders.add(model.provider)
+    candidates.push(model)
+  }
+
+  if (selectionOrder === "preferred") add(llm.getCheapModel())
+  for (const model of llm.getCheapModels(Number.MAX_SAFE_INTEGER)) add(model)
+
+  const models: LlmModel[] = []
+  const rejected: RejectedCheapModel[] = []
+  for (const model of candidates) {
+    if (llm.isProviderAvailable(model.provider)) {
+      if (models.length < limit) models.push(model)
+      continue
+    }
+    rejected.push({
+      ...model,
+      reason: llm.explainUnavailable?.(model.provider) ?? "provider reported unavailable; backend supplied no reason",
+    })
+  }
+
+  const failure =
+    models.length > 0
+      ? null
+      : candidates.length === 0
+        ? `No cheap LLM provider is available; no candidates were returned (queried in ${order})`
+        : `No cheap LLM provider is available; tried in ${order}: ${rejected
+            .map((model) => `${model.modelId} (${model.provider}): ${model.reason}`)
+            .join("; ")}`
+
+  return { models, rejected, order, failure }
+}
+
+/** Single-model projection shared by session, daily, and weekly summaries. */
+export function resolveAvailableCheapModel(llm: LlmBackend | null): CheapModelResolution {
+  if (!llm) {
+    return {
+      backend: null,
+      model: null,
+      failure: "No LLM backend is configured (TRIBE_LLM_DIR unset or failed to load)",
+    }
+  }
+  const selection = selectAvailableCheapModels(llm)
+  const model = selection.models[0]
+  if (model) return { backend: llm, model, failure: null }
+  if (!selection.failure) {
+    throw new Error("Cheap model selection returned no model without an exhaustive failure report")
+  }
+  return { backend: null, model: null, failure: selection.failure }
+}
+
 let probe: Promise<LlmBackend | null> | undefined
 let warned = false
 

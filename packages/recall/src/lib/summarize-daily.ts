@@ -14,7 +14,7 @@ import * as os from "os"
 import { getDb, closeDb } from "../history/db"
 import { summarizeSessionBatch, type SessionSummary } from "./summarize-session"
 import { findSessionJsonl } from "./extract"
-import { loadLlm } from "./llm-backend.ts"
+import { loadLlm, resolveAvailableCheapModel } from "./llm-backend.ts"
 import { createRetroBeads } from "./summarize-beads"
 
 // ============================================================================
@@ -203,13 +203,14 @@ export async function summarizeDay(
 
   if (usableSummaries.length === 0) {
     log(`no usable session summaries for ${date}`)
+    const selectionFailure = sessionSummaries.find((summary) => summary.reason)?.reason
     return {
       date,
       sessionsCount: rows.length,
       summary: null,
       memoryFile: null,
       skipped: true,
-      reason: "no_content",
+      reason: selectionFailure ?? "no_content",
     }
   }
 
@@ -256,19 +257,20 @@ export async function summarizeDay(
   log(`LLM context: ${context.length} chars from ${usableSummaries.length} sessions`)
 
   // Check LLM availability
-  const llm = await loadLlm()
-  const model = llm?.getCheapModel()
-  if (!llm || !model || !llm.isProviderAvailable(model.provider)) {
-    log(`no LLM provider available`)
+  const resolution = resolveAvailableCheapModel(await loadLlm())
+  if (!resolution.model) {
+    log(resolution.failure)
     return {
       date,
       sessionsCount: rows.length,
       summary: null,
       memoryFile: null,
       skipped: true,
-      reason: "no_llm_provider",
+      reason: resolution.failure,
     }
   }
+  const model = resolution.model
+  const llm = resolution.backend
 
   // Synthesize
   const llmStart = Date.now()
@@ -548,10 +550,9 @@ export async function summarizeWeek(weekOf: string, opts: { verbose?: boolean } 
 
   log(`LLM context: ${context.length} chars`)
 
-  const llm2 = await loadLlm()
-  const model = llm2?.getCheapModel()
-  if (!llm2 || !model || !llm2.isProviderAvailable(model.provider)) {
-    log(`no LLM provider available`)
+  const resolution = resolveAvailableCheapModel(await loadLlm())
+  if (!resolution.model) {
+    log(resolution.failure)
     return {
       weekStart,
       weekEnd,
@@ -559,9 +560,11 @@ export async function summarizeWeek(weekOf: string, opts: { verbose?: boolean } 
       summary: null,
       memoryFile: null,
       skipped: true,
-      reason: "no_llm_provider",
+      reason: resolution.failure,
     }
   }
+  const model = resolution.model
+  const llm2 = resolution.backend
 
   const llmStart = Date.now()
   const result = await llm2.queryModel({
@@ -628,6 +631,7 @@ export async function cmdWeekly(weekOf?: string, _opts: { verbose?: boolean } = 
 // Show existing summaries
 // ============================================================================
 
+// oxlint-disable-next-line typescript/require-await -- preserve the Promise-returning Commander action contract.
 export async function cmdShow(dateArg?: string): Promise<void> {
   const memoryDir = getSessionMemoryDir()
 
@@ -646,7 +650,8 @@ export async function cmdShow(dateArg?: string): Promise<void> {
       console.error("No weekly summaries found. Run `bun recall weekly` first.")
       return
     }
-    const latest = weekFiles[weekFiles.length - 1]!
+    const latest = weekFiles.at(-1)
+    if (!latest) throw new Error("Weekly summary list became empty after its non-empty check")
     console.log(fs.readFileSync(path.join(memoryDir, latest), "utf8"))
     return
   }
@@ -740,6 +745,7 @@ function buildSessionIndex(sessions: SessionSummary[]): string {
   return lines.join("\n") + "\n"
 }
 
+// oxlint-disable-next-line typescript/require-await -- preserve the async helper contract used by summarizeDay.
 async function extractBeadsActivity(
   startMs: number,
   endMs: number,

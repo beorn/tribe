@@ -5,7 +5,7 @@
 
 import * as fs from "fs"
 import * as path from "path"
-import { loadLlm, requireLlm, type LlmBackend, type LlmModel } from "../lib/llm-backend.ts"
+import { loadLlm, requireLlm, selectAvailableCheapModels, type LlmBackend, type LlmModel } from "../lib/llm-backend.ts"
 import { log, SynthesisFailure, suggestRetryTimeoutMs } from "./recall-shared.ts"
 import type {
   RecallSearchResult,
@@ -443,9 +443,13 @@ export async function remember(options: RememberOptions): Promise<RememberResult
     log(`no LLM backend (TRIBE_LLM_DIR) — remember skipped`)
     return { skipped: true, reason: "no_llm_provider" }
   }
-  const model = llm.getCheapModel()
-  if (!model || !llm.isProviderAvailable(model.provider)) {
-    log(`no LLM provider available (model: ${model?.modelId ?? "none"}, provider: ${model?.provider ?? "none"})`)
+  const selection = selectAvailableCheapModels(llm)
+  const model = selection.models[0]
+  if (!model) {
+    if (!selection.failure) {
+      throw new Error("Remember model selection returned no model without an exhaustive failure report")
+    }
+    process.stderr.write(`[recall:remember] ${selection.failure}\n`)
     return { skipped: true, reason: "no_llm_provider" }
   }
 

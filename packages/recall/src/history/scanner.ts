@@ -18,7 +18,7 @@ import {
   getIndexMeta,
 } from "./db.ts"
 import type { ContentType } from "./types.ts"
-import { loadLlm } from "../lib/llm-backend.ts"
+import { loadLlm, selectAvailableCheapModels } from "../lib/llm-backend.ts"
 import { log, ONE_HOUR_MS, THIRTY_DAYS_MS } from "./recall-shared.ts"
 import type { RecallSearchResult } from "./recall-shared.ts"
 import { runInjectDelta, createTmpfileSeenStore } from "../lib/inject-core.ts"
@@ -410,9 +410,8 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
     recommendations.push("Bounded status: LLM checks skipped — run `recall status --bench` to benchmark providers")
   }
   const reviewLlm = skipLlm ? null : await loadLlm()
-  const raceModels = reviewLlm
-    ? reviewLlm.getCheapModels(2).filter((m) => reviewLlm.isProviderAvailable(m.provider))
-    : []
+  const raceSelection = reviewLlm ? selectAvailableCheapModels(reviewLlm, { limit: 2, order: "registry" }) : null
+  const raceModels = raceSelection?.models ?? []
   if (!skipLlm && !reviewLlm) {
     recommendations.push("LLM backend unavailable (TRIBE_LLM_DIR unset or failed) — race benchmark skipped")
   }
@@ -544,7 +543,10 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
   } else if (!skipLlm && reviewLlm) {
     // Backend loaded but no cheap providers were available — genuinely a config
     // gap. In bounded mode (skipLlm) we never loaded a backend, so stay quiet.
-    recommendations.push("No cheap LLM providers available for race benchmark — check API keys")
+    if (!raceSelection?.failure) {
+      throw new Error("LLM race model selection returned no models without an exhaustive failure report")
+    }
+    recommendations.push(`LLM race benchmark unavailable — ${raceSelection.failure}`)
   }
 
   log(`review: completed in ${Date.now() - startTime}ms — ${recommendations.length} recommendations`)
@@ -564,7 +566,9 @@ export async function reviewMemorySystem(projectRoot: string, opts: ReviewOption
 function percentile(sorted: number[], pct: number): number {
   if (sorted.length === 0) return 0
   const idx = Math.ceil((pct / 100) * sorted.length) - 1
-  return sorted[Math.max(0, idx)]!
+  const value = sorted[Math.max(0, idx)]
+  if (value === undefined) throw new Error(`Percentile ${pct} resolved outside ${sorted.length} sorted values`)
+  return value
 }
 
 export function checkHookConfig(projectRoot: string, recommendations: string[]): ReviewResult["hookConfig"] {

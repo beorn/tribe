@@ -9,7 +9,7 @@ import * as fs from "fs"
 import * as path from "path"
 import * as os from "os"
 import { extractSessionContent } from "./extract"
-import { loadLlm } from "./llm-backend.ts"
+import { loadLlm, resolveAvailableCheapModel } from "./llm-backend.ts"
 
 // ============================================================================
 // Types
@@ -23,6 +23,8 @@ export interface SessionSummary {
   isSubAgent: boolean
   summary: string | null // null if skipped
   cached: boolean
+  /** Actionable explanation when model selection exhausts every candidate. */
+  reason?: string
 }
 
 // ============================================================================
@@ -158,10 +160,9 @@ export async function summarizeSession(
   }
 
   // Check LLM availability
-  const llm = await loadLlm()
-  const model = llm?.getCheapModel()
-  if (!llm || !model || !llm.isProviderAvailable(model.provider)) {
-    log(`${extract.shortId}: no LLM provider available`)
+  const resolution = resolveAvailableCheapModel(await loadLlm())
+  if (!resolution.model) {
+    log(`${extract.shortId}: ${resolution.failure}`)
     return {
       id: extract.id,
       shortId: extract.shortId,
@@ -170,8 +171,11 @@ export async function summarizeSession(
       isSubAgent: false,
       summary: null,
       cached: false,
+      reason: resolution.failure,
     }
   }
+  const model = resolution.model
+  const llm = resolution.backend
 
   // Build context for LLM
   let context = extract.content
@@ -241,7 +245,8 @@ export async function summarizeSessionBatch(
   async function worker(): Promise<void> {
     while (nextIdx < sessions.length) {
       const idx = nextIdx++
-      const session = sessions[idx]!
+      const session = sessions[idx]
+      if (!session) throw new Error(`Session batch index ${idx} is outside ${sessions.length} inputs`)
       log(`[${idx + 1}/${sessions.length}] ${session.id.slice(0, 8)}`)
       results[idx] = await summarizeSession(session.id, {
         title: session.title,
