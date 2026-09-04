@@ -1173,8 +1173,8 @@ export const CURRENT_SCHEMA_VERSION: number = MIGRATIONS.at(-1)!.version
 
 /**
  * The default-wake/stop-line message types — the ONE canonical set (19442). A
- * A message of one of these types is "actionable" when it is either direct or
- * an untaken tracked actionable broadcast owned by the mailbox. `inbox.wait` gates on it and the
+ * message of one of these types is "actionable" when it is either direct or
+ * an untaken tracked actionable message owned by the mailbox. `inbox.wait` gates on it and the
  * chief-absence watchdog counts it. Durable attention additionally carries
  * newly classified direct responses without making them default wakeups.
  */
@@ -1192,6 +1192,19 @@ export const CORRELATED_REPLY_TYPES_SQL = CORRELATED_REPLY_TYPES.map((type) => `
 /** One canonical durable-attention classification: default-wake actionables
  * plus rows atomically classified at insertion (currently direct responses). */
 export const ATTENTION_PREDICATE_SQL = `(type IN (${ACTIONABLE_TYPES_SQL}) OR attention_required = 1)`
+
+/** An open incident is emitter-owned state, never recipient-actionable work.
+ * Key this exclusion from the tracker classification rather than the message
+ * type: the public send surface permits an incident to carry any message type. */
+export function noOpenIncidentAttentionPredicateSql(alias: string, owner = `${alias}.recipient`): string {
+  return `NOT EXISTS (
+    SELECT 1
+    FROM pending_request AS incident_pending
+    WHERE incident_pending.message_id = ${alias}.id
+      AND incident_pending.recipient = ${owner}
+      AND incident_pending.request_kind = 'incident'
+  )`
+}
 
 type TakingStatusSubjectSql = {
   readonly owner: string
@@ -1321,6 +1334,7 @@ const TRACKED_ATTENTION_FETCH_COLUMNS_SQL = `COALESCE(m.id, a.id) AS id,
  * disappear merely because its source message was archived. */
 function trackedAttentionPredicateSql(ownerParameter = "$name"): string {
   return `p.recipient = ${ownerParameter}
+    AND p.request_kind != 'incident'
     AND COALESCE(m.kind, a.kind) IN ('direct', 'broadcast')
     AND ${untakenPendingBallPredicateSql("p", TRACKED_ATTENTION_SEQUENCE_SQL)}`
 }
@@ -1830,7 +1844,8 @@ export function createStatements(db: Database) {
         WHERE m.recipient = $name
           AND m.kind = 'direct'
           AND m.sender != $name
-          AND m.type IN (${ACTIONABLE_TYPES_SQL})
+          AND ${ATTENTION_PREDICATE_SQL}
+          AND ${noOpenIncidentAttentionPredicateSql("m", "$name")}
           AND ${unretiredAttentionPredicateSql("m")}
           AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
         UNION
@@ -1853,7 +1868,8 @@ export function createStatements(db: Database) {
         WHERE m.recipient != '*'
           AND m.kind = 'direct'
           AND m.sender != m.recipient
-          AND m.type IN (${ACTIONABLE_TYPES_SQL})
+          AND ${ATTENTION_PREDICATE_SQL}
+          AND ${noOpenIncidentAttentionPredicateSql("m")}
           AND ${unretiredAttentionPredicateSql("m")}
           AND m.rowid > COALESCE(
             (SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = m.recipient),
@@ -1878,7 +1894,8 @@ export function createStatements(db: Database) {
       WHERE m.recipient = $name
         AND m.kind = 'direct'
         AND m.sender != $name
-        AND m.type IN (${ACTIONABLE_TYPES_SQL})
+        AND ${ATTENTION_PREDICATE_SQL}
+        AND ${noOpenIncidentAttentionPredicateSql("m", "$name")}
         AND ${unretiredAttentionPredicateSql("m")}
         AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
       ORDER BY m.rowid DESC
@@ -1895,6 +1912,7 @@ export function createStatements(db: Database) {
       WHERE m.recipient = $name
         AND m.kind = 'direct'
         AND m.sender != $name
+        AND ${noOpenIncidentAttentionPredicateSql("m", "$name")}
         AND ${unretiredAttentionPredicateSql("m")}
         AND (
           type IN (${ACTIONABLE_TYPES_SQL})
@@ -1932,7 +1950,8 @@ export function createStatements(db: Database) {
       WHERE m.recipient = $name
         AND m.kind = 'direct'
         AND m.sender != $name
-        AND m.type IN (${ACTIONABLE_TYPES_SQL})
+        AND ${ATTENTION_PREDICATE_SQL}
+        AND ${noOpenIncidentAttentionPredicateSql("m", "$name")}
         AND ${unretiredAttentionPredicateSql("m")}
         AND m.rowid = $seq
         AND m.id = $id
@@ -2162,6 +2181,7 @@ export function createStatements(db: Database) {
         AND m.kind = 'direct'
         AND m.sender != $name
         AND (m.type IN (${ACTIONABLE_TYPES_SQL}) OR m.attention_required = 1)
+        AND ${noOpenIncidentAttentionPredicateSql("m", "$name")}
         AND ${unretiredAttentionPredicateSql("m")}
         AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
         AND m.rowid <= $upto
@@ -2188,6 +2208,7 @@ export function createStatements(db: Database) {
           AND m.kind = 'direct'
           AND m.sender != $name
           AND (m.type IN (${ACTIONABLE_TYPES_SQL}) OR m.attention_required = 1)
+          AND ${noOpenIncidentAttentionPredicateSql("m", "$name")}
           AND ${unretiredAttentionPredicateSql("m")}
           AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
         UNION
@@ -2210,6 +2231,7 @@ export function createStatements(db: Database) {
           AND m.kind = 'direct'
           AND m.sender != $name
           AND (m.type IN (${ACTIONABLE_TYPES_SQL}) OR m.attention_required = 1)
+          AND ${noOpenIncidentAttentionPredicateSql("m", "$name")}
           AND ${unretiredAttentionPredicateSql("m")}
           AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
         UNION

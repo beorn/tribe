@@ -321,12 +321,12 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       id: response.id,
       attention_required: 1,
     })
-    expect(stmts.getUnreadDms.get({ $name: NAME })).toMatchObject({ count: 0 })
+    expect(stmts.getUnreadDms.get({ $name: NAME })).toMatchObject({ count: 1 })
 
     // A real reconnect resets the successor's chronological cursor to the
     // journal tail. The semantic response must therefore ride durable
-    // attention/recovery even though it intentionally stays quiet for the
-    // default actionable-only inbox wait.
+    // attention/recovery, and the scalar must count the row the attention list
+    // is about to hand over.
     const successor = connectAs("sess-successor", NAME)
     const first = fetchJson(successor, opts).json
     expect(first.attention?.actionable_unread).toEqual([
@@ -719,6 +719,35 @@ describe("19442 mailbox-cursor actionable recovery", () => {
         by_kind: { request: 0, incident: 1 },
       },
     })
+  })
+
+  it("keeps an incident pending-only even when its message type is actionable", () => {
+    const live = connectAs("sess-actionable-incident-owner", NAME)
+    const watcher = connectAs("sess-actionable-incident-watcher", "@fleet")
+    const sent = parseToolJson(
+      handleToolCall(
+        watcher,
+        "tribe.send",
+        {
+          to: NAME,
+          message: "watcher used the wrong actionable message type",
+          type: "request",
+          incident: {
+            emitter: "wait-watch",
+            subject: NAME,
+            condition: "expired-unanswered",
+          },
+        },
+        opts,
+      ),
+    ) as { request_id: string }
+
+    const fetched = fetchJson(live, opts).json
+    expect(fetched.attention?.actionable_unread).toEqual([])
+    expect(fetched.attention?.pending_balls).toEqual([
+      expect.objectContaining({ request_id: sent.request_id, request_kind: "incident" }),
+    ])
+    expect(stmts.getUnreadDms.get({ $name: NAME })).toMatchObject({ count: 0 })
   })
 
   it("delivery acknowledgement cannot erase an explicitly tracked verdict obligation", () => {

@@ -38,11 +38,7 @@ export function createInboxWaitManager(
   readStatus: (session: string) => InboxStatus,
   readAttention: (session: string) => WireInboxWaitResult["attention"],
   readLatestQualifyingSeq: (session: string, wakeOnCorrelatedReply: boolean) => number = () => 0,
-  readCurrentQualifyingSeq: (session: string, wakeOnCorrelatedReply: boolean, status: InboxStatus) => number = (
-    _session,
-    _wakeOnCorrelatedReply,
-    status,
-  ) => (status.unread_count > 0 ? 1 : 0),
+  readCurrentQualifyingSeq: (session: string, wakeOnCorrelatedReply: boolean, status: InboxStatus) => number = () => 0,
 ) {
   const waiters = new Set<Waiter>()
 
@@ -66,23 +62,10 @@ export function createInboxWaitManager(
     return {
       status: flags.aborted ? "aborted" : flags.timedOut ? "timeout" : "woken",
       ...snapshot.status,
-      // unread_count reconciles TWO independent reads instead of trusting one.
-      // The status projection and the attention projection are separate queries and
-      // nothing made them agree, so a payload could report unread_count: 0 beside a
-      // non-empty actionable_unread — measured four times in one seat's waits. The
-      // seat reads the count, concludes nothing arrived, and sleeps on top of work
-      // it was just handed.
-      //
-      // Neither source is authoritative, and each is empty when the other is not:
-      // the status projection lags an insert (the cursor race onMessageInserted
-      // below already refuses to trust), while attention can be empty for a live
-      // assign the status read can see. Taking the max is the only combination that
-      // never UNDER-reports, and under-reporting is the harmful direction — it is
-      // what puts a seat back to sleep on top of real work.
-      //
-      // Deriving purely from actionable_unread was tried and is wrong: it returns
-      // zero for a landed assign whose row attention has not projected yet.
-      unread_count: Math.max(snapshot.status.unread_count, snapshot.attention.actionable_unread.length),
+      // The list is the actionable contract; the scalar is only its projection.
+      // Taking a max across two reads produced an impossible payload — a positive
+      // count beside no rows the caller could inspect or discharge.
+      unread_count: snapshot.attention.actionable_unread.length,
       waited_ms: waitedMs,
       effective_timeout_ms: effectiveTimeoutMs,
       timed_out: flags.timedOut,
@@ -138,7 +121,7 @@ export function createInboxWaitManager(
         settle(waiter, { timedOut: false, aborted: false })
         continue
       }
-      // Default-wake on every actionable direct or owned tracked actionable broadcast.
+      // Default-wake on every actionable direct or owned tracked actionable message.
       // Do NOT require readStatus().unread_count > 0 here: that projection can
       // lag the insert (cursor race / concurrent ack) and swallow a live assign
       // while the seat remains armed — CTO residual 2026-07-25 on 21420

@@ -597,9 +597,9 @@ export function withDispatcher<
         const latest = latestInboxWaitMessage(sessionName, wakeOnCorrelatedReply, false)
         return latest?.rowid ?? 0
       },
-      (sessionName, wakeOnCorrelatedReply, status) => {
+      (sessionName, wakeOnCorrelatedReply) => {
         const current = latestInboxWaitMessage(sessionName, wakeOnCorrelatedReply, true)
-        return current?.rowid ?? (status.unread_count > 0 ? 1 : 0)
+        return current?.rowid ?? 0
       },
     )
     const previousOnMessageInserted = daemonCtx.onMessageInserted

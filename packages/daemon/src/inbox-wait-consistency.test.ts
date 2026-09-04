@@ -50,23 +50,16 @@ describe("inbox wait payload self-consistency", () => {
     expect(result.unread_count).toBe(2)
   })
 
-  it("still reports unread work the attention projection has not shown yet", async () => {
-    // The inverse case, and the one that killed the first attempt at this fix.
-    // Deriving the count purely from actionable_unread returns 0 for a landed
-    // assign whose row attention has not projected — proven by the real-database
-    // test in the sibling suite, which went red with "expected 0 to be greater
-    // than 0". Under-reporting is the harmful direction: it is what puts a seat
-    // back to sleep on top of real work.
+  it("does not report rows that the canonical attention projection cannot hand over", async () => {
+    // A scalar is not a second queue. If the list is empty, the payload must not
+    // claim that three actionable rows exist somewhere else.
     const result = await waitOnce(3, 0)
 
     expect(result.attention.actionable_unread).toHaveLength(0)
-    expect(result.unread_count).toBe(3)
+    expect(result.unread_count).toBe(0)
   })
 
-  it("never reports fewer than either source knows about", async () => {
-    // The actual invariant, stated once: whichever projection is ahead, the
-    // count follows it. Neither source is authoritative and each is empty while
-    // the other is not.
+  it("always derives the scalar from the rows in the same payload", async () => {
     for (const [statusUnread, rows] of [
       [0, 2],
       [3, 0],
@@ -75,7 +68,7 @@ describe("inbox wait payload self-consistency", () => {
       [1, 9],
     ] as const) {
       const result = await waitOnce(statusUnread, rows)
-      expect(result.unread_count).toBe(Math.max(statusUnread, rows))
+      expect(result.unread_count).toBe(rows)
     }
   })
 

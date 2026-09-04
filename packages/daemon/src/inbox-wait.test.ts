@@ -3,7 +3,7 @@ import type { MessageInsertedInfo } from "./lib/context.ts"
 import { createTribeContext } from "./lib/context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./lib/database.ts"
 import { messagingTools } from "./lib/compose/messaging-tools.ts"
-import type { HandlerOpts } from "./lib/handlers.ts"
+import { readAttentionProjection, type AttentionProjection, type HandlerOpts } from "./lib/handlers.ts"
 import { createInboxWaitManager, type InboxStatus } from "./lib/inbox-wait.ts"
 import { sendMessage } from "./lib/messaging.ts"
 import { mkdtempSync, rmSync } from "node:fs"
@@ -26,7 +26,42 @@ const EMPTY_ATTENTION = {
 }
 
 function createTestInboxWaitManager(readStatus: (session: string) => InboxStatus) {
-  return createInboxWaitManager(readStatus, () => EMPTY_ATTENTION)
+  const readAttention = (session: string): AttentionProjection => {
+    const unread = readStatus(session).unread_count
+    return {
+      actionable_unread: Array.from({ length: unread }, (_, index) => ({
+        id: `actionable-${index}`,
+        rowid: index + 1,
+        type: "request",
+        from: "@sender",
+        to: session,
+        content: "actionable test fixture",
+        bead: null,
+        ref: null,
+        ts: new Date(0).toISOString(),
+        delivery: "pull",
+        topic: null,
+        room_id: null,
+        summary: null,
+      })),
+      pending_balls: [],
+      pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
+    }
+  }
+  return createInboxWaitManager(
+    readStatus,
+    readAttention,
+    () => 0,
+    (session) => (readStatus(session).unread_count > 0 ? 1 : 0),
+  )
+}
+
+function realAttentionReader(
+  db: ReturnType<typeof openDatabase>,
+  stmts: TribeStatements,
+): (session: string) => AttentionProjection {
+  const reader = makeContext(db, stmts, "attention-reader", "@attention-reader")
+  return (session) => readAttentionProjection(reader, session).attention
 }
 
 function message(overrides: Partial<MessageInsertedInfo>): MessageInsertedInfo {
@@ -120,12 +155,14 @@ describe("createInboxWaitManager", () => {
     const manager = createInboxWaitManager(
       (session) => status(session, 3),
       () => attention,
+      () => 0,
+      () => 1,
     )
     const result = await manager.wait("@ci", "conn-1", 0)
     expect(result).toMatchObject({
       status: "woken",
       session: "@ci",
-      unread_count: 3,
+      unread_count: 1,
       timed_out: false,
       aborted: false,
       waited_ms: immediateWakeMs,
@@ -267,7 +304,6 @@ describe("createInboxWaitManager", () => {
     const manager = createTestInboxWaitManager((session) => status(session, unread))
     const wait = manager.wait("@author", "conn-1", 1_000)
 
-    unread = 1
     manager.onMessageInserted(
       message({
         type: "ball:reminder",
@@ -282,7 +318,7 @@ describe("createInboxWaitManager", () => {
 
     await expect(wait).resolves.toMatchObject({
       session: "@author",
-      unread_count: 1,
+      unread_count: 0,
       timed_out: true,
       aborted: false,
     })
@@ -442,7 +478,7 @@ describe("createInboxWaitManager", () => {
     const stmts = createStatements(db)
     const manager = createInboxWaitManager(
       (session) => status(session, 0),
-      () => EMPTY_ATTENTION,
+      realAttentionReader(db, stmts),
       (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
       (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply, true),
     )
@@ -511,7 +547,7 @@ describe("createInboxWaitManager", () => {
     const stmts = createStatements(db)
     const manager = createInboxWaitManager(
       (session) => status(session, 0),
-      () => EMPTY_ATTENTION,
+      realAttentionReader(db, stmts),
       (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
     )
     const requester = makeContext(db, stmts, "requester", "@requester", manager.onMessageInserted)
@@ -715,8 +751,9 @@ describe("createInboxWaitManager", () => {
     const readStatus = realUnreadReader(stmts)
     const manager = createInboxWaitManager(
       readStatus,
-      () => EMPTY_ATTENTION,
+      realAttentionReader(db, stmts),
       (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
+      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply, true),
     )
     const chief = makeContext(db, stmts, "chief", "@chief", manager.onMessageInserted)
 
@@ -760,8 +797,9 @@ describe("createInboxWaitManager", () => {
     const readStatus = realUnreadReader(stmts)
     const manager = createInboxWaitManager(
       readStatus,
-      () => EMPTY_ATTENTION,
+      realAttentionReader(db, stmts),
       (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
+      (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply, true),
     )
     const chief = makeContext(db, stmts, "chief", "@chief", manager.onMessageInserted)
     const seat = "@dev/1"
@@ -790,7 +828,7 @@ describe("createInboxWaitManager", () => {
     const readStatus = realUnreadReader(stmts)
     const manager = createInboxWaitManager(
       readStatus,
-      () => EMPTY_ATTENTION,
+      realAttentionReader(db, stmts),
       (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
       (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply, true),
     )
@@ -825,7 +863,7 @@ describe("createInboxWaitManager", () => {
     const readStatus = realUnreadReader(stmts)
     const manager = createInboxWaitManager(
       readStatus,
-      () => EMPTY_ATTENTION,
+      realAttentionReader(db, stmts),
       (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
     )
     const chief = makeContext(db, stmts, "chief", "@chief", manager.onMessageInserted)
@@ -864,7 +902,7 @@ describe("createInboxWaitManager", () => {
     const readStatus = realUnreadReader(stmts)
     const manager = createInboxWaitManager(
       readStatus,
-      () => EMPTY_ATTENTION,
+      realAttentionReader(db, stmts),
       (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
     )
     const chief = makeContext(db, stmts, "chief", "@chief", manager.onMessageInserted)
@@ -909,7 +947,7 @@ describe("createInboxWaitManager", () => {
     }
     const manager = createInboxWaitManager(
       readStatus,
-      () => EMPTY_ATTENTION,
+      realAttentionReader(db, stmts),
       (session, wakeOnCorrelatedReply) => realLatestInboxWaitSeq(stmts, session, wakeOnCorrelatedReply),
     )
     const chief = makeContext(db, stmts, "chief", "@chief", manager.onMessageInserted)
