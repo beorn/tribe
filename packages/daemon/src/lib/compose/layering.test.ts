@@ -36,9 +36,16 @@ describe("package layer and live-surface boundaries", () => {
       /\bspawnDaemonDetached\b/,
       /\bexport function parsePlan\(/,
       /\bexport function sanitizeForContext\(/,
-      /\bHEALTH_REAPER_KILL\b/,
-      /\breaperKillEnabled\b/,
-      /health:reaper:killed/,
+      /\bHEALTH_REAPER_\w+/,
+      /\bHEALTH_FD_\w+/,
+      /\bfdCount\b/,
+      /\bcheckReaper\b/,
+      /\bReaperExemptEntry\b/,
+      /\b(?:clear|is|list|set)ReaperExempt\b/,
+      /\breaperExemptMarkerPath\b/,
+      /\bresolveReaperExemptDir\b/,
+      /health:reaper:/,
+      /reaper-exempt/,
     ]
     const textViolations = sources.flatMap((path) => {
       const source = readFileSync(path, "utf8")
@@ -60,10 +67,12 @@ describe("package layer and live-surface boundaries", () => {
       "daemon/src/lib/compose/with-plugin-api.ts",
       "daemon/src/lib/compose/with-plugin.ts",
       "daemon/src/lib/dolt-reaper-plugin.ts",
+      "daemon/src/lib/health-monitor-canonical-reaper.ts",
       "daemon/src/lib/pending-ball-deadlines.ts",
       "daemon/src/lib/retro.ts",
       "recall/src/history/index.ts",
       "recall/src/lib/summarize.ts",
+      "wire/src/reaper-exempt.ts",
     ])
     const moduleViolations = sources
       .map((path) => relative(packagesRoot, path))

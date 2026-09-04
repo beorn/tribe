@@ -174,6 +174,19 @@ describe("health monitor managed process source", () => {
       timestamp: 9_000,
     })
     expect(spawn.mock.calls.some(([argv]) => Array.isArray(argv) && argv[0] === "df")).toBe(false)
+    expect(
+      spawn.mock.calls.some(
+        ([argv]) => Array.isArray(argv) && argv.some((part) => /ulimit|lsof -n/.test(String(part))),
+      ),
+    ).toBe(false)
+    expect(result.metrics).not.toHaveProperty("fdCount")
+    // The old detector compared a global row count with one process's limit.
+    // Neither the real 45 descriptors nor the misreported 388,759 may page.
+    for (const total of [45, 388_759]) {
+      const legacyMetrics = { ...result.metrics, fdCount: { total, limit: 524_288, perSession: [] } }
+      const types = evaluateAlerts(legacyMetrics, defaultThresholds(), createAlertState()).map((alert) => alert.type)
+      expect(types).not.toContain("fd-count")
+    }
     spawn.mockRestore()
   })
 
