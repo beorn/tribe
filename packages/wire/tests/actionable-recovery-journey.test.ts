@@ -80,6 +80,7 @@ const BASE_ENV: NodeJS.ProcessEnv = (() => {
   delete env.CLAUDE_SESSION_NAME
   delete env.BD_ACTOR
   delete env.AG_SESSION_AUTH
+  delete env.TRIBE_DELIVERY_FALLBACKS
   return env
 })()
 
@@ -606,16 +607,22 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
   it("keeps ambient supervisor traffic fetchable without waking and still wakes actionables", async () => {
     const socketPath = join(tmpDir, "notification-diet.sock")
     const dbPath = join(tmpDir, "notification-diet.db")
+    const observerName = "@notification-diet"
     daemonProc = spawnDaemon(socketPath, dbPath)
     await waitForDaemonSocket(daemonProc, socketPath)
 
-    const fleet = await spawnLaunchAdapter(socketPath, "notification-diet-fleet.log", "notification-diet-launch", {
-      name: "@fleet",
-      delivery: "push",
-      filterMode: "focus",
-    })
-    await callLaunchToolWhenRegistered(fleet, 2, "members", {})
-    const beforeAmbient = sessionDeliveryOffsets(dbPath, "@fleet")
+    const observer = await spawnLaunchAdapter(
+      socketPath,
+      "notification-diet-observer.log",
+      "notification-diet-launch",
+      {
+        name: observerName,
+        delivery: "push",
+        filterMode: "focus",
+      },
+    )
+    await callLaunchToolWhenRegistered(observer, 2, "members", {})
+    const beforeAmbient = sessionDeliveryOffsets(dbPath, observerName)
 
     const sender = await connectToDaemon(socketPath)
     try {
@@ -635,37 +642,44 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         { type: "github:push", content: "github ambient diet row" },
       ]
       for (const ambientCase of ambientCases) {
-        await sender.call("tribe.send", {
-          to: "@fleet",
+        const sent = (await sender.call("tribe.send", {
+          to: observerName,
           message: ambientCase.content,
           type: ambientCase.type,
           summary: ambientCase.content,
-        })
+        })) as { structuredContent?: Record<string, unknown> }
+        expect(sent.structuredContent).toMatchObject({ sent: true })
       }
-      const afterAmbient = sessionDeliveryOffsets(dbPath, "@fleet")
+      const afterAmbient = sessionDeliveryOffsets(dbPath, observerName)
       expect(afterAmbient).toEqual(beforeAmbient)
       for (const ambientCase of ambientCases) {
         expect(
-          channelNotifications(fleet.stdout).some((line) => JSON.stringify(line).includes(ambientCase.content)),
+          channelNotifications(observer.stdout).some((line) => JSON.stringify(line).includes(ambientCase.content)),
         ).toBe(false)
       }
 
-      writeJson(fleet.child, callToolPayload(3, "fetch", {}))
-      await waitForCondition(() => fleet.stdout.some((line) => line.id === 3), "fleet fetch response")
-      const fetched = toolResult(fleet.stdout, 3) as { events?: Array<{ content?: string }> }
+      writeJson(observer.child, callToolPayload(3, "fetch", {}))
+      await waitForCondition(() => observer.stdout.some((line) => line.id === 3), "observer fetch response")
+      const fetched = toolResult(observer.stdout, 3) as { events?: Array<{ content?: string }> }
       for (const ambientCase of ambientCases) {
         expect(fetched.events?.some((event) => event.content === ambientCase.content)).toBe(true)
       }
 
       for (const type of ["request", "query", "assign", "verdict"]) {
         const content = `${type} actionable diet row`
-        await sender.call("tribe.send", { to: "@fleet", message: content, type, summary: content })
+        const sent = (await sender.call("tribe.send", {
+          to: observerName,
+          message: content,
+          type,
+          summary: content,
+        })) as { structuredContent?: Record<string, unknown> }
+        expect(sent.structuredContent).toMatchObject({ sent: true })
         await waitForCondition(
-          () => channelNotifications(fleet.stdout).some((line) => JSON.stringify(line).includes(content)),
-          `${type} fleet wake`,
+          () => channelNotifications(observer.stdout).some((line) => JSON.stringify(line).includes(content)),
+          `${type} observer wake`,
         )
       }
-      expect(sessionDeliveryOffsets(dbPath, "@fleet").last_delivered_seq).toBeGreaterThan(
+      expect(sessionDeliveryOffsets(dbPath, observerName).last_delivered_seq).toBeGreaterThan(
         afterAmbient.last_delivered_seq,
       )
     } finally {
