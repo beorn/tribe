@@ -100,7 +100,7 @@ async function fetchUserRepos(headers: Record<string, string>): Promise<string[]
 // GitHub API
 // ---------------------------------------------------------------------------
 
-interface GitHubEvent {
+export interface GitHubEvent {
   id: string
   type: string
   actor: { login: string }
@@ -455,8 +455,31 @@ async function fetchWorkflowRuns(
 }
 
 // ---------------------------------------------------------------------------
-// Event formatting
+// Event selection and formatting
 // ---------------------------------------------------------------------------
+
+/**
+ * Which fetched events are new since the cursor, newest first, as GitHub
+ * returns them.
+ *
+ * `resync` means the last-seen id is not on the page: the page is older than
+ * the gap, so delivering it would announce stale pushes as news. Measured
+ * 2026-09-04: a yrd push from 2026-09-02T22:34Z was broadcast at 21:06Z under
+ * a merge garage, three rows per poll, and read as a live main write. The
+ * caller moves the cursor to the newest id and logs what it skipped, once.
+ */
+export function selectNewEvents(
+  events: readonly GitHubEvent[],
+  lastSeenId: string,
+): { kind: "deliver"; events: GitHubEvent[] } | { kind: "resync"; skipped: GitHubEvent[] } {
+  if (events.length === 0) return { kind: "deliver", events: [] }
+  const fresh: GitHubEvent[] = []
+  for (const event of events) {
+    if (event.id === lastSeenId) return { kind: "deliver", events: fresh }
+    fresh.push(event)
+  }
+  return { kind: "resync", skipped: fresh }
+}
 
 export function formatEvent(
   event: GitHubEvent,
@@ -475,8 +498,13 @@ export function formatEvent(
       const lastMsg = commits?.[commits.length - 1]?.message?.split("\n")[0] ?? ""
       const url = `https://github.com/${repo}/compare/${(payload.before as string)?.slice(0, 7)}...${(payload.head as string)?.slice(0, 7)}`
       const countStr = count > 0 ? `${count} commit${count !== 1 ? "s" : ""}` : "changes"
+      // The push's own time travels in the line. A row delivered late — after a
+      // daemon restart or a cursor resync — must not read as a push that just
+      // happened: on 2026-09-04 four day-old pushes were announced as fresh
+      // main writes under a merge garage and cost four investigations.
+      const tail = lastMsg ? ` — ${lastMsg}` : ""
       return {
-        line: `${repo}: ${actor} pushed ${countStr} to ${branch} — ${lastMsg}`,
+        line: `${repo}: ${actor} pushed ${countStr} to ${branch} at ${event.created_at}${tail}`,
         type: "push",
         url,
       }
@@ -658,16 +686,24 @@ export const githubPlugin: TribePluginApi = {
             continue
           }
 
-          // Collect new events (stop at cursor)
-          const newEvents: GitHubEvent[] = []
-          for (const event of events) {
-            if (event.id === lastSeenId) break
-            newEvents.push(event)
+          const selection = selectNewEvents(events, lastSeenId)
+          if (selection.kind === "resync") {
+            // The cursor fell off the page: everything on it is older than the
+            // gap. Delivering it would announce stale pushes as news (the old
+            // three-per-poll cap only turned that flood into a slow drip of
+            // stale rows). Say what is skipped, once, and move the cursor on.
+            const newest = selection.skipped[0]
+            const oldest = selection.skipped[selection.skipped.length - 1]
+            if (newest !== undefined && oldest !== undefined) {
+              log.warn?.(
+                `github events: ${r}: last-seen event ${lastSeenId} is not among the latest ` +
+                  `${selection.skipped.length} (${oldest.created_at} .. ${newest.created_at}); ` +
+                  `skipping them rather than announcing them as new, cursor resynced to ${newest.id}`,
+              )
+            }
           }
-
-          // Cap at 3 events per repo per poll to avoid flooding on cursor miss
-          const capped = newEvents.slice(0, 3)
-          for (const event of capped.reverse()) {
+          const deliverable = selection.kind === "deliver" ? [...selection.events].reverse() : []
+          for (const event of deliverable) {
             if (seenEventIds.has(event.id)) continue
             seenEventIds.add(event.id)
             if (seenEventIds.size > 500) seenEventIds.clear()

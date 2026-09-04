@@ -15,9 +15,12 @@ import { describe, expect, test } from "vitest"
 import {
   createPollHealth,
   detectRateLimit,
+  formatEvent,
   gitHubTokenSourceLabel,
   rateLimitInfoOf,
+  selectNewEvents,
   summarizePollErrors,
+  type GitHubEvent,
   type PollError,
   type RateLimitInfo,
 } from "./github-plugin.ts"
@@ -289,5 +292,36 @@ describe("gitHubTokenSourceLabel — names the config source, never the token (2
       if (saved === undefined) delete process.env.GITHUB_TOKEN
       else process.env.GITHUB_TOKEN = saved
     }
+  })
+})
+
+describe("selectNewEvents / formatEvent — a late push must not read as news (2026-09-04 replay)", () => {
+  const push = (id: string, createdAt: string): GitHubEvent => ({
+    id,
+    type: "PushEvent",
+    actor: { login: "beorn" },
+    repo: { name: "beorn/yrd" },
+    payload: { ref: "refs/heads/main", before: "1234567abcdef", head: "abcdef0123456", size: 1, distinct_size: 1 },
+    created_at: createdAt,
+  })
+
+  test("the push line carries the push's own time, so a row delivered late is dated", () => {
+    const out = formatEvent(push("1", "2026-09-02T22:34:59Z"), ["push"])
+    expect(out?.line).toBe("beorn/yrd: beorn pushed 1 commit to main at 2026-09-02T22:34:59Z")
+    expect(out?.url).toBe("https://github.com/beorn/yrd/compare/1234567...abcdef0")
+  })
+
+  test("events newer than the cursor are delivered, newest first, with no cap", () => {
+    const page = [push("5", "t5"), push("4", "t4"), push("3", "t3"), push("2", "t2"), push("1", "t1")]
+    expect(selectNewEvents(page, "1")).toEqual({ kind: "deliver", events: page.slice(0, 4) })
+  })
+
+  test("a cursor that fell off the page is a resync, never the whole page delivered as news", () => {
+    const page = [push("5", "t5"), push("4", "t4")]
+    expect(selectNewEvents(page, "gone")).toEqual({ kind: "resync", skipped: page })
+  })
+
+  test("an empty page with a cursor delivers nothing and does not resync", () => {
+    expect(selectNewEvents([], "1")).toEqual({ kind: "deliver", events: [] })
   })
 })
