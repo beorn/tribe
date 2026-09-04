@@ -2758,6 +2758,21 @@ function handleRepair(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
   if (repairMode !== "tail" && repairMode !== "reconcile") {
     return jsonResult({ error: 'repair requires inbox_cursor: "tail" or "reconcile"' })
   }
+  // 21757 — "reconcile" moved nothing and answered with a success shape
+  // (repaired:false inside a 200), which is a silent error: an operator
+  // reaching for a mailbox-cursor lever learned nothing. The mailbox cursor
+  // is advance-only and has no set/rewind lever by design (a rewind would
+  // re-announce rows a model already received; an advance on a seat's
+  // behalf is what `tribe inbox-drain --session <name>` does explicitly).
+  // Refuse, and name the levers that exist.
+  if (repairMode === "reconcile") {
+    return jsonResult({
+      error:
+        "repair inbox_cursor=reconcile does nothing and is refused (21757): the mailbox cursor is advance-only and has no reconcile lever. " +
+        "To acknowledge a seat's unread actionables on its behalf, run `tribe inbox-drain --session <name>` (explicit, journaled as a drain; `--peek` to look first). " +
+        "To advance only the ambient cursor, use inbox_cursor=tail. To see what a seat is owed, `tribe inbox-status --session <name> --json`.",
+    })
+  }
 
   const sessionName = typeof a.session === "string" && a.session.length > 0 ? a.session : ctx.getName()
   const tail = (ctx.stmts.getMessageTailSeq.get() as { seq: number } | null)?.seq ?? 0

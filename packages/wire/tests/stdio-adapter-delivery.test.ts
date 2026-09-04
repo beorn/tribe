@@ -1188,6 +1188,51 @@ describe("stdio adapter delivery modes", () => {
     }
   })
 
+  it("documents the authority hole: a CallTool fetch is a receipt whoever issued it — the adapter has no subagent-origin signal to honor (21757)", async () => {
+    // An in-process subagent shares the seat's MCP connection. Its
+    // tribe.fetch arrives as an ordinary CallTool, and the daemon treats a
+    // model-initiated read as a receipt: the rows are acknowledged for a
+    // steering model that never saw them, and health:inbox-stale cannot see
+    // it because the cursor moved. The host sends no origin marker today
+    // (nothing in the CallTool params is read for one), so the adapter
+    // cannot pass receipt:false on a fork's behalf. This test pins the
+    // hole as executable: when the host marks subagent-origin calls, the
+    // adapter must pass receipt:false for them and this assertion flips.
+    // Filed as its own bead; @cto ruling 2026-09-04 on 21757 v2.
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath, {
+      fetchEvents: [],
+      fetchAttention: { actionable_unread: [], pending_balls: [] },
+    })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: { ...process.env, TRIBE_DELIVERY: "push", TRIBE_NO_AUTOSTART: "1", DEBUG_LOG: join(tmpDir, "adapter.log") },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    void collectStdoutJson(child)
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+
+    // A fetch carrying origin metadata a host MIGHT one day attach.
+    await writeJsonAndWaitForLine(
+      child,
+      {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "fetch", arguments: {}, _meta: { "claude/subagent": true, origin: "fork" } },
+      },
+      (line) => line.id === 3,
+    )
+    const modelFetches = daemon.requests.filter((msg) => msg.method === "tribe.fetch") as Array<{
+      params?: { receipt?: unknown }
+    }>
+    expect(modelFetches.length).toBeGreaterThanOrEqual(1)
+    // The hole: no marker is honored, so this fetch is sent as a receipt.
+    expect(modelFetches.at(-1)?.params?.receipt).not.toBe(false)
+  })
+
   it("forwards one compact pending-ball summary on every wakeup", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath, {

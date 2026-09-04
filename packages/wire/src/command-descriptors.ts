@@ -1034,7 +1034,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             type: "string",
             enum: ["tail", "reconcile"],
             description:
-              'Use "tail" to advance only the ambient inbox cursor to the current journal tail. Use "reconcile" to verify the actionable mailbox cursor remains advance-only; tracked actionables are projected from pending ownership, so this mode never rewinds it.',
+              'Use "tail" to advance only the ambient inbox cursor to the current journal tail. "reconcile" is refused (21757): the actionable mailbox cursor is advance-only and has no reconcile lever; to acknowledge a seat\'s unread actionables on its behalf run `tribe inbox-drain --session <name>`.',
           },
           reap_stale_transports: {
             type: "boolean",
@@ -1082,7 +1082,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           name: "inbox-cursor",
           flags: "--inbox-cursor <mode>",
           description:
-            "Cursor mode: 'tail' advances the ambient inbox cursor; 'reconcile' verifies the mailbox cursor without rewinding it",
+            "Cursor mode: 'tail' advances the ambient inbox cursor; 'reconcile' is refused with the levers that exist (21757)",
           mapsTo: "inbox_cursor",
           enum: ["tail", "reconcile"],
         },

@@ -1221,6 +1221,48 @@ describe("dispatcher bounded mailbox drain", () => {
     expect(harness.sessionAnnouncements("@chief")).toEqual([])
   })
 
+  it("an operator inbox-drain acknowledges on the target's behalf by explicit intent, never stamps the target's read receipt, and --peek does neither (21757)", async () => {
+    // Path 4 of the 21757 audit: this verb writes the mailbox cursor
+    // privately (outside handleFetch). That is legitimate — an operator
+    // draining a seat is an explicit receipt by intent — but it had no test,
+    // and it must never pretend the target's model read its mailbox: the
+    // attention-read stamp is what health:inbox-stale measures a seat by.
+    const harness = createDispatcherHarness({ operatorCapability: "operator-test-secret" })
+    cleanup = harness.dispose
+    const cursorOf = (name: string) => harness.mailboxCursorSeq(name)
+    const drain = async (id: string, params: Record<string, unknown>) =>
+      parseResult<InboxDrainResult>(
+        await harness.dispatcher.handleRequest(
+          {
+            jsonrpc: "2.0",
+            id,
+            method: "cli_inbox_drain",
+            params: { session: "@chief", operator_capability: "operator-test-secret", ...params },
+          },
+          "conn-drain",
+        ),
+      )
+
+    harness.sendAttentionResponse("@chief", "an untracked verdict-class row the seat never read")
+    expect(cursorOf("@chief")).toBe(0)
+    expect(harness.mailboxAttentionReadAt("@chief")).toBeNull()
+
+    const peeked = await drain("drain-peek", { peek: true })
+    expect(peeked.events.map((event) => event.content)).toEqual(["an untracked verdict-class row the seat never read"])
+    expect(cursorOf("@chief")).toBe(0)
+    expect(harness.mailboxAttentionReadAt("@chief")).toBeNull()
+
+    const drained = await drain("drain-ack", {})
+    expect(drained.drained_count).toBe(1)
+    expect(cursorOf("@chief")).toBeGreaterThan(0)
+    expect(drained.unread_count).toBe(0)
+    // Acknowledged for the seat — but the seat did not read: no receipt stamp.
+    expect(harness.mailboxAttentionReadAt("@chief")).toBeNull()
+
+    const again = await drain("drain-again", {})
+    expect(again.events).toEqual([])
+  })
+
   it("denies a registered role that tries to acknowledge another role's mailbox", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
@@ -2328,6 +2370,12 @@ function createDispatcherHarness(
         last_attention_read_at: number | null
       } | null
       return row?.last_attention_read_at ?? null
+    },
+    mailboxCursorSeq(name: string): number {
+      const row = db.prepare("SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = ?").get(name) as {
+        last_actionable_seq: number
+      } | null
+      return row?.last_actionable_seq ?? 0
     },
     sessionFilter(name: string): { mode: string; until: number | null; mute: string | null } | undefined {
       const row = db

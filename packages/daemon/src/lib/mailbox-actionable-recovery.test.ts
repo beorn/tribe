@@ -1176,10 +1176,19 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     const beforeRepair = readAttentionProjection(b, NAME)
     expect(beforeRepair.attention.actionable_unread.map((event) => event.id)).toContain("req-1")
 
+    // 21757 — reconcile is refused loudly (it never did anything); the
+    // refusal names the levers that exist and the cursor is untouched.
     const repairResult = parseToolJson(handleToolCall(b, "tribe.repair", { inbox_cursor: "reconcile" }, opts))
-    expect(repairResult.repaired).toBe(false)
-    expect(repairResult.mailbox_reconciled).toBe(false)
-    expect(repairResult.mailbox_cursor_after).toBe(9999)
+    expect(repairResult.repaired).toBeUndefined()
+    expect(String(repairResult.error)).toMatch(/reconcile does nothing and is refused/u)
+    expect(String(repairResult.error)).toContain("tribe inbox-drain --session <name>")
+    expect(
+      (
+        db.prepare("SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = ?").get(NAME) as {
+          last_actionable_seq: number
+        }
+      ).last_actionable_seq,
+    ).toBe(9999)
 
     const fetchRes = fetchJson(b, opts)
     expect(fetchRes.json.attention?.actionable_unread?.map((e) => e.id)).toContain("req-1")
@@ -1209,9 +1218,21 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       stmts.advanceMailboxCursor.run({ $recipient: NAME, $seq: 9999, $now: Date.now() })
 
       const repair = parseToolJson(handleToolCall(owner, "tribe.repair", { inbox_cursor: repairMode }, opts))
-      expect(repair.mailbox_cursor_before).toBe(9999)
-      expect(repair.mailbox_cursor_after).toBe(9999)
-      expect(repair.mailbox_reconciled).toBe(false)
+      if (repairMode === "reconcile") {
+        // 21757 — refused loudly; nothing moves.
+        expect(String(repair.error)).toMatch(/reconcile does nothing and is refused/u)
+      } else {
+        expect(repair.mailbox_cursor_before).toBe(9999)
+        expect(repair.mailbox_cursor_after).toBe(9999)
+        expect(repair.mailbox_reconciled).toBe(false)
+      }
+      expect(
+        (
+          db.prepare("SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = ?").get(NAME) as {
+            last_actionable_seq: number
+          }
+        ).last_actionable_seq,
+      ).toBe(9999)
 
       const drained = fetchJson(owner, opts).json
       expect(drained.attention?.actionable_unread).toEqual([])
