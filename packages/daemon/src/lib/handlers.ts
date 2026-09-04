@@ -3126,8 +3126,9 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
     // ahead of the ambient window. Owned tracked broadcasts already remain in
     // actionable_unread until TAKING/settlement; reinjecting one below the
     // ambient cursor would duplicate its event after an explicit advancing
-    // snapshot. Operator inbox-drain has no separate attention projection and
-    // therefore includes them through readUnackedAttentionRows's default.
+    // snapshot. Operator inbox-drain uses the same direct-only recovery and
+    // excludes tracked broadcasts: their durable ownership stays in
+    // actionable_unread until TAKING/settlement instead of being replayed as events.
     const recovered = readUnackedDirectAttentionRows(ctx, currentName, cursorBase, limit)
     const windowBudget = limit - recovered.length
     // Read the high-water mark BEFORE the window so it can only be
