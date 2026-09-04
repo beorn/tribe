@@ -50,6 +50,10 @@
 
 ### Fixed
 
+- **Node 22 library imports.** Scope uses non-global resource-management
+  constructors when the runtime does not provide them, retaining disposal and
+  error semantics without raising the supported Node version.
+
 - Keep retained disconnected `unknown-*` launch rows observable under the
   bounded `anonymous_disconnected` health count without manufacturing
   addressable transport wedges or membership discrepancies.

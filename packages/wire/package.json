@@ -129,6 +129,7 @@
     "@bearly/flock": "0.1.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@silvery/commander": "^0.19.2",
+    "core-js-pure": "3.50.0",
     "loggily": "^0.10.2",
     "removely": "^0.1.0"
   },
