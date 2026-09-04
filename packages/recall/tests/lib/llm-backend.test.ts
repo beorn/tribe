@@ -6,7 +6,7 @@
 
 import { describe, test, expect, vi } from "vitest"
 import { spawnSync } from "node:child_process"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -323,10 +323,54 @@ describe("loadLlm shared provider-health surface", () => {
     }
   })
 
-  test("loads Bearly through its public barrel and turns the host deny list into selector exclusions", () => {
+  test("loads a complete public barrel and turns the host deny list into selector exclusions", () => {
     const home = mkdtempSync(join(tmpdir(), "recall-llm-health-"))
     const backendModule = pathToFileURL(resolve(import.meta.dirname, "../../src/lib/llm-backend.ts")).href
-    const bearlyDir = resolve(import.meta.dirname, "../../../../../bearly/plugins/llm/src")
+    const fixture = join(home, "llm-backend")
+    mkdirSync(fixture, { recursive: true })
+    writeFileSync(
+      join(fixture, "index.ts"),
+      `
+        const model = { provider: "openai", modelId: "gpt-test" }
+        export const queryModel = async () => ({ response: { content: "ok" } })
+        export const getModel = (id) => id === model.modelId ? model : undefined
+        export const getCheapModel = () => model
+        export const getCheapModels = () => [model]
+        export const estimateCost = () => 0
+        export const isProviderAvailable = () => true
+        export const createProviderObservationStore = () => ({})
+        export const readProviderAvailability = async (provider) => ({
+          provider,
+          status: "unknown",
+          source: "fixture",
+          reason: "never observed",
+        })
+        export const selectModels = ({ candidates = [model], exclude = new Set() }) => {
+          const selected = candidates.filter((candidate) => !exclude.has(candidate.provider))
+          const excluded = candidates
+            .filter((candidate) => exclude.has(candidate.provider))
+            .map((candidate) => ({
+              model: candidate,
+              provider: candidate.provider,
+              status: "excluded",
+              source: "caller-exclusion",
+              reason: "excluded by caller",
+            }))
+          return {
+            candidates,
+            selected,
+            excluded,
+            evidence: candidates.map((candidate) => ({
+              provider: candidate.provider,
+              status: "unknown",
+              source: "fixture",
+              reason: "never observed",
+            })),
+          }
+        }
+        export const describeDispatchFailure = () => ({ message: "fixture failure" })
+      `,
+    )
     const childScript = `
       const { loadLlm, selectAvailableCheapModels } = await import(process.env.LLM_BACKEND_MODULE)
       const llm = await loadLlm()
@@ -347,7 +391,7 @@ describe("loadLlm shared provider-health surface", () => {
           ...process.env,
           HOME: home,
           LLM_BACKEND_MODULE: backendModule,
-          TRIBE_LLM_DIR: bearlyDir,
+          TRIBE_LLM_DIR: fixture,
           OPENAI_API_KEY: "configured-for-test",
           RECALL_LLM_DENY_PROVIDERS: "openai",
         },
