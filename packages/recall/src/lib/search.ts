@@ -141,7 +141,7 @@ export async function refreshIndexIfStale(
   return refreshIndexIfStaleWithDeps(options, merged)
 }
 
-function readIndexProvenance(options: { refresh?: boolean }): IndexProvenance {
+export function readIndexProvenance(options: { refresh?: boolean }): IndexProvenance {
   if (options.refresh === false) return "unknown"
 
   try {

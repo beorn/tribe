@@ -6,6 +6,9 @@
  * are the canonical contract used by both sides.
  */
 
+import type { IndexProvenance, SynthesisDiagnostics } from "../../../../packages/recall/src/history/recall-shared.ts"
+import type { AgentRecallResult } from "../../../../packages/recall/src/lib/agent.ts"
+
 // ---------------------------------------------------------------------------
 // Protocol
 // ---------------------------------------------------------------------------
@@ -78,6 +81,7 @@ export type AskParams = {
 export type AskResult = {
   query: string
   answer: string | null
+  provenance: IndexProvenance
   results: Array<{
     type: string
     sessionId: string
@@ -90,7 +94,31 @@ export type AskResult = {
   synthPath: "speculative-round1" | "fresh-merged" | "single-pass" | "none" | "no-synth"
   synthCallsUsed: number
   fellThrough: boolean
+  synthesisFailure?: SynthesisDiagnostics
   trace?: Record<string, unknown>
+}
+
+/** Project the canonical agent result into the shared ask wire contract. */
+export function toAskResult(result: AgentRecallResult, options: { includeTrace?: boolean } = {}): AskResult {
+  return {
+    query: result.query,
+    answer: result.synthesis,
+    provenance: result.provenance,
+    results: result.results.map((item) => ({
+      type: String(item.type),
+      sessionId: item.sessionId,
+      sessionTitle: item.sessionTitle,
+      timestamp: item.timestamp,
+      snippet: item.snippet,
+    })),
+    durationMs: result.durationMs,
+    cost: result.llmCost ?? 0,
+    synthPath: result.trace.synthPath ?? "no-synth",
+    synthCallsUsed: result.trace.synthCallsUsed ?? 0,
+    fellThrough: result.fellThrough ?? false,
+    ...(result.synthesisFailure ? { synthesisFailure: result.synthesisFailure } : {}),
+    ...(options.includeTrace ? { trace: result.trace as unknown as Record<string, unknown> } : {}),
+  }
 }
 
 // ---------------------------------------------------------------------------

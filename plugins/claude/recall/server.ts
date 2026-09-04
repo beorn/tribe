@@ -31,6 +31,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { recallAgent } from "../../../packages/recall/src/lib/agent.ts"
+import { readIndexProvenance } from "../../../packages/recall/src/lib/search.ts"
 import { planQuery, planVariants } from "../../../packages/recall/src/lib/plan.ts"
 import { buildQueryContext } from "../../../packages/recall/src/lib/context.ts"
 import { getCurrentSessionContext } from "../../../packages/recall/src/lib/session-context.ts"
@@ -40,6 +41,7 @@ import { resolveSocketPath as resolveTribeSocketPath } from "tribe-wire/lib/sock
 import {
   TRIBE_METHODS,
   RECALL_PROTOCOL_VERSION,
+  toAskResult,
   type AskResult,
   type CurrentBriefResult,
   type PlanOnlyResult,
@@ -82,7 +84,7 @@ async function getDaemon(): Promise<LoreClient | null> {
   } catch (err) {
     if (process.env.TRIBE_LOG === "1") {
       process.stderr.write(
-        `[lore] daemon unavailable, using library fallback: ${err instanceof Error ? err.message : err}\n`,
+        `[lore] daemon unavailable, using library fallback: ${err instanceof Error ? err.message : String(err)}\n`,
       )
     }
     daemonDisabled = true
@@ -221,7 +223,7 @@ async function handleAsk(args: Record<string, unknown>): Promise<string> {
     } catch (err) {
       if (process.env.TRIBE_LOG === "1") {
         process.stderr.write(
-          `[lore] daemon.ask failed, falling back to library: ${err instanceof Error ? err.message : err}\n`,
+          `[lore] daemon.ask failed, falling back to library: ${err instanceof Error ? err.message : String(err)}\n`,
         )
       }
     }
@@ -235,25 +237,12 @@ async function handleAsk(args: Record<string, unknown>): Promise<string> {
     round2: askParams.round2,
     maxRounds: askParams.maxRounds,
     speculativeSynth: askParams.speculativeSynth,
+    provenance: readIndexProvenance({}),
   })
   const payload: Record<string, unknown> = {
-    query: result.query,
-    answer: result.synthesis,
-    results: result.results.map((r) => ({
-      type: r.type,
-      sessionId: r.sessionId,
-      sessionTitle: r.sessionTitle,
-      timestamp: r.timestamp,
-      snippet: r.snippet,
-    })),
-    durationMs: result.durationMs,
-    cost: result.llmCost ?? 0,
-    synthPath: result.trace?.synthPath ?? "no-synth",
-    synthCallsUsed: result.trace?.synthCallsUsed ?? 0,
-    fellThrough: result.fellThrough ?? false,
+    ...toAskResult(result, { includeTrace: args.rawTrace === true }),
     mode: "library",
   }
-  if (args.rawTrace === true) payload.trace = result.trace
   return JSON.stringify(payload, null, 2)
 }
 
@@ -271,7 +260,7 @@ async function handleCurrentBrief(args: Record<string, unknown>): Promise<string
     } catch (err) {
       if (process.env.TRIBE_LOG === "1") {
         process.stderr.write(
-          `[lore] daemon.current_brief failed, falling back: ${err instanceof Error ? err.message : err}\n`,
+          `[lore] daemon.current_brief failed, falling back: ${err instanceof Error ? err.message : String(err)}\n`,
         )
       }
     }
@@ -315,7 +304,7 @@ async function handlePlanOnly(args: Record<string, unknown>): Promise<string> {
     } catch (err) {
       if (process.env.TRIBE_LOG === "1") {
         process.stderr.write(
-          `[lore] daemon.plan_only failed, falling back: ${err instanceof Error ? err.message : err}\n`,
+          `[lore] daemon.plan_only failed, falling back: ${err instanceof Error ? err.message : String(err)}\n`,
         )
       }
     }
@@ -402,7 +391,7 @@ async function handleInjectDelta(args: Record<string, unknown>): Promise<string>
     } catch (err) {
       if (process.env.TRIBE_LOG === "1") {
         process.stderr.write(
-          `[lore] daemon.inject_delta failed, falling back: ${err instanceof Error ? err.message : err}\n`,
+          `[lore] daemon.inject_delta failed, falling back: ${err instanceof Error ? err.message : String(err)}\n`,
         )
       }
     }
@@ -458,9 +447,10 @@ async function handleSessionState(args: Record<string, unknown>): Promise<string
 // MCP server wiring
 // ============================================================================
 
+// oxlint-disable-next-line typescript/no-deprecated -- This low-level server owns raw protocol request handlers.
 const server = new Server({ name: "lore", version: "0.14.1" }, { capabilities: { tools: {} } })
 
-server.setRequestHandler(ListToolsRequestSchema, async () => {
+server.setRequestHandler(ListToolsRequestSchema, () => {
   return { tools: TOOLS }
 })
 

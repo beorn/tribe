@@ -32,6 +32,7 @@ import {
   TRIBE_METHODS,
   RECALL_ERRORS,
   RECALL_PROTOCOL_VERSION,
+  toAskResult,
   type AskParams,
   type AskResult,
   type CurrentBriefParams,
@@ -86,6 +87,7 @@ type DeepRecallEngine = {
   setRecallLogging: (typeof import("../../../recall/src/history/recall-shared.ts"))["setRecallLogging"]
   createMemorySeenStore: (typeof import("../../../recall/src/lib/inject-core.ts"))["createMemorySeenStore"]
   runInjectDelta: (typeof import("../../../recall/src/lib/inject-core.ts"))["runInjectDelta"]
+  readIndexProvenance: (typeof import("../../../recall/src/lib/search.ts"))["readIndexProvenance"]
 }
 
 type SeenStore = ReturnType<DeepRecallEngine["createMemorySeenStore"]>
@@ -105,13 +107,16 @@ async function loadDeepRecallEngine(log: ReturnType<typeof createLogger>): Promi
     // override seam for forks/experiments only.
     const dir = process.env.TRIBE_RECALL_ENGINE_DIR ?? new URL("../../../recall/src", import.meta.url).pathname
     try {
-      const [agent, plan, context, sessionContext, shared, injectCore] = await Promise.all([
-        import(`${dir}/lib/agent.ts`),
-        import(`${dir}/lib/plan.ts`),
-        import(`${dir}/lib/context.ts`),
-        import(`${dir}/lib/session-context.ts`),
-        import(`${dir}/history/recall-shared.ts`),
-        import(`${dir}/lib/inject-core.ts`),
+      const [agent, plan, context, sessionContext, shared, injectCore, search] = await Promise.all([
+        import(`${dir}/lib/agent.ts`) as Promise<typeof import("../../../recall/src/lib/agent.ts")>,
+        import(`${dir}/lib/plan.ts`) as Promise<typeof import("../../../recall/src/lib/plan.ts")>,
+        import(`${dir}/lib/context.ts`) as Promise<typeof import("../../../recall/src/lib/context.ts")>,
+        import(`${dir}/lib/session-context.ts`) as Promise<typeof import("../../../recall/src/lib/session-context.ts")>,
+        import(`${dir}/history/recall-shared.ts`) as Promise<
+          typeof import("../../../recall/src/history/recall-shared.ts")
+        >,
+        import(`${dir}/lib/inject-core.ts`) as Promise<typeof import("../../../recall/src/lib/inject-core.ts")>,
+        import(`${dir}/lib/search.ts`) as Promise<typeof import("../../../recall/src/lib/search.ts")>,
       ])
       deepRecallEngine = {
         recallAgent: agent.recallAgent,
@@ -123,7 +128,8 @@ async function loadDeepRecallEngine(log: ReturnType<typeof createLogger>): Promi
         setRecallLogging: shared.setRecallLogging,
         createMemorySeenStore: injectCore.createMemorySeenStore,
         runInjectDelta: injectCore.runInjectDelta,
-      } as DeepRecallEngine
+        readIndexProvenance: search.readIndexProvenance,
+      }
       log.info?.(`deep-recall engine loaded from ${dir}`)
       return deepRecallEngine
     } catch (err) {
@@ -184,7 +190,7 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
   // not on first use, and (b) the sync focus poller sees `deepRecallEngine`
   // populated by the time its first 60s tick fires.
   void loadDeepRecallEngine(log).then((engine) => {
-    engine?.setRecallLogging(process.env.TRIBE_LOG === "1")
+    return engine?.setRecallLogging(process.env.TRIBE_LOG === "1")
   })
 
   const db = openRecallDatabase(opts.dbPath)
@@ -212,7 +218,7 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
   // Handlers over the shared recall database and wire protocol.
   // ---------------------------------------------------------------------------
 
-  async function handleHello(_conn: RecallConnState, params: HelloParams): Promise<HelloResult> {
+  function handleHello(_conn: RecallConnState, params: HelloParams): HelloResult {
     if (params.protocolVersion !== RECALL_PROTOCOL_VERSION) {
       throw new Error(
         `protocol version mismatch: client ${params.clientName} speaks v${params.protocolVersion}, daemon speaks v${RECALL_PROTOCOL_VERSION}`,
@@ -236,24 +242,9 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
       round2: params.round2,
       maxRounds: params.maxRounds,
       speculativeSynth: params.speculativeSynth,
+      provenance: engine.readIndexProvenance({}),
     })
-    return {
-      query: result.query,
-      answer: result.synthesis,
-      results: result.results.map((r) => ({
-        type: String(r.type),
-        sessionId: r.sessionId,
-        sessionTitle: r.sessionTitle,
-        timestamp: r.timestamp,
-        snippet: r.snippet,
-      })),
-      durationMs: result.durationMs,
-      cost: result.llmCost ?? 0,
-      synthPath: result.trace?.synthPath ?? "no-synth",
-      synthCallsUsed: result.trace?.synthCallsUsed ?? 0,
-      fellThrough: result.fellThrough ?? false,
-      trace: params.rawTrace ? (result.trace as unknown as Record<string, unknown>) : undefined,
-    }
+    return toAskResult(result, { includeTrace: params.rawTrace })
   }
 
   async function handleCurrentBrief(conn: RecallConnState, params: CurrentBriefParams): Promise<CurrentBriefResult> {
@@ -520,7 +511,7 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
         updatedAt: Date.now(),
       })
     } catch (err) {
-      log.debug?.(`focus refresh failed for pid=${row.claude_pid}: ${err instanceof Error ? err.message : err}`)
+      log.debug?.(`focus refresh failed for pid=${row.claude_pid}: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
 
@@ -561,7 +552,9 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
         })
         log.debug?.(`summary refreshed pid=${row.claude_pid} model=${summary.model} cost=$${summary.cost.toFixed(5)}`)
       } catch (err) {
-        log.debug?.(`summary refresh failed for pid=${row.claude_pid}: ${err instanceof Error ? err.message : err}`)
+        log.debug?.(
+          `summary refresh failed for pid=${row.claude_pid}: ${err instanceof Error ? err.message : String(err)}`,
+        )
       }
     }
   }
@@ -608,8 +601,8 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
   }
 
   let closed = false
-  async function close(): Promise<void> {
-    if (closed) return
+  function close(): Promise<void> {
+    if (closed) return Promise.resolve()
     closed = true
     clearInterval(janitor)
     clearInterval(focusPoller)
@@ -619,6 +612,7 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
     } catch {
       /* ignore */
     }
+    return Promise.resolve()
   }
 
   return {

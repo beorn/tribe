@@ -12,6 +12,8 @@
 import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { describe, expect, test } from "vitest"
+import { toAskResult } from "../recall/lib/rpc.ts"
+import type { AgentRecallResult } from "../../../packages/recall/src/lib/agent.ts"
 
 const RECALL_SERVER = readFileSync(resolve(import.meta.dirname, "../recall/server.ts"), "utf8")
 const RECALL_SOCKET = readFileSync(resolve(import.meta.dirname, "../recall/lib/socket.ts"), "utf8")
@@ -31,5 +33,58 @@ describe("Claude plugin boundary", () => {
     expect(readme).toContain("Reusable protocol code belongs in `tribe-wire`")
     expect(readme).toContain("Project workflow conventions")
     expect(readme).not.toContain("Placeholder")
+  })
+
+  test("preserves the degraded reason and provenance in the ask payload", () => {
+    const base: AgentRecallResult = {
+      query: "provider health",
+      provenance: "complete",
+      synthesis: null,
+      results: [],
+      durationMs: 42,
+      trace: {
+        rounds: [],
+        decision: { round2Mode: "off", reason: "fixture" },
+        contextChars: 0,
+        synthPath: "none",
+        synthCallsUsed: 0,
+      },
+    }
+    const noMatches = toAskResult(base)
+
+    const degraded = toAskResult({
+      ...base,
+      provenance: "stale",
+      results: [
+        {
+          type: "message",
+          sessionId: "session-1",
+          sessionTitle: "Provider notes",
+          timestamp: 1,
+          snippet: "The lexical hit remains useful.",
+          rank: -1,
+        },
+      ],
+      synthesisFailure: {
+        summary: "No LLM provider is available; rerun with --raw.",
+        totalBudgetMs: 20_000,
+        attempts: [],
+        batches: [],
+        excludedProviders: [{ provider: "openai", modelId: "gpt-5-nano", reason: "account unavailable" }],
+        consideredProviders: [],
+      },
+    })
+
+    expect(noMatches).toMatchObject({ answer: null, provenance: "complete", results: [] })
+    expect(noMatches).not.toHaveProperty("synthesisFailure")
+    expect(degraded).toMatchObject({
+      answer: null,
+      provenance: "stale",
+      results: [{ sessionId: "session-1", snippet: "The lexical hit remains useful." }],
+      synthesisFailure: {
+        summary: "No LLM provider is available; rerun with --raw.",
+        excludedProviders: [{ provider: "openai", reason: "account unavailable" }],
+      },
+    })
   })
 })
