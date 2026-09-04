@@ -368,11 +368,10 @@ async function cmdSessions(showAll: boolean): Promise<void> {
   console.log(
     `  ${pad("NAME", nW)}  ${pad("ROLE", rW)}  ${pad("PID", 7)}  ${pad("UPTIME", 10)}  ${pad("IDLE", 8)}  ${pad("CWD", cW)}  SOURCE`,
   )
-  for (let i = 0; i < sessions.length; i++) {
-    const r = sessions[i]!
+  for (const r of sessions) {
     const idle = typeof r.idleMs === "number" ? fmtDur(r.idleMs) : "—"
     console.log(
-      `  ${pad(r.name, nW)}  ${pad(r.role, rW)}  ${pad(String(r.pid), 7)}  ${pad(fmtDur(r.uptimeMs), 10)}  ${pad(idle, 8)}  ${pad(cwds[i]!, cW)}  ${r.source}`,
+      `  ${pad(r.name, nW)}  ${pad(r.role, rW)}  ${pad(String(r.pid), 7)}  ${pad(fmtDur(r.uptimeMs), 10)}  ${pad(idle, 8)}  ${pad(fmtCwd(r.cwd), cW)}  ${r.source}`,
     )
   }
 }
@@ -719,14 +718,12 @@ async function cmdHealth(): Promise<void> {
       console.log(`\n  Sessions: ${result.sessions.length} active`)
       const nW = Math.max(4, ...result.sessions.map((r) => r.name.length))
       const rW = Math.max(4, ...result.sessions.map((r) => r.role.length))
-      const cwds = result.sessions.map((r) => fmtCwd(r.cwd))
       console.log(
         `    ${pad("NAME", nW)}  ${pad("ROLE", rW)}  ${pad("PID", 7)}  ${pad("UPTIME", 10)}  ${pad("IDLE", 8)}  CWD`,
       )
-      for (let i = 0; i < result.sessions.length; i++) {
-        const r = result.sessions[i]!
+      for (const r of result.sessions) {
         console.log(
-          `    ${pad(r.name, nW)}  ${pad(r.role, rW)}  ${pad(String(r.pid), 7)}  ${pad(fmtDur(r.uptimeMs), 10)}  ${pad(fmtDur(r.idleMs), 8)}  ${cwds[i]}`,
+          `    ${pad(r.name, nW)}  ${pad(r.role, rW)}  ${pad(String(r.pid), 7)}  ${pad(fmtDur(r.uptimeMs), 10)}  ${pad(fmtDur(r.idleMs), 8)}  ${fmtCwd(r.cwd)}`,
         )
       }
     }
@@ -1535,7 +1532,12 @@ export async function waitForInboxWithReconnect(opts: {
   wakeOnCorrelatedReply?: boolean
 }): Promise<InboxWaitResult> {
   const now = opts.now ?? Date.now
-  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  const sleep =
+    opts.sleep ??
+    ((ms: number) =>
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, ms)
+      }))
   const maxChunkMs = opts.maxChunkMs ?? INBOX_WAIT_CHUNK_MS
   const retryDelayMs = Math.max(0, opts.retryDelayMs ?? INBOX_WAIT_RETRY_DELAY_MS)
   const unavailableGraceMs = opts.unavailableGraceMs ?? INBOX_WAIT_UNAVAILABLE_GRACE_MS
