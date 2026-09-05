@@ -5,7 +5,14 @@
 import { randomUUID } from "node:crypto"
 import type { TribeContext } from "./context.ts"
 import { AUTO_TRACK_TYPES_SET } from "./database.ts"
-import { incidentKey, type BallSettlementReason, type IncidentIdentity } from "tribe-wire"
+import {
+  incidentKey,
+  parseBallOutcomeFact,
+  type BallOutcomeFactRow,
+  type BallSettlementFact,
+  type BallSettlementReason,
+  type IncidentIdentity,
+} from "tribe-wire"
 
 export type { BallSettlementReason } from "tribe-wire"
 
@@ -217,6 +224,143 @@ export function settlePendingRows(
     ctx.stmts.closePendingRequest.run({ $request_id: row.request_id, $recipient: row.recipient })
   }
   return rows.length
+}
+
+/**
+ * Why a `closed: 0` ball result closed nothing, read straight from the
+ * journal (@ag/tribe/an-advertised-ball-owner-disappears-before-it-can-settle).
+ * `settlePendingRows` above journals one `event.ball.settled` fact per
+ * recipient row it releases, so the fact the caller wants is either present
+ * for their own name or, on a fanout='first' broadcast, present for whichever
+ * owner's answer settled the shared request first.
+ *
+ *   - `settled`                — a settlement fact exists for THIS owner.
+ *     `by_another_owner` is true when someone else (another owner's answer,
+ *     the incident emitter, the pruner, the original sender) did the settling.
+ *   - `settled-for-other-owner` — the request was settled, but never for this
+ *     owner; only for a different recipient. Distinct from never-tracked: the
+ *     id is real, it just never named this caller.
+ *   - `never-tracked`          — no row, no fact, for anyone, in either tier.
+ */
+export type PendingCloseCause =
+  | {
+      kind: "settled"
+      settlement: BallSettlementReason
+      settled_by: string
+      settled_at: number
+      recipient: string
+      fanout: "first" | "all"
+      by_another_owner: boolean
+      /** Newest `event.ball.expired` deadline observation for this owner, if
+       *  any — the ball's declared deadline passed before it was settled. */
+      expired_at?: number
+    }
+  | {
+      kind: "settled-for-other-owner"
+      settlement: BallSettlementReason
+      settled_by: string
+      settled_at: number
+      recipient: string
+      fanout: "first" | "all"
+    }
+  | { kind: "never-tracked" }
+
+/** Fold the journal for one request id, across both retention tiers, into the
+ * exact reason its owner's row is gone. Read-only; never mutates the tracker
+ * or the journal. */
+export function pendingCloseCause(ctx: TribeContext, requestId: string, owner: string): PendingCloseCause {
+  const rows = ctx.stmts.selectPendingOutcomeFactsForRequest.all({
+    $request_id: requestId,
+  }) as BallOutcomeFactRow[]
+  if (rows.length === 0) return { kind: "never-tracked" }
+  const facts = rows.map(parseBallOutcomeFact)
+
+  let ownerSettlement: BallSettlementFact | undefined
+  let otherSettlement: BallSettlementFact | undefined
+  for (const fact of facts) {
+    if (fact.kind !== "settled") continue
+    if (fact.recipient === owner) {
+      if (ownerSettlement === undefined || fact.settled_at > ownerSettlement.settled_at) ownerSettlement = fact
+    } else if (otherSettlement === undefined || fact.settled_at > otherSettlement.settled_at) {
+      otherSettlement = fact
+    }
+  }
+  const settled = ownerSettlement ?? otherSettlement
+  if (settled === undefined) return { kind: "never-tracked" }
+
+  if (ownerSettlement === undefined) {
+    return {
+      kind: "settled-for-other-owner",
+      settlement: settled.settlement,
+      settled_by: settled.settled_by,
+      settled_at: settled.settled_at,
+      recipient: settled.recipient,
+      fanout: settled.fanout,
+    }
+  }
+
+  // A deadline observation never settles ownership on its own (see
+  // `expiredPendingBalls`'s comment on the same journal) — it is context on
+  // TOP of a real settlement, never a substitute for one.
+  let expiredAt: number | undefined
+  for (const fact of facts) {
+    if (fact.kind !== "deadline-passed" || fact.recipient !== owner) continue
+    if (expiredAt === undefined || fact.observed_at > expiredAt) expiredAt = fact.observed_at
+  }
+
+  return {
+    kind: "settled",
+    settlement: ownerSettlement.settlement,
+    settled_by: ownerSettlement.settled_by,
+    settled_at: ownerSettlement.settled_at,
+    recipient: ownerSettlement.recipient,
+    fanout: ownerSettlement.fanout,
+    by_another_owner: ownerSettlement.settled_by !== owner,
+    ...(expiredAt === undefined ? {} : { expired_at: expiredAt }),
+  }
+}
+
+function settlementCauseVerb(cause: { settlement: BallSettlementReason; settled_by: string }): string {
+  switch (cause.settlement) {
+    case "answered":
+      return `answered by ${cause.settled_by}`
+    case "manual-close":
+      return `${cause.settled_by} closed it manually (manual-close)`
+    case "sender-withdrawn":
+      return `the sender withdrew it (sender-withdrawn)`
+    case "gc-expired":
+      return `settled gc-expired by ${cause.settled_by} (pending prune)`
+    case "incident-cleared":
+      return `${cause.settled_by} cleared the incident (incident-cleared)`
+  }
+}
+
+/** Render `pendingCloseCause`'s evidence as the one sentence a `closed: 0`
+ * result shows its owner: who settled it, with what reason, and when — never
+ * a list of possibilities the owner has to rule out themselves. */
+export function formatPendingCloseCause(cause: PendingCloseCause, requestId: string, owner: string): string {
+  const lead = `closed 0 rows for ${requestId}: `
+  if (cause.kind === "never-tracked") {
+    return (
+      `${lead}never tracked — no ball was ever opened for this id to ${owner} ` +
+      `(check the id against tribe pending --owner ${owner})`
+    )
+  }
+  const iso = new Date(cause.settled_at).toISOString()
+  const verb = settlementCauseVerb(cause)
+  if (cause.kind === "settled-for-other-owner") {
+    return (
+      `${lead}never opened for ${owner} — ${verb} for ${cause.recipient} instead at ${iso} ` +
+      `(check the id against tribe pending --owner ${owner})`
+    )
+  }
+  const fanoutClause =
+    cause.settlement === "answered" && cause.fanout === "first" && cause.by_another_owner
+      ? ` (fanout first: the first answer settled every owner's row, including ${owner}'s)`
+      : ""
+  const expiredClause =
+    cause.expired_at === undefined ? "" : `; its deadline had passed at ${new Date(cause.expired_at).toISOString()}`
+  return `${lead}${verb} at ${iso}${fanoutClause}${expiredClause}`
 }
 
 /** Resolve the mechanism-owned deadline default. Explicitly tracked message

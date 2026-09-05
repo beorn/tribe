@@ -1554,6 +1554,21 @@ export function createStatements(db: Database) {
 		ORDER BY ts, id
 	`),
 
+    /** Same two outcome-fact types as `selectPendingOutcomeFacts` above, but
+     *  scoped to one request by `ref` — the read behind a `closed: 0` ball
+     *  result's cause (@ag/tribe/an-advertised-ball-owner-disappears-before-
+     *  it-can-settle). A single miss must never pay for a scan of every ball
+     *  ever settled, which is what reusing the unbounded statement above
+     *  would cost. */
+    selectPendingOutcomeFactsForRequest: db.prepare(`
+		SELECT id, type, content, ts FROM messages
+		WHERE kind = 'event' AND type IN ('event.ball.expired', 'event.ball.settled') AND ref = $request_id
+		UNION
+		SELECT id, type, content, ts FROM messages_archive
+		WHERE kind = 'event' AND type IN ('event.ball.expired', 'event.ball.settled') AND ref = $request_id
+		ORDER BY ts, id
+	`),
+
     /** Answers are already durable message facts. Keep responder identity so
      *  fanout=all closes only that owner's outcome while fanout=first closes
      *  the shared request for every snapshotted owner. */

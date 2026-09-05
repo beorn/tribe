@@ -263,6 +263,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             properties: {
               request_id: { type: "string", description: "Request id handled by this reply." },
               closed: { type: "number", description: "Pending rows closed by the committed send transaction." },
+              cause: {
+                type: "string",
+                description:
+                  "Present when closed is 0: the exact journal-backed reason (already settled and by whom, settled by another owner under fanout first, or never tracked) — never a list of possibilities.",
+              },
             },
             required: ["request_id", "closed"],
             description: "Present for replies; reports the committed ball-tracker mutation.",
@@ -467,7 +472,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           warning: {
             type: "string",
             description:
-              "Loud diagnostic when close matched 0 rows while the owner still has other matching balls; names the surviving request/message ids.",
+              "Loud diagnostic when close matched 0 rows: leads with the exact journal-backed cause (already settled and by whom, settled by another owner under fanout first, or never tracked), then names the owner's other open request/message ids if any.",
           },
           ...ERROR_SHAPE,
         },

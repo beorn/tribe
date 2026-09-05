@@ -487,7 +487,14 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       ),
     )
 
-    expect(reply.tracker).toEqual({ request_id: "mistyped-request", closed: 0 })
+    expect(reply.tracker).toEqual({
+      request_id: "mistyped-request",
+      closed: 0,
+      cause:
+        "closed 0 rows for mistyped-request: never tracked — no ball was ever opened for this id to @agent/1 " +
+        "(check the id against tribe pending --owner @agent/1)",
+      cause_fact: { kind: "never-tracked" },
+    })
     expect(reply.reply_close_failed).toBe(true)
     expect(reply.warning).toContain("closed 0")
     expect(reply.warning).toContain("actual-request")
@@ -519,7 +526,14 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
       ),
     )
 
-    expect(reply.tracker).toEqual({ request_id: "mistyped-request", closed: 0 })
+    expect(reply.tracker).toEqual({
+      request_id: "mistyped-request",
+      closed: 0,
+      cause:
+        "closed 0 rows for mistyped-request: never tracked — no ball was ever opened for this id to @agent/1 " +
+        "(check the id against tribe pending --owner @agent/1)",
+      cause_fact: { kind: "never-tracked" },
+    })
     expect(reply.reply_close_failed).toBe(true)
     expect(reply.warning).not.toContain("@agent/1 owns no open balls")
     expect(reply.warning).toContain("other-peer-request")
@@ -541,7 +555,14 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     )
 
     expect(reply.sent).toBe(true)
-    expect(reply.tracker).toEqual({ request_id: "never-existed", closed: 0 })
+    expect(reply.tracker).toEqual({
+      request_id: "never-existed",
+      closed: 0,
+      cause:
+        "closed 0 rows for never-existed: never tracked — no ball was ever opened for this id to @agent/1 " +
+        "(check the id against tribe pending --owner @agent/1)",
+      cause_fact: { kind: "never-tracked" },
+    })
     expect(reply.reply_close_failed).toBe(true)
     expect(reply.warning).toContain("closed 0 rows")
     expect(reply.warning).toContain("@agent/1 owns no open balls")

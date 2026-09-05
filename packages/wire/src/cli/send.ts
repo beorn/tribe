@@ -389,7 +389,7 @@ async function warnUnreleasedBallToRecipient(sender: string, recipient: string, 
 function reportCommittedReplyTracker(
   owner: string,
   reply: string,
-  tracker: { request_id?: string; closed?: number } | undefined,
+  tracker: { request_id?: string; closed?: number; cause?: string } | undefined,
 ): void {
   if (tracker === undefined) {
     console.error(
@@ -415,9 +415,16 @@ function reportCommittedReplyTracker(
     process.exit(3)
   }
   if (closed < 1) {
+    // The daemon names the exact journal-backed cause when it can
+    // (@ag/tribe/an-advertised-ball-owner-disappears-before-it-can-settle);
+    // an older daemon that never sent `cause` still gets the three-
+    // possibilities fallback below rather than an empty line.
+    const cause = typeof tracker.cause === "string" && tracker.cause.length > 0 ? tracker.cause : undefined
     console.error(
-      `tribe-wire send: response DELIVERED, but its committed tracker result closed 0 rows for ${canonicalRequestId} ` +
-        `(ball not currently owned — expired, settled out-of-band, or never tracked).`,
+      cause !== undefined
+        ? `tribe-wire send: response DELIVERED, but its reply did not settle the ball: ${cause}`
+        : `tribe-wire send: response DELIVERED, but its committed tracker result closed 0 rows for ${canonicalRequestId} ` +
+            `(ball not currently owned — expired, settled out-of-band, or never tracked).`,
     )
     console.error(`Verify current state with: tribe pending --owner ${owner}`)
     process.exit(3)
@@ -475,7 +482,7 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     warning?: string
     truncated?: boolean
     original_length?: number
-    tracker?: { request_id?: string; closed?: number }
+    tracker?: { request_id?: string; closed?: number; cause?: string }
     delivery?: {
       state?: string
       original_target?: string

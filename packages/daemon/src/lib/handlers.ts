@@ -27,9 +27,12 @@ import {
   defaultBallTtlMs,
   MAX_BALL_TTL_MS,
   settlePendingRows,
+  pendingCloseCause,
+  formatPendingCloseCause,
   type Classification,
   type BallSettlementReason,
   type Delivery,
+  type PendingCloseCause,
   type PendingSettlementRow,
 } from "./messaging.ts"
 import { ACTIONABLE_TYPES_SET, AUTO_TRACK_TYPES_SET } from "./database.ts"
@@ -813,19 +816,20 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       ...(summaryDerived ? { summary_derived: true } : {}),
     })
   }
+  const tracker = withCloseCause(ctx, sender, result.tracker)
   const warning = combineWarnings(
     maybeDerivedSummaryWarning(summaryDerived),
     maybeTruncationWarning(truncation),
-    trackerMissWarning(ctx, sender, [recipients], result.tracker),
+    trackerMissWarning(ctx, sender, [recipients], tracker),
   )
   return jsonResult({
     sent: true,
     id: result.id,
     ...(effectiveRequestId ? { request_id: effectiveRequestId } : {}),
     delivery: deliveryReport([{ recipient: recipients, resolution }])[0],
-    ...(result.tracker ? { tracker: result.tracker } : {}),
+    ...(tracker ? { tracker } : {}),
     ...(result.deduplicated ? { deduplicated: true } : {}),
-    ...replyCloseFailure(result.tracker),
+    ...replyCloseFailure(tracker),
     summary,
     ...(summaryDerived ? { summary_derived: true } : {}),
     ...truncationReport(truncation),
@@ -902,7 +906,7 @@ function handleMultiSend(input: {
     persistDeadLetter(input.ctx, resolution, input.content, input.args, input.classification, sharedRequestId)
     return { ...result, recipient, resolution }
   })
-  const tracker = aggregateReplyTracker(results, input.replyId)
+  const tracker = withCloseCause(input.ctx, input.sender, aggregateReplyTracker(results, input.replyId))
   const warning = combineWarnings(
     maybeDerivedSummaryWarning(input.summaryDerived),
     maybeTruncationWarning(input.truncation),
@@ -1101,7 +1105,14 @@ function maybeTruncationWarning(truncation: SanitizedMessage): string | undefine
   return `message truncated to ${MESSAGE_MAX_LENGTH} chars — ${dropped} of ${truncation.originalLength} were dropped and the recipient did NOT receive them; resend the remainder or link the full text.`
 }
 
-type Tracker = { request_id: string; closed: number }
+type Tracker = {
+  request_id: string
+  closed: number
+  /** Present only when `closed === 0` — the exact journal-backed reason,
+   *  added by `withCloseCause` below. Never set by `sendMessage` itself. */
+  cause?: string
+  cause_fact?: PendingCloseCause
+}
 
 function aggregateReplyTracker(results: readonly { tracker?: Tracker }[], replyId: string | null): Tracker | undefined {
   if (replyId === null) return undefined
@@ -1110,6 +1121,19 @@ function aggregateReplyTracker(results: readonly { tracker?: Tracker }[], replyI
     request_id: trackers.find((item) => item.closed > 0)?.request_id ?? trackers[0]?.request_id ?? replyId,
     closed: trackers.reduce((total, item) => total + item.closed, 0),
   }
+}
+
+/**
+ * A `closed: 0` tracker names its cause (@ag/tribe/an-advertised-ball-owner-
+ * disappears-before-it-can-settle) — `sendMessage`'s own return stays the
+ * plain `{ request_id, closed }` the unit-level `sendMessage` tests pin;
+ * this is the JSON-response half only, applied once per send handler right
+ * before the tracker is reported.
+ */
+function withCloseCause(ctx: TribeContext, owner: string, tracker: Tracker | undefined): Tracker | undefined {
+  if (tracker === undefined || tracker.closed !== 0) return tracker
+  const cause_fact = pendingCloseCause(ctx, tracker.request_id, owner)
+  return { ...tracker, cause: formatPendingCloseCause(cause_fact, tracker.request_id, owner), cause_fact }
 }
 
 function combineWarnings(...warnings: Array<string | undefined>): string | undefined {
@@ -1437,6 +1461,10 @@ function pendingCloseMissWarning(
   peers: readonly string[] | undefined,
   attemptedId: string,
 ): string | undefined {
+  // The exact journal-backed reason leads every miss (@ag/tribe/an-advertised-
+  // ball-owner-disappears-before-it-can-settle) — never a list of
+  // possibilities the owner has to rule out themselves.
+  const cause = formatPendingCloseCause(pendingCloseCause(ctx, attemptedId, owner), attemptedId, owner)
   const peerSet = peers ? new Set(peers) : null
   const now = Date.now()
   const fromRelevantPeer = (ball: PendingBall) => peerSet === null || peerSet.has(ball.sender)
@@ -1453,7 +1481,7 @@ function pendingCloseMissWarning(
   // nothing and there was nothing it could have matched, which is exactly the
   // shape a fabricated or truncated request id produces. Staying silent here
   // let a close that closed nothing read as clean success.
-  if (allPending.length === 0) return `reply/close ${attemptedId} closed 0 rows; ${owner} owns no open balls`
+  if (allPending.length === 0) return `${cause}; ${owner} owns no open balls`
   // Prefer obligations from the addressed peer because they are the likely
   // intended close target. If that peer has none, show the owner's actual open
   // obligations instead of making the false global claim that none exist.
@@ -1474,7 +1502,7 @@ function pendingCloseMissWarning(
     .join(", ")
   const elided = pending.length - shown.length
   const more = elided > 0 ? `, and ${elided} more (run \`tribe pending\` for the full list)` : ""
-  return `reply/close ${attemptedId} closed 0 rows; ${owner} owns ${pending.length} open ball(s): ${listing}${more}`
+  return `${cause}; ${owner} owns ${pending.length} open ball(s): ${listing}${more}`
 }
 
 /**
@@ -1494,7 +1522,8 @@ function closeOneBall(
     $recipient: owner,
   }) as PendingSettlementRow | null
   if (row === null) {
-    return { request_id: requestId, closed: 0, reason: `no open ball ${requestId} owned by ${owner}` }
+    const reason = formatPendingCloseCause(pendingCloseCause(ctx, requestId, owner), requestId, owner)
+    return { request_id: requestId, closed: 0, reason }
   }
   const settlement = ctx.getName() === row.sender && ctx.getName() !== owner ? "sender-withdrawn" : "manual-close"
   return { request_id: requestId, closed: settlePendingRows(ctx, [row], settlement, ctx.getName(), now) }
