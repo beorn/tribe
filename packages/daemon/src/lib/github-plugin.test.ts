@@ -306,9 +306,12 @@ describe("selectNewEvents / formatEvent — a late push must not read as news (2
   })
 
   test("the push line carries the push's own time, so a row delivered late is dated", () => {
-    const out = formatEvent(push("1", "2026-09-02T22:34:59Z"), ["push"])
-    expect(out?.line).toBe("beorn/yrd: beorn pushed 1 commit to main at 2026-09-02T22:34:59Z")
-    expect(out?.url).toBe("https://github.com/beorn/yrd/compare/1234567...abcdef0")
+    expect(formatEvent(push("1", "2026-09-02T22:34:59Z"), ["push"])).toEqual({
+      kind: "notice",
+      type: "push",
+      line: "beorn/yrd: beorn pushed 1 commit to main at 2026-09-02T22:34:59Z",
+      url: "https://github.com/beorn/yrd/compare/1234567...abcdef0",
+    })
   })
 
   test("events newer than the cursor are delivered, newest first, with no cap", () => {
@@ -323,5 +326,106 @@ describe("selectNewEvents / formatEvent — a late push must not read as news (2
 
   test("an empty page with a cursor delivers nothing and does not resync", () => {
     expect(selectNewEvents([], "1")).toEqual({ kind: "deliver", events: [] })
+  })
+})
+
+describe("formatEvent — the Events API PR payload carries no title or html_url (2026-09-05 'undefined undefined')", () => {
+  // Measured 2026-09-05 with `gh api repos/beorn/silvery/events`: every
+  // PullRequestEvent payload carried `pull_request` keys base, head, id,
+  // number, url and nothing else, and the daemon announced
+  // "[pr] beorn/silvery: beorn opened PR #16: undefined undefined".
+  const slimPr = (id: string, action: string, number: number): GitHubEvent => ({
+    id,
+    type: "PullRequestEvent",
+    actor: { login: "beorn" },
+    repo: { name: "beorn/silvery" },
+    payload: {
+      action,
+      number,
+      pull_request: {
+        id: 1,
+        number,
+        url: `https://api.github.com/repos/beorn/silvery/pulls/${number}`,
+        head: { ref: "fix/ci-termless-dependency", sha: "a", repo: null },
+        base: { ref: "main", sha: "b", repo: null },
+      },
+    },
+    created_at: "2026-09-05T00:01:44Z",
+  })
+
+  test("a slim PR payload announces number and branches, derives the PR URL, and never prints undefined", () => {
+    const out = formatEvent(slimPr("14465153674", "opened", 16), ["pull_request"])
+    expect(out).toEqual({
+      kind: "notice",
+      type: "pr",
+      line: "[pr] beorn/silvery: beorn opened PR #16 (fix/ci-termless-dependency → main)",
+      url: "https://github.com/beorn/silvery/pull/16",
+    })
+    expect(JSON.stringify(out)).not.toMatch(/undefined|null/)
+  })
+
+  test("a full PR object (webhook shape) appends the title and keeps its own html_url", () => {
+    const event = slimPr("2", "merged", 16)
+    Object.assign(event.payload.pull_request as Record<string, unknown>, {
+      title: "fix(ci): pin termless",
+      html_url: "https://github.com/beorn/silvery/pull/16",
+    })
+    expect(formatEvent(event, ["pull_request"])).toEqual({
+      kind: "notice",
+      type: "pr",
+      line: "[pr] beorn/silvery: beorn merged PR #16 (fix/ci-termless-dependency → main): fix(ci): pin termless",
+      url: "https://github.com/beorn/silvery/pull/16",
+    })
+  })
+
+  test("a PR payload with no number is malformed and says so, rather than announcing PR #undefined", () => {
+    const event = slimPr("3", "opened", 16)
+    event.payload = { action: "opened" }
+    expect(formatEvent(event, ["pull_request"])).toEqual({
+      kind: "malformed",
+      reason: "PullRequestEvent 3 on beorn/silvery carries no pull request number; nothing announced",
+    })
+  })
+
+  test("a review on a slim PR announces the state and number and derives the PR URL", () => {
+    const event: GitHubEvent = {
+      ...slimPr("4", "created", 16),
+      type: "PullRequestReviewEvent",
+      payload: { action: "created", review: { state: "approved" }, pull_request: { number: 16 } },
+    }
+    expect(formatEvent(event, ["pull_request"])).toEqual({
+      kind: "notice",
+      type: "pr",
+      line: "[review] beorn/silvery: beorn approved review on PR #16",
+      url: "https://github.com/beorn/silvery/pull/16",
+    })
+  })
+
+  test("an issue comment keeps the full issue shape the API does deliver", () => {
+    const event: GitHubEvent = {
+      ...slimPr("5", "created", 16),
+      type: "IssueCommentEvent",
+      payload: {
+        action: "created",
+        issue: { number: 7, title: "flaky test", html_url: "https://github.com/beorn/silvery/issues/7" },
+        comment: {
+          body: "first line\nsecond line",
+          html_url: "https://github.com/beorn/silvery/issues/7#issuecomment-1",
+        },
+      },
+    }
+    expect(formatEvent(event, ["issues"])).toEqual({
+      kind: "notice",
+      type: "issue",
+      line: "[issue-comment] beorn/silvery: beorn on #7: first line",
+      url: "https://github.com/beorn/silvery/issues/7#issuecomment-1",
+    })
+  })
+
+  test("an unsubscribed type is reported as such, distinct from a malformed payload", () => {
+    expect(formatEvent(slimPr("6", "opened", 16), ["push"])).toEqual({ kind: "unsubscribed" })
+    expect(formatEvent({ ...slimPr("7", "opened", 16), type: "WatchEvent" }, ["pull_request"])).toEqual({
+      kind: "unsubscribed",
+    })
   })
 })

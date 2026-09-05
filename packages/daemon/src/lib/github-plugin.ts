@@ -481,17 +481,53 @@ export function selectNewEvents(
   return { kind: "resync", skipped: fresh }
 }
 
-export function formatEvent(
-  event: GitHubEvent,
-  eventTypes: string[],
-): { line: string; type: string; url: string } | null {
+export type FormattedEvent =
+  | { kind: "notice"; line: string; type: string; url: string }
+  /** The event's type is not in GITHUB_EVENTS: a legitimate no-op. */
+  | { kind: "unsubscribed" }
+  /** A subscribed event whose payload lacks a field the notice needs. Logged by the caller, never announced. */
+  | { kind: "malformed"; reason: string }
+
+const str = (value: unknown): string | null => (typeof value === "string" && value.length > 0 ? value : null)
+const int = (value: unknown): number | null => (typeof value === "number" && Number.isInteger(value) ? value : null)
+const obj = (value: unknown): Record<string, unknown> | null =>
+  typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null
+const firstLine = (value: unknown): string => (str(value)?.split("\n")[0] ?? "").slice(0, 80)
+
+export function formatEvent(event: GitHubEvent, eventTypes: string[]): FormattedEvent {
   const actor = event.actor.login
   const repo = event.repo.name
   const payload = event.payload
+  const notice = (line: string, type: string, url: string): FormattedEvent => ({ kind: "notice", line, type, url })
+  const malformed = (missing: string): FormattedEvent => ({
+    kind: "malformed",
+    reason: `${event.type} ${event.id} on ${repo} carries no ${missing}; nothing announced`,
+  })
+
+  // GitHub's Events API trims `payload.pull_request` to base, head, id, number
+  // and url (measured 2026-09-05 with `gh api repos/<r>/events` across every
+  // PullRequestEvent on three repos back to August): no title, no html_url.
+  // Interpolating those printed "PR #16: undefined undefined" on every PR
+  // notice the plugin ever sent. A notice is built from what the payload
+  // guarantees, the PR page URL is derived from the number, and a title rides
+  // along only when one arrives (webhook deliveries carry the full object).
+  const pr = obj(payload.pull_request)
+  const prNumber = int(payload.number) ?? int(pr?.number)
+  const prUrl = (number: number): string => `https://github.com/${repo}/pull/${number}`
+  const issueUrl = (number: number): string => `https://github.com/${repo}/issues/${number}`
+  const prRefs = (): string => {
+    const head = str(obj(pr?.head)?.ref)
+    const base = str(obj(pr?.base)?.ref)
+    return head !== null && base !== null ? ` (${head} → ${base})` : ""
+  }
+  const titled = (title: unknown): string => {
+    const text = str(title)
+    return text === null ? "" : `: ${text}`
+  }
 
   switch (event.type) {
     case "PushEvent": {
-      if (!eventTypes.includes("push")) return null
+      if (!eventTypes.includes("push")) return { kind: "unsubscribed" }
       const commits = payload.commits as Array<{ sha: string; message: string }> | undefined
       const count = commits?.length ?? (payload.distinct_size as number) ?? (payload.size as number) ?? 0
       const branch = (payload.ref as string)?.replace("refs/heads/", "") ?? "unknown"
@@ -503,78 +539,76 @@ export function formatEvent(
       // happened: on 2026-09-04 four day-old pushes were announced as fresh
       // main writes under a merge garage and cost four investigations.
       const tail = lastMsg ? ` — ${lastMsg}` : ""
-      return {
-        line: `${repo}: ${actor} pushed ${countStr} to ${branch} at ${event.created_at}${tail}`,
-        type: "push",
-        url,
-      }
+      return notice(`${repo}: ${actor} pushed ${countStr} to ${branch} at ${event.created_at}${tail}`, "push", url)
     }
 
     case "PullRequestEvent": {
-      if (!eventTypes.includes("pull_request")) return null
-      const pr = payload.pull_request as { number: number; title: string; html_url: string } | undefined
-      const action = payload.action as string
-      if (!pr) return null
-      return {
-        line: `[pr] ${repo}: ${actor} ${action} PR #${pr.number}: ${pr.title}`,
-        type: "pr",
-        url: pr.html_url,
-      }
+      if (!eventTypes.includes("pull_request")) return { kind: "unsubscribed" }
+      const action = str(payload.action)
+      if (action === null) return malformed("action")
+      if (prNumber === null) return malformed("pull request number")
+      return notice(
+        `[pr] ${repo}: ${actor} ${action} PR #${prNumber}${prRefs()}${titled(pr?.title)}`,
+        "pr",
+        str(pr?.html_url) ?? prUrl(prNumber),
+      )
     }
 
     case "PullRequestReviewEvent": {
-      if (!eventTypes.includes("pull_request")) return null
-      const review = payload.review as { state: string; html_url: string } | undefined
-      const prNum = (payload.pull_request as { number: number })?.number
-      const prTitle = (payload.pull_request as { title: string })?.title
-      if (!review) return null
-      return {
-        line: `[review] ${repo}: ${actor} ${review.state} review on PR #${prNum}: ${prTitle}`,
-        type: "pr",
-        url: review.html_url,
-      }
+      if (!eventTypes.includes("pull_request")) return { kind: "unsubscribed" }
+      const review = obj(payload.review)
+      const state = str(review?.state)
+      if (state === null) return malformed("review state")
+      if (prNumber === null) return malformed("pull request number")
+      return notice(
+        `[review] ${repo}: ${actor} ${state} review on PR #${prNumber}${titled(pr?.title)}`,
+        "pr",
+        str(review?.html_url) ?? prUrl(prNumber),
+      )
     }
 
     case "PullRequestReviewCommentEvent": {
-      if (!eventTypes.includes("pull_request")) return null
-      const comment = payload.comment as { html_url: string; body: string } | undefined
-      const prNumC = (payload.pull_request as { number: number })?.number
-      if (!comment) return null
-      const body = (comment.body.split("\n")[0] ?? "").slice(0, 80)
-      return {
-        line: `[pr-comment] ${repo}: ${actor} commented on PR #${prNumC}: ${body}`,
-        type: "pr",
-        url: comment.html_url,
-      }
+      if (!eventTypes.includes("pull_request")) return { kind: "unsubscribed" }
+      const comment = obj(payload.comment)
+      if (comment === null) return malformed("comment")
+      if (prNumber === null) return malformed("pull request number")
+      return notice(
+        `[pr-comment] ${repo}: ${actor} commented on PR #${prNumber}: ${firstLine(comment.body)}`,
+        "pr",
+        str(comment.html_url) ?? prUrl(prNumber),
+      )
     }
 
     case "IssuesEvent": {
-      if (!eventTypes.includes("issues")) return null
-      const issue = payload.issue as { number: number; title: string; html_url: string } | undefined
-      const issueAction = payload.action as string
-      if (!issue) return null
-      return {
-        line: `[issue] ${repo}: ${actor} ${issueAction} #${issue.number}: ${issue.title}`,
-        type: "issue",
-        url: issue.html_url,
-      }
+      if (!eventTypes.includes("issues")) return { kind: "unsubscribed" }
+      const issue = obj(payload.issue)
+      const number = int(issue?.number)
+      const action = str(payload.action)
+      if (action === null) return malformed("action")
+      if (number === null) return malformed("issue number")
+      return notice(
+        `[issue] ${repo}: ${actor} ${action} #${number}${titled(issue?.title)}`,
+        "issue",
+        str(issue?.html_url) ?? issueUrl(number),
+      )
     }
 
     case "IssueCommentEvent": {
-      if (!eventTypes.includes("issues")) return null
-      const issueC = payload.issue as { number: number; title: string } | undefined
-      const commentC = payload.comment as { html_url: string; body: string } | undefined
-      if (!issueC || !commentC) return null
-      const bodyC = (commentC.body.split("\n")[0] ?? "").slice(0, 80)
-      return {
-        line: `[issue-comment] ${repo}: ${actor} on #${issueC.number}: ${bodyC}`,
-        type: "issue",
-        url: commentC.html_url,
-      }
+      if (!eventTypes.includes("issues")) return { kind: "unsubscribed" }
+      const issue = obj(payload.issue)
+      const comment = obj(payload.comment)
+      const number = int(issue?.number)
+      if (comment === null) return malformed("comment")
+      if (number === null) return malformed("issue number")
+      return notice(
+        `[issue-comment] ${repo}: ${actor} on #${number}: ${firstLine(comment.body)}`,
+        "issue",
+        str(comment.html_url) ?? issueUrl(number),
+      )
     }
 
     default:
-      return null
+      return { kind: "unsubscribed" }
   }
 }
 
@@ -709,7 +743,11 @@ export const githubPlugin: TribePluginApi = {
             if (seenEventIds.size > 500) seenEventIds.clear()
 
             const formatted = formatEvent(event, eventTypes)
-            if (!formatted) continue
+            if (formatted.kind === "malformed") {
+              log.warn?.(formatted.reason)
+              continue
+            }
+            if (formatted.kind !== "notice") continue
 
             // Skip push events for the local repo — git plugin already broadcasts commits
             if (formatted.type === "push" && r === local) continue
