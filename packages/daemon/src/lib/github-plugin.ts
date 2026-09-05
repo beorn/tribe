@@ -481,6 +481,61 @@ export function selectNewEvents(
   return { kind: "resync", skipped: fresh }
 }
 
+/** Events older than this at delivery are GitHub-materialized-late, not news — dropped, never broadcast, cursor still advances past them (km 24154). */
+export const GITHUB_LATE_HORIZON_MS = 60 * 60 * 1000
+
+/**
+ * Split delivery-bound events into those fresh enough to broadcast and those
+ * GitHub materialized too late to read as news.
+ *
+ * GitHub's Events API id order does not track created_at order: ids increase
+ * monotonically while created_at can arrive non-monotonically, so the
+ * id-based cursor above (selectNewEvents) cannot see lateness — every late
+ * event still looks "new" and would otherwise be broadcast as a push that
+ * just happened. Measured 2026-09-05T04:09Z: `gh api repos/beorn/hh/events
+ * ?per_page=6` returned a PushEvent with id 20087977326 (the newest id on
+ * the page) whose created_at was 2026-09-03T05:11:29Z — 47 hours old (km
+ * 24154).
+ *
+ * `now` and `horizonMs` are injected so this stays a pure, deterministic
+ * partition — no timers, no wall-clock dependency in tests. An event whose
+ * age equals `horizonMs` exactly is fresh; one millisecond older is late.
+ */
+export function partitionLateEvents(
+  events: readonly GitHubEvent[],
+  now: number,
+  horizonMs: number = GITHUB_LATE_HORIZON_MS,
+): { fresh: GitHubEvent[]; late: GitHubEvent[] } {
+  const fresh: GitHubEvent[] = []
+  const late: GitHubEvent[] = []
+  for (const event of events) {
+    const ageMs = now - new Date(event.created_at).getTime()
+    if (ageMs > horizonMs) late.push(event)
+    else fresh.push(event)
+  }
+  return { fresh, late }
+}
+
+/**
+ * The exact warn line for a repo's late events dropped at delivery — pulled
+ * into a pure function so its shape is unit-tested without pollEvents'
+ * network I/O. `late` is newest-first, matching selectNewEvents' order, so
+ * the range reads oldest..newest. Throws on an empty list rather than
+ * printing an undefined range; callers only invoke this when
+ * partitionLateEvents reports at least one late event (km 24154).
+ */
+export function formatLateEventsWarning(repo: string, late: readonly GitHubEvent[]): string {
+  const newest = late[0]
+  const oldest = late[late.length - 1]
+  if (newest === undefined || oldest === undefined) {
+    throw new Error("formatLateEventsWarning requires at least one late event")
+  }
+  return (
+    `github events: ${late.length} late events for ${repo} ` +
+    `(${oldest.created_at}..${newest.created_at}) not broadcast; GitHub materialized them late`
+  )
+}
+
 export type FormattedEvent =
   | { kind: "notice"; line: string; type: string; url: string }
   /** The event's type is not in GITHUB_EVENTS: a legitimate no-op. */
@@ -736,7 +791,12 @@ export const githubPlugin: TribePluginApi = {
               )
             }
           }
-          const deliverable = selection.kind === "deliver" ? [...selection.events].reverse() : []
+          const candidates = selection.kind === "deliver" ? selection.events : []
+          const { fresh, late } = partitionLateEvents(candidates, Date.now())
+          if (late.length > 0) {
+            log.warn?.(formatLateEventsWarning(r, late))
+          }
+          const deliverable = [...fresh].reverse()
           for (const event of deliverable) {
             if (seenEventIds.has(event.id)) continue
             seenEventIds.add(event.id)
