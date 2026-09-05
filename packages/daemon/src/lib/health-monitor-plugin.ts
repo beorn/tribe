@@ -11,7 +11,6 @@
  *   HEALTH_PROC_WARNING   — bun/node process count for warning (default: 50)
  *   HEALTH_DISK_WARNING   — disk usage % for warning (default: 85)
  *   HEALTH_DISK_CRITICAL   — disk usage % for critical (default: 95)
- *   HEALTH_WORKTREE_WARNING — open worktree count for warning (default: 5)
  *   HEALTH_GH_RATELIMIT_WARNING — GitHub API remaining % for warning (default: 20)
  *   HEALTH_FD_WARNING      — fd usage % for warning (default: 70)
  *   HEALTH_DISK_IO_WARNING — combined read+write MB/s for warning (default: 500)
@@ -104,7 +103,6 @@ export interface HealthMetrics {
         readonly unavailable: readonly string[]
       }
     | { readonly detail?: string; readonly kind: "canonical-unavailable"; readonly reason: string }
-  worktrees: number
   timestamp: number
 }
 
@@ -116,7 +114,6 @@ export interface HealthAlert {
     | "git-lock"
     | "disk"
     | "disk-io"
-    | "worktree"
     | "fd-count"
     | "gh-rate-limit"
     | "reaper"
@@ -159,7 +156,6 @@ export interface HealthThresholds {
   processCountWarning: number
   diskWarningPercent: number
   diskCriticalPercent: number
-  worktreeWarning: number
   fdWarningPercent: number
   /** Alert when combined read+write exceeds this MB/s sustained */
   diskIoWarningMBps: number
@@ -186,7 +182,6 @@ export function defaultThresholds(): HealthThresholds {
     processCountWarning: parseInt(process.env.HEALTH_PROC_WARNING ?? "50", 10),
     diskWarningPercent: parseInt(process.env.HEALTH_DISK_WARNING ?? "85", 10),
     diskCriticalPercent: parseInt(process.env.HEALTH_DISK_CRITICAL ?? "95", 10),
-    worktreeWarning: parseInt(process.env.HEALTH_WORKTREE_WARNING ?? "5", 10),
     fdWarningPercent: parseInt(process.env.HEALTH_FD_WARNING ?? "70", 10),
     diskIoWarningMBps: parseInt(process.env.HEALTH_DISK_IO_WARNING ?? "500", 10),
     ghRateLimitWarning: parseInt(process.env.HEALTH_GH_RATELIMIT_WARNING ?? "20", 10),
@@ -298,7 +293,7 @@ export function deliverHealthAlert(
 /** Collect OS-level metrics (no child process needed). */
 export function collectOsMetrics(): Omit<
   HealthMetrics,
-  "bunProcesses" | "worktrees" | "disk" | "cpu" | "processObservation" | "scalarObservation"
+  "bunProcesses" | "disk" | "cpu" | "processObservation" | "scalarObservation"
 > & {
   cpu: Omit<HealthMetrics["cpu"], "topProcesses">
 } {
@@ -661,13 +656,6 @@ async function checkCollectedProcessReaper(
     return
   }
   checkCanonicalReaper(observation, thresholds, state.canonicalReaper, api, sessions)
-}
-
-/** Parse `git worktree list` output to count worktrees. */
-export function parseWorktreeList(output: string): number {
-  const trimmed = output.trim()
-  if (trimmed === "") return 0
-  return trimmed.split("\n").length
 }
 
 // ---------------------------------------------------------------------------
@@ -1257,22 +1245,6 @@ export function evaluateAlerts(
     state.firedAlerts.delete("disk:warning")
   }
 
-  // --- Worktrees ---
-  if (metrics.worktrees > thresholds.worktreeWarning) {
-    if (!state.firedAlerts.has("worktree:warning")) {
-      state.firedAlerts.add("worktree:warning")
-      alerts.push({
-        type: "worktree",
-        severity: "warning",
-        message: `Worktree count warning: ${metrics.worktrees} open worktrees (threshold: ${thresholds.worktreeWarning}). Run 'bun worktree clean' to remove stale ones.`,
-        metrics: {},
-        topOffenders: [],
-      })
-    }
-  } else {
-    state.firedAlerts.delete("worktree:warning")
-  }
-
   // --- File descriptors ---
   if (metrics.fdCount) {
     const usagePercent = (metrics.fdCount.total / metrics.fdCount.limit) * 100
@@ -1616,7 +1588,6 @@ export async function collectFullMetrics(
   let bunProcesses: number | undefined
   let swapUsedMB = 0
   let pidToParent = new Map<number, number>()
-  let worktrees = 0
   let fdCount: HealthMetrics["fdCount"]
   if (processObservation.kind === "available") {
     const totalBytes =
@@ -1630,7 +1601,6 @@ export async function collectFullMetrics(
   }
 
   try {
-    const wtProc = Bun.spawn(["git", "worktree", "list"], { stdout: "pipe", stderr: "ignore" })
     const fdCountOutputPromise =
       processObservation.kind === "standalone-os"
         ? new Response(
@@ -1653,9 +1623,8 @@ export async function collectFullMetrics(
             }).stdout,
           ).text()
         : Promise.resolve("")
-    const [observedPs, wtOutput, fdCountOutput, ulimitOutput] = await Promise.all([
+    const [observedPs, fdCountOutput, ulimitOutput] = await Promise.all([
       psOutput,
-      new Response(wtProc.stdout).text().catch(() => ""),
       fdCountOutputPromise.catch(() => "0"),
       ulimitOutputPromise.catch(() => "0"),
     ])
@@ -1665,8 +1634,6 @@ export async function collectFullMetrics(
       bunProcesses = processMetrics.bunProcesses
       pidToParent = processMetrics.pidToParent
     }
-    worktrees = parseWorktreeList(wtOutput)
-
     // File descriptor count
     const lsofCount = parseInt(fdCountOutput.trim(), 10) || 0
     const ulimitN = parseUlimitOutput(ulimitOutput)
@@ -1748,7 +1715,6 @@ export async function collectFullMetrics(
                 reason: processObservation.reason,
               },
       scalarObservation: hostMetrics.scalarObservation,
-      worktrees,
       timestamp: hostMetrics.timestamp,
     },
     pidToParent,
@@ -2024,6 +1990,6 @@ export const healthMonitorPlugin: TribePluginApi = {
   },
 
   instructions() {
-    return "- Health monitoring active: CPU, memory, process count, disk space, disk I/O, worktree count, file descriptor count, GitHub API rate limit, git lock alerts, and process reaper are broadcast automatically. To claim a process the reaper is targeting, reply with 'reaper:claim PID <pid>'."
+    return "- Health monitoring active: CPU, memory, process count, disk space, disk I/O, file descriptor count, GitHub API rate limit, git lock alerts, and process reaper are broadcast automatically. To claim a process the reaper is targeting, reply with 'reaper:claim PID <pid>'."
   },
 }

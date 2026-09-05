@@ -50,7 +50,13 @@ import { createLogger, setSuppressConsole } from "loggily"
 import { createTimers } from "./timers.ts"
 import { defangModelInput } from "./lib/defang.ts"
 import { createConnectReplayGate, MAX_REPLAY_EVENTS, selectReplayEvents } from "./lib/replay-cap.ts"
-import { evaluateCwdPolicy, probeCwd, readCwdPolicyFromEnv, type CwdEvaluation } from "./lib/cwd-guardrail.ts"
+import {
+  describeGuardrailEvent,
+  evaluateCwdPolicy,
+  probeCwd,
+  readCwdPolicyFromEnv,
+  type CwdEvaluation,
+} from "./lib/cwd-guardrail.ts"
 import {
   deliveryCapabilityInstruction,
   resolveDeliveryCapability,
@@ -180,7 +186,8 @@ const connectReplayGate = createConnectReplayGate({ maxEvents: CHANNEL_REPLAY_MA
 // warn the agent so edits don't leak into main. Evaluation is pure; the
 // notification fires after MCP is up. Policy env: TRIBE_MAIN_REPO_POLICY.
 const CWD_POLICY = readCwdPolicyFromEnv()
-const CWD_EVAL: CwdEvaluation = evaluateCwdPolicy(CWD_POLICY, probeCwd())
+const CWD_PROBE = probeCwd()
+const CWD_EVAL: CwdEvaluation = evaluateCwdPolicy(CWD_POLICY, CWD_PROBE)
 if (CWD_EVAL.kind === "warn" || CWD_EVAL.kind === "refuse") {
   log.warn?.(CWD_EVAL.message)
 } else {
@@ -987,10 +994,15 @@ if (CWD_EVAL.kind === "warn" || CWD_EVAL.kind === "refuse") {
   timers.setTimeout(() => {
     sendChannel(CWD_EVAL.message, { from: "stdio-adapter", type: prefix })
     // Also log to the daemon's activity stream so diagnostics can surface it.
+    // Identity-prefixed (name/pid/cwd) so a reader of the event log can tell
+    // WHICH session tripped the guardrail — the message text alone is
+    // identical across every session sitting in the same repo (@ag/tribe/21669).
+    const identity = { name: myName, pid: process.pid, cwd: CWD_PROBE.cwd }
     daemon
       ?.call("log_event", {
         type: CWD_EVAL.kind === "refuse" ? "cwd_guardrail_refuse" : "cwd_guardrail_warn",
-        content: CWD_EVAL.message,
+        content: describeGuardrailEvent({ ...identity, message: CWD_EVAL.message }),
+        meta: identity,
       })
       .catch(() => {
         /* daemon may not be ready yet — log_event is best-effort */

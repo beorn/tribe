@@ -20,7 +20,6 @@ function metrics(loadAvg1m: number, timestamp: number): HealthMetrics {
     bunProcesses: 0,
     processObservation: { kind: "standalone-os" },
     scalarObservation: { kind: "standalone-os", unavailable: ["disk.bytes", "disk.inodes"] },
-    worktrees: 0,
     timestamp,
   }
 }

@@ -20,7 +20,8 @@
  *   - `ignore` — skip the check entirely. Use this for chief integration
  *      sessions or exploratory shells where main-repo cwd is legitimate.
  *   - `warn`   — log to debug + send a startup tribe channel notification
- *      pointing the agent at `bun worktree create wtN`.
+ *      pointing the agent at a managed environment (`yrd env open --issue
+ *      <bead>`) or the seat supervisor (`hab up <seat>`).
  *   - `refuse` — same warning, plus a louder marker the agent surfaces.
  *      No process exit — the daemon still registers; the agent decides
  *      whether to proceed.
@@ -86,13 +87,15 @@ export function findSiblingPoolSlots(repoRoot: string): string[] {
   return slots
 }
 
-/** Build the canonical "migrate to a worktree" one-liner referenced by the bead. */
-export function migrationOneLiner(repoRoot: string): string {
-  const repoBasename = basename(repoRoot)
-  // Pick the lowest free slot index for the hint (best-effort — agent may
-  // pick a different one). We don't read the pool here to keep this string
-  // builder side-effect-free.
-  return `bun worktree create wtN && cd ../${repoBasename}-wtN`
+/**
+ * Build the canonical "move off main" guidance referenced by the bead. Slots
+ * are provisioned and recycled by the pool manager, not hand-picked by
+ * number, so the guidance names the two current entry points instead of a
+ * specific worktree path: an on-demand isolated environment for a bead, or
+ * the seat supervisor for a standing seat.
+ */
+export function migrationGuidance(): string {
+  return "open a managed environment (yrd env open --issue <bead>) or launch through the seat supervisor (hab up <seat>)"
 }
 
 /**
@@ -130,11 +133,10 @@ export function evaluateCwdPolicy(policy: CwdPolicy, probe: CwdProbe): CwdEvalua
 
   // We're in main, on main, with a pool sitting next door. That's the leak shape.
   const projectBasename = basename(probe.gitRoot)
-  const oneLiner = migrationOneLiner(probe.gitRoot)
   const baseMsg =
     `tribe: standalone session running in main repo (${projectBasename}) on branch ${branch}. ` +
-    `Tribe SOP §F2a says main stays on main — edits should land in a pool slot. ` +
-    `Migrate with: ${oneLiner}. ` +
+    `Tribe SOP §F2a says main stays on main — edits should land in an isolated environment. ` +
+    `${migrationGuidance()}. ` +
     `Pool slots present: ${probe.siblingPoolSlots.join(", ")}. ` +
     `Set TRIBE_MAIN_REPO_POLICY=ignore (or BEARLY_ALLOW_MAIN_REPO_CWD=1) to silence this for legitimate chief / exploratory sessions.`
 
@@ -163,4 +165,27 @@ export function probeCwd(cwd: string = process.cwd()): CwdProbe {
   const headBranch = gitRoot ? git(["rev-parse", "--abbrev-ref", "HEAD"]) : null
   const siblingPoolSlots = gitRoot ? findSiblingPoolSlots(gitRoot) : []
   return { cwd, gitRoot, headBranch, siblingPoolSlots }
+}
+
+export type GuardrailEventIdentity = {
+  /** Tribe session name at emission time (may be "pending" if not yet registered). */
+  name: string
+  /** OS process id of the adapter emitting the event. */
+  pid: number
+  /** `process.cwd()` at emission time. */
+  cwd: string
+  /** The human-readable guardrail message (`warn` or `refuse` variant). */
+  message: string
+}
+
+/**
+ * Prefix a guardrail warn/refuse message with the emitting session's identity,
+ * for the daemon's `log_event` content. The message body alone carries no
+ * per-session data — the same repo, branch and pool slots produce
+ * byte-identical text across every session sitting in that repo — so a burst
+ * of these on the fleet bus is indistinguishable from one session repeating
+ * itself unless identity travels with it (@ag/tribe/21669).
+ */
+export function describeGuardrailEvent(identity: GuardrailEventIdentity): string {
+  return `[session=${identity.name} pid=${identity.pid} cwd=${identity.cwd}] ${identity.message}`
 }
