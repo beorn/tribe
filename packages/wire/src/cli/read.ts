@@ -18,6 +18,7 @@ import {
   type DaemonClient,
 } from "../lib/socket.ts"
 import { watchActivity } from "../lib/activity-watch.ts"
+import { describeDaemonStderrLog } from "../lib/daemon-stderr-log.ts"
 import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-exempt.ts"
 import { readTribeLaunchId } from "../launch-environment.ts"
 import { withCliDaemonClient } from "./daemon-client.ts"
@@ -1182,7 +1183,7 @@ async function assertInboxWaitProtocol(client: DaemonClient, timeoutMs: number):
   throw inboxWaitProtocolMismatchError(daemonProtocolVersion, health)
 }
 
-async function cmdDoctor(opts: { fix?: boolean }): Promise<void> {
+async function cmdDoctor(opts: { fix?: boolean; json?: boolean }): Promise<void> {
   let status: {
     sessions?: DoctorVersionRow[]
     daemon?: {
@@ -1248,7 +1249,27 @@ async function cmdDoctor(opts: { fix?: boolean }): Promise<void> {
     }
   }
   const rail = await probeDoctorRail()
+  // @ag/tribe/24159 — informational only, never folded into `outcome`: a
+  // missing tee file just means no daemon has logged since the file was
+  // last rotated/pruned, not a doctor failure.
+  const daemonStderrLog = describeDaemonStderrLog()
   const outcome = deriveDoctorOutcome([identity.severity, versions.severity, membership.severity, rail.severity])
+
+  if (opts.json) {
+    await writeJsonStdout(
+      {
+        verdict: outcome.verdict,
+        identity,
+        versions,
+        membership,
+        rail,
+        daemon_stderr_log: daemonStderrLog,
+      },
+      2,
+    )
+    process.exitCode = outcome.exitCode
+    return
+  }
 
   console.log("TRIBE DOCTOR — coordination rail + daemon code identity\n")
   if (identity.severity === "OK") {
@@ -1276,6 +1297,12 @@ async function cmdDoctor(opts: { fix?: boolean }): Promise<void> {
     console.error(`  CRITICAL — ${rail.diagnosis}`)
     console.error(`  REMEDY — ${rail.remedy}`)
   }
+
+  console.log(
+    `  daemon stderr log — ${daemonStderrLog.path} (${
+      daemonStderrLog.exists ? `${daemonStderrLog.sizeBytes} bytes` : "not yet created"
+    })`,
+  )
 
   if (outcome.verdict === "OK") {
     return
@@ -1948,7 +1975,8 @@ export function registerReadCommands(program: Command): void {
     .command("doctor")
     .description("Check whether the running daemon is serving stale code (@km/tribe/20033)")
     .option("--fix", "Print the operator-gated remedy for a stale daemon (does not auto-restart)")
-    .action((opts: { fix?: boolean }) => void cmdDoctor(opts))
+    .option("--json", "Emit machine-readable JSON")
+    .action((opts: { fix?: boolean; json?: boolean }) => void cmdDoctor(opts))
 
   program
     .command("inbox")

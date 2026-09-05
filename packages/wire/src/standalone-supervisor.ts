@@ -19,10 +19,19 @@
  * stderr as it arrives, and retained as a bounded tail that is replayed in the
  * death summary. The exit code is the child's, and a child that died to a
  * signal we did not ask for exits `128 + signum` — never 0.
+ *
+ * @ag/tribe/24159 — "streamed onward to the supervisor's own stderr" is only
+ * a log when something is reading that stderr. `tribe restart` detaches the
+ * supervisor from a terminal (parent pid 1), so its own stderr is /dev/null
+ * and every daemon log line landed there was discarded — no file anywhere
+ * held it. The child's stderr is now ALSO teed to a dated file
+ * (daemonStderrLogPath, `$TRIBE_DAEMON_STDERR_LOG` override) independent of
+ * where the supervisor's own forwarded stderr goes; `tribe doctor` names it.
  */
 
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs"
 import { spawn, type ChildProcess } from "node:child_process"
-import { readFileSync } from "node:fs"
+import { dirname } from "node:path"
 import { constants as osConstants } from "node:os"
 import {
   sanitizeStandaloneDaemonEnvironment,
@@ -31,6 +40,7 @@ import {
   TRIBE_OPERATOR_CAPABILITY_ENV,
   TRIBE_OPERATOR_CAPABILITY_FD_ENV,
 } from "./daemon-environment.ts"
+import { daemonStderrLogPath } from "./lib/daemon-stderr-log.ts"
 
 export const STANDALONE_SUPERVISOR_PID_ENV = TRIBE_DAEMON_SUPERVISOR_PID_ENV
 export const STANDALONE_RELOAD_EXIT_CODE_ENV = TRIBE_DAEMON_RELOAD_EXIT_CODE_ENV
@@ -48,6 +58,40 @@ const STDERR_TAIL_LIMIT_BYTES = 64 * 1024
 /** Everything the supervisor says goes to its own stderr — that IS its log. */
 function report(line: string): void {
   process.stderr.write(`tribe-supervisor: ${line}\n`)
+}
+
+let daemonStderrLogParentEnsuredFor: string | null = null
+
+/** Create the tee file's parent dir once per path (cheap re-check on day rollover). */
+function ensureDaemonStderrLogParent(path: string): void {
+  if (daemonStderrLogParentEnsuredFor === path) return
+  const dir = dirname(path)
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  daemonStderrLogParentEnsuredFor = path
+}
+
+let daemonStderrLogWarned = false
+
+/**
+ * Append the child's raw stderr bytes to the daemon-stderr tee file, ALSO
+ * (not instead of) forwarding to the supervisor's own stderr. Synchronous so
+ * `tail -f` readers see lines as they land, matching the activity log's own
+ * discipline. A write failure is reported once on the supervisor's own
+ * stderr and never kills the child — this tee is a bonus copy, not the
+ * child's lifeline.
+ */
+function teeDaemonStderr(chunk: Buffer): void {
+  const path = daemonStderrLogPath()
+  try {
+    ensureDaemonStderrLogParent(path)
+    appendFileSync(path, chunk)
+  } catch (error) {
+    if (daemonStderrLogWarned) return
+    daemonStderrLogWarned = true
+    report(
+      `could not write daemon stderr to ${path}: ${error instanceof Error ? error.message : String(error)} — further write failures to this file are silenced`,
+    )
+  }
 }
 
 /** Signal name → wait-status convention (128 + signum), so a crash is never 0. */
@@ -207,9 +251,12 @@ export async function runStandaloneSupervisor(argv = process.argv.slice(2)): Pro
       const stderrTail = createStderrTail()
       // Forward as it arrives so a daemon that hangs after complaining still
       // gets its complaint out, then retain a bounded tail for the summary.
+      // Also tee to a file on disk (24159): the supervisor's own stderr may
+      // be /dev/null when detached, but the file survives regardless.
       child.stderr?.on("data", (chunk: Buffer) => {
         stderrTail.append(chunk)
         process.stderr.write(chunk)
+        teeDaemonStderr(chunk)
       })
       child.stderr?.on("error", () => {
         /* child exit is the authoritative lifecycle outcome */

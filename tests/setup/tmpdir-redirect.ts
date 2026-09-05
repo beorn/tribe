@@ -63,3 +63,19 @@ process.env.TMPDIR = TEST_TMP_BASE
 const TRIBE_GUARD_DIR = join(TEST_TMP_BASE, "tribe-guard", randomUUID())
 mkdirSync(TRIBE_GUARD_DIR, { recursive: true })
 process.env.TRIBE_SOCKET = join(TRIBE_GUARD_DIR, "tribe.sock")
+
+// Daemon-stderr tee guard (@ag/tribe/24159) — the standalone supervisor tees
+// each daemon child's stderr to $TRIBE_DAEMON_STDERR_LOG, defaulting (when
+// unset) to a dated file under the REAL ~/.local/share/tribe. A test that
+// spawns the supervisor (supervisor-child-failure.test.ts and friends)
+// without setting this itself would otherwise write live daemon diagnostics
+// straight into the operator's real activity-log directory — discovered
+// live during 24159's own verification: a single `vitest run` left a
+// same-day daemon-stderr-*.log full of fixture text sitting next to the
+// real activity-*.jsonl files. Same class of hazard as the socket guard
+// above, same fix shape: point the fallback at a hermetic path. Explicit
+// always wins — a test that wants to assert against this file itself still
+// sets TRIBE_DAEMON_STDERR_LOG per-test.
+if (!process.env.TRIBE_DAEMON_STDERR_LOG) {
+  process.env.TRIBE_DAEMON_STDERR_LOG = join(TEST_TMP_BASE, "daemon-stderr-log-guard.log")
+}
