@@ -2946,6 +2946,42 @@ export function readUnackedAttentionRows(ctx: TribeContext, owner: string, upto:
   return readUnackedDirectAttentionRows(ctx, owner, upto, limit)
 }
 
+/**
+ * 22733 — acknowledge the mailbox's own actionable rows a SNAPSHOT read (ids,
+ * with/from/to) delivered into the model's context, without ever skipping an
+ * unacknowledged row. The mailbox cursor is one monotonic seq, so a delivered
+ * row can be acknowledged only when every unacknowledged actionable row at or
+ * below it was delivered too; a gap leaves the cursor alone, and the fleet
+ * watch keeps counting what the seat has genuinely not seen.
+ *
+ * Measured 2026-09-05: a seat read a settling response by id, acted on it,
+ * and stayed "1 actionable unread" for 57 minutes until the fleet watch paged
+ * it busy-not-draining — the row had been delivered, just never through the
+ * cursor. Acknowledgement is reserved for a read that delivers rows into the
+ * context of the model that will act on them (21757); this is such a read.
+ * The 21626 staleness stamp stays untouched: a narrow read still never counts
+ * as checking the owned inbox.
+ */
+function acknowledgeDeliveredAttention(ctx: TribeContext, owner: string, delivered: readonly FetchRow[]): void {
+  const own = delivered.filter(
+    (row) =>
+      row.recipient === owner &&
+      row.sender !== owner &&
+      (ACTIONABLE_TYPES_SET.has(row.type) || row.attention_required === 1),
+  )
+  if (own.length === 0) return
+  const upto = Math.max(...own.map((row) => row.rowid))
+  const cursor =
+    (ctx.stmts.getMailboxCursor.get({ $recipient: owner }) as { last_actionable_seq: number } | null)
+      ?.last_actionable_seq ?? 0
+  if (upto <= cursor) return
+  const deliveredIds = new Set(own.map((row) => row.id))
+  // One more than delivered: any unacknowledged row outside the delivered set is a gap.
+  const unacked = readUnackedDirectAttentionRows(ctx, owner, upto, own.length + 1)
+  if (unacked.some((row) => !deliveredIds.has(row.id))) return
+  ctx.stmts.advanceMailboxCursor.run({ $recipient: owner, $seq: upto, $now: Date.now() })
+}
+
 /** One canonical attention projection for fetch and inbox-wait carriage.
  * Untracked direct rows retire on delivery acknowledgement. Every owned
  * tracked actionable remains until its pending owner sends TAKING or settles
@@ -3245,6 +3281,15 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
     if (lastAttention > 0) {
       ctx.stmts.advanceMailboxCursor.run({ $recipient: currentName, $seq: lastAttention, $now: Date.now() })
     }
+  }
+
+  // 22733 — a snapshot read the model is behind acknowledges the owned
+  // actionable rows it delivered, gap-free (see acknowledgeDeliveredAttention).
+  // `since` journal scans keep their explicit advance:true contract above.
+  const snapshotDelivery =
+    (ids !== null && ids.length > 0) || ((withPeer !== null || from !== null || to !== null) && since === null)
+  if (!shouldAdvance && isReceipt && snapshotDelivery) {
+    acknowledgeDeliveredAttention(ctx, currentName, filtered)
   }
 
   // 21626 — only the canonical, identity-bound attention projection is a

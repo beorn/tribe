@@ -504,6 +504,130 @@ describe("20876 Tribe health cadence", () => {
     })
   })
 
+  // 22733 — a snapshot read (ids, with/from/to) that DELIVERS the mailbox's
+  // own actionable rows into the model's context acknowledges them, under the
+  // one rule a monotonic cursor allows: never past an unacknowledged row the
+  // snapshot did not deliver. Specimen 2026-09-05: a seat read a settling
+  // response by id, acted on it, and stayed "1 actionable unread" for 57
+  // minutes until the fleet watch paged it busy-not-draining.
+  function fetchAs(sessionId: string, name: string, args: Record<string, unknown>): Record<string, unknown> {
+    const ctx = createTribeContext({
+      db,
+      stmts,
+      sessionId,
+      sessionRole: "member",
+      initialName: name,
+      domains: [],
+      claudeSessionId: null,
+      claudeSessionName: null,
+    })
+    const opts: HandlerOpts = {
+      cleanup: () => undefined,
+      userRenamed: false,
+      setUserRenamed: () => undefined,
+      getActiveSessionIds: () => new Set([sessionId]),
+      hasActiveTransport: (id) => id === sessionId,
+      getActiveSessionInfo: () => [activeSession(sessionId, name, "member", tmpDir, now)],
+    }
+    return parseToolResult(handleToolCall(ctx, "tribe.fetch", args, opts) as ReturnType<typeof handleToolCall>)
+  }
+
+  it("a snapshot read by ids acknowledges the settling response it delivered, so cadence stops counting it", () => {
+    insertSession(db, { id: "sess-dev-6", name: "@dev/6", role: "member", now })
+    insertMessage(db, {
+      id: "ci-held",
+      type: "response",
+      sender: "@ci",
+      recipient: "@dev/6",
+      ts: now - 57 * MINUTE,
+      reply: "dev-6-own-request",
+      attentionRequired: 1,
+    })
+    expect(projectHealthCadence(db, { now, connectedSessionNames: ["@dev/6"] }).inbox_lag[0]).toMatchObject({
+      actionable_rows: 1,
+      oldest_actionable: { id: "ci-held" },
+    })
+
+    const result = fetchAs("sess-dev-6", "@dev/6", { ids: ["ci-held"] })
+    expect((result.events as Array<{ id: string }>).map((event) => event.id)).toEqual(["ci-held"])
+
+    const row = projectHealthCadence(db, { now, connectedSessionNames: ["@dev/6"] }).inbox_lag[0]
+    // Acknowledged, and the 21626 staleness stamp is untouched: a narrow read
+    // never counts as checking the owned inbox.
+    expect(row).toMatchObject({ actionable_rows: 0, oldest_actionable: null, last_attention_read_at_ms: null })
+  })
+
+  it("a snapshot read that skips an older unacknowledged row acknowledges nothing", () => {
+    insertSession(db, { id: "sess-dev-6", name: "@dev/6", role: "member", now })
+    insertMessage(db, {
+      id: "older-request",
+      type: "request",
+      sender: "@chief",
+      recipient: "@dev/6",
+      ts: now - 2 * HOUR,
+      request: "older-request",
+    })
+    insertMessage(db, {
+      id: "newer-response",
+      type: "response",
+      sender: "@ci",
+      recipient: "@dev/6",
+      ts: now - HOUR,
+      attentionRequired: 1,
+    })
+
+    fetchAs("sess-dev-6", "@dev/6", { ids: ["newer-response"] })
+
+    const row = projectHealthCadence(db, { now, connectedSessionNames: ["@dev/6"] }).inbox_lag[0]
+    expect(row).toMatchObject({ actionable_rows: 2, oldest_actionable: { id: "older-request" } })
+  })
+
+  it("a with: snapshot that delivers every unacknowledged row acknowledges all of them", () => {
+    insertSession(db, { id: "sess-dev-6", name: "@dev/6", role: "member", now })
+    insertMessage(db, {
+      id: "ci-request",
+      type: "request",
+      sender: "@ci",
+      recipient: "@dev/6",
+      ts: now - 2 * HOUR,
+      request: "ci-request",
+    })
+    insertMessage(db, {
+      id: "ci-response",
+      type: "response",
+      sender: "@ci",
+      recipient: "@dev/6",
+      ts: now - HOUR,
+      attentionRequired: 1,
+    })
+    expect(projectHealthCadence(db, { now, connectedSessionNames: ["@dev/6"] }).inbox_lag[0]).toMatchObject({
+      actionable_rows: 2,
+    })
+
+    const result = fetchAs("sess-dev-6", "@dev/6", { with: "@ci" })
+    expect((result.events as Array<{ id: string }>).map((event) => event.id)).toEqual(["ci-request", "ci-response"])
+
+    const row = projectHealthCadence(db, { now, connectedSessionNames: ["@dev/6"] }).inbox_lag[0]
+    expect(row).toMatchObject({ actionable_rows: 0, oldest_actionable: null })
+  })
+
+  it("a receipt:false snapshot read acknowledges nothing (21757: no model is behind it)", () => {
+    insertSession(db, { id: "sess-dev-6", name: "@dev/6", role: "member", now })
+    insertMessage(db, {
+      id: "ci-held-relayed",
+      type: "response",
+      sender: "@ci",
+      recipient: "@dev/6",
+      ts: now - 10 * MINUTE,
+      attentionRequired: 1,
+    })
+
+    fetchAs("sess-dev-6", "@dev/6", { ids: ["ci-held-relayed"], receipt: false })
+
+    const row = projectHealthCadence(db, { now, connectedSessionNames: ["@dev/6"] }).inbox_lag[0]
+    expect(row).toMatchObject({ actionable_rows: 1, oldest_actionable: { id: "ci-held-relayed" } })
+  })
+
   it("surfaces the cadence projection and evidence-bearing warnings through tribe.health", () => {
     const ctx = createTribeContext({
       db,
