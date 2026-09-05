@@ -79,3 +79,21 @@ process.env.TRIBE_SOCKET = join(TRIBE_GUARD_DIR, "tribe.sock")
 if (!process.env.TRIBE_DAEMON_STDERR_LOG) {
   process.env.TRIBE_DAEMON_STDERR_LOG = join(TEST_TMP_BASE, "daemon-stderr-log-guard.log")
 }
+
+// Activity-log guard — the identical hazard, one level up: activityLogPath()
+// (packages/daemon/src/lib/activity-log.ts) falls back to a dated file
+// under the REAL ~/.local/share/tribe whenever $TRIBE_ACTIVITY_LOG is
+// unset. Any test that drives a real writeActivity() call without setting
+// it itself — e.g. packages/daemon/src/lib/compose/with-broadcast.test.ts —
+// writes straight into the operator's live activity log. Caught live during
+// 24159's own verification: a `vitest run` left thousands of fixture rows
+// ("tribe:subsystem-N: distinct failure N") in that day's real
+// activity-*.jsonl. Not "off" — tests that assert on the activity log's own
+// content (rather than just avoiding the real one) still need a real file
+// to read back, so the default points at a hermetic one instead of
+// disabling the write outright. Explicit always wins — a test that wants
+// its own path (or truly wants logging off) still sets
+// TRIBE_ACTIVITY_LOG itself.
+if (!process.env.TRIBE_ACTIVITY_LOG) {
+  process.env.TRIBE_ACTIVITY_LOG = join(TEST_TMP_BASE, "activity-log-guard.jsonl")
+}

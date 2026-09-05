@@ -31,9 +31,11 @@ import { createLogger, type ConditionalLogger } from "loggily"
 import {
   activityLogDir,
   activityLogFilename,
+  isActivityLogFilename,
   type ActivityEntry,
   type ActivityKind,
 } from "../../../wire/src/activity-log-contract.ts"
+import { isDaemonStderrLogFilename } from "../../../wire/src/lib/daemon-stderr-log.ts"
 import { stripLoneSurrogates, truncateSurrogateSafe } from "./validation.ts"
 
 // ---------------------------------------------------------------------------
@@ -56,9 +58,11 @@ export function activityLogPath(now: Date = new Date()): string {
 }
 
 /**
- * Remove activity-*.jsonl files whose mtime is older than `keepDays` days.
- * Best-effort: failures are silently ignored (the daemon calls this once
- * on startup; missing files / permission errors should not block boot).
+ * Remove activity-*.jsonl and daemon-stderr-*.log files whose mtime is
+ * older than `keepDays` days — the two dated log families that share
+ * activityLogDir() (@ag/tribe/24159 added the second). Best-effort:
+ * failures are silently ignored (the daemon calls this once on startup;
+ * missing files / permission errors should not block boot).
  *
  * Returns the count of files removed.
  */
@@ -69,7 +73,7 @@ export function pruneOldActivityLogs(keepDays: number = DEFAULT_RETAIN_DAYS, now
   let removed = 0
   try {
     for (const name of readdirSync(dir)) {
-      if (!/^activity-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name)) continue
+      if (!isActivityLogFilename(name) && !isDaemonStderrLogFilename(name)) continue
       const path = join(dir, name)
       try {
         if (statSync(path).mtimeMs < cutoff) {

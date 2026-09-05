@@ -32,6 +32,18 @@ export function daemonStderrLogFilename(date: Date): string {
   return `daemon-stderr-${year}-${month}-${day}.log`
 }
 
+const DAEMON_STDERR_LOG_FILENAME_PATTERN = /^daemon-stderr-\d{4}-\d{2}-\d{2}\.log$/
+
+/**
+ * True for exactly the dated filenames daemonStderrLogFilename() produces.
+ * The one home for this shape, mirroring isActivityLogFilename() in
+ * activity-log-contract.ts — pruneOldActivityLogs matches against this
+ * instead of keeping its own copy of the pattern.
+ */
+export function isDaemonStderrLogFilename(name: string): boolean {
+  return DAEMON_STDERR_LOG_FILENAME_PATTERN.test(name)
+}
+
 /**
  * Return today's daemon-stderr tee path. `TRIBE_DAEMON_STDERR_LOG=<path>`
  * override returns the literal path verbatim (no rotation) — tests pin to

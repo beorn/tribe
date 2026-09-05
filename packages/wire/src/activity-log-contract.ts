@@ -28,3 +28,15 @@ export function activityLogFilename(date: Date): string {
   const day = String(date.getDate()).padStart(2, "0")
   return `activity-${year}-${month}-${day}.jsonl`
 }
+
+const ACTIVITY_LOG_FILENAME_PATTERN = /^activity-\d{4}-\d{2}-\d{2}\.jsonl$/
+
+/**
+ * True for exactly the dated filenames activityLogFilename() produces. The
+ * one home for this shape — a directory scan that needs to recognize a
+ * rotated activity log (pruneOldActivityLogs) matches against this instead
+ * of keeping its own copy of the pattern.
+ */
+export function isActivityLogFilename(name: string): boolean {
+  return ACTIVITY_LOG_FILENAME_PATTERN.test(name)
+}
