@@ -16,7 +16,10 @@ import {
   createPollHealth,
   detectRateLimit,
   formatEvent,
+  formatLateEventsWarning,
+  GITHUB_LATE_HORIZON_MS,
   gitHubTokenSourceLabel,
+  partitionLateEvents,
   rateLimitInfoOf,
   selectNewEvents,
   summarizePollErrors,
@@ -326,6 +329,63 @@ describe("selectNewEvents / formatEvent — a late push must not read as news (2
 
   test("an empty page with a cursor delivers nothing and does not resync", () => {
     expect(selectNewEvents([], "1")).toEqual({ kind: "deliver", events: [] })
+  })
+})
+
+describe("partitionLateEvents — GitHub materializes some events 1-2 days late (24154)", () => {
+  const push = (id: string, createdAt: string): GitHubEvent => ({
+    id,
+    type: "PushEvent",
+    actor: { login: "beorn" },
+    repo: { name: "beorn/hh" },
+    payload: { ref: "refs/heads/main", before: "1234567abcdef", head: "abcdef0123456", size: 1, distinct_size: 1 },
+    created_at: createdAt,
+  })
+  const NOW = Date.parse("2026-09-05T04:09:00Z")
+  const HOUR = 60 * 60 * 1000
+
+  test("an event within the horizon is kept fresh, one well past it is dropped as late", () => {
+    const freshEvent = push("3", new Date(NOW - HOUR / 2).toISOString())
+    const staleEvent = push("2", new Date(NOW - 2 * HOUR).toISOString())
+    expect(partitionLateEvents([freshEvent, staleEvent], NOW, HOUR)).toEqual({
+      fresh: [freshEvent],
+      late: [staleEvent],
+    })
+  })
+
+  test("an event exactly at the horizon is fresh, one millisecond older is late", () => {
+    const atHorizon = push("1", new Date(NOW - HOUR).toISOString())
+    const pastHorizon = push("2", new Date(NOW - HOUR - 1).toISOString())
+    expect(partitionLateEvents([atHorizon, pastHorizon], NOW, HOUR)).toEqual({
+      fresh: [atHorizon],
+      late: [pastHorizon],
+    })
+  })
+
+  test("GITHUB_LATE_HORIZON_MS defaults the horizon to one hour", () => {
+    expect(GITHUB_LATE_HORIZON_MS).toBe(HOUR)
+  })
+})
+
+describe("formatLateEventsWarning — names the count and the created_at range (24154)", () => {
+  const push = (id: string, createdAt: string): GitHubEvent => ({
+    id,
+    type: "PushEvent",
+    actor: { login: "beorn" },
+    repo: { name: "beorn/hh" },
+    payload: { ref: "refs/heads/main", before: "1234567abcdef", head: "abcdef0123456", size: 1, distinct_size: 1 },
+    created_at: createdAt,
+  })
+
+  test("the warn line names the count, the repo, and the oldest..newest created_at range", () => {
+    const late = [push("3", "2026-09-03T05:11:29Z"), push("2", "2026-09-02T10:00:00Z")]
+    expect(formatLateEventsWarning("beorn/hh", late)).toBe(
+      "github events: 2 late events for beorn/hh (2026-09-02T10:00:00Z..2026-09-03T05:11:29Z) not broadcast; GitHub materialized them late",
+    )
+  })
+
+  test("refuses an empty list rather than printing an undefined range", () => {
+    expect(() => formatLateEventsWarning("beorn/hh", [])).toThrow("requires at least one late event")
   })
 })
 
