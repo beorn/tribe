@@ -112,9 +112,9 @@ export interface DispatcherRuntimeHooks {
   resolveDelivery?: DirectDeliveryResolver
   /** Exact identities explicitly retired by the composing layer. */
   retiredNames?: ReadonlySet<string>
-  /** Hab's declared roster (persona name -> resolved restart policy),
-   *  supplied by the composing layer from `TRIBE_EXPECTED_MEMBERS`. Absent
-   *  means no declaration — membership classification runs unchanged. */
+  /** Hab's declared roster (persona name -> "is this seat expected up"
+   *  boolean), supplied by the composing layer from `TRIBE_EXPECTED_MEMBERS`.
+   *  Absent means no declaration — membership classification runs unchanged. */
   expectedMembers?: DeclaredRoster
 }
 

@@ -263,9 +263,9 @@ export type HandlerOpts = {
   /** Exact identities retired by explicit composing-layer policy. */
   retiredNames?: ReadonlySet<string>
   /**
-   * Optional: hab's declared roster (persona name -> resolved restart
-   * policy), env `TRIBE_EXPECTED_MEMBERS`. Absent means "no declaration" —
-   * membership classification runs exactly as it did before this existed
+   * Optional: hab's declared roster (persona name -> "is this seat expected
+   * up" boolean), env `TRIBE_EXPECTED_MEMBERS`. Absent means "no declaration"
+   * — membership classification runs exactly as it did before this existed
    * (@ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded).
    */
   expectedMembers?: DeclaredRoster
@@ -1992,7 +1992,7 @@ type MembershipDiscrepancy = {
    *  is history, not degradation, so it never inflates `missing`/`missing_count`/
    *  `known_durable_launches` — it is surfaced here only as a sibling count. */
   finished_count?: number
-  /** Count of on-demand (declared `restart: "never"`) rows sitting quiet
+  /** Count of on-demand (declared `expected: false`) rows sitting quiet
    *  between uses, alongside this discrepancy (present only when at least
    *  one exists, exactly like `finished_count`). Only ever present when a
    *  declared roster was supplied — see `dormant_launches`. */
@@ -2013,8 +2013,8 @@ type MembershipDiscrepancy = {
  * is history, never a degraded seat
  * (@ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded).
  * Reached both with no declared roster and with one that declares the name
- * on-demand (`restart: "never"`) — a launch hab pages once and never
- * remounts finishes exactly like one nobody ever declared.
+ * on-demand (`expected: false`) — a launch hab pages once and never remounts
+ * finishes exactly like one nobody ever declared.
  */
 type FinishedLaunch = {
   member_id: string
@@ -2026,10 +2026,10 @@ type FinishedLaunch = {
 }
 
 /**
- * A declared on-demand (`restart: "never"`) row sitting quiet between uses:
+ * A declared on-demand (`expected: false`) row sitting quiet between uses:
  * hab pages it once on a crash and never remounts it, so silence here is by
  * design, not degradation and not history. Reached only when a declared
- * roster names this row's identity `restart: "never"` and its departure
+ * roster names this row's identity `expected: false` and its departure
  * fact (if any) never settled — see `classifyDisconnectedDurableRow`.
  * `tribe.health` never lists these rows, only their sibling count
  * (`dormant_count`); `tribe.members` lists them under `dormant_launches`.
@@ -2176,7 +2176,7 @@ type MembershipProjection = {
 /**
  * Classify one disconnected durable row against its newest `event.session.left`
  * fact (if any) and, when the composing layer declared one, the roster's
- * restart policy for its name.
+ * plain "is this name expected up" boolean.
  *
  * A departure "settles" when the fact says the harness EXITED (a positive
  * reason the adapter announced before closing — a killed adapter, a crash or
@@ -2191,11 +2191,11 @@ type MembershipProjection = {
  * With no declared roster this is exactly the pre-declaration two-way split
  * (`finished` / `missing-transport`). With one, what a settled-or-not
  * departure MEANS depends on whether the roster expects the name up:
- *   - expected (`always` / `on-failure`): settled -> `missing` state
+ *   - expected (`expected: true`): settled -> `missing` state
  *     `exited-not-remounted` (hab was supposed to remount it and didn't);
  *     otherwise -> `missing-transport`. Either way it is a live discrepancy —
  *     an expected seat with no live transport is missing regardless of why.
- *   - on-demand (`restart: "never"`): settled -> `finished` (by design,
+ *   - on-demand (`expected: false`): settled -> `finished` (by design,
  *     identical to the no-roster case); otherwise -> `dormant` (quiet
  *     between uses — a crash page is hab's, once, never a discrepancy).
  *   - undeclared (absent from the roster entirely): always `departed`,
@@ -2221,16 +2221,16 @@ function classifyDisconnectedDurableRow(
     return settled ? { ...identity, state: "finished", left_at: leftAt! } : { ...identity, state: "missing-transport" }
   }
 
-  const policy = roster.byName.get(row.name)
-  if (policy === undefined) {
+  const expected = roster.byName.get(row.name)
+  if (expected === undefined) {
     return { member_id: row.id, name: row.name, launch_id: row.launch_id, state: "departed" }
   }
-  if (policy === "never") {
+  if (!expected) {
     return settled
       ? { ...identity, state: "finished", left_at: leftAt! }
       : { member_id: row.id, name: row.name, launch_id: row.launch_id, state: "dormant" }
   }
-  // policy is "always" | "on-failure": hab expects this name up.
+  // expected === true: hab expects this name up.
   return settled
     ? { ...identity, state: "exited-not-remounted", left_at: leftAt! }
     : { ...identity, state: "missing-transport" }

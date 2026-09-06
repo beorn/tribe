@@ -11,33 +11,40 @@
  * standalone daemons) — the membership projection then runs exactly as it
  * did before this module existed.
  *
+ * The declaration is a plain per-name boolean, never a restart-policy
+ * vocabulary: hab's own resolved restart default is not one exported value
+ * (habd-runtime defaults an omitted restart to "never", the health
+ * classifier defaults it to "on-failure"), so "is hab expecting this seat
+ * up" is a declaration semantic hab must derive itself from whichever of
+ * its own defaults applies. Tribe takes the yes/no answer, never the
+ * reasoning behind it.
+ *
  * @ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded
  */
 
-export type MemberRestartPolicy = "always" | "on-failure" | "never"
-
 export interface DeclaredMember {
   readonly name: string
-  readonly restart: MemberRestartPolicy
+  readonly expected: boolean
 }
 
 export interface DeclaredRoster {
-  /** Every declared name, keyed to hab's resolved restart policy for it. */
-  readonly byName: ReadonlyMap<string, MemberRestartPolicy>
-  /** Declared names hab remounts on a harness exit (`always` / `on-failure`)
-   *  — a settled departure here is a live discrepancy, never quiet history. */
+  /** Every declared name, keyed to hab's "is this seat expected up" answer. */
+  readonly byName: ReadonlyMap<string, boolean>
+  /** Declared names hab expects up (`expected: true`) — a settled departure
+   *  here is a live discrepancy, never quiet history. */
   readonly expectedNames: ReadonlySet<string>
-  /** Declared names hab pages once and never remounts (`restart: "never"`)
-   *  — a settled departure here is `finished` by design; anything else is
-   *  `dormant` (down between uses), never a discrepancy. */
+  /** Declared names hab does NOT expect up (`expected: false`) — a settled
+   *  departure here is `finished` by design; anything else is `dormant`
+   *  (down between uses), never a discrepancy. */
   readonly onDemandNames: ReadonlySet<string>
 }
 
 /**
  * Parse the declared-roster env var (`TRIBE_EXPECTED_MEMBERS`): a JSON array
- * of `{ name, restart }` rows, `restart` one of `"always"`, `"on-failure"`,
- * or `"never"` — hab's own RESOLVED restart policy per persona, never
- * re-derived here.
+ * of `{ name, expected }` rows — `name` a non-empty string, `expected` a
+ * plain boolean answering "does hab expect this seat up". Never a
+ * restart-policy vocabulary; the composing layer derives the boolean from
+ * whatever its own restart-policy source says.
  *
  * Absent or blank means "no declaration" (`undefined`): every caller must
  * treat that as "run the pre-declaration projection", never as an empty
@@ -54,34 +61,34 @@ export function parseExpectedMembers(raw: string | undefined): DeclaredRoster | 
   }
   if (!Array.isArray(parsed)) throw new Error("TRIBE_EXPECTED_MEMBERS must be a JSON array")
 
-  const byName = new Map<string, MemberRestartPolicy>()
+  const byName = new Map<string, boolean>()
   parsed.forEach((value, index) => {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       throw new Error(`TRIBE_EXPECTED_MEMBERS[${index}] must be an object`)
     }
     const row = value as Record<string, unknown>
-    const extra = Object.keys(row).filter((key) => key !== "name" && key !== "restart")
+    const extra = Object.keys(row).filter((key) => key !== "name" && key !== "expected")
     if (extra.length > 0) {
       throw new Error(`TRIBE_EXPECTED_MEMBERS[${index}] has unknown keys: ${extra.join(", ")}`)
     }
     if (typeof row.name !== "string" || row.name.trim() === "") {
       throw new Error(`TRIBE_EXPECTED_MEMBERS[${index}].name must be a non-empty string`)
     }
-    if (row.restart !== "always" && row.restart !== "on-failure" && row.restart !== "never") {
-      throw new Error(`TRIBE_EXPECTED_MEMBERS[${index}].restart must be 'always', 'on-failure', or 'never'`)
+    if (typeof row.expected !== "boolean") {
+      throw new Error(`TRIBE_EXPECTED_MEMBERS[${index}].expected must be a boolean`)
     }
     const name = row.name.trim()
     if (byName.has(name)) {
       throw new Error(`TRIBE_EXPECTED_MEMBERS[${index}] duplicates declared name: ${name}`)
     }
-    byName.set(name, row.restart)
+    byName.set(name, row.expected)
   })
 
   const expectedNames = new Set<string>()
   const onDemandNames = new Set<string>()
-  for (const [name, restart] of byName) {
-    if (restart === "never") onDemandNames.add(name)
-    else expectedNames.add(name)
+  for (const [name, expected] of byName) {
+    if (expected) expectedNames.add(name)
+    else onDemandNames.add(name)
   }
   return { byName, expectedNames, onDemandNames }
 }
