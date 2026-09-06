@@ -143,6 +143,8 @@ describe("membership projection: declared-roster membership is a function of a p
         status: "degraded",
         connected_durable_launches: 0,
         known_durable_launches: 1,
+        expected_count: 1,
+        connected_expected_count: 0,
         missing_count: 1,
         missing: [
           {
@@ -475,10 +477,14 @@ describe("membership projection: declared-roster membership is a function of a p
     const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
       membership_discrepancy?: Record<string, unknown>
     }
+    // known/connected durable launches keep their row meaning: there is no row
+    // at all here, so both are 0 while the declaration says one seat is expected.
     expect(members.membership_discrepancy).toEqual({
       status: "degraded",
       connected_durable_launches: 0,
-      known_durable_launches: 1,
+      known_durable_launches: 0,
+      expected_count: 1,
+      connected_expected_count: 0,
       missing_count: 1,
       missing: [{ name: "@dev/12", state: "never-registered" }],
       meaning: "missing transport does not establish agent absence",

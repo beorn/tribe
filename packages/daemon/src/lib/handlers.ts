@@ -1985,6 +1985,13 @@ type MembershipDiscrepancy = {
   status: "degraded"
   connected_durable_launches: number
   known_durable_launches: number
+  /** Roster mode only: the number of declared names hab expects up, and how
+   *  many of those have a live transport. `known_durable_launches` and
+   *  `connected_durable_launches` keep their pre-declaration meaning (durable
+   *  rows minus finished ones, and connected durable rows) in both modes, so
+   *  no field changes meaning when a declaration appears. */
+  expected_count?: number
+  connected_expected_count?: number
   missing_count: number
   missing: MissingLaunch[]
   /** Count of disconnected durable rows classified `finished` alongside this
@@ -2045,7 +2052,19 @@ type DormantLaunch = {
   member_id: string
   name: string
   launch_id: string
+  launch_parent_pid: number
   state: "dormant"
+  /** ISO of the row's own `updated_at` — when it was last known registered,
+   *  independent of whether any departure fact exists. */
+  last_seen: string
+  /** ISO of the newest keyed `event.session.left` fact for this row, when
+   *  one exists — regardless of its reason or freshness relative to
+   *  `updated_at` (a dormant row is quiet-by-design either way, so this is
+   *  informational, never a classification input). */
+  left_at?: string
+  /** That fact's `reason`, when it carries one and one exists — any reason,
+   *  not only `harness-exited` (e.g. `transport-closed`). */
+  reason?: string
 }
 
 /**
@@ -2322,45 +2341,10 @@ function projectMembershipDiscrepancy(
     else missing.push(classified)
   }
 
-  if (roster !== undefined) {
-    // The declaration is the denominator: `known_durable_launches` is the
-    // declared-expected roster size, independent of what actually
-    // registered, and a declared-expected name with NO durable row at all
-    // (never launched, or its row was swept) is missing by omission — the
-    // loop above never visits it because there is no row to visit.
-    const registeredNames = new Set(rows.filter(isDurableMembershipSessionRow).map((row) => row.name))
-    for (const name of roster.expectedNames) {
-      if (!registeredNames.has(name)) missing.push({ name, state: "never-registered" })
-    }
-    const connectedNames = new Set(
-      rows.filter((row) => activeIds.has(row.id) && roster.expectedNames.has(row.name)).map((row) => row.name),
-    )
-    const departedSiblingCount = departed.filter((row) => row.why === "undeclared-sibling").length
-    const departedForeignCount = departed.filter((row) => row.why === "undeclared-foreign").length
-    if (missing.length === 0) return { discrepancy: undefined, finished, dormant, departed }
-    return {
-      discrepancy: {
-        status: "degraded",
-        connected_durable_launches: connectedNames.size,
-        known_durable_launches: roster.expectedNames.size,
-        missing_count: missing.length,
-        missing,
-        ...(finished.length > 0 ? { finished_count: finished.length } : {}),
-        ...(dormant.length > 0 ? { dormant_count: dormant.length } : {}),
-        ...(departedSiblingCount > 0 ? { departed_sibling_count: departedSiblingCount } : {}),
-        ...(departedForeignCount > 0 ? { departed_foreign_count: departedForeignCount } : {}),
-        meaning: "missing transport does not establish agent absence",
-      },
-      finished,
-      dormant,
-      departed,
-    }
-  }
-
-  // No declared roster: pre-declaration behaviour, unchanged. Superseded
-  // rows are excluded from the denominator too, or a seat that re-registered
-  // under an auto-suffixed name counts as two known launches and reports
-  // "1 of 2 connected" about one live seat.
+  // The durable-row counts mean the same thing with and without a declaration.
+  // Superseded rows are excluded from the denominator, or a seat that
+  // re-registered under an auto-suffixed name counts as two known launches and
+  // reports "1 of 2 connected" about one live seat.
   const supersededLaunchIds = activeLaunchIdSet(rows, activeIds)
   const durableRows = rows
     .filter(isDurableMembershipSessionRow)
@@ -2376,6 +2360,42 @@ function projectMembershipDiscrepancy(
   // not, is judged on its own merits).
   const knownNames = new Set(durableRows.filter((row) => !finishedIds.has(row.id)).map((row) => row.name))
   const connectedNames = new Set(durableRows.filter((row) => activeIds.has(row.id)).map((row) => row.name))
+
+  if (roster !== undefined) {
+    // The declaration adds a second denominator beside the durable rows: a
+    // declared-expected name with NO durable row at all (never launched, or
+    // its row was swept) is missing by omission — the loop above never
+    // visits it because there is no row to visit.
+    const registeredNames = new Set(rows.filter(isDurableMembershipSessionRow).map((row) => row.name))
+    for (const name of roster.expectedNames) {
+      if (!registeredNames.has(name)) missing.push({ name, state: "never-registered" })
+    }
+    const connectedExpectedNames = new Set(
+      rows.filter((row) => activeIds.has(row.id) && roster.expectedNames.has(row.name)).map((row) => row.name),
+    )
+    const departedSiblingCount = departed.filter((row) => row.why === "undeclared-sibling").length
+    const departedForeignCount = departed.filter((row) => row.why === "undeclared-foreign").length
+    if (missing.length === 0) return { discrepancy: undefined, finished, dormant, departed }
+    return {
+      discrepancy: {
+        status: "degraded",
+        connected_durable_launches: connectedNames.size,
+        known_durable_launches: knownNames.size,
+        expected_count: roster.expectedNames.size,
+        connected_expected_count: connectedExpectedNames.size,
+        missing_count: missing.length,
+        missing,
+        ...(finished.length > 0 ? { finished_count: finished.length } : {}),
+        ...(dormant.length > 0 ? { dormant_count: dormant.length } : {}),
+        ...(departedSiblingCount > 0 ? { departed_sibling_count: departedSiblingCount } : {}),
+        ...(departedForeignCount > 0 ? { departed_foreign_count: departedForeignCount } : {}),
+        meaning: "missing transport does not establish agent absence",
+      },
+      finished,
+      dormant,
+      departed,
+    }
+  }
 
   if (missing.length === 0) return { discrepancy: undefined, finished, dormant, departed }
   return {

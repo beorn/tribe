@@ -1223,6 +1223,8 @@ process.exit(await child.exited)
           status: "degraded",
           connected_durable_launches: 2,
           known_durable_launches: 4,
+          expected_count: 4,
+          connected_expected_count: 2,
           missing_count: 2,
           meaning: "missing transport does not establish agent absence",
         })
@@ -1259,6 +1261,8 @@ process.exit(await child.exited)
           status: "degraded",
           connected_durable_launches: 2,
           known_durable_launches: 3,
+          expected_count: 3,
+          connected_expected_count: 2,
           missing_count: 1,
           finished_count: 1,
           meaning: "missing transport does not establish agent absence",
