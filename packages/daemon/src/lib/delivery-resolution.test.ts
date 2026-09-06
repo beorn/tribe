@@ -71,16 +71,27 @@ describe("generic direct-message delivery resolution", () => {
     })
   })
 
-  it("routes both intentionally unstaffed coordinator roles to their declared holder", () => {
+  it("routes the intentionally unstaffed CI coordinator role to its declared holder", () => {
     const raw = tribeHabModule.services.wire.env.TRIBE_DELIVERY_FALLBACKS
     const resolve = prefixFallbackDeliveryResolver(raw)
-    for (const recipient of ["@ci", "@yrd"]) {
-      expect(resolve?.({ recipient, answerableNames: new Set(["@chief"]) })).toMatchObject({
-        status: "accepted",
-        state: "bounced",
-        to: "@chief",
-      })
-    }
+    expect(resolve?.({ recipient: "@ci", answerableNames: new Set(["@chief"]) })).toMatchObject({
+      status: "accepted",
+      state: "bounced",
+      to: "@chief",
+    })
+  })
+
+  // @yrd retired 2026-08-31; the declaration moved from a bounce row to a
+  // refuse row alongside @fleet (@ag/tribe/tribe-membership-projection-
+  // counts-permanent-history-as-degraded), so it belongs with the other
+  // terminal identity below, not with @ci's live bounce.
+  it("refuses the retired Yrd identity even when a stale transport is answer-capable", () => {
+    const raw = tribeHabModule.services.wire.env.TRIBE_DELIVERY_FALLBACKS
+    const resolve = prefixFallbackDeliveryResolver(raw)
+    expect(resolve?.({ recipient: "@yrd", answerableNames: new Set(["@yrd", "@chief"]) })).toEqual({
+      status: "refused",
+      reason: '"@yrd" is retired; send to successor "@chief"',
+    })
   })
 
   it("refuses the retired Fleet identity even when a stale transport is answer-capable", () => {

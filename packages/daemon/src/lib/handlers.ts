@@ -1957,8 +1957,38 @@ type MembershipDiscrepancy = {
     launch_parent_pid: number
     state: "missing-transport"
   }>
+  /** Count of disconnected durable rows classified `finished` alongside this
+   *  discrepancy (present only when at least one exists). A finished launch
+   *  is history, not degradation, so it never inflates `missing`/`missing_count`/
+   *  `known_durable_launches` — it is surfaced here only as a sibling count. */
+  finished_count?: number
   meaning: "missing transport does not establish agent absence"
 }
+
+/**
+ * A disconnected durable launch whose last-transport-disconnect departure fact
+ * (`event.session.left`, selected by `ref = member_id`) is at or after the
+ * registration row's own `updated_at` — i.e. the departure was the LAST thing
+ * that happened to that row, not something it later re-registered past. This
+ * is history, never a degraded seat
+ * (@ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded).
+ */
+type FinishedLaunch = {
+  member_id: string
+  name: string
+  launch_id: string
+  launch_parent_pid: number
+  state: "finished"
+  left_at: string
+}
+
+/** Newest `event.session.left` fact for a member id, or null when none was
+ *  ever journaled (either retention tier) — bun:sqlite's `.get()` reports
+ *  "no row" as `null`, never `undefined`, so callers must not narrow on
+ *  `!== undefined` (that let a real `null` through to a `.ts` read once
+ *  already, caught by the "vanished" and "restart" tests). Injected so the
+ *  projection stays a pure function of its inputs in tests. */
+type SessionLeftFactReader = (memberId: string) => { ts: number; content: string } | null
 
 /**
  * The launch ids a currently-connected session holds. `launch_id` is
@@ -2014,12 +2044,59 @@ function projectDisconnectedSessionRows<T extends MembershipSessionRow>(
   return { diagnostic, anonymousDurable }
 }
 
+type MembershipProjection = {
+  discrepancy: MembershipDiscrepancy | undefined
+  /** Every disconnected durable row classified `finished` this call, whether
+   *  or not a discrepancy is present. `tribe.members` surfaces these under a
+   *  top-level `finished_launches`; `tribe.health` deliberately drops them —
+   *  see the call sites. */
+  finished: FinishedLaunch[]
+}
+
+/**
+ * Classify one disconnected durable row against its newest `event.session.left`
+ * fact (if any). `ts >= row.updated_at` means the departure is the LAST thing
+ * that happened to that registration — i.e. it never re-registered after
+ * leaving — so the launch is history. An older or absent fact leaves the row
+ * `missing-transport`: this is the trap
+ * (@ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded)
+ * — a re-registration under the same id bumps `updated_at` past a stale left
+ * fact, and a seat that then vanishes for good with no NEW fact must stay
+ * degraded, not silently read as long-since finished.
+ */
+function classifyDisconnectedDurableRow(
+  row: DurableMembershipSessionRow,
+  getSessionLeftFact: SessionLeftFactReader,
+):
+  | FinishedLaunch
+  | { member_id: string; name: string; launch_id: string; launch_parent_pid: number; state: "missing-transport" } {
+  const fact = getSessionLeftFact(row.id)
+  if (fact && fact.ts >= row.updated_at) {
+    return {
+      member_id: row.id,
+      name: row.name,
+      launch_id: row.launch_id,
+      launch_parent_pid: row.launch_parent_pid,
+      state: "finished",
+      left_at: new Date(fact.ts).toISOString(),
+    }
+  }
+  return {
+    member_id: row.id,
+    name: row.name,
+    launch_id: row.launch_id,
+    launch_parent_pid: row.launch_parent_pid,
+    state: "missing-transport",
+  }
+}
+
 function projectMembershipDiscrepancy(
   rows: readonly MembershipSessionRow[],
   activeIds: ReadonlySet<string>,
   disconnectedRows: readonly MembershipSessionRow[],
   retiredNames: ReadonlySet<string>,
-): MembershipDiscrepancy | undefined {
+  getSessionLeftFact: SessionLeftFactReader,
+): MembershipProjection {
   // Superseded rows are excluded from the denominator too, or a seat that
   // re-registered under an auto-suffixed name counts as two known launches
   // and reports "1 of 2 connected" about one live seat.
@@ -2029,23 +2106,36 @@ function projectMembershipDiscrepancy(
     .filter((row) => !isUnidentifiedSessionName(row.name))
     .filter((row) => activeIds.has(row.id) || !supersededLaunchIds.has(row.launch_id))
     .filter((row) => activeIds.has(row.id) || !retiredNames.has(row.name))
-  const knownNames = new Set(durableRows.map((row) => row.name))
+
+  const missing: MembershipDiscrepancy["missing"] = []
+  const finished: FinishedLaunch[] = []
+  for (const row of disconnectedRows) {
+    if (!isDurableMembershipSessionRow(row)) continue
+    const classified = classifyDisconnectedDurableRow(row, getSessionLeftFact)
+    if (classified.state === "finished") finished.push(classified)
+    else missing.push(classified)
+  }
+  const finishedIds = new Set(finished.map((row) => row.member_id))
+  // A finished row is retired from the "known" denominator too — it is not
+  // counted as missing anything, and it is not double-counted against a live
+  // successor row that happens to share its name (the restart case: the old
+  // launch's id is excluded here while the new launch's own row, active or
+  // not, is judged on its own merits).
+  const knownNames = new Set(durableRows.filter((row) => !finishedIds.has(row.id)).map((row) => row.name))
   const connectedNames = new Set(durableRows.filter((row) => activeIds.has(row.id)).map((row) => row.name))
-  const missing = disconnectedRows.filter(isDurableMembershipSessionRow).map((row) => ({
-    member_id: row.id,
-    name: row.name,
-    launch_id: row.launch_id,
-    launch_parent_pid: row.launch_parent_pid,
-    state: "missing-transport" as const,
-  }))
-  if (missing.length === 0) return undefined
+
+  if (missing.length === 0) return { discrepancy: undefined, finished }
   return {
-    status: "degraded",
-    connected_durable_launches: connectedNames.size,
-    known_durable_launches: knownNames.size,
-    missing_count: missing.length,
-    missing,
-    meaning: "missing transport does not establish agent absence",
+    discrepancy: {
+      status: "degraded",
+      connected_durable_launches: connectedNames.size,
+      known_durable_launches: knownNames.size,
+      missing_count: missing.length,
+      missing,
+      ...(finished.length > 0 ? { finished_count: finished.length } : {}),
+      meaning: "missing transport does not establish agent absence",
+    },
+    finished,
   }
 }
 
@@ -2177,10 +2267,25 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
   })
   const disconnected = projectDisconnectedSessionRows(rows, activeIds)
   const diagnosticDisconnected = disconnected.diagnostic.filter((row) => !retiredNames.has(row.name))
-  const membershipDiscrepancy = projectMembershipDiscrepancy(rows, activeIds, diagnosticDisconnected, retiredNames)
+  const membership = projectMembershipDiscrepancy(
+    rows,
+    activeIds,
+    diagnosticDisconnected,
+    retiredNames,
+    (memberId) =>
+      ctx.stmts.selectLatestSessionLeftFactForMember.get({ $member_id: memberId }) as {
+        ts: number
+        content: string
+      } | null,
+  )
   return jsonResult({
     sessions,
-    ...(membershipDiscrepancy === undefined ? {} : { membership_discrepancy: membershipDiscrepancy }),
+    ...(membership.discrepancy === undefined ? {} : { membership_discrepancy: membership.discrepancy }),
+    // History, not alarm: a finished launch never sets membership_discrepancy
+    // on its own, but stays visible here so a seat's past is not erased along
+    // with its old "degraded" noise (@ag/tribe/tribe-membership-projection-
+    // counts-permanent-history-as-degraded). Omitted (not `[]`) when empty.
+    ...(membership.finished.length > 0 ? { finished_launches: membership.finished } : {}),
   })
 }
 
@@ -2507,7 +2612,20 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
       },
     ]
   })
-  const membershipDiscrepancy = projectMembershipDiscrepancy(rows, activeIds, diagnosticDisconnected, retiredNames)
+  // `.finished` is deliberately unused here — tribe.health stays a pure
+  // liveness/degradation surface and never grows a `finished_launches` list;
+  // tribe.members is where finished history is surfaced (handleSessions above).
+  const { discrepancy: membershipDiscrepancy } = projectMembershipDiscrepancy(
+    rows,
+    activeIds,
+    diagnosticDisconnected,
+    retiredNames,
+    (memberId) =>
+      ctx.stmts.selectLatestSessionLeftFactForMember.get({ $member_id: memberId }) as {
+        ts: number
+        content: string
+      } | null,
+  )
 
   const members = liveSessions.map((s) => {
     const active = byId.get(s.id)

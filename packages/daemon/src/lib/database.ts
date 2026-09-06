@@ -1569,6 +1569,24 @@ export function createStatements(db: Database) {
 		ORDER BY ts, id
 	`),
 
+    /** Newest `event.session.left` fact for one member id, across both
+     *  retention tiers, by `ref` (@ag/tribe/tribe-membership-projection-
+     *  counts-permanent-history-as-degraded) — the read behind "did this
+     *  durable launch end, or did it just lose its transport". The membership
+     *  projection finishes a disconnected row only when this fact's `ts` is
+     *  at or after the row's own `updated_at`; an older fact means the row
+     *  kept changing (re-registered) after some earlier departure, which
+     *  must stay `missing-transport`, never `finished`. */
+    selectLatestSessionLeftFactForMember: db.prepare(`
+		SELECT ts, content FROM messages
+		WHERE kind = 'event' AND type = 'event.session.left' AND ref = $member_id
+		UNION
+		SELECT ts, content FROM messages_archive
+		WHERE kind = 'event' AND type = 'event.session.left' AND ref = $member_id
+		ORDER BY ts DESC
+		LIMIT 1
+	`),
+
     /** Answers are already durable message facts. Keep responder identity so
      *  fanout=all closes only that owner's outcome while fanout=first closes
      *  the shared request for every snapshotted owner. */

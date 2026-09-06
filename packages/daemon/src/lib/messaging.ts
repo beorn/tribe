@@ -699,3 +699,40 @@ export function logEvent(
   })
   return id
 }
+
+/**
+ * Durable departure fact for a session's LAST-transport disconnect
+ * (@ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded).
+ * `ref = member.memberId` makes the fact selectable by the membership
+ * projection (`selectLatestSessionLeftFactForMember` in database.ts), which
+ * is the only way to tell a durable launch that ENDED from one whose
+ * registration merely lost its transport. Factored out of the dispatcher's
+ * socket-close handler so the payload shape has exactly one definition and a
+ * unit test that does not require a live socket harness.
+ */
+export function logSessionLeft(
+  ctx: TribeContext,
+  member: {
+    memberId: string
+    name: string
+    role: string
+    domains: readonly string[]
+    launchId: string | null
+    launchParentPid: number | null
+  },
+): string {
+  return logEvent(
+    ctx,
+    "session.left",
+    undefined,
+    {
+      name: member.name,
+      role: member.role,
+      domains: member.domains,
+      member_id: member.memberId,
+      launch_id: member.launchId,
+      launch_parent_pid: member.launchParentPid,
+    },
+    { ref: member.memberId },
+  )
+}

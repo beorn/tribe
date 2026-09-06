@@ -744,11 +744,17 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           membership_discrepancy: {
             type: "object",
             description:
-              "Present when one or more known addressable durable launch rows have no authenticated transport. Carries connected-durable/known-durable/missing counts plus missing launch identities; unidentified and connection-scoped sessions do not inflate the comparison, and missing transport does not establish agent absence.",
+              "Present when one or more known addressable durable launch rows have no authenticated transport. Carries connected-durable/known-durable/missing counts plus missing launch identities; unidentified and connection-scoped sessions do not inflate the comparison, and missing transport does not establish agent absence. Carries finished_count when one or more other disconnected durable rows were instead classified finished (see finished_launches) — those never inflate missing_count or known_durable_launches.",
             additionalProperties: true,
           },
+          finished_launches: {
+            type: "array",
+            description:
+              "Disconnected durable launches whose departure was journaled and is the last thing that happened to their registration — i.e. the launch ended rather than merely losing its transport; present only when non-empty and never itself a degradation signal.",
+            items: { type: "object", additionalProperties: true },
+          },
         },
-        "Members list under `sessions`, plus optional `membership_discrepancy` when known addressable durable launches are missing transports.",
+        "Members list under `sessions`, plus optional `membership_discrepancy` when known addressable durable launches are missing transports and optional `finished_launches` for durable launches that ended cleanly.",
       ),
     },
     cli: available({
@@ -828,7 +834,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           membership_discrepancy: {
             type: "object",
             description:
-              "Present when known addressable durable launch rows are missing authenticated transports. Uses the same projection as tribe.members so MISSING is never silently aliased to ABSENT.",
+              "Present when known addressable durable launch rows are missing authenticated transports. Uses the same projection as tribe.members so MISSING is never silently aliased to ABSENT. Carries finished_count when other disconnected durable rows were instead classified finished (a launch that ended, not one that vanished); tribe.health never lists those rows itself — see tribe.members' finished_launches.",
             additionalProperties: true,
           },
           stale_beads: { type: "number", description: "Count of beads claimed but idle past threshold." },

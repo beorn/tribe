@@ -62,7 +62,7 @@ import {
 import { createLifecycleStore } from "../lifecycle-store.ts"
 import type { TribePluginHandle } from "../plugin-api.ts"
 import { createInboxWaitManager } from "../inbox-wait.ts"
-import { logEvent, sendMessage } from "../messaging.ts"
+import { logEvent, logSessionLeft, sendMessage } from "../messaging.ts"
 import { registerSession, NameConflictError, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
 import {
   adoptByPidCwd,
@@ -2163,11 +2163,17 @@ export function withDispatcher<
           } else {
             log.info?.("session.disconnected", connectionFields)
             // Durable history stays lossless even when the channel projection
-            // coalesces a churn storm or suppresses daemon-start noise.
-            logEvent(client.ctx, "session.left", undefined, {
+            // coalesces a churn storm or suppresses daemon-start noise. Carries
+            // launch identity + `ref = member_id` so the membership projection
+            // can tell a launch that ENDED from one that only lost transport
+            // (@ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded).
+            logSessionLeft(client.ctx, {
+              memberId: client.ctx.sessionId,
               name: client.name,
               role: client.role,
               domains: client.domains,
+              launchId: client.launchId,
+              launchParentPid: client.launchParentPid,
             })
             const now = Date.now()
             const gateOpen = sessionAnnounceGate(client.name, now)
