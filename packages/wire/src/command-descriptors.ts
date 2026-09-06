@@ -744,25 +744,25 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           membership_discrepancy: {
             type: "object",
             description:
-              "Present when one or more known addressable durable launch rows have no authenticated transport. Carries connected-durable/known-durable/missing counts plus missing launch identities; unidentified and connection-scoped sessions do not inflate the comparison, and missing transport does not establish agent absence. Carries finished_count when one or more other disconnected durable rows were instead classified finished (see finished_launches) — those never inflate missing_count or known_durable_launches. When the daemon was started with a declared roster (TRIBE_EXPECTED_MEMBERS), known-durable/connected-durable instead count the declared-expected names themselves, `missing` can also carry state never-registered (a declared-expected name with no durable row at all), and dormant_count/departed_count appear alongside finished_count for any on-demand or undeclared rows classified this call (see dormant_launches/departed_launches) — absent a declaration none of this moves.",
+              "Present when one or more known addressable durable launch rows have no authenticated transport. Carries connected-durable/known-durable/missing counts plus missing launch identities; unidentified and connection-scoped sessions do not inflate the comparison, and missing transport does not establish agent absence. Carries finished_count when one or more other disconnected durable rows were instead classified finished (see finished_launches) — those never inflate missing_count or known_durable_launches. When the daemon was started with a declared roster (TRIBE_EXPECTED_MEMBERS, a plain per-name expected:boolean, never a restart-policy vocabulary), known-durable/connected-durable instead count the declared-expected names themselves, `missing` can also carry state never-registered (a declared-expected name with no durable row at all), and dormant_count/departed_sibling_count/departed_foreign_count appear alongside finished_count for any on-demand or undeclared rows classified this call (see dormant_launches/departed_launches) — absent a declaration none of this moves.",
             additionalProperties: true,
           },
           finished_launches: {
             type: "array",
             description:
-              "Disconnected durable launches whose departure was journaled and is the last thing that happened to their registration — i.e. the launch ended rather than merely losing its transport; present only when non-empty and never itself a degradation signal. Reached with no declared roster, and with one that declares the name on-demand (restart: never) and its departure settled.",
+              "Disconnected durable launches whose departure was journaled and is the last thing that happened to their registration — i.e. the launch ended rather than merely losing its transport; present only when non-empty and never itself a degradation signal. Reached with no declared roster, and with one that declares the name on-demand (expected: false) and its departure settled.",
             items: { type: "object", additionalProperties: true },
           },
           dormant_launches: {
             type: "array",
             description:
-              "Declared-roster-only: on-demand (restart: never) durable launches sitting quiet between uses — hab pages them once on a crash and never remounts, so silence is by design. Present only when non-empty and never a degradation signal; absent entirely with no declared roster.",
+              "Declared-roster-only: on-demand (expected: false) durable launches sitting quiet between uses — hab pages them once on a crash and never remounts, so silence is by design. Present only when non-empty and never a degradation signal; absent entirely with no declared roster.",
             items: { type: "object", additionalProperties: true },
           },
           departed_launches: {
             type: "array",
             description:
-              "Declared-roster-only: disconnected durable launches whose name is absent from the declared roster entirely — nothing expects them up, so they are history nobody was watching. Present only when non-empty and never a degradation signal; absent entirely with no declared roster.",
+              "Declared-roster-only: disconnected durable launches whose name is absent from the declared roster entirely — nothing expects them up, so they are history nobody was watching. Present only when non-empty and never a degradation signal; absent entirely with no declared roster. Each row carries member_id/name/launch_id/launch_parent_pid, last_seen (ISO of the row's own updated_at), left_at/reason when a keyed departure fact exists (informational only, never a classification input), and why: undeclared-sibling means the name's family (the part before its last '/', or the whole name with none) matches a declared name's family — retired on purpose or dropped by mistake, check the declaration; undeclared-foreign means no declared name shares that family — more likely a probe, a test, or an ad-hoc session.",
             items: { type: "object", additionalProperties: true },
           },
           unexpected_connected: {
@@ -852,7 +852,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           membership_discrepancy: {
             type: "object",
             description:
-              "Present when known addressable durable launch rows are missing authenticated transports. Uses the same projection as tribe.members so MISSING is never silently aliased to ABSENT. Carries finished_count when other disconnected durable rows were instead classified finished (a launch that ended, not one that vanished); tribe.health never lists those rows itself — see tribe.members' finished_launches. When the daemon was started with a declared roster (TRIBE_EXPECTED_MEMBERS), known-durable/connected-durable instead count the declared-expected names themselves, missing can also carry state never-registered, and dormant_count/departed_count appear alongside finished_count for on-demand or undeclared rows (tribe.health lists neither list itself — see tribe.members' dormant_launches/departed_launches) — absent a declaration none of this moves, and tribe.health never gains a top-level key either way.",
+              "Present when known addressable durable launch rows are missing authenticated transports. Uses the same projection as tribe.members so MISSING is never silently aliased to ABSENT. Carries finished_count when other disconnected durable rows were instead classified finished (a launch that ended, not one that vanished); tribe.health never lists those rows itself — see tribe.members' finished_launches. When the daemon was started with a declared roster (TRIBE_EXPECTED_MEMBERS, a plain per-name expected:boolean, never a restart-policy vocabulary), known-durable/connected-durable instead count the declared-expected names themselves, missing can also carry state never-registered, and dormant_count/departed_sibling_count/departed_foreign_count appear alongside finished_count for on-demand or undeclared rows (departed split by why — undeclared-sibling shares a declared name's family, undeclared-foreign shares none; tribe.health lists neither list itself — see tribe.members' dormant_launches/departed_launches) — absent a declaration none of this moves, and tribe.health never gains a top-level key either way.",
             additionalProperties: true,
           },
           stale_beads: { type: "number", description: "Count of beads claimed but idle past threshold." },
