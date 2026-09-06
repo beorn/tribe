@@ -1997,11 +1997,18 @@ type MembershipDiscrepancy = {
    *  one exists, exactly like `finished_count`). Only ever present when a
    *  declared roster was supplied — see `dormant_launches`. */
   dormant_count?: number
-  /** Count of undeclared rows — absent from the declared roster entirely —
+  /** Count of undeclared rows whose name shares a family with at least one
+   *  declared name (`why: "undeclared-sibling"` — see `DepartedLaunch`),
    *  alongside this discrepancy (present only when at least one exists,
    *  exactly like `finished_count`). Only ever present when a declared
    *  roster was supplied — see `departed_launches`. */
-  departed_count?: number
+  departed_sibling_count?: number
+  /** Count of undeclared rows whose name shares no declared family
+   *  (`why: "undeclared-foreign"`), alongside this discrepancy (present
+   *  only when at least one exists, exactly like `finished_count`). Only
+   *  ever present when a declared roster was supplied — see
+   *  `departed_launches`. */
+  departed_foreign_count?: number
   meaning: "missing transport does not establish agent absence"
 }
 
@@ -2046,14 +2053,59 @@ type DormantLaunch = {
  * entirely — nothing expects it up, so it is neither a discrepancy nor
  * quiet-by-design, just history nobody was watching. Reached only when a
  * declared roster is supplied and does not name this row's identity at all.
- * `tribe.health` never lists these rows, only their sibling count
- * (`departed_count`); `tribe.members` lists them under `departed_launches`.
+ * `tribe.health` never lists these rows, only their sibling/foreign counts
+ * (`departed_sibling_count` / `departed_foreign_count`, see `why` below);
+ * `tribe.members` lists them under `departed_launches`.
+ *
+ * `why` says which of two things an undeclared name is likely to be, so an
+ * operator doesn't mistake a genuine probe/subagent for a real seat that
+ * fell out of the roster by mistake:
+ *   - `"undeclared-sibling"`: the name's family (the part before its LAST
+ *     `/`, or the whole name when it has none) matches the family of at
+ *     least one declared name — a name in a declared family that is itself
+ *     undeclared was either retired on purpose or dropped by mistake; check
+ *     the declaration.
+ *   - `"undeclared-foreign"`: no declared name shares its family — nothing
+ *     in the roster's vocabulary claims this name at all, so it is more
+ *     likely a probe, a test, or an ad-hoc session.
  */
 type DepartedLaunch = {
   member_id: string
   name: string
   launch_id: string
+  launch_parent_pid: number
   state: "departed"
+  /** ISO of the row's own `updated_at` — when it was last known registered,
+   *  independent of whether any departure fact exists. */
+  last_seen: string
+  /** ISO of the newest keyed `event.session.left` fact for this row, when
+   *  one exists — regardless of its reason or freshness relative to
+   *  `updated_at` (undeclared rows are `departed` either way, so this is
+   *  informational, never a classification input). */
+  left_at?: string
+  /** That fact's `reason`, when it carries one and one exists. */
+  reason?: string
+  why: "undeclared-sibling" | "undeclared-foreign"
+}
+
+/** The part of a name before its LAST `/`, or the whole name when it has
+ *  none — `@dev/0`'s family is `@dev`, `session 1`'s family is `session 1`
+ *  itself. Used only to decide `DepartedLaunch.why`. */
+function nameFamily(name: string): string {
+  const slash = name.lastIndexOf("/")
+  return slash === -1 ? name : name.slice(0, slash)
+}
+
+/** An undeclared name is a `"sibling"` when its family matches at least one
+ *  DECLARED name's family (whether that name is expected or on-demand — the
+ *  declaration's vocabulary is what matters, not any one row's policy),
+ *  otherwise `"foreign"`. See `DepartedLaunch.why`. */
+function classifyUndeclaredWhy(name: string, roster: DeclaredRoster): "undeclared-sibling" | "undeclared-foreign" {
+  const family = nameFamily(name)
+  for (const declaredName of roster.byName.keys()) {
+    if (nameFamily(declaredName) === family) return "undeclared-sibling"
+  }
+  return "undeclared-foreign"
 }
 
 /** Newest `event.session.left` fact for a member id, or null when none was
@@ -2223,7 +2275,19 @@ function classifyDisconnectedDurableRow(
 
   const expected = roster.byName.get(row.name)
   if (expected === undefined) {
-    return { member_id: row.id, name: row.name, launch_id: row.launch_id, state: "departed" }
+    // Undeclared: `departed` regardless of the fact — nothing expects this
+    // name up, so `left_at`/`reason` are informational only, never gated by
+    // `settled` (an undeclared row is never "missing" no matter how fresh a
+    // transport-closed fact is).
+    const reason = fact !== null ? sessionLeftReason(fact) : undefined
+    return {
+      ...identity,
+      state: "departed",
+      last_seen: new Date(row.updated_at).toISOString(),
+      ...(fact !== null ? { left_at: new Date(fact.ts).toISOString() } : {}),
+      ...(typeof reason === "string" ? { reason } : {}),
+      why: classifyUndeclaredWhy(row.name, roster),
+    }
   }
   if (!expected) {
     return settled
@@ -2271,6 +2335,8 @@ function projectMembershipDiscrepancy(
     const connectedNames = new Set(
       rows.filter((row) => activeIds.has(row.id) && roster.expectedNames.has(row.name)).map((row) => row.name),
     )
+    const departedSiblingCount = departed.filter((row) => row.why === "undeclared-sibling").length
+    const departedForeignCount = departed.filter((row) => row.why === "undeclared-foreign").length
     if (missing.length === 0) return { discrepancy: undefined, finished, dormant, departed }
     return {
       discrepancy: {
@@ -2281,7 +2347,8 @@ function projectMembershipDiscrepancy(
         missing,
         ...(finished.length > 0 ? { finished_count: finished.length } : {}),
         ...(dormant.length > 0 ? { dormant_count: dormant.length } : {}),
-        ...(departed.length > 0 ? { departed_count: departed.length } : {}),
+        ...(departedSiblingCount > 0 ? { departed_sibling_count: departedSiblingCount } : {}),
+        ...(departedForeignCount > 0 ? { departed_foreign_count: departedForeignCount } : {}),
         meaning: "missing transport does not establish agent absence",
       },
       finished,
@@ -2817,7 +2884,8 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
   // `finished_launches`/`dormant_launches`/`departed_launches` lists (or
   // `unexpected_connected` — that is a members-only concern, see
   // handleSessions above); their sibling counts still ride inside
-  // `membershipDiscrepancy` (finished_count/dormant_count/departed_count).
+  // `membershipDiscrepancy` (finished_count/dormant_count/
+  // departed_sibling_count/departed_foreign_count).
   const { discrepancy: membershipDiscrepancy } = projectMembershipDiscrepancy(
     rows,
     activeIds,
