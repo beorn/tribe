@@ -62,7 +62,7 @@ import {
 import { createLifecycleStore } from "../lifecycle-store.ts"
 import type { TribePluginHandle } from "../plugin-api.ts"
 import { createInboxWaitManager } from "../inbox-wait.ts"
-import { logEvent, logSessionLeft, sendMessage } from "../messaging.ts"
+import { isTerminalSessionLeftReason, logEvent, logSessionLeft, sendMessage } from "../messaging.ts"
 import { registerSession, NameConflictError, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
 import {
   adoptByPidCwd,
@@ -1958,6 +1958,25 @@ export function withDispatcher<
             })
           }
 
+          // The adapter's one word before it closes: its stdin ended, so the
+          // harness process is gone and this launch is over. Recorded on the
+          // connection and written into the `session.left` fact by the
+          // disconnect handler. A socket that closes without this word — a
+          // signal, a crash, a daemon restart — stays `transport-closed`, which
+          // the membership projection treats as no evidence at all
+          // (@ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded).
+          case "leave": {
+            const client = clients.get(connId)
+            if (!client) return makeResponse(id, { error: "leave: connection is not registered" })
+            if (!isTerminalSessionLeftReason(p.reason)) {
+              return makeResponse(id, {
+                error: `leave: unknown reason ${JSON.stringify(p.reason)}; expected "harness-exited"`,
+              })
+            }
+            client.leaveReason = p.reason
+            return makeResponse(id, { ok: true, reason: p.reason })
+          }
+
           case "log_event": {
             const client = clients.get(connId)
             const ctx = client?.ctx ?? daemonCtx
@@ -2174,6 +2193,7 @@ export function withDispatcher<
               domains: client.domains,
               launchId: client.launchId,
               launchParentPid: client.launchParentPid,
+              reason: client.leaveReason ?? "transport-closed",
             })
             const now = Date.now()
             const gateOpen = sessionAnnounceGate(client.name, now)

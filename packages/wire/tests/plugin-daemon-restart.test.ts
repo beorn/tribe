@@ -884,7 +884,11 @@ process.exit(await child.exited)
     let generation = await connectToGeneration(socketPath)
     daemonPids.add(generation.pid)
 
-    const personas = ["@agent/restart-a", "@agent/restart-b", "@agent/restart-c"]
+    // restart-c is KILLED before the second restart (a signal: the daemon learns
+    // nothing about the launch, so it must read missing-transport); restart-d's
+    // HARNESS closes its stdin (the adapter announces the exit before closing,
+    // so the launch reads finished — history, not degradation).
+    const personas = ["@agent/restart-a", "@agent/restart-b", "@agent/restart-c", "@agent/restart-d"]
     const harnesses: Array<{
       child: ChildProcessWithoutNullStreams
       persona: string
@@ -941,11 +945,16 @@ process.exit(await child.exited)
       personas.map((persona) => [persona, initialMembers.get(persona)!.transport_pids![0]!]),
     )
     const withheldPersona = personas[2]!
+    const finishedPersona = personas[3]!
+    const goneBeforeRestart2 = new Set([withheldPersona, finishedPersona])
     for (let restart = 1; restart <= 2; restart += 1) {
-      const expectedPersonas = restart === 1 ? personas : personas.filter((persona) => persona !== withheldPersona)
+      const expectedPersonas = restart === 1 ? personas : personas.filter((persona) => !goneBeforeRestart2.has(persona))
       if (restart === 2) {
         const withheld = harnesses.find(({ persona }) => persona === withheldPersona)!
         await terminateTestProcess(withheld.child.pid!)
+        const finished = harnesses.find(({ persona }) => persona === finishedPersona)!
+        finished.child.stdin.end()
+        await waitFor(() => finished.child.exitCode !== null, `harness exit for ${finishedPersona}`, 10_000)
       }
 
       const priorDaemonPid = generation.pid
@@ -979,9 +988,9 @@ process.exit(await child.exited)
       priorTransportPids = new Map(
         expectedPersonas.map((persona) => [persona, rejoined.get(persona)!.transport_pids![0]!]),
       )
-      expect(harnesses.filter(({ persona }) => persona !== withheldPersona).map(({ child }) => child.exitCode)).toEqual(
-        [null, null],
-      )
+      expect(
+        harnesses.filter(({ persona }) => !goneBeforeRestart2.has(persona)).map(({ child }) => child.exitCode),
+      ).toEqual([null, null])
 
       if (restart === 2) {
         const roster = parseToolJson(await generation.client.call("tribe.members", { all: true }))
@@ -999,8 +1008,17 @@ process.exit(await child.exited)
               state: "missing-transport",
             },
           ],
+          finished_count: 1,
           meaning: "missing transport does not establish agent absence",
         })
+        expect((roster as { finished_launches?: unknown }).finished_launches).toEqual([
+          expect.objectContaining({
+            member_id: initialMembers.get(finishedPersona)?.member_id,
+            name: finishedPersona,
+            launch_id: personaLaunchId("restart-multi-3", finishedPersona),
+            state: "finished",
+          }),
+        ])
       }
     }
 
@@ -1010,7 +1028,7 @@ process.exit(await child.exited)
         .filter((session) => session.transport_state === "connected")
         .map((session) => session.name)
         .sort(),
-    ).toEqual(personas.filter((persona) => persona !== withheldPersona).sort())
+    ).toEqual(personas.filter((persona) => !goneBeforeRestart2.has(persona)).sort())
     generation.client.close()
-  }, 45_000)
+  }, 60_000)
 })

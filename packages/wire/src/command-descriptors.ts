@@ -472,7 +472,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           warning: {
             type: "string",
             description:
-              "Loud diagnostic when close matched 0 rows: leads with the exact journal-backed cause (already settled and by whom, settled by another owner under fanout first, or never tracked), then names the owner's other open request/message ids if any.",
+              "Loud diagnostic when close closed 0 rows: leads with the exact journal-backed cause (already settled and by whom, settled by another owner under fanout first, or never tracked), then names the owner's other open request/message ids if any.",
           },
           ...ERROR_SHAPE,
         },

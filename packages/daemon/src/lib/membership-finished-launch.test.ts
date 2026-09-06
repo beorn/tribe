@@ -114,6 +114,7 @@ describe("membership projection: a finished launch is history, not a degraded me
       domains: ["docs"],
       launchId: "launch-6",
       launchParentPid: 6006,
+      reason: "harness-exited",
     })
     const row = db.prepare("SELECT ref, type, content FROM messages WHERE type = 'event.session.left'").get() as {
       ref: string
@@ -128,6 +129,7 @@ describe("membership projection: a finished launch is history, not a degraded me
       member_id: "helper-1",
       launch_id: "launch-6",
       launch_parent_pid: 6006,
+      reason: "harness-exited",
     })
   })
 
@@ -144,6 +146,7 @@ describe("membership projection: a finished launch is history, not a degraded me
         domains: [],
         launchId: "launch-9",
         launchParentPid: 9009,
+        reason: "harness-exited",
       })
       const leftAt = now
 
@@ -223,6 +226,7 @@ describe("membership projection: a finished launch is history, not a degraded me
         domains: [],
         launchId: "launch-11",
         launchParentPid: 11011,
+        reason: "harness-exited",
       })
       now += 1_000 // T2 > T1: re-registers under the SAME session id, bumping updated_at past the T1 fact
       registerSession(
@@ -283,6 +287,7 @@ describe("membership projection: a finished launch is history, not a degraded me
         domains: [],
         launchId: "launch-12-old",
         launchParentPid: 12012,
+        reason: "harness-exited",
       })
       const oldLeftAt = now
       now += 1_000
@@ -379,6 +384,7 @@ describe("membership projection: a finished launch is history, not a degraded me
         member_id: "archived-1",
         launch_id: "launch-13",
         launch_parent_pid: 13013,
+        reason: "harness-exited",
       }),
       $ref: "archived-1",
       $ts: leftAt,
@@ -413,6 +419,7 @@ describe("membership projection: a finished launch is history, not a degraded me
       domains: [],
       launchId: "launch-fleet-1",
       launchParentPid: 20001,
+      reason: "harness-exited",
     })
     const opCtx = makeContext(db, stmts, "operator", "@operator")
     const opts = baseOpts({ retiredNames: new Set(["@fleet"]) })
@@ -432,33 +439,65 @@ describe("membership projection: a finished launch is history, not a degraded me
     expect(health.membership_discrepancy).toBeUndefined()
   })
 
-  // Facts written before session.left carried keys (no member_id, no ref)
-  // are the only departure evidence the 19 live legacy rows will ever have;
-  // sessions.name is UNIQUE and fixed after a row's updated_at, so the newest
-  // unkeyed fact with this name at or after updated_at is about this row.
-  it("legacy: an unkeyed departure fact naming the row, at or after its last update, finishes it", () => {
+  // A socket closing is not evidence the launch ended: a killed adapter, a
+  // crash and a daemon restart all leave a `transport-closed` fact, and the
+  // seat is exactly the one somebody needs to notice is down. Only the
+  // adapter's own word — its stdin ended, so the harness is gone — finishes.
+  it("killed adapter: a transport-closed departure fact keeps the launch missing-transport (degraded)", () => {
     let now = 5_000_000
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now)
     try {
-      const ctx = addSession(db, stmts, "legacy-1", "@agent/14", { id: "launch-14", parentPid: 14014 })
+      const ctx = addSession(db, stmts, "killed-1", "@agent/14", { id: "launch-14", parentPid: 14014 })
       now += 1_000
-      logEvent(ctx, "session.left", undefined, { name: "@agent/14", role: "member", domains: [] })
-      const leftAt = now
+      logSessionLeft(ctx, {
+        memberId: "killed-1",
+        name: "@agent/14",
+        role: "member",
+        domains: [],
+        launchId: "launch-14",
+        launchParentPid: 14014,
+        reason: "transport-closed",
+      })
       const opCtx = makeContext(db, stmts, "operator", "@operator")
       const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, baseOpts())) as {
-        membership_discrepancy?: unknown
-        finished_launches?: Array<Record<string, unknown>>
+        membership_discrepancy?: { status: string; missing: Array<Record<string, unknown>> }
+        finished_launches?: unknown
       }
-      expect(members.membership_discrepancy).toBeUndefined()
-      expect(members.finished_launches).toEqual([
-        expect.objectContaining({ member_id: "legacy-1", state: "finished", left_at: new Date(leftAt).toISOString() }),
+      expect(members.finished_launches).toBeUndefined()
+      expect(members.membership_discrepancy?.status).toBe("degraded")
+      expect(members.membership_discrepancy?.missing).toEqual([
+        expect.objectContaining({ member_id: "killed-1", state: "missing-transport" }),
       ])
     } finally {
       nowSpy.mockRestore()
     }
   })
 
-  it("legacy: an unkeyed fact older than the row's last update, or a keyed fact for another member, never finishes it", () => {
+  // Facts written before session.left carried keys and a reason cannot say
+  // why the socket closed, so they are never evidence, even when they name
+  // the row and postdate its last update.
+  it("legacy: an unkeyed departure fact never finishes a launch", () => {
+    let now = 5_500_000
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now)
+    try {
+      const ctx = addSession(db, stmts, "legacy-1", "@agent/17", { id: "launch-17", parentPid: 17017 })
+      now += 1_000
+      logEvent(ctx, "session.left", undefined, { name: "@agent/17", role: "member", domains: [] })
+      const opCtx = makeContext(db, stmts, "operator", "@operator")
+      const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, baseOpts())) as {
+        membership_discrepancy?: { missing: Array<Record<string, unknown>> }
+        finished_launches?: unknown
+      }
+      expect(members.finished_launches).toBeUndefined()
+      expect(members.membership_discrepancy?.missing).toEqual([
+        expect.objectContaining({ member_id: "legacy-1", state: "missing-transport" }),
+      ])
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+
+  it("a keyed fact for another member carrying this row's name never finishes it", () => {
     let now = 6_000_000
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now)
     try {
@@ -487,6 +526,7 @@ describe("membership projection: a finished launch is history, not a degraded me
         domains: [],
         launchId: "launch-other",
         launchParentPid: 15999,
+        reason: "harness-exited",
       })
       const opCtx = makeContext(db, stmts, "operator", "@operator")
       const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, baseOpts())) as {

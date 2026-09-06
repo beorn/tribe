@@ -1587,28 +1587,6 @@ export function createStatements(db: Database) {
 		LIMIT 1
 	`),
 
-    /** Legacy departure facts, written before `session.left` carried keys:
-     *  no `member_id` in the content and no `ref`. `sessions.name` is UNIQUE
-     *  and a row's name is fixed after its `updated_at` (a takeover renames
-     *  the loser and bumps it), so the newest unkeyed fact naming this row's
-     *  current name, at or after `updated_at`, is about this row. Read only
-     *  when no keyed fact exists for the member id; the same `ts >=
-     *  updated_at` rule applies (@ag/tribe/tribe-membership-projection-
-     *  counts-permanent-history-as-degraded). */
-    selectLatestLegacySessionLeftFactForName: db.prepare(`
-		SELECT ts, content FROM messages
-		WHERE kind = 'event' AND type = 'event.session.left'
-			AND json_extract(content, '$.member_id') IS NULL
-			AND json_extract(content, '$.name') = $name
-		UNION
-		SELECT ts, content FROM messages_archive
-		WHERE kind = 'event' AND type = 'event.session.left'
-			AND json_extract(content, '$.member_id') IS NULL
-			AND json_extract(content, '$.name') = $name
-		ORDER BY ts DESC
-		LIMIT 1
-	`),
-
     /** Answers are already durable message facts. Keep responder identity so
      *  fanout=all closes only that owner's outcome while fanout=first closes
      *  the shared request for every snapshotted owner. */

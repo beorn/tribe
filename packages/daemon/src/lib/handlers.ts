@@ -34,6 +34,7 @@ import {
   type Delivery,
   type PendingCloseCause,
   type PendingSettlementRow,
+  isTerminalSessionLeftReason,
 } from "./messaging.ts"
 import { ACTIONABLE_TYPES_SET, AUTO_TRACK_TYPES_SET } from "./database.ts"
 import {
@@ -1991,27 +1992,29 @@ type FinishedLaunch = {
 type SessionLeftFactReader = (row: { id: string; name: string }) => { ts: number; content: string } | null
 
 /**
- * Newest departure fact for a registration row: the keyed fact (`ref =
- * member_id`) when one exists, else the newest LEGACY fact — written before
- * `session.left` carried keys — naming the row's current name. The legacy
- * read is sound because `sessions.name` is UNIQUE and a row's name is fixed
- * after its own `updated_at` (a takeover renames the loser and bumps it), so
- * a later unkeyed fact with this name can only be about this row. The
- * caller's `ts >= updated_at` rule applies to both.
+ * Newest keyed departure fact (`ref = member_id`) for a registration row.
+ * Facts written before `session.left` carried keys and a reason cannot be
+ * tied to a row or say why the socket closed, so they are never evidence.
  */
 function readSessionLeftFact(
   ctx: TribeContext,
   row: { id: string; name: string },
 ): { ts: number; content: string } | null {
-  const keyed = ctx.stmts.selectLatestSessionLeftFactForMember.get({ $member_id: row.id }) as {
+  return ctx.stmts.selectLatestSessionLeftFactForMember.get({ $member_id: row.id }) as {
     ts: number
     content: string
   } | null
-  if (keyed) return keyed
-  return ctx.stmts.selectLatestLegacySessionLeftFactForName.get({ $name: row.name }) as {
-    ts: number
-    content: string
-  } | null
+}
+
+/** The fact's `reason`, when it carries one; a fact without a reason is a
+ *  socket close and nothing more. */
+function sessionLeftReason(fact: { content: string }): unknown {
+  try {
+    const parsed = JSON.parse(fact.content) as { reason?: unknown }
+    return parsed.reason
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -2089,12 +2092,14 @@ type MembershipProjection = {
 
 /**
  * Classify one disconnected durable row against its newest `event.session.left`
- * fact (if any). `ts >= row.updated_at` means the departure is the LAST thing
- * that happened to that registration — i.e. it never re-registered after
- * leaving — so the launch is history. An older or absent fact leaves the row
- * `missing-transport`: this is the trap
- * (@ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded)
- * — a re-registration under the same id bumps `updated_at` past a stale left
+ * fact (if any). Two conditions make the launch history: the fact says the
+ * harness EXITED (a positive reason the adapter announced before closing —
+ * a killed adapter, a crash or a daemon restart leaves only `transport-closed`,
+ * which is no evidence and keeps the row `missing-transport`), and
+ * `ts >= row.updated_at`, so the departure is the LAST thing that happened to
+ * that registration. The second condition is the trap
+ * (@ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded):
+ * a re-registration under the same id bumps `updated_at` past a stale left
  * fact, and a seat that then vanishes for good with no NEW fact must stay
  * degraded, not silently read as long-since finished.
  */
@@ -2105,7 +2110,7 @@ function classifyDisconnectedDurableRow(
   | FinishedLaunch
   | { member_id: string; name: string; launch_id: string; launch_parent_pid: number; state: "missing-transport" } {
   const fact = getSessionLeftFact(row)
-  if (fact && fact.ts >= row.updated_at) {
+  if (fact && isTerminalSessionLeftReason(sessionLeftReason(fact)) && fact.ts >= row.updated_at) {
     return {
       member_id: row.id,
       name: row.name,

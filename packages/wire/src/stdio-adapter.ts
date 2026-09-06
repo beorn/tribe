@@ -971,10 +971,23 @@ const shutdown = () => {
   daemon?.close()
   process.exit(0)
 }
+// The harness closing our stdin is the end of this launch — the provider
+// process is gone and nothing will reconnect under this launch id. Say so to
+// the daemon before closing, so the `session.left` fact carries a reason a
+// reader can act on; a signal says nothing about the launch and closes
+// silently (@ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded).
+let harnessExitAnnounced = false
+const shutdownAfterHarnessExit = () => {
+  if (harnessExitAnnounced) return
+  harnessExitAnnounced = true
+  const announced = daemon?.call("leave", { reason: "harness-exited" }).catch(() => undefined)
+  const deadline = new Promise<void>((resolve) => setTimeout(resolve, 500))
+  void Promise.race([announced ?? Promise.resolve(), deadline]).finally(shutdown)
+}
 process.on("SIGINT", shutdown)
 process.on("SIGTERM", shutdown)
-process.stdin.once("end", shutdown)
-process.stdin.once("close", shutdown)
+process.stdin.once("end", shutdownAfterHarnessExit)
+process.stdin.once("close", shutdownAfterHarnessExit)
 
 // Connect MCP to Claude Code
 await mcp.connect(new StdioServerTransport())

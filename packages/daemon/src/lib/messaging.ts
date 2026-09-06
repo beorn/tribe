@@ -701,14 +701,33 @@ export function logEvent(
 }
 
 /**
+ * Why a session's last transport went away. A socket closing says nothing by
+ * itself: a killed adapter, a daemon restart and a finished harness all look
+ * the same from the daemon's end of the socket. Only the adapter knows, and
+ * it says so before closing: its stdin ending means the harness process is
+ * gone, which is the end of that launch (`harness-exited`). Everything else —
+ * a signal, a crash, the daemon going away — is `transport-closed`, and
+ * proves nothing about the launch.
+ */
+export type SessionLeftReason = "harness-exited" | "transport-closed"
+
+/** The reasons that are positive evidence the LAUNCH is over, not merely
+ *  that a socket closed. The membership projection finishes a launch on
+ *  these alone (@ag/tribe/tribe-membership-projection-counts-permanent-
+ *  history-as-degraded). */
+export function isTerminalSessionLeftReason(reason: unknown): reason is "harness-exited" {
+  return reason === "harness-exited"
+}
+
+/**
  * Durable departure fact for a session's LAST-transport disconnect
  * (@ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded).
  * `ref = member.memberId` makes the fact selectable by the membership
- * projection (`selectLatestSessionLeftFactForMember` in database.ts), which
- * is the only way to tell a durable launch that ENDED from one whose
- * registration merely lost its transport. Factored out of the dispatcher's
- * socket-close handler so the payload shape has exactly one definition and a
- * unit test that does not require a live socket harness.
+ * projection (`selectLatestSessionLeftFactForMember` in database.ts), and
+ * `reason` says whether the departure was the harness ending (terminal) or
+ * only a transport closing (not evidence of anything). Factored out of the
+ * dispatcher's socket-close handler so the payload shape has exactly one
+ * definition and a unit test that does not require a live socket harness.
  */
 export function logSessionLeft(
   ctx: TribeContext,
@@ -719,6 +738,7 @@ export function logSessionLeft(
     domains: readonly string[]
     launchId: string | null
     launchParentPid: number | null
+    reason: SessionLeftReason
   },
 ): string {
   return logEvent(
@@ -732,6 +752,7 @@ export function logSessionLeft(
       member_id: member.memberId,
       launch_id: member.launchId,
       launch_parent_pid: member.launchParentPid,
+      reason: member.reason,
     },
     { ref: member.memberId },
   )
