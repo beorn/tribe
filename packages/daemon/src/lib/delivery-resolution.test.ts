@@ -92,6 +92,14 @@ describe("generic direct-message delivery resolution", () => {
       status: "refused",
       reason: '"@yrd" is retired; send to successor "@chief"',
     })
+    // @fable/0 and @fable/1: ruled retired 2026-08-10 (operator), their launch
+    // rows are the two live legacy rows no departure fact can ever finish.
+    for (const retired of ["@fable/0", "@fable/1"]) {
+      expect(resolve?.({ recipient: retired, answerableNames: new Set([retired, "@chief"]) })).toEqual({
+        status: "refused",
+        reason: `"${retired}" is retired; send to successor "@chief"`,
+      })
+    }
   })
 
   it("refuses the retired Fleet identity even when a stale transport is answer-capable", () => {

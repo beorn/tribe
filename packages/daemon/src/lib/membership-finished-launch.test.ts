@@ -19,7 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { handleToolCall, type HandlerOpts } from "./handlers.ts"
-import { logSessionLeft } from "./messaging.ts"
+import { logEvent, logSessionLeft } from "./messaging.ts"
 import { registerSession } from "./session.ts"
 
 const PROJECT_ID = "membership-finished-launch"
@@ -427,6 +427,94 @@ describe("membership projection: a finished launch is history, not a degraded me
     expect(members.sessions).toContainEqual(expect.objectContaining({ member_id: "retired-1", name: "@fleet" }))
 
     const health = parseToolJson(handleToolCall(opCtx, "tribe.health", {}, opts)) as {
+      membership_discrepancy?: unknown
+    }
+    expect(health.membership_discrepancy).toBeUndefined()
+  })
+
+  // Facts written before session.left carried keys (no member_id, no ref)
+  // are the only departure evidence the 19 live legacy rows will ever have;
+  // sessions.name is UNIQUE and fixed after a row's updated_at, so the newest
+  // unkeyed fact with this name at or after updated_at is about this row.
+  it("legacy: an unkeyed departure fact naming the row, at or after its last update, finishes it", () => {
+    let now = 5_000_000
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now)
+    try {
+      const ctx = addSession(db, stmts, "legacy-1", "@agent/14", { id: "launch-14", parentPid: 14014 })
+      now += 1_000
+      logEvent(ctx, "session.left", undefined, { name: "@agent/14", role: "member", domains: [] })
+      const leftAt = now
+      const opCtx = makeContext(db, stmts, "operator", "@operator")
+      const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, baseOpts())) as {
+        membership_discrepancy?: unknown
+        finished_launches?: Array<Record<string, unknown>>
+      }
+      expect(members.membership_discrepancy).toBeUndefined()
+      expect(members.finished_launches).toEqual([
+        expect.objectContaining({ member_id: "legacy-1", state: "finished", left_at: new Date(leftAt).toISOString() }),
+      ])
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+
+  it("legacy: an unkeyed fact older than the row's last update, or a keyed fact for another member, never finishes it", () => {
+    let now = 6_000_000
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now)
+    try {
+      const ctx = addSession(db, stmts, "legacy-2", "@agent/15", { id: "launch-15", parentPid: 15015 })
+      now += 1_000
+      logEvent(ctx, "session.left", undefined, { name: "@agent/15", role: "member", domains: [] })
+      now += 1_000 // re-registered after the unkeyed departure: the fact is stale
+      registerSession(
+        ctx,
+        PROJECT_ID,
+        () => false,
+        null,
+        process.pid,
+        "pull",
+        "/repo",
+        null,
+        "codex",
+        "launch-15",
+        15015,
+      )
+      now += 1_000 // a keyed fact for a DIFFERENT member that carries this name is not this row's
+      logSessionLeft(ctx, {
+        memberId: "someone-else",
+        name: "@agent/15",
+        role: "member",
+        domains: [],
+        launchId: "launch-other",
+        launchParentPid: 15999,
+      })
+      const opCtx = makeContext(db, stmts, "operator", "@operator")
+      const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, baseOpts())) as {
+        membership_discrepancy?: { missing: Array<Record<string, unknown>> }
+        finished_launches?: unknown
+      }
+      expect(members.finished_launches).toBeUndefined()
+      expect(members.membership_discrepancy?.missing).toEqual([
+        expect.objectContaining({ member_id: "legacy-2", state: "missing-transport" }),
+      ])
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+
+  // A `<name>-dead-<8 hex>` row is the daemon's own takeover tombstone
+  // (handlers.ts rename on takeover; session.ts sweepDeadSessionRows deletes
+  // it later): evicted on positive evidence, it is history by construction.
+  it("tombstone: a takeover-renamed dead row is neither missing nor finished", () => {
+    addSession(db, stmts, "tomb-1", "@agent/16-dead-0123abcd", { id: "launch-16", parentPid: 16016 })
+    const opCtx = makeContext(db, stmts, "operator", "@operator")
+    const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, baseOpts())) as {
+      membership_discrepancy?: unknown
+      finished_launches?: unknown
+    }
+    expect(members.membership_discrepancy).toBeUndefined()
+    expect(members.finished_launches).toBeUndefined()
+    const health = parseToolJson(handleToolCall(opCtx, "tribe.health", {}, baseOpts())) as {
       membership_discrepancy?: unknown
     }
     expect(health.membership_discrepancy).toBeUndefined()

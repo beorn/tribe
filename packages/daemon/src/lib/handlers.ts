@@ -1988,7 +1988,41 @@ type FinishedLaunch = {
  *  `!== undefined` (that let a real `null` through to a `.ts` read once
  *  already, caught by the "vanished" and "restart" tests). Injected so the
  *  projection stays a pure function of its inputs in tests. */
-type SessionLeftFactReader = (memberId: string) => { ts: number; content: string } | null
+type SessionLeftFactReader = (row: { id: string; name: string }) => { ts: number; content: string } | null
+
+/**
+ * Newest departure fact for a registration row: the keyed fact (`ref =
+ * member_id`) when one exists, else the newest LEGACY fact — written before
+ * `session.left` carried keys — naming the row's current name. The legacy
+ * read is sound because `sessions.name` is UNIQUE and a row's name is fixed
+ * after its own `updated_at` (a takeover renames the loser and bumps it), so
+ * a later unkeyed fact with this name can only be about this row. The
+ * caller's `ts >= updated_at` rule applies to both.
+ */
+function readSessionLeftFact(
+  ctx: TribeContext,
+  row: { id: string; name: string },
+): { ts: number; content: string } | null {
+  const keyed = ctx.stmts.selectLatestSessionLeftFactForMember.get({ $member_id: row.id }) as {
+    ts: number
+    content: string
+  } | null
+  if (keyed) return keyed
+  return ctx.stmts.selectLatestLegacySessionLeftFactForName.get({ $name: row.name }) as {
+    ts: number
+    content: string
+  } | null
+}
+
+/**
+ * `<name>-dead-<8 hex>` is the daemon's own takeover tombstone (see the
+ * rename below and `sweepDeadSessionRows` in session.ts): a registration the
+ * daemon itself evicted on positive evidence and later deletes. It is
+ * history by construction, never a seat whose transport is missing.
+ */
+function isTakeoverTombstoneName(name: string): boolean {
+  return /-dead-[0-9a-f]{8}$/.test(name)
+}
 
 /**
  * The launch ids a currently-connected session holds. `launch_id` is
@@ -2070,7 +2104,7 @@ function classifyDisconnectedDurableRow(
 ):
   | FinishedLaunch
   | { member_id: string; name: string; launch_id: string; launch_parent_pid: number; state: "missing-transport" } {
-  const fact = getSessionLeftFact(row.id)
+  const fact = getSessionLeftFact(row)
   if (fact && fact.ts >= row.updated_at) {
     return {
       member_id: row.id,
@@ -2106,11 +2140,13 @@ function projectMembershipDiscrepancy(
     .filter((row) => !isUnidentifiedSessionName(row.name))
     .filter((row) => activeIds.has(row.id) || !supersededLaunchIds.has(row.launch_id))
     .filter((row) => activeIds.has(row.id) || !retiredNames.has(row.name))
+    .filter((row) => activeIds.has(row.id) || !isTakeoverTombstoneName(row.name))
 
   const missing: MembershipDiscrepancy["missing"] = []
   const finished: FinishedLaunch[] = []
   for (const row of disconnectedRows) {
     if (!isDurableMembershipSessionRow(row)) continue
+    if (isTakeoverTombstoneName(row.name)) continue
     const classified = classifyDisconnectedDurableRow(row, getSessionLeftFact)
     if (classified.state === "finished") finished.push(classified)
     else missing.push(classified)
@@ -2267,16 +2303,8 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
   })
   const disconnected = projectDisconnectedSessionRows(rows, activeIds)
   const diagnosticDisconnected = disconnected.diagnostic.filter((row) => !retiredNames.has(row.name))
-  const membership = projectMembershipDiscrepancy(
-    rows,
-    activeIds,
-    diagnosticDisconnected,
-    retiredNames,
-    (memberId) =>
-      ctx.stmts.selectLatestSessionLeftFactForMember.get({ $member_id: memberId }) as {
-        ts: number
-        content: string
-      } | null,
+  const membership = projectMembershipDiscrepancy(rows, activeIds, diagnosticDisconnected, retiredNames, (row) =>
+    readSessionLeftFact(ctx, row),
   )
   return jsonResult({
     sessions,
@@ -2620,11 +2648,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     activeIds,
     diagnosticDisconnected,
     retiredNames,
-    (memberId) =>
-      ctx.stmts.selectLatestSessionLeftFactForMember.get({ $member_id: memberId }) as {
-        ts: number
-        content: string
-      } | null,
+    (row) => readSessionLeftFact(ctx, row),
   )
 
   const members = liveSessions.map((s) => {
