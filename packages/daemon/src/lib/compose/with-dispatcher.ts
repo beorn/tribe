@@ -81,6 +81,7 @@ import type { WithDatabase } from "./with-database.ts"
 import type { WithRecall } from "./with-recall.ts"
 import type { WithSocketServer } from "./with-socket-server.ts"
 import type { DirectDeliveryResolver } from "../delivery-resolution.ts"
+import type { DeclaredRoster } from "../membership-declared-roster.ts"
 import { STARTUP_SHA, TRIBE_SOURCE_ROOT } from "../code-pin.ts"
 import { shouldLogSlowRequest } from "../slow-request-log.ts"
 import { derivedLaunchPrefixUpperBound } from "../launch-prefix-range.ts"
@@ -111,6 +112,10 @@ export interface DispatcherRuntimeHooks {
   resolveDelivery?: DirectDeliveryResolver
   /** Exact identities explicitly retired by the composing layer. */
   retiredNames?: ReadonlySet<string>
+  /** Hab's declared roster (persona name -> resolved restart policy),
+   *  supplied by the composing layer from `TRIBE_EXPECTED_MEMBERS`. Absent
+   *  means no declaration — membership classification runs unchanged. */
+  expectedMembers?: DeclaredRoster
 }
 
 /**
@@ -737,6 +742,7 @@ export function withDispatcher<
       reapStaleTransports,
       resolveDelivery: hooks.resolveDelivery,
       retiredNames: hooks.retiredNames,
+      expectedMembers: hooks.expectedMembers,
       // tribe.stop actuator — absent (handler refuses loudly) unless the
       // composing daemon supplied its shutdown.
       triggerStop: hooks.triggerShutdown,

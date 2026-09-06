@@ -184,7 +184,11 @@ describe("Claude plugin daemon-restart self-heal", () => {
   const daemonPids = new Set<number>()
   const adapterPids = new Set<number>()
 
-  function spawnTestDaemon(dbPath: string, logPath: string): ChildProcessWithoutNullStreams {
+  function spawnTestDaemon(
+    dbPath: string,
+    logPath: string,
+    extraEnv: Record<string, string> = {},
+  ): ChildProcessWithoutNullStreams {
     const child = spawn(BUN_BIN, [DAEMON, "--socket", socketPath, "--db", dbPath, "--foreground", "--no-lore"], {
       cwd: tmpDir,
       env: {
@@ -193,6 +197,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
         TRIBE_NO_AUTORELOAD: "1",
         DEBUG_LOG: logPath,
         LOG_FILE: logPath,
+        ...extraEnv,
       },
       stdio: ["pipe", "pipe", "pipe"],
     }) as ChildProcessWithoutNullStreams
@@ -253,6 +258,175 @@ process.exit(await child.exited)
     }) as ChildProcessWithoutNullStreams
     plugins.add(child)
     return child
+  }
+
+  /**
+   * The always-restart-a..d multi-seat journey above, parameterized by a
+   * declared roster (`TRIBE_EXPECTED_MEMBERS`) and by what "after restart 2"
+   * should look like. restart-c is still KILLED (no departure fact, so
+   * missing-transport either way); restart-d's HARNESS still closes its
+   * stdin (the adapter announces the exit before closing, so it always
+   * settles). Whether that settled departure for restart-d reads as a live
+   * discrepancy or as history depends entirely on the declaration:
+   * `restart: "always"` -> `missing` state `exited-not-remounted` (THE
+   * regression this bead closes — an expected seat hab never remounted was
+   * silently read as finished); `restart: "never"` -> `finished_launches`,
+   * reproducing the pre-declaration reading exactly
+   * (@ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded).
+   */
+  async function runDeclaredRosterMultiSeatJourney(opts: {
+    label: string
+    expectedMembersEnv: string
+    assertAfterRestart2: (
+      rosterAfterRestart2: ToolJson,
+      identities: {
+        withheld: { member_id: string; name: string; launch_id: string; launch_parent_pid: number }
+        finished: { member_id: string; name: string; launch_id: string; launch_parent_pid: number }
+      },
+    ) => void
+  }): Promise<void> {
+    const dbPath = join(tmpDir, `tribe-${opts.label}.db`)
+    const daemonLog = join(tmpDir, `daemon-${opts.label}.log`)
+    spawnTestDaemon(dbPath, daemonLog, { TRIBE_EXPECTED_MEMBERS: opts.expectedMembersEnv })
+    await waitFor(() => existsSync(socketPath), `${opts.label} initial daemon socket`)
+    let generation = await connectToGeneration(socketPath)
+    daemonPids.add(generation.pid)
+
+    const personas = ["a", "b", "c", "d"].map((suffix) => `@agent/${opts.label}-${suffix}`)
+    const harnesses: Array<{
+      child: ChildProcessWithoutNullStreams
+      persona: string
+      stdout: JsonObject[]
+      stderr: () => string
+      logPath: string
+    }> = []
+    const initialMembers = new Map<string, Member>()
+    try {
+      // Spawn each independent provider seat only after the preceding seat
+      // owns its durable membership — see the plain multi-seat journey above
+      // for why merely serializing notifications still races the durable
+      // name claims.
+      for (const [index, persona] of personas.entries()) {
+        const adapterLog = join(tmpDir, `adapter-${opts.label}-${index}.log`)
+        const child = spawnTestPlugin({
+          dbPath,
+          logPath: adapterLog,
+          name: persona,
+          launchId: `${opts.label}-${index}`,
+          claudeSessionId: `${opts.label}-session-${index}`,
+          sessionAuth: `${"A".repeat(42)}${String(index)}`,
+          providerShim: true,
+          delivery: "pull",
+          requireJoin: false,
+        })
+        let stderr = ""
+        child.stderr.on("data", (chunk: Buffer | string) => {
+          stderr += chunk.toString()
+        })
+        const stdout = collectJsonLines(child)
+        harnesses.push({ child, persona, stdout, stderr: () => stderr, logPath: adapterLog })
+        writeJson(child, initializePayload(index + 1))
+        await waitFor(() => stdout.some((line) => line.id === index + 1), `plugin initialization for ${persona}`)
+        writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+        await waitFor(async () => {
+          const rosterRows = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
+          const member = rosterRows.find(
+            (session) => session.name === persona && session.transport_state === "connected",
+          )
+          if (member) initialMembers.set(persona, member)
+          return member !== undefined
+        }, `initial membership for ${persona}`)
+      }
+    } catch (error) {
+      const rosterRows = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
+      const diagnostics = harnesses
+        .map(({ persona, stderr, logPath }) => `${persona}: stderr=${stderr()} log=${readFileSync(logPath, "utf8")}`)
+        .join("\n")
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}\nroster=${JSON.stringify(rosterRows)}\n${diagnostics}`,
+      )
+    }
+
+    let priorTransportPids = new Map(
+      personas.map((persona) => [persona, initialMembers.get(persona)!.transport_pids![0]!]),
+    )
+    const withheldPersona = personas[2]!
+    const finishedPersona = personas[3]!
+    const goneBeforeRestart2 = new Set([withheldPersona, finishedPersona])
+    let afterRestart2Roster: ToolJson = {}
+    for (let restart = 1; restart <= 2; restart += 1) {
+      const expectedPersonas = restart === 1 ? personas : personas.filter((persona) => !goneBeforeRestart2.has(persona))
+      if (restart === 2) {
+        const withheld = harnesses.find(({ persona }) => persona === withheldPersona)!
+        await terminateTestProcess(withheld.child.pid!)
+        const finished = harnesses.find(({ persona }) => persona === finishedPersona)!
+        finished.child.stdin.end()
+        await waitFor(() => finished.child.exitCode !== null, `harness exit for ${finishedPersona}`, 10_000)
+      }
+
+      const priorDaemonPid = generation.pid
+      await generation.client.call("tribe.restart", { reason: `declared-roster multi-seat restart ${restart}` })
+      generation.client.close()
+      generation = await connectToGeneration(socketPath, (pid) => pid !== priorDaemonPid)
+      daemonPids.add(generation.pid)
+
+      const rejoined = new Map<string, Member>()
+      await waitFor(async () => {
+        const rosterRows = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
+        for (const persona of expectedPersonas) {
+          const candidate = rosterRows.find(
+            (session) =>
+              session.name === persona &&
+              session.transport_state === "connected" &&
+              session.transport_pids?.length === 1 &&
+              session.transport_pids[0] !== priorTransportPids.get(persona),
+          )
+          if (candidate) rejoined.set(persona, candidate)
+        }
+        return rejoined.size === expectedPersonas.length
+      }, `all ${opts.label} memberships after daemon restart ${restart}`)
+
+      for (const persona of expectedPersonas) {
+        const member = rejoined.get(persona)!
+        expect(member.member_id).toBe(initialMembers.get(persona)?.member_id)
+        expect(member.launch_parent_pid).toBe(initialMembers.get(persona)?.launch_parent_pid)
+        for (const pid of member.transport_pids ?? []) adapterPids.add(pid)
+      }
+      priorTransportPids = new Map(
+        expectedPersonas.map((persona) => [persona, rejoined.get(persona)!.transport_pids![0]!]),
+      )
+      expect(
+        harnesses.filter(({ persona }) => !goneBeforeRestart2.has(persona)).map(({ child }) => child.exitCode),
+      ).toEqual([null, null])
+
+      if (restart === 2) {
+        afterRestart2Roster = parseToolJson(await generation.client.call("tribe.members", { all: true }))
+      }
+    }
+
+    opts.assertAfterRestart2(afterRestart2Roster, {
+      withheld: {
+        member_id: initialMembers.get(withheldPersona)!.member_id!,
+        name: withheldPersona,
+        launch_id: personaLaunchId(`${opts.label}-2`, withheldPersona),
+        launch_parent_pid: initialMembers.get(withheldPersona)!.launch_parent_pid!,
+      },
+      finished: {
+        member_id: initialMembers.get(finishedPersona)!.member_id!,
+        name: finishedPersona,
+        launch_id: personaLaunchId(`${opts.label}-3`, finishedPersona),
+        launch_parent_pid: initialMembers.get(finishedPersona)!.launch_parent_pid!,
+      },
+    })
+
+    const finalRoster = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
+    expect(
+      finalRoster
+        .filter((session) => session.transport_state === "connected")
+        .map((session) => session.name)
+        .sort(),
+    ).toEqual(personas.filter((persona) => !goneBeforeRestart2.has(persona)).sort())
+    generation.client.close()
   }
 
   beforeEach(() => {
@@ -1030,5 +1204,70 @@ process.exit(await child.exited)
         .sort(),
     ).toEqual(personas.filter((persona) => !goneBeforeRestart2.has(persona)).sort())
     generation.client.close()
+  }, 60_000)
+
+  it("declared roster (all always): an expected seat that settles without remounting is missing, not finished", async () => {
+    const label = "declared-always"
+    await runDeclaredRosterMultiSeatJourney({
+      label,
+      expectedMembersEnv: JSON.stringify(
+        ["a", "b", "c", "d"].map((suffix) => ({ name: `@agent/${label}-${suffix}`, restart: "always" })),
+      ),
+      assertAfterRestart2: (rosterAfterRestart2, ids) => {
+        const discrepancy = (
+          rosterAfterRestart2 as {
+            membership_discrepancy?: { missing?: unknown[] }
+          }
+        ).membership_discrepancy
+        expect(rosterAfterRestart2.membership_discrepancy).toMatchObject({
+          status: "degraded",
+          connected_durable_launches: 2,
+          known_durable_launches: 4,
+          missing_count: 2,
+          meaning: "missing transport does not establish agent absence",
+        })
+        expect(discrepancy?.missing).toEqual(
+          expect.arrayContaining([
+            { ...ids.withheld, state: "missing-transport" },
+            expect.objectContaining({ ...ids.finished, state: "exited-not-remounted" }),
+          ]),
+        )
+        // THE regression this bead closes: with no declaration, restart-d's
+        // settled departure silently read as finished_launches instead.
+        expect((rosterAfterRestart2 as { finished_launches?: unknown }).finished_launches).toBeUndefined()
+      },
+    })
+  }, 60_000)
+
+  it("declared roster (restart-d never): its settled departure reads finished_launches exactly as the pre-declaration behavior did", async () => {
+    const label = "declared-never-d"
+    await runDeclaredRosterMultiSeatJourney({
+      label,
+      expectedMembersEnv: JSON.stringify([
+        { name: `@agent/${label}-a`, restart: "always" },
+        { name: `@agent/${label}-b`, restart: "always" },
+        { name: `@agent/${label}-c`, restart: "always" },
+        { name: `@agent/${label}-d`, restart: "never" },
+      ]),
+      assertAfterRestart2: (rosterAfterRestart2, ids) => {
+        const discrepancy = (
+          rosterAfterRestart2 as {
+            membership_discrepancy?: { missing?: unknown[] }
+          }
+        ).membership_discrepancy
+        expect(rosterAfterRestart2.membership_discrepancy).toMatchObject({
+          status: "degraded",
+          connected_durable_launches: 2,
+          known_durable_launches: 3,
+          missing_count: 1,
+          finished_count: 1,
+          meaning: "missing transport does not establish agent absence",
+        })
+        expect(discrepancy?.missing).toEqual([{ ...ids.withheld, state: "missing-transport" }])
+        expect((rosterAfterRestart2 as { finished_launches?: unknown[] }).finished_launches).toEqual([
+          expect.objectContaining({ ...ids.finished, state: "finished" }),
+        ])
+      },
+    })
   }, 60_000)
 })

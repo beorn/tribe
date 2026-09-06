@@ -58,6 +58,7 @@ import {
   type SessionTransportEvidence,
 } from "./session-transport-state.ts"
 import type { DirectDeliveryResolution, DirectDeliveryResolver } from "./delivery-resolution.ts"
+import type { DeclaredRoster } from "./membership-declared-roster.ts"
 import { isUnidentifiedSessionName } from "./resolve-name.ts"
 
 // ---------------------------------------------------------------------------
@@ -261,6 +262,13 @@ export type HandlerOpts = {
   getActiveSessionInfo: () => ActiveSessionInfo[]
   /** Exact identities retired by explicit composing-layer policy. */
   retiredNames?: ReadonlySet<string>
+  /**
+   * Optional: hab's declared roster (persona name -> resolved restart
+   * policy), env `TRIBE_EXPECTED_MEMBERS`. Absent means "no declaration" —
+   * membership classification runs exactly as it did before this existed
+   * (@ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded).
+   */
+  expectedMembers?: DeclaredRoster
   /** Optional: dump daemon internals for `tribe.debug`. Daemon-only (tests using
    *  handlers directly can omit this — `tribe.debug` then returns a minimal
    *  snapshot synthesized from the other accessors). */
@@ -1946,23 +1954,54 @@ function projectMailboxReadCapability(mailboxAuthorityHash: string | null): Mail
   }
 }
 
+/** The "missing-transport" / "exited-not-remounted" shapes returned directly
+ *  by `classifyDisconnectedDurableRow` — everything `missing` carries except
+ *  `never-registered`, which has no row to draw an identity from (see
+ *  `MissingLaunch` and the roster branch of `projectMembershipDiscrepancy`). */
+type MissingTransportOrExited =
+  | {
+      member_id: string
+      name: string
+      launch_id: string
+      launch_parent_pid: number
+      state: "missing-transport"
+    }
+  | {
+      member_id: string
+      name: string
+      launch_id: string
+      launch_parent_pid: number
+      state: "exited-not-remounted"
+      left_at: string
+    }
+
+/** Everything `MembershipDiscrepancy.missing` can carry. `never-registered`
+ *  is a declared-expected name with no durable row at all (never launched,
+ *  or its row was swept) — there is no registration to draw an identity
+ *  from, so it carries only the declared name. */
+type MissingLaunch = MissingTransportOrExited | { name: string; state: "never-registered" }
+
 type MembershipDiscrepancy = {
   status: "degraded"
   connected_durable_launches: number
   known_durable_launches: number
   missing_count: number
-  missing: Array<{
-    member_id: string
-    name: string
-    launch_id: string
-    launch_parent_pid: number
-    state: "missing-transport"
-  }>
+  missing: MissingLaunch[]
   /** Count of disconnected durable rows classified `finished` alongside this
    *  discrepancy (present only when at least one exists). A finished launch
    *  is history, not degradation, so it never inflates `missing`/`missing_count`/
    *  `known_durable_launches` — it is surfaced here only as a sibling count. */
   finished_count?: number
+  /** Count of on-demand (declared `restart: "never"`) rows sitting quiet
+   *  between uses, alongside this discrepancy (present only when at least
+   *  one exists, exactly like `finished_count`). Only ever present when a
+   *  declared roster was supplied — see `dormant_launches`. */
+  dormant_count?: number
+  /** Count of undeclared rows — absent from the declared roster entirely —
+   *  alongside this discrepancy (present only when at least one exists,
+   *  exactly like `finished_count`). Only ever present when a declared
+   *  roster was supplied — see `departed_launches`. */
+  departed_count?: number
   meaning: "missing transport does not establish agent absence"
 }
 
@@ -1973,6 +2012,9 @@ type MembershipDiscrepancy = {
  * that happened to that row, not something it later re-registered past. This
  * is history, never a degraded seat
  * (@ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded).
+ * Reached both with no declared roster and with one that declares the name
+ * on-demand (`restart: "never"`) — a launch hab pages once and never
+ * remounts finishes exactly like one nobody ever declared.
  */
 type FinishedLaunch = {
   member_id: string
@@ -1981,6 +2023,37 @@ type FinishedLaunch = {
   launch_parent_pid: number
   state: "finished"
   left_at: string
+}
+
+/**
+ * A declared on-demand (`restart: "never"`) row sitting quiet between uses:
+ * hab pages it once on a crash and never remounts it, so silence here is by
+ * design, not degradation and not history. Reached only when a declared
+ * roster names this row's identity `restart: "never"` and its departure
+ * fact (if any) never settled — see `classifyDisconnectedDurableRow`.
+ * `tribe.health` never lists these rows, only their sibling count
+ * (`dormant_count`); `tribe.members` lists them under `dormant_launches`.
+ */
+type DormantLaunch = {
+  member_id: string
+  name: string
+  launch_id: string
+  state: "dormant"
+}
+
+/**
+ * A disconnected durable row whose name is absent from the declared roster
+ * entirely — nothing expects it up, so it is neither a discrepancy nor
+ * quiet-by-design, just history nobody was watching. Reached only when a
+ * declared roster is supplied and does not name this row's identity at all.
+ * `tribe.health` never lists these rows, only their sibling count
+ * (`departed_count`); `tribe.members` lists them under `departed_launches`.
+ */
+type DepartedLaunch = {
+  member_id: string
+  name: string
+  launch_id: string
+  state: "departed"
 }
 
 /** Newest `event.session.left` fact for a member id, or null when none was
@@ -2088,45 +2161,79 @@ type MembershipProjection = {
    *  top-level `finished_launches`; `tribe.health` deliberately drops them —
    *  see the call sites. */
   finished: FinishedLaunch[]
+  /** Every disconnected durable row classified `dormant` this call. Always
+   *  empty with no declared roster. `tribe.members` surfaces these under a
+   *  top-level `dormant_launches`; `tribe.health` deliberately drops them —
+   *  see the call sites. */
+  dormant: DormantLaunch[]
+  /** Every disconnected durable row classified `departed` this call. Always
+   *  empty with no declared roster. `tribe.members` surfaces these under a
+   *  top-level `departed_launches`; `tribe.health` deliberately drops them —
+   *  see the call sites. */
+  departed: DepartedLaunch[]
 }
 
 /**
  * Classify one disconnected durable row against its newest `event.session.left`
- * fact (if any). Two conditions make the launch history: the fact says the
- * harness EXITED (a positive reason the adapter announced before closing —
- * a killed adapter, a crash or a daemon restart leaves only `transport-closed`,
- * which is no evidence and keeps the row `missing-transport`), and
+ * fact (if any) and, when the composing layer declared one, the roster's
+ * restart policy for its name.
+ *
+ * A departure "settles" when the fact says the harness EXITED (a positive
+ * reason the adapter announced before closing — a killed adapter, a crash or
+ * a daemon restart leaves only `transport-closed`, which is no evidence) AND
  * `ts >= row.updated_at`, so the departure is the LAST thing that happened to
  * that registration. The second condition is the trap
  * (@ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded):
  * a re-registration under the same id bumps `updated_at` past a stale left
  * fact, and a seat that then vanishes for good with no NEW fact must stay
- * degraded, not silently read as long-since finished.
+ * degraded, not silently read as settled.
+ *
+ * With no declared roster this is exactly the pre-declaration two-way split
+ * (`finished` / `missing-transport`). With one, what a settled-or-not
+ * departure MEANS depends on whether the roster expects the name up:
+ *   - expected (`always` / `on-failure`): settled -> `missing` state
+ *     `exited-not-remounted` (hab was supposed to remount it and didn't);
+ *     otherwise -> `missing-transport`. Either way it is a live discrepancy —
+ *     an expected seat with no live transport is missing regardless of why.
+ *   - on-demand (`restart: "never"`): settled -> `finished` (by design,
+ *     identical to the no-roster case); otherwise -> `dormant` (quiet
+ *     between uses — a crash page is hab's, once, never a discrepancy).
+ *   - undeclared (absent from the roster entirely): always `departed`,
+ *     regardless of the fact — nothing expects the name up, so it is history
+ *     nobody was watching.
  */
 function classifyDisconnectedDurableRow(
   row: DurableMembershipSessionRow,
   getSessionLeftFact: SessionLeftFactReader,
-):
-  | FinishedLaunch
-  | { member_id: string; name: string; launch_id: string; launch_parent_pid: number; state: "missing-transport" } {
+  roster: DeclaredRoster | undefined,
+): FinishedLaunch | DormantLaunch | DepartedLaunch | MissingTransportOrExited {
   const fact = getSessionLeftFact(row)
-  if (fact && isTerminalSessionLeftReason(sessionLeftReason(fact)) && fact.ts >= row.updated_at) {
-    return {
-      member_id: row.id,
-      name: row.name,
-      launch_id: row.launch_id,
-      launch_parent_pid: row.launch_parent_pid,
-      state: "finished",
-      left_at: new Date(fact.ts).toISOString(),
-    }
-  }
-  return {
+  const settled = fact !== null && isTerminalSessionLeftReason(sessionLeftReason(fact)) && fact.ts >= row.updated_at
+  const leftAt = settled ? new Date((fact as { ts: number }).ts).toISOString() : undefined
+  const identity = {
     member_id: row.id,
     name: row.name,
     launch_id: row.launch_id,
     launch_parent_pid: row.launch_parent_pid,
-    state: "missing-transport",
   }
+
+  if (roster === undefined) {
+    return settled ? { ...identity, state: "finished", left_at: leftAt! } : { ...identity, state: "missing-transport" }
+  }
+
+  const policy = roster.byName.get(row.name)
+  if (policy === undefined) {
+    return { member_id: row.id, name: row.name, launch_id: row.launch_id, state: "departed" }
+  }
+  if (policy === "never") {
+    return settled
+      ? { ...identity, state: "finished", left_at: leftAt! }
+      : { member_id: row.id, name: row.name, launch_id: row.launch_id, state: "dormant" }
+  }
+  // policy is "always" | "on-failure": hab expects this name up.
+  return settled
+    ? { ...identity, state: "exited-not-remounted", left_at: leftAt! }
+    : { ...identity, state: "missing-transport" }
 }
 
 function projectMembershipDiscrepancy(
@@ -2135,10 +2242,58 @@ function projectMembershipDiscrepancy(
   disconnectedRows: readonly MembershipSessionRow[],
   retiredNames: ReadonlySet<string>,
   getSessionLeftFact: SessionLeftFactReader,
+  roster: DeclaredRoster | undefined,
 ): MembershipProjection {
-  // Superseded rows are excluded from the denominator too, or a seat that
-  // re-registered under an auto-suffixed name counts as two known launches
-  // and reports "1 of 2 connected" about one live seat.
+  const missing: MissingLaunch[] = []
+  const finished: FinishedLaunch[] = []
+  const dormant: DormantLaunch[] = []
+  const departed: DepartedLaunch[] = []
+  for (const row of disconnectedRows) {
+    if (!isDurableMembershipSessionRow(row)) continue
+    if (isTakeoverTombstoneName(row.name)) continue
+    const classified = classifyDisconnectedDurableRow(row, getSessionLeftFact, roster)
+    if (classified.state === "finished") finished.push(classified)
+    else if (classified.state === "dormant") dormant.push(classified)
+    else if (classified.state === "departed") departed.push(classified)
+    else missing.push(classified)
+  }
+
+  if (roster !== undefined) {
+    // The declaration is the denominator: `known_durable_launches` is the
+    // declared-expected roster size, independent of what actually
+    // registered, and a declared-expected name with NO durable row at all
+    // (never launched, or its row was swept) is missing by omission — the
+    // loop above never visits it because there is no row to visit.
+    const registeredNames = new Set(rows.filter(isDurableMembershipSessionRow).map((row) => row.name))
+    for (const name of roster.expectedNames) {
+      if (!registeredNames.has(name)) missing.push({ name, state: "never-registered" })
+    }
+    const connectedNames = new Set(
+      rows.filter((row) => activeIds.has(row.id) && roster.expectedNames.has(row.name)).map((row) => row.name),
+    )
+    if (missing.length === 0) return { discrepancy: undefined, finished, dormant, departed }
+    return {
+      discrepancy: {
+        status: "degraded",
+        connected_durable_launches: connectedNames.size,
+        known_durable_launches: roster.expectedNames.size,
+        missing_count: missing.length,
+        missing,
+        ...(finished.length > 0 ? { finished_count: finished.length } : {}),
+        ...(dormant.length > 0 ? { dormant_count: dormant.length } : {}),
+        ...(departed.length > 0 ? { departed_count: departed.length } : {}),
+        meaning: "missing transport does not establish agent absence",
+      },
+      finished,
+      dormant,
+      departed,
+    }
+  }
+
+  // No declared roster: pre-declaration behaviour, unchanged. Superseded
+  // rows are excluded from the denominator too, or a seat that re-registered
+  // under an auto-suffixed name counts as two known launches and reports
+  // "1 of 2 connected" about one live seat.
   const supersededLaunchIds = activeLaunchIdSet(rows, activeIds)
   const durableRows = rows
     .filter(isDurableMembershipSessionRow)
@@ -2146,16 +2301,6 @@ function projectMembershipDiscrepancy(
     .filter((row) => activeIds.has(row.id) || !supersededLaunchIds.has(row.launch_id))
     .filter((row) => activeIds.has(row.id) || !retiredNames.has(row.name))
     .filter((row) => activeIds.has(row.id) || !isTakeoverTombstoneName(row.name))
-
-  const missing: MembershipDiscrepancy["missing"] = []
-  const finished: FinishedLaunch[] = []
-  for (const row of disconnectedRows) {
-    if (!isDurableMembershipSessionRow(row)) continue
-    if (isTakeoverTombstoneName(row.name)) continue
-    const classified = classifyDisconnectedDurableRow(row, getSessionLeftFact)
-    if (classified.state === "finished") finished.push(classified)
-    else missing.push(classified)
-  }
   const finishedIds = new Set(finished.map((row) => row.member_id))
   // A finished row is retired from the "known" denominator too — it is not
   // counted as missing anything, and it is not double-counted against a live
@@ -2165,7 +2310,7 @@ function projectMembershipDiscrepancy(
   const knownNames = new Set(durableRows.filter((row) => !finishedIds.has(row.id)).map((row) => row.name))
   const connectedNames = new Set(durableRows.filter((row) => activeIds.has(row.id)).map((row) => row.name))
 
-  if (missing.length === 0) return { discrepancy: undefined, finished }
+  if (missing.length === 0) return { discrepancy: undefined, finished, dormant, departed }
   return {
     discrepancy: {
       status: "degraded",
@@ -2177,6 +2322,8 @@ function projectMembershipDiscrepancy(
       meaning: "missing transport does not establish agent absence",
     },
     finished,
+    dormant,
+    departed,
   }
 }
 
@@ -2306,11 +2453,25 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
       ...(r.provider ? { provider: r.provider } : {}),
     }
   })
+  const roster = opts.expectedMembers
   const disconnected = projectDisconnectedSessionRows(rows, activeIds)
   const diagnosticDisconnected = disconnected.diagnostic.filter((row) => !retiredNames.has(row.name))
-  const membership = projectMembershipDiscrepancy(rows, activeIds, diagnosticDisconnected, retiredNames, (row) =>
-    readSessionLeftFact(ctx, row),
+  const membership = projectMembershipDiscrepancy(
+    rows,
+    activeIds,
+    diagnosticDisconnected,
+    retiredNames,
+    (row) => readSessionLeftFact(ctx, row),
+    roster,
   )
+  // Connected rows whose name the roster never mentions at all — probes,
+  // subagents, anything not in hab's persona table. Fine to be connected,
+  // just not a name the declaration can account for; never a discrepancy
+  // signal and never surfaced by tribe.health (see handleHealth).
+  const unexpectedConnected =
+    roster === undefined
+      ? []
+      : [...new Set(rows.filter((row) => activeIds.has(row.id) && !roster.byName.has(row.name)).map((row) => row.name))]
   return jsonResult({
     sessions,
     ...(membership.discrepancy === undefined ? {} : { membership_discrepancy: membership.discrepancy }),
@@ -2319,6 +2480,12 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     // with its old "degraded" noise (@ag/tribe/tribe-membership-projection-
     // counts-permanent-history-as-degraded). Omitted (not `[]`) when empty.
     ...(membership.finished.length > 0 ? { finished_launches: membership.finished } : {}),
+    // Declared-roster-only, both omitted (not `[]`) when empty: a quiet
+    // on-demand seat and an undeclared departed one are neither alarms, but
+    // an operator reading tribe.members should still be able to find them.
+    ...(membership.dormant.length > 0 ? { dormant_launches: membership.dormant } : {}),
+    ...(membership.departed.length > 0 ? { departed_launches: membership.departed } : {}),
+    ...(unexpectedConnected.length > 0 ? { unexpected_connected: unexpectedConnected } : {}),
   })
 }
 
@@ -2645,15 +2812,19 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
       },
     ]
   })
-  // `.finished` is deliberately unused here — tribe.health stays a pure
-  // liveness/degradation surface and never grows a `finished_launches` list;
-  // tribe.members is where finished history is surfaced (handleSessions above).
+  // `.finished`/`.dormant`/`.departed` are deliberately unused here —
+  // tribe.health stays a pure liveness/degradation surface and never grows
+  // `finished_launches`/`dormant_launches`/`departed_launches` lists (or
+  // `unexpected_connected` — that is a members-only concern, see
+  // handleSessions above); their sibling counts still ride inside
+  // `membershipDiscrepancy` (finished_count/dormant_count/departed_count).
   const { discrepancy: membershipDiscrepancy } = projectMembershipDiscrepancy(
     rows,
     activeIds,
     diagnosticDisconnected,
     retiredNames,
     (row) => readSessionLeftFact(ctx, row),
+    opts.expectedMembers,
   )
 
   const members = liveSessions.map((s) => {
