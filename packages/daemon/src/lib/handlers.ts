@@ -2127,6 +2127,25 @@ function classifyUndeclaredWhy(name: string, roster: DeclaredRoster): "undeclare
   return "undeclared-foreign"
 }
 
+/** The `last_seen`/`left_at`/`reason` fields shared by `DormantLaunch` and
+ *  `DepartedLaunch`: `last_seen` is unconditional (the row's own
+ *  `updated_at`); `left_at`/`reason` are informational only, populated from
+ *  the row's newest keyed fact when ONE EXISTS — any reason, not only
+ *  `harness-exited`, and regardless of freshness relative to `updated_at`.
+ *  Neither class is a classification gated by fact terminality, so nothing
+ *  here re-derives `settled`. */
+function describeDepartureActivity(
+  row: { updated_at: number },
+  fact: { ts: number; content: string } | null,
+): { last_seen: string; left_at?: string; reason?: string } {
+  const reason = fact !== null ? sessionLeftReason(fact) : undefined
+  return {
+    last_seen: new Date(row.updated_at).toISOString(),
+    ...(fact !== null ? { left_at: new Date(fact.ts).toISOString() } : {}),
+    ...(typeof reason === "string" ? { reason } : {}),
+  }
+}
+
 /** Newest `event.session.left` fact for a member id, or null when none was
  *  ever journaled (either retention tier) — bun:sqlite's `.get()` reports
  *  "no row" as `null`, never `undefined`, so callers must not narrow on
@@ -2298,20 +2317,20 @@ function classifyDisconnectedDurableRow(
     // name up, so `left_at`/`reason` are informational only, never gated by
     // `settled` (an undeclared row is never "missing" no matter how fresh a
     // transport-closed fact is).
-    const reason = fact !== null ? sessionLeftReason(fact) : undefined
     return {
       ...identity,
       state: "departed",
-      last_seen: new Date(row.updated_at).toISOString(),
-      ...(fact !== null ? { left_at: new Date(fact.ts).toISOString() } : {}),
-      ...(typeof reason === "string" ? { reason } : {}),
+      ...describeDepartureActivity(row, fact),
       why: classifyUndeclaredWhy(row.name, roster),
     }
   }
   if (!expected) {
+    // On-demand: a settled harness exit is `finished` (by design); anything
+    // else is `dormant`, quiet between uses, carrying the same informational
+    // last_seen / left_at / reason a departed row does.
     return settled
       ? { ...identity, state: "finished", left_at: leftAt! }
-      : { member_id: row.id, name: row.name, launch_id: row.launch_id, state: "dormant" }
+      : { ...identity, state: "dormant", ...describeDepartureActivity(row, fact) }
   }
   // expected === true: hab expects this name up.
   return settled

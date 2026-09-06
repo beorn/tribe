@@ -334,8 +334,18 @@ describe("membership projection: declared-roster membership is a function of a p
     expect(members.finished_launches).toBeUndefined()
     expect(members.dormant_launches).toEqual(
       expect.arrayContaining([
-        { member_id: "dem-2", name: "@adhoc/never-quiet", launch_id: "launch-dem-2", state: "dormant" },
-        { member_id: "dem-3", name: "@chief/next", launch_id: "launch-dem-3", state: "dormant" },
+        expect.objectContaining({
+          member_id: "dem-2",
+          name: "@adhoc/never-quiet",
+          launch_id: "launch-dem-2",
+          state: "dormant",
+        }),
+        expect.objectContaining({
+          member_id: "dem-3",
+          name: "@chief/next",
+          launch_id: "launch-dem-3",
+          state: "dormant",
+        }),
       ]),
     )
     expect(members.dormant_launches).toHaveLength(2)
@@ -469,6 +479,64 @@ describe("membership projection: declared-roster membership is a function of a p
     expect(members.departed_launches).toEqual([
       expect.objectContaining({ member_id: "nosl-1", name: "session 1", why: "undeclared-foreign" }),
     ])
+  })
+
+  it("5b. dormant rows carry last_seen, and left_at/reason only when a keyed fact exists", () => {
+    let now = 30_250_000
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now)
+    try {
+      const quiet = addSession(db, stmts, "dorm-quiet", "@adhoc/7", { id: "launch-dorm-quiet", parentPid: 30071 })
+      const quietSeen = now
+      now += 1_000
+      const closed = addSession(db, stmts, "dorm-closed", "@adhoc/8", { id: "launch-dorm-closed", parentPid: 30081 })
+      const closedSeen = now
+      now += 1_000
+      logSessionLeft(closed, {
+        memberId: "dorm-closed",
+        name: "@adhoc/8",
+        role: "member",
+        domains: [],
+        launchId: "launch-dorm-closed",
+        launchParentPid: 30081,
+        reason: "transport-closed",
+      })
+      const closedLeft = now
+      void quiet
+      const opCtx = makeContext(db, stmts, "operator", "@operator")
+      const opts = baseOpts({
+        expectedMembers: roster([
+          { name: "@adhoc/7", expected: false },
+          { name: "@adhoc/8", expected: false },
+        ]),
+      })
+      const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
+        membership_discrepancy?: unknown
+        dormant_launches?: Array<Record<string, unknown>>
+      }
+      expect(members.membership_discrepancy).toBeUndefined()
+      expect(members.dormant_launches).toEqual([
+        {
+          member_id: "dorm-quiet",
+          name: "@adhoc/7",
+          launch_id: "launch-dorm-quiet",
+          launch_parent_pid: 30071,
+          state: "dormant",
+          last_seen: new Date(quietSeen).toISOString(),
+        },
+        {
+          member_id: "dorm-closed",
+          name: "@adhoc/8",
+          launch_id: "launch-dorm-closed",
+          launch_parent_pid: 30081,
+          state: "dormant",
+          last_seen: new Date(closedSeen).toISOString(),
+          left_at: new Date(closedLeft).toISOString(),
+          reason: "transport-closed",
+        },
+      ])
+    } finally {
+      nowSpy.mockRestore()
+    }
   })
 
   it("7. expected name with no row at all: missing state never-registered", () => {
