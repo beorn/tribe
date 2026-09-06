@@ -268,9 +268,9 @@ process.exit(await child.exited)
    * stdin (the adapter announces the exit before closing, so it always
    * settles). Whether that settled departure for restart-d reads as a live
    * discrepancy or as history depends entirely on the declaration:
-   * `restart: "always"` -> `missing` state `exited-not-remounted` (THE
+   * `expected: true` -> `missing` state `exited-not-remounted` (THE
    * regression this bead closes — an expected seat hab never remounted was
-   * silently read as finished); `restart: "never"` -> `finished_launches`,
+   * silently read as finished); `expected: false` -> `finished_launches`,
    * reproducing the pre-declaration reading exactly
    * (@ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded).
    */
@@ -1206,12 +1206,12 @@ process.exit(await child.exited)
     generation.client.close()
   }, 60_000)
 
-  it("declared roster (all always): an expected seat that settles without remounting is missing, not finished", async () => {
+  it("declared roster (all expected): an expected seat that settles without remounting is missing, not finished", async () => {
     const label = "declared-always"
     await runDeclaredRosterMultiSeatJourney({
       label,
       expectedMembersEnv: JSON.stringify(
-        ["a", "b", "c", "d"].map((suffix) => ({ name: `@agent/${label}-${suffix}`, restart: "always" })),
+        ["a", "b", "c", "d"].map((suffix) => ({ name: `@agent/${label}-${suffix}`, expected: true })),
       ),
       assertAfterRestart2: (rosterAfterRestart2, ids) => {
         const discrepancy = (
@@ -1239,15 +1239,15 @@ process.exit(await child.exited)
     })
   }, 60_000)
 
-  it("declared roster (restart-d never): its settled departure reads finished_launches exactly as the pre-declaration behavior did", async () => {
+  it("declared roster (restart-d not expected): its settled departure reads finished_launches exactly as the pre-declaration behavior did", async () => {
     const label = "declared-never-d"
     await runDeclaredRosterMultiSeatJourney({
       label,
       expectedMembersEnv: JSON.stringify([
-        { name: `@agent/${label}-a`, restart: "always" },
-        { name: `@agent/${label}-b`, restart: "always" },
-        { name: `@agent/${label}-c`, restart: "always" },
-        { name: `@agent/${label}-d`, restart: "never" },
+        { name: `@agent/${label}-a`, expected: true },
+        { name: `@agent/${label}-b`, expected: true },
+        { name: `@agent/${label}-c`, expected: true },
+        { name: `@agent/${label}-d`, expected: false },
       ]),
       assertAfterRestart2: (rosterAfterRestart2, ids) => {
         const discrepancy = (

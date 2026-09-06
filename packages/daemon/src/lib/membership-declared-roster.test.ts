@@ -1,15 +1,19 @@
 /**
  * @failure Without a declared roster, `tribe.members` / `tribe.health` can
  * only ever call a departed durable launch `finished` or `missing-transport`
- * — there is no way to say "hab expected this seat to remount and it
- * didn't." A seat hab supervises (`restart: "always"`) whose harness exits
- * and is never remounted carries a positive `harness-exited` fact, which the
- * plain finished/missing split reads as settled history and silently drops
- * from `missing` — the exact under-report this bead exists to close.
- * `TRIBE_EXPECTED_MEMBERS` hands the daemon hab's own restart declaration so
- * the projection can tell a live discrepancy (expected, gone) from
- * quiet-by-design (on-demand, gone) from history nobody was watching
- * (undeclared, gone) — without a declaration, nothing here moves.
+ * — there is no way to say "hab expected this seat up and it wasn't." A seat
+ * hab declares `expected: true` whose harness exits and is never remounted
+ * carries a positive `harness-exited` fact, which the plain finished/missing
+ * split reads as settled history and silently drops from `missing` — the
+ * exact under-report this bead exists to close. `TRIBE_EXPECTED_MEMBERS`
+ * hands the daemon a plain per-name "is hab expecting this seat up" boolean
+ * — never a restart-policy vocabulary; hab's own resolved restart default
+ * lives in more than one place (habd-runtime, the health classifier), so
+ * "expected up" is a declaration semantic hab derives itself and tribe just
+ * takes the answer — so the projection can tell a live discrepancy
+ * (expected, gone) from quiet-by-design (on-demand, gone) from history
+ * nobody was watching (undeclared, gone) — without a declaration, nothing
+ * here moves.
  * @level l1
  * @consumer Tribe operators and daemon health/membership readers.
  *
@@ -26,7 +30,7 @@ import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { handleToolCall, type HandlerOpts } from "./handlers.ts"
 import { logSessionLeft } from "./messaging.ts"
-import { parseExpectedMembers, type DeclaredRoster, type MemberRestartPolicy } from "./membership-declared-roster.ts"
+import { parseExpectedMembers, type DeclaredRoster } from "./membership-declared-roster.ts"
 import { registerSession } from "./session.ts"
 
 const PROJECT_ID = "membership-declared-roster"
@@ -91,11 +95,11 @@ function baseOpts(overrides: Partial<HandlerOpts> = {}): HandlerOpts {
 /** Builds a declared roster exactly the way the daemon parses
  *  `TRIBE_EXPECTED_MEMBERS` — never hand-assembled, so a test can never
  *  drift from the real parser's shape. */
-function roster(members: Array<{ name: string; restart: MemberRestartPolicy }>): DeclaredRoster {
+function roster(members: Array<{ name: string; expected: boolean }>): DeclaredRoster {
   return parseExpectedMembers(JSON.stringify(members))!
 }
 
-describe("membership projection: declared-roster membership is a function of hab's own restart policy (@ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded)", () => {
+describe("membership projection: declared-roster membership is a function of a plain expected-up declaration (@ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded)", () => {
   let tmpDir: string
   let db: Database
   let stmts: TribeStatements
@@ -130,7 +134,7 @@ describe("membership projection: declared-roster membership is a function of hab
       const leftAt = now
 
       const opCtx = makeContext(db, stmts, "operator", "@operator")
-      const opts = baseOpts({ expectedMembers: roster([{ name: "@agent/restart-always", restart: "always" }]) })
+      const opts = baseOpts({ expectedMembers: roster([{ name: "@agent/restart-always", expected: true }]) })
       const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
         membership_discrepancy?: Record<string, unknown>
         finished_launches?: unknown
@@ -180,7 +184,7 @@ describe("membership projection: declared-roster membership is a function of hab
       })
       const opCtx = makeContext(db, stmts, "operator", "@operator")
       const opts = baseOpts({
-        expectedMembers: roster([{ name: "@agent/restart-onfailure", restart: "on-failure" }]),
+        expectedMembers: roster([{ name: "@agent/restart-onfailure", expected: true }]),
       })
       const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
         membership_discrepancy?: { status: string; missing: Array<Record<string, unknown>> }
@@ -234,7 +238,7 @@ describe("membership projection: declared-roster membership is a function of hab
 
       const opCtx = makeContext(db, stmts, "operator", "@operator")
       const opts = baseOpts({
-        expectedMembers: roster([{ name: "@agent/restart-live", restart: "always" }]),
+        expectedMembers: roster([{ name: "@agent/restart-live", expected: true }]),
         getActiveSessionIds: () => new Set(["exp-3"]),
         getActiveSessionInfo: () => [
           {
@@ -279,7 +283,7 @@ describe("membership projection: declared-roster membership is a function of hab
       })
       const leftAt = now
       const opCtx = makeContext(db, stmts, "operator", "@operator")
-      const opts = baseOpts({ expectedMembers: roster([{ name: "@adhoc/never-1", restart: "never" }]) })
+      const opts = baseOpts({ expectedMembers: roster([{ name: "@adhoc/never-1", expected: false }]) })
       const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
         membership_discrepancy?: unknown
         finished_launches?: Array<Record<string, unknown>>
@@ -315,8 +319,8 @@ describe("membership projection: declared-roster membership is a function of hab
     const opCtx = makeContext(db, stmts, "operator", "@operator")
     const opts = baseOpts({
       expectedMembers: roster([
-        { name: "@adhoc/never-quiet", restart: "never" },
-        { name: "@chief/next", restart: "never" },
+        { name: "@adhoc/never-quiet", expected: false },
+        { name: "@chief/next", expected: false },
       ]),
     })
     const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
@@ -342,36 +346,132 @@ describe("membership projection: declared-roster membership is a function of hab
     expect(health.dormant_launches).toBeUndefined()
   })
 
-  it("6. undeclared name, any fact: departed_launches, no discrepancy", () => {
-    const ctx = addSession(db, stmts, "und-1", "@proof/wait-rc4", { id: "launch-und-1", parentPid: 30007 })
-    logSessionLeft(ctx, {
-      memberId: "und-1",
-      name: "@proof/wait-rc4",
-      role: "member",
-      domains: [],
-      launchId: "launch-und-1",
-      launchParentPid: 30007,
-      reason: "harness-exited",
-    })
+  it("6. undeclared name, any fact: departed_launches (with last_seen/left_at/reason/why), no discrepancy", () => {
+    let now = 30_500_000
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now)
+    try {
+      const registeredAt = now
+      const ctx = addSession(db, stmts, "und-1", "@proof/wait-rc4", { id: "launch-und-1", parentPid: 30007 })
+      now += 1_000
+      logSessionLeft(ctx, {
+        memberId: "und-1",
+        name: "@proof/wait-rc4",
+        role: "member",
+        domains: [],
+        launchId: "launch-und-1",
+        launchParentPid: 30007,
+        reason: "harness-exited",
+      })
+      const leftAt = now
+      const opCtx = makeContext(db, stmts, "operator", "@operator")
+      // A real declaration that names nobody: @proof/wait-rc4 is absent from
+      // it entirely, unlike the "never" (on-demand) rows in test 5.
+      const opts = baseOpts({ expectedMembers: roster([]) })
+      const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
+        membership_discrepancy?: unknown
+        finished_launches?: unknown
+        departed_launches?: Array<Record<string, unknown>>
+      }
+      expect(members.membership_discrepancy).toBeUndefined()
+      expect(members.finished_launches).toBeUndefined()
+      expect(members.departed_launches).toEqual([
+        {
+          member_id: "und-1",
+          name: "@proof/wait-rc4",
+          launch_id: "launch-und-1",
+          launch_parent_pid: 30007,
+          state: "departed",
+          last_seen: new Date(registeredAt).toISOString(),
+          left_at: new Date(leftAt).toISOString(),
+          reason: "harness-exited",
+          // An empty declaration names nobody, so no family can ever match.
+          why: "undeclared-foreign",
+        },
+      ])
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+
+  it("6a. undeclared sibling: a name sharing a declared family reads undeclared-sibling", () => {
+    addSession(db, stmts, "sib-1", "@dev/0", { id: "launch-sib-1", parentPid: 30008 })
+    addSession(db, stmts, "sib-2", "@dev/1", { id: "launch-sib-2", parentPid: 30108 })
     const opCtx = makeContext(db, stmts, "operator", "@operator")
-    // A real declaration that names nobody: @proof/wait-rc4 is absent from
-    // it entirely, unlike the "never" (on-demand) rows in test 5.
-    const opts = baseOpts({ expectedMembers: roster([]) })
+    const opts = baseOpts({
+      expectedMembers: roster([{ name: "@dev/1", expected: true }]),
+      getActiveSessionIds: () => new Set(["sib-2"]),
+      getActiveSessionInfo: () => [
+        {
+          id: "sib-2",
+          name: "@dev/1",
+          pid: 30108,
+          cwd: "/repo",
+          role: "member",
+          claudeSessionId: null,
+          registeredAt: Date.now(),
+          launchId: "launch-sib-2",
+          launchParentPid: 30108,
+          transportPids: [30108],
+        },
+      ],
+    })
     const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
       membership_discrepancy?: unknown
-      finished_launches?: unknown
       departed_launches?: Array<Record<string, unknown>>
     }
     expect(members.membership_discrepancy).toBeUndefined()
-    expect(members.finished_launches).toBeUndefined()
     expect(members.departed_launches).toEqual([
-      { member_id: "und-1", name: "@proof/wait-rc4", launch_id: "launch-und-1", state: "departed" },
+      expect.objectContaining({ member_id: "sib-1", name: "@dev/0", why: "undeclared-sibling" }),
+    ])
+  })
+
+  it("6b. undeclared foreign: a name whose family matches no declared name reads undeclared-foreign", () => {
+    addSession(db, stmts, "for-1", "@proof/x", { id: "launch-for-1", parentPid: 30009 })
+    addSession(db, stmts, "for-2", "@dev/1", { id: "launch-for-2", parentPid: 30109 })
+    const opCtx = makeContext(db, stmts, "operator", "@operator")
+    const opts = baseOpts({
+      expectedMembers: roster([{ name: "@dev/1", expected: true }]),
+      getActiveSessionIds: () => new Set(["for-2"]),
+      getActiveSessionInfo: () => [
+        {
+          id: "for-2",
+          name: "@dev/1",
+          pid: 30109,
+          cwd: "/repo",
+          role: "member",
+          claudeSessionId: null,
+          registeredAt: Date.now(),
+          launchId: "launch-for-2",
+          launchParentPid: 30109,
+          transportPids: [30109],
+        },
+      ],
+    })
+    const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
+      membership_discrepancy?: unknown
+      departed_launches?: Array<Record<string, unknown>>
+    }
+    expect(members.membership_discrepancy).toBeUndefined()
+    expect(members.departed_launches).toEqual([
+      expect.objectContaining({ member_id: "for-1", name: "@proof/x", why: "undeclared-foreign" }),
+    ])
+  })
+
+  it("6c. undeclared foreign, no-slash name: the whole name is its own family", () => {
+    addSession(db, stmts, "nosl-1", "session 1", { id: "launch-nosl-1", parentPid: 30010 })
+    const opCtx = makeContext(db, stmts, "operator", "@operator")
+    const opts = baseOpts({ expectedMembers: roster([{ name: "@dev/1", expected: true }]) })
+    const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
+      departed_launches?: Array<Record<string, unknown>>
+    }
+    expect(members.departed_launches).toEqual([
+      expect.objectContaining({ member_id: "nosl-1", name: "session 1", why: "undeclared-foreign" }),
     ])
   })
 
   it("7. expected name with no row at all: missing state never-registered", () => {
     const opCtx = makeContext(db, stmts, "operator", "@operator")
-    const opts = baseOpts({ expectedMembers: roster([{ name: "@dev/12", restart: "always" }]) })
+    const opts = baseOpts({ expectedMembers: roster([{ name: "@dev/12", expected: true }]) })
     const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
       membership_discrepancy?: Record<string, unknown>
     }
@@ -456,14 +556,15 @@ describe("membership projection: declared-roster membership is a function of hab
 
   it.each([
     ["not-json", /must be JSON/],
-    [JSON.stringify({ name: "@a", restart: "always" }), /JSON array/],
-    [JSON.stringify([{ restart: "always" }]), /name must be a non-empty string/],
-    [JSON.stringify([{ name: "@a", restart: "sometimes" }]), /restart must be/],
-    [JSON.stringify([{ name: "@a", restart: "always", extra: true }]), /unknown keys/],
+    [JSON.stringify({ name: "@a", expected: true }), /JSON array/],
+    [JSON.stringify([{ expected: true }]), /name must be a non-empty string/],
+    [JSON.stringify([{ name: "@a" }]), /expected must be a boolean/],
+    [JSON.stringify([{ name: "@a", expected: "yes" }]), /expected must be a boolean/],
+    [JSON.stringify([{ name: "@a", expected: true, extra: true }]), /unknown keys/],
     [
       JSON.stringify([
-        { name: "@a", restart: "always" },
-        { name: "@a", restart: "never" },
+        { name: "@a", expected: true },
+        { name: "@a", expected: false },
       ]),
       /duplicates declared name/,
     ],
@@ -476,7 +577,7 @@ describe("membership projection: declared-roster membership is a function of hab
     addSession(db, stmts, "exp-10", "@agent/restart-always", { id: "launch-exp-10", parentPid: 30100 })
     const opCtx = makeContext(db, stmts, "operator", "@operator")
     const opts = baseOpts({
-      expectedMembers: roster([{ name: "@agent/restart-always", restart: "always" }]),
+      expectedMembers: roster([{ name: "@agent/restart-always", expected: true }]),
       getActiveSessionIds: () => new Set(["probe-1", "exp-10"]),
       getActiveSessionInfo: () => [
         {
