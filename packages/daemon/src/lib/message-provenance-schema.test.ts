@@ -37,6 +37,48 @@ const columnsOf = (db: Database, table: string) =>
   new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((r) => r.name))
 
 describe("message provenance (migration v26)", () => {
+  it.each([
+    { label: "messages", drop: "messages" },
+    { label: "messages_archive", drop: "messages_archive" },
+  ])("refuses v30 upgrade when $label table is missing before stamping", ({ drop }) => {
+    const { path, db: initial } = freshDb(`missing-table-${drop}`)
+    initial.close()
+    const seeded = new Database(path)
+    seeded.run("UPDATE _schema_meta SET value = '30' WHERE key = 'version'")
+    seeded.run(`DROP TABLE ${drop}`)
+    seeded.close()
+
+    expect(() => openDatabase(path)).toThrow(new RegExp(`migration v31.*${drop}.*missing`, "i"))
+    const db = new Database(path)
+    try {
+      expect(db.prepare("SELECT value FROM _schema_meta WHERE key = 'version'").get()).toEqual({ value: "30" })
+      expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?").get(drop)).toEqual(null)
+    } finally {
+      db.close()
+    }
+  })
+
+  it("refuses v30 upgrade when either room_id column is missing before stamping", () => {
+    const { path, db: initial } = freshDb("missing-column")
+    initial.close()
+    const seeded = new Database(path)
+    seeded.run("UPDATE _schema_meta SET value = '30' WHERE key = 'version'")
+    seeded.run("ALTER TABLE messages ADD COLUMN room_id TEXT")
+    seeded.run("ALTER TABLE messages_archive ADD COLUMN room_id TEXT")
+    seeded.run("ALTER TABLE messages_archive DROP COLUMN room_id")
+    seeded.close()
+
+    expect(() => openDatabase(path)).toThrow(new RegExp("migration v31.*messages_archive.*room_id.*missing", "i"))
+    const db = new Database(path)
+    try {
+      expect(db.prepare("SELECT value FROM _schema_meta WHERE key = 'version'").get()).toEqual({ value: "30" })
+      expect(columnsOf(db, "messages").has("room_id")).toBe(true)
+      expect(columnsOf(db, "messages_archive").has("room_id")).toBe(false)
+    } finally {
+      db.close()
+    }
+  })
+
   it("puts session_id on both the live table and the archive", () => {
     const { db } = freshDb("cols")
     try {
@@ -141,8 +183,12 @@ describe("message provenance (migration v26)", () => {
         last_inbox_pull_seq: 38,
       })
       expect(db.prepare("SELECT COUNT(*) AS n FROM pending_request").get()).toEqual({ n: 1 })
-      expect(db.prepare("SELECT COUNT(*) AS n FROM rooms").get()).toEqual({ n: 1 })
-      expect(db.prepare("SELECT COUNT(*) AS n FROM room_members").get()).toEqual({ n: 1 })
+      expect(db.prepare("SELECT id, project_id, name, created_at, creator_id, metadata FROM rooms").all()).toEqual([
+        { id: "room:legacy", project_id: null, name: "legacy", created_at: 1, creator_id: null, metadata: null },
+      ])
+      expect(db.prepare("SELECT room_id, session_id, joined_at, role FROM room_members").all()).toEqual([
+        { room_id: "room:legacy", session_id: "s", joined_at: 1, role: "member" },
+      ])
       expect(db.prepare("SELECT value FROM _schema_meta WHERE key = 'version'").get()).toEqual({ value: "31" })
     } finally {
       db.close()

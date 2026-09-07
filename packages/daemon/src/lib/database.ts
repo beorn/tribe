@@ -1206,17 +1206,52 @@ const MIGRATIONS: readonly Migration[] = [
     version: 31,
     name: "drop-message-room-id",
     up(db) {
+      // v31 is a destructive schema change. A v30 database must contain both
+      // journal halves with the legacy column; otherwise stamping v31 would
+      // make a partial/ambiguous upgrade look successful and prevent repair.
+      const expected = ["messages", "messages_archive"] as const
       const tables = new Set(
         (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>).map(
           (row) => row.name,
         ),
       )
-      const existing = ["messages", "messages_archive"].filter((table) => tables.has(table))
-      if (existing.length === 0) return
+      // Fresh installs create the live journal table after migrations (the
+      // archive table may already have been created by v14). There is no
+      // legacy v30 schema to validate when the version is still un-stamped.
+      const version = db.prepare("SELECT value FROM _schema_meta WHERE key = 'version'").get() as {
+        value: string
+      } | null
+      if ((version === null || version.value === "0") && !tables.has("messages")) {
+        // v14 may have created the archive half before the fresh-install
+        // guard. Bring that transient table to the latest shape as well.
+        if (tables.has("messages_archive")) {
+          const archiveColumns = new Set(
+            (db.prepare("PRAGMA table_info(messages_archive)").all() as Array<{ name: string }>).map((row) => row.name),
+          )
+          if (archiveColumns.has("room_id")) {
+            db.run("DROP INDEX IF EXISTS idx_messages_archive_room_ts")
+            db.run("ALTER TABLE messages_archive DROP COLUMN room_id")
+          }
+        }
+        return
+      }
+      for (const table of expected) {
+        if (!tables.has(table)) {
+          throw new Error(`migration v31 cannot remove message room_id in ${db.filename}: ${table} table is missing`)
+        }
+        const columns = new Set(
+          (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name),
+        )
+        if (!columns.has("room_id")) {
+          throw new Error(
+            `migration v31 cannot remove message room_id in ${db.filename}: ${table}.room_id column is missing`,
+          )
+        }
+      }
       db.run("BEGIN IMMEDIATE")
       try {
         const counts = new Map<string, number>()
-        for (const table of existing) {
+        for (const table of expected) {
           const columns = new Set(
             (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name),
           )
