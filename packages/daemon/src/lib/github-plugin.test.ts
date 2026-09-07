@@ -384,6 +384,27 @@ describe("formatLateEventsWarning — names the count and the created_at range (
     )
   })
 
+  // LIVE SPECIMEN 2026-09-07 15:43:00Z, from the daemon this fix runs in:
+  //   github events: 2 late events for beorn/hh
+  //   (2026-09-05T17:40:04Z..2026-09-05T16:07:56Z) not broadcast; ...
+  // The range ran BACKWARDS. formatLateEventsWarning trusted POSITION —
+  // late[0] as newest, last as oldest — on the strength of its own comment,
+  // "late is newest-first, matching selectNewEvents' order". That holds by
+  // ID, which is what selectNewEvents sorts by, and this whole feature exists
+  // because GitHub returns ids ascending while created_at does NOT. So the
+  // only input this code ever sees in production is the one that breaks it.
+  //
+  // The case above cannot catch this: its fixture is monotonic in BOTH id and
+  // time, so position and chronology agree and the bug is invisible. This one
+  // is deliberately non-monotonic — id "3" is the OLDER event — which is the
+  // shape the API actually returns.
+  test("the range reads oldest..newest even when created_at runs against id order", () => {
+    const late = [push("3", "2026-09-05T16:07:56Z"), push("2", "2026-09-05T17:40:04Z")]
+    expect(formatLateEventsWarning("beorn/hh", late)).toBe(
+      "github events: 2 late events for beorn/hh (2026-09-05T16:07:56Z..2026-09-05T17:40:04Z) not broadcast; GitHub materialized them late",
+    )
+  })
+
   test("refuses an empty list rather than printing an undefined range", () => {
     expect(() => formatLateEventsWarning("beorn/hh", [])).toThrow("requires at least one late event")
   })
