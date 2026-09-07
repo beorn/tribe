@@ -445,7 +445,6 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
       $ts: Date.now(),
       $delivery: "pull",
       $topic: null,
-      $room_id: null,
       $request: "stale-ball",
       $reply: null,
       $summary: null,

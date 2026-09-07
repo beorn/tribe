@@ -82,7 +82,6 @@ function insert(
     $ts: Date.now() - 60_000,
     $delivery: "pull",
     $topic: opts.topic ?? null,
-    $room_id: null,
     $request: null,
     $reply: null,
   })

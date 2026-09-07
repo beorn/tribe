@@ -44,9 +44,106 @@ describe("message provenance (migration v26)", () => {
       expect(columnsOf(db, "messages_archive").has("session_id")).toBe(true)
       // v24 added this to `messages` only; the archive half was missing until v26.
       expect(columnsOf(db, "messages_archive").has("attention_required")).toBe(true)
+      expect(columnsOf(db, "messages").has("room_id")).toBe(false)
+      expect(columnsOf(db, "messages_archive").has("room_id")).toBe(false)
       expect(db.prepare("SELECT value FROM _schema_meta WHERE key='version'").get()).toEqual({
         value: String(CURRENT_SCHEMA_VERSION),
       })
+    } finally {
+      db.close()
+    }
+  })
+
+  it.each([
+    {
+      table: "messages",
+      id: "hot",
+      sql: "INSERT INTO messages (id, type, sender, recipient, content, ts, room_id) VALUES ('hot', 'request', '@a', '@b', 'hot', 1, 'room:legacy')",
+    },
+    {
+      table: "messages_archive",
+      id: "arch",
+      sql: "INSERT INTO messages_archive (seq, id, type, sender, recipient, content, ts, room_id, archived_at) VALUES (7, 'arch', 'request', '@a', '@b', 'arch', 1, 'room:legacy', 2)",
+    },
+  ])("refuses a legacy room_id value in $table before changing either table", ({ table, id, sql }) => {
+    const { path, db: initial } = freshDb("refuse")
+    initial.close()
+    const seeded = new Database(path)
+    seeded.run("UPDATE _schema_meta SET value = '30' WHERE key = 'version'")
+    seeded.run("ALTER TABLE messages ADD COLUMN room_id TEXT")
+    seeded.run("ALTER TABLE messages_archive ADD COLUMN room_id TEXT")
+    seeded.run("CREATE INDEX idx_messages_room_ts ON messages(room_id, ts)")
+    seeded.run(sql)
+    seeded.close()
+
+    let failure: unknown
+    try {
+      openDatabase(path)
+    } catch (error) {
+      failure = error
+    }
+    expect(String(failure)).toContain(path)
+    expect(String(failure)).toContain(`${table}.room_id contains 1`)
+    const db = new Database(path)
+    try {
+      expect(columnsOf(db, "messages").has("room_id")).toBe(true)
+      expect(columnsOf(db, "messages_archive").has("room_id")).toBe(true)
+      expect(
+        db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_messages_room_ts'").get(),
+      ).toEqual({ name: "idx_messages_room_ts" })
+      expect(db.prepare("SELECT value FROM _schema_meta WHERE key = 'version'").get()).toEqual({ value: "30" })
+      expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE id = ?`).get(id)).toEqual({ n: 1 })
+    } finally {
+      db.close()
+    }
+  })
+
+  it("migrates null room ids while preserving journal, cursor, pending, and room rows", () => {
+    const { path, db: initial } = freshDb("migrate")
+    initial.close()
+    const seeded = new Database(path)
+    seeded.run("UPDATE _schema_meta SET value = '30' WHERE key = 'version'")
+    seeded.run("ALTER TABLE messages ADD COLUMN room_id TEXT")
+    seeded.run("ALTER TABLE messages_archive ADD COLUMN room_id TEXT")
+    seeded.run("CREATE INDEX idx_messages_room_ts ON messages(room_id, ts)")
+    seeded.run(
+      "INSERT INTO messages (rowid, id, type, sender, recipient, content, ts) VALUES (41, 'hot', 'request', '@a', '@b', 'hot', 1)",
+    )
+    seeded.run(
+      "INSERT INTO messages_archive (seq, id, type, sender, recipient, content, ts, archived_at) VALUES (42, 'arch', 'request', '@a', '@b', 'arch', 1, 2)",
+    )
+    seeded.run(
+      "INSERT INTO sessions (id, name, role, pid, started_at, updated_at, last_delivered_seq, last_inbox_pull_seq) VALUES ('s', '@b', 'member', 1, 1, 1, 37, 38)",
+    )
+    seeded.run("INSERT INTO rooms (id, name, created_at) VALUES ('room:legacy', 'legacy', 1)")
+    seeded.run("INSERT INTO room_members (room_id, session_id, joined_at) VALUES ('room:legacy', 's', 1)")
+    seeded.run(
+      "INSERT INTO pending_request (request_id, recipient, sender, opened_at, message_id) VALUES ('req', '@b', '@a', 1, 'hot')",
+    )
+    seeded.close()
+
+    const db = openDatabase(path)
+    try {
+      expect(columnsOf(db, "messages").has("room_id")).toBe(false)
+      expect(columnsOf(db, "messages_archive").has("room_id")).toBe(false)
+      expect(db.prepare("SELECT rowid, id, content FROM messages").get()).toEqual({
+        rowid: 41,
+        id: "hot",
+        content: "hot",
+      })
+      expect(db.prepare("SELECT seq, id, content FROM messages_archive").get()).toEqual({
+        seq: 42,
+        id: "arch",
+        content: "arch",
+      })
+      expect(db.prepare("SELECT last_delivered_seq, last_inbox_pull_seq FROM sessions WHERE id = 's'").get()).toEqual({
+        last_delivered_seq: 37,
+        last_inbox_pull_seq: 38,
+      })
+      expect(db.prepare("SELECT COUNT(*) AS n FROM pending_request").get()).toEqual({ n: 1 })
+      expect(db.prepare("SELECT COUNT(*) AS n FROM rooms").get()).toEqual({ n: 1 })
+      expect(db.prepare("SELECT COUNT(*) AS n FROM room_members").get()).toEqual({ n: 1 })
+      expect(db.prepare("SELECT value FROM _schema_meta WHERE key = 'version'").get()).toEqual({ value: "31" })
     } finally {
       db.close()
     }
@@ -69,7 +166,6 @@ describe("message provenance (migration v26)", () => {
         $ts: old,
         $delivery: "push",
         $topic: null,
-        $room_id: null,
         $request: "msg-old",
         $reply: null,
         $correlated_reply_requester: null,
