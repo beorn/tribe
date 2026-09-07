@@ -84,6 +84,56 @@ describe("neutral health process source", () => {
     expect(runCommand).not.toHaveBeenCalled()
   })
 
+  /**
+   * @failure The daemon reported `standalone-os` — "not under hab, no journal
+   *          exists" — while running UNDER hab on a host whose journal held 22
+   *          live `host:scalars` records. It never attempted a scalar read, so
+   *          no disk threshold could ever fire; /tmp reached 86% and four seats
+   *          lost their shells with the monitor reporting healthy.
+   *
+   *          Nothing in the chain was a mistake. `sanitizeStandaloneDaemonEnvironment`
+   *          strips `HAB_SESSION_DIR`, `HAB_SERVICE_KIND` and `HAB_SERVICE_NAME`
+   *          before minting a standalone supervisor, CORRECTLY, so the daemon
+   *          cannot inherit hab's idle-quit marker and leak. The defect is the
+   *          COMPOSITION: one set of variables answering both "am I hab-MANAGED"
+   *          (a lifecycle question, correctly no) and "can I READ this host's
+   *          journal" (correctly yes), whose right answers point opposite ways.
+   * @consumer every scalar-backed alert — disk, memory, cpu, fd-count — all
+   *           silent for this ONE reason (@i/4-supervision/24233).
+   */
+  it("says WHY it cannot ask when the environment is hab-shaped but unconfigured", () => {
+    const runCommand = vi.fn()
+    // The live daemon's shape, measured from /proc/1240979/environ on
+    // 2026-09-07: hab session markers present, the gate variable absent.
+    const source = createHealthProcessSource({
+      env: {
+        HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
+        HAB_SESSION_LAUNCH_ID: "70296c6b-21dd-41a9-8614-b6b6bff113e0",
+      },
+      runCommand,
+    })
+
+    expect(source.kind, "a partially-hab environment is not a healthy standalone").toBe("misconfigured")
+    if (source.kind !== "misconfigured") throw new Error("unreachable")
+    // Actionable on its own: it names the variable that is missing and the ones
+    // that prove hab is present, so the reader is not left to guess which half
+    // of the contradiction to chase.
+    expect(source.reason).toContain("HAB_SESSION_DIR")
+    expect(source.reason).toContain("HAB_SESSION_HABITAT_ROOT")
+    expect(runCommand, "a misconfigured source must not spawn a doomed read").not.toHaveBeenCalled()
+  })
+
+  it("a genuinely non-hab environment stays standalone-os and stays SILENT", () => {
+    // The control, and the reason the check is narrow: on a host with no hab at
+    // all there IS no journal, so silence is honest and must not become noise.
+    // The three delivery tests that enforce this keep their exact meaning.
+    const runCommand = vi.fn()
+    const source = createHealthProcessSource({ env: { PATH: "/usr/bin" }, runCommand })
+
+    expect(source).toEqual({ kind: "standalone-os" })
+    expect(runCommand).not.toHaveBeenCalled()
+  })
+
   it("does not treat an ambient seat session as the host source outside a Hab service", () => {
     const runCommand = vi.fn()
     const source = createHealthProcessSource({ env: { HAB_SESSION_DIR: "/hab/@dev-3" }, runCommand })
