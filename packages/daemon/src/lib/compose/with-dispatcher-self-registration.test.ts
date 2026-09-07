@@ -1434,37 +1434,6 @@ describe("dispatcher bounded mailbox drain", () => {
 })
 
 describe("dispatcher durable log projection", () => {
-  it("keeps demoted daemon activity readable through cli_log", async () => {
-    const harness = createDispatcherHarness()
-    cleanup = harness.dispose
-    const sent = (
-      [
-        ["github:push", "pushed main", "github:push"],
-        ["session", "session started", "daemon:session"],
-      ] as const
-    ).map(([type, content, topic]) => ({
-      type,
-      content,
-      topic,
-      message: harness.sendDaemonBroadcast(type, content, topic),
-    }))
-
-    const result = parseResult<{
-      messages: Array<{ id: string; type: string; kind: string; content: string; topic: string | null }>
-    }>(
-      await harness.dispatcher.handleRequest(
-        { jsonrpc: "2.0", id: "demoted-daemon-activity-log", method: "cli_log", params: { all: true } },
-        "conn-log",
-      ),
-    )
-
-    for (const { content, message, topic, type } of sent) {
-      expect(result.messages).toContainEqual(
-        expect.objectContaining({ id: message.id, type, kind: "event", content, topic }),
-      )
-    }
-  })
-
   it("filters correlation refs and reply ids by literal prefix without deriving controller policy", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
@@ -2318,9 +2287,6 @@ function createDispatcherHarness(
         {},
         request === undefined ? {} : { request },
       )
-    },
-    sendDaemonBroadcast(type: string, content: string, topic: string) {
-      return sendMessage(daemonCtx, "*", content, type, undefined, undefined, "broadcast", { topic })
     },
     sendTakingStatus(owner: string, ref: string) {
       const ownerCtx = createTribeContext({

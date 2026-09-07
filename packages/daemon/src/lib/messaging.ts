@@ -287,16 +287,9 @@ export function sendMessage(
   const ts = Date.now()
   const sender = attribution.sender ?? ctx.getName()
   const senderRole = attribution.senderRole ?? ctx.getRole()
-  // Daemon session and GitHub-push broadcasts are journal events; explicit
-  // events remain events, and all other calls keep their normal transport kind.
-  const daemonLogBroadcast =
-    sender === "daemon" &&
-    senderRole === "daemon" &&
-    recipient === "*" &&
-    kind === "broadcast" &&
-    (type === "github:push" || type === "session")
-  const resolvedKind: MessageKind =
-    kind === "event" || daemonLogBroadcast ? "event" : recipient === "*" ? "broadcast" : kind
+  // Default kind inference: '*' is a broadcast unless the caller explicitly
+  // passed 'event'. This keeps existing call sites correct without audit.
+  const resolvedKind: MessageKind = kind === "event" ? "event" : recipient === "*" ? "broadcast" : kind
   // Direct messages default to channel fanout. Events are journal-only and
   // never delivered, so delivery is irrelevant — keep the column populated for
   // schema invariants.

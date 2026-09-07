@@ -17,7 +17,6 @@ import type { TribeRole } from "tribe-wire/lib/config"
 import { createTribeContext, type MessageInsertedInfo, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { handleToolCall, type HandlerOpts } from "./handlers.ts"
-import { sendMessage } from "./messaging.ts"
 
 function makeContext(
   db: Database,
@@ -170,54 +169,6 @@ describe("tribe.send attribution and delivery", () => {
     expect(res.sent).toBe(true)
     const row = db.prepare("SELECT sender FROM messages WHERE id = ?").get(res.id as string) as { sender: string }
     expect(row.sender).toBe("@agent/8")
-  })
-
-  it("demotes only daemon session and GitHub push broadcasts while retaining their journal facts", () => {
-    const inserted: MessageInsertedInfo[] = []
-    const daemon = makeContext(db, stmts, "daemon", "sess-daemon", "daemon", (info) => inserted.push(info))
-    const peer = makeContext(db, stmts, "@dev/8", "sess-dev-8", "member", (info) => inserted.push(info))
-    const cases = [
-      [daemon, "*", "github pushed", "github:push", "github:push", "broadcast", "event"],
-      [daemon, "*", "member joined", "session", "daemon:session", "broadcast", "event"],
-      [daemon, "@ci", "private session detail", "session", "daemon:session", "direct", "direct"],
-      [peer, "*", "peer GitHub push", "github:push", "github:push", "broadcast", "broadcast"],
-      [
-        daemon,
-        "*",
-        "workflow needs attention",
-        "github:workflow:failure",
-        "github:workflow:failure",
-        "broadcast",
-        "broadcast",
-      ],
-      [daemon, "*", "explicit journal row", "session", "daemon:session", "event", "event"],
-    ] as const
-
-    const sent = cases.map(([ctx, recipient, content, type, topic, kind]) =>
-      sendMessage(ctx, recipient, content, type, undefined, undefined, kind, {
-        topic,
-      }),
-    )
-    const rows = sent.map((message) =>
-      db.prepare("SELECT type, content, topic, kind FROM messages WHERE id = ?").get(message.id),
-    )
-    expect(rows).toEqual(
-      cases.map(([, , content, type, topic, , expected]) => ({ content, kind: expected, topic, type })),
-    )
-    expect(inserted.map(({ content, kind, topic, type }) => ({ content, kind, topic, type }))).toEqual(
-      cases.map(([, , content, type, topic, , expected]) => ({ content, kind: expected, topic, type })),
-    )
-
-    const inbox = stmts.getInboxRows.all({
-      $since: 0,
-      $name: "@ci",
-      $limit: 20,
-      $filter_mode: "ambient",
-      $filter_mute: null,
-      $filter_until: null,
-      $now: Date.now(),
-    }) as Array<{ id: string }>
-    expect(inbox.map(({ id }) => id)).toEqual([sent[2]?.id, sent[3]?.id, sent[4]?.id])
   })
 
   it.each([
