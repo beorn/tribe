@@ -40,6 +40,8 @@ export type ClientSession = {
   name: string
   role: TribeRole
   domains: string[]
+  /** Omission is the legacy agent class; services declare their connection lifetime. */
+  principalClass?: "agent" | "service"
   project: string
   projectName: string
   projectId: string

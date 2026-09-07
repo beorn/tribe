@@ -39,3 +39,26 @@ export function withTribeLaunchEnvironment(env: NodeJS.ProcessEnv, launchId: str
     [INHERITED_PARENT_PID_ENV]: undefined,
   }
 }
+
+/** All caller-owned identity fields; services and daemons share this boundary. */
+const SESSION_IDENTITY_ENV = [
+  "TRIBE_ACCOUNT",
+  "TRIBE_DOMAINS",
+  LAUNCH_ID_ENV,
+  INHERITED_PARENT_PID_ENV,
+  "TRIBE_NAME",
+  "TRIBE_PLUGIN_ADAPTER_CHILD",
+  "TRIBE_PLUGIN_PROVIDER_PARENT_PID",
+  "TRIBE_PLUGIN_REEXEC_EXIT_CODE",
+  "TRIBE_PLUGIN_RESUME_JOINED",
+  "TRIBE_PROVIDER",
+  "TRIBE_ROLE",
+  "AG_SESSION_AUTH",
+  "TRIBE_SESSION_NAME",
+  "TRIBE_SLA_ROLE",
+  "TRIBE_TAKEOVER",
+] as const
+
+export function tribeSessionIdentityEnvironmentNames(): readonly string[] {
+  return SESSION_IDENTITY_ENV
+}
