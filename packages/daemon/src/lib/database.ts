@@ -1224,29 +1224,34 @@ const MIGRATIONS: readonly Migration[] = [
       if ((version === null || version.value === "0") && !tables.has("messages")) {
         // v14 may have created the archive half before the fresh-install
         // guard. Bring that transient table to the latest shape as well.
-        if (tables.has("messages_archive")) {
-          const archiveColumns = new Set(
-            (db.prepare("PRAGMA table_info(messages_archive)").all() as Array<{ name: string }>).map((row) => row.name),
-          )
-          if (archiveColumns.has("room_id")) {
-            db.run("DROP INDEX IF EXISTS idx_messages_archive_room_ts")
-            db.run("ALTER TABLE messages_archive DROP COLUMN room_id")
+        db.run("BEGIN IMMEDIATE")
+        try {
+          if (tables.has("messages_archive")) {
+            const archiveColumns = new Set(
+              (db.prepare("PRAGMA table_info(messages_archive)").all() as Array<{ name: string }>).map(
+                (row) => row.name,
+              ),
+            )
+            if (archiveColumns.has("room_id")) {
+              const row = db
+                .prepare("SELECT COUNT(*) AS count FROM messages_archive WHERE room_id IS NOT NULL")
+                .get() as { count: number }
+              if (row.count > 0) {
+                throw new Error(
+                  `migration v31 cannot remove fresh-install message room_id in ${db.filename}: ` +
+                    `messages_archive.room_id contains ${row.count} non-null row(s)`,
+                )
+              }
+              db.run("DROP INDEX IF EXISTS idx_messages_archive_room_ts")
+              db.run("ALTER TABLE messages_archive DROP COLUMN room_id")
+            }
           }
+          db.run("COMMIT")
+        } catch (error) {
+          db.run("ROLLBACK")
+          throw error
         }
         return
-      }
-      for (const table of expected) {
-        if (!tables.has(table)) {
-          throw new Error(`migration v31 cannot remove message room_id in ${db.filename}: ${table} table is missing`)
-        }
-        const columns = new Set(
-          (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name),
-        )
-        if (!columns.has("room_id")) {
-          throw new Error(
-            `migration v31 cannot remove message room_id in ${db.filename}: ${table}.room_id column is missing`,
-          )
-        }
       }
       db.run("BEGIN IMMEDIATE")
       try {
@@ -1255,7 +1260,14 @@ const MIGRATIONS: readonly Migration[] = [
           const columns = new Set(
             (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name),
           )
-          if (!columns.has("room_id")) continue
+          if (!tables.has(table)) {
+            throw new Error(`migration v31 cannot remove message room_id in ${db.filename}: ${table} table is missing`)
+          }
+          if (!columns.has("room_id")) {
+            throw new Error(
+              `migration v31 cannot remove message room_id in ${db.filename}: ${table}.room_id column is missing`,
+            )
+          }
           const row = db.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE room_id IS NOT NULL`).get() as {
             count: number
           }
@@ -1270,6 +1282,12 @@ const MIGRATIONS: readonly Migration[] = [
         }
         db.run("DROP INDEX IF EXISTS idx_messages_room_ts")
         for (const [table] of counts) db.run(`ALTER TABLE ${table} DROP COLUMN room_id`)
+        // Keep the destructive schema change and its durable version marker in
+        // one transaction. A restart can never observe v30 with v31 columns
+        // already removed and then be refused by the preflight above.
+        db.run(
+          "INSERT INTO _schema_meta (key, value) VALUES ('version', '31') ON CONFLICT(key) DO UPDATE SET value = '31'",
+        )
         db.run("COMMIT")
       } catch (error) {
         db.run("ROLLBACK")

@@ -722,6 +722,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       query: { all: true, ref_prefix: null, reply_prefix: null },
     }
     const expectedOutput = `${JSON.stringify(snapshot)}\n`
+    expect(JSON.stringify(snapshot)).not.toContain("room_id")
     const server = createServer((socket) => {
       let buffer = ""
       socket.on("data", (chunk) => {

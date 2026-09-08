@@ -33,47 +33,106 @@ function freshDb(label: string): { path: string; db: Database } {
   return { path, db: openDatabase(path) }
 }
 
+function seedV30(label: string): string {
+  const { path, db } = freshDb(label)
+  db.close()
+  const seeded = new Database(path)
+  seeded.run("UPDATE _schema_meta SET value = '30' WHERE key = 'version'")
+  seeded.run("ALTER TABLE messages ADD COLUMN room_id TEXT")
+  seeded.run("ALTER TABLE messages_archive ADD COLUMN room_id TEXT")
+  seeded.run(
+    "INSERT INTO messages (id, type, sender, recipient, content, ts) VALUES ('seed-live', 'notify', '@a', '@b', 'live', 1)",
+  )
+  seeded.run(
+    "INSERT INTO messages_archive (seq, id, type, sender, recipient, content, ts, archived_at) VALUES (2, 'seed-archive', 'notify', '@a', '@b', 'archive', 2, 3)",
+  )
+  seeded.close()
+  return path
+}
+
 const columnsOf = (db: Database, table: string) =>
   new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((r) => r.name))
 
 describe("message provenance (migration v26)", () => {
   it.each([
-    { label: "messages", drop: "messages" },
-    { label: "messages_archive", drop: "messages_archive" },
-  ])("refuses v30 upgrade when $label table is missing before stamping", ({ drop }) => {
-    const { path, db: initial } = freshDb(`missing-table-${drop}`)
-    initial.close()
+    { label: "messages", drop: "messages", surviving: "messages_archive", row: { seq: 2, id: "seed-archive" } },
+    { label: "messages_archive", drop: "messages_archive", surviving: "messages", row: { rowid: 1, id: "seed-live" } },
+  ])("refuses v30 upgrade when $label table is missing before stamping", ({ drop, surviving, row }) => {
+    const path = seedV30(`missing-table-${drop}`)
     const seeded = new Database(path)
-    seeded.run("UPDATE _schema_meta SET value = '30' WHERE key = 'version'")
     seeded.run(`DROP TABLE ${drop}`)
     seeded.close()
 
-    expect(() => openDatabase(path)).toThrow(new RegExp(`migration v31.*${drop}.*missing`, "i"))
+    expect(() => openDatabase(path)).toThrow(new RegExp(`${drop} table is missing$`, "i"))
     const db = new Database(path)
     try {
       expect(db.prepare("SELECT value FROM _schema_meta WHERE key = 'version'").get()).toEqual({ value: "30" })
       expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?").get(drop)).toEqual(null)
+      expect(
+        db.prepare(`SELECT ${surviving === "messages" ? "rowid, id" : "seq, id"} FROM ${surviving}`).get(),
+      ).toEqual(row)
     } finally {
       db.close()
     }
   })
 
-  it("refuses v30 upgrade when either room_id column is missing before stamping", () => {
-    const { path, db: initial } = freshDb("missing-column")
-    initial.close()
+  it.each([
+    { table: "messages", other: "messages_archive" },
+    { table: "messages_archive", other: "messages" },
+  ])("refuses v30 upgrade when $table.room_id is missing before stamping", ({ table, other }) => {
+    const path = seedV30(`missing-column-${table}`)
     const seeded = new Database(path)
-    seeded.run("UPDATE _schema_meta SET value = '30' WHERE key = 'version'")
-    seeded.run("ALTER TABLE messages ADD COLUMN room_id TEXT")
-    seeded.run("ALTER TABLE messages_archive ADD COLUMN room_id TEXT")
-    seeded.run("ALTER TABLE messages_archive DROP COLUMN room_id")
+    seeded.run(`ALTER TABLE ${table} DROP COLUMN room_id`)
     seeded.close()
 
-    expect(() => openDatabase(path)).toThrow(new RegExp("migration v31.*messages_archive.*room_id.*missing", "i"))
+    expect(() => openDatabase(path)).toThrow(new RegExp(`${table}\\.room_id column is missing$`, "i"))
     const db = new Database(path)
     try {
       expect(db.prepare("SELECT value FROM _schema_meta WHERE key = 'version'").get()).toEqual({ value: "30" })
-      expect(columnsOf(db, "messages").has("room_id")).toBe(true)
-      expect(columnsOf(db, "messages_archive").has("room_id")).toBe(false)
+      expect(columnsOf(db, table).has("room_id")).toBe(false)
+      expect(columnsOf(db, other).has("room_id")).toBe(true)
+      expect(db.prepare("SELECT id, content FROM messages").all()).toEqual([{ id: "seed-live", content: "live" }])
+      expect(db.prepare("SELECT id, content FROM messages_archive").all()).toEqual([
+        { id: "seed-archive", content: "archive" },
+      ])
+    } finally {
+      db.close()
+    }
+  })
+
+  it("refuses v30 upgrade when both message tables are missing before stamping", () => {
+    const path = seedV30("missing-both-tables")
+    const seeded = new Database(path)
+    seeded.run("DROP TABLE messages")
+    seeded.run("DROP TABLE messages_archive")
+    seeded.close()
+    expect(() => openDatabase(path)).toThrow(/messages table is missing$/i)
+    const db = new Database(path)
+    try {
+      expect(db.prepare("SELECT value FROM _schema_meta WHERE key = 'version'").get()).toEqual({ value: "30" })
+    } finally {
+      db.close()
+    }
+  })
+
+  it("refuses a non-empty transient archive during a fresh upgrade", () => {
+    const { path, db: initial } = freshDb("fresh-archive-data")
+    initial.close()
+    const seeded = new Database(path)
+    seeded.run("DELETE FROM _schema_meta WHERE key = 'version'")
+    seeded.run("DROP TABLE messages")
+    seeded.run("ALTER TABLE messages_archive ADD COLUMN room_id TEXT")
+    seeded.run(
+      "INSERT INTO messages_archive (seq, id, type, sender, recipient, content, ts, room_id, archived_at) VALUES (9, 'fresh-archive', 'notify', '@a', '@b', 'must keep', 9, 'room:unknown', 10)",
+    )
+    seeded.close()
+
+    expect(() => openDatabase(path)).toThrow(/messages_archive\.room_id contains 1 non-null row/i)
+    const db = new Database(path)
+    try {
+      expect(db.prepare("SELECT id, content, room_id FROM messages_archive").all()).toEqual([
+        { id: "fresh-archive", content: "must keep", room_id: "room:unknown" },
+      ])
     } finally {
       db.close()
     }

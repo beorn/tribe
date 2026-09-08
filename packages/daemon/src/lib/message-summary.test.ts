@@ -12,10 +12,10 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
-import { createTribeContext, type TribeContext } from "./context.ts"
+import { createTribeContext, type MessageInsertedInfo, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { handleToolCall, type HandlerOpts } from "./handlers.ts"
-import { deriveSummary } from "./messaging.ts"
+import { deriveSummary, type Classification } from "./messaging.ts"
 import { registerSession } from "./session.ts"
 
 const SENDER = "@chief"
@@ -62,6 +62,15 @@ function parseToolJson(result: ReturnType<typeof handleToolCall>): ToolJson {
 }
 
 describe("deriveSummary", () => {
+  it("keeps removed room identity out of classification and insertion contracts", () => {
+    // @ts-expect-error roomId was removed with the message room facade.
+    type ClassificationRoomId = Classification["roomId"]
+    // @ts-expect-error roomId was removed with the message room facade.
+    type InsertedRoomId = MessageInsertedInfo["roomId"]
+    expect("roomId" in ({} as Classification)).toBe(false)
+    expect("room_id" in ({} as MessageInsertedInfo)).toBe(false)
+  })
+
   it("returns a short single-line body unchanged", () => {
     expect(deriveSummary("shipping the fix in 30s")).toBe("shipping the fix in 30s")
   })
@@ -159,5 +168,6 @@ describe("tribe.send summary — persist + LLM-reject / non-LLM fallback", () =>
     const event = drain.events?.find((e) => e.content.startsWith("Full plan"))
     expect(event).toBeDefined()
     expect(event?.summary).toBe(authored)
+    expect(event).not.toHaveProperty("room_id")
   })
 })
