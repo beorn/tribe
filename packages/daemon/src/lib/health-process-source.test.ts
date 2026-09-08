@@ -98,6 +98,7 @@ describe("neutral health process source", () => {
    *          COMPOSITION: one set of variables answering both "am I hab-MANAGED"
    *          (a lifecycle question, correctly no) and "can I READ this host's
    *          journal" (correctly yes), whose right answers point opposite ways.
+   * @level   l2 — the source's own decision against a supplied environment.
    * @consumer every scalar-backed alert — disk, memory, cpu, fd-count — all
    *           silent for this ONE reason (@i/4-supervision/24233).
    */
@@ -121,6 +122,119 @@ describe("neutral health process source", () => {
     expect(source.reason).toContain("HAB_SESSION_DIR")
     expect(source.reason).toContain("HAB_SESSION_HABITAT_ROOT")
     expect(runCommand, "a misconfigured source must not spawn a doomed read").not.toHaveBeenCalled()
+  })
+
+  /**
+   * @failure ONE variable answered two unrelated questions. `HAB_SESSION_DIR`
+   *          carried BOTH the hab lifecycle-quit marker and the journal's
+   *          location, so stripping it to stop a standalone daemon inheriting
+   *          hab's idle-quit — which is correct — also severed the daemon's
+   *          ability to find the journal. Every scalar-backed alert went silent
+   *          while reporting healthy; /tmp reached 86% and four seats lost
+   *          their shells (@i/4-supervision/24233, @i/4-supervision/24248).
+   * @level   l2 — the source's own decision, with the journal reader faked.
+   *          The lowest level that can exercise it: the defect is in how the
+   *          environment is READ, so a real journal would add cost and prove
+   *          nothing this does not.
+   * @consumer every scalar-backed alert in the Tribe daemon's health monitor —
+   *           disk, memory, cpu, fd-count — all of which read through
+   *           `createHealthProcessSource` and all of which went blind together.
+   *
+   * Three arms, one contract: this case proves the cure works, the next proves
+   * it did not over-correct, and the third proves the loud branch is untouched.
+   */
+  it("reads the journal again when the root is injected, with the lifecycle marker still stripped", async () => {
+    // THE CURE, and the shape of it matters: the daemon is NOT told it is
+    // hab-managed — `HAB_SESSION_DIR` and `HAB_SERVICE_KIND` stay stripped, so
+    // it still cannot inherit hab's idle-quit and still retires correctly. It
+    // is told only WHERE THE JOURNAL IS. Lifecycle and journal access were one
+    // variable; this is them apart.
+    const runCommand = vi.fn(async (argv: readonly string[]) => ({
+      exitCode: 0,
+      stderr: "",
+      stdout: `${JSON.stringify(argv.includes("scalars") ? scalarPayload : availablePayload)}\n`,
+    }))
+    const source = createHealthProcessSource({
+      env: {
+        HAB_SCALAR_JOURNAL_DIR: "/hh/main.hab/run/sessions/habmod",
+        HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
+        HAB_SESSION_LAUNCH_ID: "70296c6b-21dd-41a9-8614-b6b6bff113e0",
+      },
+      runCommand,
+    })
+
+    expect(source.kind, "an injected journal root is readable, not misconfigured").toBe("managed")
+    if (source.kind !== "managed") throw new Error("expected managed source")
+    await expect(source.readScalars()).resolves.toEqual(scalarPayload)
+    // The state root is the PARENT of the injected controller dir, so the
+    // consumer spells neither `run/sessions` nor `habmod` anywhere.
+    expect(runCommand).toHaveBeenCalledWith(expect.arrayContaining(["--state-root", "/hh/main.hab/run/sessions"]))
+  })
+
+  /**
+   * @failure Over-correction: a change that restores journal access could just
+   *          as easily have silenced the genuine blindness it was meant to
+   *          narrow, leaving an empty or unreadable journal reporting healthy.
+   * @level   l2 — same reader, faked to fail; see the contract three cases up.
+   * @consumer the same scalar-backed alerts — this is the arm that keeps them
+   *           loud when the journal really is missing.
+   */
+  it("STILL goes loud when the injected root holds no journal — blindness is only narrowed", async () => {
+    // THE RED FIXTURE @cto REQUIRED, and the one that proves I did not
+    // over-correct. The ONLY case this change removes is fresh-feed-wrong-place.
+    // A genuinely empty or unreadable journal must remain as loud as it is
+    // today, and must name the path it actually checked rather than saying a
+    // generic nothing.
+    const runCommand = vi.fn(async () => ({ exitCode: 1, stderr: "no such directory", stdout: "" }))
+    const source = createHealthProcessSource({
+      env: {
+        HAB_SCALAR_JOURNAL_DIR: "/hh/main.hab/run/sessions/habmod",
+        HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
+        HAB_SESSION_LAUNCH_ID: "70296c6b-21dd-41a9-8614-b6b6bff113e0",
+      },
+      runCommand,
+    })
+    expect(source.kind).toBe("managed")
+    if (source.kind !== "managed") throw new Error("expected managed source")
+
+    const observation = await source.readScalars()
+    // `unavailable` IS the blind signal at this layer; the plugin lifts it to
+    // `canonical-unavailable` before the alert. Asserting the source-level kind
+    // keeps this test about the source rather than about the plugin.
+    expect(observation.kind, "an empty journal is still blindness").toBe("unavailable")
+    // GATE 3's "names itself", and it is already honoured: the diagnostic
+    // carries the exact directory that was checked, so the reader is never told
+    // a generic nothing.
+    if (observation.kind !== "unavailable") throw new Error("unreachable")
+    expect(observation.detail, "loudness must name the path it looked in").toContain("/hh/main.hab/run/sessions/habmod")
+    expect(runCommand, "and it must actually have looked").toHaveBeenCalled()
+  })
+
+  /**
+   * @failure Regression in the untouched arm: an environment offering no way to
+   *          find the journal at all must stay exactly as loud as it was, or
+   *          the narrowing becomes a deletion.
+   * @level   l2 — same reader; see the contract two cases up.
+   * @consumer the same scalar-backed alerts, in the case where nothing can be
+   *           read and saying so is the whole product.
+   */
+  it("with NEITHER the lifecycle marker nor an injected root, the loud branch is unchanged", () => {
+    // Gate 1's third arm. Narrowed, never deleted: an environment that offers
+    // no way to find the journal is genuinely misconfigured and must say so
+    // exactly as it does today.
+    const runCommand = vi.fn()
+    const source = createHealthProcessSource({
+      env: {
+        HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
+        HAB_SESSION_LAUNCH_ID: "70296c6b-21dd-41a9-8614-b6b6bff113e0",
+      },
+      runCommand,
+    })
+
+    expect(source.kind).toBe("misconfigured")
+    if (source.kind !== "misconfigured") throw new Error("unreachable")
+    expect(source.reason).toContain("HAB_SESSION_DIR")
+    expect(runCommand, "a source with nowhere to look must not spawn a doomed read").not.toHaveBeenCalled()
   })
 
   it("a genuinely non-hab environment stays standalone-os and stays SILENT", () => {

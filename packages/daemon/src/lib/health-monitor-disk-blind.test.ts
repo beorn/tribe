@@ -9,6 +9,11 @@
  *          `metrics.disk` is never populated and no threshold can fire.
  *          The monitor was not declining to warn. It could not see, and did not
  *          say so.
+ * @level   l2 — the real exported `evaluateAlerts` with the real
+ *          `createAlertState` and `defaultThresholds`, driven from synthetic
+ *          metrics. The lowest level that can hold it: the contract is what
+ *          the production evaluator EMITS, so a restatement of the evaluator
+ *          would prove nothing.
  * @consumer every seat that trusts the host-health broadcast, and @chief, who
  *           reads it for runtime health
  *
@@ -33,14 +38,17 @@ import {
  * `scalar-fact-unavailable`, which is what `hab sysmon snapshot --kind scalars`
  * returns when zero scalar facts exist.
  */
-function blindMetrics(reason = "scalar-fact-unavailable"): HealthMetrics {
+function blindMetrics(reason = "scalar-fact-unavailable", detail?: string): HealthMetrics {
   return {
     cpu: { topProcesses: [] },
     // Inert here: `evaluateScalarMetrics` is derived from `scalarObservation`
     // alone, so the process lane cannot steer any assertion below. It is
     // present because `HealthMetrics` requires it.
     processObservation: { kind: "standalone-os" },
-    scalarObservation: { kind: "canonical-unavailable", reason },
+    // `detail` is what the SOURCE measured — the production path already sets it
+    // from `processSource.reason`. It is optional here so every existing caller
+    // is unchanged, and present so the alert can be held to carrying it.
+    scalarObservation: { detail, kind: "canonical-unavailable", reason },
     timestamp: Date.now(),
     worktrees: 0,
   }
@@ -244,11 +252,11 @@ describe("the condition clears without ever seeing a disk number (@i/4-supervisi
 })
 
 describe("the diagnostic names the stage its reason actually means (@i/4-supervision/24233)", () => {
-  const fire = (reason: string): string => {
+  const fire = (reason: string, detail?: string): string => {
     const state = createAlertState()
     const thresholds = defaultThresholds()
-    evaluateAlerts(blindMetrics(reason), thresholds, state)
-    const fired = blindAlerts(evaluateAlerts(blindMetrics(reason), thresholds, state))
+    evaluateAlerts(blindMetrics(reason, detail), thresholds, state)
+    const fired = blindAlerts(evaluateAlerts(blindMetrics(reason, detail), thresholds, state))
     expect(fired).toHaveLength(1)
     return fired[0] ?? ""
   }
@@ -316,6 +324,72 @@ describe("the diagnostic names the stage its reason actually means (@i/4-supervi
     expect(message, "an inspectable command beats a description").toContain("/proc/")
     expect(message).not.toContain("nothing is writing them")
     expect(message).not.toContain("a sampler wrote and then stopped")
+  })
+
+  /**
+   * @failure The alert DISCARDED a stage it had already measured.
+   *          `createHealthProcessSource` computes which variable is missing and
+   *          hands it over as `scalarObservation.detail`; the alert threw that
+   *          away and rebuilt generic "compare its variables against a working
+   *          one" advice from the reason CODE alone. Measured 2026-09-07: a
+   *          seat ran exactly that comparison, saw all three markers present,
+   *          read the environment as HEALTHY, and published a wrong root cause
+   *          it then had to retract — while the one name that would have ended
+   *          it had been computed one layer down and dropped (`@cto` 6e05294a).
+   * @level   l2 — see the file header; this asserts what the production
+   *          evaluator emits, which is where the sentence was being lost.
+   * @consumer the operator or seat reading the host-health alert, for whom the
+   *           measured variable name IS the diagnosis rather than colour on it.
+   *
+   * Two cases, one contract: this proves the measured detail survives, the next
+   * proves its absence degrades to correct generic advice instead of a literal
+   * `undefined` in an operator-facing alert.
+   */
+  it("carries the source's MEASURED variable name instead of regenerating generic advice", () => {
+    // THE DISCARDED SENTENCE. `createHealthProcessSource` already establishes
+    // WHICH variable is missing and hands it over as `scalarObservation.detail`
+    // — the production path sets `detail: processSource.reason` verbatim. The
+    // alert then threw that away and rebuilt a generic "compare its variables
+    // against a working one" instruction from the reason CODE alone.
+    //
+    // That is not lost polish, it is the whole answer. Measured 2026-09-07: a
+    // seat ran exactly the comparison the generic advice named, saw all three
+    // markers present and correct, read the environment as HEALTHY, and went
+    // hunting a producer that was never missing — publishing a wrong root cause
+    // it then had to retract. The one name that would have ended it,
+    // `HAB_SESSION_DIR`, had been computed one layer down and dropped on the
+    // floor. A diagnostic must not DISCARD a stage it already measured
+    // (`@cto` 6e05294a).
+    const detail =
+      "hab session markers are set (HAB_SESSION_HABITAT_ROOT, HAB_SESSION_LAUNCH_ID) but " +
+      "HAB_SESSION_DIR is not, so this daemon is under hab and cannot locate its journal."
+    const message = fire("hab-environment-contradictory", detail)
+
+    expect(message, "the measured variable name IS the diagnosis").toContain("HAB_SESSION_DIR")
+    expect(message, "the source's own sentence, not a paraphrase of it").toContain(detail)
+    // The established framing survives: the fault is still local, and the
+    // reader still gets an inspectable command.
+    expect(message).toContain("not in the producer")
+    expect(message).toContain("/proc/")
+  })
+
+  /**
+   * @failure The detail is optional on the wire, so an absent one must degrade
+   *          to today's generic-but-correct advice — never an empty clause, and
+   *          never the word `undefined` rendered into an operator-facing alert.
+   * @level   l2 — same production evaluator; see the contract above.
+   * @consumer the same alert reader, in the case where nothing was measured and
+   *           the message still has to be worth reading.
+   */
+  it("still says something useful when the source measured no detail", () => {
+    // The detail is optional on the wire, so absence must degrade to today's
+    // generic-but-correct advice rather than rendering an empty clause or the
+    // word undefined into an operator-facing alert.
+    const message = fire("hab-environment-contradictory")
+
+    expect(message).toContain("under hab and cannot locate its journal")
+    expect(message).toContain("not in the producer")
+    expect(message, "an absent detail must never surface as a literal").not.toContain("undefined")
   })
 })
 

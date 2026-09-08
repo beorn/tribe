@@ -1346,7 +1346,7 @@ export function evaluateAlerts(
         // must not be described as either. The reason reported is the one from
         // the sample that fired; consecutive blind samples may carry different
         // reasons, and the condition is blindness, not any single reason.
-        const { reason } = metrics.scalarObservation
+        const { detail, reason } = metrics.scalarObservation
         // HAND THE READER THE EXPERIMENT, NOT A CAUSE. `scalar-fact-unavailable`
         // means THE READER FOUND NOTHING, which covers a missing producer AND a
         // reader that cannot resolve the journal — and naming one confidently
@@ -1356,9 +1356,25 @@ export function evaluateAlerts(
         // test that does; that survives a fourth cause nobody has thought of.
         const remediation =
           reason === "hab-environment-contradictory"
-            ? "this daemon is under hab and cannot locate its journal — the cause is in THIS process's " +
-              "environment, not in the producer. Compare its variables against a working one: " +
-              "`tr '\\0' '\\n' < /proc/<daemon-pid>/environ | grep ^HAB_`."
+            ? // THE SOURCE ALREADY MEASURED WHICH VARIABLE IS MISSING, so say
+              // it. `detail` carries `processSource.reason` verbatim — "hab
+              // session markers are set (…) but HAB_SESSION_DIR is not" — and
+              // regenerating generic advice from the reason CODE discarded a
+              // stage this diagnostic had already established.
+              //
+              // That discard cost a real investigation on 2026-09-07: a seat
+              // ran exactly the comparison the generic wording named, saw all
+              // three markers present and correct, read the environment as
+              // HEALTHY, and published a root cause it had to retract — while
+              // the one name that ends the question, HAB_SESSION_DIR, sat
+              // computed one layer down. A diagnostic must not DISCARD a stage
+              // it already measured (@cto 6e05294a). The closing clause exists
+              // because the misread was specifically "the markers are all
+              // there, so the environment is fine".
+              (detail ?? "this daemon is under hab and cannot locate its journal.") +
+              " The cause is in THIS process's environment, not in the producer. " +
+              "Read them with `tr '\\0' '\\n' < /proc/<daemon-pid>/environ | grep ^HAB_` — " +
+              "the MISSING name is the repair; the markers that are present are not the answer."
             : reason === "scalar-fact-stale"
               ? "reason `scalar-fact-stale` means facts EXIST and the newest is past its max age, so a " +
                 "sampler wrote and then stopped — look for a producer that DIED, not one never declared."

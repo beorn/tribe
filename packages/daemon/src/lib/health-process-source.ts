@@ -466,11 +466,21 @@ function unavailable(
 }
 
 function scalarUnavailable(
+  checkedPath: string,
   reason: string,
   detail?: string,
 ): Extract<CanonicalHostScalarObservation, { kind: "unavailable" }> {
+  // GATE 3: blindness NAMES THE PATH IT CHECKED. The process-side `unavailable`
+  // has carried `location` all along; the scalar side carried only a reason, so
+  // a scalar outage could say it found nothing and never say WHERE it looked.
+  // That mattered less while the location was derived in-process from a
+  // variable the reader could inspect themselves. Now that the journal root is
+  // INJECTED, "where did you look" is the first question a reader has, and an
+  // answer that omits it sends them back to guessing — the failure this whole
+  // change exists to end (@i/4-supervision/24248, @cto gate 3).
+  const located = `at=${checkedPath}${detail === undefined || detail === "" ? "" : ` ${detail}`}`
   return {
-    ...(detail === undefined || detail === "" ? {} : { detail: detail.slice(0, MAX_DIAGNOSTIC_CHARS) }),
+    detail: located.slice(0, MAX_DIAGNOSTIC_CHARS),
     kind: "unavailable",
     reason,
     schema: HOST_SCALAR_OBSERVATION_SCHEMA,
@@ -518,6 +528,18 @@ export const HAB_SESSION_MARKERS = [
 export function createHealthProcessSource(options: HealthProcessSourceOptions = {}): HealthProcessSource {
   const env = options.env ?? process.env
   const sessionDir = env.HAB_SESSION_DIR?.trim()
+  // THE JOURNAL ROOT, INJECTED, and deliberately not a member of the
+  // `HAB_SESSION_*` family. `HAB_SESSION_DIR` answered two unrelated questions
+  // — "am I hab-MANAGED" (lifecycle) and "where is the journal" (access) — and
+  // the standalone sanitizer strips it for the lifecycle answer, correctly, so
+  // a daemon cannot inherit hab's idle-quit and never retire. Severing journal
+  // access was the side effect. Hab now derives this value through
+  // `habdSessionPaths`, the same owner habmod uses to decide where to WRITE,
+  // and hands it over; the consumer resolves nothing and spells no layout.
+  const injectedJournalDir = env.HAB_SCALAR_JOURNAL_DIR?.trim()
+  if (!sessionDir && injectedJournalDir) {
+    return managedProcessSource(injectedJournalDir, options, env)
+  }
   if (!sessionDir) {
     // CONTRADICTORY ENVIRONMENT. hab session markers are present and the one
     // variable this source needs is not. That is never a healthy standalone,
@@ -544,8 +566,26 @@ export function createHealthProcessSource(options: HealthProcessSourceOptions = 
     return { kind: "standalone-os" }
   }
   if (!env.HAB_SERVICE_KIND?.trim()) return { kind: "standalone-os" }
-  const stateRoot = dirname(sessionDir)
-  const controllerSessionDir = join(stateRoot, "habmod")
+  // The legacy path keeps its own derivation, per the precedence rule: an
+  // environment that still carries `HAB_SESSION_DIR` behaves exactly as it did
+  // before this change. The `habmod` literal survives HERE and only here; it
+  // leaves the moment this branch can be retired, once every launcher injects.
+  return managedProcessSource(join(dirname(sessionDir), "habmod"), options, env)
+}
+
+/**
+ * The managed source, given the controller session directory it should read.
+ *
+ * Taking the RESOLVED directory as a parameter is what lets the injected path
+ * and the legacy path share one implementation: there is no second copy of the
+ * read logic to drift, and the caller decides where the journal is.
+ */
+function managedProcessSource(
+  controllerSessionDir: string,
+  options: HealthProcessSourceOptions,
+  env: NodeJS.ProcessEnv,
+): HealthProcessSource {
+  const stateRoot = dirname(controllerSessionDir)
   const maxAgeMs = options.maxAgeMs ?? DEFAULT_MAX_AGE_MS
   const now = options.now ?? Date.now
   const timeoutMs = options.commandTimeoutMs ?? SYSMON_COMMAND_TIMEOUT_MS
@@ -642,13 +682,13 @@ export function createHealthProcessSource(options: HealthProcessSourceOptions = 
         "--json",
       ]
       const invoked = await invoke(argv)
-      if (!invoked.ok) return scalarUnavailable(invoked.reason, invoked.detail)
+      if (!invoked.ok) return scalarUnavailable(controllerSessionDir, invoked.reason, invoked.detail)
       const result = invoked.result
       const lines = result.stdout.trim().split("\n").filter(Boolean)
       if (lines.length === 1) {
         try {
           const line = lines[0]
-          if (line === undefined) return scalarUnavailable("source-protocol-invalid")
+          if (line === undefined) return scalarUnavailable(controllerSessionDir, "source-protocol-invalid")
           const parsed = parseScalarObservation(JSON.parse(line))
           if (parsed !== undefined && (result.exitCode === 0 || parsed.kind === "unavailable")) return parsed
         } catch {
@@ -657,11 +697,13 @@ export function createHealthProcessSource(options: HealthProcessSourceOptions = 
       }
       if (result.exitCode !== 0) {
         return scalarUnavailable(
+          controllerSessionDir,
           "source-command-failed",
           `exit=${result.exitCode}${result.stderr.trim() === "" ? "" : ` stderr=${result.stderr.trim()}`}`,
         )
       }
       return scalarUnavailable(
+        controllerSessionDir,
         "source-protocol-invalid",
         "command did not emit one valid host-scalar-observation/1 row",
       )
