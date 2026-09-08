@@ -53,6 +53,20 @@ For tracked work, `--type status --ref <request-or-message-id>` records a
 non-closing TAKING receipt and removes the ball from idle/wait attention while
 leaving it open. Final disposition is `--type response --reply <id>`; the
 reported tracker `closed` count proves settlement.
+
+Ordinary direct statuses remain quiet in the actionable inbox projection.
+`tribe-wire inbox-status --json` also reports `open_request_status_count` and
+`latest_open_request_status_seq`: retained owner-to-requester status **messages**
+threading open requests you sent or received. The count survives inbox drains,
+cursor repair and archival; settlement removes that request's statuses from
+the count. The latest sequence describes the current set, is not a cursor,
+and can decrease after settlement. Neither field proves a model read the content.
+Known empty is `0`/`null`; an unknown session or missing original request source
+is `null`/`null`. The human CLI reports unavailable if an older daemon omits
+these fields. Incidents, uncorrelated statuses and settled-request history are
+excluded, so zero does not mean no quiet messages exist. Recover a request's
+statuses with `tribe-wire log --ref-prefix <request-id> --json`.
+
 The shell examples opt into `--anonymous` because no managed launch identity is
 present; anonymous sends are limited to untracked messages. Managed provider
 seats omit the flag and are attributed through daemon launch authority.

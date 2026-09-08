@@ -1733,6 +1733,12 @@ export function withDispatcher<
             // cli_inbox_delivery_by_launch_v1's response shape.
             return makeResponse(id, {
               ...readInboxStatus(target.sessionName),
+              ...(stmts.getOpenRequestStatus.get({ $name: target.sessionName }) as {
+                open_request_status_count: number | null
+                /** Latest retained status for current open requests; not a cursor.
+                 * May decrease when a request settles. */
+                latest_open_request_status_seq: number | null
+              }),
               ...(target.launchId === undefined ? {} : { launch_id: target.launchId }),
               ...(target.launchParentPid === undefined ? {} : { launch_parent_pid: target.launchParentPid }),
             })

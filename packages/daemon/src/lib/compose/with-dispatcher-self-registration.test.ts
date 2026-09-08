@@ -1130,6 +1130,116 @@ describe("dispatcher bounded mailbox drain", () => {
     expect(status.session).toBe(name)
   })
 
+  /** @failure 24269: an ambient drain hides a status associated with an open request.
+   * @level l2
+   * @consumer inbox-status callers on either side of the request */
+  it("keeps open-request statuses visible to both parties through drains and retention", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    for (const name of ["requester", "owner", "peer"]) {
+      harness.addPendingClient(name)
+      await harness.register(name, { name, pid: liveHolderPid, project: "/tmp/km" })
+    }
+    const call = async <T>(method: string, params: Record<string, unknown>, connId = "requester") =>
+      parseResult<T>(await harness.dispatcher.handleRequest({ jsonrpc: "2.0", id: method, method, params }, connId))
+    const status = (session: string) =>
+      call<{
+        unread_count: number
+        open_request_status_count: number | null
+        latest_open_request_status_seq: number | null
+      }>("cli_inbox_status", { session })
+    const send = (connId: string, params: Record<string, unknown>) =>
+      call<{ structuredContent: SendResult }>("tribe.send", params, connId)
+
+    expect(await status("requester")).toMatchObject({
+      open_request_status_count: 0,
+      latest_open_request_status_seq: null,
+    })
+    // A status older than the request, even with its eventual ref, is not a receipt.
+    await send("owner", { to: "requester", type: "status", ref: "work", message: "too early" })
+    const request = (await send("requester", { to: "owner", type: "request", request: "work", message: "review" }))
+      .structuredContent
+    await send("requester", { to: "owner", type: "status", ref: "work", message: "wrong direction" })
+    await send("owner", { to: "requester", type: "status", ref: "other", message: "unrelated" })
+    expect((await status("requester")).open_request_status_count).toBe(0)
+
+    const receipt = (await send("owner", { to: "requester", type: "status", ref: "work", message: "TAKING" }))
+      .structuredContent
+    const first = await status("requester")
+    expect(first).toMatchObject({
+      unread_count: 0,
+      open_request_status_count: 1,
+      latest_open_request_status_seq: expect.any(Number),
+    })
+    expect(await status("owner")).toMatchObject({
+      unread_count: 0,
+      open_request_status_count: first.open_request_status_count,
+      latest_open_request_status_seq: first.latest_open_request_status_seq,
+    })
+    for (const params of [{ receipt: false, limit: 1 }, { limit: 50 }]) {
+      await call("tribe.fetch", params)
+      expect(await status("requester")).toMatchObject(first)
+    }
+    await send("owner", { to: "requester", type: "status", ref: request.id, message: "progress" })
+    const second = await status("requester")
+    expect(second.open_request_status_count).toBe(2)
+    expect(second.latest_open_request_status_seq).toBeGreaterThan(first.latest_open_request_status_seq!)
+    const repaired = await call<{ structuredContent: { repaired: boolean } }>("tribe.repair", { inbox_cursor: "tail" })
+    expect(repaired.structuredContent.repaired).toBe(true)
+    expect(await status("requester")).toMatchObject(second)
+    harness.archiveMessage(receipt.id)
+    expect(await status("requester")).toMatchObject(second)
+    expect(await status("owner")).toMatchObject({
+      open_request_status_count: second.open_request_status_count,
+      latest_open_request_status_seq: second.latest_open_request_status_seq,
+    })
+
+    await send("owner", { to: "requester", type: "response", reply: "work", message: "done" })
+    expect(await status("requester")).toMatchObject({
+      open_request_status_count: 0,
+      latest_open_request_status_seq: null,
+    })
+    expect(await status("owner")).toMatchObject({ open_request_status_count: 0, latest_open_request_status_seq: null })
+    // Fanout creates multiple pending rows, but each owner's message is counted once.
+    await send("requester", { to: "*", type: "request", request: "fanout", fanout: "all", message: "review together" })
+    await send("owner", { to: "requester", type: "status", ref: "fanout", message: "TAKING" })
+    expect((await status("requester")).open_request_status_count).toBe(1)
+    expect((await status("owner")).open_request_status_count).toBe(1)
+    expect((await status("peer")).open_request_status_count).toBe(0)
+    await send("peer", { to: "requester", type: "status", ref: "fanout", message: "TAKING" })
+    expect((await status("requester")).open_request_status_count).toBe(2)
+    expect((await status("owner")).open_request_status_count).toBe(1)
+    expect((await status("peer")).open_request_status_count).toBe(1)
+  })
+
+  /** @failure 24269: missing identity or request source is reported as zero statuses.
+   * @level l2
+   * @consumer inbox-status diagnostics */
+  it("distinguishes unavailable open-request status evidence from known empty", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const read = async (session: string) =>
+      parseResult<Record<string, unknown>>(
+        await harness.dispatcher.handleRequest(
+          { jsonrpc: "2.0", id: session, method: "cli_inbox_status", params: { session } },
+          "reader",
+        ),
+      )
+    expect(await read("unknown")).toMatchObject({
+      open_request_status_count: null,
+      latest_open_request_status_seq: null,
+    })
+    harness.addPendingClient("owner")
+    await harness.register("owner", { name: "owner", pid: liveHolderPid, project: "/tmp/km" })
+    expect(await read("owner")).toMatchObject({ open_request_status_count: 0, latest_open_request_status_seq: null })
+    const request = harness.sendActionable("owner")
+    harness.db.prepare("DELETE FROM messages WHERE id = ?").run(request.id)
+    expect(await read("owner")).toMatchObject({ open_request_status_count: null, latest_open_request_status_seq: null })
+    // Incidents are excluded from this request diagnostic, including its availability check.
+    harness.db.prepare("UPDATE pending_request SET request_kind = 'incident' WHERE message_id = ?").run(request.id)
+    expect(await read("owner")).toMatchObject({ open_request_status_count: 0, latest_open_request_status_seq: null })
+  })
+
   it("keeps taken obligations open without counting them as idle attention", async () => {
     const harness = createDispatcherHarness({ operatorCapability: "operator-test-secret" })
     cleanup = harness.dispose
@@ -2278,6 +2388,7 @@ function createDispatcherHarness(
   })(shape)
 
   return {
+    db,
     socketPath: shape.config.socketPath,
     dispatcher: daemon.dispatcher,
     register(
