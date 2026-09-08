@@ -137,3 +137,29 @@ describe("Tribe daemon environment ownership", () => {
     expect(readSelfMailboxAuthorityFromEnvironment(env)).toBe("a".repeat(43))
   })
 })
+
+describe("the scalar journal root survives standalone sanitizing (@i/4-supervision/24248)", () => {
+  test("keeps HAB_SCALAR_JOURNAL_DIR while still stripping every lifecycle marker", () => {
+    // The fix must not be stripped by the sanitizer it exists to work around.
+    // This sanitizer is a DENY-LIST, so a new variable is retained by
+    // construction — which means the risk is not today's code but tomorrow's
+    // edit adding this name to the delete list, silently reintroducing the
+    // exact blindness. That is what this pins.
+    const kept = sanitizeStandaloneDaemonEnvironment({
+      HAB_SCALAR_JOURNAL_DIR: "/hh/main.hab/run/sessions/habmod",
+      HAB_SERVICE_KIND: "service",
+      HAB_SERVICE_NAME: "tribe-daemon",
+      HAB_SESSION_DIR: "/hh/main.hab/run/sessions/abc",
+      PATH: "/usr/bin",
+    })
+
+    expect(kept.HAB_SCALAR_JOURNAL_DIR, "stripping this reintroduces the blindness").toBe(
+      "/hh/main.hab/run/sessions/habmod",
+    )
+    // Asserted together on purpose: the whole point is that JOURNAL ACCESS
+    // survives while LIFECYCLE does not. Losing either half is a defect.
+    expect(kept.HAB_SESSION_DIR).toBeUndefined()
+    expect(kept.HAB_SERVICE_KIND).toBeUndefined()
+    expect(kept.HAB_SERVICE_NAME).toBeUndefined()
+  })
+})

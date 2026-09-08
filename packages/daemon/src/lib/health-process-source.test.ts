@@ -123,6 +123,88 @@ describe("neutral health process source", () => {
     expect(runCommand, "a misconfigured source must not spawn a doomed read").not.toHaveBeenCalled()
   })
 
+  it("reads the journal again when the root is injected, with the lifecycle marker still stripped", async () => {
+    // THE CURE, and the shape of it matters: the daemon is NOT told it is
+    // hab-managed — `HAB_SESSION_DIR` and `HAB_SERVICE_KIND` stay stripped, so
+    // it still cannot inherit hab's idle-quit and still retires correctly. It
+    // is told only WHERE THE JOURNAL IS. Lifecycle and journal access were one
+    // variable; this is them apart.
+    const runCommand = vi.fn(async (argv: readonly string[]) => ({
+      exitCode: 0,
+      stderr: "",
+      stdout: `${JSON.stringify(argv.includes("scalars") ? scalarPayload : availablePayload)}\n`,
+    }))
+    const source = createHealthProcessSource({
+      env: {
+        HAB_SCALAR_JOURNAL_DIR: "/hh/main.hab/run/sessions/habmod",
+        HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
+        HAB_SESSION_LAUNCH_ID: "70296c6b-21dd-41a9-8614-b6b6bff113e0",
+      },
+      runCommand,
+    })
+
+    expect(source.kind, "an injected journal root is readable, not misconfigured").toBe("managed")
+    if (source.kind !== "managed") throw new Error("expected managed source")
+    await expect(source.readScalars()).resolves.toEqual(scalarPayload)
+    // The state root is the PARENT of the injected controller dir, so the
+    // consumer spells neither `run/sessions` nor `habmod` anywhere.
+    expect(runCommand).toHaveBeenCalledWith(
+      expect.arrayContaining(["--state-root", "/hh/main.hab/run/sessions"]),
+    )
+  })
+
+  it("STILL goes loud when the injected root holds no journal — blindness is only narrowed", async () => {
+    // THE RED FIXTURE @cto REQUIRED, and the one that proves I did not
+    // over-correct. The ONLY case this change removes is fresh-feed-wrong-place.
+    // A genuinely empty or unreadable journal must remain as loud as it is
+    // today, and must name the path it actually checked rather than saying a
+    // generic nothing.
+    const runCommand = vi.fn(async () => ({ exitCode: 1, stderr: "no such directory", stdout: "" }))
+    const source = createHealthProcessSource({
+      env: {
+        HAB_SCALAR_JOURNAL_DIR: "/hh/main.hab/run/sessions/habmod",
+        HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
+        HAB_SESSION_LAUNCH_ID: "70296c6b-21dd-41a9-8614-b6b6bff113e0",
+      },
+      runCommand,
+    })
+    expect(source.kind).toBe("managed")
+    if (source.kind !== "managed") throw new Error("expected managed source")
+
+    const observation = await source.readScalars()
+    // `unavailable` IS the blind signal at this layer; the plugin lifts it to
+    // `canonical-unavailable` before the alert. Asserting the source-level kind
+    // keeps this test about the source rather than about the plugin.
+    expect(observation.kind, "an empty journal is still blindness").toBe("unavailable")
+    // GATE 3's "names itself", and it is already honoured: the diagnostic
+    // carries the exact directory that was checked, so the reader is never told
+    // a generic nothing.
+    if (observation.kind !== "unavailable") throw new Error("unreachable")
+    expect(observation.detail, "loudness must name the path it looked in").toContain(
+      "/hh/main.hab/run/sessions/habmod",
+    )
+    expect(runCommand, "and it must actually have looked").toHaveBeenCalled()
+  })
+
+  it("with NEITHER the lifecycle marker nor an injected root, the loud branch is unchanged", () => {
+    // Gate 1's third arm. Narrowed, never deleted: an environment that offers
+    // no way to find the journal is genuinely misconfigured and must say so
+    // exactly as it does today.
+    const runCommand = vi.fn()
+    const source = createHealthProcessSource({
+      env: {
+        HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
+        HAB_SESSION_LAUNCH_ID: "70296c6b-21dd-41a9-8614-b6b6bff113e0",
+      },
+      runCommand,
+    })
+
+    expect(source.kind).toBe("misconfigured")
+    if (source.kind !== "misconfigured") throw new Error("unreachable")
+    expect(source.reason).toContain("HAB_SESSION_DIR")
+    expect(runCommand, "a source with nowhere to look must not spawn a doomed read").not.toHaveBeenCalled()
+  })
+
   it("a genuinely non-hab environment stays standalone-os and stays SILENT", () => {
     // The control, and the reason the check is narrow: on a host with no hab at
     // all there IS no journal, so silence is honest and must not become noise.
