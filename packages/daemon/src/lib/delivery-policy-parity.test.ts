@@ -89,7 +89,6 @@ describe("push filter and pull predicate agree on every subscription case", () =
       $ts: Date.now() - 60_000,
       $delivery: "pull",
       $topic: row.topic,
-      $room_id: null,
       $request: null,
       $reply: null,
     })

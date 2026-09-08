@@ -702,7 +702,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           events: {
             type: "array",
             description:
-              "Visible messages. Each: { id, rowid, type, from, to, content, bead?, ref?, ts (ISO), delivery, topic?, room_id? }.",
+              "Visible messages. Each: { id, rowid, type, from, to, content, bead?, ref?, ts (ISO), delivery, topic? }.",
             items: { type: "object", additionalProperties: true },
           },
           cursor: { type: "number", description: "Highest rowid returned (or unchanged when no rows matched)." },
