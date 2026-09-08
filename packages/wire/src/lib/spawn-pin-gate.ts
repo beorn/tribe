@@ -32,9 +32,8 @@
  *       source pin IS an ancestor
  *       of the sidecar pin         → REFUSE (proven downgrade — the observed
  *                                    incident)
- *       diverged (neither contains
- *       the other)                 → allow, loudly (dev forks are legitimate;
- *                                    the class killed here is resurrect-OLDER)
+ *       source NOT an ancestor     → allow, loudly (upgrade or dev fork)
+ *       shallow negative           → indeterminate, allow loudly
  *
  * The one window this cannot close by construction: the very first upgrade,
  * before the new pin has ever bound (the sidecar still names the old pin, and
@@ -43,17 +42,12 @@
  * checkout), which is how the d463c5b rollout ultimately succeeded.
  */
 
-import { execFileSync } from "node:child_process"
 import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
 import { createLogger } from "loggily"
+import { probeGitValue, probeIsAncestor } from "./code-identity.ts"
 
 const log = createLogger("tribe:spawn-pin-gate")
-
-/** Source identity belongs to the probed checkout, never to a caller-selected git context. */
-function gitProbeEnv(): NodeJS.ProcessEnv {
-  return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")))
-}
 
 export interface SpawnSourceDecision {
   allow: boolean
@@ -101,7 +95,7 @@ export function evaluateSpawnSource(input: {
   if (sourceIsAncestorOfLast === false) {
     return {
       allow: true,
-      reason: `spawn source ${short(sourcePin)} diverges from last-bound pin ${short(lastBoundPin)} (neither is the other's ancestor) — allowing loudly (dev fork?)`,
+      reason: `spawn source ${short(sourcePin)} is not an ancestor of last-bound pin ${short(lastBoundPin)} — allowing loudly (upgrade or dev fork)`,
     }
   }
   return {
@@ -146,20 +140,6 @@ export function writePinSidecar(socketPath: string, pin: string | null, pid: num
   }
 }
 
-function git(cwd: string, args: string[]): { status: number; stdout: string } {
-  try {
-    const stdout = execFileSync("git", ["-C", cwd, ...args], {
-      encoding: "utf8",
-      env: gitProbeEnv(),
-      stdio: ["ignore", "pipe", "ignore"],
-    })
-    return { status: 0, stdout: stdout.trim() }
-  } catch (err) {
-    const status = (err as { status?: number }).status
-    return { status: typeof status === "number" ? status : 1, stdout: "" }
-  }
-}
-
 /**
  * Gather the decision facts for a daemon script path, then decide. IO wrapper
  * over the pure predicate — call sites log `reason` and either proceed or
@@ -173,15 +153,15 @@ export function evaluateSpawnSourceForScript(daemonScript: string, socketPath: s
 export function evaluateSpawnSourceForTree(tree: string, socketPath: string): SpawnSourceDecision {
   const sidecar = readPinSidecar(socketPath)
   if (!sidecar) return { allow: true, reason: null }
-  const head = git(tree, ["rev-parse", "HEAD"])
-  const sourcePin = head.status === 0 && head.stdout !== "" ? head.stdout : null
+  const head = probeGitValue(tree, ["rev-parse", "HEAD"])
+  const sourcePin = head.ok ? head.value : null
   let lastPinKnownToSource: boolean | null = null
   let sourceIsAncestorOfLast: boolean | null = null
   if (sourcePin && sourcePin !== sidecar.pin) {
-    lastPinKnownToSource = git(tree, ["cat-file", "-e", `${sidecar.pin}^{commit}`]).status === 0
+    lastPinKnownToSource = probeGitValue(tree, ["rev-parse", "--verify", `${sidecar.pin}^{commit}`]).ok
     if (lastPinKnownToSource) {
-      const anc = git(tree, ["merge-base", "--is-ancestor", sourcePin, sidecar.pin])
-      sourceIsAncestorOfLast = anc.status === 0 ? true : anc.status === 1 ? false : null
+      const anc = probeIsAncestor(tree, sourcePin, sidecar.pin)
+      sourceIsAncestorOfLast = anc.ok ? anc.isAncestor : null
     }
   }
   return evaluateSpawnSource({ sourcePin, lastBoundPin: sidecar.pin, lastPinKnownToSource, sourceIsAncestorOfLast })

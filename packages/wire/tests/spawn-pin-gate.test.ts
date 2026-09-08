@@ -13,7 +13,7 @@ import { execFileSync } from "node:child_process"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
-import { fileURLToPath } from "node:url"
+import { fileURLToPath, pathToFileURL } from "node:url"
 import { afterAll, beforeAll, describe, expect, test } from "vitest"
 import {
   evaluateSpawnSource,
@@ -86,7 +86,7 @@ describe("evaluateSpawnSource — pure decision table", () => {
     expect(d.reason).toMatch(/ancestor of last-bound pin/)
   })
 
-  test("diverged trees — dev fork, allow LOUDLY", () => {
+  test("source is not an ancestor — allow loudly without claiming reverse ancestry", () => {
     const d = evaluateSpawnSource({
       sourcePin: A,
       lastBoundPin: B,
@@ -94,7 +94,8 @@ describe("evaluateSpawnSource — pure decision table", () => {
       sourceIsAncestorOfLast: false,
     })
     expect(d.allow).toBe(true)
-    expect(d.reason).toMatch(/diverges/)
+    expect(d.reason).toMatch(/not an ancestor/)
+    expect(d.reason).not.toMatch(/diverge|neither/)
   })
 })
 
@@ -181,6 +182,22 @@ describe("evaluateSpawnSourceForScript — the observed race, against real git t
 
     const current = evaluateSpawnSourceForScript(join(currentTree, "daemon.ts"), sock)
     expect(current).toEqual({ allow: true, reason: null })
+  })
+
+  test("shallow source with both pins present reports indeterminate ancestry, never divergence", () => {
+    const shallow = join(root, "shallow")
+    execFileSync("git", ["init", "-q", shallow])
+    for (const pin of [pinA, pinB]) {
+      git(shallow, "fetch", "-q", "--depth=1", pathToFileURL(currentTree).href, pin)
+      expect(git(shallow, "cat-file", "-t", pin)).toBe("commit")
+    }
+    git(shallow, "checkout", "-q", "--detach", pinA)
+    const sock = join(root, "shallow.sock")
+    writePinSidecar(sock, pinB, 5555)
+    const decision = evaluateSpawnSourceForScript(join(shallow, "daemon.ts"), sock)
+    expect(decision.allow).toBe(true)
+    expect(decision.reason).toMatch(/indeterminate/)
+    expect(decision.reason).not.toMatch(/diverge|neither/)
   })
 
   test("caller GIT_* pollution cannot make a stale source match a newer sidecar pin", () => {

@@ -77,12 +77,9 @@ export type AncestorProbe =
 
 /**
  * `git -C <path> merge-base --is-ancestor <maybeAncestor> <maybeDescendant>`.
- * Per git's own contract for `--is-ancestor`: exit 0 is a definitive true,
- * exit 1 is a definitive false — both are `ok: true` answers. Any other exit
- * (e.g. one of the two commits is not a valid object in this checkout, such
- * as a shallow clone missing the history) is a real failure, surfaced as
- * `ok: false` rather than folded into "not an ancestor" — an indeterminate
- * ancestry answer must stay visible, never guessed.
+ * Exit 0 proves ancestry. Exit 1 proves non-ancestry only with complete history:
+ * shallow boundaries hide parent edges even when both endpoint objects exist.
+ * Missing objects, shallow negatives and failed probes remain typed failures.
  */
 export function probeIsAncestor(path: string, maybeAncestor: string, maybeDescendant: string): AncestorProbe {
   const operation = `git merge-base --is-ancestor ${maybeAncestor} ${maybeDescendant}`
@@ -96,7 +93,22 @@ export function probeIsAncestor(path: string, maybeAncestor: string, maybeDescen
   } catch (error) {
     const failure = error as NodeJS.ErrnoException & { status?: unknown; stderr?: unknown }
     const status = typeof failure.status === "number" ? failure.status : null
-    if (status === 1) return { ok: true, isAncestor: false }
+    if (status === 1) {
+      const shallow = probeGitValue(path, ["rev-parse", "--is-shallow-repository"])
+      if (!shallow.ok) return shallow
+      if (shallow.value === "false") return { ok: true, isAncestor: false }
+      return {
+        ok: false,
+        failure: {
+          path,
+          operation,
+          errno: shallow.value === "true" ? "SHALLOW_HISTORY" : "INVALID_SHALLOW_STATE",
+          message:
+            `cannot establish non-ancestry of ${maybeAncestor} and ${maybeDescendant} in ${path}: ` +
+            `git reported shallow=${JSON.stringify(shallow.value)}; inspect and complete the history before retrying`,
+        },
+      }
+    }
     const errno = failure.code ?? (status === null ? "UNKNOWN" : `exit-${status}`)
     const stderr = typeof failure.stderr === "string" ? failure.stderr.trim() : ""
     return {
