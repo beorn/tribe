@@ -138,6 +138,21 @@ describe("Tribe daemon environment ownership", () => {
   })
 })
 
+/**
+ * @failure The sanitizer is a DENY-LIST, so the new journal-root variable is
+ *          retained by construction today. The risk is not this code but the
+ *          next edit that adds the name to the delete list — which would
+ *          silently reintroduce the exact blindness the variable exists to
+ *          cure, with no test failing anywhere, because the deny-list has no
+ *          opinion about what it does not name
+ *          (@i/4-supervision/24248, @i/4-supervision/24233).
+ * @level   l1 — one pure function against a literal environment object. The
+ *          lowest level that can hold the contract: the sanitizer's whole
+ *          behaviour is input-to-output on a plain record.
+ * @consumer `createHealthProcessSource` in the Tribe daemon, whose scalar
+ *           reads all die together when the journal root is stripped, taking
+ *           every disk, memory, cpu and fd-count alert with them.
+ */
 describe("the scalar journal root survives standalone sanitizing (@i/4-supervision/24248)", () => {
   test("keeps HAB_SCALAR_JOURNAL_DIR while still stripping every lifecycle marker", () => {
     // The fix must not be stripped by the sanitizer it exists to work around.

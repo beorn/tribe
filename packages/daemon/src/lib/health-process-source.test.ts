@@ -98,6 +98,7 @@ describe("neutral health process source", () => {
    *          COMPOSITION: one set of variables answering both "am I hab-MANAGED"
    *          (a lifecycle question, correctly no) and "can I READ this host's
    *          journal" (correctly yes), whose right answers point opposite ways.
+   * @level   l2 — the source's own decision against a supplied environment.
    * @consumer every scalar-backed alert — disk, memory, cpu, fd-count — all
    *           silent for this ONE reason (@i/4-supervision/24233).
    */
@@ -123,6 +124,25 @@ describe("neutral health process source", () => {
     expect(runCommand, "a misconfigured source must not spawn a doomed read").not.toHaveBeenCalled()
   })
 
+  /**
+   * @failure ONE variable answered two unrelated questions. `HAB_SESSION_DIR`
+   *          carried BOTH the hab lifecycle-quit marker and the journal's
+   *          location, so stripping it to stop a standalone daemon inheriting
+   *          hab's idle-quit — which is correct — also severed the daemon's
+   *          ability to find the journal. Every scalar-backed alert went silent
+   *          while reporting healthy; /tmp reached 86% and four seats lost
+   *          their shells (@i/4-supervision/24233, @i/4-supervision/24248).
+   * @level   l2 — the source's own decision, with the journal reader faked.
+   *          The lowest level that can exercise it: the defect is in how the
+   *          environment is READ, so a real journal would add cost and prove
+   *          nothing this does not.
+   * @consumer every scalar-backed alert in the Tribe daemon's health monitor —
+   *           disk, memory, cpu, fd-count — all of which read through
+   *           `createHealthProcessSource` and all of which went blind together.
+   *
+   * Three arms, one contract: this case proves the cure works, the next proves
+   * it did not over-correct, and the third proves the loud branch is untouched.
+   */
   it("reads the journal again when the root is injected, with the lifecycle marker still stripped", async () => {
     // THE CURE, and the shape of it matters: the daemon is NOT told it is
     // hab-managed — `HAB_SESSION_DIR` and `HAB_SERVICE_KIND` stay stripped, so
@@ -153,6 +173,14 @@ describe("neutral health process source", () => {
     )
   })
 
+  /**
+   * @failure Over-correction: a change that restores journal access could just
+   *          as easily have silenced the genuine blindness it was meant to
+   *          narrow, leaving an empty or unreadable journal reporting healthy.
+   * @level   l2 — same reader, faked to fail; see the contract three cases up.
+   * @consumer the same scalar-backed alerts — this is the arm that keeps them
+   *           loud when the journal really is missing.
+   */
   it("STILL goes loud when the injected root holds no journal — blindness is only narrowed", async () => {
     // THE RED FIXTURE @cto REQUIRED, and the one that proves I did not
     // over-correct. The ONLY case this change removes is fresh-feed-wrong-place.
@@ -186,6 +214,14 @@ describe("neutral health process source", () => {
     expect(runCommand, "and it must actually have looked").toHaveBeenCalled()
   })
 
+  /**
+   * @failure Regression in the untouched arm: an environment offering no way to
+   *          find the journal at all must stay exactly as loud as it was, or
+   *          the narrowing becomes a deletion.
+   * @level   l2 — same reader; see the contract two cases up.
+   * @consumer the same scalar-backed alerts, in the case where nothing can be
+   *           read and saying so is the whole product.
+   */
   it("with NEITHER the lifecycle marker nor an injected root, the loud branch is unchanged", () => {
     // Gate 1's third arm. Narrowed, never deleted: an environment that offers
     // no way to find the journal is genuinely misconfigured and must say so
