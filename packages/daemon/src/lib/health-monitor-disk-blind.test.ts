@@ -9,6 +9,11 @@
  *          `metrics.disk` is never populated and no threshold can fire.
  *          The monitor was not declining to warn. It could not see, and did not
  *          say so.
+ * @level   l2 — the real exported `evaluateAlerts` with the real
+ *          `createAlertState` and `defaultThresholds`, driven from synthetic
+ *          metrics. The lowest level that can hold it: the contract is what
+ *          the production evaluator EMITS, so a restatement of the evaluator
+ *          would prove nothing.
  * @consumer every seat that trusts the host-health broadcast, and @chief, who
  *           reads it for runtime health
  *
@@ -321,6 +326,25 @@ describe("the diagnostic names the stage its reason actually means (@i/4-supervi
     expect(message).not.toContain("a sampler wrote and then stopped")
   })
 
+  /**
+   * @failure The alert DISCARDED a stage it had already measured.
+   *          `createHealthProcessSource` computes which variable is missing and
+   *          hands it over as `scalarObservation.detail`; the alert threw that
+   *          away and rebuilt generic "compare its variables against a working
+   *          one" advice from the reason CODE alone. Measured 2026-09-07: a
+   *          seat ran exactly that comparison, saw all three markers present,
+   *          read the environment as HEALTHY, and published a wrong root cause
+   *          it then had to retract — while the one name that would have ended
+   *          it had been computed one layer down and dropped (`@cto` 6e05294a).
+   * @level   l2 — see the file header; this asserts what the production
+   *          evaluator emits, which is where the sentence was being lost.
+   * @consumer the operator or seat reading the host-health alert, for whom the
+   *           measured variable name IS the diagnosis rather than colour on it.
+   *
+   * Two cases, one contract: this proves the measured detail survives, the next
+   * proves its absence degrades to correct generic advice instead of a literal
+   * `undefined` in an operator-facing alert.
+   */
   it("carries the source's MEASURED variable name instead of regenerating generic advice", () => {
     // THE DISCARDED SENTENCE. `createHealthProcessSource` already establishes
     // WHICH variable is missing and hands it over as `scalarObservation.detail`
@@ -349,6 +373,14 @@ describe("the diagnostic names the stage its reason actually means (@i/4-supervi
     expect(message).toContain("/proc/")
   })
 
+  /**
+   * @failure The detail is optional on the wire, so an absent one must degrade
+   *          to today's generic-but-correct advice — never an empty clause, and
+   *          never the word `undefined` rendered into an operator-facing alert.
+   * @level   l2 — same production evaluator; see the contract above.
+   * @consumer the same alert reader, in the case where nothing was measured and
+   *           the message still has to be worth reading.
+   */
   it("still says something useful when the source measured no detail", () => {
     // The detail is optional on the wire, so absence must degrade to today's
     // generic-but-correct advice rather than rendering an empty clause or the
