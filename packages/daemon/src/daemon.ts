@@ -57,6 +57,7 @@ import { countDurableSessionRows } from "./lib/session.ts"
 import { gatherCodePin, STARTUP_SHA } from "./lib/code-pin.ts"
 import { parseDeliveryFallbackPolicy } from "./lib/delivery-resolution.ts"
 import { sanitizeDaemonProcessEnvironment } from "../../wire/src/daemon-environment.ts"
+import { drainOutput } from "loggily"
 
 // ---------------------------------------------------------------------------
 // `daemon.ts hook <event>` — Claude Code hook entry point. This is the
@@ -71,10 +72,12 @@ if (process.argv[2] === "hook") {
   const event = process.argv[3] as (typeof HOOK_EVENTS)[number] | undefined
   if (!event || !HOOK_EVENTS.includes(event)) {
     process.stderr.write(`tribe-daemon hook: unknown event "${event ?? ""}" (expected ${HOOK_EVENTS.join("|")})\n`)
+    await drainOutput()
     process.exit(2)
   }
   const { dispatchHook } = await import("./lib/hook-dispatch.ts")
   await dispatchHook(event)
+  await drainOutput()
   process.exit(0)
 }
 
@@ -126,11 +129,13 @@ if (process.argv[2] === "install" || process.argv[2] === "uninstall" || process.
       process.stderr.write(
         `tribe-daemon install: --autostart must be one of ${VALID_AUTOSTART_MODES.join("|")}, got "${autostartRaw}"\n`,
       )
+      await drainOutput()
       process.exit(2)
     }
     const plan = planInstall(env, { autostart: autostartRaw as TribeAutostart | undefined })
     console.log(formatInstallPlan(plan, dryRun))
     if (!dryRun) applyInstall(plan)
+    await drainOutput()
     process.exit(0)
   }
 
@@ -138,6 +143,7 @@ if (process.argv[2] === "install" || process.argv[2] === "uninstall" || process.
     const plan = planUninstall(env)
     console.log(formatUninstallPlan(plan, dryRun))
     if (!dryRun) applyUninstall(plan)
+    await drainOutput()
     process.exit(0)
   }
 
@@ -145,6 +151,7 @@ if (process.argv[2] === "install" || process.argv[2] === "uninstall" || process.
   // scriptable in CI/health checks without parsing stdout).
   const report = await doctorReport(env)
   console.log(formatDoctorReport(report))
+  await drainOutput()
   process.exit(report.hasFailures ? 1 : 0)
 }
 

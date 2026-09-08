@@ -21,7 +21,7 @@ import * as path from "path"
 import * as os from "os"
 import * as fs from "fs"
 import { spawn } from "child_process"
-import { createLogger } from "loggily"
+import { createLogger, drainOutput } from "loggily"
 import { hookRecall } from "../history/recall"
 import { getDb, closeDb, getIndexMeta } from "../history/db"
 import { summarizeUnprocessedDays } from "./summarize-daily"
@@ -170,7 +170,9 @@ export async function cmdSessionStart(): Promise<void> {
       input = JSON.parse(stdin) as typeof input
     } catch (e) {
       sessionStartLog.warn?.("invalid JSON", { error: String(e) })
-      process.exit(0) // don't block session startup
+      // Return rather than await so drain failures bypass this handler's catch.
+      // oxlint-disable-next-line typescript/return-await -- preserve drain failure outside this catch
+      return drainOutput().then(() => process.exit(0)) // don't block session startup
     }
 
     if (!input.session_id || !input.cwd) {
@@ -178,7 +180,8 @@ export async function cmdSessionStart(): Promise<void> {
         has_session_id: Boolean(input.session_id),
         has_cwd: Boolean(input.cwd),
       })
-      process.exit(0)
+      // oxlint-disable-next-line typescript/return-await -- preserve drain failure outside this catch
+      return drainOutput().then(() => process.exit(0))
     }
 
     const claudePid = process.ppid
@@ -359,6 +362,8 @@ export async function readStdin(): Promise<string> {
 
 export async function cmdHook(): Promise<void> {
   const startTime = Date.now()
+  // Return the drain promise rather than await it so a drain failure bypasses
+  // this handler's catch and remains the process's non-zero exit signal.
   try {
     const stdin = await readStdin()
     let input: { prompt?: string; session_id?: string; transcript_path?: string; cwd?: string }
@@ -369,8 +374,8 @@ export async function cmdHook(): Promise<void> {
         elapsed_ms: Date.now() - startTime,
         stdin_preview: stdin.slice(0, 200),
       })
-      process.exit(1)
-      return
+      // oxlint-disable-next-line typescript/return-await -- preserve drain failure outside this catch
+      return drainOutput().then(() => process.exit(1))
     }
 
     // Write a sentinel file keyed by the parent Claude Code PID so that
@@ -391,7 +396,8 @@ export async function cmdHook(): Promise<void> {
     const prompt = input.prompt
     if (!prompt) {
       hookLog.warn?.("no prompt in stdin", { elapsed_ms: Date.now() - startTime })
-      process.exit(0)
+      // oxlint-disable-next-line typescript/return-await -- preserve drain failure outside this catch
+      return drainOutput().then(() => process.exit(0))
     }
 
     // Try daemon first. Daemon holds per-session dedup state
@@ -406,7 +412,8 @@ export async function cmdHook(): Promise<void> {
           elapsed_ms: Date.now() - startTime,
           prompt_preview: prompt.slice(0, 60),
         })
-        process.exit(0)
+        // oxlint-disable-next-line typescript/return-await -- preserve drain failure outside this catch
+        return drainOutput().then(() => process.exit(0))
       }
       if (daemonOutput.kind === "ok") {
         hookLog.info?.("daemon ok", {
@@ -418,7 +425,8 @@ export async function cmdHook(): Promise<void> {
         })
         // The hook's JSON response: console.log is the sanctioned channel.
         console.log(envelopeEmitHookJson("UserPromptSubmit", daemonOutput.additionalContext, prompt))
-        process.exit(0)
+        // oxlint-disable-next-line typescript/return-await -- preserve drain failure outside this catch
+        return drainOutput().then(() => process.exit(0))
       }
       // kind === "error" — fall through to library path below.
     }
@@ -431,7 +439,8 @@ export async function cmdHook(): Promise<void> {
         elapsed_ms: elapsed,
         prompt_preview: prompt.slice(0, 60),
       })
-      process.exit(0)
+      // oxlint-disable-next-line typescript/return-await -- preserve drain failure outside this catch
+      return drainOutput().then(() => process.exit(0))
     }
     const additionalContext = result.hookOutput?.hookSpecificOutput.additionalContext ?? ""
     hookLog.info?.("library ok", {
@@ -446,7 +455,7 @@ export async function cmdHook(): Promise<void> {
     hookLog.error?.(e instanceof Error ? e : new Error(String(e)), "FATAL: unhandled error", {
       elapsed_ms: elapsed,
     })
-    process.exit(1)
+    return drainOutput().then(() => process.exit(1))
   }
 }
 
