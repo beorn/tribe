@@ -276,13 +276,13 @@ export function openDatabase(path: string): Database {
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_room_ts ON messages(room_id, ts)")
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_ts ON messages_archive(ts)")
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_seq ON messages_archive(seq)")
-  // Membership/health reads one departure fact per disconnected launch. Keep
-  // both retention tiers keyed by member, rather than scanning their journals.
+  // RPC expiry checks and membership departure checks probe event facts by
+  // type/ref. Share the keyed access path across both consumers and tiers.
   db.run(
-    "CREATE INDEX IF NOT EXISTS idx_messages_session_left_ref_ts ON messages(ref, ts DESC) WHERE kind = 'event' AND type = 'event.session.left'",
+    "CREATE INDEX IF NOT EXISTS idx_messages_event_type_ref_ts ON messages(type, ref, ts DESC) WHERE kind = 'event'",
   )
   db.run(
-    "CREATE INDEX IF NOT EXISTS idx_messages_archive_session_left_ref_ts ON messages_archive(ref, ts DESC) WHERE kind = 'event' AND type = 'event.session.left'",
+    "CREATE INDEX IF NOT EXISTS idx_messages_archive_event_type_ref_ts ON messages_archive(type, ref, ts DESC) WHERE kind = 'event'",
   )
   db.run("CREATE INDEX IF NOT EXISTS idx_pending_recipient ON pending_request(recipient)")
   db.run("CREATE INDEX IF NOT EXISTS idx_pending_sender ON pending_request(sender)")

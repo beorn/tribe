@@ -404,7 +404,7 @@ describe("membership projection: a finished launch is history, not a degraded me
       detail: string
     }>
     for (const table of ["messages", "messages_archive"]) {
-      expect(plan.some(({ detail }) => detail.startsWith(`SEARCH ${table} `) && detail.includes("(ref=?)"))).toBe(true)
+      expect(plan.some(({ detail }) => detail.startsWith(`SEARCH ${table} `) && /\bref=\?/.test(detail))).toBe(true)
     }
 
     const opCtx = makeContext(db, stmts, "operator", "@operator")

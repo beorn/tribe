@@ -618,7 +618,12 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     expect(pendingRecipients(db, "late-request")).toEqual([])
   })
 
-  it("keeps a deadline-passed row owned and visible while recording one durable expiry edge", () => {
+  /**
+   * @failure Every RPC scans retained history to decide whether an expiry edge was already recorded (#24284).
+   * @level l1
+   * @consumer All Tribe RPC callers and pending-ball owners.
+   */
+  it("keeps a deadline-passed row owned and records one expiry edge without scanning unrelated history", () => {
     parseToolJson(
       handleToolCall(
         chief,
@@ -660,5 +665,13 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     expect(
       db.prepare("SELECT COUNT(*) AS count FROM messages WHERE kind = 'event' AND type = 'event.ball.expired'").get(),
     ).toEqual({ count: 1 })
+
+    // The shared RPC preflight must seek the request's facts in both tiers.
+    // Existing exactly-once assertions stayed green while this scanned the archive.
+    const sql = chief.stmts.selectExpiredPendingRequests.toString()
+    const plan = db.query(`EXPLAIN QUERY PLAN ${sql}`).all({ $now: Date.now() }) as Array<{ detail: string }>
+    for (const table of ["messages", "messages_archive"]) {
+      expect(plan.some(({ detail }) => detail.startsWith(`SEARCH ${table} `) && /\bref=\?/.test(detail))).toBe(true)
+    }
   })
 })
