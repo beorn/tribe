@@ -138,6 +138,35 @@ describe("message provenance (migration v26)", () => {
     }
   })
 
+  // A failed version write must not leave removed columns behind: the next
+  // startup would otherwise see an incomplete v30 database and refuse it.
+  it.each(["v30", "unversioned"] as const)("rolls back %s schema removal when its version write fails", (version) => {
+    const path = seedV30(`version-write-${version}`)
+    const seeded = new Database(path)
+    if (version === "unversioned") {
+      seeded.run("DELETE FROM _schema_meta WHERE key = 'version'")
+      seeded.run("DROP TABLE messages")
+    }
+    seeded.run(`CREATE TRIGGER refuse_v31 BEFORE INSERT ON _schema_meta
+      WHEN NEW.key = 'version' AND NEW.value = '31'
+      BEGIN SELECT RAISE(ABORT, 'fixture refuses version 31'); END`)
+    const beforeColumns = [...columnsOf(seeded, "messages_archive")]
+    const beforeRows = seeded.prepare("SELECT * FROM messages_archive").all()
+    const beforeVersion = seeded.prepare("SELECT value FROM _schema_meta WHERE key = 'version'").get()
+    seeded.close()
+
+    expect(() => openDatabase(path)).toThrow("fixture refuses version 31")
+    const db = new Database(path)
+    try {
+      expect([...columnsOf(db, "messages_archive")]).toEqual(beforeColumns)
+      expect(db.prepare("SELECT * FROM messages_archive").all()).toEqual(beforeRows)
+      expect(db.prepare("SELECT value FROM _schema_meta WHERE key = 'version'").get()).toEqual(beforeVersion)
+      if (version === "v30") expect(columnsOf(db, "messages").has("room_id")).toBe(true)
+    } finally {
+      db.close()
+    }
+  })
+
   it("puts session_id on both the live table and the archive", () => {
     const { db } = freshDb("cols")
     try {

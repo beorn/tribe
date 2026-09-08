@@ -10,7 +10,7 @@ import { Database } from "bun:sqlite"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from "vitest"
 
 import { createTribeContext, type MessageInsertedInfo, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
@@ -31,7 +31,11 @@ function makeContext(
   stmts: TribeStatements,
   name: string,
   sessionId: string,
-  opts?: { claudeSessionId?: string | null; claudeSessionName?: string | null },
+  opts?: {
+    claudeSessionId?: string | null
+    claudeSessionName?: string | null
+    onMessageInserted?: TribeContext["onMessageInserted"]
+  },
 ): TribeContext {
   return createTribeContext({
     db,
@@ -42,6 +46,7 @@ function makeContext(
     domains: [],
     claudeSessionId: opts?.claudeSessionId ?? null,
     claudeSessionName: opts?.claudeSessionName ?? null,
+    onMessageInserted: opts?.onMessageInserted,
   })
 }
 
@@ -63,12 +68,9 @@ function parseToolJson(result: ReturnType<typeof handleToolCall>): ToolJson {
 
 describe("deriveSummary", () => {
   it("keeps removed room identity out of classification and insertion contracts", () => {
-    // @ts-expect-error roomId was removed with the message room facade.
-    type ClassificationRoomId = Classification["roomId"]
-    // @ts-expect-error roomId was removed with the message room facade.
-    type InsertedRoomId = MessageInsertedInfo["roomId"]
-    expect("roomId" in ({} as Classification)).toBe(false)
-    expect("room_id" in ({} as MessageInsertedInfo)).toBe(false)
+    // These are checked by the component typecheck, which includes this file.
+    expectTypeOf<Classification>().not.toHaveProperty("roomId")
+    expectTypeOf<MessageInsertedInfo>().not.toHaveProperty("roomId")
   })
 
   it("returns a short single-line body unchanged", () => {
@@ -158,7 +160,24 @@ describe("tribe.send summary — persist + LLM-reject / non-LLM fallback", () =>
 
   it("rides the summary back out on fetch so the recipient UI can show it", () => {
     const authored = "rebase then push"
-    send({ to: RECIPIENT, message: "Full plan:\n\n- rebase\n- push", summary: authored })
+    const inserted: MessageInsertedInfo[] = []
+    const senderCtx = makeContext(db, stmts, SENDER, SENDER_ID, {
+      onMessageInserted: (info) => inserted.push(info),
+    })
+    registerSession(senderCtx, PROJECT_ID, () => true, null, 1234, "push", "/repo", null, "claude")
+    const sent = parseToolJson(
+      handleToolCall(
+        senderCtx,
+        "tribe.send",
+        { to: RECIPIENT, message: "Full plan:\n\n- rebase\n- push", summary: authored },
+        makeOpts(),
+      ),
+    )
+    expect(sent.sent).toBe(true)
+    const insertedMessage = inserted.find((info) => info.id === sent.id)
+    expect(insertedMessage).toBeDefined()
+    expect(insertedMessage).not.toHaveProperty("roomId")
+    expect(insertedMessage).not.toHaveProperty("room_id")
 
     const recipientCtx = makeContext(db, stmts, RECIPIENT, RECIPIENT_ID)
     registerSession(recipientCtx, PROJECT_ID, () => true, null, 5678, "pull", "/repo", null, "claude")

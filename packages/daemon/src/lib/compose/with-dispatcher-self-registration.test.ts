@@ -1462,6 +1462,8 @@ describe("dispatcher durable log projection", () => {
       expect(result.messages).toContainEqual(
         expect.objectContaining({ id: message.id, type, kind: "event", content, topic }),
       )
+      const logged = result.messages.find((row) => row.id === message.id)
+      expect(logged).not.toHaveProperty("room_id")
     }
   })
 
