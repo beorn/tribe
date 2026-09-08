@@ -16,7 +16,13 @@
  * lifecycle vocabulary without an inter-vendor private dependency.
  */
 
-export class Scope extends AsyncDisposableStack {
+import AsyncDisposableStack from "core-js-pure/actual/async-disposable-stack/index.js"
+import SuppressedError from "core-js-pure/actual/suppressed-error.js"
+
+// Keep the untyped implementation module out of the published declaration surface.
+const ScopeStack: typeof globalThis.AsyncDisposableStack = AsyncDisposableStack
+
+export class Scope extends ScopeStack {
   readonly signal: AbortSignal
   readonly name?: string
   readonly #children = new Set<Scope>()

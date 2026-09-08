@@ -5,7 +5,7 @@
  * whether the previous run finished. That is safe only while every run is
  * reliably faster than the interval, and the daemon's pollers are not: the
  * health sampler alone spawns `iostat -d -c 2 -w 1` (>=2s by construction),
- * `lsof -n | wc -l`, a full `ps -axo` dump, a `hab sysmon snapshot` walk over
+ * a full `ps -axo` dump, a `hab sysmon snapshot` walk over
  * the habitat journal, and a network `gh api rate_limit` — each spawned with
  * no deadline and slurped whole into memory. When one run outlasts the
  * interval the runs overlap, and every subsequent tick adds another concurrent

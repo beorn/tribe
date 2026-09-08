@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process"
 import { describe, expect, it } from "vitest"
 import { createScope, disposable, pipe, Scope, withTool, withTools, type Tool, type WithTools } from "../src/index.ts"
 
@@ -40,6 +41,51 @@ describe("pipe", () => {
 })
 
 describe("Scope", () => {
+  it("preserves disposal semantics without native resource-management constructors", () => {
+    // Node 22 is supported but lacks these globals. A fresh process also prevents
+    // Vitest's Bun globals and module cache from masking the import-time failure.
+    const scopeUrl = new URL("../src/composition/scope.ts", import.meta.url).href
+    const output = execFileSync(
+      "node",
+      [
+        "--input-type=module",
+        "-e",
+        `
+          import assert from "node:assert/strict";
+          Reflect.deleteProperty(globalThis, "AsyncDisposableStack");
+          Reflect.deleteProperty(globalThis, "SuppressedError");
+          assert.equal(typeof Symbol.asyncDispose, "symbol");
+          const { createScope } = await import(${JSON.stringify(scopeUrl)});
+          assert.equal(globalThis.AsyncDisposableStack, undefined);
+          assert.equal(globalThis.SuppressedError, undefined);
+          const parent = createScope("parent");
+          const child = parent.child("child");
+          const order = [];
+          const childError = new Error("child cleanup");
+          const parentError = new Error("parent cleanup");
+          child.defer(() => { order.push("child"); throw childError; });
+          parent.defer(() => { order.push("parent"); throw parentError; });
+          await assert.rejects(parent[Symbol.asyncDispose](), error => {
+            assert.equal(error.error, parentError);
+            assert.equal(error.suppressed, childError);
+            return true;
+          });
+          assert.deepEqual(order, ["child", "parent"]);
+          assert.equal(parent.disposed, true);
+          assert.equal(child.signal.aborted, true);
+          assert.throws(() => parent.defer(() => {}), ReferenceError);
+          await parent[Symbol.asyncDispose]();
+          const empty = createScope();
+          await empty.disposeAsync();
+          assert.equal(empty.disposed, true);
+          process.stdout.write("disposed");
+        `,
+      ],
+      { encoding: "utf8", timeout: 5_000, stdio: "pipe" },
+    )
+    expect(output).toBe("disposed")
+  })
+
   it("runs deferred cleanups in LIFO order", async () => {
     const order: number[] = []
     const scope = createScope("root")
