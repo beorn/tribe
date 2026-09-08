@@ -1424,6 +1424,18 @@ const TRACKED_ACTIONABLE_TYPE_SQL = `(COALESCE(m.type, a.type) IN (${ACTIONABLE_
 
 /** A TAKING receipt is durable evidence for an open ball. Keep it through
  * archive retention until the structured reply removes the pending row. */
+function takingStatusForOpenRequestMatchSql(
+  receipt: string,
+  receiptSequence: string,
+  pending: string,
+  originalSequence: string,
+): string {
+  return `${takingStatusSubjectMatchSql(receipt, { owner: `${pending}.recipient`, requester: `${pending}.sender` })}
+    AND ${receipt}.ref IS NOT NULL
+    AND (${receipt}.ref = ${pending}.request_id OR ${receipt}.ref = ${pending}.message_id)
+    AND ${receipt}.${receiptSequence} > ${originalSequence}`
+}
+
 function takingStatusProtectsOpenBallPredicateSql(receipt: string, receiptSequence: string): string {
   const pending = "taking_pending"
   const originalMessage = "taking_original_message"
@@ -1436,10 +1448,7 @@ function takingStatusProtectsOpenBallPredicateSql(receipt: string, receiptSequen
       FROM pending_request AS ${pending}
       LEFT JOIN messages AS ${originalMessage} ON ${originalMessage}.id = ${pending}.message_id
       LEFT JOIN messages_archive AS ${originalArchive} ON ${originalArchive}.id = ${pending}.message_id
-      WHERE ${receipt}.sender = ${pending}.recipient
-        AND ${receipt}.recipient = ${pending}.sender
-        AND (${receipt}.ref = ${pending}.request_id OR ${receipt}.ref = ${pending}.message_id)
-        AND ${receipt}.${receiptSequence} > COALESCE(${originalMessage}.rowid, ${originalArchive}.seq)
+      WHERE ${takingStatusForOpenRequestMatchSql(receipt, receiptSequence, pending, `COALESCE(${originalMessage}.rowid, ${originalArchive}.seq)`)}
     )`
 }
 
@@ -1712,6 +1721,55 @@ export function createStatements(db: Database) {
 			AND ${untakenPendingBallPredicateSql("p", "COALESCE(pending_message.rowid, pending_archive.seq)")}
 		ORDER BY p.opened_at ASC
 	`),
+
+    /** Cursor-independent status evidence for requests the caller sent OR owns.
+     * Retention uses the same match; archive moves cannot hide these receipts. */
+    getOpenRequestStatus: db.prepare(`
+      WITH caller_pending AS (
+        SELECT p.*, COALESCE(m.rowid, a.seq) AS original_seq
+        FROM pending_request p
+        LEFT JOIN messages m ON m.id = p.message_id
+        LEFT JOIN messages_archive a ON a.id = p.message_id
+        WHERE p.request_kind != 'incident' AND (p.sender = $name OR p.recipient = $name)
+      ), receipts AS (
+        SELECT r.id, r.rowid AS seq FROM caller_pending p
+        JOIN messages r ON ${takingStatusForOpenRequestMatchSql("r", "rowid", "p", "p.original_seq")}
+        UNION
+        SELECT r.id, r.seq FROM caller_pending p
+        JOIN messages_archive r ON ${takingStatusForOpenRequestMatchSql("r", "seq", "p", "p.original_seq")}
+      ), availability AS (
+        SELECT EXISTS(SELECT 1 FROM sessions WHERE name = $name)
+          AND NOT EXISTS(SELECT 1 FROM caller_pending WHERE original_seq IS NULL) AS available
+      )
+      SELECT CASE WHEN available THEN (SELECT COUNT(*) FROM receipts) END AS open_request_status_count,
+        CASE WHEN available THEN (SELECT MAX(seq) FROM receipts) END AS latest_open_request_status_seq
+      FROM availability
+    `),
+
+    /** Ref-filtered recovery for the receipts counted above. Materializing
+     * matching requests before probing either retention tier keeps the archive
+     * lookup indexed instead of scanning all retained statuses. */
+    getOpenRequestStatusesForRefPrefix: db.prepare(`
+      WITH matched_pending AS MATERIALIZED (
+        SELECT p.*, COALESCE(m.rowid, a.seq) AS original_seq
+        FROM pending_request p
+        LEFT JOIN messages m ON m.id = p.message_id
+        LEFT JOIN messages_archive a ON a.id = p.message_id
+        WHERE p.request_kind != 'incident'
+          AND (substr(p.request_id, 1, length($prefix)) = $prefix
+            OR substr(p.message_id, 1, length($prefix)) = $prefix)
+      )
+      SELECT r.id, r.type, r.sender, r.recipient, r.kind, r.content, r.bead_id, r.ref,
+        r.ts AS ts, r.delivery, r.topic, r.room_id, r.request, r.reply, r.summary
+      FROM matched_pending p CROSS JOIN messages r
+      WHERE ${takingStatusForOpenRequestMatchSql("r", "rowid", "p", "p.original_seq")}
+      UNION
+      SELECT r.id, r.type, r.sender, r.recipient, r.kind, r.content, r.bead_id, r.ref,
+        r.ts AS ts, r.delivery, r.topic, r.room_id, r.request, r.reply, r.summary
+      FROM matched_pending p CROSS JOIN messages_archive r
+      WHERE ${takingStatusForOpenRequestMatchSql("r", "seq", "p", "p.original_seq")}
+      ORDER BY ts DESC LIMIT $limit
+    `),
 
     /** Full active pending surface for one owner. Unlike the attention query
      *  above, this deliberately joins question bodies in the same statement

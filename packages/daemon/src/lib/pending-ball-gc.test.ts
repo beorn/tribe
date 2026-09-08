@@ -1134,7 +1134,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         { owner: "@ci", count: 1, oldest_age_ms: expect.any(Number) },
       ])
       expect(health.pending_balls?.owners.every((owner) => owner.pending === undefined)).toBe(true)
-      expect(health.issues).toEqual([expect.stringMatching(/1 stale pending ball.*1 owner/i)])
+      expect(health.issues).toEqual([expect.stringMatching(/1 stale pending ball.*1 owner.*remains open and owned/i)])
       expect(JSON.stringify(health.pending_balls).length).toBeLessThan(2_048)
     } finally {
       db.close()

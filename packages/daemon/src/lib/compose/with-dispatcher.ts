@@ -1696,15 +1696,27 @@ export function withDispatcher<
             // an explicit AUTOINCREMENT column rather than SQLite's hidden
             // alias. The monotonic cursor is exposed only through the bounded
             // structural status API above, not as an accidental log field.
-            const rows = db
+            let rows = db
               .prepare(
                 `SELECT id, type, sender, recipient, kind, content, bead_id, ref,
                         ts, delivery, topic, room_id, request, reply, summary
                  FROM messages${where} ORDER BY ts DESC${limitSql}`,
               )
-              .all(...values)
+              .all(...values) as Array<{ id: string; ts: number }>
+            if (refPrefix) {
+              const receipts = stmts.getOpenRequestStatusesForRefPrefix.all({
+                $prefix: refPrefix,
+                $limit: all ? -1 : limit,
+              }) as Array<{ id: string; ts: number }>
+              // Each subset's newest N is sufficient for the combined newest
+              // N. A hot receipt can occur in both queries; return it once.
+              rows = [...new Map([...rows, ...receipts].map((row) => [row.id, row])).values()].sort(
+                (a, b) => b.ts - a.ts,
+              )
+              if (!all && limit >= 0) rows = rows.slice(0, limit)
+            }
             return makeResponse(id, {
-              messages: (rows as unknown[]).reverse(),
+              messages: rows.reverse(),
               query: { all, ref_prefix: refPrefix, reply_prefix: replyPrefix },
             })
           }
@@ -1733,6 +1745,12 @@ export function withDispatcher<
             // cli_inbox_delivery_by_launch_v1's response shape.
             return makeResponse(id, {
               ...readInboxStatus(target.sessionName),
+              ...(stmts.getOpenRequestStatus.get({ $name: target.sessionName }) as {
+                open_request_status_count: number | null
+                /** Latest retained status for current open requests; not a cursor.
+                 * May decrease when a request settles. */
+                latest_open_request_status_seq: number | null
+              }),
               ...(target.launchId === undefined ? {} : { launch_id: target.launchId }),
               ...(target.launchParentPid === undefined ? {} : { launch_parent_pid: target.launchParentPid }),
             })

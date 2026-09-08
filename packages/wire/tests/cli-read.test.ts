@@ -13,6 +13,7 @@ import { describe, expect, test } from "vitest"
 import { Command } from "@silvery/commander"
 import {
   formatRestartResult,
+  formatInboxStatus,
   registerReadCommands,
   resolveRepairOptions,
   waitForInboxWithReconnect,
@@ -106,6 +107,21 @@ describe("registerReadCommands", () => {
     expect(cmd).toBeDefined()
     const flags = optionFlags(cmd!)
     expect(flags).toEqual(expect.arrayContaining(["--session", "--json"]))
+  })
+
+  /** @failure 24269: human status output hides correlated statuses or invents zero on old daemons.
+   * @level l0
+   * @consumer inbox-status CLI readers */
+  test.each([
+    [{ open_request_status_count: 3, latest_open_request_status_seq: 42 }, /3 status messages.*open requests.*42/s],
+    [{ open_request_status_count: 0, latest_open_request_status_seq: null }, /0 status messages.*open requests/s],
+    [{ open_request_status_count: null, latest_open_request_status_seq: null }, /status evidence unavailable/i],
+    [{}, /status evidence unavailable/i],
+  ])("reports open-request status evidence honestly: %j", (fields, expected) => {
+    const output = formatInboxStatus({ session: "reader", unread_count: 0, oldest_unread_age_min: 0, ...fields })
+    expect(output).toMatch(expected)
+    expect(output).toContain("no unanswered actionables")
+    expect(output).toContain("tribe log --ref-prefix <request-id> --json")
   })
 
   test("inbox verb exposes no caller-selected mailbox target", () => {

@@ -370,11 +370,10 @@ async function cmdSessions(showAll: boolean): Promise<void> {
   console.log(
     `  ${pad("NAME", nW)}  ${pad("ROLE", rW)}  ${pad("PID", 7)}  ${pad("UPTIME", 10)}  ${pad("IDLE", 8)}  ${pad("CWD", cW)}  SOURCE`,
   )
-  for (let i = 0; i < sessions.length; i++) {
-    const r = sessions[i]!
+  for (const r of sessions) {
     const idle = typeof r.idleMs === "number" ? fmtDur(r.idleMs) : "—"
     console.log(
-      `  ${pad(r.name, nW)}  ${pad(r.role, rW)}  ${pad(String(r.pid), 7)}  ${pad(fmtDur(r.uptimeMs), 10)}  ${pad(idle, 8)}  ${pad(cwds[i]!, cW)}  ${r.source}`,
+      `  ${pad(r.name, nW)}  ${pad(r.role, rW)}  ${pad(String(r.pid), 7)}  ${pad(fmtDur(r.uptimeMs), 10)}  ${pad(idle, 8)}  ${pad(fmtCwd(r.cwd), cW)}  ${r.source}`,
     )
   }
 }
@@ -475,7 +474,7 @@ async function cmdLog(
   await client.call("subscribe")
   // Also poll for new DB messages periodically
   let lastTs = rows.length ? Math.max(...rows.map((m) => m.ts)) : Date.now()
-  setInterval(async () => {
+  const pollLog = async () => {
     try {
       const pollParams: Record<string, unknown> = { limit: 50 }
       if (refPrefix) pollParams.ref_prefix = refPrefix
@@ -489,6 +488,9 @@ async function cmdLog(
     } catch {
       // Connection lost
     }
+  }
+  setInterval(() => {
+    void pollLog()
   }, 2000)
 }
 
@@ -721,14 +723,12 @@ async function cmdHealth(): Promise<void> {
       console.log(`\n  Sessions: ${result.sessions.length} active`)
       const nW = Math.max(4, ...result.sessions.map((r) => r.name.length))
       const rW = Math.max(4, ...result.sessions.map((r) => r.role.length))
-      const cwds = result.sessions.map((r) => fmtCwd(r.cwd))
       console.log(
         `    ${pad("NAME", nW)}  ${pad("ROLE", rW)}  ${pad("PID", 7)}  ${pad("UPTIME", 10)}  ${pad("IDLE", 8)}  CWD`,
       )
-      for (let i = 0; i < result.sessions.length; i++) {
-        const r = result.sessions[i]!
+      for (const r of result.sessions) {
         console.log(
-          `    ${pad(r.name, nW)}  ${pad(r.role, rW)}  ${pad(String(r.pid), 7)}  ${pad(fmtDur(r.uptimeMs), 10)}  ${pad(fmtDur(r.idleMs), 8)}  ${cwds[i]}`,
+          `    ${pad(r.name, nW)}  ${pad(r.role, rW)}  ${pad(String(r.pid), 7)}  ${pad(fmtDur(r.uptimeMs), 10)}  ${pad(fmtDur(r.idleMs), 8)}  ${fmtCwd(r.cwd)}`,
         )
       }
     }
@@ -1321,26 +1321,44 @@ async function cmdDoctor(opts: { fix?: boolean; json?: boolean }): Promise<void>
  * `.agents/hooks` twin.
  * Delivery-attention lineage: @ag/tribe/21626-per-seat-inbox-staleness-alarm.
  */
+interface InboxStatusSummary {
+  session: string
+  unread_count: number
+  oldest_unread_age_min: number
+  /** Retained owner-to-requester status messages for open requests on either side.
+   * Null is unavailable; optional for older daemons. Never an unread count. */
+  open_request_status_count?: number | null
+  /** Latest sequence in the current open-request set, not a cursor or read proof.
+   * May decrease when a request settles. */
+  latest_open_request_status_seq?: number | null
+}
+
+export function formatInboxStatus(result: InboxStatusSummary): string {
+  const n = result.unread_count
+  const attention =
+    n === 0
+      ? `${result.session}: no unanswered actionables.`
+      : `${result.session}: ${n} unanswered actionable item${n === 1 ? "" : "s"}, oldest ${result.oldest_unread_age_min}min ago.`
+  const count = result.open_request_status_count
+  const seq = result.latest_open_request_status_seq
+  const statuses =
+    count == null || seq === undefined
+      ? "Open-request status evidence unavailable."
+      : `${count} status message${count === 1 ? "" : "s"} associated with your open requests` +
+        (seq === null ? "." : ` (latest sequence ${seq}).`)
+  return `${attention}\n${statuses}\nRecover a request's statuses: tribe log --ref-prefix <request-id> --json`
+}
+
 async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promise<void> {
-  const result = (await callDaemon(cliInboxMethod("status", opts.session), cliInboxTargetParams(opts.session))) as {
-    session: string
-    unread_count: number
-    oldest_unread_age_min: number
-    oldest_unread_ts: number
-  }
+  const result = (await callDaemon(
+    cliInboxMethod("status", opts.session),
+    cliInboxTargetParams(opts.session),
+  )) as InboxStatusSummary
   if (opts.json) {
     await writeJsonStdout(result)
     return
   }
-  const n = result.unread_count
-  if (n === 0) {
-    console.log(`${result.session}: no unanswered actionables.`)
-    return
-  }
-  console.log(
-    `${result.session}: ${n} unanswered actionable item${n === 1 ? "" : "s"}, ` +
-      `oldest ${result.oldest_unread_age_min}min ago.`,
-  )
+  console.log(formatInboxStatus(result))
 }
 
 function readOperatorCapabilityFromInheritedFd(fdRaw: string | undefined): string | undefined {
@@ -1577,7 +1595,12 @@ export async function waitForInboxWithReconnect(opts: {
   wakeOnCorrelatedReply?: boolean
 }): Promise<InboxWaitResult> {
   const now = opts.now ?? Date.now
-  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  const sleep =
+    opts.sleep ??
+    ((ms: number) =>
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, ms)
+      }))
   const maxChunkMs = opts.maxChunkMs ?? INBOX_WAIT_CHUNK_MS
   const retryDelayMs = Math.max(0, opts.retryDelayMs ?? INBOX_WAIT_RETRY_DELAY_MS)
   const unavailableGraceMs = opts.unavailableGraceMs ?? INBOX_WAIT_UNAVAILABLE_GRACE_MS

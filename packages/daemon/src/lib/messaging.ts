@@ -672,7 +672,7 @@ export function logEvent(
   type: string,
   bead_id?: string,
   data?: Record<string, unknown>,
-  options: { sender?: string; ref?: string; ts?: number } = {},
+  options: { sender?: string; ref?: string; ts?: number; summary?: string } = {},
 ): string {
   const id = randomUUID()
   ctx.stmts.insertMessage.run({
@@ -701,7 +701,7 @@ export function logEvent(
     $request: null,
     $reply: null,
     $correlated_reply_requester: null,
-    $summary: null,
+    $summary: options.summary ?? null,
     $attention_required: 0,
   })
   return id
