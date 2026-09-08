@@ -75,6 +75,8 @@ export interface HealthMetrics {
     total: number
     perSession: Array<{ name: string; count: number }>
     limit: number
+    /** Which like-with-like pair produced these two numbers. */
+    basis: FdBasis
   }
   ghRateLimit?: {
     remaining: number
@@ -699,22 +701,72 @@ export function parseGhRateLimit(jsonOutput: string): { remaining: number; limit
 // File descriptor monitoring
 // ---------------------------------------------------------------------------
 
-/** Parse the system file descriptor limit from `ulimit -n` output. */
-export function parseUlimitOutput(output: string): number {
-  const n = parseInt(output.trim(), 10)
-  return isNaN(n) ? 0 : n
+/**
+ * WHY `lsof` IS GONE, and why no filter could have saved it.
+ *
+ * The old sampler ran `lsof -n | wc -l` and called the LINE COUNT "open fds".
+ * Two independent attempts to repair that by filtering were measured against
+ * the kernel on the host that raised the false alarm (2026-09-08,
+ * @ag/tribe/24297), and both failed:
+ *
+ *   lsof -n | wc -l                        200,011   (what the alarm counted)
+ *   filtered to a numeric FD column        144,814
+ *   lsof -n -F f, counting ^f<digits>      143,269
+ *   kernel /proc/sys/fs/file-nr              6,639   (ground truth)
+ *
+ * The residual 20x is not noise and not a parsing bug: lsof lists one row per
+ * TASK, so every descriptor a process holds is repeated once per THREAD. The
+ * tribe daemon holds 89 descriptors and many threads. No column filter can
+ * remove a duplication that is inherent to what lsof was asked to list, which
+ * is why the count tracked thread count and flapped between samples.
+ *
+ * So the count comes from the kernel instead, and it is compared against a
+ * limit of the SAME KIND. An all-process tally over `ulimit -n` — a PER-PROCESS
+ * soft limit — was meaningless however accurate either half was.
+ */
+export type FdBasis = "linux-file-nr-vs-file-max"
+
+export type FdReading =
+  | { readonly kind: "measured"; readonly total: number; readonly limit: number; readonly basis: FdBasis }
+  | { readonly kind: "not-measured"; readonly reason: string }
+
+/** `/proc/sys/fs/file-nr` is "allocated  free  max"; the first field is the
+ *  count of file handles the kernel currently has open, host-wide. */
+export function parseFileNr(text: string): number | undefined {
+  const allocated = text.trim().split(/\s+/u)[0]
+  if (allocated === undefined) return undefined
+  const n = Number.parseInt(allocated, 10)
+  return Number.isFinite(n) && n >= 0 ? n : undefined
 }
 
-/** Compute fd usage info from a total count and ulimit. */
-export function parseFdInfo(
-  lsofCount: number,
-  ulimitN: number,
-): { total: number; limit: number; usagePercent: number } {
-  const limit = ulimitN > 0 ? ulimitN : 1 // Avoid division by zero
+/** `/proc/sys/fs/file-max`, the host-wide ceiling that pairs with file-nr. */
+export function parseFileMax(text: string): number | undefined {
+  const n = Number.parseInt(text.trim(), 10)
+  return Number.isFinite(n) && n > 0 ? n : undefined
+}
+
+/**
+ * Build the reading from whichever like-with-like pair is available.
+ *
+ * A sensor that cannot read reports NOT MEASURED rather than a value: emitting
+ * a number from a source you could not read is how this alarm trained the fleet
+ * to discount fd warnings before a real one ever arrived.
+ */
+export function resolveFdReading(sources: {
+  readonly fileNr?: string | undefined
+  readonly fileMax?: string | undefined
+}): FdReading {
+  const total = sources.fileNr === undefined ? undefined : parseFileNr(sources.fileNr)
+  const limit = sources.fileMax === undefined ? undefined : parseFileMax(sources.fileMax)
+  if (total !== undefined && limit !== undefined) {
+    return { kind: "measured", total, limit, basis: "linux-file-nr-vs-file-max" }
+  }
   return {
-    total: lsofCount,
-    limit,
-    usagePercent: Math.round((lsofCount / limit) * 100),
+    kind: "not-measured",
+    reason:
+      "host-wide fd accounting needs /proc/sys/fs/file-nr and /proc/sys/fs/file-max, which this " +
+      "host does not expose. Reporting NOT MEASURED rather than a value: the predecessor emitted " +
+      "an lsof line count against a per-process ulimit, which fired falsely and flapped",
   }
 }
 
@@ -1392,7 +1444,8 @@ export function evaluateAlerts(
           message:
             "Host scalar monitoring is BLIND: no scalar facts for " +
             `${String(state.scalarBlindSamples)} consecutive samples, so NO scalar-backed threshold ` +
-            "can fire — disk, memory, cpu and fd-count are all silent for this ONE reason, not four. " +
+            "can fire — disk, memory and cpu are all silent for this ONE reason, not three. " +
+            "(fd-count is NOT among them: it reads /proc/sys/fs directly and is unaffected.) " +
             `Check \`hab sysmon snapshot --kind scalars\`; ${remediation}`,
           metrics: {},
           topOffenders: [],
@@ -1426,7 +1479,9 @@ export function evaluateAlerts(
         alerts.push({
           type: "fd-count",
           severity: "warning",
-          message: `FD count warning: ${metrics.fdCount.total} open fds (${Math.round(usagePercent)}% of ${metrics.fdCount.limit} limit)`,
+          message:
+            `FD count warning: ${metrics.fdCount.total} open fds ` +
+            `(${Math.round(usagePercent)}% of ${metrics.fdCount.limit} limit, basis ${metrics.fdCount.basis})`,
           metrics: {},
           topOffenders: [],
         })
@@ -1791,19 +1846,15 @@ export async function collectFullMetrics(
 
   try {
     const wtProc = Bun.spawn(["git", "worktree", "list"], { stdout: "pipe", stderr: "ignore" })
-    const fdCountOutputPromise =
-      processObservation.kind === "standalone-os"
-        ? new Response(
-            Bun.spawn(["sh", "-c", "lsof -n 2>/dev/null | wc -l"], {
-              stdout: "pipe",
-              stderr: "ignore",
-            }).stdout,
-          ).text()
-        : Promise.resolve("0")
-    const ulimitOutputPromise =
-      processObservation.kind === "standalone-os"
-        ? new Response(Bun.spawn(["sh", "-c", "ulimit -n"], { stdout: "pipe", stderr: "ignore" }).stdout).text()
-        : Promise.resolve("0")
+    // Two small kernel reads, no spawn and no 200,000-line pipe per sample.
+    // `undefined` (not "0") when unreadable, so resolveFdReading can tell "this
+    // host does not expose it" from "it read zero".
+    const fdCountOutputPromise: Promise<string | undefined> = Bun.file("/proc/sys/fs/file-nr")
+      .text()
+      .catch(() => undefined)
+    const ulimitOutputPromise: Promise<string | undefined> = Bun.file("/proc/sys/fs/file-max")
+      .text()
+      .catch(() => undefined)
     const psOutput =
       processObservation.kind === "standalone-os"
         ? new Response(
@@ -1816,8 +1867,8 @@ export async function collectFullMetrics(
     const [observedPs, wtOutput, fdCountOutput, ulimitOutput] = await Promise.all([
       psOutput,
       new Response(wtProc.stdout).text().catch(() => ""),
-      fdCountOutputPromise.catch(() => "0"),
-      ulimitOutputPromise.catch(() => "0"),
+      fdCountOutputPromise.catch(() => undefined),
+      ulimitOutputPromise.catch(() => undefined),
     ])
     if (processObservation.kind === "standalone-os") {
       const processMetrics = deriveProcessMetricsFromSnapshot(observedPs, process.pid)
@@ -1827,12 +1878,15 @@ export async function collectFullMetrics(
     }
     worktrees = parseWorktreeList(wtOutput)
 
-    // File descriptor count
-    const lsofCount = parseInt(fdCountOutput.trim(), 10) || 0
-    const ulimitN = parseUlimitOutput(ulimitOutput)
-    if (ulimitN > 0) {
-      const fdInfo = parseFdInfo(lsofCount, ulimitN)
-      fdCount = { total: fdInfo.total, perSession: [], limit: fdInfo.limit }
+    // File descriptor count — host-wide against a host-wide ceiling, or nothing.
+    const reading = resolveFdReading({ fileNr: fdCountOutput, fileMax: ulimitOutput })
+    if (reading.kind === "measured") {
+      fdCount = { total: reading.total, perSession: [], limit: reading.limit, basis: reading.basis }
+    } else {
+      // Deliberately leaves fdCount undefined so no threshold can fire from a
+      // source we could not read. The reason is logged rather than broadcast:
+      // a host without /proc is a configuration fact, not an incident.
+      log.debug?.(`fd accounting NOT MEASURED: ${reading.reason}`)
     }
   } catch (err) {
     log.debug?.(`health metric collection failed: ${err instanceof Error ? err.message : String(err)}`)
