@@ -525,6 +525,43 @@ export const HAB_SESSION_MARKERS = [
   "HAB_SESSION_INSTRUCTION_ANCHOR",
 ] as const
 
+/**
+ * The habd controller's session name, and the one place this package spells any
+ * part of hab's layout.
+ *
+ * Spelling a layout here is a real cost and it is deliberate. The injected root
+ * exists precisely so the consumer need not know this, and it REMAINS the
+ * authority: whenever `HAB_SCALAR_JOURNAL_DIR` is present it wins, because only
+ * the launcher can resolve a habitat whose controller session is not the
+ * default. What is below is the floor for the processes that injection cannot
+ * reach — measured 2026-09-08, that was every one of ~194 live hab-launched
+ * processes, because a supervisor launches its children from the code it loaded
+ * at ITS start (@i/4-supervision/24248).
+ *
+ * Both derivations go through the two helpers so the literal cannot drift into
+ * two versions; `health-process-source.test.ts` asserts they agree.
+ *
+ * HOW MUCH THIS LITERAL ACTUALLY COSTS, traced rather than assumed: the read
+ * uses only `dirname(controllerSessionDir)`, so the session NAME never reaches
+ * the command — it reaches the `unavailable` diagnostic and nothing else. A
+ * habitat whose controller session is not the default therefore still READS
+ * correctly through this branch; only the "looked here and found nothing"
+ * message would name the wrong sibling. That is why assuming the default is a
+ * cosmetic risk here and not a correctness one, and it is why the injected
+ * value still wins: it is the only one that can also be RIGHT in the message.
+ */
+const HABD_CONTROLLER_SESSION = "habmod"
+
+/** `<habitat root>/run/sessions/habmod` — used when nothing was injected. */
+function controllerSessionDirFromHabitatRoot(habitatRoot: string): string {
+  return join(habitatRoot, "run", "sessions", HABD_CONTROLLER_SESSION)
+}
+
+/** The controller session beside a sibling session dir — the legacy formula. */
+function controllerSessionDirBesideSession(sessionDir: string): string {
+  return join(dirname(sessionDir), HABD_CONTROLLER_SESSION)
+}
+
 export function createHealthProcessSource(options: HealthProcessSourceOptions = {}): HealthProcessSource {
   const env = options.env ?? process.env
   const sessionDir = env.HAB_SESSION_DIR?.trim()
@@ -533,17 +570,40 @@ export function createHealthProcessSource(options: HealthProcessSourceOptions = 
   // — "am I hab-MANAGED" (lifecycle) and "where is the journal" (access) — and
   // the standalone sanitizer strips it for the lifecycle answer, correctly, so
   // a daemon cannot inherit hab's idle-quit and never retire. Severing journal
-  // access was the side effect. Hab now derives this value through
+  // access was the side effect. Hab derives this value through
   // `habdSessionPaths`, the same owner habmod uses to decide where to WRITE,
-  // and hands it over; the consumer resolves nothing and spells no layout.
+  // and hands it over. It stays FIRST: a handed-over value beats a derived one,
+  // because the launcher can name a non-default controller session and this
+  // consumer can only assume the default.
   const injectedJournalDir = env.HAB_SCALAR_JOURNAL_DIR?.trim()
   if (!sessionDir && injectedJournalDir) {
     return managedProcessSource(injectedJournalDir, options, env)
   }
   if (!sessionDir) {
-    // CONTRADICTORY ENVIRONMENT. hab session markers are present and the one
-    // variable this source needs is not. That is never a healthy standalone,
-    // whatever put it in that state, so it is reported rather than absorbed.
+    // NOTHING WAS HANDED OVER — DERIVE IT, because the daemon is already
+    // carrying the answer. A launcher-side injection cannot reach a process
+    // whose supervisor predates it: the supervisor launches every child from
+    // the code it loaded at its own start, so the cure could not arrive until
+    // that supervisor restarted, and restarting it means restarting ~194
+    // descendants including every seat. Measured 2026-09-08 over the live
+    // habitat: ZERO of those processes carried the injected variable, 42 of
+    // them launched after it landed, and all 42 still lacked it. The habitat
+    // root, meanwhile, was present on every single one.
+    //
+    // This is a floor, never a ceiling. It runs only when nothing was injected,
+    // it defers to any injected value, and if it derives a directory that holds
+    // no journal the read degrades to a LOUD `unavailable` naming the path it
+    // checked. It cannot degrade to silence, which is what makes assuming the
+    // default controller session an acceptable trade here rather than a guess.
+    const habitatRoot = env.HAB_SESSION_HABITAT_ROOT?.trim()
+    if (habitatRoot) {
+      return managedProcessSource(controllerSessionDirFromHabitatRoot(habitatRoot), options, env)
+    }
+
+    // CONTRADICTORY ENVIRONMENT. hab session markers are present and there is
+    // no way at all to locate the journal — not handed over, not derivable.
+    // That is never a healthy standalone, whatever put it in that state, so it
+    // is reported rather than absorbed.
     //
     // Measured 2026-09-07: the live daemon carried HAB_SESSION_HABITAT_ROOT,
     // HAB_SESSION_LAUNCH_ID and HAB_SESSION_INSTRUCTION_ANCHOR and no
@@ -557,7 +617,8 @@ export function createHealthProcessSource(options: HealthProcessSourceOptions = 
       return {
         kind: "misconfigured",
         reason:
-          `hab session markers are set (${present.join(", ")}) but HAB_SESSION_DIR is not, ` +
+          `hab session markers are set (${present.join(", ")}) but none of HAB_SESSION_DIR, ` +
+          "HAB_SCALAR_JOURNAL_DIR or HAB_SESSION_HABITAT_ROOT is, " +
           "so this daemon is under hab and cannot locate its journal. It is NOT standalone: " +
           "standalone means no journal exists. Host scalars — disk, memory, cpu, fd-count — are " +
           "all unreadable for this one reason (@i/4-supervision/24233).",
@@ -568,9 +629,10 @@ export function createHealthProcessSource(options: HealthProcessSourceOptions = 
   if (!env.HAB_SERVICE_KIND?.trim()) return { kind: "standalone-os" }
   // The legacy path keeps its own derivation, per the precedence rule: an
   // environment that still carries `HAB_SESSION_DIR` behaves exactly as it did
-  // before this change. The `habmod` literal survives HERE and only here; it
-  // leaves the moment this branch can be retired, once every launcher injects.
-  return managedProcessSource(join(dirname(sessionDir), "habmod"), options, env)
+  // before this change. It walks up from a sibling session; the habitat-root
+  // branch above walks down from the root. Two routes to ONE directory, sharing
+  // one literal, with a test that fails the moment they disagree.
+  return managedProcessSource(controllerSessionDirBesideSession(sessionDir), options, env)
 }
 
 /**
