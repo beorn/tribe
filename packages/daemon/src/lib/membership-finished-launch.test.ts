@@ -357,7 +357,12 @@ describe("membership projection: a finished launch is history, not a degraded me
     }
   })
 
-  it("both tiers: finishes a launch whose departure fact already migrated into the archive tier", () => {
+  /**
+   * @failure Membership/health blocks the daemon while scanning retained history per disconnected launch (#24284).
+   * @level l1
+   * @consumer Tribe membership and health readers.
+   */
+  it("both tiers: finds an archived departure by member without scanning unrelated history", () => {
     addSession(db, stmts, "archived-1", "@agent/13", { id: "launch-13", parentPid: 13013 })
     const registered = db.prepare("SELECT updated_at FROM sessions WHERE id = ?").get("archived-1") as {
       updated_at: number
@@ -391,6 +396,16 @@ describe("membership projection: a finished launch is history, not a degraded me
       $archived_at: leftAt + 1_000,
       $session_id: "archived-1",
     })
+
+    // The answer alone passed on the 336 MB journal while 20 lookups took 2s.
+    // Inspect the actual statement's access path, avoiding host-load-sensitive timing.
+    const sql = stmts.selectLatestSessionLeftFactForMember.toString()
+    const plan = db.query(`EXPLAIN QUERY PLAN ${sql}`).all({ $member_id: "archived-1" }) as Array<{
+      detail: string
+    }>
+    for (const table of ["messages", "messages_archive"]) {
+      expect(plan.some(({ detail }) => detail.startsWith(`SEARCH ${table} `) && detail.includes("(ref=?)"))).toBe(true)
+    }
 
     const opCtx = makeContext(db, stmts, "operator", "@operator")
     const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, baseOpts())) as {

@@ -276,6 +276,14 @@ export function openDatabase(path: string): Database {
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_room_ts ON messages(room_id, ts)")
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_ts ON messages_archive(ts)")
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_seq ON messages_archive(seq)")
+  // Membership/health reads one departure fact per disconnected launch. Keep
+  // both retention tiers keyed by member, rather than scanning their journals.
+  db.run(
+    "CREATE INDEX IF NOT EXISTS idx_messages_session_left_ref_ts ON messages(ref, ts DESC) WHERE kind = 'event' AND type = 'event.session.left'",
+  )
+  db.run(
+    "CREATE INDEX IF NOT EXISTS idx_messages_archive_session_left_ref_ts ON messages_archive(ref, ts DESC) WHERE kind = 'event' AND type = 'event.session.left'",
+  )
   db.run("CREATE INDEX IF NOT EXISTS idx_pending_recipient ON pending_request(recipient)")
   db.run("CREATE INDEX IF NOT EXISTS idx_pending_sender ON pending_request(sender)")
   // Journal retention's ball-tracker exclusion (retention.ts): before hard-
