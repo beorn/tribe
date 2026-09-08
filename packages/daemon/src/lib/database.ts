@@ -11,8 +11,8 @@ import { TRIBE_ACTIONABLE_TYPES, TRIBE_AUTO_TRACK_TYPES } from "../../../wire/sr
 
 export function openDatabase(path: string): Database {
   const db = new Database(path, { create: true })
-  db.run("PRAGMA journal_mode = WAL")
   db.run("PRAGMA busy_timeout = 5000")
+  db.run("PRAGMA journal_mode = WAL")
 
   db.run(`CREATE TABLE IF NOT EXISTS sessions (
 		id         TEXT PRIMARY KEY,
