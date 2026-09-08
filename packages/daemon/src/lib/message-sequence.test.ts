@@ -62,6 +62,14 @@ describe("durable message sequence", () => {
       ts INTEGER NOT NULL, delivery TEXT NOT NULL DEFAULT 'push', topic TEXT, room_id TEXT,
       request TEXT, reply TEXT, summary TEXT
     )`)
+    // Versioned databases already contain both halves of the message journal.
+    legacy.run(`CREATE TABLE messages_archive (
+      seq INTEGER NOT NULL, id TEXT PRIMARY KEY, type TEXT NOT NULL, sender TEXT NOT NULL, recipient TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'direct', content TEXT NOT NULL, bead_id TEXT, ref TEXT,
+      ts INTEGER NOT NULL, delivery TEXT NOT NULL DEFAULT 'push', topic TEXT, room_id TEXT,
+      request TEXT, reply TEXT, summary TEXT,
+      archived_at INTEGER NOT NULL
+    )`)
     legacy.run(
       `INSERT INTO messages (rowid, id, type, sender, recipient, kind, content, ts)
        VALUES (40, 'legacy-message', 'response', '@sender', '@receiver', 'direct', 'legacy', 1)`,

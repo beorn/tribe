@@ -118,7 +118,6 @@ function insertRow(stmts: TribeStatements, spec: InsertSpec): number {
     $ts: spec.ts,
     $delivery: "push",
     $topic: null,
-    $room_id: null,
     $request: null,
     $reply: null,
     $summary: null,

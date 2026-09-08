@@ -308,7 +308,6 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
       $ts: Date.now() - 13 * 60 * 60 * 1000,
       $delivery: "pull",
       $topic: null,
-      $room_id: null,
       $request: null,
       $reply: null,
     })

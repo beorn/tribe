@@ -30,6 +30,20 @@ describe("session launch identity schema (migration chain from v18)", () => {
     const seedDb = new Database(dbPath, { create: true })
     seedDb.run("CREATE TABLE _schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     seedDb.run("INSERT INTO _schema_meta (key, value) VALUES ('version', '18')")
+    // Versioned databases already contain both halves of the message journal.
+    seedDb.run(`CREATE TABLE messages (
+      id TEXT PRIMARY KEY, type TEXT NOT NULL, sender TEXT NOT NULL, recipient TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'direct', content TEXT NOT NULL, bead_id TEXT, ref TEXT,
+      ts INTEGER NOT NULL, delivery TEXT NOT NULL DEFAULT 'push', topic TEXT, room_id TEXT,
+      request TEXT, reply TEXT, summary TEXT
+    )`)
+    seedDb.run(`CREATE TABLE messages_archive (
+      seq INTEGER NOT NULL, id TEXT PRIMARY KEY, type TEXT NOT NULL, sender TEXT NOT NULL, recipient TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'direct', content TEXT NOT NULL, bead_id TEXT, ref TEXT,
+      ts INTEGER NOT NULL, delivery TEXT NOT NULL DEFAULT 'push', topic TEXT, room_id TEXT,
+      request TEXT, reply TEXT, summary TEXT,
+      archived_at INTEGER NOT NULL
+    )`)
     seedDb.run(`CREATE TABLE sessions (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL UNIQUE,

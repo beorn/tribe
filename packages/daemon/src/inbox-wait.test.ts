@@ -41,7 +41,6 @@ function createTestInboxWaitManager(readStatus: (session: string) => InboxStatus
         ts: new Date(0).toISOString(),
         delivery: "pull",
         topic: null,
-        room_id: null,
         summary: null,
       })),
       pending_balls: [],
@@ -78,7 +77,6 @@ function message(overrides: Partial<MessageInsertedInfo>): MessageInsertedInfo {
     bead_id: null,
     delivery: "pull",
     topic: null,
-    roomId: null,
     correlatedReply: null,
     ...overrides,
   }
@@ -300,7 +298,7 @@ describe("createInboxWaitManager", () => {
 
   it("does not wake on the retired daemon-only ball reminder type", async () => {
     vi.useFakeTimers()
-    let unread = 0
+    const unread = 0
     const manager = createTestInboxWaitManager((session) => status(session, unread))
     const wait = manager.wait("@author", "conn-1", 1_000)
 
