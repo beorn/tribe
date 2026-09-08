@@ -25,6 +25,9 @@ import { HAB_SESSION_MARKERS } from "./health-process-source.ts"
  *          other test supplies its own environment.
  *
  * @level   l1 — the real sanitizer, no fixture of the function under test
+ * @consumer `createHealthProcessSource`, whose contradictory-environment branch
+ *           reads this exact marker list, and through it the disk-blindness alert
+ *           that stayed silent while a 61G tmpfs filled on 2026-09-07
  * @bead    @i/4-supervision/24233-tmpfs-has-no-reaper (@cto's carried-forward term)
  */
 describe("the markers list and the standalone sanitizer agree on one vocabulary", () => {
