@@ -44,7 +44,12 @@ import { hashSelfMailboxAuthority, readSelfMailboxAuthorityFromEnvironment } fro
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
-import { isExplicitTribePersonaName, isTribeNameShape, TRIBE_NAME_SHAPE_ERROR } from "./lib/persona-name.ts"
+import {
+  autoIdentifyAsk,
+  isExplicitTribePersonaName,
+  isTribeNameShape,
+  TRIBE_NAME_SHAPE_ERROR,
+} from "./lib/persona-name.ts"
 import { deriveTribePersonaLaunchIdentity } from "./lib/persona-launch-identity.ts"
 import { createLogger, setSuppressConsole } from "loggily"
 import { createTimers } from "./timers.ts"
@@ -854,17 +859,34 @@ mcp = new Server(
 // ---------------------------------------------------------------------------
 
 let nudgeSent = false
-/** Check if session name is auto-generated (not explicitly set by user/agent) */
-function isAutoName(name: string): boolean {
-  return name.startsWith("member-") || name.startsWith("pending-") || /^[a-z]+-\d+-[a-z0-9]{3}$/.test(name)
-}
 mcp.setRequestHandler(ListToolsRequestSchema, async () => {
-  // Nudge on tools discovery (fires on session init/resume)
-  if (!nudgeSent && isAutoName(myName)) {
+  // Nudge on tools discovery (fires on session init/resume).
+  //
+  // GATED ON NOT-JOINED, NOT ON THE NAME. This fired only for an
+  // auto-generated name, on the theory that the nudge exists to get a session
+  // named. Naming is half of what the join does: until it runs,
+  // `registerParamsForConnection` reports `pull` however push-capable this
+  // adapter is, so an unjoined session is MUTED as well as anonymous.
+  //
+  // A managed seat is launched with its persona name already seeded, so it
+  // never surfaces as `unknown-*`, `isAutoName` is false, this nudge never
+  // fired, and nothing else in this process ever asked the model to join. The
+  // two rules in c6071f3 above — keep pre-join delivery pull-only, and seed
+  // explicit @personas at register — are each correct, and composed into a
+  // silent mute: the second removed the trigger the first depends on. Nobody
+  // wrote a bug.
+  //
+  // Measured 2026-09-08: six live claude seats all launched
+  // `TRIBE_DELIVERY=push`; every daemon row read `pull` except the one seat
+  // whose model had happened to call join by hand while testing something
+  // else. That is also why it survived — every investigator self-cured, so the
+  // healthy-looking sample was systematically the wrong one.
+  if (!nudgeSent && !joined) {
     nudgeSent = true
+    const ask = autoIdentifyAsk(myName)
     timers.setTimeout(() => {
       sendChannel(
-        `Auto-identify: call tribe.join(name="${myName}") with a short name for your focus area. Omit the role parameter — the daemon auto-assigns it. Do not call tribe.members or tribe.fetch — just join silently and continue.`,
+        `Auto-identify: ${ask}. Omit the role parameter — the daemon auto-assigns it. Omit the delivery parameter — the join activates the delivery mode this adapter was launched with, and passing one overrides that instead. Do not call tribe.members or tribe.fetch — just join silently and continue.`,
         { from: "stdio-adapter", type: "system" },
       )
     }, 500)

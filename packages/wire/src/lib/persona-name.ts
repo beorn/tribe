@@ -57,3 +57,28 @@ export function isTribeNameShape(name: string): boolean {
 export function isExplicitTribePersonaName(name: string): boolean {
   return name.startsWith("@") && isTribeNameShape(name)
 }
+
+/**
+ * Is `name` one the adapter generated for itself, rather than one a launcher or
+ * an agent chose? Auto names are placeholders; every other name is somebody's
+ * decision and must not be overwritten.
+ */
+export function isAutoName(name: string): boolean {
+  return name.startsWith("member-") || name.startsWith("pending-") || /^[a-z]+-\d+-[a-z0-9]{3}$/.test(name)
+}
+
+/**
+ * The join request the auto-identify nudge makes of one session.
+ *
+ * The nudge fires whenever a session has not joined — not only when it is
+ * anonymous — because the join does two jobs: it names the session AND it lifts
+ * the pre-join `pull` placeholder to the delivery mode the adapter was launched
+ * with. A seeded persona needs the second job and must not be offered the
+ * first: telling `@chief` to pick "a short name for your focus area" would
+ * rename a seat the whole fleet addresses by name.
+ */
+export function autoIdentifyAsk(name: string): string {
+  return isAutoName(name)
+    ? `call tribe.join(name="<a short name for your focus area>")`
+    : `call tribe.join(name="${name}") — your name is already set, so join under it rather than renaming`
+}

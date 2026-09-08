@@ -69,3 +69,40 @@ describe("turn-start inbox instruction (km 19442 context-flood guard)", () => {
     expect(src).not.toContain("Silver UI/Silvercode")
   })
 })
+
+describe("auto-identify nudge fires on NOT-JOINED, not on the name (2026-09-08)", () => {
+  // A managed seat is launched with its persona name seeded, so it never
+  // surfaces as unknown-* and the old isAutoName gate never fired for it.
+  // Nothing else in this process asks a model to join, and until it joins
+  // registerParamsForConnection reports pull however push-capable the adapter
+  // is. Six live claude seats measured that night: all launched
+  // TRIBE_DELIVERY=push, every daemon row pull but one.
+  it("gates the nudge on the join state, never on the name shape", () => {
+    expect(src).toMatch(/if \(!nudgeSent && !joined\)/)
+    expect(src).not.toMatch(/if \(!nudgeSent && isAutoName\(/)
+  })
+
+  it("keeps the once-only semantics — only the second conjunct changed", () => {
+    expect((src.match(/nudgeSent = true/g) ?? []).length).toBe(1)
+    expect((src.match(/let nudgeSent = false/g) ?? []).length).toBe(1)
+  })
+
+  it("reads join-ness from the adapter's existing flag, with no second authority", () => {
+    expect((src.match(/^let joined = /m) ?? []).length).toBe(1)
+    expect(src).toContain('if (name === "join") joined = true')
+  })
+
+  it("delegates the wording so a seeded persona is never told to rename", () => {
+    // The branch itself is behaviourally tested in persona-name.test.ts; the
+    // adapter must not carry a second copy of that decision.
+    expect(src).toContain("autoIdentifyAsk(myName)")
+    expect(src).not.toMatch(/isAutoName\(myName\)\s*\n?\s*\?/)
+  })
+
+  it("tells the model to OMIT delivery, so the join activates the launched mode", () => {
+    // Passing delivery SETS the value instead of activating what the 21919
+    // classifier already decided at launch, which is both wrong and the thing
+    // that would invalidate any measurement of the promotion.
+    expect(src).toContain("Omit the delivery parameter")
+  })
+})

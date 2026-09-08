@@ -20,7 +20,13 @@
  * malformed separators, over-length).
  */
 import { describe, expect, it } from "vitest"
-import { MAX_TRIBE_NAME_LENGTH, isExplicitTribePersonaName, isTribeNameShape } from "../src/lib/persona-name.ts"
+import {
+  MAX_TRIBE_NAME_LENGTH,
+  autoIdentifyAsk,
+  isAutoName,
+  isExplicitTribePersonaName,
+  isTribeNameShape,
+} from "../src/lib/persona-name.ts"
 
 /**
  * Names the fleet actually emits. Every one of these must survive BOTH gates —
@@ -118,5 +124,38 @@ describe("isTribeNameShape", () => {
   it("accepts the sigil-less forms the daemon has always allowed", () => {
     expect(isTribeNameShape("ci")).toBe(true)
     expect(isTribeNameShape("agent/7")).toBe(true)
+  })
+})
+
+describe("autoIdentifyAsk — the nudge must not rename a seat the fleet addresses", () => {
+  // 2026-09-08. The auto-identify nudge used to fire only for auto-generated
+  // names, because it was understood as a NAMING prompt. The join it asks for
+  // also lifts the pre-join `pull` placeholder to the delivery mode the adapter
+  // was launched with, so a seeded persona needs the join too — and now gets
+  // the nudge. What it must NOT get is the naming half: measured that night,
+  // six live claude seats were launched `TRIBE_DELIVERY=push` and every daemon
+  // row read `pull` except the one whose model had called join by hand.
+
+  it("offers a NAME to a session that has none", () => {
+    for (const auto of ["member-1", "pending-4f2", "silvercode-3-a1b"]) {
+      expect(isAutoName(auto)).toBe(true)
+      expect(autoIdentifyAsk(auto)).toContain("a short name for your focus area")
+    }
+  })
+
+  it("tells a seeded persona to join UNDER ITS OWN NAME, never to pick one", () => {
+    for (const seat of ["@chief", "@dev/6", "@ci", "@adhoc/0"]) {
+      expect(isAutoName(seat)).toBe(false)
+      const ask = autoIdentifyAsk(seat)
+      expect(ask).toContain(`tribe.join(name="${seat}")`)
+      expect(ask).toContain("your name is already set")
+      // The regression this pins: renaming @chief to a focus-area word would
+      // make every seat that addresses it by name unable to reach it.
+      expect(ask).not.toContain("a short name for your focus area")
+    }
+  })
+
+  it("names the seat verbatim so the model does not have to derive it", () => {
+    expect(autoIdentifyAsk("@dev/11")).toContain('tribe.join(name="@dev/11")')
   })
 })
