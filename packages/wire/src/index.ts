@@ -48,6 +48,7 @@ export {
   projectTribeLaunchEnvironment,
   readTribeLaunchId,
   tribeLaunchEnvironmentNames,
+  tribeSessionIdentityEnvironmentNames,
   withTribeLaunchEnvironment,
 } from "./launch-environment.ts"
 
@@ -162,3 +163,6 @@ export {
 // (@km/infra/20359, vendor-local; mirrors code-pin's running-code visibility).
 export { formatRuntimeId, gitShortHead, tribeWireRuntimeId, wireVersion } from "./runtime-id.ts"
 export { deriveTribePersonaLaunchIdentity, type TribePersonaLaunchIdentity } from "./lib/persona-launch-identity.ts"
+
+export { connectTribeLaunch } from "./launch-registration.ts"
+export type { TribeLaunchRequest, TribeLaunchConnection, TribeLaunchDeps } from "./launch-registration.ts"

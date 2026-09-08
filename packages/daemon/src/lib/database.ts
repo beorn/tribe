@@ -19,6 +19,7 @@ export function openDatabase(path: string): Database {
 		name       TEXT NOT NULL UNIQUE,
 		role       TEXT NOT NULL,
 		domains    TEXT NOT NULL DEFAULT '[]',
+		principal_class TEXT NOT NULL DEFAULT 'agent',
 		pid        INTEGER NOT NULL,
 		cwd        TEXT,
 		project_id TEXT,
@@ -1192,11 +1193,25 @@ const MIGRATIONS: readonly Migration[] = [
       )`)
     },
   },
+  {
+    version: 30,
+    name: "service-principal-class",
+    up(db) {
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>).map((row) => row.name),
+      )
+      if (!columns.has("principal_class")) {
+        db.run("ALTER TABLE sessions ADD COLUMN principal_class TEXT NOT NULL DEFAULT 'agent'")
+      }
+    },
+  },
 ]
 
 /** The schema terminus `openDatabase` upgrades to — derived from the same
  * `MIGRATIONS.at(-1)` it uses, so a test can never pin a stale literal. */
-export const CURRENT_SCHEMA_VERSION: number = MIGRATIONS.at(-1)!.version
+const latestMigration = MIGRATIONS.at(-1)
+if (latestMigration === undefined) throw new Error("Tribe database has no schema migrations")
+export const CURRENT_SCHEMA_VERSION: number = latestMigration.version
 
 // ---------------------------------------------------------------------------
 // Prepared statements
@@ -1905,7 +1920,7 @@ export function createStatements(db: Database) {
     // BINARY collation — while remaining a range scan idx_sessions_launch_id
     // can serve. See derivedLaunchPrefixUpperBound for the upper bound.
     getSessionsByProviderLaunchId: db.prepare(
-      "SELECT name, launch_id, launch_parent_pid FROM sessions " +
+      "SELECT id, name, principal_class, launch_id, launch_parent_pid FROM sessions " +
         "WHERE launch_id = $launch_id " +
         "OR (launch_id >= $derived_prefix AND launch_id < $derived_prefix_upper) ORDER BY id",
     ),

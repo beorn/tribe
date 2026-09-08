@@ -185,6 +185,16 @@ export type CanonicalHostScalarObservation =
 
 export type HealthProcessSource =
   | { readonly kind: "standalone-os" }
+  /**
+   * Under hab, but without the configuration needed to read its journal.
+   *
+   * This is NOT `standalone-os` and the difference is the whole defect it
+   * exists to end: `standalone-os` means no journal EXISTS, which is honest and
+   * must stay silent, while this means a journal probably exists and we cannot
+   * reach it, which must be LOUD. One value naming both is why every
+   * scalar-backed alert on this host was silent for the life of the monitor.
+   */
+  | { readonly kind: "misconfigured"; readonly reason: string }
   | {
       readonly kind: "managed"
       readonly read: () => Promise<CanonicalProcessObservation>
@@ -492,10 +502,48 @@ function isCircuitFailure(reason: string): boolean {
   )
 }
 
+/**
+ * Variables that prove hab launched this process, WITHOUT proving it is
+ * hab-managed. `sanitizeStandaloneDaemonEnvironment` deliberately strips the
+ * management markers (`HAB_SESSION_DIR`, `HAB_SERVICE_KIND`, `HAB_SERVICE_NAME`)
+ * and leaves these, so these are exactly the evidence that hab is present when
+ * the management markers are gone.
+ */
+export const HAB_SESSION_MARKERS = [
+  "HAB_SESSION_HABITAT_ROOT",
+  "HAB_SESSION_LAUNCH_ID",
+  "HAB_SESSION_INSTRUCTION_ANCHOR",
+] as const
+
 export function createHealthProcessSource(options: HealthProcessSourceOptions = {}): HealthProcessSource {
   const env = options.env ?? process.env
   const sessionDir = env.HAB_SESSION_DIR?.trim()
-  if (!sessionDir || !env.HAB_SERVICE_KIND?.trim()) return { kind: "standalone-os" }
+  if (!sessionDir) {
+    // CONTRADICTORY ENVIRONMENT. hab session markers are present and the one
+    // variable this source needs is not. That is never a healthy standalone,
+    // whatever put it in that state, so it is reported rather than absorbed.
+    //
+    // Measured 2026-09-07: the live daemon carried HAB_SESSION_HABITAT_ROOT,
+    // HAB_SESSION_LAUNCH_ID and HAB_SESSION_INSTRUCTION_ANCHOR and no
+    // HAB_SESSION_DIR among 84 variables, because
+    // `sanitizeStandaloneDaemonEnvironment` strips it before minting a
+    // standalone supervisor — CORRECTLY, so the daemon cannot inherit hab's
+    // idle-quit marker and never retire. The strip is right. Reading a
+    // LIFECYCLE answer as the answer to a JOURNAL-ACCESS question is the bug.
+    const present = HAB_SESSION_MARKERS.filter((name) => env[name]?.trim())
+    if (present.length > 0) {
+      return {
+        kind: "misconfigured",
+        reason:
+          `hab session markers are set (${present.join(", ")}) but HAB_SESSION_DIR is not, ` +
+          "so this daemon is under hab and cannot locate its journal. It is NOT standalone: " +
+          "standalone means no journal exists. Host scalars — disk, memory, cpu, fd-count — are " +
+          "all unreadable for this one reason (@i/4-supervision/24233).",
+      }
+    }
+    return { kind: "standalone-os" }
+  }
+  if (!env.HAB_SERVICE_KIND?.trim()) return { kind: "standalone-os" }
   const stateRoot = dirname(sessionDir)
   const controllerSessionDir = join(stateRoot, "habmod")
   const maxAgeMs = options.maxAgeMs ?? DEFAULT_MAX_AGE_MS

@@ -519,20 +519,37 @@ export function partitionLateEvents(
 /**
  * The exact warn line for a repo's late events dropped at delivery — pulled
  * into a pure function so its shape is unit-tested without pollEvents'
- * network I/O. `late` is newest-first, matching selectNewEvents' order, so
- * the range reads oldest..newest. Throws on an empty list rather than
- * printing an undefined range; callers only invoke this when
- * partitionLateEvents reports at least one late event (km 24154).
+ * network I/O. Throws on an empty list rather than printing an undefined
+ * range; callers only invoke this when partitionLateEvents reports at least
+ * one late event (km 24154).
+ *
+ * THE RANGE IS TAKEN BY TIME, NEVER BY POSITION. This used to read `late[0]`
+ * as newest and the last element as oldest, on the strength of a comment
+ * saying the list is newest-first "matching selectNewEvents' order". That is
+ * true by ID — which is what selectNewEvents sorts by — and this whole feature
+ * exists because GitHub emits ids ascending while `created_at` does NOT. So
+ * position was exactly the wrong proxy for chronology on the only input this
+ * ever sees, and the printed range inverted whenever the late set was
+ * non-monotonic. Live specimen 2026-09-07: `(…T17:40:04Z..…T16:07:56Z)`.
+ *
+ * Lexicographic comparison IS chronological here: the Events API stamps
+ * `created_at` as fixed-width ISO-8601 in UTC (`2026-09-05T16:07:56Z`), so
+ * string order and time order coincide without parsing a Date per event.
  */
 export function formatLateEventsWarning(repo: string, late: readonly GitHubEvent[]): string {
-  const newest = late[0]
-  const oldest = late[late.length - 1]
-  if (newest === undefined || oldest === undefined) {
+  const first = late[0]
+  if (first === undefined) {
     throw new Error("formatLateEventsWarning requires at least one late event")
+  }
+  let oldest = first.created_at
+  let newest = first.created_at
+  for (const event of late) {
+    if (event.created_at < oldest) oldest = event.created_at
+    if (event.created_at > newest) newest = event.created_at
   }
   return (
     `github events: ${late.length} late events for ${repo} ` +
-    `(${oldest.created_at}..${newest.created_at}) not broadcast; GitHub materialized them late`
+    `(${oldest}..${newest}) not broadcast; GitHub materialized them late`
   )
 }
 

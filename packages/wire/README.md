@@ -84,6 +84,17 @@ currently exists: the OS may have recycled it. Health keeps addressable
 complete-launch rows with no transport loud, while connection-scoped no-launch
 rows are reaped only after reconnect grace.
 
+Service principals declare `principalClass: "service"` when registering through
+`connectTribeLaunch`. They are attributed senders with their own bare names,
+such as `telegram` and `state-project-watch`; they are never claimable seats,
+refilled workers, or owners of standing duties. Their launch authority lasts
+only while the service owner's connection remains open. A CLI connection
+cannot extend that lifetime. After a disconnect, the service must register
+again before sending; its name preserves attribution across runs, while each
+new process mints fresh launch proof. Agent principals retain their existing
+disconnected launch recovery. Registration must acknowledge the service class,
+so an older daemon fails explicitly instead of granting agent recovery semantics.
+
 When known addressable durable launch rows have no authenticated transport,
 both `members` and `health` include `membership_discrepancy` with the connected
 durable-launch, known durable-launch, and missing counts plus the affected

@@ -340,6 +340,35 @@ export function withDispatcher<
      * extending what this bearer may do requires a new typed member and its
      * own boundary test, never a caller-supplied method name.
      */
+    type LaunchAuthorityRow = {
+      id: string
+      name: string
+      principal_class: "agent" | "service"
+      launch_id: string | null
+      launch_parent_pid: number | null
+    }
+
+    /** One authority decision for lookup, fan-in, bearer reads, and attributed
+     * operations (including the send transaction that creates a ball).
+     * A service CLI transport cannot outlive its service owner's authority.
+     * Agents intentionally retain disconnected launch recovery.
+     */
+    function hasLaunchAuthority(session: LaunchAuthorityRow): boolean {
+      if (isTombstonedSessionName(session.name)) return false
+      if (session.principal_class === "agent") return true
+      if (session.principal_class !== "service") throw new Error(`invalid principal class for ${session.name}`)
+      if (!registry.hasActiveTransport(session.id)) return false
+      return Array.from(clients.values()).some(
+        (client) =>
+          client.ctx.sessionId === session.id &&
+          client.principalClass === "service" &&
+          client.launchId === session.launch_id &&
+          client.launchParentPid === session.launch_parent_pid &&
+          client.pid === session.launch_parent_pid &&
+          !client.socket.destroyed,
+      )
+    }
+
     function resolveSessionAuthority(value: unknown): SessionAuthorityResolution {
       const supplied = requiredNonEmptyString(value)
       if (supplied === null) {
@@ -351,7 +380,7 @@ export function withDispatcher<
       }
       const row = db
         .prepare(
-          `SELECT id, name, role, domains, claude_session_id, claude_session_name
+          `SELECT id, name, role, domains, principal_class, launch_id, launch_parent_pid, claude_session_id, claude_session_name
            FROM sessions WHERE mailbox_authority_hash = $hash`,
         )
         .get({ $hash: hashSelfMailboxAuthority(supplied) }) as {
@@ -359,10 +388,13 @@ export function withDispatcher<
         name: string
         role: TribeRole
         domains: string
+        principal_class: "agent" | "service"
+        launch_id: string | null
+        launch_parent_pid: number | null
         claude_session_id: string | null
         claude_session_name: string | null
       } | null
-      if (row === null) {
+      if (row === null || !hasLaunchAuthority(row)) {
         return {
           errorCode: -32003,
           errorMessage: `current session authority was rejected or revoked; ${AG_SESSION_AUTH_ENV} did not match a live managed session`,
@@ -540,14 +572,8 @@ export function withDispatcher<
         $launch_id: launchId,
         $derived_prefix: derivedPrefix,
         $derived_prefix_upper: derivedPrefixUpper,
-      }) as Array<{
-        name: string
-        launch_id: string
-        launch_parent_pid: number | null
-      }>
-      // Tombstones retain journal addressability but no longer own routing.
-      // A disconnected canonical row remains valid for managed CLI recovery.
-      const routableLaunchSessions = launchSessions.filter((session) => !isTombstonedSessionName(session.name))
+      }) as LaunchAuthorityRow[]
+      const routableLaunchSessions = launchSessions.filter(hasLaunchAuthority)
       const persona = hasPersona && typeof params.persona === "string" ? params.persona.trim() : ""
       if (hasPersona && persona.length === 0) {
         return { errorCode: -32602, errorMessage: "Managed inbox persona must be a non-empty string" }
@@ -574,6 +600,9 @@ export function withDispatcher<
             (persona.length > 0 ? `; persona ${persona} matched ${resolvedLaunchSessions.length}` : "") +
             "; exactly one routable session is required",
         }
+      }
+      if (launchSession.launch_id === null) {
+        return { errorCode: -32003, errorMessage: "Inbox launch identity has no authoritative launch id" }
       }
       if (!Number.isSafeInteger(launchSession.launch_parent_pid) || Number(launchSession.launch_parent_pid) <= 0) {
         return { errorCode: -32003, errorMessage: "Inbox launch identity has no authoritative parent pid" }
@@ -878,6 +907,7 @@ export function withDispatcher<
         name: string
         role: TribeRole
         domains: string[]
+        principalClass: "agent" | "service"
         project: string
         projectName: string
         projectId: string
@@ -898,6 +928,7 @@ export function withDispatcher<
         name: fields.name,
         role: fields.role,
         domains: fields.domains,
+        principalClass: fields.principalClass,
         project: fields.project,
         projectName: fields.projectName,
         projectId: fields.projectId,
@@ -991,6 +1022,23 @@ export function withDispatcher<
       }
 
       try {
+        if (
+          method !== "register" &&
+          liveClient?.launchId &&
+          !hasLaunchAuthority({
+            id: liveClient.ctx.sessionId,
+            name: liveClient.name,
+            principal_class: liveClient.principalClass ?? "agent",
+            launch_id: liveClient.launchId,
+            launch_parent_pid: liveClient.launchParentPid,
+          })
+        ) {
+          return makeError(
+            id,
+            -32003,
+            `launch authority for ${liveClient.name} is unavailable; its service owner is disconnected`,
+          )
+        }
         switch (method) {
           case "register": {
             const clientProtocolVersion = p.protocolVersion === undefined ? undefined : Number(p.protocolVersion)
@@ -1023,6 +1071,9 @@ export function withDispatcher<
             if (p.mailboxAuthorityHash !== undefined && mailboxAuthorityHash === null) {
               return makeError(id, -32602, "register mailboxAuthorityHash must be a lowercase SHA-256 hex digest")
             }
+            if (p.principalClass !== undefined && p.principalClass !== "agent" && p.principalClass !== "service") {
+              return makeError(id, -32602, "register principalClass must be agent or service")
+            }
             const hasLaunchId = p.launchId !== undefined && p.launchId !== null
             const hasLaunchParentPid = p.launchParentPid !== undefined && p.launchParentPid !== null
             if (hasLaunchId !== hasLaunchParentPid) {
@@ -1045,6 +1096,12 @@ export function withDispatcher<
             }
             // Only complete absence selects legacy per-transport semantics.
             const launchIdentity = launchIdentityValid ? { id: launchIdRaw, parentPid: launchParentPidRaw } : null
+
+            const isServiceOwner =
+              p.principalClass === "service" && launchIdentity !== null && Number(p.pid) === launchIdentity.parentPid
+            if (p.principalClass === "service" && !isServiceOwner) {
+              return makeError(id, -32602, "a service owner must register its own pid as launchParentPid")
+            }
 
             let role = detectRole(db, { role: p.role as string | undefined })
             if (role === "daemon" || role === "pending") role = "member"
@@ -1153,6 +1210,40 @@ export function withDispatcher<
                 }
               }
             }
+            // Class belongs to the resolved identity, not the optional caller
+            // name. PID/cwd adoption and persisted renames must not turn an
+            // expired service into an agent with disconnected recovery rights.
+            const priorServices = db
+              .prepare(
+                `SELECT id, name, principal_class, launch_id, launch_parent_pid FROM sessions
+               WHERE principal_class = 'service' AND
+                 (name = ? OR id = ? OR (launch_id = ? AND launch_parent_pid = ?))`,
+              )
+              .all(
+                resolvedName,
+                adopted?.id ?? null,
+                launchIdentity?.id ?? null,
+                launchIdentity?.parentPid ?? null,
+              ) as LaunchAuthorityRow[]
+            if (priorServices.length > 0 && p.principalClass === "agent") {
+              return makeError(id, -32602, "register cannot change a service launch into an agent launch")
+            }
+            const principalClass = p.principalClass === "service" || priorServices.length > 0 ? "service" : "agent"
+            if (principalClass === "service" && !isServiceOwner) {
+              const authorized = priorServices.some(
+                (prior) =>
+                  prior.launch_id === launchIdentity?.id &&
+                  prior.launch_parent_pid === launchIdentity?.parentPid &&
+                  hasLaunchAuthority(prior),
+              )
+              if (!authorized) {
+                return makeError(
+                  id,
+                  -32003,
+                  `launch authority for ${resolvedName} is unavailable; its service owner is disconnected or the current launch tuple was not supplied`,
+                )
+              }
+            }
             const launchFanIn = findLaunchFanIn(resolvedName, clientPid, launchIdentity, connId)
             if (launchFanIn) {
               const { holder, launch, transportClass } = launchFanIn
@@ -1167,6 +1258,7 @@ export function withDispatcher<
                 name: holder.name,
                 role: holder.role,
                 domains: holder.domains,
+                principalClass: holder.principalClass ?? "agent",
                 project,
                 projectName,
                 projectId,
@@ -1191,6 +1283,7 @@ export function withDispatcher<
                 sessionId: client.ctx.sessionId,
                 name: client.name,
                 role: client.role,
+                principalClass: client.principalClass,
                 protocolVersion: negotiatedProtocolVersion ?? TRIBE_PROTOCOL_VERSION,
                 supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
                 coordinationState: coordState,
@@ -1318,6 +1411,7 @@ export function withDispatcher<
               launchIdentity?.parentPid ?? null,
               mailboxAuthorityHash,
             )
+            db.prepare("UPDATE sessions SET principal_class = ? WHERE id = ?").run(principalClass, clientCtx.sessionId)
             // Apply launch-declared admission before applyClient makes this
             // session visible to the broadcast fanout. Omission preserves a
             // reconnecting session's stored preference; an explicit mode is
@@ -1328,6 +1422,7 @@ export function withDispatcher<
               name,
               role,
               domains,
+              principalClass,
               project,
               projectName,
               projectId,
@@ -1356,6 +1451,7 @@ export function withDispatcher<
               sessionId: clientCtx.sessionId,
               name,
               role,
+              principalClass,
               protocolVersion: negotiatedProtocolVersion ?? TRIBE_PROTOCOL_VERSION,
               supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
               coordinationState: coordState,
@@ -1556,7 +1652,8 @@ export function withDispatcher<
                 error: `contradictory live membership for ${name}: ${holders.length} logical holders`,
               })
             }
-            const holder = holders[0]!
+            const holder = holders[0]
+            if (holder === undefined) throw new Error(`live membership for ${name} disappeared during registration`)
             const row = db.prepare("SELECT delivery FROM sessions WHERE id = ?").get(holder.id) as {
               delivery: string
             } | null
@@ -2150,17 +2247,17 @@ export function withDispatcher<
       socketToClient.set(sock, connId)
       onActiveClient()
 
-      const parse = createLineParser(async (msg: JsonRpcMessage) => {
-        if (isRequest(msg)) {
-          // Slow-method timing lives inside handleRequest so this path and the
-          // MCP tools/call path are covered by one implementation.
-          const response = await handleRequest(msg, connId)
-          try {
-            sock.write(response)
-          } catch {
-            /* socket died during handling */
-          }
-        }
+      const parse = createLineParser((msg: JsonRpcMessage) => {
+        if (!isRequest(msg)) return
+        // Slow-method timing covers this path and the MCP tools/call path.
+        void handleRequest(msg, connId)
+          .then((response) => {
+            return sock.destroyed ? undefined : sock.write(response)
+          })
+          .catch((error: unknown) => {
+            log.error?.(`request ${msg.method} failed on connection ${connId}`, { error })
+            sock.destroy()
+          })
       })
 
       sock.on("data", parse)

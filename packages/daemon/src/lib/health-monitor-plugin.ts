@@ -921,6 +921,16 @@ export interface AlertState {
   memAboveWarning: number
   /** Consecutive high disk I/O readings */
   ioAboveWarning: number
+  /**
+   * Consecutive samples where the scalar lane produced no disk capacity.
+   *
+   * A monitor that cannot see must say so. Without this the disk branch
+   * silently cleared its own alerts whenever the metric was absent, so a host
+   * whose scalar producer was gone looked exactly like a host under no
+   * pressure — and did, through a 61G tmpfs reaching 86% and four seats losing
+   * their shells with no warning (@i/4-supervision/24233).
+   */
+  scalarBlindSamples: number
   /** Track which alerts have been fired to avoid repeating */
   firedAlerts: Set<string>
   /** Per-alert last-fire timestamps (used by rate-limited alerts like chief:expired) */
@@ -946,6 +956,7 @@ export function createAlertState(): AlertState {
     memAboveCritical: 0,
     memAboveWarning: 0,
     ioAboveWarning: 0,
+    scalarBlindSamples: 0,
     firedAlerts: new Set(),
     firedAt: new Map(),
     gitLockDetected: false,
@@ -1083,6 +1094,38 @@ export function evaluateAlerts(
   const scalarFact = scalarFactIdentity(metrics.scalarObservation)
   const evaluateScalarMetrics = scalarFact === undefined || scalarFact !== state.lastScalarFact
   if (scalarFact !== undefined && evaluateScalarMetrics) state.lastScalarFact = scalarFact
+
+  // SEEING IS NOT A THRESHOLD EVALUATION, and this clearing edge must not sit
+  // behind the dedupe gate above.
+  //
+  // `evaluateScalarMetrics` exists so the evaluator does not re-judge numbers
+  // it has already judged. That is right for thresholds and WRONG for
+  // blindness, because blindness is not a fact about the numbers — it is a
+  // fact about whether this process can read them at all.
+  //
+  // The failure it caused, found by `@ci` returning head 6dee0742 unadmitted:
+  // while blind the observation carries NO identity, so `state.lastScalarFact`
+  // is never overwritten and still holds the last PRE-OUTAGE epoch+sequence. A
+  // journal RETRY that re-emits that same fact — an ordinary re-read, not an
+  // exotic input — then reads as "same fact, skip". The clearing inside the
+  // disk branches never runs, `scalarBlindSamples` stays at 2 and `disk:blind`
+  // stays in `firedAlerts`, so the NEXT real outage counts back up and is
+  // swallowed by its own dedupe entry. That is the swallowed-alert failure this
+  // whole change exists to end, reintroduced one gate away from the fix.
+  //
+  // The predicate is the same one the disk branch uses, and deliberately so:
+  // blind means NO scalar facts at all, which is narrower than "no disk number
+  // in this sample" — a platform that honestly reports disk as unsupported is
+  // seeing, not blind.
+  //
+  // The two clears inside the disk branches below are left in place rather than
+  // deleted. They are now redundant for every case this one covers, and keeping
+  // them makes this change strictly additive: no sample that cleared before can
+  // stop clearing because of it.
+  if (metrics.scalarObservation.kind !== "canonical-unavailable") {
+    state.scalarBlindSamples = 0
+    state.firedAlerts.delete("disk:blind")
+  }
   const cores = metrics.cpu.coreCount
   const load = metrics.cpu.loadAvg1m
 
@@ -1224,6 +1267,9 @@ export function evaluateAlerts(
 
   // --- Disk ---
   if (evaluateScalarMetrics && metrics.disk) {
+    // A reading is the clearing edge for the blindness condition below.
+    state.scalarBlindSamples = 0
+    state.firedAlerts.delete("disk:blind")
     const disk = describeDiskCapacity(metrics.disk)
     if (disk.usagePercent > thresholds.diskCriticalPercent) {
       if (!state.firedAlerts.has("disk:critical")) {
@@ -1253,8 +1299,90 @@ export function evaluateAlerts(
       state.firedAlerts.delete("disk:warning")
     }
   } else if (evaluateScalarMetrics) {
+    // NO DISK METRIC. This branch used to clear the disk alerts and say
+    // nothing, which is why a host at 86% looked identical to a host at rest:
+    // the monitor was not deciding against a warning, it had nothing to decide
+    // with, and absence of measurement was indistinguishable from absence of
+    // pressure. Announce the blindness on the same path the disk alert itself
+    // would use — a log line is how this stayed invisible.
+    //
+    // Two consecutive samples, matching the disk-I/O rule above: sustained
+    // blindness holds ONE open condition, while a single failed read does not
+    // page. The count also makes this fire from BOOT — a daemon that has never
+    // seen a scalar takes this branch on every sample — rather than only on a
+    // working-to-blind transition, which is the shape the live failure had.
     state.firedAlerts.delete("disk:critical")
     state.firedAlerts.delete("disk:warning")
+    // BLIND MEANS NO SCALAR FACTS AT ALL, which is narrower than "no disk
+    // number here". An observation that declares disk unavailable — the
+    // standalone-os kind names `disk.bytes` and `disk.inodes` outright — is not
+    // blind, it is honestly reporting a platform limit, and crying blind at it
+    // is the noise that gets an alert muted. Muted is how the real one stayed
+    // invisible, so the narrow rule is the useful one. Three existing delivery
+    // tests caught the broad version; they were right and are untouched.
+    if (metrics.scalarObservation.kind !== "canonical-unavailable") {
+      // A NON-BLIND OBSERVATION IS THE CLEARING EDGE, and it has to clear the
+      // DEDUPE ENTRY as well as the counter. Resetting only the counter latches
+      // the condition: `disk:blind` stays in firedAlerts, so the next real
+      // outage counts back up to two and is then swallowed by its own dedupe —
+      // the swallowed-alert failure this whole change exists to end,
+      // reintroduced one branch away from the fix. The disk-present branch
+      // above already clears it; this branch is the one reached when a sample
+      // carries scalar facts but no disk number, which is the standalone-os
+      // case, and it clears it too.
+      state.scalarBlindSamples = 0
+      state.firedAlerts.delete("disk:blind")
+    } else {
+      state.scalarBlindSamples++
+      if (state.scalarBlindSamples >= 2 && !state.firedAlerts.has("disk:blind")) {
+        state.firedAlerts.add("disk:blind")
+        // THE REASON NAMES A DIFFERENT STAGE FOR EACH VALUE, and reporting the
+        // wrong one sends the reader to the wrong repair — worse than saying
+        // nothing, because it is actionable and false. `scalar-fact-unavailable`
+        // is zero facts in the journal, so no producer has ever written and one
+        // is MISSING. `scalar-fact-stale` is facts that exist with the newest
+        // past its max age, so a producer wrote and then STOPPED and one is
+        // DOWN. Anything else arrived through a path not enumerated here and
+        // must not be described as either. The reason reported is the one from
+        // the sample that fired; consecutive blind samples may carry different
+        // reasons, and the condition is blindness, not any single reason.
+        const { reason } = metrics.scalarObservation
+        // HAND THE READER THE EXPERIMENT, NOT A CAUSE. `scalar-fact-unavailable`
+        // means THE READER FOUND NOTHING, which covers a missing producer AND a
+        // reader that cannot resolve the journal — and naming one confidently
+        // is what cost a day on 2026-09-07, when the producer was healthy the
+        // whole time and 22 host:scalars sat in the journal unread. A
+        // diagnostic that cannot distinguish stages must give the reader the
+        // test that does; that survives a fourth cause nobody has thought of.
+        const remediation =
+          reason === "hab-environment-contradictory"
+            ? "this daemon is under hab and cannot locate its journal — the cause is in THIS process's " +
+              "environment, not in the producer. Compare its variables against a working one: " +
+              "`tr '\\0' '\\n' < /proc/<daemon-pid>/environ | grep ^HAB_`."
+            : reason === "scalar-fact-stale"
+              ? "reason `scalar-fact-stale` means facts EXIST and the newest is past its max age, so a " +
+                "sampler wrote and then stopped — look for a producer that DIED, not one never declared."
+              : "reason `" +
+                reason +
+                "` means THE READER FOUND NOTHING, which does NOT by itself say whether the producer " +
+                "is missing or the reader cannot resolve the journal. RUN THIS to tell them apart: " +
+                "`hab sysmon snapshot --session-dir <habitat>/run/sessions/habmod --kind scalars`. " +
+                "Facts available there while `--state-root` reports unavailable means the READER path " +
+                "is at fault — check its resolution, not the sampler. Nothing there either means the " +
+                "producer really is absent."
+        alerts.push({
+          type: "disk",
+          severity: "warning",
+          message:
+            "Host scalar monitoring is BLIND: no scalar facts for " +
+            `${String(state.scalarBlindSamples)} consecutive samples, so NO scalar-backed threshold ` +
+            "can fire — disk, memory, cpu and fd-count are all silent for this ONE reason, not four. " +
+            `Check \`hab sysmon snapshot --kind scalars\`; ${remediation}`,
+          metrics: {},
+          topOffenders: [],
+        })
+      }
+    }
   }
 
   // --- Worktrees ---
@@ -1593,10 +1721,26 @@ export async function collectFullMetrics(
   pidToParent: Map<number, number>
   processObservation: CollectedProcessObservation
 }> {
+  // A MISCONFIGURED source is BLIND, not standalone, and the mapping is where
+  // that distinction becomes an alert. `standalone-os` reaches the disk branch
+  // as an honest platform limit and is deliberately NOT cried blind; a
+  // contradictory hab environment reaches it as `canonical-unavailable`, which
+  // IS blind, so the condition fires and carries the reason with it. The daemon
+  // that never asks becomes the daemon that says why it cannot ask.
   const [processObservation, scalarObservation] =
     processSource.kind === "managed"
       ? await Promise.all([processSource.read(), processSource.readScalars()])
-      : ([{ kind: "standalone-os" }, { kind: "standalone-os" }] as const)
+      : processSource.kind === "misconfigured"
+        ? ([
+            { kind: "standalone-os" },
+            {
+              detail: processSource.reason,
+              kind: "unavailable",
+              reason: "hab-environment-contradictory",
+              schema: "host-scalar-observation/1",
+            },
+          ] as const)
+        : ([{ kind: "standalone-os" }, { kind: "standalone-os" }] as const)
   const hostMetrics: Pick<HealthMetrics, "cpu" | "disk" | "diskIo" | "memory" | "scalarObservation" | "timestamp"> =
     scalarObservation.kind === "standalone-os"
       ? (() => {
