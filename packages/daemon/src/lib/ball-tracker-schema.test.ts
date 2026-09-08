@@ -91,6 +91,20 @@ describe("ball-tracker schema (migration v16)", () => {
     const seedDb = new Database(dbPath, { create: true })
     seedDb.run("CREATE TABLE _schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     seedDb.run("INSERT INTO _schema_meta (key, value) VALUES ('version', '19')")
+    // Versioned databases already contain both halves of the message journal.
+    seedDb.run(`CREATE TABLE messages (
+      id TEXT PRIMARY KEY, type TEXT NOT NULL, sender TEXT NOT NULL, recipient TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'direct', content TEXT NOT NULL, bead_id TEXT, ref TEXT,
+      ts INTEGER NOT NULL, delivery TEXT NOT NULL DEFAULT 'push', topic TEXT, room_id TEXT,
+      request TEXT, reply TEXT, summary TEXT
+    )`)
+    seedDb.run(`CREATE TABLE messages_archive (
+      seq INTEGER NOT NULL, id TEXT PRIMARY KEY, type TEXT NOT NULL, sender TEXT NOT NULL, recipient TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'direct', content TEXT NOT NULL, bead_id TEXT, ref TEXT,
+      ts INTEGER NOT NULL, delivery TEXT NOT NULL DEFAULT 'push', topic TEXT, room_id TEXT,
+      request TEXT, reply TEXT, summary TEXT,
+      archived_at INTEGER NOT NULL
+    )`)
     seedDb.run(`CREATE TABLE pending_request (
       request_id TEXT NOT NULL,
       recipient TEXT NOT NULL,
@@ -125,6 +139,20 @@ describe("ball-tracker schema (migration v16)", () => {
     const seedDb = new Database(dbPath, { create: true })
     seedDb.run("CREATE TABLE _schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     seedDb.run("INSERT INTO _schema_meta (key, value) VALUES ('version', '25')")
+    // Versioned databases already contain both halves of the message journal.
+    seedDb.run(`CREATE TABLE messages (
+      rowid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, type TEXT NOT NULL, sender TEXT NOT NULL, recipient TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'direct', content TEXT NOT NULL, bead_id TEXT, ref TEXT,
+      ts INTEGER NOT NULL, delivery TEXT NOT NULL DEFAULT 'push', topic TEXT, room_id TEXT,
+      request TEXT, reply TEXT, summary TEXT, attention_required INTEGER NOT NULL DEFAULT 0, correlated_reply_requester TEXT
+    )`)
+    seedDb.run(`CREATE TABLE messages_archive (
+      seq INTEGER NOT NULL, id TEXT PRIMARY KEY, type TEXT NOT NULL, sender TEXT NOT NULL, recipient TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'direct', content TEXT NOT NULL, bead_id TEXT, ref TEXT,
+      ts INTEGER NOT NULL, delivery TEXT NOT NULL DEFAULT 'push', topic TEXT, room_id TEXT,
+      request TEXT, reply TEXT, summary TEXT,
+      archived_at INTEGER NOT NULL, correlated_reply_requester TEXT
+    )`)
     seedDb.run(`CREATE TABLE pending_request (
       request_id TEXT NOT NULL,
       recipient TEXT NOT NULL,
