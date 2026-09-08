@@ -69,3 +69,49 @@ describe("turn-start inbox instruction (km 19442 context-flood guard)", () => {
     expect(src).not.toContain("Silver UI/Silvercode")
   })
 })
+
+describe("channel delivery has a voice (2026-09-08 — NO SILENT ERRORS)", () => {
+  // sendChannel discarded every notification rejection with `.catch(() => {})`
+  // on the fleet's one push path. A month of undelivered channel messages
+  // therefore produced no evidence anywhere, and no seat could tell whether its
+  // `delivery=push` row meant anything. Measured the same night: two seats held
+  // push rows and neither ever received an envelope.
+  it("has no silent catch left anywhere in the adapter", () => {
+    // Comment lines are excluded on purpose: the fix's own comment quotes the
+    // old `.catch(() => {})` so the next reader knows what was there, and a
+    // naive substring match flags that quotation as the defect. A text guard
+    // that cannot tell code from prose about code fails on its own fix.
+    const codeLines = src
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .filter((line) => !line.startsWith("//") && !line.startsWith("*"))
+    expect(codeLines.filter((line) => line.includes(".catch(() => {})"))).toEqual([])
+  })
+
+  it("gives the SUBSCRIBE call a voice — it is the push stream, not registration", () => {
+    // Registration succeeding does not subscribe a session. A silently failed
+    // subscribe leaves the daemon row reading delivery=push with nothing ever
+    // arriving, which is the exact signature measured on two seats.
+    expect(src).toContain("tribe subscribe FAILED for")
+    expect(src).toContain("registered but will receive no pushed events")
+  })
+
+  it("reports a rejection with the transport named, not just that one happened", () => {
+    expect(src).toContain("channel delivery REJECTED by the MCP transport")
+    expect(src).toMatch(/\.catch\(\(error: unknown\) => \{/)
+  })
+
+  it("also voices the DROPS, because never-attempted is not attempted-and-failed", () => {
+    // An instrument that reports only rejections cannot tell those apart: with
+    // the early returns silent, zero rejections reads as "delivery works" when
+    // nothing was ever sent. That ambiguity is what this pins.
+    expect(src).toContain("channel delivery DROPPED before send")
+    expect(src).toContain('dropChannel(label, "session has not joined")')
+    expect(src).toContain('dropChannel(label, "adapter is not channel-enabled")')
+  })
+
+  it("bounds the drop reporting so one unjoined session cannot flood its own log", () => {
+    expect(src).toMatch(/const channelDrops = new Map<string, number>\(\)/)
+    expect(src).toMatch(/if \(seen === 1\) log\.warn/)
+  })
+})

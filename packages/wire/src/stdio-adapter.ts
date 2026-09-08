@@ -232,12 +232,43 @@ let daemonDegradedReason: string | null = null
  * `meta` is harness/tribe routing metadata (from / type / bead /
  * message_id) — not user-visible content — so it's left as-is.
  */
+/**
+ * Channel deliveries that never reached `mcp.notification`, by reason. Counted
+ * so the first of each kind is loud and the rest are bounded — an unjoined
+ * session drops one per ambient event, and a warn per event would be its own
+ * denial of service.
+ */
+const channelDrops = new Map<string, number>()
+
+/**
+ * A drop is not a delivery. Silence here used to be indistinguishable from
+ * success, which is why nobody could tell an un-pushed fleet from a quiet one.
+ */
+function dropChannel(label: string, reason: string): void {
+  const seen = (channelDrops.get(reason) ?? 0) + 1
+  channelDrops.set(reason, seen)
+  if (seen === 1) log.warn?.(`channel delivery DROPPED before send (${label}): ${reason}`)
+}
+
 function sendChannel(content: string, meta: Record<string, string | undefined>): void {
-  if (!joined) return
-  if (!CLAUDE_CHANNEL_ENABLED) return
-  if (!mcp) return // Not yet initialized
+  const label = `${meta.from ?? "?"}/${meta.type ?? "?"}`
+  // NEVER-ATTEMPTED AND ATTEMPTED-AND-FAILED ARE DIFFERENT FACTS, and an
+  // instrument that reports only rejections cannot tell them apart: with these
+  // returns silent, zero rejections reads as "delivery works" when in truth
+  // nothing was ever sent. Both halves get a voice or neither is evidence.
+  if (!joined) return dropChannel(label, "session has not joined")
+  if (!CLAUDE_CHANNEL_ENABLED) return dropChannel(label, "adapter is not channel-enabled")
+  if (!mcp) return dropChannel(label, "MCP server is not yet initialised")
   const safeContent = defangModelInput(content)
-  mcp.notification({ method: "notifications/claude/channel", params: { content: safeContent, meta } }).catch(() => {})
+  mcp
+    .notification({ method: "notifications/claude/channel", params: { content: safeContent, meta } })
+    // NO SILENT ERRORS. This was `.catch(() => {})`, which discarded every
+    // rejection on the fleet's one push path — so a month of undelivered
+    // channel messages produced no evidence anywhere, and no seat could tell
+    // whether its configured `delivery=push` row meant anything.
+    .catch((error: unknown) => {
+      log.warn?.(`channel delivery REJECTED by the MCP transport (${label}): ${errorMessage(error)}`)
+    })
 }
 
 const NOTIFICATION_ONLY_MARKER = "notification-only:do-not-acknowledge-or-respond-to"
@@ -582,7 +613,17 @@ function startDaemonConnection(): Promise<DaemonClient> {
           reportProtocolVersion(`session=${TRIBE_PROTOCOL_VERSION}, daemon=${reg.protocolVersion}`)
         }
       }
-      void client.call("subscribe").catch(() => {})
+      // THE PUSH STREAM IS THIS CALL. Registration succeeding does not
+      // subscribe a session; this does. When it was `.catch(() => {})` a failed
+      // subscribe left the daemon row reading `delivery=push` while nothing
+      // ever arrived — registered, unsubscribed, and silent about it. That is
+      // the exact signature measured 2026-09-08 on two seats, and it was
+      // unfalsifiable by construction because the rejection was discarded.
+      void client.call("subscribe").catch((error: unknown) => {
+        log.warn?.(
+          `tribe subscribe FAILED for ${myName}: ${errorMessage(error)} — this session is registered but will receive no pushed events`,
+        )
+      })
 
       // Startup banner — emit tribe state to the channel so the agent (and user) sees the setup
       try {
@@ -961,7 +1002,9 @@ import { setupHotReload } from "./lib/hot-reload.ts"
 using _reload = setupHotReload({
   importMetaUrl: import.meta.url,
   logActivity: (type, content) => {
-    daemon?.call("log_event", { type, content }).catch(() => {})
+    daemon?.call("log_event", { type, content }).catch((error: unknown) => {
+      log.warn?.(`hot-reload activity log_event failed (${type}): ${errorMessage(error)}`)
+    })
   },
   replaceProcess: (reason) => requestPluginReexec(reason),
 })
