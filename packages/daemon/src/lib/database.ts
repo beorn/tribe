@@ -1219,6 +1219,11 @@ const MIGRATIONS: readonly Migration[] = [
         const version = db.prepare("SELECT value FROM _schema_meta WHERE key = 'version'").get() as {
           value: string
         } | null
+        // A peer may have completed this migration after our startup read.
+        if (version?.value === "31") {
+          db.run("COMMIT")
+          return
+        }
         const bootstrap = (version === null || version.value === "0") && !tables.has("messages")
         const counts = new Map<string, number>()
         for (const table of ["messages", "messages_archive"]) {

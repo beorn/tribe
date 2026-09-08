@@ -14,7 +14,7 @@
  *    nobody noticed.
  */
 import { Database } from "bun:sqlite"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { mkdtempSync, realpathSync } from "node:fs"
 import { safeRemoveSync } from "removely"
 import { tmpdir } from "node:os"
@@ -54,6 +54,38 @@ const columnsOf = (db: Database, table: string) =>
   new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((r) => r.name))
 
 describe("message provenance (migration v26)", () => {
+  it("accepts a peer's completed v31 upgrade before acquiring its migration lock", () => {
+    const path = seedV30("overlapping-upgrade")
+    // Both openers can read v30 before either takes the migration lock. Run
+    // the peer at that boundary, using real SQLite and no timing-dependent race.
+    const run = Database.prototype.run
+    let peerCompleted = false
+    const boundary = vi.spyOn(Database.prototype, "run").mockImplementation(function (this: Database, ...args) {
+      if (this.filename === path && args[0] === "BEGIN IMMEDIATE" && !peerCompleted) {
+        peerCompleted = true
+        openDatabase(path).close()
+      }
+      return run.apply(this, args)
+    })
+    try {
+      const db = openDatabase(path)
+      try {
+        expect(peerCompleted).toBe(true)
+        expect(columnsOf(db, "messages").has("room_id")).toBe(false)
+        expect(columnsOf(db, "messages_archive").has("room_id")).toBe(false)
+        expect(db.prepare("SELECT value FROM _schema_meta WHERE key = 'version'").get()).toEqual({ value: "31" })
+        expect(db.prepare("SELECT id, content FROM messages").all()).toEqual([{ id: "seed-live", content: "live" }])
+        expect(db.prepare("SELECT id, content FROM messages_archive").all()).toEqual([
+          { id: "seed-archive", content: "archive" },
+        ])
+      } finally {
+        db.close()
+      }
+    } finally {
+      boundary.mockRestore()
+    }
+  })
+
   it.each([
     { label: "messages", drop: "messages", surviving: "messages_archive", row: { seq: 2, id: "seed-archive" } },
     { label: "messages_archive", drop: "messages_archive", surviving: "messages", row: { rowid: 1, id: "seed-live" } },
