@@ -16,6 +16,7 @@ import { execFileSync } from "node:child_process"
 import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { pathToFileURL } from "node:url"
 import { safeRemoveSync } from "removely"
 import { realpathSync } from "node:fs"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
@@ -53,6 +54,34 @@ describe("probeIsAncestor / resolvePinDirection (real git, temp repo)", () => {
   })
 
   describe("probeIsAncestor", () => {
+    it("refuses a shallow negative with both endpoints present, then resolves after history is complete", () => {
+      const shallow = join(repo, "shallow")
+      const git = (...args: string[]): string =>
+        execFileSync("git", ["-C", shallow, ...args], { encoding: "utf8" }).trim()
+      execFileSync("git", ["init", "-q", shallow])
+      const source = pathToFileURL(repo).href
+      for (const sha of [base, child]) {
+        git("fetch", "-q", "--depth=1", source, sha)
+        expect(git("cat-file", "-t", sha)).toBe("commit")
+      }
+      expect(git("rev-parse", "--is-shallow-repository")).toBe("true")
+      expect(probeIsAncestor(shallow, child, child)).toEqual({ ok: true, isAncestor: true })
+      const probe = probeIsAncestor(shallow, base, child)
+      expect(probe).toMatchObject({ ok: false, failure: { path: shallow, errno: "SHALLOW_HISTORY" } })
+      if (probe.ok) throw new Error("shallow negative must be indeterminate")
+      expect(probe.failure.message).toContain(base)
+      expect(probe.failure.message).toContain(child)
+      expect(probe.failure.message).toContain(shallow)
+      expect(resolvePinDirection(shallow, child, base)).toBe("unknown")
+      expect(resolvePinDirection(shallow, base, child)).toBe("unknown")
+
+      git("fetch", "-q", "--unshallow", source, child)
+      expect(git("rev-parse", "--is-shallow-repository")).toBe("false")
+      expect(probeIsAncestor(shallow, base, child)).toEqual({ ok: true, isAncestor: true })
+      expect(resolvePinDirection(shallow, child, base)).toBe("checkout-ahead")
+      expect(resolvePinDirection(shallow, base, child)).toBe("checkout-behind")
+    })
+
     it("exit 0 (base IS an ancestor of child) → ok:true, isAncestor:true", () => {
       expect(probeIsAncestor(repo, base, child)).toEqual({ ok: true, isAncestor: true })
     })
