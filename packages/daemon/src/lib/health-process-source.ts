@@ -1,9 +1,18 @@
 import { dirname, join } from "node:path"
+import { createLogger } from "loggily"
 import {
   BoundedProcessCommandError,
   runBoundedProcessCommand,
   type BoundedProcessCommandResult,
 } from "../../../recall/src/lib/bounded-process.ts"
+
+/**
+ * `tribe:health` — deliberately the SAME namespace `health-monitor-plugin.ts`
+ * uses. Which directory this source chose, and the alert that follows from
+ * reading it, are one story; splitting them across two namespaces means the
+ * reader who sees the alert cannot see how the journal was located.
+ */
+const log = createLogger("tribe:health")
 
 const PROCESS_OBSERVATION_SCHEMA = "process-observation/1" as const
 const HOST_SCALAR_OBSERVATION_SCHEMA = "host-scalar-observation/1" as const
@@ -577,6 +586,21 @@ export function createHealthProcessSource(options: HealthProcessSourceOptions = 
   // consumer can only assume the default.
   const injectedJournalDir = env.HAB_SCALAR_JOURNAL_DIR?.trim()
   if (!sessionDir && injectedJournalDir) {
+    // INJECTION WINS — but not silently when it CONTRADICTS what this consumer
+    // would have derived. The two answers disagreeing means the launcher named
+    // a session this consumer would never have guessed, and that is the single
+    // fact that makes the derivation below safe to keep as a floor. A match is
+    // the ordinary case and says nothing; only the disagreement is news.
+    const habitatRoot = env.HAB_SESSION_HABITAT_ROOT?.trim()
+    const derivable = habitatRoot ? controllerSessionDirFromHabitatRoot(habitatRoot) : undefined
+    if (derivable !== undefined && derivable !== injectedJournalDir) {
+      log.warn?.(
+        `scalar journal: HAB_SCALAR_JOURNAL_DIR is ${injectedJournalDir} but HAB_SESSION_HABITAT_ROOT ` +
+          `${habitatRoot} derives ${derivable}. Using the injected value, because the launcher can name a ` +
+          "non-default controller session and this consumer can only assume the default. If the injected " +
+          "value is the wrong one, the launcher is what to fix (@i/4-supervision/24248).",
+      )
+    }
     return managedProcessSource(injectedJournalDir, options, env)
   }
   if (!sessionDir) {
@@ -597,7 +621,17 @@ export function createHealthProcessSource(options: HealthProcessSourceOptions = 
     // default controller session an acceptable trade here rather than a guess.
     const habitatRoot = env.HAB_SESSION_HABITAT_ROOT?.trim()
     if (habitatRoot) {
-      return managedProcessSource(controllerSessionDirFromHabitatRoot(habitatRoot), options, env)
+      const derived = controllerSessionDirFromHabitatRoot(habitatRoot)
+      // A CORRECT derivation used to be indistinguishable from an injected
+      // value: both simply worked, and no reader could tell which one located
+      // the journal. Say it once, here, so the fallback can never be mistaken
+      // for the designed path.
+      log.warn?.(
+        `scalar journal: HAB_SCALAR_JOURNAL_DIR was not set, so the journal directory was DERIVED from ` +
+          `HAB_SESSION_HABITAT_ROOT ${habitatRoot} as ${derived}. This is the fallback for a daemon whose ` +
+          "supervisor predates the launcher-side injection, not the designed path (@i/4-supervision/24248).",
+      )
+      return managedProcessSource(derived, options, env)
     }
 
     // CONTRADICTORY ENVIRONMENT. hab session markers are present and there is

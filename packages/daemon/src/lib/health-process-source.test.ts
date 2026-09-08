@@ -794,3 +794,89 @@ describe("neutral health process source", () => {
     })
   })
 })
+
+/**
+ * @failure The derivation added for 24248 was correct and INVISIBLE. It only
+ *   spoke when it failed: a derived directory holding no journal degraded to a
+ *   loud `unavailable` naming the path, but a derivation that WORKED said
+ *   nothing at all, so nobody could tell a journal reached by injection from
+ *   one reached by assuming the default controller session. And when both an
+ *   injected and a derivable value were present they were never compared —
+ *   injection won early and silently, so a launcher naming a non-default
+ *   session while this consumer assumed the default was unreportable by
+ *   construction.
+ *
+ *   @chief ruled these the conditions that keep the hab-side injection
+ *   (ag d92ef529) and this daemon-side derivation COMPLEMENTS rather than a
+ *   second implementation: the derivation is the fallback for the one consumer
+ *   that can start without a hab launcher, it is loud, an injected value wins,
+ *   and a disagreement is reported rather than resolved quietly.
+ * @level l2 — the source's own decision with the journal reader faked; the
+ *   defect is in what it SAYS, so a real journal would prove nothing more.
+ * @consumer every scalar-backed alert in the Tribe daemon's health monitor, and
+ *   through them @chief's runtime-health rail.
+ */
+describe("the derivation is loud, and disagrees out loud", () => {
+  const reader = () =>
+    vi.fn(async (argv: readonly string[]) => ({
+      exitCode: 0,
+      stderr: "",
+      stdout: `${JSON.stringify(argv.includes("scalars") ? scalarPayload : availablePayload)}\n`,
+    }))
+
+  it("says so when a derivation succeeds — the derived path, and that the variable was absent", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      const source = createHealthProcessSource({
+        env: {
+          HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
+          HAB_SESSION_LAUNCH_ID: "70296c6b-21dd-41a9-8614-b6b6bff113e0",
+        },
+        runCommand: reader(),
+      })
+
+      expect(source.kind).toBe("managed")
+      const said = warn.mock.calls.map((call) => call.map(String).join(" ")).join("\n")
+      // Both halves are required: the path it chose, and the fact that nothing
+      // handed it one. Either alone leaves a reader guessing which source won.
+      expect(said, "names the derived path").toContain("/hh/main.hab/run/sessions/habmod")
+      expect(said, "names the absent variable").toContain("HAB_SCALAR_JOURNAL_DIR")
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it("reports a disagreement naming BOTH values, and the injected one still wins", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const runCommand = reader()
+    try {
+      const source = createHealthProcessSource({
+        env: {
+          // A launcher naming a NON-DEFAULT controller session, beside a habitat
+          // root from which this consumer would assume the default. Exactly the
+          // case the early return used to swallow.
+          // A DIFFERENT habitat entirely, not a sibling session: the injected and
+          // derived paths must not share a parent, or the state-root assertion
+          // below would pass whichever value won and prove nothing.
+          HAB_SCALAR_JOURNAL_DIR: "/other/hab/run/sessions/habmod",
+          HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
+          HAB_SESSION_LAUNCH_ID: "70296c6b-21dd-41a9-8614-b6b6bff113e0",
+        },
+        runCommand,
+      })
+
+      expect(source.kind).toBe("managed")
+      if (source.kind !== "managed") throw new Error("expected managed source")
+      await expect(source.readScalars()).resolves.toEqual(scalarPayload)
+
+      const said = warn.mock.calls.map((call) => call.map(String).join(" ")).join("\n")
+      expect(said, "names the injected value").toContain("/other/hab/run/sessions/habmod")
+      expect(said, "names the derived candidate").toContain("/hh/main.hab/run/sessions/habmod")
+
+      // INJECTION STILL WINS: the state root is the parent of the INJECTED dir.
+      expect(runCommand).toHaveBeenCalledWith(expect.arrayContaining(["--state-root", "/other/hab/run/sessions"]))
+    } finally {
+      warn.mockRestore()
+    }
+  })
+})
