@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from "vitest"
 import { spawnSync } from "node:child_process"
-import { mkdtempSync, readdirSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
@@ -27,6 +27,37 @@ function hermeticEnv(base: string): NodeJS.ProcessEnv {
 }
 
 describe("daemon.ts hook entry", () => {
+  test("public import exposes callable bootstrap without starting daemon", () => {
+    const base = mkdtempSync(join(tmpdir(), "tribe-hook-entry-"))
+    const stateRoot = join(base, "daemon")
+    mkdirSync(stateRoot)
+    try {
+      const res = spawnSync(
+        process.execPath,
+        [
+          "-e",
+          `import { runTribeDaemon } from ${JSON.stringify(DAEMON)}; if (typeof runTribeDaemon !== "function") process.exit(3)`,
+        ],
+        {
+          cwd: stateRoot,
+          env: {
+            ...hermeticEnv(stateRoot),
+            // Bun's own import caches are not daemon startup effects.
+            BUN_INSTALL_CACHE_DIR: join(base, "bun-install-cache"),
+            BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(base, "bun-transpiler-cache"),
+          },
+          timeout: 5_000,
+          encoding: "utf8",
+        },
+      )
+      expect(res.error, res.stderr).toBeUndefined()
+      expect(res.status, res.stderr).toBe(0)
+      expect(readdirSync(stateRoot)).toEqual([])
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  })
+
   test("unknown event exits 2 with a loud message and boots nothing", () => {
     const base = mkdtempSync(join(tmpdir(), "tribe-hook-entry-"))
     const res = spawnSync(process.execPath, [DAEMON, "hook", "nonsense"], {
