@@ -509,7 +509,7 @@ function isCircuitFailure(reason: string): boolean {
  * and leaves these, so these are exactly the evidence that hab is present when
  * the management markers are gone.
  */
-const HAB_SESSION_MARKERS = [
+export const HAB_SESSION_MARKERS = [
   "HAB_SESSION_HABITAT_ROOT",
   "HAB_SESSION_LAUNCH_ID",
   "HAB_SESSION_INSTRUCTION_ANCHOR",
