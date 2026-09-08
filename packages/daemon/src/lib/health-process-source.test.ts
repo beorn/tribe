@@ -168,9 +168,7 @@ describe("neutral health process source", () => {
     await expect(source.readScalars()).resolves.toEqual(scalarPayload)
     // The state root is the PARENT of the injected controller dir, so the
     // consumer spells neither `run/sessions` nor `habmod` anywhere.
-    expect(runCommand).toHaveBeenCalledWith(
-      expect.arrayContaining(["--state-root", "/hh/main.hab/run/sessions"]),
-    )
+    expect(runCommand).toHaveBeenCalledWith(expect.arrayContaining(["--state-root", "/hh/main.hab/run/sessions"]))
   })
 
   /**
@@ -208,9 +206,7 @@ describe("neutral health process source", () => {
     // carries the exact directory that was checked, so the reader is never told
     // a generic nothing.
     if (observation.kind !== "unavailable") throw new Error("unreachable")
-    expect(observation.detail, "loudness must name the path it looked in").toContain(
-      "/hh/main.hab/run/sessions/habmod",
-    )
+    expect(observation.detail, "loudness must name the path it looked in").toContain("/hh/main.hab/run/sessions/habmod")
     expect(runCommand, "and it must actually have looked").toHaveBeenCalled()
   })
 
