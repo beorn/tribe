@@ -24,6 +24,11 @@ import { HAB_SESSION_MARKERS } from "./health-process-source.ts"
  *          Neither shows up as a failing test anywhere else, because every
  *          other test supplies its own environment.
  *
+ *          COMPLETENESS IS NOT THIS FILE'S JOB and it must not pretend
+ *          otherwise. Whether the two vocabularies cover every variable Ag
+ *          actually writes is decided at the root, which can see both
+ *          repositories: tools/hab-session-vocabulary.integration.test.ts.
+ *
  * @level   l1 — the real sanitizer, no fixture of the function under test
  * @consumer `createHealthProcessSource`, whose contradictory-environment branch
  *           reads this exact marker list, and through it the disk-blindness alert
@@ -31,25 +36,24 @@ import { HAB_SESSION_MARKERS } from "./health-process-source.ts"
  * @bead    @i/4-supervision/24233-tmpfs-has-no-reaper (@cto's carried-forward term)
  */
 describe("the markers list and the standalone sanitizer agree on one vocabulary", () => {
-  // The population is spelled out rather than derived from either side. Deriving
-  // it from HAB_SESSION_MARKERS would ask the sanitizer only about the names the
-  // markers list already knows, which is the half of the contract that cannot
-  // fail; the interesting half is a name hab sets that this file has not
-  // classified. HAB_SESSION_DIR is here because it is the one the gate reads.
+  // THIS LIST IS NOT A COMPLETENESS CLAIM, and an earlier version of this file
+  // made one. It named itself EVERY_HAB_SESSION_VARIABLE and offered a manual
+  // grep as its staleness story, which made it a THIRD hardcoded vocabulary: a
+  // new or renamed Ag-written variable changed none of the two subjects NOR
+  // this list, so every case here stayed green while the producer drifted —
+  // exactly the failure this file exists to prevent (@ci, P1 on af774852).
   //
-  // MEASURED 2026-09-07 against the writer, not the readers: `ag` sets exactly
-  // these four HAB_SESSION_* environment variables — supervisor.ts:884 and
-  // pty-session.ts:667 (DIR), hab-agent-session-lifecycle.ts:1000 (LAUNCH_ID),
-  // and hab-unit-run-contract.ts:41/:53 (HABITAT_ROOT, INSTRUCTION_ANCHOR).
-  // Confirmed on two LIVE tribe daemons by reading /proc/<pid>/environ: three
-  // HAB_SESSION_* variables each, the three markers, and no HAB_SESSION_DIR.
+  // Completeness is not expressible in this package. A Tribe test cannot import
+  // Ag, so it cannot know what Ag writes. That job belongs to, and now lives
+  // in, the root contract at tools/hab-session-vocabulary.integration.test.ts,
+  // which derives the population from Ag's own source and is proven red by
+  // adding and by renaming an Ag variable.
   //
-  // STALENESS TEST, so the next reader can check this rather than trust it:
-  //   grep -rhno 'HAB_SESSION_[A-Z_]*' <ag>/packages --include=*.ts | sort -u
-  // If that turns up a fifth name that is really an environment variable, add
-  // it below and classify it — a new name is exactly what this test cannot
-  // discover on its own.
-  const EVERY_HAB_SESSION_VARIABLE = [
+  // What THIS file still proves, and proves well, is the agreement between the
+  // two vocabularies that live in Tribe: whatever names are put in, the ones
+  // that survive sanitizing are exactly the ones the source calls markers. The
+  // sample below is enough to exercise that, and it is a SAMPLE.
+  const SAMPLE_HAB_SESSION_VARIABLES = [
     "HAB_SESSION_DIR",
     "HAB_SESSION_HABITAT_ROOT",
     "HAB_SESSION_INSTRUCTION_ANCHOR",
@@ -57,7 +61,7 @@ describe("the markers list and the standalone sanitizer agree on one vocabulary"
   ] as const
 
   const habLaunchedEnvironment = (): NodeJS.ProcessEnv => ({
-    ...Object.fromEntries(EVERY_HAB_SESSION_VARIABLE.map((name) => [name, `value-of-${name}`])),
+    ...Object.fromEntries(SAMPLE_HAB_SESSION_VARIABLES.map((name) => [name, `value-of-${name}`])),
     HAB_SERVICE_KIND: "agent",
     HAB_SERVICE_NAME: "tribe-daemon",
     PATH: "/usr/bin",
@@ -91,23 +95,4 @@ describe("the markers list and the standalone sanitizer agree on one vocabulary"
     expect(HAB_SESSION_MARKERS as readonly string[]).not.toContain("HAB_SESSION_DIR")
   })
 
-  test("every name the sanitizer leaves is classified, and every marker is really left", () => {
-    const env = habLaunchedEnvironment()
-    const survivors = survivingHabSessionNames(sanitizeStandaloneDaemonEnvironment(env))
-
-    // Both directions, because they fail differently. An unclassified survivor
-    // means the source's `present` filter under-reports the evidence and a
-    // contradictory environment reads as a clean standalone. A marker that does
-    // not survive means the source waits for evidence the sanitizer has already
-    // destroyed.
-    for (const name of survivors) {
-      expect(
-        [...HAB_SESSION_MARKERS] as string[],
-        `${name} survives sanitizing but is not classified as a marker`,
-      ).toContain(name)
-    }
-    for (const marker of HAB_SESSION_MARKERS) {
-      expect(survivors, `${marker} is called a marker but the sanitizer strips it`).toContain(marker)
-    }
-  })
 })
