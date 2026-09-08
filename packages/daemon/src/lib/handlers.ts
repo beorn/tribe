@@ -444,7 +444,12 @@ function recordExpiredPendingRequests(ctx: TribeContext, now: number): number {
         observation: "deadline-passed",
         observed_at: now,
       } satisfies BallDeadlineObservationPayload
-      logEvent(ctx, "ball.expired", undefined, fact, { sender: "daemon", ref: row.request_id, ts: now })
+      logEvent(ctx, "ball.expired", undefined, fact, {
+        sender: "daemon",
+        ref: row.request_id,
+        ts: now,
+        summary: `Request ${row.request_id}: deadline passed; row remains open and owned.`,
+      })
     }
     return rows.length
   })()
@@ -2308,7 +2313,9 @@ function classifyDisconnectedDurableRow(
   }
 
   if (roster === undefined) {
-    return settled ? { ...identity, state: "finished", left_at: leftAt! } : { ...identity, state: "missing-transport" }
+    return leftAt !== undefined
+      ? { ...identity, state: "finished", left_at: leftAt }
+      : { ...identity, state: "missing-transport" }
   }
 
   const expected = roster.byName.get(row.name)
@@ -2328,13 +2335,13 @@ function classifyDisconnectedDurableRow(
     // On-demand: a settled harness exit is `finished` (by design); anything
     // else is `dormant`, quiet between uses, carrying the same informational
     // last_seen / left_at / reason a departed row does.
-    return settled
-      ? { ...identity, state: "finished", left_at: leftAt! }
+    return leftAt !== undefined
+      ? { ...identity, state: "finished", left_at: leftAt }
       : { ...identity, state: "dormant", ...describeDepartureActivity(row, fact) }
   }
   // expected === true: hab expects this name up.
-  return settled
-    ? { ...identity, state: "exited-not-remounted", left_at: leftAt! }
+  return leftAt !== undefined
+    ? { ...identity, state: "exited-not-remounted", left_at: leftAt }
     : { ...identity, state: "missing-transport" }
 }
 
@@ -3021,7 +3028,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     stalePending.length === 0
       ? []
       : [
-          `${stalePending.length} stale pending ${stalePending.length === 1 ? "ball" : "balls"} across ${staleOwnerCount} ${staleOwnerCount === 1 ? "owner" : "owners"}; oldest is ${Math.floor(oldestStaleAgeMs / 60_000)}m old`,
+          `${stalePending.length} stale pending ${stalePending.length === 1 ? "ball" : "balls"} across ${staleOwnerCount} ${staleOwnerCount === 1 ? "owner" : "owners"}; oldest is ${Math.floor(oldestStaleAgeMs / 60_000)}m old; ${stalePending.length === 1 ? "row remains" : "rows remain"} open and owned`,
         ]
   const retiredMemberIssues = [...new Set(liveSessions.map((session) => session.name))]
     .filter((name) => retiredNames.has(name))

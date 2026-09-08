@@ -1156,10 +1156,13 @@ describe("dispatcher bounded mailbox drain", () => {
       latest_open_request_status_seq: null,
     })
     // A status older than the request, even with its eventual ref, is not a receipt.
-    await send("owner", { to: "requester", type: "status", ref: "work", message: "too early" })
+    const early = (await send("owner", { to: "requester", type: "status", ref: "work", message: "too early" }))
+      .structuredContent
     const request = (await send("requester", { to: "owner", type: "request", request: "work", message: "review" }))
       .structuredContent
-    await send("requester", { to: "owner", type: "status", ref: "work", message: "wrong direction" })
+    const wrongDirection = (
+      await send("requester", { to: "owner", type: "status", ref: "work", message: "wrong direction" })
+    ).structuredContent
     await send("owner", { to: "requester", type: "status", ref: "other", message: "unrelated" })
     expect((await status("requester")).open_request_status_count).toBe(0)
 
@@ -1180,7 +1183,8 @@ describe("dispatcher bounded mailbox drain", () => {
       await call("tribe.fetch", params)
       expect(await status("requester")).toMatchObject(first)
     }
-    await send("owner", { to: "requester", type: "status", ref: request.id, message: "progress" })
+    const progress = (await send("owner", { to: "requester", type: "status", ref: request.id, message: "progress" }))
+      .structuredContent
     const second = await status("requester")
     expect(second.open_request_status_count).toBe(2)
     expect(second.latest_open_request_status_seq).toBeGreaterThan(first.latest_open_request_status_seq!)
@@ -1194,12 +1198,39 @@ describe("dispatcher bounded mailbox drain", () => {
       latest_open_request_status_seq: second.latest_open_request_status_seq,
     })
 
+    // The advertised recovery must reach the same receipts, including a custom
+    // request ID whose status refers to the original message ID. Archive the
+    // non-receipts too: older/wrong-direction statuses must not be recovered.
+    const log = (params: Record<string, unknown>) =>
+      call<{ messages: Array<{ id: string; ts: number }> }>("cli_log", params)
+    expect(
+      (await log({ ref_prefix: request.id.slice(0, 8), all: true })).messages.map((message) => message.id).sort(),
+    ).toEqual([receipt.id, progress.id].sort())
+    for (const message of [early, wrongDirection, progress, request]) harness.archiveMessage(message.id)
+    for (const ref_prefix of ["wor", request.id.slice(0, 8)]) {
+      const recovered = (await log({ ref_prefix, all: true })).messages
+      expect(recovered.map((message) => message.id).sort()).toEqual([receipt.id, progress.id].sort())
+      expect(recovered.map((message) => message.ts)).toEqual(
+        recovered.map((message) => message.ts).sort((a, b) => a - b),
+      )
+      const limited = (await log({ ref_prefix, limit: 1 })).messages
+      expect(limited).toHaveLength(1)
+      expect([receipt.id, progress.id]).toContain(limited[0]!.id)
+    }
+    expect((await log({ all: true })).messages.some((message) => message.id === receipt.id)).toBe(false)
+    expect(await status("requester")).toMatchObject(second)
+
     await send("owner", { to: "requester", type: "response", reply: "work", message: "done" })
     expect(await status("requester")).toMatchObject({
       open_request_status_count: 0,
       latest_open_request_status_seq: null,
     })
     expect(await status("owner")).toMatchObject({ open_request_status_count: 0, latest_open_request_status_seq: null })
+    expect(
+      (await log({ ref_prefix: "wor", all: true })).messages.some((message) =>
+        [receipt.id, progress.id].includes(message.id),
+      ),
+    ).toBe(false)
     // Fanout creates multiple pending rows, but each owner's message is counted once.
     await send("requester", { to: "*", type: "request", request: "fanout", fanout: "all", message: "review together" })
     await send("owner", { to: "requester", type: "status", ref: "fanout", message: "TAKING" })

@@ -640,9 +640,10 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     expect(pendingRecipients(db, "deadline-passed-open")).toEqual(["@agent/1"])
 
     const expiryFacts = db
-      .prepare("SELECT type, kind, content FROM messages WHERE kind = 'event' AND type = 'event.ball.expired'")
-      .all() as Array<{ type: string; kind: string; content: string }>
+      .prepare("SELECT type, kind, content, summary FROM messages WHERE kind = 'event' AND type = 'event.ball.expired'")
+      .all() as Array<{ type: string; kind: string; content: string; summary: string | null }>
     expect(expiryFacts).toHaveLength(1)
+    expect(expiryFacts[0]!.summary).toBe("Request deadline-passed-open: deadline passed; row remains open and owned.")
     expect(JSON.parse(expiryFacts[0]!.content)).toMatchObject({
       schema_version: 2,
       request_id: "deadline-passed-open",

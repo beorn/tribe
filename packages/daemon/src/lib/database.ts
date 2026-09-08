@@ -1738,6 +1738,31 @@ export function createStatements(db: Database) {
       FROM availability
     `),
 
+    /** Ref-filtered recovery for the receipts counted above. Materializing
+     * matching requests before probing either retention tier keeps the archive
+     * lookup indexed instead of scanning all retained statuses. */
+    getOpenRequestStatusesForRefPrefix: db.prepare(`
+      WITH matched_pending AS MATERIALIZED (
+        SELECT p.*, COALESCE(m.rowid, a.seq) AS original_seq
+        FROM pending_request p
+        LEFT JOIN messages m ON m.id = p.message_id
+        LEFT JOIN messages_archive a ON a.id = p.message_id
+        WHERE p.request_kind != 'incident'
+          AND (substr(p.request_id, 1, length($prefix)) = $prefix
+            OR substr(p.message_id, 1, length($prefix)) = $prefix)
+      )
+      SELECT r.id, r.type, r.sender, r.recipient, r.kind, r.content, r.bead_id, r.ref,
+        r.ts AS ts, r.delivery, r.topic, r.room_id, r.request, r.reply, r.summary
+      FROM matched_pending p CROSS JOIN messages r
+      WHERE ${takingStatusForOpenRequestMatchSql("r", "rowid", "p", "p.original_seq")}
+      UNION
+      SELECT r.id, r.type, r.sender, r.recipient, r.kind, r.content, r.bead_id, r.ref,
+        r.ts AS ts, r.delivery, r.topic, r.room_id, r.request, r.reply, r.summary
+      FROM matched_pending p CROSS JOIN messages_archive r
+      WHERE ${takingStatusForOpenRequestMatchSql("r", "seq", "p", "p.original_seq")}
+      ORDER BY ts DESC LIMIT $limit
+    `),
+
     /** Full active pending surface for one owner. Unlike the attention query
      *  above, this deliberately joins question bodies in the same statement
      *  so snapshot cost does not grow by one query per ball. */
