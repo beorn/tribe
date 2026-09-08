@@ -38,6 +38,45 @@ import {
  * `scalar-fact-unavailable`, which is what `hab sysmon snapshot --kind scalars`
  * returns when zero scalar facts exist.
  */
+/**
+ * A valid `host:scalars` payload, copied verbatim from the source's own
+ * suite (`health-process-source.test.ts`) so the two cannot disagree about
+ * what a readable journal returns. Only the end-to-end cure arm uses it.
+ */
+const scalarsFixture = {
+  kind: "available",
+  observedAt: 1_500,
+  schema: "host-scalar-observation/1",
+  source: { epoch: "host-a", sequence: 8 },
+  values: {
+    cpu: {
+      kind: "supported",
+      value: { busyPercent: 25, loadAverage1m: 1.25, loadAverage5m: 1, loadAverage15m: 0.75, logicalCores: 8 },
+    },
+    disk: {
+      kind: "supported",
+      value: {
+        availableBytes: 6_000_000_000,
+        freeBytes: 6_000_000_000,
+        inodes: { kind: "supported", value: { free: 600, total: 1_000, used: 400 } },
+        path: "/",
+        totalBytes: 10_000_000_000,
+        usedBytes: 4_000_000_000,
+      },
+    },
+    diskIo: { kind: "supported", value: { readWriteBytesPerSecond: 2_000_000 } },
+    kind: "host:scalars",
+    memory: {
+      kind: "supported",
+      value: { availableBytes: 6_000_000_000, totalBytes: 10_000_000_000, usedBytes: 4_000_000_000 },
+    },
+    sampleBudgetMs: 250,
+    sampleDurationMs: 4,
+    sampleOverBudget: false,
+    swap: { kind: "supported", value: { freeBytes: 900_000_000, totalBytes: 1_000_000_000, usedBytes: 100_000_000 } },
+  },
+} as const
+
 function blindMetrics(reason = "scalar-fact-unavailable", detail?: string): HealthMetrics {
   return {
     cpu: { topProcesses: [] },
@@ -403,8 +442,18 @@ describe("END TO END through the consumer's own read path (@cto term 3b)", () =>
     // journal held 22 host:scalars and every store-side check passed while the
     // daemon read nothing. Only the end-to-end path crosses the seam where the
     // defect lives.
+    //
+    // THE ENVIRONMENT IN THIS ARM CHANGED and TERM 3b's meaning did NOT. It
+    // used to carry `HAB_SESSION_HABITAT_ROOT`, which located nothing when this
+    // was written. The habitat root now DERIVES the journal
+    // (@i/4-supervision/24248), so an environment carrying it is no longer
+    // contradictory — it is readable, and leaving it here would have this term
+    // assert that a readable environment must alert. What term 3b bought,
+    // "contradictory reaches the ALERT and never a silent standalone", is
+    // preserved exactly by using an environment that is still contradictory:
+    // hab present, and nothing at all to locate the journal with. The arm below
+    // covers the environment that moved.
     const env = {
-      HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
       HAB_SESSION_LAUNCH_ID: "70296c6b-21dd-41a9-8614-b6b6bff113e0",
     }
     const source = createHealthProcessSource({
@@ -436,6 +485,48 @@ describe("END TO END through the consumer's own read path (@cto term 3b)", () =>
     // bound is set with real headroom rather than trimmed to today's number.
     // If this ever times out at 30s, the chain got an order of magnitude
     // slower and that is the finding — do not just raise it again.
+  }, 30_000)
+
+  /**
+   * @failure The cure lands in the source and never reaches the ALERT layer: a
+   *          derivation that makes `createHealthProcessSource` return `managed`
+   *          still pages "cannot locate its journal" if anything between the
+   *          source and `evaluateAlerts` re-derives blindness. Term 3b proved
+   *          that seam for the loud direction; nothing proved it for the cure,
+   *          and the seam is where 24233 lived (@i/4-supervision/24248).
+   * @level   l2 — same production evaluator and the same end-to-end chain as
+   *          term 3b, with only the journal reader faked.
+   * @consumer the same alert reader — this is the arm that proves the operator
+   *           stops being paged for a condition that no longer holds.
+   */
+  it("the DERIVED environment reads end to end and stops paging", async () => {
+    // The live daemon's measured shape: hab markers, no journal variable of
+    // either kind, and a habitat root. Same chain as term 3b — env →
+    // createHealthProcessSource → collectFullMetrics → evaluateAlerts.
+    const source = createHealthProcessSource({
+      env: {
+        HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
+        HAB_SESSION_LAUNCH_ID: "70296c6b-21dd-41a9-8614-b6b6bff113e0",
+      },
+      runCommand: async (argv: readonly string[]) => {
+        // The reader is faked; the DERIVATION is not. Assert the derived path
+        // is what it was asked to read, so a wrong derivation fails here rather
+        // than passing on a fake that answers any question.
+        expect(argv, "the derived state root is what gets read").toContain("/hh/main.hab/run/sessions")
+        return { exitCode: 0, stderr: "", stdout: `${JSON.stringify(scalarsFixture)}\n` }
+      },
+    })
+    const thresholds = defaultThresholds()
+    const state = createAlertState()
+
+    // Two samples, exactly as term 3b takes them: one failed read does not page,
+    // so two are what it takes to prove that NOTHING pages.
+    const first = await collectFullMetrics(source)
+    evaluateAlerts(first.metrics, thresholds, state)
+    const second = await collectFullMetrics(source)
+    const alerts = blindAlerts(evaluateAlerts(second.metrics, thresholds, state))
+
+    expect(alerts, "a daemon that can read must not page that it cannot").toEqual([])
   }, 30_000)
 
   it("a genuinely non-hab environment yields standalone-os, and standalone-os stays SILENT", () => {

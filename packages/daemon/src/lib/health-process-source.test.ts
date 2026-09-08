@@ -102,10 +102,14 @@ describe("neutral health process source", () => {
    * @consumer every scalar-backed alert — disk, memory, cpu, fd-count — all
    *           silent for this ONE reason (@i/4-supervision/24233).
    */
-  it("says WHY it cannot ask when the environment is hab-shaped but unconfigured", () => {
-    const runCommand = vi.fn()
+  it("ASKS, rather than explaining why it cannot, in the exact shape the incident measured", async () => {
+    const runCommand = vi.fn(async (argv: readonly string[]) => ({
+      exitCode: 0,
+      stderr: "",
+      stdout: `${JSON.stringify(argv.includes("scalars") ? scalarPayload : availablePayload)}\n`,
+    }))
     // The live daemon's shape, measured from /proc/1240979/environ on
-    // 2026-09-07: hab session markers present, the gate variable absent.
+    // 2026-09-07: hab session markers present, both journal variables absent.
     const source = createHealthProcessSource({
       env: {
         HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
@@ -114,14 +118,25 @@ describe("neutral health process source", () => {
       runCommand,
     })
 
-    expect(source.kind, "a partially-hab environment is not a healthy standalone").toBe("misconfigured")
-    if (source.kind !== "misconfigured") throw new Error("unreachable")
-    // Actionable on its own: it names the variable that is missing and the ones
-    // that prove hab is present, so the reader is not left to guess which half
-    // of the contradiction to chase.
-    expect(source.reason).toContain("HAB_SESSION_DIR")
-    expect(source.reason).toContain("HAB_SESSION_HABITAT_ROOT")
-    expect(runCommand, "a misconfigured source must not spawn a doomed read").not.toHaveBeenCalled()
+    // WHAT THIS ARM ASSERTS CHANGED, and the change IS the incident's cure, so
+    // it is recorded rather than quietly swapped. It used to require
+    // `misconfigured` — "under hab, cannot locate the journal" — which was the
+    // honest answer while the habitat root located nothing. The root now
+    // derives the journal, so requiring `misconfigured` here would pin the
+    // blindness this bead exists to remove.
+    //
+    // The contract the incident actually bought is INTACT and asserted below: a
+    // partially-hab environment is never reported as a healthy standalone. That
+    // was the defect — `standalone-os` means "no journal EXISTS", and the
+    // monitor said it while 22 live records sat in the journal. It is still
+    // impossible. The loud branch keeps its own arm further down, in an
+    // environment that genuinely offers nothing to go on.
+    expect(source.kind, "a partially-hab environment is never a healthy standalone").not.toBe("standalone-os")
+    expect(source.kind, "the habitat root the daemon already carries locates the journal").toBe("managed")
+    if (source.kind !== "managed") throw new Error("unreachable")
+    await expect(source.readScalars()).resolves.toEqual(scalarPayload)
+    expect(runCommand, "and it must actually ask, which is the whole incident").toHaveBeenCalled()
+    expect(runCommand).toHaveBeenCalledWith(expect.arrayContaining(["--state-root", "/hh/main.hab/run/sessions"]))
   })
 
   /**
@@ -218,23 +233,184 @@ describe("neutral health process source", () => {
    * @consumer the same scalar-backed alerts, in the case where nothing can be
    *           read and saying so is the whole product.
    */
-  it("with NEITHER the lifecycle marker nor an injected root, the loud branch is unchanged", () => {
+  it("with NO way to locate the journal at all, the loud branch is unchanged", () => {
     // Gate 1's third arm. Narrowed, never deleted: an environment that offers
-    // no way to find the journal is genuinely misconfigured and must say so
-    // exactly as it does today.
+    // no way to find the journal is genuinely misconfigured and must say so.
+    //
+    // THE ENVIRONMENT IN THIS ARM CHANGED, and saying why is the honest part.
+    // It used to carry `HAB_SESSION_HABITAT_ROOT` as well, because when it was
+    // written that variable located nothing. It now locates the journal by
+    // derivation, so leaving it here would assert that a locatable environment
+    // is unlocatable — the test would be pinning the bug. What this arm has
+    // always MEANT, nothing to go on so be loud, is preserved exactly by
+    // dropping the one marker that is now something to go on.
     const runCommand = vi.fn()
     const source = createHealthProcessSource({
-      env: {
-        HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
-        HAB_SESSION_LAUNCH_ID: "70296c6b-21dd-41a9-8614-b6b6bff113e0",
-      },
+      env: { HAB_SESSION_LAUNCH_ID: "70296c6b-21dd-41a9-8614-b6b6bff113e0" },
       runCommand,
     })
 
     expect(source.kind).toBe("misconfigured")
     if (source.kind !== "misconfigured") throw new Error("unreachable")
+    // NO SILENT ERRORS: a negative result names what it looked for. All three
+    // keys, so the reader never has to guess which one would have helped.
     expect(source.reason).toContain("HAB_SESSION_DIR")
+    expect(source.reason, "the loud branch names every key it looked for").toContain("HAB_SCALAR_JOURNAL_DIR")
+    expect(source.reason).toContain("HAB_SESSION_HABITAT_ROOT")
     expect(runCommand, "a source with nowhere to look must not spawn a doomed read").not.toHaveBeenCalled()
+  })
+
+  /**
+   * @failure A launcher-side injection cannot reach a process whose supervisor
+   *          started before the injection existed: a long-running supervisor
+   *          launches every child from the code it loaded at ITS start, and
+   *          nothing in hab says so. Measured 2026-09-08 by a /proc environ
+   *          walk over the live habitat: of ~194 hab-launched processes ZERO
+   *          carried `HAB_SCALAR_JOURNAL_DIR`, including all 42 that launched
+   *          AFTER the injection landed. So the daemon stays blind until its
+   *          supervisor restarts — a fleet-wide event with ~194 descendants,
+   *          which nobody may take for a monitoring fix
+   *          (@i/4-supervision/24248, @chief ruling 328dd3b0).
+   * @level   l2 — the source's own decision against a supplied environment,
+   *          journal reader faked. The defect is in how the environment is
+   *          READ, so a real journal would add cost and prove nothing more.
+   * @consumer every scalar-backed alert in the Tribe daemon's health monitor —
+   *           disk, memory, cpu, fd-count — the same set that went blind
+   *           together and stayed blind through the launcher-side cure.
+   *
+   * Four arms, one contract: the derivation FIRES, it AGREES with the legacy
+   * formula, it never OUTRANKS a value it was handed, and it stays LOUD when
+   * it points somewhere empty.
+   */
+  describe("deriving the journal from the habitat root the daemon already carries", () => {
+    const derivedStateRoot = "/hh/main.hab/run/sessions"
+
+    function readerFake() {
+      return vi.fn(async (argv: readonly string[]) => ({
+        exitCode: 0,
+        stderr: "",
+        stdout: `${JSON.stringify(argv.includes("scalars") ? scalarPayload : availablePayload)}\n`,
+      }))
+    }
+
+    it("reads the journal from the habitat root when NOTHING was injected", async () => {
+      // The live daemon's measured environment, verbatim: the three markers the
+      // standalone sanitizer leaves behind, and neither journal variable. This
+      // is the case the launcher-side cure cannot reach.
+      const runCommand = readerFake()
+      const source = createHealthProcessSource({
+        env: {
+          HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
+          HAB_SESSION_INSTRUCTION_ANCHOR: "/hh/main.hab/run/anchor",
+          HAB_SESSION_LAUNCH_ID: "70296c6b-21dd-41a9-8614-b6b6bff113e0",
+        },
+        runCommand,
+      })
+
+      expect(source.kind, "a habitat root IS a way to find the journal").toBe("managed")
+      if (source.kind !== "managed") throw new Error("expected managed source")
+      await expect(source.readScalars()).resolves.toEqual(scalarPayload)
+      expect(runCommand).toHaveBeenCalledWith(expect.arrayContaining(["--state-root", derivedStateRoot]))
+    })
+
+    it("AGREES with the legacy formula — the two derivations may never drift apart", async () => {
+      // THE TRIPWIRE, and the reason this change is affordable. The legacy
+      // branch already derives the controller journal by spelling `habmod`
+      // beside the session dir it was given; this arm derives the same place
+      // from the habitat root instead. They are two expressions of ONE layout,
+      // so the risk is not that either is wrong today but that one is edited
+      // later and the other is not. This test fails the moment they disagree.
+      const readThrough = async (env: NodeJS.ProcessEnv, runCommand: ReturnType<typeof readerFake>) => {
+        const source = createHealthProcessSource({ env, runCommand })
+        if (source.kind !== "managed") throw new Error(`expected managed, got ${source.kind}`)
+        await source.readScalars()
+      }
+
+      const legacyRun = readerFake()
+      await readThrough(
+        {
+          HAB_SERVICE_KIND: "service",
+          // any sibling session under the same habitat — the legacy branch
+          // walks up one level and spells the controller name itself.
+          HAB_SESSION_DIR: "/hh/main.hab/run/sessions/yrd-service",
+        },
+        legacyRun,
+      )
+
+      const derivedRun = readerFake()
+      await readThrough(
+        {
+          HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
+          HAB_SESSION_LAUNCH_ID: "70296c6b-21dd-41a9-8614-b6b6bff113e0",
+        },
+        derivedRun,
+      )
+
+      const stateRootOf = (fake: ReturnType<typeof readerFake>): string => {
+        const argv = fake.mock.calls[0]?.[0]
+        if (argv === undefined) throw new Error("the source never read — nothing to compare")
+        const at = argv.indexOf("--state-root")
+        if (at < 0) throw new Error(`no --state-root in ${argv.join(" ")}`)
+        return argv[at + 1] ?? ""
+      }
+
+      expect(stateRootOf(derivedRun), "habitat-root derivation must equal the legacy derivation").toBe(
+        stateRootOf(legacyRun),
+      )
+      expect(stateRootOf(derivedRun)).toBe(derivedStateRoot)
+    })
+
+    it("never OUTRANKS an injected root — a value handed over always wins over one derived", async () => {
+      // Precedence, and it points the safe way: the launcher knows the layout's
+      // owner and can name a non-default controller session; the consumer can
+      // only assume the default. So when the launcher-side injection finally
+      // does reach a process, it must win. The derivation is a floor, never a
+      // ceiling, and this arm is what stops it quietly overriding the real fix.
+      const runCommand = readerFake()
+      const source = createHealthProcessSource({
+        env: {
+          HAB_SCALAR_JOURNAL_DIR: "/hh/other.hab/run/sessions/habmod",
+          HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
+          HAB_SESSION_LAUNCH_ID: "70296c6b-21dd-41a9-8614-b6b6bff113e0",
+        },
+        runCommand,
+      })
+
+      expect(source.kind).toBe("managed")
+      if (source.kind !== "managed") throw new Error("expected managed source")
+      await source.readScalars()
+      // The INJECTED value's parent, never the derived one. It has to live under
+      // a different habitat root to discriminate at all: a sibling of the
+      // derived directory shares its parent, so the state-root would be
+      // identical on both branches and the assertion would prove nothing.
+      expect(runCommand).toHaveBeenCalledWith(expect.arrayContaining(["--state-root", "/hh/other.hab/run/sessions"]))
+      const argv = runCommand.mock.calls[0]?.[0] ?? []
+      expect(argv.join(" "), "the derived root must not appear at all").not.toContain(derivedStateRoot)
+    })
+
+    it("STAYS LOUD when the derived directory holds no journal, and NAMES the path it derived", async () => {
+      // The anti-over-correction arm, and the property that makes deriving safe
+      // at all: a derivation that guesses WRONG degrades to a loud `unavailable`
+      // carrying the exact directory it checked. It can never degrade to
+      // silence, so the worst case of this change is a reader who is told
+      // precisely where we looked and found nothing.
+      const runCommand = vi.fn(async () => ({ exitCode: 1, stderr: "no such directory", stdout: "" }))
+      const source = createHealthProcessSource({
+        env: {
+          HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
+          HAB_SESSION_LAUNCH_ID: "70296c6b-21dd-41a9-8614-b6b6bff113e0",
+        },
+        runCommand,
+      })
+      expect(source.kind).toBe("managed")
+      if (source.kind !== "managed") throw new Error("expected managed source")
+
+      const observation = await source.readScalars()
+      expect(observation.kind, "a derivation that finds nothing is still blindness").toBe("unavailable")
+      if (observation.kind !== "unavailable") throw new Error("unreachable")
+      expect(observation.detail, "loudness must name the path it derived").toContain("/hh/main.hab/run/sessions/habmod")
+      expect(runCommand, "and it must actually have looked").toHaveBeenCalled()
+    })
   })
 
   it("a genuinely non-hab environment stays standalone-os and stays SILENT", () => {
