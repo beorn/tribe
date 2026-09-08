@@ -2,7 +2,7 @@
  * A periodic async poller scheduled with `setInterval(() => void poll(), ms)`
  * starts a new run every tick whether or not the previous run finished. When
  * one run outlasts the interval — the health sampler spawns `iostat -d -c 2`
- * (>=2s by construction), `lsof -n | wc -l`, a full `ps -axo` dump and a
+ * (>=2s by construction), a full `ps -axo` dump and a
  * network `gh api rate_limit`, each slurped unbounded into memory — the runs
  * overlap, and every further tick adds another concurrent run for as long as
  * the slowness lasts. Nothing removes them, so in-flight work grows with
