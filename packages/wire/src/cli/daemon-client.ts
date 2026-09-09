@@ -14,7 +14,9 @@ export async function withCliDaemonClient<T>(action: (client: DaemonClient) => P
     const code = (error as { code?: string | number }).code
     if (code === "ECONNREFUSED" || code === "ENOENT") {
       console.error(`No daemon running (socket: ${socketPath})`)
-      console.error("Start one with: bun tribe-daemon (package tribe-daemon), or let a host autostart it")
+      console.error(
+        "Start one with: bun packages/daemon/src/daemon.ts (from the repo root), or let a host autostart it",
+      )
       process.exit(1)
     }
     throw error

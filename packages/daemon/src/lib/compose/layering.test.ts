@@ -51,7 +51,7 @@ describe("package layer and live-surface boundaries", () => {
       .filter((path) => /\bfunction mcpJsonContent\(/.test(readFileSync(path, "utf8")))
       .map((path) => relative(packagesRoot, path))
     const cliDaemonLifecycleOwners = sources
-      .filter((path) => /Start one with: bun tribe-daemon/.test(readFileSync(path, "utf8")))
+      .filter((path) => /Start one with: bun /.test(readFileSync(path, "utf8")))
       .map((path) => relative(packagesRoot, path))
     const retiredModules = new Set([
       "daemon/src/lib/activity-watch.ts",
