@@ -174,6 +174,8 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       TRIBE_DB: dbPath,
       TRIBE_NO_AUTOSTART: "1",
       TRIBE_SUMMARIZER_MODEL: "off",
+      // This isolated daemon expects no fleet seats from the invoking shell.
+      TRIBE_EXPECTED_MEMBERS: "[]",
     }
     const daemon = spawn(
       BUN_BIN,

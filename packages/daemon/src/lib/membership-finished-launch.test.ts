@@ -371,10 +371,10 @@ describe("membership projection: a finished launch is history, not a degraded me
     db.prepare(
       `INSERT INTO messages_archive
          (seq, id, type, sender, recipient, kind, content, bead_id, ref, ts,
-          delivery, topic, room_id, archived_at, request, reply, correlated_reply_requester, summary, session_id, attention_required)
+          delivery, topic, archived_at, request, reply, correlated_reply_requester, summary, session_id, attention_required)
        VALUES
          ($seq, $id, $type, $sender, $recipient, $kind, $content, NULL, $ref, $ts,
-          'push', NULL, NULL, $archived_at, NULL, NULL, NULL, NULL, $session_id, 0)`,
+          'push', NULL, $archived_at, NULL, NULL, NULL, NULL, $session_id, 0)`,
     ).run({
       $seq: 1,
       $id: "archived-left-1",

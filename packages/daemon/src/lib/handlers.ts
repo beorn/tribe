@@ -2308,7 +2308,9 @@ function classifyDisconnectedDurableRow(
   }
 
   if (roster === undefined) {
-    return settled ? { ...identity, state: "finished", left_at: leftAt! } : { ...identity, state: "missing-transport" }
+    return leftAt !== undefined
+      ? { ...identity, state: "finished", left_at: leftAt }
+      : { ...identity, state: "missing-transport" }
   }
 
   const expected = roster.byName.get(row.name)
@@ -2328,13 +2330,13 @@ function classifyDisconnectedDurableRow(
     // On-demand: a settled harness exit is `finished` (by design); anything
     // else is `dormant`, quiet between uses, carrying the same informational
     // last_seen / left_at / reason a departed row does.
-    return settled
-      ? { ...identity, state: "finished", left_at: leftAt! }
+    return leftAt !== undefined
+      ? { ...identity, state: "finished", left_at: leftAt }
       : { ...identity, state: "dormant", ...describeDepartureActivity(row, fact) }
   }
   // expected === true: hab expects this name up.
-  return settled
-    ? { ...identity, state: "exited-not-remounted", left_at: leftAt! }
+  return leftAt !== undefined
+    ? { ...identity, state: "exited-not-remounted", left_at: leftAt }
     : { ...identity, state: "missing-transport" }
 }
 

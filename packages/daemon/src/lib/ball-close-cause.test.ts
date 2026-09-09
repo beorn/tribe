@@ -401,12 +401,12 @@ describe("a closed: 0 ball result names its exact cause from the journal", () =>
     db.prepare(
       `INSERT INTO messages_archive (
          seq, id, type, sender, recipient, kind, content, bead_id, ref, ts,
-         delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id,
+         delivery, topic, request, reply, correlated_reply_requester, summary, session_id,
          attention_required, archived_at
        )
        SELECT
          rowid, id, type, sender, recipient, kind, content, bead_id, ref, ts,
-         delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id,
+         delivery, topic, request, reply, correlated_reply_requester, summary, session_id,
          attention_required, $archived_at
        FROM messages WHERE rowid = $rowid`,
     ).run({ $rowid: settledRow.rowid, $archived_at: Date.now() })
