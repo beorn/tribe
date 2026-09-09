@@ -67,7 +67,6 @@ export type ReplyHint = "yes" | "no" | "optional"
 export type Classification = {
   delivery?: Delivery
   topic?: string
-  roomId?: string
   /** Force this direct row into the durable attention projection. */
   attentionRequired?: boolean
   /** Persist an existing request id as correlation without opening another ball. */
@@ -524,7 +523,6 @@ export function sendMessage(
       $ts: ts,
       $delivery: delivery,
       $topic: classification.topic ?? null,
-      $room_id: classification.roomId ?? null,
       $request: persistedRequest,
       $reply: canonicalReplyId,
       $correlated_reply_requester: correlatedReply?.requester ?? null,
@@ -622,7 +620,6 @@ export function sendMessage(
     bead_id: bead_id ?? null,
     delivery,
     topic: classification.topic ?? null,
-    roomId: classification.roomId ?? null,
     ...(resolvedKind === "broadcast" && requestId !== null ? { pendingOwners: openedOwners } : {}),
     correlatedReply,
   })
@@ -694,7 +691,6 @@ export function logEvent(
     // keep schema invariants — every row carries a delivery class.
     $delivery: "push",
     $topic: null,
-    $room_id: null,
     // Event rows never participate in ball-tracking — they're journal-only,
     // not addressed to anyone in particular. Columns stay populated for
     // schema invariants.

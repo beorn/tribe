@@ -3326,7 +3326,6 @@ export type FetchRow = {
   ts: number
   delivery: string
   topic: string | null
-  room_id: string | null
   summary: string | null
   attention_required: number
 }
@@ -3343,7 +3342,6 @@ export type FetchEvent = {
   ts: string
   delivery: string
   topic: string | null
-  room_id: string | null
   summary: string | null
 }
 
@@ -3360,7 +3358,6 @@ export function fetchEvent(row: FetchRow): FetchEvent {
     ts: new Date(row.ts).toISOString(),
     delivery: row.delivery,
     topic: row.topic,
-    room_id: row.room_id,
     summary: row.summary,
   }
 }
@@ -3498,7 +3495,7 @@ function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRo
   const order = filters.since !== null ? "ASC" : "DESC"
   const rows = ctx.db
     .prepare(`
-      SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
+      SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, summary,
              attention_required
       FROM messages
       WHERE ${conditions.join("\n        AND ")}
@@ -3607,7 +3604,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
     const placeholders = ids.map(() => "?").join(", ")
     rows = ctx.db
       .prepare(`
-        SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
+        SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, summary,
                attention_required
         FROM messages
         WHERE id IN (${placeholders})

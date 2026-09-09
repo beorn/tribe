@@ -84,7 +84,6 @@ export function openDatabase(path: string): Database {
 		ts         INTEGER NOT NULL,
 		delivery   TEXT NOT NULL DEFAULT 'push',
 		topic      TEXT,
-		room_id    TEXT,
 		request    TEXT,
 		reply      TEXT,
 		correlated_reply_requester TEXT,
@@ -106,7 +105,6 @@ export function openDatabase(path: string): Database {
 		ts          INTEGER NOT NULL,
 		delivery    TEXT NOT NULL DEFAULT 'push',
 		topic       TEXT,
-		room_id     TEXT,
 		archived_at INTEGER NOT NULL,
 		request     TEXT,
 		reply       TEXT,
@@ -273,7 +271,6 @@ export function openDatabase(path: string): Database {
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_delivery_ts ON messages(delivery, ts)")
   db.run("DROP INDEX IF EXISTS idx_messages_plugin_kind_ts")
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_topic_ts ON messages(topic, ts)")
-  db.run("CREATE INDEX IF NOT EXISTS idx_messages_room_ts ON messages(room_id, ts)")
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_ts ON messages_archive(ts)")
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_seq ON messages_archive(seq)")
   // RPC expiry checks and membership departure checks probe event facts by
@@ -1213,6 +1210,70 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 31,
+    name: "drop-message-room-id",
+    up(db) {
+      // Startup runs historical migrations before creating the live journal.
+      // Only an unversioned bootstrap may lack those legacy tables/columns;
+      // a versioned upgrade must find both complete journal halves.
+      db.run("BEGIN IMMEDIATE")
+      try {
+        const tables = new Set(
+          (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>).map(
+            (row) => row.name,
+          ),
+        )
+        const version = db.prepare("SELECT value FROM _schema_meta WHERE key = 'version'").get() as {
+          value: string
+        } | null
+        // A peer may have completed this migration after our startup read.
+        if (version?.value === "31") {
+          db.run("COMMIT")
+          return
+        }
+        const bootstrap = (version === null || version.value === "0") && !tables.has("messages")
+        const counts = new Map<string, number>()
+        for (const table of ["messages", "messages_archive"]) {
+          if (!tables.has(table)) {
+            if (bootstrap) continue
+            throw new Error(`migration v31 cannot remove message room_id in ${db.filename}: ${table} table is missing`)
+          }
+          const columns = new Set(
+            (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name),
+          )
+          if (!columns.has("room_id")) {
+            if (bootstrap) continue
+            throw new Error(
+              `migration v31 cannot remove message room_id in ${db.filename}: ${table}.room_id column is missing`,
+            )
+          }
+          const row = db.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE room_id IS NOT NULL`).get() as {
+            count: number
+          }
+          counts.set(table, row.count)
+        }
+        const conflict = [...counts.entries()].find(([, count]) => count > 0)
+        if (conflict !== undefined) {
+          throw new Error(
+            `cannot remove unused message room_id in ${db.filename}: ${conflict[0]}.room_id contains ${conflict[1]} non-null row(s); ` +
+              "unknown historical room data needs disposition",
+          )
+        }
+        db.run("DROP INDEX IF EXISTS idx_messages_room_ts")
+        for (const [table] of counts) db.run(`ALTER TABLE ${table} DROP COLUMN room_id`)
+        // The marker commits with the schema, including on first creation.
+        // Otherwise a restart could see version 30 after its columns are gone.
+        db.run(
+          "INSERT INTO _schema_meta (key, value) VALUES ('version', '31') ON CONFLICT(key) DO UPDATE SET value = '31'",
+        )
+        db.run("COMMIT")
+      } catch (error) {
+        db.run("ROLLBACK")
+        throw error
+      }
+    },
+  },
 ]
 
 /** The schema terminus `openDatabase` upgrades to — derived from the same
@@ -1403,7 +1464,6 @@ const TRACKED_ATTENTION_FETCH_COLUMNS_SQL = `COALESCE(m.id, a.id) AS id,
   COALESCE(m.ts, a.ts) AS ts,
   COALESCE(m.delivery, a.delivery) AS delivery,
   COALESCE(m.topic, a.topic) AS topic,
-  COALESCE(m.room_id, a.room_id) AS room_id,
   COALESCE(m.summary, a.summary) AS summary,
   COALESCE(m.attention_required, a.attention_required) AS attention_required`
 
@@ -1470,9 +1530,9 @@ export function createStatements(db: Database) {
 
     insertMessage: db.prepare(`
 		INSERT OR IGNORE INTO messages (id, type, sender, recipient, kind, content, bead_id, ref, ts,
-			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id, attention_required)
+			delivery, topic, request, reply, correlated_reply_requester, summary, session_id, attention_required)
 		VALUES ($id, $type, $sender, $recipient, $kind, $content, $bead_id, $ref, $ts,
-			$delivery, $topic, $room_id, $request, $reply, $correlated_reply_requester, $summary, $session_id,
+			$delivery, $topic, $request, $reply, $correlated_reply_requester, $summary, $session_id,
 			CASE
 				WHEN $attention_required = 1 THEN 1
 				WHEN $kind = 'direct' AND $sender != $recipient AND $type = 'response' THEN 1
@@ -2149,12 +2209,12 @@ export function createStatements(db: Database) {
     archiveExpiredMessages: db.prepare(`
 		INSERT OR IGNORE INTO messages_archive (
 			seq, id, type, sender, recipient, kind, content, bead_id, ref, ts,
-			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id,
+			delivery, topic, request, reply, correlated_reply_requester, summary, session_id,
 			attention_required, archived_at
 		)
 		SELECT
 			rowid, id, type, sender, recipient, kind, content, bead_id, ref, ts,
-			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id,
+			delivery, topic, request, reply, correlated_reply_requester, summary, session_id,
 			attention_required, $archived_at
 		FROM messages AS m
 		WHERE m.ts < $cutoff
@@ -2232,7 +2292,7 @@ export function createStatements(db: Database) {
      *  per-call `topics` snapshot — that one filters rows the seat IS owed. */
     getInboxRows: db.prepare(`
 		SELECT m.id, m.rowid, m.type, m.sender, m.recipient, m.content, m.bead_id, m.ref, m.ts,
-			m.delivery, m.topic, m.room_id, m.summary, m.attention_required
+			m.delivery, m.topic, m.summary, m.attention_required
 		FROM messages AS m
 		WHERE m.rowid > $since
 			AND (m.recipient = $name OR m.recipient = '*')
@@ -2351,7 +2411,7 @@ export function createStatements(db: Database) {
      * acknowledgement retires a row from this view.
      */
     selectUnackedAttention: db.prepare(`
-      SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
+      SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, summary,
              attention_required
       FROM messages AS m
       WHERE m.recipient = $name
@@ -2375,10 +2435,10 @@ export function createStatements(db: Database) {
      * reuses the recipient mailbox cursor — no second queue, cursor, or store.
      */
     selectAttention: db.prepare(`
-      SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
+      SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, summary,
              attention_required
       FROM (
-        SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
+        SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, summary,
                attention_required
         FROM messages AS m
         WHERE m.recipient = $name

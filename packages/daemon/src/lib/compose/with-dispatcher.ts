@@ -1699,7 +1699,7 @@ export function withDispatcher<
             const rows = db
               .prepare(
                 `SELECT id, type, sender, recipient, kind, content, bead_id, ref,
-                        ts, delivery, topic, room_id, request, reply, summary
+                        ts, delivery, topic, request, reply, summary
                  FROM messages${where} ORDER BY ts DESC${limitSql}`,
               )
               .all(...values)

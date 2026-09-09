@@ -67,7 +67,6 @@ function insertDirect(stmts: TribeStatements, content: string): number {
     $ts: Date.now() - 60_000,
     $delivery: "pull",
     $topic: null,
-    $room_id: null,
     $request: null,
     $reply: null,
   })

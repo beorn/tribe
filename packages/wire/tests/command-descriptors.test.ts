@@ -36,6 +36,13 @@ function longOptionFlag(flags: string): string | undefined {
 }
 
 describe("Tribe command descriptors", () => {
+  test("does not expose removed message room identity in descriptor output", () => {
+    const fetch = commandDescriptorByMcpName("fetch")!
+    expect(JSON.stringify(fetch.mcp.outputSchema)).not.toContain("room_id")
+    expect(JSON.stringify(fetch.cli)).not.toContain("room_id")
+    expect(JSON.stringify(TRIBE_COMMAND_DESCRIPTORS)).not.toContain("room_id")
+  })
+
   test("cover every exposed MCP tool, with CLI projection explicit", () => {
     const descriptorMcpNames = new Set(TRIBE_COMMAND_DESCRIPTORS.map((descriptor) => descriptor.mcp.name))
 

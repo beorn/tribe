@@ -39,8 +39,6 @@ export type MessageInsertedInfo = {
   delivery: Delivery
   /** Originating plugin event id (e.g. `git:commit`); null for human messages. */
   topic: string | null
-  /** Matrix-shape room scope; null until populated by the room-aware path. */
-  roomId: string | null
   /** Mailboxes that received an open pending row for this tracked broadcast.
    * Absent for direct, untracked broadcast, and journal-only messages. */
   pendingOwners?: readonly string[]
