@@ -21,7 +21,8 @@ describe("no-daemon CLI hint", () => {
     const match = source.match(/Start one with: bun (\S+)/)
     expect(match, 'expected a "Start one with: bun <path>" hint in daemon-client.ts').not.toBeNull()
 
-    const scriptPath = match![1]
+    const scriptPath = match?.[1]
+    if (scriptPath === undefined) throw new Error('the "Start one with: bun <path>" hint lost its capture group')
     const resolved = resolve(tribeRoot, scriptPath)
     expect(existsSync(resolved), `named cure "bun ${scriptPath}" does not exist at ${resolved}`).toBe(true)
   })
