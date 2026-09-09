@@ -29,6 +29,6 @@
     "emit-summary": "bun tools/emit-summary.ts"
   },
   "dependencies": {
-    "loggily": "^0.10.2"
+    "loggily": "^0.11.0"
   }
 }

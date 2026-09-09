@@ -23,7 +23,7 @@
   },
   "dependencies": {
     "@bearly/flock": "0.1.0",
-    "loggily": "^0.10.2",
+    "loggily": "^0.11.0",
     "removely": "^0.1.0",
     "tribe-injection-envelope": "workspace:*",
     "tribe-recall": "workspace:*",
