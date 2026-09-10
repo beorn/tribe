@@ -50,6 +50,8 @@ type Harness = {
   getDeadline: () => number | null
   markActive: () => void
   markIdle: () => void
+  stop: () => void
+  countDurableSessions: ReturnType<typeof vi.fn>
   clients: Map<string, ClientSession>
   setDurable: (n: number) => void
   advance: (ms: number) => void
@@ -68,11 +70,12 @@ async function makeHarness(
   let fakeNow = 1_000_000_000
   let durable = opts.durable ?? 0
   const shutdown = vi.fn()
+  const countDurableSessions = vi.fn(() => durable)
   const base = { ...createBaseTribe({ scope }), config: makeConfig(config) }
   const withRegistry = withClientRegistry<typeof base>()(base)
   const shape = withIdleQuit<typeof withRegistry>({
     triggerShutdown: shutdown,
-    countDurableSessions: () => durable,
+    countDurableSessions,
     tickIntervalMs: 1,
     socketPathExists: opts.socketPathExists ?? (() => true),
     socketPathGoneTimeoutMs: opts.socketPathGoneTimeoutMs ?? 30_000,
@@ -83,6 +86,8 @@ async function makeHarness(
     getDeadline: () => shape.idleQuit.getDeadline(),
     markActive: () => shape.idleQuit.markActive(),
     markIdle: () => shape.idleQuit.markIdle(),
+    stop: () => shape.idleQuit.stop(),
+    countDurableSessions,
     clients: shape.registry.clients,
     setDurable: (n) => {
       durable = n
@@ -184,5 +189,60 @@ describe("withIdleQuit client census", () => {
     // backstop still fired: an unreachable daemon must yield the socket.
     expect(h.getDeadline()).toBeNull()
     expect(h.shutdown).toHaveBeenCalled()
+  })
+})
+
+describe("withIdleQuit stop() latch — the shutdown-vs-closed-database race", () => {
+  // Pins the fix for: a client socket's "close" event fires during the
+  // runtime's own socket teardown (after shutdown() has started but before
+  // scope.dispose() has closed the db), reaches markIdle() through the
+  // dispatcher's onIdle hook, and — pre-fix — called countDurableSessions()
+  // straight into a database with-database's scope.defer was concurrently
+  // closing: `RangeError: Cannot use a closed database`. The runtime now
+  // calls idleQuit.stop() before any of that teardown starts.
+  // loggily's terminal sink routes every level below "warn" through
+  // console.error — the rendered "INFO"/"DEBUG" prefix carries the level, the
+  // console method never did (see vendor/loggily's invokeForLevelStderr) —
+  // so an info-level line is caught here, not on console.info.
+  let infoSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    infoSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+  })
+
+  it("before stop(), markIdle() consults countDurableSessions", async () => {
+    const h = await makeHarness()
+    h.markActive() // clear the constructor's own initial markIdle() deadline
+    h.countDurableSessions.mockClear()
+    h.markIdle()
+    expect(h.countDurableSessions).toHaveBeenCalledTimes(1)
+  })
+
+  it("after stop(), markIdle() never reaches countDurableSessions — and logs the skip once, not per call", async () => {
+    const h = await makeHarness()
+    h.markActive()
+    h.stop()
+    h.countDurableSessions.mockClear()
+    // Simulate several client sockets each firing "close" during shutdown's
+    // socket-teardown loop — every one reaches markIdle() via onIdle().
+    h.markIdle()
+    h.markIdle()
+    h.markIdle()
+    expect(h.countDurableSessions).not.toHaveBeenCalled()
+    expect(h.getDeadline()).toBeNull() // a stopped daemon never arms a countdown
+    const skipLines = infoSpy.mock.calls.filter((call: unknown[]) =>
+      call.some((arg: unknown) => String(arg).includes("idle census skipped")),
+    )
+    expect(skipLines).toHaveLength(1)
+  })
+
+  it("after stop(), the liveness tick is also a no-op — it cannot re-arm or re-query the census", async () => {
+    const h = await makeHarness({}, { durable: 0 })
+    h.stop()
+    h.countDurableSessions.mockClear()
+    h.advance(10 * THIRTY_MIN_MS)
+    await h.settle() // several 1ms ticks would normally run checkLiveness repeatedly
+    expect(h.countDurableSessions).not.toHaveBeenCalled()
+    expect(h.shutdown).not.toHaveBeenCalled()
   })
 })

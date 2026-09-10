@@ -40,6 +40,7 @@ import type { WithConfig } from "./with-config.ts"
 import type { WithDaemonContext } from "./with-daemon-context.ts"
 import type { WithDispatcher } from "./with-dispatcher.ts"
 import type { WithDatabase } from "./with-database.ts"
+import type { WithIdleQuit } from "./with-idle-quit.ts"
 import type { WithRecall } from "./with-recall.ts"
 import type { WithSocketServer } from "./with-socket-server.ts"
 
@@ -50,6 +51,7 @@ type RuntimeShape = BaseTribe &
   WithDatabase &
   WithDaemonContext &
   WithDispatcher &
+  WithIdleQuit &
   WithRecall &
   WithClientRegistry &
   WithBroadcast &
@@ -273,6 +275,16 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
       if (exited) return
       exited = true
       log.info?.("Shutting down...")
+      // Latch idle-census accounting off FIRST, before anything below can
+      // yield to the event loop. A client socket's "close" event fires
+      // asynchronously (it does not resolve in the same turn as the .end()
+      // call further down), and reaches markIdle() through the dispatcher's
+      // onIdle hook — racing with-database's scope-deferred db.close() and
+      // throwing `RangeError: Cannot use a closed database` out of
+      // countDurableSessions() if the census ran after the db closed. Setting
+      // the latch here, synchronously before any of shutdown()'s own I/O
+      // starts, guarantees no later close event can observe it unset.
+      t.idleQuit.stop()
       // GOAWAY before socket teardown lets long-poll clients redial
       // deliberately instead of discovering shutdown through EOF.
       t.dispatcher.shutdown()

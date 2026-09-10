@@ -106,6 +106,17 @@ export interface IdleQuit {
   markIdle(): void
   /** Currently scheduled deadline (ms epoch) or null when active. Tests inspect this. */
   getDeadline(): number | null
+  /**
+   * Latch census accounting off for good. The runtime's shutdown() calls this
+   * before it closes sockets or disposes the scope, so a client socket's
+   * "close" event firing during shutdown's own socket teardown — which calls
+   * markIdle() through the dispatcher's onIdle hook — can no longer race
+   * with-database's scope-deferred `db.close()` and throw `RangeError: Cannot
+   * use a closed database` out of countDurableSessions(). After stop(),
+   * markIdle() and the liveness tick are no-ops: the daemon is already on its
+   * way out, so there is nothing left for the census to decide.
+   */
+  stop(): void
 }
 
 export interface WithIdleQuit {
@@ -147,6 +158,13 @@ export function withIdleQuit<T extends BaseTribe & WithConfig & WithClientRegist
 
     let idleDeadline: number | null = null
     let socketPathGoneSince: number | null = null
+    // Set once by stop() and never cleared — shutdown is one-way. Logged once
+    // (not once per skipped call) because every client socket's "close" event
+    // during shutdown's own socket teardown reaches markIdle() through the
+    // same onIdle hook, and a daemon with many connected seats would otherwise
+    // repeat the line once per socket.
+    let stopped = false
+    let stopSkipLogged = false
 
     /** Connected sockets + registered durable sessions — see file header. */
     function clientCensus(): { connected: number; registered: number } {
@@ -158,6 +176,13 @@ export function withIdleQuit<T extends BaseTribe & WithConfig & WithClientRegist
     }
 
     function markIdle(): void {
+      if (stopped) {
+        if (!stopSkipLogged) {
+          stopSkipLogged = true
+          log.info?.("idle census skipped: daemon stopping")
+        }
+        return
+      }
       if (idleQuitAfterSec < 0) return // never idle-quit
       if (idleDeadline !== null) return // already counting down
       const census = clientCensus()
@@ -212,6 +237,10 @@ export function withIdleQuit<T extends BaseTribe & WithConfig & WithClientRegist
     }
 
     function checkLiveness(): void {
+      // Shutting down — the runtime's shutdown() already latched stop()
+      // before this tick could race db.close() (see stop()'s doc comment).
+      // Nothing here decides anything once the daemon is on its way out.
+      if (stopped) return
       const nowMs = now()
       // Expire pending sessions that never sent a register message
       for (const [connId, client] of clients) {
@@ -275,9 +304,13 @@ export function withIdleQuit<T extends BaseTribe & WithConfig & WithClientRegist
     // spawned but no client ever connects (e.g. spawning test crashes).
     markIdle()
 
+    function stop(): void {
+      stopped = true
+    }
+
     return {
       ...t,
-      idleQuit: { markActive, markIdle, getDeadline: () => idleDeadline },
+      idleQuit: { markActive, markIdle, getDeadline: () => idleDeadline, stop },
     }
   }
 }
