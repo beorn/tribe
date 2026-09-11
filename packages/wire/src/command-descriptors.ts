@@ -302,7 +302,8 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           },
           warning: {
             type: "string",
-            description: "Human-readable note — emitted when the summary was derived or the message was truncated.",
+            description:
+              "Human-readable note — emitted when the summary was derived, the message was truncated, or a targeted notify/status went to a recipient that is not answer-capable (opens no obligation; not a refusal).",
           },
           delivery_failure_id: {
             type: "string",

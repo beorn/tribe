@@ -276,6 +276,72 @@ describe("registerSendCommands", () => {
     }
   })
 
+  test("prints the unreachable-notify warning on stderr and still exits 0", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-send-unreachable-"))
+    const socketPath = join(tmp, "tribe.sock")
+    const warning =
+      "note — @ci is not answer-capable; this notify opens no obligation and pages nobody. " +
+      "Send type=request if you need a reply. Sending anyway — this is a note, not a refusal."
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as { id: number; method: string }
+          const result =
+            request.method === "cli_inbox_status_by_launch_v1"
+              ? { session: "@dev/12", launch_id: "launch-dev12", launch_parent_pid: 123 }
+              : request.method === "register"
+                ? { name: "@dev/12", role: "member" }
+                : request.method === "tribe.pending"
+                  ? { pending: [], count: 0 }
+                  : request.method === "tribe.send"
+                    ? { sent: true, id: "msg-1", warning, delivery: { state: "offline", recipient: "@ci" } }
+                    : { error: `unexpected call ${request.method}` }
+          socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`)
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const res = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProcess) => {
+        const child = spawn(
+          BUN_BIN,
+          [CLI, "send", "@ci", "please", "admit", "this", "--type", "notify", "--summary", "admission wait"],
+          {
+            env: { ...process.env, TRIBE_SOCKET: socketPath, TRIBE_LAUNCH_ID: "launch-dev12" },
+            stdio: ["ignore", "pipe", "pipe"],
+          },
+        )
+        let stdout = ""
+        let stderr = ""
+        child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+        child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+        child.on("close", (code) => resolveProcess({ code, stdout, stderr }))
+      })
+      expect(res.code).toBe(0)
+      expect(res.stdout).toContain("Sent message to @ci")
+      expect(res.stderr).toContain("not answer-capable")
+      expect(res.stderr).toContain("opens no obligation")
+      expect(res.stderr).toContain("type=request")
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
+    }
+  })
+
   test("join verb declares <name> and accepts role, domain, delivery, and json flags", () => {
     const cmd = findCmd(buildProgram(), "join")
     expect(cmd).toBeDefined()

@@ -515,6 +515,12 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
   } else {
     console.log(`Sent message to ${input.to}`)
   }
+  // 24526: daemon-authored note when a targeted notify/status went to a
+  // recipient with no answer-capable transport. Warn, never refuse — the
+  // send already succeeded. 22990's note is the CLI shape.
+  if (typeof result.warning === "string" && result.warning.includes("not answer-capable")) {
+    console.error(`tribe-wire send: ${result.warning}`)
+  }
   // Derive-not-reject: surface (no-silent) when the daemon derived a one-liner
   // because none was authored, so the sender learns to pass `--summary`.
   if (result.summary_derived) {

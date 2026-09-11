@@ -24,7 +24,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
-import { handleToolCall, type HandlerOpts } from "./handlers.ts"
+import { handleToolCall, type ActiveSessionInfo, type HandlerOpts } from "./handlers.ts"
 import { MESSAGE_MAX_LENGTH } from "./validation.ts"
 
 function makeContext(db: Database, stmts: TribeStatements): TribeContext {
@@ -40,14 +40,30 @@ function makeContext(db: Database, stmts: TribeStatements): TribeContext {
   })
 }
 
+function liveRecipient(): ActiveSessionInfo {
+  return {
+    id: "sess-agent-7",
+    name: "@agent/7",
+    pid: process.pid,
+    cwd: "/repo",
+    role: "member",
+    claudeSessionId: null,
+    registeredAt: Date.now(),
+    launchId: null,
+    launchParentPid: process.pid,
+    transportPids: [process.pid],
+  }
+}
+
 function makeOpts(): HandlerOpts {
+  const active = [liveRecipient()]
   return {
     cleanup: () => undefined,
     userRenamed: false,
     setUserRenamed: () => undefined,
-    getActiveSessionIds: () => new Set<string>(),
-    hasActiveTransport: () => false,
-    getActiveSessionInfo: () => [],
+    getActiveSessionIds: () => new Set(active.map((row) => row.id)),
+    hasActiveTransport: (sessionId) => active.some((row) => row.id === sessionId),
+    getActiveSessionInfo: () => active,
   }
 }
 

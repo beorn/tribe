@@ -756,6 +756,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       truncation,
       resolveRecipient,
       observedAt,
+      answerableNames: transport.answerableNames,
     })
   }
 
@@ -835,6 +836,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     maybeDerivedSummaryWarning(summaryDerived),
     maybeTruncationWarning(truncation),
     trackerMissWarning(ctx, sender, [recipients], tracker),
+    maybeUnreachableUntrackedWarning(msgType, recipients, transport.answerableNames),
   )
   return jsonResult({
     sent: true,
@@ -870,6 +872,7 @@ function handleMultiSend(input: {
   truncation: SanitizedMessage
   resolveRecipient: (recipient: string, tracked: boolean) => DirectDeliveryResolution
   observedAt: number
+  answerableNames: ReadonlySet<string>
 }): ToolResult {
   const implicitlyTracked =
     AUTO_TRACK_TYPES_SET.has(input.msgType) && input.recipients.some((recipient) => recipient !== input.sender)
@@ -925,6 +928,7 @@ function handleMultiSend(input: {
     maybeDerivedSummaryWarning(input.summaryDerived),
     maybeTruncationWarning(input.truncation),
     trackerMissWarning(input.ctx, input.sender, input.recipients, tracker),
+    maybeUnreachableUntrackedWarning(input.msgType, input.recipients, input.answerableNames),
   )
   const deliveries = deliveryReport(results)
   logEvent(input.ctx, `message.sent.${input.msgType}`, input.args.bead as string | undefined, {
@@ -1117,6 +1121,30 @@ function maybeTruncationWarning(truncation: SanitizedMessage): string | undefine
   if (!truncation.truncated) return undefined
   const dropped = truncation.originalLength - MESSAGE_MAX_LENGTH
   return `message truncated to ${MESSAGE_MAX_LENGTH} chars — ${dropped} of ${truncation.originalLength} were dropped and the recipient did NOT receive them; resend the remainder or link the full text.`
+}
+
+/**
+ * 24526 / CTO ruling: a targeted notify or status to a recipient with no
+ * answer-capable transport still delivers (`sent: true`) and still opens no
+ * ball. Warn so the sender learns at send time — the @dev/10/@ci specimen —
+ * and name `request` as the cure. Broadcasts excluded (22990 same exclusion).
+ * Warn, never refuse.
+ */
+function maybeUnreachableUntrackedWarning(
+  msgType: string,
+  recipients: string | readonly string[],
+  answerableNames: ReadonlySet<string>,
+): string | undefined {
+  if (msgType !== "notify" && msgType !== "status") return undefined
+  const names = typeof recipients === "string" ? [recipients] : [...recipients]
+  const dark = names.filter((name) => name !== "*" && !answerableNames.has(name))
+  if (dark.length === 0) return undefined
+  const listed = dark.join(", ")
+  const verb = dark.length === 1 ? "is" : "are"
+  return (
+    `note — ${listed} ${verb} not answer-capable; this ${msgType} opens no obligation and pages nobody. ` +
+    "Send type=request if you need a reply. Sending anyway — this is a note, not a refusal."
+  )
 }
 
 type Tracker = {
