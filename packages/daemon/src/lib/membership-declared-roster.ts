@@ -37,6 +37,10 @@ export interface DeclaredRoster {
    *  `dormant` (down between uses), never a discrepancy. Manner of death
    *  does not decide it (24589). */
   readonly onDemandNames: ReadonlySet<string>
+  /** Unix-ms when this roster was parsed. TRIBE_EXPECTED_MEMBERS is snapshotted
+   *  at daemon start; a members read must carry this so expected_count cannot
+   *  be quoted from a list older than the config (24589 row 3). */
+  readonly loadedAt: number
 }
 
 /**
@@ -51,7 +55,7 @@ export interface DeclaredRoster {
  * roster — an empty roster (`"[]"`) is a real declaration that happens to
  * name nobody, and reads every durable launch as undeclared/departed.
  */
-export function parseExpectedMembers(raw: string | undefined): DeclaredRoster | undefined {
+export function parseExpectedMembers(raw: string | undefined, loadedAt = Date.now()): DeclaredRoster | undefined {
   if (raw === undefined || raw.trim() === "") return undefined
   let parsed: unknown
   try {
@@ -90,7 +94,7 @@ export function parseExpectedMembers(raw: string | undefined): DeclaredRoster | 
     if (expected) expectedNames.add(name)
     else onDemandNames.add(name)
   }
-  return { byName, expectedNames, onDemandNames }
+  return { byName, expectedNames, onDemandNames, loadedAt }
 }
 
 /**

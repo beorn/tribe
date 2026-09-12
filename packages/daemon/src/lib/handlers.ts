@@ -2083,6 +2083,10 @@ type MembershipDiscrepancy = {
    *  no field changes meaning when a declaration appears. */
   expected_count?: number
   connected_expected_count?: number
+  /** ISO of when the in-memory declared roster was parsed. Present whenever
+   *  expected_count is, so a count cannot be quoted from a list older than
+   *  the config (24589 row 3). */
+  roster_loaded_at?: string
   missing_count: number
   missing: MissingLaunch[]
   /** Count of disconnected durable rows classified `finished` alongside this
@@ -2506,6 +2510,7 @@ function projectMembershipDiscrepancy(
         known_durable_launches: knownNames.size,
         expected_count: roster.expectedNames.size,
         connected_expected_count: connectedExpectedNames.size,
+        roster_loaded_at: new Date(roster.loadedAt).toISOString(),
         missing_count: missing.length,
         missing,
         ...(finished.length > 0 ? { finished_count: finished.length } : {}),
@@ -2684,6 +2689,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
       : [...new Set(rows.filter((row) => activeIds.has(row.id) && !roster.byName.has(row.name)).map((row) => row.name))]
   return jsonResult({
     sessions,
+    ...(roster !== undefined ? { roster_loaded_at: new Date(roster.loadedAt).toISOString() } : {}),
     ...(membership.discrepancy === undefined ? {} : { membership_discrepancy: membership.discrepancy }),
     // History, not alarm: a finished launch never sets membership_discrepancy
     // on its own, but stays visible here so a seat's past is not erased along
