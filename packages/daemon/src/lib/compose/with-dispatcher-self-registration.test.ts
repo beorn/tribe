@@ -1136,9 +1136,13 @@ describe("dispatcher bounded mailbox drain", () => {
   it("keeps open-request statuses visible to both parties through drains and retention", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
-    for (const name of ["requester", "owner", "peer"]) {
+    for (const [name, mailboxAuthorityHash] of [
+      ["requester", "01".repeat(32)],
+      ["owner", "02".repeat(32)],
+      ["peer", "03".repeat(32)],
+    ] as const) {
       harness.addPendingClient(name)
-      await harness.register(name, { name, pid: liveHolderPid, project: "/tmp/km" })
+      await harness.register(name, { name, pid: liveHolderPid, project: "/tmp/km", mailboxAuthorityHash })
     }
     const call = async <T>(method: string, params: Record<string, unknown>, connId = "requester") =>
       parseResult<T>(await harness.dispatcher.handleRequest({ jsonrpc: "2.0", id: method, method, params }, connId))
@@ -1748,12 +1752,14 @@ describe("dispatcher inbox-wait parsing", () => {
       name: "@agent/sender",
       pid: liveHolderPid,
       project: "/tmp/km-wt9",
+      mailboxAuthorityHash: "01".repeat(32),
     })
     harness.addPendingClient("conn-wait")
     await harness.register("conn-wait", {
       name: "@agent/wait",
       pid: liveHolderPid,
       project: "/tmp/km-wt9",
+      mailboxAuthorityHash: "02".repeat(32),
     })
 
     const wait = harness.dispatcher.handleRequest(
@@ -1798,10 +1804,10 @@ describe("dispatcher inbox-wait parsing", () => {
     cleanup = harness.dispose
     const recipientLaunchId = "tracked-broadcast-launch"
 
-    for (const [connId, name] of [
-      ["conn-sender", "@agent/sender"],
-      ["conn-recipient", "@agent/recipient"],
-      ["conn-other", "@agent/other"],
+    for (const [connId, name, mailboxAuthorityHash] of [
+      ["conn-sender", "@agent/sender", "01".repeat(32)],
+      ["conn-recipient", "@agent/recipient", "02".repeat(32)],
+      ["conn-other", "@agent/other", "03".repeat(32)],
     ] as const) {
       harness.addPendingClient(connId)
       if (name === "@agent/recipient") {
@@ -1812,10 +1818,11 @@ describe("dispatcher inbox-wait parsing", () => {
             project: "/tmp/km-wt6",
             launchId: recipientLaunchId,
             launchParentPid: process.pid,
+            mailboxAuthorityHash,
           }),
         )
       } else {
-        await registerMember(harness, connId, name)
+        await registerMember(harness, connId, name, mailboxAuthorityHash)
       }
     }
 
@@ -2078,12 +2085,12 @@ describe("dispatcher inbox-wait parsing", () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
 
-    for (const [connId, name] of [
-      ["conn-requester", "@requester"],
-      ["conn-responder", "@responder"],
+    for (const [connId, name, mailboxAuthorityHash] of [
+      ["conn-requester", "@requester", "01".repeat(32)],
+      ["conn-responder", "@responder", "02".repeat(32)],
     ] as const) {
       harness.addPendingClient(connId)
-      await registerMember(harness, connId, name)
+      await registerMember(harness, connId, name, mailboxAuthorityHash)
     }
 
     parseResult(
@@ -2431,6 +2438,7 @@ function createDispatcherHarness(
         launchId?: string
         launchParentPid?: number
         filterMode?: string
+        mailboxAuthorityHash?: string
       },
     ) {
       const req: JsonRpcRequest = {
@@ -2668,12 +2676,14 @@ async function registerMember(
   harness: ReturnType<typeof createDispatcherHarness>,
   connId: string,
   name: string,
+  mailboxAuthorityHash?: string,
 ): Promise<RegisterResult> {
   return parseResult<RegisterResult>(
     await harness.register(connId, {
       name,
       pid: liveHolderPid,
       project: "/tmp/km-wt6",
+      mailboxAuthorityHash,
     }),
   )
 }

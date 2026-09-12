@@ -109,9 +109,48 @@ describe("a closed: 0 ball result names its exact cause from the journal", () =>
     dev3 = makeContext(db, stmts, "@dev/3", "sess-dev3")
     dev9 = makeContext(db, stmts, "@dev/9", "sess-dev9")
 
-    registerSession(ci, PROJECT_ID, () => true, null, 2001, "push", "/repo", null, "claude")
-    registerSession(dev3, PROJECT_ID, () => true, null, 2002, "push", "/repo", null, "claude")
-    registerSession(dev9, PROJECT_ID, () => true, null, 2003, "push", "/repo", null, "claude")
+    registerSession(
+      ci,
+      PROJECT_ID,
+      () => true,
+      null,
+      2001,
+      "push",
+      "/repo",
+      null,
+      "claude",
+      null,
+      null,
+      "01".repeat(32),
+    )
+    registerSession(
+      dev3,
+      PROJECT_ID,
+      () => true,
+      null,
+      2002,
+      "push",
+      "/repo",
+      null,
+      "claude",
+      null,
+      null,
+      "02".repeat(32),
+    )
+    registerSession(
+      dev9,
+      PROJECT_ID,
+      () => true,
+      null,
+      2003,
+      "push",
+      "/repo",
+      null,
+      "claude",
+      null,
+      null,
+      "03".repeat(32),
+    )
   })
 
   afterEach(() => {

@@ -15,6 +15,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { getLogLevel, setLogLevel } from "loggily"
 import { createScope } from "tribe-wire"
 import { createBaseTribe } from "./base.ts"
 import { withClientRegistry, type ClientSession } from "./with-client-registry.ts"
@@ -205,9 +206,17 @@ describe("withIdleQuit stop() latch — the shutdown-vs-closed-database race", (
   // console method never did (see vendor/loggily's invokeForLevelStderr) —
   // so an info-level line is caught here, not on console.info.
   let infoSpy: ReturnType<typeof vi.spyOn>
+  let previousLogLevel: ReturnType<typeof getLogLevel>
 
   beforeEach(() => {
+    previousLogLevel = getLogLevel()
+    setLogLevel("info")
     infoSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    infoSpy.mockRestore()
+    setLogLevel(previousLogLevel)
   })
 
   it("before stop(), markIdle() consults countDurableSessions", async () => {

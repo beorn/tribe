@@ -638,6 +638,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         name: observerName,
         delivery: "push",
         filterMode: "focus",
+        selfMailboxAuthority: `${"A".repeat(42)}0`,
       },
     )
     await callLaunchToolWhenRegistered(observer, 2, "members", {})
@@ -959,6 +960,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
 
     const successor = await spawnLaunchAdapter(socketPath, "successor-reply.log", launchId, {
       name: "@chief/next",
+      selfMailboxAuthority: `${"A".repeat(42)}1`,
     })
     await callLaunchToolWhenRegistered(successor, 70, "members", {})
     await callLaunchTool(successor, 71, "rename", { new_name: "@chief" })
@@ -1004,7 +1006,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         TRIBE_SESSION_NAME: "@chief/next",
         TRIBE_NO_AUTOSTART: "1",
       },
-      { throughParent: true },
+      { throughParent: true, selfMailboxAuthority: `${"A".repeat(42)}1` },
     )
 
     expect(reply.exitCode, reply.stderr).toBe(0)
@@ -1386,7 +1388,12 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     await waitForDaemonSocket(daemonProc, socketPath, "shared-persona daemon socket")
 
     const seats = await Promise.all(
-      personas.map((name) => spawnLaunchAdapter(socketPath, `shared-persona-${name.slice(1)}.log`, launchId, { name })),
+      personas.map((name, index) =>
+        spawnLaunchAdapter(socketPath, `shared-persona-${name.slice(1)}.log`, launchId, {
+          name,
+          selfMailboxAuthority: `${"A".repeat(42)}${index}`,
+        }),
+      ),
     )
     const firstSeat = seats.at(0)
     if (firstSeat === undefined) throw new Error("shared-persona journey started no seats")
@@ -1447,7 +1454,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
             TRIBE_SESSION_NAME: persona,
             TRIBE_NO_AUTOSTART: "1",
           },
-          { throughParent: true },
+          { throughParent: true, selfMailboxAuthority: `${"A".repeat(42)}${index}` },
         )
         expect(reply.exitCode, reply.stderr).toBe(0)
         expect(reply.stdout).toContain(`Closed 1 pending request row(s) for ${persona}: ${requestId}`)
@@ -1582,7 +1589,11 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     await waitForDaemonSocket(daemonProc, socketPath)
 
     const launchId = "stopped-persona-launch"
-    const initial = await spawnLaunchAdapter(socketPath, "stopped-persona-initial.log", launchId, { name: NAME })
+    const selfMailboxAuthority = `${"A".repeat(42)}0`
+    const initial = await spawnLaunchAdapter(socketPath, "stopped-persona-initial.log", launchId, {
+      name: NAME,
+      selfMailboxAuthority,
+    })
     await callLaunchToolWhenRegistered(initial, 10, "members", {})
     initial.child.kill("SIGTERM")
     await once(initial.child, "exit")
@@ -1609,12 +1620,15 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         TRIBE_NAME: NAME,
         TRIBE_NO_AUTOSTART: "1",
       },
-      { throughParent: true },
+      { throughParent: true, selfMailboxAuthority },
     )
     expect(waitRun.exitCode, waitRun.stderr).toBe(0)
     expect(JSON.parse(waitRun.stdout)).toMatchObject({ session: NAME, unread_count: 1, timed_out: false })
 
-    const successor = await spawnLaunchAdapter(socketPath, "stopped-persona-successor.log", launchId, { name: NAME })
+    const successor = await spawnLaunchAdapter(socketPath, "stopped-persona-successor.log", launchId, {
+      name: NAME,
+      selfMailboxAuthority,
+    })
     const fetched = (await callLaunchToolWhenRegistered(successor, 30, "fetch", { limit: 10 })) as {
       attention?: {
         actionable_unread?: Array<{ id?: string; type?: string; from?: string }>
@@ -1646,6 +1660,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const quiet = await spawnLaunchAdapter(socketPath, "quiet-pull-member.log", undefined, {
       name: quietName,
       delivery: "pull",
+      selfMailboxAuthority: `${"A".repeat(42)}0`,
     })
     await callLaunchToolWhenRegistered(quiet, 20, "members", {})
     await callLaunchTool(quiet, 21, "send", {
@@ -1706,9 +1721,15 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
 
     const launchId = "provider-launch-a"
     const launchAdapters = await Promise.all([
-      spawnLaunchAdapter(socketPath, "launch-adapter-1.log", launchId),
-      spawnLaunchAdapter(socketPath, "launch-adapter-2.log", launchId),
-      spawnLaunchAdapter(socketPath, "launch-adapter-3.log", launchId),
+      spawnLaunchAdapter(socketPath, "launch-adapter-1.log", launchId, {
+        selfMailboxAuthority: `${"A".repeat(42)}0`,
+      }),
+      spawnLaunchAdapter(socketPath, "launch-adapter-2.log", launchId, {
+        selfMailboxAuthority: `${"A".repeat(42)}1`,
+      }),
+      spawnLaunchAdapter(socketPath, "launch-adapter-3.log", launchId, {
+        selfMailboxAuthority: `${"A".repeat(42)}2`,
+      }),
     ])
 
     // Force every transport through daemon registration, then give displaced
@@ -1876,7 +1897,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     // logical member and restores the three-transport diagnostic set.
     launchAdapters[1]!.child.kill("SIGTERM")
     await once(launchAdapters[1]!.child, "exit")
-    const replacement = await spawnLaunchAdapter(socketPath, "launch-adapter-2b.log", launchId)
+    const replacement = await spawnLaunchAdapter(socketPath, "launch-adapter-2b.log", launchId, {
+      selfMailboxAuthority: `${"A".repeat(42)}1`,
+    })
     launchAdapters[1] = replacement
     const afterReconnect = await callLaunchToolUntil<{
       sessions?: Array<{ name?: string; member_id?: string; launch_id?: string; transport_pids?: number[] }>

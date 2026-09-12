@@ -17,6 +17,7 @@
  */
 
 import { Database } from "bun:sqlite"
+import { createHash } from "node:crypto"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -25,6 +26,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { handleToolCall, readAttentionProjection, type HandlerOpts } from "./handlers.ts"
+import { registerSession } from "./session.ts"
 
 const NAME = "@agent/3"
 
@@ -186,6 +188,21 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     const ctx = makeContext(db, stmts, sessionId, `boot-${sessionId}`)
     active.add(sessionId)
     parseToolJson(handleToolCall(ctx, "tribe.join", { name, delivery: "pull" }, opts))
+    // Join must reset the tail first; registration then supplies this adapter's readable mailbox authority.
+    registerSession(
+      ctx,
+      undefined,
+      opts.hasActiveTransport,
+      null,
+      0,
+      "pull",
+      undefined,
+      null,
+      null,
+      null,
+      null,
+      createHash("sha256").update(sessionId).digest("hex"),
+    )
     return ctx
   }
 
