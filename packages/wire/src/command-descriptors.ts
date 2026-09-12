@@ -744,13 +744,13 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           membership_discrepancy: {
             type: "object",
             description:
-              "Present when one or more known addressable durable launch rows have no authenticated transport. Carries connected-durable/known-durable/missing counts plus missing launch identities; unidentified and connection-scoped sessions do not inflate the comparison, and missing transport does not establish agent absence. Carries finished_count when one or more other disconnected durable rows were instead classified finished (see finished_launches) — those never inflate missing_count or known_durable_launches. When the daemon was started with a declared roster (TRIBE_EXPECTED_MEMBERS, a plain per-name expected:boolean, never a restart-policy vocabulary), known-durable/connected-durable keep their row meaning and expected_count/connected_expected_count are added (declared-expected names, and those with a live transport), `missing` can also carry state never-registered (a declared-expected name with no durable row at all), and dormant_count/departed_sibling_count/departed_foreign_count appear alongside finished_count for any on-demand or undeclared rows classified this call (see dormant_launches/departed_launches) — absent a declaration none of this moves.",
+              "Present when one or more known addressable durable launch rows have no authenticated transport. Carries connected-durable/known-durable/missing counts plus missing launch identities; unidentified and connection-scoped sessions do not inflate the comparison, and missing transport does not establish agent absence. Carries finished_count when one or more other disconnected durable rows were instead classified finished (see finished_launches) — those never inflate missing_count or known_durable_launches. When the daemon was started with a declared roster (TRIBE_EXPECTED_MEMBERS, a plain per-name expected:boolean, never a restart-policy vocabulary), known-durable/connected-durable keep their row meaning and expected_count/connected_expected_count are added (declared-expected names, and those with a live transport) together with roster_loaded_at (ISO of when that in-memory roster was parsed — 24589: a count cannot be quoted from a list older than the config), `missing` can also carry state never-registered (a declared-expected name with no durable row at all), and dormant_count/departed_sibling_count/departed_foreign_count appear alongside finished_count for any on-demand or undeclared rows classified this call (see dormant_launches/departed_launches) — absent a declaration none of this moves.",
             additionalProperties: true,
           },
           finished_launches: {
             type: "array",
             description:
-              "Disconnected durable launches whose departure was journaled and is the last thing that happened to their registration — i.e. the launch ended rather than merely losing its transport; present only when non-empty and never itself a degradation signal. Reached with no declared roster, and with one that declares the name on-demand (expected: false) and its departure settled.",
+              "Disconnected durable launches whose departure was journaled and is the last thing that happened to their registration — i.e. the launch ended rather than merely losing its transport; present only when non-empty and never itself a degradation signal. Reached with no declared roster. On-demand (expected: false) rows are dormant regardless of manner of death (24589), never finished.",
             items: { type: "object", additionalProperties: true },
           },
           dormant_launches: {
@@ -771,8 +771,13 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
               "Declared-roster-only: names of currently-connected sessions the declared roster never mentions at all (probes, subagents). Fine to be connected; present only when non-empty, never itself a degradation signal, and never surfaced by tribe.health.",
             items: { type: "string" },
           },
+          roster_loaded_at: {
+            type: "string",
+            description:
+              "Declared-roster-only: ISO timestamp of when the in-memory TRIBE_EXPECTED_MEMBERS snapshot was parsed at daemon start. Present whenever a declaration exists, including when there is no discrepancy, so expected_count cannot be quoted from a list older than the config (24589).",
+          },
         },
-        "Members list under `sessions`, plus optional `membership_discrepancy` when known addressable durable launches are missing transports, optional `finished_launches` for durable launches that ended cleanly, and — only when the daemon was started with a declared roster — optional `dormant_launches`, `departed_launches`, and `unexpected_connected`.",
+        "Members list under `sessions`, plus optional `membership_discrepancy` when known addressable durable launches are missing transports, optional `finished_launches` for durable launches that ended cleanly, and — only when the daemon was started with a declared roster — optional `roster_loaded_at`, `dormant_launches`, `departed_launches`, and `unexpected_connected`.",
       ),
     },
     cli: available({

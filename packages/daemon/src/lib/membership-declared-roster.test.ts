@@ -145,6 +145,7 @@ describe("membership projection: declared-roster membership is a function of a p
         known_durable_launches: 1,
         expected_count: 1,
         connected_expected_count: 0,
+        roster_loaded_at: expect.any(String),
         missing_count: 1,
         missing: [
           {
@@ -560,6 +561,7 @@ describe("membership projection: declared-roster membership is a function of a p
       known_durable_launches: 0,
       expected_count: 1,
       connected_expected_count: 0,
+      roster_loaded_at: expect.any(String),
       missing_count: 1,
       missing: [{ name: "@dev/12", state: "never-registered" }],
       meaning: "missing transport does not establish agent absence",
@@ -803,5 +805,52 @@ describe("24589: expected:false is dormant regardless of manner of death", () =>
         classified_by: "declared-expected-true",
       }),
     ])
+  })
+
+  it("expected_count is never present without roster_loaded_at, and members carries the age even with no discrepancy", () => {
+    let now = 50_000_000
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now)
+    try {
+      const loadedAt = new Date(now).toISOString()
+      addSession(db, stmts, "live-1", "@chief", { id: "launch-live-1", parentPid: 50001 })
+      const opCtx = makeContext(db, stmts, "operator", "@operator")
+      const liveOpts = baseOpts({
+        expectedMembers: roster([{ name: "@chief", expected: true }]),
+        getActiveSessionIds: () => new Set(["live-1"]),
+        hasActiveTransport: () => true,
+        getActiveSessionInfo: () => [
+          {
+            id: "live-1",
+            name: "@chief",
+            pid: 50001,
+            cwd: "/repo",
+            role: "member",
+            claudeSessionId: null,
+            registeredAt: now,
+            launchId: "launch-live-1",
+            launchParentPid: 50001,
+            transportPids: [50001],
+          },
+        ],
+      })
+      const live = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, liveOpts)) as {
+        roster_loaded_at?: string
+        membership_discrepancy?: { expected_count?: number; roster_loaded_at?: string }
+      }
+      expect(live.membership_discrepancy).toBeUndefined()
+      expect(live.roster_loaded_at).toBe(loadedAt)
+
+      addSession(db, stmts, "gone-1", "@dev/6", { id: "launch-gone-1", parentPid: 50002 })
+      const goneOpts = baseOpts({ expectedMembers: roster([{ name: "@dev/6", expected: true }]) })
+      const gone = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, goneOpts)) as {
+        roster_loaded_at?: string
+        membership_discrepancy?: { expected_count?: number; roster_loaded_at?: string }
+      }
+      expect(gone.roster_loaded_at).toBe(loadedAt)
+      expect(gone.membership_discrepancy?.expected_count).toBe(1)
+      expect(gone.membership_discrepancy?.roster_loaded_at).toBe(loadedAt)
+    } finally {
+      nowSpy.mockRestore()
+    }
   })
 })
