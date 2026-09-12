@@ -193,6 +193,9 @@ describe("Claude plugin daemon-restart self-heal", () => {
       cwd: tmpDir,
       env: {
         ...process.env,
+        HAB_SESSION_HABITAT_ROOT: "",
+        TRIBE_EXPECTED_MEMBERS_FILE: "",
+        TRIBE_EXPECTED_MEMBERS: "",
         TRIBE_NO_PLUGINS: "1",
         TRIBE_NO_AUTORELOAD: "1",
         DEBUG_LOG: logPath,
@@ -474,6 +477,7 @@ process.exit(await child.exited)
       logPath: adapterLog,
       name: PERSONA,
       launchId: "restart-journey-launch",
+      sessionAuth: `${"A".repeat(42)}0`,
       providerParentPid: String(harnessParentPid),
       delivery: "push",
       requireJoin: true,
