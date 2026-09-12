@@ -229,11 +229,10 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
           name: "@agent/6",
           launch_id: "launch-health",
           launch_parent_pid: 6006,
-          state: "missing-transport",
+          state: "not-connected",
         },
       ],
-      meaning: "missing transport does not establish agent absence",
-    })
+          })
     expect(health.transport_wedges).toHaveLength(2)
     expect(health.transport_wedges).toEqual(
       expect.arrayContaining([

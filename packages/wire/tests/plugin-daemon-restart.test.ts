@@ -1179,12 +1179,11 @@ process.exit(await child.exited)
               name: withheldPersona,
               launch_id: personaLaunchId("restart-multi-2", withheldPersona),
               launch_parent_pid: initialMembers.get(withheldPersona)?.launch_parent_pid,
-              state: "missing-transport",
+              state: "not-connected",
             },
           ],
           finished_count: 1,
-          meaning: "missing transport does not establish agent absence",
-        })
+                  })
         expect((roster as { finished_launches?: unknown }).finished_launches).toEqual([
           expect.objectContaining({
             member_id: initialMembers.get(finishedPersona)?.member_id,
@@ -1226,11 +1225,10 @@ process.exit(await child.exited)
           expected_count: 4,
           connected_expected_count: 2,
           missing_count: 2,
-          meaning: "missing transport does not establish agent absence",
-        })
+                  })
         expect(discrepancy?.missing).toEqual(
           expect.arrayContaining([
-            { ...ids.withheld, state: "missing-transport" },
+            { ...ids.withheld, state: "not-connected" },
             expect.objectContaining({ ...ids.finished, state: "exited-not-remounted" }),
           ]),
         )
@@ -1265,9 +1263,8 @@ process.exit(await child.exited)
           connected_expected_count: 2,
           missing_count: 1,
           finished_count: 1,
-          meaning: "missing transport does not establish agent absence",
-        })
-        expect(discrepancy?.missing).toEqual([{ ...ids.withheld, state: "missing-transport" }])
+                  })
+        expect(discrepancy?.missing).toEqual([{ ...ids.withheld, state: "not-connected" }])
         expect((rosterAfterRestart2 as { finished_launches?: unknown[] }).finished_launches).toEqual([
           expect.objectContaining({ ...ids.finished, state: "finished" }),
         ])

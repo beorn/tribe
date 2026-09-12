@@ -310,7 +310,7 @@ describe("status-backed doctor checks", () => {
       ],
       {
         status: "degraded",
-        missing: [{ name: "@dev/2", state: "missing-transport" }],
+        missing: [{ name: "@dev/2", state: "not-connected" }],
       },
     )
     expect(check).toMatchObject({ severity: "WARNING" })

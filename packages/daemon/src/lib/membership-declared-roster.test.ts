@@ -158,8 +158,7 @@ describe("membership projection: declared-roster membership is a function of a p
             classified_by: "declared-expected-true",
           },
         ],
-        meaning: "missing transport does not establish agent absence",
-      })
+              })
       expect(members.finished_launches).toBeUndefined()
 
       const health = parseToolJson(handleToolCall(opCtx, "tribe.health", {}, opts)) as {
@@ -202,7 +201,7 @@ describe("membership projection: declared-roster membership is a function of a p
           name: "@agent/restart-onfailure",
           launch_id: "launch-exp-2",
           launch_parent_pid: 30002,
-          state: "missing-transport",
+          state: "not-connected",
           classified_by: "declared-expected-true",
         },
       ])
@@ -302,7 +301,7 @@ describe("membership projection: declared-roster membership is a function of a p
           name: "@adhoc/never-1",
           launch_id: "launch-dem-1",
           launch_parent_pid: 30004,
-          state: "dormant",
+          state: "left",
           left_at: new Date(leftAt).toISOString(),
           classified_by: "declared-expected-false",
         }),
@@ -344,13 +343,13 @@ describe("membership projection: declared-roster membership is a function of a p
           member_id: "dem-2",
           name: "@adhoc/never-quiet",
           launch_id: "launch-dem-2",
-          state: "dormant",
+          state: "left",
         }),
         expect.objectContaining({
           member_id: "dem-3",
           name: "@chief/next",
           launch_id: "launch-dem-3",
-          state: "dormant",
+          state: "left",
         }),
       ]),
     )
@@ -398,7 +397,7 @@ describe("membership projection: declared-roster membership is a function of a p
           name: "@proof/wait-rc4",
           launch_id: "launch-und-1",
           launch_parent_pid: 30007,
-          state: "departed",
+          state: "not-in-this-hab",
           last_seen: new Date(registeredAt).toISOString(),
           left_at: new Date(leftAt).toISOString(),
           reason: "harness-exited",
@@ -526,7 +525,7 @@ describe("membership projection: declared-roster membership is a function of a p
           name: "@adhoc/7",
           launch_id: "launch-dorm-quiet",
           launch_parent_pid: 30071,
-          state: "dormant",
+          state: "left",
           last_seen: new Date(quietSeen).toISOString(),
           classified_by: "declared-expected-false",
         },
@@ -535,7 +534,7 @@ describe("membership projection: declared-roster membership is a function of a p
           name: "@adhoc/8",
           launch_id: "launch-dorm-closed",
           launch_parent_pid: 30081,
-          state: "dormant",
+          state: "left",
           last_seen: new Date(closedSeen).toISOString(),
           left_at: new Date(closedLeft).toISOString(),
           reason: "transport-closed",
@@ -564,8 +563,7 @@ describe("membership projection: declared-roster membership is a function of a p
       roster_loaded_at: expect.any(String),
       missing_count: 1,
       missing: [{ name: "@dev/12", state: "never-registered" }],
-      meaning: "missing transport does not establish agent absence",
-    })
+          })
   })
 
   it("8. no declaration present: byte-identical to the pre-declaration finished/missing-transport split for the same rows", () => {
@@ -623,12 +621,11 @@ describe("membership projection: declared-roster membership is a function of a p
             name: "@agent/nodecl-10",
             launch_id: "launch-nodecl-10",
             launch_parent_pid: 40010,
-            state: "missing-transport",
+            state: "not-connected",
           },
         ],
         finished_count: 1,
-        meaning: "missing transport does not establish agent absence",
-      })
+              })
       expect(members.dormant_launches).toBeUndefined()
       expect(members.departed_launches).toBeUndefined()
       expect(members.unexpected_connected).toBeUndefined()
@@ -744,7 +741,7 @@ describe("24589: expected:false is dormant regardless of manner of death", () =>
       expect.objectContaining({
         member_id: "crash-1",
         name: "@dev/5",
-        state: "dormant",
+        state: "left",
         classified_by: "declared-expected-false",
       }),
     ])
@@ -778,7 +775,7 @@ describe("24589: expected:false is dormant regardless of manner of death", () =>
         expect.objectContaining({
           member_id: "exit-1",
           name: "@dev/7",
-          state: "dormant",
+          state: "left",
           classified_by: "declared-expected-false",
         }),
       ])
@@ -801,7 +798,7 @@ describe("24589: expected:false is dormant regardless of manner of death", () =>
       expect.objectContaining({
         member_id: "need-1",
         name: "@chief",
-        state: "missing-transport",
+        state: "not-connected",
         classified_by: "declared-expected-true",
       }),
     ])

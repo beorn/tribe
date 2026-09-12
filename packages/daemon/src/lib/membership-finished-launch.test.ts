@@ -200,11 +200,10 @@ describe("membership projection: a finished launch is history, not a degraded me
           name: "@agent/10",
           launch_id: "launch-10",
           launch_parent_pid: 10010,
-          state: "missing-transport",
+          state: "not-connected",
         },
       ],
-      meaning: "missing transport does not establish agent absence",
-    })
+          })
     expect(members.finished_launches).toBeUndefined()
 
     const health = parseToolJson(handleToolCall(opCtx, "tribe.health", {}, opts)) as {
@@ -255,7 +254,7 @@ describe("membership projection: a finished launch is history, not a degraded me
           name: "@agent/11",
           launch_id: "launch-11",
           launch_parent_pid: 11011,
-          state: "missing-transport",
+          state: "not-connected",
         },
       ])
       expect(members.membership_discrepancy?.missing_count).toBe(1)
@@ -344,7 +343,7 @@ describe("membership projection: a finished launch is history, not a degraded me
           name: "@agent/12-restarted",
           launch_id: "launch-12-new",
           launch_parent_pid: 12013,
-          state: "missing-transport",
+          state: "not-connected",
         },
       ])
       expect(afterNewVanishes.membership_discrepancy?.missing_count).toBe(1)
@@ -481,7 +480,7 @@ describe("membership projection: a finished launch is history, not a degraded me
       expect(members.finished_launches).toBeUndefined()
       expect(members.membership_discrepancy?.status).toBe("degraded")
       expect(members.membership_discrepancy?.missing).toEqual([
-        expect.objectContaining({ member_id: "killed-1", state: "missing-transport" }),
+        expect.objectContaining({ member_id: "killed-1", state: "not-connected" }),
       ])
     } finally {
       nowSpy.mockRestore()
@@ -505,7 +504,7 @@ describe("membership projection: a finished launch is history, not a degraded me
       }
       expect(members.finished_launches).toBeUndefined()
       expect(members.membership_discrepancy?.missing).toEqual([
-        expect.objectContaining({ member_id: "legacy-1", state: "missing-transport" }),
+        expect.objectContaining({ member_id: "legacy-1", state: "not-connected" }),
       ])
     } finally {
       nowSpy.mockRestore()
@@ -550,7 +549,7 @@ describe("membership projection: a finished launch is history, not a degraded me
       }
       expect(members.finished_launches).toBeUndefined()
       expect(members.membership_discrepancy?.missing).toEqual([
-        expect.objectContaining({ member_id: "legacy-2", state: "missing-transport" }),
+        expect.objectContaining({ member_id: "legacy-2", state: "not-connected" }),
       ])
     } finally {
       nowSpy.mockRestore()

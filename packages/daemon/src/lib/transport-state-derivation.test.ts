@@ -370,8 +370,7 @@ describe("a replaced registration is retired by projection and repair, never by 
     expect(health.membership_discrepancy).toEqual(
       expect.objectContaining({
         missing_count: 1,
-        meaning: "missing transport does not establish agent absence",
-      }),
+              }),
     )
   })
 })

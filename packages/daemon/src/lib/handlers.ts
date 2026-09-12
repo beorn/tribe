@@ -2053,7 +2053,7 @@ type MissingTransportOrExited =
       name: string
       launch_id: string
       launch_parent_pid: number
-      state: "missing-transport"
+      state: "not-connected"
       classified_by?: "declared-expected-true"
     }
   | {
@@ -2111,7 +2111,6 @@ type MembershipDiscrepancy = {
    *  ever present when a declared roster was supplied — see
    *  `departed_launches`. */
   departed_foreign_count?: number
-  meaning: "missing transport does not establish agent absence"
 }
 
 /**
@@ -2148,7 +2147,7 @@ type DormantLaunch = {
   name: string
   launch_id: string
   launch_parent_pid: number
-  state: "dormant"
+  state: "left"
   /** ISO of the row's own `updated_at` — when it was last known registered,
    *  independent of whether any departure fact exists. */
   last_seen: string
@@ -2191,7 +2190,7 @@ type DepartedLaunch = {
   name: string
   launch_id: string
   launch_parent_pid: number
-  state: "departed"
+  state: "not-in-this-hab"
   /** ISO of the row's own `updated_at` — when it was last known registered,
    *  independent of whether any departure fact exists. */
   last_seen: string
@@ -2409,7 +2408,7 @@ function classifyDisconnectedDurableRow(
   if (roster === undefined) {
     return leftAt !== undefined
       ? { ...identity, state: "finished", left_at: leftAt }
-      : { ...identity, state: "missing-transport" }
+      : { ...identity, state: "not-connected" }
   }
 
   const expected = roster.byName.get(row.name)
@@ -2420,7 +2419,7 @@ function classifyDisconnectedDurableRow(
     // transport-closed fact is).
     return {
       ...identity,
-      state: "departed",
+      state: "not-in-this-hab",
       ...describeDepartureActivity(row, fact),
       why: classifyUndeclaredWhy(row.name, roster),
     }
@@ -2430,7 +2429,7 @@ function classifyDisconnectedDurableRow(
     // read as finished; manner of death must not decide the class.
     return {
       ...identity,
-      state: "dormant",
+      state: "left",
       ...describeDepartureActivity(row, fact),
       classified_by: "declared-expected-false",
     }
@@ -2443,7 +2442,7 @@ function classifyDisconnectedDurableRow(
         left_at: leftAt,
         classified_by: "declared-expected-true",
       }
-    : { ...identity, state: "missing-transport", classified_by: "declared-expected-true" }
+    : { ...identity, state: "not-connected", classified_by: "declared-expected-true" }
 }
 
 function projectMembershipDiscrepancy(
@@ -2463,8 +2462,8 @@ function projectMembershipDiscrepancy(
     if (isTakeoverTombstoneName(row.name)) continue
     const classified = classifyDisconnectedDurableRow(row, getSessionLeftFact, roster)
     if (classified.state === "finished") finished.push(classified)
-    else if (classified.state === "dormant") dormant.push(classified)
-    else if (classified.state === "departed") departed.push(classified)
+    else if (classified.state === "left") dormant.push(classified)
+    else if (classified.state === "not-in-this-hab") departed.push(classified)
     else missing.push(classified)
   }
 
@@ -2517,7 +2516,6 @@ function projectMembershipDiscrepancy(
         ...(dormant.length > 0 ? { dormant_count: dormant.length } : {}),
         ...(departedSiblingCount > 0 ? { departed_sibling_count: departedSiblingCount } : {}),
         ...(departedForeignCount > 0 ? { departed_foreign_count: departedForeignCount } : {}),
-        meaning: "missing transport does not establish agent absence",
       },
       finished,
       dormant,
@@ -2534,7 +2532,6 @@ function projectMembershipDiscrepancy(
       missing_count: missing.length,
       missing,
       ...(finished.length > 0 ? { finished_count: finished.length } : {}),
-      meaning: "missing transport does not establish agent absence",
     },
     finished,
     dormant,
