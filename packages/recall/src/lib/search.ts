@@ -832,7 +832,8 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
   // Determine which sources to search
   const searchMessages = !types || types.includes("message")
   const contentTypes = types?.filter((t) => t !== "message") as ContentType[] | undefined
-  const searchContent = !types || (contentTypes && contentTypes.length > 0)
+  // Content rows have no message role, including when both roles are selected.
+  const searchContent = !question && !response && (!types || (contentTypes && contentTypes.length > 0))
 
   // Build search options
   const messageOpts: MessageSearchOptions = {

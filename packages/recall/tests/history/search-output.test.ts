@@ -389,6 +389,46 @@ describe("recall search output", () => {
     }
   })
 
+  test.each([
+    ["--question", { question: true }, ["message:user"]],
+    ["--response", { response: true }, ["message:assistant"]],
+    ["both roles", { question: true, response: true }, ["message:assistant", "message:user"]],
+    ["no role filter", {}, ["llm_research", "message:assistant", "message:user", "project_memory", "vault"]],
+  ])("raw role filters select messages across source types: %s", async (_label, filter, expected) => {
+    // The existing vault-only cases cannot catch research or memory rows
+    // leaking into a query labeled "questions only" (23189).
+    const dir = mkdtempSync(join(tmpdir(), "tribe-raw-role-filter-"))
+    const dbPath = join(dir, "state.db")
+    const previousVaultDb = process.env.KM_VAULT_DB
+    try {
+      seedMessage("rolefilterneedle user question")
+      seedRankedMessage("reply", "rolefilterneedle assistant response", null)
+      const db = getDb()
+      setIndexMeta(db, "last_rebuild", new Date().toISOString())
+      for (const type of ["project_memory", "llm_research"]) {
+        db.prepare(
+          `INSERT INTO content (content_type, source_id, project_path, title, content, timestamp)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        ).run(type, type, "/test/km", type, "rolefilterneedle project knowledge", Date.now())
+      }
+      seedVaultDb(dbPath, "rolefilterneedle vault knowledge")
+      process.env.KM_VAULT_DB = dbPath
+      resetVaultDbCacheForTests()
+
+      await cmdSearch("rolefilterneedle", { raw: true, json: true, project: "*", ...filter })
+
+      const payload = lastJsonLog<{ results: Array<{ contentType: string; type?: string }> | null }>(logSpy)
+      expect(
+        payload.results?.map((row) => (row.type ? `${row.contentType}:${row.type}` : row.contentType)).sort(),
+      ).toEqual(expected)
+    } finally {
+      resetVaultDbCacheForTests()
+      if (previousVaultDb === undefined) delete process.env.KM_VAULT_DB
+      else process.env.KM_VAULT_DB = previousVaultDb
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test("agent zero-results raw-probes literal tokens before printing authoritative no-results", async () => {
     seedMessage("The prior session mentioned barenode in the architecture notes.")
     mockAgent.result = async (query, options) => zeroAgentResult(query, options) as never
