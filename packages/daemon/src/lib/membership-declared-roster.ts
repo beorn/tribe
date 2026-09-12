@@ -33,9 +33,9 @@ export interface DeclaredRoster {
   /** Declared names hab expects up (`expected: true`) — a settled departure
    *  here is a live discrepancy, never quiet history. */
   readonly expectedNames: ReadonlySet<string>
-  /** Declared names hab does NOT expect up (`expected: false`) — a settled
-   *  departure here is `finished` by design; anything else is `dormant`
-   *  (down between uses), never a discrepancy. */
+  /** Declared names hab does NOT expect up (`expected: false`) — always
+   *  `dormant` (down between uses), never a discrepancy. Manner of death
+   *  does not decide it (24589). */
   readonly onDemandNames: ReadonlySet<string>
 }
 
