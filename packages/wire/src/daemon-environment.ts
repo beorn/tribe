@@ -57,6 +57,9 @@ export function sanitizeDaemonProcessEnvironment(env: NodeJS.ProcessEnv, parentP
   if (!hasStandaloneOwner && !hasDirectOperatorCapability) {
     delete env[TRIBE_OPERATOR_CAPABILITY_FD_ENV]
   }
+  // Hab owns this launch's roster. An unowned direct daemon keeps its
+  // explicit env/file pair so the loader can still refuse disagreement.
+  if (env.HAB_SERVICE_KIND !== undefined) dropInheritedRosterForPinnedFile(env)
   return env
 }
 
@@ -74,6 +77,11 @@ export function sanitizeStandaloneDaemonEnvironment(source: Readonly<NodeJS.Proc
   delete env[TRIBE_DAEMON_RELOAD_EXIT_CODE_ENV]
   delete env[TRIBE_DAEMON_SUPERVISOR_PID_ENV]
   delete env[TRIBE_OPERATOR_CAPABILITY_FD_ENV]
+  dropInheritedRosterForPinnedFile(env)
+  return env
+}
+
+function dropInheritedRosterForPinnedFile(env: NodeJS.ProcessEnv): void {
   // 24589 row 3 / 24591: a client's TRIBE_EXPECTED_MEMBERS is frozen at that
   // client's launch. When hab has pinned the JSON on disk, drop the inherited
   // snapshot so the daemon cannot quote a list older than the config.
@@ -83,5 +91,4 @@ export function sanitizeStandaloneDaemonEnvironment(source: Readonly<NodeJS.Proc
   if (env.TRIBE_EXPECTED_MEMBERS_FILE?.trim() || (habitatFile !== undefined && existsSync(habitatFile))) {
     delete env.TRIBE_EXPECTED_MEMBERS
   }
-  return env
 }

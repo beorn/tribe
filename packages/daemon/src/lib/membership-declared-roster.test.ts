@@ -21,10 +21,14 @@
  */
 
 import { Database } from "bun:sqlite"
-import { mkdtempSync, rmSync, writeFileSync, utimesSync } from "node:fs"
+import { mkdtempSync, rmSync, statSync, writeFileSync, utimesSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import {
+  sanitizeDaemonProcessEnvironment,
+  sanitizeStandaloneDaemonEnvironment,
+} from "../../../wire/src/daemon-environment.ts"
 
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
@@ -715,6 +719,13 @@ describe("membership projection: declared-roster membership is a function of a p
   })
 })
 
+/**
+ * @failure Managed daemon startup keeps a stale client roster beside the pinned
+ *          file and refuses to start; stripping direct operator input instead
+ *          would hide an explicit mismatch.
+ * @level l1
+ * @consumer Daemon startup sanitation followed by loadDeclaredRosterFromEnv.
+ */
 describe("loadDeclaredRosterFromEnv pins hab JSON, not inherited env (24589 row 3 / 24591)", () => {
   const habJson = JSON.stringify([
     { name: "@ci", expected: false },
@@ -740,15 +751,17 @@ describe("loadDeclaredRosterFromEnv pins hab JSON, not inherited env (24589 row 
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it("refuses inherited env that disagrees with hab JSON on expected_count and onDemand names", () => {
+  it("direct daemon startup still refuses an explicit env roster that disagrees with hab JSON", () => {
     const dir = mkdtempSync(join(tmpdir(), "roster-disagree-"))
     const file = join(dir, "tribe-expected-members.json")
     writeFileSync(file, habJson)
     expect(() =>
-      loadDeclaredRosterFromEnv({
-        [TRIBE_EXPECTED_MEMBERS_FILE_ENV]: file,
-        TRIBE_EXPECTED_MEMBERS: staleEnv,
-      }),
+      loadDeclaredRosterFromEnv(
+        sanitizeDaemonProcessEnvironment({
+          [TRIBE_EXPECTED_MEMBERS_FILE_ENV]: file,
+          TRIBE_EXPECTED_MEMBERS: staleEnv,
+        }),
+      ),
     ).toThrow(/disagrees with hab JSON/)
     rmSync(dir, { recursive: true, force: true })
   })
@@ -768,11 +781,65 @@ describe("loadDeclaredRosterFromEnv pins hab JSON, not inherited env (24589 row 
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it("env-only roster is unstamped — parse time is not a config identity", () => {
-    const roster = loadDeclaredRosterFromEnv({ TRIBE_EXPECTED_MEMBERS: habJson })
+  it.each(["direct", "managed", "standalone"] as const)("%s env-only roster remains usable and unstamped", (owner) => {
+    const env = {
+      ...(owner === "managed" ? { HAB_SERVICE_KIND: "service" } : {}),
+      TRIBE_EXPECTED_MEMBERS: habJson,
+    }
+    const sanitized =
+      owner === "standalone" ? sanitizeStandaloneDaemonEnvironment(env) : sanitizeDaemonProcessEnvironment(env)
+    const roster = loadDeclaredRosterFromEnv(sanitized)
     expect(roster?.loadedAt).toBeUndefined()
-    expect(roster?.onDemandNames.has("@ci")).toBe(true)
+    expect(roster?.onDemandNames).toEqual(new Set(["@ci"]))
+    expect(roster?.expectedNames).toEqual(new Set(["@dev/12"]))
   })
+
+  it.each(["explicit", "habitat-root"] as const)(
+    "managed startup loads the %s pin despite a stale client roster",
+    (selection) => {
+      const dir = mkdtempSync(join(tmpdir(), "roster-managed-"))
+      const file = join(dir, "tribe-expected-members.json")
+      writeFileSync(file, habJson)
+      const mtimeSec = 1_700_000_300
+      utimesSync(file, mtimeSec, mtimeSec)
+      try {
+        const env = sanitizeDaemonProcessEnvironment({
+          HAB_SERVICE_KIND: "service",
+          TRIBE_EXPECTED_MEMBERS: staleEnv,
+          ...(selection === "explicit" ? { TRIBE_EXPECTED_MEMBERS_FILE: file } : { HAB_SESSION_HABITAT_ROOT: dir }),
+        })
+        const roster = loadDeclaredRosterFromEnv(env)
+        expect(roster?.expectedNames).toEqual(new Set(["@dev/12"]))
+        expect(roster?.onDemandNames).toEqual(new Set(["@ci"]))
+        expect(roster?.loadedAt).toBe(mtimeSec * 1000)
+        expect(statSync(file).mtimeMs).toBe(mtimeSec * 1000)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+  )
+
+  it.each([
+    ["missing", undefined, /TRIBE_EXPECTED_MEMBERS_FILE .* is unreadable/],
+    ["malformed", "not-json", /must be JSON/],
+  ] as const)(
+    "managed startup refuses a %s selected file instead of using the inherited roster",
+    (_state, contents, refusal) => {
+      const dir = mkdtempSync(join(tmpdir(), "roster-managed-invalid-"))
+      const file = join(dir, "tribe-expected-members.json")
+      if (contents !== undefined) writeFileSync(file, contents)
+      try {
+        const env = sanitizeDaemonProcessEnvironment({
+          HAB_SERVICE_KIND: "service",
+          TRIBE_EXPECTED_MEMBERS: staleEnv,
+          TRIBE_EXPECTED_MEMBERS_FILE: file,
+        })
+        expect(() => loadDeclaredRosterFromEnv(env)).toThrow(refusal)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+  )
 
   it("reads the habitat-root file when TRIBE_EXPECTED_MEMBERS_FILE is unset", () => {
     const dir = mkdtempSync(join(tmpdir(), "roster-habitat-"))
