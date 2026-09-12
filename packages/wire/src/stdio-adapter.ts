@@ -52,6 +52,7 @@ import { defangModelInput } from "./lib/defang.ts"
 import { createConnectReplayGate, MAX_REPLAY_EVENTS, selectReplayEvents } from "./lib/replay-cap.ts"
 import { evaluateCwdPolicy, probeCwd, readCwdPolicyFromEnv, type CwdEvaluation } from "./lib/cwd-guardrail.ts"
 import {
+  advertisedRegisterDelivery,
   deliveryCapabilityInstruction,
   resolveDeliveryCapability,
   resolveJoinDelivery,
@@ -88,9 +89,17 @@ const CLAUDE_SESSION_NAME = resolveClaudeSessionName()
 // channel.
 const DELIVERY = process.env.TRIBE_DELIVERY === "pull" ? "pull" : "push"
 const CLAUDE_CHANNEL_ENABLED = DELIVERY === "push"
+// c6071f3 / 24590: a connected MCP adapter is NOT a push-delivered tribe
+// member until the model explicitly calls tribe.join. Advertised capability
+// must match registration (http-adapter.ts:105). REQUIRE_EXPLICIT_JOIN is
+// computed here so the instruction text cannot say "do not poll" while the
+// daemon has the session pull.
+const REQUIRE_EXPLICIT_JOIN = process.env.TRIBE_REQUIRE_JOIN !== "0"
+let joined = !REQUIRE_EXPLICIT_JOIN || process.env.TRIBE_PLUGIN_RESUME_JOINED === "1"
+const advertisedDelivery = advertisedRegisterDelivery({ configuredDelivery: DELIVERY, joined })
 const DELIVERY_CAPABILITY = resolveDeliveryCapability({
-  delivery: DELIVERY,
-  channel: CLAUDE_CHANNEL_ENABLED,
+  delivery: advertisedDelivery,
+  channel: advertisedDelivery === "push" && CLAUDE_CHANNEL_ENABLED,
   pullTransport: process.env.TRIBE_PULL_TRANSPORT ?? process.env.TRIBE_WAIT_TRANSPORT,
 })
 const TRIBE_TOOLS_LIST = toolListForDeliveryCapability(DELIVERY_CAPABILITY)
@@ -99,11 +108,9 @@ const TRIBE_TOOLS_LIST = toolListForDeliveryCapability(DELIVERY_CAPABILITY)
 // configuration. The adapter forwards it on register so the session is never
 // push-eligible under the default mode, even for one event-loop turn.
 const INITIAL_FILTER_MODE = initialFilterModeFromEnv(process.env.TRIBE_FILTER_MODE)
-// c6071f3: a connected MCP adapter is NOT a push-delivered tribe member until
-// the model explicitly calls tribe.join. Keep pre-join delivery pull-only, but
-// seed explicit @personas at register time so configured Codex identities
-// (`TRIBE_NAME=@chief`, `@agent/N`, etc.) never surface as unknown-*.
-const REQUIRE_EXPLICIT_JOIN = process.env.TRIBE_REQUIRE_JOIN !== "0"
+// Keep pre-join delivery pull-only, but seed explicit @personas at register
+// time so configured Codex identities (`TRIBE_NAME=@chief`, `@agent/N`, etc.)
+// never surface as unknown-*.
 const LAUNCH_NAME = typeof args.name === "string" && args.name.trim().length > 0 ? args.name.trim() : undefined
 // 21768 — a MALFORMED launch name is an operator error, not a hint to fall back
 // on. The daemon would reject it at register/join anyway, so degrading to an
@@ -122,7 +129,6 @@ if (LAUNCH_NAME !== undefined && !isTribeNameShape(LAUNCH_NAME)) {
 }
 const REGISTER_WITH_LAUNCH_NAME =
   LAUNCH_NAME !== undefined && (!REQUIRE_EXPLICIT_JOIN || isExplicitTribePersonaName(LAUNCH_NAME))
-let joined = !REQUIRE_EXPLICIT_JOIN || process.env.TRIBE_PLUGIN_RESUME_JOINED === "1"
 // 20703 — managed spawns set TRIBE_TAKEOVER=1 so an explicit-persona
 // respawn can supersede a stale live holder once. The capability is consumed
 // after the first successful registration; replaying it on reconnect lets two
@@ -399,7 +405,7 @@ function registerParamsForConnection(): typeof baseRegisterParams & {
   return {
     ...baseRegisterParams,
     ...protocolVersionAdvertisement(selectedProtocolVersion),
-    delivery: joined ? DELIVERY : "pull",
+    delivery: advertisedRegisterDelivery({ configuredDelivery: DELIVERY, joined }),
     ...(TAKEOVER && !hasRegistered ? { takeover: true as const } : {}),
   }
 }
@@ -698,7 +704,7 @@ armDegradeNotice(daemonReady)
 // MCP Server
 // ---------------------------------------------------------------------------
 
-const joinInstruction = `If you receive a stdio-adapter auto-identify message, just call tribe.join with a short name for your focus area. Omit the role parameter — the daemon registers every session as a plain "member"; it does NOT assign "chief" by connect order. "chief" is a bead-lease hat (claimed via /up / the bead lease system), not a daemon-assigned role. No need to call tribe.members or tribe.fetch afterward — just join silently and continue.`
+const joinInstruction = `If you receive a stdio-adapter auto-identify message, call tribe.join with a short name for your focus area and delivery: "${DELIVERY}". Omit the role parameter — the daemon registers every session as a plain "member"; it does NOT assign "chief" by connect order. "chief" is a bead-lease hat (claimed via /up / the bead lease system), not a daemon-assigned role. No need to call tribe.members or tribe.fetch afterward — just join silently and continue.`
 const deliveryInstruction = deliveryCapabilityInstruction(DELIVERY_CAPABILITY)
 const attentionProjectionInstruction =
   "- Default fetch exposes `attention.actionable_unread` (request/query/verdict/assign plus direct responses) and up to 10 `attention.pending_balls`, prioritizing peer requests over watcher incidents, ahead of ambient events; `attention.pending_balls_summary` reports the full total/oldest age and any omitted request/incident counts, while `tribe.pending` returns the full pile. Responses remain quiet for default inbox waits. These are facts projected from the existing mailbox and ball tracker, not another queue."
@@ -864,7 +870,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => {
     nudgeSent = true
     timers.setTimeout(() => {
       sendChannel(
-        `Auto-identify: call tribe.join(name="${myName}") with a short name for your focus area. Omit the role parameter — the daemon auto-assigns it. Do not call tribe.members or tribe.fetch — just join silently and continue.`,
+        `Auto-identify: call tribe.join(name="${myName}", delivery="${DELIVERY}") with a short name for your focus area. Omit the role parameter — the daemon auto-assigns it. Do not call tribe.members or tribe.fetch — just join silently and continue.`,
         { from: "stdio-adapter", type: "system" },
       )
     }, 500)

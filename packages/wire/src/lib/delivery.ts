@@ -33,6 +33,19 @@ export function resolveJoinDelivery(opts: {
   return opts.adapterDelivery
 }
 
+/**
+ * Pre-join registration and the advertised MCP capability must agree.
+ * Under require-join, a connected adapter is pull until tribe.join
+ * (http-adapter.ts:105). stdio must advertise the same fact (24590).
+ * `joined` is true when require-join is off or the session already joined.
+ */
+export function advertisedRegisterDelivery(opts: {
+  readonly configuredDelivery: TribeDelivery
+  readonly joined: boolean
+}): TribeDelivery {
+  return opts.joined ? opts.configuredDelivery : "pull"
+}
+
 export function resolvePullTransport(value: unknown): TribePullTransport {
   if (value === "cli") return "cli"
   if (value === "host-stream" || value === "stream" || value === "channel") return "host-stream"

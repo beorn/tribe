@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { resolveDeliveryCapability, resolveJoinDelivery } from "../src/lib/delivery.ts"
+import { advertisedRegisterDelivery, resolveDeliveryCapability, resolveJoinDelivery } from "../src/lib/delivery.ts"
 
 describe("resolveJoinDelivery", () => {
   it("ignores model-requested push for pull-only adapters", () => {
@@ -30,6 +30,29 @@ describe("resolveJoinDelivery", () => {
         allowRequestedDelivery: true,
       }),
     ).toBe("pull")
+  })
+})
+
+describe("advertisedRegisterDelivery (24590)", () => {
+  it("advertises pull before join even when configured push — matches registration", () => {
+    expect(advertisedRegisterDelivery({ configuredDelivery: "push", joined: false })).toBe("pull")
+    const advertised = resolveDeliveryCapability({
+      delivery: advertisedRegisterDelivery({ configuredDelivery: "push", joined: false }),
+      channel: false,
+    })
+    expect(advertised.delivery).toBe("pull")
+    expect(advertised.summary).not.toMatch(/do not poll/)
+  })
+
+  it("NEGATIVE CONTROL: with require-join off (joined at start) advertises and registers push", () => {
+    expect(advertisedRegisterDelivery({ configuredDelivery: "push", joined: true })).toBe("push")
+    const advertised = resolveDeliveryCapability({
+      delivery: advertisedRegisterDelivery({ configuredDelivery: "push", joined: true }),
+      channel: true,
+    })
+    expect(advertised.delivery).toBe("push")
+    expect(advertised.idleStrategy).toBe("channel")
+    expect(advertised.summary).toMatch(/do not poll/)
   })
 })
 

@@ -68,4 +68,9 @@ describe("turn-start inbox instruction (km 19442 context-flood guard)", () => {
     expect(src).not.toContain("native Codex should use CLI")
     expect(src).not.toContain("Silver UI/Silvercode")
   })
+
+  it("24590: advertised capability uses advertisedRegisterDelivery so require-join cannot say do-not-poll while registered pull", () => {
+    expect(src).toContain("advertisedRegisterDelivery({ configuredDelivery: DELIVERY, joined })")
+    expect(src).toContain('delivery: "${DELIVERY}"')
+  })
 })
