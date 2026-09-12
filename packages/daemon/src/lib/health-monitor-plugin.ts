@@ -21,7 +21,7 @@
  *   HEALTH_REAPER_GRACE_SAMPLES — samples to wait after asking before kill (default: 6)
  */
 
-import { existsSync, readdirSync, statSync, unlinkSync } from "node:fs"
+import { existsSync, readdirSync, statSync, statfsSync, unlinkSync } from "node:fs"
 import { cpus, totalmem, freemem, loadavg } from "node:os"
 import { createLogger } from "loggily"
 import { isReaperExempt } from "tribe-wire"
@@ -1318,10 +1318,19 @@ export function evaluateAlerts(
   }
 
   // --- Disk ---
+  //
+  // TWO INDEPENDENT JUDGEMENTS, and coupling them is how the second one dies.
+  // A capacity number answers "is this filesystem full"; the scalar
+  // observation answers "can this daemon see the canonical lane at all". They
+  // used to share a branch, because the only source of a number WAS that lane,
+  // so a number implied sight. `readDiskCapacityDirect` broke that implication
+  // on purpose: the direct filesystem read hands us a number while the lane is
+  // still dead. Under the old shape that number cleared `disk:blind` and the
+  // fallback would have silently DELETED the only announcement that the
+  // canonical lane produces nothing — trading a threshold that cannot fire for
+  // a blindness alert that cannot fire (@i/4-supervision/24233, caught by the
+  // end-to-end arm of `health-monitor-disk-blind.test.ts`).
   if (evaluateScalarMetrics && metrics.disk) {
-    // A reading is the clearing edge for the blindness condition below.
-    state.scalarBlindSamples = 0
-    state.firedAlerts.delete("disk:blind")
     const disk = describeDiskCapacity(metrics.disk)
     if (disk.usagePercent > thresholds.diskCriticalPercent) {
       if (!state.firedAlerts.has("disk:critical")) {
@@ -1351,7 +1360,8 @@ export function evaluateAlerts(
       state.firedAlerts.delete("disk:warning")
     }
   } else if (evaluateScalarMetrics) {
-    // NO DISK METRIC. This branch used to clear the disk alerts and say
+    // NO DISK METRIC AT ALL — neither the canonical lane nor the direct read
+    // produced one. This branch used to clear the disk alerts and say
     // nothing, which is why a host at 86% looked identical to a host at rest:
     // the monitor was not deciding against a warning, it had nothing to decide
     // with, and absence of measurement was indistinguishable from absence of
@@ -1365,6 +1375,17 @@ export function evaluateAlerts(
     // working-to-blind transition, which is the shape the live failure had.
     state.firedAlerts.delete("disk:critical")
     state.firedAlerts.delete("disk:warning")
+  }
+
+  // --- Scalar-lane blindness ---
+  //
+  // Judged from the OBSERVATION alone, never from whether a disk number
+  // reached us: see the note on the disk block above for why a number no
+  // longer implies sight. This runs on every sample the disk block runs on,
+  // including the ones where a direct reading produced a threshold alert in
+  // the same pass — "this filesystem is filling up" and "this daemon cannot
+  // see the canonical lane" are both true then, and both are worth saying.
+  if (evaluateScalarMetrics) {
     // BLIND MEANS NO SCALAR FACTS AT ALL, which is narrower than "no disk
     // number here". An observation that declares disk unavailable — the
     // standalone-os kind names `disk.bytes` and `disk.inodes` outright — is not
@@ -1378,10 +1399,10 @@ export function evaluateAlerts(
       // the condition: `disk:blind` stays in firedAlerts, so the next real
       // outage counts back up to two and is then swallowed by its own dedupe —
       // the swallowed-alert failure this whole change exists to end,
-      // reintroduced one branch away from the fix. The disk-present branch
-      // above already clears it; this branch is the one reached when a sample
-      // carries scalar facts but no disk number, which is the standalone-os
-      // case, and it clears it too.
+      // reintroduced one branch away from the fix. Every non-blind
+      // observation clears it here, whether or not it carried a disk number:
+      // a canonical reading, and the standalone-os kind that carries scalar
+      // facts and no disk number both take this path.
       state.scalarBlindSamples = 0
       state.firedAlerts.delete("disk:blind")
     } else {
@@ -1683,6 +1704,8 @@ export async function checkReaper(
 
 interface CollectFullMetricsDeps {
   readonly collectOsMetrics?: typeof collectOsMetrics
+  /** Injected so a test can drive the fallback without a real filesystem. */
+  readonly readDiskCapacity?: () => CanonicalDiskCapacity | undefined
 }
 
 function metricUnavailableNames(observation: Extract<CanonicalHostScalarObservation, { kind: "available" }>): string[] {
@@ -1693,6 +1716,100 @@ function metricUnavailableNames(observation: Extract<CanonicalHostScalarObservat
     unavailable.push("disk.inodes")
   }
   return unavailable
+}
+
+/**
+ * Disk capacity read DIRECTLY from the filesystem, because the lane this metric
+ * is typed against is carrying nothing.
+ *
+ * THE BUG THIS FIXES IS AN ALERT THAT CANNOT FIRE. `metrics.disk` is typed as a
+ * canonical host-scalar observation, and on 2026-09-11 the canonical lane
+ * returned `scalar-fact-unavailable` for BOTH its kinds — paired with a
+ * positive control, so the lane was genuinely empty rather than the invocation
+ * wrong. `metrics.disk` was therefore never populated and the 85% threshold
+ * could not fire. On 2026-09-07 a 61G tmpfs reached 86% and four seats lost
+ * their shells with no alert ever having been possible
+ * (@i/4-supervision/24233).
+ *
+ * THE CAUSE IS AN EMPTY JOURNAL, NOT A MISSING PRODUCER, and the difference
+ * decides when this code dies. `readLatestHostScalarSnapshot` returns
+ * `scalar-fact-unavailable` when the journal holds ZERO facts. The writer
+ * exists and landed (ag `1917be42b3`, setting `HAB_SCALAR_JOURNAL_DIR` to the
+ * same `sessionDir` the reader uses). The daemon serving these metrics was
+ * launched before that landed, so its environ carries no journal dir, and it is
+ * reparented to init — no supervisor tree contains it, so nothing will restart
+ * it into the fix. The relaunch is a deliberate, deferred wire break held by
+ * `@chief` (measured and ruled 2026-09-12; @i/4-supervision/24248). Reading
+ * "no producer is declared" off this symptom is the wrong cause, and it was the
+ * first thing this comment said.
+ *
+ * A field typed as an observation that nothing fills is a PROXY, not a
+ * mechanism. Reading capacity here is not a second implementation of the scalar
+ * lane; it is declining to depend on a lane that is not carrying a value.
+ *
+ * DEATH CONDITION, and it is the whole reason this is acceptable rather than
+ * debt: **when the scalar journal starts carrying facts, the disk branch
+ * becomes their consumer and this direct read is DELETED.** Not when a producer
+ * is declared — one already is — but when the lane actually carries a value,
+ * which is one daemon relaunch away and is the only condition an observer can
+ * check. `collectFullMetrics` already prefers the canonical value whenever one
+ * exists, so the day the journal fills this becomes dead code rather than a
+ * second source of truth.
+ *
+ * `HEALTH_DISK_PATH` defaults to `/tmp` because that is the filesystem the
+ * fleet actually dies on — a RAM-backed tmpfs shared by every seat — and
+ * `describeDiskCapacity` already says "root filesystem not covered" for any
+ * non-root path, so the report stays honest about what it measured.
+ */
+export function readDiskCapacityDirect(
+  path: string = process.env.HEALTH_DISK_PATH ?? "/tmp",
+  statfs: typeof statfsSync = statfsSync,
+): CanonicalDiskCapacity | undefined {
+  let stats: ReturnType<typeof statfsSync>
+  try {
+    stats = statfs(path)
+  } catch (error) {
+    // Never throws at the caller: this runs inside metric collection, and a
+    // health monitor that crashes on an unreadable mount reports nothing at
+    // all. The absent value is itself reported by the blindness branch.
+    // silent-fallback-allow: an unreadable mount is a real answer here — the caller renders it as "disk capacity unavailable", never as healthy
+    void error
+    return undefined
+  }
+  const blockSize = Number(stats.bsize)
+  const totalBlocks = Number(stats.blocks)
+  const freeBlocks = Number(stats.bfree)
+  const availableBlocks = Number(stats.bavail)
+  const totalBytes = totalBlocks * blockSize
+  // A filesystem reporting a zero or nonsensical size is not a 0%-full disk —
+  // it is an unusable reading, and a usage percentage computed from it would
+  // divide by zero and alert on NaN. Report nothing rather than a number.
+  if (!Number.isFinite(totalBytes) || totalBytes <= 0) return undefined
+  if (!Number.isFinite(freeBlocks) || !Number.isFinite(availableBlocks)) return undefined
+  const totalInodes = Number(stats.files)
+  const freeInodes = Number(stats.ffree)
+  const inodesReported = Number.isFinite(totalInodes) && totalInodes > 0 && Number.isFinite(freeInodes)
+  return {
+    availableBytes: availableBlocks * blockSize,
+    freeBytes: freeBlocks * blockSize,
+    inodes: inodesReported
+      ? {
+          kind: "supported",
+          value: { free: freeInodes, total: totalInodes, used: totalInodes - freeInodes },
+        }
+      : {
+          kind: "unavailable",
+          metric: "disk.inodes",
+          platform: process.platform,
+          // Named, not blank: a filesystem that reports no inode table (tmpfs
+          // on some kernels, and every overlay mount here) is a different fact
+          // from a read that failed, and the report says which.
+          reason: "statfs-reported-no-inode-table",
+        },
+    path,
+    totalBytes,
+    usedBytes: (totalBlocks - freeBlocks) * blockSize,
+  }
 }
 
 function canonicalScalarMetrics(
@@ -1812,7 +1929,10 @@ export async function collectFullMetrics(
             },
           ] as const)
         : ([{ kind: "standalone-os" }, { kind: "standalone-os" }] as const)
-  const hostMetrics: Pick<HealthMetrics, "cpu" | "disk" | "diskIo" | "memory" | "scalarObservation" | "timestamp"> =
+  const sampledHostMetrics: Pick<
+    HealthMetrics,
+    "cpu" | "disk" | "diskIo" | "memory" | "scalarObservation" | "timestamp"
+  > =
     scalarObservation.kind === "standalone-os"
       ? (() => {
           const sampled = (deps.collectOsMetrics ?? collectOsMetrics)()
@@ -1826,6 +1946,16 @@ export async function collectFullMetrics(
           }
         })()
       : canonicalScalarMetrics(scalarObservation)
+
+  // ONE SEAM, covering every path that leaves `disk` absent — the canonical
+  // lane being unavailable, and the standalone sampler which omits disk
+  // outright. Filling it here rather than in each branch means a future branch
+  // cannot forget. The canonical value always WINS when one exists, so this
+  // never shadows a real producer; see readDiskCapacityDirect's death
+  // condition (@i/4-supervision/24233).
+  const directDisk =
+    sampledHostMetrics.disk === undefined ? (deps.readDiskCapacity ?? readDiskCapacityDirect)() : undefined
+  const hostMetrics = directDisk === undefined ? sampledHostMetrics : { ...sampledHostMetrics, disk: directDisk }
 
   let topProcesses: Array<{ pid: number; cpu: number; mem?: number; command: string }> = []
   let bunProcesses: number | undefined

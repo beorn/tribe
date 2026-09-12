@@ -228,11 +228,31 @@ describe("health monitor managed process source", () => {
     spawn.mockRestore()
   })
 
-  it("keeps managed scalar unavailability explicit without any OS fallback", async () => {
+  it("keeps managed scalar unavailability explicit, with disk capacity the ONE narrow OS read", async () => {
+    // AMENDED 2026-09-11 (@i/4-supervision/24233). This arm asserted that a
+    // managed source with an unavailable scalar lane produced NO metric at
+    // all, disk included. That is no longer the contract for disk, and the
+    // change was ruled rather than drifted into: the canonical journal is
+    // empty on this host, so `metrics.disk` was never populated and the 85%
+    // threshold could not fire while a 61G tmpfs filled.
+    //
+    // The guard this arm exists for is UNCHANGED and still asserted below: the
+    // standalone OS sampler must not run, and memory, diskIo and cpu must stay
+    // absent rather than be resampled. What is now permitted is exactly one
+    // direct filesystem read for capacity, seamed here, and it dies when the
+    // journal starts carrying facts — see `readDiskCapacityDirect`.
     const spawn = stubPeripheralCommands()
     const osSampler = vi.fn(() => {
       throw new Error("standalone OS sampler must not run")
     })
+    const directDisk = {
+      availableBytes: 1 * 1024 ** 3,
+      freeBytes: 1 * 1024 ** 3,
+      inodes: { kind: "unavailable" as const, metric: "disk.inodes" as const, platform: "linux", reason: "no-table" },
+      path: "/tmp",
+      totalBytes: 10 * 1024 ** 3,
+      usedBytes: 9 * 1024 ** 3,
+    }
     const unavailable: CanonicalHostScalarObservation = {
       detail: "scalar journal stale",
       kind: "unavailable",
@@ -240,14 +260,18 @@ describe("health monitor managed process source", () => {
       schema: "host-scalar-observation/1",
     }
 
-    const result = await collectFullMetrics(managed(observation(), unavailable), { collectOsMetrics: osSampler })
+    const result = await collectFullMetrics(managed(observation(), unavailable), {
+      collectOsMetrics: osSampler,
+      readDiskCapacity: () => directDisk,
+    })
 
     expect(osSampler).not.toHaveBeenCalled()
     expect(result.metrics.cpu).toEqual({
       topProcesses: [expect.objectContaining({ command: "bun worker.ts", pid: 10 })],
     })
     expect(result.metrics.memory).toBeUndefined()
-    expect(result.metrics.disk).toBeUndefined()
+    // The narrow exception, and it is narrow: disk only, from the seam only.
+    expect(result.metrics.disk).toEqual(directDisk)
     expect(result.metrics.diskIo).toBeUndefined()
     expect(result.metrics.scalarObservation).toEqual({
       detail: "scalar journal stale",
