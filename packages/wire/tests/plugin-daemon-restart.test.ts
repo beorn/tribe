@@ -450,7 +450,6 @@ process.exit(await child.exited)
     }
     for (const plugin of plugins) {
       const pluginPid = plugin.pid
-      plugin.kill("SIGTERM")
       if (pluginPid) await terminateTestProcess(pluginPid)
     }
     for (const pid of adapterPids) await terminateTestProcess(pid)
