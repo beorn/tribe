@@ -6,7 +6,9 @@
  * @consumer root hab.yml wire service
  */
 
-import { closeSync, openSync } from "node:fs"
+import { closeSync, mkdtempSync, openSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, test } from "vitest"
 import tribeProject from "../../../hab.projects.ts"
@@ -96,6 +98,28 @@ describe("Tribe daemon environment ownership", () => {
       TRIBE_EXPECTED_MEMBERS_FILE: "/hab/tribe-expected-members.json",
       TRIBE_SOCKET: "/tmp/tribe.sock",
     })
+  })
+
+  test("standalone spawn drops inherited roster when the habitat-root pin exists", () => {
+    const dir = mkdtempSync(join(tmpdir(), "roster-pin-"))
+    writeFileSync(join(dir, "tribe-expected-members.json"), "[]")
+    try {
+      expect(
+        sanitizeStandaloneDaemonEnvironment({
+          ...ambientIdentity,
+          HAB_SESSION_HABITAT_ROOT: dir,
+          PATH: "/bin",
+          TRIBE_EXPECTED_MEMBERS: '[{"name":"@ci","expected":true}]',
+          TRIBE_SOCKET: "/tmp/tribe.sock",
+        }),
+      ).toEqual({
+        HAB_SESSION_HABITAT_ROOT: dir,
+        PATH: "/bin",
+        TRIBE_SOCKET: "/tmp/tribe.sock",
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   test("a standalone generation keeps its supervisor-provided capability fd", () => {

@@ -22,7 +22,8 @@
  * @ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded
  */
 
-import { readFileSync, statSync } from "node:fs"
+import { existsSync, readFileSync, statSync } from "node:fs"
+import { join } from "node:path"
 
 export interface DeclaredMember {
   readonly name: string
@@ -61,6 +62,17 @@ export interface DeclaredRoster {
  * name nobody, and reads every durable launch as undeclared/departed.
  */
 export const TRIBE_EXPECTED_MEMBERS_FILE_ENV = "TRIBE_EXPECTED_MEMBERS_FILE"
+/** Must match @hab/plugin-ag pin-expected-members. */
+export const TRIBE_EXPECTED_MEMBERS_HABITAT_FILE = "tribe-expected-members.json"
+
+function resolvedRosterFile(env: Readonly<NodeJS.ProcessEnv>): string | undefined {
+  const explicit = env[TRIBE_EXPECTED_MEMBERS_FILE_ENV]?.trim()
+  if (explicit !== undefined && explicit !== "") return explicit
+  const root = env.HAB_SESSION_HABITAT_ROOT?.trim()
+  if (root === undefined || root === "") return undefined
+  const derived = join(root, TRIBE_EXPECTED_MEMBERS_HABITAT_FILE)
+  return existsSync(derived) ? derived : undefined
+}
 
 export function parseExpectedMembers(raw: string | undefined, loadedAt?: number): DeclaredRoster | undefined {
   if (raw === undefined || raw.trim() === "") return undefined
@@ -137,9 +149,9 @@ function rosterDisagreement(hab: DeclaredRoster, inherited: DeclaredRoster): str
  * as fresh. File mtime is the config identity, not parse time.
  */
 export function loadDeclaredRosterFromEnv(env: Readonly<NodeJS.ProcessEnv>): DeclaredRoster | undefined {
-  const filePath = env[TRIBE_EXPECTED_MEMBERS_FILE_ENV]?.trim()
+  const filePath = resolvedRosterFile(env)
   const envRaw = env.TRIBE_EXPECTED_MEMBERS
-  if (filePath !== undefined && filePath !== "") {
+  if (filePath !== undefined) {
     let raw: string
     try {
       raw = readFileSync(filePath, "utf8")

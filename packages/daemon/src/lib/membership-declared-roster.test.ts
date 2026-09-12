@@ -773,4 +773,20 @@ describe("loadDeclaredRosterFromEnv pins hab JSON, not inherited env (24589 row 
     expect(roster?.loadedAt).toBeUndefined()
     expect(roster?.onDemandNames.has("@ci")).toBe(true)
   })
+
+  it("reads the habitat-root file when TRIBE_EXPECTED_MEMBERS_FILE is unset", () => {
+    const dir = mkdtempSync(join(tmpdir(), "roster-habitat-"))
+    const file = join(dir, "tribe-expected-members.json")
+    writeFileSync(file, habJson)
+    const mtimeSec = 1_700_000_200
+    utimesSync(file, mtimeSec, mtimeSec)
+    const roster = loadDeclaredRosterFromEnv({ HAB_SESSION_HABITAT_ROOT: dir })
+    expect(roster?.loadedAt).toBe(mtimeSec * 1000)
+    expect(roster?.onDemandNames.has("@ci")).toBe(true)
+    expect(roster?.expectedNames.has("@dev/12")).toBe(true)
+    expect(() =>
+      loadDeclaredRosterFromEnv({ HAB_SESSION_HABITAT_ROOT: dir, TRIBE_EXPECTED_MEMBERS: staleEnv }),
+    ).toThrow(/disagrees with hab JSON/)
+    rmSync(dir, { recursive: true, force: true })
+  })
 })

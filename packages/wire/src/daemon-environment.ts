@@ -6,7 +6,8 @@
  * only to the supervisor that minted them.
  */
 
-import { fstatSync } from "node:fs"
+import { existsSync, fstatSync } from "node:fs"
+import { join } from "node:path"
 import { tribeSessionIdentityEnvironmentNames } from "./launch-environment.ts"
 
 export const TRIBE_OPERATOR_CAPABILITY_FD_ENV = "TRIBE_OPERATOR_CAPABILITY_FD"
@@ -76,6 +77,11 @@ export function sanitizeStandaloneDaemonEnvironment(source: Readonly<NodeJS.Proc
   // 24589 row 3 / 24591: a client's TRIBE_EXPECTED_MEMBERS is frozen at that
   // client's launch. When hab has pinned the JSON on disk, drop the inherited
   // snapshot so the daemon cannot quote a list older than the config.
-  if (env.TRIBE_EXPECTED_MEMBERS_FILE?.trim()) delete env.TRIBE_EXPECTED_MEMBERS
+  const habitatFile = env.HAB_SESSION_HABITAT_ROOT?.trim()
+    ? join(env.HAB_SESSION_HABITAT_ROOT, "tribe-expected-members.json")
+    : undefined
+  if (env.TRIBE_EXPECTED_MEMBERS_FILE?.trim() || (habitatFile !== undefined && existsSync(habitatFile))) {
+    delete env.TRIBE_EXPECTED_MEMBERS
+  }
   return env
 }
