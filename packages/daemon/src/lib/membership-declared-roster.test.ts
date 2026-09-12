@@ -154,6 +154,7 @@ describe("membership projection: declared-roster membership is a function of a p
             launch_parent_pid: 30001,
             state: "exited-not-remounted",
             left_at: new Date(leftAt).toISOString(),
+            classified_by: "declared-expected-true",
           },
         ],
         meaning: "missing transport does not establish agent absence",
@@ -201,6 +202,7 @@ describe("membership projection: declared-roster membership is a function of a p
           launch_id: "launch-exp-2",
           launch_parent_pid: 30002,
           state: "missing-transport",
+          classified_by: "declared-expected-true",
         },
       ])
     } finally {
@@ -268,7 +270,7 @@ describe("membership projection: declared-roster membership is a function of a p
     }
   })
 
-  it("4. on-demand seat, harness-exited fact: finished_launches, no discrepancy (by design, unchanged)", () => {
+  it("4. on-demand seat, harness-exited fact: dormant_launches, no discrepancy (24589: manner of death does not decide it)", () => {
     let now = 30_300_000
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now)
     try {
@@ -288,18 +290,21 @@ describe("membership projection: declared-roster membership is a function of a p
       const opts = baseOpts({ expectedMembers: roster([{ name: "@adhoc/never-1", expected: false }]) })
       const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
         membership_discrepancy?: unknown
-        finished_launches?: Array<Record<string, unknown>>
+        finished_launches?: unknown
+        dormant_launches?: Array<Record<string, unknown>>
       }
       expect(members.membership_discrepancy).toBeUndefined()
-      expect(members.finished_launches).toEqual([
-        {
+      expect(members.finished_launches).toBeUndefined()
+      expect(members.dormant_launches).toEqual([
+        expect.objectContaining({
           member_id: "dem-1",
           name: "@adhoc/never-1",
           launch_id: "launch-dem-1",
           launch_parent_pid: 30004,
-          state: "finished",
+          state: "dormant",
           left_at: new Date(leftAt).toISOString(),
-        },
+          classified_by: "declared-expected-false",
+        }),
       ])
     } finally {
       nowSpy.mockRestore()
@@ -522,6 +527,7 @@ describe("membership projection: declared-roster membership is a function of a p
           launch_parent_pid: 30071,
           state: "dormant",
           last_seen: new Date(quietSeen).toISOString(),
+          classified_by: "declared-expected-false",
         },
         {
           member_id: "dorm-closed",
@@ -532,6 +538,7 @@ describe("membership projection: declared-roster membership is a function of a p
           last_seen: new Date(closedSeen).toISOString(),
           left_at: new Date(closedLeft).toISOString(),
           reason: "transport-closed",
+          classified_by: "declared-expected-false",
         },
       ])
     } finally {
@@ -693,5 +700,108 @@ describe("membership projection: declared-roster membership is a function of a p
       unexpected_connected?: unknown
     }
     expect(health.unexpected_connected).toBeUndefined()
+  })
+})
+
+/**
+ * @i/24589-4-supervision: expected:false must classify dormant whether the
+ * seat exited cleanly or died. Current code still routes a settled
+ * harness-exited on-demand row to finished_launches (test 4 above), and the
+ * classification does not name which input decided the class — so a reader
+ * cannot tell "dormant because declared" from "dormant because it closed
+ * politely". The negative control is load-bearing: without it, classifying
+ * everything dormant would satisfy the first row.
+ */
+describe("24589: expected:false is dormant regardless of manner of death", () => {
+  let tmpDir: string
+  let db: Database
+  let stmts: TribeStatements
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "membership-24589-"))
+    db = openDatabase(join(tmpDir, "tribe.db"))
+    stmts = createStatements(db)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    db.close()
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it("on-demand crash with no left fact is dormant, not missing-transport", () => {
+    addSession(db, stmts, "crash-1", "@dev/5", { id: "launch-crash-1", parentPid: 40001 })
+    const opCtx = makeContext(db, stmts, "operator", "@operator")
+    const opts = baseOpts({ expectedMembers: roster([{ name: "@dev/5", expected: false }]) })
+    const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
+      membership_discrepancy?: unknown
+      dormant_launches?: Array<Record<string, unknown>>
+    }
+    expect(members.membership_discrepancy).toBeUndefined()
+    expect(members.dormant_launches).toEqual([
+      expect.objectContaining({
+        member_id: "crash-1",
+        name: "@dev/5",
+        state: "dormant",
+        classified_by: "declared-expected-false",
+      }),
+    ])
+  })
+
+  it("on-demand harness-exited is also dormant — manner of death does not decide it", () => {
+    let now = 40_000_000
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now)
+    try {
+      const ctx = addSession(db, stmts, "exit-1", "@dev/7", { id: "launch-exit-1", parentPid: 40002 })
+      now += 1_000
+      logSessionLeft(ctx, {
+        memberId: "exit-1",
+        name: "@dev/7",
+        role: "member",
+        domains: [],
+        launchId: "launch-exit-1",
+        launchParentPid: 40002,
+        reason: "harness-exited",
+      })
+      const opCtx = makeContext(db, stmts, "operator", "@operator")
+      const opts = baseOpts({ expectedMembers: roster([{ name: "@dev/7", expected: false }]) })
+      const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
+        membership_discrepancy?: unknown
+        finished_launches?: unknown
+        dormant_launches?: Array<Record<string, unknown>>
+      }
+      expect(members.membership_discrepancy).toBeUndefined()
+      expect(members.finished_launches).toBeUndefined()
+      expect(members.dormant_launches).toEqual([
+        expect.objectContaining({
+          member_id: "exit-1",
+          name: "@dev/7",
+          state: "dormant",
+          classified_by: "declared-expected-false",
+        }),
+      ])
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+
+  it("NEGATIVE CONTROL: expected:true crash with no left fact is still missing-transport", () => {
+    addSession(db, stmts, "need-1", "@chief", { id: "launch-need-1", parentPid: 40003 })
+    const opCtx = makeContext(db, stmts, "operator", "@operator")
+    const opts = baseOpts({ expectedMembers: roster([{ name: "@chief", expected: true }]) })
+    const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
+      membership_discrepancy?: { missing?: Array<Record<string, unknown>>; missing_count?: number }
+      dormant_launches?: unknown
+    }
+    expect(members.dormant_launches).toBeUndefined()
+    expect(members.membership_discrepancy?.missing_count).toBe(1)
+    expect(members.membership_discrepancy?.missing).toEqual([
+      expect.objectContaining({
+        member_id: "need-1",
+        name: "@chief",
+        state: "missing-transport",
+        classified_by: "declared-expected-true",
+      }),
+    ])
   })
 })

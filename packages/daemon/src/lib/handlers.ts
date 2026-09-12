@@ -2023,6 +2023,7 @@ type MissingTransportOrExited =
       launch_id: string
       launch_parent_pid: number
       state: "missing-transport"
+      classified_by?: "declared-expected-true"
     }
   | {
       member_id: string
@@ -2031,6 +2032,7 @@ type MissingTransportOrExited =
       launch_parent_pid: number
       state: "exited-not-remounted"
       left_at: string
+      classified_by?: "declared-expected-true"
     }
 
 /** Everything `MembershipDiscrepancy.missing` can carry. `never-registered`
@@ -2123,6 +2125,9 @@ type DormantLaunch = {
   /** That fact's `reason`, when it carries one and one exists — any reason,
    *  not only `harness-exited` (e.g. `transport-closed`). */
   reason?: string
+  /** 24589: names the input that decided this class, so a reader can tell
+   *  "dormant because declared" from "dormant because it closed politely". */
+  classified_by: "declared-expected-false"
 }
 
 /**
@@ -2343,9 +2348,10 @@ type MembershipProjection = {
  *     `exited-not-remounted` (hab was supposed to remount it and didn't);
  *     otherwise -> `missing-transport`. Either way it is a live discrepancy —
  *     an expected seat with no live transport is missing regardless of why.
- *   - on-demand (`expected: false`): settled -> `finished` (by design,
- *     identical to the no-roster case); otherwise -> `dormant` (quiet
- *     between uses — a crash page is hab's, once, never a discrepancy).
+ *   - on-demand (`expected: false`): always `dormant` (24589). Manner of
+ *     death does not decide it — a crash with no left fact and a polite
+ *     harness-exited fact are the same class. A crash page is hab's, once,
+ *     never a discrepancy.
  *   - undeclared (absent from the roster entirely): always `departed`,
  *     regardless of the fact — nothing expects the name up, so it is history
  *     nobody was watching.
@@ -2385,17 +2391,24 @@ function classifyDisconnectedDurableRow(
     }
   }
   if (!expected) {
-    // On-demand: a settled harness exit is `finished` (by design); anything
-    // else is `dormant`, quiet between uses, carrying the same informational
-    // last_seen / left_at / reason a departed row does.
-    return leftAt !== undefined
-      ? { ...identity, state: "finished", left_at: leftAt }
-      : { ...identity, state: "dormant", ...describeDepartureActivity(row, fact) }
+    // On-demand (24589): always dormant. A settled harness exit used to
+    // read as finished; manner of death must not decide the class.
+    return {
+      ...identity,
+      state: "dormant",
+      ...describeDepartureActivity(row, fact),
+      classified_by: "declared-expected-false",
+    }
   }
   // expected === true: hab expects this name up.
   return leftAt !== undefined
-    ? { ...identity, state: "exited-not-remounted", left_at: leftAt }
-    : { ...identity, state: "missing-transport" }
+    ? {
+        ...identity,
+        state: "exited-not-remounted",
+        left_at: leftAt,
+        classified_by: "declared-expected-true",
+      }
+    : { ...identity, state: "missing-transport", classified_by: "declared-expected-true" }
 }
 
 function projectMembershipDiscrepancy(
