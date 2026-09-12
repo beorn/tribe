@@ -22,6 +22,8 @@
  * @ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded
  */
 
+import { readFileSync, statSync } from "node:fs"
+
 export interface DeclaredMember {
   readonly name: string
   readonly expected: boolean
@@ -37,6 +39,13 @@ export interface DeclaredRoster {
    *  departure here is `finished` by design; anything else is `dormant`
    *  (down between uses), never a discrepancy. */
   readonly onDemandNames: ReadonlySet<string>
+  /**
+   * Unix-ms identity of the hab JSON this roster was loaded from (file mtime).
+   * Absent when the roster came only from inherited env — do not stamp
+   * Date.now() at parse; that manufactures freshness for a list older than
+   * the config (24589 row 3 / 24591).
+   */
+  readonly loadedAt?: number
 }
 
 /**
@@ -51,7 +60,9 @@ export interface DeclaredRoster {
  * roster — an empty roster (`"[]"`) is a real declaration that happens to
  * name nobody, and reads every durable launch as undeclared/departed.
  */
-export function parseExpectedMembers(raw: string | undefined): DeclaredRoster | undefined {
+export const TRIBE_EXPECTED_MEMBERS_FILE_ENV = "TRIBE_EXPECTED_MEMBERS_FILE"
+
+export function parseExpectedMembers(raw: string | undefined, loadedAt?: number): DeclaredRoster | undefined {
   if (raw === undefined || raw.trim() === "") return undefined
   let parsed: unknown
   try {
@@ -90,7 +101,69 @@ export function parseExpectedMembers(raw: string | undefined): DeclaredRoster | 
     if (expected) expectedNames.add(name)
     else onDemandNames.add(name)
   }
-  return { byName, expectedNames, onDemandNames }
+  return loadedAt === undefined ? { byName, expectedNames, onDemandNames } : { byName, expectedNames, onDemandNames, loadedAt }
+}
+
+function rosterDisagreement(hab: DeclaredRoster, inherited: DeclaredRoster): string | undefined {
+  if (hab.expectedNames.size !== inherited.expectedNames.size || hab.onDemandNames.size !== inherited.onDemandNames.size) {
+    return (
+      `TRIBE_EXPECTED_MEMBERS disagrees with hab JSON: expected_count hab=${hab.expectedNames.size} inherited=${inherited.expectedNames.size}; ` +
+      `onDemand hab=${hab.onDemandNames.size} inherited=${inherited.onDemandNames.size}`
+    )
+  }
+  for (const name of hab.onDemandNames) {
+    if (!inherited.onDemandNames.has(name)) {
+      return `TRIBE_EXPECTED_MEMBERS disagrees with hab JSON: onDemand ${name} is in hab JSON, not in inherited env`
+    }
+  }
+  for (const name of inherited.onDemandNames) {
+    if (!hab.onDemandNames.has(name)) {
+      return `TRIBE_EXPECTED_MEMBERS disagrees with hab JSON: onDemand ${name} is in inherited env, not in hab JSON`
+    }
+  }
+  for (const name of hab.expectedNames) {
+    if (!inherited.expectedNames.has(name)) {
+      return `TRIBE_EXPECTED_MEMBERS disagrees with hab JSON: expected ${name} is in hab JSON, not in inherited env`
+    }
+  }
+  return undefined
+}
+
+/**
+ * Load the declared roster at daemon start (24589 row 3 / 24591).
+ *
+ * Hab JSON on disk (`TRIBE_EXPECTED_MEMBERS_FILE`) is the source of truth.
+ * Inherited `TRIBE_EXPECTED_MEMBERS` is asserted against it and never stamped
+ * as fresh. File mtime is the config identity, not parse time.
+ */
+export function loadDeclaredRosterFromEnv(env: Readonly<NodeJS.ProcessEnv>): DeclaredRoster | undefined {
+  const filePath = env[TRIBE_EXPECTED_MEMBERS_FILE_ENV]?.trim()
+  const envRaw = env.TRIBE_EXPECTED_MEMBERS
+  if (filePath !== undefined && filePath !== "") {
+    let raw: string
+    try {
+      raw = readFileSync(filePath, "utf8")
+    } catch (error) {
+      throw new Error(
+        `${TRIBE_EXPECTED_MEMBERS_FILE_ENV} ${filePath} is unreadable: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+    const loadedAt = Math.trunc(statSync(filePath).mtimeMs)
+    const fromFile = parseExpectedMembers(raw, loadedAt)
+    if (fromFile === undefined) {
+      throw new Error(`${TRIBE_EXPECTED_MEMBERS_FILE_ENV} ${filePath} is empty`)
+    }
+    if (envRaw !== undefined && envRaw.trim() !== "") {
+      const fromEnv = parseExpectedMembers(envRaw)
+      if (fromEnv === undefined) {
+        throw new Error("TRIBE_EXPECTED_MEMBERS is empty while TRIBE_EXPECTED_MEMBERS_FILE is set")
+      }
+      const disagreement = rosterDisagreement(fromFile, fromEnv)
+      if (disagreement !== undefined) throw new Error(disagreement)
+    }
+    return fromFile
+  }
+  return parseExpectedMembers(envRaw)
 }
 
 /**

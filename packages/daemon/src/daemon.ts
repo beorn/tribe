@@ -56,7 +56,7 @@ import { pruneOldActivityLogs } from "./lib/activity-log.ts"
 import { countDurableSessionRows } from "./lib/session.ts"
 import { gatherCodePin, STARTUP_SHA } from "./lib/code-pin.ts"
 import { parseDeliveryFallbackPolicy } from "./lib/delivery-resolution.ts"
-import { parseExpectedMembers } from "./lib/membership-declared-roster.ts"
+import { loadDeclaredRosterFromEnv } from "./lib/membership-declared-roster.ts"
 import { sanitizeDaemonProcessEnvironment } from "../../wire/src/daemon-environment.ts"
 
 // ---------------------------------------------------------------------------
@@ -153,7 +153,7 @@ sanitizeDaemonProcessEnvironment(process.env)
 
 const log = createLogger("tribe:daemon")
 const deliveryFallbackPolicy = parseDeliveryFallbackPolicy(process.env.TRIBE_DELIVERY_FALLBACKS)
-const expectedMembers = parseExpectedMembers(process.env.TRIBE_EXPECTED_MEMBERS)
+const expectedMembers = loadDeclaredRosterFromEnv(process.env)
 
 // ---------------------------------------------------------------------------
 // Sync portion of the pipe — config, db, daemonCtx, recall, tools, registry,

@@ -73,5 +73,9 @@ export function sanitizeStandaloneDaemonEnvironment(source: Readonly<NodeJS.Proc
   delete env[TRIBE_DAEMON_RELOAD_EXIT_CODE_ENV]
   delete env[TRIBE_DAEMON_SUPERVISOR_PID_ENV]
   delete env[TRIBE_OPERATOR_CAPABILITY_FD_ENV]
+  // 24589 row 3 / 24591: a client's TRIBE_EXPECTED_MEMBERS is frozen at that
+  // client's launch. When hab has pinned the JSON on disk, drop the inherited
+  // snapshot so the daemon cannot quote a list older than the config.
+  if (env.TRIBE_EXPECTED_MEMBERS_FILE?.trim()) delete env.TRIBE_EXPECTED_MEMBERS
   return env
 }

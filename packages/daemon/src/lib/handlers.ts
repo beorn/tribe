@@ -2081,6 +2081,8 @@ type MembershipDiscrepancy = {
    *  no field changes meaning when a declaration appears. */
   expected_count?: number
   connected_expected_count?: number
+  /** Config identity of the hab JSON this roster was loaded from (file mtime), never parse time. */
+  roster_loaded_at?: number
   missing_count: number
   missing: MissingLaunch[]
   /** Count of disconnected durable rows classified `finished` alongside this
@@ -2493,6 +2495,7 @@ function projectMembershipDiscrepancy(
         known_durable_launches: knownNames.size,
         expected_count: roster.expectedNames.size,
         connected_expected_count: connectedExpectedNames.size,
+        ...(roster.loadedAt === undefined ? {} : { roster_loaded_at: roster.loadedAt }),
         missing_count: missing.length,
         missing,
         ...(finished.length > 0 ? { finished_count: finished.length } : {}),

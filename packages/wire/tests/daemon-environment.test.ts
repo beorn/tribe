@@ -82,6 +82,22 @@ describe("Tribe daemon environment ownership", () => {
     })
   })
 
+  test("standalone spawn drops inherited TRIBE_EXPECTED_MEMBERS when hab pinned a file", () => {
+    expect(
+      sanitizeStandaloneDaemonEnvironment({
+        ...ambientIdentity,
+        PATH: "/bin",
+        TRIBE_EXPECTED_MEMBERS: '[{"name":"@ci","expected":true}]',
+        TRIBE_EXPECTED_MEMBERS_FILE: "/hab/tribe-expected-members.json",
+        TRIBE_SOCKET: "/tmp/tribe.sock",
+      }),
+    ).toEqual({
+      PATH: "/bin",
+      TRIBE_EXPECTED_MEMBERS_FILE: "/hab/tribe-expected-members.json",
+      TRIBE_SOCKET: "/tmp/tribe.sock",
+    })
+  })
+
   test("a standalone generation keeps its supervisor-provided capability fd", () => {
     const env: NodeJS.ProcessEnv = {
       ...ambientIdentity,

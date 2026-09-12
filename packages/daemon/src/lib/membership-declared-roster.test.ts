@@ -21,7 +21,7 @@
  */
 
 import { Database } from "bun:sqlite"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync, utimesSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -30,7 +30,12 @@ import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { handleToolCall, type HandlerOpts } from "./handlers.ts"
 import { logSessionLeft } from "./messaging.ts"
-import { parseExpectedMembers, type DeclaredRoster } from "./membership-declared-roster.ts"
+import {
+  loadDeclaredRosterFromEnv,
+  parseExpectedMembers,
+  TRIBE_EXPECTED_MEMBERS_FILE_ENV,
+  type DeclaredRoster,
+} from "./membership-declared-roster.ts"
 import { registerSession } from "./session.ts"
 
 const PROJECT_ID = "membership-declared-roster"
@@ -693,5 +698,79 @@ describe("membership projection: declared-roster membership is a function of a p
       unexpected_connected?: unknown
     }
     expect(health.unexpected_connected).toBeUndefined()
+  })
+
+  it("11. discrepancy carries roster_loaded_at from the hab JSON identity", () => {
+    addSession(db, stmts, "exp-11", "@agent/restart-always", { id: "launch-exp-11", parentPid: 30111 })
+    const opCtx = makeContext(db, stmts, "operator", "@operator")
+    const stamped = parseExpectedMembers(
+      JSON.stringify([{ name: "@agent/restart-always", expected: true }]),
+      1_700_000_000_000,
+    )
+    const members = parseToolJson(
+      handleToolCall(opCtx, "tribe.members", {}, baseOpts({ expectedMembers: stamped })),
+    ) as { membership_discrepancy?: { roster_loaded_at?: number; expected_count?: number } }
+    expect(members.membership_discrepancy?.expected_count).toBe(1)
+    expect(members.membership_discrepancy?.roster_loaded_at).toBe(1_700_000_000_000)
+  })
+})
+
+describe("loadDeclaredRosterFromEnv pins hab JSON, not inherited env (24589 row 3 / 24591)", () => {
+  const habJson = JSON.stringify([
+    { name: "@ci", expected: false },
+    { name: "@dev/12", expected: true },
+  ])
+  const staleEnv = JSON.stringify([
+    { name: "@ci", expected: true },
+    { name: "@chief/next", expected: false },
+  ])
+
+  it("stamps loadedAt from file mtime, not parse time", () => {
+    const dir = mkdtempSync(join(tmpdir(), "roster-file-"))
+    const file = join(dir, "tribe-expected-members.json")
+    writeFileSync(file, habJson)
+    const mtimeSec = 1_700_000_000
+    utimesSync(file, mtimeSec, mtimeSec)
+    const before = Date.now()
+    const roster = loadDeclaredRosterFromEnv({ [TRIBE_EXPECTED_MEMBERS_FILE_ENV]: file })
+    expect(roster?.loadedAt).toBe(mtimeSec * 1000)
+    expect(roster?.loadedAt).toBeLessThan(before)
+    expect(roster?.onDemandNames.has("@ci")).toBe(true)
+    expect(roster?.expectedNames.has("@dev/12")).toBe(true)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it("refuses inherited env that disagrees with hab JSON on expected_count and onDemand names", () => {
+    const dir = mkdtempSync(join(tmpdir(), "roster-disagree-"))
+    const file = join(dir, "tribe-expected-members.json")
+    writeFileSync(file, habJson)
+    expect(() =>
+      loadDeclaredRosterFromEnv({
+        [TRIBE_EXPECTED_MEMBERS_FILE_ENV]: file,
+        TRIBE_EXPECTED_MEMBERS: staleEnv,
+      }),
+    ).toThrow(/disagrees with hab JSON/)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it("accepts inherited env that matches hab JSON and still stamps file mtime", () => {
+    const dir = mkdtempSync(join(tmpdir(), "roster-agree-"))
+    const file = join(dir, "tribe-expected-members.json")
+    writeFileSync(file, habJson)
+    const mtimeSec = 1_700_000_100
+    utimesSync(file, mtimeSec, mtimeSec)
+    const roster = loadDeclaredRosterFromEnv({
+      [TRIBE_EXPECTED_MEMBERS_FILE_ENV]: file,
+      TRIBE_EXPECTED_MEMBERS: habJson,
+    })
+    expect(roster?.loadedAt).toBe(mtimeSec * 1000)
+    expect([...roster!.onDemandNames]).toEqual(["@ci"])
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it("env-only roster is unstamped — parse time is not a config identity", () => {
+    const roster = loadDeclaredRosterFromEnv({ TRIBE_EXPECTED_MEMBERS: habJson })
+    expect(roster?.loadedAt).toBeUndefined()
+    expect(roster?.onDemandNames.has("@ci")).toBe(true)
   })
 })
