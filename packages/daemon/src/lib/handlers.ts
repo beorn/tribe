@@ -996,18 +996,22 @@ function resolveDirectDelivery(
         ? directMailboxResolution
         : (policyResolution ?? directMailboxResolution)
   if (!tracked || resolution.status !== "accepted") return resolution
-  // 24581: reachable-and-deaf (telegram) must fail loudly. Untracked notify
+  // 24581: reachable-and-deaf final owners must fail loudly. Untracked notify
   // still delivers — that is what a relay is for. Names with no sessions row
   // are not this rule; they keep the existing unresolved/offline path.
-  if (transport.mailboxDeafNames.has(recipient)) {
-    const snapshot = transport.observe(recipient).owner_transport_observed_at
-    const reason = transport.mailboxDeafReasons.get(recipient) ?? "self-mailbox-authority-missing"
+  const resolvedOwner = resolution.state === "bounced" ? resolution.to : recipient
+  if (transport.mailboxDeafNames.has(resolvedOwner)) {
+    const snapshot = transport.observe(resolvedOwner).owner_transport_observed_at
+    const reason = transport.mailboxDeafReasons.get(resolvedOwner) ?? "self-mailbox-authority-missing"
     return {
       status: "unresolved",
       reason:
-        `at admission snapshot ${snapshot}, recipient ${JSON.stringify(recipient)} ` +
+        `resolved owner ${JSON.stringify(resolvedOwner)} for recipient ${JSON.stringify(recipient)} ` +
+        `at admission snapshot ${snapshot}: ` +
         `mailbox_read_capability.state is unavailable (${reason}); a tracked ball promises an answer ` +
-        "this mailbox cannot read. Send an untracked notify if the recipient is a relay (24581).",
+        `this mailbox cannot read. Restore mailbox authority for ${JSON.stringify(resolvedOwner)} ` +
+        "before retrying an answer-required request. Use untracked notify only for a relay notification " +
+        "that needs no answer (24581).",
     }
   }
   if (resolution.state === "online" && transport.answerableNames.has(recipient)) return resolution
