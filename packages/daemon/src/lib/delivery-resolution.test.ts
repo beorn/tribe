@@ -178,8 +178,34 @@ describe("generic direct-message delivery resolution", () => {
     stmts = createStatements(db)
     sender = makeContext(db, stmts, "@sender", "sess-sender")
     manager = makeContext(db, stmts, "@dev", "sess-manager")
-    registerSession(sender, PROJECT_ID, () => true, null, 1001, "pull", "/repo", null, "codex")
-    registerSession(manager, PROJECT_ID, () => true, null, 1002, "pull", "/repo", null, "codex")
+    registerSession(
+      sender,
+      PROJECT_ID,
+      () => true,
+      null,
+      1001,
+      "pull",
+      "/repo",
+      null,
+      "codex",
+      null,
+      null,
+      "01".repeat(32),
+    )
+    registerSession(
+      manager,
+      PROJECT_ID,
+      () => true,
+      null,
+      1002,
+      "pull",
+      "/repo",
+      null,
+      "codex",
+      null,
+      null,
+      "02".repeat(32),
+    )
   })
 
   afterEach(() => {
@@ -557,6 +583,7 @@ describe("generic direct-message delivery resolution", () => {
       "codex",
       "durable-launch",
       2003,
+      "03".repeat(32),
     )
 
     const sent = resultJson(
@@ -577,7 +604,20 @@ describe("generic direct-message delivery resolution", () => {
 
   it("keeps explicit pull on the named mailbox when its configured fallback is disconnected", () => {
     const yrd = makeContext(db, stmts, "@yrd", "departed-yrd-session")
-    registerSession(yrd, PROJECT_ID, () => true, null, 1004, "pull", "/repo", null, "codex", "yrd-launch", 2004)
+    registerSession(
+      yrd,
+      PROJECT_ID,
+      () => true,
+      null,
+      1004,
+      "pull",
+      "/repo",
+      null,
+      "codex",
+      "yrd-launch",
+      2004,
+      "04".repeat(32),
+    )
     const pullOpts = {
       ...opts(),
       resolveDelivery: prefixFallbackDeliveryResolver(JSON.stringify([{ name: "@yrd", to: "@chief" }])),
@@ -646,7 +686,20 @@ describe("generic direct-message delivery resolution", () => {
     // nonetheless a currently-known session, so a tracked send must enqueue
     // into its mailbox, not refuse.
     const quietPull = makeContext(db, stmts, "@quiet-pull", "sess-quiet-pull")
-    registerSession(quietPull, PROJECT_ID, () => true, null, 1005, "pull", "/repo", null, "codex")
+    registerSession(
+      quietPull,
+      PROJECT_ID,
+      () => true,
+      null,
+      1005,
+      "pull",
+      "/repo",
+      null,
+      "codex",
+      null,
+      null,
+      "05".repeat(32),
+    )
     db.prepare("UPDATE messages SET ts = ? WHERE sender = ?").run(
       Date.now() - (DEFAULT_MAX_SILENCE_SEC + 1) * 1_000,
       "@quiet-pull",

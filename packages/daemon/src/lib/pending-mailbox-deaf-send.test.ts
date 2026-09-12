@@ -10,8 +10,10 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
+import tribeHabModule from "../../../../hab.projects.ts"
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
+import { prefixFallbackDeliveryResolver } from "./delivery-resolution.ts"
 import { handleToolCall, type ActiveSessionInfo, type HandlerOpts } from "./handlers.ts"
 import { registerSession } from "./session.ts"
 
@@ -151,5 +153,43 @@ describe("24581: tracked send to mailbox-deaf recipient is refused", () => {
     expect(sent.error).toBeUndefined()
     const remaining = stmts.selectPendingForRecipient.all({ $recipient: "@dev/6" }) as unknown[]
     expect(remaining).toHaveLength(1)
+  })
+
+  /**
+   * @failure A tracked request falls back to a connected owner who cannot read it.
+   * @level l2
+   * @consumer Requests using the deployed @ci -> @chief fallback policy.
+   */
+  it.each([
+    ["unreadable", null, 0],
+    ["readable", VALID_HASH, 1],
+  ] as const)("checks the %s final owner before opening a fallback ball", (_state, hash, expectedBalls) => {
+    addSession(db, stmts, "sess-chief", "@chief", hash)
+    const sender = makeContext(db, stmts, "sess-dev12", "@dev/12")
+    const sent = parseToolJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        { to: "@ci", message: "who holds admission", type: "request" },
+        {
+          ...optsWithLive([liveInfo("sess-chief", "@chief")]),
+          resolveDelivery: prefixFallbackDeliveryResolver(tribeHabModule.services.wire.env.TRIBE_DELIVERY_FALLBACKS),
+        },
+      ),
+    )
+    expect(stmts.selectPendingForRecipient.all({ $recipient: "@chief" })).toHaveLength(expectedBalls)
+    if (expectedBalls === 0) {
+      expect(sent.error).toContain('"@chief"')
+      expect(sent.error).toContain("mailbox_read_capability.state is unavailable")
+      expect(sent.error).toContain('"@ci"')
+      expect(sent.error).toContain("self-mailbox-authority-missing")
+      expect(sent.error).toContain('Restore mailbox authority for "@chief"')
+      expect(
+        db.prepare("SELECT id FROM messages WHERE kind = 'direct' AND content = ?").get("who holds admission"),
+      ).toBeNull()
+    } else {
+      expect(sent.error).toBeUndefined()
+      expect(sent.sent).toBe(true)
+    }
   })
 })
