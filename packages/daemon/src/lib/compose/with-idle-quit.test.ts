@@ -15,7 +15,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { getLogLevel, setLogLevel } from "loggily"
+import { addWriter, getLogLevel, setLogLevel } from "loggily"
 import { createScope } from "tribe-wire"
 import { createBaseTribe } from "./base.ts"
 import { withClientRegistry, type ClientSession } from "./with-client-registry.ts"
@@ -201,21 +201,22 @@ describe("withIdleQuit stop() latch — the shutdown-vs-closed-database race", (
   // straight into a database with-database's scope.defer was concurrently
   // closing: `RangeError: Cannot use a closed database`. The runtime now
   // calls idleQuit.stop() before any of that teardown starts.
-  // loggily's terminal sink routes every level below "warn" through
-  // console.error — the rendered "INFO"/"DEBUG" prefix carries the level, the
-  // console method never did (see vendor/loggily's invokeForLevelStderr) —
-  // so an info-level line is caught here, not on console.info.
-  let infoSpy: ReturnType<typeof vi.spyOn>
+  // Capture INFO records independently of the console stream the sink uses.
+  const infoLines: string[] = []
+  let unsubscribe: () => void
   let previousLogLevel: ReturnType<typeof getLogLevel>
 
   beforeEach(() => {
     previousLogLevel = getLogLevel()
     setLogLevel("info")
-    infoSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+    infoLines.length = 0
+    unsubscribe = addWriter({ ns: "tribe:idle-quit" }, (formatted, level) => {
+      if (level === "info") infoLines.push(formatted)
+    })
   })
 
   afterEach(() => {
-    infoSpy.mockRestore()
+    unsubscribe()
     setLogLevel(previousLogLevel)
   })
 
@@ -239,9 +240,7 @@ describe("withIdleQuit stop() latch — the shutdown-vs-closed-database race", (
     h.markIdle()
     expect(h.countDurableSessions).not.toHaveBeenCalled()
     expect(h.getDeadline()).toBeNull() // a stopped daemon never arms a countdown
-    const skipLines = infoSpy.mock.calls.filter((call: unknown[]) =>
-      call.some((arg: unknown) => String(arg).includes("idle census skipped")),
-    )
+    const skipLines = infoLines.filter((line) => line.includes("idle census skipped"))
     expect(skipLines).toHaveLength(1)
   })
 
