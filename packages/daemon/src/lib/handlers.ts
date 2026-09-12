@@ -328,17 +328,29 @@ type OwnerTransportObservation = {
 }
 
 function ownerTransportObservationProjector(ctx: TribeContext, opts: HandlerOpts, observedAt: number) {
-  const sessionRows = ctx.db.prepare("SELECT name FROM sessions").all() as Array<{ name: string }>
+  const sessionRows = ctx.db.prepare("SELECT name, mailbox_authority_hash FROM sessions").all() as Array<{
+    name: string
+    mailbox_authority_hash: string | null
+  }>
   const knownNames = new Set(sessionRows.map((row) => row.name))
+  const mailboxDeafNames = new Set<string>()
+  const mailboxDeafReasons = new Map<string, MailboxReadCapability["reason"]>()
+  for (const row of sessionRows) {
+    const capability = projectMailboxReadCapability(row.mailbox_authority_hash)
+    if (capability.state === "unavailable") {
+      mailboxDeafNames.add(row.name)
+      mailboxDeafReasons.set(row.name, capability.reason)
+    }
+  }
   // Any currently-registered session has a live `sessions` row and therefore
   // an addressable mailbox — durable-launch (hab-tracked) and plain
   // connection-scoped registrations alike (e.g. a CLI-rail pull seat that
   // joined without launch_id/launch_parent_pid). A tracked send to a known
-  // name always lands; `tribe.fetch`/`tribe pending` will surface it on the
-  // recipient's next drain regardless of how it registered. The union below
-  // additionally covers names that have since left `sessions` entirely
-  // (superseded/reaped rows) but were active recently enough to deserve a
-  // grace period.
+  // name lands unless mailbox_read_capability.state is unavailable (24581:
+  // a relay like telegram is reachable and deaf; the ball must bounce).
+  // Untracked notify still delivers. The union below additionally covers
+  // names that have since left `sessions` entirely (superseded/reaped rows)
+  // but were active recently enough to deserve a grace period.
   const mailboxRecipientNames = new Set(knownNames)
   const recentSince = observedAt - DEFAULT_MAX_SILENCE_SEC * 1_000
   const recentActivity = ctx.db
@@ -398,6 +410,8 @@ function ownerTransportObservationProjector(ctx: TribeContext, opts: HandlerOpts
   return {
     observe,
     mailboxRecipientNames,
+    mailboxDeafNames,
+    mailboxDeafReasons,
     answerableNames: new Set(
       [...activeByName.keys()].filter((name) => observe(name).owner_answer_capability === "observed"),
     ),
@@ -771,7 +785,10 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
 
   const broadcastOwners =
     recipients === "*" && (requestFlag || requestId !== null)
-      ? activeBroadcastRecipients(ctx, transport.answerableNames)
+      ? activeBroadcastRecipients(
+          ctx,
+          new Set([...transport.answerableNames].filter((name) => !transport.mailboxDeafNames.has(name))),
+        )
       : undefined
   if (recipients === "*" && broadcastOwners?.length === 0) {
     return trackedDeliveryFailure(ctx, {
@@ -979,6 +996,20 @@ function resolveDirectDelivery(
         ? directMailboxResolution
         : (policyResolution ?? directMailboxResolution)
   if (!tracked || resolution.status !== "accepted") return resolution
+  // 24581: reachable-and-deaf (telegram) must fail loudly. Untracked notify
+  // still delivers — that is what a relay is for. Names with no sessions row
+  // are not this rule; they keep the existing unresolved/offline path.
+  if (transport.mailboxDeafNames.has(recipient)) {
+    const snapshot = transport.observe(recipient).owner_transport_observed_at
+    const reason = transport.mailboxDeafReasons.get(recipient) ?? "self-mailbox-authority-missing"
+    return {
+      status: "unresolved",
+      reason:
+        `at admission snapshot ${snapshot}, recipient ${JSON.stringify(recipient)} ` +
+        `mailbox_read_capability.state is unavailable (${reason}); a tracked ball promises an answer ` +
+        "this mailbox cannot read. Send an untracked notify if the recipient is a relay (24581).",
+    }
+  }
   if (resolution.state === "online" && transport.answerableNames.has(recipient)) return resolution
   if (resolution.state === "bounced" && transport.answerableNames.has(resolution.to)) return resolution
   if (resolution.state === "offline" && transport.mailboxRecipientNames.has(recipient)) return resolution
