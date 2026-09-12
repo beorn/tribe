@@ -154,6 +154,12 @@ export type BallTracker = {
    * class policy; deadline passage never settles ownership. */
   expiresInMs?: number
   /**
+   * 24588 row 4: skip opening a pending row even when this send would
+   * otherwise auto-track. The message still delivers. Used when sender and
+   * recipient are both declared expected:false so a ball cannot accrue.
+   */
+  suppressOpen?: boolean
+  /**
    * Ambient incident identity — habwire stage 2(d), "one ball per incident".
    *
    * A watcher that fires on every tick would otherwise mint one obligation per
@@ -541,7 +547,7 @@ export function sendMessage(
     // snapshots remain handleSend's responsibility; direct rows are complete
     // before this transaction returns.
     if (resolvedKind === "direct") {
-      if (requestId) {
+      if (requestId && ballTracker.suppressOpen !== true) {
         const openRequest = incidentRequestId === null ? ctx.stmts.openPendingRequest : ctx.stmts.openIncidentRequest
         openRequest.run({
           $request_id: requestId,

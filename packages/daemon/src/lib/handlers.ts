@@ -58,7 +58,7 @@ import {
   type SessionTransportEvidence,
 } from "./session-transport-state.ts"
 import type { DirectDeliveryResolution, DirectDeliveryResolver } from "./delivery-resolution.ts"
-import type { DeclaredRoster } from "./membership-declared-roster.ts"
+import { bothDeclaredUnrun, type DeclaredRoster } from "./membership-declared-roster.ts"
 import { isUnidentifiedSessionName } from "./resolve-name.ts"
 
 // ---------------------------------------------------------------------------
@@ -706,11 +706,21 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   const hasImplicitOwner = Array.isArray(recipients)
     ? recipients.some((recipient) => recipient !== sender)
     : recipients !== "*" && recipients !== sender
+  const pairUnrun =
+    typeof recipients === "string" && recipients !== "*" && bothDeclaredUnrun(opts.expectedMembers, sender, recipients)
+  if (pairUnrun && (requestFlag || requestId !== null || incident !== undefined)) {
+    return jsonResult({
+      error:
+        "tribe.send: refusing to open a tracked ball — sender and recipient are both declared expected:false " +
+        "(24588 row 4); an untracked notify still delivers. Names absent from the roster are not unrun seats.",
+    })
+  }
   const willTrack =
-    requestFlag ||
-    requestId !== null ||
-    (incident !== undefined && incident.active !== false) ||
-    (hasImplicitOwner && AUTO_TRACK_TYPES_SET.has(msgType))
+    !pairUnrun &&
+    (requestFlag ||
+      requestId !== null ||
+      (incident !== undefined && incident.active !== false) ||
+      (hasImplicitOwner && AUTO_TRACK_TYPES_SET.has(msgType)))
   if (a.expires_in_ms !== undefined && !willTrack) {
     return jsonResult({ error: "tribe.send: `expires_in_ms` requires a tracked request." })
   }
@@ -809,6 +819,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       expiresInMs,
       owners: broadcastOwners,
       incident,
+      suppressOpen: pairUnrun,
     },
   )
   // An incident reports its identity as the request id so the caller can see
@@ -1524,6 +1535,38 @@ function pendingCloseMissWarning(
  * the two can never diverge on what "closed" means. Must be called inside a
  * transaction by its caller — the batch opens one for the whole list.
  */
+function settleDeclaredUnrunPairs(ctx: TribeContext, roster: DeclaredRoster | undefined, now: number): number {
+  if (roster === undefined) return 0
+  const open = ctx.stmts.selectAllPendingRequests.all() as Array<{
+    request_id: string
+    recipient: string
+    sender: string
+    opened_at: number
+    expires_at: number | null
+    message_id: string
+    fanout: "first" | "all"
+    request_kind: "request" | "incident"
+    summary: string | null
+  }>
+  const rows: PendingSettlementRow[] = []
+  for (const row of open) {
+    if (row.request_kind === "incident") continue
+    if (!bothDeclaredUnrun(roster, row.sender, row.recipient)) continue
+    rows.push({
+      request_id: row.request_id,
+      recipient: row.recipient,
+      sender: row.sender,
+      opened_at: row.opened_at,
+      expires_at: row.expires_at,
+      message_id: row.message_id,
+      fanout: row.fanout,
+      summary: row.summary,
+    })
+  }
+  if (rows.length === 0) return 0
+  return settlePendingRows(ctx, rows, "gc-expired", "declared-roster", now)
+}
+
 function closeOneBall(
   ctx: TribeContext,
   owner: string,
@@ -1776,6 +1819,16 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
   }
   if (owed && !expired) {
     return jsonResult({ owner, error: "tribe.pending: owed filters the expired view; pass expired: true." })
+  }
+
+  // 24588 row 4: dual expected:false balls cannot be answered, so they must
+  // not accrue on the live view. The expired diagnostic stays a snapshot.
+  // settled_by is declared-roster, not the caller — this is not a third-party
+  // owner close (24563). Incident balls stay emitter-owned.
+  if (!expired && opts.expectedMembers !== undefined) {
+    ctx.db.transaction(() => {
+      settleDeclaredUnrunPairs(ctx, opts.expectedMembers, now)
+    })()
   }
 
   // Explicit bounded repair path (@km/tribe/20008): prune stale balls for

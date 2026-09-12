@@ -92,3 +92,19 @@ export function parseExpectedMembers(raw: string | undefined): DeclaredRoster | 
   }
   return { byName, expectedNames, onDemandNames }
 }
+
+/**
+ * 24588 row 4: a ball whose recipient AND sender are both declared
+ * `expected: false` cannot be answered by anyone alive, so it must not
+ * accrue. Names absent from the roster (machine emitters such as hab-page)
+ * are not "unrun seats" — only an explicit false declaration counts.
+ * No roster means the pre-declaration projection: never auto-retire.
+ */
+export function bothDeclaredUnrun(
+  roster: DeclaredRoster | undefined,
+  sender: string,
+  recipient: string,
+): boolean {
+  if (roster === undefined) return false
+  return roster.onDemandNames.has(sender) && roster.onDemandNames.has(recipient)
+}
