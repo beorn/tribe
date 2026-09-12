@@ -1052,7 +1052,7 @@ export function evaluateDoctorMembership(
     return {
       severity: "WARNING",
       diagnosis: `membership degraded: ${evidence}`,
-      remedy: "rejoin each disconnected or missing-transport seat, then re-run `tribe doctor`",
+      remedy: "rejoin each disconnected or not-connected seat, then re-run `tribe doctor`",
     }
   }
   return { severity: "OK", diagnosis: `connected=${states.size} missing=0 ${evidence}` }

@@ -56,7 +56,7 @@ type MembershipDiscrepancy = {
     name?: string
     launch_id?: string
     launch_parent_pid?: number
-    state?: "missing-transport"
+    state?: "not-connected"
   }>
   meaning?: string
 }
@@ -1183,7 +1183,7 @@ process.exit(await child.exited)
             },
           ],
           finished_count: 1,
-                  })
+        })
         expect((roster as { finished_launches?: unknown }).finished_launches).toEqual([
           expect.objectContaining({
             member_id: initialMembers.get(finishedPersona)?.member_id,
@@ -1258,15 +1258,15 @@ process.exit(await child.exited)
         expect(rosterAfterRestart2.membership_discrepancy).toMatchObject({
           status: "degraded",
           connected_durable_launches: 2,
-          known_durable_launches: 3,
+          known_durable_launches: 4,
           expected_count: 3,
           connected_expected_count: 2,
           missing_count: 1,
-          finished_count: 1,
-                  })
+        })
         expect(discrepancy?.missing).toEqual([{ ...ids.withheld, state: "not-connected" }])
-        expect((rosterAfterRestart2 as { finished_launches?: unknown[] }).finished_launches).toEqual([
-          expect.objectContaining({ ...ids.finished, state: "finished" }),
+        expect((rosterAfterRestart2 as { finished_launches?: unknown }).finished_launches).toBeUndefined()
+        expect((rosterAfterRestart2 as { dormant_launches?: unknown[] }).dormant_launches).toEqual([
+          expect.objectContaining({ ...ids.finished, state: "left" }),
         ])
       },
     })

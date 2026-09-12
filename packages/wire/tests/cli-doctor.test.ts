@@ -316,6 +316,6 @@ describe("status-backed doctor checks", () => {
     expect(check).toMatchObject({ severity: "WARNING" })
     expect(check.diagnosis).toContain("@dev/0=connected")
     expect(check.diagnosis).toContain("@dev/1=disconnected")
-    expect(check.diagnosis).toContain("@dev/2=missing-transport")
+    expect(check.diagnosis).toContain("@dev/2=not-connected")
   })
 })
