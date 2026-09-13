@@ -7,6 +7,7 @@
  */
 
 import { Database } from "bun:sqlite"
+import { tryAcquireFlock } from "@bearly/flock"
 import * as path from "path"
 import * as fs from "fs"
 import { DB_PATH, initSchema } from "./db-schema.ts"
@@ -35,11 +36,49 @@ export function getDb(): Database {
 
   // Enable WAL mode for concurrent access (multiple Claude sessions)
   // WAL allows readers to not block writers and vice versa
-  dbInstance.exec("PRAGMA journal_mode = WAL")
-  dbInstance.exec("PRAGMA busy_timeout = 5000") // Wait 5s if locked
+  dbInstance.run("PRAGMA journal_mode = WAL")
+  dbInstance.run("PRAGMA busy_timeout = 5000") // Wait 5s if locked
 
   initSchema(dbInstance)
   return dbInstance
+}
+
+/** Internal writer admission shared by the CLI and synchronous compatibility helper. */
+export class IndexWriterBusyError extends Error {}
+
+export function acquireIndexWriter(db: Database) {
+  // SQLite's actual file identity includes RECALL_DB_PATH and symlink aliases.
+  // In-memory databases cannot be shared by competing CLI processes.
+  if (db.filename === ":memory:") return undefined
+  const lockPath = `${fs.realpathSync(db.filename)}.rebuild.lock`
+  const lock = tryAcquireFlock(lockPath, { body: JSON.stringify({ startedAt: Date.now() }) })
+  if (lock !== null) return lock
+
+  // Read diagnostic age only after the kernel proves another owner. Match
+  // the host's 10m budget so reports cannot hide a stuck lifecycle/manual run.
+  let owner: unknown
+  try {
+    owner = JSON.parse(fs.readFileSync(lockPath, "utf8"))
+  } catch (error) {
+    throw new Error(`Recall active index writer has unreadable start evidence: ${lockPath}`, { cause: error })
+  }
+  if (
+    typeof owner !== "object" ||
+    owner === null ||
+    !("startedAt" in owner) ||
+    typeof owner.startedAt !== "number" ||
+    !Number.isFinite(owner.startedAt)
+  ) {
+    throw new Error(`Recall active index writer has invalid start evidence: ${lockPath}`)
+  }
+  if (Date.now() - owner.startedAt > 10 * 60_000) {
+    throw new Error(
+      `Recall index writer exceeded the 10m refresh budget for ${db.filename}; inspect the active run before retrying.`,
+    )
+  }
+  throw new IndexWriterBusyError(
+    `Recall index already active for ${db.filename}; this request did not rebuild the index. Retry after the active run finishes.`,
+  )
 }
 
 export function closeDb(): void {

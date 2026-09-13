@@ -23,6 +23,7 @@ vi.mock("../../src/history/db", async (original) => ({
 
 const { rebuildIndex } = await import("../../src/history/indexer")
 const { cmdIndex } = await import("../../src/lib/sessions")
+const { ensureProjectSourcesIndexed } = await import("../../src/history/project-sources")
 const { closeDb, initSchema, getIndexMeta, setIndexMeta } = await import("../../src/history/db")
 let root: string
 let db: Database
@@ -129,6 +130,25 @@ describe("Recall refresh completion", () => {
     vi.spyOn(console, "error").mockImplementation(() => {})
     await cmdIndex({ incremental: true })
     expect(process.exitCode).toBe(4)
+  })
+
+  test("the exported project-source helper cannot bypass the active writer", () => {
+    vi.stubEnv("CLAUDE_PROJECT_DIR", root)
+    const marker = getIndexMeta(db, "last_rebuild")
+    using lock = tryAcquireFlock(`${realpathSync(dbPath)}.rebuild.lock`, {
+      body: JSON.stringify({ startedAt: Date.now() }),
+    })
+    expect(lock).not.toBeNull()
+    expect(() => ensureProjectSourcesIndexed()).toThrow("already active")
+    expect(getIndexMeta(db, "last_rebuild")).toBe(marker)
+  })
+
+  test("a project-source-only refresh retains the older session completion timestamp", () => {
+    vi.stubEnv("CLAUDE_PROJECT_DIR", root)
+    const marker = new Date(Date.now() - 60 * 60_000).toISOString()
+    setIndexMeta(db, "last_rebuild", marker)
+    ensureProjectSourcesIndexed()
+    expect(getIndexMeta(db, "last_rebuild")).toBe(marker)
   })
 
   test("the actual CLI preserves the contention exit without running a second index", async () => {
