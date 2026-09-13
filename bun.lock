@@ -20,7 +20,7 @@
       },
       "dependencies": {
         "@bearly/flock": "0.1.0",
-        "loggily": "^0.10.2",
+        "loggily": "^0.11.0",
         "removely": "^0.1.0",
         "tribe-injection-envelope": "workspace:*",
         "tribe-recall": "workspace:*",
@@ -31,7 +31,7 @@
       "name": "tribe-injection-envelope",
       "version": "0.1.0",
       "dependencies": {
-        "loggily": "^0.10.2",
+        "loggily": "^0.11.0",
       },
     },
     "packages/recall": {
@@ -41,9 +41,10 @@
         "recall": "./src/cli.ts",
       },
       "dependencies": {
+        "@bearly/flock": "0.1.0",
         "@silvery/commander": "^0.19.2",
         "@tobilu/qmd": "2.5.3",
-        "loggily": "^0.10.2",
+        "loggily": "^0.11.0",
         "zod": "^4.3.6",
       },
     },
@@ -57,7 +58,7 @@
         "@bearly/flock": "0.1.0",
         "@modelcontextprotocol/sdk": "^1.27.1",
         "@silvery/commander": "^0.19.2",
-        "loggily": "^0.10.2",
+        "loggily": "^0.11.0",
         "removely": "^0.1.0",
       },
       "devDependencies": {
@@ -563,7 +564,7 @@
 
     "log-symbols": ["log-symbols@7.0.1", "", { "dependencies": { "is-unicode-supported": "^2.0.0", "yoctocolors": "^2.1.1" } }, "sha512-ja1E3yCr9i/0hmBVaM0bfwDjnGy8I/s6PP4DFp+yP+a+mrHO4Rm7DtmnqROTUkHIkqffC84YY7AeqX6oFk0WFg=="],
 
-    "loggily": ["loggily@0.10.2", "", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "sha512-c4ihogdduRDl/k3EwBTKL6iryWDt+MO3OBeGiHNQErCeiAVcF076Yw6i1/agltL0Ap4PuaQtZzKslTdi9Cxzgg=="],
+    "loggily": ["loggily@0.11.0", "", { "peerDependencies": { "@opentelemetry/api": ">=1.0.0" }, "optionalPeers": ["@opentelemetry/api"] }, "sha512-3EZAGMH0I5QiWTuypfNGZTfmte+D1j2nRBrzz1du86xiKTL7/kpSCees3ZGUl9LwOZ6OQFus6w5O+ZrLFqXoPw=="],
 
     "lowdb": ["lowdb@7.0.1", "", { "dependencies": { "steno": "^4.0.2" } }, "sha512-neJAj8GwF0e8EpycYIDFqEPcx9Qz4GUho20jWFR7YiFeXzF1YMLdxB36PypcTSPMA+4+LvgyMacYhlr18Zlymw=="],
 
