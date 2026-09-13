@@ -6,12 +6,12 @@
  * @failure  A forced hook exit can discard bytes already queued on stdout or
  *           stderr, causing Claude Code to observe truncated hook output.
  * @level     l4 — real hook process with both output pipes consumed.
- * @consumer  The Bash process substitutions delay each reader before copying
+ * @consumer  The parent pauses each pipe reader before collecting
  *            bytes, leaving the child to exercise its exit-time completion.
  */
 
 import { describe, expect, test } from "vitest"
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { mkdtempSync, readdirSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -53,33 +53,37 @@ describe("daemon.ts hook entry", () => {
       process.argv = [process.execPath, ${JSON.stringify(DAEMON)}, "hook", ${JSON.stringify(event)}]
       await import(${JSON.stringify(DAEMON)})
     `
-      // Delayed Bash readers create backpressure while preserving every byte;
-      // this tests the observable pipe contract without relying on Bun internals.
-      const child = Bun.spawn(
-        [
-          "bash",
-          "-c",
-          '"$@" > >(sleep 1; cat) 2> >(sleep 1; cat >&2); child_code=$?; wait; exit "$child_code"',
-          "drain-pipe",
-          process.execPath,
-          "-e",
-          script,
-        ],
-        {
-          cwd: base,
-          env: hermeticEnv(base),
-          stdin: "pipe",
-          stdout: "pipe",
-          stderr: "pipe",
-        },
-      )
-      child.stdin.write(input)
-      child.stdin.end()
-      const [exitCode, stdout, stderr] = await Promise.all([
-        child.exited,
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-      ])
+      // Node pipe readers remain paused for a second, creating real pipe
+      // backpressure without Bash/cat descendants to outlive a failed test.
+      const child = spawn(process.execPath, ["-e", script], {
+        cwd: base,
+        env: hermeticEnv(base),
+        stdio: ["pipe", "pipe", "pipe"],
+      })
+      const exited = new Promise<number | null>((resolve, reject) => {
+        child.once("error", reject)
+        child.once("close", resolve)
+      })
+      let timedOut = false
+      const deadline = setTimeout(() => {
+        timedOut = true
+        child.kill("SIGKILL")
+      }, 15_000)
+      let stdout = ""
+      let stderr = ""
+      let exitCode: number | null
+      try {
+        child.stdin.end(input)
+        await new Promise((resolve) => setTimeout(resolve, 1000))
+        child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk))
+        child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk))
+        exitCode = await exited
+      } finally {
+        clearTimeout(deadline)
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
+        await exited
+      }
+      expect(timedOut, "hook child exceeded its 15-second parent deadline").toBe(false)
       expect(exitCode).toBe(expectedStatus)
       expect(stdout.length).toBeGreaterThanOrEqual(size)
       expect(stderr.length).toBeGreaterThanOrEqual(size)
