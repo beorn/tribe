@@ -6,7 +6,7 @@
  * @failure  A forced hook exit can discard bytes already queued on stdout or
  *           stderr, causing Claude Code to observe truncated hook output.
  * @level     l4 — real hook process with both output pipes consumed.
- * @consumer  The parent pauses each pipe reader before collecting
+ * @consumer  The Bash pipe readers delay consumption before collecting
  *            bytes, leaving the child to exercise its exit-time completion.
  */
 
@@ -53,13 +53,38 @@ describe("daemon.ts hook entry", () => {
       process.argv = [process.execPath, ${JSON.stringify(DAEMON)}, "hook", ${JSON.stringify(event)}]
       await import(${JSON.stringify(DAEMON)})
     `
-      // Node pipe readers remain paused for a second, creating real pipe
-      // backpressure without Bash/cat descendants to outlive a failed test.
-      const child = spawn(process.execPath, ["-e", script], {
-        cwd: base,
-        env: hermeticEnv(base),
-        stdio: ["pipe", "pipe", "pipe"],
-      })
+      // The shell owns delayed OS-pipe readers. Bun 1.3.x can prebuffer
+      // Node child streams even while paused, which hides the undrained control.
+      const child = spawn(
+        "bash",
+        [
+          "-c",
+          `
+        exec 3> >(sleep 1; exec cat)
+        out_reader=$!
+        exec 4> >(sleep 1; exec cat >&2)
+        err_reader=$!
+        "$@" <&0 >&3 2>&4 &
+        cli=$!
+        exec 3>&- 4>&-
+        trap 'trap "" TERM; kill -TERM -- -$$; wait "$cli" "$out_reader" "$err_reader"; exit 124' TERM
+        wait "$cli"
+        code=$?
+        wait "$out_reader" "$err_reader"
+        exit "$code"
+      `,
+          "hook-pipe",
+          process.execPath,
+          "-e",
+          script,
+        ],
+        {
+          cwd: base,
+          env: hermeticEnv(base),
+          stdio: ["pipe", "pipe", "pipe"],
+          detached: true,
+        },
+      )
       const exited = new Promise<number | null>((resolve, reject) => {
         child.once("error", reject)
         child.once("close", resolve)
@@ -67,21 +92,27 @@ describe("daemon.ts hook entry", () => {
       let timedOut = false
       const deadline = setTimeout(() => {
         timedOut = true
-        child.kill("SIGKILL")
+        child.kill("SIGTERM")
       }, 15_000)
+      const hardDeadline = setTimeout(() => {
+        if (child.pid) process.kill(-child.pid, "SIGKILL")
+      }, 16_000)
       let stdout = ""
       let stderr = ""
       let exitCode: number | null
       try {
-        child.stdin.end(input)
-        await new Promise((resolve) => setTimeout(resolve, 1000))
         child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk))
         child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk))
+        child.stdin.end(input)
         exitCode = await exited
       } finally {
-        clearTimeout(deadline)
-        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
-        await exited
+        try {
+          if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM")
+          await exited
+        } finally {
+          clearTimeout(deadline)
+          clearTimeout(hardDeadline)
+        }
       }
       expect(timedOut, "hook child exceeded its 15-second parent deadline").toBe(false)
       expect(exitCode).toBe(expectedStatus)
