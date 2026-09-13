@@ -824,7 +824,9 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
   if (project) searchDesc.push(`in project ${project}`)
   if (session) searchDesc.push(`session ${session.slice(0, 8)}...`)
 
-  console.log(`${DIM}Searching: ${searchDesc.join(" ")}${RESET}\n`)
+  const searchDescription = `${DIM}Searching: ${searchDesc.join(" ")}${RESET}\n`
+  if (json) console.error(searchDescription)
+  else console.log(searchDescription)
 
   const startTime = Date.now()
   const db = getDb()

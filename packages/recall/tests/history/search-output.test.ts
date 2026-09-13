@@ -200,10 +200,9 @@ function callsText(spy: ReturnType<typeof vi.spyOn>): string {
   return spy.mock.calls.map((args: unknown[]) => args.join(" ")).join("\n")
 }
 
-function lastJsonLog<T>(spy: ReturnType<typeof vi.spyOn>): T {
-  const jsonOutput = spy.mock.calls.at(-1)?.[0]
-  expect(jsonOutput).toBeTypeOf("string")
-  return JSON.parse(String(jsonOutput)) as T
+function jsonStdout<T>(spy: ReturnType<typeof vi.spyOn>): T {
+  // Consumers parse all stdout; selecting the last call hid human prefaces.
+  return JSON.parse(callsText(spy)) as T
 }
 
 describe("recall search output", () => {
@@ -306,6 +305,7 @@ describe("recall search output", () => {
       await cmdSearch("vaultrawneedle", { raw: true, project: "*" })
 
       const output = callsText(logSpy)
+      expect(output).toContain("Searching:")
       expect(output).toContain("Vault")
       expect(output).toContain("Vault raw-mode fixture")
       expect(output).toContain("vaultrawneedle")
@@ -328,7 +328,8 @@ describe("recall search output", () => {
 
       await cmdSearch("vaultrawjsonneedle", { raw: true, json: true, project: "*" })
 
-      const payload = lastJsonLog<{ results: Array<{ contentType: string; snippet: string }> | null }>(logSpy)
+      const payload = jsonStdout<{ results: Array<{ contentType: string; snippet: string }> | null }>(logSpy)
+      expect(callsText(errSpy)).toContain('Searching: "vaultrawjsonneedle"')
       expect(payload.results).not.toBeNull()
       const vaultRow = payload.results!.find((r) => r.contentType === "vault")
       expect(vaultRow).toBeDefined()
@@ -352,7 +353,7 @@ describe("recall search output", () => {
 
       await cmdSearch("vaultlimitneedle", { raw: true, json: true, limit: "1", project: "*" })
 
-      const payload = lastJsonLog<{ results: Array<{ contentType: string }> | null }>(logSpy)
+      const payload = jsonStdout<{ results: Array<{ contentType: string }> | null }>(logSpy)
       expect(payload.results?.filter((result) => result.contentType === "vault")).toHaveLength(1)
     } finally {
       resetVaultDbCacheForTests()
@@ -379,7 +380,7 @@ describe("recall search output", () => {
 
       await cmdSearch("vaultfilterneedle", { raw: true, json: true, project: "*", ...filter })
 
-      const payload = lastJsonLog<{ results: Array<{ contentType: string }> | null }>(logSpy)
+      const payload = jsonStdout<{ results: Array<{ contentType: string }> | null }>(logSpy)
       expect(payload.results?.some((result) => result.contentType === "vault") ?? false).toBe(false)
     } finally {
       resetVaultDbCacheForTests()
@@ -417,7 +418,7 @@ describe("recall search output", () => {
 
       await cmdSearch("rolefilterneedle", { raw: true, json: true, project: "*", ...filter })
 
-      const payload = lastJsonLog<{ results: Array<{ contentType: string; type?: string }> | null }>(logSpy)
+      const payload = jsonStdout<{ results: Array<{ contentType: string; type?: string }> | null }>(logSpy)
       expect(
         payload.results?.map((row) => (row.type ? `${row.contentType}:${row.type}` : row.contentType)).sort(),
       ).toEqual(expected)
@@ -484,7 +485,7 @@ describe("recall search output", () => {
     try {
       await cmdSearch("nohits", { raw: true, json: true, project: "*", limit: "5" })
 
-      const payload = lastJsonLog<{
+      const payload = jsonStdout<{
         provenance?: string
         total: number | null
         results: unknown[] | null
@@ -507,7 +508,7 @@ describe("recall search output", () => {
     try {
       await cmdSearch("stalepositive", { raw: true, json: true, project: "*", limit: "5" })
 
-      const payload = lastJsonLog<{ provenance?: string; total: number | null; results: unknown[] | null }>(logSpy)
+      const payload = jsonStdout<{ provenance?: string; total: number | null; results: unknown[] | null }>(logSpy)
       expect(process.exitCode).toBe(3)
       expect(payload.provenance).toBe("stale")
       expect(payload.total).toBe(1)
@@ -525,7 +526,7 @@ describe("recall search output", () => {
     try {
       await cmdSearch("nohits", { json: true, project: "*", limit: "5" })
 
-      const payload = lastJsonLog<{ provenance?: string; results: unknown[] | null }>(logSpy)
+      const payload = jsonStdout<{ provenance?: string; results: unknown[] | null }>(logSpy)
       expect(process.exitCode).toBe(3)
       expect(payload.provenance).toBe("stale")
       expect(payload.results).toBeNull()
@@ -543,7 +544,7 @@ describe("recall search output", () => {
     try {
       await cmdSearch("nohits", { agent: true, json: true, project: "*", limit: "5", round2: "off" })
 
-      const payload = lastJsonLog<{ provenance?: string; results: unknown[] | null }>(logSpy)
+      const payload = jsonStdout<{ provenance?: string; results: unknown[] | null }>(logSpy)
       expect(process.exitCode).toBe(3)
       expect(payload.provenance).toBe("stale")
       expect(payload.results).toBeNull()
@@ -590,7 +591,7 @@ describe("recall search output", () => {
         cmdSearch("agentsynthneedle", { agent: true, json: true, project: "*", round2: "off" }),
       ).resolves.toBeUndefined()
 
-      const payload = lastJsonLog<{ results: unknown[] | null }>(logSpy)
+      const payload = jsonStdout<{ results: unknown[] | null }>(logSpy)
       expect(process.exitCode).toBe(3)
       expect(payload.results).toHaveLength(1)
     } finally {
@@ -620,7 +621,7 @@ describe("recall search output", () => {
     try {
       await cmdSearch("nohits", { raw: true, json: true, project: "*", limit: "5" })
 
-      const payload = lastJsonLog<{ provenance?: string; total: number | null; results: unknown[] | null }>(logSpy)
+      const payload = jsonStdout<{ provenance?: string; total: number | null; results: unknown[] | null }>(logSpy)
       expect(process.exitCode).toBe(0)
       expect(payload.provenance).toBe("complete")
       expect(payload.total).toBe(0)
