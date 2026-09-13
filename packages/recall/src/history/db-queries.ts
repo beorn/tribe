@@ -122,7 +122,7 @@ function escapeToken(token: string): { text: string; quoted: boolean } {
 export function toFts5Query(query: string): string {
   // Handle quoted phrases
   const phrases: string[] = []
-  const remaining = query.replace(/"([^"]+)"/g, (_, phrase) => {
+  const remaining = query.replace(/"([^"]+)"/g, (_: string, phrase: string) => {
     phrases.push(phrase)
     return `__PHRASE_${phrases.length - 1}__`
   })
@@ -133,8 +133,8 @@ export function toFts5Query(query: string): string {
 
   for (const token of tokens) {
     const phraseMatch = token.match(/^__PHRASE_(\d+)__$/)
-    if (phraseMatch) {
-      const idx = parseInt(phraseMatch[1]!, 10)
+    if (phraseMatch?.[1] !== undefined) {
+      const idx = parseInt(phraseMatch[1], 10)
       const phrase = phrases[idx]
       if (phrase !== undefined) {
         // FTS5 phrase syntax: "word1 word2 word3"
@@ -784,8 +784,8 @@ export function findPlanFiles(): string[] {
         files.push(path.join(PLANS_DIR, entry.name))
       }
     }
-  } catch {
-    // Ignore errors
+  } catch (error) {
+    throw new Error(`Recall plan directory cannot be read: ${PLANS_DIR}`, { cause: error })
   }
   return files
 }
@@ -803,8 +803,8 @@ export function findTodoFiles(): string[] {
         files.push(path.join(TODOS_DIR, entry.name))
       }
     }
-  } catch {
-    // Ignore errors
+  } catch (error) {
+    throw new Error(`Recall todo directory cannot be read: ${TODOS_DIR}`, { cause: error })
   }
   return files
 }

@@ -109,7 +109,7 @@ export interface IndexOptions {
 
 export async function* findSessionFiles(): AsyncGenerator<string> {
   if (!fs.existsSync(PROJECTS_DIR)) {
-    return
+    throw new Error(`Recall session source is missing: ${PROJECTS_DIR}`)
   }
 
   const glob = new Glob("**/*.jsonl")
@@ -262,7 +262,7 @@ export async function indexSessionFile(
       // Use actual record timestamp for session date tracking;
       // fall back to Date.now() only for message insertion (not session bounds)
       const hasRecordTimestamp = !!record.timestamp
-      const timestamp = hasRecordTimestamp ? new Date(record.timestamp!).getTime() : Date.now()
+      const timestamp = record.timestamp ? new Date(record.timestamp).getTime() : Date.now()
       if (hasRecordTimestamp) {
         if (firstTimestamp === null) firstTimestamp = timestamp
         lastTimestamp = timestamp
@@ -295,7 +295,9 @@ export async function indexSessionFile(
             (item as ToolUse).input?.content
           ) {
             const toolUse = item as ToolUse
-            const content = toolUse.input.content!
+            const content = toolUse.input.content
+            const filePath = toolUse.input.file_path
+            if (!content || !filePath) continue
             const hash = hashContent(content)
             const uniqueKey = `${toolUse.input.file_path}:${hash}`
 
@@ -311,7 +313,7 @@ export async function indexSessionFile(
               relativePath,
               toolUse.id,
               record.timestamp || new Date().toISOString(),
-              toolUse.input.file_path!,
+              filePath,
               hash,
               contentSize,
               contentSize <= MAX_CONTENT_SIZE ? content : null,
@@ -425,6 +427,14 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   const startTime = Date.now()
   const cutoffTime = Date.now() - THIRTY_DAYS_MS
 
+  // Commit invalidation before any corpus write. A failure or killed process
+  // must not leave the prior success timestamp over partially updated data.
+  setIndexMeta(db, "last_rebuild", "")
+
+  if (options.projectRoot && !fs.statSync(options.projectRoot).isDirectory()) {
+    throw new Error(`Recall project source is not a directory: ${options.projectRoot}`)
+  }
+
   // Clear existing data unless incremental
   if (!options.incremental) {
     clearTables(db, options.messagesOnly ? ["sessions", "messages"] : ["writes", "sessions", "messages"])
@@ -525,8 +535,8 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
         stats.mtime.getTime(),
       )
       totalPlans++
-    } catch {
-      // Skip files we can't read
+    } catch (error) {
+      throw new Error(`Recall plan indexing failed: ${planFile}`, { cause: error })
     }
   }
 
@@ -555,8 +565,8 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
         )
         totalTodos++
       }
-    } catch {
-      // Skip files we can't read
+    } catch (error) {
+      throw new Error(`Recall todo indexing failed: ${todoFile}`, { cause: error })
     }
   }
 
@@ -576,7 +586,6 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
 
   // Store metadata
   const duration = Date.now() - startTime
-  setIndexMeta(db, "last_rebuild", new Date().toISOString())
   setIndexMeta(db, "rebuild_duration_ms", String(duration))
   setIndexMeta(db, "total_files", String(totalFiles))
   setIndexMeta(db, "total_messages", String(totalMessages))
@@ -590,6 +599,8 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   setIndexMeta(db, "total_docs", String(projectSourceResult.docs))
   setIndexMeta(db, "total_claude_md", String(projectSourceResult.claudeMd))
   setIndexMeta(db, "total_research", String(projectSourceResult.research))
+  // Publish success last, including after completion metadata writes.
+  setIndexMeta(db, "last_rebuild", new Date().toISOString())
 
   return {
     files: totalFiles,

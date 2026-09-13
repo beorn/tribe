@@ -21,6 +21,7 @@ import * as path from "path"
 import * as os from "os"
 import * as fs from "fs"
 import { spawn } from "child_process"
+import { fileURLToPath } from "node:url"
 import { createLogger } from "loggily"
 import { hookRecall } from "../history/recall"
 import { getDb, closeDb, getIndexMeta } from "../history/db"
@@ -102,8 +103,8 @@ function indexIsStale(maxAgeMs: number): boolean {
     try {
       const lastRebuild = getIndexMeta(db, "last_rebuild")
       if (!lastRebuild) return true
-      const age = Date.now() - new Date(lastRebuild).getTime()
-      return age > maxAgeMs
+      const rebuiltAt = new Date(lastRebuild).getTime()
+      return !Number.isFinite(rebuiltAt) || Date.now() - rebuiltAt > maxAgeMs
     } finally {
       closeDb()
     }
@@ -121,8 +122,8 @@ function indexIsStale(maxAgeMs: number): boolean {
  */
 function spawnBackgroundIncrementalIndex(reason: string): void {
   try {
-    const scriptPath = process.argv[1]
-    if (!scriptPath) return
+    // The parent can be Tribe or the Ag host; only Recall owns this command.
+    const scriptPath = fileURLToPath(new URL("../cli.ts", import.meta.url))
     const logDir = path.join(os.homedir(), ".claude", "bearly-sessions")
     fs.mkdirSync(logDir, { recursive: true })
     const logPath = path.join(logDir, "index-bg.log")
@@ -134,10 +135,13 @@ function spawnBackgroundIncrementalIndex(reason: string): void {
       stdio: ["ignore", out, out],
       env: { ...process.env, RECALL_BG: "1" },
     })
+    child.on("error", (error) => {
+      sessionStartLog.error?.(error, "background index process failed to start")
+    })
     child.unref()
     fs.closeSync(out)
-  } catch {
-    // best-effort — never block the hook
+  } catch (error) {
+    sessionStartLog.error?.(error instanceof Error ? error : new Error(String(error)), "background index launch failed")
   }
 }
 

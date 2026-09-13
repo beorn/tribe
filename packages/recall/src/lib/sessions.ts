@@ -10,67 +10,98 @@ import { rebuildIndex, findSessionFiles } from "../history/indexer"
 import type { JsonlRecord } from "../history/types"
 import { THIRTY_DAYS_MS, formatBytes, displayProjectPath, matchProjectGlob } from "./format"
 import * as os from "os"
+import { tryAcquireFlock } from "@bearly/flock"
 
 // ============================================================================
 // Index
 // ============================================================================
 
 export async function cmdIndex(opts: { incremental?: boolean; projectRoot?: string }): Promise<void> {
-  console.log(opts.incremental ? "Updating session index..." : "Building session index...")
-  console.log("(indexing sessions from the last 30 days)\n")
-
   const db = getDb()
-
-  let lastProgressUpdate = 0
-  const result = await rebuildIndex(db, {
-    incremental: opts.incremental,
-    projectRoot: opts.projectRoot,
-    onProgress: (progress) => {
-      if (progress.filesProcessed - lastProgressUpdate >= 50) {
-        lastProgressUpdate = progress.filesProcessed
-        process.stdout.write(`\r${progress.filesProcessed} files, ${progress.messagesIndexed} messages...`)
+  try {
+    // SQLite's actual file identity includes RECALL_DB_PATH and symlink aliases.
+    // In-memory databases cannot be shared by competing CLI processes.
+    const lockPath = db.filename === ":memory:" ? null : `${fs.realpathSync(db.filename)}.rebuild.lock`
+    using lock =
+      lockPath === null
+        ? undefined
+        : tryAcquireFlock(lockPath, {
+            body: JSON.stringify({ startedAt: Date.now() }),
+          })
+    if (lock === null && lockPath !== null) {
+      // Observe age only after the kernel proved ownership. Stale diagnostic
+      // bytes alone never mean a writer is alive. Match the host's 10m budget;
+      // repeated report exits must not hide a stuck manual/lifecycle writer.
+      const owner = JSON.parse(fs.readFileSync(lockPath, "utf8")) as { startedAt?: unknown }
+      if (typeof owner.startedAt !== "number" || !Number.isFinite(owner.startedAt)) {
+        throw new Error(`Recall active index writer has invalid start evidence: ${lockPath}`)
       }
-    },
-  })
-  process.stdout.write("\r" + " ".repeat(60) + "\r")
+      if (Date.now() - owner.startedAt > 10 * 60_000) {
+        throw new Error(
+          `Recall index writer exceeded the 10m refresh budget for ${db.filename}; inspect the active run before retrying.`,
+        )
+      }
+      console.error(
+        `Recall index already active for ${db.filename}; this request did not rebuild the index. Retry after the active run finishes.`,
+      )
+      process.exitCode = 4
+      return
+    }
 
-  console.log(`\n\n\u2713 Indexed content:`)
-  console.log(`  ${result.messages.toLocaleString()} messages from ${result.files} session files`)
-  if (result.writes > 0) {
-    console.log(`  ${result.writes.toLocaleString()} file writes`)
-  }
-  if (result.summaries > 0) {
-    console.log(`  ${result.summaries.toLocaleString()} session summaries`)
-  }
-  if (result.firstPrompts > 0) {
-    console.log(`  ${result.firstPrompts.toLocaleString()} first prompts`)
-  }
-  if (result.plans > 0) {
-    console.log(`  ${result.plans.toLocaleString()} plan files`)
-  }
-  if (result.todos > 0) {
-    console.log(`  ${result.todos.toLocaleString()} todo lists`)
-  }
-  if (result.beads > 0) {
-    console.log(`  ${result.beads.toLocaleString()} beads (issues)`)
-  }
-  if (result.sessionMemory > 0) {
-    console.log(`  ${result.sessionMemory.toLocaleString()} session memory files`)
-  }
-  if (result.projectMemory > 0) {
-    console.log(`  ${result.projectMemory.toLocaleString()} project memory files`)
-  }
-  if (result.docs > 0) {
-    console.log(`  ${result.docs.toLocaleString()} documentation files`)
-  }
-  if (result.claudeMd > 0) {
-    console.log(`  ${result.claudeMd.toLocaleString()} CLAUDE.md files`)
-  }
-  if (result.skippedOld > 0) {
-    console.log(`  (skipped ${result.skippedOld} sessions older than 30 days)`)
-  }
+    console.log(opts.incremental ? "Updating session index..." : "Building session index...")
+    console.log("(indexing sessions from the last 30 days)\n")
 
-  closeDb()
+    let lastProgressUpdate = 0
+    const result = await rebuildIndex(db, {
+      incremental: opts.incremental,
+      projectRoot: opts.projectRoot,
+      onProgress: (progress) => {
+        if (progress.filesProcessed - lastProgressUpdate >= 50) {
+          lastProgressUpdate = progress.filesProcessed
+          process.stdout.write(`\r${progress.filesProcessed} files, ${progress.messagesIndexed} messages...`)
+        }
+      },
+    })
+    process.stdout.write("\r" + " ".repeat(60) + "\r")
+
+    console.log(`\n\n\u2713 Indexed content:`)
+    console.log(`  ${result.messages.toLocaleString()} messages from ${result.files} session files`)
+    if (result.writes > 0) {
+      console.log(`  ${result.writes.toLocaleString()} file writes`)
+    }
+    if (result.summaries > 0) {
+      console.log(`  ${result.summaries.toLocaleString()} session summaries`)
+    }
+    if (result.firstPrompts > 0) {
+      console.log(`  ${result.firstPrompts.toLocaleString()} first prompts`)
+    }
+    if (result.plans > 0) {
+      console.log(`  ${result.plans.toLocaleString()} plan files`)
+    }
+    if (result.todos > 0) {
+      console.log(`  ${result.todos.toLocaleString()} todo lists`)
+    }
+    if (result.beads > 0) {
+      console.log(`  ${result.beads.toLocaleString()} beads (issues)`)
+    }
+    if (result.sessionMemory > 0) {
+      console.log(`  ${result.sessionMemory.toLocaleString()} session memory files`)
+    }
+    if (result.projectMemory > 0) {
+      console.log(`  ${result.projectMemory.toLocaleString()} project memory files`)
+    }
+    if (result.docs > 0) {
+      console.log(`  ${result.docs.toLocaleString()} documentation files`)
+    }
+    if (result.claudeMd > 0) {
+      console.log(`  ${result.claudeMd.toLocaleString()} CLAUDE.md files`)
+    }
+    if (result.skippedOld > 0) {
+      console.log(`  (skipped ${result.skippedOld} sessions older than 30 days)`)
+    }
+  } finally {
+    closeDb()
+  }
 }
 
 // ============================================================================

@@ -2,7 +2,7 @@
   "name": "tribe-recall",
   "version": "0.2.0",
   "private": true,
-  "description": "Session history recall — FTS-indexed search, LLM-driven planner, multi-round agent over Claude Code transcripts",
+  "description": "Session history recall \u2014 FTS-indexed search, LLM-driven planner, multi-round agent over Claude Code transcripts",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -25,6 +25,7 @@
     "@silvery/commander": "^0.19.2",
     "@tobilu/qmd": "2.5.3",
     "loggily": "^0.10.2",
-    "zod": "^4.3.6"
+    "zod": "^4.3.6",
+    "@bearly/flock": "0.1.0"
   }
 }

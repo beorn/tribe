@@ -189,7 +189,7 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
   const project = resolveProjectScope(options.project)
 
   // Search is a read path: classify the index without starting index work.
-  // Session lifecycle hooks own incremental indexing cadence.
+  // Lifecycle hints and the host scheduler own incremental indexing cadence.
   const provenance = readIndexProvenance(options)
   if (!regexMode && provenance !== "complete") process.exitCode = 3
 
