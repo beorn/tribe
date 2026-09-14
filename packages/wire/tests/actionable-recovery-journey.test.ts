@@ -416,11 +416,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     )
   }
 
-  async function spawnAdapterAndJoin(
-    socketPath: string,
-    logName: string,
-    opts: { delivery?: "push" | "pull" } = {},
-  ): Promise<{ child: ChildProcessWithoutNullStreams; stdout: Record<string, unknown>[] }> {
+  async function spawnAdapterAndJoin(socketPath: string, logName: string, opts: { delivery?: "push" | "pull" } = {}) {
     const child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath], {
       cwd: tmpDir,
       env: {
@@ -438,14 +434,75 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     })
     adapters.push(child)
     const stdout = collectStdoutJson(child)
-    writeJson(child, initializePayload(1))
-    await waitForCondition(() => stdout.some((line) => line.id === 1), "adapter initialize response")
-    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
-    // Claim the loaded name explicitly — register happens under a generated
-    // member name, so this join is a genuine name CLAIM (the recovery path).
-    writeJson(child, callToolPayload(2, "join", { name: NAME }))
-    await waitForCondition(() => stdout.some((line) => line.id === 2), "join response")
-    return { child, stdout }
+    let stderr = ""
+    let closed = false
+    let spawnError: Error | undefined
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      stderr = (stderr + String(chunk)).slice(-4000)
+    })
+    child.once("close", () => {
+      closed = true
+    })
+    child.once("error", (error) => {
+      spawnError = error
+    })
+    const failure = (error: unknown): Error => {
+      const logs = [join(tmpDir, logName), join(tmpDir, "daemon.log")].map(
+        (path) =>
+          `${path}:\n${existsSync(path) ? readFileSync(path, "utf8").split("\n").slice(-30).join("\n") : "(no log)"}`,
+      )
+      return new Error(
+        `${error instanceof Error ? error.message : String(error)}; adapter=${logName} pid=${child.pid} ` +
+          `exit=${child.exitCode} signal=${child.signalCode}\n` +
+          `responses=${JSON.stringify(stdout.filter((line) => line.id === 1 || line.id === 2))}\n` +
+          `stderr=${stderr || "(empty)"}\n${logs.join("\n")}`,
+      )
+    }
+    const waitFor = async (predicate: () => boolean, label: string): Promise<void> => {
+      try {
+        await waitForCondition(() => {
+          if (spawnError) throw spawnError
+          if (child.exitCode !== null || child.signalCode !== null) throw new Error(`adapter exited before ${label}`)
+          return predicate()
+        }, label)
+      } catch (error) {
+        throw failure(error)
+      }
+    }
+    const stop = async (): Promise<void> => {
+      if (closed) return
+      child.kill("SIGTERM")
+      try {
+        await waitForCondition(() => closed, `${logName} close after SIGTERM`, { timeoutMs: 1000 })
+      } catch {
+        child.kill("SIGKILL")
+        try {
+          await waitForCondition(() => closed, `${logName} close after SIGKILL`, { timeoutMs: 1000 })
+        } catch (error) {
+          throw failure(error)
+        }
+      }
+    }
+    try {
+      writeJson(child, initializePayload(1))
+      await waitFor(() => stdout.some((line) => line.id === 1), "adapter initialize response")
+      const initialized = stdout.find((line) => line.id === 1)
+      expect(initialized).not.toHaveProperty("error")
+      expect(initialized?.result).toMatchObject({ protocolVersion: expect.any(String) })
+      writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+      // Claim the loaded name explicitly; an error response is not a claim.
+      writeJson(child, callToolPayload(2, "join", { name: NAME }))
+      await waitFor(() => stdout.some((line) => line.id === 2), "join response")
+      const joined = stdout.find((line) => line.id === 2)
+      expect(joined).not.toHaveProperty("error")
+      expect(joined?.result).not.toHaveProperty("isError", true)
+      expect(toolResult(stdout, 2)).toMatchObject({ name: NAME })
+    } catch (error) {
+      const diagnostic = failure(error)
+      await stop()
+      throw diagnostic
+    }
+    return { child, stdout, waitFor, stop }
   }
 
   async function spawnLaunchAdapter(
@@ -1487,7 +1544,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
 
     // --- First adapter: the claim must recover both durable attention rows.
     const first = await spawnAdapterAndJoin(socketPath, "adapter-1.log")
-    await waitForCondition(
+    await first.waitFor(
       () => channelNotifications(first.stdout).length >= 2,
       "recovered attention channel notifications",
     )
@@ -1507,10 +1564,10 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     // the mailbox is NOT acknowledged — both rows are forwarded again. Before
     // 21757 this asserted toHaveLength(0): the drain had acked rows no model
     // had seen, which is how eight officer rows were lost on 2026-09-02.
-    first.child.kill("SIGTERM")
+    await first.stop()
     expect(mailboxCursor(dbPath, NAME)?.last_actionable_seq ?? 0).toBe(0)
     const second = await spawnAdapterAndJoin(socketPath, "adapter-2.log")
-    await waitForCondition(
+    await second.waitFor(
       () => channelNotifications(second.stdout).length >= 2,
       "re-forwarded attention after an un-receipted drain",
     )
@@ -1520,11 +1577,11 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     // --- The model's own read through the second adapter IS the receipt: an
     // MCP fetch (CallTool) delivers the rows into its context and acknowledges.
     writeJson(second.child, callToolPayload(3, "fetch", {}))
-    await waitForCondition(() => second.stdout.some((line) => line.id === 3), "model fetch response")
+    await second.waitFor(() => second.stdout.some((line) => line.id === 3), "model fetch response")
     expect(mailboxCursor(dbPath, NAME)?.last_actionable_seq ?? 0).toBeGreaterThan(0)
 
     // --- Third adapter: acknowledged by a model read, so NOTHING is forwarded.
-    second.child.kill("SIGTERM")
+    await second.stop()
     const third = await spawnAdapterAndJoin(socketPath, "adapter-3.log")
     await new Promise((resolveTick) => setTimeout(resolveTick, 700))
     expect(channelNotifications(third.stdout)).toHaveLength(0)
@@ -1545,7 +1602,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     // Positive control that the drain actually ran: its fetch advances the
     // AMBIENT session cursor past the seeded broadcasts. Without this the
     // assertions below pass trivially on an adapter that ignored the wakeup.
-    await waitForCondition(
+    await dark.waitFor(
       () => sessionDeliveryOffsets(dbPath, NAME).last_inbox_pull_seq > 0,
       "dark adapter's drain advanced the ambient cursor",
     )
@@ -1563,17 +1620,17 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(JSON.parse(statusRun.stdout)).toMatchObject({ session: NAME, unread_count: 2 })
 
     // A live pane claiming the name is forwarded both rows.
-    dark.child.kill("SIGTERM")
+    await dark.stop()
     const lit = await spawnAdapterAndJoin(socketPath, "adapter-lit.log", { delivery: "push" })
-    await waitForCondition(() => channelNotifications(lit.stdout).length >= 2, "forwarded after the dark drain")
+    await lit.waitFor(() => channelNotifications(lit.stdout).length >= 2, "forwarded after the dark drain")
     await new Promise((resolveTick) => setTimeout(resolveTick, 500))
     expect(channelNotifications(lit.stdout)).toHaveLength(2)
 
     // The model's own read acknowledges; the third adapter and the idle gate see nothing.
     writeJson(lit.child, callToolPayload(3, "fetch", {}))
-    await waitForCondition(() => lit.stdout.some((line) => line.id === 3), "model fetch response")
+    await lit.waitFor(() => lit.stdout.some((line) => line.id === 3), "model fetch response")
     expect(mailboxCursor(dbPath, NAME)?.last_actionable_seq ?? 0).toBeGreaterThan(0)
-    lit.child.kill("SIGTERM")
+    await lit.stop()
     const third = await spawnAdapterAndJoin(socketPath, "adapter-third.log")
     await new Promise((resolveTick) => setTimeout(resolveTick, 700))
     expect(channelNotifications(third.stdout)).toHaveLength(0)

@@ -7,7 +7,7 @@
       "devDependencies": {
         "@types/bun": "^1.3.12",
         "oxfmt": "0.38.0",
-        "removely": "^0.1.0",
+        "removely": "^0.2.1",
         "typescript": "^5.9.3",
         "vitest": "^4.1.6",
       },
@@ -21,7 +21,7 @@
       "dependencies": {
         "@bearly/flock": "0.1.0",
         "loggily": "^0.11.0",
-        "removely": "^0.1.0",
+        "removely": "^0.2.1",
         "tribe-injection-envelope": "workspace:*",
         "tribe-recall": "workspace:*",
         "tribe-wire": "workspace:*",
@@ -59,7 +59,7 @@
         "@modelcontextprotocol/sdk": "^1.27.1",
         "@silvery/commander": "^0.19.2",
         "loggily": "^0.11.0",
-        "removely": "^0.1.0",
+        "removely": "^0.2.1",
       },
       "devDependencies": {
         "tsdown": "^0.21.7",
@@ -674,7 +674,7 @@
 
     "readable-stream": ["readable-stream@3.6.2", "", { "dependencies": { "inherits": "^2.0.3", "string_decoder": "^1.1.1", "util-deprecate": "^1.0.1" } }, "sha512-9u/sniCrY3D5WdsERHzHE4G2YCXqoG5FTHUiCC4SIbr6XcLZBY05ya9EKjYek9O5xOAwjGq+1JdGBAS7Q9ScoA=="],
 
-    "removely": ["removely@0.1.0", "", { "bin": { "removely": "./dist/cli.mjs" } }, "sha512-k0fZjY/7phBNLjQgKEkZ+KyfrfqAWCEmV8RJ7g7cEBG2123ifnDsGnrZsVm4cky0Qw6nR5CSxG4Nwtrl0X0mxg=="],
+    "removely": ["removely@0.2.1", "", { "bin": { "removely": "./dist/cli.mjs" } }, "sha512-GVhHWIHAjz59ZVg0nYO93dIKfOibmdEKzc3eFHuPrvqCVg+idA3ey9Ysiz7xoawFgs/XMrXzfkBqRacjj7qbwA=="],
 
     "require-directory": ["require-directory@2.1.1", "", {}, "sha512-fGxEI7+wsG9xrvdjsrlmL22OMTTiHRwAMroiEeMgq8gzoLC/PQr7RsRDSTLUg/bZAZtF+TVIkHc6/4RIKrui+Q=="],
 
