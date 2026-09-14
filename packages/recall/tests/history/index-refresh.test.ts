@@ -211,26 +211,58 @@ describe("Recall refresh completion", () => {
     `,
         dbPath,
       ],
-      { stdio: ["ignore", "pipe", "pipe"] },
+      {
+        cwd: fileURLToPath(new URL("../../", import.meta.url)),
+        stdio: ["ignore", "pipe", "pipe"],
+      },
     )
-    const exited = once(child, "exit")
+    let stderr = ""
+    child.stderr!.on("data", (chunk) => {
+      stderr += String(chunk)
+    })
+    // close waits for stderr to drain as well as for the child to be reaped.
+    const exited = once(child, "close")
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<never>((_, reject) => {
+      deadlineTimer = setTimeout(() => {
+        reject(new Error(`fixture writer exceeded 2000ms; stderr: ${stderr || "<empty>"}`))
+      }, 2000)
+    })
     try {
       const [chunk] = await Promise.race([
         once(child.stdout!, "data"),
-        exited.then(() => {
-          throw new Error("fixture writer exited before holding its lock")
+        exited.then(([code, signal]) => {
+          throw new Error(
+            `fixture writer exited before holding its lock (code=${code}, signal=${signal}); stderr: ${stderr || "<empty>"}`,
+          )
         }),
+        deadline,
       ])
       expect(String(chunk)).toContain("invalidated-and-held")
       expect(tryAcquireFlock(`${realpathSync(dbPath)}.rebuild.lock`)).toBeNull()
       child.kill("SIGKILL")
-      expect(await exited).toEqual([null, "SIGKILL"])
+      expect(await Promise.race([exited, deadline])).toEqual([null, "SIGKILL"])
       expect(getIndexMeta(db, "last_rebuild")).toBe("")
       await cmdIndex({ incremental: true })
       expect(Number.isFinite(Date.parse(getIndexMeta(db, "last_rebuild")!))).toBe(true)
     } finally {
+      clearTimeout(deadlineTimer)
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
-      await exited
+      let cleanupTimer: ReturnType<typeof setTimeout> | undefined
+      try {
+        await Promise.race([
+          exited,
+          new Promise<never>((_, reject) => {
+            cleanupTimer = setTimeout(() => {
+              reject(
+                new Error(`fixture writer was not reaped within 1000ms after SIGKILL; stderr: ${stderr || "<empty>"}`),
+              )
+            }, 1000)
+          }),
+        ])
+      } finally {
+        clearTimeout(cleanupTimer)
+      }
     }
   })
 })
