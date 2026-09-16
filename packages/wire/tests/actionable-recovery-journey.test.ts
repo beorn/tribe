@@ -81,9 +81,6 @@ const BASE_ENV: NodeJS.ProcessEnv = (() => {
   delete env.BD_ACTOR
   delete env.AG_SESSION_AUTH
   delete env.TRIBE_DELIVERY_FALLBACKS
-  // Test daemons own their roster; a managed seat's file and snapshot may differ.
-  delete env.TRIBE_EXPECTED_MEMBERS
-  delete env.TRIBE_EXPECTED_MEMBERS_FILE
   return env
 })()
 
