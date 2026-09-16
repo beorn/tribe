@@ -24,6 +24,7 @@ import { readTribeLaunchId } from "../launch-environment.ts"
 import { withCliDaemonClient } from "./daemon-client.ts"
 import { writeJsonStdout } from "./json-output.ts"
 import { mcpJsonContent } from "./mcp-json-content.ts"
+import { warnIfSelfTransportDown } from "./self-transport-warning.ts"
 import {
   resolveCheckoutCodeIdentity,
   resolvePinDirection,
@@ -1331,6 +1332,10 @@ interface InboxStatusSummary {
   /** Latest sequence in the current open-request set, not a cursor or read proof.
    * May decrease when a request settles. */
   latest_open_request_status_seq?: number | null
+  /** Launch-scoped reads only, and only while this seat's own tribe transport
+   * is not connected (G9 P0 row 7). */
+  transport_state?: "disconnected"
+  transport_reason?: string
 }
 
 export function formatInboxStatus(result: InboxStatusSummary): string {
@@ -1354,6 +1359,7 @@ async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promi
     cliInboxMethod("status", opts.session),
     cliInboxTargetParams(opts.session),
   )) as InboxStatusSummary
+  warnIfSelfTransportDown("inbox-status", result)
   if (opts.json) {
     await writeJsonStdout(result)
     return

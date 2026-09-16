@@ -35,6 +35,7 @@ import { readTribeLaunchId } from "../launch-environment.ts"
 import { withCliDaemonClient } from "./daemon-client.ts"
 import { writeJsonStdout } from "./json-output.ts"
 import { mcpJsonContent } from "./mcp-json-content.ts"
+import { warnIfSelfTransportDown } from "./self-transport-warning.ts"
 import { oversizedMessageError } from "../lib/send-validation.ts"
 
 const SEND_CLI = visibleCliProjectionForMcp("send")
@@ -255,7 +256,10 @@ async function resolveSendCaller(reply?: string, anonymous = false): Promise<Sen
         session?: unknown
         launch_id?: unknown
         launch_parent_pid?: unknown
+        transport_state?: unknown
+        transport_reason?: unknown
       }
+      warnIfSelfTransportDown("send", status)
       if (typeof status.session === "string" && status.session.length > 0) {
         const caller: SendCaller = { name: status.session }
         // The daemon owns the (launch_id, launch_parent_pid) tuple; forward it

@@ -1986,7 +1986,7 @@ export function createStatements(db: Database) {
     // BINARY collation — while remaining a range scan idx_sessions_launch_id
     // can serve. See derivedLaunchPrefixUpperBound for the upper bound.
     getSessionsByProviderLaunchId: db.prepare(
-      "SELECT id, name, principal_class, launch_id, launch_parent_pid FROM sessions " +
+      "SELECT id, name, principal_class, launch_id, launch_parent_pid, updated_at FROM sessions " +
         "WHERE launch_id = $launch_id " +
         "OR (launch_id >= $derived_prefix AND launch_id < $derived_prefix_upper) ORDER BY id",
     ),

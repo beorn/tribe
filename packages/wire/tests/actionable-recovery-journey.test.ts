@@ -1006,6 +1006,67 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     ])
   }, 120_000)
 
+  // G9 P0 row 7: a seat's tribe adapter can die while the seat keeps working,
+  // because one-shot CLI calls still authenticate through launch authority.
+  // Those calls are where the seat can learn it, so the daemon names the
+  // caller's own transport when it is not connected and the CLI warns.
+  it("tells a managed seat its own tribe transport is gone, and says nothing while it is connected", async () => {
+    const socketPath = join(tmpDir, "self-transport.sock")
+    const dbPath = join(tmpDir, "self-transport.db")
+    const authority = "self-transport-secret-000000000000000000000"
+    const launchId = "self-transport-launch"
+    const seatName = "@agent/7"
+    const derivedLaunchId = `${launchId}::${encodeURIComponent(seatName)}`
+    const warning = "this seat's tribe transport is disconnected"
+
+    daemonProc = spawnDaemon(socketPath, dbPath)
+    await waitForDaemonSocket(daemonProc, socketPath)
+    const seat = await spawnLaunchAdapter(socketPath, "self-transport.log", launchId, {
+      name: seatName,
+      throughPluginSupervisor: true,
+      selfMailboxAuthority: authority,
+    })
+    await callLaunchToolWhenRegistered(seat, 70, "members", {})
+    const cliEnv = { ...BASE_ENV, TRIBE_SOCKET: socketPath, TRIBE_LAUNCH_ID: launchId, TRIBE_NO_AUTOSTART: "1" }
+
+    const connected = await runCli(["inbox-status", "--json"], cliEnv, { throughParent: true })
+    expect(connected.exitCode, connected.stderr).toBe(0)
+    expect(JSON.parse(connected.stdout)).toMatchObject({ session: seatName })
+    expect(JSON.parse(connected.stdout)).not.toHaveProperty("transport_state")
+    expect(connected.stderr).not.toContain(warning)
+
+    seat.child.kill("SIGTERM")
+    await once(seat.child, "exit")
+
+    // The daemon learns of the closed socket asynchronously; poll the real read.
+    let dead = await runCli(["inbox-status", "--json"], cliEnv, { throughParent: true })
+    for (const deadline = Date.now() + 15_000; Date.now() < deadline; ) {
+      if (dead.exitCode === 0 && "transport_state" in (JSON.parse(dead.stdout) as object)) break
+      await Bun.sleep(250)
+      dead = await runCli(["inbox-status", "--json"], cliEnv, { throughParent: true })
+    }
+    expect(dead.exitCode, dead.stderr).toBe(0)
+    expect(JSON.parse(dead.stdout)).toMatchObject({
+      session: seatName,
+      unread_count: 0,
+      launch_id: derivedLaunchId,
+      transport_state: "disconnected",
+      transport_reason: "owner-unknown-no-transport",
+    })
+    expect(dead.stderr).toContain(warning)
+    expect(dead.stderr).toContain(derivedLaunchId)
+    expect(dead.stderr).toContain("counts may be stale")
+    expect(dead.stderr).toContain("relaunch")
+
+    // tribe send resolves its caller through the same launch read, so it warns too.
+    const send = await runCli(["send", "@chief", "still here", "--type", "notify"], cliEnv, {
+      selfMailboxAuthority: authority,
+      throughParent: true,
+    })
+    expect(send.exitCode, send.stderr).toBe(0)
+    expect(send.stderr).toContain(warning)
+  }, 120_000)
+
   it("successor takeover closes the base role ball through daemon-derived launch ownership", async () => {
     const socketPath = join(tmpDir, "successor-reply.sock")
     const dbPath = join(tmpDir, "successor-reply.db")
