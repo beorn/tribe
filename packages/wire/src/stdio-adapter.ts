@@ -750,7 +750,7 @@ const deliveryInstruction = pullUntilJoin
   ? `${deliveryCapabilityInstruction(initialDeliveryCapability)} Nothing arrives as a channel notification until this session calls tribe.join, which switches it to ${DELIVERY_CAPABILITY.summary}.`
   : deliveryCapabilityInstruction(DELIVERY_CAPABILITY)
 const attentionProjectionInstruction =
-  "- Default fetch exposes `attention.actionable_unread` (request/query/verdict/assign plus direct responses) and up to 10 `attention.pending_balls`, prioritizing peer requests over watcher incidents, ahead of ambient events; `attention.pending_balls_summary` reports the full total/oldest age and any omitted request/incident counts, while `tribe.pending` returns the full pile. Responses remain quiet for default inbox waits. These are facts projected from the existing mailbox and ball tracker, not another queue."
+  "- Default fetch exposes `attention.actionable_unread` (request/query/verdict/assign, direct responses, and direct status/notify from another named seat other than a ball owner's TAKING receipt) and up to 10 `attention.pending_balls`, prioritizing peer requests over watcher incidents, ahead of ambient events; `attention.pending_balls_summary` reports the full total/oldest age and any omitted request/incident counts, while `tribe.pending` returns the full pile. Responses and those status/notify rows remain quiet for default inbox waits. These are facts projected from the existing mailbox and ball tracker, not another queue."
 
 // Shared turn-start inbox guidance for every role variant. Kept deliberately
 // SMALL: the turn-start call is a small catch-up drain, NOT a full replay. The

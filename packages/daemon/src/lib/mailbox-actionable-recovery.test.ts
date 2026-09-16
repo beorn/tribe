@@ -1130,30 +1130,93 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(health.unread?.some((row) => row.recipient === NAME)).toBe(false)
   })
 
-  it("non-actionable directs (notify/status) are ambient — never recovered on claim", () => {
-    const a = connectAs("sess-a", NAME)
-    disconnect("sess-a")
-    void a
-    insertRow(stmts, {
-      id: "fyi",
-      type: "notify",
-      sender: "@chief",
-      recipient: NAME,
-      kind: "direct",
-      content: "fyi only",
-      ts: now - 60_000,
+  /**
+   * P0 row 3, ruling C (@chief, 2026-09-16): a report one named seat sends
+   * another as status or notify used to reach no instrument — ambient in every
+   * drain, and invisible to a focus or pull seat — so @chief missed outcome
+   * reports that sat delivered. It is attention now. The one exception is the
+   * ball owner's TAKING receipt on a request the recipient still has open:
+   * pending already shows that one.
+   */
+  describe("a direct status or notify between named seats is attention (P0 row 3)", () => {
+    function send(ctx: TribeContext, args: Record<string, unknown>): { id: string } {
+      return parseToolJson(handleToolCall(ctx, "tribe.send", args, opts)) as { id: string }
+    }
+
+    function attentionOf(id: string): number {
+      return (
+        db.prepare("SELECT attention_required FROM messages WHERE id = ?").get(id) as { attention_required: number }
+      ).attention_required
+    }
+
+    function unreadIds(ctx: TribeContext): string[] {
+      return (fetchJson(ctx, opts).json.attention?.actionable_unread ?? []).map((event) => event.id)
+    }
+
+    it("makes a named seat's direct status and notify attention for the named recipient", () => {
+      const worker = connectAs("sess-row3-worker", NAME)
+      const chief = connectAs("sess-row3-chief", "@chief")
+
+      const report = send(chief, { to: NAME, message: "probe finished: 3 of 3 green", type: "status" })
+      const fyi = send(chief, { to: NAME, message: "the queue is paused until 17:00", type: "notify" })
+
+      expect([attentionOf(report.id), attentionOf(fyi.id)]).toEqual([1, 1])
+      expect(unreadIds(worker)).toEqual([report.id, fyi.id])
     })
-    insertRow(stmts, {
-      id: "st",
-      type: "status",
-      sender: "@agent/2",
-      recipient: NAME,
-      kind: "direct",
-      content: "status line",
-      ts: now - 50_000,
+
+    it("keeps the owner's status receipt on the recipient's own open request ambient", () => {
+      const worker = connectAs("sess-row3-requester", NAME)
+      const chief = connectAs("sess-row3-owner", "@chief")
+      const request = send(worker, { to: "@chief", message: "choose the seam", type: "request" })
+
+      const taking = send(chief, { to: NAME, message: "TAKING, ETA 20m", type: "status", ref: request.id })
+
+      expect(attentionOf(taking.id)).toBe(0)
+      expect(unreadIds(worker)).toEqual([])
+      expect(stmts.selectPendingForReplyRecipient.get({ $reply_id: request.id, $recipient: "@chief" })).toMatchObject({
+        request_id: request.id,
+      })
     })
-    const b = connectAs("sess-b", NAME)
-    expect(fetchEvents(b, opts)).toEqual([])
+
+    it("makes a status that refs an already-closed request attention, since nothing else surfaces it", () => {
+      const worker = connectAs("sess-row3-closed-requester", NAME)
+      const chief = connectAs("sess-row3-closed-owner", "@chief")
+      const request = send(worker, { to: "@chief", message: "choose the seam", type: "request" })
+      const answer = send(chief, { to: NAME, message: "seam B", type: "response", reply: request.id })
+
+      const followUp = send(chief, { to: NAME, message: "seam B is merged", type: "status", ref: request.id })
+
+      expect(attentionOf(followUp.id)).toBe(1)
+      expect(unreadIds(worker)).toEqual([answer.id, followUp.id])
+    })
+
+    it("counts only the ball owner's status as a receipt: a notify with the same ref, or a third seat's status, is attention", () => {
+      const worker = connectAs("sess-row3-ref-requester", NAME)
+      const chief = connectAs("sess-row3-ref-owner", "@chief")
+      const peer = connectAs("sess-row3-ref-peer", "@agent/7")
+      const request = send(worker, { to: "@chief", message: "choose the seam", type: "request" })
+
+      const ownerNotify = send(chief, { to: NAME, message: "looking at it", type: "notify", ref: request.id })
+      const peerStatus = send(peer, { to: NAME, message: "I am helping @chief on it", type: "status", ref: request.id })
+
+      expect([attentionOf(ownerNotify.id), attentionOf(peerStatus.id)]).toEqual([1, 1])
+      expect(unreadIds(worker)).toEqual([ownerNotify.id, peerStatus.id])
+    })
+
+    it("keeps broadcasts and directs from watcher or anonymous senders ambient", () => {
+      const worker = connectAs("sess-row3-ambient-worker", NAME)
+      const chief = connectAs("sess-row3-ambient-chief", "@chief")
+      const watcher = connectAs("sess-row3-watcher", "wait-watch")
+      const anonymous = makeContext(db, stmts, "sess-row3-anonymous", "pending-3f0c9a1e")
+      active.add("sess-row3-anonymous")
+
+      const broadcast = send(chief, { to: "*", message: "fleet: the queue is paused", type: "status" })
+      const watch = send(watcher, { to: NAME, message: "WATCH: seat idle 12m", type: "notify" })
+      const telemetry = send(anonymous, { to: NAME, message: "herdr-status changed", type: "status" })
+
+      expect([attentionOf(broadcast.id), attentionOf(watch.id), attentionOf(telemetry.id)]).toEqual([0, 0, 0])
+      expect(unreadIds(worker)).toEqual([])
+    })
   })
 
   it("same-name rejoin is a refresh: drained ambient history stays drained and nothing re-recovers", () => {

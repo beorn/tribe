@@ -92,7 +92,7 @@ const ATTENTION_SCHEMA = {
     actionable_unread: {
       type: "array",
       description:
-        "All unacknowledged direct request/query/verdict/assign/response messages plus tracked actionable direct or broadcast messages still awaiting this owner's TAKING or settlement, independent of the event limit. Incident notifications remain pending-only. Responses stay quiet for default inbox waits.",
+        "All unacknowledged direct request/query/verdict/assign/response messages, direct status/notify messages from another named seat other than a ball owner's TAKING receipt, plus tracked actionable direct or broadcast messages still awaiting this owner's TAKING or settlement, independent of the event limit. Incident notifications remain pending-only. Responses and those status/notify messages stay quiet for default inbox waits.",
       items: { type: "object", additionalProperties: true },
     },
     pending_balls: {
