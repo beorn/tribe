@@ -145,6 +145,12 @@ const TAKEOVER = REGISTER_WITH_LAUNCH_NAME && process.env.TRIBE_TAKEOVER === "1"
 const LAUNCH_ID_RAW = readTribeLaunchId(process.env) ?? ""
 const PLUGIN_ADAPTER_CHILD = process.env.TRIBE_PLUGIN_ADAPTER_CHILD === "1"
 const PLUGIN_PROVIDER_PARENT_PID_RAW = process.env.TRIBE_PLUGIN_PROVIDER_PARENT_PID?.trim() ?? ""
+// G9 P0 row 7 — the launch's adapter-exit record, named by the supervisor that
+// appends to it (plugins/claude/supervisor-exit-record.ts). Registering it lets
+// tribe members name the file on this seat's row after this adapter is gone.
+const ADAPTER_EXIT_RECORD = PLUGIN_ADAPTER_CHILD
+  ? process.env.TRIBE_PLUGIN_ADAPTER_EXIT_RECORD?.trim() || undefined
+  : undefined
 
 function reportSupervisedIdentity(name: string): void {
   if (!PLUGIN_ADAPTER_CHILD || !isTribeNameShape(name)) return
@@ -351,6 +357,7 @@ const baseRegisterParams = {
   identityToken,
   ...(selfMailboxAuthority === null ? {} : { mailboxAuthorityHash: hashSelfMailboxAuthority(selfMailboxAuthority) }),
   ...(LAUNCH_IDENTITY ? { launchId: LAUNCH_IDENTITY.id, launchParentPid: LAUNCH_IDENTITY.parentPid } : {}),
+  ...(ADAPTER_EXIT_RECORD === undefined ? {} : { adapterExitRecord: ADAPTER_EXIT_RECORD }),
   ...(INITIAL_FILTER_MODE === undefined ? {} : { filterMode: INITIAL_FILTER_MODE }),
   // @km/infra/15641 Phase 1 — per-session account/provider label sourced
   // from `ag` via TRIBE_ACCOUNT / TRIBE_PROVIDER env vars (which ag sets

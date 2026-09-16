@@ -2618,7 +2618,8 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     .prepare(`
       SELECT s.id, s.name, s.role, s.domains, s.pid, s.cwd,
         s.claude_session_id, s.claude_session_name, s.started_at, s.updated_at,
-        s.account, s.provider, s.mailbox_authority_hash, s.launch_id, s.launch_parent_pid, s.delivery
+        s.account, s.provider, s.mailbox_authority_hash, s.launch_id, s.launch_parent_pid, s.delivery,
+        s.adapter_exit_record
       FROM sessions s
       ORDER BY s.started_at
     `)
@@ -2639,6 +2640,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     launch_id: string | null
     launch_parent_pid: number | null
     delivery: "push" | "pull"
+    adapter_exit_record: string | null
   }>
 
   // By default return only currently-connected sessions. `a.all` exposes the
@@ -2693,6 +2695,9 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
       // weren't spawned through ag).
       ...(r.account ? { account: r.account } : {}),
       ...(r.provider ? { provider: r.provider } : {}),
+      // G9 P0 row 7 — the file where this launch's plugin supervisor appends
+      // one line per adapter exit; present only for a supervised adapter.
+      ...(r.adapter_exit_record ? { adapter_exit_record: r.adapter_exit_record } : {}),
     }
   })
   const roster = opts.getExpectedMembers?.()

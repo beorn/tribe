@@ -31,6 +31,7 @@
 
 import { randomUUID, timingSafeEqual } from "node:crypto"
 import { type Socket as NetSocket } from "node:net"
+import { isAbsolute } from "node:path"
 import { createLogger } from "loggily"
 import { DEFAULT_INBOX_WAIT_SESSION, resolveInboxWaitOptions } from "tribe-wire"
 import { deriveTribePersonaLaunchIdentity } from "tribe-wire/lib/persona-launch-identity"
@@ -1080,6 +1081,11 @@ export function withDispatcher<
             if (p.mailboxAuthorityHash !== undefined && mailboxAuthorityHash === null) {
               return makeError(id, -32602, "register mailboxAuthorityHash must be a lowercase SHA-256 hex digest")
             }
+            const adapterExitRecord =
+              typeof p.adapterExitRecord === "string" && isAbsolute(p.adapterExitRecord) ? p.adapterExitRecord : null
+            if (p.adapterExitRecord !== undefined && adapterExitRecord === null) {
+              return makeError(id, -32602, "register adapterExitRecord must be an absolute file path")
+            }
             if (p.principalClass !== undefined && p.principalClass !== "agent" && p.principalClass !== "service") {
               return makeError(id, -32602, "register principalClass must be agent or service")
             }
@@ -1421,6 +1427,15 @@ export function withDispatcher<
               mailboxAuthorityHash,
             )
             db.prepare("UPDATE sessions SET principal_class = ? WHERE id = ?").run(principalClass, clientCtx.sessionId)
+            // G9 P0 row 7 — the launch's adapter-exit record, named by the plugin
+            // supervisor that appends to it. Omission keeps a reconnecting
+            // session's stored path, as it does for account and provider.
+            if (adapterExitRecord !== null) {
+              db.prepare("UPDATE sessions SET adapter_exit_record = ? WHERE id = ?").run(
+                adapterExitRecord,
+                clientCtx.sessionId,
+              )
+            }
             // Apply launch-declared admission before applyClient makes this
             // session visible to the broadcast fanout. Omission preserves a
             // reconnecting session's stored preference; an explicit mode is

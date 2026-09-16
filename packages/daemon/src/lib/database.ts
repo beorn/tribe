@@ -39,7 +39,8 @@ export function openDatabase(path: string): Database {
 		filter_mute TEXT,
 		delivery     TEXT NOT NULL DEFAULT 'push',
 		account    TEXT,
-		provider   TEXT
+		provider   TEXT,
+		adapter_exit_record TEXT
 	)`)
 
   // Migrations table — tracks schema version so we can evolve the DB without
@@ -1211,6 +1212,19 @@ const MIGRATIONS: readonly Migration[] = [
       if (!columns.has("principal_class")) {
         db.run("ALTER TABLE sessions ADD COLUMN principal_class TEXT NOT NULL DEFAULT 'agent'")
       }
+    },
+  },
+  {
+    version: 31,
+    name: "session-adapter-exit-record",
+    up(db) {
+      // G9 P0 row 7 — where the plugin supervisor appends this launch's
+      // adapter exits, registered by its adapter so tribe members can name
+      // the file after the adapter is gone.
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>).map((row) => row.name),
+      )
+      if (!columns.has("adapter_exit_record")) db.run("ALTER TABLE sessions ADD COLUMN adapter_exit_record TEXT")
     },
   },
 ]

@@ -14,9 +14,9 @@ export default defineConfig({
     exclude: ["**/node_modules/**", "**/dist/**", "**/*.slow.*"],
     // tmpdir-redirect keeps fixtures/sockets out of the shared macOS tmpdir,
     // whose degraded readdir wedges spawned bun subprocesses (see file header).
-    // isolate-fleet-roster keeps a managed seat's declared roster out of every
-    // test daemon (see file header).
-    setupFiles: ["tests/setup/tmpdir-redirect.ts", "tests/setup/isolate-fleet-roster.ts"],
+    // isolate-managed-seat keeps a managed seat's declared roster and launch
+    // state directory out of every test daemon and plugin (see file header).
+    setupFiles: ["tests/setup/tmpdir-redirect.ts", "tests/setup/isolate-managed-seat.ts"],
     // A test that reaches connectOrStart on the guard socket default spawns a
     // DETACHED daemon that outlives the run. This reaps them at the end. It has
     // to be globalSetup: a top-level afterAll in a setupFiles module never runs.
