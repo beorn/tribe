@@ -195,9 +195,6 @@ describe("Claude plugin daemon-restart self-heal", () => {
       cwd: tmpDir,
       env: {
         ...process.env,
-        HAB_SESSION_HABITAT_ROOT: "",
-        TRIBE_EXPECTED_MEMBERS_FILE: "",
-        TRIBE_EXPECTED_MEMBERS: "",
         TRIBE_NO_PLUGINS: "1",
         TRIBE_NO_AUTORELOAD: "1",
         DEBUG_LOG: logPath,
