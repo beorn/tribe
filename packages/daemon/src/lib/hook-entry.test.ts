@@ -12,7 +12,8 @@
 
 import { describe, expect, test } from "vitest"
 import { spawn, spawnSync } from "node:child_process"
-import { mkdtempSync, readdirSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, writeFileSync } from "node:fs"
+import { tryAcquireFlock } from "@bearly/flock"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
@@ -156,5 +157,64 @@ describe("daemon.ts hook entry", () => {
       // Directory never created — equally proves no socket was bound.
     }
     expect(entries.filter((e) => e.endsWith(".sock"))).toEqual([])
+  })
+
+  // A burst of prompts puts every loser of the index-writer lock here: the
+  // flush of ~15 queued tribe channel messages on 2026-09-16 ~14:10 PDT made
+  // Claude Code print `UserPromptSubmit hook error — Failed with non-blocking
+  // status code: No stderr output` once per message. Enrichment is optional,
+  // so contention must succeed without context rather than fail mutely.
+  test("hook prompt survives a held index-writer lock and never exits mute", () => {
+    const base = mkdtempSync(join(tmpdir(), "tribe-hook-busy-"))
+    const dbPath = join(base, "session-index.db")
+    writeFileSync(dbPath, "")
+    mkdirSync(join(base, "project"), { recursive: true })
+    writeFileSync(join(base, "project", "CLAUDE.md"), "# hermetic project\n")
+
+    // Hold the writer the hook wants, exactly as a competing process would.
+    using held = tryAcquireFlock(`${realpathSync(dbPath)}.rebuild.lock`, {
+      body: JSON.stringify({ startedAt: Date.now() }),
+    })
+    expect(held, "test must own the rebuild lock before the hook runs").not.toBeNull()
+
+    const prompt = [
+      '<channel source="plugin:tribe:tribe" from="@chief" type="response" message_id="0204b343-1111-2222-3333-444455556666">',
+      "DONE: 24141 and 24050 are closed as STATE 8bd94f2337 — the fixture beads are green on main",
+      "and the run journal header landed with them. No further action needed from your side.",
+      "</channel>",
+    ].join("\n")
+
+    const res = spawnSync(process.execPath, [DAEMON, "hook", "prompt"], {
+      env: {
+        ...hermeticEnv(base),
+        RECALL_DB_PATH: dbPath,
+        CLAUDE_PROJECT_DIR: join(base, "project"),
+      },
+      input: `${JSON.stringify({ session_id: "busy-lock-probe", cwd: base, prompt })}\n`,
+      timeout: 30_000,
+      encoding: "utf8",
+    })
+
+    expect(res.status, `hook stderr: ${res.stderr}`).toBe(0)
+    // Whatever a future failure is, it must name itself: a nonzero exit with
+    // an empty stderr is the defect this test exists to keep out.
+    if (res.status !== 0) expect(res.stderr.trim()).not.toBe("")
+  })
+
+  // NO SILENT ERRORS. The hook process muzzles loggily's console sink, so a
+  // nonzero exit that only logs reaches the operator as
+  // `Failed with non-blocking status code: No stderr output` and the reason
+  // dies with the process. Every failing exit names the hook and the reason.
+  test("hook prompt that genuinely fails says why on stderr", () => {
+    const base = mkdtempSync(join(tmpdir(), "tribe-hook-loud-"))
+    const res = spawnSync(process.execPath, [DAEMON, "hook", "prompt"], {
+      env: hermeticEnv(base),
+      input: "not-json\n",
+      timeout: 30_000,
+      encoding: "utf8",
+    })
+    expect(res.status).toBe(1)
+    expect(res.stderr).toContain("tribe hook prompt:")
+    expect(res.stderr).toContain("invalid JSON on stdin")
   })
 })

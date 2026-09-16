@@ -15,6 +15,12 @@
  * `console.log` is the *only* sanctioned stdout writer in this file —
  * it's the hook's JSON response channel, read by Claude Code via
  * `hookSpecificOutput`.
+ *
+ * The one exception to the stderr ban is `reportHookFailure`, called only
+ * on a nonzero exit. Nothing is captured into the next turn when the hook
+ * fails; Claude Code shows that stderr to the operator instead, and an
+ * empty one reads as `Failed with non-blocking status code: No stderr
+ * output`. See its docstring.
  */
 
 import * as path from "path"
@@ -24,7 +30,7 @@ import { spawn } from "child_process"
 import { fileURLToPath } from "node:url"
 import { createLogger, drainOutput } from "loggily"
 import { hookRecall } from "../history/recall"
-import { getDb, closeDb, getIndexMeta } from "../history/db"
+import { getDb, closeDb, getIndexMeta, IndexWriterBusyError } from "../history/db"
 import { summarizeUnprocessedDays } from "./summarize-daily"
 import { withDaemonCall } from "../../../../plugins/claude/recall/lib/socket.ts"
 import { resolveRecallSocketPath } from "../../../../plugins/claude/recall/lib/config.ts"
@@ -43,6 +49,34 @@ const sessionStartLog = createLogger("recall:hook:session-start")
 const sessionEndLog = createLogger("recall:hook:session-end")
 const hookLog = createLogger("recall:hook:prompt")
 const rememberLog = createLogger("recall:hook:remember")
+
+/**
+ * The one sanctioned stderr writer in this file, for FAILING exits only.
+ *
+ * The muzzle described in the module docstring silences loggily's console
+ * sink for the whole hook process, so a `hookLog.error` before a nonzero
+ * exit reaches nobody: Claude Code reports the hook as
+ * `UserPromptSubmit hook error — Failed with non-blocking status code: No
+ * stderr output` and the reason is lost. NO SILENT ERRORS — name the hook
+ * and the reason on the way out.
+ *
+ * Only the nonzero paths call this. On exit 0 the harness folds captured
+ * hook output into the next turn as
+ * `<system-reminder>UserPromptSubmit hook success: …</system-reminder>`,
+ * which is the hallucination the muzzle exists to prevent; successful
+ * skips stay on the loggily rail with the other skip reasons.
+ *
+ * `writeSync` rather than `process.stderr.write`: the caller exits as soon
+ * as `drainOutput()` settles, and a queued async write can be discarded.
+ */
+function reportHookFailure(event: string, reason: unknown): void {
+  const text = reason instanceof Error ? reason.message : String(reason)
+  try {
+    fs.writeSync(2, `tribe hook ${event}: ${text}\n`)
+  } catch {
+    // stderr is gone (closed pipe) — the exit status still carries the failure.
+  }
+}
 
 // ============================================================================
 // Session sentinel (written by hook, read by `bun recall` subprocesses)
@@ -376,6 +410,7 @@ export async function cmdHook(): Promise<void> {
         elapsed_ms: Date.now() - startTime,
         stdin_preview: stdin.slice(0, 200),
       })
+      reportHookFailure("prompt", `invalid JSON on stdin: ${e instanceof Error ? e.message : String(e)}`)
       // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
       return drainOutput().then(() => process.exit(1))
     }
@@ -454,9 +489,21 @@ export async function cmdHook(): Promise<void> {
     console.log(envelopeEmitHookJson("UserPromptSubmit", additionalContext, prompt))
   } catch (e) {
     const elapsed = Date.now() - startTime
+    // Another process holds the index rebuild lock. That is contention, not
+    // failure: `acquireIndexWriter` admits exactly one writer, and a burst of
+    // prompts — ~15 queued tribe channel messages flushed at once on
+    // 2026-09-16 ~14:10 PDT — puts every loser here. Enrichment is optional,
+    // so a prompt we merely cannot enrich succeeds without context, exactly
+    // like the daemon/library skips above.
+    if (e instanceof IndexWriterBusyError) {
+      hookLog.info?.("index writer busy — recall enrichment skipped", { elapsed_ms: elapsed })
+      // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
+      return drainOutput().then(() => process.exit(0))
+    }
     hookLog.error?.(e instanceof Error ? e : new Error(String(e)), "FATAL: unhandled error", {
       elapsed_ms: elapsed,
     })
+    reportHookFailure("prompt", e)
     // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
     return drainOutput().then(() => process.exit(1))
   }
