@@ -2500,8 +2500,9 @@ function projectMembershipDiscrepancy(
     const departedSiblingCount = departed.filter((row) => row.why === "undeclared-sibling").length
     const departedForeignCount = departed.filter((row) => row.why === "undeclared-foreign").length
     // A roster that could not follow its pin file cannot vouch for an all-clear either.
-    if (missing.length === 0 && roster.stale === undefined)
-      {return { discrepancy: undefined, finished, dormant, departed }}
+    if (missing.length === 0 && roster.stale === undefined) {
+      return { discrepancy: undefined, finished, dormant, departed }
+    }
     return {
       discrepancy: {
         status: "degraded",
@@ -2556,6 +2557,44 @@ function isDurableMembershipSessionRow(row: MembershipSessionRow): row is Durabl
       launchParentPid: row.launch_parent_pid,
     }) === "durable-launch"
   )
+}
+
+/**
+ * One stored session row's transport, as `tribe members` projects it. A
+ * managed seat's launch-scoped inbox read reports its own transport through
+ * this same projection (G9 P0 row 7), so the two can never disagree.
+ *
+ * A registry entry can outlive the process it names — a dead transport
+ * adapter, a session mid-restart whose old socket hasn't been pruned yet — so
+ * BOTH `transport_state` and `alive` must be confirmed with a pid probe at read
+ * time, never read off transport-registry presence alone. Registry presence
+ * stays visible as `transport_registered`; it just no longer speaks for the
+ * transport. Disconnected rows are deliberately NOT pid-probed: a DB-stored pid
+ * is reusable and proves nothing once the transport is gone (session.ts
+ * `isPidAlive` docstring) — transport_connected=false already yields
+ * alive=false.
+ */
+export function projectSessionRowTransport(
+  row: { readonly id: string; readonly updated_at: number },
+  activeIds: ReadonlySet<string>,
+  activeInfo: readonly ActiveSessionInfo[],
+): {
+  readonly active: ActiveSessionInfo | undefined
+  readonly transportPids: number[]
+  readonly agentPid: number | null
+  readonly evidence: SessionTransportEvidence
+} {
+  const active = activeInfo.find((session) => session.id === row.id)
+  const transportPids = active?.transportPids ?? []
+  const agentPid = active ? (active.launchParentPid ?? active.pid) : null
+  const evidence = projectSessionTransportEvidence({
+    transportConnected: activeIds.has(row.id),
+    transportPids,
+    agentPid,
+    lastSeenSec: Math.round((Date.now() - row.updated_at) / 1000),
+    probe: (pid) => (pidStillAlive(pid) ? "live" : "dead"),
+  })
+  return { active, transportPids, agentPid, evidence }
 }
 
 function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
@@ -2617,27 +2656,8 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
 
   const sessions = visibleRows.map((r) => {
     const parent = r.claude_session_id ? parentMap.get(r.claude_session_id) : undefined
-    const active = activeInfo.find((session) => session.id === r.id)
+    const { active, transportPids, agentPid, evidence } = projectSessionRowTransport(r, activeIds, activeInfo)
     const protocolVersions = active?.protocolVersions ?? []
-    const transportConnected = activeIds.has(r.id)
-    const transportPids = active?.transportPids ?? []
-    // A registry entry can outlive the process it names — a dead transport
-    // adapter, a session mid-restart whose old socket hasn't been pruned yet
-    // — so BOTH `transport_state` and `alive` must be confirmed with a pid
-    // probe at read time, never read off transport-registry presence alone.
-    // Registry presence stays visible as `transport_registered`; it just no
-    // longer speaks for the transport. Disconnected rows are deliberately NOT
-    // pid-probed: a DB-stored pid is reusable and proves nothing once the
-    // transport is gone (session.ts `isPidAlive` docstring) —
-    // transport_connected=false already yields alive=false below.
-    const agentPid = active ? (active.launchParentPid ?? active.pid) : null
-    const evidence = projectSessionTransportEvidence({
-      transportConnected,
-      transportPids,
-      agentPid,
-      lastSeenSec: Math.round((Date.now() - r.updated_at) / 1000),
-      probe: (pid) => (pidStillAlive(pid) ? "live" : "dead"),
-    })
     return {
       member_id: r.id,
       name: r.name,

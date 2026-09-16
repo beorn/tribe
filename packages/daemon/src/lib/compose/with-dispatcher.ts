@@ -54,6 +54,7 @@ import {
   fetchEvent,
   handleToolCall,
   isRemovedTribeMethod,
+  projectSessionRowTransport,
   readAttentionProjection,
   readUnackedAttentionRows,
   removedTribeMethodMessage,
@@ -516,7 +517,13 @@ export function withDispatcher<
     }
 
     type InboxTargetResolution =
-      | { sessionName: string; launchId?: string; launchParentPid?: number }
+      | {
+          sessionName: string
+          launchId?: string
+          launchParentPid?: number
+          /** The resolved session row, for a launch-scoped read only. */
+          sessionRow?: { id: string; updated_at: number }
+        }
       | { errorCode: number; errorMessage: string }
 
     /**
@@ -573,7 +580,7 @@ export function withDispatcher<
         $launch_id: launchId,
         $derived_prefix: derivedPrefix,
         $derived_prefix_upper: derivedPrefixUpper,
-      }) as LaunchAuthorityRow[]
+      }) as Array<LaunchAuthorityRow & { updated_at: number }>
       const routableLaunchSessions = launchSessions.filter(hasLaunchAuthority)
       const persona = hasPersona && typeof params.persona === "string" ? params.persona.trim() : ""
       if (hasPersona && persona.length === 0) {
@@ -622,6 +629,7 @@ export function withDispatcher<
         sessionName: launchSession.name,
         launchId: launchSession.launch_id,
         launchParentPid: Number(launchSession.launch_parent_pid),
+        sessionRow: { id: launchSession.id, updated_at: launchSession.updated_at },
       }
     }
 
@@ -1737,6 +1745,19 @@ export function withDispatcher<
                 : { mode: "explicit", defaultSession: "@chief" },
             )
             if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage)
+            // G9 P0 row 7: a seat's tribe adapter can die while the seat keeps
+            // working through one-shot CLI calls like this one, so a launch-scoped
+            // read names the caller's own transport when it is not connected,
+            // through the projection tribe members uses. A connected seat's
+            // response is unchanged.
+            const selfTransport =
+              target.sessionRow === undefined
+                ? undefined
+                : projectSessionRowTransport(
+                    target.sessionRow,
+                    registry.getActiveSessionIds(),
+                    registry.getActiveSessionInfo(),
+                  ).evidence
             // Round-trip the daemon-authoritative launch tuple so a managed
             // one-shot CLI can register its send connection under the SAME
             // (launch_id, launch_parent_pid) as the live seat and fan in to it
@@ -1754,6 +1775,12 @@ export function withDispatcher<
               }),
               ...(target.launchId === undefined ? {} : { launch_id: target.launchId }),
               ...(target.launchParentPid === undefined ? {} : { launch_parent_pid: target.launchParentPid }),
+              ...(selfTransport === undefined || selfTransport.transport_state === "connected"
+                ? {}
+                : {
+                    transport_state: selfTransport.transport_state,
+                    transport_reason: selfTransport.transport_reason,
+                  }),
             })
           }
 
