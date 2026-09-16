@@ -64,7 +64,11 @@ describe("turn-start inbox instruction (km 19442 context-flood guard)", () => {
 
   it("points idle-wait policy at delivery capability metadata instead of hardcoded fetch loops", () => {
     expect(src).toContain("TRIBE_PULL_TRANSPORT")
-    expect(src).toContain("const deliveryInstruction = deliveryCapabilityInstruction(DELIVERY_CAPABILITY)")
+    // Both the delivery and turn-start wording come from the capability the
+    // session has at initialize: pull until tribe.join for an unjoined push session.
+    expect(src).toContain("const initialDeliveryCapability = currentDeliveryCapability()")
+    expect(src).toContain("deliveryCapabilityInstruction(initialDeliveryCapability)")
+    expect(src).toContain("const turnStartInboxCheck = turnStartInboxCheckForDelivery(initialDeliveryCapability)")
     expect(src).not.toContain("native Codex should use CLI")
     expect(src).not.toContain("Silver UI/Silvercode")
   })
