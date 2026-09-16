@@ -48,7 +48,7 @@ function optsWithRoster(members: Array<{ name: string; expected: boolean }>): Ha
     getActiveSessionIds: () => new Set<string>(),
     hasActiveTransport: () => false,
     getActiveSessionInfo: () => [],
-    expectedMembers: roster(members),
+    getExpectedMembers: () => roster(members),
   }
 }
 
@@ -90,9 +90,12 @@ describe("24588 row 4: dual expected:false balls do not accrue", () => {
     const remaining = stmts.selectPendingForRecipient.all({ $recipient: "@dev/3" }) as unknown[]
     expect(remaining).toHaveLength(0)
     const fact = parseBallOutcomeFact(
-      db
-        .prepare("SELECT id, type, content, ts FROM messages WHERE type = 'event.ball.settled' LIMIT 1")
-        .get() as { id: string; type: "event.ball.settled"; content: string; ts: number },
+      db.prepare("SELECT id, type, content, ts FROM messages WHERE type = 'event.ball.settled' LIMIT 1").get() as {
+        id: string
+        type: "event.ball.settled"
+        content: string
+        ts: number
+      },
     ) as BallSettlementFact
     expect(fact.settlement).toBe("gc-expired")
     expect(fact.settled_by).toBe("declared-roster")
@@ -129,14 +132,19 @@ describe("24588 row 4: dual expected:false balls do not accrue", () => {
     })
     const ctx = makeContext(db, stmts, "@dev/12")
     const listed = parseToolJson(
-      handleToolCall(ctx, "tribe.pending", { all: true }, {
-        cleanup: () => undefined,
-        userRenamed: false,
-        setUserRenamed: () => undefined,
-        getActiveSessionIds: () => new Set<string>(),
-        hasActiveTransport: () => false,
-        getActiveSessionInfo: () => [],
-      }),
+      handleToolCall(
+        ctx,
+        "tribe.pending",
+        { all: true },
+        {
+          cleanup: () => undefined,
+          userRenamed: false,
+          setUserRenamed: () => undefined,
+          getActiveSessionIds: () => new Set<string>(),
+          hasActiveTransport: () => false,
+          getActiveSessionInfo: () => [],
+        },
+      ),
     )
     expect(listed.count).toBe(1)
   })
@@ -144,7 +152,12 @@ describe("24588 row 4: dual expected:false balls do not accrue", () => {
   it("refuses an explicit tracked send between two unrun seats; auto-track request is untracked", () => {
     const ci = makeContext(db, stmts, "@ci")
     const explicit = parseToolJson(
-      handleToolCall(ci, "tribe.send", { to: "@dev/3", message: "work", type: "request", request: true }, optsWithRoster(UNRUN)),
+      handleToolCall(
+        ci,
+        "tribe.send",
+        { to: "@dev/3", message: "work", type: "request", request: true },
+        optsWithRoster(UNRUN),
+      ),
     )
     expect(String(explicit.error ?? "")).toContain("expected:false")
     const auto = parseToolJson(

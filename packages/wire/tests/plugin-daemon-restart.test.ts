@@ -6,7 +6,7 @@
  * plugins are disabled, and no production daemon is signalled.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -50,13 +50,15 @@ type MembershipDiscrepancy = {
   status?: "degraded"
   connected_durable_launches?: number
   known_durable_launches?: number
+  expected_count?: number
+  roster_loaded_at?: number
   missing_count?: number
   missing?: Array<{
     member_id?: string
     name?: string
     launch_id?: string
     launch_parent_pid?: number
-    state?: "missing-transport"
+    state?: "missing-transport" | "never-registered"
   }>
   meaning?: string
 }
@@ -1276,5 +1278,46 @@ process.exit(await child.exited)
         ])
       },
     })
+  }, 60_000)
+
+  // 24660: the roster was read once at boot, so a running daemon judged seats by
+  // a declaration four days older than the pin file hab had since rewritten.
+  it("declared roster: a running daemon judges membership by the pin file as it is now, not as it was at boot", async () => {
+    const dbPath = join(tmpDir, "tribe-roster-reload.db")
+    const daemonLog = join(tmpDir, "daemon-roster-reload.log")
+    const pinFile = join(tmpDir, "tribe-expected-members.json")
+    const pin = (rows: Array<{ name: string; expected: boolean }>, mtimeSec: number): number => {
+      writeFileSync(pinFile, JSON.stringify(rows))
+      utimesSync(pinFile, mtimeSec, mtimeSec)
+      return Math.trunc(statSync(pinFile).mtimeMs)
+    }
+    const bootPin = pin([{ name: "@agent/roster-boot", expected: true }], 1_789_000_000)
+    spawnTestDaemon(dbPath, daemonLog, { TRIBE_EXPECTED_MEMBERS_FILE: pinFile })
+    await waitFor(() => existsSync(socketPath), "roster-reload daemon socket")
+    const generation = await connectToGeneration(socketPath)
+    daemonPids.add(generation.pid)
+    const discrepancy = async () =>
+      parseToolJson(await generation.client.call("tribe.members", {})).membership_discrepancy
+
+    expect(await discrepancy()).toMatchObject({
+      roster_loaded_at: bootPin,
+      expected_count: 1,
+      missing: [{ name: "@agent/roster-boot", state: "never-registered" }],
+    })
+
+    const rewrittenPin = pin(
+      [
+        { name: "@agent/roster-boot", expected: false },
+        { name: "@agent/roster-rewritten", expected: true },
+      ],
+      1_789_000_600,
+    )
+    // The very next read follows the rewrite: no restart, no polling window.
+    expect(await discrepancy()).toMatchObject({
+      roster_loaded_at: rewrittenPin,
+      expected_count: 1,
+      missing: [{ name: "@agent/roster-rewritten", state: "never-registered" }],
+    })
+    generation.client.close()
   }, 60_000)
 })

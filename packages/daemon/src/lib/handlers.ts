@@ -264,11 +264,13 @@ export type HandlerOpts = {
   retiredNames?: ReadonlySet<string>
   /**
    * Optional: hab's declared roster (persona name -> "is this seat expected
-   * up" boolean), env `TRIBE_EXPECTED_MEMBERS`. Absent means "no declaration"
-   * — membership classification runs exactly as it did before this existed
+   * up" boolean), read as it stands at call time so a running daemon follows
+   * the pin file (24660). Read it once per operation. Absent, or returning
+   * undefined, means "no declaration" — membership classification runs exactly
+   * as it did before this existed
    * (@ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded).
    */
-  expectedMembers?: DeclaredRoster
+  getExpectedMembers?: () => DeclaredRoster | undefined
   /** Optional: dump daemon internals for `tribe.debug`. Daemon-only (tests using
    *  handlers directly can omit this — `tribe.debug` then returns a minimal
    *  snapshot synthesized from the other accessors). */
@@ -721,7 +723,9 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     ? recipients.some((recipient) => recipient !== sender)
     : recipients !== "*" && recipients !== sender
   const pairUnrun =
-    typeof recipients === "string" && recipients !== "*" && bothDeclaredUnrun(opts.expectedMembers, sender, recipients)
+    typeof recipients === "string" &&
+    recipients !== "*" &&
+    bothDeclaredUnrun(opts.getExpectedMembers?.(), sender, recipients)
   if (pairUnrun && (requestFlag || requestId !== null || incident !== undefined)) {
     return jsonResult({
       error:
@@ -1860,9 +1864,10 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
   // not accrue on the live view. The expired diagnostic stays a snapshot.
   // settled_by is declared-roster, not the caller — this is not a third-party
   // owner close (24563). Incident balls stay emitter-owned.
-  if (!expired && opts.expectedMembers !== undefined) {
+  const declaredRoster = expired ? undefined : opts.getExpectedMembers?.()
+  if (declaredRoster !== undefined) {
     ctx.db.transaction(() => {
-      settleDeclaredUnrunPairs(ctx, opts.expectedMembers, now)
+      settleDeclaredUnrunPairs(ctx, declaredRoster, now)
     })()
   }
 
@@ -2087,6 +2092,9 @@ type MembershipDiscrepancy = {
   connected_expected_count?: number
   /** Config identity of the hab JSON this roster was loaded from (file mtime), never parse time. */
   roster_loaded_at?: number
+  /** The pin file moved on but could not be re-read (24660): these verdicts come
+   *  from the roster stamped `roster_loaded_at`, not from the file as it is now. */
+  roster_stale?: { error: string; pin_mtime?: number }
   missing_count: number
   missing: MissingLaunch[]
   /** Count of disconnected durable rows classified `finished` alongside this
@@ -2491,7 +2499,9 @@ function projectMembershipDiscrepancy(
     )
     const departedSiblingCount = departed.filter((row) => row.why === "undeclared-sibling").length
     const departedForeignCount = departed.filter((row) => row.why === "undeclared-foreign").length
-    if (missing.length === 0) return { discrepancy: undefined, finished, dormant, departed }
+    // A roster that could not follow its pin file cannot vouch for an all-clear either.
+    if (missing.length === 0 && roster.stale === undefined)
+      {return { discrepancy: undefined, finished, dormant, departed }}
     return {
       discrepancy: {
         status: "degraded",
@@ -2500,6 +2510,14 @@ function projectMembershipDiscrepancy(
         expected_count: roster.expectedNames.size,
         connected_expected_count: connectedExpectedNames.size,
         ...(roster.loadedAt === undefined ? {} : { roster_loaded_at: roster.loadedAt }),
+        ...(roster.stale === undefined
+          ? {}
+          : {
+              roster_stale: {
+                error: roster.stale.error,
+                ...(roster.stale.pinMtime === undefined ? {} : { pin_mtime: roster.stale.pinMtime }),
+              },
+            }),
         missing_count: missing.length,
         missing,
         ...(finished.length > 0 ? { finished_count: finished.length } : {}),
@@ -2657,7 +2675,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
       ...(r.provider ? { provider: r.provider } : {}),
     }
   })
-  const roster = opts.expectedMembers
+  const roster = opts.getExpectedMembers?.()
   const disconnected = projectDisconnectedSessionRows(rows, activeIds)
   const diagnosticDisconnected = disconnected.diagnostic.filter((row) => !retiredNames.has(row.name))
   const membership = projectMembershipDiscrepancy(
@@ -3029,7 +3047,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     diagnosticDisconnected,
     retiredNames,
     (row) => readSessionLeftFact(ctx, row),
-    opts.expectedMembers,
+    opts.getExpectedMembers?.(),
   )
 
   const members = liveSessions.map((s) => {

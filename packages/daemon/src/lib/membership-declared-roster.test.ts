@@ -31,6 +31,7 @@ import { createStatements, openDatabase, type TribeStatements } from "./database
 import { handleToolCall, type HandlerOpts } from "./handlers.ts"
 import { logSessionLeft } from "./messaging.ts"
 import {
+  createDeclaredRosterReader,
   loadDeclaredRosterFromEnv,
   parseExpectedMembers,
   TRIBE_EXPECTED_MEMBERS_FILE_ENV,
@@ -139,7 +140,7 @@ describe("membership projection: declared-roster membership is a function of a p
       const leftAt = now
 
       const opCtx = makeContext(db, stmts, "operator", "@operator")
-      const opts = baseOpts({ expectedMembers: roster([{ name: "@agent/restart-always", expected: true }]) })
+      const opts = baseOpts({ getExpectedMembers: () => roster([{ name: "@agent/restart-always", expected: true }]) })
       const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
         membership_discrepancy?: Record<string, unknown>
         finished_launches?: unknown
@@ -191,7 +192,7 @@ describe("membership projection: declared-roster membership is a function of a p
       })
       const opCtx = makeContext(db, stmts, "operator", "@operator")
       const opts = baseOpts({
-        expectedMembers: roster([{ name: "@agent/restart-onfailure", expected: true }]),
+        getExpectedMembers: () => roster([{ name: "@agent/restart-onfailure", expected: true }]),
       })
       const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
         membership_discrepancy?: { status: string; missing: Array<Record<string, unknown>> }
@@ -245,7 +246,7 @@ describe("membership projection: declared-roster membership is a function of a p
 
       const opCtx = makeContext(db, stmts, "operator", "@operator")
       const opts = baseOpts({
-        expectedMembers: roster([{ name: "@agent/restart-live", expected: true }]),
+        getExpectedMembers: () => roster([{ name: "@agent/restart-live", expected: true }]),
         getActiveSessionIds: () => new Set(["exp-3"]),
         getActiveSessionInfo: () => [
           {
@@ -290,7 +291,7 @@ describe("membership projection: declared-roster membership is a function of a p
       })
       const leftAt = now
       const opCtx = makeContext(db, stmts, "operator", "@operator")
-      const opts = baseOpts({ expectedMembers: roster([{ name: "@adhoc/never-1", expected: false }]) })
+      const opts = baseOpts({ getExpectedMembers: () => roster([{ name: "@adhoc/never-1", expected: false }]) })
       const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
         membership_discrepancy?: unknown
         finished_launches?: Array<Record<string, unknown>>
@@ -325,10 +326,11 @@ describe("membership projection: declared-roster membership is a function of a p
     })
     const opCtx = makeContext(db, stmts, "operator", "@operator")
     const opts = baseOpts({
-      expectedMembers: roster([
-        { name: "@adhoc/never-quiet", expected: false },
-        { name: "@chief/next", expected: false },
-      ]),
+      getExpectedMembers: () =>
+        roster([
+          { name: "@adhoc/never-quiet", expected: false },
+          { name: "@chief/next", expected: false },
+        ]),
     })
     const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
       membership_discrepancy?: unknown
@@ -383,7 +385,7 @@ describe("membership projection: declared-roster membership is a function of a p
       const opCtx = makeContext(db, stmts, "operator", "@operator")
       // A real declaration that names nobody: @proof/wait-rc4 is absent from
       // it entirely, unlike the "never" (on-demand) rows in test 5.
-      const opts = baseOpts({ expectedMembers: roster([]) })
+      const opts = baseOpts({ getExpectedMembers: () => roster([]) })
       const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
         membership_discrepancy?: unknown
         finished_launches?: unknown
@@ -415,7 +417,7 @@ describe("membership projection: declared-roster membership is a function of a p
     addSession(db, stmts, "sib-2", "@dev/1", { id: "launch-sib-2", parentPid: 30108 })
     const opCtx = makeContext(db, stmts, "operator", "@operator")
     const opts = baseOpts({
-      expectedMembers: roster([{ name: "@dev/1", expected: true }]),
+      getExpectedMembers: () => roster([{ name: "@dev/1", expected: true }]),
       getActiveSessionIds: () => new Set(["sib-2"]),
       getActiveSessionInfo: () => [
         {
@@ -447,7 +449,7 @@ describe("membership projection: declared-roster membership is a function of a p
     addSession(db, stmts, "for-2", "@dev/1", { id: "launch-for-2", parentPid: 30109 })
     const opCtx = makeContext(db, stmts, "operator", "@operator")
     const opts = baseOpts({
-      expectedMembers: roster([{ name: "@dev/1", expected: true }]),
+      getExpectedMembers: () => roster([{ name: "@dev/1", expected: true }]),
       getActiveSessionIds: () => new Set(["for-2"]),
       getActiveSessionInfo: () => [
         {
@@ -477,7 +479,7 @@ describe("membership projection: declared-roster membership is a function of a p
   it("6c. undeclared foreign, no-slash name: the whole name is its own family", () => {
     addSession(db, stmts, "nosl-1", "session 1", { id: "launch-nosl-1", parentPid: 30010 })
     const opCtx = makeContext(db, stmts, "operator", "@operator")
-    const opts = baseOpts({ expectedMembers: roster([{ name: "@dev/1", expected: true }]) })
+    const opts = baseOpts({ getExpectedMembers: () => roster([{ name: "@dev/1", expected: true }]) })
     const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
       departed_launches?: Array<Record<string, unknown>>
     }
@@ -509,10 +511,11 @@ describe("membership projection: declared-roster membership is a function of a p
       void quiet
       const opCtx = makeContext(db, stmts, "operator", "@operator")
       const opts = baseOpts({
-        expectedMembers: roster([
-          { name: "@adhoc/7", expected: false },
-          { name: "@adhoc/8", expected: false },
-        ]),
+        getExpectedMembers: () =>
+          roster([
+            { name: "@adhoc/7", expected: false },
+            { name: "@adhoc/8", expected: false },
+          ]),
       })
       const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
         membership_discrepancy?: unknown
@@ -546,7 +549,7 @@ describe("membership projection: declared-roster membership is a function of a p
 
   it("7. expected name with no row at all: missing state never-registered", () => {
     const opCtx = makeContext(db, stmts, "operator", "@operator")
-    const opts = baseOpts({ expectedMembers: roster([{ name: "@dev/12", expected: true }]) })
+    const opts = baseOpts({ getExpectedMembers: () => roster([{ name: "@dev/12", expected: true }]) })
     const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
       membership_discrepancy?: Record<string, unknown>
     }
@@ -586,7 +589,7 @@ describe("membership projection: declared-roster membership is a function of a p
       addSession(db, stmts, "nodecl-vanished", "@agent/nodecl-10", { id: "launch-nodecl-10", parentPid: 40010 })
 
       const opCtx = makeContext(db, stmts, "operator", "@operator")
-      const opts = baseOpts() // no `expectedMembers` key at all — undefined, not an empty roster
+      const opts = baseOpts() // no `getExpectedMembers` key at all — undefined, not an empty roster
       const members = parseToolJson(handleToolCall(opCtx, "tribe.members", {}, opts)) as {
         membership_discrepancy?: Record<string, unknown>
         finished_launches?: Array<Record<string, unknown>>
@@ -656,7 +659,7 @@ describe("membership projection: declared-roster membership is a function of a p
     addSession(db, stmts, "exp-10", "@agent/restart-always", { id: "launch-exp-10", parentPid: 30100 })
     const opCtx = makeContext(db, stmts, "operator", "@operator")
     const opts = baseOpts({
-      expectedMembers: roster([{ name: "@agent/restart-always", expected: true }]),
+      getExpectedMembers: () => roster([{ name: "@agent/restart-always", expected: true }]),
       getActiveSessionIds: () => new Set(["probe-1", "exp-10"]),
       getActiveSessionInfo: () => [
         {
@@ -708,10 +711,119 @@ describe("membership projection: declared-roster membership is a function of a p
       1_700_000_000_000,
     )
     const members = parseToolJson(
-      handleToolCall(opCtx, "tribe.members", {}, baseOpts({ expectedMembers: stamped })),
+      handleToolCall(opCtx, "tribe.members", {}, baseOpts({ getExpectedMembers: () => stamped })),
     ) as { membership_discrepancy?: { roster_loaded_at?: number; expected_count?: number } }
     expect(members.membership_discrepancy?.expected_count).toBe(1)
     expect(members.membership_discrepancy?.roster_loaded_at).toBe(1_700_000_000_000)
+  })
+
+  it("12. a roster that could not follow its pin file says so even when nothing is missing (24660)", () => {
+    addSession(db, stmts, "exp-12", "@agent/restart-always", { id: "launch-exp-12", parentPid: 30112 })
+    const opCtx = makeContext(db, stmts, "operator", "@operator")
+    const declared = parseExpectedMembers(
+      JSON.stringify([{ name: "@agent/restart-always", expected: true }]),
+      1_700_000_000_000,
+    )!
+    const stale: DeclaredRoster = {
+      ...declared,
+      stale: { error: "tribe-expected-members.json: must be JSON", pinMtime: 1_700_000_600_000 },
+    }
+    const optsFor = (current: DeclaredRoster) =>
+      baseOpts({
+        getExpectedMembers: () => current,
+        getActiveSessionIds: () => new Set(["exp-12"]),
+        getActiveSessionInfo: () => [
+          {
+            id: "exp-12",
+            name: "@agent/restart-always",
+            pid: 30112,
+            cwd: "/repo",
+            role: "member",
+            claudeSessionId: null,
+            registeredAt: Date.now(),
+            launchId: "launch-exp-12",
+            launchParentPid: 30112,
+            transportPids: [30112],
+          },
+        ],
+      })
+
+    expect(
+      parseToolJson(handleToolCall(opCtx, "tribe.members", {}, optsFor(declared))).membership_discrepancy,
+    ).toBeUndefined()
+    for (const tool of ["tribe.members", "tribe.health"]) {
+      expect(parseToolJson(handleToolCall(opCtx, tool, {}, optsFor(stale))).membership_discrepancy).toMatchObject({
+        missing_count: 0,
+        roster_loaded_at: 1_700_000_000_000,
+        roster_stale: { error: "tribe-expected-members.json: must be JSON", pin_mtime: 1_700_000_600_000 },
+      })
+    }
+  })
+})
+
+describe("createDeclaredRosterReader follows the pin file after boot (24660)", () => {
+  let dir: string
+  let file: string
+  const pin = (content: Array<{ name: string; expected: boolean }> | string, mtimeSec: number): void => {
+    writeFileSync(file, typeof content === "string" ? content : JSON.stringify(content))
+    utimesSync(file, mtimeSec, mtimeSec)
+  }
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "roster-reader-"))
+    file = join(dir, "tribe-expected-members.json")
+  })
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it("keeps the boot roster while the file is unchanged, and re-reads it once its mtime moves", () => {
+    pin([{ name: "@dev/9", expected: false }], 1_700_000_000)
+    const read = createDeclaredRosterReader({ [TRIBE_EXPECTED_MEMBERS_FILE_ENV]: file })
+    const booted = read()
+    expect(booted?.loadedAt).toBe(1_700_000_000_000)
+    expect(read()).toBe(booted)
+
+    pin([{ name: "@dev/9", expected: true }], 1_700_000_600)
+    const reloaded = read()
+    expect(reloaded?.loadedAt).toBe(1_700_000_600_000)
+    expect(reloaded?.expectedNames.has("@dev/9")).toBe(true)
+    expect(reloaded?.stale).toBeUndefined()
+  })
+
+  it("a rewrite that does not parse keeps the last roster, marked stale, until a good rewrite replaces it", () => {
+    pin([{ name: "@dev/9", expected: true }], 1_700_000_000)
+    const read = createDeclaredRosterReader({ [TRIBE_EXPECTED_MEMBERS_FILE_ENV]: file })
+
+    pin("{not json", 1_700_000_600)
+    const stale = read()
+    expect(stale?.loadedAt).toBe(1_700_000_000_000)
+    expect(stale?.expectedNames.has("@dev/9")).toBe(true)
+    expect(stale?.stale).toEqual({ error: expect.stringContaining("must be JSON"), pinMtime: 1_700_000_600_000 })
+
+    pin([{ name: "@dev/9", expected: false }], 1_700_001_200)
+    const recovered = read()
+    expect(recovered?.loadedAt).toBe(1_700_001_200_000)
+    expect(recovered?.onDemandNames.has("@dev/9")).toBe(true)
+    expect(recovered?.stale).toBeUndefined()
+  })
+
+  it("a pin file that disappears leaves the last roster marked stale, with no pin mtime to name", () => {
+    pin([{ name: "@dev/9", expected: true }], 1_700_000_000)
+    const read = createDeclaredRosterReader({ [TRIBE_EXPECTED_MEMBERS_FILE_ENV]: file })
+    rmSync(file)
+    const stale = read()
+    expect(stale?.loadedAt).toBe(1_700_000_000_000)
+    expect(stale?.stale).toEqual({ error: expect.stringContaining("is unreadable") })
+  })
+
+  it("a roster from inherited env alone has no file to follow and never changes", () => {
+    const read = createDeclaredRosterReader({
+      TRIBE_EXPECTED_MEMBERS: JSON.stringify([{ name: "@ci", expected: false }]),
+    })
+    expect(read()).toBe(read())
+    expect(read()?.loadedAt).toBeUndefined()
   })
 })
 

@@ -113,9 +113,10 @@ export interface DispatcherRuntimeHooks {
   /** Exact identities explicitly retired by the composing layer. */
   retiredNames?: ReadonlySet<string>
   /** Hab's declared roster (persona name -> "is this seat expected up"
-   *  boolean), supplied by the composing layer from `TRIBE_EXPECTED_MEMBERS`.
-   *  Absent means no declaration — membership classification runs unchanged. */
-  expectedMembers?: DeclaredRoster
+   *  boolean) as it stands now, supplied by the composing layer so a running
+   *  daemon follows the pin file (24660). Absent means no declaration —
+   *  membership classification runs unchanged. */
+  getExpectedMembers?: () => DeclaredRoster | undefined
 }
 
 /**
@@ -771,7 +772,7 @@ export function withDispatcher<
       reapStaleTransports,
       resolveDelivery: hooks.resolveDelivery,
       retiredNames: hooks.retiredNames,
-      expectedMembers: hooks.expectedMembers,
+      getExpectedMembers: hooks.getExpectedMembers,
       // tribe.stop actuator — absent (handler refuses loudly) unless the
       // composing daemon supplied its shutdown.
       triggerStop: hooks.triggerShutdown,

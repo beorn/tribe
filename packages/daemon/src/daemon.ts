@@ -56,7 +56,7 @@ import { pruneOldActivityLogs } from "./lib/activity-log.ts"
 import { countDurableSessionRows } from "./lib/session.ts"
 import { gatherCodePin, STARTUP_SHA } from "./lib/code-pin.ts"
 import { parseDeliveryFallbackPolicy } from "./lib/delivery-resolution.ts"
-import { loadDeclaredRosterFromEnv } from "./lib/membership-declared-roster.ts"
+import { createDeclaredRosterReader } from "./lib/membership-declared-roster.ts"
 import { drainOutput } from "loggily"
 import { sanitizeDaemonProcessEnvironment } from "../../wire/src/daemon-environment.ts"
 
@@ -160,7 +160,7 @@ sanitizeDaemonProcessEnvironment(process.env)
 
 const log = createLogger("tribe:daemon")
 const deliveryFallbackPolicy = parseDeliveryFallbackPolicy(process.env.TRIBE_DELIVERY_FALLBACKS)
-const expectedMembers = loadDeclaredRosterFromEnv(process.env)
+const getExpectedMembers = createDeclaredRosterReader(process.env)
 
 // ---------------------------------------------------------------------------
 // Sync portion of the pipe — config, db, daemonCtx, recall, tools, registry,
@@ -267,7 +267,7 @@ const withDispatcherShape = withDispatcher<typeof withIdleQuitShape>({
   triggerShutdown: () => refs.shutdown(),
   resolveDelivery: deliveryFallbackPolicy?.resolveDelivery,
   retiredNames: deliveryFallbackPolicy?.retiredNames,
-  expectedMembers,
+  getExpectedMembers,
 })(withIdleQuitShape)
 // MCP-spec surface — reads the tool registry, registers initialize / tools/list
 // / tools/call on the dispatcher. tools/call routes through the dispatcher's

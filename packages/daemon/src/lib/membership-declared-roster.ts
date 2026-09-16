@@ -6,10 +6,11 @@
  * persona table expects the seat up — a fact only the composing layer
  * knows. `TRIBE_EXPECTED_MEMBERS` hands the daemon that declaration exactly
  * the way `TRIBE_DELIVERY_FALLBACKS` hands it a delivery-disposition table
- * (see delivery-resolution.ts): parsed once at daemon start, loud on
- * malformed input, silently absent when nobody supplies one (tests,
- * standalone daemons) — the membership projection then runs exactly as it
- * did before this module existed.
+ * (see delivery-resolution.ts): loud on malformed input at daemon start,
+ * silently absent when nobody supplies one (tests, standalone daemons) — the
+ * membership projection then runs exactly as it did before this module
+ * existed. Unlike that table, a roster pinned in hab's JSON is followed after
+ * start (`createDeclaredRosterReader`, 24660).
  *
  * The declaration is a plain per-name boolean, never a restart-policy
  * vocabulary: hab's own resolved restart default is not one exported value
@@ -47,6 +48,12 @@ export interface DeclaredRoster {
    * the config (24589 row 3 / 24591).
    */
   readonly loadedAt?: number
+  /**
+   * Present when the pin file moved on but could not be re-read (24660): every
+   * verdict still comes from the roster stamped `loadedAt`, which is older than
+   * the file on disk. `pinMtime` is absent when the file could not be stat'ed.
+   */
+  readonly stale?: { readonly error: string; readonly pinMtime?: number }
 }
 
 /**
@@ -113,11 +120,16 @@ export function parseExpectedMembers(raw: string | undefined, loadedAt?: number)
     if (expected) expectedNames.add(name)
     else onDemandNames.add(name)
   }
-  return loadedAt === undefined ? { byName, expectedNames, onDemandNames } : { byName, expectedNames, onDemandNames, loadedAt }
+  return loadedAt === undefined
+    ? { byName, expectedNames, onDemandNames }
+    : { byName, expectedNames, onDemandNames, loadedAt }
 }
 
 function rosterDisagreement(hab: DeclaredRoster, inherited: DeclaredRoster): string | undefined {
-  if (hab.expectedNames.size !== inherited.expectedNames.size || hab.onDemandNames.size !== inherited.onDemandNames.size) {
+  if (
+    hab.expectedNames.size !== inherited.expectedNames.size ||
+    hab.onDemandNames.size !== inherited.onDemandNames.size
+  ) {
     return (
       `TRIBE_EXPECTED_MEMBERS disagrees with hab JSON: expected_count hab=${hab.expectedNames.size} inherited=${inherited.expectedNames.size}; ` +
       `onDemand hab=${hab.onDemandNames.size} inherited=${inherited.onDemandNames.size}`
@@ -152,19 +164,7 @@ export function loadDeclaredRosterFromEnv(env: Readonly<NodeJS.ProcessEnv>): Dec
   const filePath = resolvedRosterFile(env)
   const envRaw = env.TRIBE_EXPECTED_MEMBERS
   if (filePath !== undefined) {
-    let raw: string
-    try {
-      raw = readFileSync(filePath, "utf8")
-    } catch (error) {
-      throw new Error(
-        `${TRIBE_EXPECTED_MEMBERS_FILE_ENV} ${filePath} is unreadable: ${error instanceof Error ? error.message : String(error)}`,
-      )
-    }
-    const loadedAt = Math.trunc(statSync(filePath).mtimeMs)
-    const fromFile = parseExpectedMembers(raw, loadedAt)
-    if (fromFile === undefined) {
-      throw new Error(`${TRIBE_EXPECTED_MEMBERS_FILE_ENV} ${filePath} is empty`)
-    }
+    const fromFile = readRosterFile(filePath)
     if (envRaw !== undefined && envRaw.trim() !== "") {
       const fromEnv = parseExpectedMembers(envRaw)
       if (fromEnv === undefined) {
@@ -179,17 +179,68 @@ export function loadDeclaredRosterFromEnv(env: Readonly<NodeJS.ProcessEnv>): Dec
 }
 
 /**
+ * The declared roster as it stands now, for a daemon that outlives hab's rewrites
+ * of the pin file (24660).
+ *
+ * The boot read is `loadDeclaredRosterFromEnv`, refusal included. After it, each
+ * call stats the pin file and re-reads it when its mtime has moved, so `loadedAt`
+ * follows the file instead of the day the daemon started. A re-read that fails
+ * keeps the last roster that parsed and marks it `stale` rather than presenting
+ * it as current. A roster from inherited env alone has no file to follow.
+ */
+export function createDeclaredRosterReader(env: Readonly<NodeJS.ProcessEnv>): () => DeclaredRoster | undefined {
+  const booted = loadDeclaredRosterFromEnv(env)
+  const filePath = resolvedRosterFile(env)
+  if (booted === undefined || filePath === undefined) return () => booted
+  let parsed: DeclaredRoster = booted
+  let current: DeclaredRoster = booted
+  let attemptedMtime: number | undefined = booted.loadedAt
+  return () => {
+    let mtime: number
+    try {
+      mtime = Math.trunc(statSync(filePath).mtimeMs)
+    } catch (error) {
+      attemptedMtime = undefined
+      current = { ...parsed, stale: { error: unreadable(filePath, error) } }
+      return current
+    }
+    if (mtime === attemptedMtime) return current
+    attemptedMtime = mtime
+    try {
+      parsed = readRosterFile(filePath)
+      current = parsed
+    } catch (error) {
+      current = { ...parsed, stale: { error: error instanceof Error ? error.message : String(error), pinMtime: mtime } }
+    }
+    return current
+  }
+}
+
+/** One read of hab's pin file, shared by the boot refusal and the running re-read. */
+function readRosterFile(filePath: string): DeclaredRoster {
+  let raw: string
+  try {
+    raw = readFileSync(filePath, "utf8")
+  } catch (error) {
+    throw new Error(unreadable(filePath, error))
+  }
+  const roster = parseExpectedMembers(raw, Math.trunc(statSync(filePath).mtimeMs))
+  if (roster === undefined) throw new Error(`${TRIBE_EXPECTED_MEMBERS_FILE_ENV} ${filePath} is empty`)
+  return roster
+}
+
+function unreadable(filePath: string, error: unknown): string {
+  return `${TRIBE_EXPECTED_MEMBERS_FILE_ENV} ${filePath} is unreadable: ${error instanceof Error ? error.message : String(error)}`
+}
+
+/**
  * 24588 row 4: a ball whose recipient AND sender are both declared
  * `expected: false` cannot be answered by anyone alive, so it must not
  * accrue. Names absent from the roster (machine emitters such as hab-page)
  * are not "unrun seats" — only an explicit false declaration counts.
  * No roster means the pre-declaration projection: never auto-retire.
  */
-export function bothDeclaredUnrun(
-  roster: DeclaredRoster | undefined,
-  sender: string,
-  recipient: string,
-): boolean {
+export function bothDeclaredUnrun(roster: DeclaredRoster | undefined, sender: string, recipient: string): boolean {
   if (roster === undefined) return false
   return roster.onDemandNames.has(sender) && roster.onDemandNames.has(recipient)
 }
