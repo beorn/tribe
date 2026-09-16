@@ -2349,6 +2349,10 @@ function createDispatcherHarness(
         return 0
       },
       forgetTransportSessions() {},
+      recordForeignIdentityTransport() {},
+      getForeignIdentityTransport() {
+        return undefined
+      },
       onTransportDisconnected() {},
       getActiveSessionInfo() {
         const members = new Map<

@@ -54,6 +54,7 @@ import {
   projectSessionLiveness,
   projectSessionTransportEvidence,
   projectSessionTransportState,
+  type ForeignIdentityTransport,
   type OwnerState,
   type SessionTransportEvidence,
 } from "./session-transport-state.ts"
@@ -260,6 +261,9 @@ export type HandlerOpts = {
   isReconnectGraceProtected?: (sessionId: string, nowMs: number) => boolean
   /** Realtime snapshot of connected sessions (daemon clients Map). */
   getActiveSessionInfo: () => ActiveSessionInfo[]
+  /** 24767: the latest transport refused for presenting this session's
+   * authority under another seat's identity, until a real transport connects. */
+  getForeignIdentityTransport?: (sessionId: string) => ForeignIdentityTransport | undefined
   /** Exact identities retired by explicit composing-layer policy. */
   retiredNames?: ReadonlySet<string>
   /**
@@ -2073,11 +2077,23 @@ type MissingTransportOrExited =
       left_at: string
     }
 
+/** A missing-transport row whose only transport attempt the daemon refused
+ *  for carrying another seat's identity (24767): the seat is not simply
+ *  unconnected, its connector was started as someone else. */
+type ForeignIdentityMissing = {
+  member_id: string
+  name: string
+  launch_id: string
+  launch_parent_pid: number
+  state: "foreign-identity-transport"
+  foreign_transport: ForeignIdentityTransport
+}
+
 /** Everything `MembershipDiscrepancy.missing` can carry. `never-registered`
  *  is a declared-expected name with no durable row at all (never launched,
  *  or its row was swept) — there is no registration to draw an identity
  *  from, so it carries only the declared name. */
-type MissingLaunch = MissingTransportOrExited | { name: string; state: "never-registered" }
+type MissingLaunch = MissingTransportOrExited | ForeignIdentityMissing | { name: string; state: "never-registered" }
 
 type MembershipDiscrepancy = {
   status: "degraded"
@@ -2450,6 +2466,7 @@ function projectMembershipDiscrepancy(
   retiredNames: ReadonlySet<string>,
   getSessionLeftFact: SessionLeftFactReader,
   roster: DeclaredRoster | undefined,
+  getForeignIdentityTransport?: (sessionId: string) => ForeignIdentityTransport | undefined,
 ): MembershipProjection {
   const missing: MissingLaunch[] = []
   const finished: FinishedLaunch[] = []
@@ -2462,7 +2479,15 @@ function projectMembershipDiscrepancy(
     if (classified.state === "finished") finished.push(classified)
     else if (classified.state === "dormant") dormant.push(classified)
     else if (classified.state === "departed") departed.push(classified)
-    else missing.push(classified)
+    else {
+      const foreignTransport =
+        classified.state === "missing-transport" ? getForeignIdentityTransport?.(row.id) : undefined
+      missing.push(
+        foreignTransport === undefined
+          ? classified
+          : { ...classified, state: "foreign-identity-transport", foreign_transport: foreignTransport },
+      )
+    }
   }
 
   // The durable-row counts mean the same thing with and without a declaration.
@@ -2578,6 +2603,7 @@ export function projectSessionRowTransport(
   row: { readonly id: string; readonly updated_at: number },
   activeIds: ReadonlySet<string>,
   activeInfo: readonly ActiveSessionInfo[],
+  foreignIdentityTransport?: ForeignIdentityTransport,
 ): {
   readonly active: ActiveSessionInfo | undefined
   readonly transportPids: number[]
@@ -2593,6 +2619,7 @@ export function projectSessionRowTransport(
     agentPid,
     lastSeenSec: Math.round((Date.now() - row.updated_at) / 1000),
     probe: (pid) => (pidStillAlive(pid) ? "live" : "dead"),
+    foreignIdentityTransport: foreignIdentityTransport !== undefined,
   })
   return { active, transportPids, agentPid, evidence }
 }
@@ -2658,7 +2685,13 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
 
   const sessions = visibleRows.map((r) => {
     const parent = r.claude_session_id ? parentMap.get(r.claude_session_id) : undefined
-    const { active, transportPids, agentPid, evidence } = projectSessionRowTransport(r, activeIds, activeInfo)
+    const foreignTransport = opts.getForeignIdentityTransport?.(r.id)
+    const { active, transportPids, agentPid, evidence } = projectSessionRowTransport(
+      r,
+      activeIds,
+      activeInfo,
+      foreignTransport,
+    )
     const protocolVersions = active?.protocolVersions ?? []
     return {
       member_id: r.id,
@@ -2698,6 +2731,9 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
       // G9 P0 row 7 — the file where this launch's plugin supervisor appends
       // one line per adapter exit; present only for a supervised adapter.
       ...(r.adapter_exit_record ? { adapter_exit_record: r.adapter_exit_record } : {}),
+      // 24767 — the transport the daemon refused for this seat: it presented
+      // this seat's authority under another seat's name and launch.
+      ...(foreignTransport ? { foreign_transport: foreignTransport } : {}),
     }
   })
   const roster = opts.getExpectedMembers?.()
@@ -2710,6 +2746,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     retiredNames,
     (row) => readSessionLeftFact(ctx, row),
     roster,
+    opts.getForeignIdentityTransport,
   )
   // Connected rows whose name the roster never mentions at all — probes,
   // subagents, anything not in hab's persona table. Fine to be connected,
@@ -3073,6 +3110,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     retiredNames,
     (row) => readSessionLeftFact(ctx, row),
     opts.getExpectedMembers?.(),
+    opts.getForeignIdentityTransport,
   )
 
   const members = liveSessions.map((s) => {

@@ -35,3 +35,9 @@ export function deriveTribePersonaLaunchIdentity(
     writer: `${normalizedPersona}#${launchId}`,
   }
 }
+
+/** The provider launch a stored launch id belongs to, whether or not it carries a persona. */
+export function providerLaunchIdOf(launchId: string): string {
+  const separator = launchId.indexOf("::")
+  return separator === -1 ? launchId : launchId.slice(0, separator)
+}

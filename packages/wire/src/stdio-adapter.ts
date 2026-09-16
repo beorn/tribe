@@ -442,6 +442,20 @@ function isManagedPersonaRegistrationConflict(err: unknown): boolean {
   return REGISTER_WITH_LAUNCH_NAME && isPersonaNameConflictError(err)
 }
 
+/**
+ * 24767 — the daemon refused this transport because it presents its seat's
+ * session authority under another seat's name and launch (a shared provider
+ * config baked the other identity into this connector's env). Retrying cannot
+ * change who this connector claims to be, so every tool call answers with the
+ * refusal at once instead of waiting on a registration that will not come.
+ */
+let foreignIdentityRefusal: string | null = null
+
+function isForeignIdentityRefusal(err: unknown): boolean {
+  const data = (err as { data?: unknown } | null)?.data
+  return typeof data === "object" && data !== null && (data as { kind?: unknown }).kind === "foreign-identity-transport"
+}
+
 function failManagedPersonaRegistration(err: unknown): never {
   const reason = errorMessage(err)
   log.warn?.(`tribe registration failed for explicit launch persona ${LAUNCH_NAME}: ${reason}`)
@@ -574,6 +588,11 @@ function startDaemonConnection(): Promise<DaemonClient> {
           managedRegistrationConflicts += 1
           setRequiredMcpTransportHealth("closed", errorMessage(err))
         }
+        if (isForeignIdentityRefusal(err)) {
+          foreignIdentityRefusal = errorMessage(err)
+          log.warn?.(foreignIdentityRefusal)
+          setRequiredMcpTransportHealth("closed", foreignIdentityRefusal)
+        }
         throw err
       }
       const nextDaemonPid = typeof reg.daemon?.pid === "number" ? reg.daemon.pid : null
@@ -588,6 +607,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
       registeredDaemonPid = nextDaemonPid
       hasRegistered = true
       protocolMismatchReason = null
+      foreignIdentityRefusal = null
       managedRegistrationConflicts = 0
       setRequiredMcpTransportHealth("live", "registered with tribe daemon")
       reconnectWatchdog.markConnected()
@@ -895,6 +915,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const a = (toolArgs ?? {}) as Record<string, unknown>
 
   try {
+    if (foreignIdentityRefusal !== null) {
+      return { content: [{ type: "text", text: foreignIdentityRefusal }], isError: true }
+    }
     // Degraded: an earlier connect failed. Before reporting either managed
     // transport health or solo mode, self-heal — the daemon may be up now.
     // Throttled inside recoverDaemonIfDegraded.

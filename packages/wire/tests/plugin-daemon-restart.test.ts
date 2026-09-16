@@ -45,7 +45,9 @@ type Member = {
   transport_pids?: number[]
   transport_state?: "connected" | "disconnected"
   owner_state?: "live" | "dead" | "unknown"
+  transport_reason?: string
   adapter_exit_record?: string
+  foreign_transport?: { name?: string; launch_id?: string; pid?: number }
 }
 type MembershipDiscrepancy = {
   status?: "degraded"
@@ -59,7 +61,8 @@ type MembershipDiscrepancy = {
     name?: string
     launch_id?: string
     launch_parent_pid?: number
-    state?: "missing-transport" | "never-registered"
+    state?: "missing-transport" | "never-registered" | "foreign-identity-transport"
+    foreign_transport?: { name?: string; launch_id?: string; pid?: number }
   }>
   meaning?: string
 }
@@ -926,6 +929,103 @@ process.exit(await child.exited)
     },
     30_000,
   )
+
+  // 24767. A grok seat's connector kept another seat's name and launch id from a
+  // shared provider config while inheriting its own seat's session authority. The
+  // daemon refused it as a bare name conflict, its tribe.join sat until the host's
+  // 120 s tool timeout, and tribe members read the seat as plain missing-transport.
+  it("refuses a connector that carries another seat's identity at once, and members names both (24767)", async () => {
+    const dbPath = join(tmpDir, "tribe-foreign-identity.db")
+    const seat = "@agent/foreign-seat"
+    const foreign = "@agent/foreign-other"
+    const sessionAuth = "foreign-identity-authority".padEnd(43, "0")
+    spawnTestDaemon(dbPath, join(tmpDir, "daemon-foreign-identity.log"), {
+      TRIBE_EXPECTED_MEMBERS: JSON.stringify([{ name: seat, expected: true }]),
+    })
+    await waitFor(() => existsSync(socketPath), "foreign-identity daemon socket")
+    const generation = await connectToGeneration(socketPath)
+    daemonPids.add(generation.pid)
+    const roster = async (): Promise<ToolJson> =>
+      parseToolJson(await generation.client.call("tribe.members", { all: true }))
+    const initialize = async (plugin: ChildProcessWithoutNullStreams, id: number): Promise<JsonObject[]> => {
+      const stdout = collectJsonLines(plugin)
+      writeJson(plugin, initializePayload(id))
+      await waitFor(() => stdout.some((line) => line.id === id), `plugin initialization ${id}`)
+      writeJson(plugin, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+      return stdout
+    }
+
+    const own = spawnTestPlugin({
+      dbPath,
+      logPath: join(tmpDir, "adapter-foreign-identity-own.log"),
+      name: seat,
+      launchId: "foreign-seat-launch",
+      sessionAuth,
+      providerParentPid: String(process.pid),
+      delivery: "pull",
+      requireJoin: true,
+    })
+    await initialize(own, 70)
+    await waitFor(
+      async () =>
+        (await roster()).sessions?.some((row) => row.name === seat && row.transport_state === "connected") === true,
+      "own connector membership",
+    )
+    await terminateTestProcess(own.pid!)
+    await waitFor(
+      async () =>
+        (await roster()).sessions?.some((row) => row.name === seat && row.transport_state === "disconnected") === true,
+      "own connector departure",
+    )
+
+    const leaked = spawnTestPlugin({
+      dbPath,
+      logPath: join(tmpDir, "adapter-foreign-identity-leaked.log"),
+      name: foreign,
+      launchId: "foreign-other-launch",
+      sessionAuth,
+      providerParentPid: String(process.pid),
+      delivery: "pull",
+      requireJoin: true,
+    })
+    const stdout = await initialize(leaked, 71)
+    const seatLaunchId = personaLaunchId("foreign-seat-launch", seat)
+    const foreignLaunchId = personaLaunchId("foreign-other-launch", foreign)
+
+    let reported: ToolJson = {}
+    await waitFor(async () => {
+      reported = await roster()
+      return (
+        reported.sessions?.find((row) => row.name === seat)?.transport_reason ===
+        "transport-carries-another-seats-identity"
+      )
+    }, "members names the foreign-identity transport")
+    expect(reported.sessions?.find((row) => row.name === seat)).toMatchObject({
+      launch_id: seatLaunchId,
+      transport_state: "disconnected",
+      foreign_transport: { name: foreign, launch_id: foreignLaunchId },
+    })
+    expect(reported.sessions?.some((row) => row.name === foreign)).toBe(false)
+    expect(reported.membership_discrepancy?.missing).toContainEqual(
+      expect.objectContaining({
+        name: seat,
+        state: "foreign-identity-transport",
+        foreign_transport: expect.objectContaining({ name: foreign, launch_id: foreignLaunchId }),
+      }),
+    )
+
+    const joinStartedAt = Date.now()
+    writeJson(leaked, callToolPayload(72, "join", { name: seat }))
+    await waitFor(() => stdout.some((line) => line.id === 72), "foreign-identity join answer", 5_000)
+    expect(Date.now() - joinStartedAt).toBeLessThan(5_000)
+    const answer = stdout.find((line) => line.id === 72)?.result as
+      | { isError?: boolean; content?: Array<{ text?: string }> }
+      | undefined
+    expect(answer?.isError).toBe(true)
+    const text = answer?.content?.[0]?.text ?? ""
+    for (const expected of [foreign, foreignLaunchId, seat, seatLaunchId]) expect(text).toContain(expected)
+    generation.client.close()
+  }, 45_000)
 
   it.each([
     ["a malformed parent PID", "not-a-pid", "invalid-provider-parent-launch"],
