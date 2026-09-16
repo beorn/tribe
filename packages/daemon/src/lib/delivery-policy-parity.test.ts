@@ -111,7 +111,10 @@ describe("push filter and pull predicate agree on every subscription case", () =
     for (const filter of FILTERS) {
       for (const row of ROWS.filter((r) => r.kind === "broadcast")) {
         index += 1
-        const push = shouldDeliver({ kind: row.kind, type: row.type, replyHint: "no", topic: row.topic }, filter)
+        const push = shouldDeliver(
+          { kind: row.kind, type: row.type, replyHint: "no", topic: row.topic, settlesOwnRequest: false },
+          filter,
+        )
         const pull = sqlAdmits(row, filter, index)
         if (push !== pull) {
           disagreements.push(
@@ -138,12 +141,12 @@ describe("push filter and pull predicate agree on every subscription case", () =
     const direct: Row = { kind: "direct", topic: null, type: "notify" }
     const focus: Filter = { filter_mode: "focus", filter_mute: null, filter_until: null }
 
-    expect(shouldDeliver({ ...direct, replyHint: "no" }, focus)).toBe(false)
+    expect(shouldDeliver({ ...direct, replyHint: "no", settlesOwnRequest: false }, focus)).toBe(false)
     expect(sqlAdmits(direct, focus, 2000)).toBe(true)
 
     // A muted-everything window must not swallow a direct either.
     const mutedAll: Filter = { filter_mode: "normal", filter_mute: "[]", filter_until: ACTIVE_UNTIL }
-    expect(shouldDeliver({ ...direct, replyHint: "no" }, mutedAll)).toBe(true)
+    expect(shouldDeliver({ ...direct, replyHint: "no", settlesOwnRequest: false }, mutedAll)).toBe(true)
     expect(sqlAdmits(direct, mutedAll, 2001)).toBe(true)
   })
 
@@ -154,7 +157,12 @@ describe("push filter and pull predicate agree on every subscription case", () =
     let index = 1000
     for (const row of ROWS) {
       index += 1
-      expect(shouldDeliver({ kind: row.kind, type: row.type, replyHint: "no", topic: row.topic }, undefined)).toBe(true)
+      expect(
+        shouldDeliver(
+          { kind: row.kind, type: row.type, replyHint: "no", topic: row.topic, settlesOwnRequest: false },
+          undefined,
+        ),
+      ).toBe(true)
       expect(sqlAdmits(row, openFilter, index)).toBe(true)
     }
   })

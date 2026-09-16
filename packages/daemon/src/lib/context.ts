@@ -3,7 +3,7 @@
  */
 
 import type { Database } from "bun:sqlite"
-import type { TribeStatements } from "./database.ts"
+import { CORRELATED_REPLY_TYPES_SET, type TribeStatements } from "./database.ts"
 import type { TribeRole } from "tribe-wire/lib/config"
 import type { Delivery, MessageKind } from "./messaging.ts"
 
@@ -47,6 +47,16 @@ export type MessageInsertedInfo = {
   /** Canonical tracked-request correlation, present only when this message
    *  closed a still-open reply target owned by `requester`. */
   correlatedReply: { requestId: string; requester: string } | null
+}
+
+/** True when this message settles a tracked request that `session` opened. The
+ *  one answer to "is this the reply I asked for?", shared by inbox.wait's opt-in
+ *  wake and focus-mode push. */
+export function settlesRequestOpenedBy(
+  info: Pick<MessageInsertedInfo, "type" | "correlatedReply">,
+  session: string,
+): boolean {
+  return CORRELATED_REPLY_TYPES_SET.has(info.type) && info.correlatedReply?.requester === session
 }
 
 export type TribeContext = {

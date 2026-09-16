@@ -1,9 +1,6 @@
-import type { MessageInsertedInfo } from "./context.ts"
+import { settlesRequestOpenedBy, type MessageInsertedInfo } from "./context.ts"
 import type { InboxWaitResult as WireInboxWaitResult } from "tribe-wire"
-import {
-  ACTIONABLE_TYPES_SET as ACTIONABLE_TYPES,
-  CORRELATED_REPLY_TYPES_SET as CORRELATED_REPLY_TYPES,
-} from "./database.ts"
+import { ACTIONABLE_TYPES_SET as ACTIONABLE_TYPES } from "./database.ts"
 
 export type InboxStatus = Pick<
   WireInboxWaitResult,
@@ -112,12 +109,7 @@ export function createInboxWaitManager(
         info.kind === "broadcast" && info.pendingOwners?.includes(waiter.session) === true
       if (!directForWaiter && !trackedBroadcastForWaiter) continue
       if (info.rowid <= waiter.baselineSeq) continue
-      if (
-        waiter.wakeOnCorrelatedReply &&
-        CORRELATED_REPLY_TYPES.has(info.type) &&
-        info.correlatedReply !== null &&
-        info.correlatedReply.requester === waiter.session
-      ) {
+      if (waiter.wakeOnCorrelatedReply && settlesRequestOpenedBy(info, waiter.session)) {
         settle(waiter, { timedOut: false, aborted: false })
         continue
       }

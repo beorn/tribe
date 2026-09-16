@@ -23,7 +23,7 @@
  */
 
 import { createLogger } from "loggily"
-import { type MessageInsertedInfo } from "../context.ts"
+import { settlesRequestOpenedBy, type MessageInsertedInfo } from "../context.ts"
 import { activityFromMessage, writeActivity } from "../activity-log.ts"
 import { createCoalescer, type PendingBroadcast } from "../broadcast-coalescer.ts"
 import { ACTIONABLE_TYPES_SET } from "../database.ts"
@@ -78,7 +78,7 @@ type SessionFilter = {
 }
 
 export function shouldDeliver(
-  info: { kind: MessageKind; type: string; replyHint: ReplyHint; topic: string | null },
+  info: { kind: MessageKind; type: string; replyHint: ReplyHint; topic: string | null; settlesOwnRequest: boolean },
   filter: SessionFilter | undefined,
 ): boolean {
   if (!filter) return true // No session row yet — default-allow
@@ -87,7 +87,9 @@ export function shouldDeliver(
   if (mode === "focus") {
     // Only the canonical actionable classes wake the seat. Plain direct
     // notify/response traffic is informational even though its legacy reply
-    // hint is "yes".
+    // hint is "yes". The one exception is the reply that settles a request this
+    // seat opened: that is its own answer arriving, not traffic, and without it
+    // an asker slept through the answer (G9 self-inbox P0).
     //
     // This used to say focus was "an opt-in push diet, not a durability filter:
     // every row stays fetchable". That is no longer true, and saying so was the
@@ -98,7 +100,7 @@ export function shouldDeliver(
     //
     // The two copies must agree — delivery-policy-parity.test.ts is what keeps
     // them honest.
-    return ACTIONABLE_TYPES_SET.has(info.type)
+    return ACTIONABLE_TYPES_SET.has(info.type) || info.settlesOwnRequest
   }
   if (info.kind === "direct") return true
   // mode === 'normal' — apply the time-bounded mute when active
@@ -106,13 +108,14 @@ export function shouldDeliver(
   if (!filter.filter_until || filter.filter_until <= now) return true
   const muted = filter.filter_mute ? safeJsonArray(filter.filter_mute) : null
   if (!muted || muted.length === 0) return false // mute covers all topics
-  if (!info.topic) return true
-  return !muted.some((g) => globMatch(g, info.topic!))
+  const topic = info.topic
+  if (!topic) return true
+  return !muted.some((g) => globMatch(g, topic))
 }
 
 function safeJsonArray(s: string): string[] | null {
   try {
-    const parsed = JSON.parse(s)
+    const parsed: unknown = JSON.parse(s)
     if (Array.isArray(parsed) && parsed.every((x) => typeof x === "string")) return parsed as string[]
     return null
   } catch {
@@ -285,8 +288,15 @@ export function withBroadcast<T extends BaseTribe & WithDatabase & WithDaemonCon
         // while notification-only topics remain durable pull history.
         if (!isWatch) {
           const sessionFilter = stmts.getSessionFilter.get({ $id: client.ctx.sessionId }) as SessionFilter | undefined
-          if (!shouldDeliver({ kind: info.kind, type: info.type, replyHint, topic: info.topic }, sessionFilter))
+          const settlesOwnRequest = settlesRequestOpenedBy(info, client.name)
+          if (
+            !shouldDeliver(
+              { kind: info.kind, type: info.type, replyHint, topic: info.topic, settlesOwnRequest },
+              sessionFilter,
+            )
+          ) {
             continue
+          }
         }
 
         // Direct messages bypass coalescing — they're time-sensitive.

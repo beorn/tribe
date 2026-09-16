@@ -8,6 +8,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest"
 import { createLogger, getLogLevel, setLogLevel, setSuppressConsole } from "loggily"
 import { defangModelInput } from "tribe-injection-envelope"
+import type { MessageInsertedInfo } from "../context.ts"
 import { withBroadcast } from "./with-broadcast.ts"
 import { withHotReload } from "./with-hot-reload.ts"
 
@@ -202,6 +203,63 @@ describe("22514 daemon health-log broadcast admission", () => {
       )
     } finally {
       harness.dispose()
+    }
+  })
+})
+
+describe("G9 self-inbox P0: a focus seat is woken by the reply that settles its own request", () => {
+  function focusSeatFanout() {
+    const writes: string[] = []
+    const deferred: Array<() => void> = []
+    const daemonCtx: { onMessageInserted?: (info: MessageInsertedInfo) => void } = {}
+    const seat = {
+      name: "@seat",
+      role: "member",
+      ctx: { sessionId: "seat" },
+      socket: { write: (m: string) => writes.push(m) },
+    }
+    withBroadcast()({
+      scope: { defer: (fn: () => void) => deferred.push(fn) },
+      stmts: {
+        getSessionDeliveryById: { get: () => ({ delivery: "push" }) },
+        getSessionFilter: { get: () => ({ filter_mode: "focus", filter_until: null, filter_mute: null }) },
+        updateLastDelivered: { run: () => {} },
+      },
+      daemonCtx,
+      registry: { clients: new Map([["conn-seat", seat]]) },
+    } as never)
+    const reply = (correlatedReply: MessageInsertedInfo["correlatedReply"]): MessageInsertedInfo => ({
+      id: "reply",
+      ts: 1,
+      rowid: 1,
+      type: "response",
+      kind: "direct",
+      sender: "@chief",
+      senderRole: "member",
+      recipient: "@seat",
+      content: "ruled",
+      bead_id: null,
+      delivery: "push",
+      topic: null,
+      roomId: null,
+      correlatedReply,
+    })
+    return { writes, reply, tap: daemonCtx.onMessageInserted!, dispose: () => deferred.reverse().forEach((fn) => fn()) }
+  }
+
+  test("wakes for its own settlement, and still not for a plain reply or one settling another seat's request", async () => {
+    const fanout = focusSeatFanout()
+    try {
+      fanout.tap(fanout.reply(null))
+      fanout.tap(fanout.reply({ requestId: "r-other", requester: "@other" }))
+      await Promise.resolve()
+      expect(fanout.writes).toEqual([])
+
+      fanout.tap(fanout.reply({ requestId: "r-own", requester: "@seat" }))
+      await vi.waitFor(() => expect(fanout.writes).toHaveLength(1))
+      expect(fanout.writes[0]).toContain('"wakeup"')
+    } finally {
+      fanout.dispose()
     }
   })
 })
