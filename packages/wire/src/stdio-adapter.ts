@@ -88,12 +88,17 @@ const CLAUDE_SESSION_NAME = resolveClaudeSessionName()
 // channel.
 const DELIVERY = process.env.TRIBE_DELIVERY === "pull" ? "pull" : "push"
 const CLAUDE_CHANNEL_ENABLED = DELIVERY === "push"
+const PULL_TRANSPORT = process.env.TRIBE_PULL_TRANSPORT ?? process.env.TRIBE_WAIT_TRANSPORT
 const DELIVERY_CAPABILITY = resolveDeliveryCapability({
   delivery: DELIVERY,
   channel: CLAUDE_CHANNEL_ENABLED,
-  pullTransport: process.env.TRIBE_PULL_TRANSPORT ?? process.env.TRIBE_WAIT_TRANSPORT,
+  pullTransport: PULL_TRANSPORT,
 })
-const TRIBE_TOOLS_LIST = toolListForDeliveryCapability(DELIVERY_CAPABILITY)
+// What a session that has not joined actually gets: the daemon holds it as pull
+// (see currentDeliveryCapability), so that is what its model is told.
+const UNJOINED_DELIVERY_CAPABILITY = CLAUDE_CHANNEL_ENABLED
+  ? resolveDeliveryCapability({ delivery: "pull", channel: false, pullTransport: PULL_TRANSPORT })
+  : DELIVERY_CAPABILITY
 
 // A launch controller may declare one existing daemon filter as session
 // configuration. The adapter forwards it on register so the session is never
@@ -123,6 +128,15 @@ if (LAUNCH_NAME !== undefined && !isTribeNameShape(LAUNCH_NAME)) {
 const REGISTER_WITH_LAUNCH_NAME =
   LAUNCH_NAME !== undefined && (!REQUIRE_EXPLICIT_JOIN || isExplicitTribePersonaName(LAUNCH_NAME))
 let joined = !REQUIRE_EXPLICIT_JOIN || process.env.TRIBE_PLUGIN_RESUME_JOINED === "1"
+/**
+ * The delivery this session has now. Registration declares it to the daemon and
+ * the model is told the same thing: a push session that has not called
+ * tribe.join is pull until it does (G9 P0 row 1, where the model was told
+ * "delivery=push ... do not poll" while every push was withheld).
+ */
+function currentDeliveryCapability(): TribeDeliveryCapability {
+  return joined ? DELIVERY_CAPABILITY : UNJOINED_DELIVERY_CAPABILITY
+}
 // 20703 — managed spawns set TRIBE_TAKEOVER=1 so an explicit-persona
 // respawn can supersede a stale live holder once. The capability is consumed
 // after the first successful registration; replaying it on reconnect lets two
@@ -399,7 +413,7 @@ function registerParamsForConnection(): typeof baseRegisterParams & {
   return {
     ...baseRegisterParams,
     ...protocolVersionAdvertisement(selectedProtocolVersion),
-    delivery: joined ? DELIVERY : "pull",
+    delivery: currentDeliveryCapability().delivery,
     ...(TAKEOVER && !hasRegistered ? { takeover: true as const } : {}),
   }
 }
@@ -698,8 +712,16 @@ armDegradeNotice(daemonReady)
 // MCP Server
 // ---------------------------------------------------------------------------
 
-const joinInstruction = `If you receive a stdio-adapter auto-identify message, just call tribe.join with a short name for your focus area. Omit the role parameter — the daemon registers every session as a plain "member"; it does NOT assign "chief" by connect order. "chief" is a bead-lease hat (claimed via /up / the bead lease system), not a daemon-assigned role. No need to call tribe.members or tribe.fetch afterward — just join silently and continue.`
-const deliveryInstruction = deliveryCapabilityInstruction(DELIVERY_CAPABILITY)
+const joinInstruction = `When you call tribe.join, omit the role parameter — the daemon registers every session as a plain "member"; it does NOT assign "chief" by connect order. "chief" is a bead-lease hat (claimed via /up / the bead lease system), not a daemon-assigned role. No need to call tribe.members or tribe.fetch afterward.`
+// Instructions are fixed at initialize. A push session that starts unjoined is
+// pull until tribe.join, so it is told pull and what the join switches it to;
+// tools/list follows the live state instead.
+const initialDeliveryCapability = currentDeliveryCapability()
+const pullUntilJoin = initialDeliveryCapability.delivery !== DELIVERY_CAPABILITY.delivery
+const channelEnvelopeIntro = `${pullUntilJoin ? "Once this session has called tribe.join, messages" : "Messages"} from other Claude Code sessions arrive as <channel source="tribe" from="..." type="..." bead="...">.`
+const deliveryInstruction = pullUntilJoin
+  ? `${deliveryCapabilityInstruction(initialDeliveryCapability)} Nothing arrives as a channel notification until this session calls tribe.join, which switches it to ${DELIVERY_CAPABILITY.summary}.`
+  : deliveryCapabilityInstruction(DELIVERY_CAPABILITY)
 const attentionProjectionInstruction =
   "- Default fetch exposes `attention.actionable_unread` (request/query/verdict/assign plus direct responses) and up to 10 `attention.pending_balls`, prioritizing peer requests over watcher incidents, ahead of ambient events; `attention.pending_balls_summary` reports the full total/oldest age and any omitted request/incident counts, while `tribe.pending` returns the full pile. Responses remain quiet for default inbox waits. These are facts projected from the existing mailbox and ball tracker, not another queue."
 
@@ -735,9 +757,9 @@ ${attentionProjectionInstruction}
 - Ignore routine ambient joins/leaves, git commits, low-severity status, and notification-only events unless explicitly asked.`
 }
 
-const turnStartInboxCheck = turnStartInboxCheckForDelivery(DELIVERY_CAPABILITY)
+const turnStartInboxCheck = turnStartInboxCheckForDelivery(initialDeliveryCapability)
 
-const chiefInstructions = `Messages from other Claude Code sessions arrive as <channel source="tribe" from="..." type="..." bead="...">.
+const chiefInstructions = `${channelEnvelopeIntro}
 
 You are the chief of a tribe — a coordinator for multiple Claude Code sessions working on the same project.
 
@@ -762,7 +784,7 @@ Tribe messages:
 - Keep SHORT — 1-3 lines max. No essays.
 - Plain text only — no markdown (**bold**, headers, bullets). Renders as escaped text.`
 
-const memberInstructions = `Messages from other Claude Code sessions arrive as <channel source="tribe" from="..." type="..." bead="...">.
+const memberInstructions = `${channelEnvelopeIntro}
 
 You are a tribe member — a worker session coordinated by the chief.
 
@@ -853,24 +875,13 @@ mcp = new Server(
 // Tools — forward all to daemon
 // ---------------------------------------------------------------------------
 
-let nudgeSent = false
-/** Check if session name is auto-generated (not explicitly set by user/agent) */
-function isAutoName(name: string): boolean {
-  return name.startsWith("member-") || name.startsWith("pending-") || /^[a-z]+-\d+-[a-z0-9]{3}$/.test(name)
-}
-mcp.setRequestHandler(ListToolsRequestSchema, async () => {
-  // Nudge on tools discovery (fires on session init/resume)
-  if (!nudgeSent && isAutoName(myName)) {
-    nudgeSent = true
-    timers.setTimeout(() => {
-      sendChannel(
-        `Auto-identify: call tribe.join(name="${myName}") with a short name for your focus area. Omit the role parameter — the daemon auto-assigns it. Do not call tribe.members or tribe.fetch — just join silently and continue.`,
-        { from: "stdio-adapter", type: "system" },
-      )
-    }, 500)
-  }
-  return { tools: TRIBE_TOOLS_LIST }
-})
+// Projected per call: inbox.wait describes the delivery this session has now,
+// which changes at tribe.join. (An auto-identify join nudge used to fire here;
+// it went through sendChannel, which drops everything before join, so no
+// session could ever receive it.)
+mcp.setRequestHandler(ListToolsRequestSchema, () => ({
+  tools: toolListForDeliveryCapability(currentDeliveryCapability()),
+}))
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const { name, arguments: toolArgs } = req.params

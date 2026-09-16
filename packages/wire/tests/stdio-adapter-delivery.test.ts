@@ -308,6 +308,19 @@ function toolsListPayload(id: number): Record<string, unknown> {
   return { jsonrpc: "2.0", id, method: "tools/list", params: {} }
 }
 
+function initInstructions(init: Record<string, unknown>): string {
+  return (init.result as { instructions?: string } | undefined)?.instructions ?? ""
+}
+
+/** The delivery capability a tools/list response advertises on inbox.wait. */
+function inboxWaitCapability(list: Record<string, unknown>): { delivery?: string } | undefined {
+  const tools = (list.result as { tools?: Array<{ name?: string; _meta?: Record<string, unknown> }> } | undefined)
+    ?.tools
+  return tools?.find((tool) => tool.name === "inbox.wait")?._meta?.["tribe.deliveryCapability"] as
+    | { delivery?: string }
+    | undefined
+}
+
 describe("stdio adapter delivery modes", () => {
   let tmpDir: string
   let daemon: FakeDaemon | undefined
@@ -975,7 +988,7 @@ describe("stdio adapter delivery modes", () => {
     expect(daemon.requests.filter((msg) => msg.method === "tribe.inbox.wait")).toHaveLength(1)
   })
 
-  it("push delivery registers explicit persona as pull and suppresses channel notifications until tribe.join", async () => {
+  it("push delivery registers explicit persona as pull, says so, and suppresses channel notifications until tribe.join", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath)
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
@@ -983,6 +996,8 @@ describe("stdio adapter delivery modes", () => {
       env: {
         ...process.env,
         TRIBE_DELIVERY: "push",
+        TRIBE_REQUIRE_JOIN: "1",
+        TRIBE_PLUGIN_RESUME_JOINED: "0",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
       },
@@ -992,17 +1007,27 @@ describe("stdio adapter delivery modes", () => {
 
     writeJson(child, initializePayload(1))
     const init = await waitForLine(child, (line) => line.id === 1)
+    // The channel stays declared so pushes can reach the model once it joins.
     expect(JSON.stringify(init)).toContain("claude/channel")
-    expect(JSON.stringify(init)).toContain("New messages also arrive inline as <channel> envelopes")
+    // G9 P0 row 1: until tribe.join the daemon holds this session as pull, so the
+    // model must be told pull. It was told "delivery=push ... do not poll", and
+    // to wait for an auto-identify message the join gate never let through.
+    const instructions = initInstructions(init)
+    expect(instructions).toContain("delivery=pull")
+    expect(instructions).toContain("This session is pull-delivery")
+    expect(instructions).toContain("until this session calls tribe.join")
+    expect(instructions).not.toContain("you do not need to fetch to receive them")
+    expect(instructions).not.toContain("auto-identify")
 
     writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
-    await writeJsonAndWaitForLine(child, toolsListPayload(2), (line) => line.id === 2)
+    const listBeforeJoin = await writeJsonAndWaitForLine(child, toolsListPayload(2), (line) => line.id === 2)
 
     const register = daemon.requests.find((msg) => msg.method === "register") as
       | { params?: { name?: string; delivery?: string } }
       | undefined
     expect(register?.params?.name).toBe("@agent/test")
     expect(register?.params?.delivery).toBe("pull")
+    expect(inboxWaitCapability(listBeforeJoin)?.delivery).toBe(register?.params?.delivery)
 
     daemon.clients[0]?.write(makeNotification("channel", { from: "chief", type: "request", content: "before" }))
     await new Promise((resolveTick) => setTimeout(resolveTick, 250))
@@ -1013,10 +1038,45 @@ describe("stdio adapter delivery modes", () => {
       | { params?: { delivery?: string } }
       | undefined
     expect(joinRequest?.params?.delivery).toBe("push")
+    const listAfterJoin = await writeJsonAndWaitForLine(child, toolsListPayload(4), (line) => line.id === 4)
+    expect(inboxWaitCapability(listAfterJoin)?.delivery).toBe(joinRequest?.params?.delivery)
 
     daemon.clients[0]?.write(makeNotification("channel", { from: "chief", type: "request", content: "after" }))
     const channel = await waitForLine(child, (line) => line.method === "notifications/claude/channel")
     expect(JSON.stringify(channel)).toContain("after")
+  })
+
+  it("a push persona bound at registration is told push from its first instruction", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath)
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_REQUIRE_JOIN: "0",
+        TRIBE_PLUGIN_RESUME_JOINED: "0",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+
+    const init = await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    const instructions = initInstructions(init)
+    expect(instructions).toContain("delivery=push; idleStrategy=channel")
+    expect(instructions).toContain("you do not need to fetch to receive them")
+    expect(instructions).not.toContain("This session is pull-delivery")
+    expect(instructions).not.toContain("until this session calls tribe.join")
+
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    const list = await writeJsonAndWaitForLine(child, toolsListPayload(2), (line) => line.id === 2)
+    await waitForCondition(() => daemon!.requests.some((msg) => msg.method === "register"), "register")
+    const register = daemon.requests.find((msg) => msg.method === "register") as
+      | { params?: { delivery?: string } }
+      | undefined
+    expect(register?.params?.delivery).toBe("push")
+    expect(inboxWaitCapability(list)?.delivery).toBe(register?.params?.delivery)
   })
 
   it("bounds a connect-time channel-push burst to the cap (km 19442 push-path backstop)", async () => {
