@@ -23,7 +23,24 @@ export type SessionTransportProjection = {
   transport_registered: boolean
   transport_state: TransportState
   owner_state: OwnerState
-  transport_reason: "registered-transport" | "registered-transport-pids-dead" | "owner-unknown-no-transport"
+  transport_reason:
+    | "registered-transport"
+    | "registered-transport-pids-dead"
+    | "owner-unknown-no-transport"
+    | "transport-carries-another-seats-identity"
+}
+
+/**
+ * A transport the daemon refused at register because it presented this
+ * session's mailbox authority under another provider launch (24767): a
+ * connector started with another seat's name and launch id. The registry keeps
+ * the latest one per session until a real transport connects.
+ */
+export type ForeignIdentityTransport = {
+  readonly name: string
+  readonly launch_id: string
+  readonly pid: number
+  readonly refused_at: string
 }
 
 export type SessionAnswerCapability = "observed" | "not-observed"
@@ -80,6 +97,8 @@ export function probeProcessState(pid: number): OwnerState {
 export function projectSessionTransportState(input: {
   transportConnected: boolean
   transportPidsAlive?: boolean
+  /** A transport for this session was refused as carrying another seat's identity. */
+  foreignIdentityTransport?: boolean
 }): SessionTransportProjection {
   if (input.transportConnected) {
     if (input.transportPidsAlive === false) {
@@ -102,7 +121,10 @@ export function projectSessionTransportState(input: {
     transport_registered: false,
     transport_state: "disconnected",
     owner_state: "unknown",
-    transport_reason: "owner-unknown-no-transport",
+    transport_reason:
+      input.foreignIdentityTransport === true
+        ? "transport-carries-another-seats-identity"
+        : "owner-unknown-no-transport",
   }
 }
 
@@ -176,6 +198,7 @@ export function projectSessionTransportEvidence(input: {
   lastSeenSec?: number | null
   maxSilenceSec?: number
   probe?: (pid: number) => OwnerState
+  foreignIdentityTransport?: boolean
   consumers: readonly MailboxConsumer[]
   /** The owner's mailbox authority is registered (`mailbox_read_capability` available). */
   mailboxReadable: boolean
@@ -189,6 +212,7 @@ export function projectSessionTransportEvidence(input: {
   const transport = projectSessionTransportState({
     transportConnected: input.transportConnected,
     transportPidsAlive: input.transportConnected ? transportPidsAlive : undefined,
+    foreignIdentityTransport: input.foreignIdentityTransport,
   })
   const agentPidAlive = input.agentPid === null || probe(input.agentPid) !== "dead"
   const liveness = input.transportConnected

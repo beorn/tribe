@@ -21,6 +21,7 @@
 import type { Socket as NetSocket } from "node:net"
 import type { RecallConnState } from "../recall-handlers.ts"
 import type { TribeContext } from "../context.ts"
+import type { ForeignIdentityTransport } from "../session-transport-state.ts"
 import type { TribeRole } from "tribe-wire/lib/config"
 import type { BaseTribe } from "./base.ts"
 
@@ -117,6 +118,10 @@ export interface ClientRegistry {
   startupReconnectGraceRemainingMs(nowMs: number): number
   /** Forget transient grace entries once their durable rows are reaped. */
   forgetTransportSessions(sessionIds: readonly string[]): void
+  /** Remember the latest transport refused for carrying another seat's
+   * identity with this session's authority, until a real transport connects. */
+  recordForeignIdentityTransport(sessionId: string, transport: ForeignIdentityTransport): void
+  getForeignIdentityTransport(sessionId: string): ForeignIdentityTransport | undefined
 }
 
 export interface WithClientRegistry {
@@ -128,6 +133,7 @@ export function withClientRegistry<T extends BaseTribe>(): (t: T) => T & WithCli
     const clients = new Map<string, ClientSession>()
     const socketToClient = new Map<NetSocket, string>()
     const disconnectedAtBySession = new Map<string, number>()
+    const foreignIdentityTransportBySession = new Map<string, ForeignIdentityTransport>()
     const transportDisconnectListeners: Array<(sessionId: string, nowMs: number) => void> = []
 
     const registry: ClientRegistry = {
@@ -197,6 +203,7 @@ export function withClientRegistry<T extends BaseTribe>(): (t: T) => T & WithCli
       },
       markTransportConnected(sessionId): void {
         disconnectedAtBySession.delete(sessionId)
+        foreignIdentityTransportBySession.delete(sessionId)
       },
       markTransportDisconnected(sessionId, nowMs = Date.now()): void {
         disconnectedAtBySession.set(sessionId, nowMs)
@@ -213,7 +220,16 @@ export function withClientRegistry<T extends BaseTribe>(): (t: T) => T & WithCli
         return Math.max(0, t.startedAt + DEFAULT_RECONNECT_GRACE_MS - nowMs)
       },
       forgetTransportSessions(sessionIds): void {
-        for (const sessionId of sessionIds) disconnectedAtBySession.delete(sessionId)
+        for (const sessionId of sessionIds) {
+          disconnectedAtBySession.delete(sessionId)
+          foreignIdentityTransportBySession.delete(sessionId)
+        }
+      },
+      recordForeignIdentityTransport(sessionId, transport): void {
+        foreignIdentityTransportBySession.set(sessionId, transport)
+      },
+      getForeignIdentityTransport(sessionId): ForeignIdentityTransport | undefined {
+        return foreignIdentityTransportBySession.get(sessionId)
       },
     }
 
@@ -223,6 +239,7 @@ export function withClientRegistry<T extends BaseTribe>(): (t: T) => T & WithCli
       clients.clear()
       socketToClient.clear()
       disconnectedAtBySession.clear()
+      foreignIdentityTransportBySession.clear()
     })
 
     return { ...t, registry }

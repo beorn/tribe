@@ -145,6 +145,12 @@ const TAKEOVER = REGISTER_WITH_LAUNCH_NAME && process.env.TRIBE_TAKEOVER === "1"
 const LAUNCH_ID_RAW = readTribeLaunchId(process.env) ?? ""
 const PLUGIN_ADAPTER_CHILD = process.env.TRIBE_PLUGIN_ADAPTER_CHILD === "1"
 const PLUGIN_PROVIDER_PARENT_PID_RAW = process.env.TRIBE_PLUGIN_PROVIDER_PARENT_PID?.trim() ?? ""
+// G9 P0 row 7 — the launch's adapter-exit record, named by the supervisor that
+// appends to it (plugins/claude/supervisor-exit-record.ts). Registering it lets
+// tribe members name the file on this seat's row after this adapter is gone.
+const ADAPTER_EXIT_RECORD = PLUGIN_ADAPTER_CHILD
+  ? process.env.TRIBE_PLUGIN_ADAPTER_EXIT_RECORD?.trim() || undefined
+  : undefined
 
 function reportSupervisedIdentity(name: string): void {
   if (!PLUGIN_ADAPTER_CHILD || !isTribeNameShape(name)) return
@@ -351,6 +357,7 @@ const baseRegisterParams = {
   identityToken,
   ...(selfMailboxAuthority === null ? {} : { mailboxAuthorityHash: hashSelfMailboxAuthority(selfMailboxAuthority) }),
   ...(LAUNCH_IDENTITY ? { launchId: LAUNCH_IDENTITY.id, launchParentPid: LAUNCH_IDENTITY.parentPid } : {}),
+  ...(ADAPTER_EXIT_RECORD === undefined ? {} : { adapterExitRecord: ADAPTER_EXIT_RECORD }),
   ...(INITIAL_FILTER_MODE === undefined ? {} : { filterMode: INITIAL_FILTER_MODE }),
   // @km/infra/15641 Phase 1 — per-session account/provider label sourced
   // from `ag` via TRIBE_ACCOUNT / TRIBE_PROVIDER env vars (which ag sets
@@ -433,6 +440,20 @@ function isPersonaNameConflictError(err: unknown): boolean {
 
 function isManagedPersonaRegistrationConflict(err: unknown): boolean {
   return REGISTER_WITH_LAUNCH_NAME && isPersonaNameConflictError(err)
+}
+
+/**
+ * 24767 — the daemon refused this transport because it presents its seat's
+ * session authority under another seat's name and launch (a shared provider
+ * config baked the other identity into this connector's env). Retrying cannot
+ * change who this connector claims to be, so every tool call answers with the
+ * refusal at once instead of waiting on a registration that will not come.
+ */
+let foreignIdentityRefusal: string | null = null
+
+function isForeignIdentityRefusal(err: unknown): boolean {
+  const data = (err as { data?: unknown } | null)?.data
+  return typeof data === "object" && data !== null && (data as { kind?: unknown }).kind === "foreign-identity-transport"
 }
 
 function failManagedPersonaRegistration(err: unknown): never {
@@ -567,6 +588,11 @@ function startDaemonConnection(): Promise<DaemonClient> {
           managedRegistrationConflicts += 1
           setRequiredMcpTransportHealth("closed", errorMessage(err))
         }
+        if (isForeignIdentityRefusal(err)) {
+          foreignIdentityRefusal = errorMessage(err)
+          log.warn?.(foreignIdentityRefusal)
+          setRequiredMcpTransportHealth("closed", foreignIdentityRefusal)
+        }
         throw err
       }
       const nextDaemonPid = typeof reg.daemon?.pid === "number" ? reg.daemon.pid : null
@@ -581,6 +607,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
       registeredDaemonPid = nextDaemonPid
       hasRegistered = true
       protocolMismatchReason = null
+      foreignIdentityRefusal = null
       managedRegistrationConflicts = 0
       setRequiredMcpTransportHealth("live", "registered with tribe daemon")
       reconnectWatchdog.markConnected()
@@ -723,7 +750,7 @@ const deliveryInstruction = pullUntilJoin
   ? `${deliveryCapabilityInstruction(initialDeliveryCapability)} Nothing arrives as a channel notification until this session calls tribe.join, which switches it to ${DELIVERY_CAPABILITY.summary}.`
   : deliveryCapabilityInstruction(DELIVERY_CAPABILITY)
 const attentionProjectionInstruction =
-  "- Default fetch exposes `attention.actionable_unread` (request/query/verdict/assign plus direct responses) and up to 10 `attention.pending_balls`, prioritizing peer requests over watcher incidents, ahead of ambient events; `attention.pending_balls_summary` reports the full total/oldest age and any omitted request/incident counts, while `tribe.pending` returns the full pile. Responses remain quiet for default inbox waits. These are facts projected from the existing mailbox and ball tracker, not another queue."
+  "- Default fetch exposes `attention.actionable_unread` (request/query/verdict/assign, direct responses, and direct status/notify from another named seat other than a ball owner's TAKING receipt) and up to 10 `attention.pending_balls`, prioritizing peer requests over watcher incidents, ahead of ambient events; `attention.pending_balls_summary` reports the full total/oldest age and any omitted request/incident counts, while `tribe.pending` returns the full pile. Responses and those status/notify rows remain quiet for default inbox waits. These are facts projected from the existing mailbox and ball tracker, not another queue."
 
 // Shared turn-start inbox guidance for every role variant. Kept deliberately
 // SMALL: the turn-start call is a small catch-up drain, NOT a full replay. The
@@ -888,6 +915,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const a = (toolArgs ?? {}) as Record<string, unknown>
 
   try {
+    if (foreignIdentityRefusal !== null) {
+      return { content: [{ type: "text", text: foreignIdentityRefusal }], isError: true }
+    }
     // Degraded: an earlier connect failed. Before reporting either managed
     // transport health or solo mode, self-heal — the daemon may be up now.
     // Throttled inside recoverDaemonIfDegraded.

@@ -459,6 +459,10 @@ function createDispatcherHarness(dir: string) {
         return 0
       },
       forgetTransportSessions() {},
+      recordForeignIdentityTransport() {},
+      getForeignIdentityTransport() {
+        return undefined
+      },
       onTransportDisconnected() {},
       getActiveSessionInfo() {
         return Array.from(clients.values()).map((c) => ({

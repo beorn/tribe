@@ -13,6 +13,7 @@ import {
   type BallSettlementReason,
   type IncidentIdentity,
 } from "tribe-wire"
+import { isExplicitTribePersonaName } from "tribe-wire/lib/persona-name"
 
 export type { BallSettlementReason } from "tribe-wire"
 
@@ -536,6 +537,7 @@ export function sendMessage(
       $correlated_reply_requester: correlatedReply?.requester ?? null,
       $summary: classification.summary ?? null,
       $attention_required: classification.attentionRequired === true ? 1 : 0,
+      $between_personas: isExplicitTribePersonaName(sender) && isExplicitTribePersonaName(recipient) ? 1 : 0,
     })
     if (result.changes === 0) {
       const existing = ctx.stmts.selectMessageById.get({ $id: id }) as { rowid: number; ts: number } | undefined
@@ -709,6 +711,7 @@ export function logEvent(
     $correlated_reply_requester: null,
     $summary: options.summary ?? null,
     $attention_required: 0,
+    $between_personas: 0,
   })
   return id
 }

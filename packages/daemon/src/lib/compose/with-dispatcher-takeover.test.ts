@@ -677,6 +677,10 @@ function createDispatcherHarness() {
         return 0
       },
       forgetTransportSessions() {},
+      recordForeignIdentityTransport() {},
+      getForeignIdentityTransport() {
+        return undefined
+      },
       onTransportDisconnected() {},
       getActiveSessionInfo() {
         return Array.from(clients.values())

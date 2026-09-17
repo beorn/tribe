@@ -31,9 +31,10 @@
 
 import { randomUUID, timingSafeEqual } from "node:crypto"
 import { type Socket as NetSocket } from "node:net"
+import { isAbsolute } from "node:path"
 import { createLogger } from "loggily"
 import { DEFAULT_INBOX_WAIT_SESSION, resolveInboxWaitOptions } from "tribe-wire"
-import { deriveTribePersonaLaunchIdentity } from "tribe-wire/lib/persona-launch-identity"
+import { deriveTribePersonaLaunchIdentity, providerLaunchIdOf } from "tribe-wire/lib/persona-launch-identity"
 import { AG_SESSION_AUTH_ENV, hashSelfMailboxAuthority } from "tribe-wire/lib/self-mailbox-authority"
 import {
   createLineParser,
@@ -786,6 +787,7 @@ export function withDispatcher<
       getActiveSessionIds: () => registry.getActiveSessionIds(),
       hasActiveTransport: (sessionId: string) => registry.hasActiveTransport(sessionId),
       getActiveSessionInfo: () => registry.getActiveSessionInfo(),
+      getForeignIdentityTransport: (sessionId: string) => registry.getForeignIdentityTransport(sessionId),
       getLifecycleStore: () => lifecycleStore,
       inboxWait,
       notifyWakeupForReplay,
@@ -1092,6 +1094,11 @@ export function withDispatcher<
             if (p.mailboxAuthorityHash !== undefined && mailboxAuthorityHash === null) {
               return makeError(id, -32602, "register mailboxAuthorityHash must be a lowercase SHA-256 hex digest")
             }
+            const adapterExitRecord =
+              typeof p.adapterExitRecord === "string" && isAbsolute(p.adapterExitRecord) ? p.adapterExitRecord : null
+            if (p.adapterExitRecord !== undefined && adapterExitRecord === null) {
+              return makeError(id, -32602, "register adapterExitRecord must be an absolute file path")
+            }
             if (p.principalClass !== undefined && p.principalClass !== "agent" && p.principalClass !== "service") {
               return makeError(id, -32602, "register principalClass must be agent or service")
             }
@@ -1117,6 +1124,40 @@ export function withDispatcher<
             }
             // Only complete absence selects legacy per-transport semantics.
             const launchIdentity = launchIdentityValid ? { id: launchIdRaw, parentPid: launchParentPidRaw } : null
+
+            // 24767 — a session authority is minted per provider launch. A
+            // transport presenting one under a different provider launch was
+            // started with another seat's identity (a shared provider config
+            // baked it), so it can never become that seat. Refuse it naming both
+            // identities; the unique authority index used to surface this as a
+            // bare "name taken" and the adapter retried forever.
+            if (mailboxAuthorityHash !== null && launchIdentity !== null) {
+              const authorityHolder = db
+                .prepare("SELECT id, name, launch_id FROM sessions WHERE mailbox_authority_hash = ?")
+                .get(mailboxAuthorityHash) as { id: string; name: string; launch_id: string | null } | null
+              if (
+                authorityHolder?.launch_id != null &&
+                providerLaunchIdOf(authorityHolder.launch_id) !== providerLaunchIdOf(launchIdentity.id)
+              ) {
+                const claimedName = typeof p.name === "string" ? p.name : "(no name)"
+                registry.recordForeignIdentityTransport(authorityHolder.id, {
+                  name: claimedName,
+                  launch_id: launchIdentity.id,
+                  pid: Number(p.pid ?? 0),
+                  refused_at: new Date().toISOString(),
+                })
+                const message =
+                  `register refused: this transport claims ${claimedName} on launch ${launchIdentity.id}, ` +
+                  `but its session authority belongs to ${authorityHolder.name} on launch ${authorityHolder.launch_id}. ` +
+                  "It was started with another seat's identity; restart this MCP connector from its own seat's launch environment."
+                log.warn?.(message)
+                return makeError(id, -32003, message, {
+                  kind: "foreign-identity-transport",
+                  transport: { name: claimedName, launch_id: launchIdentity.id },
+                  authority: { name: authorityHolder.name, launch_id: authorityHolder.launch_id },
+                })
+              }
+            }
 
             const isServiceOwner =
               p.principalClass === "service" && launchIdentity !== null && Number(p.pid) === launchIdentity.parentPid
@@ -1433,6 +1474,15 @@ export function withDispatcher<
               mailboxAuthorityHash,
             )
             db.prepare("UPDATE sessions SET principal_class = ? WHERE id = ?").run(principalClass, clientCtx.sessionId)
+            // G9 P0 row 7 — the launch's adapter-exit record, named by the plugin
+            // supervisor that appends to it. Omission keeps a reconnecting
+            // session's stored path, as it does for account and provider.
+            if (adapterExitRecord !== null) {
+              db.prepare("UPDATE sessions SET adapter_exit_record = ? WHERE id = ?").run(
+                adapterExitRecord,
+                clientCtx.sessionId,
+              )
+            }
             // Apply launch-declared admission before applyClient makes this
             // session visible to the broadcast fanout. Omission preserves a
             // reconnecting session's stored preference; an explicit mode is
@@ -1770,6 +1820,7 @@ export function withDispatcher<
                     registry.getActiveSessionIds(),
                     registry.getActiveSessionInfo(),
                     { stmts, hasLiveWaiter: inboxWait.hasLiveWaiter },
+                    registry.getForeignIdentityTransport(target.sessionRow.id),
                   ).evidence
             // Round-trip the daemon-authoritative launch tuple so a managed
             // one-shot CLI can register its send connection under the SAME

@@ -39,7 +39,8 @@ export function openDatabase(path: string): Database {
 		filter_mute TEXT,
 		delivery     TEXT NOT NULL DEFAULT 'push',
 		account    TEXT,
-		provider   TEXT
+		provider   TEXT,
+		adapter_exit_record TEXT
 	)`)
 
   // Migrations table — tracks schema version so we can evolve the DB without
@@ -1213,6 +1214,19 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 31,
+    name: "session-adapter-exit-record",
+    up(db) {
+      // G9 P0 row 7 — where the plugin supervisor appends this launch's
+      // adapter exits, registered by its adapter so tribe members can name
+      // the file after the adapter is gone.
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>).map((row) => row.name),
+      )
+      if (!columns.has("adapter_exit_record")) db.run("ALTER TABLE sessions ADD COLUMN adapter_exit_record TEXT")
+    },
+  },
 ]
 
 /** The schema terminus `openDatabase` upgrades to — derived from the same
@@ -1477,6 +1491,15 @@ export function createStatements(db: Database) {
 			provider = COALESCE($provider, provider)
 	`),
 
+    /**
+     * `$between_personas` is 1 when sender and recipient are both explicit
+     * personas (tribe-wire/lib/persona-name). A direct status or notify between
+     * them is attention: a report one seat sends another otherwise reaches no
+     * instrument (P0 row 3, ruling C 2026-09-16). The exception is the ball
+     * owner's TAKING receipt on a request the recipient still has open — the
+     * same receipt `takingStatusMatchSql` reads — because pending shows it.
+     * Watchers and anonymous senders carry no sigil and stay ambient.
+     */
     insertMessage: db.prepare(`
 		INSERT OR IGNORE INTO messages (id, type, sender, recipient, kind, content, bead_id, ref, ts,
 			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id, attention_required)
@@ -1485,6 +1508,13 @@ export function createStatements(db: Database) {
 			CASE
 				WHEN $attention_required = 1 THEN 1
 				WHEN $kind = 'direct' AND $sender != $recipient AND $type = 'response' THEN 1
+				WHEN $kind = 'direct' AND $sender != $recipient AND $type IN ('status', 'notify') AND $between_personas = 1
+					AND NOT ($type = 'status' AND $ref IS NOT NULL AND EXISTS (
+						SELECT 1 FROM pending_request
+						WHERE (request_id = $ref OR message_id = $ref)
+							AND recipient = $sender
+							AND sender = $recipient
+					)) THEN 1
 				ELSE 0
 			END)
 	`),

@@ -6,7 +6,7 @@
  * plugins are disabled, and no production daemon is signalled.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -45,6 +45,9 @@ type Member = {
   transport_pids?: number[]
   transport_state?: "connected" | "disconnected"
   owner_state?: "live" | "dead" | "unknown"
+  transport_reason?: string
+  adapter_exit_record?: string
+  foreign_transport?: { name?: string; launch_id?: string; pid?: number }
 }
 type MembershipDiscrepancy = {
   status?: "degraded"
@@ -58,7 +61,8 @@ type MembershipDiscrepancy = {
     name?: string
     launch_id?: string
     launch_parent_pid?: number
-    state?: "missing-transport" | "never-registered"
+    state?: "missing-transport" | "never-registered" | "foreign-identity-transport"
+    foreign_transport?: { name?: string; launch_id?: string; pid?: number }
   }>
   meaning?: string
 }
@@ -218,6 +222,7 @@ describe("Claude plugin daemon-restart self-heal", () => {
     sessionAuth?: string
     providerParentPid?: string
     providerShim?: boolean
+    launchStateDir?: string
     delivery: "push" | "pull"
     requireJoin: boolean
   }): ChildProcessWithoutNullStreams {
@@ -246,6 +251,7 @@ process.exit(await child.exited)
         TRIBE_LAUNCH_ID: opts.launchId,
         ...(opts.claudeSessionId === undefined ? {} : { CLAUDE_SESSION_ID: opts.claudeSessionId }),
         ...(opts.sessionAuth === undefined ? {} : { AG_SESSION_AUTH: opts.sessionAuth }),
+        ...(opts.launchStateDir === undefined ? {} : { AG_HOST_SESSION_STATE_DIR: opts.launchStateDir }),
         TRIBE_PLUGIN_ADAPTER_CHILD: "",
         ...(opts.providerParentPid === undefined
           ? { TRIBE_PLUGIN_PROVIDER_PARENT_PID: "" }
@@ -777,6 +783,247 @@ process.exit(await child.exited)
       transport_state: "connected",
       transport_pids: [transportPid],
     })
+    generation.client.close()
+  }, 45_000)
+
+  // G9 P0 row 7 slice 2. A dead adapter used to leave only a supervisor stderr
+  // line in the host's MCP log, which nobody can find by the time a seat reads
+  // disconnected. The supervisor appends one line per adapter exit under the
+  // launch's own state directory, and tribe members names that file on the
+  // seat's row, connected or not.
+  it("records each adapter exit under the launch's state directory, and members names that file", async () => {
+    const dbPath = join(tmpDir, "tribe-exit-record.db")
+    const launchStateDir = join(tmpDir, "launch-state")
+    mkdirSync(launchStateDir)
+    const recordPath = join(launchStateDir, "tribe-adapter-exits.jsonl")
+    const readRecord = (): JsonObject[] =>
+      existsSync(recordPath)
+        ? readFileSync(recordPath, "utf8")
+            .split("\n")
+            .filter((line) => line.length > 0)
+            .map((line) => JSON.parse(line) as JsonObject)
+        : []
+    spawnTestDaemon(dbPath, join(tmpDir, "daemon-exit-record.log"))
+    await waitFor(() => existsSync(socketPath), "exit-record daemon socket")
+    const generation = await connectToGeneration(socketPath)
+    daemonPids.add(generation.pid)
+
+    const plugin = spawnTestPlugin({
+      dbPath,
+      logPath: join(tmpDir, "adapter-exit-record.log"),
+      name: PERSONA,
+      launchId: "exit-record-launch",
+      providerParentPid: String(process.pid),
+      launchStateDir,
+      delivery: "push",
+      requireJoin: true,
+    })
+    const stdout = collectJsonLines(plugin)
+    writeJson(plugin, initializePayload(30))
+    await waitFor(() => stdout.some((line) => line.id === 30), "exit-record plugin initialization")
+    writeJson(plugin, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+
+    const connectedMember = async (label: string, replacedPid?: number): Promise<Member> => {
+      let found: Member | undefined
+      await waitFor(async () => {
+        const roster = parseToolJson(await generation.client.call("tribe.members", { all: true }))
+        const candidate = roster.sessions?.find(
+          (session) => session.name === PERSONA && session.transport_state === "connected",
+        )
+        if (candidate?.transport_pids?.length === 1 && candidate.transport_pids[0] !== replacedPid) found = candidate
+        return found !== undefined
+      }, label)
+      for (const pid of found?.transport_pids ?? []) adapterPids.add(pid)
+      return found!
+    }
+
+    const first = await connectedMember("exit-record initial membership")
+    expect(first.adapter_exit_record).toBe(recordPath)
+    expect(readRecord()).toEqual([])
+
+    const crashedPid = first.transport_pids![0]!
+    process.kill(crashedPid, "SIGKILL")
+    await waitFor(() => readRecord().length === 1, "adapter crash recorded")
+    const crash = readRecord()[0]
+    expect(crash).toMatchObject({
+      adapter_pid: crashedPid,
+      code: null,
+      signal: "SIGKILL",
+      decision: "retry",
+      attempt: 1,
+    })
+    expect(typeof crash?.retry_delay_ms).toBe("number")
+    expect(Date.now() - Date.parse(String(crash?.at))).toBeLessThan(60_000)
+
+    const restarted = await connectedMember("exit-record supervised recovery", crashedPid)
+    expect(restarted.adapter_exit_record).toBe(recordPath)
+
+    process.kill(plugin.pid!, "SIGTERM")
+    await waitFor(() => readRecord().length === 2, "host stop recorded")
+    expect(readRecord()[1]).toMatchObject({ adapter_pid: restarted.transport_pids![0], decision: "host-stop" })
+
+    let departed: Member | undefined
+    await waitFor(async () => {
+      const roster = parseToolJson(await generation.client.call("tribe.members", { all: true }))
+      departed = roster.sessions?.find(
+        (session) => session.name === PERSONA && session.transport_state === "disconnected",
+      )
+      return departed !== undefined
+    }, "exit-record departed membership")
+    expect(departed?.adapter_exit_record).toBe(recordPath)
+    generation.client.close()
+  }, 30_000)
+
+  it.each([
+    ["a launch state directory that does not exist", "missing-launch-state"],
+    ["no launch state directory", undefined],
+  ])(
+    "says so in the supervisor's own log when an adapter exit cannot be recorded: %s",
+    async (_label, stateDirName) => {
+      const dbPath = join(tmpDir, "tribe-exit-record-unwritable.db")
+      const launchStateDir = stateDirName === undefined ? undefined : join(tmpDir, stateDirName)
+      spawnTestDaemon(dbPath, join(tmpDir, "daemon-exit-record-unwritable.log"))
+      await waitFor(() => existsSync(socketPath), "unwritable exit-record daemon socket")
+      const generation = await connectToGeneration(socketPath)
+      daemonPids.add(generation.pid)
+
+      const plugin = spawnTestPlugin({
+        dbPath,
+        logPath: join(tmpDir, "adapter-exit-record-unwritable.log"),
+        name: PERSONA,
+        launchId: "unwritable-exit-record-launch",
+        providerParentPid: String(process.pid),
+        launchStateDir,
+        delivery: "push",
+        requireJoin: true,
+      })
+      let pluginStderr = ""
+      plugin.stderr.on("data", (chunk: Buffer | string) => {
+        pluginStderr += chunk.toString()
+      })
+      const stdout = collectJsonLines(plugin)
+      writeJson(plugin, initializePayload(40))
+      await waitFor(() => stdout.some((line) => line.id === 40), "unwritable exit-record plugin initialization")
+      writeJson(plugin, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+
+      let member: Member | undefined
+      await waitFor(async () => {
+        const roster = parseToolJson(await generation.client.call("tribe.members", { all: true }))
+        member = roster.sessions?.find((session) => session.name === PERSONA && session.transport_state === "connected")
+        return member?.transport_pids?.length === 1
+      }, "unwritable exit-record membership")
+      const crashedPid = member!.transport_pids![0]!
+      adapterPids.add(crashedPid)
+      const expected =
+        launchStateDir === undefined
+          ? "could not record adapter exit (AG_HOST_SESSION_STATE_DIR is unset"
+          : `could not record adapter exit (${join(launchStateDir, "tribe-adapter-exits.jsonl")}`
+      if (launchStateDir === undefined) expect(member).not.toHaveProperty("adapter_exit_record")
+      else expect(member?.adapter_exit_record).toBe(join(launchStateDir, "tribe-adapter-exits.jsonl"))
+
+      process.kill(crashedPid, "SIGKILL")
+      await waitFor(() => pluginStderr.includes(expected), "unrecorded adapter exit in the supervisor log")
+      expect(pluginStderr).toContain(`adapter pid ${crashedPid}, exit=null signal=SIGKILL, decision=retry`)
+      expect(plugin.exitCode).toBeNull()
+      generation.client.close()
+    },
+    30_000,
+  )
+
+  // 24767. A grok seat's connector kept another seat's name and launch id from a
+  // shared provider config while inheriting its own seat's session authority. The
+  // daemon refused it as a bare name conflict, its tribe.join sat until the host's
+  // 120 s tool timeout, and tribe members read the seat as plain missing-transport.
+  it("refuses a connector that carries another seat's identity at once, and members names both (24767)", async () => {
+    const dbPath = join(tmpDir, "tribe-foreign-identity.db")
+    const seat = "@agent/foreign-seat"
+    const foreign = "@agent/foreign-other"
+    const sessionAuth = "foreign-identity-authority".padEnd(43, "0")
+    spawnTestDaemon(dbPath, join(tmpDir, "daemon-foreign-identity.log"), {
+      TRIBE_EXPECTED_MEMBERS: JSON.stringify([{ name: seat, expected: true }]),
+    })
+    await waitFor(() => existsSync(socketPath), "foreign-identity daemon socket")
+    const generation = await connectToGeneration(socketPath)
+    daemonPids.add(generation.pid)
+    const roster = async (): Promise<ToolJson> =>
+      parseToolJson(await generation.client.call("tribe.members", { all: true }))
+    const initialize = async (plugin: ChildProcessWithoutNullStreams, id: number): Promise<JsonObject[]> => {
+      const stdout = collectJsonLines(plugin)
+      writeJson(plugin, initializePayload(id))
+      await waitFor(() => stdout.some((line) => line.id === id), `plugin initialization ${id}`)
+      writeJson(plugin, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+      return stdout
+    }
+
+    const own = spawnTestPlugin({
+      dbPath,
+      logPath: join(tmpDir, "adapter-foreign-identity-own.log"),
+      name: seat,
+      launchId: "foreign-seat-launch",
+      sessionAuth,
+      providerParentPid: String(process.pid),
+      delivery: "pull",
+      requireJoin: true,
+    })
+    await initialize(own, 70)
+    await waitFor(
+      async () =>
+        (await roster()).sessions?.some((row) => row.name === seat && row.transport_state === "connected") === true,
+      "own connector membership",
+    )
+    await terminateTestProcess(own.pid!)
+    await waitFor(
+      async () =>
+        (await roster()).sessions?.some((row) => row.name === seat && row.transport_state === "disconnected") === true,
+      "own connector departure",
+    )
+
+    const leaked = spawnTestPlugin({
+      dbPath,
+      logPath: join(tmpDir, "adapter-foreign-identity-leaked.log"),
+      name: foreign,
+      launchId: "foreign-other-launch",
+      sessionAuth,
+      providerParentPid: String(process.pid),
+      delivery: "pull",
+      requireJoin: true,
+    })
+    const stdout = await initialize(leaked, 71)
+    const seatLaunchId = personaLaunchId("foreign-seat-launch", seat)
+    const foreignLaunchId = personaLaunchId("foreign-other-launch", foreign)
+
+    let reported: ToolJson = {}
+    await waitFor(async () => {
+      reported = await roster()
+      return (
+        reported.sessions?.find((row) => row.name === seat)?.transport_reason ===
+        "transport-carries-another-seats-identity"
+      )
+    }, "members names the foreign-identity transport")
+    expect(reported.sessions?.find((row) => row.name === seat)).toMatchObject({
+      launch_id: seatLaunchId,
+      transport_state: "disconnected",
+      foreign_transport: { name: foreign, launch_id: foreignLaunchId },
+    })
+    expect(reported.sessions?.some((row) => row.name === foreign)).toBe(false)
+    expect(reported.membership_discrepancy?.missing).toContainEqual(
+      expect.objectContaining({
+        name: seat,
+        state: "foreign-identity-transport",
+        foreign_transport: expect.objectContaining({ name: foreign, launch_id: foreignLaunchId }),
+      }),
+    )
+
+    const joinStartedAt = Date.now()
+    writeJson(leaked, callToolPayload(72, "join", { name: seat }))
+    await waitFor(() => stdout.some((line) => line.id === 72), "foreign-identity join answer", 5_000)
+    expect(Date.now() - joinStartedAt).toBeLessThan(5_000)
+    const answer = stdout.find((line) => line.id === 72)?.result as
+      | { isError?: boolean; content?: Array<{ text?: string }> }
+      | undefined
+    expect(answer?.isError).toBe(true)
+    const text = answer?.content?.[0]?.text ?? ""
+    for (const expected of [foreign, foreignLaunchId, seat, seatLaunchId]) expect(text).toContain(expected)
     generation.client.close()
   }, 45_000)
 

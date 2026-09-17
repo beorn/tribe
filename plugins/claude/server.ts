@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url"
 import { isTribeNameShape } from "tribe-wire/lib/persona-name"
 import { evaluateAdapterRestart } from "./supervisor-policy.ts"
 import { buildPluginAdapterEnvironment, PLUGIN_REEXEC_EXIT_CODE } from "./supervisor-environment.ts"
+import { recordAdapterExit, resolveAdapterExitRecord } from "./supervisor-exit-record.ts"
 
 const PLUGIN_CHILD = "TRIBE_PLUGIN_ADAPTER_CHILD"
 const PLUGIN_PROVIDER_PARENT_PID = "TRIBE_PLUGIN_PROVIDER_PARENT_PID"
@@ -110,6 +111,7 @@ async function superviseAdapter(): Promise<void> {
   let consecutiveReexecs = 0
   let resumeJoined = false
   let reportedJoined = false
+  const exitRecord = resolveAdapterExitRecord(process.env)
   const launchName = process.env.TRIBE_NAME?.trim()
   let resumeName = launchName && isTribeNameShape(launchName) ? launchName : undefined
   const forward = (signal: NodeJS.Signals) => {
@@ -129,6 +131,7 @@ async function superviseAdapter(): Promise<void> {
         process.env,
         providerParentPid,
         canResumeJoined && resumeName !== undefined ? { name: resumeName } : undefined,
+        exitRecord.path,
       ),
     })
     active.on("message", (message) => {
@@ -138,10 +141,16 @@ async function superviseAdapter(): Promise<void> {
         reportedJoined = identity.joined
       }
     })
+    const adapterPid = active.pid
     const result = await waitForExit(active)
     active = null
-    if (stopping) return
+    const exit = { adapterPid, code: result.code, signal: result.signal, error: result.error }
+    if (stopping) {
+      recordAdapterExit(exitRecord, { ...exit, decision: "host-stop" })
+      return
+    }
     if (!result.error && result.code === 0) {
+      recordAdapterExit(exitRecord, { ...exit, decision: "clean-exit" })
       process.exitCode = 0
       return
     }
@@ -172,6 +181,12 @@ async function superviseAdapter(): Promise<void> {
       Math.random(),
     )
     consecutiveReexecs = decision.consecutiveReexecs
+    recordAdapterExit(exitRecord, {
+      ...exit,
+      decision: decision.retry ? "retry" : "stop",
+      attempt: decision.consecutiveReexecs,
+      ...(decision.retry ? { retryDelayMs: decision.retryDelayMs } : {}),
+    })
     if (!decision.retry) {
       const cause = result.error?.message ?? `exit=${String(result.code)} signal=${String(result.signal)}`
       process.stderr.write(`${REMEDY} (${cause})\n`)

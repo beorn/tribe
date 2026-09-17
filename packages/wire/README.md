@@ -98,6 +98,15 @@ currently exists: the OS may have recycled it. Health keeps addressable
 complete-launch rows with no transport loud, while connection-scoped no-launch
 rows are reaped only after reconnect grace.
 
+A supervised plugin adapter's exits outlive the host's MCP log. The plugin
+supervisor appends one JSON line per adapter exit (`at`, `adapter_pid`, `code`,
+`signal`, `decision` of `retry` / `stop` / `host-stop` / `clean-exit`, plus
+`attempt` and `retry_delay_ms` for a restart) to `tribe-adapter-exits.jsonl` in
+the launch's state directory, `AG_HOST_SESSION_STATE_DIR`. `members --all` names
+that file as `adapter_exit_record` on the seat's row, connected or not. A line
+that cannot be written, including for a launch with no state directory, is
+reported on the supervisor's own stderr.
+
 Service principals declare `principalClass: "service"` when registering through
 `connectTribeLaunch`. They are attributed senders with their own bare names,
 such as `telegram` and `state-project-watch`; they are never claimable seats,
