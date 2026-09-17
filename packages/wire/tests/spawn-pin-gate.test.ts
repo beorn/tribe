@@ -16,10 +16,13 @@ import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterAll, beforeAll, describe, expect, test } from "vitest"
 import {
+  evaluateHabLaunchedClient,
+  evaluateSocketOwner,
   evaluateSpawnSource,
   evaluateSpawnSourceForScript,
   pinSidecarPath,
   readPinSidecar,
+  socketOwnerForBinder,
   writePinSidecar,
 } from "../src/lib/spawn-pin-gate.ts"
 
@@ -123,6 +126,71 @@ describe("pin sidecar round-trip", () => {
     writePinSidecar(sock, "d".repeat(40), 1)
     writePinSidecar(sock, null, 2)
     expect(readPinSidecar(sock)?.pin).toBe("d".repeat(40))
+  })
+
+  test("the sidecar records which kind of binder owned the socket (24906)", () => {
+    const sock = join(dir, "tribe3.sock")
+    writePinSidecar(sock, "e".repeat(40), 7, "hab:wire")
+    expect(readPinSidecar(sock)?.owner).toBe("hab:wire")
+    writeFileSync(pinSidecarPath(sock), JSON.stringify({ pin: "e".repeat(40), pid: 7, atMs: 1 }))
+    expect(readPinSidecar(sock)?.owner, "a sidecar written before 24906 has no owner").toBeNull()
+  })
+})
+
+describe("socket owner — hab's socket is never taken by a standalone daemon (24906)", () => {
+  const habLaunch = {
+    HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
+    HAB_SESSION_LAUNCH_ID: "launch-under-hab",
+    HAB_SESSION_INSTRUCTION_ANCHOR: "/hh/main.hab.tsx",
+  }
+
+  test("a binder's owner comes from its own env: hab:<service> under a hab service, else standalone", () => {
+    expect(socketOwnerForBinder({ HAB_SERVICE_NAME: "wire" })).toBe("hab:wire")
+    expect(socketOwnerForBinder({ ...habLaunch })).toBe("standalone")
+    expect(socketOwnerForBinder({})).toBe("standalone")
+  })
+
+  test("a non-hab binder refuses a socket hab owned last, naming the service and its restart", () => {
+    const decision = evaluateSocketOwner({ lastOwner: "hab:wire", binderOwner: "standalone" })
+    expect(decision.allow).toBe(false)
+    expect(decision.reason).toContain('hab service "wire"')
+    expect(decision.reason).toContain("main-hab up wire")
+  })
+
+  test("hab's own binder proceeds, a standalone-owned socket allows silently, and an unknown owner allows loudly", () => {
+    expect(evaluateSocketOwner({ lastOwner: "hab:wire", binderOwner: "hab:wire" })).toEqual({ allow: true, reason: null })
+    expect(evaluateSocketOwner({ lastOwner: "standalone", binderOwner: "standalone" })).toEqual({
+      allow: true,
+      reason: null,
+    })
+    const unknown = evaluateSocketOwner({ lastOwner: null, binderOwner: "standalone" })
+    expect(unknown.allow).toBe(true)
+    expect(unknown.reason, "an owner the sidecar cannot prove is allowed out loud").toContain("owner")
+  })
+
+  test("a client launched by hab never starts a daemon for the socket hab handed it", () => {
+    const decision = evaluateHabLaunchedClient({
+      env: { ...habLaunch, TRIBE_SOCKET: "/run/user/3001/tribe.sock" },
+      socketPath: "/run/user/3001/tribe.sock",
+    })
+    expect(decision.allow).toBe(false)
+    expect(decision.reason).toContain("/hh/main.hab")
+    expect(decision.reason).toContain("main-hab up wire")
+  })
+
+  test("the launch rule is scoped to hab's socket and to a caller hab actually launched", () => {
+    expect(
+      evaluateHabLaunchedClient({
+        env: { ...habLaunch, TRIBE_SOCKET: "/run/user/3001/tribe.sock" },
+        socketPath: "/tmp/a-test-socket/tribe.sock",
+      }).allow,
+    ).toBe(true)
+    expect(
+      evaluateHabLaunchedClient({
+        env: { TRIBE_SOCKET: "/run/user/3001/tribe.sock" },
+        socketPath: "/run/user/3001/tribe.sock",
+      }).allow,
+    ).toBe(true)
   })
 })
 

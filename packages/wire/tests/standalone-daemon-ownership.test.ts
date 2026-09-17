@@ -17,6 +17,7 @@ import { dirname, join, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { connectToDaemon, type DaemonClient } from "../src/client.ts"
+import { readPinSidecar } from "../src/lib/spawn-pin-gate.ts"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CLIENT = resolve(HERE, "../src/client.ts")
@@ -26,9 +27,16 @@ const BUN_BIN = process.versions.bun ? process.execPath : "bun"
 function pidExists(pid: number): boolean {
   try {
     process.kill(pid, 0)
-    return true
   } catch (error) {
     return (error as NodeJS.ErrnoException).code !== "ESRCH"
+  }
+  // A zombie has already exited. A detached supervisor whose starter exited is
+  // adopted by the nearest subreaper, which may not wait on it for seconds.
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8")
+    return stat.charAt(stat.lastIndexOf(")") + 2) !== "Z"
+  } catch {
+    return true
   }
 }
 
@@ -313,5 +321,135 @@ await import(${JSON.stringify(pathToFileURL(DAEMON).href)})
       supervisorPid: String(ownerPid),
     })
     successor.client.close()
+  }, 30_000)
+
+  // 24906 — wire recovery, 2026-09-17: hab's wire daemon stopped at 09:35:31 and
+  // unlinked its socket; four seconds later a tribe CLI poll under @dev/9's inhab
+  // found no socket and started a standalone supervisor that then held the rail
+  // outside hab. A socket hab owns is restarted by hab, never by a client.
+  function clientEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+    const env = { ...process.env }
+    for (const key of Object.keys(env)) {
+      if (key.startsWith("HAB_") || key.startsWith("TRIBE_")) delete env[key]
+    }
+    return { ...env, TRIBE_NO_AUTORELOAD: "1", TRIBE_NO_PLUGINS: "1", ...extra }
+  }
+
+  function habServiceEnv(): NodeJS.ProcessEnv {
+    const habitat = join(tmpDir, "main.hab")
+    return clientEnv({
+      HAB_SERVICE_NAME: "wire",
+      HAB_SERVICE_KIND: "resident",
+      HAB_SESSION_DIR: join(habitat, "run", "sessions", "wire"),
+      HAB_SESSION_HABITAT_ROOT: habitat,
+      HAB_SESSION_LAUNCH_ID: "wire-launch",
+      HAB_SESSION_INSTRUCTION_ANCHOR: join(tmpDir, "main.hab.tsx"),
+    })
+  }
+
+  function daemonArgs(dbPath: string): string[] {
+    return [DAEMON, "--socket", socketPath, "--db", dbPath, "--foreground", "--no-lore", "--idle-quit-after", "never"]
+  }
+
+  async function bindThenStop(env: NodeJS.ProcessEnv, dbPath: string): Promise<void> {
+    const daemon = spawn(BUN_BIN, daemonArgs(dbPath), { cwd: tmpDir, env, stdio: "ignore" })
+    daemonPids.add(daemon.pid!)
+    const bound = await connectToGeneration(socketPath, (pid) => pid === daemon.pid)
+    bound.client.close()
+    await terminate(daemon.pid!)
+    expect(existsSync(socketPath), "a stopping daemon unlinks its socket").toBe(false)
+  }
+
+  async function attemptConnectOrStart(
+    dbPath: string,
+    env: NodeJS.ProcessEnv = clientEnv(),
+  ): Promise<{ connected: boolean; detail: string }> {
+    const resultPath = join(tmpDir, "attempt.json")
+    const attempt = join(tmpDir, "attempt.ts")
+    writeFileSync(
+      attempt,
+      `import { writeFileSync } from "node:fs"
+import { connectOrStart } from ${JSON.stringify(pathToFileURL(CLIENT).href)}
+try {
+  const client = await connectOrStart(${JSON.stringify(socketPath)}, {
+    daemonScript: ${JSON.stringify(DAEMON)},
+    daemonArgs: ["--db", ${JSON.stringify(dbPath)}, "--foreground", "--no-lore"],
+    maxStartupAttempts: 20,
+  })
+  const status = await client.call("cli_daemon")
+  writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({ connected: true, detail: JSON.stringify(status) }))
+  client.close()
+} catch (error) {
+  writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({ connected: false, detail: error instanceof Error ? error.message : String(error) }))
+}
+`,
+    )
+    const child = spawn(BUN_BIN, [attempt], { cwd: tmpDir, env, stdio: "ignore" })
+    const exitCode = await new Promise<number | null>((resolveExit) => child.once("exit", resolveExit))
+    expect(existsSync(resultPath), `the client attempt exited ${String(exitCode)} without recording a result`).toBe(true)
+    return JSON.parse(readFileSync(resultPath, "utf8")) as { connected: boolean; detail: string }
+  }
+
+  it("refuses to start a daemon for a socket whose last owner was a hab service, and names the cure", async () => {
+    const dbPath = join(tmpDir, "hab-owned.db")
+    await bindThenStop(habServiceEnv(), dbPath)
+    expect(readPinSidecar(socketPath)?.owner, "hab's binder records itself beside the pin").toBe("hab:wire")
+
+    const attempt = await attemptConnectOrStart(dbPath)
+    expect(attempt.connected, `a client started a daemon in place of hab's wire: ${attempt.detail}`).toBe(false)
+    expect(attempt.detail).toContain('hab service "wire"')
+    expect(attempt.detail).toContain("main-hab up wire")
+    expect(existsSync(socketPath), "no daemon bound the hab-owned socket").toBe(false)
+  }, 30_000)
+
+  it("still starts a daemon for a socket whose last owner was a standalone daemon", async () => {
+    const dbPath = join(tmpDir, "standalone-owned.db")
+    await bindThenStop(clientEnv(), dbPath)
+    expect(readPinSidecar(socketPath)?.owner, "a binder outside hab records standalone").toBe("standalone")
+
+    const attempt = await attemptConnectOrStart(dbPath)
+    expect(attempt.connected, `the standalone owner's successor did not start: ${attempt.detail}`).toBe(true)
+  }, 30_000)
+
+  it("a client launched by hab never starts a daemon for the socket hab handed it", async () => {
+    const habitat = join(tmpDir, "main.hab")
+    const attempt = await attemptConnectOrStart(
+      join(tmpDir, "never-bound.db"),
+      clientEnv({
+        HAB_SESSION_HABITAT_ROOT: habitat,
+        HAB_SESSION_LAUNCH_ID: "seat-launch",
+        HAB_SESSION_INSTRUCTION_ANCHOR: join(tmpDir, "main.hab.tsx"),
+        TRIBE_SOCKET: socketPath,
+      }),
+    )
+    expect(attempt.connected, `a hab-launched client started its own daemon: ${attempt.detail}`).toBe(false)
+    expect(attempt.detail).toContain(habitat)
+    expect(attempt.detail).toContain("main-hab up wire")
+    expect(existsSync(socketPath), "no daemon bound the socket hab handed the client").toBe(false)
+  }, 30_000)
+
+  it("the daemon's own door refuses a binder outside hab when hab owned the socket last, and admits hab's", async () => {
+    const dbPath = join(tmpDir, "door.db")
+    await bindThenStop(habServiceEnv(), dbPath)
+
+    const outsider = spawn(BUN_BIN, daemonArgs(dbPath), { cwd: tmpDir, env: clientEnv(), stdio: ["ignore", "pipe", "pipe"] })
+    daemonPids.add(outsider.pid!)
+    let outsiderOutput = ""
+    outsider.stdout.on("data", (chunk: Buffer | string) => (outsiderOutput += chunk.toString()))
+    outsider.stderr.on("data", (chunk: Buffer | string) => (outsiderOutput += chunk.toString()))
+    let outsiderExit: number | null | undefined
+    outsider.once("exit", (code) => {
+      outsiderExit = code
+    })
+    await waitFor(() => outsiderExit !== undefined || existsSync(socketPath), "the outsider's bind or exit", 10_000)
+    expect(existsSync(socketPath), `a daemon outside hab bound hab's socket: ${outsiderOutput}`).toBe(false)
+    expect(outsiderExit, `the refused binder exited 0: ${outsiderOutput}`).not.toBe(0)
+    expect(outsiderOutput).toContain('hab service "wire"')
+    expect(existsSync(socketPath), "the refused binder left no socket").toBe(false)
+
+    const hab = spawn(BUN_BIN, daemonArgs(dbPath), { cwd: tmpDir, env: habServiceEnv(), stdio: "ignore" })
+    daemonPids.add(hab.pid!)
+    const bound = await connectToGeneration(socketPath, (pid) => pid === hab.pid)
+    bound.client.close()
   }, 30_000)
 })
