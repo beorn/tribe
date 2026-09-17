@@ -51,6 +51,7 @@ import { registeredTrustTierForTopic, senderMayUseRegisteredTrustTopic, type Ses
 import type { LifecycleStore, LifecycleSnapshotRecord } from "./lifecycle-store.ts"
 import {
   DEFAULT_MAX_SILENCE_SEC,
+  observeMailboxConsumers,
   projectSessionLiveness,
   projectSessionTransportEvidence,
   projectSessionTransportState,
@@ -288,8 +289,10 @@ export type HandlerOpts = {
       session: string,
       connId: string,
       timeoutMs: number,
-      opts?: { readonly wakeOnCorrelatedReply?: boolean },
+      opts?: { readonly wakeOnCorrelatedReply?: boolean; readonly consumesMailbox?: boolean },
     ) => Promise<InboxWaitResult>
+    /** The mailbox owner has a wait parked right now: consumer evidence (24664). */
+    hasLiveWaiter: (session: string) => boolean
   }
   /**
    * Optional: fire a JSON-RPC `wakeup` notification at the claiming session's
@@ -326,15 +329,27 @@ type OwnerTransportObservation = {
   owner_state: OwnerState
   owner_answer_capability: "observed" | "not-observed"
   owner_transport_reason: OwnerTransportReason
+  owner_last_mailbox_read_age_ms: number | null
   owner_transport_observed_at: string
 }
 
+/** The mailbox's last canonical read, joined by NAME exactly as the cursor is keyed. */
+function readLastMailboxReadAt(stmts: TribeContext["stmts"], name: string): number | null {
+  const row = stmts.getMailboxAttentionReadAt.get({ $recipient: name }) as {
+    last_attention_read_at: number | null
+  } | null
+  return row?.last_attention_read_at ?? null
+}
+
 function ownerTransportObservationProjector(ctx: TribeContext, opts: HandlerOpts, observedAt: number) {
-  const sessionRows = ctx.db.prepare("SELECT name, mailbox_authority_hash FROM sessions").all() as Array<{
+  const sessionRows = ctx.db.prepare("SELECT id, name, mailbox_authority_hash, delivery FROM sessions").all() as Array<{
+    id: string
     name: string
     mailbox_authority_hash: string | null
+    delivery: string
   }>
   const knownNames = new Set(sessionRows.map((row) => row.name))
+  const deliveryBySessionId = new Map(sessionRows.map((row) => [row.id, row.delivery]))
   const mailboxDeafNames = new Set<string>()
   const mailboxDeafReasons = new Map<string, MailboxReadCapability["reason"]>()
   for (const row of sessionRows) {
@@ -372,51 +387,73 @@ function ownerTransportObservationProjector(ctx: TribeContext, opts: HandlerOpts
     activeByName.set(info.name, siblings)
   }
   const observedAtIso = new Date(observedAt).toISOString()
-  const cache = new Map<string, OwnerTransportObservation>()
+  const cache = new Map<string, { observation: OwnerTransportObservation; liveTransport: boolean }>()
 
-  const observe = (name: string): OwnerTransportObservation => {
+  const project = (name: string) => {
     const cached = cache.get(name)
     if (cached !== undefined) return cached
-    const evidence = (activeByName.get(name) ?? []).map((info) =>
+    const active = activeByName.get(name) ?? []
+    const mailbox = {
+      mailboxReadable: !mailboxDeafNames.has(name),
+      lastMailboxReadAt: readLastMailboxReadAt(ctx.stmts, name),
+      now: observedAt,
+    }
+    const ownerWaiting = opts.inboxWait?.hasLiveWaiter(name) === true
+    const evidence = active.map((info) =>
       projectSessionTransportEvidence({
         transportConnected: true,
         transportPids: info.transportPids,
         agentPid: info.launchParentPid ?? info.pid,
+        consumers: observeMailboxConsumers({
+          delivery: deliveryBySessionId.get(info.id),
+          clientRegistered: true,
+          ownerWaiting,
+        }),
+        ...mailbox,
       }),
     )
     const selected =
       evidence.find((row) => row.answer_capability === "observed") ??
+      evidence.find((row) => row.transport_alive && row.agent_alive) ??
       evidence.find((row) => row.owner_state === "dead") ??
-      evidence[0]
-    const observation: OwnerTransportObservation = selected
-      ? {
-          owner_transport_registered: selected.transport_registered,
-          owner_transport_state: selected.transport_state,
-          owner_state: selected.owner_state,
-          owner_answer_capability: selected.answer_capability,
-          owner_transport_reason: selected.answer_reason,
-          owner_transport_observed_at: observedAtIso,
-        }
-      : {
-          owner_transport_registered: false,
-          owner_transport_state: "disconnected",
-          owner_state: "unknown",
-          owner_answer_capability: "not-observed",
-          owner_transport_reason: knownNames.has(name) ? "owner-unknown-no-transport" : "no-session-record",
-          owner_transport_observed_at: observedAtIso,
-        }
-    cache.set(name, observation)
-    return observation
+      evidence[0] ??
+      projectSessionTransportEvidence({
+        transportConnected: false,
+        transportPids: [],
+        agentPid: null,
+        consumers: [],
+        ...mailbox,
+      })
+    const projected = {
+      observation: {
+        owner_transport_registered: selected.transport_registered,
+        owner_transport_state: selected.transport_state,
+        owner_state: selected.owner_state,
+        owner_answer_capability: selected.answer_capability,
+        owner_transport_reason:
+          active.length === 0 && !knownNames.has(name) ? "no-session-record" : selected.answer_reason,
+        owner_last_mailbox_read_age_ms: selected.last_mailbox_read_age_ms,
+        owner_transport_observed_at: observedAtIso,
+      } satisfies OwnerTransportObservation,
+      liveTransport: selected.transport_alive && selected.agent_alive,
+    }
+    cache.set(name, projected)
+    return projected
   }
 
   return {
-    observe,
+    observe: (name: string): OwnerTransportObservation => project(name).observation,
     mailboxRecipientNames,
     mailboxDeafNames,
     mailboxDeafReasons,
-    answerableNames: new Set(
-      [...activeByName.keys()].filter((name) => observe(name).owner_answer_capability === "observed"),
-    ),
+    /**
+     * Names with a connected, PID-live transport. Routing, fallback bounces and
+     * tracked-send admission key on this, never on answer capability: a seat
+     * that nothing is consuming right now still reads at its next tick, so it
+     * keeps its mail (24664). Only the reported delivery state reads the
+     * consumer-aware capability.
+     */
+    liveTransportNames: new Set([...activeByName.keys()].filter((name) => project(name).liveTransport)),
   }
 }
 
@@ -783,6 +820,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       summaryDerived,
       truncation,
       resolveRecipient,
+      transport,
       observedAt,
     })
   }
@@ -791,7 +829,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     recipients === "*" && (requestFlag || requestId !== null)
       ? activeBroadcastRecipients(
           ctx,
-          new Set([...transport.answerableNames].filter((name) => !transport.mailboxDeafNames.has(name))),
+          new Set([...transport.liveTransportNames].filter((name) => !transport.mailboxDeafNames.has(name))),
         )
       : undefined
   if (recipients === "*" && broadcastOwners?.length === 0) {
@@ -872,7 +910,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     sent: true,
     id: result.id,
     ...(effectiveRequestId ? { request_id: effectiveRequestId } : {}),
-    delivery: deliveryReport([{ recipient: recipients, resolution }])[0],
+    delivery: deliveryReport([{ recipient: recipients, resolution }], transport)[0],
     ...(tracker ? { tracker } : {}),
     ...(result.deduplicated ? { deduplicated: true } : {}),
     ...replyCloseFailure(tracker),
@@ -901,6 +939,7 @@ function handleMultiSend(input: {
   summaryDerived: boolean
   truncation: SanitizedMessage
   resolveRecipient: (recipient: string, tracked: boolean) => DirectDeliveryResolution
+  transport: OwnerTransportProjector
   observedAt: number
 }): ToolResult {
   const implicitlyTracked =
@@ -958,7 +997,7 @@ function handleMultiSend(input: {
     maybeTruncationWarning(input.truncation),
     trackerMissWarning(input.ctx, input.sender, input.recipients, tracker),
   )
-  const deliveries = deliveryReport(results)
+  const deliveries = deliveryReport(results, input.transport)
   logEvent(input.ctx, `message.sent.${input.msgType}`, input.args.bead as string | undefined, {
     to: input.recipients,
     message_ids: results.map((result) => result.id),
@@ -981,18 +1020,20 @@ function handleMultiSend(input: {
   })
 }
 
+type OwnerTransportProjector = ReturnType<typeof ownerTransportObservationProjector>
+
 function resolveDirectDelivery(
   recipient: string,
-  transport: ReturnType<typeof ownerTransportObservationProjector>,
+  transport: OwnerTransportProjector,
   resolver: DirectDeliveryResolver | undefined,
   tracked: boolean,
   explicitDelivery: Delivery | undefined,
 ): DirectDeliveryResolution {
   const directMailboxResolution = {
     status: "accepted",
-    state: transport.answerableNames.has(recipient) ? "online" : "offline",
+    state: transport.liveTransportNames.has(recipient) ? "online" : "offline",
   } as const
-  const policyResolution = resolver?.({ recipient, answerableNames: transport.answerableNames })
+  const policyResolution = resolver?.({ recipient, answerableNames: transport.liveTransportNames })
   const resolution =
     policyResolution?.status === "refused"
       ? policyResolution
@@ -1018,8 +1059,8 @@ function resolveDirectDelivery(
         "that needs no answer (24581).",
     }
   }
-  if (resolution.state === "online" && transport.answerableNames.has(recipient)) return resolution
-  if (resolution.state === "bounced" && transport.answerableNames.has(resolution.to)) return resolution
+  if (resolution.state === "online" && transport.liveTransportNames.has(recipient)) return resolution
+  if (resolution.state === "bounced" && transport.liveTransportNames.has(resolution.to)) return resolution
   if (resolution.state === "offline" && transport.mailboxRecipientNames.has(recipient)) return resolution
 
   const original = transport.observe(recipient)
@@ -1114,7 +1155,17 @@ function persistDeadLetter(
   )
 }
 
-function deliveryReport(rows: readonly ResolvedDirectRecipient[]): Array<
+/**
+ * The sender's per-recipient report. Routing chose the mailbox from the live
+ * transport; the reported state reads the owner's answer capability (24664).
+ * A live seat that nothing is consuming reports `offline`, and every mailbox
+ * row carries the reason and the read age, so a sender can tell a seat that
+ * reads at its next tick from an unreachable one. A broadcast names no mailbox.
+ */
+function deliveryReport(
+  rows: readonly ResolvedDirectRecipient[],
+  transport: OwnerTransportProjector,
+): Array<
   | {
       state: "bounced"
       original_target: string
@@ -1124,18 +1175,29 @@ function deliveryReport(rows: readonly ResolvedDirectRecipient[]): Array<
   | {
       state: "online" | "offline" | "parked"
       recipient: string
+      reason?: OwnerTransportReason
+      last_mailbox_read_age_ms?: number | null
     }
 > {
-  return rows.map(({ recipient, resolution }) =>
-    resolution.state === "bounced"
-      ? {
-          state: resolution.state,
-          original_target: recipient,
-          recipient: resolution.to,
-          reason: resolution.reason,
-        }
-      : { state: resolution.state, recipient },
-  )
+  return rows.map(({ recipient, resolution }) => {
+    if (resolution.state === "bounced") {
+      return {
+        state: resolution.state,
+        original_target: recipient,
+        recipient: resolution.to,
+        reason: resolution.reason,
+      }
+    }
+    if (recipient === "*") return { state: resolution.state, recipient }
+    const owner = transport.observe(recipient)
+    return {
+      state:
+        resolution.state === "online" && owner.owner_answer_capability !== "observed" ? "offline" : resolution.state,
+      recipient,
+      reason: owner.owner_transport_reason,
+      last_mailbox_read_age_ms: owner.owner_last_mailbox_read_age_ms,
+    }
+  })
 }
 
 function derivedSummaryWarning(): string {
@@ -2575,9 +2637,19 @@ function isDurableMembershipSessionRow(row: MembershipSessionRow): row is Durabl
  * alive=false.
  */
 export function projectSessionRowTransport(
-  row: { readonly id: string; readonly updated_at: number },
+  row: {
+    readonly id: string
+    readonly name: string
+    readonly updated_at: number
+    readonly delivery: string
+    readonly mailbox_authority_hash: string | null
+  },
   activeIds: ReadonlySet<string>,
   activeInfo: readonly ActiveSessionInfo[],
+  mailbox: {
+    readonly stmts: TribeContext["stmts"]
+    readonly hasLiveWaiter: ((session: string) => boolean) | undefined
+  },
 ): {
   readonly active: ActiveSessionInfo | undefined
   readonly transportPids: number[]
@@ -2587,12 +2659,22 @@ export function projectSessionRowTransport(
   const active = activeInfo.find((session) => session.id === row.id)
   const transportPids = active?.transportPids ?? []
   const agentPid = active ? (active.launchParentPid ?? active.pid) : null
+  const transportConnected = activeIds.has(row.id)
+  const now = Date.now()
   const evidence = projectSessionTransportEvidence({
-    transportConnected: activeIds.has(row.id),
+    transportConnected,
     transportPids,
     agentPid,
-    lastSeenSec: Math.round((Date.now() - row.updated_at) / 1000),
+    lastSeenSec: Math.round((now - row.updated_at) / 1000),
     probe: (pid) => (pidStillAlive(pid) ? "live" : "dead"),
+    consumers: observeMailboxConsumers({
+      delivery: row.delivery,
+      clientRegistered: transportConnected,
+      ownerWaiting: mailbox.hasLiveWaiter?.(row.name) === true,
+    }),
+    mailboxReadable: projectMailboxReadCapability(row.mailbox_authority_hash).state === "available",
+    lastMailboxReadAt: readLastMailboxReadAt(mailbox.stmts, row.name),
+    now,
   })
   return { active, transportPids, agentPid, evidence }
 }
@@ -2656,7 +2738,10 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
 
   const sessions = visibleRows.map((r) => {
     const parent = r.claude_session_id ? parentMap.get(r.claude_session_id) : undefined
-    const { active, transportPids, agentPid, evidence } = projectSessionRowTransport(r, activeIds, activeInfo)
+    const { active, transportPids, agentPid, evidence } = projectSessionRowTransport(r, activeIds, activeInfo, {
+      stmts: ctx.stmts,
+      hasLiveWaiter: opts.inboxWait?.hasLiveWaiter,
+    })
     const protocolVersions = active?.protocolVersions ?? []
     return {
       member_id: r.id,
@@ -3437,7 +3522,9 @@ function handleInboxWait(
   if (!opts.inboxWait || connId === undefined) {
     return jsonResult({ error: "inbox wait requires a connection-owned handler context" })
   }
-  return opts.inboxWait.wait(session, connId, timeoutMs, { wakeOnCorrelatedReply }).then((result) => {
+  // A caller waiting on its own mailbox is consumer evidence (24664).
+  const consumesMailbox = session === ctx.getName()
+  return opts.inboxWait.wait(session, connId, timeoutMs, { wakeOnCorrelatedReply, consumesMailbox }).then((result) => {
     const publicResult = { ...result } as InboxWaitResult & {
       baseline_seq?: number
     }

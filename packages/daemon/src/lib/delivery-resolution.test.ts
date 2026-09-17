@@ -389,10 +389,12 @@ describe("generic direct-message delivery resolution", () => {
       ),
     )
 
+    // @dev is a live pull seat with no wait parked: the ball lands in its
+    // mailbox, and the report says it reads at its next tick (24664).
     expect(sent).toMatchObject({
       sent: true,
       request_id: request,
-      delivery: { state: "online", recipient: "@dev" },
+      delivery: { state: "offline", recipient: "@dev", reason: "connected-no-consumer" },
     })
     expect(db.prepare("SELECT request_id, recipient FROM pending_request WHERE request_id = ?").get(request)).toEqual({
       request_id: request,
@@ -787,7 +789,7 @@ describe("generic direct-message delivery resolution", () => {
         recipient: "@dev",
         reason: "declared child has no live transport",
       },
-      { state: "online", recipient: "@sender" },
+      { state: "offline", recipient: "@sender", reason: "connected-no-consumer", last_mailbox_read_age_ms: null },
     ])
   })
 })

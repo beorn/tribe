@@ -643,6 +643,100 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     }
   })
 
+  // 24664: DEGRADED is reserved for transport-down. A pull seat between reads
+  // will read at its next tick, so it renders its read age instead.
+  it("pending renders one sentence per owner answer reason and reserves DEGRADED for transport-down", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-pending-reasons-"))
+    const socketPath = join(dir, "tribe.sock")
+    const observedAt = "2026-09-16T20:00:00.000Z"
+    const ball = (owner: string, reason: string, readAgeMs: number | null) => ({
+      request_id: `req-${owner}`,
+      recipient: owner,
+      sender: "@chief",
+      summary: `work for ${owner}`,
+      opened_at: "2026-09-16T19:55:00.000Z",
+      age_ms: 300_000,
+      message_id: `msg-${owner}`,
+      fanout: "first",
+      owner_transport_registered: reason !== "owner-unknown-no-transport",
+      owner_transport_state: reason === "owner-unknown-no-transport" ? "disconnected" : "connected",
+      owner_state: reason === "owner-unknown-no-transport" ? "unknown" : "live",
+      owner_answer_capability: "not-observed",
+      owner_transport_reason: reason,
+      owner_last_mailbox_read_age_ms: readAgeMs,
+      owner_transport_observed_at: observedAt,
+    })
+    const owners = [
+      ball("@dev/3", "connected-no-consumer", 240_000),
+      ball("@dev/4", "connected-no-consumer", null),
+      ball("@relay", "mailbox-read-unavailable", 3_600_000),
+      ball("@gone", "owner-unknown-no-transport", null),
+    ]
+    const allSnapshot = {
+      all: true,
+      count: owners.length,
+      owner_count: owners.length,
+      oldest_age_ms: 300_000,
+      pending: owners,
+      owners: owners.map((row) => ({ owner: row.recipient, count: 1, oldest_age_ms: 300_000, pending: [row] })),
+    }
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as { id: number; params?: Record<string, unknown> }
+          const response =
+            request.params?.owner === "@dev/3"
+              ? { owner: "@dev/3", expired: false, pending: [owners[0]], count: 1 }
+              : allSnapshot
+          socket.write(
+            `${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { structuredContent: response } })}\n`,
+          )
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const env = { ...process.env, TRIBE_SOCKET: socketPath, TRIBE_NO_AUTOSTART: "1" }
+      const all = await runCliAsync(["pending", "--all"], env)
+      const one = await runCliAsync(["pending", "--owner", "@dev/3"], env)
+
+      expect(all).toMatchObject({ code: 0, stderr: "" })
+      const ownerLine = (owner: string) => all.stdout.split("\n").find((line) => line.startsWith(`  ${owner}: `))
+      expect(ownerLine("@dev/3")).toBe("  @dev/3: 1 (oldest 5m ago)  pull; last read 4m ago")
+      expect(ownerLine("@dev/4")).toBe("  @dev/4: 1 (oldest 5m ago)  pull; never read")
+      expect(ownerLine("@relay")).toBe(
+        `  @relay: 1 (oldest 5m ago)  MAILBOX UNREADABLE — current owner is connected but cannot read its own mailbox as of ${observedAt}; obligation remains open; no automatic close/reroute`,
+      )
+      expect(ownerLine("@gone")).toBe(
+        `  @gone: 1 (oldest 5m ago)  DEGRADED — current owner has no connected, PID-live transport as of ${observedAt}; obligation remains open; no automatic close/reroute`,
+      )
+      expect(all.stdout.match(/DEGRADED/g)).toHaveLength(1)
+
+      expect(one).toMatchObject({ code: 0, stderr: "" })
+      expect(one.stdout).toContain(
+        "req-@dev/3  from @chief  5m ago  fanout=first  (msg msg-@dev/3)  pull; last read 4m ago",
+      )
+      expect(one.stdout).not.toContain("DEGRADED")
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it("pending --all --json flushes snapshots larger than the stdout pipe buffer", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-pending-all-large-"))
     const socketPath = join(dir, "tribe.sock")

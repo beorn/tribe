@@ -300,7 +300,7 @@ describe("createInboxWaitManager", () => {
 
   it("does not wake on the retired daemon-only ball reminder type", async () => {
     vi.useFakeTimers()
-    let unread = 0
+    const unread = 0
     const manager = createTestInboxWaitManager((session) => status(session, unread))
     const wait = manager.wait("@author", "conn-1", 1_000)
 
@@ -709,6 +709,34 @@ describe("createInboxWaitManager", () => {
     })
   })
 
+  // 24664: a parked wait is consumer evidence for answer capability, but only
+  // the mailbox owner's own wait. An operator watching another seat's mailbox
+  // consumes nothing, exactly as it never writes that seat's read receipt.
+  it("reports a live waiter only while the mailbox owner's own wait is parked", async () => {
+    vi.useFakeTimers()
+    const manager = createTestInboxWaitManager((session) => status(session, 0))
+    expect(manager.hasLiveWaiter("@ci")).toBe(false)
+
+    const observer = manager.wait("@ci", "conn-operator", 5_000)
+    expect(manager.hasLiveWaiter("@ci")).toBe(false)
+
+    const cancelled = manager.wait("@ci", "conn-ci", 1_000, { consumesMailbox: true })
+    expect(manager.hasLiveWaiter("@ci")).toBe(true)
+    expect(manager.hasLiveWaiter("@chief")).toBe(false)
+    manager.cancelConnection("conn-ci")
+    await cancelled
+    expect(manager.hasLiveWaiter("@ci")).toBe(false)
+
+    const timedOut = manager.wait("@ci", "conn-ci", 1_000, { consumesMailbox: true })
+    expect(manager.hasLiveWaiter("@ci")).toBe(true)
+    vi.advanceTimersByTime(1_000)
+    await timedOut
+    expect(manager.hasLiveWaiter("@ci")).toBe(false)
+
+    manager.shutdown()
+    await observer
+  })
+
   /**
    * CTO residual 2026-07-25 on @tent/tooling/21420: live @dev/3 sat in
    * `tribe inbox-wait` while a type=assign addressed to it had already landed.
@@ -991,6 +1019,7 @@ describe("tribe.inbox.wait handler wiring", () => {
           connId: string
           timeoutMs: number
           wakeOnCorrelatedReply: boolean | undefined
+          consumesMailbox: boolean | undefined
         }
       | undefined
     try {
@@ -1010,6 +1039,7 @@ describe("tribe.inbox.wait handler wiring", () => {
                   connId,
                   timeoutMs,
                   wakeOnCorrelatedReply: options?.wakeOnCorrelatedReply,
+                  consumesMailbox: options?.consumesMailbox,
                 }
                 return {
                   status: "woken",
@@ -1024,6 +1054,7 @@ describe("tribe.inbox.wait handler wiring", () => {
                   attention: EMPTY_ATTENTION,
                 }
               },
+              hasLiveWaiter: () => false,
             }),
           },
         },
@@ -1045,6 +1076,8 @@ describe("tribe.inbox.wait handler wiring", () => {
         connId: "transport-1",
         timeoutMs: 30 * 60_000,
         wakeOnCorrelatedReply: true,
+        // The caller waits on its own mailbox, so the wait is consumer evidence (24664).
+        consumesMailbox: true,
       })
     } finally {
       db.close()

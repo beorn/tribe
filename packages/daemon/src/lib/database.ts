@@ -1986,7 +1986,7 @@ export function createStatements(db: Database) {
     // BINARY collation — while remaining a range scan idx_sessions_launch_id
     // can serve. See derivedLaunchPrefixUpperBound for the upper bound.
     getSessionsByProviderLaunchId: db.prepare(
-      "SELECT id, name, principal_class, launch_id, launch_parent_pid, updated_at FROM sessions " +
+      "SELECT id, name, principal_class, launch_id, launch_parent_pid, updated_at, delivery, mailbox_authority_hash FROM sessions " +
         "WHERE launch_id = $launch_id " +
         "OR (launch_id >= $derived_prefix AND launch_id < $derived_prefix_upper) ORDER BY id",
     ),
@@ -2399,6 +2399,11 @@ export function createStatements(db: Database) {
       ON CONFLICT(recipient) DO UPDATE SET
         last_attention_read_at = MAX(COALESCE(last_attention_read_at, 0), $now)
     `),
+
+    /** The receipt above, read back by mailbox NAME for answer capability (24664). */
+    getMailboxAttentionReadAt: db.prepare(
+      "SELECT last_attention_read_at FROM mailbox_cursors WHERE recipient = $recipient",
+    ),
 
     /**
      * The attention-only recovery view (19442, 21757): unacknowledged attention

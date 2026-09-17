@@ -2268,6 +2268,72 @@ describe("dispatcher inbox-wait parsing", () => {
       nowSpy.mockRestore()
     }
   })
+
+  // 24664: a parked wait is consumer evidence only when the mailbox owner is the
+  // one waiting, attributed exactly like the read receipt above. Each owner form
+  // gets its own seat: a wake leaves an unread actionable that would end the
+  // next fresh wait on the same mailbox at once.
+  it("counts the owner's parked wait as a mailbox consumer, never an operator's wait on that mailbox", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const launchId = "managed-consumer"
+    const cliSeat = "@agent/consumer-cli"
+    const mcpSeat = "@agent/consumer-mcp"
+    const cliOwner = harness.connectClient()
+    await harness.register(cliOwner.connId, {
+      name: cliSeat,
+      pid: liveHolderPid,
+      project: "/tmp/km-wt-consumer-cli",
+      launchId,
+      launchParentPid: process.pid,
+      mailboxAuthorityHash: "0c".repeat(32),
+    })
+    const mcpOwner = harness.connectClient()
+    await harness.register(mcpOwner.connId, {
+      name: mcpSeat,
+      pid: liveHolderPid,
+      project: "/tmp/km-wt-consumer-mcp",
+      mailboxAuthorityHash: "0d".repeat(32),
+    })
+    const watcher = harness.connectClient()
+    await harness.register(watcher.connId, {
+      name: "@agent/watcher",
+      pid: liveHolderPid,
+      project: "/tmp/km-wt-watcher",
+    })
+    const member = async (name: string) =>
+      parseResult<{ structuredContent: { sessions: Array<Record<string, unknown>> } }>(
+        await harness.dispatcher.handleRequest(
+          { jsonrpc: "2.0", id: `members-${name}`, method: "tribe.members", params: {} },
+          watcher.connId,
+        ),
+      ).structuredContent.sessions.find((session) => session.name === name)
+    const wait = (id: string, method: string, params: Record<string, unknown>, connId: string) =>
+      harness.dispatcher.handleRequest({ jsonrpc: "2.0", id, method, params: { timeoutMs: 60_000, ...params } }, connId)
+    const parked = () => new Promise((resolveParked) => setTimeout(resolveParked, 20))
+    const unconsumed = { delivery: "pull", answer_capability: "not-observed", answer_reason: "connected-no-consumer" }
+    const consumed = { answer_capability: "observed", answer_reason: "connected-pid-live-transport" }
+
+    expect(await member(cliSeat)).toMatchObject({ ...unconsumed, last_mailbox_read_age_ms: null })
+    const operatorCli = wait("operator-cli", "cli_inbox_wait", { session: cliSeat }, "conn-operator")
+    const operatorMcp = wait("operator-mcp", "tribe.inbox.wait", { session: cliSeat }, watcher.connId)
+    await parked()
+    expect(await member(cliSeat)).toMatchObject(unconsumed)
+    const ownerCli = wait("owner-cli", "cli_inbox_wait_by_launch_v1", { launch_id: launchId }, "conn-cli")
+    await parked()
+    expect(await member(cliSeat)).toMatchObject(consumed)
+    harness.sendActionable(cliSeat, "wake every wait on this mailbox")
+    await Promise.all([operatorCli, operatorMcp, ownerCli])
+    expect(await member(cliSeat)).toMatchObject({ ...unconsumed, last_mailbox_read_age_ms: expect.any(Number) })
+
+    expect(await member(mcpSeat)).toMatchObject(unconsumed)
+    const ownerMcp = wait("owner-mcp", "tribe.inbox.wait", {}, mcpOwner.connId)
+    await parked()
+    expect(await member(mcpSeat)).toMatchObject(consumed)
+    harness.sendActionable(mcpSeat, "wake the owner's own wait")
+    await ownerMcp
+    expect(await member(mcpSeat)).toMatchObject(unconsumed)
+  })
 })
 
 function createDispatcherHarness(

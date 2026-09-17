@@ -522,7 +522,13 @@ export function withDispatcher<
           launchId?: string
           launchParentPid?: number
           /** The resolved session row, for a launch-scoped read only. */
-          sessionRow?: { id: string; updated_at: number }
+          sessionRow?: {
+            id: string
+            name: string
+            updated_at: number
+            delivery: string
+            mailbox_authority_hash: string | null
+          }
         }
       | { errorCode: number; errorMessage: string }
 
@@ -580,7 +586,7 @@ export function withDispatcher<
         $launch_id: launchId,
         $derived_prefix: derivedPrefix,
         $derived_prefix_upper: derivedPrefixUpper,
-      }) as Array<LaunchAuthorityRow & { updated_at: number }>
+      }) as Array<LaunchAuthorityRow & { updated_at: number; delivery: string; mailbox_authority_hash: string | null }>
       const routableLaunchSessions = launchSessions.filter(hasLaunchAuthority)
       const persona = hasPersona && typeof params.persona === "string" ? params.persona.trim() : ""
       if (hasPersona && persona.length === 0) {
@@ -629,7 +635,13 @@ export function withDispatcher<
         sessionName: launchSession.name,
         launchId: launchSession.launch_id,
         launchParentPid: Number(launchSession.launch_parent_pid),
-        sessionRow: { id: launchSession.id, updated_at: launchSession.updated_at },
+        sessionRow: {
+          id: launchSession.id,
+          name: launchSession.name,
+          updated_at: launchSession.updated_at,
+          delivery: launchSession.delivery,
+          mailbox_authority_hash: launchSession.mailbox_authority_hash,
+        },
       }
     }
 
@@ -1757,6 +1769,7 @@ export function withDispatcher<
                     target.sessionRow,
                     registry.getActiveSessionIds(),
                     registry.getActiveSessionInfo(),
+                    { stmts, hasLiveWaiter: inboxWait.hasLiveWaiter },
                   ).evidence
             // Round-trip the daemon-authoritative launch tuple so a managed
             // one-shot CLI can register its send connection under the SAME
@@ -2016,6 +2029,8 @@ export function withDispatcher<
             const result = await inboxWait.wait(sessionName, connId, timeoutMs, {
               wakeOnCorrelatedReply,
               ...(afterSeqRaw === undefined ? {} : { afterSeq: Number(afterSeqRaw) }),
+              // Consumer evidence follows the receipt rule below (24664).
+              consumesMailbox: method === "cli_inbox_wait_by_launch_v1",
             })
             // The launch-correlated form proves which managed mailbox is
             // reading. The explicit operator form observes another mailbox
@@ -2035,7 +2050,11 @@ export function withDispatcher<
             } = resolveInboxWaitOptions(p, {
               defaultSession: client?.name ?? DEFAULT_INBOX_WAIT_SESSION,
             })
-            const result = await inboxWait.wait(sessionName, connId, timeoutMs, { wakeOnCorrelatedReply })
+            const result = await inboxWait.wait(sessionName, connId, timeoutMs, {
+              wakeOnCorrelatedReply,
+              // Only the caller waiting on its own mailbox consumes it (24664).
+              consumesMailbox: client?.role === "member" && client.name === sessionName,
+            })
             if (client?.role === "member") {
               // Attribute the read to the authenticated caller, never to an
               // explicit target supplied in params.

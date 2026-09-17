@@ -10,6 +10,8 @@ export type InboxStatus = Pick<
 type Waiter = {
   readonly connId: string
   readonly session: string
+  /** The mailbox owner is the one waiting, so this wait consumes `session`'s mailbox. */
+  readonly consumesMailbox: boolean
   readonly baselineSeq: number
   readonly startedAt: number
   readonly effectiveTimeoutMs: number
@@ -135,11 +137,28 @@ export function createInboxWaitManager(
     for (const waiter of Array.from(waiters)) settleForShutdown(waiter)
   }
 
+  /**
+   * Consumer evidence for answer capability (24664): the mailbox owner has a
+   * wait parked on `session` right now. A wait an operator parks on another
+   * seat's mailbox never counts, exactly as it never writes that seat's read
+   * receipt.
+   */
+  function hasLiveWaiter(session: string): boolean {
+    for (const waiter of waiters) {
+      if (waiter.session === session && waiter.consumesMailbox) return true
+    }
+    return false
+  }
+
   function wait(
     session: string,
     connId: string,
     timeoutMs: number,
-    opts: { readonly wakeOnCorrelatedReply?: boolean; readonly afterSeq?: number } = {},
+    opts: {
+      readonly wakeOnCorrelatedReply?: boolean
+      readonly afterSeq?: number
+      readonly consumesMailbox?: boolean
+    } = {},
   ): Promise<InboxWaitChunkResult> {
     const effectiveTimeoutMs = Number.isFinite(timeoutMs) ? Math.max(0, timeoutMs) : 0
     const wakeOnCorrelatedReply = opts.wakeOnCorrelatedReply === true
@@ -161,6 +180,7 @@ export function createInboxWaitManager(
       const waiter: Waiter = {
         connId,
         session,
+        consumesMailbox: opts.consumesMailbox === true,
         baselineSeq,
         startedAt: Date.now(),
         effectiveTimeoutMs,
@@ -185,6 +205,7 @@ export function createInboxWaitManager(
 
   return {
     wait,
+    hasLiveWaiter,
     onMessageInserted,
     cancelConnection,
     shutdown,

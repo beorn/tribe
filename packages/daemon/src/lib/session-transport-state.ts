@@ -28,6 +28,21 @@ export type SessionTransportProjection = {
 
 export type SessionAnswerCapability = "observed" | "not-observed"
 
+export type SessionAnswerReason =
+  | "connected-pid-live-transport"
+  | "connected-no-consumer"
+  | "mailbox-read-unavailable"
+  | "registered-transport-pids-dead"
+  | "registered-owner-pid-dead"
+  | "owner-unknown-no-transport"
+
+/**
+ * What is consuming a session's mailbox right now (24664). An open set: a new
+ * consumer class lands as one more member here and one more line in
+ * `observeMailboxConsumers`, never as a second definition of `observed`.
+ */
+export type MailboxConsumer = "push-client" | "inbox-wait"
+
 /** Existing activity horizon used by the member liveness projection. */
 export const DEFAULT_MAX_SILENCE_SEC = 14_400
 
@@ -38,11 +53,9 @@ export type SessionTransportEvidence = SessionTransportProjection & {
   pid_alive: boolean
   is_silent: boolean
   answer_capability: SessionAnswerCapability
-  answer_reason:
-    | "connected-pid-live-transport"
-    | "registered-transport-pids-dead"
-    | "registered-owner-pid-dead"
-    | "owner-unknown-no-transport"
+  answer_reason: SessionAnswerReason
+  /** Age of the mailbox's last canonical read; null when it never read. */
+  last_mailbox_read_age_ms: number | null
 }
 
 /** Probe OS process existence without turning an unfamiliar error into death. */
@@ -127,12 +140,34 @@ export function projectSessionLiveness(input: {
   }
 }
 
+/** Turn what the daemon can see into the consumer inputs of the answer projection. */
+export function observeMailboxConsumers(input: {
+  /** `sessions.delivery`, the mode registered at join. */
+  readonly delivery: string | undefined
+  /** A participating client is registered, so a push has a socket to reach. */
+  readonly clientRegistered: boolean
+  /** The mailbox owner has an inbox.wait parked right now. */
+  readonly ownerWaiting: boolean
+}): MailboxConsumer[] {
+  const consumers: MailboxConsumer[] = []
+  if (input.delivery === "push" && input.clientRegistered) consumers.push("push-client")
+  if (input.ownerWaiting) consumers.push("inbox-wait")
+  return consumers
+}
+
 /**
  * One PID-aware evidence projection shared by members, tracked-send admission,
  * and pending. `answer_capability` is deliberately an observation about this
  * transport snapshot, never a claim that the persona is permanently alive or
  * dead. Silence remains visible in `alive` but does not make a connected,
  * process-live transport unable to receive a new obligation.
+ *
+ * A live transport is not enough to be `observed` (24664): something must be
+ * consuming the mailbox and the owner must be able to read it. A live seat
+ * nothing is consuming reads `connected-no-consumer`. It is still reachable
+ * and reads at its next tick, so the read age travels with every reason.
+ * Transport reasons outrank the mailbox reason, which outranks the consumer
+ * reason.
  */
 export function projectSessionTransportEvidence(input: {
   transportConnected: boolean
@@ -141,6 +176,12 @@ export function projectSessionTransportEvidence(input: {
   lastSeenSec?: number | null
   maxSilenceSec?: number
   probe?: (pid: number) => OwnerState
+  consumers: readonly MailboxConsumer[]
+  /** The owner's mailbox authority is registered (`mailbox_read_capability` available). */
+  mailboxReadable: boolean
+  /** `mailbox_cursors.last_attention_read_at` for the session NAME, the cursor's own key. */
+  lastMailboxReadAt: number | null
+  now?: number
 }): SessionTransportEvidence {
   const probe = input.probe ?? probeProcessState
   const transportPidsAlive =
@@ -159,18 +200,23 @@ export function projectSessionTransportEvidence(input: {
         maxSilenceSec: input.maxSilenceSec,
       })
     : projectSessionLiveness({ transportConnected: false })
-  const answerCapability = liveness.transport_alive && liveness.agent_alive
-  const answerReason: SessionTransportEvidence["answer_reason"] = answerCapability
-    ? "connected-pid-live-transport"
-    : !input.transportConnected
-      ? "owner-unknown-no-transport"
-      : !transportPidsAlive
-        ? "registered-transport-pids-dead"
-        : "registered-owner-pid-dead"
+  const answerReason: SessionAnswerReason = !input.transportConnected
+    ? "owner-unknown-no-transport"
+    : !transportPidsAlive
+      ? "registered-transport-pids-dead"
+      : !liveness.agent_alive
+        ? "registered-owner-pid-dead"
+        : !input.mailboxReadable
+          ? "mailbox-read-unavailable"
+          : input.consumers.length === 0
+            ? "connected-no-consumer"
+            : "connected-pid-live-transport"
   return {
     ...transport,
     ...liveness,
-    answer_capability: answerCapability ? "observed" : "not-observed",
+    answer_capability: answerReason === "connected-pid-live-transport" ? "observed" : "not-observed",
     answer_reason: answerReason,
+    last_mailbox_read_age_ms:
+      input.lastMailboxReadAt === null ? null : (input.now ?? Date.now()) - input.lastMailboxReadAt,
   }
 }

@@ -5,6 +5,11 @@ import {
   projectSessionTransportState,
 } from "./session-transport-state.ts"
 
+const NOW = 1_800_000_000_000
+const LIVE_TRANSPORT = { transportConnected: true, transportPids: [41], agentPid: 42, probe: () => "live" as const }
+/** Consumer evidence that satisfies everything but the transport, for cases about the transport. */
+const CONSUMED = { consumers: ["push-client"] as const, mailboxReadable: true, lastMailboxReadAt: null }
+
 describe("daemon-authoritative session transport state", () => {
   it("treats an authenticated registry entry with no contrary pid evidence as connected", () => {
     expect(projectSessionTransportState({ transportConnected: true })).toEqual({
@@ -95,6 +100,7 @@ describe("daemon-authoritative session transport state", () => {
         transportPids: [41],
         agentPid: 42,
         probe: () => "live",
+        ...CONSUMED,
       }),
     ).toMatchObject({
       transport_state: "connected",
@@ -108,6 +114,10 @@ describe("daemon-authoritative session transport state", () => {
         transportPids: [41],
         agentPid: 42,
         probe: (pid) => (pid === 41 ? "dead" : "live"),
+        // A dead transport reads as transport-down even when the mailbox is
+        // also unreadable: the transport reason outranks the mailbox reason.
+        ...CONSUMED,
+        mailboxReadable: false,
       }),
     ).toMatchObject({
       transport_registered: true,
@@ -125,6 +135,7 @@ describe("daemon-authoritative session transport state", () => {
         transportPids: [],
         agentPid: null,
         lastSeenSec: 15_234,
+        ...CONSUMED,
       }),
     ).toMatchObject({ alive: false, is_silent: true, answer_capability: "observed" })
     expect(
@@ -133,6 +144,7 @@ describe("daemon-authoritative session transport state", () => {
         transportPids: [41],
         agentPid: 42,
         probe: () => "live",
+        ...CONSUMED,
       }),
     ).toMatchObject({
       transport_registered: false,
@@ -140,6 +152,71 @@ describe("daemon-authoritative session transport state", () => {
       owner_state: "unknown",
       answer_capability: "not-observed",
       answer_reason: "owner-unknown-no-transport",
+    })
+  })
+
+  // 24664: a PID-live transport says the seat CAN be reached, not that anything
+  // is reading. Answer capability needs a consumer and a readable mailbox, and
+  // the read age travels with the reason so a sender can tell "reads at its
+  // next tick" from "unreachable".
+  it("does not count a PID-live session that nothing consumes as able to answer", () => {
+    expect(
+      projectSessionTransportEvidence({
+        ...LIVE_TRANSPORT,
+        consumers: [],
+        mailboxReadable: true,
+        lastMailboxReadAt: NOW - 240_000,
+        now: NOW,
+      }),
+    ).toMatchObject({
+      transport_state: "connected",
+      transport_alive: true,
+      agent_alive: true,
+      answer_capability: "not-observed",
+      answer_reason: "connected-no-consumer",
+      last_mailbox_read_age_ms: 240_000,
+    })
+    expect(
+      projectSessionTransportEvidence({
+        ...LIVE_TRANSPORT,
+        consumers: [],
+        mailboxReadable: true,
+        lastMailboxReadAt: null,
+        now: NOW,
+      }),
+    ).toMatchObject({ answer_reason: "connected-no-consumer", last_mailbox_read_age_ms: null })
+  })
+
+  it.each(["inbox-wait", "push-client"] as const)("counts a live %s consumer as able to answer", (consumer) => {
+    expect(
+      projectSessionTransportEvidence({
+        ...LIVE_TRANSPORT,
+        consumers: [consumer],
+        mailboxReadable: true,
+        lastMailboxReadAt: NOW - 240_000,
+        now: NOW,
+      }),
+    ).toMatchObject({
+      answer_capability: "observed",
+      answer_reason: "connected-pid-live-transport",
+      last_mailbox_read_age_ms: 240_000,
+    })
+  })
+
+  it("reports an unreadable mailbox in the same field, even while a consumer waits (24576)", () => {
+    expect(
+      projectSessionTransportEvidence({
+        ...LIVE_TRANSPORT,
+        consumers: ["inbox-wait"],
+        mailboxReadable: false,
+        lastMailboxReadAt: NOW - 60_000,
+        now: NOW,
+      }),
+    ).toMatchObject({
+      transport_alive: true,
+      answer_capability: "not-observed",
+      answer_reason: "mailbox-read-unavailable",
+      last_mailbox_read_age_ms: 60_000,
     })
   })
 })

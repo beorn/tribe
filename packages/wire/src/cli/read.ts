@@ -544,16 +544,47 @@ type PendingCliRow = {
   owner_state?: "live" | "dead" | "unknown"
   owner_answer_capability?: "observed" | "not-observed"
   owner_transport_reason?: string
+  owner_last_mailbox_read_age_ms?: number | null
   owner_transport_observed_at?: string
 }
 
+/**
+ * One sentence per owner answer reason (24664). DEGRADED and "no connected,
+ * PID-live transport" belong to transport-down alone: a pull seat that nothing
+ * is consuming reads at its next tick, so it renders its read age instead.
+ */
 function pendingOwnerTransportWarning(row: PendingCliRow): string {
   if (row.owner_answer_capability !== "not-observed") return ""
   const observedAt = row.owner_transport_observed_at ?? "unknown observation time"
-  return (
-    `  DEGRADED — current owner has no connected, PID-live transport as of ${observedAt}` +
-    "; obligation remains open; no automatic close/reroute"
-  )
+  const unresolved = "; obligation remains open; no automatic close/reroute"
+  switch (row.owner_transport_reason) {
+    case "connected-no-consumer":
+      return `  pull; ${mailboxReadAge(row.owner_last_mailbox_read_age_ms)}`
+    case "mailbox-read-unavailable":
+      return (
+        `  MAILBOX UNREADABLE — current owner is connected but cannot read its own mailbox as of ${observedAt}` +
+        unresolved
+      )
+    // A row without a reason keeps the pre-24664 reading: not-observed meant transport-down.
+    case undefined:
+    case "owner-unknown-no-transport":
+    case "registered-transport-pids-dead":
+    case "registered-owner-pid-dead":
+    case "no-session-record":
+      return `  DEGRADED — current owner has no connected, PID-live transport as of ${observedAt}${unresolved}`
+    default:
+      return (
+        `  NOT OBSERVED — current owner is not observed able to answer (${row.owner_transport_reason}) ` +
+        `as of ${observedAt}${unresolved}`
+      )
+  }
+}
+
+function mailboxReadAge(ageMs: number | null | undefined): string {
+  if (ageMs === null) return "never read"
+  if (ageMs === undefined) return "last read age not reported"
+  const sec = Math.floor(ageMs / 1000)
+  return `last read ${sec >= 60 ? `${Math.floor(sec / 60)}m` : `${sec}s`} ago`
 }
 
 async function cmdPending(

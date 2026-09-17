@@ -26,7 +26,11 @@ export type DirectDeliveryResolution =
 
 export interface DirectDeliveryResolutionInput {
   readonly recipient: string
-  /** Names with an answer-capable transport in this admission snapshot. */
+  /**
+   * Names with a connected, PID-live transport in this admission snapshot,
+   * whether or not anything consumes the mailbox right now: a seat between
+   * reads is reachable, so policy never bounces it (24664).
+   */
   readonly answerableNames: ReadonlySet<string>
 }
 

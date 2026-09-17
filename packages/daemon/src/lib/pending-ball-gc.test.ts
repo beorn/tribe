@@ -704,12 +704,16 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         owners: Array<{ owner: string; pending: Array<Record<string, unknown>> }>
       }
       const byOwner = new Map(all.pending.map((row) => [row.recipient, row]))
+      // @agent/live has a PID-live transport but registered no mailbox
+      // authority, so nothing can read its mailbox: not able to answer, in the
+      // same field (24664 folds 24576 in). The transport facts stay live.
       expect(byOwner.get("@agent/live")).toMatchObject({
         owner_transport_registered: true,
         owner_transport_state: "connected",
         owner_state: "live",
-        owner_answer_capability: "observed",
-        owner_transport_reason: "connected-pid-live-transport",
+        owner_answer_capability: "not-observed",
+        owner_transport_reason: "mailbox-read-unavailable",
+        owner_last_mailbox_read_age_ms: null,
         owner_transport_observed_at: expect.any(String),
       })
       expect(byOwner.get("@agent/disconnected")).toMatchObject({
@@ -718,6 +722,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         owner_state: "unknown",
         owner_answer_capability: "not-observed",
         owner_transport_reason: "owner-unknown-no-transport",
+        owner_last_mailbox_read_age_ms: null,
       })
       expect(byOwner.get("@agent/unknown")).toMatchObject({
         owner_transport_registered: false,
@@ -725,6 +730,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         owner_state: "unknown",
         owner_answer_capability: "not-observed",
         owner_transport_reason: "no-session-record",
+        owner_last_mailbox_read_age_ms: null,
       })
       expect(all.owners.flatMap((owner) => owner.pending)).toEqual(all.pending)
     } finally {
