@@ -144,6 +144,7 @@ export function withHotReload<T extends BaseTribe & WithBroadcast & WithConfig &
         try {
           return spawnStandaloneDaemonSupervisor({
             daemonScript: argv[0]!,
+            socketPath: t.config.socketPath,
             daemonArgs: argv.slice(1),
             operatorCapability,
             waitForPid: process.pid,

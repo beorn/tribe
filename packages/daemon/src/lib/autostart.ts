@@ -109,13 +109,15 @@ export function spawnTribeDaemonDetached(
   const scriptPath = opts.scriptPath ?? resolveTribeDaemonScriptPath()
   const bunPath = opts.bunPath ?? process.execPath
   const label = opts.label ?? "tribe"
-  const args = [scriptPath]
-  if (opts.socketPath) args.push("--socket", opts.socketPath)
+  // Name the socket explicitly: the ownership gates judge the path the daemon
+  // will bind, so the two can never differ.
+  const socketPath = opts.socketPath ?? resolveTribeSocketPath()
 
   try {
     const child = spawnStandaloneDaemonSupervisor({
-      daemonScript: args[0]!,
-      daemonArgs: args.slice(1),
+      daemonScript: scriptPath,
+      socketPath,
+      daemonArgs: ["--socket", socketPath],
       runtimePath: bunPath,
     })
     const pid = child.pid

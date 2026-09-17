@@ -239,6 +239,8 @@ function createOperatorCapabilityReader(): () => string | null {
 
 export type StandaloneDaemonSupervisorOpts = {
   daemonScript: string
+  /** The socket the supervised daemon will bind; the 24906 ownership gates read it. */
+  socketPath: string
   daemonArgs?: string[]
   operatorCapability?: string | null
   runtimePath?: string
@@ -284,6 +286,16 @@ function resolveSupervisorLogFd(env: NodeJS.ProcessEnv): number | "ignore" {
 export function spawnStandaloneDaemonSupervisor(opts: StandaloneDaemonSupervisorOpts): ReturnType<typeof spawn> {
   const capability = opts.operatorCapability?.trim() || null
   const env = sanitizeStandaloneDaemonEnvironment(process.env)
+  // 24906 — hab restarts the daemon it owns, so nothing starts one in its
+  // place: not connectOrStart, not hook autostart, not a hot reload. Every
+  // standalone supervisor is minted here, so the refusal lives here, thrown
+  // before anything spawns. The daemon binds with the sanitized env, so its
+  // owner is read from that env, not from the caller's.
+  const launchGate = evaluateHabLaunchedClient({ env: process.env, socketPath: opts.socketPath })
+  if (!launchGate.allow) throw Object.assign(new Error(launchGate.reason), { code: "EHABOWNED" })
+  const ownerGate = evaluateSocketOwnerForSocket(opts.socketPath, socketOwnerForBinder(env))
+  if (!ownerGate.allow) throw Object.assign(new Error(ownerGate.reason), { code: "EHABOWNED" })
+  if (ownerGate.reason) log.warn?.(ownerGate.reason)
   delete env[OPERATOR_CAPABILITY_FD_ENV]
   delete env.TRIBE_OPERATOR_CAPABILITY
   if (capability) env[OPERATOR_CAPABILITY_FD_ENV] = "3"
@@ -318,11 +330,13 @@ export function spawnStandaloneDaemonSupervisor(opts: StandaloneDaemonSupervisor
 
 function spawnLifecycleOwnerWithOperatorCapability(
   script: string,
+  socketPath: string,
   args: string[],
   readOperatorCapability: () => string | null,
 ): ReturnType<typeof spawn> {
   return spawnStandaloneDaemonSupervisor({
     daemonScript: script,
+    socketPath,
     daemonArgs: args,
     operatorCapability: readOperatorCapability(),
   })
@@ -445,26 +459,11 @@ async function connectOrStartWithCapability(
   }
   if (pinGate.reason) log.warn?.(pinGate.reason)
 
-  // 24906 — hab restarts the daemon it owns, so a client never starts one in
-  // its place. Both refusals are thrown before any spawn, like ESTALEPIN, so a
-  // reconnecting caller keeps retrying until hab's daemon is back. The daemon
-  // this client would start binds with the sanitized env, so its owner is read
-  // from that env, not from the client's own.
-  const launchGate = evaluateHabLaunchedClient({ env: process.env, socketPath })
-  if (!launchGate.allow) {
-    throw Object.assign(new Error(`connectOrStart: ${launchGate.reason}`), { code: "EHABOWNED" })
-  }
-  const ownerGate = evaluateSocketOwnerForSocket(
-    socketPath,
-    socketOwnerForBinder(sanitizeStandaloneDaemonEnvironment(process.env)),
-  )
-  if (!ownerGate.allow) {
-    throw Object.assign(new Error(`connectOrStart: ${ownerGate.reason}`), { code: "EHABOWNED" })
-  }
-  if (ownerGate.reason) log.warn?.(ownerGate.reason)
-
+  // The spawner refuses a socket hab owns (EHABOWNED, 24906) before anything
+  // starts; like ESTALEPIN, that leaves a reconnecting caller retrying until
+  // hab's daemon is back.
   const args = ["--socket", socketPath, ...(opts?.daemonArgs ?? [])]
-  spawnLifecycleOwnerWithOperatorCapability(script, args, readOperatorCapability)
+  spawnLifecycleOwnerWithOperatorCapability(script, socketPath, args, readOperatorCapability)
 
   const maxAttempts = opts?.maxStartupAttempts ?? 10
   for (let attempt = 0; attempt < maxAttempts; attempt++) {

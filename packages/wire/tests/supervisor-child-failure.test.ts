@@ -132,6 +132,7 @@ describe("the detached launcher gives the supervisor somewhere to speak", () => 
     try {
       const child = spawnStandaloneDaemonSupervisor({
         daemonScript: join(fixtures, "throwing-daemon.ts"),
+        socketPath: join(fixtures, "tribe.sock"),
       })
       await new Promise<void>((resolvePromise) => {
         const deadline = Date.now() + 20_000

@@ -56,11 +56,11 @@ function gitProbeEnv(): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")))
 }
 
-export interface SpawnSourceDecision {
-  allow: boolean
-  /** Operator-facing explanation; null only for the silent equal/fresh case. */
-  reason: string | null
-}
+/**
+ * `reason` is the operator-facing explanation. A refusal always carries one;
+ * an allow carries one only when it is loud, and null in the silent case.
+ */
+export type SpawnSourceDecision = { allow: true; reason: string | null } | { allow: false; reason: string }
 
 const short = (sha: string): string => sha.slice(0, 12)
 

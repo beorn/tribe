@@ -22,6 +22,7 @@ import { readPinSidecar } from "../src/lib/spawn-pin-gate.ts"
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CLIENT = resolve(HERE, "../src/client.ts")
 const DAEMON = resolve(HERE, "../../daemon/src/daemon.ts")
+const AUTOSTART = resolve(HERE, "../../daemon/src/lib/autostart.ts")
 const BUN_BIN = process.versions.bun ? process.execPath : "bun"
 
 function pidExists(pid: number): boolean {
@@ -430,6 +431,46 @@ try {
     expect(attempt.detail).toContain(habitat)
     expect(attempt.detail).toContain("main-hab up wire")
     expect(existsSync(socketPath), "no daemon bound the socket hab handed the client").toBe(false)
+  }, 30_000)
+
+  it("hook autostart in a client launched by hab never starts a daemon for the socket hab handed it", async () => {
+    const habitat = join(tmpDir, "main.hab")
+    const resultPath = join(tmpDir, "autostart.json")
+    const script = join(tmpDir, "autostart.ts")
+    writeFileSync(
+      script,
+      `import { writeFileSync } from "node:fs"
+import { ensureTribeDaemonIfConfigured } from ${JSON.stringify(pathToFileURL(AUTOSTART).href)}
+const outcome = await ensureTribeDaemonIfConfigured({ resolveMode: () => "daemon", budgetMs: 5_000 })
+writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify(outcome))
+`,
+    )
+    const child = spawn(BUN_BIN, [script], {
+      cwd: tmpDir,
+      env: clientEnv({
+        HAB_SESSION_HABITAT_ROOT: habitat,
+        HAB_SESSION_LAUNCH_ID: "seat-launch",
+        HAB_SESSION_INSTRUCTION_ANCHOR: join(tmpDir, "main.hab.tsx"),
+        TRIBE_SOCKET: socketPath,
+        TRIBE_DB: join(tmpDir, "autostart.db"),
+        XDG_DATA_HOME: join(tmpDir, "xdg-data"),
+      }),
+      stdio: "ignore",
+    })
+    const exitCode = await new Promise<number | null>((resolveExit) => child.once("exit", resolveExit))
+    expect(existsSync(resultPath), `the autostart attempt exited ${String(exitCode)} without recording a result`).toBe(
+      true,
+    )
+    const outcome = JSON.parse(readFileSync(resultPath, "utf8")) as { action: string; error?: string }
+    // A spawned supervisor's daemon binds within a second or two: give it that
+    // long before asserting that nothing bound.
+    await waitFor(() => existsSync(socketPath), "a daemon on the hab-owned socket", 3_000).catch(() => {})
+    expect(existsSync(socketPath), `hook autostart started a daemon in hab's place: ${JSON.stringify(outcome)}`).toBe(
+      false,
+    )
+    expect(outcome.action).toBe("spawn-failed")
+    expect(outcome.error).toContain(habitat)
+    expect(outcome.error).toContain("main-hab up wire")
   }, 30_000)
 
   it("the daemon's own door refuses a binder outside hab when hab owned the socket last, and admits hab's", async () => {
