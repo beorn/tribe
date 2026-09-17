@@ -45,8 +45,9 @@
 
 import { execFileSync } from "node:child_process"
 import { existsSync, readFileSync, writeFileSync } from "node:fs"
-import { dirname } from "node:path"
+import { dirname, resolve } from "node:path"
 import { createLogger } from "loggily"
+import { HAB_SESSION_MARKERS } from "../daemon-environment.ts"
 
 const log = createLogger("tribe:spawn-pin-gate")
 
@@ -119,6 +120,8 @@ export interface PinSidecar {
   pin: string
   pid: number
   atMs: number
+  /** Who bound the socket (24906); null for a sidecar written before the owner was recorded. */
+  owner: SocketOwner | null
 }
 
 /** Best-effort read; a missing or corrupt sidecar is null (first start / legacy). */
@@ -128,7 +131,12 @@ export function readPinSidecar(socketPath: string): PinSidecar | null {
   try {
     const parsed = JSON.parse(readFileSync(p, "utf8")) as Partial<PinSidecar>
     if (typeof parsed.pin === "string" && parsed.pin.length >= 7) {
-      return { pin: parsed.pin, pid: Number(parsed.pid ?? 0), atMs: Number(parsed.atMs ?? 0) }
+      return {
+        pin: parsed.pin,
+        pid: Number(parsed.pid ?? 0),
+        atMs: Number(parsed.atMs ?? 0),
+        owner: isSocketOwner(parsed.owner) ? parsed.owner : null,
+      }
     }
   } catch {
     /* corrupt sidecar = no evidence; the gate stays loud-but-open */
@@ -137,12 +145,91 @@ export function readPinSidecar(socketPath: string): PinSidecar | null {
 }
 
 /** Called by the daemon RIGHT AFTER binding the socket. Never throws. */
-export function writePinSidecar(socketPath: string, pin: string | null, pid: number = process.pid): void {
+export function writePinSidecar(
+  socketPath: string,
+  pin: string | null,
+  pid: number = process.pid,
+  owner: SocketOwner = socketOwnerForBinder(process.env),
+): void {
   if (!pin) return // no provable pin (standalone/no-git) — leave prior evidence in place
   try {
-    writeFileSync(pinSidecarPath(socketPath), JSON.stringify({ pin, pid, atMs: Date.now() }))
+    writeFileSync(pinSidecarPath(socketPath), JSON.stringify({ pin, pid, atMs: Date.now(), owner }))
   } catch (err) {
     log.warn?.(`could not write pin sidecar for ${socketPath}: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+/**
+ * 24906 — who last bound the socket, recorded beside its pin. hab restarts the
+ * daemon it owns; a client, or a binder outside hab, must not start one in its
+ * place. Observed 2026-09-17: hab's wire daemon stopped at 09:35:31 and
+ * unlinked its socket, and four seconds later a tribe CLI poll started a
+ * standalone supervisor that held the rail outside hab.
+ */
+export type SocketOwner = `hab:${string}` | "standalone"
+
+function isSocketOwner(value: unknown): value is SocketOwner {
+  return value === "standalone" || (typeof value === "string" && /^hab:\S+$/u.test(value))
+}
+
+function habServiceOf(owner: SocketOwner): string | null {
+  return owner === "standalone" ? null : owner.slice("hab:".length)
+}
+
+/** A binder's owner comes from its own env: `hab:<service>` under a hab service, else standalone. */
+export function socketOwnerForBinder(env: Readonly<NodeJS.ProcessEnv>): SocketOwner {
+  const service = env.HAB_SERVICE_NAME?.trim()
+  return service && !/\s/u.test(service) ? `hab:${service}` : "standalone"
+}
+
+/**
+ * Pure owner decision. hab's own binder always proceeds; a binder outside hab
+ * refuses a socket hab owned last. A sidecar that recorded no owner cannot
+ * prove hab owns the socket, so it allows loudly, like an unprovable pin.
+ */
+export function evaluateSocketOwner(input: {
+  lastOwner: SocketOwner | null
+  binderOwner: SocketOwner
+}): SpawnSourceDecision {
+  if (habServiceOf(input.binderOwner) !== null) return { allow: true, reason: null }
+  if (input.lastOwner === null) {
+    return {
+      allow: true,
+      reason:
+        "the socket's pin sidecar records no owner (written before 24906) — cannot prove hab owns this socket, allowing loudly",
+    }
+  }
+  const service = habServiceOf(input.lastOwner)
+  if (service === null) return { allow: true, reason: null }
+  return {
+    allow: false,
+    reason: `this socket was last bound by hab service "${service}", which hab restarts — refusing to start a daemon outside hab in its place; restart it with: main-hab up ${service} (24906)`,
+  }
+}
+
+/** The owner gate at a socket: no sidecar means nothing ever bound it, which allows silently. */
+export function evaluateSocketOwnerForSocket(socketPath: string, binderOwner: SocketOwner): SpawnSourceDecision {
+  const sidecar = readPinSidecar(socketPath)
+  if (!sidecar) return { allow: true, reason: null }
+  return evaluateSocketOwner({ lastOwner: sidecar.owner, binderOwner })
+}
+
+/**
+ * A client hab launched never starts a daemon for the socket hab handed it
+ * (TRIBE_SOCKET): hab owns that daemon and brings it back. Scoped to hab's
+ * socket and to a caller carrying every hab launch marker.
+ */
+export function evaluateHabLaunchedClient(input: {
+  env: Readonly<NodeJS.ProcessEnv>
+  socketPath: string
+}): SpawnSourceDecision {
+  const { env, socketPath } = input
+  const handed = env.TRIBE_SOCKET?.trim()
+  if (!handed || resolve(handed) !== resolve(socketPath)) return { allow: true, reason: null }
+  if (!HAB_SESSION_MARKERS.every((name) => env[name]?.trim())) return { allow: true, reason: null }
+  return {
+    allow: false,
+    reason: `this process was launched by hab (habitat ${env.HAB_SESSION_HABITAT_ROOT}), which owns the daemon for ${socketPath} — not starting one here; restart it with: main-hab up wire (24906)`,
   }
 }
 

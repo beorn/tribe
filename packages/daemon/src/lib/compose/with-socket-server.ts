@@ -23,7 +23,12 @@ import { createServer, type Server } from "node:net"
 import { existsSync, unlinkSync, chmodSync } from "node:fs"
 import { createLogger } from "loggily"
 import { waitForSocketAlive } from "tribe-wire/lib/socket"
-import { evaluateSpawnSourceForTree, writePinSidecar } from "tribe-wire/lib/spawn-pin-gate"
+import {
+  evaluateSocketOwnerForSocket,
+  evaluateSpawnSourceForTree,
+  socketOwnerForBinder,
+  writePinSidecar,
+} from "tribe-wire/lib/spawn-pin-gate"
 import { STARTUP_SHA } from "../code-pin.ts"
 import type { BaseTribe } from "./base.ts"
 import type { WithBroadcast } from "./with-broadcast.ts"
@@ -139,6 +144,13 @@ export function withSocketServer<T extends BaseTribe & WithBroadcast & WithConfi
         throw new Error(`refusing to bind ${socketPath}: ${pinGate.reason}`)
       }
       if (pinGate.reason) log.warn?.(pinGate.reason)
+      // 24906 — the daemon's own door of the owner gate: a binder outside hab
+      // refuses a socket hab owned last; hab's own binder always proceeds.
+      const ownerGate = evaluateSocketOwnerForSocket(socketPath, socketOwnerForBinder(process.env))
+      if (!ownerGate.allow) {
+        throw new Error(`refusing to bind ${socketPath}: ${ownerGate.reason}`)
+      }
+      if (ownerGate.reason) log.warn?.(ownerGate.reason)
       server = createServer()
       server.once("error", onBindError)
       server.listen(socketPath, () => {

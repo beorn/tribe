@@ -110,8 +110,10 @@ describe("standalone daemon lifecycle ownership", () => {
         const status = (await current.call("cli_daemon")) as { pid?: number }
         if (typeof status.pid === "number") {
           daemonPids.add(status.pid)
+          // A daemon a test spawned directly has this worker as its parent;
+          // terminating that "owner" kills vitest's own worker mid-run.
           const ppid = parentPid(status.pid)
-          if (ppid > 1) ownerPids.add(ppid)
+          if (ppid > 1 && ppid !== process.pid) ownerPids.add(ppid)
         }
         current.close()
       } catch {
@@ -386,7 +388,9 @@ try {
     )
     const child = spawn(BUN_BIN, [attempt], { cwd: tmpDir, env, stdio: "ignore" })
     const exitCode = await new Promise<number | null>((resolveExit) => child.once("exit", resolveExit))
-    expect(existsSync(resultPath), `the client attempt exited ${String(exitCode)} without recording a result`).toBe(true)
+    expect(existsSync(resultPath), `the client attempt exited ${String(exitCode)} without recording a result`).toBe(
+      true,
+    )
     return JSON.parse(readFileSync(resultPath, "utf8")) as { connected: boolean; detail: string }
   }
 
@@ -432,7 +436,11 @@ try {
     const dbPath = join(tmpDir, "door.db")
     await bindThenStop(habServiceEnv(), dbPath)
 
-    const outsider = spawn(BUN_BIN, daemonArgs(dbPath), { cwd: tmpDir, env: clientEnv(), stdio: ["ignore", "pipe", "pipe"] })
+    const outsider = spawn(BUN_BIN, daemonArgs(dbPath), {
+      cwd: tmpDir,
+      env: clientEnv(),
+      stdio: ["ignore", "pipe", "pipe"],
+    })
     daemonPids.add(outsider.pid!)
     let outsiderOutput = ""
     outsider.stdout.on("data", (chunk: Buffer | string) => (outsiderOutput += chunk.toString()))

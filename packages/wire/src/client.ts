@@ -21,7 +21,12 @@ import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { createLogger } from "loggily"
 import { createLineParser } from "./parser.ts"
-import { evaluateSpawnSourceForScript } from "./lib/spawn-pin-gate.ts"
+import {
+  evaluateHabLaunchedClient,
+  evaluateSocketOwnerForSocket,
+  evaluateSpawnSourceForScript,
+  socketOwnerForBinder,
+} from "./lib/spawn-pin-gate.ts"
 import { isNotification, isResponse, makeNotification, makeRequest } from "./rpc.ts"
 import { sanitizeStandaloneDaemonEnvironment } from "./daemon-environment.ts"
 import { createTimers } from "./timers.ts"
@@ -439,6 +444,24 @@ async function connectOrStartWithCapability(
     throw Object.assign(new Error(`connectOrStart: ${pinGate.reason}`), { code: "ESTALEPIN" })
   }
   if (pinGate.reason) log.warn?.(pinGate.reason)
+
+  // 24906 — hab restarts the daemon it owns, so a client never starts one in
+  // its place. Both refusals are thrown before any spawn, like ESTALEPIN, so a
+  // reconnecting caller keeps retrying until hab's daemon is back. The daemon
+  // this client would start binds with the sanitized env, so its owner is read
+  // from that env, not from the client's own.
+  const launchGate = evaluateHabLaunchedClient({ env: process.env, socketPath })
+  if (!launchGate.allow) {
+    throw Object.assign(new Error(`connectOrStart: ${launchGate.reason}`), { code: "EHABOWNED" })
+  }
+  const ownerGate = evaluateSocketOwnerForSocket(
+    socketPath,
+    socketOwnerForBinder(sanitizeStandaloneDaemonEnvironment(process.env)),
+  )
+  if (!ownerGate.allow) {
+    throw Object.assign(new Error(`connectOrStart: ${ownerGate.reason}`), { code: "EHABOWNED" })
+  }
+  if (ownerGate.reason) log.warn?.(ownerGate.reason)
 
   const args = ["--socket", socketPath, ...(opts?.daemonArgs ?? [])]
   spawnLifecycleOwnerWithOperatorCapability(script, args, readOperatorCapability)

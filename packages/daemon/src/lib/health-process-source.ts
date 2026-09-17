@@ -1,4 +1,5 @@
 import { dirname, join } from "node:path"
+import { HAB_SESSION_MARKERS } from "../../../wire/src/daemon-environment.ts"
 import {
   BoundedProcessCommandError,
   runBoundedProcessCommand,
@@ -512,18 +513,10 @@ function isCircuitFailure(reason: string): boolean {
   )
 }
 
-/**
- * Variables that prove hab launched this process, WITHOUT proving it is
- * hab-managed. `sanitizeStandaloneDaemonEnvironment` deliberately strips the
- * management markers (`HAB_SESSION_DIR`, `HAB_SERVICE_KIND`, `HAB_SERVICE_NAME`)
- * and leaves these, so these are exactly the evidence that hab is present when
- * the management markers are gone.
- */
-export const HAB_SESSION_MARKERS = [
-  "HAB_SESSION_HABITAT_ROOT",
-  "HAB_SESSION_LAUNCH_ID",
-  "HAB_SESSION_INSTRUCTION_ANCHOR",
-] as const
+// The markers that prove hab launched this process live beside the standalone
+// sanitizer that keeps them true (wire/src/daemon-environment.ts); the client
+// spawn gate reads the same list (24906).
+export { HAB_SESSION_MARKERS }
 
 export function createHealthProcessSource(options: HealthProcessSourceOptions = {}): HealthProcessSource {
   const env = options.env ?? process.env

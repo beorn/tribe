@@ -10,6 +10,20 @@ import { existsSync, fstatSync } from "node:fs"
 import { join } from "node:path"
 import { tribeSessionIdentityEnvironmentNames } from "./launch-environment.ts"
 
+/**
+ * Variables that prove hab launched this process, WITHOUT proving it is
+ * hab-managed. `sanitizeStandaloneDaemonEnvironment` deliberately strips the
+ * management markers (`HAB_SESSION_DIR`, `HAB_SERVICE_KIND`, `HAB_SERVICE_NAME`)
+ * and leaves these, so these are exactly the evidence that hab is present when
+ * the management markers are gone. Defined beside the sanitizer that makes that
+ * true; the daemon's health source and the client spawn gate both read it here.
+ */
+export const HAB_SESSION_MARKERS = [
+  "HAB_SESSION_HABITAT_ROOT",
+  "HAB_SESSION_LAUNCH_ID",
+  "HAB_SESSION_INSTRUCTION_ANCHOR",
+] as const
+
 export const TRIBE_OPERATOR_CAPABILITY_FD_ENV = "TRIBE_OPERATOR_CAPABILITY_FD"
 export const TRIBE_OPERATOR_CAPABILITY_ENV = "TRIBE_OPERATOR_CAPABILITY"
 export const TRIBE_DAEMON_SUPERVISOR_PID_ENV = "TRIBE_DAEMON_SUPERVISOR_PID"

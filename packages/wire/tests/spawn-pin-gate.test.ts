@@ -158,7 +158,10 @@ describe("socket owner — hab's socket is never taken by a standalone daemon (2
   })
 
   test("hab's own binder proceeds, a standalone-owned socket allows silently, and an unknown owner allows loudly", () => {
-    expect(evaluateSocketOwner({ lastOwner: "hab:wire", binderOwner: "hab:wire" })).toEqual({ allow: true, reason: null })
+    expect(evaluateSocketOwner({ lastOwner: "hab:wire", binderOwner: "hab:wire" })).toEqual({
+      allow: true,
+      reason: null,
+    })
     expect(evaluateSocketOwner({ lastOwner: "standalone", binderOwner: "standalone" })).toEqual({
       allow: true,
       reason: null,
