@@ -72,6 +72,7 @@ describe("registerSendCommands", () => {
         "--request",
         "--fanout",
         "--expires-in-ms",
+        "--verbose",
       ]),
     )
     const summaryOpt = cmd!.options.find((o) => o.long === "--summary")
@@ -274,6 +275,122 @@ describe("registerSendCommands", () => {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
       safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
     }
+  })
+
+  test("send verb formats plain one-line error without duplicate prefix and reveals detail on --verbose (24994)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-send-plain-error-"))
+    const socketPath = join(tmp, "tribe.sock")
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as { id: number; method: string }
+          const result =
+            request.method === "cli_inbox_status_by_launch_v1"
+              ? { session: "@dev/7", launch_id: "launch-dev7", launch_parent_pid: 123 }
+              : request.method === "register"
+                ? { name: "@dev/7", role: "member" }
+                : request.method === "tribe.send"
+                  ? {
+                      error: "tribe.send: failed to deliver to @adhoc/1 - not online (last seen 4 mins ago)",
+                      detail:
+                        'resolved owner "@adhoc/1" for recipient "@adhoc/1" at admission snapshot 2026-09-18T16:16:19.223Z: ' +
+                        'mailbox_read_capability.state is unavailable (self-mailbox-authority-missing); a tracked ball promises an answer this mailbox cannot read (24581).',
+                    }
+                  : { error: `unexpected call ${request.method}` }
+          socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`)
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const runSend = (args: string[]) =>
+        new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProcess) => {
+          const child = spawn(
+            BUN_BIN,
+            [CLI, "send", "@adhoc/1", "hello", "--type", "request", "--summary", "ping", ...args],
+            {
+              env: { ...process.env, TRIBE_SOCKET: socketPath, TRIBE_LAUNCH_ID: "launch-dev7" },
+              stdio: ["ignore", "pipe", "pipe"],
+            },
+          )
+          let stdout = ""
+          let stderr = ""
+          child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+          child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+          child.on("close", (code) => resolveProcess({ code, stdout, stderr }))
+        })
+
+      // Default: one line only, no duplicate prefix, no long detail
+      const defaultSend = await runSend([])
+      expect(defaultSend.code).toBe(1)
+      expect(defaultSend.stdout).toBe("")
+      expect(defaultSend.stderr).toBe(
+        "tribe.send: failed to deliver to @adhoc/1 - not online (last seen 4 mins ago)\n",
+      )
+      expect(defaultSend.stderr).not.toContain("tribe-wire send:")
+      expect(defaultSend.stderr).not.toContain("mailbox_read_capability")
+      expect(defaultSend.stderr).not.toContain("24581")
+
+      // --verbose: includes the short line plus detail
+      const verboseSend = await runSend(["--verbose"])
+      expect(verboseSend.code).toBe(1)
+      expect(verboseSend.stdout).toBe("")
+      expect(verboseSend.stderr).toContain(
+        "tribe.send: failed to deliver to @adhoc/1 - not online (last seen 4 mins ago)",
+      )
+      expect(verboseSend.stderr).toContain(
+        'detail: resolved owner "@adhoc/1" for recipient "@adhoc/1" at admission snapshot',
+      )
+      expect(verboseSend.stderr).toContain("self-mailbox-authority-missing")
+      expect(verboseSend.stderr).not.toContain("tribe-wire send:")
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
+    }
+  })
+
+  test("options validation failures output canonical tribe.send: invalid --<opt> shape (24994)", async () => {
+    const runCliRaw = (args: string[]) =>
+      new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProcess) => {
+        const child = spawn(BUN_BIN, [CLI, "send", ...args], {
+          env: { ...process.env },
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+        let stdout = ""
+        let stderr = ""
+        child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+        child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+        child.on("close", (code) => resolveProcess({ code, stdout, stderr }))
+      })
+
+    const invalidType = await runCliRaw(["@chief", "test", "--type", "bogus"])
+    expect(invalidType.code).toBe(2)
+    expect(invalidType.stderr).toContain("tribe.send: invalid --type 'bogus' — expected one of:")
+    expect(invalidType.stderr).not.toContain("tribe-wire send:")
+
+    const invalidDelivery = await runCliRaw(["@chief", "test", "--delivery", "express"])
+    expect(invalidDelivery.code).toBe(2)
+    expect(invalidDelivery.stderr).toContain("tribe.send: invalid --delivery 'express' — expected one of:")
+    expect(invalidDelivery.stderr).not.toContain("tribe-wire send:")
+
+    const secondRecipient = await runCliRaw(["@chief", "@agent/1", "hello world"])
+    expect(secondRecipient.code).toBe(2)
+    expect(secondRecipient.stderr).toContain("tribe.send: invalid recipient - refusing '@agent/1'")
+    expect(secondRecipient.stderr).not.toContain("tribe-wire send:")
   })
 
   test("join verb declares <name> and accepts role, domain, delivery, and json flags", () => {

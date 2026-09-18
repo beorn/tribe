@@ -60,7 +60,7 @@ export function classifyIdentityGrant(
 ): { ok: true } | { ok: false; fatal: boolean; message: string } {
   if (assigned === requested) return { ok: true }
   const who = assigned === undefined || assigned.length === 0 ? "an anonymous session" : `"${assigned}"`
-  const base = `tribe-wire: could not take the identity "${requested}" — the daemon assigned ${who}, because that name is held by a live session.`
+  const base = `tribe.send: delivery refused - could not take identity "${requested}" (assigned ${who}, name held by live session).`
   if (requireIdentity) {
     return {
       ok: false,
@@ -158,6 +158,8 @@ type SendPayloadInput = {
   incident?: string
   /** `--incident-cleared`: the condition no longer holds. */
   incidentCleared?: boolean
+  /** Verbose output on refusal or delivery failure. */
+  verbose?: boolean
 }
 
 type SendPayload = {
@@ -234,7 +236,7 @@ function rejectUnstructuredMessageIntent(input: SendPayloadInput): void {
   const value = intent[2] ?? ""
 
   console.error(
-    `tribe-wire send: message content begins with ${field}=${value}; structured intent must not be encoded as prose.`,
+    `tribe.send: invalid message - message content begins with ${field}=${value}; structured intent must not be encoded as prose.`,
   )
   console.error(`Use --${field} ${value} and remove ${field}=${value} from the message content.`)
   process.exit(2)
@@ -278,10 +280,10 @@ async function resolveSendCaller(reply?: string, anonymous = false): Promise<Sen
     } catch (error) {
       failure = `cannot resolve launch identity ${launchId}: ${error instanceof Error ? error.message : String(error)}`
     }
-    console.error(`tribe-wire send: ${failure}; not sending${reply ? ` --reply ${reply}` : ""}.`)
+    console.error(`tribe.send: delivery refused - ${failure}; not sending${reply ? ` --reply ${reply}` : ""}.`)
     console.error(
       reply
-        ? `A tracked reply must be sent by the ball's owner. Inspect with: tribe pending --owner <owner>`
+        ? "A tracked reply must be sent by the ball's owner. Inspect with: tribe pending --owner <owner>"
         : "Restore the managed seat identity, or pass --anonymous for an intentionally unattributed untracked message.",
     )
     process.exit(1)
@@ -294,7 +296,7 @@ async function resolveSendCaller(reply?: string, anonymous = false): Promise<Sen
   // daemon can attribute the closure (a live holder still dedupes fail-loud, so
   // a running seat is never stolen by a one-shot).
   if (!reply) {
-    console.error("tribe-wire send: no daemon-validated launch identity is available; not sending.")
+    console.error("tribe.send: delivery refused - no daemon-validated launch identity is available; not sending.")
     console.error(
       "Send from a managed Tribe seat, or pass --anonymous for an intentionally unattributed untracked message.",
     )
@@ -303,7 +305,7 @@ async function resolveSendCaller(reply?: string, anonymous = false): Promise<Sen
   const owner = replyOwnerFromEnv()
   if (owner) return { name: owner }
   console.error(
-    `tribe-wire send: --reply ${reply} requires TRIBE_NAME or TRIBE_SESSION_NAME so the one-shot CLI can close the pending owner.`,
+    `tribe.send: invalid options - --reply ${reply} requires TRIBE_NAME or TRIBE_SESSION_NAME so the one-shot CLI can close the pending owner.`,
   )
   console.error(`Example: TRIBE_NAME=@chief tribe send <recipient> --type response --reply ${reply} <message>`)
   console.error(`Inspect ownership first: tribe pending --owner <owner>`)
@@ -455,7 +457,7 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
   rejectUnstructuredMessageIntent(input)
   const oversized = oversizedMessageError(input.message)
   if (oversized !== null) {
-    console.error(`tribe-wire send: ${oversized}`)
+    console.error(oversized)
     process.exit(2)
   }
   const type = input.type ?? "notify"
@@ -469,7 +471,7 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     type === "assign"
   if (input.anonymous && anonymousWouldTrack) {
     console.error(
-      "tribe-wire send: --anonymous is limited to untracked messages; it cannot be combined with reply/request/incident tracking or request, query, or assign types.",
+      "tribe.send: invalid options - --anonymous is limited to untracked messages; it cannot be combined with reply/request/incident tracking or request, query, or assign types.",
     )
     process.exit(2)
   }
@@ -481,6 +483,7 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
 
   const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input), caller, !input.anonymous)) as {
     error?: string
+    detail?: string
     summary?: string
     summary_derived?: boolean
     warning?: string
@@ -495,7 +498,10 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
     }
   }
   if (typeof result.error === "string" && result.error.length > 0) {
-    console.error(`tribe-wire send: ${result.error}`)
+    console.error(result.error)
+    if (input.verbose && typeof result.detail === "string" && result.detail.length > 0) {
+      console.error(`  detail: ${result.detail}`)
+    }
     process.exit(1)
   }
   if (input.reply && caller) reportCommittedReplyTracker(caller.name, input.reply, result.tracker)
@@ -510,7 +516,7 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
       reason.length === 0
     ) {
       console.error(
-        `tribe-wire send: message DELIVERED, but the daemon returned malformed redirect proof for ${input.to}.`,
+        `tribe.send: delivery error - message DELIVERED, but the daemon returned malformed redirect proof for ${input.to}.`,
       )
       console.error("Inspect the recipient mailbox and daemon delivery policy before retrying.")
       process.exit(3)
@@ -540,7 +546,7 @@ async function cmdJoin(
 ): Promise<void> {
   const delivery = opts.delivery ?? "pull"
   if (!(TRIBE_DELIVERY_MODES as readonly string[]).includes(delivery)) {
-    console.error(`tribe-wire join: invalid --delivery '${delivery}' — expected ${TRIBE_DELIVERY_MODES.join("|")}`)
+    console.error(`tribe.join: invalid --delivery '${delivery}' — expected ${TRIBE_DELIVERY_MODES.join("|")}`)
     process.exit(2)
   }
 
@@ -559,7 +565,7 @@ async function cmdJoin(
   }
 
   if (result.error) {
-    console.error(`tribe-wire join: ${result.error}`)
+    console.error(result.error.startsWith("tribe.join:") ? result.error : `tribe.join: failed to join - ${result.error}`)
     process.exit(1)
   }
   if (opts.json) {
@@ -582,7 +588,7 @@ async function cmdAlarmSet(reason: string, opts: { by?: string }): Promise<void>
   const by = opts.by ?? process.env.USER ?? "anonymous"
   const result = (await callDaemon("cli_alarm_set", { reason, by })) as { ok: boolean }
   if (!result.ok) {
-    console.error("tribe alarm: daemon refused")
+    console.error("tribe.alarm: set failed - daemon refused")
     process.exit(1)
   }
   console.log(`ALARM SET — chief tool calls will block until 'tribe alarm-ack' is run.`)
@@ -610,7 +616,7 @@ async function cmdAlarmStatus(opts: { json?: boolean }): Promise<void> {
 async function cmdAlarmAck(): Promise<void> {
   const result = (await callDaemon("cli_alarm_ack")) as { ok: boolean }
   if (!result.ok) {
-    console.error("tribe alarm-ack: daemon refused")
+    console.error("tribe.alarm-ack: clear failed - daemon refused")
     process.exit(1)
   }
   console.log("ALARM CLEARED — chief tool calls unblocked.")
@@ -623,7 +629,7 @@ async function cmdRetro(opts: { since?: string; format: string; db?: string }): 
   // km-tribe.decouple-db-location migration.
   const dbPath = opts.db ?? resolveDbPathFromCli()
   if (!existsSync(dbPath)) {
-    console.error(`No tribe database found at ${dbPath}`)
+    console.error(`tribe.retro: database missing - no tribe database found at ${dbPath}`)
     process.exit(1)
   }
 
@@ -672,6 +678,7 @@ export function registerSendCommands(program: Command): void {
   const sendExpiresInMs = cliOption(SEND_CLI, "expires-in-ms")
   const sendIncident = cliOption(SEND_CLI, "incident")
   const sendIncidentCleared = cliOption(SEND_CLI, "incident-cleared")
+  const sendVerbose = cliOption(SEND_CLI, "verbose")
   program
     .command(SEND_CLI.name)
     .description(SEND_CLI.description)
@@ -689,6 +696,7 @@ export function registerSendCommands(program: Command): void {
     .option(sendExpiresInMs.flags, sendExpiresInMs.description)
     .option(sendIncident.flags, sendIncident.description)
     .option(sendIncidentCleared.flags, sendIncidentCleared.description)
+    .option(sendVerbose.flags, sendVerbose.description)
     .action(
       (
         to: string,
@@ -706,12 +714,13 @@ export function registerSendCommands(program: Command): void {
           expiresInMs?: string
           incident?: string
           incidentCleared?: boolean
+          verbose?: boolean
         },
       ) => {
         const type = opts.type ?? "notify"
         if (!(TRIBE_MESSAGE_TYPES as readonly string[]).includes(type)) {
           console.error(
-            `tribe-wire send: invalid --type '${type}' — expected one of: ${TRIBE_MESSAGE_TYPES.join(", ")}`,
+            `tribe.send: invalid --type '${type}' — expected one of: ${TRIBE_MESSAGE_TYPES.join(", ")}`,
           )
           process.exit(2)
         }
@@ -734,7 +743,7 @@ export function registerSendCommands(program: Command): void {
         const swallowedRecipient = message.length > 1 ? (message[0] ?? "") : ""
         if (/^@[A-Za-z0-9_/-]+$/u.test(swallowedRecipient)) {
           console.error(
-            `tribe-wire send: refusing — '${swallowedRecipient}' looks like a second recipient, but this command ` +
+            `tribe.send: invalid recipient - refusing '${swallowedRecipient}' which looks like a second recipient, but this command ` +
               `takes exactly one. It would have been absorbed into the message body and delivered to '${to}' alone, ` +
               `with '${swallowedRecipient}' silently receiving nothing.`,
           )
@@ -749,32 +758,32 @@ export function registerSendCommands(program: Command): void {
         }
         if (opts.delivery !== undefined && !(TRIBE_DELIVERY_MODES as readonly string[]).includes(opts.delivery)) {
           console.error(
-            `tribe-wire send: invalid --delivery '${opts.delivery}' — expected one of: ${TRIBE_DELIVERY_MODES.join(", ")}`,
+            `tribe.send: invalid --delivery '${opts.delivery}' — expected one of: ${TRIBE_DELIVERY_MODES.join(", ")}`,
           )
           process.exit(2)
         }
         if (opts.fanout !== undefined && !(TRIBE_FANOUTS as readonly string[]).includes(opts.fanout)) {
           console.error(
-            `tribe-wire send: invalid --fanout '${opts.fanout}' — expected one of: ${TRIBE_FANOUTS.join(", ")}`,
+            `tribe.send: invalid --fanout '${opts.fanout}' — expected one of: ${TRIBE_FANOUTS.join(", ")}`,
           )
           process.exit(2)
         }
         const expiresInMs = opts.expiresInMs === undefined ? undefined : Number(opts.expiresInMs)
         if (expiresInMs !== undefined && !Number.isSafeInteger(expiresInMs)) {
-          console.error(`tribe-wire send: invalid --expires-in-ms '${opts.expiresInMs}' — expected an integer`)
+          console.error(`tribe.send: invalid --expires-in-ms '${opts.expiresInMs}' — expected an integer`)
           process.exit(2)
         }
         // Validated here as well as in buildSendPayload so a malformed key
         // exits 2 with the shape named, rather than surfacing as a stack trace.
         if (opts.incident !== undefined && parseIncidentKey(opts.incident) === null) {
           console.error(
-            `tribe-wire send: invalid --incident '${opts.incident}' — expected emitter${INCIDENT_KEY_SEPARATOR}subject${INCIDENT_KEY_SEPARATOR}condition with all three parts non-empty`,
+            `tribe.send: invalid --incident '${opts.incident}' — expected emitter${INCIDENT_KEY_SEPARATOR}subject${INCIDENT_KEY_SEPARATOR}condition with all three parts non-empty`,
           )
           process.exit(2)
         }
         if (opts.incidentCleared === true && opts.incident === undefined) {
           console.error(
-            "tribe-wire send: --incident-cleared requires --incident <emitter:subject:condition> naming the condition that cleared",
+            "tribe.send: invalid options - --incident-cleared requires --incident <emitter:subject:condition> naming the condition that cleared",
           )
           process.exit(2)
         }
@@ -793,6 +802,7 @@ export function registerSendCommands(program: Command): void {
           expiresInMs,
           incident: opts.incident,
           incidentCleared: opts.incidentCleared,
+          verbose: opts.verbose,
         })
       },
     )

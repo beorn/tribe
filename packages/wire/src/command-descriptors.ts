@@ -398,6 +398,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           flags: "--incident-cleared",
           description: "The condition named by --incident no longer holds: close its ball (no operator verb needed)",
         },
+        {
+          name: "verbose",
+          flags: "-v, --verbose",
+          description: "Emit verbose diagnostic details on refusal or delivery failure",
+        },
       ],
     }),
   },

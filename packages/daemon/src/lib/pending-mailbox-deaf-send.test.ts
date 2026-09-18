@@ -116,8 +116,9 @@ describe("24581: tracked send to mailbox-deaf recipient is refused", () => {
         optsWithLive([liveInfo("sess-telegram", "telegram")]),
       ),
     )
-    expect(String(sent.error ?? "")).toContain("mailbox_read_capability.state is unavailable")
-    expect(String(sent.error ?? "")).toContain("self-mailbox-authority-missing")
+    expect(String(sent.error ?? "")).toContain("tribe.send: failed to deliver to telegram - not online")
+    expect(String(sent.detail ?? "")).toContain("mailbox_read_capability.state is unavailable")
+    expect(String(sent.detail ?? "")).toContain("self-mailbox-authority-missing")
     const remaining = stmts.selectPendingForRecipient.all({ $recipient: "telegram" }) as unknown[]
     expect(remaining).toHaveLength(0)
   })
@@ -179,11 +180,12 @@ describe("24581: tracked send to mailbox-deaf recipient is refused", () => {
     )
     expect(stmts.selectPendingForRecipient.all({ $recipient: "@chief" })).toHaveLength(expectedBalls)
     if (expectedBalls === 0) {
-      expect(sent.error).toContain('"@chief"')
-      expect(sent.error).toContain("mailbox_read_capability.state is unavailable")
-      expect(sent.error).toContain('"@ci"')
-      expect(sent.error).toContain("self-mailbox-authority-missing")
-      expect(sent.error).toContain('Restore mailbox authority for "@chief"')
+      expect(sent.error).toContain("tribe.send: failed to deliver to @ci - not online")
+      expect(sent.detail).toContain('"@chief"')
+      expect(sent.detail).toContain("mailbox_read_capability.state is unavailable")
+      expect(sent.detail).toContain('"@ci"')
+      expect(sent.detail).toContain("self-mailbox-authority-missing")
+      expect(sent.detail).toContain('Restore mailbox authority for "@chief"')
       expect(
         db.prepare("SELECT id FROM messages WHERE kind = 'direct' AND content = ?").get("who holds admission"),
       ).toBeNull()

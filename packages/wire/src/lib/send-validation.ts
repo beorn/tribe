@@ -16,7 +16,7 @@ export function oversizedMessageError(message: string): string | null {
   const byteCount = Buffer.byteLength(message, "utf8")
   const sha256 = createHash("sha256").update(message, "utf8").digest("hex")
   return (
-    `tribe.send rejected before daemon: message is ${byteCount} UTF-8 bytes (${message.length} UTF-16 code units), ` +
+    `tribe.send: message too large - message is ${byteCount} UTF-8 bytes (${message.length} UTF-16 code units), ` +
     `over the ${CLIENT_MESSAGE_MAX_LENGTH}-character cap. Save the exact content to a file and send a file+SHA pointer ` +
     `instead: file:///absolute/path/to/message sha256:${sha256}.`
   )

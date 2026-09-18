@@ -346,13 +346,17 @@ function readLastMailboxReadAt(stmts: TribeContext["stmts"], name: string): numb
 }
 
 function ownerTransportObservationProjector(ctx: TribeContext, opts: HandlerOpts, observedAt: number) {
-  const sessionRows = ctx.db.prepare("SELECT id, name, mailbox_authority_hash, delivery FROM sessions").all() as Array<{
+  const sessionRows = ctx.db
+    .prepare("SELECT id, name, mailbox_authority_hash, delivery, updated_at FROM sessions")
+    .all() as Array<{
     id: string
     name: string
     mailbox_authority_hash: string | null
     delivery: string
+    updated_at: number
   }>
   const knownNames = new Set(sessionRows.map((row) => row.name))
+  const lastSeenByName = new Map(sessionRows.map((row) => [row.name, row.updated_at]))
   const deliveryBySessionId = new Map(sessionRows.map((row) => [row.id, row.delivery]))
   const mailboxDeafNames = new Set<string>()
   const mailboxDeafReasons = new Map<string, MailboxReadCapability["reason"]>()
@@ -458,6 +462,11 @@ function ownerTransportObservationProjector(ctx: TribeContext, opts: HandlerOpts
      * consumer-aware capability.
      */
     liveTransportNames: new Set([...activeByName.keys()].filter((name) => project(name).liveTransport)),
+    lastSeenMin: (name: string): number | null => {
+      const ts = lastSeenByName.get(name)
+      if (typeof ts !== "number") return null
+      return Math.max(0, Math.round((observedAt - ts) / 60_000))
+    },
   }
 }
 
@@ -645,7 +654,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   // message types — coordination authority is an L3 concern, not a daemon one.
   const recipients = normalizeRecipients(a.to)
   if (recipients === null) {
-    return jsonResult({ error: "tribe.send: `to` must be a non-empty string or array of non-empty strings." })
+    return jsonResult({ error: "tribe.send: invalid to - must be a non-empty string or array of non-empty strings" })
   }
   const msgType = (a.type as string) ?? "notify"
   const truncation = sanitizeMessageWithReport(a.message as string)
@@ -654,15 +663,15 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   let delivery: Delivery | undefined
   if (deliveryArg === "push" || deliveryArg === "pull") delivery = deliveryArg
   else if (deliveryArg !== undefined) {
-    return jsonResult({ error: "tribe.send: `delivery` must be 'push' or 'pull' when supplied." })
+    return jsonResult({ error: "tribe.send: invalid delivery - must be 'push' or 'pull'" })
   }
   const messageIdArg = a.message_id
   if (messageIdArg !== undefined && (typeof messageIdArg !== "string" || messageIdArg.trim().length === 0)) {
-    return jsonResult({ error: "tribe.send: `message_id` must be a non-empty client-generated UUID when supplied." })
+    return jsonResult({ error: "tribe.send: invalid message_id - must be a non-empty client-generated UUID" })
   }
   if (messageIdArg !== undefined && Array.isArray(recipients)) {
     return jsonResult({
-      error: "tribe.send: `message_id` is supported for one recipient or broadcast, not a recipient list.",
+      error: "tribe.send: invalid message_id - recipient lists do not support message_id",
     })
   }
   // Ball-tracker fields (@km/tribe/message-ball-tracker Phase 2a): typed
@@ -673,15 +682,15 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   const replyArg = a.reply
   const fanoutArg = a.fanout as "first" | "all" | undefined
   if (requestArg !== undefined && requestArg !== true && typeof requestArg !== "string") {
-    return jsonResult({ error: "tribe.send: `request` must be true or a non-empty string when supplied." })
+    return jsonResult({ error: "tribe.send: invalid request - must be true or a non-empty string" })
   }
   if (typeof requestArg === "string" && requestArg.trim().length === 0) {
-    return jsonResult({ error: "tribe.send: `request` must be true or a non-empty string when supplied." })
+    return jsonResult({ error: "tribe.send: invalid request - must be true or a non-empty string" })
   }
   if (typeof requestArg === "string" && requestArg.trim() === "true") {
     return jsonResult({
       error:
-        'tribe.send: explicit request id "true" is reserved for generated message-id tracking; pass boolean `true` instead.',
+        'tribe.send: invalid request - "true" is reserved for generated tracking, pass boolean true',
     })
   }
   const requestFlag = requestArg === true
@@ -696,7 +705,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       a.expires_in_ms > MAX_BALL_TTL_MS
     ) {
       return jsonResult({
-        error: `tribe.send: \`expires_in_ms\` must be a positive integer no greater than ${MAX_BALL_TTL_MS}.`,
+        error: `tribe.send: invalid expires_in_ms - must be a positive integer no greater than ${MAX_BALL_TTL_MS}`,
       })
     }
     expiresInMs = a.expires_in_ms
@@ -711,32 +720,32 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
       return jsonResult({
         error:
-          "tribe.send: `incident` must be an object {emitter, subject, condition, active?} identifying one live condition.",
+          "tribe.send: invalid incident - must be an object {emitter, subject, condition, active?}",
       })
     }
     const fields = raw as Record<string, unknown>
     for (const field of ["emitter", "subject", "condition"] as const) {
       if (typeof fields[field] !== "string" || (fields[field] as string).trim().length === 0) {
         return jsonResult({
-          error: `tribe.send: \`incident.${field}\` must be a non-empty string; all three of emitter/subject/condition identify the condition and a missing part would merge distinct incidents.`,
+          error: `tribe.send: invalid incident.${field} - must be a non-empty string`,
         })
       }
     }
     if (fields.active !== undefined && typeof fields.active !== "boolean") {
       return jsonResult({
         error:
-          "tribe.send: `incident.active` must be a boolean — omit it (or pass true) while the condition holds, pass false as the clearing edge that closes the ball.",
+          "tribe.send: invalid incident.active - must be a boolean",
       })
     }
     if (requestFlag || requestId !== null) {
       return jsonResult({
-        error: "tribe.send: pass `incident` or `request`, not both — the incident identity IS the tracked request id.",
+        error: "tribe.send: invalid options - pass incident or request, not both",
       })
     }
     if (recipients === "*" || Array.isArray(recipients)) {
       return jsonResult({
         error:
-          "tribe.send: `incident` requires exactly one recipient — an incident is one standing obligation with one owner, and a broadcast owns no ball.",
+          "tribe.send: invalid recipient - incident requires exactly one recipient",
       })
     }
     try {
@@ -744,7 +753,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       // disagree about what a well-formed identity is.
       incidentKey(fields as unknown as IncidentIdentity)
     } catch (error) {
-      return jsonResult({ error: `tribe.send: ${(error as Error).message}` })
+      return jsonResult({ error: `tribe.send: invalid incident - ${(error as Error).message}` })
     }
     incident = {
       emitter: (fields.emitter as string).trim(),
@@ -756,7 +765,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   if (incident !== undefined && a.expires_in_ms !== undefined) {
     return jsonResult({
       error:
-        "tribe.send: `expires_in_ms` cannot be combined with `incident`; an incident is a standing condition cleared only by its emitter, not a reply deadline.",
+        "tribe.send: invalid options - expires_in_ms cannot be combined with incident",
     })
   }
   const sender = ctx.getName()
@@ -770,8 +779,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   if (pairUnrun && (requestFlag || requestId !== null || incident !== undefined)) {
     return jsonResult({
       error:
-        "tribe.send: refusing to open a tracked ball — sender and recipient are both declared expected:false " +
-        "(24588 row 4); an untracked notify still delivers. Names absent from the roster are not unrun seats.",
+        "tribe.send: delivery refused - sender and recipient both declared unrun",
     })
   }
   const willTrack =
@@ -781,14 +789,14 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       (incident !== undefined && incident.active !== false) ||
       (hasImplicitOwner && AUTO_TRACK_TYPES_SET.has(msgType)))
   if (a.expires_in_ms !== undefined && !willTrack) {
-    return jsonResult({ error: "tribe.send: `expires_in_ms` requires a tracked request." })
+    return jsonResult({ error: "tribe.send: invalid options - expires_in_ms requires a tracked request" })
   }
   expiresInMs ??= defaultBallTtlMs(msgType, willTrack)
   const summaryArg = typeof a.summary === "string" ? a.summary.trim() : ""
   const llmSender = ctx.claudeSessionId !== null || ctx.claudeSessionName !== null
   if (llmSender && summaryArg.length === 0) {
     return jsonResult({
-      error: "tribe.send: summary is required for LLM senders; author a one-line summary before sending.",
+      error: "tribe.send: summary required - author a one-line summary before sending",
     })
   }
   // 20316 #3: LLM senders must author the one-line summary up front. Non-LLM
@@ -837,11 +845,13 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
         )
       : undefined
   if (recipients === "*" && broadcastOwners?.length === 0) {
+    const longDetail =
+      `at admission snapshot ${new Date(observedAt).toISOString()}, no answer-capable broadcast owner was observed; ` +
+      "start or resume a recipient, address a declared live holder, or retry later"
     return trackedDeliveryFailure(ctx, {
       recipients: [recipients],
-      reason:
-        `at admission snapshot ${new Date(observedAt).toISOString()}, no answer-capable broadcast owner was observed; ` +
-        "start or resume a recipient, address a declared live holder, or retry later",
+      reason: "failed to deliver to * - no online recipients",
+      detail: longDetail,
       observedAt,
       args: a,
       requestId,
@@ -856,13 +866,18 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       return trackedDeliveryFailure(ctx, {
         recipients: [recipients],
         reason: resolution.reason,
+        detail: resolution.detail,
         observedAt,
         args: a,
         requestId,
       })
     }
+    const shortReason = resolution.reason.startsWith("failed to deliver to")
+      ? resolution.reason
+      : `failed to deliver to ${recipients} - ${resolution.reason}`
     return jsonResult({
-      error: `tribe.send: ${resolution.status} recipient ${JSON.stringify(recipients)}: ${resolution.reason}`,
+      error: `tribe.send: ${shortReason}`,
+      ...(resolution.detail ? { detail: resolution.detail } : {}),
     })
   }
   const result = sendMessage(
@@ -958,17 +973,21 @@ function handleMultiSend(input: {
       explicitlyTracked || (AUTO_TRACK_TYPES_SET.has(input.msgType) && recipient !== input.sender),
     ),
   )
-  if (resolutions instanceof Error) {
+  if (!Array.isArray(resolutions)) {
     if (sharedRequestId !== null) {
       return trackedDeliveryFailure(input.ctx, {
         recipients: input.recipients,
         reason: resolutions.message.replace(/^tribe\.send:\s*/u, ""),
+        detail: resolutions.detail,
         observedAt: input.observedAt,
         args: input.args,
         requestId: sharedRequestId,
       })
     }
-    return jsonResult({ error: resolutions.message })
+    return jsonResult({
+      error: resolutions.message,
+      ...(resolutions.detail ? { detail: resolutions.detail } : {}),
+    })
   }
   const results = resolutions.map(({ recipient, resolution }) => {
     const result = sendMessage(
@@ -1052,15 +1071,20 @@ function resolveDirectDelivery(
   if (transport.mailboxDeafNames.has(resolvedOwner)) {
     const snapshot = transport.observe(resolvedOwner).owner_transport_observed_at
     const reason = transport.mailboxDeafReasons.get(resolvedOwner) ?? "self-mailbox-authority-missing"
+    const lastSeen = transport.lastSeenMin(resolvedOwner)
+    const shortReason =
+      lastSeen !== null ? `not online (last seen ${lastSeen} mins ago)` : "not online (last seen: unknown)"
+    const longDetail =
+      `resolved owner ${JSON.stringify(resolvedOwner)} for recipient ${JSON.stringify(recipient)} ` +
+      `at admission snapshot ${snapshot}: ` +
+      `mailbox_read_capability.state is unavailable (${reason}); a tracked ball promises an answer ` +
+      `this mailbox cannot read. Restore mailbox authority for ${JSON.stringify(resolvedOwner)} ` +
+      "before retrying an answer-required request. Use untracked notify only for a relay notification " +
+      "that needs no answer (24581)."
     return {
       status: "unresolved",
-      reason:
-        `resolved owner ${JSON.stringify(resolvedOwner)} for recipient ${JSON.stringify(recipient)} ` +
-        `at admission snapshot ${snapshot}: ` +
-        `mailbox_read_capability.state is unavailable (${reason}); a tracked ball promises an answer ` +
-        `this mailbox cannot read. Restore mailbox authority for ${JSON.stringify(resolvedOwner)} ` +
-        "before retrying an answer-required request. Use untracked notify only for a relay notification " +
-        "that needs no answer (24581).",
+      reason: `failed to deliver to ${recipient} - ${shortReason}`,
+      detail: longDetail,
     }
   }
   if (resolution.state === "online" && transport.liveTransportNames.has(recipient)) return resolution
@@ -1071,21 +1095,25 @@ function resolveDirectDelivery(
   const snapshot = original.owner_transport_observed_at
   if (resolution.state === "bounced") {
     const fallback = transport.observe(resolution.to)
+    const longDetail =
+      `at admission snapshot ${snapshot}, no connected, PID-live transport was observed for ` +
+      `${JSON.stringify(recipient)}; configured fallback ${JSON.stringify(resolution.to)} also had ` +
+      `no connected, PID-live transport (${fallback.owner_transport_reason}); start or resume ${recipient}, ` +
+      "address a declared live holder, or retry later"
     return {
       status: "unresolved",
-      reason:
-        `at admission snapshot ${snapshot}, no connected, PID-live transport was observed for ` +
-        `${JSON.stringify(recipient)}; configured fallback ${JSON.stringify(resolution.to)} also had ` +
-        `no connected, PID-live transport (${fallback.owner_transport_reason}); start or resume ${recipient}, ` +
-        "address a declared live holder, or retry later",
+      reason: `failed to deliver to ${recipient} - not online (no connected transport)`,
+      detail: longDetail,
     }
   }
+  const longDetail =
+    `at admission snapshot ${snapshot}, no connected, PID-live transport was observed for ` +
+    `${JSON.stringify(recipient)} (${original.owner_transport_reason}); start or resume ${recipient}, ` +
+    "address a declared live holder, or retry later"
   return {
     status: "unresolved",
-    reason:
-      `at admission snapshot ${snapshot}, no connected, PID-live transport was observed for ` +
-      `${JSON.stringify(recipient)} (${original.owner_transport_reason}); start or resume ${recipient}, ` +
-      "address a declared live holder, or retry later",
+    reason: `failed to deliver to ${recipient} - not online (no connected transport)`,
+    detail: longDetail,
   }
 }
 
@@ -1094,6 +1122,7 @@ function trackedDeliveryFailure(
   input: {
     recipients: readonly string[]
     reason: string
+    detail?: string
     observedAt: number
     args: ToolArgs
     requestId: string | null
@@ -1107,27 +1136,41 @@ function trackedDeliveryFailure(
       schema_version: 1,
       recipients: input.recipients,
       reason: input.reason,
+      detail: input.detail ?? input.reason,
       observed_at: input.observedAt,
       ...(input.requestId === null ? {} : { request_id: input.requestId }),
     },
     { sender: ctx.getName(), ref: input.args.ref as string | undefined, ts: input.observedAt },
   )
+  const cleanReason = input.reason.replace(/^tribe\.send:\s*/u, "")
   return jsonResult({
-    error: `tribe.send: ${input.reason}`,
+    error: `tribe.send: ${cleanReason}`,
+    ...(input.detail ? { detail: input.detail } : {}),
     delivery_failure_id: deliveryFailureId,
     observed_at: new Date(input.observedAt).toISOString(),
   })
 }
 
+interface DirectRecipientResolutionFailure {
+  readonly message: string
+  readonly detail?: string
+}
+
 function resolveDirectRecipients(
   recipients: readonly string[],
   resolve: (recipient: string) => DirectDeliveryResolution,
-): ResolvedDirectRecipient[] | Error {
+): ResolvedDirectRecipient[] | DirectRecipientResolutionFailure {
   const resolved: ResolvedDirectRecipient[] = []
   for (const recipient of recipients) {
     const resolution = resolve(recipient)
     if (resolution.status !== "accepted") {
-      return new Error(`tribe.send: ${resolution.status} recipient ${JSON.stringify(recipient)}: ${resolution.reason}`)
+      const shortReason = resolution.reason.startsWith("failed to deliver to")
+        ? resolution.reason
+        : `failed to deliver to ${recipient} - ${resolution.reason}`
+      return {
+        message: `tribe.send: ${shortReason}`,
+        detail: resolution.detail,
+      }
     }
     resolved.push({ recipient, resolution })
   }

@@ -18,10 +18,12 @@ export type DirectDeliveryResolution =
       readonly state: "bounced"
       readonly to: string
       readonly reason: string
+      readonly detail?: string
     }
   | {
       readonly status: "invalid" | "refused" | "unresolved"
       readonly reason: string
+      readonly detail?: string
     }
 
 export interface DirectDeliveryResolutionInput {

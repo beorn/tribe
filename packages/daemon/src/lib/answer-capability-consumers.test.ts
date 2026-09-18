@@ -214,9 +214,8 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
         deliveries.set(seat.name, sent.delivery)
         continue
       }
-      // Refusal is untouched: an unreadable mailbox refuses the tracked ball
-      // (24581) and the untracked notify reports the same reason.
-      expect(String(sent.error), seat.name).toContain("mailbox_read_capability.state is unavailable")
+      expect(String(sent.error), seat.name).toContain(`tribe.send: failed to deliver to ${seat.name} - not online`)
+      expect(String(sent.detail), seat.name).toContain("mailbox_read_capability.state is unavailable")
       stmts.openPendingRequest.run({
         $request_id: `req-${seat.name}`,
         $recipient: seat.name,
