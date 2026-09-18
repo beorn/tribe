@@ -1,5 +1,10 @@
 import { describe, expect, test } from "vitest"
-import { formatCollectedHealthAlert, type HealthAlert } from "./health-monitor-plugin.ts"
+import {
+  createAlertState,
+  formatCollectedHealthAlert,
+  recordAttributionBlindness,
+  type HealthAlert,
+} from "./health-monitor-plugin.ts"
 
 // The incident a reader actually receives when the census could not attribute.
 // @i/1-instruments/24962: today it reports a DESIGNED bound as an unexplained
@@ -25,12 +30,13 @@ function unavailableObservation(reason: string) {
   } as const
 }
 
-function format(reason: string): string {
+function format(reason: string, consecutive = 1): string {
   return formatCollectedHealthAlert(
     cpuCritical(),
     unavailableObservation(reason) as never,
     new Map<number, number>(),
     [],
+    consecutive,
   ).message
 }
 
@@ -70,5 +76,49 @@ describe("an unattributable incident carries its own explanation", () => {
     expect(message).toContain("latest exact process census with owner attribution")
     expect(message).toContain(SESSION_DIR)
     expect(message).toContain(EXCLUDED.join(","))
+  })
+})
+
+describe("the monitor counts its own failure to attribute", () => {
+  // The counting rule, not its rendering. Handing the formatter a number proves
+  // the formatter; this drives the thing that produces the number.
+  test("consecutive unavailable censuses advance the run", () => {
+    const state = createAlertState()
+
+    expect(recordAttributionBlindness(state, { kind: "unavailable" })).toBe(1)
+    expect(recordAttributionBlindness(state, { kind: "unavailable" })).toBe(2)
+    expect(recordAttributionBlindness(state, { kind: "unavailable" })).toBe(3)
+    expect(recordAttributionBlindness(state, { kind: "unavailable" })).toBe(4)
+    expect(state.attributionBlindSamples).toBe(4)
+  })
+
+  test("one successful census clears the run", () => {
+    const state = createAlertState()
+
+    recordAttributionBlindness(state, { kind: "unavailable" })
+    recordAttributionBlindness(state, { kind: "unavailable" })
+    expect(recordAttributionBlindness(state, { kind: "available" })).toBe(0)
+    // and the next failure starts a NEW run rather than resuming the old one
+    expect(recordAttributionBlindness(state, { kind: "unavailable" })).toBe(1)
+  })
+
+  test("a standalone-os census also clears the run", () => {
+    const state = createAlertState()
+
+    recordAttributionBlindness(state, { kind: "unavailable" })
+    expect(recordAttributionBlindness(state, { kind: "standalone-os" })).toBe(0)
+  })
+
+  test("the fourth consecutive failure says so in the incident", () => {
+    // The 2026-09-17 specimen: four for four, each reading as a separate event.
+    expect(format("source-command-timeout", 4)).toContain("failed 4 consecutive samples")
+  })
+
+  test("a first failure does NOT claim a run", () => {
+    // "failed 1 consecutive samples" is noise, and worse, it would make a
+    // transient timeout look like a standing failure.
+    const message = format("source-command-timeout", 1)
+
+    expect(message).not.toMatch(/consecutive samples/)
   })
 })

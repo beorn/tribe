@@ -631,11 +631,37 @@ function censusBoundNote(reason: string): string {
   return `: the ${SYSMON_COMMAND_TIMEOUT_MS / 1000}s census bound fired, which is expected under load`
 }
 
+/**
+ * ONE RULE, ONE PLACE: advance or clear the consecutive-blindness run for a
+ * census, and return the run length.
+ *
+ * This lives here rather than inline in the sample loop because the loop is a
+ * closure no test can drive. Passing a count straight to the formatter would
+ * prove the formatter renders a number and say nothing about whether anything
+ * ever counts one (@i/1-instruments/24962).
+ */
+export function recordAttributionBlindness(
+  state: { attributionBlindSamples: number },
+  observation: { readonly kind: string },
+): number {
+  if (observation.kind === "unavailable") state.attributionBlindSamples++
+  else state.attributionBlindSamples = 0
+  return state.attributionBlindSamples
+}
+
+// A standing failure restated N times reads as N unrelated events unless the
+// restatement carries its own count (@i/1-instruments/24962).
+function consecutiveNote(consecutiveBlindSamples: number): string {
+  if (consecutiveBlindSamples < 2) return ""
+  return `; attribution has now failed ${String(consecutiveBlindSamples)} consecutive samples`
+}
+
 export function formatCollectedHealthAlert(
   alert: Pick<HealthAlert, "type" | "message" | "topOffenders">,
   observation: CollectedProcessObservation,
   pidToParent: Map<number, number>,
   sessions: HealthSession[],
+  consecutiveBlindSamples = 1,
 ): { message: string; attributedSessions: Set<string>; hasUnattributed: boolean } {
   if (observation.kind === "standalone-os") return formatHealthAlertForDelivery(alert, pidToParent, sessions)
   if (observation.kind === "available") return formatCanonicalHealthAlertForDelivery(alert, observation)
@@ -645,7 +671,7 @@ export function formatCollectedHealthAlert(
   return {
     attributedSessions: new Set<string>(),
     hasUnattributed: true,
-    message: `${alert.message}. process attribution unavailable (${observation.reason})${censusBoundNote(observation.reason)}; run \`${byHand}\` to attribute by hand; queried ${observation.diagnostic.query} in ${observation.diagnostic.location}; excluded ${observation.diagnostic.excluded.join(",")}`,
+    message: `${alert.message}. process attribution unavailable (${observation.reason})${censusBoundNote(observation.reason)}${consecutiveNote(consecutiveBlindSamples)}; run \`${byHand}\` to attribute by hand; queried ${observation.diagnostic.query} in ${observation.diagnostic.location}; excluded ${observation.diagnostic.excluded.join(",")}`,
   }
 }
 
@@ -997,6 +1023,18 @@ export interface AlertState {
    * their shells with no warning (@i/4-supervision/24233).
    */
   scalarBlindSamples: number
+  /**
+   * Consecutive samples whose process census could not attribute.
+   *
+   * The same shape one level up: the monitor cannot attribute the load, and
+   * without this nothing attributes the monitor's own failure to attribute.
+   * Four incidents on 2026-09-17 each reported `source-command-timeout` and
+   * each read as a separate event, so the fourth restatement carried no more
+   * information than the first. A count is what separates a transient timeout
+   * from a mechanism that has never once worked under load
+   * (@i/1-instruments/24962).
+   */
+  attributionBlindSamples: number
   /** Track which alerts have been fired to avoid repeating */
   firedAlerts: Set<string>
   /** Per-alert last-fire timestamps (used by rate-limited alerts like chief:expired) */
@@ -1023,6 +1061,7 @@ export function createAlertState(): AlertState {
     memAboveWarning: 0,
     ioAboveWarning: 0,
     scalarBlindSamples: 0,
+    attributionBlindSamples: 0,
     firedAlerts: new Set(),
     firedAt: new Map(),
     gitLockDetected: false,
@@ -2166,8 +2205,13 @@ export const healthMonitorPlugin: TribePluginApi = {
         const scalarFact = scalarFactIdentity(metrics.scalarObservation)
         const alerts = evaluateAlerts(metrics, thresholds, alertState, activeAgentCount)
 
+        // Count the blindness once per SAMPLE, not once per alert: two alerts
+        // in one census are one failure to attribute, not two
+        // (@i/1-instruments/24962).
+        const blindRun = recordAttributionBlindness(alertState, processObservation)
+
         for (const alert of alerts) {
-          const formatted = formatCollectedHealthAlert(alert, processObservation, pidToParent, sessions)
+          const formatted = formatCollectedHealthAlert(alert, processObservation, pidToParent, sessions, blindRun)
           log.info?.(`alert: ${formatted.message}`)
           deliverHealthAlert(
             api,
