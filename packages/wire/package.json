@@ -33,6 +33,10 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./launch-environment": "./src/launch-environment.ts",
+    "./client": "./src/barrels/client.ts",
+    "./trust": "./src/trust.ts",
+    "./records": "./src/barrels/records.ts",
     "./cli": "./src/cli.ts",
     "./stdio": "./src/stdio-adapter.ts",
     "./lib/socket": "./src/lib/socket.ts",
