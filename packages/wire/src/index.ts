@@ -6,8 +6,13 @@
  * deadline-bounded call, and composition primitives (pipe, Scope, tool
  * registry).
  *
- * Consumers (tribe daemon, lore plugin, MCP proxy, agent shells) import
- * from here instead of duplicating the wire protocol per package.
+ * THIS ROOT BARREL IS FOR `vendor/tribe`'s OWN packages and tests. Outside it,
+ * import the narrowest sub-barrel instead — `tribe-wire/launch-environment`,
+ * `tribe-wire/client`, `tribe-wire/trust` or `tribe-wire/records` — because one
+ * import of this file makes the consumer a graph dependent of all 30 modules.
+ * Measured in 24905: every file in this package selected the same ~785 test
+ * files, so the package was atomic to `vitest related`. An oxlint
+ * `no-restricted-imports` entry enforces it (24965).
  */
 
 // JSON-RPC wire protocol
@@ -25,35 +30,35 @@ export type {
   DaemonClient,
   ReconnectingClientOpts,
   StandaloneDaemonSupervisorOpts,
-} from "./client.ts"
+} from "./barrels/client.ts"
 export {
   connectOrStart,
   connectToDaemon,
   createReconnectingClient,
   isSocketAlive,
   spawnStandaloneDaemonSupervisor,
-} from "./client.ts"
+} from "./barrels/client.ts"
 
 // Deadline-bounded call (hook-friendly)
-export type { DaemonCallOutcome, WithDaemonCallOpts } from "./util.ts"
-export { withDaemonCall } from "./util.ts"
+export type { DaemonCallOutcome, WithDaemonCallOpts } from "./barrels/client.ts"
+export { withDaemonCall } from "./barrels/client.ts"
 
 // Socket path discovery
-export { resolvePeerSocketPath, resolveSocketPath } from "./paths.ts"
+export { resolvePeerSocketPath, resolveSocketPath } from "./barrels/client.ts"
 
 // Process-boundary projection for a neutral launchId. Tribe owns its private
 // environment representation; launchers pass only the structural value.
-export type { TribeLaunchEnvironment } from "./launch-environment.ts"
+export type { TribeLaunchEnvironment } from "./barrels/client.ts"
 export {
   projectTribeLaunchEnvironment,
   readTribeLaunchId,
   tribeLaunchEnvironmentNames,
   tribeSessionIdentityEnvironmentNames,
   withTribeLaunchEnvironment,
-} from "./launch-environment.ts"
+} from "./barrels/client.ts"
 
 // Reaper-exempt markers — exempt a PID from the health-reaper auto-kill (gap 1)
-export type { ReaperExemptEntry } from "./reaper-exempt.ts"
+export type { ReaperExemptEntry } from "./barrels/records.ts"
 export {
   clearReaperExempt,
   isReaperExempt,
@@ -61,7 +66,7 @@ export {
   reaperExemptMarkerPath,
   resolveReaperExemptDir,
   setReaperExempt,
-} from "./reaper-exempt.ts"
+} from "./barrels/records.ts"
 
 // Topic trust registry
 export type { SessionRoster, SessionRosterEntry, TopicGlob, TrustTier } from "./trust.ts"
@@ -83,7 +88,7 @@ export type { StartTribeHttpMcpServerOptions, TribeHttpMcpServer } from "./http-
 export { startTribeHttpMcpServer } from "./http-adapter.ts"
 
 // Join delivery resolution (require-join-before-push contract, c6071f3 + 333193c).
-export { resolveJoinDelivery } from "./lib/delivery.ts"
+export { resolveJoinDelivery } from "./barrels/records.ts"
 
 // Pending-ball deadline and settlement replay facts. The daemon and wire
 // reports share this parser so malformed evidence cannot mean different things
@@ -98,7 +103,7 @@ export {
   type BallOutcomeFactRow,
   type BallSettlementFact,
   type BallSettlementReason,
-} from "./lib/ball-outcome.ts"
+} from "./barrels/records.ts"
 
 // One-ball-per-incident identity, shared by the CLI (which parses the
 // `--incident` key) and the daemon (which keys the ball on it). One
@@ -110,7 +115,7 @@ export {
   isIncidentKey,
   INCIDENT_KEY_SEPARATOR,
   type IncidentIdentity,
-} from "./lib/incident.ts"
+} from "./barrels/records.ts"
 
 // Inbox-wait option parsing shared by CLI and MCP/raw daemon call paths.
 export type {
@@ -122,7 +127,7 @@ export type {
   InboxWaitResult,
   InboxWaitTerminalStatus,
   InboxWaitToolResult,
-} from "./lib/inbox-wait-options.ts"
+} from "./barrels/records.ts"
 export {
   DEFAULT_INBOX_WAIT_SESSION,
   DEFAULT_INBOX_WAIT_TIMEOUT_MS,
@@ -134,7 +139,7 @@ export {
   inboxWaitHostCutResult,
   parseInboxWaitTimeoutMs,
   resolveInboxWaitOptions,
-} from "./lib/inbox-wait-options.ts"
+} from "./barrels/records.ts"
 
 // Command descriptors - source of truth for MCP/CLI/help/future UI projection.
 export type {
@@ -147,7 +152,7 @@ export type {
   TribeFanout,
   TribeMcpTool,
   TribeMessageType,
-} from "./command-descriptors.ts"
+} from "./barrels/records.ts"
 export {
   TRIBE_COMMAND_DESCRIPTORS,
   TRIBE_DELIVERY_MODES,
@@ -157,12 +162,12 @@ export {
   cliOption,
   commandDescriptorByMcpName,
   visibleCliProjectionForMcp,
-} from "./command-descriptors.ts"
+} from "./barrels/records.ts"
 
 // Runtime identity — `<version>+<sha>` for `tribe-wire --version` + daemon startup
 // (@km/infra/20359, vendor-local; mirrors code-pin's running-code visibility).
-export { formatRuntimeId, gitShortHead, tribeWireRuntimeId, wireVersion } from "./runtime-id.ts"
+export { formatRuntimeId, gitShortHead, tribeWireRuntimeId, wireVersion } from "./barrels/records.ts"
 export { deriveTribePersonaLaunchIdentity, type TribePersonaLaunchIdentity } from "./lib/persona-launch-identity.ts"
 
-export { connectTribeLaunch } from "./launch-registration.ts"
-export type { TribeLaunchRequest, TribeLaunchConnection, TribeLaunchDeps } from "./launch-registration.ts"
+export { connectTribeLaunch } from "./barrels/client.ts"
+export type { TribeLaunchRequest, TribeLaunchConnection, TribeLaunchDeps } from "./barrels/client.ts"
