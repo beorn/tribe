@@ -419,11 +419,12 @@ describe("generic direct-message delivery resolution", () => {
     )
 
     expect(refused).toMatchObject({
-      error: expect.stringContaining('no connected, PID-live transport was observed for "@ci"'),
+      error: "tribe.send: failed to deliver to @ci - not online (no connected transport)",
       delivery_failure_id: expect.any(String),
       observed_at: expect.any(String),
     })
-    expect(refused.error).toContain("start or resume @ci, address a declared live holder, or retry later")
+    expect(refused.detail).toContain('no connected, PID-live transport was observed for "@ci"')
+    expect(refused.detail).toContain("start or resume @ci, address a declared live holder, or retry later")
     expect(db.prepare("SELECT request_id FROM pending_request WHERE request_id = 'req-offline-ci'").get()).toBeNull()
     expect(
       db.prepare("SELECT id FROM messages WHERE kind = 'direct' AND content = 'run the integration gate'").get(),
@@ -448,9 +449,10 @@ describe("generic direct-message delivery resolution", () => {
       ),
     )
     expect(refusedUnknownPull).toMatchObject({
-      error: expect.stringContaining('"@never-seen" (no-session-record)'),
+      error: "tribe.send: failed to deliver to @never-seen - not online (no connected transport)",
       delivery_failure_id: expect.any(String),
     })
+    expect(refusedUnknownPull.detail).toContain('"@never-seen" (no-session-record)')
     expect(db.prepare("SELECT request_id FROM pending_request WHERE request_id = 'req-unknown-pull'").get()).toBeNull()
 
     const offlineNotice = resultJson(
@@ -533,7 +535,7 @@ describe("generic direct-message delivery resolution", () => {
       ),
     )
 
-    expect(refused.error).toContain('refused recipient "@fleet"')
+    expect(refused.error).toContain("failed to deliver to @fleet")
     expect(refused.error).toContain('"@fleet" is retired; send to successor "@chief"')
     expect(
       db.prepare("SELECT COUNT(*) AS count FROM messages WHERE kind = 'direct' AND content = ?").get(content),
@@ -670,9 +672,10 @@ describe("generic direct-message delivery resolution", () => {
     )
 
     expect(refused).toMatchObject({
-      error: expect.stringContaining('no connected, PID-live transport was observed for "@stale"'),
+      error: "tribe.send: failed to deliver to @stale - not online (no connected transport)",
       delivery_failure_id: expect.any(String),
     })
+    expect(refused.detail).toContain('no connected, PID-live transport was observed for "@stale"')
     expect(db.prepare("SELECT request_id FROM pending_request WHERE request_id = ?").get("req-stale")).toBeNull()
   })
 
@@ -750,8 +753,9 @@ describe("generic direct-message delivery resolution", () => {
       ),
     )
 
-    expect(refused.error).toContain('configured fallback "@dev"')
-    expect(refused.error).toContain("no connected, PID-live transport")
+    expect(refused.error).toBe("tribe.send: failed to deliver to @dev/gone - not online (no connected transport)")
+    expect(refused.detail).toContain('configured fallback "@dev"')
+    expect(refused.detail).toContain("no connected, PID-live transport")
     expect(db.prepare("SELECT request_id FROM pending_request WHERE request_id = 'req-dead-fallback'").get()).toBeNull()
     expect(db.prepare("SELECT id FROM messages WHERE kind = 'direct' AND content = 'do work'").get()).toBeNull()
   })

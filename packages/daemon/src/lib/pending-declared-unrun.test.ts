@@ -159,7 +159,7 @@ describe("24588 row 4: dual expected:false balls do not accrue", () => {
         optsWithRoster(UNRUN),
       ),
     )
-    expect(String(explicit.error ?? "")).toContain("expected:false")
+    expect(String(explicit.error ?? "")).toContain("sender and recipient both declared unrun")
     const auto = parseToolJson(
       handleToolCall(ci, "tribe.send", { to: "@dev/3", message: "work", type: "request" }, optsWithRoster(UNRUN)),
     )
