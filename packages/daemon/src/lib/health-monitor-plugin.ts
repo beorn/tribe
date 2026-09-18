@@ -30,6 +30,7 @@ import { startSingleFlightTicker } from "./single-flight-ticker.ts"
 import type { TribePluginApi, TribeClientApi } from "./plugin-api.ts"
 import {
   createHealthProcessSource,
+  SYSMON_COMMAND_TIMEOUT_MS,
   type CanonicalHostScalarObservation,
   type CanonicalProcessObservation,
   type HealthProcessSource,
@@ -620,7 +621,17 @@ export function formatCanonicalHealthAlertForDelivery(
 
 type CollectedProcessObservation = CanonicalProcessObservation | { readonly kind: "standalone-os" }
 
-function formatCollectedHealthAlert(
+// The census bound is DESIGNED, so an incident that reports it as a bare reason
+// string reports a working mechanism as an unexplained absence. Name the bound
+// and say it is expected — but only for the reason that actually is the bound,
+// or the note becomes a louder lie than the silence it replaces
+// (@i/1-instruments/24962).
+function censusBoundNote(reason: string): string {
+  if (reason !== "source-command-timeout") return ""
+  return `: the ${SYSMON_COMMAND_TIMEOUT_MS / 1000}s census bound fired, which is expected under load`
+}
+
+export function formatCollectedHealthAlert(
   alert: Pick<HealthAlert, "type" | "message" | "topOffenders">,
   observation: CollectedProcessObservation,
   pidToParent: Map<number, number>,
@@ -628,10 +639,13 @@ function formatCollectedHealthAlert(
 ): { message: string; attributedSessions: Set<string>; hasUnattributed: boolean } {
   if (observation.kind === "standalone-os") return formatHealthAlertForDelivery(alert, pidToParent, sessions)
   if (observation.kind === "available") return formatCanonicalHealthAlertForDelivery(alert, observation)
+  // An unattributable incident still owes the reader a next move: the same
+  // census, run by hand without the bound (@i/1-instruments/24962).
+  const byHand = `hab sysmon snapshot --state-root ${observation.diagnostic.location}`
   return {
     attributedSessions: new Set<string>(),
     hasUnattributed: true,
-    message: `${alert.message}. process attribution unavailable (${observation.reason}); queried ${observation.diagnostic.query} in ${observation.diagnostic.location}; excluded ${observation.diagnostic.excluded.join(",")}`,
+    message: `${alert.message}. process attribution unavailable (${observation.reason})${censusBoundNote(observation.reason)}; run \`${byHand}\` to attribute by hand; queried ${observation.diagnostic.query} in ${observation.diagnostic.location}; excluded ${observation.diagnostic.excluded.join(",")}`,
   }
 }
 
