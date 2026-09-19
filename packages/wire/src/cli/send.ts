@@ -268,7 +268,7 @@ async function resolveCallerNameHint(): Promise<string | null> {
         return status.session
       }
     } catch {
-      // fall through
+      // silent-fallback-allow: status lookup is best-effort hint; falls through to replyOwnerFromEnv()
     }
   }
   return replyOwnerFromEnv()
@@ -294,7 +294,7 @@ export async function resolveRequestSender(requestId: string, callerName?: strin
       const match = (res.pending ?? []).find((p) => p.request_id === normalizedId || p.message_id === normalizedId)
       if (match?.sender && match.sender.trim().length > 0) return match.sender.trim()
     } catch {
-      // fall through
+      // silent-fallback-allow: caller pending lookup is best-effort; falls through to fleet-wide lookup
     }
   }
 
@@ -312,7 +312,7 @@ export async function resolveRequestSender(requestId: string, callerName?: strin
       }
     }
   } catch {
-    // fall through
+    // silent-fallback-allow: fleet active pending lookup is best-effort; falls through to expired lookup
   }
 
   // 3. Check fleet-wide expired pending requests
@@ -329,7 +329,7 @@ export async function resolveRequestSender(requestId: string, callerName?: strin
       }
     }
   } catch {
-    // fall through
+    // silent-fallback-allow: fleet expired pending lookup is best-effort; falls through to fetch by ID
   }
 
   // 4. Check message history by exact ID via tribe.fetch
@@ -341,7 +341,7 @@ export async function resolveRequestSender(requestId: string, callerName?: strin
     const sender = match?.from ?? match?.sender
     if (sender && sender.trim().length > 0) return sender.trim()
   } catch {
-    // fall through
+    // silent-fallback-allow: history fetch by ID is best-effort; falls through to cli_log
   }
 
   // 5. Check cli_log for references to this request
@@ -353,7 +353,7 @@ export async function resolveRequestSender(requestId: string, callerName?: strin
     const sender = match?.from ?? match?.sender
     if (sender && sender.trim().length > 0) return sender.trim()
   } catch {
-    // fall through
+    // silent-fallback-allow: cli_log lookup is best-effort; returns null if not found
   }
 
   return null
