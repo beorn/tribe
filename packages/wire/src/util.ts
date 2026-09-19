@@ -30,6 +30,7 @@ export async function withDaemonCall<T>(
   const deadline = Date.now() + opts.deadlineMs
   let timeoutHandle: ReturnType<typeof setTimeout> | null = null
   let client: DaemonClient | undefined
+  let timedOut = false
   const closeClient = (): void => {
     const open = client
     client = undefined
@@ -37,9 +38,14 @@ export async function withDaemonCall<T>(
   }
   try {
     const racePromise = (async (): Promise<DaemonCallOutcome<T>> => {
-      client = await connectToDaemon(opts.socketPath, {
+      const connected = await connectToDaemon(opts.socketPath, {
         callTimeoutMs: opts.callTimeoutMs ?? opts.deadlineMs,
       })
+      if (timedOut) {
+        connected.close()
+        return { kind: "timeout" }
+      }
+      client = connected
       try {
         return { kind: "ok", value: await fn(client) }
       } finally {
@@ -49,15 +55,13 @@ export async function withDaemonCall<T>(
     const timeout = new Promise<DaemonCallOutcome<T>>((resolve) => {
       timeoutHandle = setTimeout(
         () => {
+          timedOut = true
           closeClient()
           resolve({ kind: "timeout" })
         },
         Math.max(50, deadline - Date.now()),
       )
     })
-    // Timeout winning the race leaves racePromise running; closing the client
-    // makes fn fail, and that rejection must not become unhandled.
-    void racePromise.catch(() => undefined)
     return await Promise.race([racePromise, timeout])
   } catch (err) {
     closeClient()

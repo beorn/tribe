@@ -17,6 +17,19 @@ import { isRequest, makeNotification, makeResponse } from "../src/rpc.ts"
 import { callTribeTool } from "../src/lib/tool-daemon-call.ts"
 import { withDaemonCall } from "../src/util.ts"
 
+/** Extra connect latency for the late-connect timeout case; other tests keep 0. */
+let connectDelayMs = 0
+vi.mock("../src/client.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/client.ts")>()
+  return {
+    ...actual,
+    connectToDaemon: async (socketPath: string, opts?: ConnectToDaemonOpts) => {
+      if (connectDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, connectDelayMs))
+      return actual.connectToDaemon(socketPath, opts)
+    },
+  }
+})
+
 /** errno-tagged error, like the ones node:net throws on connect failures. */
 function errno(code: string): Error {
   return Object.assign(new Error(code), { code })
@@ -237,6 +250,7 @@ describe("withDaemonCall", () => {
   })
 
   afterEach(() => {
+    connectDelayMs = 0
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
@@ -268,6 +282,29 @@ describe("withDaemonCall", () => {
       expect(lateSend, "fn must not complete a send after timeout returned").toBe(false)
     } finally {
       await new Promise<void>((r) => server.close(() => r()))
+    }
+  }, 10_000)
+
+  it("closes a connection that completes after timeout and never invokes fn", async () => {
+    const sock = join(tmpDir, "late-connect.sock")
+    const { server } = await spawnFakeDaemon(sock)
+    connectDelayMs = 300
+    try {
+      let invoked = 0
+      const outcome = await withDaemonCall({ socketPath: sock, deadlineMs: 80, callTimeoutMs: 5_000 }, async () => {
+        invoked += 1
+        return "fn-ran"
+      })
+      expect(outcome).toEqual({ kind: "timeout" })
+      expect(invoked).toBe(0)
+      const deadline = Date.now() + 500
+      while (invoked === 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 20))
+      }
+      expect(invoked, "late connect must close immediately and never invoke fn").toBe(0)
+    } finally {
+      connectDelayMs = 0
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
     }
   }, 10_000)
 })
