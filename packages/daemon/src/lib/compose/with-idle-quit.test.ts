@@ -28,6 +28,7 @@ beforeEach(() => {
   // These specimens deliberately reach the loud arm/stop diagnostics while
   // asserting the underlying deadline and shutdown state directly.
   vi.spyOn(console, "warn").mockImplementation(() => {})
+  vi.spyOn(console, "error").mockImplementation(() => {})
 })
 
 function makeConfig(overrides: Partial<TribeConfig> = {}): TribeConfig {

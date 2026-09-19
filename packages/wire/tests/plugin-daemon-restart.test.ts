@@ -11,7 +11,7 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { connectToDaemon, type DaemonClient } from "../src/client.ts"
 import { deriveTribePersonaLaunchIdentity } from "../src/lib/persona-launch-identity.ts"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
@@ -199,6 +199,10 @@ describe("Claude plugin daemon-restart self-heal", () => {
       cwd: tmpDir,
       env: {
         ...process.env,
+        HAB_SESSION_HABITAT_ROOT: "",
+        TRIBE_EXPECTED_MEMBERS_FILE: "",
+        TRIBE_EXPECTED_MEMBERS: "",
+        AG_HOST_SESSION_STATE_DIR: "",
         TRIBE_NO_PLUGINS: "1",
         TRIBE_NO_AUTORELOAD: "1",
         DEBUG_LOG: logPath,
@@ -251,7 +255,9 @@ process.exit(await child.exited)
         TRIBE_LAUNCH_ID: opts.launchId,
         ...(opts.claudeSessionId === undefined ? {} : { CLAUDE_SESSION_ID: opts.claudeSessionId }),
         ...(opts.sessionAuth === undefined ? {} : { AG_SESSION_AUTH: opts.sessionAuth }),
-        ...(opts.launchStateDir === undefined ? {} : { AG_HOST_SESSION_STATE_DIR: opts.launchStateDir }),
+        ...(opts.launchStateDir === undefined
+          ? { AG_HOST_SESSION_STATE_DIR: "" }
+          : { AG_HOST_SESSION_STATE_DIR: opts.launchStateDir }),
         TRIBE_PLUGIN_ADAPTER_CHILD: "",
         ...(opts.providerParentPid === undefined
           ? { TRIBE_PLUGIN_PROVIDER_PARENT_PID: "" }
@@ -438,6 +444,7 @@ process.exit(await child.exited)
   }
 
   beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation(() => {})
     tmpDir = mkdtempSync(join(tmpdir(), "tribe-plugin-restart-"))
     socketPath = join(tmpDir, "tribe.sock")
   })

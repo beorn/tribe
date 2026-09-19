@@ -81,6 +81,10 @@ const BASE_ENV: NodeJS.ProcessEnv = (() => {
   delete env.BD_ACTOR
   delete env.AG_SESSION_AUTH
   delete env.TRIBE_DELIVERY_FALLBACKS
+  delete env.TRIBE_EXPECTED_MEMBERS
+  delete env.TRIBE_EXPECTED_MEMBERS_FILE
+  delete env.HAB_SESSION_HABITAT_ROOT
+  delete env.AG_HOST_SESSION_STATE_DIR
   return env
 })()
 
