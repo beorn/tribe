@@ -22,6 +22,7 @@ import {
   deriveInboxWaitCallTimeoutMs,
   MAX_INBOX_WAIT_TIMEOUT_MS,
   resolveInboxWaitOptions,
+  resolveWaitOptions,
 } from "../src/lib/inbox-wait-options.ts"
 
 function buildProgram(): Command {
@@ -56,6 +57,7 @@ describe("registerReadCommands", () => {
         "inbox-drain",
         "inbox-status",
         "inbox-wait",
+        "wait",
         "restart",
         "repair",
         "activity",
@@ -142,6 +144,14 @@ describe("registerReadCommands", () => {
     expect(cmd).toBeDefined()
     const flags = optionFlags(cmd!)
     expect(flags).toEqual(expect.arrayContaining(["--session", "--timeout", "--json"]))
+  })
+
+  test("wait verb is registered as idle wait alias with 5m default timeout and correlated reply wake", () => {
+    const cmd = findCmd(buildProgram(), "wait")
+    expect(cmd).toBeDefined()
+    expect(cmd!.description()).toMatch(/inbox-wait|actionable inbox activity/i)
+    const flags = optionFlags(cmd!)
+    expect(flags).toEqual(expect.arrayContaining(["--session", "--timeout", "--wake-on-correlated-reply", "--json"]))
   })
 
   test("repair verb accepts the cursor and stale-transport modes", () => {
@@ -240,6 +250,44 @@ describe("resolveInboxWaitOptions", () => {
     expect(resolved.timeoutMs).toBe(MAX_INBOX_WAIT_TIMEOUT_MS)
     expect(deriveInboxWaitCallTimeoutMs(resolved.timeoutMs)).toBe(MAX_INBOX_WAIT_TIMEOUT_MS + 5_000)
     expect(deriveInboxWaitCallTimeoutMs(24 * 60 * 60_000)).toBe(MAX_INBOX_WAIT_TIMEOUT_MS + 5_000)
+  })
+})
+
+describe("resolveWaitOptions", () => {
+  test("defaults to 5m timeout, wakes on correlated reply, and JSON when stdout is not TTY", () => {
+    const nonTty = resolveWaitOptions({}, { defaultSession: "@agent/5", isTTY: false })
+    expect(nonTty).toEqual({
+      session: "@agent/5",
+      timeoutMs: 300_000,
+      wakeOnCorrelatedReply: true,
+      json: true,
+    })
+
+    const tty = resolveWaitOptions({}, { defaultSession: "@agent/5", isTTY: true })
+    expect(tty).toEqual({
+      session: "@agent/5",
+      timeoutMs: 300_000,
+      wakeOnCorrelatedReply: true,
+      json: false,
+    })
+  })
+
+  test("honors explicit flags over defaults", () => {
+    const resolved = resolveWaitOptions(
+      {
+        session: "@dev/8",
+        timeout_ms: "60000",
+        wake_on_correlated_reply: false,
+        json: true,
+      },
+      { defaultSession: "@agent/5", isTTY: true },
+    )
+    expect(resolved).toEqual({
+      session: "@dev/8",
+      timeoutMs: 60_000,
+      wakeOnCorrelatedReply: false,
+      json: true,
+    })
   })
 })
 

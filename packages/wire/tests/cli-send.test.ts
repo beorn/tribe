@@ -15,7 +15,12 @@ import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { buildSendPayload, registerSendCommands } from "../src/cli/send.ts"
+import {
+  buildSendPayload,
+  deriveFirstLineSummary,
+  registerSendCommands,
+  resolveRequestSender,
+} from "../src/cli/send.ts"
 import { AG_SESSION_AUTH_ENV } from "../src/lib/self-mailbox-authority.ts"
 import { oversizedMessageError } from "../src/lib/send-validation.ts"
 import { safeRemoveSync } from "removely"
@@ -52,7 +57,9 @@ describe("registerSendCommands", () => {
   test("registers all send/messaging verbs", () => {
     const program = buildProgram()
     const names = program.commands.map((c) => c.name())
-    expect(names).toEqual(expect.arrayContaining(["send", "join", "alarm", "alarm-status", "alarm-ack", "retro"]))
+    expect(names).toEqual(
+      expect.arrayContaining(["send", "join", "alarm", "alarm-status", "alarm-ack", "retro", "reply", "taking"]),
+    )
   })
 
   test("send verb is registered with description and message/ball-tracker options", () => {
@@ -301,7 +308,7 @@ describe("registerSendCommands", () => {
                       error: "tribe.send: failed to deliver to @adhoc/1 - not online (last seen 4 mins ago)",
                       detail:
                         'resolved owner "@adhoc/1" for recipient "@adhoc/1" at admission snapshot 2026-09-18T16:16:19.223Z: ' +
-                        'mailbox_read_capability.state is unavailable (self-mailbox-authority-missing); a tracked ball promises an answer this mailbox cannot read (24581).',
+                        "mailbox_read_capability.state is unavailable (self-mailbox-authority-missing); a tracked ball promises an answer this mailbox cannot read (24581).",
                     }
                   : { error: `unexpected call ${request.method}` }
           socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`)
@@ -338,9 +345,7 @@ describe("registerSendCommands", () => {
       const defaultSend = await runSend([])
       expect(defaultSend.code).toBe(1)
       expect(defaultSend.stdout).toBe("")
-      expect(defaultSend.stderr).toBe(
-        "tribe.send: failed to deliver to @adhoc/1 - not online (last seen 4 mins ago)\n",
-      )
+      expect(defaultSend.stderr).toBe("tribe.send: failed to deliver to @adhoc/1 - not online (last seen 4 mins ago)\n")
       expect(defaultSend.stderr).not.toContain("tribe-wire send:")
       expect(defaultSend.stderr).not.toContain("mailbox_read_capability")
       expect(defaultSend.stderr).not.toContain("24581")
@@ -1349,6 +1354,13 @@ describe("a second recipient must never be absorbed into the message body", () =
     return new Promise((resolveProcess) => {
       const child = spawn(BUN_BIN, [CLI, ...args], {
         cwd: TEST_ROOT,
+        env: {
+          ...process.env,
+          TRIBE_SOCKET: join(TEST_ROOT, "isolated-test-tribe.sock"),
+          TRIBE_LAUNCH_ID: "",
+          TRIBE_SESSION_NAME: "",
+          TRIBE_NAME: "",
+        },
         stdio: ["ignore", "pipe", "pipe"],
       })
       let stderr = ""
@@ -1358,26 +1370,314 @@ describe("a second recipient must never be absorbed into the message body", () =
   }
 
   test("refuses when the first message word is a bare seat name, naming both recipients", async () => {
-    const res = await runSend(["send", "@cto", "@chief", "the", "actual", "message"])
+    const res = await runSend(["send", "@mock-target", "@mock-swallowed", "the", "actual", "message"])
 
     expect(res.code).toBe(2)
     // Names BOTH, so the reader sees exactly what would have been swallowed.
-    expect(res.stderr).toContain("@cto")
-    expect(res.stderr).toContain("@chief")
+    expect(res.stderr).toContain("@mock-target")
+    expect(res.stderr).toContain("@mock-swallowed")
     // Says what would have happened, not merely that something is invalid.
     expect(res.stderr).toMatch(/message body|absorbed|swallow/iu)
   })
 
   test("does not fire when the message is one quoted argument — the normal correct form", async () => {
-    const res = await runSend(["send", "@cto", "@chief please look at this"])
+    const res = await runSend(["send", "@mock-target", "@mock-swallowed please look at this"])
 
     // May fail later for lack of a daemon; it must NOT fail as a recipient error.
     expect(res.stderr).not.toMatch(/second recipient|absorbed into the message/iu)
   })
 
   test("does not fire on a single-word message that happens to be a seat name", async () => {
-    const res = await runSend(["send", "@cto", "@chief"])
+    const res = await runSend(["send", "@mock-target", "@mock-swallowed"])
 
     expect(res.stderr).not.toMatch(/second recipient|absorbed into the message/iu)
+  })
+})
+
+describe("reply and taking convenience commands (25028)", () => {
+  test("deriveFirstLineSummary extracts the first non-empty trimmed line", () => {
+    expect(deriveFirstLineSummary("simple message")).toBe("simple message")
+    expect(deriveFirstLineSummary("  first line  \nsecond line\nthird line")).toBe("first line")
+    expect(deriveFirstLineSummary("\n\n  first non-empty  \nsecond")).toBe("first non-empty")
+    expect(deriveFirstLineSummary("", "TAKING")).toBe("TAKING")
+    expect(deriveFirstLineSummary("   \n\t  ", "TAKING")).toBe("TAKING")
+  })
+
+  test("reply verb declares <request-id> and <message...> arguments", () => {
+    const cmd = findCmd(buildProgram(), "reply")
+    expect(cmd).toBeDefined()
+    expect(cmd!.description()).toMatch(/settle an open request ball/i)
+    const args =
+      (cmd as unknown as { _args?: Array<{ name: () => string; variadic?: boolean; required?: boolean }> })._args ?? []
+    expect(args.length).toBe(2)
+    expect(args[0]!.name()).toBe("request-id")
+    expect(args[0]!.required).toBe(true)
+    expect(args[1]!.name()).toBe("message")
+    expect(args[1]!.variadic).toBe(true)
+    expect(args[1]!.required).toBe(true)
+    expect(optionFlags(cmd!)).toEqual(expect.arrayContaining(["--summary", "--verbose"]))
+  })
+
+  test("taking verb declares <request-id> and optional [message...] arguments", () => {
+    const cmd = findCmd(buildProgram(), "taking")
+    expect(cmd).toBeDefined()
+    expect(cmd!.description()).toMatch(/acknowledge an open request ball/i)
+    const args =
+      (cmd as unknown as { _args?: Array<{ name: () => string; variadic?: boolean; required?: boolean }> })._args ?? []
+    expect(args.length).toBe(2)
+    expect(args[0]!.name()).toBe("request-id")
+    expect(args[0]!.required).toBe(true)
+    expect(args[1]!.name()).toBe("message")
+    expect(args[1]!.variadic).toBe(true)
+    expect(args[1]!.required).toBe(false)
+    expect(optionFlags(cmd!)).toEqual(expect.arrayContaining(["--summary", "--verbose"]))
+  })
+
+  type MockDaemonOptions = {
+    pendingRows?: Array<{
+      request_id?: string
+      message_id?: string
+      recipient?: string
+      sender?: string
+      status?: string
+      summary?: string
+    }>
+    fleetPendingRows?: Array<{
+      request_id?: string
+      message_id?: string
+      recipient?: string
+      sender?: string
+      status?: string
+      summary?: string
+    }>
+    expiredRows?: Array<{
+      request_id?: string
+      message_id?: string
+      recipient?: string
+      sender?: string
+      status?: string
+      summary?: string
+    }>
+    fetchEvents?: Array<{ id?: string; from?: string; sender?: string; recipient?: string; content?: string }>
+  }
+
+  async function runMockDaemon(
+    args: string[],
+    opts: MockDaemonOptions = {},
+  ): Promise<{ code: number | null; stdout: string; stderr: string; sent: Array<Record<string, unknown>> }> {
+    const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-reply-taking-"))
+    const socketPath = join(tmp, "tribe.sock")
+    const sent: Array<Record<string, unknown>> = []
+
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as { id: number; method: string; params?: Record<string, unknown> }
+          let result: unknown
+          if (request.method === "cli_inbox_status_by_launch_v1") {
+            result = { session: "@dev/8", launch_id: "launch-25028", launch_parent_pid: 1234 }
+          } else if (request.method === "register") {
+            result = { name: (request.params?.name as string) ?? "@dev/8", role: "member" }
+          } else if (request.method === "tribe.pending") {
+            const p = request.params ?? {}
+            if (p.expired) {
+              result = {
+                content: [
+                  {
+                    text: JSON.stringify({
+                      all: true,
+                      expired: true,
+                      pending: opts.expiredRows ?? [],
+                    }),
+                  },
+                ],
+              }
+            } else if (p.all) {
+              result = {
+                content: [
+                  {
+                    text: JSON.stringify({
+                      all: true,
+                      count: (opts.fleetPendingRows ?? []).length,
+                      owners: [{ owner: "@dev/8", pending: opts.fleetPendingRows ?? [] }],
+                      pending: opts.fleetPendingRows ?? [],
+                    }),
+                  },
+                ],
+              }
+            } else {
+              result = {
+                content: [
+                  {
+                    text: JSON.stringify({
+                      owner: (p.owner as string) ?? "@dev/8",
+                      count: (opts.pendingRows ?? []).length,
+                      pending: opts.pendingRows ?? [],
+                    }),
+                  },
+                ],
+              }
+            }
+          } else if (request.method === "tribe.fetch") {
+            result = {
+              content: [
+                {
+                  text: JSON.stringify({
+                    events: opts.fetchEvents ?? [],
+                  }),
+                },
+              ],
+            }
+          } else if (request.method === "cli_log") {
+            result = { messages: [] }
+          } else if (request.method === "tribe.send") {
+            sent.push(request.params ?? {})
+            const reply = request.params?.reply as string | undefined
+            result = {
+              sent: true,
+              tracker: reply ? { request_id: reply, closed: 1 } : undefined,
+            }
+          } else {
+            result = { error: `unexpected call ${request.method}` }
+          }
+          socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`)
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+
+      const outcome = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProc) => {
+        const child = spawn(BUN_BIN, [CLI, ...args], {
+          env: {
+            ...process.env,
+            TRIBE_SOCKET: socketPath,
+            TRIBE_SESSION_NAME: "@dev/8",
+            TRIBE_LAUNCH_ID: "launch-25028",
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+        let stdout = ""
+        let stderr = ""
+        child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+        child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+        child.on("close", (code) => resolveProc({ code, stdout, stderr }))
+      })
+
+      return { ...outcome, sent }
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
+    }
+  }
+
+  test("tribe reply settles a ball with type response, --reply, and derived summary", async () => {
+    const res = await runMockDaemon(["reply", "req-ball-1", "Done and verified green\nDetails here"], {
+      pendingRows: [
+        {
+          request_id: "req-ball-1",
+          recipient: "@dev/8",
+          sender: "@mock-requester",
+          summary: "need review",
+          status: "active",
+        },
+      ],
+    })
+
+    expect(res.code).toBe(0)
+    expect(res.stdout).toContain("Sent message to @mock-requester")
+    expect(res.stdout).toContain("Closed 1 pending request row(s) for @dev/8: req-ball-1")
+    expect(res.sent.length).toBe(1)
+    expect(res.sent[0]).toMatchObject({
+      to: "@mock-requester",
+      type: "response",
+      reply: "req-ball-1",
+      message: "Done and verified green\nDetails here",
+      summary: "Done and verified green",
+    })
+  })
+
+  test("tribe reply refuses when message is missing", async () => {
+    const res = await runMockDaemon(["reply", "req-ball-1"])
+    expect(res.code).not.toBe(0)
+    expect(res.stderr).toMatch(/missing required argument/i)
+  })
+
+  test("tribe reply fails loudly when request id cannot be resolved", async () => {
+    const res = await runMockDaemon(["reply", "req-unknown", "some answer"], { pendingRows: [] })
+    expect(res.code).toBe(1)
+    expect(res.stderr).toContain("cannot resolve sender for request 'req-unknown'")
+    expect(res.stderr).toContain("tribe send <recipient> --type response --reply req-unknown")
+  })
+
+  test("tribe taking sends a TAKING status receipt with default message when text is omitted", async () => {
+    const res = await runMockDaemon(["taking", "req-ball-2"], {
+      pendingRows: [
+        {
+          request_id: "req-ball-2",
+          recipient: "@dev/8",
+          sender: "@mock-requester",
+          summary: "please investigate",
+          status: "active",
+        },
+      ],
+    })
+
+    expect(res.code).toBe(0)
+    expect(res.stdout).toContain("Sent message to @mock-requester")
+    expect(res.sent.length).toBe(1)
+    expect(res.sent[0]).toMatchObject({
+      to: "@mock-requester",
+      type: "status",
+      ref: "req-ball-2",
+      message: "TAKING",
+      summary: "TAKING",
+    })
+  })
+
+  test("tribe taking sends a TAKING status receipt with provided message and derived summary", async () => {
+    const res = await runMockDaemon(["taking", "req-ball-2", "TAKING — working on the fix", "extra detail"], {
+      pendingRows: [
+        {
+          request_id: "req-ball-2",
+          recipient: "@dev/8",
+          sender: "@mock-requester",
+          summary: "please investigate",
+          status: "active",
+        },
+      ],
+    })
+
+    expect(res.code).toBe(0)
+    expect(res.stdout).toContain("Sent message to @mock-requester")
+    expect(res.sent.length).toBe(1)
+    expect(res.sent[0]).toMatchObject({
+      to: "@mock-requester",
+      type: "status",
+      ref: "req-ball-2",
+      message: "TAKING — working on the fix extra detail",
+      summary: "TAKING — working on the fix extra detail",
+    })
+  })
+
+  test("tribe taking fails loudly when request id cannot be resolved", async () => {
+    const res = await runMockDaemon(["taking", "req-unknown"], { pendingRows: [] })
+    expect(res.code).toBe(1)
+    expect(res.stderr).toContain("cannot resolve sender for request 'req-unknown'")
+    expect(res.stderr).toContain("tribe send <recipient> --type status --ref req-unknown")
   })
 })

@@ -1,5 +1,6 @@
 export const DEFAULT_INBOX_WAIT_SESSION = "@chief"
 export const DEFAULT_INBOX_WAIT_TIMEOUT_MS = 30_000
+export const DEFAULT_WAIT_TIMEOUT_MS = 5 * 60_000
 export const DEFAULT_MCP_INBOX_WAIT_TIMEOUT_MS = 5_000
 export const MAX_INBOX_WAIT_TIMEOUT_MS = 30 * 60_000
 export const MCP_INBOX_WAIT_HOST_CEILING_MS = 10_000
@@ -168,6 +169,29 @@ export function resolveInboxWaitOptions(
   return {
     session: session ?? DEFAULT_INBOX_WAIT_SESSION,
     ...resolveInboxWaitControls(source),
+  }
+}
+
+export function resolveWaitOptions(
+  source: InboxWaitOptionSource & { readonly json?: unknown },
+  opts: { readonly defaultSession?: string; readonly isTTY?: boolean } = {},
+): InboxWaitOptions & { readonly json: boolean } {
+  const session = typeof source.session === "string" && source.session.length > 0 ? source.session : opts.defaultSession
+  const timeoutRaw = source.timeout_ms ?? source.timeoutMs
+  const timeoutMs =
+    timeoutRaw === undefined
+      ? DEFAULT_WAIT_TIMEOUT_MS
+      : Math.min(MAX_INBOX_WAIT_TIMEOUT_MS, Math.max(0, parseInboxWaitTimeoutMs(timeoutRaw)))
+  const wakeOnCorrelatedReply =
+    source.wake_on_correlated_reply === undefined && source.wakeOnCorrelatedReply === undefined
+      ? true
+      : source.wake_on_correlated_reply === true || source.wakeOnCorrelatedReply === true
+  const json = typeof source.json === "boolean" ? source.json : !(opts.isTTY ?? true)
+  return {
+    session: session ?? DEFAULT_INBOX_WAIT_SESSION,
+    timeoutMs,
+    wakeOnCorrelatedReply,
+    json,
   }
 }
 

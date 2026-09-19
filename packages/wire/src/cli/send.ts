@@ -222,11 +222,141 @@ type PendingListResult = {
     summary?: string
     status?: string
   }>
+  owners?: Array<{
+    owner?: string
+    pending?: Array<{
+      request_id?: string
+      message_id?: string
+      recipient?: string
+      sender?: string
+      summary?: string
+      status?: string
+    }>
+  }>
+}
+
+/**
+ * Derive a one-line summary from message text (bead 25028).
+ * Takes the first non-empty line (trimmed). Falls back to the provided fallback string.
+ */
+export function deriveFirstLineSummary(message: string, fallback = ""): string {
+  const line =
+    message
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find((l) => l.length > 0) ?? ""
+  return line.length > 0 ? line : fallback
 }
 
 function replyOwnerFromEnv(env: NodeJS.ProcessEnv = process.env): string | null {
   const name = env.TRIBE_SESSION_NAME?.trim() || env.TRIBE_NAME?.trim() || ""
   return name.length > 0 ? name : null
+}
+
+async function resolveCallerNameHint(): Promise<string | null> {
+  const launchId = readTribeLaunchId(process.env)
+  if (launchId) {
+    try {
+      const persona = replyOwnerFromEnv()
+      const status = mcpJsonContent(
+        await callDaemon("cli_inbox_status_by_launch_v1", {
+          launch_id: launchId,
+          ...(persona === null ? {} : { persona }),
+        }),
+      ) as { session?: unknown }
+      if (typeof status.session === "string" && status.session.length > 0) {
+        return status.session
+      }
+    } catch {
+      // fall through
+    }
+  }
+  return replyOwnerFromEnv()
+}
+
+/**
+ * Resolve the sender of a tracked request (bead 25028) by inspecting:
+ * 1. The caller's own pending requests
+ * 2. Fleet-wide active pending requests
+ * 3. Fleet-wide expired pending requests
+ * 4. Message history via tribe.fetch by ID
+ * 5. Recent message log via cli_log
+ */
+export async function resolveRequestSender(requestId: string, callerName?: string | null): Promise<string | null> {
+  const normalizedId = requestId.trim()
+  if (normalizedId.length === 0) return null
+
+  // 1. Check caller's own pending requests
+  const caller = callerName ?? (await resolveCallerNameHint())
+  if (caller) {
+    try {
+      const res = mcpJsonContent(await callDaemon("tribe.pending", { owner: caller })) as PendingListResult
+      const match = (res.pending ?? []).find((p) => p.request_id === normalizedId || p.message_id === normalizedId)
+      if (match?.sender && match.sender.trim().length > 0) return match.sender.trim()
+    } catch {
+      // fall through
+    }
+  }
+
+  // 2. Check fleet-wide active pending requests
+  try {
+    const res = mcpJsonContent(await callDaemon("tribe.pending", { all: true })) as PendingListResult
+    const match = (res.pending ?? []).find((p) => p.request_id === normalizedId || p.message_id === normalizedId)
+    if (match?.sender && match.sender.trim().length > 0) return match.sender.trim()
+    if (res.owners) {
+      for (const group of res.owners) {
+        const groupMatch = (group.pending ?? []).find(
+          (p) => p.request_id === normalizedId || p.message_id === normalizedId,
+        )
+        if (groupMatch?.sender && groupMatch.sender.trim().length > 0) return groupMatch.sender.trim()
+      }
+    }
+  } catch {
+    // fall through
+  }
+
+  // 3. Check fleet-wide expired pending requests
+  try {
+    const res = mcpJsonContent(await callDaemon("tribe.pending", { all: true, expired: true })) as PendingListResult
+    const match = (res.pending ?? []).find((p) => p.request_id === normalizedId || p.message_id === normalizedId)
+    if (match?.sender && match.sender.trim().length > 0) return match.sender.trim()
+    if (res.owners) {
+      for (const group of res.owners) {
+        const groupMatch = (group.pending ?? []).find(
+          (p) => p.request_id === normalizedId || p.message_id === normalizedId,
+        )
+        if (groupMatch?.sender && groupMatch.sender.trim().length > 0) return groupMatch.sender.trim()
+      }
+    }
+  } catch {
+    // fall through
+  }
+
+  // 4. Check message history by exact ID via tribe.fetch
+  try {
+    const res = mcpJsonContent(await callDaemon("tribe.fetch", { ids: [normalizedId], receipt: false })) as {
+      events?: Array<{ id?: string; from?: string; sender?: string }>
+    }
+    const match = (res.events ?? []).find((e) => e.id === normalizedId)
+    const sender = match?.from ?? match?.sender
+    if (sender && sender.trim().length > 0) return sender.trim()
+  } catch {
+    // fall through
+  }
+
+  // 5. Check cli_log for references to this request
+  try {
+    const res = (await callDaemon("cli_log", { ref_prefix: normalizedId })) as {
+      messages?: Array<{ id?: string; from?: string; sender?: string; recipient?: string }>
+    }
+    const match = (res.messages ?? []).find((m) => m.id === normalizedId)
+    const sender = match?.from ?? match?.sender
+    if (sender && sender.trim().length > 0) return sender.trim()
+  } catch {
+    // fall through
+  }
+
+  return null
 }
 
 function rejectUnstructuredMessageIntent(input: SendPayloadInput): void {
@@ -565,7 +695,9 @@ async function cmdJoin(
   }
 
   if (result.error) {
-    console.error(result.error.startsWith("tribe.join:") ? result.error : `tribe.join: failed to join - ${result.error}`)
+    console.error(
+      result.error.startsWith("tribe.join:") ? result.error : `tribe.join: failed to join - ${result.error}`,
+    )
     process.exit(1)
   }
   if (opts.json) {
@@ -654,6 +786,64 @@ async function cmdRetro(opts: { since?: string; format: string; db?: string }): 
   db.close()
 }
 
+async function cmdReply(
+  requestId: string,
+  messageWords: string[],
+  opts: { summary?: string; verbose?: boolean },
+): Promise<void> {
+  const message = messageWords.join(" ")
+  if (message.trim().length === 0) {
+    console.error("tribe.reply: invalid message - message content must not be empty.")
+    process.exit(2)
+  }
+  const caller = await resolveCallerNameHint()
+  const recipient = await resolveRequestSender(requestId, caller)
+  if (!recipient) {
+    console.error(
+      `tribe.reply: cannot resolve sender for request '${requestId}' — request not found in pending tracker or message history.`,
+    )
+    console.error(`Provide the recipient explicitly with:`)
+    console.error(`  tribe send <recipient> --type response --reply ${requestId} <message>`)
+    process.exit(1)
+  }
+  const summary = opts.summary ?? deriveFirstLineSummary(message)
+  await cmdSend({
+    to: recipient,
+    message,
+    type: "response",
+    reply: requestId,
+    summary: summary.length > 0 ? summary : undefined,
+    verbose: opts.verbose,
+  })
+}
+
+async function cmdTaking(
+  requestId: string,
+  messageWords: string[] | undefined,
+  opts: { summary?: string; verbose?: boolean },
+): Promise<void> {
+  const message = messageWords && messageWords.length > 0 ? messageWords.join(" ") : "TAKING"
+  const caller = await resolveCallerNameHint()
+  const recipient = await resolveRequestSender(requestId, caller)
+  if (!recipient) {
+    console.error(
+      `tribe.taking: cannot resolve sender for request '${requestId}' — request not found in pending tracker or message history.`,
+    )
+    console.error(`Provide the recipient explicitly with:`)
+    console.error(`  tribe send <recipient> --type status --ref ${requestId} [message]`)
+    process.exit(1)
+  }
+  const summary = opts.summary ?? deriveFirstLineSummary(message, "TAKING")
+  await cmdSend({
+    to: recipient,
+    message,
+    type: "status",
+    ref: requestId,
+    summary: summary.length > 0 ? summary : "TAKING",
+    verbose: opts.verbose,
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
@@ -719,9 +909,7 @@ export function registerSendCommands(program: Command): void {
       ) => {
         const type = opts.type ?? "notify"
         if (!(TRIBE_MESSAGE_TYPES as readonly string[]).includes(type)) {
-          console.error(
-            `tribe.send: invalid --type '${type}' — expected one of: ${TRIBE_MESSAGE_TYPES.join(", ")}`,
-          )
+          console.error(`tribe.send: invalid --type '${type}' — expected one of: ${TRIBE_MESSAGE_TYPES.join(", ")}`)
           process.exit(2)
         }
         // A SECOND RECIPIENT MUST NEVER BECOME MESSAGE TEXT.
@@ -763,9 +951,7 @@ export function registerSendCommands(program: Command): void {
           process.exit(2)
         }
         if (opts.fanout !== undefined && !(TRIBE_FANOUTS as readonly string[]).includes(opts.fanout)) {
-          console.error(
-            `tribe.send: invalid --fanout '${opts.fanout}' — expected one of: ${TRIBE_FANOUTS.join(", ")}`,
-          )
+          console.error(`tribe.send: invalid --fanout '${opts.fanout}' — expected one of: ${TRIBE_FANOUTS.join(", ")}`)
           process.exit(2)
         }
         const expiresInMs = opts.expiresInMs === undefined ? undefined : Number(opts.expiresInMs)
@@ -805,6 +991,27 @@ export function registerSendCommands(program: Command): void {
           verbose: opts.verbose,
         })
       },
+    )
+
+  program
+    .command("reply <request-id> <message...>")
+    .description("Settle an open request ball — send response to the request's sender")
+    .option("-s, --summary <summary>", "One-line summary for channel attention (default: first line of message)")
+    .option("--verbose", "Verbose output on refusal or delivery failure")
+    .action((requestId: string, message: string[], opts: { summary?: string; verbose?: boolean }) =>
+      cmdReply(requestId, message, opts),
+    )
+
+  program
+    .command("taking <request-id> [message...]")
+    .description("Acknowledge an open request ball — send TAKING status receipt to the request's sender")
+    .option(
+      "-s, --summary <summary>",
+      "One-line summary for channel attention (default: first line of message or 'TAKING')",
+    )
+    .option("--verbose", "Verbose output on refusal or delivery failure")
+    .action((requestId: string, message: string[], opts: { summary?: string; verbose?: boolean }) =>
+      cmdTaking(requestId, message, opts),
     )
 
   const joinName = cliArgument(JOIN_CLI, "name")

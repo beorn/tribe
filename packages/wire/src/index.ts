@@ -126,6 +126,7 @@ export type {
 export {
   DEFAULT_INBOX_WAIT_SESSION,
   DEFAULT_INBOX_WAIT_TIMEOUT_MS,
+  DEFAULT_WAIT_TIMEOUT_MS,
   DEFAULT_MCP_INBOX_WAIT_TIMEOUT_MS,
   MAX_INBOX_WAIT_TIMEOUT_MS,
   MCP_INBOX_WAIT_HOST_CEILING_MS,
@@ -134,6 +135,7 @@ export {
   inboxWaitHostCutResult,
   parseInboxWaitTimeoutMs,
   resolveInboxWaitOptions,
+  resolveWaitOptions,
 } from "./lib/inbox-wait-options.ts"
 
 // Command descriptors - source of truth for MCP/CLI/help/future UI projection.
@@ -166,3 +168,6 @@ export { deriveTribePersonaLaunchIdentity, type TribePersonaLaunchIdentity } fro
 
 export { connectTribeLaunch } from "./launch-registration.ts"
 export type { TribeLaunchRequest, TribeLaunchConnection, TribeLaunchDeps } from "./launch-registration.ts"
+
+// Convenient reply and taking resolution (bead 25028)
+export { deriveFirstLineSummary, resolveRequestSender } from "./cli/send.ts"

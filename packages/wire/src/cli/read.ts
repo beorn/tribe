@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs"
 import { Command, int } from "@silvery/commander"
 import { cliOption, visibleCliProjectionForMcp } from "../command-descriptors.ts"
 import {
+  DEFAULT_WAIT_TIMEOUT_MS,
   deriveInboxWaitCallTimeoutMs,
   parseInboxWaitResult,
   resolveInboxWaitControls,
@@ -1751,7 +1752,9 @@ async function cmdInboxWait(opts: {
   timeoutMs?: number
   wakeOnCorrelatedReply?: boolean
   json?: boolean
+  verb?: string
 }): Promise<void> {
+  const verb = opts.verb ?? "inbox-wait"
   const controls = resolveInboxWaitControls({
     timeout_ms: opts.timeoutMs,
     wake_on_correlated_reply: opts.wakeOnCorrelatedReply,
@@ -1774,7 +1777,7 @@ async function cmdInboxWait(opts: {
     })
   } catch (err) {
     if ((err as { code?: unknown }).code !== INBOX_WAIT_PROTOCOL_MISMATCH) throw err
-    console.error(`tribe inbox-wait: ${(err as Error).message}`)
+    console.error(`tribe ${verb}: ${(err as Error).message}`)
     process.exitCode = 1
     return
   }
@@ -2101,6 +2104,33 @@ export function registerReadCommands(program: Command): void {
         timeoutMs,
         wakeOnCorrelatedReply: opts.wakeOnCorrelatedReply,
         json: opts.json,
+      })
+    })
+
+  program
+    .command("wait")
+    .description(
+      "Wait for actionable inbox activity (alias of inbox-wait with 5m default timeout, wakes on correlated reply, and JSON when stdout is not a terminal)",
+    )
+    .option(inboxWaitSession.flags, inboxWaitSession.description, inboxWaitSession.default)
+    .option(inboxWaitTimeout.flags, inboxWaitTimeout.description, "5m")
+    .option(inboxWaitWakeOnCorrelatedReply.flags, inboxWaitWakeOnCorrelatedReply.description)
+    .option("--no-wake-on-correlated-reply", "Do not wake on a validated reply to caller's own tracked request")
+    .option(inboxWaitJson.flags, inboxWaitJson.description)
+    .action(async (opts: { session?: string; timeout?: string; wakeOnCorrelatedReply?: boolean; json?: boolean }) => {
+      const timeoutMs = opts.timeout ? parseDurationMs(opts.timeout) : DEFAULT_WAIT_TIMEOUT_MS
+      if (opts.timeout && timeoutMs === undefined) {
+        console.error(`tribe wait: bad --timeout '${opts.timeout}' (expected NNs|NNm|NNh)`)
+        process.exit(2)
+      }
+      const json = opts.json ?? !process.stdout.isTTY
+      const wakeOnCorrelatedReply = opts.wakeOnCorrelatedReply ?? true
+      await cmdInboxWait({
+        session: opts.session,
+        timeoutMs,
+        wakeOnCorrelatedReply,
+        json,
+        verb: "wait",
       })
     })
 
