@@ -635,13 +635,16 @@ function managedProcessSource(
     async read() {
       const argv = ["hab", "sysmon", "snapshot", "--state-root", stateRoot, "--max-age-ms", String(maxAgeMs), "--json"]
       const invoked = await invoke(argv)
-      if (!invoked.ok) return unavailable(controllerSessionDir, invoked.reason, invoked.detail)
+      // diagnostic.location is the --state-root the census used (stateRoot),
+      // not the controller session dir. The formatter reprints it as the
+      // manual command (@i/1-instruments/24962).
+      if (!invoked.ok) return unavailable(stateRoot, invoked.reason, invoked.detail)
       const result = invoked.result
       const lines = result.stdout.trim().split("\n").filter(Boolean)
       if (lines.length === 1) {
         try {
           const line = lines[0]
-          if (line === undefined) return unavailable(controllerSessionDir, "source-protocol-invalid")
+          if (line === undefined) return unavailable(stateRoot, "source-protocol-invalid")
           const parsed = parseObservation(JSON.parse(line))
           if (parsed !== undefined && (result.exitCode === 0 || parsed.kind === "unavailable")) return parsed
         } catch {
@@ -650,13 +653,13 @@ function managedProcessSource(
       }
       if (result.exitCode !== 0) {
         return unavailable(
-          controllerSessionDir,
+          stateRoot,
           "source-command-failed",
           `exit=${result.exitCode}${result.stderr.trim() === "" ? "" : ` stderr=${result.stderr.trim()}`}`,
         )
       }
       return unavailable(
-        controllerSessionDir,
+        stateRoot,
         "source-protocol-invalid",
         "command did not emit one valid process-observation/1 row",
       )

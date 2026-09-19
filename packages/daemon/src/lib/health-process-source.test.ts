@@ -305,7 +305,7 @@ describe("neutral health process source", () => {
     await expect(source.read()).resolves.toMatchObject({
       diagnostic: {
         excluded: ["standalone-os-resample", "cross-batch-attribution", "implicit-unowned"],
-        location: "/hab/habmod",
+        location: "/hab",
         query: "latest exact process census with owner attribution",
       },
       kind: "unavailable",
