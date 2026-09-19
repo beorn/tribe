@@ -1544,6 +1544,26 @@ describe("reply and taking convenience commands (25028)", () => {
               sent: true,
               tracker: reply ? { request_id: reply, closed: 1 } : undefined,
             }
+          } else if (request.method === "cli_protocol") {
+            result = { protocol_version: 10 }
+          } else if (request.method === "cli_inbox_wait_by_launch_v1" || request.method === "cli_inbox_wait") {
+            result = {
+              status: "timeout",
+              session: "@dev/8",
+              unread_count: 0,
+              oldest_unread_age_min: 0,
+              oldest_unread_ts: 0,
+              waited_ms: 10,
+              effective_timeout_ms: 10,
+              timed_out: true,
+              aborted: false,
+              baseline_seq: 1,
+              attention: {
+                actionable_unread: [],
+                pending_balls: [],
+                pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
+              },
+            }
           } else {
             result = { error: `unexpected call ${request.method}` }
           }
@@ -1679,5 +1699,87 @@ describe("reply and taking convenience commands (25028)", () => {
     expect(res.code).toBe(1)
     expect(res.stderr).toContain("cannot resolve sender for request 'req-unknown'")
     expect(res.stderr).toContain("tribe send <recipient> --type status --ref req-unknown")
+  })
+
+  test("send, reply, taking, and wait under test cannot reach a live TRIBE_SOCKET inherited from the environment", async () => {
+    const sentinelTmp = mkdtempSync(join(tmpdir(), "tribe-sentinel-socket-"))
+    const sentinelSocketPath = join(sentinelTmp, "live-sentinel.sock")
+    let sentinelConnections = 0
+
+    const sentinelServer = createServer((socket) => {
+      sentinelConnections++
+      socket.destroy()
+    })
+
+    await new Promise<void>((resolveListen, rejectListen) => {
+      sentinelServer.once("error", rejectListen)
+      sentinelServer.listen(sentinelSocketPath, () => {
+        sentinelServer.off("error", rejectListen)
+        resolveListen()
+      })
+    })
+
+    const originalTribeSocket = process.env.TRIBE_SOCKET
+    try {
+      // Set TRIBE_SOCKET to the sentinel path in the parent environment
+      process.env.TRIBE_SOCKET = sentinelSocketPath
+
+      // 1. send under test
+      const sendRes = await runMockDaemon([
+        "send",
+        "@mock-recipient",
+        "test message",
+        "--type",
+        "notify",
+        "--summary",
+        "test send",
+      ])
+      expect(sendRes.code).toBe(0)
+      expect(sendRes.sent).toHaveLength(1)
+      expect(sendRes.sent[0]).toMatchObject({ to: "@mock-recipient", message: "test message" })
+
+      // 2. reply under test
+      const replyRes = await runMockDaemon(["reply", "req-test-1", "test reply text"], {
+        pendingRows: [
+          {
+            request_id: "req-test-1",
+            recipient: "@dev/8",
+            sender: "@mock-sender",
+            summary: "test request",
+            status: "active",
+          },
+        ],
+      })
+      expect(replyRes.code).toBe(0)
+      expect(replyRes.stdout).toContain("Closed 1 pending request row(s) for @dev/8: req-test-1")
+
+      // 3. taking under test
+      const takingRes = await runMockDaemon(["taking", "req-test-2", "TAKING receipt"], {
+        pendingRows: [
+          {
+            request_id: "req-test-2",
+            recipient: "@dev/8",
+            sender: "@mock-sender",
+            summary: "test request 2",
+            status: "active",
+          },
+        ],
+      })
+      expect(takingRes.code).toBe(0)
+      expect(takingRes.sent).toHaveLength(1)
+      expect(takingRes.sent[0]).toMatchObject({ to: "@mock-sender", type: "status", ref: "req-test-2" })
+
+      // 4. wait under test
+      const waitRes = await runMockDaemon(["wait", "--timeout", "1s", "--json"])
+      expect(waitRes.code).toBe(0)
+      expect(JSON.parse(waitRes.stdout)).toMatchObject({ status: "timeout", timed_out: true })
+
+      // Assert nothing under test connected to the inherited sentinel socket
+      expect(sentinelConnections).toBe(0)
+    } finally {
+      process.env.TRIBE_SOCKET = originalTribeSocket
+      await new Promise<void>((resolveClose) => sentinelServer.close(() => resolveClose()))
+      safeRemoveSync(sentinelTmp, { within: TEST_ROOT, allowMissing: true })
+    }
   })
 })
