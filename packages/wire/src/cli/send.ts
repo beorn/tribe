@@ -268,7 +268,7 @@ async function resolveCallerNameHint(): Promise<string | null> {
         return status.session
       }
     } catch {
-      // fall through
+      // silent-fallback-allow: daemon session lookup by launch ID is opportunistic; falls back to environment session variables
     }
   }
   return replyOwnerFromEnv()
@@ -294,7 +294,7 @@ export async function resolveRequestSender(requestId: string, callerName?: strin
       const match = (res.pending ?? []).find((p) => p.request_id === normalizedId || p.message_id === normalizedId)
       if (match?.sender && match.sender.trim().length > 0) return match.sender.trim()
     } catch {
-      // fall through
+      // silent-fallback-allow: caller pending lookup failure falls through to fleet-wide request search
     }
   }
 
@@ -312,7 +312,7 @@ export async function resolveRequestSender(requestId: string, callerName?: strin
       }
     }
   } catch {
-    // fall through
+    // silent-fallback-allow: active pending lookup failure falls through to expired request search
   }
 
   // 3. Check fleet-wide expired pending requests
@@ -329,7 +329,7 @@ export async function resolveRequestSender(requestId: string, callerName?: strin
       }
     }
   } catch {
-    // fall through
+    // silent-fallback-allow: expired pending lookup failure falls through to message history fetch
   }
 
   // 4. Check message history by exact ID via tribe.fetch
@@ -341,7 +341,7 @@ export async function resolveRequestSender(requestId: string, callerName?: strin
     const sender = match?.from ?? match?.sender
     if (sender && sender.trim().length > 0) return sender.trim()
   } catch {
-    // fall through
+    // silent-fallback-allow: message history fetch failure falls through to cli_log search
   }
 
   // 5. Check cli_log for references to this request
@@ -353,7 +353,7 @@ export async function resolveRequestSender(requestId: string, callerName?: strin
     const sender = match?.from ?? match?.sender
     if (sender && sender.trim().length > 0) return sender.trim()
   } catch {
-    // fall through
+    // silent-fallback-allow: log search failure returns null and caller fails loud
   }
 
   return null
