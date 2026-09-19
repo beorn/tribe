@@ -29,22 +29,38 @@ export async function withDaemonCall<T>(
 ): Promise<DaemonCallOutcome<T>> {
   const deadline = Date.now() + opts.deadlineMs
   let timeoutHandle: ReturnType<typeof setTimeout> | null = null
+  let client: DaemonClient | undefined
+  const closeClient = (): void => {
+    const open = client
+    client = undefined
+    open?.close()
+  }
   try {
     const racePromise = (async (): Promise<DaemonCallOutcome<T>> => {
-      const client = await connectToDaemon(opts.socketPath, {
+      client = await connectToDaemon(opts.socketPath, {
         callTimeoutMs: opts.callTimeoutMs ?? opts.deadlineMs,
       })
       try {
         return { kind: "ok", value: await fn(client) }
       } finally {
-        client.close()
+        closeClient()
       }
     })()
     const timeout = new Promise<DaemonCallOutcome<T>>((resolve) => {
-      timeoutHandle = setTimeout(() => resolve({ kind: "timeout" }), Math.max(50, deadline - Date.now()))
+      timeoutHandle = setTimeout(
+        () => {
+          closeClient()
+          resolve({ kind: "timeout" })
+        },
+        Math.max(50, deadline - Date.now()),
+      )
     })
+    // Timeout winning the race leaves racePromise running; closing the client
+    // makes fn fail, and that rejection must not become unhandled.
+    void racePromise.catch(() => undefined)
     return await Promise.race([racePromise, timeout])
   } catch (err) {
+    closeClient()
     const code = (err as NodeJS.ErrnoException).code
     if (code === "ECONNREFUSED" || code === "ENOENT") return { kind: "no-daemon" }
     return { kind: "error", message: err instanceof Error ? err.message : String(err) }

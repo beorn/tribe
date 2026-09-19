@@ -15,6 +15,7 @@ import {
 import { createLineParser } from "../src/parser.ts"
 import { isRequest, makeNotification, makeResponse } from "../src/rpc.ts"
 import { callTribeTool } from "../src/lib/tool-daemon-call.ts"
+import { withDaemonCall } from "../src/util.ts"
 
 /** errno-tagged error, like the ones node:net throws on connect failures. */
 function errno(code: string): Error {
@@ -226,6 +227,49 @@ describe("connectToDaemon", () => {
     const missing = join(tmpDir, "nope.sock")
     await expect(connectToDaemon(missing)).rejects.toMatchObject({ code: "ENOENT" })
   })
+})
+
+describe("withDaemonCall", () => {
+  let tmpDir: string
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "tribe-daemon-call-"))
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it("closes the daemon socket when the outer deadline wins before fn returns", async () => {
+    const sock = join(tmpDir, "d.sock")
+    const { server, clients } = await spawnFakeDaemon(sock)
+    try {
+      let closed = 0
+      let lateSend = false
+      const outcome = await withDaemonCall(
+        { socketPath: sock, deadlineMs: 80, callTimeoutMs: 5_000 },
+        async (client) => {
+          const originalClose = client.close.bind(client)
+          client.close = () => {
+            closed += 1
+            originalClose()
+          }
+          await client.call("never")
+          lateSend = true
+          return await client.call("echo", { late: true })
+        },
+      )
+      expect(outcome).toEqual({ kind: "timeout" })
+      const deadline = Date.now() + 400
+      while (closed === 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 20))
+      }
+      expect(closed, "timeout must close the in-flight client, not leave certification running").toBeGreaterThan(0)
+      expect(lateSend, "fn must not complete a send after timeout returned").toBe(false)
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  }, 10_000)
 })
 
 describe("callTribeTool", () => {
