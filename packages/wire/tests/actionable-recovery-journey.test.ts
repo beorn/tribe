@@ -306,18 +306,43 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     tmpDir = mkdtempSync(join(tmpdir(), "tribe-recovery-journey-"))
   })
 
-  afterEach(() => {
-    for (const adapter of adapters) adapter.kill("SIGTERM")
-    adapters.length = 0
-    daemonProc?.kill("SIGTERM")
-    daemonProc = undefined
-    for (const pid of detachedDaemonPids) {
+  async function stopPid(pid: number, label: string): Promise<void> {
+    const gone = (): boolean => {
       try {
-        process.kill(pid, "SIGTERM")
+        process.kill(pid, 0)
+        return false
       } catch {
-        /* already exited during hot reload */
+        return true
       }
     }
+    if (gone()) return
+    try {
+      process.kill(pid, "SIGTERM")
+    } catch {
+      return
+    }
+    try {
+      await waitForCondition(gone, `${label} gone after SIGTERM`, { timeoutMs: 1000 })
+    } catch {
+      try {
+        process.kill(pid, "SIGKILL")
+      } catch {
+        return
+      }
+      await waitForCondition(gone, `${label} gone after SIGKILL`, { timeoutMs: 1000 })
+    }
+  }
+
+  afterEach(async () => {
+    // 24234 / CI287: writers (successor-reply.log, activity.jsonl) outlive SIGTERM.
+    // Reuse the adapter stop() SIGTERM→wait→SIGKILL→wait sequence; do not rm until gone.
+    for (const [index, adapter] of adapters.entries()) {
+      if (adapter.pid !== undefined) await stopPid(adapter.pid, `adapter[${index}]`)
+    }
+    adapters.length = 0
+    if (daemonProc?.pid !== undefined) await stopPid(daemonProc.pid, "daemon")
+    daemonProc = undefined
+    for (const pid of detachedDaemonPids) await stopPid(pid, `detached:${pid}`)
     detachedDaemonPids.length = 0
     safeRemoveSync(tmpDir, { within: TEST_ROOT, allowMissing: true })
   })
