@@ -7,7 +7,7 @@
  * throwing — hooks want structured failure, not exception plumbing.
  */
 
-import { type DaemonClient } from "./client.ts"
+import { type ConnectToDaemonOpts, type DaemonClient } from "./client.ts"
 import * as daemonClient from "./client.ts"
 
 export type DaemonCallOutcome<T> =
@@ -22,6 +22,8 @@ export type WithDaemonCallOpts = {
   deadlineMs: number
   /** Per-call timeout for the underlying client. Defaults to `deadlineMs`. */
   callTimeoutMs?: number
+  /** @internal test seam — override the connect primitive. */
+  connectFn?: (socketPath: string, opts?: ConnectToDaemonOpts) => Promise<DaemonClient>
 }
 
 export async function withDaemonCall<T>(
@@ -37,9 +39,10 @@ export async function withDaemonCall<T>(
     client = undefined
     open?.close()
   }
+  const connect = opts.connectFn ?? daemonClient.connectToDaemon
   try {
     const racePromise = (async (): Promise<DaemonCallOutcome<T>> => {
-      const connected = await daemonClient.connectToDaemon(opts.socketPath, {
+      const connected = await connect(opts.socketPath, {
         callTimeoutMs: opts.callTimeoutMs ?? opts.deadlineMs,
       })
       if (timedOut) {

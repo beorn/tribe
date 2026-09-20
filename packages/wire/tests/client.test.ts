@@ -296,7 +296,9 @@ describe("withDaemonCall", () => {
     try {
       let invoked = 0
       const started = Date.now()
-      const outcome = await withDaemonCall({ socketPath: sock, deadlineMs: 80, callTimeoutMs: 5_000 }, async () => {
+      const outcome = await withDaemonCall(
+        { socketPath: sock, deadlineMs: 80, callTimeoutMs: 5_000, connectFn: connectToDaemon },
+        async () => {
         invoked += 1
         return "fn-ran"
       })
