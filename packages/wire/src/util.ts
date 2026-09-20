@@ -7,7 +7,8 @@
  * throwing — hooks want structured failure, not exception plumbing.
  */
 
-import { connectToDaemon, type DaemonClient } from "./client.ts"
+import { type DaemonClient } from "./client.ts"
+import * as daemonClient from "./client.ts"
 
 export type DaemonCallOutcome<T> =
   | { kind: "ok"; value: T }
@@ -38,7 +39,7 @@ export async function withDaemonCall<T>(
   }
   try {
     const racePromise = (async (): Promise<DaemonCallOutcome<T>> => {
-      const connected = await connectToDaemon(opts.socketPath, {
+      const connected = await daemonClient.connectToDaemon(opts.socketPath, {
         callTimeoutMs: opts.callTimeoutMs ?? opts.deadlineMs,
       })
       if (timedOut) {

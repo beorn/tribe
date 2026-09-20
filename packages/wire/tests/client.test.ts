@@ -19,13 +19,16 @@ import { withDaemonCall } from "../src/util.ts"
 
 /** Extra connect latency for the late-connect timeout case; other tests keep 0. */
 let connectDelayMs = 0
+let delayedClient: DaemonClient | undefined
 vi.mock("../src/client.ts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/client.ts")>()
   return {
     ...actual,
     connectToDaemon: async (socketPath: string, opts?: ConnectToDaemonOpts) => {
       if (connectDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, connectDelayMs))
-      return actual.connectToDaemon(socketPath, opts)
+      const client = await actual.connectToDaemon(socketPath, opts)
+      if (connectDelayMs > 0) delayedClient = client
+      return client
     },
   }
 })
@@ -289,12 +292,18 @@ describe("withDaemonCall", () => {
     const sock = join(tmpDir, "late-connect.sock")
     const { server } = await spawnFakeDaemon(sock)
     connectDelayMs = 300
+    delayedClient = undefined
     try {
       let invoked = 0
+      const started = Date.now()
       const outcome = await withDaemonCall({ socketPath: sock, deadlineMs: 80, callTimeoutMs: 5_000 }, async () => {
         invoked += 1
         return "fn-ran"
       })
+      expect(
+        Date.now() - started,
+        "deadline must elapse; a 21ms ok means the delay never wrapped connect",
+      ).toBeGreaterThanOrEqual(80)
       expect(outcome).toEqual({ kind: "timeout" })
       expect(invoked).toBe(0)
       const deadline = Date.now() + 500
@@ -302,8 +311,11 @@ describe("withDaemonCall", () => {
         await new Promise((r) => setTimeout(r, 20))
       }
       expect(invoked, "late connect must close immediately and never invoke fn").toBe(0)
+      expect(delayedClient, "delayed connectToDaemon must have completed after timeout").toBeDefined()
+      expect(delayedClient?.socket.destroyed, "late connection must be closed").toBe(true)
     } finally {
       connectDelayMs = 0
+      delayedClient = undefined
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
     }
   }, 10_000)
