@@ -306,28 +306,58 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     tmpDir = mkdtempSync(join(tmpdir(), "tribe-recovery-journey-"))
   })
 
-  async function stopPid(pid: number, label: string): Promise<void> {
+  function isEsrch(error: unknown): boolean {
+    return Boolean(
+      error && typeof error === "object" && "code" in error && (error as { code: unknown }).code === "ESRCH",
+    )
+  }
+
+  /** Adapter `stop()`: SIGTERM → wait close → SIGKILL → wait. ChildProcess only. */
+  async function stopChild(child: ChildProcessWithoutNullStreams, label: string): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) return
+    child.kill("SIGTERM")
+    try {
+      await waitForCondition(
+        () => child.exitCode !== null || child.signalCode !== null,
+        `${label} close after SIGTERM`,
+        { timeoutMs: 1000 },
+      )
+    } catch {
+      child.kill("SIGKILL")
+      await waitForCondition(
+        () => child.exitCode !== null || child.signalCode !== null,
+        `${label} close after SIGKILL`,
+        { timeoutMs: 1000 },
+      )
+    }
+  }
+
+  /** Detached pids have no handle. Only ESRCH means absent; EPERM and others fail loud. */
+  async function stopDetachedPid(pid: number, label: string): Promise<void> {
     const gone = (): boolean => {
       try {
         process.kill(pid, 0)
         return false
-      } catch {
-        return true
+      } catch (error) {
+        if (isEsrch(error)) return true
+        throw error
       }
     }
     if (gone()) return
     try {
       process.kill(pid, "SIGTERM")
-    } catch {
-      return
+    } catch (error) {
+      if (isEsrch(error)) return
+      throw error
     }
     try {
       await waitForCondition(gone, `${label} gone after SIGTERM`, { timeoutMs: 1000 })
     } catch {
       try {
         process.kill(pid, "SIGKILL")
-      } catch {
-        return
+      } catch (error) {
+        if (isEsrch(error)) return
+        throw error
       }
       await waitForCondition(gone, `${label} gone after SIGKILL`, { timeoutMs: 1000 })
     }
@@ -335,14 +365,11 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
 
   afterEach(async () => {
     // 24234 / CI287: writers (successor-reply.log, activity.jsonl) outlive SIGTERM.
-    // Reuse the adapter stop() SIGTERM→wait→SIGKILL→wait sequence; do not rm until gone.
-    for (const [index, adapter] of adapters.entries()) {
-      if (adapter.pid !== undefined) await stopPid(adapter.pid, `adapter[${index}]`)
-    }
+    for (const [index, adapter] of adapters.entries()) await stopChild(adapter, `adapter[${index}]`)
     adapters.length = 0
-    if (daemonProc?.pid !== undefined) await stopPid(daemonProc.pid, "daemon")
+    if (daemonProc !== undefined) await stopChild(daemonProc, "daemon")
     daemonProc = undefined
-    for (const pid of detachedDaemonPids) await stopPid(pid, `detached:${pid}`)
+    for (const pid of detachedDaemonPids) await stopDetachedPid(pid, `detached:${pid}`)
     detachedDaemonPids.length = 0
     safeRemoveSync(tmpDir, { within: TEST_ROOT, allowMissing: true })
   })
