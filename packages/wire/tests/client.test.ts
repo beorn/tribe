@@ -314,7 +314,8 @@ describe("withDaemonCall", () => {
       expect(delayedClient, "delayed connectToDaemon must have completed after timeout").toBeDefined()
       const late = delayedClient
       if (late === undefined) throw new Error("delayed connectToDaemon must have completed after timeout")
-      expect(late.socket.destroyed, "late connection must be closed").toBe(true)
+      const lateSocket = (late as { socket?: { destroyed?: boolean } }).socket
+      expect(lateSocket?.destroyed, "late connection must be closed").toBe(true)
     } finally {
       connectDelayMs = 0
       delayedClient = undefined
