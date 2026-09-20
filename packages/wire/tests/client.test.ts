@@ -1,8 +1,8 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { createServer, type Server, type Socket } from "node:net"
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { Socket, createServer, type Server } from "node:net"
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
   connectExisting,
   connectOrStart,
@@ -20,17 +20,22 @@ import { withDaemonCall } from "../src/util.ts"
 /** Extra connect latency for the late-connect timeout case; other tests keep 0. */
 let connectDelayMs = 0
 let delayedClient: DaemonClient | undefined
-vi.mock("../src/client.ts", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../src/client.ts")>()
-  return {
-    ...actual,
-    connectToDaemon: async (socketPath: string, opts?: ConnectToDaemonOpts) => {
-      if (connectDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, connectDelayMs))
-      const client = await actual.connectToDaemon(socketPath, opts)
-      if (connectDelayMs > 0) delayedClient = client
-      return client
-    },
+
+const originalSocketConnect = Socket.prototype.connect
+Socket.prototype.connect = function (this: Socket, ...args: any[]) {
+  if (connectDelayMs > 0) {
+    const socket = this
+    delayedClient = { socket } as unknown as DaemonClient
+    setTimeout(() => {
+      originalSocketConnect.apply(socket, args as any)
+    }, connectDelayMs)
+    return this
   }
+  return originalSocketConnect.apply(this, args as any)
+}
+
+afterAll(() => {
+  Socket.prototype.connect = originalSocketConnect
 })
 
 /** errno-tagged error, like the ones node:net throws on connect failures. */
