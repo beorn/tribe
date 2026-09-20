@@ -312,7 +312,9 @@ describe("withDaemonCall", () => {
       }
       expect(invoked, "late connect must close immediately and never invoke fn").toBe(0)
       expect(delayedClient, "delayed connectToDaemon must have completed after timeout").toBeDefined()
-      expect(delayedClient?.socket.destroyed, "late connection must be closed").toBe(true)
+      const late = delayedClient
+      if (late === undefined) throw new Error("delayed connectToDaemon must have completed after timeout")
+      expect(late.socket.destroyed, "late connection must be closed").toBe(true)
     } finally {
       connectDelayMs = 0
       delayedClient = undefined
