@@ -272,10 +272,15 @@ describe("recall search output", () => {
     process.exitCode = previousExitCode
   })
 
-  test("normalizes repo and worktree names while preserving explicit narrowing", () => {
-    expect(resolveProjectScope(undefined, "/repos/km")).toBe("km")
-    expect(resolveProjectScope(undefined, "/repos/km-wt7")).toBe("km")
+  test("preserves global default scope when no project filter is supplied and supports explicit narrowing", () => {
+    expect(resolveProjectScope(undefined, "/repos/km")).toBeUndefined()
+    expect(resolveProjectScope(undefined, "/repos/km-wt7")).toBeUndefined()
+    expect(resolveProjectScope(undefined, "/hh")).toBeUndefined()
+    expect(resolveProjectScope(undefined, "/hh/dev")).toBeUndefined()
     expect(resolveProjectScope("*km-wt7*", "/repos/km-wt1")).toBe("km-wt7")
+    expect(resolveProjectScope("km", "/hh")).toBe("km")
+    expect(resolveProjectScope("dev", "/hh")).toBe("dev")
+    expect(resolveProjectScope("*", "/hh/dev")).toBeUndefined()
   })
 
   test("ranks prose above matching tool-call payloads", () => {
@@ -656,7 +661,7 @@ describe("recall search output", () => {
     expect(output).toContain('0 results — UNPROVEN (unknown index) for "nohits"')
   })
 
-  test("defaults search to the current repo family across sibling worktrees", async () => {
+  test("defaults search to global project scope when no explicit -p is supplied", async () => {
     const prevHome = process.env.HOME
     const prevCwd = process.cwd()
     const home = mkdtempSync(join(tmpdir(), "recall-home-"))
@@ -684,7 +689,7 @@ describe("recall search output", () => {
 
     const errors = callsText(errSpy)
     const output = callsText(logSpy)
-    expect(mockAgent.options).toMatchObject({ projectFilter: "km" })
+    expect((mockAgent.options as { projectFilter?: string } | null)?.projectFilter).toBeUndefined()
     expect(errors).not.toContain("sibling worktree project dir(s) detected")
     expect(output).toContain('0 results — UNPROVEN (unknown index) for "nohits"')
   })
@@ -702,25 +707,32 @@ describe("recall search output", () => {
     expect(mockAgent.options).toMatchObject({ timeout: 45_000 })
   })
 
-  test("default raw search includes sibling worktrees but excludes unrelated repos", async () => {
+  test("default raw search uses global project scope finding transcripts across project origins", async () => {
     const prevCwd = process.cwd()
     const parent = mkdtempSync(join(tmpdir(), "recall-projects-"))
     const project = join(parent, "km-wt1")
     mkdirSync(project)
     process.chdir(project)
-    seedMessage("familyscope marker", "sibling", "/repos/km-wt7")
-    seedMessage("familyscope marker", "unrelated", "/repos/elsewhere")
+    seedMessage("familyscope marker", "sibling", "/hh/dev-wt7")
+    seedMessage("familyscope marker", "origin", "/hh")
 
     try {
+      // Default query without -p finds transcripts from both /hh and /hh/dev origins
       await cmdSearch("familyscope", { raw: true, refresh: false })
+      const output = callsText(logSpy)
+      expect(output).toContain("Found 2 matches")
+      expect(output).toContain("/hh/dev/wt7")
+      expect(output).toContain("/hh")
+
+      // Explicit narrowing with -p filters to the specified project
+      logSpy.mockClear()
+      await cmdSearch("familyscope", { raw: true, refresh: false, project: "dev" })
+      const narrowedOutput = callsText(logSpy)
+      expect(narrowedOutput).toContain("Found 1 matches")
+      expect(narrowedOutput).toContain("/hh/dev/wt7")
     } finally {
       process.chdir(prevCwd)
       rmSync(parent, { recursive: true, force: true })
     }
-
-    const output = callsText(logSpy)
-    expect(output).toContain("Found 1 matches")
-    expect(output).toContain("/repos/km/wt7")
-    expect(output).not.toContain("elsewhere")
   })
 })

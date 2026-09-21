@@ -6,7 +6,6 @@ import * as path from "path"
 import * as fs from "fs"
 import {
   getDb,
-  closeDb,
   getIndexMeta,
   PROJECTS_DIR,
   ftsSearchWithSnippet,
@@ -87,23 +86,14 @@ export interface SearchOptions {
 }
 
 /**
- * Default searches to the current repository family. Linked worktrees keep
- * their conventional `-wtN` suffix, so `km`, `km-wt0`, and `km-wt7` all map
- * to the same `km` substring already understood by the shared DB queries.
- * An explicit --project remains the narrower caller-owned filter.
+ * Default searches use global project scope (undefined) when no explicit
+ * --project filter is supplied, so queries from any working directory (e.g.
+ * /hh or /hh/dev) find transcripts across all project origins and stock/profile
+ * Codex sessions. An explicit --project remains the narrower caller-owned filter.
  */
-export function resolveProjectScope(project: string | undefined, cwd = process.cwd()): string | undefined {
+export function resolveProjectScope(project: string | undefined, _cwd = process.cwd()): string | undefined {
   if (project !== undefined) return project.replace(/\*/g, "").trim() || undefined
-
-  let root = cwd
-  const gitRoot = Bun.spawnSync(["git", "-C", cwd, "rev-parse", "--show-toplevel"], {
-    stdout: "pipe",
-    stderr: "ignore",
-  })
-  if (gitRoot.exitCode === 0) root = gitRoot.stdout.toString().trim() || cwd
-
-  const name = path.basename(root).replace(/-wt\d+$/, "")
-  return name || undefined
+  return undefined
 }
 
 // ============================================================================
@@ -997,7 +987,6 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
         2,
       ),
     )
-    closeDb()
     return
   }
 
@@ -1012,7 +1001,6 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     } else {
       console.log(`0 matches${unprovenSuffix(provenance)}${queryPart} (searched in ${duration}ms)`)
     }
-    closeDb()
     return
   }
 
@@ -1137,8 +1125,6 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
   } else if (shownCount === limit && total === limit) {
     console.log(`${DIM}(showing ${shownCount} matches, use -n/--limit <num> to see more if needed)${RESET}`)
   }
-
-  closeDb()
 }
 
 // ============================================================================
