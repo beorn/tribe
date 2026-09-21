@@ -723,13 +723,27 @@ describe("recall search output", () => {
       expect(output).toContain("Found 2 matches")
       expect(output).toContain("/hh/dev/wt7")
       expect(output).toContain("/hh")
+    } finally {
+      process.chdir(prevCwd)
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
 
-      // Explicit narrowing with -p filters to the specified project
-      logSpy.mockClear()
+  test("explicit -p narrows raw search to matching session project path", async () => {
+    const prevCwd = process.cwd()
+    const parent = mkdtempSync(join(tmpdir(), "recall-projects-"))
+    const project = join(parent, "km-wt1")
+    mkdirSync(project)
+    process.chdir(project)
+    seedMessage("familyscope marker", "sibling", "/hh/dev-wt7")
+    seedMessage("familyscope marker", "origin", "/hh")
+
+    try {
       await cmdSearch("familyscope", { raw: true, refresh: false, project: "dev" })
       const narrowedOutput = callsText(logSpy)
       expect(narrowedOutput).toContain("Found 1 matches")
       expect(narrowedOutput).toContain("/hh/dev/wt7")
+      expect(narrowedOutput).not.toContain("/hh (")
     } finally {
       process.chdir(prevCwd)
       rmSync(parent, { recursive: true, force: true })

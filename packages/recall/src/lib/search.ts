@@ -6,6 +6,7 @@ import * as path from "path"
 import * as fs from "fs"
 import {
   getDb,
+  closeDb,
   getIndexMeta,
   PROJECTS_DIR,
   ftsSearchWithSnippet,
@@ -88,8 +89,8 @@ export interface SearchOptions {
 /**
  * Default searches use global project scope (undefined) when no explicit
  * --project filter is supplied, so queries from any working directory (e.g.
- * /hh or /hh/dev) find transcripts across all project origins and stock/profile
- * Codex sessions. An explicit --project remains the narrower caller-owned filter.
+ * /hh or /hh/dev) find transcripts across all project origins. An explicit
+ * --project remains the narrower caller-owned session-history filter.
  */
 export function resolveProjectScope(project: string | undefined, _cwd = process.cwd()): string | undefined {
   if (project !== undefined) return project.replace(/\*/g, "").trim() || undefined
@@ -987,6 +988,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
         2,
       ),
     )
+    closeDb()
     return
   }
 
@@ -1001,6 +1003,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     } else {
       console.log(`0 matches${unprovenSuffix(provenance)}${queryPart} (searched in ${duration}ms)`)
     }
+    closeDb()
     return
   }
 
@@ -1125,6 +1128,8 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
   } else if (shownCount === limit && total === limit) {
     console.log(`${DIM}(showing ${shownCount} matches, use -n/--limit <num> to see more if needed)${RESET}`)
   }
+
+  closeDb()
 }
 
 // ============================================================================
