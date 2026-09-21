@@ -346,43 +346,29 @@ describe("24588 row 4: dual expected:false balls do not accrue", () => {
     expect(stmts.selectPendingForRecipient.all({ $recipient: "@dev/3" })).toHaveLength(2)
   })
 
-  it("T5 pin: mutation proof — roster-only predicate turns T1 red", () => {
+  it("fails loudly when required membership observation getters throw (no silent errors)", () => {
     const onDemandRoster = [
       { name: "@adhoc/5", expected: false },
       { name: "@dev/review-adhoc5", expected: false },
     ]
-    const parsedRoster = roster(onDemandRoster)
-    const sender = "@adhoc/5"
-    const recipient = "@dev/review-adhoc5"
-
-    // Roster-only predicate check:
-    const rosterOnlyRefusal = parsedRoster.onDemandNames.has(sender) && parsedRoster.onDemandNames.has(recipient)
-    expect(rosterOnlyRefusal).toBe(true)
-
-    // Under the mutated roster-only predicate (pre-fix behaviour), sending a tracked request is refused:
-    const simulateRosterOnlySend = (requestFlag: boolean) => {
-      if (rosterOnlyRefusal && requestFlag) {
-        return { error: "tribe.send: delivery refused - sender and recipient both declared unrun" }
-      }
-      return { sent: true }
+    const brokenOpts: HandlerOpts = {
+      ...optsWithRoster(onDemandRoster),
+      getActiveSessionInfo: () => {
+        throw new Error("simulated membership getter failure")
+      },
+      getActiveSessionIds: () => {
+        throw new Error("simulated session IDs failure")
+      },
     }
-    const mutatedSendResult = simulateRosterOnlySend(true)
-    expect(mutatedSendResult.error).toBeDefined()
-    expect(mutatedSendResult.error).toContain("sender and recipient both declared unrun")
-
-    // In contrast, with our live-launch aware repair, T1 succeeds:
-    const liveOpts = optsWithLiveSeats(onDemandRoster, ["@adhoc/5", "@dev/review-adhoc5"])
     const senderCtx = makeContext(db, stmts, "@adhoc/5")
-    const actualSendResult = parseToolJson(
+    expect(() => {
       handleToolCall(
         senderCtx,
         "tribe.send",
         { to: "@dev/review-adhoc5", message: "review request", type: "request", request: true },
-        liveOpts,
-      ),
-    )
-    expect(actualSendResult.error).toBeUndefined()
-    expect(actualSendResult.sent).toBe(true)
+        brokenOpts,
+      )
+    }).toThrow("simulated membership getter failure")
   })
 
   it("Condition 4: refusal teaches seats, what was checked, and cure when neither is live", () => {

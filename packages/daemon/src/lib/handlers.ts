@@ -607,29 +607,24 @@ function listActiveSessionNames(ctx: TribeContext, activeIds?: Set<string> | str
  * 24588 row 4: A seat has a live launch when it has an active session in the
  * daemon's existing membership classification (getActiveSessionInfo / getActiveSessionIds),
  * distinguishing actively running seats from unrun/stopped ones.
+ *
+ * Required membership getters are called directly; observation errors propagate
+ * loudly rather than being silently recast as unrun/stopped (fail-loud).
  */
 function hasLiveLaunch(ctx: TribeContext, opts: HandlerOpts, name: string): boolean {
-  try {
-    const activeInfo = opts.getActiveSessionInfo?.()
-    if (activeInfo && activeInfo.some((s) => s.name === name)) {
+  const activeInfo = opts.getActiveSessionInfo()
+  if (activeInfo && activeInfo.some((s) => s.name === name)) {
+    return true
+  }
+  const activeIds = opts.getActiveSessionIds()
+  if (activeIds && activeIds.size > 0) {
+    if (ctx.getName() === name && activeIds.has(ctx.sessionId)) {
       return true
     }
-  } catch {
-    // ignore
-  }
-  try {
-    const activeIds = opts.getActiveSessionIds?.()
-    if (activeIds && activeIds.size > 0) {
-      if (ctx.getName() === name && activeIds.has(ctx.sessionId)) {
-        return true
-      }
-      const rows = ctx.stmts.allSessions.all() as Array<{ id: string; name: string }>
-      if (rows.some((r) => r.name === name && activeIds.has(r.id))) {
-        return true
-      }
+    const rows = ctx.stmts.allSessions.all() as Array<{ id: string; name: string }>
+    if (rows.some((r) => r.name === name && activeIds.has(r.id))) {
+      return true
     }
-  } catch {
-    // ignore
   }
   return false
 }
