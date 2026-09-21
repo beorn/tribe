@@ -294,20 +294,37 @@ function deriveBallAnalysis(db: RetroDatabase, messages: Message[], windowStart:
     replies.push(message)
     repliesByReference.set(message.reply, replies)
   }
-  const matchingReply = (record: BallRecord): Message | null => {
-    const candidates =
+  const matchingReply = (record: BallRecord, settlement?: BallSettlementFact): Message | null => {
+    const rawCandidates =
       record.requestId === record.messageId
         ? (repliesByReference.get(record.requestId) ?? [])
         : [...(repliesByReference.get(record.requestId) ?? []), ...(repliesByReference.get(record.messageId) ?? [])]
+    const candidates = rawCandidates
+      .filter((reply) => {
+        if (reply.ts < record.openedAt) return false
+        if (settlement !== undefined && reply.ts > settlement.settled_at + 1000) return false
+        return true
+      })
+      .sort((a, b) => a.ts - b.ts)
     return (
-      candidates.find(
-        (reply) =>
-          reply.sender === record.owner &&
-          (record.opener === null || reply.recipient === record.opener.sender) &&
-          (reply.correlated_reply_requester === null ||
-            record.opener === null ||
-            reply.correlated_reply_requester === record.opener.sender),
-      ) ?? null
+      candidates.find((reply) => {
+        if (reply.sender !== record.owner) return false
+
+        // If tracker explicitly verified answered settlement for this owner, match the reply that settled it
+        if (settlement !== undefined && settlement.settlement === "answered") {
+          if (settlement.settled_by === record.owner && Math.abs(reply.ts - settlement.settled_at) <= 1000) {
+            return true
+          }
+        }
+
+        const recipientMatches = record.opener === null || reply.recipient === record.opener.sender
+        const correlatedMatches =
+          reply.correlated_reply_requester === null ||
+          record.opener === null ||
+          reply.correlated_reply_requester === record.opener.sender
+
+        return recipientMatches && correlatedMatches
+      }) ?? null
     )
   }
   for (const [key, record] of records) {
@@ -315,7 +332,7 @@ function deriveBallAnalysis(db: RetroDatabase, messages: Message[], windowStart:
     if (settlement !== undefined) {
       record.ending = settlement.settlement
       record.latencyMs = settlement.settlement === "answered" ? settlement.settled_at - record.openedAt : null
-      record.reply = matchingReply(record)
+      record.reply = settlement.settlement === "answered" ? matchingReply(record, settlement) : null
       continue
     }
     if (pendingKeys.has(key)) {

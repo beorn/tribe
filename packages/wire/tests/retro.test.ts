@@ -83,11 +83,12 @@ function insertSettlement(
   ts: number,
   recipient = "@chief",
   openedAt = ts - MINUTE,
+  messageId = requestId,
 ): void {
   db.prepare(
     "INSERT INTO messages (id, type, sender, recipient, kind, content, ref, ts, request, reply) VALUES (?, 'event.ball.settled', 'daemon', '*', 'event', ?, ?, ?, NULL, NULL)",
   ).run(
-    `${requestId}-${settlement}`,
+    `${requestId}-${recipient}-${messageId}-${settlement}`,
     JSON.stringify({
       schema_version: 1,
       request_id: requestId,
@@ -95,12 +96,12 @@ function insertSettlement(
       sender: "@agent/1",
       opened_at: openedAt,
       expires_at: null,
-      message_id: requestId,
+      message_id: messageId,
       fanout: "first",
       summary: null,
       settlement,
       settled_at: ts,
-      settled_by: "daemon",
+      settled_by: settlement === "answered" ? recipient : "daemon",
     }),
     requestId,
     ts,
@@ -336,5 +337,165 @@ describe("21714 wire retro response latency", () => {
     expect(markdown).not.toContain("Default: ship unless you object")
     expect(markdown).toContain("1 older event omitted")
     expect(Buffer.byteLength(markdown, "utf8")).toBeLessThan(4_096)
+  })
+
+  it("matches recurring-incident replies to their actual episode and avoids negative latency", () => {
+    const incidentId = "wait-watch:ball @dev/7:expired-unanswered"
+
+    // Episode 1: opened 20m ago, answered 18m ago (latency 2m)
+    insertMessage(db, {
+      id: "ep1-msg",
+      type: "request",
+      sender: "wait-watch",
+      recipient: "@chief",
+      ts: now - 20 * MINUTE,
+      request: incidentId,
+    })
+    insertMessage(db, {
+      id: "ep1-reply",
+      type: "response",
+      sender: "@chief",
+      recipient: "wait-watch",
+      ts: now - 18 * MINUTE,
+      reply: incidentId,
+    })
+    insertSettlement(db, incidentId, "answered", now - 18 * MINUTE, "@chief", now - 20 * MINUTE, "ep1-msg")
+
+    // Episode 2: opened 10m ago, answered 7m ago (latency 3m)
+    insertMessage(db, {
+      id: "ep2-msg",
+      type: "request",
+      sender: "wait-watch",
+      recipient: "@chief",
+      ts: now - 10 * MINUTE,
+      request: incidentId,
+    })
+    insertMessage(db, {
+      id: "ep2-reply",
+      type: "response",
+      sender: "@chief",
+      recipient: "wait-watch",
+      ts: now - 7 * MINUTE,
+      reply: incidentId,
+    })
+    insertSettlement(db, incidentId, "answered", now - 7 * MINUTE, "@chief", now - 10 * MINUTE, "ep2-msg")
+
+    const report = generateRetro(db, 6 * HOUR)
+    const ep1 = report.review_corpus.find((r) => r.request.id === "ep1-msg")
+    const ep2 = report.review_corpus.find((r) => r.request.id === "ep2-msg")
+
+    expect(ep1).toBeDefined()
+    expect(ep1?.reply).toMatchObject({ id: "ep1-reply", ts: now - 18 * MINUTE })
+
+    expect(ep2).toBeDefined()
+    expect(ep2?.reply).toMatchObject({ id: "ep2-reply", ts: now - 7 * MINUTE })
+    expect((ep2?.reply?.ts ?? 0) - (ep2?.request.ts ?? 0)).toBe(3 * MINUTE)
+  })
+
+  it("honors proven tracker settlement for hab-page opener replied to @hab", () => {
+    const pageRequestId = "hab-page-req-123"
+
+    insertMessage(db, {
+      id: pageRequestId,
+      type: "request",
+      sender: "hab-page",
+      recipient: "@chief",
+      ts: now - 5 * MINUTE,
+      request: pageRequestId,
+    })
+    insertMessage(db, {
+      id: "hab-page-reply-123",
+      type: "response",
+      sender: "@chief",
+      recipient: "@hab",
+      ts: now - 2 * MINUTE,
+      reply: pageRequestId,
+    })
+    insertSettlement(db, pageRequestId, "answered", now - 2 * MINUTE, "@chief", now - 5 * MINUTE, pageRequestId)
+
+    const report = generateRetro(db, 6 * HOUR)
+    const pageRecord = report.review_corpus.find((r) => r.request_id === pageRequestId)
+
+    expect(pageRecord).toBeDefined()
+    expect(pageRecord?.ending).toBe("answered")
+    expect(pageRecord?.reply).toMatchObject({
+      id: "hab-page-reply-123",
+      sender: "@chief",
+      ts: now - 2 * MINUTE,
+    })
+  })
+
+  it("does not credit losing owners on fanout:first requests with replies", () => {
+    insertSession(db, "@agent/2", "dev", now)
+    insertSession(db, "@agent/3", "dev", now)
+    const fanoutReqId = "fanout-req-1"
+
+    insertMessage(db, {
+      id: fanoutReqId,
+      type: "query",
+      sender: "@chief",
+      recipient: "*",
+      ts: now - 10 * MINUTE,
+      request: fanoutReqId,
+    })
+    // Winning answer from @agent/2
+    insertMessage(db, {
+      id: "fanout-reply-2",
+      type: "response",
+      sender: "@agent/2",
+      recipient: "@chief",
+      ts: now - 8 * MINUTE,
+      reply: fanoutReqId,
+    })
+    // Settled for both @agent/2 and @agent/3 by tracker
+    insertSettlement(db, fanoutReqId, "answered", now - 8 * MINUTE, "@agent/2", now - 10 * MINUTE, fanoutReqId)
+    insertSettlement(db, fanoutReqId, "answered", now - 8 * MINUTE, "@agent/3", now - 10 * MINUTE, fanoutReqId)
+
+    const report = generateRetro(db, 6 * HOUR)
+    const entryWinner = report.review_corpus.find((r) => r.request_id === fanoutReqId && r.owner === "@agent/2")
+    const entryLoser = report.review_corpus.find((r) => r.request_id === fanoutReqId && r.owner === "@agent/3")
+
+    expect(entryWinner).toBeDefined()
+    expect(entryWinner?.ending).toBe("answered")
+    expect(entryWinner?.reply).toMatchObject({
+      id: "fanout-reply-2",
+      sender: "@agent/2",
+    })
+
+    expect(entryLoser).toBeDefined()
+    expect(entryLoser?.ending).toBe("answered")
+    expect(entryLoser?.reply).toBeNull()
+  })
+
+  it("does not match an unrelated later reply to an expired or cleared episode", () => {
+    const expiredReqId = "expired-req-neg"
+
+    insertMessage(db, {
+      id: expiredReqId,
+      type: "request",
+      sender: "@agent/1",
+      recipient: "@chief",
+      ts: now - 30 * MINUTE,
+      request: expiredReqId,
+    })
+    // Settled as gc-expired at 20m ago
+    insertSettlement(db, expiredReqId, "gc-expired", now - 20 * MINUTE, "@chief", now - 30 * MINUTE, expiredReqId)
+
+    // Unrelated later reply sent at 5m ago (long after gc-expired settlement)
+    insertMessage(db, {
+      id: "unrelated-late-reply",
+      type: "response",
+      sender: "@chief",
+      recipient: "@agent/1",
+      ts: now - 5 * MINUTE,
+      reply: expiredReqId,
+    })
+
+    const report = generateRetro(db, 6 * HOUR)
+    const entry = report.review_corpus.find((r) => r.request_id === expiredReqId)
+
+    expect(entry).toBeDefined()
+    expect(entry?.ending).toBe("gc-expired")
+    expect(entry?.reply).toBeNull()
   })
 })
