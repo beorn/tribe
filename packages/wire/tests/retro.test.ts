@@ -84,6 +84,7 @@ function insertSettlement(
   recipient = "@chief",
   openedAt = ts - MINUTE,
   messageId = requestId,
+  settledBy?: string,
 ): void {
   db.prepare(
     "INSERT INTO messages (id, type, sender, recipient, kind, content, ref, ts, request, reply) VALUES (?, 'event.ball.settled', 'daemon', '*', 'event', ?, ?, ?, NULL, NULL)",
@@ -101,7 +102,7 @@ function insertSettlement(
       summary: null,
       settlement,
       settled_at: ts,
-      settled_by: settlement === "answered" ? recipient : "daemon",
+      settled_by: settledBy ?? (settlement === "answered" ? recipient : "daemon"),
     }),
     requestId,
     ts,
@@ -438,7 +439,7 @@ describe("21714 wire retro response latency", () => {
       ts: now - 10 * MINUTE,
       request: fanoutReqId,
     })
-    // Winning answer from @agent/2
+    // Winning answer from @agent/2 at t = now - 8 * MINUTE
     insertMessage(db, {
       id: "fanout-reply-2",
       type: "response",
@@ -447,9 +448,18 @@ describe("21714 wire retro response latency", () => {
       ts: now - 8 * MINUTE,
       reply: fanoutReqId,
     })
-    // Settled for both @agent/2 and @agent/3 by tracker
-    insertSettlement(db, fanoutReqId, "answered", now - 8 * MINUTE, "@agent/2", now - 10 * MINUTE, fanoutReqId)
-    insertSettlement(db, fanoutReqId, "answered", now - 8 * MINUTE, "@agent/3", now - 10 * MINUTE, fanoutReqId)
+    // Late answer from loser @agent/3 at t = now - 8 * MINUTE + 500ms (within 1s race window)
+    insertMessage(db, {
+      id: "fanout-reply-3-late",
+      type: "response",
+      sender: "@agent/3",
+      recipient: "@chief",
+      ts: now - 8 * MINUTE + 500,
+      reply: fanoutReqId,
+    })
+    // Production tracker writes settled_by: winner (@agent/2) for both released owner rows
+    insertSettlement(db, fanoutReqId, "answered", now - 8 * MINUTE, "@agent/2", now - 10 * MINUTE, fanoutReqId, "@agent/2")
+    insertSettlement(db, fanoutReqId, "answered", now - 8 * MINUTE, "@agent/3", now - 10 * MINUTE, fanoutReqId, "@agent/2")
 
     const report = generateRetro(db, 6 * HOUR)
     const entryWinner = report.review_corpus.find((r) => r.request_id === fanoutReqId && r.owner === "@agent/2")
@@ -497,5 +507,49 @@ describe("21714 wire retro response latency", () => {
     expect(entry).toBeDefined()
     expect(entry?.ending).toBe("gc-expired")
     expect(entry?.reply).toBeNull()
+  })
+
+  it("does not match a late second response sent after answered settlement", () => {
+    const reqId = "req-settled-then-second-reply"
+
+    insertMessage(db, {
+      id: reqId,
+      type: "request",
+      sender: "@agent/1",
+      recipient: "@chief",
+      ts: now - 15 * MINUTE,
+      request: reqId,
+    })
+    // Legitimate first reply that settled the ball at 10m ago
+    insertMessage(db, {
+      id: "reply-first",
+      type: "response",
+      sender: "@chief",
+      recipient: "@agent/1",
+      ts: now - 10 * MINUTE,
+      reply: reqId,
+    })
+    insertSettlement(db, reqId, "answered", now - 10 * MINUTE, "@chief", now - 15 * MINUTE, reqId, "@chief")
+
+    // Late second response sent after settlement (5m ago)
+    insertMessage(db, {
+      id: "reply-second-late",
+      type: "response",
+      sender: "@chief",
+      recipient: "@agent/1",
+      ts: now - 5 * MINUTE,
+      reply: reqId,
+    })
+
+    const report = generateRetro(db, 6 * HOUR)
+    const entry = report.review_corpus.find((r) => r.request_id === reqId)
+
+    expect(entry).toBeDefined()
+    expect(entry?.ending).toBe("answered")
+    expect(entry?.reply).toMatchObject({
+      id: "reply-first",
+      sender: "@chief",
+    })
+    expect(entry!.reply!.ts - entry!.request.ts).toBe(5 * MINUTE)
   })
 })

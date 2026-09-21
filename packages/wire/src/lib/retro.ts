@@ -295,6 +295,11 @@ function deriveBallAnalysis(db: RetroDatabase, messages: Message[], windowStart:
     repliesByReference.set(message.reply, replies)
   }
   const matchingReply = (record: BallRecord, settlement?: BallSettlementFact): Message | null => {
+    // In fanout requests, when another owner settled the ball, this non-winning owner did not answer.
+    if (settlement !== undefined && settlement.settlement === "answered" && settlement.settled_by !== record.owner) {
+      return null
+    }
+
     const rawCandidates =
       record.requestId === record.messageId
         ? (repliesByReference.get(record.requestId) ?? [])
@@ -302,7 +307,7 @@ function deriveBallAnalysis(db: RetroDatabase, messages: Message[], windowStart:
     const candidates = rawCandidates
       .filter((reply) => {
         if (reply.ts < record.openedAt) return false
-        if (settlement !== undefined && reply.ts > settlement.settled_at + 1000) return false
+        if (settlement !== undefined && reply.ts > settlement.settled_at) return false
         return true
       })
       .sort((a, b) => a.ts - b.ts)
@@ -312,7 +317,7 @@ function deriveBallAnalysis(db: RetroDatabase, messages: Message[], windowStart:
 
         // If tracker explicitly verified answered settlement for this owner, match the reply that settled it
         if (settlement !== undefined && settlement.settlement === "answered") {
-          if (settlement.settled_by === record.owner && Math.abs(reply.ts - settlement.settled_at) <= 1000) {
+          if (settlement.settled_by === record.owner && reply.ts <= settlement.settled_at) {
             return true
           }
         }
