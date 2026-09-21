@@ -174,25 +174,6 @@ describe("24588 row 4: dual expected:false balls do not accrue", () => {
     expect(listed.count).toBe(1)
   })
 
-  it("refuses an explicit tracked send between two unrun seats; auto-track request is untracked", () => {
-    const ci = makeContext(db, stmts, "@ci")
-    const explicit = parseToolJson(
-      handleToolCall(
-        ci,
-        "tribe.send",
-        { to: "@dev/3", message: "work", type: "request", request: true },
-        optsWithRoster(UNRUN),
-      ),
-    )
-    expect(String(explicit.error ?? "")).toContain("sender and recipient both declared unrun")
-    const auto = parseToolJson(
-      handleToolCall(ci, "tribe.send", { to: "@dev/3", message: "work", type: "request" }, optsWithRoster(UNRUN)),
-    )
-    expect(auto.error).toBeUndefined()
-    const remaining = stmts.selectPendingForRecipient.all({ $recipient: "@dev/3" }) as unknown[]
-    expect(remaining).toHaveLength(0)
-  })
-
   it("NEGATIVE: live expected:true sender to unrun recipient still opens a ball", () => {
     const live = makeContext(db, stmts, "@dev/12")
     const sent = parseToolJson(
@@ -346,48 +327,49 @@ describe("24588 row 4: dual expected:false balls do not accrue", () => {
     expect(stmts.selectPendingForRecipient.all({ $recipient: "@dev/3" })).toHaveLength(2)
   })
 
-  it("fails loudly when required membership observation getters throw (no silent errors)", () => {
-    const onDemandRoster = [
-      { name: "@adhoc/5", expected: false },
-      { name: "@dev/review-adhoc5", expected: false },
-    ]
+  it("F1 pin: fails loudly when required membership observation getter throws in tribe.pending (no silent errors)", () => {
+    stmts.openPendingRequest.run({
+      $request_id: "throwing-getter-req",
+      $recipient: "@dev/3",
+      $sender: "@ci",
+      $opened_at: 1_000,
+      $expires_at: 2_000,
+      $message_id: "throwing-msg",
+      $fanout: "all",
+    })
     const brokenOpts: HandlerOpts = {
-      ...optsWithRoster(onDemandRoster),
+      ...optsWithRoster(UNRUN),
       getActiveSessionInfo: () => {
         throw new Error("simulated membership getter failure")
       },
-      getActiveSessionIds: () => {
-        throw new Error("simulated session IDs failure")
-      },
     }
-    const senderCtx = makeContext(db, stmts, "@adhoc/5")
+    const ctx = makeContext(db, stmts, "@dev/12")
     expect(() => {
-      handleToolCall(
-        senderCtx,
-        "tribe.send",
-        { to: "@dev/review-adhoc5", message: "review request", type: "request", request: true },
-        brokenOpts,
-      )
+      handleToolCall(ctx, "tribe.pending", { all: true }, brokenOpts)
     }).toThrow("simulated membership getter failure")
+
+    // Proves tribe.pending settles nothing on throw
+    const remaining = stmts.selectPendingForRecipient.all({ $recipient: "@dev/3" }) as unknown[]
+    expect(remaining).toHaveLength(1)
   })
 
-  it("Condition 4: refusal teaches seats, what was checked, and cure when neither is live", () => {
-    const ci = makeContext(db, stmts, "@ci")
-    const explicit = parseToolJson(
-      handleToolCall(
-        ci,
-        "tribe.send",
-        { to: "@dev/3", message: "work", type: "request", request: true },
-        optsWithRoster(UNRUN),
-      ),
-    )
-    const err = String(explicit.error ?? "")
-    expect(err).toBe("tribe.send: delivery refused - sender and recipient both declared unrun")
-    const detail = String(explicit.detail ?? "")
-    expect(detail).toContain('"@ci"')
-    expect(detail).toContain('"@dev/3"')
-    expect(detail).toContain("neither has a live launch (24588 row 4)")
-    expect(detail).toContain("an untracked notify still delivers")
-    expect(detail).toContain("To open a tracked ball, ensure at least one seat has a live launch")
+  it("Condition 2 pin (suggestion): ball with explicit expires_at 10m ahead opened 30m ago survives sweep", () => {
+    const now = Date.now()
+    stmts.openPendingRequest.run({
+      $request_id: "long-deadline-gap-req",
+      $recipient: "@dev/3",
+      $sender: "@ci",
+      $opened_at: now - 30 * 60 * 1000,
+      $expires_at: now + 10 * 60 * 1000,
+      $message_id: "long-deadline-msg",
+      $fanout: "first",
+    })
+    const ctx = makeContext(db, stmts, "@dev/12")
+    const listed = parseToolJson(handleToolCall(ctx, "tribe.pending", { all: true }, optsWithRoster(UNRUN)))
+    expect(listed.count).toBe(1)
+    const remaining = stmts.selectPendingForRecipient.all({ $recipient: "@dev/3" }) as unknown[]
+    expect(remaining).toHaveLength(1)
+    const settledFact = db.prepare("SELECT id FROM messages WHERE type = 'event.ball.settled'").get()
+    expect(settledFact).toBeNull()
   })
 })

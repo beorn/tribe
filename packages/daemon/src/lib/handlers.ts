@@ -605,28 +605,16 @@ function listActiveSessionNames(ctx: TribeContext, activeIds?: Set<string> | str
 
 /**
  * 24588 row 4: A seat has a live launch when it has an active session in the
- * daemon's existing membership classification (getActiveSessionInfo / getActiveSessionIds),
- * distinguishing actively running seats from unrun/stopped ones.
+ * daemon's existing membership classification (getActiveSessionInfo).
  *
- * Required membership getters are called directly; observation errors propagate
- * loudly rather than being silently recast as unrun/stopped (fail-loud).
+ * Reads the connection list (daemon clients Map filtered to participants)
+ * rather than DB queries or PID probes; a stale entry reads as live, which
+ * is safe for this guard (sweep skipped). No pid probe needed.
+ * Required getter is called directly; observation errors propagate loudly (fail-loud).
  */
-function hasLiveLaunch(ctx: TribeContext, opts: HandlerOpts, name: string): boolean {
+function hasLiveLaunch(opts: HandlerOpts, name: string): boolean {
   const activeInfo = opts.getActiveSessionInfo()
-  if (activeInfo && activeInfo.some((s) => s.name === name)) {
-    return true
-  }
-  const activeIds = opts.getActiveSessionIds()
-  if (activeIds && activeIds.size > 0) {
-    if (ctx.getName() === name && activeIds.has(ctx.sessionId)) {
-      return true
-    }
-    const rows = ctx.stmts.allSessions.all() as Array<{ id: string; name: string }>
-    if (rows.some((r) => r.name === name && activeIds.has(r.id))) {
-      return true
-    }
-  }
-  return false
+  return activeInfo.some((s) => s.name === name)
 }
 
 function parseDomains(value: string): string[] {
@@ -793,26 +781,11 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   const hasImplicitOwner = Array.isArray(recipients)
     ? recipients.some((recipient) => recipient !== sender)
     : recipients !== "*" && recipients !== sender
-  const declaredUnrunPair =
-    typeof recipients === "string" &&
-    recipients !== "*" &&
-    bothDeclaredUnrun(opts.getExpectedMembers?.(), sender, recipients)
-  const pairUnrun = declaredUnrunPair && !hasLiveLaunch(ctx, opts, sender) && !hasLiveLaunch(ctx, opts, recipients)
-  if (pairUnrun && (requestFlag || requestId !== null || incident !== undefined)) {
-    return jsonResult({
-      error: "tribe.send: delivery refused - sender and recipient both declared unrun",
-      detail:
-        `sender "${sender}" and recipient "${recipients}" are both declared on-demand (expected:false) ` +
-        `and neither has a live launch (24588 row 4); an untracked notify still delivers. ` +
-        `To open a tracked ball, ensure at least one seat has a live launch.`,
-    })
-  }
   const willTrack =
-    !pairUnrun &&
-    (requestFlag ||
-      requestId !== null ||
-      (incident !== undefined && incident.active !== false) ||
-      (hasImplicitOwner && AUTO_TRACK_TYPES_SET.has(msgType)))
+    requestFlag ||
+    requestId !== null ||
+    (incident !== undefined && incident.active !== false) ||
+    (hasImplicitOwner && AUTO_TRACK_TYPES_SET.has(msgType))
   if (a.expires_in_ms !== undefined && !willTrack) {
     return jsonResult({ error: "tribe.send: invalid options - expires_in_ms requires a tracked request" })
   }
@@ -922,7 +895,6 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       expiresInMs,
       owners: broadcastOwners,
       incident,
-      suppressOpen: pairUnrun,
     },
   )
   // An incident reports its identity as the request id so the caller can see
@@ -1726,14 +1698,17 @@ function settleDeclaredUnrunPairs(
     request_kind: "request" | "incident"
     summary: string | null
   }>
+  const defaultTtl = defaultBallTtlMs("request", true)
+  if (defaultTtl === undefined) {
+    throw new Error("tribe.pending: defaultBallTtlMs('request', true) returned undefined")
+  }
   const rows: PendingSettlementRow[] = []
   for (const row of open) {
     if (row.request_kind === "incident") continue
     if (!bothDeclaredUnrun(roster, row.sender, row.recipient)) continue
     // 24588 row 4: Condition 1 — live seats can answer, so do not settle if either end has a live launch.
-    if (hasLiveLaunch(ctx, opts, row.sender) || hasLiveLaunch(ctx, opts, row.recipient)) continue
+    if (hasLiveLaunch(opts, row.sender) || hasLiveLaunch(opts, row.recipient)) continue
     // 24588 row 4: Condition 2 — sweep must not act on an instant; settle only when past deadline (protects restart gaps).
-    const defaultTtl = defaultBallTtlMs("request", true) ?? 20 * 60 * 1000
     const deadline = row.expires_at ?? row.opened_at + defaultTtl
     if (now < deadline) continue
     rows.push({

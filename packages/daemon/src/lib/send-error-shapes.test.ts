@@ -85,10 +85,7 @@ function liveInfo(id: string, name: string): ActiveSessionInfo {
   }
 }
 
-function makeOpts(
-  info: ActiveSessionInfo[] = [],
-  expectedMembers?: () => DeclaredRoster | undefined,
-): HandlerOpts {
+function makeOpts(info: ActiveSessionInfo[] = [], expectedMembers?: () => DeclaredRoster | undefined): HandlerOpts {
   const ids = new Set(info.map((row) => row.id))
   return {
     cleanup: () => undefined,
@@ -131,8 +128,10 @@ describe("24994: canonical one-line error shape for tribe.send", () => {
     )
 
     expect(sent.error).toBe("tribe.send: failed to deliver to @adhoc/1 - not online (last seen 5 mins ago)")
-    expect(String(sent.detail)).toContain("mailbox_read_capability.state is unavailable (self-mailbox-authority-missing)")
-    expect(String(sent.detail)).toContain("Restore mailbox authority for \"@adhoc/1\"")
+    expect(String(sent.detail)).toContain(
+      "mailbox_read_capability.state is unavailable (self-mailbox-authority-missing)",
+    )
+    expect(String(sent.detail)).toContain('Restore mailbox authority for "@adhoc/1"')
   })
 
   it("pins no-live-transport refusal to one line and preserves detail", () => {
@@ -153,37 +152,11 @@ describe("24994: canonical one-line error shape for tribe.send", () => {
   it("pins no-broadcast-owner refusal to one line when no broadcast owners are live", () => {
     const sender = makeContext(db, stmts, "sess-dev7", "@dev/7")
     const sent = parseToolJson(
-      handleToolCall(
-        sender,
-        "tribe.send",
-        { to: "*", message: "anyone there?", request: true },
-        makeOpts([]),
-      ),
+      handleToolCall(sender, "tribe.send", { to: "*", message: "anyone there?", request: true }, makeOpts([])),
     )
 
     expect(sent.error).toBe("tribe.send: failed to deliver to * - no online recipients")
     expect(String(sent.detail)).toContain("no answer-capable broadcast owner was observed")
-  })
-
-  it("pins pair-unrun refusal to one line when both sender and recipient are expected: false", () => {
-    const sender = makeContext(db, stmts, "sess-unrun-a", "@unrun/a")
-    const sent = parseToolJson(
-      handleToolCall(
-        sender,
-        "tribe.send",
-        { to: "@unrun/b", message: "hello", request: true },
-        makeOpts([], () =>
-          parseExpectedMembers(
-            JSON.stringify([
-              { name: "@unrun/a", expected: false },
-              { name: "@unrun/b", expected: false },
-            ]),
-          ),
-        ),
-      ),
-    )
-
-    expect(sent.error).toBe("tribe.send: delivery refused - sender and recipient both declared unrun")
   })
 
   it("pins summary-required refusal to one line for LLM senders omitting summary", () => {
@@ -203,9 +176,7 @@ describe("24994: canonical one-line error shape for tribe.send", () => {
   describe("argument validation refusals", () => {
     it("pins invalid to", () => {
       const sender = makeContext(db, stmts, "sess-dev7", "@dev/7")
-      const sent = parseToolJson(
-        handleToolCall(sender, "tribe.send", { to: "", message: "hi" }, makeOpts()),
-      )
+      const sent = parseToolJson(handleToolCall(sender, "tribe.send", { to: "", message: "hi" }, makeOpts()))
       expect(sent.error).toBe("tribe.send: invalid to - must be a non-empty string or array of non-empty strings")
     })
 
@@ -230,7 +201,9 @@ describe("24994: canonical one-line error shape for tribe.send", () => {
       const sent = parseToolJson(
         handleToolCall(sender, "tribe.send", { to: "@chief", message: "hi", request: "true" }, makeOpts()),
       )
-      expect(sent.error).toBe('tribe.send: invalid request - "true" is reserved for generated tracking, pass boolean true')
+      expect(sent.error).toBe(
+        'tribe.send: invalid request - "true" is reserved for generated tracking, pass boolean true',
+      )
     })
 
     it("pins invalid expires_in_ms", () => {
