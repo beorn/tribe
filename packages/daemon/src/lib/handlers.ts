@@ -603,6 +603,37 @@ function listActiveSessionNames(ctx: TribeContext, activeIds?: Set<string> | str
     .sort()
 }
 
+/**
+ * 24588 row 4: A seat has a live launch when it has an active session in the
+ * daemon's existing membership classification (getActiveSessionInfo / getActiveSessionIds),
+ * distinguishing actively running seats from unrun/stopped ones.
+ */
+function hasLiveLaunch(ctx: TribeContext, opts: HandlerOpts, name: string): boolean {
+  try {
+    const activeInfo = opts.getActiveSessionInfo?.()
+    if (activeInfo && activeInfo.some((s) => s.name === name)) {
+      return true
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    const activeIds = opts.getActiveSessionIds?.()
+    if (activeIds && activeIds.size > 0) {
+      if (ctx.getName() === name && activeIds.has(ctx.sessionId)) {
+        return true
+      }
+      const rows = ctx.stmts.allSessions.all() as Array<{ id: string; name: string }>
+      if (rows.some((r) => r.name === name && activeIds.has(r.id))) {
+        return true
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return false
+}
+
 function parseDomains(value: string): string[] {
   const parsed: unknown = JSON.parse(value)
   return Array.isArray(parsed) && parsed.every((v) => typeof v === "string") ? parsed : []
@@ -689,8 +720,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   }
   if (typeof requestArg === "string" && requestArg.trim() === "true") {
     return jsonResult({
-      error:
-        'tribe.send: invalid request - "true" is reserved for generated tracking, pass boolean true',
+      error: 'tribe.send: invalid request - "true" is reserved for generated tracking, pass boolean true',
     })
   }
   const requestFlag = requestArg === true
@@ -719,8 +749,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     const raw = a.incident
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
       return jsonResult({
-        error:
-          "tribe.send: invalid incident - must be an object {emitter, subject, condition, active?}",
+        error: "tribe.send: invalid incident - must be an object {emitter, subject, condition, active?}",
       })
     }
     const fields = raw as Record<string, unknown>
@@ -733,8 +762,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     }
     if (fields.active !== undefined && typeof fields.active !== "boolean") {
       return jsonResult({
-        error:
-          "tribe.send: invalid incident.active - must be a boolean",
+        error: "tribe.send: invalid incident.active - must be a boolean",
       })
     }
     if (requestFlag || requestId !== null) {
@@ -744,8 +772,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     }
     if (recipients === "*" || Array.isArray(recipients)) {
       return jsonResult({
-        error:
-          "tribe.send: invalid recipient - incident requires exactly one recipient",
+        error: "tribe.send: invalid recipient - incident requires exactly one recipient",
       })
     }
     try {
@@ -764,22 +791,25 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   }
   if (incident !== undefined && a.expires_in_ms !== undefined) {
     return jsonResult({
-      error:
-        "tribe.send: invalid options - expires_in_ms cannot be combined with incident",
+      error: "tribe.send: invalid options - expires_in_ms cannot be combined with incident",
     })
   }
   const sender = ctx.getName()
   const hasImplicitOwner = Array.isArray(recipients)
     ? recipients.some((recipient) => recipient !== sender)
     : recipients !== "*" && recipients !== sender
-  const pairUnrun =
+  const declaredUnrunPair =
     typeof recipients === "string" &&
     recipients !== "*" &&
     bothDeclaredUnrun(opts.getExpectedMembers?.(), sender, recipients)
+  const pairUnrun = declaredUnrunPair && !hasLiveLaunch(ctx, opts, sender) && !hasLiveLaunch(ctx, opts, recipients)
   if (pairUnrun && (requestFlag || requestId !== null || incident !== undefined)) {
     return jsonResult({
-      error:
-        "tribe.send: delivery refused - sender and recipient both declared unrun",
+      error: "tribe.send: delivery refused - sender and recipient both declared unrun",
+      detail:
+        `sender "${sender}" and recipient "${recipients}" are both declared on-demand (expected:false) ` +
+        `and neither has a live launch (24588 row 4); an untracked notify still delivers. ` +
+        `To open a tracked ball, ensure at least one seat has a live launch.`,
     })
   }
   const willTrack =
@@ -1683,7 +1713,12 @@ function pendingCloseMissWarning(
  * the two can never diverge on what "closed" means. Must be called inside a
  * transaction by its caller — the batch opens one for the whole list.
  */
-function settleDeclaredUnrunPairs(ctx: TribeContext, roster: DeclaredRoster | undefined, now: number): number {
+function settleDeclaredUnrunPairs(
+  ctx: TribeContext,
+  opts: HandlerOpts,
+  roster: DeclaredRoster | undefined,
+  now: number,
+): number {
   if (roster === undefined) return 0
   const open = ctx.stmts.selectAllPendingRequests.all() as Array<{
     request_id: string
@@ -1700,6 +1735,12 @@ function settleDeclaredUnrunPairs(ctx: TribeContext, roster: DeclaredRoster | un
   for (const row of open) {
     if (row.request_kind === "incident") continue
     if (!bothDeclaredUnrun(roster, row.sender, row.recipient)) continue
+    // 24588 row 4: Condition 1 — live seats can answer, so do not settle if either end has a live launch.
+    if (hasLiveLaunch(ctx, opts, row.sender) || hasLiveLaunch(ctx, opts, row.recipient)) continue
+    // 24588 row 4: Condition 2 — sweep must not act on an instant; settle only when past deadline (protects restart gaps).
+    const defaultTtl = defaultBallTtlMs("request", true) ?? 20 * 60 * 1000
+    const deadline = row.expires_at ?? row.opened_at + defaultTtl
+    if (now < deadline) continue
     rows.push({
       request_id: row.request_id,
       recipient: row.recipient,
@@ -1976,7 +2017,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
   const declaredRoster = expired ? undefined : opts.getExpectedMembers?.()
   if (declaredRoster !== undefined) {
     ctx.db.transaction(() => {
-      settleDeclaredUnrunPairs(ctx, declaredRoster, now)
+      settleDeclaredUnrunPairs(ctx, opts, declaredRoster, now)
     })()
   }
 
