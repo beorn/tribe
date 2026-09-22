@@ -1,8 +1,8 @@
 import { Database } from "bun:sqlite"
-import { writeFileSync, mkdtempSync, chmodSync, mkdirSync, utimesSync } from "node:fs"
+import { writeFileSync, mkdtempSync, chmodSync, mkdirSync, utimesSync, existsSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { tmpdir, homedir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 import { initSchema } from "../../src/history/db-schema.ts"
 import { getSession, upsertSession, insertMessage, ftsSearchWithSnippet, getSessionStatus } from "../../src/history/db-queries.ts"
@@ -48,19 +48,369 @@ ${content}
     return scriptPath
   }
 
-  function makeRealAg(isolatedHome?: string): string {
-    const realAgEntry = join(__dirname, "../../../../../../ag/packages/ag-cli/src/bin/ag.ts")
-    const scriptPath = join(tempDir, `real-ag-${Math.random().toString(36).slice(2)}.sh`)
+  function makeFixtureProducer(isolatedHome?: string): string {
     const homeVal = isolatedHome ?? tempDir
+    const tsPath = join(tempDir, `fixture-ag-${Math.random().toString(36).slice(2)}.ts`)
+    const shPath = join(tempDir, `fixture-ag-${Math.random().toString(36).slice(2)}.sh`)
+    const content = `import * as fs from "node:fs"
+import * as path from "node:path"
+
+const homeDir = ${JSON.stringify(homeVal)}
+const args = process.argv.slice(2)
+const command = args[0]
+const subcommand = args[1]
+
+function findFiles(dir: string, ext: string): string[] {
+  const results: string[] = []
+  if (!fs.existsSync(dir)) return results
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true })
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        results.push(...findFiles(full, ext))
+      } else if (entry.isFile() && entry.name.endsWith(ext)) {
+        results.push(full)
+      }
+    }
+  } catch {}
+  return results
+}
+
+interface DiscoveredSession {
+  path: string
+  nativeId: string
+  account: string | null
+  key: string
+  sizeBytes: number
+  mtimeMs: number
+  cwd: string | null
+  createdAt: string | null
+}
+
+function discoverSessions(): DiscoveredSession[] {
+  const allJsonl = findFiles(homeDir, ".jsonl")
+  const results: DiscoveredSession[] = []
+  for (const f of allJsonl) {
+    try {
+      const st = fs.statSync(f)
+      const content = fs.readFileSync(f, "utf8")
+      const lines = content.split("\\n")
+      const firstLine = lines.find((l) => l.trim().length > 0)
+      if (!firstLine) continue
+      const parsed = JSON.parse(firstLine)
+      if (parsed.type !== "session_meta" || !parsed.payload?.id) continue
+      const nativeId = parsed.payload.id
+      const cwd = parsed.payload.cwd ?? null
+      const createdAt = parsed.payload.timestamp ?? null
+      let account: string | null = null
+      const profMatch = f.match(/\\/profiles\\/codex\\/([^\\/]+)\\//)
+      if (profMatch) {
+        account = profMatch[1]!
+      }
+      const key = account ? \`codex:\${account}:\${nativeId}\` : \`codex:\${nativeId}\`
+      results.push({
+        path: f,
+        nativeId,
+        account,
+        key,
+        sizeBytes: st.size,
+        mtimeMs: Math.round(st.mtimeMs),
+        cwd,
+        createdAt,
+      })
+    } catch {}
+  }
+  return results
+}
+
+if (command === "transcript" && subcommand === "list") {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  const sessions = discoverSessions()
+  const byId = new Map<string, DiscoveredSession[]>()
+  for (const s of sessions) {
+    const list = byId.get(s.nativeId) ?? []
+    list.push(s)
+    byId.set(s.nativeId, list)
+  }
+
+  let canonicalCount = 0
+  let ambiguousCount = 0
+
+  for (const [nativeId, copies] of byId.entries()) {
+    if (copies.length === 1) {
+      canonicalCount++
+      const copy = copies[0]!
+      console.log(
+        JSON.stringify({
+          kind: "session",
+          provider: "codex",
+          nativeId,
+          canonicalPath: copy.path,
+          copies: [
+            {
+              path: copy.path,
+              account: copy.account,
+              sizeBytes: copy.sizeBytes,
+              mtimeMs: copy.mtimeMs,
+              lastEventAtMs: null,
+              decision: "canonical",
+              key: copy.key,
+            },
+          ],
+          status: "canonical",
+          key: copy.key,
+        }),
+      )
+    } else {
+      ambiguousCount++
+      console.log(
+        JSON.stringify({
+          kind: "session",
+          provider: "codex",
+          nativeId,
+          canonicalPath: null,
+          copies: copies.map((c) => ({
+            path: c.path,
+            account: c.account,
+            sizeBytes: c.sizeBytes,
+            mtimeMs: c.mtimeMs,
+            lastEventAtMs: null,
+            decision: "ambiguous",
+            key: c.key,
+          })),
+          status: "ambiguous",
+          key: null,
+        }),
+      )
+    }
+  }
+
+  console.log(
+    JSON.stringify({
+      kind: "done",
+      discovered: sessions.length,
+      canonical: canonicalCount,
+      ambiguous: ambiguousCount,
+      stale: 0,
+      invalid: 0,
+    }),
+  )
+  process.exit(0)
+}
+
+if (command === "transcript" && subcommand === "export") {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+
+  let targetPaths: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--path" && args[i + 1]) {
+      targetPaths.push(path.resolve(args[i + 1]!))
+      i++
+    }
+  }
+  const pathsIdx = args.indexOf("--paths")
+  if (pathsIdx !== -1) {
+    let i = pathsIdx + 1
+    while (i < args.length && !args[i]!.startsWith("-")) {
+      targetPaths.push(path.resolve(args[i]!))
+      i++
+    }
+  }
+
+  let sessions = discoverSessions()
+  if (targetPaths.length > 0) {
+    sessions = sessions.filter((s) => targetPaths.includes(path.resolve(s.path)))
+    for (const tp of targetPaths) {
+      if (!sessions.some((s) => path.resolve(s.path) === tp)) {
+        try {
+          const st = fs.statSync(tp)
+          const content = fs.readFileSync(tp, "utf8")
+          const lines = content.split("\\n")
+          const firstLine = lines.find((l) => l.trim().length > 0)
+          if (firstLine) {
+            const parsed = JSON.parse(firstLine)
+            if (parsed.type === "session_meta" && parsed.payload?.id) {
+              const nativeId = parsed.payload.id
+              const key = \`codex:\${nativeId}\`
+              sessions.push({
+                path: tp,
+                nativeId,
+                account: null,
+                key,
+                sizeBytes: st.size,
+                mtimeMs: Math.round(st.mtimeMs),
+                cwd: parsed.payload.cwd ?? null,
+                createdAt: parsed.payload.timestamp ?? null,
+              })
+            }
+          }
+        } catch {}
+      }
+    }
+  }
+
+  const byId = new Map<string, DiscoveredSession[]>()
+  for (const s of sessions) {
+    const list = byId.get(s.nativeId) ?? []
+    list.push(s)
+    byId.set(s.nativeId, list)
+  }
+
+  let totalExportedRows = 0
+  let sessionExportCount = 0
+
+  for (const [nativeId, copies] of byId.entries()) {
+    sessionExportCount++
+    const isAmbiguous = copies.length > 1
+    const stableKeys = copies.map((c) => c.key)
+    const sessionKey = isAmbiguous ? null : copies[0]!.key
+    const primary = copies[0]!
+
+    console.log(
+      JSON.stringify({
+        kind: "session",
+        provider: "codex",
+        nativeId,
+        sessionKey,
+        key: sessionKey,
+        keys: stableKeys,
+        path: primary.path,
+        home: homeDir,
+        account: primary.account,
+        cwd: primary.cwd,
+        createdAt: primary.createdAt,
+        sizeBytes: primary.sizeBytes,
+        mtimeMs: primary.mtimeMs,
+        copies: copies.map((c) => ({
+          path: c.path,
+          account: c.account,
+          sizeBytes: c.sizeBytes,
+          mtimeMs: c.mtimeMs,
+          lastEventAtMs: null,
+          decision: isAmbiguous ? "ambiguous" : "canonical",
+          key: c.key,
+        })),
+      }),
+    )
+
+    let sessionRows = 0
+    for (const copy of copies) {
+      try {
+        const content = fs.readFileSync(copy.path, "utf8")
+        const lines = content.split("\\n")
+        let lineNumber = 0
+        for (const line of lines) {
+          lineNumber++
+          const trimmed = line.trim()
+          if (!trimmed) continue
+          const parsed = JSON.parse(trimmed)
+          if (parsed.type === "event_msg") {
+            const payload = parsed.payload
+            if (payload?.type === "user_message" && typeof payload.message === "string") {
+              sessionRows++
+              console.log(
+                JSON.stringify({
+                  kind: "row",
+                  sessionKey: copy.key,
+                  line: lineNumber,
+                  role: "user",
+                  text: payload.message,
+                  timestamp: parsed.timestamp ?? primary.createdAt,
+                  recordKind: "event_msg",
+                  duplicateOf: null,
+                }),
+              )
+            }
+          } else if (parsed.type === "response_item") {
+            const payload = parsed.payload
+            if (payload?.type === "message") {
+              const role = payload.role ?? "assistant"
+              let text = ""
+              if (Array.isArray(payload.content)) {
+                for (const item of payload.content) {
+                  if (item?.type === "text" && item.text) {
+                    text += item.text
+                  }
+                }
+              } else if (typeof payload.content === "string") {
+                text = payload.content
+              }
+              if (text) {
+                sessionRows++
+                console.log(
+                  JSON.stringify({
+                    kind: "row",
+                    sessionKey: copy.key,
+                    line: lineNumber,
+                    role,
+                    text,
+                    timestamp: parsed.timestamp ?? primary.createdAt,
+                    recordKind: "response_item",
+                    duplicateOf: null,
+                  }),
+                )
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+
+    totalExportedRows += sessionRows
+    console.log(
+      JSON.stringify({
+        kind: "end",
+        nativeId,
+        keys: stableKeys,
+        rows: sessionRows,
+        skipped: 0,
+        status: "complete",
+      }),
+    )
+  }
+
+  console.log(
+    JSON.stringify({
+      kind: "done",
+      sessions: sessionExportCount,
+      rows: totalExportedRows,
+      errors: 0,
+    }),
+  )
+  process.exit(0)
+}
+
+process.exit(0)
+`
+    writeFileSync(tsPath, content)
     writeFileSync(
-      scriptPath,
+      shPath,
       `#!/bin/sh
+export HOME="${homeVal}"
+exec bun "${tsPath}" "$@"
+`,
+    )
+    chmodSync(shPath, 0o755)
+    return shPath
+  }
+
+  function makeRealAg(isolatedHome?: string): string {
+    const realAgEntry = process.env.AG_BIN || join(__dirname, "../../../../../../ag/packages/ag-cli/src/bin/ag.ts")
+    if (existsSync(realAgEntry) && process.env.USE_FIXTURE_PRODUCER !== "1") {
+      const scriptPath = join(tempDir, `real-ag-${Math.random().toString(36).slice(2)}.sh`)
+      const homeVal = isolatedHome ?? tempDir
+      writeFileSync(
+        scriptPath,
+        `#!/bin/sh
 export HOME="${homeVal}"
 exec bun "${realAgEntry}" "$@"
 `,
-    )
-    chmodSync(scriptPath, 0o755)
-    return scriptPath
+      )
+      chmodSync(scriptPath, 0o755)
+      return scriptPath
+    }
+    return makeFixtureProducer(isolatedHome)
   }
 
   describe("resolveAgBin", () => {
