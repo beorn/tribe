@@ -116,6 +116,8 @@ export interface MessageRecord {
   file_paths: string | null
   timestamp: number
   duplicate_of?: number | null
+  line?: number | null
+  duplicate_line?: number | null
 }
 
 export interface WriteRecord {

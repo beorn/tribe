@@ -494,7 +494,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
       try {
         const firstLine = fs.readFileSync(absPath, "utf8").split("\n", 1)[0]
         if (firstLine) {
-          const parsed = JSON.parse(firstLine)
+          const parsed = JSON.parse(firstLine) as { type?: unknown }
           if (parsed.type === "user" || parsed.type === "assistant") {
             isClaudeTarget = true
           }
