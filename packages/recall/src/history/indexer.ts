@@ -17,6 +17,8 @@ import {
   PROJECTS_DIR,
   MAX_CONTENT_SIZE,
   upsertSession,
+  updateSessionStatus,
+  getSession,
   insertMessage,
   insertWrite,
   upsertContent,
@@ -82,10 +84,9 @@ function loadRecallIgnore(): ((p: string) => boolean)[] {
     const expanded = pattern.startsWith("~/") ? path.join(os.homedir(), pattern.slice(2)) : pattern
     const glob = new Glob(expanded)
     return (filePath: string): boolean => {
-      // Match against absolute path AND PROJECTS_DIR-relative path so users
-      // can write either form in .recall-ignore.
-      if (glob.match(filePath)) return true
-      const rel = path.relative(PROJECTS_DIR, filePath)
+      // Match against absolute path AND currentProjectsDir()-relative path so users
+      // can write both "foo.jsonl" and full absolute paths in .recall-ignore
+      const rel = path.relative(currentProjectsDir(), filePath)
       if (rel && !rel.startsWith("..") && glob.match(rel)) return true
       return false
     }
@@ -113,13 +114,18 @@ export interface IndexOptions {
   onProgress?: (progress: IndexProgress) => void
 }
 
+export function currentProjectsDir(): string {
+  return process.env.CLAUDE_DIR ? path.join(process.env.CLAUDE_DIR, "projects") : PROJECTS_DIR
+}
+
 export async function* findSessionFiles(): AsyncGenerator<string> {
-  if (!fs.existsSync(PROJECTS_DIR)) {
-    throw new Error(`Recall session source is missing: ${PROJECTS_DIR}`)
+  const pdir = currentProjectsDir()
+  if (!fs.existsSync(pdir)) {
+    throw new Error(`Recall session source is missing: ${pdir}`)
   }
 
   const glob = new Glob("**/*.jsonl")
-  for await (const file of glob.scan({ cwd: PROJECTS_DIR, absolute: true })) {
+  for await (const file of glob.scan({ cwd: pdir, absolute: true })) {
     if (isRecallIgnored(file)) continue
     yield file
   }
@@ -230,7 +236,7 @@ export async function indexSessionFile(
   filePath: string,
   options: IndexOptions = {},
 ): Promise<{ messages: number; writes: number }> {
-  const relativePath = path.relative(PROJECTS_DIR, filePath)
+  const relativePath = path.relative(currentProjectsDir(), filePath)
   const projectPath = projectPathFromRelative(relativePath)
   const stats = fs.statSync(filePath)
   const mtime = stats.mtime.getTime()
@@ -257,40 +263,35 @@ export async function indexSessionFile(
   const seenUuids = new Set<string>()
   const seenWriteHashes = new Set<string>()
 
-  interface StagedMessage {
-    uuid: string | null
-    sessionId: string
-    type: string
-    textContent: string | null
-    toolName: string | null
-    filePaths: string | null
-    timestamp: number
-  }
-
-  interface StagedWrite {
-    sessionId: string
-    relativePath: string
-    toolUseId: string
-    timestamp: string
-    filePath: string
-    hash: string
-    contentSize: number
-    content: string | null
-  }
-
-  const stagedMessages: StagedMessage[] = []
-  const stagedWrites: StagedWrite[] = []
   const touchedSessionIds = new Set<string>([sessionId])
+  const spId = "sp_claude_" + Date.now() + "_" + Math.random().toString(36).slice(2)
+  db.run(`SAVEPOINT ${spId}`)
 
-  for await (const line of rl) {
-    if (!line.trim()) continue
+  try {
+    for (const sid of touchedSessionIds) {
+      db.prepare("DELETE FROM messages WHERE session_id = ?").run(sid)
+      db.prepare("DELETE FROM writes WHERE session_id = ?").run(sid)
+    }
 
-    try {
-      const record = JSON.parse(line) as JsonlRecord
+    let lineNum = 0
+    for await (const line of rl) {
+      lineNum++
+      if (!line.trim()) continue
+
+      let record: JsonlRecord
+      try {
+        record = JSON.parse(line) as JsonlRecord
+      } catch (parseErr) {
+        throw new Error(`Malformed JSON in Claude transcript at line ${lineNum}: ${(parseErr as Error).message}`, { cause: parseErr })
+      }
 
       if (record.sessionId && record.sessionId !== sessionId) {
+        if (!touchedSessionIds.has(record.sessionId)) {
+          touchedSessionIds.add(record.sessionId)
+          db.prepare("DELETE FROM messages WHERE session_id = ?").run(record.sessionId)
+          db.prepare("DELETE FROM writes WHERE session_id = ?").run(record.sessionId)
+        }
         sessionId = record.sessionId
-        touchedSessionIds.add(sessionId)
       }
 
       // Use actual record timestamp for session date tracking;
@@ -308,24 +309,16 @@ export async function indexSessionFile(
         seenUuids.add(record.uuid)
       }
 
-      // Index the message
+      // Index the message directly into SQLite
       const textContent = extractTextContent(record)
       const { toolName, filePaths } = extractToolInfo(record)
 
       if (textContent || toolName) {
-        stagedMessages.push({
-          uuid: record.uuid || null,
-          sessionId,
-          type: record.type,
-          textContent,
-          toolName,
-          filePaths,
-          timestamp,
-        })
+        insertMessage(db, record.uuid || null, sessionId, record.type, textContent, toolName, filePaths, timestamp)
         messageCount++
       }
 
-      // Also index writes for backwards compatibility
+      // Also index writes for backwards compatibility directly into SQLite
       if (!options.messagesOnly && record.type === "assistant" && record.message?.content) {
         for (const item of record.message.content) {
           if (
@@ -349,49 +342,30 @@ export async function indexSessionFile(
 
             const contentSize = Buffer.byteLength(content, "utf8")
 
-            stagedWrites.push({
+            insertWrite(
+              db,
               sessionId,
               relativePath,
-              toolUseId: toolUse.id,
-              timestamp: record.timestamp || new Date().toISOString(),
+              toolUse.id,
+              record.timestamp || new Date().toISOString(),
               filePath,
               hash,
               contentSize,
-              content: contentSize <= MAX_CONTENT_SIZE ? content : null,
-            })
+              contentSize <= MAX_CONTENT_SIZE ? content : null,
+            )
             writeCount++
           }
         }
       }
-    } catch {
-      // Skip malformed JSON lines
     }
-  }
 
-  // Atomically apply replacement inside a transaction only after file is fully parsed
-  db.transaction(() => {
-    for (const sid of touchedSessionIds) {
-      db.prepare("DELETE FROM messages WHERE session_id = ?").run(sid)
-      db.prepare("DELETE FROM writes WHERE session_id = ?").run(sid)
-    }
-    for (const m of stagedMessages) {
-      insertMessage(db, m.uuid, m.sessionId, m.type, m.textContent, m.toolName, m.filePaths, m.timestamp)
-    }
-    for (const w of stagedWrites) {
-      insertWrite(
-        db,
-        w.sessionId,
-        w.relativePath,
-        w.toolUseId,
-        w.timestamp,
-        w.filePath,
-        w.hash,
-        w.contentSize,
-        w.content,
-      )
-    }
-    upsertSession(db, sessionId, projectPath, relativePath, firstTimestamp || mtime, lastTimestamp || mtime, messageCount)
-  })()
+    upsertSession(db, sessionId, projectPath, relativePath, firstTimestamp || mtime, lastTimestamp || mtime, messageCount, null, { status: "complete" })
+    db.run(`RELEASE SAVEPOINT ${spId}`)
+  } catch (err) {
+    db.run(`ROLLBACK TO SAVEPOINT ${spId}`)
+    db.run(`RELEASE SAVEPOINT ${spId}`)
+    throw err
+  }
 
   return { messages: messageCount, writes: writeCount }
 }
@@ -474,7 +448,7 @@ export function pruneIgnoredSessions(db: Database): { sessions: number; messages
 
   const ignoredIds: string[] = []
   for (const s of allSessions) {
-    const abs = path.isAbsolute(s.jsonl_path) ? s.jsonl_path : path.join(PROJECTS_DIR, s.jsonl_path)
+    const abs = path.isAbsolute(s.jsonl_path) ? s.jsonl_path : path.join(currentProjectsDir(), s.jsonl_path)
     if (isRecallIgnored(abs)) ignoredIds.push(s.id)
   }
 
@@ -532,13 +506,15 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     throw new Error(`Recall project source is not a directory: ${options.projectRoot}`)
   }
 
+  const seenSessionIds = new Set<string>()
+
   let isClaudeTarget = false
   if (options.path) {
     const absPath = path.resolve(options.path)
     if (!fs.existsSync(absPath)) {
       throw new Error(`Specified path does not exist: ${absPath}`)
     }
-    if (absPath.startsWith(path.resolve(PROJECTS_DIR))) {
+    if (absPath.startsWith(path.resolve(currentProjectsDir()))) {
       isClaudeTarget = true
     } else {
       try {
@@ -553,7 +529,18 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
         if (err instanceof SyntaxError) {
           // not JSON in first line -> not a Claude transcript
         } else {
-          throw new Error(`Failed to read path ${absPath}: ${(err as Error).message}`, { cause: err })
+          const baseSessionId = path.basename(absPath, ".jsonl")
+          const existing = getSession(db, baseSessionId)
+          if (existing) {
+            updateSessionStatus(db, baseSessionId, "stale-unreadable", {
+              failureReason: (err as Error).message,
+              failureTime: Date.now(),
+            })
+            seenSessionIds.add(baseSessionId)
+            isClaudeTarget = true
+          } else {
+            throw new Error(`Failed to read path ${absPath}: ${(err as Error).message}`, { cause: err })
+          }
         }
       }
     }
@@ -563,8 +550,6 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   if (!options.skipCodex && process.env.RECALL_SKIP_CODEX !== "1" && (!options.path || !isClaudeTarget)) {
     await validateAgReadiness(options.agBin)
   }
-
-  const seenSessionIds = new Set<string>()
 
   let totalFiles = 0
   let totalMessages = 0
@@ -589,7 +574,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
       const baseSessionId = path.basename(sessionFile, ".jsonl")
       seenSessionIds.add(baseSessionId)
 
-      const relativePath = path.relative(PROJECTS_DIR, sessionFile)
+      const relativePath = path.relative(currentProjectsDir(), sessionFile)
       options.onProgress?.({
         filesProcessed: totalFiles,
         messagesIndexed: totalMessages,
@@ -597,13 +582,22 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
         currentFile: relativePath,
       })
 
-      const { messages, writes } = await indexSessionFile(db, sessionFile, options)
-      totalMessages += messages
-      totalWrites += writes
+      try {
+        const { messages, writes } = await indexSessionFile(db, sessionFile, options)
+        totalMessages += messages
+        totalWrites += writes
+      } catch (err) {
+        const errMsg = (err as Error).message || String(err)
+        updateSessionStatus(db, baseSessionId, "stale-unreadable", {
+          failureReason: errMsg,
+          failureTime: Date.now(),
+        })
+        seenSessionIds.add(baseSessionId)
+      }
     }
   } else if (isClaudeTarget) {
     totalFiles++
-    const relativePath = path.relative(PROJECTS_DIR, options.path)
+    const relativePath = path.relative(currentProjectsDir(), options.path)
     options.onProgress?.({
       filesProcessed: totalFiles,
       messagesIndexed: totalMessages,
@@ -611,9 +605,19 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
       currentFile: relativePath,
     })
 
-    const { messages, writes } = await indexSessionFile(db, options.path, options)
-    totalMessages += messages
-    totalWrites += writes
+    const baseSessionId = path.basename(options.path, ".jsonl")
+    try {
+      const { messages, writes } = await indexSessionFile(db, options.path, options)
+      totalMessages += messages
+      totalWrites += writes
+    } catch (err) {
+      const errMsg = (err as Error).message || String(err)
+      updateSessionStatus(db, baseSessionId, "stale-unreadable", {
+        failureReason: errMsg,
+        failureTime: Date.now(),
+      })
+      seenSessionIds.add(baseSessionId)
+    }
   }
 
   // Index Codex transcripts via ag transcript export

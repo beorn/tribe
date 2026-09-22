@@ -8,18 +8,29 @@ import { initSchema } from "../../src/history/db-schema.ts"
 import { getSession, upsertSession, insertMessage, ftsSearchWithSnippet, getSessionStatus } from "../../src/history/db-queries.ts"
 import { resolveAgBin, fetchCodexCatalog, indexCodexTranscripts, safeRollback } from "../../src/history/codex-indexer.ts"
 import { rebuildIndex, INDEX_WINDOW_DAYS, INDEX_WINDOW_MS, pruneOldSessions } from "../../src/history/indexer.ts"
+import { getPersistedFailedSessions } from "../../src/lib/status.ts"
 
 describe("Codex Transcript Indexer", () => {
   let tempDir: string
   let db: Database
+  let origClaudeDir: string | undefined
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), "recall-codex-test-"))
+    origClaudeDir = process.env.CLAUDE_DIR
+    const testClaudeDir = join(tempDir, "isolated-claude")
+    mkdirSync(join(testClaudeDir, "projects"), { recursive: true })
+    process.env.CLAUDE_DIR = testClaudeDir
     db = new Database(":memory:")
     initSchema(db)
   })
 
   afterEach(() => {
+    if (origClaudeDir !== undefined) {
+      process.env.CLAUDE_DIR = origClaudeDir
+    } else {
+      delete process.env.CLAUDE_DIR
+    }
     db.close()
   })
 
@@ -1497,9 +1508,22 @@ if (args.includes("list")) {
       const extendedSearch = ftsSearchWithSnippet(db, "forty-five", { sinceTime: cutoffTime })
       expect(extendedSearch.results.length).toBeGreaterThanOrEqual(2)
 
-      // Incremental rebuild does not prune them
-      const pruned = pruneOldSessions(db, cutoffTime)
-      expect(pruned.sessions).toBe(0)
+      // Actual public incremental rebuild with native fixtures preserves them across prune
+      await rebuildIndex(db, { incremental: true, agBin: realAg })
+
+      const claudeSessAfter = getSession(db, "claude-45d")
+      expect(claudeSessAfter).toBeDefined()
+      expect(claudeSessAfter?.message_count).toBeGreaterThan(0)
+
+      const codexSessAfter = getSession(db, "codex:019fce85-test-45d")
+      expect(codexSessAfter).toBeDefined()
+      expect(codexSessAfter?.message_count).toBeGreaterThan(0)
+
+      const defaultSearchAfter = ftsSearchWithSnippet(db, "forty-five", { sinceTime: now - 30 * 24 * 60 * 60 * 1000 })
+      expect(defaultSearchAfter.results).toHaveLength(0)
+
+      const extendedSearchAfter = ftsSearchWithSnippet(db, "forty-five", { sinceTime: cutoffTime })
+      expect(extendedSearchAfter.results.length).toBeGreaterThanOrEqual(2)
     })
   })
 
@@ -1528,7 +1552,7 @@ if (args.includes("list")) {
   })
 
   describe("Chief Review 2150: Corrections 1 & 2 - Prior Good Data Preservation & Shrink Prune Safety", () => {
-    test("public rebuild preserves prior good Claude session when subsequent read fails or is malformed", async () => {
+    test("public rebuild preserves prior good Claude session when subsequent read fails or is malformed after valid first record", async () => {
       const claudeDir = join(tempDir, "claude-preservation")
       mkdirSync(claudeDir, { recursive: true })
       const sessionPath = join(claudeDir, "session-preserve.jsonl")
@@ -1545,20 +1569,81 @@ if (args.includes("list")) {
       const initialSess = getSession(db, "session-preserve")
       expect(initialSess).toBeDefined()
       expect(initialSess?.message_count).toBe(2)
+      expect(initialSess?.status).toBe("complete")
 
-      // Corrupt the file with invalid non-JSON content
-      writeFileSync(sessionPath, "NOT_VALID_JSON_AT_ALL\n\n{{{corrupt", "utf8")
+      // Corrupt the file: valid first user line followed by malformed second line!
+      const corruptLines = [
+        JSON.stringify({ type: "user", message: { content: "First valid user prompt in v2" } }),
+        "NOT_VALID_JSON_AT_ALL\n\n{{{corrupt",
+      ]
+      writeFileSync(sessionPath, corruptLines.join("\n") + "\n", "utf8")
 
       // Re-run public rebuild
       await rebuildIndex(db, { path: sessionPath, skipCodex: true })
 
-      // Prior good data remains completely preserved in SQLite
+      // Prior good data remains completely preserved in SQLite via transaction savepoint rollback!
       const preservedSess = getSession(db, "session-preserve")
       expect(preservedSess).toBeDefined()
       expect(preservedSess?.message_count).toBe(2)
 
       const searchRes = ftsSearchWithSnippet(db, "Original preserved query")
       expect(searchRes.results).toHaveLength(1)
+
+      // Status and failure fields are visible
+      const statusDetails = getSessionStatus(db, "session-preserve")
+      expect(statusDetails?.status).toBe("stale-unreadable")
+      expect(statusDetails?.failureReason).toContain("Malformed JSON in Claude transcript")
+
+      // Persisted failures in status module returns the failed session
+      const failed = getPersistedFailedSessions(db)
+      expect(failed.some((f) => f.id === "session-preserve" && f.status === "stale-unreadable")).toBe(true)
+
+      // Recovery: write valid replacement transcript with 3 messages
+      const recoveryLines = [
+        JSON.stringify({ type: "user", message: { content: "Recovered query 1" } }),
+        JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Recovered response 1" }] } }),
+        JSON.stringify({ type: "user", message: { content: "Recovered query 2" } }),
+      ]
+      writeFileSync(sessionPath, recoveryLines.join("\n") + "\n", "utf8")
+
+      await rebuildIndex(db, { path: sessionPath, skipCodex: true })
+      const recoveredSess = getSessionStatus(db, "session-preserve")
+      expect(recoveredSess?.status).toBe("complete")
+      expect(recoveredSess?.failureReason).toBeNull()
+      expect(recoveredSess?.messageCount).toBe(3)
+
+      const failedAfter = getPersistedFailedSessions(db)
+      expect(failedAfter.some((f) => f.id === "session-preserve")).toBe(false)
+    })
+
+    test("public rebuild preserves prior good Claude session on asynchronous read failure at public entry", async () => {
+      const claudeDir = join(tempDir, "claude-async-fail")
+      mkdirSync(claudeDir, { recursive: true })
+      const sessionPath = join(claudeDir, "session-async-fail.jsonl")
+
+      const lines = [
+        JSON.stringify({ type: "user", message: { content: "Async read fail query" } }),
+        JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Async read fail response" }] } }),
+      ]
+      writeFileSync(sessionPath, lines.join("\n") + "\n", "utf8")
+
+      await rebuildIndex(db, { path: sessionPath, skipCodex: true })
+      const initialSess = getSession(db, "session-async-fail")
+      expect(initialSess?.message_count).toBe(2)
+
+      // Make file unreadable
+      chmodSync(sessionPath, 0o000)
+      try {
+        await rebuildIndex(db, { path: sessionPath, skipCodex: true })
+      } finally {
+        chmodSync(sessionPath, 0o644)
+      }
+
+      // Prior good data remains preserved
+      const preservedSess = getSession(db, "session-async-fail")
+      expect(preservedSess).toBeDefined()
+      expect(preservedSess?.message_count).toBe(2)
+      expect(preservedSess?.status).toBe("stale-unreadable")
     })
 
     test("public rebuild preserves prior Codex rows when shrink is rejected without force", async () => {
@@ -1578,8 +1663,8 @@ if (args.includes("list")) {
 
       const realAg = makeRealAg(codexHome)
 
-      // Initial rebuild
-      await rebuildIndex(db, { path: rolloutPath, agBin: realAg })
+      // Initial rebuild via full public rebuild branch
+      await rebuildIndex(db, { full: true, agBin: realAg })
       const initialSess = getSession(db, "codex:019fce85-test-shrink")
       expect(initialSess?.message_count).toBe(3)
       expect(initialSess?.status).toBe("complete")
@@ -1590,12 +1675,11 @@ if (args.includes("list")) {
         JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Shrink test message 1" } }),
       ]
       writeFileSync(rolloutPath, v2Lines.join("\n") + "\n", "utf8")
-      // Update mtime so indexer sees change
       const later = new Date(Date.now() + 5000)
       utimesSync(rolloutPath, later, later)
 
-      // Rebuild without force
-      await rebuildIndex(db, { path: rolloutPath, agBin: realAg })
+      // Full public rebuild without force (exercises full unreferenced pruning branch)
+      await rebuildIndex(db, { full: true, agBin: realAg })
 
       // Prior rows are PRESERVED, not pruned or deleted!
       const shrunkSess = getSession(db, "codex:019fce85-test-shrink")
@@ -1609,6 +1693,13 @@ if (args.includes("list")) {
       expect(statusDetails?.shrinkOldCount).toBe(3)
       expect(statusDetails?.shrinkNewCount).toBe(1)
 
+      // Persisted failures in status module returns shrink details
+      const failed = getPersistedFailedSessions(db)
+      const failedEntry = failed.find((f) => f.id === "codex:019fce85-test-shrink")
+      expect(failedEntry).toBeDefined()
+      expect(failedEntry?.shrink_old_count).toBe(3)
+      expect(failedEntry?.shrink_new_count).toBe(1)
+
       // Now re-run with force: should recover and update status to complete, clearing failure fields
       await rebuildIndex(db, { path: rolloutPath, agBin: realAg, force: true })
       const forcedSess = getSessionStatus(db, "codex:019fce85-test-shrink")
@@ -1616,6 +1707,9 @@ if (args.includes("list")) {
       expect(forcedSess?.messageCount).toBe(1)
       expect(forcedSess?.failureReason).toBeNull()
       expect(forcedSess?.shrinkOldCount).toBeNull()
+
+      const failedAfter = getPersistedFailedSessions(db)
+      expect(failedAfter.find((f) => f.id === "codex:019fce85-test-shrink")).toBeUndefined()
     })
   })
 

@@ -96,6 +96,8 @@ export {
   // Session operations
   upsertSession,
   updateSessionTitle,
+  updateSessionStatus,
+  getSessionStatus,
   getSession,
   getSessionByPath,
   // Message operations

@@ -5,6 +5,7 @@
 
 import * as fs from "fs"
 import * as os from "os"
+import type { Database } from "bun:sqlite"
 import { getDb, closeDb, DB_PATH, getActiveSessionsInWindow, getActivitySummary, getIndexMeta } from "../history/db"
 import { reviewMemorySystem } from "../history/recall"
 import { formatCost } from "./llm-backend.ts"
@@ -27,6 +28,27 @@ import {
   formatRelativeTime,
   displayProjectPath,
 } from "./format"
+ 
+export interface PersistedFailedSession {
+  id: string
+  jsonl_path: string
+  status: string
+  failure_reason: string | null
+  failure_time: number | null
+  shrink_old_count: number | null
+  shrink_new_count: number | null
+}
+
+export function getPersistedFailedSessions(db: Database): PersistedFailedSession[] {
+  return db
+    .prepare(
+      `SELECT id, jsonl_path, status, failure_reason, failure_time, shrink_old_count, shrink_new_count
+       FROM sessions
+       WHERE failure_reason IS NOT NULL OR status IN ('stale-unreadable', 'stale-bad-header', 'shrunk')
+       ORDER BY COALESCE(failure_time, updated_at) DESC`,
+    )
+    .all() as PersistedFailedSession[]
+}
 
 export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Promise<void> {
   // Resolve the project root from the CALLER's cwd, not this file's location.
@@ -133,6 +155,26 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
         }
       } catch {
         // ignore
+      }
+    }
+
+    const failedSessions = getPersistedFailedSessions(db)
+    if (failedSessions.length > 0) {
+      console.log(`  Failed/stale sessions (${failedSessions.length}):`)
+      for (const s of failedSessions.slice(0, 10)) {
+        const timeStr = s.failure_time
+          ? ` (${new Date(s.failure_time).toISOString().replace("T", " ").replace(/\.\d+Z$/, "Z")})`
+          : ""
+        const reasonStr = s.failure_reason ? `: ${s.failure_reason}` : ""
+        const pathStr = s.jsonl_path ? ` [${s.jsonl_path}]` : ""
+        const shrinkStr =
+          s.shrink_old_count !== null && s.shrink_new_count !== null
+            ? ` (rows: ${s.shrink_old_count} -> ${s.shrink_new_count})`
+            : ""
+        console.log(`    - [${s.id}] ${s.status}${reasonStr}${pathStr}${shrinkStr}${timeStr}`)
+      }
+      if (failedSessions.length > 10) {
+        console.log(`    ... and ${failedSessions.length - 10} more`)
       }
     }
 
