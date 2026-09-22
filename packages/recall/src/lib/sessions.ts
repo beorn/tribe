@@ -104,6 +104,17 @@ export async function cmdIndex(opts: {
     if (result.skippedOld > 0) {
       console.log(`  (skipped ${result.skippedOld} sessions older than 180 days)`)
     }
+
+    const hasLedgeredSkips =
+      (result.codexFailures !== undefined && result.codexFailures.length > 0) ||
+      (result.codexUnreadable !== undefined && result.codexUnreadable > 0) ||
+      (result.codexErrors !== undefined && result.codexErrors > 0)
+
+    if (hasLedgeredSkips) {
+      process.exitCode = 5
+    } else {
+      process.exitCode = 0
+    }
   } catch (error) {
     if (error instanceof IndexWriterBusyError) {
       console.error(error.message)
