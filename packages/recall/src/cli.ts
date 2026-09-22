@@ -42,6 +42,7 @@ import { cmdExport } from "./qmd-export"
 // ============================================================================
 
 const SUBCOMMANDS = new Set([
+  "search",
   "index",
   "status",
   "sessions",

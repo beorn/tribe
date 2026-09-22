@@ -595,10 +595,10 @@ function printResultEntries(results: RecallSearchResult[]): void {
       .toISOString()
       .replace("T", " ")
       .replace(/\.\d+Z$/, "Z")
+    const duplicateDetail = r.duplicateLine ? `, also line ${r.duplicateLine}` : ""
     const typeLabel = formatType(r.type)
     const sessionLabel = r.sessionTitle ? `${r.sessionTitle}` : `${r.sessionId.slice(0, 8)}...`
-
-    console.log(`${typeLabel} ${BOLD}${sessionLabel}${RESET} ${DIM}(${date})${RESET}`)
+    console.log(`${typeLabel} ${BOLD}${sessionLabel}${RESET} ${DIM}(${date}${duplicateDetail})${RESET}`)
 
     const highlighted = r.snippet.replace(/>>>/g, `${BOLD}${YELLOW}`).replace(/<<</g, RESET)
     const indented = highlighted
@@ -854,10 +854,13 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     messageResults = ftsSearchWithSnippet(db, query, messageOpts)
   } else if (searchMessages && !query) {
     const recentQuery = `
-      SELECT m.*, s.project_path, '' as snippet, 0 as rank
+      SELECT m.*, s.project_path,
+             (SELECT d.line FROM messages d WHERE d.session_id = m.session_id AND d.duplicate_of = m.line LIMIT 1) as duplicate_line,
+             '' as snippet, 0 as rank
       FROM messages m
       JOIN sessions s ON m.session_id = s.id
       WHERE 1=1
+      AND (m.duplicate_of IS NULL)
       ${sinceTime ? "AND m.timestamp >= ?" : ""}
       ${messageType ? "AND m.type = ?" : ""}
       ${tool ? "AND m.tool_name = ?" : ""}

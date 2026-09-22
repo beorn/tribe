@@ -28,7 +28,7 @@ export async function cmdIndex(opts: {
     using lock = acquireIndexWriter(db)
 
     console.log(opts.incremental ? "Updating session index..." : "Building session index...")
-    console.log("(indexing sessions from the last 30 days)\n")
+    console.log("(indexing sessions from the last 180 days)\n")
 
     let lastProgressUpdate = 0
     const result = await rebuildIndex(db, {
@@ -53,6 +53,13 @@ export async function cmdIndex(opts: {
     }
     if (result.codexSkipped !== undefined && result.codexSkipped > 0) {
       console.log(`  (skipped ${result.codexSkipped} unchanged Codex transcripts)`)
+    }
+    if (result.codexUnreadable !== undefined && result.codexUnreadable > 0) {
+      console.log(`  (${result.codexUnreadable} unreadable Codex transcripts)`)
+    }
+    if (result.codexReasonCounts && Object.keys(result.codexReasonCounts).length > 0) {
+      const breakdown = Object.entries(result.codexReasonCounts).map(([k, v]) => `${v} ${k}`).join(", ")
+      console.log(`  (Codex wire status: ${breakdown})`)
     }
     if (result.writes > 0) {
       console.log(`  ${result.writes.toLocaleString()} file writes`)

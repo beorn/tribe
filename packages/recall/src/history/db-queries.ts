@@ -89,13 +89,15 @@ export function insertMessage(
   toolName: string | null,
   filePaths: string | null,
   timestamp: number,
+  duplicateOf?: number | null,
+  line?: number | null,
 ): number {
   const result = db
     .prepare(`
-    INSERT INTO messages (uuid, session_id, type, content, tool_name, file_paths, timestamp)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO messages (uuid, session_id, type, content, tool_name, file_paths, timestamp, duplicate_of, line)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
-    .run(uuid, sessionId, type, content, toolName, filePaths, timestamp)
+    .run(uuid, sessionId, type, content, toolName, filePaths, timestamp, duplicateOf ?? null, line ?? null)
   return Number(result.lastInsertRowid)
 }
 
@@ -199,6 +201,7 @@ export function ftsSearch(
     JOIN messages m ON f.rowid = m.id
     JOIN sessions s ON m.session_id = s.id
     WHERE messages_fts MATCH ?
+      AND (m.duplicate_of IS NULL)
   `
   let searchQuery = `
     SELECT m.*, s.project_path, ${MESSAGE_RANK_SQL} as rank
@@ -206,6 +209,7 @@ export function ftsSearch(
     JOIN messages m ON f.rowid = m.id
     JOIN sessions s ON m.session_id = s.id
     WHERE messages_fts MATCH ?
+      AND (m.duplicate_of IS NULL)
   `
 
   const params: (string | number)[] = [ftsQuery]
@@ -268,15 +272,18 @@ export function ftsSearchWithSnippet(
     JOIN messages m ON f.rowid = m.id
     JOIN sessions s ON m.session_id = s.id
     WHERE messages_fts MATCH ?
+      AND (m.duplicate_of IS NULL)
   `
   let searchQuery = `
     SELECT m.*, s.project_path,
+           (SELECT d.line FROM messages d WHERE d.session_id = m.session_id AND d.duplicate_of = m.line LIMIT 1) as duplicate_line,
            snippet(messages_fts, 0, '>>>', '<<<', '...', ${snippetTokens}) as snippet,
            ${MESSAGE_RANK_SQL} as rank
     FROM messages_fts f
     JOIN messages m ON f.rowid = m.id
     JOIN sessions s ON m.session_id = s.id
     WHERE messages_fts MATCH ?
+      AND (m.duplicate_of IS NULL)
   `
 
   const params: (string | number)[] = [ftsQuery]

@@ -115,6 +115,7 @@ export interface MessageRecord {
   tool_name: string | null
   file_paths: string | null
   timestamp: number
+  duplicate_of?: number | null
 }
 
 export interface WriteRecord {

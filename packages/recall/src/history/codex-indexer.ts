@@ -6,14 +6,24 @@
 
 import { Database } from "bun:sqlite"
 import { spawn, spawnSync } from "node:child_process"
-import { createHash } from "node:crypto"
 import { fileURLToPath } from "node:url"
 import * as readline from "readline"
 import * as path from "path"
 import * as fs from "fs"
 import { getSession, upsertSession, insertMessage, updateSessionStatus } from "./db-queries.ts"
 
-const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000
+export const INDEX_WINDOW_DAYS = 180
+export const INDEX_WINDOW_MS = INDEX_WINDOW_DAYS * 24 * 60 * 60 * 1000
+
+export function safeRollback(db: Database): void {
+  try {
+    db.run("ROLLBACK")
+  } catch (rollbackErr) {
+    throw new Error(`CRITICAL: Database transaction rollback failed: ${(rollbackErr as Error).message}`, {
+      cause: rollbackErr,
+    })
+  }
+}
 
 export interface CodexIndexOptions {
   incremental?: boolean
@@ -26,6 +36,14 @@ export interface CodexIndexOptions {
   onProgress?: (info: { sessionsProcessed: number; messagesIndexed: number; currentSession: string }) => void
 }
 
+export interface CodexFailureRecord {
+  kind: "skipped" | "unreadable" | "error"
+  path?: string
+  reason: string
+  line?: number
+  timestamp: number
+}
+
 export interface CodexIndexResult {
   discovered: number
   canonical: number
@@ -35,6 +53,8 @@ export interface CodexIndexResult {
   skipped: number
   unreadable: number
   errors: number
+  failures: CodexFailureRecord[]
+  reasonCounts: Record<string, number>
 }
 
 interface TranscriptCatalogSession {
@@ -44,10 +64,13 @@ interface TranscriptCatalogSession {
   canonicalPath: string
   copies: Array<{
     path: string
+    home?: string
     account: string | null
     sizeBytes: number
     mtimeMs: number
     lastEventAtMs: number | null
+    decision: "canonical" | "ambiguous" | "stale" | "invalid"
+    key: string
   }>
   status: "canonical" | "ambiguous" | "stale" | "invalid"
   key: string | null
@@ -71,8 +94,13 @@ interface TranscriptExportSessionRecord {
   keys: string[]
   copies: Array<{
     path: string
+    home?: string
+    account?: string | null
     sizeBytes: number
+    mtimeMs?: number
+    lastEventAtMs?: number | null
     decision: "canonical" | "stale" | "invalid" | "ambiguous"
+    key: string
   }>
 }
 
@@ -181,7 +209,7 @@ export async function fetchCodexCatalog(agBin: string): Promise<{
       let record: Record<string, unknown>
       try {
         record = JSON.parse(trimmed) as Record<string, unknown>
-      } catch (err) {
+      } catch {
         reject(new Error(`Malformed JSON from ag transcript list: ${trimmed}`))
         child.kill()
         return
@@ -273,12 +301,11 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         }
       }
 
-      // Check skip key
+      // Check skip key using real copy metadata and copy keys
       if (session.status === "ambiguous") {
         let allCopiesSkipped = true
         for (const c of session.copies) {
-          const hash = createHash("sha256").update(c.path).digest("hex")
-          const copyKey = `codex:${session.nativeId}@${hash}`
+          const copyKey = c.key ?? `codex:${session.nativeId}`
           const stored = getSession(db, copyKey)
           if (
             stored &&
@@ -298,7 +325,8 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
           skipped++
         }
       } else {
-        const stored = session.key ? getSession(db, session.key) : null
+        const copyKey = session.key ?? session.sessionKey ?? `codex:${session.nativeId}`
+        const stored = getSession(db, copyKey)
         if (
           stored &&
           stored.status === "complete" &&
@@ -325,6 +353,8 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
       skipped,
       unreadable: 0,
       errors: 0,
+      failures: [],
+      reasonCounts: {},
     }
   }
 
@@ -343,13 +373,17 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
     rows: number
     unreadable: number
     errors: number
+    failures: CodexFailureRecord[]
+    reasonCounts: Record<string, number>
   }>((resolve, reject) => {
     const child = spawn(agBin, exportArgs, {
       stdio: ["ignore", "pipe", "pipe"],
     })
 
     let currentSession: TranscriptExportSessionRecord | null = null
-    let currentRows: TranscriptExportRowRecord[] = []
+    const currentExistingCounts = new Map<string, number>()
+    const currentRowCounts = new Map<string, number>()
+    let totalRowsThisSession = 0
     let inTx = false
     let isFirstLine = true
     let doneRecord: Record<string, unknown> | null = null
@@ -358,6 +392,8 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
     let batchRowCount = 0
     let batchUnreadableCount = 0
     let batchErrorCount = 0
+    const failures: CodexFailureRecord[] = []
+    const reasonCounts: Record<string, number> = {}
 
     child.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8")
@@ -365,11 +401,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
 
     child.on("error", (err) => {
       if (inTx) {
-        try {
-          db.run("ROLLBACK")
-        } catch {
-          // ignore
-        }
+        safeRollback(db)
         inTx = false
       }
       reject(new Error(`Failed to spawn ag transcript export: ${err.message}`))
@@ -389,11 +421,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         record = JSON.parse(trimmed) as Record<string, unknown>
       } catch {
         if (inTx) {
-          try {
-            db.run("ROLLBACK")
-          } catch {
-            // ignore
-          }
+          safeRollback(db)
           inTx = false
         }
         reject(new Error(`Malformed JSON from ag transcript export: ${trimmed}`))
@@ -413,11 +441,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
 
       if (record.kind === "session") {
         if (inTx) {
-          try {
-            db.run("ROLLBACK")
-          } catch {
-            // ignore
-          }
+          safeRollback(db)
           inTx = false
           reject(
             new Error(
@@ -428,7 +452,22 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
           return
         }
         currentSession = record as unknown as TranscriptExportSessionRecord
-        currentRows = []
+        const nativeId = currentSession.nativeId
+        const keys =
+          currentSession.keys && currentSession.keys.length > 0
+            ? currentSession.keys
+            : currentSession.sessionKey
+              ? [currentSession.sessionKey]
+              : [`codex:${nativeId}`]
+
+        currentExistingCounts.clear()
+        for (const key of keys) {
+          const existing = getSession(db, key)
+          if (existing) {
+            currentExistingCounts.set(key, existing.message_count)
+          }
+        }
+
         try {
           db.run("BEGIN")
           inTx = true
@@ -437,10 +476,97 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
           child.kill()
           return
         }
+
+        try {
+          // Delete old rows for this native id inside the transaction
+          db.prepare("DELETE FROM messages WHERE session_id = ? OR session_id LIKE ?").run(
+            `codex:${nativeId}`,
+            `codex:${nativeId}@%`,
+          )
+          db.prepare("DELETE FROM sessions WHERE id = ? OR id LIKE ?").run(
+            `codex:${nativeId}`,
+            `codex:${nativeId}@%`,
+          )
+        } catch (err) {
+          safeRollback(db)
+          inTx = false
+          reject(err)
+          child.kill()
+          return
+        }
+
+        currentRowCounts.clear()
+        totalRowsThisSession = 0
       } else if (record.kind === "row") {
-        currentRows.push(record as unknown as TranscriptExportRowRecord)
+        if (!currentSession || !inTx) {
+          if (inTx) safeRollback(db)
+          inTx = false
+          reject(new Error(`Protocol error: received row record without active session transaction`))
+          child.kill()
+          return
+        }
+        const row = record as unknown as TranscriptExportRowRecord
+        const key = row.sessionKey
+        const createdAtMs = currentSession.createdAt ? new Date(currentSession.createdAt).getTime() : Date.now()
+        const rowTimestamp = row.timestamp ? new Date(row.timestamp).getTime() : createdAtMs
+
+        try {
+          insertMessage(
+            db,
+            `${key}:${row.line}`,
+            key,
+            row.role,
+            row.text,
+            null,
+            null,
+            rowTimestamp,
+            row.duplicateOf ?? null,
+            row.line ?? null,
+          )
+        } catch (err) {
+          safeRollback(db)
+          inTx = false
+          reject(err)
+          child.kill()
+          return
+        }
+
+        currentRowCounts.set(key, (currentRowCounts.get(key) ?? 0) + 1)
+        totalRowsThisSession++
+      } else if (record.kind === "skipped") {
+        const reason = String(record.reason ?? "unknown-skip")
+        reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1
+        failures.push({
+          kind: "skipped",
+          path: (record.path as string) || (currentSession?.path ?? ""),
+          reason,
+          line: typeof record.line === "number" ? record.line : undefined,
+          timestamp: Date.now(),
+        })
+      } else if (record.kind === "unreadable") {
+        const reason = String(record.reason ?? "unknown-unreadable")
+        reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1
+        failures.push({
+          kind: "unreadable",
+          path: (record.path as string) || (currentSession?.path ?? ""),
+          reason,
+          timestamp: Date.now(),
+        })
+        batchUnreadableCount++
+      } else if (record.kind === "error") {
+        const reason = String(record.reason ?? record.message ?? "unknown-error")
+        reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1
+        failures.push({
+          kind: "error",
+          path: (record.path as string) || (currentSession?.path ?? ""),
+          reason,
+          timestamp: Date.now(),
+        })
+        batchErrorCount++
       } else if (record.kind === "end") {
         if (!currentSession || !inTx) {
+          if (inTx) safeRollback(db)
+          inTx = false
           reject(new Error(`Protocol error: received end record without active session`))
           child.kill()
           return
@@ -449,16 +575,27 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         const endRecord = record as unknown as TranscriptExportEndRecord
         const status = endRecord.status
         const nativeId = endRecord.nativeId
-        const keys = currentSession.keys || [currentSession.sessionKey]
+        const keys =
+          currentSession.keys && currentSession.keys.length > 0
+            ? currentSession.keys
+            : currentSession.sessionKey
+              ? [currentSession.sessionKey]
+              : [`codex:${nativeId}`]
+        const createdAtMs = currentSession.createdAt ? new Date(currentSession.createdAt).getTime() : Date.now()
 
         if (status === "bad-header" || status === "unreadable") {
-          try {
-            db.run("ROLLBACK")
-            inTx = false
-          } catch {
-            // ignore
-          }
+          safeRollback(db)
+          inTx = false
           batchUnreadableCount++
+          const reason = status
+          reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1
+          failures.push({
+            kind: "unreadable",
+            path: currentSession.path,
+            reason,
+            timestamp: Date.now(),
+          })
+
           for (const key of keys) {
             const existing = getSession(db, key)
             if (existing) {
@@ -469,7 +606,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
                 key,
                 currentSession.cwd || "",
                 currentSession.path,
-                currentSession.createdAt ? new Date(currentSession.createdAt).getTime() : Date.now(),
+                createdAtMs,
                 Date.now(),
                 0,
                 null,
@@ -481,96 +618,66 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
           // Check shrink condition (D1)
           let isShrunk = false
           for (const key of keys) {
-            const existing = getSession(db, key)
-            const newRowsCount = currentRows.filter((r) => r.sessionKey === key).length
-            if (existing && existing.message_count > newRowsCount && !options.force) {
+            const oldCount = currentExistingCounts.get(key) ?? 0
+            const newCount = currentRowCounts.get(key) ?? 0
+            if (oldCount > newCount && !options.force) {
               isShrunk = true
             }
           }
 
           if (isShrunk) {
-            try {
-              db.run("ROLLBACK")
-              inTx = false
-            } catch {
-              // ignore
-            }
+            safeRollback(db)
+            inTx = false
+            const reason = "shrunk"
+            reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1
+            failures.push({
+              kind: "skipped",
+              path: currentSession.path,
+              reason,
+              timestamp: Date.now(),
+            })
             for (const key of keys) {
               updateSessionStatus(db, key, "shrunk")
             }
           } else {
             try {
-              // Delete old rows for this native id
-              db.prepare("DELETE FROM messages WHERE session_id = ? OR session_id LIKE ?").run(
-                `codex:${nativeId}`,
-                `codex:${nativeId}@%`,
-              )
-              db.prepare("DELETE FROM sessions WHERE id = ? OR id LIKE ?").run(
-                `codex:${nativeId}`,
-                `codex:${nativeId}@%`,
-              )
-
-              // Insert sessions and rows
+              const session = currentSession
               for (const key of keys) {
-                const keyRows = currentRows.filter((r) => r.sessionKey === key)
-                const createdAtMs = currentSession.createdAt ? new Date(currentSession.createdAt).getTime() : Date.now()
-                const updatedAtMs = currentSession.mtimeMs ?? Date.now()
-
-                let copyPath = currentSession.path
-                let copySize = currentSession.sizeBytes
-                if (currentSession.copies && currentSession.copies.length > 0) {
-                  const matchedCopy = currentSession.copies.find((c) => {
-                    const hash = createHash("sha256").update(c.path).digest("hex")
-                    return key.includes(hash)
-                  })
-                  if (matchedCopy) {
-                    copyPath = matchedCopy.path
-                    copySize = matchedCopy.sizeBytes
-                  }
-                }
+                const count = currentRowCounts.get(key) ?? 0
+                const matchedCopy =
+                  session.copies?.find((c) => c.key === key) ??
+                  (session.copies && keys.length === session.copies.length
+                    ? session.copies[keys.indexOf(key)]
+                    : session.copies?.find((c) => c.path === session.path))
+                const copyPath = matchedCopy?.path ?? session.path
+                const copySize = matchedCopy?.sizeBytes ?? session.sizeBytes
+                const copyMtime = matchedCopy?.mtimeMs ?? session.mtimeMs ?? Date.now()
+                const copyLastEvent = matchedCopy?.lastEventAtMs ?? session.lastEventAtMs ?? null
 
                 upsertSession(
                   db,
                   key,
-                  currentSession.cwd || "",
+                  session.cwd || "",
                   copyPath,
                   createdAtMs,
-                  updatedAtMs,
-                  keyRows.length,
+                  copyMtime,
+                  count,
                   null,
                   {
                     status: status,
                     sizeBytes: copySize,
-                    mtimeMs: currentSession.mtimeMs,
-                    lastEventAtMs: currentSession.lastEventAtMs,
+                    mtimeMs: copyMtime,
+                    lastEventAtMs: copyLastEvent,
                   },
                 )
-
-                for (const row of keyRows) {
-                  insertMessage(
-                    db,
-                    `${key}:${row.line}`,
-                    key,
-                    row.role,
-                    row.text,
-                    null,
-                    null,
-                    row.timestamp ? new Date(row.timestamp).getTime() : createdAtMs,
-                  )
-                }
-
-                batchRowCount += keyRows.length
               }
 
               db.run("COMMIT")
               inTx = false
+              batchRowCount += totalRowsThisSession
               batchSessionCount++
             } catch (err) {
-              try {
-                db.run("ROLLBACK")
-              } catch {
-                // ignore
-              }
+              safeRollback(db)
               inTx = false
               reject(err)
               child.kill()
@@ -586,9 +693,9 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         })
 
         currentSession = null
-        currentRows = []
-      } else if (record.kind === "error") {
-        batchErrorCount++
+        currentExistingCounts.clear()
+        currentRowCounts.clear()
+        totalRowsThisSession = 0
       } else if (record.kind === "done") {
         doneRecord = record
       }
@@ -596,11 +703,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
 
     child.on("close", (code) => {
       if (inTx) {
-        try {
-          db.run("ROLLBACK")
-        } catch {
-          // ignore
-        }
+        safeRollback(db)
         inTx = false
         reject(new Error("ag transcript export stream ended abruptly during active transaction"))
         return
@@ -618,6 +721,8 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         rows: batchRowCount,
         unreadable: batchUnreadableCount,
         errors: batchErrorCount,
+        failures,
+        reasonCounts,
       })
     })
   })
@@ -631,5 +736,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
     skipped,
     unreadable: batchResult.unreadable,
     errors: batchResult.errors,
+    failures: batchResult.failures,
+    reasonCounts: batchResult.reasonCounts,
   }
 }

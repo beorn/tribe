@@ -12,7 +12,7 @@ import * as fs from "fs"
 import * as readline from "readline"
 import * as os from "os"
 import { spawnSync } from "node:child_process"
-import { indexCodexTranscripts } from "./codex-indexer.ts"
+import { indexCodexTranscripts, resolveAgBin } from "./codex-indexer.ts"
 import {
   PROJECTS_DIR,
   MAX_CONTENT_SIZE,
@@ -40,8 +40,10 @@ export interface IndexProgress {
   currentFile: string
 }
 
-// Time window for indexing - sessions older than this are skipped
-const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000
+// Time window for indexing - sessions older than this are skipped.
+// Per Chief Review requirement 3, index window is 180 days across Claude and Codex.
+export const INDEX_WINDOW_DAYS = 180
+export const INDEX_WINDOW_MS = INDEX_WINDOW_DAYS * 24 * 60 * 60 * 1000
 
 // .recall-ignore — quarantine list for the session indexer.
 //
@@ -357,6 +359,10 @@ export interface IndexResult {
   codexSessions?: number
   codexMessages?: number
   codexSkipped?: number
+  codexUnreadable?: number
+  codexErrors?: number
+  codexFailures?: Array<{ kind: string; path?: string; reason: string; line?: number; timestamp: number }>
+  codexReasonCounts?: Record<string, number>
 }
 
 /**
@@ -434,23 +440,36 @@ export function pruneIgnoredSessions(db: Database): { sessions: number; messages
 
 export async function rebuildIndex(db: Database, options: IndexOptions = {}): Promise<IndexResult> {
   const startTime = Date.now()
-  const cutoffTime = Date.now() - THIRTY_DAYS_MS
+  const cutoffTime = options.full ? undefined : Date.now() - INDEX_WINDOW_MS
+
+  if (options.force && !options.path) {
+    throw new Error("--force is only permitted when an explicit --path is specified")
+  }
+
+  // Pre-flight ag binary before corpus write if Codex transcripts will be indexed
+  if (!options.skipCodex && process.env.RECALL_SKIP_CODEX !== "1") {
+    resolveAgBin(options.agBin)
+  }
 
   // Commit invalidation before any corpus write. A failure or killed process
   // must not leave the prior success timestamp over partially updated data.
-  setIndexMeta(db, "last_rebuild", "")
+  if (!options.path) {
+    setIndexMeta(db, "last_rebuild", "")
+  }
 
   if (options.projectRoot && !fs.statSync(options.projectRoot).isDirectory()) {
     throw new Error(`Recall project source is not a directory: ${options.projectRoot}`)
   }
 
-  // Clear existing data unless incremental
-  if (!options.incremental) {
+  // Clear existing data unless incremental or targeting a specific path
+  if (!options.incremental && !options.path) {
     clearTables(db, options.messagesOnly ? ["sessions", "messages"] : ["writes", "sessions", "messages"])
     clearContent(db)
-  } else {
-    // In incremental mode, prune sessions older than 30 days
-    pruneOldSessions(db, cutoffTime)
+  } else if (!options.path) {
+    // In incremental mode across the entire corpus, prune sessions older than 180 days
+    if (cutoffTime !== undefined) {
+      pruneOldSessions(db, cutoffTime)
+    }
     // Always prune sessions matched by .recall-ignore, even in incremental
     // mode — quarantine must take effect immediately after the ignore file
     // is updated, without requiring a full rebuild.
@@ -463,20 +482,56 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   let totalPlans = 0
   let totalTodos = 0
   let totalSummaries = 0
+  let totalFirstPrompts = 0
   let skippedOld = 0
 
-  // Index session files
-  for await (const sessionFile of findSessionFiles()) {
-    // Skip sessions older than 30 days
-    const stats = fs.statSync(sessionFile)
-    if (stats.mtime.getTime() < cutoffTime) {
-      skippedOld++
-      continue
+  let isClaudeTarget = false
+  if (options.path) {
+    const absPath = path.resolve(options.path)
+    if (absPath.startsWith(path.resolve(PROJECTS_DIR))) {
+      isClaudeTarget = true
+    } else {
+      try {
+        const firstLine = fs.readFileSync(absPath, "utf8").split("\n", 1)[0]
+        if (firstLine) {
+          const parsed = JSON.parse(firstLine)
+          if (parsed.type === "user" || parsed.type === "assistant") {
+            isClaudeTarget = true
+          }
+        }
+      } catch {
+        // ignore
+      }
     }
+  }
 
+  // Index Claude session files
+  if (!options.path) {
+    for await (const sessionFile of findSessionFiles()) {
+      // Skip sessions older than 180 days
+      const stats = fs.statSync(sessionFile)
+      if (cutoffTime !== undefined && stats.mtime.getTime() < cutoffTime) {
+        skippedOld++
+        continue
+      }
+
+      totalFiles++
+
+      const relativePath = path.relative(PROJECTS_DIR, sessionFile)
+      options.onProgress?.({
+        filesProcessed: totalFiles,
+        messagesIndexed: totalMessages,
+        writesIndexed: totalWrites,
+        currentFile: relativePath,
+      })
+
+      const { messages, writes } = await indexSessionFile(db, sessionFile, options)
+      totalMessages += messages
+      totalWrites += writes
+    }
+  } else if (isClaudeTarget) {
     totalFiles++
-
-    const relativePath = path.relative(PROJECTS_DIR, sessionFile)
+    const relativePath = path.relative(PROJECTS_DIR, options.path)
     options.onProgress?.({
       filesProcessed: totalFiles,
       messagesIndexed: totalMessages,
@@ -484,7 +539,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
       currentFile: relativePath,
     })
 
-    const { messages, writes } = await indexSessionFile(db, sessionFile, options)
+    const { messages, writes } = await indexSessionFile(db, options.path, options)
     totalMessages += messages
     totalWrites += writes
   }
@@ -493,10 +548,15 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   let codexSessions = 0
   let codexMessages = 0
   let codexSkipped = 0
+  let codexUnreadable = 0
+  let codexErrors = 0
+  let codexFailures: Array<{ kind: string; path?: string; reason: string; line?: number; timestamp: number }> = []
+  let codexReasonCounts: Record<string, number> = {}
+
   if (
     !options.skipCodex &&
     process.env.RECALL_SKIP_CODEX !== "1" &&
-    (!options.path || options.path.includes(".codex") || options.path.includes("rollout-"))
+    (!options.path || !isClaudeTarget)
   ) {
     const codexResult = await indexCodexTranscripts(db, {
       incremental: options.incremental,
@@ -518,101 +578,15 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     codexSessions = codexResult.sessions
     codexMessages = codexResult.rows
     codexSkipped = codexResult.skipped
+    codexUnreadable = codexResult.unreadable
+    codexErrors = codexResult.errors
+    codexFailures = codexResult.failures
+    codexReasonCounts = codexResult.reasonCounts
     totalFiles += codexSessions
     totalMessages += codexMessages
   }
 
-  // Index session summaries from sessions-index.json
-  const sessionEntries = getAllSessionEntries()
-  for (const entry of sessionEntries) {
-    if (entry.summary) {
-      upsertContent(
-        db,
-        "summary",
-        entry.sessionId,
-        entry.projectPath || null,
-        entry.customTitle || null,
-        entry.summary,
-        entry.modified ? new Date(entry.modified).getTime() : Date.now(),
-      )
-      totalSummaries++
-    }
-  }
-
-  // Index session first prompts (enables topic-level recall)
-  let totalFirstPrompts = 0
-  for (const entry of sessionEntries) {
-    if (entry.firstPrompt) {
-      upsertContent(
-        db,
-        "first_prompt",
-        entry.sessionId,
-        entry.projectPath || null,
-        entry.customTitle || null,
-        entry.firstPrompt,
-        entry.created ? new Date(entry.created).getTime() : Date.now(),
-      )
-      totalFirstPrompts++
-    }
-  }
-
-  // Index plan files
-  for (const planFile of findPlanFiles()) {
-    try {
-      const stats = fs.statSync(planFile)
-      const content = fs.readFileSync(planFile, "utf8")
-      const filename = path.basename(planFile, ".md")
-
-      // Extract title from first heading or filename
-      const titleMatch = content.match(/^#\s+(.+)$/m)
-      const title = titleMatch?.[1] ?? filename
-
-      upsertContent(
-        db,
-        "plan",
-        filename,
-        null, // Plans aren't project-specific
-        title,
-        content,
-        stats.mtime.getTime(),
-      )
-      totalPlans++
-    } catch (error) {
-      throw new Error(`Recall plan indexing failed: ${planFile}`, { cause: error })
-    }
-  }
-
-  // Index todo files
-  for (const todoFile of findTodoFiles()) {
-    try {
-      const stats = fs.statSync(todoFile)
-      const content = fs.readFileSync(todoFile, "utf8")
-      const todos = JSON.parse(content) as TodoItem[]
-      const filename = path.basename(todoFile, ".json")
-
-      // Combine all todos into searchable content
-      const todoContent = todos
-        .map((t) => `[${t.status}] ${t.content}${t.activeForm ? ` (${t.activeForm})` : ""}`)
-        .join("\n")
-
-      if (todoContent.trim()) {
-        upsertContent(
-          db,
-          "todo",
-          filename,
-          null,
-          `Todo list (${todos.length} items)`,
-          todoContent,
-          stats.mtime.getTime(),
-        )
-        totalTodos++
-      }
-    } catch (error) {
-      throw new Error(`Recall todo indexing failed: ${todoFile}`, { cause: error })
-    }
-  }
-
-  // Index project sources if projectRoot is provided
+  // Index session summaries, plans, todos, and project sources only during corpus rebuilds
   let projectSourceResult = {
     beads: 0,
     sessionMemory: 0,
@@ -621,28 +595,124 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     claudeMd: 0,
     research: 0,
   }
-  if (options.projectRoot) {
-    const projectPath = options.projectRoot
-    projectSourceResult = indexProjectSources(db, projectPath)
+
+  if (!options.path) {
+    const sessionEntries = getAllSessionEntries()
+    for (const entry of sessionEntries) {
+      if (entry.summary) {
+        upsertContent(
+          db,
+          "summary",
+          entry.sessionId,
+          entry.projectPath || null,
+          entry.customTitle || null,
+          entry.summary,
+          entry.modified ? new Date(entry.modified).getTime() : Date.now(),
+        )
+        totalSummaries++
+      }
+    }
+
+    // Index session first prompts (enables topic-level recall)
+    for (const entry of sessionEntries) {
+      if (entry.firstPrompt) {
+        upsertContent(
+          db,
+          "first_prompt",
+          entry.sessionId,
+          entry.projectPath || null,
+          entry.customTitle || null,
+          entry.firstPrompt,
+          entry.created ? new Date(entry.created).getTime() : Date.now(),
+        )
+        totalFirstPrompts++
+      }
+    }
+
+    // Index plan files
+    for (const planFile of findPlanFiles()) {
+      try {
+        const stats = fs.statSync(planFile)
+        const content = fs.readFileSync(planFile, "utf8")
+        const filename = path.basename(planFile, ".md")
+
+        // Extract title from first heading or filename
+        const titleMatch = content.match(/^#\s+(.+)$/m)
+        const title = titleMatch?.[1] ?? filename
+
+        upsertContent(
+          db,
+          "plan",
+          filename,
+          null, // Plans aren't project-specific
+          title,
+          content,
+          stats.mtime.getTime(),
+        )
+        totalPlans++
+      } catch (error) {
+        throw new Error(`Recall plan indexing failed: ${planFile}`, { cause: error })
+      }
+    }
+
+    // Index todo files
+    for (const todoFile of findTodoFiles()) {
+      try {
+        const stats = fs.statSync(todoFile)
+        const content = fs.readFileSync(todoFile, "utf8")
+        const todos = JSON.parse(content) as TodoItem[]
+        const filename = path.basename(todoFile, ".json")
+
+        // Combine all todos into searchable content
+        const todoContent = todos
+          .map((t) => `[${t.status}] ${t.content}${t.activeForm ? ` (${t.activeForm})` : ""}`)
+          .join("\n")
+
+        if (todoContent.trim()) {
+          upsertContent(
+            db,
+            "todo",
+            filename,
+            null,
+            `Todo list (${todos.length} items)`,
+            todoContent,
+            stats.mtime.getTime(),
+          )
+          totalTodos++
+        }
+      } catch (error) {
+        throw new Error(`Recall todo indexing failed: ${todoFile}`, { cause: error })
+      }
+    }
+
+    // Index project sources if projectRoot is provided
+    if (options.projectRoot) {
+      const projectPath = options.projectRoot
+      projectSourceResult = indexProjectSources(db, projectPath)
+    }
+
+    // Store metadata
+    const duration = Date.now() - startTime
+    setIndexMeta(db, "rebuild_duration_ms", String(duration))
+    setIndexMeta(db, "total_files", String(totalFiles))
+    setIndexMeta(db, "total_messages", String(totalMessages))
+    setIndexMeta(db, "total_plans", String(totalPlans))
+    setIndexMeta(db, "total_todos", String(totalTodos))
+    setIndexMeta(db, "total_summaries", String(totalSummaries))
+    setIndexMeta(db, "total_first_prompts", String(totalFirstPrompts))
+    setIndexMeta(db, "total_beads", String(projectSourceResult.beads))
+    setIndexMeta(db, "total_session_memory", String(projectSourceResult.sessionMemory))
+    setIndexMeta(db, "total_project_memory", String(projectSourceResult.projectMemory))
+    setIndexMeta(db, "total_docs", String(projectSourceResult.docs))
+    setIndexMeta(db, "total_claude_md", String(projectSourceResult.claudeMd))
+    setIndexMeta(db, "total_research", String(projectSourceResult.research))
+    // Publish success last, including after completion metadata writes.
+    setIndexMeta(db, "last_rebuild", new Date().toISOString())
   }
 
-  // Store metadata
-  const duration = Date.now() - startTime
-  setIndexMeta(db, "rebuild_duration_ms", String(duration))
-  setIndexMeta(db, "total_files", String(totalFiles))
-  setIndexMeta(db, "total_messages", String(totalMessages))
-  setIndexMeta(db, "total_plans", String(totalPlans))
-  setIndexMeta(db, "total_todos", String(totalTodos))
-  setIndexMeta(db, "total_summaries", String(totalSummaries))
-  setIndexMeta(db, "total_first_prompts", String(totalFirstPrompts))
-  setIndexMeta(db, "total_beads", String(projectSourceResult.beads))
-  setIndexMeta(db, "total_session_memory", String(projectSourceResult.sessionMemory))
-  setIndexMeta(db, "total_project_memory", String(projectSourceResult.projectMemory))
-  setIndexMeta(db, "total_docs", String(projectSourceResult.docs))
-  setIndexMeta(db, "total_claude_md", String(projectSourceResult.claudeMd))
-  setIndexMeta(db, "total_research", String(projectSourceResult.research))
-  // Publish success last, including after completion metadata writes.
-  setIndexMeta(db, "last_rebuild", new Date().toISOString())
+  if (Object.keys(codexReasonCounts).length > 0) {
+    setIndexMeta(db, "last_codex_reason_counts", JSON.stringify(codexReasonCounts))
+  }
 
   return {
     files: totalFiles,
@@ -656,6 +726,10 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     codexSessions,
     codexMessages,
     codexSkipped,
+    codexUnreadable,
+    codexErrors,
+    codexFailures,
+    codexReasonCounts,
     ...projectSourceResult,
   }
 }

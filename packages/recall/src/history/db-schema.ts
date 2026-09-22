@@ -64,7 +64,9 @@ CREATE TABLE IF NOT EXISTS messages (
   content TEXT,
   tool_name TEXT,
   file_paths TEXT,
-  timestamp INTEGER NOT NULL
+  timestamp INTEGER NOT NULL,
+  duplicate_of INTEGER,
+  line INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
@@ -151,6 +153,8 @@ export const MIGRATIONS = [
   `ALTER TABLE sessions ADD COLUMN size_bytes INTEGER`,
   `ALTER TABLE sessions ADD COLUMN mtime_ms REAL`,
   `ALTER TABLE sessions ADD COLUMN last_event_at_ms REAL`,
+  `ALTER TABLE messages ADD COLUMN duplicate_of INTEGER`,
+  `ALTER TABLE messages ADD COLUMN line INTEGER`,
   // Unique index for upsert support on content table
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_content_type_source ON content(content_type, source_id)`,
   // Update trigger for content FTS (needed for upsert)

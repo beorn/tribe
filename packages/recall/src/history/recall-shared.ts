@@ -72,6 +72,8 @@ export interface RecallSearchResult {
   timestamp: number
   snippet: string
   rank: number
+  line?: number | null
+  duplicateLine?: number | null
 }
 
 // ============================================================================

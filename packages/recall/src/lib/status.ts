@@ -113,6 +113,29 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
       console.log(`  Statuses: ${statusParts.join(", ")}`)
     }
 
+    const providerCounts = db
+      .prepare(
+        "SELECT CASE WHEN id LIKE 'codex:%' THEN 'codex' ELSE 'claude' END as provider, COUNT(*) as n FROM sessions GROUP BY provider",
+      )
+      .all() as { provider: string; n: number }[]
+    if (providerCounts.length > 0) {
+      const providerParts = providerCounts.map((r) => `${r.n} ${r.provider}`)
+      console.log(`  Providers: ${providerParts.join(", ")}`)
+    }
+
+    const lastCodexReasonCounts = getIndexMeta(db, "last_codex_reason_counts")
+    if (lastCodexReasonCounts) {
+      try {
+        const rc = JSON.parse(lastCodexReasonCounts) as Record<string, number>
+        if (Object.keys(rc).length > 0) {
+          const rcParts = Object.entries(rc).map(([k, v]) => `${v} ${k}`)
+          console.log(`  Codex wire records: ${rcParts.join(", ")}`)
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     console.log(
       `  DB: ${formatBytes(dbSizeBytes)}  Last rebuild: ${lastRebuild ? formatRelativeTime(new Date(lastRebuild).getTime()) : `${RED}never${RESET}`}${isStale ? ` ${YELLOW}(stale)${RESET}` : ""}`,
     )
