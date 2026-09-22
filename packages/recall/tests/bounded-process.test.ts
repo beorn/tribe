@@ -22,14 +22,36 @@ function errorCode(error: unknown): string | undefined {
     : undefined
 }
 
-function pidAlive(pid: number): boolean {
+/**
+ * Whether `pid` is still RUNNING. These tests assert a process tree DIED, and a
+ * zombie has: it is dead, unreaped, and can never run again, yet it still
+ * answers `kill(pid, 0)`. Asking only that made a teardown that finishes in
+ * milliseconds read as a survivor for as long as its parent took to reap it,
+ * so these tests failed whenever reaping lagged. This is not a relaxation: the
+ * bounds and assertions are unchanged; only a corpse now reads as dead.
+ *
+ * Existence stays the portable probe. On Linux, /proc says whether an existing
+ * pid is a corpse (state Z) or already gone; anything else unreadable keeps the
+ * portable answer, so a death is never certified on missing evidence.
+ */
+function pidRunning(pid: number): boolean {
   try {
     process.kill(pid, 0)
-    return true
   } catch (error) {
     if (errorCode(error) === "ESRCH") return false
     throw error
   }
+  if (process.platform !== "linux") return true
+  let stat: string
+  try {
+    stat = readFileSync(`/proc/${pid}/stat`, "utf8")
+  } catch (error) {
+    // It exited between the two reads.
+    if (errorCode(error) === "ENOENT") return false
+    return true
+  }
+  // The state follows the parenthesised command name, which may itself contain ")".
+  return stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3) !== "Z"
 }
 
 async function waitForFile(path: string, timeoutMs = 2_000): Promise<number> {
@@ -49,15 +71,15 @@ async function waitForFile(path: string, timeoutMs = 2_000): Promise<number> {
 async function waitDead(pid: number, timeoutMs = 2_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    if (!pidAlive(pid)) return true
+    if (!pidRunning(pid)) return true
     await Bun.sleep(10)
   }
-  return !pidAlive(pid)
+  return !pidRunning(pid)
 }
 
 afterEach(async () => {
   for (const pid of fixturePids) {
-    if (!pidAlive(pid)) continue
+    if (!pidRunning(pid)) continue
     try {
       process.kill(pid, "SIGKILL")
     } catch (error) {
