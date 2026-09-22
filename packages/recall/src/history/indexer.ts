@@ -60,8 +60,13 @@ export const INDEX_WINDOW_MS = INDEX_WINDOW_DAYS * 24 * 60 * 60 * 1000
 // hub/silvercode/design/ambient-context-safety.md §9 (content quarantine).
 let _ignoreCache: { mtime: number; matchers: ((p: string) => boolean)[] } | null = null
 
+export function resetIgnoreCache(): void {
+  _ignoreCache = null
+}
+
 function loadRecallIgnore(): ((p: string) => boolean)[] {
-  const ignorePath = path.join(os.homedir(), ".claude", ".recall-ignore")
+  const claudeDir = process.env.CLAUDE_DIR || path.join(os.homedir(), ".claude")
+  const ignorePath = path.join(claudeDir, ".recall-ignore")
   let mtime = 0
   try {
     mtime = fs.statSync(ignorePath).mtime.getTime()
@@ -86,6 +91,7 @@ function loadRecallIgnore(): ((p: string) => boolean)[] {
     return (filePath: string): boolean => {
       // Match against absolute path AND currentProjectsDir()-relative path so users
       // can write both "foo.jsonl" and full absolute paths in .recall-ignore
+      if (glob.match(filePath)) return true
       const rel = path.relative(currentProjectsDir(), filePath)
       if (rel && !rel.startsWith("..") && glob.match(rel)) return true
       return false
@@ -488,6 +494,36 @@ export function readFirstLineBounded(filePath: string, maxBytes = 4096): string 
   }
 }
 
+function recordClaudeFailure(
+  db: Database,
+  sessionId: string,
+  filePath: string,
+  errMsg: string,
+): void {
+  const existing = getSession(db, sessionId)
+  const now = Date.now()
+  if (existing) {
+    updateSessionStatus(db, sessionId, "stale-unreadable", {
+      failureReason: errMsg,
+      failureTime: now,
+    })
+  } else {
+    let mtime = now
+    try {
+      mtime = fs.statSync(filePath).mtime.getTime()
+    } catch {
+      // ignore
+    }
+    const relativePath = path.relative(currentProjectsDir(), filePath)
+    const projectPath = projectPathFromRelative(relativePath)
+    upsertSession(db, sessionId, projectPath, relativePath, mtime, mtime, 0, null, {
+      status: "stale-unreadable",
+      failureReason: errMsg,
+      failureTime: now,
+    })
+  }
+}
+
 export async function rebuildIndex(db: Database, options: IndexOptions = {}): Promise<IndexResult> {
   const startTime = Date.now()
   const cutoffTime = options.full ? undefined : Date.now() - INDEX_WINDOW_MS
@@ -588,10 +624,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
         totalWrites += writes
       } catch (err) {
         const errMsg = (err as Error).message || String(err)
-        updateSessionStatus(db, baseSessionId, "stale-unreadable", {
-          failureReason: errMsg,
-          failureTime: Date.now(),
-        })
+        recordClaudeFailure(db, baseSessionId, sessionFile, errMsg)
         seenSessionIds.add(baseSessionId)
       }
     }
@@ -612,10 +645,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
       totalWrites += writes
     } catch (err) {
       const errMsg = (err as Error).message || String(err)
-      updateSessionStatus(db, baseSessionId, "stale-unreadable", {
-        failureReason: errMsg,
-        failureTime: Date.now(),
-      })
+      recordClaudeFailure(db, baseSessionId, options.path, errMsg)
       seenSessionIds.add(baseSessionId)
     }
   }

@@ -1,13 +1,13 @@
 import { Database } from "bun:sqlite"
 import { writeFileSync, mkdtempSync, chmodSync, mkdirSync, utimesSync } from "node:fs"
 import { createHash } from "node:crypto"
-import { tmpdir } from "node:os"
+import { tmpdir, homedir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, test } from "vitest"
 import { initSchema } from "../../src/history/db-schema.ts"
 import { getSession, upsertSession, insertMessage, ftsSearchWithSnippet, getSessionStatus } from "../../src/history/db-queries.ts"
 import { resolveAgBin, fetchCodexCatalog, indexCodexTranscripts, safeRollback } from "../../src/history/codex-indexer.ts"
-import { rebuildIndex, INDEX_WINDOW_DAYS, INDEX_WINDOW_MS, pruneOldSessions } from "../../src/history/indexer.ts"
+import { rebuildIndex, INDEX_WINDOW_DAYS, INDEX_WINDOW_MS, pruneOldSessions, isRecallIgnored, resetIgnoreCache } from "../../src/history/indexer.ts"
 import { getPersistedFailedSessions } from "../../src/lib/status.ts"
 
 describe("Codex Transcript Indexer", () => {
@@ -26,6 +26,7 @@ describe("Codex Transcript Indexer", () => {
   })
 
   afterEach(() => {
+    resetIgnoreCache()
     if (origClaudeDir !== undefined) {
       process.env.CLAUDE_DIR = origClaudeDir
     } else {
@@ -1616,7 +1617,53 @@ if (args.includes("list")) {
       expect(failedAfter.some((f) => f.id === "session-preserve")).toBe(false)
     })
 
-    test("public rebuild preserves prior good Claude session on asynchronous read failure at public entry", async () => {
+    test("public rebuild records reason-coded failure for brand new malformed Claude session and recovers cleanly", async () => {
+      const claudeDir = join(tempDir, "claude-new-fail")
+      mkdirSync(claudeDir, { recursive: true })
+      const sessionPath = join(claudeDir, "session-new-fail.jsonl")
+
+      // Brand new session: valid first user record followed by malformed second line
+      const corruptLines = [
+        JSON.stringify({ type: "user", message: { content: "Brand new user prompt" } }),
+        "NOT_VALID_JSON_AT_ALL\n\n{{{corrupt",
+      ]
+      writeFileSync(sessionPath, corruptLines.join("\n") + "\n", "utf8")
+
+      // Public rebuild on this brand-new path
+      await rebuildIndex(db, { path: sessionPath, skipCodex: true })
+
+      // Crucial: session row DOES exist with reason-coded failure in existing storage!
+      const statusDetails = getSessionStatus(db, "session-new-fail")
+      expect(statusDetails).toBeDefined()
+      expect(statusDetails?.status).toBe("stale-unreadable")
+      expect(statusDetails?.messageCount).toBe(0)
+      expect(statusDetails?.failureReason).toContain("Malformed JSON in Claude transcript")
+      expect(typeof statusDetails?.failureTime).toBe("number")
+
+      // Appears in persisted failed sessions
+      const failed = getPersistedFailedSessions(db)
+      expect(failed.some((f) => f.id === "session-new-fail" && f.status === "stale-unreadable")).toBe(true)
+
+      // Recovery: repair the file with 2 valid records
+      const recoveryLines = [
+        JSON.stringify({ type: "user", message: { content: "Recovered brand new query" } }),
+        JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Recovered brand new response" }] } }),
+      ]
+      writeFileSync(sessionPath, recoveryLines.join("\n") + "\n", "utf8")
+
+      await rebuildIndex(db, { path: sessionPath, skipCodex: true })
+
+      const recoveredSess = getSessionStatus(db, "session-new-fail")
+      expect(recoveredSess?.status).toBe("complete")
+      expect(recoveredSess?.failureReason).toBeNull()
+      expect(recoveredSess?.failureTime).toBeNull()
+      expect(recoveredSess?.messageCount).toBe(2)
+
+      const failedAfter = getPersistedFailedSessions(db)
+      expect(failedAfter.some((f) => f.id === "session-new-fail")).toBe(false)
+    })
+
+    test("public rebuild preserves prior good Claude session on unreadable source at public entry", async () => {
       const claudeDir = join(tempDir, "claude-async-fail")
       mkdirSync(claudeDir, { recursive: true })
       const sessionPath = join(claudeDir, "session-async-fail.jsonl")
@@ -1907,6 +1954,41 @@ if (process.argv.includes("list")) {
       expect(res.rows).toBe(1)
       const sess = getSession(db, "codex:session-with-line-sep")
       expect(sess?.message_count).toBe(1)
+    })
+  })
+
+  describe("Chief Review 2246: Correction 2 - Absolute, Tilde, and Relative .recall-ignore Matching", () => {
+    test("isRecallIgnored matches absolute, tilde, and projects-relative patterns from .recall-ignore", () => {
+      const claudeHome = process.env.CLAUDE_DIR!
+      const projectsDir = join(claudeHome, "projects")
+      const ignoreFile = join(claudeHome, ".recall-ignore")
+
+      const absPatternFile = "/opt/forensic/quarantine.jsonl"
+      const tildePatternFile = join(homedir(), "special-quarantine.jsonl")
+      const relSessionFile = join(projectsDir, "my-project", "quarantine-me.jsonl")
+      const normalSessionFile = join(projectsDir, "my-project", "normal-session.jsonl")
+
+      writeFileSync(
+        ignoreFile,
+        [
+          "# Comment line",
+          "",
+          "/opt/forensic/quarantine.jsonl",
+          "~/special-quarantine.jsonl",
+          "my-project/quarantine-me.jsonl",
+        ].join("\n") + "\n",
+        "utf8",
+      )
+      resetIgnoreCache()
+
+      // Absolute path match
+      expect(isRecallIgnored(absPatternFile)).toBe(true)
+      // Tilde expanded path match
+      expect(isRecallIgnored(tildePatternFile)).toBe(true)
+      // Relative path match against current projects dir
+      expect(isRecallIgnored(relSessionFile)).toBe(true)
+      // Normal session is not ignored
+      expect(isRecallIgnored(normalSessionFile)).toBe(false)
     })
   })
 })
