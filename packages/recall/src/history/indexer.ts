@@ -253,9 +253,10 @@ export async function indexSessionFile(
     if (
       existing &&
       (existing.status == null || existing.status === "complete") &&
-      (existing.mtime_ms != null
-        ? existing.mtime_ms === mtime && (existing.size_bytes == null || existing.size_bytes === stats.size)
-        : existing.updated_at >= mtime)
+      existing.mtime_ms != null &&
+      existing.size_bytes != null &&
+      existing.mtime_ms === mtime &&
+      existing.size_bytes === stats.size
     ) {
       return { messages: 0, writes: 0 }
     }

@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite"
 import { tryAcquireFlock } from "@bearly/flock"
 import { spawn } from "node:child_process"
 import { once } from "node:events"
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -296,5 +296,123 @@ describe("Recall refresh completion", () => {
     const run2 = await indexSessionFile(db, sessionFile, { incremental: true })
     expect(run2.messages).toBe(0)
     expect(run2.writes).toBe(0)
+  })
+
+  test("legacy row with future event timestamp reindexes once to populate mtime_ms and size_bytes", async () => {
+    const projectDir = join(corpus.projects, "test-proj")
+    mkdirSync(projectDir, { recursive: true })
+    const sessionFile = join(projectDir, "sess-future.jsonl")
+    const pastTime = new Date("2026-07-01T12:00:00.000Z").toISOString()
+    const content =
+      JSON.stringify({
+        sessionId: "sess-future",
+        type: "user",
+        message: { content: "Future event content" },
+        timestamp: pastTime,
+      }) + "\n"
+    writeFileSync(sessionFile, content)
+
+    const st = statSync(sessionFile)
+    const mtime = st.mtime.getTime()
+
+    // Insert legacy row with updated_at in the FUTURE compared to mtime, but mtime_ms and size_bytes null
+    db.prepare(`
+      INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, mtime_ms, size_bytes)
+      VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)
+    `).run("sess-future", "test-proj", "test-proj/sess-future.jsonl", mtime + 50000, mtime + 100000, 1)
+
+    // Incremental pass: must NOT skip because mtime_ms and size_bytes are null
+    const run = await indexSessionFile(db, sessionFile, { incremental: true })
+    expect(run.messages).toBe(1)
+
+    // Check that legacy row was rewritten with exact mtime_ms and size_bytes, semantic event timestamps intact
+    const row = db.query("SELECT * FROM sessions WHERE id = 'sess-future'").get() as any
+    expect(row).toBeDefined()
+    expect(row.mtime_ms).toBe(mtime)
+    expect(row.size_bytes).toBe(Buffer.byteLength(content))
+    expect(row.updated_at).toBe(new Date(pastTime).getTime())
+
+    // Subsequent pass: now both present and equal -> skips
+    const runSubsequent = await indexSessionFile(db, sessionFile, { incremental: true })
+    expect(runSubsequent.messages).toBe(0)
+  })
+
+  test("legacy row with null size_bytes reindexes once even if mtime_ms matches", async () => {
+    const projectDir = join(corpus.projects, "test-proj")
+    mkdirSync(projectDir, { recursive: true })
+    const sessionFile = join(projectDir, "sess-null-size.jsonl")
+    const content =
+      JSON.stringify({
+        sessionId: "sess-null-size",
+        type: "user",
+        message: { content: "Null size content" },
+        timestamp: new Date().toISOString(),
+      }) + "\n"
+    writeFileSync(sessionFile, content)
+
+    const st = statSync(sessionFile)
+    const mtime = st.mtime.getTime()
+
+    // Insert legacy row where mtime_ms is set, but size_bytes is NULL
+    db.prepare(`
+      INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, mtime_ms, size_bytes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+    `).run("sess-null-size", "test-proj", "test-proj/sess-null-size.jsonl", mtime, mtime, 1, mtime)
+
+    // Incremental pass: must reindex because size_bytes is null
+    const run = await indexSessionFile(db, sessionFile, { incremental: true })
+    expect(run.messages).toBe(1)
+
+    const row = db.query("SELECT * FROM sessions WHERE id = 'sess-null-size'").get() as any
+    expect(row.mtime_ms).toBe(mtime)
+    expect(row.size_bytes).toBe(Buffer.byteLength(content))
+
+    // Subsequent pass skips
+    const run2 = await indexSessionFile(db, sessionFile, { incremental: true })
+    expect(run2.messages).toBe(0)
+  })
+
+  test("session reindexes when file size changed even if mtime is unchanged", async () => {
+    const projectDir = join(corpus.projects, "test-proj")
+    mkdirSync(projectDir, { recursive: true })
+    const sessionFile = join(projectDir, "sess-same-mtime.jsonl")
+    const line1 =
+      JSON.stringify({
+        sessionId: "sess-same-mtime",
+        type: "user",
+        message: { content: "First message" },
+        timestamp: new Date().toISOString(),
+      }) + "\n"
+    writeFileSync(sessionFile, line1)
+
+    // First index pass
+    const run1 = await indexSessionFile(db, sessionFile, { incremental: true })
+    expect(run1.messages).toBe(1)
+
+    const row1 = db.query("SELECT * FROM sessions WHERE id = 'sess-same-mtime'").get() as any
+    const originalMtime = row1.mtime_ms
+
+    // Modify file (append line) but restore original mtime via utimesSync
+    const line2 =
+      JSON.stringify({
+        sessionId: "sess-same-mtime",
+        type: "user",
+        message: { content: "Second message added" },
+        timestamp: new Date().toISOString(),
+      }) + "\n"
+    writeFileSync(sessionFile, line1 + line2)
+    utimesSync(sessionFile, originalMtime / 1000, originalMtime / 1000)
+
+    // Incremental pass: mtime matches, but size_bytes has changed -> MUST reindex
+    const run2 = await indexSessionFile(db, sessionFile, { incremental: true })
+    expect(run2.messages).toBe(2)
+
+    const row2 = db.query("SELECT * FROM sessions WHERE id = 'sess-same-mtime'").get() as any
+    expect(row2.mtime_ms).toBe(originalMtime)
+    expect(row2.size_bytes).toBe(Buffer.byteLength(line1 + line2))
+
+    // Subsequent pass: now size_bytes matches -> skips
+    const run3 = await indexSessionFile(db, sessionFile, { incremental: true })
+    expect(run3.messages).toBe(0)
   })
 })
