@@ -51,3 +51,10 @@ export {
   tribeSessionIdentityEnvironmentNames,
   withTribeLaunchEnvironment,
 } from "../launch-environment.ts"
+
+// JSON-RPC framing and the line parser. Already inside this barrel's closure
+// (client.ts imports both), so a consumer that fakes a daemon in a test takes
+// them from here rather than the root barrel.
+export type { JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse } from "../rpc.ts"
+export { isNotification, isRequest, isResponse, makeError, makeNotification, makeRequest, makeResponse } from "../rpc.ts"
+export { createLineParser } from "../parser.ts"
