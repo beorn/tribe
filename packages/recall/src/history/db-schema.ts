@@ -45,7 +45,11 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   message_count INTEGER DEFAULT 0,
-  title TEXT
+  title TEXT,
+  status TEXT,
+  size_bytes INTEGER,
+  mtime_ms REAL,
+  last_event_at_ms REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_path);
@@ -143,6 +147,10 @@ END;
 export const MIGRATIONS = [
   // Add title column to sessions table
   `ALTER TABLE sessions ADD COLUMN title TEXT`,
+  `ALTER TABLE sessions ADD COLUMN status TEXT`,
+  `ALTER TABLE sessions ADD COLUMN size_bytes INTEGER`,
+  `ALTER TABLE sessions ADD COLUMN mtime_ms REAL`,
+  `ALTER TABLE sessions ADD COLUMN last_event_at_ms REAL`,
   // Unique index for upsert support on content table
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_content_type_source ON content(content_type, source_id)`,
   // Update trigger for content FTS (needed for upsert)

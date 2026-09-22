@@ -118,10 +118,15 @@ program
   .command("index")
   .description("Build/rebuild FTS5 index")
   .option("--incremental", "Only index new sessions")
+  .option("--full", "Full re-index of all sessions including codex transcripts")
+  .option("--force", "Force commit even if session rows shrunk")
+  .option("--path <file>", "Index specific transcript file")
   .option("--project-root <path>", "Project root for indexing project sources (beads, docs, memory)")
-  .action(async (opts: { incremental?: boolean; projectRoot?: string }) => {
-    await cmdIndex(opts)
-  })
+  .action(
+    async (opts: { incremental?: boolean; full?: boolean; force?: boolean; path?: string; projectRoot?: string }) => {
+      await cmdIndex(opts)
+    },
+  )
 
 // ── status ──────────────────────────────────────────────────────────────
 program

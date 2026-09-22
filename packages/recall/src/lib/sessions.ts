@@ -16,7 +16,13 @@ import { acquireIndexWriter, IndexWriterBusyError } from "../history/db.ts"
 // Index
 // ============================================================================
 
-export async function cmdIndex(opts: { incremental?: boolean; projectRoot?: string }): Promise<void> {
+export async function cmdIndex(opts: {
+  incremental?: boolean
+  projectRoot?: string
+  full?: boolean
+  force?: boolean
+  path?: string
+}): Promise<void> {
   const db = getDb()
   try {
     using lock = acquireIndexWriter(db)
@@ -28,6 +34,9 @@ export async function cmdIndex(opts: { incremental?: boolean; projectRoot?: stri
     const result = await rebuildIndex(db, {
       incremental: opts.incremental,
       projectRoot: opts.projectRoot,
+      full: opts.full,
+      force: opts.force,
+      path: opts.path,
       onProgress: (progress) => {
         if (progress.filesProcessed - lastProgressUpdate >= 50) {
           lastProgressUpdate = progress.filesProcessed
@@ -39,6 +48,12 @@ export async function cmdIndex(opts: { incremental?: boolean; projectRoot?: stri
 
     console.log(`\n\n\u2713 Indexed content:`)
     console.log(`  ${result.messages.toLocaleString()} messages from ${result.files} session files`)
+    if (result.codexSessions !== undefined && result.codexSessions > 0) {
+      console.log(`  ${result.codexMessages?.toLocaleString()} messages from ${result.codexSessions} Codex transcripts`)
+    }
+    if (result.codexSkipped !== undefined && result.codexSkipped > 0) {
+      console.log(`  (skipped ${result.codexSkipped} unchanged Codex transcripts)`)
+    }
     if (result.writes > 0) {
       console.log(`  ${result.writes.toLocaleString()} file writes`)
     }

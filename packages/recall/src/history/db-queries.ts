@@ -26,15 +26,42 @@ export function upsertSession(
   updatedAt: number,
   messageCount: number,
   title?: string | null,
+  meta?: {
+    status?: string | null
+    sizeBytes?: number | null
+    mtimeMs?: number | null
+    lastEventAtMs?: number | null
+  },
 ): void {
   db.prepare(`
-    INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title, status, size_bytes, mtime_ms, last_event_at_ms)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
+      jsonl_path = excluded.jsonl_path,
       updated_at = excluded.updated_at,
       message_count = excluded.message_count,
-      title = COALESCE(excluded.title, sessions.title)
-  `).run(id, projectPath, jsonlPath, createdAt, updatedAt, messageCount, title ?? null)
+      title = COALESCE(excluded.title, sessions.title),
+      status = COALESCE(excluded.status, sessions.status),
+      size_bytes = COALESCE(excluded.size_bytes, sessions.size_bytes),
+      mtime_ms = COALESCE(excluded.mtime_ms, sessions.mtime_ms),
+      last_event_at_ms = COALESCE(excluded.last_event_at_ms, sessions.last_event_at_ms)
+  `).run(
+    id,
+    projectPath,
+    jsonlPath,
+    createdAt,
+    updatedAt,
+    messageCount,
+    title ?? null,
+    meta?.status ?? null,
+    meta?.sizeBytes ?? null,
+    meta?.mtimeMs ?? null,
+    meta?.lastEventAtMs ?? null,
+  )
+}
+
+export function updateSessionStatus(db: Database, id: string, status: string): void {
+  db.prepare("UPDATE sessions SET status = ? WHERE id = ?").run(status, id)
 }
 
 export function updateSessionTitle(db: Database, id: string, title: string | null): void {

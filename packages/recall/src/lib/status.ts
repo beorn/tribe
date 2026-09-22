@@ -105,6 +105,14 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
       console.log(`  Content: ${contentParts.join(", ")}`)
     }
 
+    const statusCounts = db
+      .prepare("SELECT status, COUNT(*) as n FROM sessions WHERE status IS NOT NULL GROUP BY status")
+      .all() as { status: string; n: number }[]
+    if (statusCounts.length > 0) {
+      const statusParts = statusCounts.map((r) => `${r.n} ${r.status}`)
+      console.log(`  Statuses: ${statusParts.join(", ")}`)
+    }
+
     console.log(
       `  DB: ${formatBytes(dbSizeBytes)}  Last rebuild: ${lastRebuild ? formatRelativeTime(new Date(lastRebuild).getTime()) : `${RED}never${RESET}`}${isStale ? ` ${YELLOW}(stale)${RESET}` : ""}`,
     )

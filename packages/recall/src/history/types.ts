@@ -28,6 +28,10 @@ export interface SessionRecord {
   updated_at: number
   message_count: number
   title: string | null
+  status?: string | null
+  size_bytes?: number | null
+  mtime_ms?: number | null
+  last_event_at_ms?: number | null
 }
 
 // Entry from sessions-index.json

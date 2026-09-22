@@ -40,6 +40,7 @@ beforeEach(() => {
   initSchema(db)
   setIndexMeta(db, "last_rebuild", new Date().toISOString())
   vi.stubEnv("RECALL_DB_PATH", dbPath)
+  vi.stubEnv("RECALL_SKIP_CODEX", "1")
 })
 
 afterEach(() => {

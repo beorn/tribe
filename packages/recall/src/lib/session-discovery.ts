@@ -216,14 +216,6 @@ export function enumerateRoots(homeDir: string): RootEnumeration {
   return { roots, unsupported }
 }
 
-/**
- * Backward-compatible supported-root list. Prefer {@link enumerateRoots} when
- * you also need unsupported-provider diagnostics.
- */
-export function sessionRoots(homeDir: string): SessionRoot[] {
-  return enumerateRoots(homeDir).roots
-}
-
 // ============================================================================
 // Public API
 // ============================================================================

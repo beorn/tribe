@@ -31,7 +31,7 @@ export {
   extractSessionFocus,
 } from "./lib/session-context.ts"
 export type { CurrentSessionResolution, NoSessionReason } from "./lib/session-context.ts"
-export { discoverActiveSession, sessionRoots, cwdMatches, renderDiscoveryDiagnostics } from "./lib/session-discovery.ts"
+export { discoverActiveSession, cwdMatches, renderDiscoveryDiagnostics } from "./lib/session-discovery.ts"
 export type {
   SessionFormat,
   SessionRoot,

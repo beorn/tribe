@@ -12,6 +12,7 @@ import * as fs from "fs"
 import * as readline from "readline"
 import * as os from "os"
 import { spawnSync } from "node:child_process"
+import { indexCodexTranscripts } from "./codex-indexer.ts"
 import {
   PROJECTS_DIR,
   MAX_CONTENT_SIZE,
@@ -104,6 +105,11 @@ export interface IndexOptions {
   incremental?: boolean // Only index new/updated sessions
   messagesOnly?: boolean // Skip writes table (faster)
   projectRoot?: string // Project root for indexing project sources
+  full?: boolean
+  force?: boolean
+  path?: string
+  agBin?: string
+  skipCodex?: boolean
   onProgress?: (progress: IndexProgress) => void
 }
 
@@ -348,6 +354,9 @@ export interface IndexResult {
   docs: number
   claudeMd: number
   research: number
+  codexSessions?: number
+  codexMessages?: number
+  codexSkipped?: number
 }
 
 /**
@@ -478,6 +487,39 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     const { messages, writes } = await indexSessionFile(db, sessionFile, options)
     totalMessages += messages
     totalWrites += writes
+  }
+
+  // Index Codex transcripts via ag transcript export
+  let codexSessions = 0
+  let codexMessages = 0
+  let codexSkipped = 0
+  if (
+    !options.skipCodex &&
+    process.env.RECALL_SKIP_CODEX !== "1" &&
+    (!options.path || options.path.includes(".codex") || options.path.includes("rollout-"))
+  ) {
+    const codexResult = await indexCodexTranscripts(db, {
+      incremental: options.incremental,
+      full: options.full,
+      force: options.force,
+      path: options.path,
+      projectRoot: options.projectRoot,
+      agBin: options.agBin,
+      cutoffTime: options.full ? undefined : cutoffTime,
+      onProgress: (p) => {
+        options.onProgress?.({
+          filesProcessed: totalFiles + p.sessionsProcessed,
+          messagesIndexed: totalMessages + p.messagesIndexed,
+          writesIndexed: totalWrites,
+          currentFile: p.currentSession,
+        })
+      },
+    })
+    codexSessions = codexResult.sessions
+    codexMessages = codexResult.rows
+    codexSkipped = codexResult.skipped
+    totalFiles += codexSessions
+    totalMessages += codexMessages
   }
 
   // Index session summaries from sessions-index.json
@@ -611,6 +653,9 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     summaries: totalSummaries,
     firstPrompts: totalFirstPrompts,
     skippedOld,
+    codexSessions,
+    codexMessages,
+    codexSkipped,
     ...projectSourceResult,
   }
 }
