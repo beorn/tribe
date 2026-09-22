@@ -79,7 +79,10 @@ program
       `  2  CLI usage error (bad flags, removed subcommand)\n` +
       `  3  degraded — index provenance is stale, missing, or unknown, or LLM\n` +
       `     synthesis failed. Positive hits still print; degraded empty JSON is\n` +
-      `     discriminated with results:null and total:null, never []/0.\n`,
+      `     discriminated with results:null and total:null, never []/0.\n` +
+      `  4  busy — index writer lock is held by another process\n` +
+      `  5  clean with ledgered skips — index committed successfully, but some\n` +
+      `     transcripts were unreadable, bad-header, shrunk, or skipped\n`,
   )
 
 // ── Default: search ─────────────────────────────────────────────────────

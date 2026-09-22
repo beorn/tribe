@@ -268,17 +268,23 @@ export async function fetchCodexCatalog(agBin: string): Promise<{
       if (buffer.trim()) {
         if (!handleLine(buffer)) return
       }
-      if (code !== 0) {
+      if (!doneRecord) {
+        const failureDetails = failures.length > 0
+          ? ` (recorded ${failures.length} catalog failures: ${failures.map((f) => `${f.kind}:${f.reason}${f.path ? ` [${f.path}]` : ""}${f.timestamp ? ` (at ${new Date(f.timestamp).toISOString()})` : ""}`).join(", ")})`
+          : ""
+        const err = new Error(`ag transcript list ${code !== 0 ? `exited with code ${code}: ` : "stream ended without done record"}${stderr.trim()}${failureDetails}`)
+        ;(err as any).failures = failures
+        reject(err)
+        return
+      }
+      const hasCatalogIssues = failures.length > 0 || Number(doneRecord.unreadable ?? 0) > 0 || Number(doneRecord.errors ?? 0) > 0
+      if (code !== 0 && !(code === 1 && hasCatalogIssues)) {
         const failureDetails = failures.length > 0
           ? ` (recorded ${failures.length} catalog failures: ${failures.map((f) => `${f.kind}:${f.reason}${f.path ? ` [${f.path}]` : ""}${f.timestamp ? ` (at ${new Date(f.timestamp).toISOString()})` : ""}`).join(", ")})`
           : ""
         const err = new Error(`ag transcript list exited with code ${code}: ${stderr.trim()}${failureDetails}`)
         ;(err as any).failures = failures
         reject(err)
-        return
-      }
-      if (!doneRecord) {
-        reject(new Error("ag transcript list stream ended without done record"))
         return
       }
       resolve({
@@ -831,7 +837,20 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         )
         return
       }
-      if (code !== 0) {
+      if (!doneRecord) {
+        const failureDetails = failures.length > 0
+          ? ` (recorded ${failures.length} failures: ${failures.map((f) => `${f.kind}:${f.reason}${f.path ? ` [${f.path}]` : ""}${f.timestamp ? ` (at ${new Date(f.timestamp).toISOString()})` : ""}${f.oldRowCount !== undefined ? ` [rows: ${f.oldRowCount} -> ${f.newRowCount}]` : ""}`).join(", ")})`
+          : ""
+        const committedProgress = ` (committed ${batchSessionCount} sessions [${batchIndexedSessionIds.join(", ")}], ${batchRowCount} rows prior to error)`
+        const err = new Error(
+          `ag transcript export ${code !== 0 ? `exited with code ${code}: ` : "stream ended without done record"}${stderr.trim()}${failureDetails}${committedProgress}`,
+        )
+        ;(err as any).failures = failures
+        reject(err)
+        return
+      }
+      const hasLedgeredIssues = failures.length > 0 || batchUnreadableCount > 0 || batchErrorCount > 0
+      if (code !== 0 && !(code === 1 && hasLedgeredIssues)) {
         const failureDetails = failures.length > 0
           ? ` (recorded ${failures.length} failures: ${failures.map((f) => `${f.kind}:${f.reason}${f.path ? ` [${f.path}]` : ""}${f.timestamp ? ` (at ${new Date(f.timestamp).toISOString()})` : ""}${f.oldRowCount !== undefined ? ` [rows: ${f.oldRowCount} -> ${f.newRowCount}]` : ""}`).join(", ")})`
           : ""
@@ -839,14 +858,6 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         const err = new Error(`ag transcript export exited with code ${code}: ${stderr.trim()}${failureDetails}${committedProgress}`)
         ;(err as any).failures = failures
         reject(err)
-        return
-      }
-      if (!doneRecord) {
-        reject(
-          new Error(
-            `ag transcript export stream ended without done record (committed ${batchSessionCount} sessions [${batchIndexedSessionIds.join(", ")}], ${batchRowCount} rows prior to exit)`,
-          ),
-        )
         return
       }
       resolve({

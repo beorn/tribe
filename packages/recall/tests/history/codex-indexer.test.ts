@@ -3,12 +3,13 @@ import { writeFileSync, mkdtempSync, chmodSync, mkdirSync, utimesSync } from "no
 import { createHash } from "node:crypto"
 import { tmpdir, homedir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, test } from "vitest"
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 import { initSchema } from "../../src/history/db-schema.ts"
 import { getSession, upsertSession, insertMessage, ftsSearchWithSnippet, getSessionStatus } from "../../src/history/db-queries.ts"
 import { resolveAgBin, fetchCodexCatalog, indexCodexTranscripts, safeRollback } from "../../src/history/codex-indexer.ts"
 import { rebuildIndex, INDEX_WINDOW_DAYS, INDEX_WINDOW_MS, pruneOldSessions, isRecallIgnored, resetIgnoreCache } from "../../src/history/indexer.ts"
 import { getPersistedFailedSessions } from "../../src/lib/status.ts"
+import { cmdIndex } from "../../src/lib/sessions.ts"
 
 describe("Codex Transcript Indexer", () => {
   let tempDir: string
@@ -1991,5 +1992,283 @@ if (process.argv.includes("list")) {
       expect(isRecallIgnored(normalSessionFile)).toBe(false)
     })
   })
+
+  describe("Request c1effe68: Exit Code Semantics & Ledgered Skips (Exit 5 vs Exit 1)", () => {
+    test("export exiting 1 with doneRecord and ledgered skips resolves and commits valid sessions", async () => {
+      const mockSkipsAg = makeMockAg(`
+if (process.argv.includes("list")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "valid-sess-1",
+    sessionKey: "codex:valid-sess-1",
+    canonicalPath: "/path/valid.jsonl",
+    sizeBytes: 100,
+    mtimeMs: 1000,
+    status: "canonical",
+    copies: [{ path: "/path/valid.jsonl", sizeBytes: 100, mtimeMs: 1000, decision: "canonical", key: "codex:valid-sess-1" }]
+  }))
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "broken-sess-2",
+    sessionKey: "codex:broken-sess-2",
+    canonicalPath: "/path/broken.jsonl",
+    sizeBytes: 50,
+    mtimeMs: 1000,
+    status: "canonical",
+    copies: [{ path: "/path/broken.jsonl", sizeBytes: 50, mtimeMs: 1000, decision: "canonical", key: "codex:broken-sess-2" }]
+  }))
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 2, sessions: 2, canonical: 2, ambiguous: 0, stale: 0, invalid: 0 }))
+} else if (process.argv.includes("export")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "valid-sess-1",
+    sessionKey: "codex:valid-sess-1",
+    path: "/path/valid.jsonl",
+    sizeBytes: 100,
+    mtimeMs: 1000,
+    status: "canonical"
+  }))
+  console.log(JSON.stringify({
+    kind: "row",
+    sessionKey: "codex:valid-sess-1",
+    line: 1,
+    role: "user",
+    text: "hello from valid session"
+  }))
+  console.log(JSON.stringify({ kind: "end", sessionKey: "codex:valid-sess-1", status: "complete", nativeId: "valid-sess-1" }))
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "broken-sess-2",
+    sessionKey: "codex:broken-sess-2",
+    path: "/path/broken.jsonl",
+    sizeBytes: 50,
+    mtimeMs: 1000,
+    status: "canonical"
+  }))
+  console.log(JSON.stringify({
+    kind: "unreadable",
+    path: "/path/broken.jsonl",
+    nativeId: "broken-sess-2",
+    reason: "bad-header"
+  }))
+  console.log(JSON.stringify({ kind: "end", sessionKey: "codex:broken-sess-2", status: "bad-header", nativeId: "broken-sess-2" }))
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 2, sessions: 2, canonical: 1, ambiguous: 0, stale: 0, invalid: 0, unreadable: 1, errors: 0 }))
+  // Real ag transcript export exits with 1 when unreadable/bad-header/errors > 0
+  process.exit(1)
+}
+`)
+
+      const res = await indexCodexTranscripts(db, { agBin: mockSkipsAg })
+      expect(res.sessions).toBe(1)
+      expect(res.rows).toBe(1)
+      expect(res.failures).toHaveLength(2)
+      expect(res.failures[0]?.reason).toBe("bad-header")
+      const validSess = getSession(db, "codex:valid-sess-1")
+      expect(validSess?.message_count).toBe(1)
+    })
+
+    test("export exiting 1 without doneRecord rejects loud with exit code in error", async () => {
+      const mockCrashAg = makeMockAg(`
+if (process.argv.includes("list")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "sess-crash",
+    sessionKey: "codex:sess-crash",
+    canonicalPath: "/path/crash.jsonl",
+    sizeBytes: 100,
+    mtimeMs: 1000,
+    status: "canonical",
+    copies: [{ path: "/path/crash.jsonl", sizeBytes: 100, mtimeMs: 1000, decision: "canonical", key: "codex:sess-crash" }]
+  }))
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 1, sessions: 1, canonical: 1, ambiguous: 0, stale: 0, invalid: 0 }))
+} else if (process.argv.includes("export")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.error("FATAL: segmentation fault or unexpected exit")
+  process.exit(1)
+}
+`)
+
+      await expect(indexCodexTranscripts(db, { agBin: mockCrashAg })).rejects.toThrow(
+        /ag transcript export exited with code 1.*FATAL: segmentation fault/,
+      )
+    })
+
+    test("export exiting with usage error (code 2) rejects loud even if doneRecord was emitted", async () => {
+      const mockUsageErrorAg = makeMockAg(`
+if (process.argv.includes("list")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "sess-usage",
+    sessionKey: "codex:sess-usage",
+    canonicalPath: "/path/usage.jsonl",
+    sizeBytes: 100,
+    mtimeMs: 1000,
+    status: "canonical",
+    copies: [{ path: "/path/usage.jsonl", sizeBytes: 100, mtimeMs: 1000, decision: "canonical", key: "codex:sess-usage" }]
+  }))
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 1, sessions: 1, canonical: 1, ambiguous: 0, stale: 0, invalid: 0 }))
+} else if (process.argv.includes("export")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 1, sessions: 1, canonical: 1, ambiguous: 0, stale: 0, invalid: 0 }))
+  console.error("usage error: bad flags")
+  process.exit(2)
+}
+`)
+
+      await expect(indexCodexTranscripts(db, { agBin: mockUsageErrorAg })).rejects.toThrow(
+        /ag transcript export exited with code 2.*usage error/,
+      )
+    })
+
+    test("cmdIndex sets process.exitCode = 5 when batch commits with ledgered skips", async () => {
+      const origExitCode = process.exitCode
+      const origAgBin = process.env.AG_BIN
+      try {
+        process.exitCode = undefined
+        const isolatedDbPath = join(tempDir, "isolated-test.db")
+        const isolatedDb = new Database(isolatedDbPath)
+        initSchema(isolatedDb)
+        isolatedDb.close()
+        process.env.RECALL_DB_PATH = isolatedDbPath
+
+        const skipFile = join(tempDir, "skip.jsonl")
+        writeFileSync(skipFile, "")
+
+        const mockSkipsAg = makeMockAg(`
+if (process.argv.includes("list")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "skip-test-sess",
+    sessionKey: "codex:skip-test-sess",
+    canonicalPath: "${skipFile}",
+    sizeBytes: 100,
+    mtimeMs: 1000,
+    status: "canonical",
+    copies: [{ path: "${skipFile}", sizeBytes: 100, mtimeMs: 1000, decision: "canonical", key: "codex:skip-test-sess" }]
+  }))
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 1, sessions: 1, canonical: 1, ambiguous: 0, stale: 0, invalid: 0 }))
+} else if (process.argv.includes("export")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "skip-test-sess",
+    sessionKey: "codex:skip-test-sess",
+    path: "${skipFile}",
+    sizeBytes: 100,
+    mtimeMs: 1000,
+    status: "canonical"
+  }))
+  console.log(JSON.stringify({
+    kind: "unreadable",
+    path: "${skipFile}",
+    nativeId: "skip-test-sess",
+    reason: "permission-denied"
+  }))
+  console.log(JSON.stringify({ kind: "end", sessionKey: "codex:skip-test-sess", status: "unreadable", nativeId: "skip-test-sess" }))
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 1, sessions: 1, canonical: 0, ambiguous: 0, stale: 0, invalid: 0, unreadable: 1, errors: 0 }))
+  process.exit(1)
+}
+`)
+        process.env.AG_BIN = mockSkipsAg
+
+        const logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
+        await cmdIndex({ path: skipFile })
+        expect(process.exitCode).toBe(5)
+        logSpy.mockRestore()
+      } finally {
+        process.exitCode = origExitCode
+        if (origAgBin !== undefined) {
+          process.env.AG_BIN = origAgBin
+        } else {
+          delete process.env.AG_BIN
+        }
+        delete process.env.RECALL_DB_PATH
+      }
+    })
+
+    test("cmdIndex does not set process.exitCode = 5 when batch is clean without skips", async () => {
+      const origExitCode = process.exitCode
+      const origAgBin = process.env.AG_BIN
+      try {
+        process.exitCode = undefined
+        const isolatedDbPath = join(tempDir, "isolated-clean-test.db")
+        const isolatedDb = new Database(isolatedDbPath)
+        initSchema(isolatedDb)
+        isolatedDb.close()
+        process.env.RECALL_DB_PATH = isolatedDbPath
+
+        const cleanFile = join(tempDir, "clean.jsonl")
+        writeFileSync(cleanFile, "")
+
+        const mockCleanAg = makeMockAg(`
+if (process.argv.includes("list")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "clean-sess",
+    sessionKey: "codex:clean-sess",
+    canonicalPath: "${cleanFile}",
+    sizeBytes: 100,
+    mtimeMs: 1000,
+    status: "canonical",
+    copies: [{ path: "${cleanFile}", sizeBytes: 100, mtimeMs: 1000, decision: "canonical", key: "codex:clean-sess" }]
+  }))
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 1, sessions: 1, canonical: 1, ambiguous: 0, stale: 0, invalid: 0 }))
+} else if (process.argv.includes("export")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "clean-sess",
+    sessionKey: "codex:clean-sess",
+    path: "${cleanFile}",
+    sizeBytes: 100,
+    mtimeMs: 1000,
+    status: "canonical"
+  }))
+  console.log(JSON.stringify({
+    kind: "row",
+    sessionKey: "codex:clean-sess",
+    line: 1,
+    role: "user",
+    text: "clean message"
+  }))
+  console.log(JSON.stringify({ kind: "end", sessionKey: "codex:clean-sess", status: "complete", nativeId: "clean-sess" }))
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 1, sessions: 1, canonical: 1, ambiguous: 0, stale: 0, invalid: 0, unreadable: 0, errors: 0 }))
+  process.exit(0)
+}
+`)
+        process.env.AG_BIN = mockCleanAg
+
+        const logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
+        await cmdIndex({ path: cleanFile })
+        expect(process.exitCode).toBe(0)
+        logSpy.mockRestore()
+      } finally {
+        process.exitCode = origExitCode
+        if (origAgBin !== undefined) {
+          process.env.AG_BIN = origAgBin
+        } else {
+          delete process.env.AG_BIN
+        }
+        delete process.env.RECALL_DB_PATH
+      }
+    })
+  })
 })
+
 
