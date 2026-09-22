@@ -62,6 +62,22 @@
         "types": "./dist/index.d.mts",
         "import": "./dist/index.mjs"
       },
+      "./launch-environment": {
+        "types": "./dist/launch-environment.d.mts",
+        "import": "./dist/launch-environment.mjs"
+      },
+      "./client": {
+        "types": "./dist/barrels/client.d.mts",
+        "import": "./dist/barrels/client.mjs"
+      },
+      "./trust": {
+        "types": "./dist/trust.d.mts",
+        "import": "./dist/trust.mjs"
+      },
+      "./records": {
+        "types": "./dist/barrels/records.d.mts",
+        "import": "./dist/barrels/records.mjs"
+      },
       "./cli": {
         "types": "./dist/cli.d.mts",
         "import": "./dist/cli.mjs"
@@ -145,6 +161,10 @@
     "dts": true,
     "entry": [
       "src/index.ts",
+      "src/launch-environment.ts",
+      "src/barrels/client.ts",
+      "src/trust.ts",
+      "src/barrels/records.ts",
       "src/cli.ts",
       "src/stdio-adapter.ts",
       "src/lib/socket.ts",
