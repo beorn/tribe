@@ -16,12 +16,14 @@
  * km-bearly.injection-envelope-lib for the phase-2 extraction.
  */
 
+import { readFileSync, writeFileSync } from "node:fs"
 import {
   classifyPromptSkip,
   cleanSnippet,
   containsRejectedSignal,
   hasSalience,
   LONG_PROMPT_BYPASS_LENGTH,
+  MAX_RECALL_QUERY_CHARS,
   MIN_RANK_THRESHOLD,
   type InjectSkipReason,
 } from "./prompt-filter.ts"
@@ -252,7 +254,7 @@ export async function runInjectDelta(
   // results, we retry with the glossary anchor before giving up.
   const promptHasSalience = hasSalience(prompt)
   const glossaryHit = findGlossaryAnchorImpl(prompt)
-  let recallQuerySeed: string | null = !promptHasSalience ? glossaryHit : null
+  const recallQuerySeed: string | null = !promptHasSalience ? glossaryHit : null
 
   // Question-shaped prompts get a more permissive bypass threshold:
   // "which env vars do we flip on/off?" (102 chars) is genuinely a
@@ -279,7 +281,8 @@ export async function runInjectDelta(
   // When salience came from a glossary anchor, use the anchor itself as
   // the recall query — it's the highest-signal token in the prompt and
   // produces a tightly-targeted result instead of broad lexical noise.
-  const recallQuery = recallQuerySeed ?? prompt
+  // Bounded: FTS cost grows super-linearly with query length (25071).
+  const recallQuery = recallQuerySeed ?? prompt.slice(0, MAX_RECALL_QUERY_CHARS)
   const recallOpts = {
     limit: 5,
     raw: true,
@@ -453,10 +456,7 @@ export function createTmpfileSeenStore(filePath: string | null): SeenStore {
   let turn = 0
   if (filePath) {
     try {
-      // Top-level require is fine here — fs is a node builtin.
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const fs = require("node:fs") as typeof import("node:fs")
-      const raw = fs.readFileSync(filePath, "utf8")
+      const raw = readFileSync(filePath, "utf8")
       const data = JSON.parse(raw) as { seen?: Record<string, number>; turn?: number }
       seen = data.seen ?? {}
       turn = data.turn ?? 0
@@ -476,9 +476,7 @@ export function createTmpfileSeenStore(filePath: string | null): SeenStore {
     flush: () => {
       if (!filePath) return
       try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const fs = require("node:fs") as typeof import("node:fs")
-        fs.writeFileSync(filePath, JSON.stringify({ turn, seen }))
+        writeFileSync(filePath, JSON.stringify({ turn, seen }))
       } catch {
         // Non-fatal — best-effort persistence.
       }

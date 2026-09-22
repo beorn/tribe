@@ -398,3 +398,29 @@ describe("runInjectDelta — dedup tracking still works", () => {
     expect(second.reason).toBe("all_seen")
   })
 })
+
+describe("runInjectDelta — recall query bound (@ag/tribe/25071)", () => {
+  beforeEach(() => {
+    recallMock.mockReset()
+    ensureProjectSourcesIndexedMock.mockReset()
+  })
+
+  test("an 8 KB salient prompt reaches recall with a query of at most MAX_RECALL_QUERY_CHARS", async () => {
+    const { MAX_RECALL_QUERY_CHARS } = await import("../src/lib/prompt-filter.ts")
+    mockRecall([])
+    const head = "why does src/lib/inject-core.ts take thirty seconds on a pasted subagent result? "
+    const prompt = (head + "the hook log shows the search phase dominating the whole budget again. ".repeat(120)).slice(
+      0,
+      8192,
+    )
+    expect(prompt.length).toBe(8192)
+
+    await runInjectDelta(prompt, createMemorySeenStore())
+
+    expect(recallMock).toHaveBeenCalled()
+    const query = recallMock.mock.calls[0]![0] as string
+    expect(query.length).toBeLessThanOrEqual(500)
+    expect(prompt.startsWith(query)).toBe(true)
+    expect(MAX_RECALL_QUERY_CHARS).toBe(500)
+  })
+})
