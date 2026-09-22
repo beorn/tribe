@@ -21,7 +21,7 @@ vi.mock("../../src/history/db", async (original) => ({
   findTodoFiles: () => corpus.todos,
 }))
 
-const { rebuildIndex } = await import("../../src/history/indexer")
+const { rebuildIndex, indexSessionFile } = await import("../../src/history/indexer")
 const { cmdIndex } = await import("../../src/lib/sessions")
 const { ensureProjectSourcesIndexed } = await import("../../src/history/project-sources")
 const { closeDb, initSchema, getIndexMeta, setIndexMeta } = await import("../../src/history/db")
@@ -266,5 +266,35 @@ describe("Recall refresh completion", () => {
         clearTimeout(cleanupTimer)
       }
     }
+  })
+
+  test("incremental index skips unchanged session even when mtime is later than event timestamps", async () => {
+    const projectDir = join(corpus.projects, "test-proj")
+    mkdirSync(projectDir, { recursive: true })
+    const sessionFile = join(projectDir, "sess-1.jsonl")
+    const eventTime = new Date("2026-08-01T12:00:00.000Z").toISOString()
+    const content =
+      JSON.stringify({
+        sessionId: "sess-1",
+        type: "user",
+        message: { content: "Hello world" },
+        timestamp: eventTime,
+      }) + "\n"
+    writeFileSync(sessionFile, content)
+
+    // First index pass
+    const run1 = await indexSessionFile(db, sessionFile, { incremental: true })
+    expect(run1.messages).toBe(1)
+
+    const sessionRow = db.query("SELECT * FROM sessions WHERE id = 'sess-1'").get() as any
+    expect(sessionRow).toBeDefined()
+    expect(sessionRow.updated_at).toBe(new Date(eventTime).getTime())
+    expect(sessionRow.mtime_ms).toBeGreaterThan(0)
+    expect(sessionRow.size_bytes).toBe(Buffer.byteLength(content))
+
+    // Second incremental pass on unchanged file: must skip re-indexing
+    const run2 = await indexSessionFile(db, sessionFile, { incremental: true })
+    expect(run2.messages).toBe(0)
+    expect(run2.writes).toBe(0)
   })
 })

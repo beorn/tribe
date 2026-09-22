@@ -250,7 +250,13 @@ export async function indexSessionFile(
   // Check if we can skip (incremental mode)
   if (options.incremental) {
     const existing = getSessionByPath(db, relativePath)
-    if (existing && existing.updated_at >= mtime) {
+    if (
+      existing &&
+      (existing.status == null || existing.status === "complete") &&
+      (existing.mtime_ms != null
+        ? existing.mtime_ms === mtime && (existing.size_bytes == null || existing.size_bytes === stats.size)
+        : existing.updated_at >= mtime)
+    ) {
       return { messages: 0, writes: 0 }
     }
   }
@@ -365,7 +371,12 @@ export async function indexSessionFile(
       }
     }
 
-    upsertSession(db, sessionId, projectPath, relativePath, firstTimestamp || mtime, lastTimestamp || mtime, messageCount, null, { status: "complete" })
+    upsertSession(db, sessionId, projectPath, relativePath, firstTimestamp || mtime, lastTimestamp || mtime, messageCount, null, {
+      status: "complete",
+      sizeBytes: stats.size,
+      mtimeMs: mtime,
+      lastEventAtMs: lastTimestamp,
+    })
     db.run(`RELEASE SAVEPOINT ${spId}`)
   } catch (err) {
     db.run(`ROLLBACK TO SAVEPOINT ${spId}`)
