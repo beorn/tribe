@@ -100,7 +100,7 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
     try {
       dbSizeBytes = fs.statSync(DB_PATH).size
     } catch {
-      // ignore
+      // silent-fallback-allow: DB file may be in-memory or not yet created on disk; defaults to 0 bytes
     }
 
     const lastRebuild = getIndexMeta(db, "last_rebuild") ?? null
@@ -153,8 +153,8 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
           const rcParts = Object.entries(rc).map(([k, v]) => `${v} ${k}`)
           console.log(`  Codex wire records: ${rcParts.join(", ")}`)
         }
-      } catch {
-        // ignore
+      } catch (err) {
+        console.warn(`  Warning: unreadable last_codex_reason_counts: ${(err as Error).message}`)
       }
     }
 
@@ -203,8 +203,8 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
             console.log(`    ... and ${failures.length - 5} more`)
           }
         }
-      } catch {
-        // ignore
+      } catch (err) {
+        console.warn(`  Warning: unreadable last_codex_failures: ${(err as Error).message}`)
       }
     }
 

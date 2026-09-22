@@ -171,7 +171,7 @@ export function resolveAgBin(explicitBin?: string): string {
       return wtTs
     }
   } catch {
-    // ignore URL resolution error
+    // silent-fallback-allow: import.meta.url resolution can fail in non-file or bundler environments; fall through to PATH lookup.
   }
   // Check system PATH
   const whichResult = spawnSync("which", ["ag"], { encoding: "utf8" })
