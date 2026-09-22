@@ -250,15 +250,37 @@ export async function indexSessionFile(
   })
 
   let sessionId = path.basename(filePath, ".jsonl")
-  db.prepare("DELETE FROM messages WHERE session_id = ?").run(sessionId)
-  db.prepare("DELETE FROM writes WHERE session_id = ?").run(sessionId)
-
   let firstTimestamp: number | null = null
   let lastTimestamp: number | null = null
   let messageCount = 0
   let writeCount = 0
   const seenUuids = new Set<string>()
   const seenWriteHashes = new Set<string>()
+
+  interface StagedMessage {
+    uuid: string | null
+    sessionId: string
+    type: string
+    textContent: string | null
+    toolName: string | null
+    filePaths: string | null
+    timestamp: number
+  }
+
+  interface StagedWrite {
+    sessionId: string
+    relativePath: string
+    toolUseId: string
+    timestamp: string
+    filePath: string
+    hash: string
+    contentSize: number
+    content: string | null
+  }
+
+  const stagedMessages: StagedMessage[] = []
+  const stagedWrites: StagedWrite[] = []
+  const touchedSessionIds = new Set<string>([sessionId])
 
   for await (const line of rl) {
     if (!line.trim()) continue
@@ -268,8 +290,7 @@ export async function indexSessionFile(
 
       if (record.sessionId && record.sessionId !== sessionId) {
         sessionId = record.sessionId
-        db.prepare("DELETE FROM messages WHERE session_id = ?").run(sessionId)
-        db.prepare("DELETE FROM writes WHERE session_id = ?").run(sessionId)
+        touchedSessionIds.add(sessionId)
       }
 
       // Use actual record timestamp for session date tracking;
@@ -292,7 +313,15 @@ export async function indexSessionFile(
       const { toolName, filePaths } = extractToolInfo(record)
 
       if (textContent || toolName) {
-        insertMessage(db, record.uuid || null, sessionId, record.type, textContent, toolName, filePaths, timestamp)
+        stagedMessages.push({
+          uuid: record.uuid || null,
+          sessionId,
+          type: record.type,
+          textContent,
+          toolName,
+          filePaths,
+          timestamp,
+        })
         messageCount++
       }
 
@@ -320,17 +349,16 @@ export async function indexSessionFile(
 
             const contentSize = Buffer.byteLength(content, "utf8")
 
-            insertWrite(
-              db,
+            stagedWrites.push({
               sessionId,
               relativePath,
-              toolUse.id,
-              record.timestamp || new Date().toISOString(),
+              toolUseId: toolUse.id,
+              timestamp: record.timestamp || new Date().toISOString(),
               filePath,
               hash,
               contentSize,
-              contentSize <= MAX_CONTENT_SIZE ? content : null,
-            )
+              content: contentSize <= MAX_CONTENT_SIZE ? content : null,
+            })
             writeCount++
           }
         }
@@ -340,8 +368,30 @@ export async function indexSessionFile(
     }
   }
 
-  // Update session metadata
-  upsertSession(db, sessionId, projectPath, relativePath, firstTimestamp || mtime, lastTimestamp || mtime, messageCount)
+  // Atomically apply replacement inside a transaction only after file is fully parsed
+  db.transaction(() => {
+    for (const sid of touchedSessionIds) {
+      db.prepare("DELETE FROM messages WHERE session_id = ?").run(sid)
+      db.prepare("DELETE FROM writes WHERE session_id = ?").run(sid)
+    }
+    for (const m of stagedMessages) {
+      insertMessage(db, m.uuid, m.sessionId, m.type, m.textContent, m.toolName, m.filePaths, m.timestamp)
+    }
+    for (const w of stagedWrites) {
+      insertWrite(
+        db,
+        w.sessionId,
+        w.relativePath,
+        w.toolUseId,
+        w.timestamp,
+        w.filePath,
+        w.hash,
+        w.contentSize,
+        w.content,
+      )
+    }
+    upsertSession(db, sessionId, projectPath, relativePath, firstTimestamp || mtime, lastTimestamp || mtime, messageCount)
+  })()
 
   return { messages: messageCount, writes: writeCount }
 }
@@ -593,7 +643,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
           filesProcessed: totalFiles + p.sessionsProcessed,
           messagesIndexed: totalMessages + p.messagesIndexed,
           writesIndexed: totalWrites,
-          currentFile: p.currentSession,
+          currentFile: p.currentSession ?? "",
         })
       },
     })
@@ -608,6 +658,11 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     totalMessages += codexMessages
     if (codexResult.indexedSessionIds) {
       for (const sid of codexResult.indexedSessionIds) {
+        seenSessionIds.add(sid)
+      }
+    }
+    if (codexResult.retainedSessionIds) {
+      for (const sid of codexResult.retainedSessionIds) {
         seenSessionIds.add(sid)
       }
     }
@@ -721,7 +776,10 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     // Prune unreferenced sessions after all sources (Claude + Codex) have been indexed
     if (!options.incremental && !options.path) {
       const allDbSessions = db.prepare("SELECT id FROM sessions").all() as { id: string }[]
-      const unreferencedIds = allDbSessions.map((s) => s.id).filter((id) => !seenSessionIds.has(id))
+      let unreferencedIds = allDbSessions.map((s) => s.id).filter((id) => !seenSessionIds.has(id))
+      if (options.skipCodex || process.env.RECALL_SKIP_CODEX === "1") {
+        unreferencedIds = unreferencedIds.filter((id) => !id.startsWith("codex:"))
+      }
       if (unreferencedIds.length > 0) {
         const placeholders = unreferencedIds.map(() => "?").join(",")
         db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...unreferencedIds)
@@ -756,12 +814,8 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     setIndexMeta(db, "last_rebuild", new Date().toISOString())
   }
 
-  if (codexFailures.length > 0) {
-    setIndexMeta(db, "last_codex_failures", JSON.stringify(codexFailures))
-  }
-  if (Object.keys(codexReasonCounts).length > 0) {
-    setIndexMeta(db, "last_codex_reason_counts", JSON.stringify(codexReasonCounts))
-  }
+  setIndexMeta(db, "last_codex_failures", JSON.stringify(codexFailures))
+  setIndexMeta(db, "last_codex_reason_counts", JSON.stringify(codexReasonCounts))
 
   return {
     files: totalFiles,

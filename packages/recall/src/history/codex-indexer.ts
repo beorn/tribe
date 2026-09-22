@@ -6,6 +6,7 @@
 
 import { Database } from "bun:sqlite"
 import { spawn, spawnSync } from "node:child_process"
+import { StringDecoder } from "node:string_decoder"
 import { fileURLToPath } from "node:url"
 import * as path from "path"
 import * as fs from "fs"
@@ -32,18 +33,22 @@ export interface CodexIndexOptions {
   projectRoot?: string
   agBin?: string
   cutoffTime?: number
-  onProgress?: (info: { sessionsProcessed: number; messagesIndexed: number; currentSession: string }) => void
+  onProgress?: (progress: {
+    sessionsProcessed: number
+    messagesIndexed: number
+    currentSession?: string
+  }) => void
 }
 
 export interface CodexFailureRecord {
-  kind: "skipped" | "unreadable" | "error"
+  kind: "unreadable" | "skipped" | "error"
   path?: string
   nativeId?: string
   reason: string
-  line?: number
   timestamp: number
   oldRowCount?: number
   newRowCount?: number
+  line?: number
 }
 
 export interface CodexIndexResult {
@@ -58,6 +63,7 @@ export interface CodexIndexResult {
   failures: CodexFailureRecord[]
   reasonCounts: Record<string, number>
   indexedSessionIds: string[]
+  retainedSessionIds?: string[]
 }
 
 interface TranscriptCatalogSession {
@@ -246,8 +252,9 @@ export async function fetchCodexCatalog(agBin: string): Promise<{
       return true
     }
 
+    const decoder = new StringDecoder("utf8")
     child.stdout.on("data", (chunk: Buffer) => {
-      buffer += chunk.toString("utf8")
+      buffer += decoder.write(chunk)
       let idx: number
       while ((idx = buffer.indexOf("\n")) !== -1) {
         const line = buffer.slice(0, idx)
@@ -257,14 +264,17 @@ export async function fetchCodexCatalog(agBin: string): Promise<{
     })
 
     child.on("close", (code) => {
+      buffer += decoder.end()
       if (buffer.trim()) {
         if (!handleLine(buffer)) return
       }
       if (code !== 0) {
         const failureDetails = failures.length > 0
-          ? ` (recorded ${failures.length} catalog failures: ${failures.map((f) => `${f.kind}:${f.reason}`).join(", ")})`
+          ? ` (recorded ${failures.length} catalog failures: ${failures.map((f) => `${f.kind}:${f.reason}${f.path ? ` [${f.path}]` : ""}${f.timestamp ? ` (at ${new Date(f.timestamp).toISOString()})` : ""}`).join(", ")})`
           : ""
-        reject(new Error(`ag transcript list exited with code ${code}: ${stderr.trim()}${failureDetails}`))
+        const err = new Error(`ag transcript list exited with code ${code}: ${stderr.trim()}${failureDetails}`)
+        ;(err as any).failures = failures
+        reject(err)
         return
       }
       if (!doneRecord) {
@@ -445,12 +455,14 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
     failures: CodexFailureRecord[]
     reasonCounts: Record<string, number>
     indexedSessionIds: string[]
+    retainedSessionIds: string[]
   }>((resolve, reject) => {
     const child = spawn(agBin, exportArgs, {
       stdio: ["ignore", "pipe", "pipe"],
     })
 
     const batchIndexedSessionIds: string[] = []
+    const batchRetainedSessionIds: string[] = []
     let currentSession: TranscriptExportSessionRecord | null = null
     const currentExistingCounts = new Map<string, number>()
     const currentRowCounts = new Map<string, number>()
@@ -654,18 +666,22 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
           batchUnreadableCount++
           const reason = status
           reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1
+          const now = Date.now()
           failures.push({
             kind: "unreadable",
             path: currentSession.path,
             nativeId: currentSession.nativeId,
             reason,
-            timestamp: Date.now(),
+            timestamp: now,
           })
 
           for (const key of keys) {
             const existing = getSession(db, key)
             if (existing) {
-              updateSessionStatus(db, key, `stale-${status}`)
+              updateSessionStatus(db, key, `stale-${status}`, {
+                failureReason: reason,
+                failureTime: now,
+              })
             } else {
               upsertSession(
                 db,
@@ -676,10 +692,15 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
                 Date.now(),
                 0,
                 null,
-                { status: status },
+                {
+                  status: status,
+                  failureReason: reason,
+                  failureTime: now,
+                },
               )
             }
           }
+          batchRetainedSessionIds.push(...keys)
         } else if (status === "complete" || status === "incomplete-tail") {
           // Check shrink condition (D1)
           let isShrunk = false
@@ -700,18 +721,26 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
             inTx = false
             const reason = "shrunk"
             reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1
+            const now = Date.now()
+            const shrinkReason = `shrunk: prior count ${shrinkOldCount} > new count ${shrinkNewCount}`
             failures.push({
               kind: "skipped",
               path: currentSession.path,
               nativeId: currentSession.nativeId,
-              reason: `shrunk: prior count ${shrinkOldCount} > new count ${shrinkNewCount}`,
-              timestamp: Date.now(),
+              reason: shrinkReason,
+              timestamp: now,
               oldRowCount: shrinkOldCount,
               newRowCount: shrinkNewCount,
             })
             for (const key of keys) {
-              updateSessionStatus(db, key, "shrunk")
+              updateSessionStatus(db, key, "shrunk", {
+                failureReason: shrinkReason,
+                failureTime: now,
+                shrinkOldCount,
+                shrinkNewCount,
+              })
             }
+            batchRetainedSessionIds.push(...keys)
           } else {
             try {
               const session = currentSession
@@ -776,8 +805,9 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
       return true
     }
 
+    const decoder = new StringDecoder("utf8")
     child.stdout.on("data", (chunk: Buffer) => {
-      buffer += chunk.toString("utf8")
+      buffer += decoder.write(chunk)
       let idx: number
       while ((idx = buffer.indexOf("\n")) !== -1) {
         const line = buffer.slice(0, idx)
@@ -787,6 +817,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
     })
 
     child.on("close", (code) => {
+      buffer += decoder.end()
       if (buffer.trim()) {
         if (!handleLine(buffer)) return
       }
@@ -795,23 +826,25 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         inTx = false
         reject(
           new Error(
-            `ag transcript export stream ended abruptly during active transaction for session ${currentSession?.nativeId ?? "unknown"} (committed ${batchSessionCount} sessions, ${batchRowCount} rows prior to interruption)`,
+            `ag transcript export stream ended abruptly during active transaction for session ${currentSession?.nativeId ?? "unknown"} (committed ${batchSessionCount} sessions [${batchIndexedSessionIds.join(", ")}], ${batchRowCount} rows prior to interruption)`,
           ),
         )
         return
       }
       if (code !== 0) {
         const failureDetails = failures.length > 0
-          ? ` (recorded ${failures.length} failures: ${failures.map((f) => `${f.kind}:${f.reason}`).join(", ")})`
+          ? ` (recorded ${failures.length} failures: ${failures.map((f) => `${f.kind}:${f.reason}${f.path ? ` [${f.path}]` : ""}${f.timestamp ? ` (at ${new Date(f.timestamp).toISOString()})` : ""}${f.oldRowCount !== undefined ? ` [rows: ${f.oldRowCount} -> ${f.newRowCount}]` : ""}`).join(", ")})`
           : ""
-        const committedProgress = ` (committed ${batchSessionCount} sessions, ${batchRowCount} rows prior to error)`
-        reject(new Error(`ag transcript export exited with code ${code}: ${stderr.trim()}${failureDetails}${committedProgress}`))
+        const committedProgress = ` (committed ${batchSessionCount} sessions [${batchIndexedSessionIds.join(", ")}], ${batchRowCount} rows prior to error)`
+        const err = new Error(`ag transcript export exited with code ${code}: ${stderr.trim()}${failureDetails}${committedProgress}`)
+        ;(err as any).failures = failures
+        reject(err)
         return
       }
       if (!doneRecord) {
         reject(
           new Error(
-            `ag transcript export stream ended without done record (committed ${batchSessionCount} sessions, ${batchRowCount} rows prior to exit)`,
+            `ag transcript export stream ended without done record (committed ${batchSessionCount} sessions [${batchIndexedSessionIds.join(", ")}], ${batchRowCount} rows prior to exit)`,
           ),
         )
         return
@@ -824,6 +857,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         failures,
         reasonCounts,
         indexedSessionIds: batchIndexedSessionIds,
+        retainedSessionIds: batchRetainedSessionIds,
       })
     })
   })
@@ -840,5 +874,6 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
     failures: batchResult.failures,
     reasonCounts: batchResult.reasonCounts,
     indexedSessionIds: [...skippedSessionIds, ...batchResult.indexedSessionIds],
+    retainedSessionIds: batchResult.retainedSessionIds,
   }
 }

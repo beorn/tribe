@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, test } from "vitest"
 import { initSchema } from "../../src/history/db-schema.ts"
-import { getSession, upsertSession, insertMessage, ftsSearchWithSnippet } from "../../src/history/db-queries.ts"
+import { getSession, upsertSession, insertMessage, ftsSearchWithSnippet, getSessionStatus } from "../../src/history/db-queries.ts"
 import { resolveAgBin, fetchCodexCatalog, indexCodexTranscripts, safeRollback } from "../../src/history/codex-indexer.ts"
 import { rebuildIndex, INDEX_WINDOW_DAYS, INDEX_WINDOW_MS, pruneOldSessions } from "../../src/history/indexer.ts"
 
@@ -1444,26 +1444,62 @@ if (args.includes("list")) {
     })
   })
 
-  describe("Chief Review 2106: Correction 3 - 180-Day Retention & 30-Day Search Default", () => {
-    test("retains Claude and Codex sessions older than 30 days and younger than 180 days across rebuild", async () => {
+  describe("Chief Review 2106 / 2150: Correction 3 - 180-Day Retention & 30-Day Search Default", () => {
+    test("public rebuild indexes older-than-30d native fixtures; 30d default search omits them; extended search finds them", async () => {
       const now = Date.now()
       const fortyFiveDaysAgo = now - 45 * 24 * 60 * 60 * 1000
 
-      upsertSession(db, "claude-45d", "/hh", "claude-45d.jsonl", fortyFiveDaysAgo, fortyFiveDaysAgo, 1)
-      insertMessage(db, "msg-claude-45d", "claude-45d", "user", "Searching forty-five day old topic", null, null, fortyFiveDaysAgo)
+      // Create native Claude fixture
+      const claudeDir = join(tempDir, "claude-corpus")
+      mkdirSync(claudeDir, { recursive: true })
+      const claudeFile = join(claudeDir, "claude-45d.jsonl")
+      const claudeLines = [
+        JSON.stringify({ type: "user", message: { content: "Searching ancient forty-five day old topic claude" }, timestamp: new Date(fortyFiveDaysAgo).toISOString() }),
+        JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Answer from forty-five days ago" }] }, timestamp: new Date(fortyFiveDaysAgo + 1000).toISOString() }),
+      ]
+      writeFileSync(claudeFile, claudeLines.join("\n") + "\n", "utf8")
+      utimesSync(claudeFile, new Date(fortyFiveDaysAgo), new Date(fortyFiveDaysAgo))
 
-      upsertSession(db, "codex:codex-45d", "/hh", "/tmp/codex-45d.jsonl", fortyFiveDaysAgo, fortyFiveDaysAgo, 1)
-      insertMessage(db, "msg-codex-45d", "codex:codex-45d", "user", "Searching forty-five day old topic codex", null, null, fortyFiveDaysAgo)
+      // Create native Codex fixture
+      const codexHome = join(tempDir, "codex-corpus")
+      const sessionDir = join(codexHome, ".codex/sessions/2026/08/07")
+      mkdirSync(sessionDir, { recursive: true })
+      const codexFile = join(sessionDir, "rollout-2026-08-07T10-00-00-019fce85-test-45d.jsonl")
+      const codexLines = [
+        JSON.stringify({ type: "session_meta", payload: { id: "019fce85-test-45d", cwd: "/home/work", timestamp: new Date(fortyFiveDaysAgo).toISOString() } }),
+        JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Searching ancient forty-five day old topic codex" }, timestamp: new Date(fortyFiveDaysAgo).toISOString() }),
+        JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "text", text: "Codex answer from forty-five days ago" }] }, timestamp: new Date(fortyFiveDaysAgo + 1000).toISOString() }),
+      ]
+      writeFileSync(codexFile, codexLines.join("\n") + "\n", "utf8")
+      utimesSync(codexFile, new Date(fortyFiveDaysAgo), new Date(fortyFiveDaysAgo))
 
-      const cutoffTime = now - INDEX_WINDOW_MS
-      const pruned = pruneOldSessions(db, cutoffTime)
-      expect(pruned.sessions).toBe(0)
+      const realAg = makeRealAg(codexHome)
 
+      // Ingest via public path/indexer
+      await rebuildIndex(db, { path: claudeFile, skipCodex: true })
+      await rebuildIndex(db, { path: codexFile, agBin: realAg })
+
+      // Verify both sessions and messages exist in SQLite
+      const claudeSess = getSession(db, "claude-45d")
+      expect(claudeSess).toBeDefined()
+      expect(claudeSess?.message_count).toBeGreaterThan(0)
+
+      const codexSess = getSession(db, "codex:019fce85-test-45d")
+      expect(codexSess).toBeDefined()
+      expect(codexSess?.message_count).toBeGreaterThan(0)
+
+      // Default 30-day search window omits 45-day-old records
       const defaultSearch = ftsSearchWithSnippet(db, "forty-five", { sinceTime: now - 30 * 24 * 60 * 60 * 1000 })
       expect(defaultSearch.results).toHaveLength(0)
 
+      // Extended search window (cutoffTime / 180 days) finds both
+      const cutoffTime = now - INDEX_WINDOW_MS
       const extendedSearch = ftsSearchWithSnippet(db, "forty-five", { sinceTime: cutoffTime })
-      expect(extendedSearch.results).toHaveLength(2)
+      expect(extendedSearch.results.length).toBeGreaterThanOrEqual(2)
+
+      // Incremental rebuild does not prune them
+      const pruned = pruneOldSessions(db, cutoffTime)
+      expect(pruned.sessions).toBe(0)
     })
   })
 
@@ -1491,7 +1527,233 @@ if (args.includes("list")) {
     })
   })
 
-  describe("Chief Review 2106: Correction 5 - Failure and Anomaly Evidence", () => {
+  describe("Chief Review 2150: Corrections 1 & 2 - Prior Good Data Preservation & Shrink Prune Safety", () => {
+    test("public rebuild preserves prior good Claude session when subsequent read fails or is malformed", async () => {
+      const claudeDir = join(tempDir, "claude-preservation")
+      mkdirSync(claudeDir, { recursive: true })
+      const sessionPath = join(claudeDir, "session-preserve.jsonl")
+
+      // Write initial valid transcript
+      const lines = [
+        JSON.stringify({ type: "user", message: { content: "Original preserved query" } }),
+        JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Original preserved response" }] } }),
+      ]
+      writeFileSync(sessionPath, lines.join("\n") + "\n", "utf8")
+
+      // Initial public rebuild
+      await rebuildIndex(db, { path: sessionPath, skipCodex: true })
+      const initialSess = getSession(db, "session-preserve")
+      expect(initialSess).toBeDefined()
+      expect(initialSess?.message_count).toBe(2)
+
+      // Corrupt the file with invalid non-JSON content
+      writeFileSync(sessionPath, "NOT_VALID_JSON_AT_ALL\n\n{{{corrupt", "utf8")
+
+      // Re-run public rebuild
+      await rebuildIndex(db, { path: sessionPath, skipCodex: true })
+
+      // Prior good data remains completely preserved in SQLite
+      const preservedSess = getSession(db, "session-preserve")
+      expect(preservedSess).toBeDefined()
+      expect(preservedSess?.message_count).toBe(2)
+
+      const searchRes = ftsSearchWithSnippet(db, "Original preserved query")
+      expect(searchRes.results).toHaveLength(1)
+    })
+
+    test("public rebuild preserves prior Codex rows when shrink is rejected without force", async () => {
+      const codexHome = join(tempDir, "codex-shrink-home")
+      const sessionDir = join(codexHome, ".codex/sessions/2026/09/21")
+      mkdirSync(sessionDir, { recursive: true })
+      const rolloutPath = join(sessionDir, "rollout-2026-09-21T12-00-00-019fce85-test-shrink.jsonl")
+
+      // Version 1: 3 rows
+      const v1Lines = [
+        JSON.stringify({ type: "session_meta", payload: { id: "019fce85-test-shrink", cwd: "/home/work", timestamp: "2026-09-21T12:00:00.000Z" } }),
+        JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Shrink test message 1" } }),
+        JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "text", text: "Shrink test message 2" }] } }),
+        JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Shrink test message 3" } }),
+      ]
+      writeFileSync(rolloutPath, v1Lines.join("\n") + "\n", "utf8")
+
+      const realAg = makeRealAg(codexHome)
+
+      // Initial rebuild
+      await rebuildIndex(db, { path: rolloutPath, agBin: realAg })
+      const initialSess = getSession(db, "codex:019fce85-test-shrink")
+      expect(initialSess?.message_count).toBe(3)
+      expect(initialSess?.status).toBe("complete")
+
+      // Version 2: truncated to 1 row (shrink)
+      const v2Lines = [
+        JSON.stringify({ type: "session_meta", payload: { id: "019fce85-test-shrink", cwd: "/home/work", timestamp: "2026-09-21T12:00:00.000Z" } }),
+        JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Shrink test message 1" } }),
+      ]
+      writeFileSync(rolloutPath, v2Lines.join("\n") + "\n", "utf8")
+      // Update mtime so indexer sees change
+      const later = new Date(Date.now() + 5000)
+      utimesSync(rolloutPath, later, later)
+
+      // Rebuild without force
+      await rebuildIndex(db, { path: rolloutPath, agBin: realAg })
+
+      // Prior rows are PRESERVED, not pruned or deleted!
+      const shrunkSess = getSession(db, "codex:019fce85-test-shrink")
+      expect(shrunkSess?.status).toBe("shrunk")
+      expect(shrunkSess?.message_count).toBe(3) // Prior 3 rows retained!
+
+      // Per-session status query shows shrink details
+      const statusDetails = getSessionStatus(db, "codex:019fce85-test-shrink")
+      expect(statusDetails?.status).toBe("shrunk")
+      expect(statusDetails?.failureReason).toContain("shrunk")
+      expect(statusDetails?.shrinkOldCount).toBe(3)
+      expect(statusDetails?.shrinkNewCount).toBe(1)
+
+      // Now re-run with force: should recover and update status to complete, clearing failure fields
+      await rebuildIndex(db, { path: rolloutPath, agBin: realAg, force: true })
+      const forcedSess = getSessionStatus(db, "codex:019fce85-test-shrink")
+      expect(forcedSess?.status).toBe("complete")
+      expect(forcedSess?.messageCount).toBe(1)
+      expect(forcedSess?.failureReason).toBeNull()
+      expect(forcedSess?.shrinkOldCount).toBeNull()
+    })
+  })
+
+  describe("Chief Review 2150: Corrections 4 & 5 - Failure Contract, Committed IDs, and UTF-8 Chunk Splitting", () => {
+    test("interrupted export reports committed session IDs alongside interrupted native ID", async () => {
+      const mockInterruptedAg = makeMockAg(`
+if (process.argv.includes("list")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "sess-1",
+    sessionKey: "codex:sess-1",
+    canonicalPath: "/path/sess-1.jsonl",
+    sizeBytes: 100,
+    mtimeMs: 1000,
+    status: "canonical",
+    copies: [{ path: "/path/sess-1.jsonl", sizeBytes: 100, mtimeMs: 1000, decision: "canonical", key: "codex:sess-1" }]
+  }))
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "sess-2-interrupted",
+    sessionKey: "codex:sess-2-interrupted",
+    canonicalPath: "/path/sess-2.jsonl",
+    sizeBytes: 100,
+    mtimeMs: 1000,
+    status: "canonical",
+    copies: [{ path: "/path/sess-2.jsonl", sizeBytes: 100, mtimeMs: 1000, decision: "canonical", key: "codex:sess-2-interrupted" }]
+  }))
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 2, sessions: 2, canonical: 2, ambiguous: 0, stale: 0, invalid: 0 }))
+} else if (process.argv.includes("export")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  // Session 1: succeeds
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "sess-1",
+    sessionKey: "codex:sess-1",
+    path: "/path/sess-1.jsonl",
+    sizeBytes: 100,
+    mtimeMs: 1000,
+    status: "canonical"
+  }))
+  console.log(JSON.stringify({ kind: "row", sessionKey: "codex:sess-1", line: 1, role: "user", text: "msg 1" }))
+  console.log(JSON.stringify({ kind: "end", sessionKey: "codex:sess-1", status: "complete" }))
+  // Session 2: abruptly cut mid-transaction
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "sess-2-interrupted",
+    sessionKey: "codex:sess-2-interrupted",
+    path: "/path/sess-2.jsonl",
+    sizeBytes: 100,
+    mtimeMs: 1000,
+    status: "canonical"
+  }))
+  console.log(JSON.stringify({ kind: "row", sessionKey: "codex:sess-2-interrupted", line: 1, role: "user", text: "msg 2" }))
+  // Child process exits abruptly without closing end record
+  process.exit(1)
+}
+`)
+
+      await expect(indexCodexTranscripts(db, { agBin: mockInterruptedAg })).rejects.toThrow(/sess-2-interrupted.*committed 1 sessions \[codex:sess-1\]/)
+    })
+
+    test("nonzero producer failure includes failed path, wire reason, and timestamp", async () => {
+      const mockListError = makeMockAg(`
+if (process.argv.includes("list")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({ kind: "unreadable", path: "/var/unreadable-path.jsonl", reason: "permission-denied-eacces" }))
+  console.error("Fatal error listing transcripts")
+  process.exit(1)
+}
+`)
+
+      await expect(indexCodexTranscripts(db, { agBin: mockListError })).rejects.toThrow(/unreadable:permission-denied-eacces.*\/var\/unreadable-path\.jsonl/)
+    })
+
+    test("handles multi-byte UTF-8 split across chunk boundaries without Unicode corruption", async () => {
+      const mockSplitAg = makeMockAg(`
+if (process.argv.includes("list")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "utf8-split-sess",
+    sessionKey: "codex:utf8-split-sess",
+    canonicalPath: "/path/utf8-split.jsonl",
+    sizeBytes: 100,
+    mtimeMs: 1000,
+    status: "canonical",
+    copies: [{ path: "/path/utf8-split.jsonl", sizeBytes: 100, mtimeMs: 1000, decision: "canonical", key: "codex:utf8-split-sess" }]
+  }))
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 1, sessions: 1, canonical: 1, ambiguous: 0, stale: 0, invalid: 0 }))
+} else if (process.argv.includes("export")) {
+  process.stdout.write(JSON.stringify({ kind: "schema", version: 1 }) + "\\n")
+  process.stdout.write(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "utf8-split-sess",
+    sessionKey: "codex:utf8-split-sess",
+    path: "/path/utf8-split.jsonl",
+    sizeBytes: 100,
+    mtimeMs: 1000,
+    status: "canonical"
+  }) + "\\n")
+  
+  const fullLine = JSON.stringify({
+    kind: "row",
+    sessionKey: "codex:utf8-split-sess",
+    line: 1,
+    role: "user",
+    text: "Prefix " + "\\u{1F31F}" + " and " + "\\u2028" + " Suffix"
+  }) + "\\n"
+
+  const buf = Buffer.from(fullLine, "utf8")
+  const splitPoint = buf.indexOf(Buffer.from("\\u{1F31F}", "utf8")) + 2
+  process.stdout.write(buf.subarray(0, splitPoint))
+  setTimeout(() => {
+    process.stdout.write(buf.subarray(splitPoint))
+    process.stdout.write(JSON.stringify({ kind: "end", sessionKey: "codex:utf8-split-sess", status: "complete" }) + "\\n")
+    process.stdout.write(JSON.stringify({ kind: "done", homes: 1, files: 1, sessions: 1, canonical: 1, ambiguous: 0, stale: 0, invalid: 0 }) + "\\n")
+  }, 20)
+}
+`)
+
+      const res = await indexCodexTranscripts(db, { agBin: mockSplitAg })
+      expect(res.sessions).toBe(1)
+      expect(res.rows).toBe(1)
+
+      const searchRes = ftsSearchWithSnippet(db, "Prefix")
+      expect(searchRes.results).toHaveLength(1)
+      const text = searchRes.results[0]?.content
+      expect(text).toContain("\u{1F31F}")
+      expect(text).not.toContain("\uFFFD")
+    })
+
     test("list failures are captured into result failures with wire reasons", async () => {
       const mockListFail = makeMockAg(`
 if (process.argv.includes("list")) {
@@ -1554,3 +1816,4 @@ if (process.argv.includes("list")) {
     })
   })
 })
+

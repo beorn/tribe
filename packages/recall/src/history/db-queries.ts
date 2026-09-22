@@ -31,11 +31,15 @@ export function upsertSession(
     sizeBytes?: number | null
     mtimeMs?: number | null
     lastEventAtMs?: number | null
+    failureReason?: string | null
+    failureTime?: number | null
+    shrinkOldCount?: number | null
+    shrinkNewCount?: number | null
   },
 ): void {
   db.prepare(`
-    INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title, status, size_bytes, mtime_ms, last_event_at_ms)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title, status, size_bytes, mtime_ms, last_event_at_ms, failure_reason, failure_time, shrink_old_count, shrink_new_count)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       jsonl_path = excluded.jsonl_path,
       updated_at = excluded.updated_at,
@@ -44,7 +48,11 @@ export function upsertSession(
       status = COALESCE(excluded.status, sessions.status),
       size_bytes = COALESCE(excluded.size_bytes, sessions.size_bytes),
       mtime_ms = COALESCE(excluded.mtime_ms, sessions.mtime_ms),
-      last_event_at_ms = COALESCE(excluded.last_event_at_ms, sessions.last_event_at_ms)
+      last_event_at_ms = COALESCE(excluded.last_event_at_ms, sessions.last_event_at_ms),
+      failure_reason = excluded.failure_reason,
+      failure_time = excluded.failure_time,
+      shrink_old_count = excluded.shrink_old_count,
+      shrink_new_count = excluded.shrink_new_count
   `).run(
     id,
     projectPath,
@@ -57,11 +65,65 @@ export function upsertSession(
     meta?.sizeBytes ?? null,
     meta?.mtimeMs ?? null,
     meta?.lastEventAtMs ?? null,
+    meta?.failureReason ?? null,
+    meta?.failureTime ?? null,
+    meta?.shrinkOldCount ?? null,
+    meta?.shrinkNewCount ?? null,
   )
 }
 
-export function updateSessionStatus(db: Database, id: string, status: string): void {
-  db.prepare("UPDATE sessions SET status = ? WHERE id = ?").run(status, id)
+export function updateSessionStatus(
+  db: Database,
+  id: string,
+  status: string,
+  details?: {
+    failureReason?: string | null
+    failureTime?: number | null
+    shrinkOldCount?: number | null
+    shrinkNewCount?: number | null
+  },
+): void {
+  db.prepare(`
+    UPDATE sessions
+    SET status = ?,
+        failure_reason = ?,
+        failure_time = ?,
+        shrink_old_count = ?,
+        shrink_new_count = ?
+    WHERE id = ?
+  `).run(
+    status,
+    details?.failureReason ?? null,
+    details?.failureTime ?? null,
+    details?.shrinkOldCount ?? null,
+    details?.shrinkNewCount ?? null,
+    id,
+  )
+}
+
+export function getSessionStatus(db: Database, id: string): {
+  id: string
+  status: string | null
+  messageCount: number
+  failureReason: string | null
+  failureTime: number | null
+  shrinkOldCount: number | null
+  shrinkNewCount: number | null
+} | undefined {
+  const row = db.prepare(`
+    SELECT id, status, message_count as messageCount, failure_reason as failureReason, failure_time as failureTime, shrink_old_count as shrinkOldCount, shrink_new_count as shrinkNewCount
+    FROM sessions
+    WHERE id = ?
+  `).get(id) as any
+  return row ? {
+    id: row.id,
+    status: row.status ?? null,
+    messageCount: row.messageCount ?? 0,
+    failureReason: row.failureReason ?? null,
+    failureTime: row.failureTime ?? null,
+    shrinkOldCount: row.shrinkOldCount ?? null,
+    shrinkNewCount: row.shrinkNewCount ?? null,
+  } : undefined
 }
 
 export function updateSessionTitle(db: Database, id: string, title: string | null): void {

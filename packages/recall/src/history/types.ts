@@ -32,6 +32,10 @@ export interface SessionRecord {
   size_bytes?: number | null
   mtime_ms?: number | null
   last_event_at_ms?: number | null
+  failure_reason?: string | null
+  failure_time?: number | null
+  shrink_old_count?: number | null
+  shrink_new_count?: number | null
 }
 
 // Entry from sessions-index.json
