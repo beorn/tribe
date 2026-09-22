@@ -136,6 +136,36 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
       }
     }
 
+    const lastCodexFailures = getIndexMeta(db, "last_codex_failures")
+    if (lastCodexFailures) {
+      try {
+        const failures = JSON.parse(lastCodexFailures) as Array<{
+          kind: string
+          path?: string
+          nativeId?: string
+          reason: string
+          timestamp: number
+          oldRowCount?: number
+          newRowCount?: number
+        }>
+        if (failures.length > 0) {
+          console.log(`  Codex failures (${failures.length}):`)
+          for (const f of failures.slice(0, 5)) {
+            const timeStr = new Date(f.timestamp).toISOString().replace("T", " ").replace(/\.\d+Z$/, "Z")
+            const idStr = f.nativeId ? ` [${f.nativeId}]` : ""
+            const pathStr = f.path ? ` ${f.path}` : ""
+            const shrinkStr = f.oldRowCount !== undefined && f.newRowCount !== undefined ? ` (rows: ${f.oldRowCount} -> ${f.newRowCount})` : ""
+            console.log(`    - ${f.kind}: ${f.reason}${idStr}${pathStr}${shrinkStr} (${timeStr})`)
+          }
+          if (failures.length > 5) {
+            console.log(`    ... and ${failures.length - 5} more`)
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     console.log(
       `  DB: ${formatBytes(dbSizeBytes)}  Last rebuild: ${lastRebuild ? formatRelativeTime(new Date(lastRebuild).getTime()) : `${RED}never${RESET}`}${isStale ? ` ${YELLOW}(stale)${RESET}` : ""}`,
     )

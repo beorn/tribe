@@ -595,10 +595,13 @@ function printResultEntries(results: RecallSearchResult[]): void {
       .toISOString()
       .replace("T", " ")
       .replace(/\.\d+Z$/, "Z")
-    const duplicateDetail = r.duplicateLine ? `, also line ${r.duplicateLine}` : ""
+    const lineInfo = r.line
+      ? (r.duplicateLine ? ` L${r.line}, also line ${r.duplicateLine}` : ` L${r.line}`)
+      : (r.duplicateLine ? ` also line ${r.duplicateLine}` : "")
+    const detail = lineInfo ? `,${lineInfo}` : ""
     const typeLabel = formatType(r.type)
     const sessionLabel = r.sessionTitle ? `${r.sessionTitle}` : `${r.sessionId.slice(0, 8)}...`
-    console.log(`${typeLabel} ${BOLD}${sessionLabel}${RESET} ${DIM}(${date}${duplicateDetail})${RESET}`)
+    console.log(`${typeLabel} ${BOLD}${sessionLabel}${RESET} ${DIM}(${date}${detail})${RESET}`)
 
     const highlighted = r.snippet.replace(/>>>/g, `${BOLD}${YELLOW}`).replace(/<<</g, RESET)
     const indented = highlighted
@@ -953,6 +956,8 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
         snippet: r.snippet,
         rank: r.rank,
         type: r.type,
+        line: r.line ?? null,
+        duplicateLine: (r as { duplicate_line?: number | null }).duplicate_line ?? null,
       })),
       ...contentResults.results.map((r) => ({
         contentType: r.content_type,
@@ -1052,7 +1057,11 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
         const time = formatTime(r.timestamp)
         const icon = typeIcons[r.type] || "\u{1F4AC}"
         const role = r.type === "user" ? "User" : r.type === "assistant" ? "Assistant" : r.type
-        console.log(`\n${icon} ${role} (${time}):`)
+        const dupLine = (r as { duplicate_line?: number | null }).duplicate_line
+        const lineDetail = r.line
+          ? (dupLine ? `, L${r.line}, also line ${dupLine}` : `, L${r.line}`)
+          : (dupLine ? `, also line ${dupLine}` : "")
+        console.log(`\n${icon} ${role} (${time}${lineDetail}):`)
         console.log("\u2500".repeat(60))
         if (r.snippet) {
           const highlighted = r.snippet.replace(/>>>/g, "\x1b[1m\x1b[33m").replace(/<<</g, "\x1b[0m")

@@ -61,6 +61,16 @@ export async function cmdIndex(opts: {
       const breakdown = Object.entries(result.codexReasonCounts).map(([k, v]) => `${v} ${k}`).join(", ")
       console.log(`  (Codex wire status: ${breakdown})`)
     }
+    if (result.codexFailures && result.codexFailures.length > 0) {
+      console.log(`  (${result.codexFailures.length} Codex transcript issues):`)
+      for (const f of result.codexFailures.slice(0, 5)) {
+        const pathPart = f.path ? ` [${f.path}]` : ""
+        console.log(`    - ${f.kind}: ${f.reason}${pathPart}`)
+      }
+      if (result.codexFailures.length > 5) {
+        console.log(`    ... and ${result.codexFailures.length - 5} more`)
+      }
+    }
     if (result.writes > 0) {
       console.log(`  ${result.writes.toLocaleString()} file writes`)
     }
@@ -92,7 +102,7 @@ export async function cmdIndex(opts: {
       console.log(`  ${result.claudeMd.toLocaleString()} CLAUDE.md files`)
     }
     if (result.skippedOld > 0) {
-      console.log(`  (skipped ${result.skippedOld} sessions older than 30 days)`)
+      console.log(`  (skipped ${result.skippedOld} sessions older than 180 days)`)
     }
   } catch (error) {
     if (error instanceof IndexWriterBusyError) {

@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite"
-import { writeFileSync, mkdtempSync, chmodSync } from "node:fs"
+import { writeFileSync, mkdtempSync, chmodSync, mkdirSync, utimesSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -29,6 +29,21 @@ describe("Codex Transcript Indexer", () => {
       scriptPath,
       `#!/usr/bin/env bun
 ${content}
+`,
+    )
+    chmodSync(scriptPath, 0o755)
+    return scriptPath
+  }
+
+  function makeRealAg(isolatedHome?: string): string {
+    const realAgEntry = join(__dirname, "../../../../../../ag/packages/ag-cli/src/bin/ag.ts")
+    const scriptPath = join(tempDir, `real-ag-${Math.random().toString(36).slice(2)}.sh`)
+    const homeVal = isolatedHome ?? tempDir
+    writeFileSync(
+      scriptPath,
+      `#!/bin/sh
+export HOME="${homeVal}"
+exec bun "${realAgEntry}" "$@"
 `,
     )
     chmodSync(scriptPath, 0o755)
@@ -1318,6 +1333,224 @@ if (args.includes("list")) {
       // Prior 3 messages must remain in database intact
       const msgs = db.prepare("SELECT * FROM messages WHERE session_id = ?").all("codex:stream-shrink")
       expect(msgs).toHaveLength(3)
+    })
+  })
+
+  describe("Chief Review 2106: Correction 1 - Public Rebuild Preserves Good Data", () => {
+    test("public rebuildIndex preserves prior rows when Ag readiness preflight fails", async () => {
+      upsertSession(db, "prior-session-1", "/hh", "prior.jsonl", Date.now() - 1000, Date.now(), 1)
+      insertMessage(db, "uuid-1", "prior-session-1", "user", "Prior good message", null, null, Date.now())
+
+      const brokenAg = join(tempDir, "broken-ag-nonexistent")
+      await expect(rebuildIndex(db, { agBin: brokenAg })).rejects.toThrow()
+
+      const stored = getSession(db, "prior-session-1")
+      expect(stored).toBeDefined()
+      const msgs = db.prepare("SELECT * FROM messages WHERE session_id = ?").all("prior-session-1")
+      expect(msgs).toHaveLength(1)
+    })
+  })
+
+  describe("Chief Review 2106: Correction 2 - Real Producer Skip, Growth & Ambiguous Copies", () => {
+    test("real producer two-pass skip exports 0 paths on second pass", async () => {
+      const codexHome = join(tempDir, "codex-home-skip")
+      const realAg = makeRealAg(codexHome)
+      const sessionDir = join(codexHome, ".codex/sessions/2026/09/21")
+      mkdirSync(sessionDir, { recursive: true })
+      const rolloutFile = join(sessionDir, "rollout-2026-09-21T10-00-00-019fce85-test-skip.jsonl")
+      writeFileSync(
+        rolloutFile,
+        JSON.stringify({ type: "session_meta", payload: { id: "019fce85-test-skip", cwd: "/home/work", timestamp: "2026-09-21T10:00:00.000Z" } }) + "\n" +
+        JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Real producer message 1" } }) + "\n",
+      )
+
+      // Pass 1: explicit path indexing
+      const pass1 = await indexCodexTranscripts(db, { agBin: realAg, path: rolloutFile })
+      expect(pass1.sessions).toBe(1)
+      expect(pass1.rows).toBe(1)
+      expect(pass1.skipped).toBe(0)
+
+      // Pass 2: catalog indexing with same unchanged file -> 0 paths exported, 1 skipped
+      const pass2 = await indexCodexTranscripts(db, { agBin: realAg })
+      expect(pass2.sessions).toBe(0)
+      expect(pass2.rows).toBe(0)
+      expect(pass2.skipped).toBe(1)
+    })
+
+    test("real producer grown file selects and updates session", async () => {
+      const codexHome = join(tempDir, "codex-home-growth")
+      const realAg = makeRealAg(codexHome)
+      const sessionDir = join(codexHome, ".codex/sessions/2026/09/21")
+      mkdirSync(sessionDir, { recursive: true })
+      const rolloutFile = join(sessionDir, "rollout-2026-09-21T11-00-00-019fce85-test-grow.jsonl")
+      writeFileSync(
+        rolloutFile,
+        JSON.stringify({ type: "session_meta", payload: { id: "019fce85-test-grow", cwd: "/home/work", timestamp: "2026-09-21T11:00:00.000Z" } }) + "\n" +
+        JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Initial message" } }) + "\n",
+      )
+
+      const pass1 = await indexCodexTranscripts(db, { agBin: realAg })
+      expect(pass1.sessions).toBe(1)
+      expect(pass1.rows).toBe(1)
+
+      // Grow file by adding a second message
+      writeFileSync(
+        rolloutFile,
+        JSON.stringify({ type: "session_meta", payload: { id: "019fce85-test-grow", cwd: "/home/work", timestamp: "2026-09-21T11:00:00.000Z" } }) + "\n" +
+        JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Initial message" } }) + "\n" +
+        JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "text", text: "Grown message 2" }] } }) + "\n",
+      )
+
+      const pass2 = await indexCodexTranscripts(db, { agBin: realAg })
+      expect(pass2.sessions).toBe(1)
+      expect(pass2.rows).toBe(2)
+      expect(pass2.skipped).toBe(0)
+
+      const sess = getSession(db, "codex:019fce85-test-grow")
+      expect(sess?.message_count).toBe(2)
+    })
+
+    test("real producer indexes genuinely ambiguous copies under distinct keys", async () => {
+      const codexHome = join(tempDir, "codex-home-ambig")
+      const realAg = makeRealAg(codexHome)
+      mkdirSync(join(codexHome, ".codex/sessions"), { recursive: true })
+      const acc1Dir = join(codexHome, ".config/ag/profiles/codex/work/sessions/2026/09/21")
+      const acc2Dir = join(codexHome, ".config/ag/profiles/codex/personal/sessions/2026/09/21")
+      mkdirSync(acc1Dir, { recursive: true })
+      mkdirSync(acc2Dir, { recursive: true })
+
+      const file1 = join(acc1Dir, "rollout-2026-09-21T12-00-00-019fce85-test-ambig.jsonl")
+      const file2 = join(acc2Dir, "rollout-2026-09-21T12-00-00-019fce85-test-ambig.jsonl")
+
+      const content =
+        JSON.stringify({ type: "session_meta", payload: { id: "019fce85-test-ambig", cwd: "/home/work", timestamp: "2026-09-21T12:00:00.000Z" } }) + "\n" +
+        JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Ambiguous message" } }) + "\n"
+      writeFileSync(file1, content)
+      writeFileSync(file2, content)
+      const fixedTime = new Date("2026-09-21T12:00:00.000Z")
+      utimesSync(file1, fixedTime, fixedTime)
+      utimesSync(file2, fixedTime, fixedTime)
+
+      const result = await indexCodexTranscripts(db, { agBin: realAg })
+      expect(result.sessions).toBe(1)
+      expect(result.ambiguous).toBe(1)
+
+      const allSessions = db.prepare("SELECT id, status, size_bytes FROM sessions WHERE id LIKE 'codex:%'").all() as { id: string; status: string; size_bytes: number }[]
+      expect(allSessions).toHaveLength(2)
+      expect(allSessions[0]?.id).not.toBe(allSessions[1]?.id)
+      for (const s of allSessions) {
+        expect(s.status).toBe("complete")
+      }
+    })
+  })
+
+  describe("Chief Review 2106: Correction 3 - 180-Day Retention & 30-Day Search Default", () => {
+    test("retains Claude and Codex sessions older than 30 days and younger than 180 days across rebuild", async () => {
+      const now = Date.now()
+      const fortyFiveDaysAgo = now - 45 * 24 * 60 * 60 * 1000
+
+      upsertSession(db, "claude-45d", "/hh", "claude-45d.jsonl", fortyFiveDaysAgo, fortyFiveDaysAgo, 1)
+      insertMessage(db, "msg-claude-45d", "claude-45d", "user", "Searching forty-five day old topic", null, null, fortyFiveDaysAgo)
+
+      upsertSession(db, "codex:codex-45d", "/hh", "/tmp/codex-45d.jsonl", fortyFiveDaysAgo, fortyFiveDaysAgo, 1)
+      insertMessage(db, "msg-codex-45d", "codex:codex-45d", "user", "Searching forty-five day old topic codex", null, null, fortyFiveDaysAgo)
+
+      const cutoffTime = now - INDEX_WINDOW_MS
+      const pruned = pruneOldSessions(db, cutoffTime)
+      expect(pruned.sessions).toBe(0)
+
+      const defaultSearch = ftsSearchWithSnippet(db, "forty-five", { sinceTime: now - 30 * 24 * 60 * 60 * 1000 })
+      expect(defaultSearch.results).toHaveLength(0)
+
+      const extendedSearch = ftsSearchWithSnippet(db, "forty-five", { sinceTime: cutoffTime })
+      expect(extendedSearch.results).toHaveLength(2)
+    })
+  })
+
+  describe("Chief Review 2106: Correction 4 - Public Search Output Line Provenance", () => {
+    test("public search output formats line and duplicateLine while keeping unmarked repeated utterance distinct", () => {
+      const sessionId = "search-line-provenance"
+      upsertSession(db, sessionId, "/hh", "session.jsonl", Date.now(), Date.now(), 3)
+
+      insertMessage(db, "m1", sessionId, "user", "exact match query", null, null, Date.now(), null, 1)
+      insertMessage(db, "m2", sessionId, "user", "exact match query", null, null, Date.now(), 1, 2)
+      insertMessage(db, "m3", sessionId, "user", "exact match query", null, null, Date.now(), null, 5)
+
+      const searchRes = ftsSearchWithSnippet(db, "exact match query")
+      expect(searchRes.results).toHaveLength(2)
+
+      const firstHit = searchRes.results.find((r) => r.line === 1)
+      expect(firstHit).toBeDefined()
+      expect(firstHit?.line).toBe(1)
+      expect((firstHit as { duplicate_line?: number | null }).duplicate_line).toBe(2)
+
+      const secondHit = searchRes.results.find((r) => r.line === 5)
+      expect(secondHit).toBeDefined()
+      expect(secondHit?.line).toBe(5)
+      expect((secondHit as { duplicate_line?: number | null }).duplicate_line).toBeNull()
+    })
+  })
+
+  describe("Chief Review 2106: Correction 5 - Failure and Anomaly Evidence", () => {
+    test("list failures are captured into result failures with wire reasons", async () => {
+      const mockListFail = makeMockAg(`
+if (process.argv.includes("list")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({ kind: "unreadable", path: "/path/unreadable.jsonl", reason: "permission-denied" }))
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 1, sessions: 0, canonical: 0, ambiguous: 0, stale: 0, invalid: 0 }))
+}
+`)
+      const res = await indexCodexTranscripts(db, { agBin: mockListFail })
+      expect(res.failures).toHaveLength(1)
+      expect(res.failures[0]?.kind).toBe("unreadable")
+      expect(res.failures[0]?.reason).toBe("permission-denied")
+      expect(res.reasonCounts["permission-denied"]).toBe(1)
+    })
+
+    test("handles NDJSON records containing unicode line separators (U+2028) without premature line splitting", async () => {
+      const mockAg = makeMockAg(`
+if (process.argv.includes("list")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "session-with-line-sep",
+    sessionKey: "codex:session-with-line-sep",
+    canonicalPath: "/path/session-with-line-sep.jsonl",
+    sizeBytes: 100,
+    mtimeMs: 1000,
+    status: "canonical",
+    copies: [{ path: "/path/session-with-line-sep.jsonl", sizeBytes: 100, mtimeMs: 1000, decision: "canonical", key: "codex:session-with-line-sep" }]
+  }))
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 1, sessions: 1, canonical: 1, ambiguous: 0, stale: 0, invalid: 0 }))
+} else if (process.argv.includes("export")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "session-with-line-sep",
+    sessionKey: "codex:session-with-line-sep",
+    path: "/path/session-with-line-sep.jsonl",
+    sizeBytes: 100,
+    mtimeMs: 1000,
+    status: "canonical"
+  }))
+  console.log(JSON.stringify({
+    kind: "row",
+    sessionKey: "codex:session-with-line-sep",
+    line: 1,
+    role: "user",
+    text: "first part\\u2028second part"
+  }))
+  console.log(JSON.stringify({ kind: "end", sessionKey: "codex:session-with-line-sep", status: "complete" }))
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 1, sessions: 1, canonical: 1, ambiguous: 0, stale: 0, invalid: 0 }))
+}
+`)
+      const res = await indexCodexTranscripts(db, { agBin: mockAg })
+      expect(res.sessions).toBe(1)
+      expect(res.rows).toBe(1)
+      const sess = getSession(db, "codex:session-with-line-sep")
+      expect(sess?.message_count).toBe(1)
     })
   })
 })

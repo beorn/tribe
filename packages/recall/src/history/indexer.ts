@@ -12,7 +12,7 @@ import * as fs from "fs"
 import * as readline from "readline"
 import * as os from "os"
 import { spawnSync } from "node:child_process"
-import { indexCodexTranscripts, resolveAgBin } from "./codex-indexer.ts"
+import { indexCodexTranscripts, validateAgReadiness, type CodexFailureRecord } from "./codex-indexer.ts"
 import {
   PROJECTS_DIR,
   MAX_CONTENT_SIZE,
@@ -21,8 +21,6 @@ import {
   insertWrite,
   upsertContent,
   getSessionByPath,
-  clearTables,
-  clearContent,
   setIndexMeta,
   getIndexMeta,
   getAllSessionEntries,
@@ -252,6 +250,9 @@ export async function indexSessionFile(
   })
 
   let sessionId = path.basename(filePath, ".jsonl")
+  db.prepare("DELETE FROM messages WHERE session_id = ?").run(sessionId)
+  db.prepare("DELETE FROM writes WHERE session_id = ?").run(sessionId)
+
   let firstTimestamp: number | null = null
   let lastTimestamp: number | null = null
   let messageCount = 0
@@ -265,7 +266,11 @@ export async function indexSessionFile(
     try {
       const record = JSON.parse(line) as JsonlRecord
 
-      if (record.sessionId) sessionId = record.sessionId
+      if (record.sessionId && record.sessionId !== sessionId) {
+        sessionId = record.sessionId
+        db.prepare("DELETE FROM messages WHERE session_id = ?").run(sessionId)
+        db.prepare("DELETE FROM writes WHERE session_id = ?").run(sessionId)
+      }
 
       // Use actual record timestamp for session date tracking;
       // fall back to Date.now() only for message insertion (not session bounds)
@@ -361,7 +366,7 @@ export interface IndexResult {
   codexSkipped?: number
   codexUnreadable?: number
   codexErrors?: number
-  codexFailures?: Array<{ kind: string; path?: string; reason: string; line?: number; timestamp: number }>
+  codexFailures?: CodexFailureRecord[]
   codexReasonCounts?: Record<string, number>
 }
 
@@ -438,17 +443,33 @@ export function pruneIgnoredSessions(db: Database): { sessions: number; messages
   }
 }
 
+/**
+ * Read the first line of a file in a bounded memory buffer (default 4KB).
+ * Avoids reading multi-gigabyte files into memory.
+ */
+export function readFirstLineBounded(filePath: string, maxBytes = 4096): string | null {
+  const stat = fs.statSync(filePath)
+  const len = Math.min(stat.size, maxBytes)
+  if (len === 0) return null
+  const fd = fs.openSync(filePath, "r")
+  try {
+    const buf = Buffer.alloc(len)
+    const bytesRead = fs.readSync(fd, buf, 0, len, 0)
+    if (bytesRead === 0) return null
+    const text = buf.toString("utf8", 0, bytesRead)
+    const newline = text.indexOf("\n")
+    return newline !== -1 ? text.slice(0, newline) : text
+  } finally {
+    fs.closeSync(fd)
+  }
+}
+
 export async function rebuildIndex(db: Database, options: IndexOptions = {}): Promise<IndexResult> {
   const startTime = Date.now()
   const cutoffTime = options.full ? undefined : Date.now() - INDEX_WINDOW_MS
 
   if (options.force && !options.path) {
     throw new Error("--force is only permitted when an explicit --path is specified")
-  }
-
-  // Pre-flight ag binary before corpus write if Codex transcripts will be indexed
-  if (!options.skipCodex && process.env.RECALL_SKIP_CODEX !== "1") {
-    resolveAgBin(options.agBin)
   }
 
   // Commit invalidation before any corpus write. A failure or killed process
@@ -461,20 +482,39 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     throw new Error(`Recall project source is not a directory: ${options.projectRoot}`)
   }
 
-  // Clear existing data unless incremental or targeting a specific path
-  if (!options.incremental && !options.path) {
-    clearTables(db, options.messagesOnly ? ["sessions", "messages"] : ["writes", "sessions", "messages"])
-    clearContent(db)
-  } else if (!options.path) {
-    // In incremental mode across the entire corpus, prune sessions older than 180 days
-    if (cutoffTime !== undefined) {
-      pruneOldSessions(db, cutoffTime)
+  let isClaudeTarget = false
+  if (options.path) {
+    const absPath = path.resolve(options.path)
+    if (!fs.existsSync(absPath)) {
+      throw new Error(`Specified path does not exist: ${absPath}`)
     }
-    // Always prune sessions matched by .recall-ignore, even in incremental
-    // mode — quarantine must take effect immediately after the ignore file
-    // is updated, without requiring a full rebuild.
-    pruneIgnoredSessions(db)
+    if (absPath.startsWith(path.resolve(PROJECTS_DIR))) {
+      isClaudeTarget = true
+    } else {
+      try {
+        const firstLine = readFirstLineBounded(absPath, 4096)
+        if (firstLine) {
+          const parsed = JSON.parse(firstLine) as { type?: unknown }
+          if (parsed.type === "user" || parsed.type === "assistant") {
+            isClaudeTarget = true
+          }
+        }
+      } catch (err) {
+        if (err instanceof SyntaxError) {
+          // not JSON in first line -> not a Claude transcript
+        } else {
+          throw new Error(`Failed to read path ${absPath}: ${(err as Error).message}`, { cause: err })
+        }
+      }
+    }
   }
+
+  // Pre-flight ag binary and schema readiness before any index modification
+  if (!options.skipCodex && process.env.RECALL_SKIP_CODEX !== "1" && (!options.path || !isClaudeTarget)) {
+    await validateAgReadiness(options.agBin)
+  }
+
+  const seenSessionIds = new Set<string>()
 
   let totalFiles = 0
   let totalMessages = 0
@@ -484,26 +524,6 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   let totalSummaries = 0
   let totalFirstPrompts = 0
   let skippedOld = 0
-
-  let isClaudeTarget = false
-  if (options.path) {
-    const absPath = path.resolve(options.path)
-    if (absPath.startsWith(path.resolve(PROJECTS_DIR))) {
-      isClaudeTarget = true
-    } else {
-      try {
-        const firstLine = fs.readFileSync(absPath, "utf8").split("\n", 1)[0]
-        if (firstLine) {
-          const parsed = JSON.parse(firstLine) as { type?: unknown }
-          if (parsed.type === "user" || parsed.type === "assistant") {
-            isClaudeTarget = true
-          }
-        }
-      } catch {
-        // ignore
-      }
-    }
-  }
 
   // Index Claude session files
   if (!options.path) {
@@ -516,6 +536,8 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
       }
 
       totalFiles++
+      const baseSessionId = path.basename(sessionFile, ".jsonl")
+      seenSessionIds.add(baseSessionId)
 
       const relativePath = path.relative(PROJECTS_DIR, sessionFile)
       options.onProgress?.({
@@ -550,7 +572,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   let codexSkipped = 0
   let codexUnreadable = 0
   let codexErrors = 0
-  let codexFailures: Array<{ kind: string; path?: string; reason: string; line?: number; timestamp: number }> = []
+  let codexFailures: CodexFailureRecord[] = []
   let codexReasonCounts: Record<string, number> = {}
 
   if (
@@ -584,6 +606,11 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     codexReasonCounts = codexResult.reasonCounts
     totalFiles += codexSessions
     totalMessages += codexMessages
+    if (codexResult.indexedSessionIds) {
+      for (const sid of codexResult.indexedSessionIds) {
+        seenSessionIds.add(sid)
+      }
+    }
   }
 
   // Index session summaries, plans, todos, and project sources only during corpus rebuilds
@@ -691,6 +718,25 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
       projectSourceResult = indexProjectSources(db, projectPath)
     }
 
+    // Prune unreferenced sessions after all sources (Claude + Codex) have been indexed
+    if (!options.incremental && !options.path) {
+      const allDbSessions = db.prepare("SELECT id FROM sessions").all() as { id: string }[]
+      const unreferencedIds = allDbSessions.map((s) => s.id).filter((id) => !seenSessionIds.has(id))
+      if (unreferencedIds.length > 0) {
+        const placeholders = unreferencedIds.map(() => "?").join(",")
+        db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...unreferencedIds)
+        db.prepare(`DELETE FROM writes WHERE session_id IN (${placeholders})`).run(...unreferencedIds)
+        db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...unreferencedIds)
+        db.prepare("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')").run()
+      }
+      pruneIgnoredSessions(db)
+    } else if (!options.path) {
+      if (cutoffTime !== undefined) {
+        pruneOldSessions(db, cutoffTime)
+      }
+      pruneIgnoredSessions(db)
+    }
+
     // Store metadata
     const duration = Date.now() - startTime
     setIndexMeta(db, "rebuild_duration_ms", String(duration))
@@ -710,6 +756,9 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     setIndexMeta(db, "last_rebuild", new Date().toISOString())
   }
 
+  if (codexFailures.length > 0) {
+    setIndexMeta(db, "last_codex_failures", JSON.stringify(codexFailures))
+  }
   if (Object.keys(codexReasonCounts).length > 0) {
     setIndexMeta(db, "last_codex_reason_counts", JSON.stringify(codexReasonCounts))
   }

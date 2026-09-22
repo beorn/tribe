@@ -560,6 +560,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         timestamp: Number(r.timestamp),
         snippet: r.snippet || (r.content?.slice(0, 500) ?? ""),
         rank: r.rank / corroborationBoost,
+        line: r.line ?? null,
+        duplicateLine: (r as { duplicate_line?: number | null }).duplicate_line ?? null,
       })
     }
 

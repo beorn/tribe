@@ -7,7 +7,6 @@
 import { Database } from "bun:sqlite"
 import { spawn, spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
-import * as readline from "readline"
 import * as path from "path"
 import * as fs from "fs"
 import { getSession, upsertSession, insertMessage, updateSessionStatus } from "./db-queries.ts"
@@ -39,9 +38,12 @@ export interface CodexIndexOptions {
 export interface CodexFailureRecord {
   kind: "skipped" | "unreadable" | "error"
   path?: string
+  nativeId?: string
   reason: string
   line?: number
   timestamp: number
+  oldRowCount?: number
+  newRowCount?: number
 }
 
 export interface CodexIndexResult {
@@ -55,13 +57,14 @@ export interface CodexIndexResult {
   errors: number
   failures: CodexFailureRecord[]
   reasonCounts: Record<string, number>
+  indexedSessionIds: string[]
 }
 
 interface TranscriptCatalogSession {
   kind: "session"
   provider: "codex"
   nativeId: string
-  canonicalPath: string
+  canonicalPath: string | null
   copies: Array<{
     path: string
     home?: string
@@ -131,8 +134,12 @@ export function resolveAgBin(explicitBin?: string): string {
     }
     throw new Error(`Specified ag binary does not exist: ${explicitBin}`)
   }
-  if (process.env.AG_BIN && fs.existsSync(process.env.AG_BIN)) {
-    return process.env.AG_BIN
+  if (process.env.AG_BIN && process.env.AG_BIN.trim().length > 0) {
+    const envBin = process.env.AG_BIN.trim()
+    if (fs.existsSync(envBin)) {
+      return envBin
+    }
+    throw new Error(`Configured AG_BIN does not exist: ${envBin}`)
   }
   // Try locating ag by searching upwards for node_modules/.bin/ag from cwd
   let cur = process.cwd()
@@ -178,6 +185,7 @@ export async function fetchCodexCatalog(agBin: string): Promise<{
   ambiguous: number
   stale: number
   invalid: number
+  failures: CodexFailureRecord[]
 }> {
   return new Promise((resolve, reject) => {
     const child = spawn(agBin, ["transcript", "list", "--provider", "codex", "--json"], {
@@ -185,6 +193,7 @@ export async function fetchCodexCatalog(agBin: string): Promise<{
     })
 
     const sessions: TranscriptCatalogSession[] = []
+    const failures: CodexFailureRecord[] = []
     let doneRecord: Record<string, unknown> | null = null
     let isFirstLine = true
     let stderr = ""
@@ -197,14 +206,10 @@ export async function fetchCodexCatalog(agBin: string): Promise<{
       reject(new Error(`Failed to spawn ag: ${err.message}`))
     })
 
-    const rl = readline.createInterface({
-      input: child.stdout,
-      crlfDelay: Infinity,
-    })
-
-    rl.on("line", (line) => {
+    let buffer = ""
+    const handleLine = (line: string): boolean => {
       const trimmed = line.trim()
-      if (!trimmed) return
+      if (!trimmed) return true
 
       let record: Record<string, unknown>
       try {
@@ -212,7 +217,7 @@ export async function fetchCodexCatalog(agBin: string): Promise<{
       } catch {
         reject(new Error(`Malformed JSON from ag transcript list: ${trimmed}`))
         child.kill()
-        return
+        return false
       }
 
       if (isFirstLine) {
@@ -220,21 +225,46 @@ export async function fetchCodexCatalog(agBin: string): Promise<{
         if (record.kind !== "schema" || record.version !== 1) {
           reject(new Error(`Unsupported ag transcript schema version: expected 1, got ${record.version ?? "unknown"}`))
           child.kill()
-          return
+          return false
         }
-        return
+        return true
       }
 
       if (record.kind === "session") {
         sessions.push(record as unknown as TranscriptCatalogSession)
+      } else if (record.kind === "unreadable" || record.kind === "skipped" || record.kind === "error") {
+        failures.push({
+          kind: record.kind as "unreadable" | "skipped" | "error",
+          path: typeof record.path === "string" ? record.path : undefined,
+          nativeId: typeof record.nativeId === "string" ? record.nativeId : undefined,
+          reason: typeof record.reason === "string" ? record.reason : "unknown",
+          timestamp: Date.now(),
+        })
       } else if (record.kind === "done") {
         doneRecord = record
+      }
+      return true
+    }
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8")
+      let idx: number
+      while ((idx = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, idx)
+        buffer = buffer.slice(idx + 1)
+        if (!handleLine(line)) return
       }
     })
 
     child.on("close", (code) => {
+      if (buffer.trim()) {
+        if (!handleLine(buffer)) return
+      }
       if (code !== 0) {
-        reject(new Error(`ag transcript list exited with code ${code}: ${stderr.trim()}`))
+        const failureDetails = failures.length > 0
+          ? ` (recorded ${failures.length} catalog failures: ${failures.map((f) => `${f.kind}:${f.reason}`).join(", ")})`
+          : ""
+        reject(new Error(`ag transcript list exited with code ${code}: ${stderr.trim()}${failureDetails}`))
         return
       }
       if (!doneRecord) {
@@ -248,9 +278,19 @@ export async function fetchCodexCatalog(agBin: string): Promise<{
         ambiguous: Number(doneRecord.ambiguous ?? 0),
         stale: Number(doneRecord.stale ?? 0),
         invalid: Number(doneRecord.invalid ?? 0),
+        failures,
       })
     })
   })
+}
+
+/**
+ * Preflight validation of Ag readiness before any index modification.
+ * Ensures Ag binary exists, is executable, emits schema version 1, and can read transcripts.
+ */
+export async function validateAgReadiness(agBin?: string): Promise<void> {
+  const bin = resolveAgBin(agBin)
+  await fetchCodexCatalog(bin)
 }
 
 /**
@@ -263,6 +303,8 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
   let discovered = 0
   let canonical = 0
   let ambiguous = 0
+  const failures: CodexFailureRecord[] = []
+  const reasonCounts: Record<string, number> = {}
 
   if (!options.path) {
     const catalog = await fetchCodexCatalog(agBin)
@@ -270,10 +312,17 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
     discovered = catalog.discovered
     canonical = catalog.canonical
     ambiguous = catalog.ambiguous
+    if (catalog.failures.length > 0) {
+      failures.push(...catalog.failures)
+      for (const f of catalog.failures) {
+        reasonCounts[f.reason] = (reasonCounts[f.reason] ?? 0) + 1
+      }
+    }
   }
 
   // Filter which transcripts need export
   const pathsToExport: string[] = []
+  const skippedSessionIds: string[] = []
   let skipped = 0
 
   if (options.path) {
@@ -282,16 +331,29 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
     for (const session of catalogSessions) {
       if (options.full) {
         if (session.status === "ambiguous") {
-          for (const copy of session.copies) pathsToExport.push(copy.path)
-        } else {
+          for (const copy of session.copies) {
+            if (copy.path) pathsToExport.push(copy.path)
+          }
+        } else if (session.canonicalPath) {
           pathsToExport.push(session.canonicalPath)
+        } else if (session.copies[0]?.path) {
+          pathsToExport.push(session.copies[0].path)
         }
         continue
       }
 
       // Check time window: sessions older than cutoffTime are skipped if specified
-      const copy = session.copies.find((c) => c.path === session.canonicalPath) ?? session.copies[0]
-      if (!copy) continue
+      const copy = (session.canonicalPath ? session.copies.find((c) => c.path === session.canonicalPath) : null) ?? session.copies[0]
+      if (!copy || !copy.path) {
+        failures.push({
+          kind: "unreadable",
+          nativeId: session.nativeId,
+          reason: "missing-path",
+          timestamp: Date.now(),
+        })
+        reasonCounts["missing-path"] = (reasonCounts["missing-path"] ?? 0) + 1
+        continue
+      }
 
       if (options.cutoffTime !== undefined) {
         const eventTime = copy.lastEventAtMs ?? copy.mtimeMs
@@ -305,6 +367,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
       if (session.status === "ambiguous") {
         let allCopiesSkipped = true
         for (const c of session.copies) {
+          if (!c.path) continue
           const copyKey = c.key ?? `codex:${session.nativeId}`
           const stored = getSession(db, copyKey)
           if (
@@ -316,6 +379,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
             stored.last_event_at_ms === c.lastEventAtMs
           ) {
             // this copy unchanged
+            skippedSessionIds.push(copyKey)
           } else {
             allCopiesSkipped = false
             pathsToExport.push(c.path)
@@ -325,20 +389,24 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
           skipped++
         }
       } else {
+        const targetPath = session.canonicalPath ?? copy.path
         const copyKey = session.key ?? session.sessionKey ?? `codex:${session.nativeId}`
         const stored = getSession(db, copyKey)
         if (
           stored &&
           stored.status === "complete" &&
-          stored.jsonl_path === session.canonicalPath &&
+          stored.jsonl_path === targetPath &&
           stored.size_bytes === copy.sizeBytes &&
           stored.mtime_ms === copy.mtimeMs &&
           stored.last_event_at_ms === copy.lastEventAtMs
         ) {
           skipped++
+          skippedSessionIds.push(copyKey)
           continue
         }
-        pathsToExport.push(session.canonicalPath)
+        if (targetPath) {
+          pathsToExport.push(targetPath)
+        }
       }
     }
   }
@@ -353,8 +421,9 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
       skipped,
       unreadable: 0,
       errors: 0,
-      failures: [],
-      reasonCounts: {},
+      failures,
+      reasonCounts,
+      indexedSessionIds: skippedSessionIds,
     }
   }
 
@@ -375,11 +444,13 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
     errors: number
     failures: CodexFailureRecord[]
     reasonCounts: Record<string, number>
+    indexedSessionIds: string[]
   }>((resolve, reject) => {
     const child = spawn(agBin, exportArgs, {
       stdio: ["ignore", "pipe", "pipe"],
     })
 
+    const batchIndexedSessionIds: string[] = []
     let currentSession: TranscriptExportSessionRecord | null = null
     const currentExistingCounts = new Map<string, number>()
     const currentRowCounts = new Map<string, number>()
@@ -392,8 +463,6 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
     let batchRowCount = 0
     let batchUnreadableCount = 0
     let batchErrorCount = 0
-    const failures: CodexFailureRecord[] = []
-    const reasonCounts: Record<string, number> = {}
 
     child.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8")
@@ -407,14 +476,10 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
       reject(new Error(`Failed to spawn ag transcript export: ${err.message}`))
     })
 
-    const rl = readline.createInterface({
-      input: child.stdout,
-      crlfDelay: Infinity,
-    })
-
-    rl.on("line", (line) => {
+    let buffer = ""
+    const handleLine = (line: string): boolean => {
       const trimmed = line.trim()
-      if (!trimmed) return
+      if (!trimmed) return true
 
       let record: Record<string, unknown>
       try {
@@ -426,7 +491,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         }
         reject(new Error(`Malformed JSON from ag transcript export: ${trimmed}`))
         child.kill()
-        return
+        return false
       }
 
       if (isFirstLine) {
@@ -434,9 +499,9 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         if (record.kind !== "schema" || record.version !== 1) {
           reject(new Error(`Unsupported ag transcript schema version: expected 1, got ${record.version ?? "unknown"}`))
           child.kill()
-          return
+          return false
         }
-        return
+        return true
       }
 
       if (record.kind === "session") {
@@ -449,7 +514,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
             ),
           )
           child.kill()
-          return
+          return false
         }
         currentSession = record as unknown as TranscriptExportSessionRecord
         const nativeId = currentSession.nativeId
@@ -474,7 +539,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         } catch (e) {
           reject(e)
           child.kill()
-          return
+          return false
         }
 
         try {
@@ -492,7 +557,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
           inTx = false
           reject(err)
           child.kill()
-          return
+          return false
         }
 
         currentRowCounts.clear()
@@ -503,7 +568,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
           inTx = false
           reject(new Error(`Protocol error: received row record without active session transaction`))
           child.kill()
-          return
+          return false
         }
         const row = record as unknown as TranscriptExportRowRecord
         const key = row.sessionKey
@@ -528,7 +593,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
           inTx = false
           reject(err)
           child.kill()
-          return
+          return false
         }
 
         currentRowCounts.set(key, (currentRowCounts.get(key) ?? 0) + 1)
@@ -569,7 +634,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
           inTx = false
           reject(new Error(`Protocol error: received end record without active session`))
           child.kill()
-          return
+          return false
         }
 
         const endRecord = record as unknown as TranscriptExportEndRecord
@@ -592,6 +657,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
           failures.push({
             kind: "unreadable",
             path: currentSession.path,
+            nativeId: currentSession.nativeId,
             reason,
             timestamp: Date.now(),
           })
@@ -617,11 +683,15 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         } else if (status === "complete" || status === "incomplete-tail") {
           // Check shrink condition (D1)
           let isShrunk = false
+          let shrinkOldCount = 0
+          let shrinkNewCount = 0
           for (const key of keys) {
             const oldCount = currentExistingCounts.get(key) ?? 0
             const newCount = currentRowCounts.get(key) ?? 0
             if (oldCount > newCount && !options.force) {
               isShrunk = true
+              shrinkOldCount = oldCount
+              shrinkNewCount = newCount
             }
           }
 
@@ -633,8 +703,11 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
             failures.push({
               kind: "skipped",
               path: currentSession.path,
-              reason,
+              nativeId: currentSession.nativeId,
+              reason: `shrunk: prior count ${shrinkOldCount} > new count ${shrinkNewCount}`,
               timestamp: Date.now(),
+              oldRowCount: shrinkOldCount,
+              newRowCount: shrinkNewCount,
             })
             for (const key of keys) {
               updateSessionStatus(db, key, "shrunk")
@@ -676,12 +749,13 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
               inTx = false
               batchRowCount += totalRowsThisSession
               batchSessionCount++
+              batchIndexedSessionIds.push(...keys)
             } catch (err) {
               safeRollback(db)
               inTx = false
               reject(err)
               child.kill()
-              return
+              return false
             }
           }
         }
@@ -699,21 +773,47 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
       } else if (record.kind === "done") {
         doneRecord = record
       }
+      return true
+    }
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8")
+      let idx: number
+      while ((idx = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, idx)
+        buffer = buffer.slice(idx + 1)
+        if (!handleLine(line)) return
+      }
     })
 
     child.on("close", (code) => {
+      if (buffer.trim()) {
+        if (!handleLine(buffer)) return
+      }
       if (inTx) {
         safeRollback(db)
         inTx = false
-        reject(new Error("ag transcript export stream ended abruptly during active transaction"))
+        reject(
+          new Error(
+            `ag transcript export stream ended abruptly during active transaction for session ${currentSession?.nativeId ?? "unknown"} (committed ${batchSessionCount} sessions, ${batchRowCount} rows prior to interruption)`,
+          ),
+        )
         return
       }
       if (code !== 0) {
-        reject(new Error(`ag transcript export exited with code ${code}: ${stderr.trim()}`))
+        const failureDetails = failures.length > 0
+          ? ` (recorded ${failures.length} failures: ${failures.map((f) => `${f.kind}:${f.reason}`).join(", ")})`
+          : ""
+        const committedProgress = ` (committed ${batchSessionCount} sessions, ${batchRowCount} rows prior to error)`
+        reject(new Error(`ag transcript export exited with code ${code}: ${stderr.trim()}${failureDetails}${committedProgress}`))
         return
       }
       if (!doneRecord) {
-        reject(new Error("ag transcript export stream ended without done record"))
+        reject(
+          new Error(
+            `ag transcript export stream ended without done record (committed ${batchSessionCount} sessions, ${batchRowCount} rows prior to exit)`,
+          ),
+        )
         return
       }
       resolve({
@@ -723,6 +823,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         errors: batchErrorCount,
         failures,
         reasonCounts,
+        indexedSessionIds: batchIndexedSessionIds,
       })
     })
   })
@@ -738,5 +839,6 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
     errors: batchResult.errors,
     failures: batchResult.failures,
     reasonCounts: batchResult.reasonCounts,
+    indexedSessionIds: [...skippedSessionIds, ...batchResult.indexedSessionIds],
   }
 }
