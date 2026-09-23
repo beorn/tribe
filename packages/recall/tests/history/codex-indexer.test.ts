@@ -584,10 +584,10 @@ if (args.includes("list")) {
         content: string
       }[]
       expect(msgs).toHaveLength(2)
-      expect(msgs[0]!.uuid).toBe("codex:session-abc:10")
+      expect(msgs[0]!.uuid).toBe("10")
       expect(msgs[0]!.type).toBe("user")
       expect(msgs[0]!.content).toContain("silverize algorithm")
-      expect(msgs[1]!.uuid).toBe("codex:session-abc:12")
+      expect(msgs[1]!.uuid).toBe("12")
       expect(msgs[1]!.type).toBe("assistant")
       expect(msgs[1]!.content).toContain("Silvery reconciler")
 

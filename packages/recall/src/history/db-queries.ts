@@ -185,8 +185,7 @@ export function insertMessage(
     .prepare(`
     INSERT INTO messages (uuid, session_id, type, content, tool_name, file_paths, timestamp, duplicate_of, line)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(uuid) DO UPDATE SET
-      session_id = excluded.session_id,
+    ON CONFLICT(session_id, uuid) DO UPDATE SET
       type = excluded.type,
       content = excluded.content,
       tool_name = excluded.tool_name,
@@ -293,6 +292,16 @@ export function ftsSearch(
   // Convert search query to FTS5 syntax
   const ftsQuery = toFts5Query(query)
 
+  const uuidCollapseClause = `
+    AND (m.uuid IS NULL OR m.id = (
+      SELECT m2.id FROM messages m2
+      JOIN sessions s2 ON m2.session_id = s2.id
+      WHERE m2.uuid = m.uuid
+      ORDER BY CASE WHEN s2.parent_session_id IS NULL THEN 0 ELSE 1 END, m2.id ASC
+      LIMIT 1
+    ))
+  `
+
   let countQuery = `
     SELECT COUNT(*) as total
     FROM messages_fts f
@@ -300,6 +309,7 @@ export function ftsSearch(
     JOIN sessions s ON m.session_id = s.id
     WHERE messages_fts MATCH ?
       AND (m.duplicate_of IS NULL)
+      ${uuidCollapseClause}
   `
   let searchQuery = `
     SELECT m.*, s.project_path, s.parent_session_id, s.agent_id, ${MESSAGE_RANK_SQL} as rank
@@ -308,6 +318,7 @@ export function ftsSearch(
     JOIN sessions s ON m.session_id = s.id
     WHERE messages_fts MATCH ?
       AND (m.duplicate_of IS NULL)
+      ${uuidCollapseClause}
   `
 
   const params: (string | number)[] = [ftsQuery]
@@ -364,6 +375,16 @@ export function ftsSearchWithSnippet(
 
   const ftsQuery = toFts5Query(query)
 
+  const uuidCollapseClause = `
+    AND (m.uuid IS NULL OR m.id = (
+      SELECT m2.id FROM messages m2
+      JOIN sessions s2 ON m2.session_id = s2.id
+      WHERE m2.uuid = m.uuid
+      ORDER BY CASE WHEN s2.parent_session_id IS NULL THEN 0 ELSE 1 END, m2.id ASC
+      LIMIT 1
+    ))
+  `
+
   let countQuery = `
     SELECT COUNT(*) as total
     FROM messages_fts f
@@ -371,6 +392,7 @@ export function ftsSearchWithSnippet(
     JOIN sessions s ON m.session_id = s.id
     WHERE messages_fts MATCH ?
       AND (m.duplicate_of IS NULL)
+      ${uuidCollapseClause}
   `
   let searchQuery = `
     SELECT m.*, s.project_path, s.parent_session_id, s.agent_id,
@@ -382,6 +404,7 @@ export function ftsSearchWithSnippet(
     JOIN sessions s ON m.session_id = s.id
     WHERE messages_fts MATCH ?
       AND (m.duplicate_of IS NULL)
+      ${uuidCollapseClause}
   `
 
   const params: (string | number)[] = [ftsQuery]

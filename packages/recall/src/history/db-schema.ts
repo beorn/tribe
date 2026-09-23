@@ -64,7 +64,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at);
 -- All messages (user, assistant, tool_use, tool_result, etc.)
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY,
-  uuid TEXT UNIQUE,
+  uuid TEXT,
   session_id TEXT NOT NULL REFERENCES sessions(id),
   type TEXT NOT NULL,
   content TEXT,
@@ -72,13 +72,15 @@ CREATE TABLE IF NOT EXISTS messages (
   file_paths TEXT,
   timestamp INTEGER NOT NULL,
   duplicate_of INTEGER,
-  line INTEGER
+  line INTEGER,
+  UNIQUE(session_id, uuid)
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_type ON messages(type);
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
 CREATE INDEX IF NOT EXISTS idx_messages_tool ON messages(tool_name);
+CREATE INDEX IF NOT EXISTS idx_messages_uuid ON messages(uuid);
 
 -- FTS5 virtual table for fast full-text search
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
@@ -161,7 +163,7 @@ CREATE TRIGGER IF NOT EXISTS content_au AFTER UPDATE ON content BEGIN
 END;
 `
 
-export const CURRENT_SCHEMA_VERSION = 2
+export const CURRENT_SCHEMA_VERSION = 3
 
 export interface MigrationStep {
   version: number
@@ -229,6 +231,134 @@ export const MIGRATION_STEPS: MigrationStep[] = [
         const sessDel = db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...ids)
         console.log(
           `[migration] Cleaned ${sessDel.changes} clobbered subagent session(s), ${msgDel.changes} message(s), ${wrDel.changes} write(s); will re-index cleanly.`,
+        )
+      }
+    },
+  },
+  {
+    version: 3,
+    name: "message-uuid-scoping-and-dedup",
+    up: (db: Database) => {
+      // 1. Check if messages table has old uuid UNIQUE constraint (single-column unique on uuid)
+      let needsTableRecreation = false
+      try {
+        const indexList = db.prepare("PRAGMA index_list('messages')").all() as Array<{
+          name: string
+          unique: number
+        }>
+        for (const idx of indexList) {
+          if (idx.unique) {
+            const cols = db.prepare(`PRAGMA index_info('${idx.name}')`).all() as Array<{ name: string }>
+            if (cols.length === 1 && cols[0]?.name === "uuid") {
+              needsTableRecreation = true
+              break
+            }
+          }
+        }
+      } catch {
+        // messages table might not exist yet
+      }
+
+      if (needsTableRecreation) {
+        db.exec("BEGIN TRANSACTION")
+        try {
+          db.exec(`
+            DROP TRIGGER IF EXISTS messages_ai;
+            DROP TRIGGER IF EXISTS messages_ad;
+            DROP TRIGGER IF EXISTS messages_au;
+            CREATE TABLE messages_new (
+              id INTEGER PRIMARY KEY,
+              uuid TEXT,
+              session_id TEXT NOT NULL REFERENCES sessions(id),
+              type TEXT NOT NULL,
+              content TEXT,
+              tool_name TEXT,
+              file_paths TEXT,
+              timestamp INTEGER NOT NULL,
+              duplicate_of INTEGER,
+              line INTEGER,
+              UNIQUE(session_id, uuid)
+            );
+            INSERT OR IGNORE INTO messages_new (id, uuid, session_id, type, content, tool_name, file_paths, timestamp, duplicate_of, line)
+            SELECT id, uuid, session_id, type, content, tool_name, file_paths, timestamp, duplicate_of, line
+            FROM messages;
+            DROP TABLE messages;
+            ALTER TABLE messages_new RENAME TO messages;
+            CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+            CREATE INDEX IF NOT EXISTS idx_messages_type ON messages(type);
+            CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_messages_tool ON messages(tool_name);
+            CREATE INDEX IF NOT EXISTS idx_messages_uuid ON messages(uuid);
+
+            CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+              INSERT INTO messages_fts(rowid, content, tool_name, file_paths)
+              VALUES (new.id, new.content, new.tool_name, new.file_paths);
+            END;
+            CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+              INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, file_paths)
+              VALUES ('delete', old.id, old.content, old.tool_name, old.file_paths);
+            END;
+            CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+              INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, file_paths)
+              VALUES ('delete', old.id, old.content, old.tool_name, old.file_paths);
+              INSERT INTO messages_fts(rowid, content, tool_name, file_paths)
+              VALUES (new.id, new.content, new.tool_name, new.file_paths);
+            END;
+          `)
+          db.exec("COMMIT")
+        } catch (err) {
+          db.exec("ROLLBACK")
+          throw err
+        }
+      } else {
+        db.exec("CREATE INDEX IF NOT EXISTS idx_messages_uuid ON messages(uuid)")
+      }
+
+      // 2. Convert garage sessionId:uuid rows back to raw uuid (substring after last ':')
+      let convertedCount = 0
+      try {
+        const colonRows = db.prepare("SELECT id, uuid FROM messages WHERE uuid LIKE '%:%'").all() as Array<{
+          id: number
+          uuid: string
+        }>
+        if (colonRows.length > 0) {
+          const updateStmt = db.prepare("UPDATE OR IGNORE messages SET uuid = ? WHERE id = ?")
+          db.exec("BEGIN TRANSACTION")
+          try {
+            for (const row of colonRows) {
+              const rawUuid = row.uuid.slice(row.uuid.lastIndexOf(":") + 1)
+              updateStmt.run(rawUuid, row.id)
+              convertedCount++
+            }
+            db.exec("COMMIT")
+          } catch (err) {
+            db.exec("ROLLBACK")
+            throw err
+          }
+        }
+      } catch {
+        // Ignore if messages table doesn't have uuid column or similar
+      }
+
+      // 3. Clear stale-unreadable status of sessions whose recorded error was uuid UNIQUE
+      let clearedCount = 0
+      try {
+        const result = db
+          .prepare(
+            `UPDATE sessions
+             SET status = NULL, failure_reason = NULL, failure_time = NULL
+             WHERE status = 'stale-unreadable'
+               AND (failure_reason LIKE '%UNIQUE%messages.uuid%' OR failure_reason LIKE '%messages.uuid%' OR failure_reason LIKE '%UNIQUE constraint failed: messages.session_id, messages.uuid%')`,
+          )
+          .run()
+        clearedCount = result.changes
+      } catch {
+        // Ignore if sessions table not yet present
+      }
+
+      if (convertedCount > 0 || clearedCount > 0) {
+        console.log(
+          `[migration] Converted ${convertedCount} garage sessionId:uuid row(s) back to raw uuid; cleared ${clearedCount} stale-unreadable session(s).`,
         )
       }
     },

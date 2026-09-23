@@ -623,7 +623,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         try {
           insertMessage(
             db,
-            `${key}:${row.line}`,
+            row.line != null ? String(row.line) : null,
             key,
             row.role,
             row.text,
