@@ -94,5 +94,4 @@ describe("the markers list and the standalone sanitizer agree on one vocabulary"
     ).not.toContain("HAB_SESSION_DIR")
     expect(HAB_SESSION_MARKERS as readonly string[]).not.toContain("HAB_SESSION_DIR")
   })
-
 })
