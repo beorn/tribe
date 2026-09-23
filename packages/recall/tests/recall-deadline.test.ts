@@ -61,23 +61,18 @@ describe("25071 stopgap: recall that outlives its deadline is skipped, loudly", 
     }
   })
 
-  // bun 1.3.14 does not end a process whose Worker sits in a native SQLite call, even on process.exit (review2,
-  // tribe CI run 35910142616); bun 1.4.2, which runs the hook on the fleet, does. The floor is stated, not hidden.
-  const [major = 0, minor = 0] = Bun.version.split(".").map(Number)
-  test.skipIf(major < 1 || (major === 1 && minor < 4))(
-    "a process whose recall is stuck inside SQLite still exits at the deadline (bun >= 1.4)",
-    () => {
-      // Measured: a Worker stuck in one native SQLite call keeps its process alive after terminate() until the call
-      // returns (48 s in the probe), so the deadline is only real because the hook exits explicitly.
-      const script = fileURLToPath(new URL("./fixtures/recall-deadline-exit.ts", import.meta.url))
-      const started = performance.now()
-      const child = spawnSync(process.execPath, [script, "500", "20000"], { encoding: "utf8", timeout: 15_000 })
-      const wall = performance.now() - started
-      expect(child.stderr).toBe("")
-      expect(child.stdout).toMatch(/^deadline \d+\n$/u)
-      expect(child.status).toBe(0)
-      expect(wall).toBeLessThan(5000)
-    },
-    20_000,
-  )
+  // Needs bun >= 1.4: 1.3.14 does not end a process whose Worker sits in a native SQLite call, even on process.exit
+  // (review2, tribe CI run 35910142616). .bun-version pins the fleet's 1.4.2, so CI runs it.
+  test("a process whose recall is stuck inside SQLite still exits at the deadline", () => {
+    // Measured: a Worker stuck in one native SQLite call keeps its process alive after terminate() until the call
+    // returns (48 s in the probe), so the deadline is only real because the hook exits explicitly.
+    const script = fileURLToPath(new URL("./fixtures/recall-deadline-exit.ts", import.meta.url))
+    const started = performance.now()
+    const child = spawnSync(process.execPath, [script, "500", "20000"], { encoding: "utf8", timeout: 15_000 })
+    const wall = performance.now() - started
+    expect(child.stderr).toBe("")
+    expect(child.stdout).toMatch(/^deadline \d+\n$/u)
+    expect(child.status).toBe(0)
+    expect(wall).toBeLessThan(5000)
+  }, 20_000)
 })
