@@ -374,7 +374,14 @@ export const CURRENT_SCHEMA_VERSION = MIGRATION_STEPS.at(-1)?.version ?? 1
 export const MIGRATIONS: string[] = MIGRATION_STEPS.map((s) => s.name)
 
 export function runMigrations(db: Database): void {
+  const initialVersion = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version
+  if (initialVersion >= CURRENT_SCHEMA_VERSION) {
+    return
+  }
   for (const step of MIGRATION_STEPS) {
+    if (initialVersion >= step.version) {
+      continue
+    }
     db.exec("BEGIN IMMEDIATE")
     try {
       const currentVersion = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version
