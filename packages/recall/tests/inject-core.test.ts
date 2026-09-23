@@ -535,6 +535,36 @@ describe("runInjectDelta — a busy project-source step is skipped, never waited
     expect(result).toEqual({ skipped: true, reason: "no_results", skippedSteps: { project_sources: error.message } })
   })
 
+  test.each([
+    [
+      "the index writer is held by a run",
+      async () => new (await import("../src/history/db.ts")).IndexWriterBusyError("busy"),
+    ],
+    [
+      "another connection holds SQLite's write lock",
+      async () => new (await import("../src/history/project-sources.ts")).ProjectSourcesBusyError("database is locked"),
+    ],
+  ])("%s, and recall finds a hit: the injected result names the skipped step too", async (_case, busy) => {
+    const error = await busy()
+    ensureProjectSourcesIndexedMock.mockImplementation(() => {
+      throw error
+    })
+    mockRecall([
+      {
+        sessionId: "sess-abcd1234",
+        sessionTitle: "sess-title",
+        type: "message",
+        snippet: "A descriptive snippet that is plenty long enough to pass the minimum filter.",
+      },
+    ])
+
+    // The common path (25071 row 3 review, round 2): a successful injection carries the skip as well.
+    const result = await runInjectDelta("what did we decide about km-storage-sync layering?", createMemorySeenStore())
+
+    expect(result.skipped).toBe(false)
+    expect(result.skippedSteps).toEqual({ project_sources: error.message })
+  })
+
   test("any other project-source failure still fails the hook", async () => {
     ensureProjectSourcesIndexedMock.mockImplementation(() => {
       throw new Error("disk I/O error")
