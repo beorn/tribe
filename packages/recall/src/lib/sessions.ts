@@ -109,6 +109,9 @@ export async function cmdIndex(opts: {
     if (result.claudeVanished !== undefined && result.claudeVanished > 0) {
       console.log(`  (skipped ${result.claudeVanished} vanished files)`)
     }
+    if (result.pruned !== undefined && result.pruned > 0) {
+      console.log(`  (pruned: ${result.pruned})`)
+    }
     if (result.claudeFailures && result.claudeFailures.length > 0) {
       console.log(`  (${result.claudeFailures.length} Claude transcript issues):`)
       for (const f of result.claudeFailures.slice(0, 5)) {

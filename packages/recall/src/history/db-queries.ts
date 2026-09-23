@@ -2,11 +2,28 @@
  * Database query functions — prepared statement wrappers, getters, setters, search.
  */
 
-import { Database } from "bun:sqlite"
+import { Database, type Statement } from "bun:sqlite"
 import * as path from "path"
 import * as fs from "fs"
 import type { SessionRecord, MessageRecord, ContentType, ContentRecord, SessionIndexEntry } from "./types.ts"
 import { PROJECTS_DIR, PLANS_DIR, TODOS_DIR } from "./db-schema.ts"
+
+// Hoisted statement cache per Database instance
+const statementCache = new WeakMap<Database, Map<string, Statement>>()
+
+export function getCachedStatement(db: Database, sql: string): Statement {
+  let cache = statementCache.get(db)
+  if (!cache) {
+    cache = new Map()
+    statementCache.set(db, cache)
+  }
+  let stmt = cache.get(sql)
+  if (!stmt) {
+    stmt = db.prepare(sql)
+    cache.set(sql, stmt)
+  }
+  return stmt
+}
 
 // Assistant rows containing tool_use blocks mix prose with serialized tool
 // inputs. Keep them searchable for --tool and forensic lookup, but prevent a
@@ -39,7 +56,9 @@ export function upsertSession(
     agentId?: string | null
   },
 ): void {
-  db.prepare(`
+  getCachedStatement(
+    db,
+    `
     INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title, status, size_bytes, mtime_ms, last_event_at_ms, failure_reason, failure_time, shrink_old_count, shrink_new_count, parent_session_id, agent_id)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
@@ -57,7 +76,8 @@ export function upsertSession(
       shrink_new_count = excluded.shrink_new_count,
       parent_session_id = COALESCE(excluded.parent_session_id, sessions.parent_session_id),
       agent_id = COALESCE(excluded.agent_id, sessions.agent_id)
-  `).run(
+  `,
+  ).run(
     id,
     projectPath,
     jsonlPath,
@@ -93,7 +113,9 @@ export function updateSessionStatus(
     jsonlPath?: string | null
   },
 ): void {
-  db.prepare(`
+  getCachedStatement(
+    db,
+    `
     UPDATE sessions
     SET status = ?,
         failure_reason = ?,
@@ -105,7 +127,8 @@ export function updateSessionStatus(
         last_event_at_ms = COALESCE(?, last_event_at_ms),
         jsonl_path = COALESCE(?, jsonl_path)
     WHERE id = ?
-  `).run(
+  `,
+  ).run(
     status,
     details?.failureReason ?? null,
     details?.failureTime ?? null,
@@ -133,13 +156,14 @@ export function getSessionStatus(
       shrinkNewCount: number | null
     }
   | undefined {
-  const row = db
-    .prepare(`
+  const row = getCachedStatement(
+    db,
+    `
     SELECT id, status, message_count as messageCount, failure_reason as failureReason, failure_time as failureTime, shrink_old_count as shrinkOldCount, shrink_new_count as shrinkNewCount
     FROM sessions
     WHERE id = ?
-  `)
-    .get(id) as any
+  `,
+  ).get(id) as any
   return row
     ? {
         id: row.id,
@@ -154,15 +178,17 @@ export function getSessionStatus(
 }
 
 export function updateSessionTitle(db: Database, id: string, title: string | null): void {
-  db.prepare("UPDATE sessions SET title = ? WHERE id = ?").run(title, id)
+  getCachedStatement(db, "UPDATE sessions SET title = ? WHERE id = ?").run(title, id)
 }
 
 export function getSession(db: Database, id: string): SessionRecord | undefined {
-  return db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRecord | undefined
+  return getCachedStatement(db, "SELECT * FROM sessions WHERE id = ?").get(id) as SessionRecord | undefined
 }
 
 export function getSessionByPath(db: Database, jsonlPath: string): SessionRecord | undefined {
-  return db.prepare("SELECT * FROM sessions WHERE jsonl_path = ?").get(jsonlPath) as SessionRecord | undefined
+  return getCachedStatement(db, "SELECT * FROM sessions WHERE jsonl_path = ?").get(jsonlPath) as
+    | SessionRecord
+    | undefined
 }
 
 // ============================================================================
@@ -181,8 +207,9 @@ export function insertMessage(
   duplicateOf?: number | null,
   line?: number | null,
 ): number {
-  const result = db
-    .prepare(`
+  const result = getCachedStatement(
+    db,
+    `
     INSERT INTO messages (uuid, session_id, type, content, tool_name, file_paths, timestamp, duplicate_of, line)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(uuid) DO UPDATE SET
@@ -194,13 +221,15 @@ export function insertMessage(
       timestamp = excluded.timestamp,
       duplicate_of = excluded.duplicate_of,
       line = excluded.line
-  `)
-    .run(uuid, sessionId, type, content, toolName, filePaths, timestamp, duplicateOf ?? null, line ?? null)
+  `,
+  ).run(uuid, sessionId, type, content, toolName, filePaths, timestamp, duplicateOf ?? null, line ?? null)
   return Number(result.lastInsertRowid)
 }
 
 export function getMessageCount(db: Database, sessionId: string): number {
-  const row = db.prepare("SELECT COUNT(*) as count FROM messages WHERE session_id = ?").get(sessionId) as {
+  const row = getCachedStatement(db, "SELECT COUNT(*) as count FROM messages WHERE session_id = ?").get(
+    sessionId,
+  ) as {
     count: number
   }
   return row.count
@@ -221,10 +250,13 @@ export function insertWrite(
   contentSize: number,
   content: string | null,
 ): void {
-  db.prepare(`
+  getCachedStatement(
+    db,
+    `
     INSERT INTO writes (session_id, session_file, tool_use_id, timestamp, file_path, content_hash, content_size, content)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(sessionId, sessionFile, toolUseId, timestamp, filePath, contentHash, contentSize, content)
+  `,
+  ).run(sessionId, sessionFile, toolUseId, timestamp, filePath, contentHash, contentSize, content)
 }
 
 // ============================================================================
@@ -720,12 +752,13 @@ export function insertContent(
   content: string,
   timestamp: number,
 ): number {
-  const result = db
-    .prepare(`
+  const result = getCachedStatement(
+    db,
+    `
     INSERT INTO content (content_type, source_id, project_path, title, content, timestamp)
     VALUES (?, ?, ?, ?, ?, ?)
-  `)
-    .run(contentType, sourceId, projectPath, title, content, timestamp)
+  `,
+  ).run(contentType, sourceId, projectPath, title, content, timestamp)
   return Number(result.lastInsertRowid)
 }
 
@@ -742,7 +775,9 @@ export function upsertContent(
   content: string,
   timestamp: number,
 ): void {
-  db.prepare(`
+  getCachedStatement(
+    db,
+    `
     INSERT INTO content (content_type, source_id, project_path, title, content, timestamp)
     VALUES (?, ?, ?, ?, ?, ?)
     ON CONFLICT(content_type, source_id) DO UPDATE SET
@@ -750,7 +785,8 @@ export function upsertContent(
       content = excluded.content,
       timestamp = excluded.timestamp,
       project_path = excluded.project_path
-  `).run(contentType, sourceId, projectPath, title, content, timestamp)
+  `,
+  ).run(contentType, sourceId, projectPath, title, content, timestamp)
 }
 
 /**

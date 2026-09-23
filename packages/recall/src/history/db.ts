@@ -38,6 +38,7 @@ export function getDb(): Database {
   // WAL allows readers to not block writers and vice versa
   dbInstance.run("PRAGMA journal_mode = WAL")
   dbInstance.run("PRAGMA busy_timeout = 5000") // Wait 5s if locked
+  dbInstance.run("PRAGMA synchronous = NORMAL") // Safe under WAL for rebuildable index (A7)
 
   initSchema(dbInstance)
   return dbInstance
@@ -100,6 +101,7 @@ export {
   getSessionStatus,
   getSession,
   getSessionByPath,
+  getCachedStatement,
   // Message operations
   insertMessage,
   getMessageCount,

@@ -33,6 +33,7 @@ import {
   getAllSessionEntries,
   findPlanFiles,
   findTodoFiles,
+  getCachedStatement,
 } from "./db"
 import type { TodoItem, BeadRecord, JsonlRecord, ToolUse, ClaudeFailureRecord } from "./types"
 import { formatBead, extractMarkdownTitle } from "./formatters"
@@ -121,7 +122,66 @@ export interface IndexOptions {
   path?: string
   agBin?: string
   skipCodex?: boolean
+  chunkSize?: number // Max files/sessions per chunked commit (default: 25)
+  chunkTimeMs?: number // Max elapsed ms before committing a chunk (default: 2000)
   onProgress?: (progress: IndexProgress) => void
+}
+
+/**
+ * Manages chunked transactions around per-file savepoints (A7).
+ * Batches commits every N files or T milliseconds while preserving
+ * savepoint-level failure isolation.
+ */
+export class ChunkedTransaction {
+  private inTx = false
+  private count = 0
+  private chunkStartMs = Date.now()
+
+  constructor(
+    private db: Database,
+    private maxChunkSize: number = 25,
+    private maxChunkMs: number = 2000,
+  ) {}
+
+  ensureInTx(): void {
+    if (!this.inTx) {
+      this.db.run("BEGIN")
+      this.inTx = true
+      this.count = 0
+      this.chunkStartMs = Date.now()
+    }
+  }
+
+  recordItem(): void {
+    this.count++
+    if (this.inTx && (this.count >= this.maxChunkSize || Date.now() - this.chunkStartMs >= this.maxChunkMs)) {
+      this.commit()
+    }
+  }
+
+  commit(): void {
+    if (this.inTx) {
+      this.db.run("COMMIT")
+      this.inTx = false
+      this.count = 0
+    }
+  }
+
+  rollback(): void {
+    if (this.inTx) {
+      try {
+        this.db.run("ROLLBACK")
+      } catch {
+        // ignore rollback errors
+      }
+      this.inTx = false
+      this.count = 0
+    }
+  }
+
+  isActive(): boolean {
+    return this.inTx
+  }
 }
 
 export function currentProjectsDir(): string {
@@ -355,8 +415,8 @@ export async function indexSessionFile(
 
   try {
     for (const sid of touchedSessionIds) {
-      db.prepare("DELETE FROM messages WHERE session_id = ?").run(sid)
-      db.prepare("DELETE FROM writes WHERE session_id = ?").run(sid)
+      getCachedStatement(db, "DELETE FROM messages WHERE session_id = ?").run(sid)
+      getCachedStatement(db, "DELETE FROM writes WHERE session_id = ?").run(sid)
     }
 
     let lineNum = 0
@@ -506,6 +566,7 @@ export interface IndexResult {
   claudeSkipped?: number
   claudeVanished?: number
   claudeFailures?: ClaudeFailureRecord[]
+  pruned?: number
 }
 
 /**
@@ -709,6 +770,10 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     preloadedCatalog = await validateAgReadiness(options.agBin)
   }
 
+  // Performance pragmas for index runs (A7)
+  db.run("PRAGMA synchronous = NORMAL")
+  db.run("PRAGMA cache_size = -64000")
+
   let totalFiles = 0
   let totalMessages = 0
   let totalWrites = 0
@@ -719,6 +784,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   let skippedOld = 0
   let claudeSkipped = 0
   let claudeVanished = 0
+  let prunedCount = 0
   const claudeFailures: ClaudeFailureRecord[] = []
 
   // Index Claude session files
@@ -741,77 +807,90 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
       }
     }
 
-    for await (const sessionFile of findSessionFiles()) {
-      // Skip sessions older than 180 days
-      let stats: fs.Stats
-      try {
-        stats = fs.statSync(sessionFile)
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-          claudeVanished++
+    const chunkTx = new ChunkedTransaction(
+      db,
+      options.chunkSize ?? 25,
+      options.chunkTimeMs ?? 2000,
+    )
+
+    try {
+      for await (const sessionFile of findSessionFiles()) {
+        // Skip sessions older than 180 days
+        let stats: fs.Stats
+        try {
+          stats = fs.statSync(sessionFile)
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+            claudeVanished++
+            continue
+          }
+          throw err
+        }
+        if (cutoffTime !== undefined && stats.mtime.getTime() < cutoffTime) {
+          skippedOld++
           continue
         }
-        throw err
-      }
-      if (cutoffTime !== undefined && stats.mtime.getTime() < cutoffTime) {
-        skippedOld++
-        continue
-      }
 
-      totalFiles++
-      const relativePath = path.relative(currentProjectsDir(), sessionFile)
-      const sessionInfo = parseSessionPath(relativePath, sessionFile)
-      seenSessionIds.add(sessionInfo.id)
-
-      if (options.incremental) {
-        const existing = existingSessionMap.get(relativePath)
-        if (
-          existing &&
-          (existing.status == null ||
-            existing.status === "complete" ||
-            existing.status === "stale-unreadable" ||
-            existing.status === "unreadable") &&
-          existing.mtime_ms != null &&
-          existing.size_bytes != null &&
-          existing.mtime_ms === stats.mtime.getTime() &&
-          existing.size_bytes === stats.size
-        ) {
-          claudeSkipped++
-          continue
-        }
-      }
-
-      options.onProgress?.({
-        filesProcessed: totalFiles,
-        messagesIndexed: totalMessages,
-        writesIndexed: totalWrites,
-        currentFile: relativePath,
-      })
-
-      try {
-        const { messages, writes } = await indexSessionFile(db, sessionFile, options, stats)
-        totalMessages += messages
-        totalWrites += writes
-      } catch (err) {
-        const errMsg = (err as Error).message || String(err)
-        recordClaudeFailure(
-          db,
-          sessionInfo.id,
-          sessionFile,
-          errMsg,
-          {
-            parentSessionId: sessionInfo.parentSessionId,
-            agentId: sessionInfo.agentId,
-          },
-          stats,
-        )
+        totalFiles++
+        const relativePath = path.relative(currentProjectsDir(), sessionFile)
+        const sessionInfo = parseSessionPath(relativePath, sessionFile)
         seenSessionIds.add(sessionInfo.id)
-        claudeFailures.push({
-          id: sessionInfo.id,
-          file: relativePath,
-          reason: errMsg,
+
+        if (options.incremental) {
+          const existing = existingSessionMap.get(relativePath)
+          if (
+            existing &&
+            (existing.status == null ||
+              existing.status === "complete" ||
+              existing.status === "stale-unreadable" ||
+              existing.status === "unreadable") &&
+            existing.mtime_ms != null &&
+            existing.size_bytes != null &&
+            existing.mtime_ms === stats.mtime.getTime() &&
+            existing.size_bytes === stats.size
+          ) {
+            claudeSkipped++
+            continue
+          }
+        }
+
+        options.onProgress?.({
+          filesProcessed: totalFiles,
+          messagesIndexed: totalMessages,
+          writesIndexed: totalWrites,
+          currentFile: relativePath,
         })
+
+        chunkTx.ensureInTx()
+        try {
+          const { messages, writes } = await indexSessionFile(db, sessionFile, options, stats)
+          totalMessages += messages
+          totalWrites += writes
+          chunkTx.recordItem()
+        } catch (err) {
+          const errMsg = (err as Error).message || String(err)
+          recordClaudeFailure(
+            db,
+            sessionInfo.id,
+            sessionFile,
+            errMsg,
+            {
+              parentSessionId: sessionInfo.parentSessionId,
+              agentId: sessionInfo.agentId,
+            },
+            stats,
+          )
+          seenSessionIds.add(sessionInfo.id)
+          claudeFailures.push({
+            id: sessionInfo.id,
+            file: relativePath,
+            reason: errMsg,
+          })
+          chunkTx.recordItem()
+        }
       }
+    } finally {
+      chunkTx.commit()
     }
   } else if (isClaudeTarget) {
     totalFiles++
@@ -905,91 +984,104 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
 
   if (!options.path) {
     const sessionEntries = getAllSessionEntries()
-    for (const entry of sessionEntries) {
-      if (entry.summary) {
-        upsertContent(
-          db,
-          "summary",
-          entry.sessionId,
-          entry.projectPath || null,
-          entry.customTitle || null,
-          entry.summary,
-          entry.modified ? new Date(entry.modified).getTime() : Date.now(),
-        )
-        totalSummaries++
-      }
-    }
-
-    // Index session first prompts (enables topic-level recall)
-    for (const entry of sessionEntries) {
-      if (entry.firstPrompt) {
-        upsertContent(
-          db,
-          "first_prompt",
-          entry.sessionId,
-          entry.projectPath || null,
-          entry.customTitle || null,
-          entry.firstPrompt,
-          entry.created ? new Date(entry.created).getTime() : Date.now(),
-        )
-        totalFirstPrompts++
-      }
-    }
-
-    // Index plan files
-    for (const planFile of findPlanFiles()) {
-      try {
-        const stats = fs.statSync(planFile)
-        const content = fs.readFileSync(planFile, "utf8")
-        const filename = path.basename(planFile, ".md")
-
-        // Extract title from first heading or filename
-        const titleMatch = content.match(/^#\s+(.+)$/m)
-        const title = titleMatch?.[1] ?? filename
-
-        upsertContent(
-          db,
-          "plan",
-          filename,
-          null, // Plans aren't project-specific
-          title,
-          content,
-          stats.mtime.getTime(),
-        )
-        totalPlans++
-      } catch (error) {
-        throw new Error(`Recall plan indexing failed: ${planFile}`, { cause: error })
-      }
-    }
-
-    // Index todo files
-    for (const todoFile of findTodoFiles()) {
-      try {
-        const stats = fs.statSync(todoFile)
-        const content = fs.readFileSync(todoFile, "utf8")
-        const todos = JSON.parse(content) as TodoItem[]
-        const filename = path.basename(todoFile, ".json")
-
-        // Combine all todos into searchable content
-        const todoContent = todos
-          .map((t) => `[${t.status}] ${t.content}${t.activeForm ? ` (${t.activeForm})` : ""}`)
-          .join("\n")
-
-        if (todoContent.trim()) {
+    const metaTx = new ChunkedTransaction(db, 50, 2000)
+    try {
+      for (const entry of sessionEntries) {
+        if (entry.summary) {
+          metaTx.ensureInTx()
           upsertContent(
             db,
-            "todo",
+            "summary",
+            entry.sessionId,
+            entry.projectPath || null,
+            entry.customTitle || null,
+            entry.summary,
+            entry.modified ? new Date(entry.modified).getTime() : Date.now(),
+          )
+          totalSummaries++
+          metaTx.recordItem()
+        }
+      }
+
+      // Index session first prompts (enables topic-level recall)
+      for (const entry of sessionEntries) {
+        if (entry.firstPrompt) {
+          metaTx.ensureInTx()
+          upsertContent(
+            db,
+            "first_prompt",
+            entry.sessionId,
+            entry.projectPath || null,
+            entry.customTitle || null,
+            entry.firstPrompt,
+            entry.created ? new Date(entry.created).getTime() : Date.now(),
+          )
+          totalFirstPrompts++
+          metaTx.recordItem()
+        }
+      }
+
+      // Index plan files
+      for (const planFile of findPlanFiles()) {
+        try {
+          const stats = fs.statSync(planFile)
+          const content = fs.readFileSync(planFile, "utf8")
+          const filename = path.basename(planFile, ".md")
+
+          // Extract title from first heading or filename
+          const titleMatch = content.match(/^#\s+(.+)$/m)
+          const title = titleMatch?.[1] ?? filename
+
+          metaTx.ensureInTx()
+          upsertContent(
+            db,
+            "plan",
             filename,
-            null,
-            `Todo list (${todos.length} items)`,
-            todoContent,
+            null, // Plans aren't project-specific
+            title,
+            content,
             stats.mtime.getTime(),
           )
-          totalTodos++
+          totalPlans++
+          metaTx.recordItem()
+        } catch (error) {
+          throw new Error(`Recall plan indexing failed: ${planFile}`, { cause: error })
         }
-      } catch (error) {
-        throw new Error(`Recall todo indexing failed: ${todoFile}`, { cause: error })
       }
+
+      // Index todo files
+      for (const todoFile of findTodoFiles()) {
+        try {
+          const stats = fs.statSync(todoFile)
+          const content = fs.readFileSync(todoFile, "utf8")
+          const todos = JSON.parse(content) as TodoItem[]
+          const filename = path.basename(todoFile, ".json")
+
+          // Combine all todos into searchable content
+          const todoContent = todos
+            .map((t) => `[${t.status}] ${t.content}${t.activeForm ? ` (${t.activeForm})` : ""}`)
+            .join("\n")
+
+          if (todoContent.trim()) {
+            metaTx.ensureInTx()
+            upsertContent(
+              db,
+              "todo",
+              filename,
+              null,
+              `Todo list (${todos.length} items)`,
+              todoContent,
+              stats.mtime.getTime(),
+            )
+            totalTodos++
+            metaTx.recordItem()
+          }
+        } catch (error) {
+          throw new Error(`Recall todo indexing failed: ${todoFile}`, { cause: error })
+        }
+      }
+    } finally {
+      metaTx.commit()
     }
 
     // Index project sources if projectRoot is provided
@@ -998,27 +1090,42 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
       projectSourceResult = indexProjectSources(db, projectPath)
     }
 
-    // Prune unreferenced sessions after all sources (Claude + Codex) have been indexed
-    if (!options.incremental && !options.path) {
-      const allDbSessions = db.prepare("SELECT id FROM sessions").all() as { id: string }[]
-      let unreferencedIds = allDbSessions.map((s) => s.id).filter((id) => !seenSessionIds.has(id))
-      if (options.skipCodex || process.env.RECALL_SKIP_CODEX === "1") {
-        unreferencedIds = unreferencedIds.filter((id) => !id.startsWith("codex:"))
+    // Prune vanished sessions safely (A8):
+    // A session row whose file is gone is marked 'stale-missing' on first miss.
+    // If it is missed on a second consecutive run (already 'stale-missing'), its row, messages, and writes are pruned.
+    prunedCount = 0
+    const allDbSessions = db
+      .prepare("SELECT id, jsonl_path, status FROM sessions WHERE jsonl_path IS NOT NULL")
+      .all() as Array<{ id: string; jsonl_path: string; status: string | null }>
+
+    for (const s of allDbSessions) {
+      if (seenSessionIds.has(s.id)) continue
+      if (s.id.startsWith("codex:") && (options.skipCodex || process.env.RECALL_SKIP_CODEX === "1")) {
+        continue
       }
-      if (unreferencedIds.length > 0) {
-        const placeholders = unreferencedIds.map(() => "?").join(",")
-        db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...unreferencedIds)
-        db.prepare(`DELETE FROM writes WHERE session_id IN (${placeholders})`).run(...unreferencedIds)
-        db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...unreferencedIds)
-        db.prepare("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')").run()
+
+      const fullPath = path.isAbsolute(s.jsonl_path) ? s.jsonl_path : path.join(currentProjectsDir(), s.jsonl_path)
+      if (!fs.existsSync(fullPath)) {
+        if (s.status === "stale-missing") {
+          // Second consecutive miss: prune
+          db.prepare("DELETE FROM messages WHERE session_id = ?").run(s.id)
+          db.prepare("DELETE FROM writes WHERE session_id = ?").run(s.id)
+          db.prepare("DELETE FROM sessions WHERE id = ?").run(s.id)
+          prunedCount++
+        } else {
+          // First miss: mark stale-missing (stays searchable)
+          db.prepare("UPDATE sessions SET status = 'stale-missing', failure_time = ? WHERE id = ?").run(
+            Date.now(),
+            s.id,
+          )
+        }
       }
-      pruneIgnoredSessions(db)
-    } else if (!options.path) {
-      if (cutoffTime !== undefined) {
-        pruneOldSessions(db, cutoffTime)
-      }
-      pruneIgnoredSessions(db)
     }
+
+    if (cutoffTime !== undefined) {
+      pruneOldSessions(db, cutoffTime)
+    }
+    pruneIgnoredSessions(db)
 
     // Store metadata
     const duration = Date.now() - startTime
@@ -1042,6 +1149,13 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   setIndexMeta(db, "last_codex_failures", JSON.stringify(codexFailures))
   setIndexMeta(db, "last_codex_reason_counts", JSON.stringify(codexReasonCounts))
 
+  // Advisory optimize at end of indexing run (A7)
+  try {
+    db.run("PRAGMA optimize")
+  } catch {
+    // Ignore optimize errors
+  }
+
   return {
     files: totalFiles,
     messages: totalMessages,
@@ -1061,6 +1175,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     claudeSkipped,
     claudeVanished,
     claudeFailures,
+    pruned: prunedCount,
     ...projectSourceResult,
   }
 }
