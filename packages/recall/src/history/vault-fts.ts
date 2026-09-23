@@ -10,9 +10,10 @@
  * line (`--vault-db <path>`, via {@link bindVaultDb}) or by `KM_VAULT_DB`,
  * its generic explicit form; the call line wins. Recall never discovers a
  * vault from the cwd: a walk up could reach a real vault a caller never named,
- * or a stale copy (25149, @cto ruling Q1). With nothing bound, search says so. Vault matches get a typed pointer (path + title +
- * snippet) so the inject path can render a high-signal hint instead of
- * lexical noise from message FTS.
+ * or a stale copy (25149, @cto ruling Q1). With nothing bound, search and the
+ * injection say so. Vault matches get a typed pointer (path + title + snippet)
+ * so the inject path can render a high-signal hint instead of lexical noise
+ * from message FTS.
  */
 
 import { Database } from "bun:sqlite"

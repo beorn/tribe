@@ -28,6 +28,7 @@ import {
   type InjectSkipReason,
 } from "./prompt-filter.ts"
 import { recall } from "../history/search.ts"
+import { getVaultDbPath } from "../history/vault-fts.ts"
 import { findGlossaryAnchor } from "../history/vault-glossary.ts"
 import { ensureProjectSourcesIndexed } from "../history/project-sources.ts"
 // Envelope framing primitives live in the shared library. Re-exported here so
@@ -155,6 +156,7 @@ export interface RunInjectDeltaOptions {
     recall?: typeof recall
     ensureProjectSourcesIndexed?: typeof ensureProjectSourcesIndexed
     findGlossaryAnchor?: typeof findGlossaryAnchor
+    getVaultDbPath?: typeof getVaultDbPath
   }
 }
 
@@ -187,15 +189,42 @@ export type RunInjectDeltaResult =
       emptyRecallReason?: Extract<InjectSkipReason, "no_results" | "all_seen">
     }
 
+/** What an injection says, once per session, when no vault is bound (25149, @cto Q1). */
+export const VAULT_UNBOUND_NOTICE = "recall: vault: not bound (pass --vault-db); vault notes were not searched"
+
+/**
+ * Seen-store key for {@link VAULT_UNBOUND_NOTICE}. Stored at the largest safe
+ * turn, so the store's gc never drops it and the session is told once.
+ */
+const VAULT_UNBOUND_NOTICE_KEY = "recall:vault-unbound-notice"
+
 /**
  * Run the recall + dedup + format pipeline against the supplied seen-store.
  * Pure logic aside from the recall call itself and the store reads/writes;
  * both callers (daemon, hook library) adapt this to their result shape.
+ *
+ * With no vault bound, the first injection of a session carries
+ * {@link VAULT_UNBOUND_NOTICE}: silent "no vault hits" is the failure to avoid.
  */
 export async function runInjectDelta(
   prompt: string,
   store: SeenStore,
   opts: RunInjectDeltaOptions = {},
+): Promise<RunInjectDeltaResult> {
+  const result = await runRecallInjection(prompt, store, opts)
+  const vaultDbPath = opts.deps?.getVaultDbPath ?? getVaultDbPath
+  if (vaultDbPath() !== null || store.get(VAULT_UNBOUND_NOTICE_KEY) !== undefined) return result
+  store.set(VAULT_UNBOUND_NOTICE_KEY, Number.MAX_SAFE_INTEGER)
+  store.flush?.()
+  if (result.skipped)
+    {return { skipped: false, additionalContext: VAULT_UNBOUND_NOTICE, newKeys: [], turn: store.turn() }}
+  return { ...result, additionalContext: `${VAULT_UNBOUND_NOTICE}\n\n${result.additionalContext}` }
+}
+
+async function runRecallInjection(
+  prompt: string,
+  store: SeenStore,
+  opts: RunInjectDeltaOptions,
 ): Promise<RunInjectDeltaResult> {
   const limitSnippets = opts.limit ?? 1
   const ttlTurns = opts.ttlTurns ?? 100

@@ -351,6 +351,23 @@ describe("recall search output", () => {
     }
   })
 
+  // 25149 Q4: an empty --vault-db is what a failed substitution passes. The CLI
+  // refuses it with exit 2, never a silent "not bound".
+  test("an empty --vault-db exits 2 naming the empty binding, never 'not bound'", async () => {
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`process.exit(${code})`)
+    }) as typeof process.exit)
+    try {
+      resetVaultDbCacheForTests()
+      await expect(cmdSearch("anything", { raw: true, project: "*", vaultDb: "" })).rejects.toThrow("process.exit(2)")
+      expect(callsText(errSpy)).toContain("--vault-db is empty")
+      expect(callsText(errSpy)).not.toContain("not bound")
+    } finally {
+      exitSpy.mockRestore()
+      resetVaultDbCacheForTests()
+    }
+  })
+
   test('raw mode JSON includes vault matches with contentType "vault"', async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-raw-vault-json-"))
     const dbPath = join(dir, "state.db")
