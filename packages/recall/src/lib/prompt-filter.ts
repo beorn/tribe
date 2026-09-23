@@ -37,13 +37,8 @@ export const TRIVIAL_PROMPTS: ReadonlySet<string> = new Set([
   "go for it",
 ])
 
-/**
- * Classify a prompt into a skip reason, or null if it's substantive enough
- * to feed into recall. Order matters: short-check runs before trivial-check
- * because all current trivial phrases are <15 chars (trivial is effectively
- * a fail-safe for exact-match short phrases that might slip past a relaxed
- * short-check in the future).
- */
+const HARNESS_ENVELOPE = /<(task-notification|channel|system-reminder)\b[^>]*>[\s\S]*?<\/\1>/g
+
 /**
  * The harness wraps what it hands a session in envelopes: Monitor events (`<task-notification>`),
  * tribe channel messages (`<channel …>`) and reminders (`<system-reminder>`). They are not the
@@ -51,12 +46,17 @@ export const TRIVIAL_PROMPTS: ReadonlySet<string> = new Set([
  * fallback ran 3.1 s at p50 and 29.6 s at worst against Claude Code's 30 s kill (25071). What is
  * left after removing them is the prompt salience, the glossary and recall may read.
  */
-const HARNESS_ENVELOPE = /<(task-notification|channel|system-reminder)\b[^>]*>[\s\S]*?<\/\1>/g
-
 export function stripHarnessEnvelopes(prompt: string): string {
   return prompt.replace(HARNESS_ENVELOPE, "").trim()
 }
 
+/**
+ * Classify a prompt into a skip reason, or null if it's substantive enough
+ * to feed into recall. Order matters: short-check runs before trivial-check
+ * because all current trivial phrases are <15 chars (trivial is effectively
+ * a fail-safe for exact-match short phrases that might slip past a relaxed
+ * short-check in the future).
+ */
 export function classifyPromptSkip(prompt: string): InjectSkipReason | null {
   if (!prompt || prompt.trim().length === 0) return "empty"
   if (prompt.trim().length < 15) return "short"
