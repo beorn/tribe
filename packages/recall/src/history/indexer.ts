@@ -132,6 +132,7 @@ export async function* findSessionFiles(): AsyncGenerator<string> {
 
   const glob = new Glob("**/*.jsonl")
   for await (const file of glob.scan({ cwd: pdir, absolute: true })) {
+    if (file.includes("/memory/")) continue
     if (isRecallIgnored(file)) continue
     yield file
   }
@@ -266,17 +267,22 @@ export async function indexSessionFile(
   db: Database,
   filePath: string,
   options: IndexOptions = {},
+  existingStats?: fs.Stats,
 ): Promise<{ messages: number; writes: number }> {
   const relativePath = path.relative(currentProjectsDir(), filePath)
   const projectPath = projectPathFromRelative(relativePath)
   let stats: fs.Stats
-  try {
-    stats = fs.statSync(filePath)
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      return { messages: 0, writes: 0 }
+  if (existingStats) {
+    stats = existingStats
+  } else {
+    try {
+      stats = fs.statSync(filePath)
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        return { messages: 0, writes: 0 }
+      }
+      throw err
     }
-    throw err
   }
   const mtime = stats.mtime.getTime()
 
@@ -285,7 +291,10 @@ export async function indexSessionFile(
     const existing = getSessionByPath(db, relativePath)
     if (
       existing &&
-      (existing.status == null || existing.status === "complete") &&
+      (existing.status == null ||
+        existing.status === "complete" ||
+        existing.status === "stale-unreadable" ||
+        existing.status === "unreadable") &&
       existing.mtime_ms != null &&
       existing.size_bytes != null &&
       existing.mtime_ms === mtime &&
@@ -364,7 +373,8 @@ export async function indexSessionFile(
       const { toolName, filePaths } = extractToolInfo(record)
 
       if (textContent || toolName) {
-        insertMessage(db, record.uuid || null, sessionId, record.type, textContent, toolName, filePaths, timestamp)
+        const msgUuid = record.uuid ? `${sessionId}:${record.uuid}` : null
+        insertMessage(db, msgUuid, sessionId, record.type, textContent, toolName, filePaths, timestamp)
         messageCount++
       }
 
@@ -570,27 +580,36 @@ function recordClaudeFailure(
   filePath: string,
   errMsg: string,
   meta?: { parentSessionId?: string | null; agentId?: string | null },
+  stats?: fs.Stats,
 ): void {
   const existing = getSession(db, sessionId)
   const now = Date.now()
+  let fileStats = stats
+  if (!fileStats) {
+    try {
+      fileStats = fs.statSync(filePath)
+    } catch {
+      // ignore
+    }
+  }
+  const mtime = fileStats ? fileStats.mtime.getTime() : now
+  const size = fileStats ? fileStats.size : null
   if (existing) {
     updateSessionStatus(db, sessionId, "stale-unreadable", {
       failureReason: errMsg,
       failureTime: now,
+      mtimeMs: mtime,
+      sizeBytes: size,
     })
   } else {
-    let mtime = now
-    try {
-      mtime = fs.statSync(filePath).mtime.getTime()
-    } catch {
-      // ignore
-    }
     const relativePath = path.relative(currentProjectsDir(), filePath)
     const projectPath = projectPathFromRelative(relativePath)
     upsertSession(db, sessionId, projectPath, relativePath, mtime, mtime, 0, null, {
       status: "stale-unreadable",
       failureReason: errMsg,
       failureTime: now,
+      mtimeMs: mtime,
+      sizeBytes: size,
       parentSessionId: meta?.parentSessionId,
       agentId: meta?.agentId,
     })
@@ -672,6 +691,24 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
 
   // Index Claude session files
   if (!options.path) {
+    const existingSessionMap = new Map<
+      string,
+      { status: string | null; mtime_ms: number | null; size_bytes: number | null }
+    >()
+    if (options.incremental) {
+      const rows = db
+        .prepare("SELECT jsonl_path, status, mtime_ms, size_bytes FROM sessions WHERE jsonl_path IS NOT NULL")
+        .all() as Array<{
+        jsonl_path: string
+        status: string | null
+        mtime_ms: number | null
+        size_bytes: number | null
+      }>
+      for (const r of rows) {
+        existingSessionMap.set(r.jsonl_path, r)
+      }
+    }
+
     for await (const sessionFile of findSessionFiles()) {
       // Skip sessions older than 180 days
       let stats: fs.Stats
@@ -693,6 +730,23 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
       const sessionInfo = parseSessionPath(relativePath, sessionFile)
       seenSessionIds.add(sessionInfo.id)
 
+      if (options.incremental) {
+        const existing = existingSessionMap.get(relativePath)
+        if (
+          existing &&
+          (existing.status == null ||
+            existing.status === "complete" ||
+            existing.status === "stale-unreadable" ||
+            existing.status === "unreadable") &&
+          existing.mtime_ms != null &&
+          existing.size_bytes != null &&
+          existing.mtime_ms === stats.mtime.getTime() &&
+          existing.size_bytes === stats.size
+        ) {
+          continue
+        }
+      }
+
       options.onProgress?.({
         filesProcessed: totalFiles,
         messagesIndexed: totalMessages,
@@ -701,15 +755,22 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
       })
 
       try {
-        const { messages, writes } = await indexSessionFile(db, sessionFile, options)
+        const { messages, writes } = await indexSessionFile(db, sessionFile, options, stats)
         totalMessages += messages
         totalWrites += writes
       } catch (err) {
         const errMsg = (err as Error).message || String(err)
-        recordClaudeFailure(db, sessionInfo.id, sessionFile, errMsg, {
-          parentSessionId: sessionInfo.parentSessionId,
-          agentId: sessionInfo.agentId,
-        })
+        recordClaudeFailure(
+          db,
+          sessionInfo.id,
+          sessionFile,
+          errMsg,
+          {
+            parentSessionId: sessionInfo.parentSessionId,
+            agentId: sessionInfo.agentId,
+          },
+          stats,
+        )
         seenSessionIds.add(sessionInfo.id)
       }
     }

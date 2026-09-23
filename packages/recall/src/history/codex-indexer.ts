@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url"
 import * as path from "path"
 import * as fs from "fs"
 import { getSession, upsertSession, insertMessage, updateSessionStatus } from "./db-queries.ts"
+import type { SessionRecord } from "./types.ts"
 
 export const INDEX_WINDOW_DAYS = 180
 export const INDEX_WINDOW_MS = INDEX_WINDOW_DAYS * 24 * 60 * 60 * 1000
@@ -345,6 +346,14 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
   if (options.path) {
     pathsToExport.push(options.path)
   } else {
+    const storedCodexMap = new Map<string, SessionRecord>()
+    if (options.incremental) {
+      const codexRows = db.prepare("SELECT * FROM sessions WHERE id LIKE 'codex:%'").all() as SessionRecord[]
+      for (const row of codexRows) {
+        storedCodexMap.set(row.id, row)
+      }
+    }
+
     for (const session of catalogSessions) {
       if (options.full) {
         if (session.status === "ambiguous") {
@@ -409,7 +418,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         for (const c of session.copies) {
           if (!c.path) continue
           const copyKey = c.key ?? `codex:${session.nativeId}`
-          const stored = getSession(db, copyKey)
+          const stored = options.incremental ? storedCodexMap.get(copyKey) : getSession(db, copyKey)
           if (isUnchangedStoredCopy(stored, c.path, c)) {
             // this copy unchanged
             skippedSessionIds.push(copyKey)
@@ -424,7 +433,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
       } else {
         const targetPath = session.canonicalPath ?? copy.path
         const copyKey = session.key ?? session.sessionKey ?? `codex:${session.nativeId}`
-        const stored = getSession(db, copyKey)
+        const stored = options.incremental ? storedCodexMap.get(copyKey) : getSession(db, copyKey)
         if (targetPath && isUnchangedStoredCopy(stored, targetPath, copy)) {
           skipped++
           skippedSessionIds.push(copyKey)
@@ -775,10 +784,12 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
               for (const key of keys) {
                 const count = currentRowCounts.get(key) ?? 0
                 const matchedCopy =
-                  session.copies?.find((c) => c.key === key) ??
                   (session.copies && keys.length === session.copies.length
                     ? session.copies[keys.indexOf(key)]
-                    : session.copies?.find((c) => c.path === session.path))
+                    : undefined) ??
+                  session.copies?.find((c) => c.path === session.path) ??
+                  session.copies?.find((c) => c.decision === "canonical") ??
+                  session.copies?.find((c) => c.key === key)
                 const copyPath = matchedCopy?.path ?? session.path
                 const copySize = matchedCopy?.sizeBytes ?? session.sizeBytes
                 const copyMtime = matchedCopy?.mtimeMs ?? session.mtimeMs ?? Date.now()

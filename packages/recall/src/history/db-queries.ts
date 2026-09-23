@@ -182,6 +182,15 @@ export function insertMessage(
     .prepare(`
     INSERT INTO messages (uuid, session_id, type, content, tool_name, file_paths, timestamp, duplicate_of, line)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(uuid) DO UPDATE SET
+      session_id = excluded.session_id,
+      type = excluded.type,
+      content = excluded.content,
+      tool_name = excluded.tool_name,
+      file_paths = excluded.file_paths,
+      timestamp = excluded.timestamp,
+      duplicate_of = excluded.duplicate_of,
+      line = excluded.line
   `)
     .run(uuid, sessionId, type, content, toolName, filePaths, timestamp, duplicateOf ?? null, line ?? null)
   return Number(result.lastInsertRowid)
