@@ -100,6 +100,18 @@ export function hasSalience(prompt: string): boolean {
 export const LONG_PROMPT_BYPASS_LENGTH = 120
 
 /**
+ * Longest prompt prefix handed to recall as its FTS query (@ag/tribe/25071).
+ * Query cost is super-linear in length and recall's own `timeout` does not
+ * bound it. Measured on one 4 KB prompt: 200 chars 22 ms, 500 297 ms,
+ * 1000 655 ms, 2000 3457 ms, full 4096 21-26 s (FTS5 search 19.3 s plus nine
+ * query-expansion variants). Unbounded, every prompt over ~3 KB (a subagent
+ * result, a paste) ran past Claude Code's 30 s hook timeout, on the daemon
+ * path and again on the library fallback. The directive, salience and
+ * glossary checks still read the whole prompt; they cost 0-21 ms.
+ */
+export const MAX_RECALL_QUERY_CHARS = 500
+
+/**
  * Body patterns that signal a snippet is its own evidence of irrelevance —
  * either it's a stored verdict from prior research, or it's about a
  * superseded/rejected/deprecated outcome. Catches the literal failure mode
