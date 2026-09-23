@@ -99,11 +99,14 @@ export interface HookResult {
  * Returns { skipped: true } for trivial prompts, { hookOutput } for results.
  * Throws on actual errors (fail loud).
  */
-export async function hookRecall(prompt: string, opts: { steps?: Record<string, number> } = {}): Promise<HookResult> {
+export async function hookRecall(
+  prompt: string,
+  opts: { steps?: Record<string, number>; skippedSteps?: Record<string, string> } = {},
+): Promise<HookResult> {
   const claudeSessionId = process.env.CLAUDE_SESSION_ID
   const seenFile = claudeSessionId ? path.join(os.tmpdir(), `recall-hook-seen-${claudeSessionId}.json`) : null
   const store = timeStep(opts.steps, "seen_store", () => createTmpfileSeenStore(seenFile))
-  const core = await runInjectDelta(prompt, store, { steps: opts.steps })
+  const core = await runInjectDelta(prompt, store, { steps: opts.steps, skippedSteps: opts.skippedSteps })
   if (core.skipped) return { skipped: true, reason: core.reason }
   return {
     skipped: false,

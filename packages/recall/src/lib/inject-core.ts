@@ -29,7 +29,8 @@ import {
 } from "./prompt-filter.ts"
 import { recall } from "../history/search.ts"
 import { findGlossaryAnchor } from "../history/vault-glossary.ts"
-import { ensureProjectSourcesIndexed } from "../history/project-sources.ts"
+import { ensureProjectSourcesIndexed, ProjectSourcesBusyError } from "../history/project-sources.ts"
+import { IndexWriterBusyError } from "../history/db.ts"
 // Envelope framing primitives live in the shared library. Re-exported here so
 // existing callers (and the plugin's own tests) keep working without churn.
 // Relative import because plugins/ is not a declared workspace inside bearly
@@ -129,6 +130,11 @@ export interface RunInjectDeltaOptions {
    * record, so a step that throws is still recorded when the caller logs the failure.
    */
   steps?: Record<string, number>
+  /**
+   * Filled with each step that was skipped rather than waited on, and why (@ag/tribe/25071). Today that is the
+   * project-source refresh when the index writer or SQLite's write lock is held; recall still runs.
+   */
+  skippedSteps?: Record<string, string>
   /**
    * Max snippets to include. Default 1.
    *
@@ -312,7 +318,13 @@ export async function runInjectDelta(
     return { skipped: true, reason: "low_salience" }
   }
 
-  timeStep(steps, "project_sources", () => ensureProjectSourcesIndexedImpl())
+  try {
+    timeStep(steps, "project_sources", () => ensureProjectSourcesIndexedImpl())
+  } catch (error) {
+    // Busy is contention, not failure: recall reads the index as it stands. Anything else still fails the hook.
+    if (!(error instanceof IndexWriterBusyError || error instanceof ProjectSourcesBusyError)) throw error
+    if (opts.skippedSteps) opts.skippedSteps.project_sources = error.message
+  }
 
   const turn = timeStep(steps, "advance_turn", () => store.advanceTurn())
 

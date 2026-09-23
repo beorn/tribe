@@ -30,7 +30,7 @@ import { spawn } from "child_process"
 import { fileURLToPath } from "node:url"
 import { createLogger, drainOutput } from "loggily"
 import { hookRecall } from "../history/recall"
-import { getDb, closeDb, getIndexMeta, IndexWriterBusyError } from "../history/db"
+import { getDb, closeDb, getIndexMeta } from "../history/db"
 import { summarizeUnprocessedDays } from "./summarize-daily"
 import { roundSteps, timeStepAsync } from "./inject-core"
 import { withDaemonCall } from "../../../../plugins/claude/recall/lib/socket.ts"
@@ -474,8 +474,18 @@ export async function cmdHook(): Promise<void> {
       // kind === "error" — fall through to library path below.
     }
 
-    const result = await hookRecall(prompt, { steps })
+    const skippedSteps: Record<string, string> = {}
+    const result = await hookRecall(prompt, { steps, skippedSteps })
     const elapsed = Date.now() - startTime
+    // A step skipped rather than waited on is said out loud, never silent (@ag/tribe/25071): today the
+    // project-source refresh, when the index writer or SQLite's write lock is held. Recall still ran.
+    if (Object.keys(skippedSteps).length > 0) {
+      hookLog.warn?.("step skipped rather than waited on", {
+        skipped_steps: skippedSteps,
+        elapsed_ms: elapsed,
+        steps: roundSteps(steps),
+      })
+    }
     if (result.skipped) {
       hookLog.info?.("library skipped", {
         reason: result.reason,
@@ -497,17 +507,6 @@ export async function cmdHook(): Promise<void> {
     console.log(envelopeEmitHookJson("UserPromptSubmit", additionalContext, prompt))
   } catch (e) {
     const elapsed = Date.now() - startTime
-    // Another process holds the index rebuild lock. That is contention, not
-    // failure: `acquireIndexWriter` admits exactly one writer, and a burst of
-    // prompts — ~15 queued tribe channel messages flushed at once on
-    // 2026-09-16 ~14:10 PDT — puts every loser here. Enrichment is optional,
-    // so a prompt we merely cannot enrich succeeds without context, exactly
-    // like the daemon/library skips above.
-    if (e instanceof IndexWriterBusyError) {
-      hookLog.info?.("index writer busy — recall enrichment skipped", { elapsed_ms: elapsed, steps: roundSteps(steps) })
-      // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
-      return drainOutput().then(() => process.exit(0))
-    }
     hookLog.error?.(e instanceof Error ? e : new Error(String(e)), "FATAL: unhandled error", {
       elapsed_ms: elapsed,
       steps: roundSteps(steps),
