@@ -424,3 +424,82 @@ describe("runInjectDelta — recall query bound (@ag/tribe/25071)", () => {
     expect(MAX_RECALL_QUERY_CHARS).toBe(500)
   })
 })
+
+describe("runInjectDelta — per-step durations (@ag/tribe/25071 row 1)", () => {
+  beforeEach(() => {
+    recallMock.mockReset()
+    ensureProjectSourcesIndexedMock.mockReset()
+  })
+
+  const salientPrompt = "why does src/lib/inject-core.ts stall the prompt hook past thirty seconds tonight?"
+  const busyWait = (ms: number): void => {
+    const until = performance.now() + ms
+    while (performance.now() < until) {
+      // A synchronous step, like the SQLite writes it stands in for.
+    }
+  }
+
+  test("each step records its own duration, so a slow run names its slow step", async () => {
+    ensureProjectSourcesIndexedMock.mockImplementation(() => busyWait(60))
+    recallMock.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve({ results: [] }), 40)))
+    const steps: Record<string, number> = {}
+
+    await runInjectDelta(salientPrompt, createMemorySeenStore(), { steps })
+
+    expect(Object.keys(steps)).toEqual(
+      expect.arrayContaining(["classify", "glossary", "project_sources", "advance_turn", "recall"]),
+    )
+    expect(steps.project_sources).toBeGreaterThanOrEqual(55)
+    expect(steps.recall).toBeGreaterThanOrEqual(35)
+    expect(steps.classify).toBeLessThan(55)
+  })
+
+  test("the glossary fallback is its own step, so a slow fallback is named apart from the first query", async () => {
+    ensureProjectSourcesIndexedMock.mockImplementation(() => {})
+    recallMock
+      .mockImplementationOnce(() => Promise.resolve({ results: [] }))
+      .mockImplementationOnce(() => new Promise((resolve) => setTimeout(() => resolve({ results: [] }), 40)))
+    const steps: Record<string, number> = {}
+
+    await runInjectDelta(salientPrompt, createMemorySeenStore(), { steps, deps: { findGlossaryAnchor: () => "tribe" } })
+
+    expect(recallMock).toHaveBeenCalledTimes(2)
+    expect(steps.recall_fallback).toBeGreaterThanOrEqual(35)
+    expect(steps.recall).toBeLessThan(35)
+  })
+
+  test("three 0.4 ms steps under one name read 1 ms on the row, not 0: sums stay raw until roundSteps", async () => {
+    const { roundSteps, timeStep, timeStepAsync } = await import("../src/lib/inject-core.ts")
+    let now = 0
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => now)
+    try {
+      const steps: Record<string, number> = {}
+      for (let i = 0; i < 3; i++) {
+        timeStep(steps, "classify", () => {
+          now += 0.4
+        })
+        await timeStepAsync(steps, "recall", async () => {
+          now += 0.4
+        })
+      }
+      expect(roundSteps(steps)).toEqual({ classify: 1, recall: 1 })
+    } finally {
+      clock.mockRestore()
+    }
+  })
+
+  test("a step that throws still records how long it ran before throwing", async () => {
+    ensureProjectSourcesIndexedMock.mockImplementation(() => {
+      busyWait(30)
+      throw new Error("database is locked")
+    })
+    const steps: Record<string, number> = {}
+
+    await expect(runInjectDelta(salientPrompt, createMemorySeenStore(), { steps })).rejects.toThrow(
+      "database is locked",
+    )
+
+    expect(steps.project_sources).toBeGreaterThanOrEqual(25)
+    expect(steps.recall).toBeUndefined()
+  })
+})
