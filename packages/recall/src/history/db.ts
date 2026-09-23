@@ -17,6 +17,9 @@ export { CLAUDE_DIR, DB_PATH, PROJECTS_DIR, PLANS_DIR, TODOS_DIR, MAX_CONTENT_SI
 
 let dbInstance: Database | null = null
 
+/** How long a statement waits for another connection's SQLite write lock before failing "database is locked". */
+export const DB_BUSY_TIMEOUT_MS = 5000
+
 function currentDbPath(): string {
   return process.env.RECALL_DB_PATH?.trim() || DB_PATH
 }
@@ -41,7 +44,7 @@ export function getDb(options?: GetDbOptions): Database {
   // Enable WAL mode for concurrent access (multiple Claude sessions)
   // WAL allows readers to not block writers and vice versa
   db.run("PRAGMA journal_mode = WAL")
-  db.run("PRAGMA busy_timeout = 5000") // Wait 5s if locked
+  db.run(`PRAGMA busy_timeout = ${DB_BUSY_TIMEOUT_MS}`)
 
   try {
     initSchema(db, { allowMigration: options?.allowMigration })

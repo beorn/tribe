@@ -23,8 +23,8 @@ vi.mock("../../src/history/db", async (original) => ({
 
 const { rebuildIndex, indexSessionFile } = await import("../../src/history/indexer")
 const { cmdIndex } = await import("../../src/lib/sessions")
-const { ensureProjectSourcesIndexed } = await import("../../src/history/project-sources")
-const { closeDb, initSchema, getIndexMeta, setIndexMeta } = await import("../../src/history/db")
+const { ensureProjectSourcesIndexed, ProjectSourcesBusyError } = await import("../../src/history/project-sources")
+const { closeDb, getDb, initSchema, getIndexMeta, setIndexMeta } = await import("../../src/history/db")
 let root: string
 let db: Database
 let dbPath: string
@@ -142,6 +142,23 @@ describe("Recall refresh completion", () => {
     })
     expect(lock).not.toBeNull()
     expect(() => ensureProjectSourcesIndexed()).toThrow("already active")
+    expect(getIndexMeta(db, "last_rebuild")).toBe(marker)
+  })
+
+  test("the project-source helper never waits on another connection's write lock (25071)", () => {
+    vi.stubEnv("CLAUDE_PROJECT_DIR", root)
+    getDb() // opened (WAL, schema) before the lock, as the live DB always is
+    const marker = getIndexMeta(db, "last_rebuild")
+    const holder = new Database(dbPath)
+    holder.run("BEGIN IMMEDIATE")
+    try {
+      const start = performance.now()
+      expect(() => ensureProjectSourcesIndexed()).toThrow(ProjectSourcesBusyError)
+      expect(performance.now() - start).toBeLessThan(1000)
+    } finally {
+      holder.run("ROLLBACK")
+      holder.close()
+    }
     expect(getIndexMeta(db, "last_rebuild")).toBe(marker)
   })
 

@@ -28,8 +28,8 @@ import * as os from "os"
 import * as fs from "fs"
 import { createLogger, drainOutput } from "loggily"
 import { hookRecall } from "../history/recall"
-import { IndexWriterBusyError } from "../history/db"
 import { summarizeUnprocessedDays } from "./summarize-daily"
+import { roundSteps, timeStepAsync } from "./inject-core"
 import { withDaemonCall } from "../../../../plugins/claude/recall/lib/socket.ts"
 import { resolveRecallSocketPath } from "../../../../plugins/claude/recall/lib/config.ts"
 import {
@@ -264,8 +264,15 @@ async function registerWithRecallDaemon(input: {
 // ============================================================================
 
 type InjectDeltaOutcome =
-  | { kind: "skipped"; reason: string }
-  | { kind: "ok"; additionalContext: string; contextLen: number; seenCount: number; turnNumber: number }
+  | { kind: "skipped"; reason: string; skippedSteps?: Record<string, string> }
+  | {
+      kind: "ok"
+      additionalContext: string
+      contextLen: number
+      seenCount: number
+      turnNumber: number
+      skippedSteps?: Record<string, string>
+    }
   | { kind: "error"; message: string }
 
 /**
@@ -284,7 +291,7 @@ async function tryInjectDeltaViaDaemon(prompt: string, sessionId?: string): Prom
       })
       const result = (await client.call(TRIBE_METHODS.injectDelta, { prompt, sessionId })) as InjectDeltaResult
       if (result.skipped) {
-        return { kind: "skipped", reason: result.reason ?? "unknown" }
+        return { kind: "skipped", reason: result.reason ?? "unknown", skippedSteps: result.skippedSteps }
       }
       const ctx = result.additionalContext ?? ""
       return {
@@ -293,6 +300,7 @@ async function tryInjectDeltaViaDaemon(prompt: string, sessionId?: string): Prom
         contextLen: ctx.length,
         seenCount: result.seenCount ?? 0,
         turnNumber: result.turnNumber ?? 0,
+        skippedSteps: result.skippedSteps,
       }
     },
   )
@@ -324,17 +332,39 @@ export async function readStdin(): Promise<string> {
 // Hook command — UserPromptSubmit
 // ============================================================================
 
+/**
+ * A step skipped rather than waited on is said out loud, never silent (@ag/tribe/25071): today the project-source
+ * refresh, when the index writer or SQLite's write lock is held. Recall still ran, on the daemon or the library path.
+ */
+function warnSkippedSteps(
+  skippedSteps: Record<string, string> | undefined,
+  path: "daemon" | "library",
+  startTime: number,
+  steps: Record<string, number>,
+): void {
+  if (!skippedSteps || Object.keys(skippedSteps).length === 0) return
+  hookLog.warn?.("step skipped rather than waited on", {
+    path,
+    skipped_steps: skippedSteps,
+    elapsed_ms: Date.now() - startTime,
+    steps: roundSteps(steps),
+  })
+}
+
 export async function cmdHook(): Promise<void> {
   // Return drain promises so failures bypass the hook catch and remain nonzero.
   const startTime = Date.now()
+  // Each step's wall time, carried on every row below, so a slow run names its slow step (@ag/tribe/25071 row 1).
+  const steps: Record<string, number> = {}
   try {
-    const stdin = await readStdin()
+    const stdin = await timeStepAsync(steps, "stdin", () => readStdin())
     let input: { prompt?: string; session_id?: string; transcript_path?: string; cwd?: string }
     try {
       input = JSON.parse(stdin) as { prompt?: string; session_id?: string; transcript_path?: string; cwd?: string }
     } catch (e) {
       hookLog.error?.(e instanceof Error ? e : new Error(String(e)), "FATAL: invalid JSON on stdin", {
         elapsed_ms: Date.now() - startTime,
+        steps: roundSteps(steps),
         stdin_preview: stdin.slice(0, 200),
       })
       reportHookFailure("prompt", `invalid JSON on stdin: ${e instanceof Error ? e.message : String(e)}`)
@@ -359,7 +389,7 @@ export async function cmdHook(): Promise<void> {
 
     const prompt = input.prompt
     if (!prompt) {
-      hookLog.warn?.("no prompt in stdin", { elapsed_ms: Date.now() - startTime })
+      hookLog.warn?.("no prompt in stdin", { elapsed_ms: Date.now() - startTime, steps: roundSteps(steps) })
       // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
       return drainOutput().then(() => process.exit(0))
     }
@@ -369,11 +399,13 @@ export async function cmdHook(): Promise<void> {
     // rely on tmpfile round-trips and survive Claude Code session
     // boundaries as long as the daemon is alive.
     if (process.env.TRIBE_NO_DAEMON !== "1") {
-      const daemonOutput = await tryInjectDeltaViaDaemon(prompt, input.session_id)
+      const daemonOutput = await timeStepAsync(steps, "daemon", () => tryInjectDeltaViaDaemon(prompt, input.session_id))
+      if (daemonOutput.kind !== "error") warnSkippedSteps(daemonOutput.skippedSteps, "daemon", startTime, steps)
       if (daemonOutput.kind === "skipped") {
         hookLog.info?.("daemon skipped", {
           reason: daemonOutput.reason,
           elapsed_ms: Date.now() - startTime,
+          steps: roundSteps(steps),
           prompt_preview: prompt.slice(0, 60),
         })
         // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
@@ -383,6 +415,7 @@ export async function cmdHook(): Promise<void> {
         hookLog.info?.("daemon ok", {
           context_len: daemonOutput.contextLen,
           elapsed_ms: Date.now() - startTime,
+          steps: roundSteps(steps),
           seen_count: daemonOutput.seenCount,
           turn_number: daemonOutput.turnNumber,
           prompt_preview: prompt.slice(0, 60),
@@ -395,12 +428,14 @@ export async function cmdHook(): Promise<void> {
       // kind === "error" — fall through to library path below.
     }
 
-    const result = await hookRecall(prompt)
+    const result = await hookRecall(prompt, { steps })
     const elapsed = Date.now() - startTime
+    warnSkippedSteps(result.skippedSteps, "library", startTime, steps)
     if (result.skipped) {
       hookLog.info?.("library skipped", {
         reason: result.reason,
         elapsed_ms: elapsed,
+        steps: roundSteps(steps),
         prompt_preview: prompt.slice(0, 60),
       })
       // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
@@ -410,25 +445,16 @@ export async function cmdHook(): Promise<void> {
     hookLog.info?.("library ok", {
       context_len: additionalContext.length,
       elapsed_ms: elapsed,
+      steps: roundSteps(steps),
       prompt_preview: prompt.slice(0, 60),
     })
     // The hook's JSON response: console.log is the sanctioned channel.
     console.log(envelopeEmitHookJson("UserPromptSubmit", additionalContext, prompt))
   } catch (e) {
     const elapsed = Date.now() - startTime
-    // Another process holds the index rebuild lock. That is contention, not
-    // failure: `acquireIndexWriter` admits exactly one writer, and a burst of
-    // prompts — ~15 queued tribe channel messages flushed at once on
-    // 2026-09-16 ~14:10 PDT — puts every loser here. Enrichment is optional,
-    // so a prompt we merely cannot enrich succeeds without context, exactly
-    // like the daemon/library skips above.
-    if (e instanceof IndexWriterBusyError) {
-      hookLog.info?.("index writer busy — recall enrichment skipped", { elapsed_ms: elapsed })
-      // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
-      return drainOutput().then(() => process.exit(0))
-    }
     hookLog.error?.(e instanceof Error ? e : new Error(String(e)), "FATAL: unhandled error", {
       elapsed_ms: elapsed,
+      steps: roundSteps(steps),
     })
     reportHookFailure("prompt", e)
     // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
