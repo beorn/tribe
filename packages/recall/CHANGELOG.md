@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed — the vault is bound only explicitly
+
+- `recall search --vault-db <path>` binds the km vault database on the call line and outranks `KM_VAULT_DB`. An empty `--vault-db` (a failed `$(…)` substitution) is a usage error, exit 2.
+- Recall no longer walks up from the cwd looking for `.km/state.db`. With nothing bound, search prints `vault: not bound (pass --vault-db)` on stderr instead of silently searching no vault.
+
 ## 0.2.0 (2026-04-27)
 
 ### Added — quality gate

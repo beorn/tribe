@@ -322,6 +322,35 @@ describe("recall search output", () => {
     }
   })
 
+  // 25149: recall binds a vault only explicitly, so an unbound search says so
+  // instead of reading as "no vault hits"; --vault-db binds it on the call line.
+  test("an unbound search says the vault is not bound; --vault-db binds it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-vault-bound-"))
+    const dbPath = join(dir, "state.db")
+    const previousVaultDb = process.env.KM_VAULT_DB
+    try {
+      seedVaultDb(dbPath, "vaultboundneedle only lives in the km vault")
+      delete process.env.KM_VAULT_DB
+      resetVaultDbCacheForTests()
+
+      await cmdSearch("vaultboundneedle", { raw: true, project: "*" })
+      expect(callsText(errSpy)).toContain("vault: not bound (pass --vault-db)")
+      expect(callsText(logSpy)).not.toContain("vaultboundneedle only lives")
+
+      errSpy.mockClear()
+      logSpy.mockClear()
+      resetVaultDbCacheForTests()
+      await cmdSearch("vaultboundneedle", { raw: true, project: "*", vaultDb: dbPath })
+      expect(callsText(errSpy)).not.toContain("vault: not bound")
+      expect(callsText(logSpy)).toContain("vaultboundneedle")
+    } finally {
+      resetVaultDbCacheForTests()
+      if (previousVaultDb === undefined) delete process.env.KM_VAULT_DB
+      else process.env.KM_VAULT_DB = previousVaultDb
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('raw mode JSON includes vault matches with contentType "vault"', async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-raw-vault-json-"))
     const dbPath = join(dir, "state.db")

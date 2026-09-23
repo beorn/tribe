@@ -6,41 +6,48 @@
  * the vault (beads, design docs, CLAUDE.md, README.md, hub/* docs). Those
  * are indexed by km in `nodes_fts` keyed on `(name, title, content)`.
  *
- * Adapter is opt-in: when `KM_VAULT_DB` is set, or when `.km/state.db` is
- * found by walking up from CWD, the recall pipeline merges vault matches
- * into its result list. Vault matches get a typed pointer (path + title +
+ * Adapter is opt-in and explicit: the vault database is bound on the call
+ * line (`--vault-db <path>`, via {@link bindVaultDb}) or by `KM_VAULT_DB`,
+ * its generic explicit form; the call line wins. Recall never discovers a
+ * vault from the cwd: a walk up could reach a real vault a caller never named,
+ * or a stale copy (25149, @cto ruling Q1). With nothing bound, search says so. Vault matches get a typed pointer (path + title +
  * snippet) so the inject path can render a high-signal hint instead of
  * lexical noise from message FTS.
  */
 
 import { Database } from "bun:sqlite"
 import { existsSync } from "node:fs"
-import { resolve, dirname } from "node:path"
+import { resolve } from "node:path"
 import { toFts5Query } from "./db-queries.ts"
 
 let cachedDb: Database | null = null
 let cachedPath: string | null = null
 let resolveAttempted = false
+let boundVaultDb: string | null = null
+
+/**
+ * Bind the vault database from the call line (`--vault-db`). It outranks
+ * `KM_VAULT_DB`. An empty path refuses: it is what a failed `$(…)`
+ * substitution passes, and treating it as "unbound" would hide that failure.
+ */
+export function bindVaultDb(path: string): void {
+  if (path.trim().length === 0) {
+    throw new Error("recall: --vault-db is empty (a failed substitution?); pass the vault's state.db path")
+  }
+  const bound = resolve(path)
+  if (bound === boundVaultDb) return
+  resetVaultDbCache()
+  boundVaultDb = bound
+}
 
 function findVaultDb(): string | null {
-  const fromEnv = process.env.KM_VAULT_DB
-  if (fromEnv) {
-    const configuredPath = resolve(fromEnv)
-    if (!existsSync(configuredPath)) {
-      throw vaultDbError(configuredPath, "does not exist")
-    }
-    return configuredPath
+  const envPath = process.env.KM_VAULT_DB
+  const configured = boundVaultDb ?? (envPath ? resolve(envPath) : null)
+  if (configured === null) return null
+  if (!existsSync(configured)) {
+    throw vaultDbError(configured, "does not exist")
   }
-
-  let dir = process.cwd()
-  for (let i = 0; i < 8; i++) {
-    const candidate = resolve(dir, ".km/state.db")
-    if (existsSync(candidate)) return candidate
-    const parent = dirname(dir)
-    if (parent === dir) break
-    dir = parent
-  }
-  return null
+  return configured
 }
 
 export function getVaultDb(): Database | null {
@@ -55,7 +62,7 @@ export function getVaultDb(): Database | null {
 
   try {
     const db = new Database(path, { readonly: true })
-    db.exec("PRAGMA query_only = ON")
+    db.run("PRAGMA query_only = ON")
     cachedDb = db
     cachedPath = path
     resolveAttempted = true
@@ -80,6 +87,11 @@ export function getVaultDbPath(): string | null {
  * cases. Additive hook — not part of the recall/injection API surface.
  */
 export function resetVaultDbCacheForTests(): void {
+  resetVaultDbCache()
+  boundVaultDb = null
+}
+
+function resetVaultDbCache(): void {
   if (cachedDb) {
     try {
       cachedDb.close()
@@ -356,7 +368,7 @@ function errorMessage(error: unknown): string {
 
 function vaultDbError(path: string, reason: string): Error {
   return new Error(
-    `Vault index KM_VAULT_DB=${path} ${reason}. ` +
-      `Run 'km sync' in the vault root to repair it, or unset KM_VAULT_DB to disable vault search.`,
+    `Vault index ${path} (bound by --vault-db or KM_VAULT_DB) ${reason}. ` +
+      `Run 'km sync' in the vault root to repair it, or drop the binding to disable vault search.`,
   )
 }
