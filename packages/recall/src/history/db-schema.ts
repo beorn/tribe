@@ -303,16 +303,16 @@ export const MIGRATION_STEPS: MigrationStep[] = [
       const unconvertibleRowIds: number[] = []
 
       // Direct SQL update for codex rows avoids loading millions of rows into JavaScript heap
-      const codexCountRes = db.prepare("SELECT COUNT(*) as c FROM messages WHERE uuid LIKE 'codex:%'").get() as { c: number }
+      const codexCountRes = db.prepare("SELECT COUNT(*) as c FROM messages WHERE uuid LIKE 'codex:%'").get() as {
+        c: number
+      }
       if (codexCountRes.c > 0) {
         db.exec("UPDATE messages SET uuid = NULL WHERE uuid LIKE 'codex:%'")
         codexConvertedCount = codexCountRes.c
       }
 
       // Remaining colon rows are garage sessionId:uuid rows
-      const garageRows = db
-        .prepare("SELECT id, session_id, uuid FROM messages WHERE uuid LIKE '%:%'")
-        .all() as Array<{
+      const garageRows = db.prepare("SELECT id, session_id, uuid FROM messages WHERE uuid LIKE '%:%'").all() as Array<{
         id: number
         session_id: string
         uuid: string
