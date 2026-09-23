@@ -1,5 +1,5 @@
 /**
- * @reach fs-walk <fixture-only: tempDir = mkdtempSync(join(tmpdir(), ...)); the embedded `findFiles`/readdirSync walker is source text written into a generated mock-CLI script tha...>
+ * @reach fs-walk <fixture-only: mkdtemp codex dir; existsSync then spawns ag-cli bin/ag.ts>
  */
 import { Database } from "bun:sqlite"
 import { writeFileSync, mkdtempSync, chmodSync, mkdirSync, utimesSync, existsSync } from "node:fs"

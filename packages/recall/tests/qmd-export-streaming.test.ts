@@ -1,5 +1,5 @@
 /**
- * @reach fs-walk <fixture-only: dir/home are mkdtempSync(join(tmpdir(), ...)) fixtures; every readdirSync/session file lives under these temp roots.>
+ * @reach fs-walk <fixture-only: dir/home are mkdtempSync(tmpdir()) fixtures>
  */
 import { describe, test, expect, beforeAll, afterAll } from "vitest"
 import { mkdtempSync, writeFileSync, rmSync, appendFileSync, mkdirSync, readdirSync, statSync } from "node:fs"

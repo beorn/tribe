@@ -4,7 +4,7 @@
  *   appeared as a second PM-state mutation and rolled every create back.
  * @level l2 — real files, Git porcelain, and legacy-to-XDG adoption.
  * @consumer githubPlugin.start cursor persistence.
- * @reach fs-walk <fixture-only: fixture() always builds a fresh mkdtempSync(join(parent, ...)) directory; tribeRoot is only used as the `parent` argument for one case (a temp dir...>
+ * @reach fs-walk <fixture-only: fixture() builds a fresh mkdtempSync dir each case>
  */
 import { execFileSync, spawn } from "node:child_process"
 import {

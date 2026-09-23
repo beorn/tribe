@@ -4,7 +4,7 @@
  * Sets up a temp chats dir with mixed clean/corrupted markdown, runs
  * scanChats(), and asserts that only the corrupted files are flagged.
  * Then exercises the CLI with --dry-run and --yes paths.
- * @reach fs-walk <fixture-only: tmpRoot = mkdtempSync(join(tmpdir(), ...)); readdirSync(chatsDir)/readdirSync(quarantineDir) only scan subdirs of this temp root; PURGE_BIN/quality...>
+ * @reach fs-walk <fixture-only: tmpRoot=mkdtempSync(tmpdir()); readdirSync scoped to it>
  */
 import { describe, test, expect, beforeEach, afterEach } from "vitest"
 import { spawnSync } from "node:child_process"
