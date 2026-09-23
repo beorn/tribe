@@ -44,6 +44,19 @@ export const TRIVIAL_PROMPTS: ReadonlySet<string> = new Set([
  * a fail-safe for exact-match short phrases that might slip past a relaxed
  * short-check in the future).
  */
+/**
+ * The harness wraps what it hands a session in envelopes: Monitor events (`<task-notification>`),
+ * tribe channel messages (`<channel …>`) and reminders (`<system-reminder>`). They are not the
+ * operator's words, and their boilerplate picked the glossary anchor "tribe", whose recall
+ * fallback ran 3.1 s at p50 and 29.6 s at worst against Claude Code's 30 s kill (25071). What is
+ * left after removing them is the prompt salience, the glossary and recall may read.
+ */
+const HARNESS_ENVELOPE = /<(task-notification|channel|system-reminder)\b[^>]*>[\s\S]*?<\/\1>/g
+
+export function stripHarnessEnvelopes(prompt: string): string {
+  return prompt.replace(HARNESS_ENVELOPE, "").trim()
+}
+
 export function classifyPromptSkip(prompt: string): InjectSkipReason | null {
   if (!prompt || prompt.trim().length === 0) return "empty"
   if (prompt.trim().length < 15) return "short"

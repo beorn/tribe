@@ -25,6 +25,7 @@ import {
   LONG_PROMPT_BYPASS_LENGTH,
   MAX_RECALL_QUERY_CHARS,
   MIN_RANK_THRESHOLD,
+  stripHarnessEnvelopes,
   type InjectSkipReason,
 } from "./prompt-filter.ts"
 import { recall } from "../history/search.ts"
@@ -230,7 +231,7 @@ export async function timeStepAsync<T>(
  * both callers (daemon, hook library) adapt this to their result shape.
  */
 export async function runInjectDelta(
-  prompt: string,
+  rawPrompt: string,
   store: SeenStore,
   opts: RunInjectDeltaOptions = {},
 ): Promise<RunInjectDeltaResult> {
@@ -244,6 +245,17 @@ export async function runInjectDelta(
   const findGlossaryAnchorImpl = opts.deps?.findGlossaryAnchor ?? findGlossaryAnchor
 
   const steps = opts.steps
+  // Only the operator's own words reach salience, the glossary and recall (25071).
+  const prompt = stripHarnessEnvelopes(rawPrompt)
+  if (prompt.length === 0 && rawPrompt.trim().length > 0) {
+    emitInjectionDebugEvent({
+      source: "recall",
+      action: "skip",
+      reason: "harness_envelope",
+      prompt: rawPrompt.slice(0, 200),
+    })
+    return { skipped: true, reason: "low_salience" }
+  }
   const skipReason = timeStep(steps, "classify", () => classifyPromptSkip(prompt))
   if (skipReason && TRIVIAL_SKIP_REASONS.has(skipReason)) {
     emitInjectionDebugEvent({
