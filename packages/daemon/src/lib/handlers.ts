@@ -809,8 +809,10 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   }
   const observedAt = Date.now()
   const transport = ownerTransportObservationProjector(ctx, opts, observedAt)
+  // An incident edge stays a tracked ball but promises no answer, so the 24581
+  // mailbox-readability gate does not apply to it (@cto 2026-09-16, 24644).
   const resolveRecipient = (recipient: string, tracked: boolean): DirectDeliveryResolution =>
-    resolveDirectDelivery(recipient, transport, opts.resolveDelivery, tracked, delivery)
+    resolveDirectDelivery(recipient, transport, opts.resolveDelivery, tracked && incident === undefined, delivery)
   if (Array.isArray(recipients)) {
     return handleMultiSend({
       ctx,
@@ -1046,7 +1048,7 @@ function resolveDirectDelivery(
   recipient: string,
   transport: OwnerTransportProjector,
   resolver: DirectDeliveryResolver | undefined,
-  tracked: boolean,
+  answerPromising: boolean,
   explicitDelivery: Delivery | undefined,
 ): DirectDeliveryResolution {
   const directMailboxResolution = {
@@ -1060,7 +1062,7 @@ function resolveDirectDelivery(
       : explicitDelivery === "pull"
         ? directMailboxResolution
         : (policyResolution ?? directMailboxResolution)
-  if (!tracked || resolution.status !== "accepted") return resolution
+  if (!answerPromising || resolution.status !== "accepted") return resolution
   // 24581: reachable-and-deaf final owners must fail loudly. Untracked notify
   // still delivers — that is what a relay is for. Names with no sessions row
   // are not this rule; they keep the existing unresolved/offline path.
