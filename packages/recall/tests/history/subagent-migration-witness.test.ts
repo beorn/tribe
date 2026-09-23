@@ -154,15 +154,17 @@ describe("Subagent Migration Witness (CTO Ruling 25158)", () => {
     // 1. Search with sessionId = 'parent-sess' matches BOTH parent and subagent messages
     const searchParent = ftsSearchWithSnippet(db, "question", { sessionId: "parent-sess" })
     expect(searchParent.results.length).toBe(1)
-    expect(searchParent.results[0].session_id).toBe("parent-sess")
-    expect(searchParent.results[0].parent_session_id).toBeNull()
-    expect(searchParent.results[0].agent_id).toBeNull()
+    const parentHit = searchParent.results[0]!
+    expect(parentHit.session_id).toBe("parent-sess")
+    expect(parentHit.parent_session_id).toBeNull()
+    expect(parentHit.agent_id).toBeNull()
 
     const searchSubagentUnderParent = ftsSearchWithSnippet(db, "subagent instructions", { sessionId: "parent-sess" })
     expect(searchSubagentUnderParent.results.length).toBe(1)
-    expect(searchSubagentUnderParent.results[0].session_id).toBe("parent-sess:agent-sub1")
-    expect(searchSubagentUnderParent.results[0].parent_session_id).toBe("parent-sess")
-    expect(searchSubagentUnderParent.results[0].agent_id).toBe("agent-sub1")
+    const subHitUnderParent = searchSubagentUnderParent.results[0]!
+    expect(subHitUnderParent.session_id).toBe("parent-sess:agent-sub1")
+    expect(subHitUnderParent.parent_session_id).toBe("parent-sess")
+    expect(subHitUnderParent.agent_id).toBe("agent-sub1")
 
     // 2. High-level recall search exposes parentSessionId and agentId in results
     const recallResult = await recall("subagent finished task", { raw: true, since: "180d" })
