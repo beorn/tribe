@@ -6,7 +6,7 @@
 
 - `recall search --vault-db <path>` binds the km vault database on the call line and outranks `KM_VAULT_DB`. An empty `--vault-db` (a failed `$(…)` substitution) is a usage error, exit 2.
 - Recall no longer walks up from the cwd looking for `.km/state.db`. With nothing bound, search prints `vault: not bound (pass --vault-db)` on stderr instead of silently searching no vault.
-- Prompt injection (the hook and the tribe daemon's `inject_delta`) says the same once per session: with no vault bound, the session's first injection carries `recall: vault: not bound (pass --vault-db); vault notes were not searched`.
+- Prompt injection (the hook and the tribe daemon's `inject_delta`) says the same once per session: with no vault bound, the session's first injection carries `recall: vault: not bound (pass --vault-db); vault notes were not searched`, framed inside the recall `<injected_context>` envelope (as `<vault-notice>`, `mode="notice"` when there are no snippets) and followed by the protocol footer.
 
 ## 0.2.0 (2026-04-27)
 
