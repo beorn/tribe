@@ -37,6 +37,20 @@ export const TRIVIAL_PROMPTS: ReadonlySet<string> = new Set([
   "go for it",
 ])
 
+const HARNESS_ENVELOPE = /<(task-notification|channel|system-reminder|agent-message)\b[^>]*>[\s\S]*?<\/\1>/g
+
+/**
+ * The harness wraps what it hands a session in envelopes: Monitor events (`<task-notification>`),
+ * tribe channel messages (`<channel …>`), reminders (`<system-reminder>`) and subagent messages
+ * (`<agent-message from=…>`). They are not the operator's words, and their boilerplate picked the
+ * glossary anchors "tribe" and "agent", whose recall fallback ran 3.1 s at p50 and 29.6 s at worst
+ * against Claude Code's 30 s kill (25071). What is left after removing them is the prompt salience,
+ * the glossary and recall may read.
+ */
+export function stripHarnessEnvelopes(prompt: string): string {
+  return prompt.replace(HARNESS_ENVELOPE, "").trim()
+}
+
 /**
  * Classify a prompt into a skip reason, or null if it's substantive enough
  * to feed into recall. Order matters: short-check runs before trivial-check

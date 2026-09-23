@@ -25,6 +25,7 @@ import {
   LONG_PROMPT_BYPASS_LENGTH,
   MAX_RECALL_QUERY_CHARS,
   MIN_RANK_THRESHOLD,
+  stripHarnessEnvelopes,
   type InjectSkipReason,
 } from "./prompt-filter.ts"
 import { recall } from "../history/search.ts"
@@ -279,13 +280,13 @@ export async function timeStepAsync<T>(
  * the failure to avoid.
  */
 export async function runInjectDelta(
-  prompt: string,
+  rawPrompt: string,
   store: SeenStore,
   opts: RunInjectDeltaOptions = {},
 ): Promise<RunInjectDeltaResult> {
   const vaultDbPath = opts.deps?.getVaultDbPath ?? getVaultDbPath
   const notice = vaultDbPath() === null && store.get(VAULT_UNBOUND_NOTICE_KEY) === undefined
-  const result = await runRecallInjection(prompt, store, opts, notice ? VAULT_UNBOUND_ELEMENT : null)
+  const result = await runRecallInjection(rawPrompt, store, opts, notice ? VAULT_UNBOUND_ELEMENT : null)
   if (!notice) return result
   store.set(VAULT_UNBOUND_NOTICE_KEY, Number.MAX_SAFE_INTEGER)
   store.flush?.()
@@ -299,7 +300,7 @@ export async function runInjectDelta(
 }
 
 async function runRecallInjection(
-  prompt: string,
+  rawPrompt: string,
   store: SeenStore,
   opts: RunInjectDeltaOptions,
   notice: string | null,
@@ -314,6 +315,17 @@ async function runRecallInjection(
   const findGlossaryAnchorImpl = opts.deps?.findGlossaryAnchor ?? findGlossaryAnchor
 
   const steps = opts.steps
+  // Only the operator's own words reach salience, the glossary and recall (25071).
+  const prompt = stripHarnessEnvelopes(rawPrompt)
+  if (prompt.length === 0 && rawPrompt.trim().length > 0) {
+    emitInjectionDebugEvent({
+      source: "recall",
+      action: "skip",
+      reason: "harness_envelope",
+      prompt: rawPrompt.slice(0, 200),
+    })
+    return { skipped: true, reason: "low_salience" }
+  }
   const skipReason = timeStep(steps, "classify", () => classifyPromptSkip(prompt))
   if (skipReason && TRIVIAL_SKIP_REASONS.has(skipReason)) {
     emitInjectionDebugEvent({

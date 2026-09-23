@@ -635,3 +635,43 @@ describe("runInjectDelta — a busy project-source step is skipped, never waited
     expect(recallMock).not.toHaveBeenCalled()
   })
 })
+
+// 25071: the harness wraps what it hands a session in envelopes (Monitor events, tribe channel
+// messages, reminders). They are not the operator's words, yet their boilerplate picked the glossary
+// anchor "tribe", whose recall_fallback ran 3.1 s at p50 and 29.6 s at worst, against the 30 s kill.
+describe("25071: harness envelopes never reach salience, the glossary or recall", () => {
+  beforeEach(() => {
+    recallMock.mockReset()
+    ensureProjectSourcesIndexedMock.mockReset()
+  })
+
+  // The return reuses "low_salience" (no user text is salient): InjectSkipReason is public API. The
+  // injection debug record names it "harness_envelope".
+  test("a prompt that is only harness envelopes skips without salience, glossary or recall", async () => {
+    const glossary = vi.fn(() => "tribe")
+    for (const prompt of [
+      '<task-notification>\n<task-id>b1</task-id>\n<summary>Monitor event: "@dev/11 queue"</summary>\n<event>QUEUE: task/dev11-25229-agy-trust-home pending</event>\n</task-notification>',
+      '<channel source="plugin:tribe:tribe" from="@chief" type="request" message_id="m1">\nplease look at km-storage-sync\n</channel>',
+      "<system-reminder>\nwhat did we decide about km-board-state?\n</system-reminder>",
+      '<agent-message from="a8e4e5faade7d267e">\n25186 evidence: km-storage-sync is green\n</agent-message>',
+    ]) {
+      const result = await runInjectDelta(prompt, createMemorySeenStore(), { deps: { findGlossaryAnchor: glossary } })
+      expect(result, prompt.slice(0, 40)).toMatchObject({ skipped: true, reason: "low_salience" })
+    }
+    expect(glossary).not.toHaveBeenCalled()
+    expect(recallMock).not.toHaveBeenCalled()
+  })
+
+  test("typed text beside an envelope is all that salience and the glossary see", async () => {
+    const glossary = vi.fn(() => null)
+    mockRecall([])
+    const typed = "what did we decide about km-storage-sync layering?"
+    await runInjectDelta(
+      `<system-reminder>\nthe tribe hook said tribe\n</system-reminder>\n${typed}\n<task-notification>\n<event>x</event>\n</task-notification>`,
+      createMemorySeenStore(),
+      { deps: { findGlossaryAnchor: glossary } },
+    )
+    expect(glossary).toHaveBeenCalledWith(typed)
+    expect(recallMock.mock.calls[0]?.[0]).toBe(typed)
+  })
+})
