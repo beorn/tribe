@@ -21,7 +21,11 @@ function currentDbPath(): string {
   return process.env.RECALL_DB_PATH?.trim() || DB_PATH
 }
 
-export function getDb(): Database {
+export interface GetDbOptions {
+  allowMigration?: boolean
+}
+
+export function getDb(options?: GetDbOptions): Database {
   if (dbInstance) return dbInstance
 
   const dbPath = currentDbPath()
@@ -32,14 +36,21 @@ export function getDb(): Database {
     fs.mkdirSync(claudeDir, { recursive: true })
   }
 
-  dbInstance = new Database(dbPath)
+  const db = new Database(dbPath)
 
   // Enable WAL mode for concurrent access (multiple Claude sessions)
   // WAL allows readers to not block writers and vice versa
-  dbInstance.run("PRAGMA journal_mode = WAL")
-  dbInstance.run("PRAGMA busy_timeout = 5000") // Wait 5s if locked
+  db.run("PRAGMA journal_mode = WAL")
+  db.run("PRAGMA busy_timeout = 5000") // Wait 5s if locked
 
-  initSchema(dbInstance)
+  try {
+    initSchema(db, { allowMigration: options?.allowMigration })
+  } catch (err) {
+    db.close()
+    throw err
+  }
+
+  dbInstance = db
   return dbInstance
 }
 

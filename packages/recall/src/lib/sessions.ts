@@ -22,8 +22,14 @@ export async function cmdIndex(opts: {
   full?: boolean
   force?: boolean
   path?: string
+  migrate?: boolean
 }): Promise<void> {
-  const db = getDb()
+  const db = getDb({ allowMigration: opts.migrate })
+  if (opts.migrate && !opts.incremental && !opts.full && !opts.path) {
+    console.log("Database schema migration complete.")
+    closeDb()
+    return
+  }
   try {
     using lock = acquireIndexWriter(db)
 

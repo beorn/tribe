@@ -44,6 +44,7 @@ import { cmdExport } from "./qmd-export"
 const SUBCOMMANDS = new Set([
   "search",
   "index",
+  "migrate",
   "status",
   "sessions",
   "files",
@@ -126,11 +127,27 @@ program
   .option("--force", "Force commit even if session rows shrunk")
   .option("--path <file>", "Index specific transcript file")
   .option("--project-root <path>", "Project root for indexing project sources (beads, docs, memory)")
+  .option("--migrate", "Run pending database schema migrations")
   .action(
-    async (opts: { incremental?: boolean; full?: boolean; force?: boolean; path?: string; projectRoot?: string }) => {
+    async (opts: {
+      incremental?: boolean
+      full?: boolean
+      force?: boolean
+      path?: string
+      projectRoot?: string
+      migrate?: boolean
+    }) => {
       await cmdIndex(opts)
     },
   )
+
+// ── migrate ─────────────────────────────────────────────────────────────
+program
+  .command("migrate")
+  .description("Run pending database schema migrations (e.g. v2 -> v3)")
+  .action(async () => {
+    await cmdIndex({ migrate: true })
+  })
 
 // ── status ──────────────────────────────────────────────────────────────
 program

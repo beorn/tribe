@@ -5,9 +5,9 @@ import { tmpdir } from "node:os"
 import * as path from "node:path"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
-import { initSchema, runMigrations } from "../../src/history/db-schema.ts"
+import { CURRENT_SCHEMA_VERSION, MIGRATION_STEPS, initSchema, runMigrations } from "../../src/history/db-schema.ts"
 import { getSession, insertMessage, upsertSession } from "../../src/history/db-queries.ts"
-import { closeDb } from "../../src/history/db.ts"
+import { closeDb, getDb } from "../../src/history/db.ts"
 import { rebuildIndex, findSessionFiles, isTranscriptShape } from "../../src/history/indexer.ts"
 import {
   deleteCodexSessionKeys,
@@ -711,31 +711,217 @@ if (args[0] === "transcript" && args[1] === "list") {
   })
 
   // --------------------------------------------------------------------------
-  // Chief Ruling 1: BEGIN IMMEDIATE & version re-read inside transaction
+  // Chief Ruling 1: Two-connection concurrency witness & inner re-read
   // --------------------------------------------------------------------------
-  test("Chief Ruling 1: runMigrations uses BEGIN IMMEDIATE and safely re-reads user_version inside transaction", () => {
-    const memoryDb = new Database(":memory:")
-    initSchema(memoryDb)
-    expect((memoryDb.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3)
+  test("Chief Ruling 1: two connections on one file - B reads v2, A commits v3 before B's BEGIN, B runs v3 body 0 times and ends at 3", () => {
+    const concDbPath = join(tempDir, "ruling1-concurrency.db")
+    const initDb = new Database(concDbPath)
+    initSchema(initDb)
+    initDb.exec("PRAGMA user_version = 2")
+    initDb.close()
 
-    // Setting user_version back to 2
-    memoryDb.exec("PRAGMA user_version = 2")
-    expect((memoryDb.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(2)
+    const dbA = new Database(concDbPath)
+    const dbB = new Database(concDbPath)
+    dbA.run("PRAGMA busy_timeout = 5000")
+    dbB.run("PRAGMA busy_timeout = 5000")
 
-    // If another transaction advances version to 3 inside the transaction, re-read sees it
-    const origPrepare = memoryDb.prepare.bind(memoryDb)
-    let reReadChecked = false
-    memoryDb.prepare = ((sql: string) => {
-      if (sql.includes("PRAGMA user_version") && !reReadChecked) {
-        reReadChecked = true
+    const step3 = MIGRATION_STEPS.find((s) => s.version === 3)!
+    const origUp = step3.up
+    let v3RunsInA = 0
+    let v3RunsInB = 0
+
+    // Spy on connection B: right before B executes BEGIN IMMEDIATE, A runs and commits v3!
+    const origBExec = dbB.exec.bind(dbB)
+    let bBeganImmediate = false
+    dbB.exec = ((sql: string) => {
+      if (sql === "BEGIN IMMEDIATE" && !bBeganImmediate) {
+        bBeganImmediate = true
+        // At this exact moment, connection A commits v3!
+        step3.up = (d) => {
+          v3RunsInA++
+          return origUp(d)
+        }
+        runMigrations(dbA)
+        expect((dbA.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3)
+        // Now set spy for B's body run
+        step3.up = (d) => {
+          v3RunsInB++
+          return origUp(d)
+        }
       }
-      return origPrepare(sql)
+      return origBExec(sql)
     }) as any
 
-    // Running migrations brings user_version cleanly to 3
-    runMigrations(memoryDb)
-    expect(reReadChecked).toBe(true)
-    expect((memoryDb.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3)
-    memoryDb.close()
+    try {
+      // B runs migrations starting from initial version 2 read outside
+      runMigrations(dbB)
+
+      // B must have run v3 body 0 times!
+      expect(v3RunsInA).toBe(1)
+      expect(v3RunsInB).toBe(0)
+      expect((dbB.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3)
+    } finally {
+      step3.up = origUp
+      dbA.close()
+      dbB.close()
+    }
+  })
+
+  test("Chief Ruling 1: red arm - runner without inner re-read runs v3 body a second time", () => {
+    const concDbPath = join(tempDir, "ruling1-red-arm.db")
+    const initDb = new Database(concDbPath)
+    initSchema(initDb)
+    initDb.exec("PRAGMA user_version = 2")
+    initDb.close()
+
+    const dbA = new Database(concDbPath)
+    const dbB = new Database(concDbPath)
+    dbA.run("PRAGMA busy_timeout = 5000")
+    dbB.run("PRAGMA busy_timeout = 5000")
+
+    const step3 = MIGRATION_STEPS.find((s) => s.version === 3)!
+    const origUp = step3.up
+    let v3RunsInB = 0
+
+    // Capture stale version 2 for connection B before dbA migrates
+    const staleVersion = (dbB.prepare("PRAGMA user_version").get() as { user_version: number }).user_version
+    expect(staleVersion).toBe(2)
+
+    // Defective runner: round 2's runner that lacks inner re-read inside the transaction
+    function defectiveRunMigrationsWithoutInnerReRead(d: Database, initialVersion: number) {
+      for (const step of MIGRATION_STEPS) {
+        if (initialVersion < step.version) {
+          d.exec("BEGIN TRANSACTION")
+          // Defect: does NOT re-read user_version inside transaction! Uses stale initialVersion!
+          step.up(d)
+          d.exec(`PRAGMA user_version = ${step.version}`)
+          d.exec("COMMIT")
+        }
+      }
+    }
+
+    try {
+      // A migrates to v3
+      runMigrations(dbA)
+      expect((dbA.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3)
+
+      // B uses defective runner
+      step3.up = (d) => {
+        v3RunsInB++
+        return origUp(d)
+      }
+      defectiveRunMigrationsWithoutInnerReRead(dbB, staleVersion)
+
+      // In the defective runner, B runs the body again!
+      expect(v3RunsInB).toBe(1)
+    } finally {
+      step3.up = origUp
+      dbA.close()
+      dbB.close()
+    }
+  })
+
+  // --------------------------------------------------------------------------
+  // Item 3(a): Busy error names migration step
+  // --------------------------------------------------------------------------
+  test("Item 3(a): busy failure on BEGIN IMMEDIATE names the migration step", () => {
+    const lockDbPath = join(tempDir, "item3a-busy.db")
+    const initDb = new Database(lockDbPath)
+    initSchema(initDb)
+    initDb.exec("PRAGMA user_version = 2")
+    initDb.close()
+
+    const dbHolder = new Database(lockDbPath)
+    const dbMigrator = new Database(lockDbPath)
+    dbMigrator.run("PRAGMA busy_timeout = 0")
+
+    // dbHolder acquires write lock
+    dbHolder.exec("BEGIN IMMEDIATE")
+
+    try {
+      expect(() => {
+        runMigrations(dbMigrator)
+      }).toThrow(/\[migration v3\] message-uuid-scoping-and-dedup failed: .*locked/)
+    } finally {
+      dbHolder.exec("ROLLBACK")
+      dbHolder.close()
+      dbMigrator.close()
+    }
+  })
+
+  test("Item 3(a): red arm - BEGIN IMMEDIATE outside try produces bare unnamed database is locked error", () => {
+    const lockDbPath = join(tempDir, "item3a-red-arm.db")
+    const initDb = new Database(lockDbPath)
+    initSchema(initDb)
+    initDb.exec("PRAGMA user_version = 2")
+    initDb.close()
+
+    const dbHolder = new Database(lockDbPath)
+    const dbMigrator = new Database(lockDbPath)
+    dbMigrator.run("PRAGMA busy_timeout = 0")
+
+    dbHolder.exec("BEGIN IMMEDIATE")
+
+    // Simulate runner with BEGIN IMMEDIATE outside try
+    function runnerWithBeginOutsideTry(d: Database) {
+      d.exec("BEGIN IMMEDIATE")
+      try {
+        d.exec("COMMIT")
+      } catch (e) {
+        throw new Error(`[migration v3] failed: ${(e as Error).message}`)
+      }
+    }
+
+    try {
+      expect(() => {
+        runnerWithBeginOutsideTry(dbMigrator)
+      }).toThrow(/^database is locked$/)
+    } finally {
+      dbHolder.exec("ROLLBACK")
+      dbHolder.close()
+      dbMigrator.close()
+    }
+  })
+
+  // --------------------------------------------------------------------------
+  // Item 3(b) (Chief Ruling): Non-migrate openers refuse; explicit migrate command migrates
+  // --------------------------------------------------------------------------
+  test("Item 3(b) (Chief Ruling): v2 fixture opened by non-migrate command throws naming migrate command and stays at 2; explicit migrate command migrates to 3", async () => {
+    const v2FixturePath = join(tempDir, "v2-opener-gate.db")
+    const initDb = new Database(v2FixturePath)
+    initSchema(initDb)
+    initDb.exec("PRAGMA user_version = 2")
+    initDb.close()
+
+    process.env.RECALL_DB_PATH = v2FixturePath
+    closeDb() // ensure clean singleton state
+
+    try {
+      // 1. Non-migrate opener (getDb() without allowMigration) throws loud error naming migrate command
+      expect(() => {
+        getDb()
+      }).toThrow(/Database schema version 2 requires migration to 3\. Run 'recall index --migrate' to migrate/)
+
+      // 2. user_version remains at 2!
+      const checkDb = new Database(v2FixturePath, { readonly: true })
+      expect((checkDb.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(2)
+      checkDb.close()
+
+      // 3. Explicit migrate command (cmdIndex with migrate: true) migrates it
+      await cmdIndex({ migrate: true })
+
+      // 4. user_version is now 3!
+      const afterDb = new Database(v2FixturePath, { readonly: true })
+      expect((afterDb.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3)
+      afterDb.close()
+
+      // 5. Subsequent non-migrate getDb() now succeeds without error!
+      expect(() => {
+        const opened = getDb()
+        expect(opened).toBeDefined()
+      }).not.toThrow()
+    } finally {
+      closeDb()
+    }
   })
 })

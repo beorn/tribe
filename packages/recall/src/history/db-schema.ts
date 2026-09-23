@@ -382,8 +382,8 @@ export function runMigrations(db: Database): void {
     if (initialVersion >= step.version) {
       continue
     }
-    db.exec("BEGIN IMMEDIATE")
     try {
+      db.exec("BEGIN IMMEDIATE")
       const currentVersion = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version
       if (currentVersion < step.version) {
         step.up(db)
@@ -403,7 +403,26 @@ export function runMigrations(db: Database): void {
   }
 }
 
-export function initSchema(db: Database): void {
+export interface InitSchemaOptions {
+  allowMigration?: boolean
+}
+
+export function initSchema(db: Database, options?: InitSchemaOptions): void {
+  const versionBefore = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version
   db.exec(SCHEMA)
+
+  if (versionBefore === 0) {
+    db.exec(`PRAGMA user_version = ${CURRENT_SCHEMA_VERSION}`)
+    return
+  }
+
+  if (versionBefore < CURRENT_SCHEMA_VERSION) {
+    if (!options?.allowMigration && process.env.RECALL_ALLOW_MIGRATE !== "1") {
+      throw new Error(
+        `Database schema version ${versionBefore} requires migration to ${CURRENT_SCHEMA_VERSION}. Run 'recall index --migrate' to migrate the database.`,
+      )
+    }
+  }
+
   runMigrations(db)
 }
