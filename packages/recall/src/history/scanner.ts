@@ -86,6 +86,8 @@ export function extractTranscriptMessages(transcriptPath: string): string | null
 export interface HookResult {
   skipped: boolean
   reason?: import("../lib/prompt-filter.ts").InjectSkipReason
+  /** Each step skipped rather than waited on, and why (@ag/tribe/25071). Absent when nothing was skipped. */
+  skippedSteps?: Record<string, string>
   hookOutput?: {
     hookSpecificOutput: {
       hookEventName: "UserPromptSubmit"
@@ -104,9 +106,11 @@ export async function hookRecall(prompt: string, opts: { steps?: Record<string, 
   const seenFile = claudeSessionId ? path.join(os.tmpdir(), `recall-hook-seen-${claudeSessionId}.json`) : null
   const store = timeStep(opts.steps, "seen_store", () => createTmpfileSeenStore(seenFile))
   const core = await runInjectDelta(prompt, store, { steps: opts.steps })
-  if (core.skipped) return { skipped: true, reason: core.reason }
+  const skipped = core.skippedSteps ? { skippedSteps: core.skippedSteps } : {}
+  if (core.skipped) return { skipped: true, reason: core.reason, ...skipped }
   return {
     skipped: false,
+    ...skipped,
     hookOutput: {
       hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: core.additionalContext },
     },

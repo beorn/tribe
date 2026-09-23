@@ -421,7 +421,13 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
       ttlTurns: params.ttlTurns,
     })
     if (core.skipped) {
-      return { skipped: true, reason: core.reason, seenCount: store.size(), turnNumber: store.turn() }
+      return {
+        skipped: true,
+        reason: core.reason,
+        seenCount: store.size(),
+        turnNumber: store.turn(),
+        skippedSteps: core.skippedSteps,
+      }
     }
     return {
       skipped: false,
@@ -429,6 +435,7 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
       newKeys: core.newKeys,
       seenCount: store.size(),
       turnNumber: core.turn,
+      skippedSteps: core.skippedSteps,
     }
   }
 
