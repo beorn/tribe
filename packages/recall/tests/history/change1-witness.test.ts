@@ -5,7 +5,13 @@ import { tmpdir } from "node:os"
 import * as path from "node:path"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
-import { CURRENT_SCHEMA_VERSION, MIGRATION_STEPS, initSchema, runMigrations } from "../../src/history/db-schema.ts"
+import {
+  CURRENT_SCHEMA_VERSION,
+  MIGRATION_STEPS,
+  SCHEMA,
+  initSchema,
+  runMigrations,
+} from "../../src/history/db-schema.ts"
 import { getSession, insertMessage, upsertSession } from "../../src/history/db-queries.ts"
 import { closeDb, getDb } from "../../src/history/db.ts"
 import { rebuildIndex, findSessionFiles, isTranscriptShape } from "../../src/history/indexer.ts"
@@ -884,14 +890,102 @@ if (args[0] === "transcript" && args[1] === "list") {
   })
 
   // --------------------------------------------------------------------------
-  // Item 3(b) (Chief Ruling): Non-migrate openers refuse; explicit migrate command migrates
+  // Item 3(b) (Chief Ruling): Non-migrate openers refuse before SCHEMA; explicit migrate command migrates
   // --------------------------------------------------------------------------
-  test("Item 3(b) (Chief Ruling): v2 fixture opened by non-migrate command throws naming migrate command and stays at 2; explicit migrate command migrates to 3", async () => {
-    const v2FixturePath = join(tempDir, "v2-opener-gate.db")
-    const initDb = new Database(v2FixturePath)
-    initSchema(initDb)
-    initDb.exec("PRAGMA user_version = 2")
-    initDb.close()
+  function createRealV2Fixture(dbPath: string): void {
+    const fixtureDb = new Database(dbPath)
+    fixtureDb.exec(`
+      PRAGMA user_version = 2;
+      CREATE TABLE writes (
+        id INTEGER PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        session_file TEXT NOT NULL,
+        tool_use_id TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        content_size INTEGER NOT NULL,
+        content TEXT
+      );
+      CREATE INDEX idx_writes_path ON writes(file_path);
+      CREATE INDEX idx_writes_timestamp ON writes(timestamp);
+      CREATE INDEX idx_writes_session ON writes(session_id);
+      CREATE INDEX idx_writes_hash ON writes(content_hash);
+
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        project_path TEXT NOT NULL,
+        jsonl_path TEXT UNIQUE NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        message_count INTEGER DEFAULT 0,
+        title TEXT,
+        status TEXT,
+        size_bytes INTEGER,
+        mtime_ms REAL,
+        last_event_at_ms REAL,
+        failure_reason TEXT,
+        failure_time INTEGER,
+        shrink_old_count INTEGER,
+        shrink_new_count INTEGER,
+        parent_session_id TEXT,
+        agent_id TEXT
+      );
+      CREATE INDEX idx_sessions_parent ON sessions(parent_session_id);
+
+      CREATE TABLE messages (
+        id INTEGER PRIMARY KEY,
+        uuid TEXT UNIQUE,
+        session_id TEXT NOT NULL REFERENCES sessions(id),
+        type TEXT NOT NULL,
+        content TEXT,
+        tool_name TEXT,
+        file_paths TEXT,
+        timestamp INTEGER NOT NULL,
+        duplicate_of INTEGER,
+        line INTEGER
+      );
+      CREATE INDEX idx_messages_session ON messages(session_id);
+      CREATE INDEX idx_messages_type ON messages(type);
+      CREATE INDEX idx_messages_timestamp ON messages(timestamp);
+      CREATE INDEX idx_messages_tool ON messages(tool_name);
+
+      CREATE VIRTUAL TABLE messages_fts USING fts5(
+        content,
+        tool_name,
+        file_paths,
+        content='messages',
+        content_rowid='id'
+      );
+      CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
+        INSERT INTO messages_fts(rowid, content, tool_name, file_paths)
+        VALUES (new.id, new.content, new.tool_name, new.file_paths);
+      END;
+      CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, file_paths)
+        VALUES ('delete', old.id, old.content, old.tool_name, old.file_paths);
+      END;
+      CREATE TRIGGER messages_au AFTER UPDATE ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, file_paths)
+        VALUES ('delete', old.id, old.content, old.tool_name, old.file_paths);
+        INSERT INTO messages_fts(rowid, content, tool_name, file_paths)
+        VALUES (new.id, new.content, new.tool_name, new.file_paths);
+      END;
+    `)
+    fixtureDb.close()
+  }
+
+  test("Item 3(b) (Chief Ruling): v2 fixture opened by non-migrate command throws naming migrate command, leaves sqlite_master and user_version untouched; explicit migrate command migrates to 3", async () => {
+    const v2FixturePath = join(tempDir, "v2-opener-gate-real.db")
+    createRealV2Fixture(v2FixturePath)
+
+    // Capture sqlite_master before refusal
+    const checkDbBefore = new Database(v2FixturePath, { readonly: true })
+    const masterBefore = checkDbBefore
+      .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
+      .all() as Array<{ type: string; name: string; sql: string }>
+    expect(masterBefore.some((r) => r.name === "idx_messages_uuid")).toBe(false)
+    checkDbBefore.close()
 
     process.env.RECALL_DB_PATH = v2FixturePath
     closeDb() // ensure clean singleton state
@@ -902,26 +996,130 @@ if (args[0] === "transcript" && args[1] === "list") {
         getDb()
       }).toThrow(/Database schema version 2 requires migration to 3\. Run 'recall index --migrate' to migrate/)
 
-      // 2. user_version remains at 2!
-      const checkDb = new Database(v2FixturePath, { readonly: true })
-      expect((checkDb.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(2)
-      checkDb.close()
+      // 2. sqlite_master is completely UNCHANGED: no DDL ran, idx_messages_uuid was NOT created
+      const checkDbAfter = new Database(v2FixturePath, { readonly: true })
+      const masterAfter = checkDbAfter
+        .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
+        .all() as Array<{ type: string; name: string; sql: string }>
+      expect(masterAfter).toEqual(masterBefore)
+      expect(masterAfter.some((r) => r.name === "idx_messages_uuid")).toBe(false)
 
-      // 3. Explicit migrate command (cmdIndex with migrate: true) migrates it
+      // 3. user_version remains at 2!
+      expect((checkDbAfter.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(2)
+      checkDbAfter.close()
+
+      // 4. Explicit migrate command (cmdIndex with migrate: true) migrates it
       await cmdIndex({ migrate: true })
 
-      // 4. user_version is now 3!
-      const afterDb = new Database(v2FixturePath, { readonly: true })
-      expect((afterDb.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3)
-      afterDb.close()
+      // 5. user_version is now 3!
+      const afterMigrateDb = new Database(v2FixturePath, { readonly: true })
+      expect((afterMigrateDb.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3)
+      const masterMigrated = afterMigrateDb
+        .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
+        .all() as Array<{ type: string; name: string; sql: string }>
+      expect(masterMigrated.some((r) => r.name === "idx_messages_uuid")).toBe(true)
+      afterMigrateDb.close()
 
-      // 5. Subsequent non-migrate getDb() now succeeds without error!
+      // 6. Subsequent non-migrate getDb() now succeeds without error!
       expect(() => {
         const opened = getDb()
         expect(opened).toBeDefined()
       }).not.toThrow()
     } finally {
       closeDb()
+    }
+  })
+
+  test("Item 3(b): red arm - runner executing SCHEMA before check mutates sqlite_master by gaining idx_messages_uuid", () => {
+    const v2RedArmPath = join(tempDir, "v2-schema-red-arm.db")
+    createRealV2Fixture(v2RedArmPath)
+
+    const checkDb = new Database(v2RedArmPath)
+    const masterBefore = checkDb
+      .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
+      .all() as Array<{ type: string; name: string; sql: string }>
+    expect(masterBefore.some((r) => r.name === "idx_messages_uuid")).toBe(false)
+
+    // Defective runner: executes SCHEMA before checking/refusing
+    function runnerWithSchemaBeforeCheck(d: Database) {
+      const ver = (d.prepare("PRAGMA user_version").get() as { user_version: number }).user_version
+      // Defect: runs SCHEMA before gate!
+      d.exec(SCHEMA)
+      if (ver > 0 && ver < 3) {
+        throw new Error("refused")
+      }
+    }
+
+    try {
+      expect(() => {
+        runnerWithSchemaBeforeCheck(checkDb)
+      }).toThrow("refused")
+
+      // Defect verified: sqlite_master was mutated despite throwing! Gained idx_messages_uuid!
+      const masterAfter = checkDb
+        .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
+        .all() as Array<{ type: string; name: string; sql: string }>
+      expect(masterAfter.some((r) => r.name === "idx_messages_uuid")).toBe(true)
+      expect(masterAfter).not.toEqual(masterBefore)
+    } finally {
+      checkDb.close()
+    }
+  })
+
+  test("Item 3(b): RECALL_ALLOW_MIGRATE=1 env var does not bypass refusal on v2 database", () => {
+    const v2EnvTestPath = join(tempDir, "v2-env-bypass-test.db")
+    createRealV2Fixture(v2EnvTestPath)
+
+    process.env.RECALL_DB_PATH = v2EnvTestPath
+    process.env.RECALL_ALLOW_MIGRATE = "1"
+    closeDb()
+
+    try {
+      // Must STILL refuse even if RECALL_ALLOW_MIGRATE=1 is set in environment!
+      expect(() => {
+        getDb()
+      }).toThrow(/Database schema version 2 requires migration to 3\. Run 'recall index --migrate' to migrate/)
+
+      const checkDb = new Database(v2EnvTestPath, { readonly: true })
+      expect((checkDb.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(2)
+      checkDb.close()
+    } finally {
+      delete process.env.RECALL_ALLOW_MIGRATE
+      closeDb()
+    }
+  })
+
+  test("Item 3(b): red arm - runner with RECALL_ALLOW_MIGRATE=1 bypass migrates database without explicit migrate command", () => {
+    const v2RedArmEnvPath = join(tempDir, "v2-env-red-arm.db")
+    createRealV2Fixture(v2RedArmEnvPath)
+
+    const checkDb = new Database(v2RedArmEnvPath)
+    expect((checkDb.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(2)
+
+    // Defective runner: round 4 runner with RECALL_ALLOW_MIGRATE bypass
+    function runnerWithEnvBypass(d: Database) {
+      const ver = (d.prepare("PRAGMA user_version").get() as { user_version: number }).user_version
+      if (ver > 0 && ver < 3) {
+        if (process.env.RECALL_ALLOW_MIGRATE !== "1") {
+          throw new Error("refused")
+        }
+      }
+      d.exec(SCHEMA)
+      runMigrations(d)
+    }
+
+    try {
+      process.env.RECALL_ALLOW_MIGRATE = "1"
+      // Defective runner does NOT throw; it silently migrates!
+      expect(() => {
+        runnerWithEnvBypass(checkDb)
+      }).not.toThrow()
+
+      // Defect verified: database was migrated to version 3 by non-migrate opener!
+      expect((checkDb.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3)
+    } finally {
+      delete process.env.RECALL_ALLOW_MIGRATE
+      checkDb.close()
     }
   })
 })
