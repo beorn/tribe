@@ -90,6 +90,7 @@ export function updateSessionStatus(
     sizeBytes?: number | null
     mtimeMs?: number | null
     lastEventAtMs?: number | null
+    jsonlPath?: string | null
   },
 ): void {
   db.prepare(`
@@ -101,7 +102,8 @@ export function updateSessionStatus(
         shrink_new_count = ?,
         size_bytes = COALESCE(?, size_bytes),
         mtime_ms = COALESCE(?, mtime_ms),
-        last_event_at_ms = COALESCE(?, last_event_at_ms)
+        last_event_at_ms = COALESCE(?, last_event_at_ms),
+        jsonl_path = COALESCE(?, jsonl_path)
     WHERE id = ?
   `).run(
     status,
@@ -112,6 +114,7 @@ export function updateSessionStatus(
     details?.sizeBytes ?? null,
     details?.mtimeMs ?? null,
     details?.lastEventAtMs ?? null,
+    details?.jsonlPath ?? null,
     id,
   )
 }

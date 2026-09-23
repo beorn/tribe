@@ -198,3 +198,9 @@ export interface SimilarResult {
   timestamp: number
   rank: number
 }
+
+export interface ClaudeFailureRecord {
+  id: string
+  file: string
+  reason: string
+}

@@ -149,63 +149,108 @@ CREATE TRIGGER IF NOT EXISTS content_ad AFTER DELETE ON content BEGIN
   INSERT INTO content_fts(content_fts, rowid, title, content)
   VALUES ('delete', old.id, old.title, old.content);
 END;
+
+-- Unique index for upsert support on content table
+CREATE UNIQUE INDEX IF NOT EXISTS idx_content_type_source ON content(content_type, source_id);
+-- Update trigger for content FTS (needed for upsert)
+CREATE TRIGGER IF NOT EXISTS content_au AFTER UPDATE ON content BEGIN
+  INSERT INTO content_fts(content_fts, rowid, title, content)
+  VALUES ('delete', old.id, old.title, old.content);
+  INSERT INTO content_fts(rowid, title, content)
+  VALUES (new.id, new.title, new.content);
+END;
 `
 
-// Migrations to run after schema creation
-export const MIGRATIONS = [
-  // Add title column to sessions table
-  `ALTER TABLE sessions ADD COLUMN title TEXT`,
-  `ALTER TABLE sessions ADD COLUMN status TEXT`,
-  `ALTER TABLE sessions ADD COLUMN size_bytes INTEGER`,
-  `ALTER TABLE sessions ADD COLUMN mtime_ms REAL`,
-  `ALTER TABLE sessions ADD COLUMN last_event_at_ms REAL`,
-  `ALTER TABLE messages ADD COLUMN duplicate_of INTEGER`,
-  `ALTER TABLE messages ADD COLUMN line INTEGER`,
-  `ALTER TABLE sessions ADD COLUMN failure_reason TEXT`,
-  `ALTER TABLE sessions ADD COLUMN failure_time INTEGER`,
-  `ALTER TABLE sessions ADD COLUMN shrink_old_count INTEGER`,
-  `ALTER TABLE sessions ADD COLUMN shrink_new_count INTEGER`,
-  `ALTER TABLE sessions ADD COLUMN parent_session_id TEXT`,
-  `ALTER TABLE sessions ADD COLUMN agent_id TEXT`,
-  `CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)`,
-  // Unique index for upsert support on content table
-  `CREATE UNIQUE INDEX IF NOT EXISTS idx_content_type_source ON content(content_type, source_id)`,
-  // Update trigger for content FTS (needed for upsert)
-  `CREATE TRIGGER IF NOT EXISTS content_au AFTER UPDATE ON content BEGIN
-    INSERT INTO content_fts(content_fts, rowid, title, content)
-    VALUES ('delete', old.id, old.title, old.content);
-    INSERT INTO content_fts(rowid, title, content)
-    VALUES (new.id, new.title, new.content);
-  END`,
+export const CURRENT_SCHEMA_VERSION = 2
+
+export interface MigrationStep {
+  version: number
+  name: string
+  up: (db: Database) => void
+}
+
+export const MIGRATION_STEPS: MigrationStep[] = [
+  {
+    version: 1,
+    name: "baseline-columns-and-indexes",
+    up: (db: Database) => {
+      const getColumns = (table: string): Set<string> => {
+        try {
+          const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+          return new Set(rows.map((r) => r.name))
+        } catch {
+          return new Set()
+        }
+      }
+
+      const sessionCols = getColumns("sessions")
+      if (sessionCols.size > 0) {
+        if (!sessionCols.has("title")) db.exec("ALTER TABLE sessions ADD COLUMN title TEXT")
+        if (!sessionCols.has("status")) db.exec("ALTER TABLE sessions ADD COLUMN status TEXT")
+        if (!sessionCols.has("size_bytes")) db.exec("ALTER TABLE sessions ADD COLUMN size_bytes INTEGER")
+        if (!sessionCols.has("mtime_ms")) db.exec("ALTER TABLE sessions ADD COLUMN mtime_ms REAL")
+        if (!sessionCols.has("last_event_at_ms")) db.exec("ALTER TABLE sessions ADD COLUMN last_event_at_ms REAL")
+        if (!sessionCols.has("failure_reason")) db.exec("ALTER TABLE sessions ADD COLUMN failure_reason TEXT")
+        if (!sessionCols.has("failure_time")) db.exec("ALTER TABLE sessions ADD COLUMN failure_time INTEGER")
+        if (!sessionCols.has("shrink_old_count")) db.exec("ALTER TABLE sessions ADD COLUMN shrink_old_count INTEGER")
+        if (!sessionCols.has("shrink_new_count")) db.exec("ALTER TABLE sessions ADD COLUMN shrink_new_count INTEGER")
+        if (!sessionCols.has("parent_session_id")) db.exec("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT")
+        if (!sessionCols.has("agent_id")) db.exec("ALTER TABLE sessions ADD COLUMN agent_id TEXT")
+      }
+
+      const messageCols = getColumns("messages")
+      if (messageCols.size > 0) {
+        if (!messageCols.has("duplicate_of")) db.exec("ALTER TABLE messages ADD COLUMN duplicate_of INTEGER")
+        if (!messageCols.has("line")) db.exec("ALTER TABLE messages ADD COLUMN line INTEGER")
+      }
+
+      db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)")
+      db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_content_type_source ON content(content_type, source_id)")
+      db.exec(`CREATE TRIGGER IF NOT EXISTS content_au AFTER UPDATE ON content BEGIN
+        INSERT INTO content_fts(content_fts, rowid, title, content)
+        VALUES ('delete', old.id, old.title, old.content);
+        INSERT INTO content_fts(rowid, title, content)
+        VALUES (new.id, new.title, new.content);
+      END`)
+    },
+  },
+  {
+    version: 2,
+    name: "subagent-clobber-cleanup",
+    up: (db: Database) => {
+      const clobbered = db
+        .prepare("SELECT id FROM sessions WHERE jsonl_path LIKE '%/subagents/%' AND agent_id IS NULL")
+        .all() as { id: string }[]
+      if (clobbered.length > 0) {
+        const ids = clobbered.map((s) => s.id)
+        const placeholders = ids.map(() => "?").join(",")
+        const msgDel = db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...ids)
+        const wrDel = db.prepare(`DELETE FROM writes WHERE session_id IN (${placeholders})`).run(...ids)
+        const sessDel = db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...ids)
+        console.log(
+          `[migration] Cleaned ${sessDel.changes} clobbered subagent session(s), ${msgDel.changes} message(s), ${wrDel.changes} write(s); will re-index cleanly.`,
+        )
+      }
+    },
+  },
 ]
 
-export function runMigrations(db: Database): void {
-  for (const migration of MIGRATIONS) {
-    try {
-      db.exec(migration)
-    } catch {
-      // Column/table already exists, skip
-    }
-  }
+// Backward compatibility export for legacy callers
+export const MIGRATIONS: string[] = []
 
-  // Idempotent migration: clean clobbered rows where jsonl_path is under /subagents/
-  // and agent_id is NULL (rows written by the old indexer that clobbered parent session)
-  try {
-    const clobbered = db
-      .prepare("SELECT id FROM sessions WHERE jsonl_path LIKE '%/subagents/%' AND agent_id IS NULL")
-      .all() as { id: string }[]
-    if (clobbered.length > 0) {
-      const ids = clobbered.map((s) => s.id)
-      const placeholders = ids.map(() => "?").join(",")
-      const msgDel = db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...ids)
-      const wrDel = db.prepare(`DELETE FROM writes WHERE session_id IN (${placeholders})`).run(...ids)
-      const sessDel = db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...ids)
-      console.log(
-        `[migration] Cleaned ${sessDel.changes} clobbered subagent session(s), ${msgDel.changes} message(s), ${wrDel.changes} write(s); will re-index cleanly.`,
-      )
+export function runMigrations(db: Database): void {
+  const currentVersion = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version
+  for (const step of MIGRATION_STEPS) {
+    if (currentVersion < step.version) {
+      try {
+        step.up(db)
+        db.exec(`PRAGMA user_version = ${step.version}`)
+      } catch (err) {
+        throw new Error(`[migration v${step.version}] ${step.name} failed: ${(err as Error).message}`, {
+          cause: err,
+        })
+      }
     }
-  } catch {
-    // sessions table might not exist yet or other transient error
   }
 }
 

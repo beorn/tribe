@@ -58,7 +58,9 @@ export async function cmdIndex(opts: {
       console.log(`  (${result.codexUnreadable} unreadable Codex transcripts)`)
     }
     if (result.codexReasonCounts && Object.keys(result.codexReasonCounts).length > 0) {
-      const breakdown = Object.entries(result.codexReasonCounts).map(([k, v]) => `${v} ${k}`).join(", ")
+      const breakdown = Object.entries(result.codexReasonCounts)
+        .map(([k, v]) => `${v} ${k}`)
+        .join(", ")
       console.log(`  (Codex wire status: ${breakdown})`)
     }
     if (result.codexFailures && result.codexFailures.length > 0) {
@@ -101,16 +103,29 @@ export async function cmdIndex(opts: {
     if (result.claudeMd > 0) {
       console.log(`  ${result.claudeMd.toLocaleString()} CLAUDE.md files`)
     }
-    if (result.skippedOld > 0) {
-      console.log(`  (skipped ${result.skippedOld} sessions older than 180 days)`)
+    if (result.claudeSkipped !== undefined && result.claudeSkipped > 0) {
+      console.log(`  (skipped ${result.claudeSkipped} unchanged Claude sessions)`)
+    }
+    if (result.claudeVanished !== undefined && result.claudeVanished > 0) {
+      console.log(`  (skipped ${result.claudeVanished} vanished files)`)
+    }
+    if (result.claudeFailures && result.claudeFailures.length > 0) {
+      console.log(`  (${result.claudeFailures.length} Claude transcript issues):`)
+      for (const f of result.claudeFailures.slice(0, 5)) {
+        console.log(`    - ${f.file}: ${f.reason}`)
+      }
+      if (result.claudeFailures.length > 5) {
+        console.log(`    ... and ${result.claudeFailures.length - 5} more`)
+      }
     }
 
-    const hasLedgeredSkips =
+    const hasFailures =
       (result.codexFailures !== undefined && result.codexFailures.length > 0) ||
       (result.codexUnreadable !== undefined && result.codexUnreadable > 0) ||
-      (result.codexErrors !== undefined && result.codexErrors > 0)
+      (result.codexErrors !== undefined && result.codexErrors > 0) ||
+      (result.claudeFailures !== undefined && result.claudeFailures.length > 0)
 
-    if (hasLedgeredSkips) {
+    if (hasFailures) {
       process.exitCode = 5
     } else {
       process.exitCode = 0

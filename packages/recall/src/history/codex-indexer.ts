@@ -26,6 +26,16 @@ export function safeRollback(db: Database): void {
   }
 }
 
+export interface CodexCatalog {
+  sessions: TranscriptCatalogSession[]
+  discovered: number
+  canonical: number
+  ambiguous: number
+  stale: number
+  invalid: number
+  failures: CodexFailureRecord[]
+}
+
 export interface CodexIndexOptions {
   incremental?: boolean
   full?: boolean
@@ -33,6 +43,7 @@ export interface CodexIndexOptions {
   path?: string
   projectRoot?: string
   agBin?: string
+  catalog?: CodexCatalog
   cutoffTime?: number
   onProgress?: (progress: { sessionsProcessed: number; messagesIndexed: number; currentSession?: string }) => void
 }
@@ -305,10 +316,11 @@ export async function fetchCodexCatalog(agBin: string): Promise<{
 /**
  * Preflight validation of Ag readiness before any index modification.
  * Ensures Ag binary exists, is executable, emits schema version 1, and can read transcripts.
+ * Returns the catalog so subsequent indexing does not invoke ag transcript list a second time.
  */
-export async function validateAgReadiness(agBin?: string): Promise<void> {
+export async function validateAgReadiness(agBin?: string): Promise<CodexCatalog> {
   const bin = resolveAgBin(agBin)
-  await fetchCodexCatalog(bin)
+  return await fetchCodexCatalog(bin)
 }
 
 /**
@@ -325,7 +337,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
   const reasonCounts: Record<string, number> = {}
 
   if (!options.path) {
-    const catalog = await fetchCodexCatalog(agBin)
+    const catalog = options.catalog ?? (await fetchCodexCatalog(agBin))
     catalogSessions = catalog.sessions
     discovered = catalog.discovered
     canonical = catalog.canonical
@@ -580,12 +592,11 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         }
 
         try {
-          // Delete old rows for this native id inside the transaction
-          db.prepare("DELETE FROM messages WHERE session_id = ? OR session_id LIKE ?").run(
-            `codex:${nativeId}`,
-            `codex:${nativeId}@%`,
-          )
-          db.prepare("DELETE FROM sessions WHERE id = ? OR id LIKE ?").run(`codex:${nativeId}`, `codex:${nativeId}@%`)
+          // Delete old rows for this native id inside the transaction by explicit keys list (A1: fully indexed)
+          const deleteKeys = Array.from(new Set([`codex:${nativeId}`, ...keys]))
+          const placeholders = deleteKeys.map(() => "?").join(",")
+          db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...deleteKeys)
+          db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...deleteKeys)
         } catch (err) {
           safeRollback(db)
           inTx = false
@@ -716,24 +727,36 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
             }
           }
 
+          const session = currentSession
           for (const key of keys) {
+            const matchedCopy =
+              session.copies?.find((c) => c.key === key && c.decision === "ambiguous") ??
+              session.copies?.find((c) => c.path === session.path) ??
+              session.copies?.find((c) => c.decision === "canonical") ??
+              session.copies?.find((c) => c.key === key)
+            const copyPath = matchedCopy?.path ?? session.path
+            const copySize = matchedCopy?.sizeBytes ?? sessionSizeBytes
+            const copyMtime = matchedCopy?.mtimeMs ?? sessionMtimeMs
+            const copyLastEvent = matchedCopy?.lastEventAtMs ?? session.lastEventAtMs
+
             const existing = getSession(db, key)
             if (existing) {
               updateSessionStatus(db, key, `stale-${status}`, {
+                jsonlPath: copyPath,
                 failureReason: reason,
                 failureTime: now,
-                sizeBytes: sessionSizeBytes,
-                mtimeMs: sessionMtimeMs,
-                lastEventAtMs: currentSession.lastEventAtMs,
+                sizeBytes: copySize,
+                mtimeMs: copyMtime,
+                lastEventAtMs: copyLastEvent,
               })
             } else {
-              upsertSession(db, key, currentSession.cwd || "", currentSession.path, createdAtMs, Date.now(), 0, null, {
+              upsertSession(db, key, currentSession.cwd || "", copyPath, createdAtMs, Date.now(), 0, null, {
                 status: status,
                 failureReason: reason,
                 failureTime: now,
-                sizeBytes: sessionSizeBytes,
-                mtimeMs: sessionMtimeMs,
-                lastEventAtMs: currentSession.lastEventAtMs,
+                sizeBytes: copySize,
+                mtimeMs: copyMtime,
+                lastEventAtMs: copyLastEvent,
               })
             }
           }
@@ -784,6 +807,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
               for (const key of keys) {
                 const count = currentRowCounts.get(key) ?? 0
                 const matchedCopy =
+                  session.copies?.find((c) => c.key === key && c.decision === "ambiguous") ??
                   (session.copies && keys.length === session.copies.length
                     ? session.copies[keys.indexOf(key)]
                     : undefined) ??

@@ -12,7 +12,12 @@ import * as fs from "fs"
 import * as readline from "readline"
 import * as os from "os"
 import { spawnSync } from "node:child_process"
-import { indexCodexTranscripts, validateAgReadiness, type CodexFailureRecord } from "./codex-indexer.ts"
+import {
+  indexCodexTranscripts,
+  validateAgReadiness,
+  type CodexFailureRecord,
+  type CodexCatalog,
+} from "./codex-indexer.ts"
 import {
   PROJECTS_DIR,
   MAX_CONTENT_SIZE,
@@ -29,8 +34,7 @@ import {
   findPlanFiles,
   findTodoFiles,
 } from "./db"
-import type { TodoItem, BeadRecord } from "./types"
-import type { JsonlRecord, ToolUse } from "./types"
+import type { TodoItem, BeadRecord, JsonlRecord, ToolUse, ClaudeFailureRecord } from "./types"
 import { formatBead, extractMarkdownTitle } from "./formatters"
 
 export interface IndexProgress {
@@ -124,6 +128,26 @@ export function currentProjectsDir(): string {
   return process.env.CLAUDE_DIR ? path.join(process.env.CLAUDE_DIR, "projects") : PROJECTS_DIR
 }
 
+/**
+ * Restricts Claude transcript discovery to valid transcript shapes (A4):
+ * 1. Root sessions: <project>/<uuid>.jsonl (no subdirectories)
+ * 2. Subagents: <project>/<parentSessionId>/subagents/.../agent-*.jsonl
+ *
+ * This excludes non-transcript files such as <project>/memory/*.jsonl
+ */
+export function isTranscriptShape(relativePath: string): boolean {
+  const norm = relativePath.replace(/\\/g, "/")
+  // Root transcript: <proj>/<name>.jsonl (exactly one slash)
+  if (/^[^/]+\/[^/]+\.jsonl$/.test(norm)) {
+    return true
+  }
+  // Subagent transcript: <proj>/<parent>/subagents/**/agent-*.jsonl
+  if (/^[^/]+\/[^/]+\/subagents\/(?:.+\/)?agent-[^/]+\.jsonl$/.test(norm)) {
+    return true
+  }
+  return false
+}
+
 export async function* findSessionFiles(): AsyncGenerator<string> {
   const pdir = currentProjectsDir()
   if (!fs.existsSync(pdir)) {
@@ -132,7 +156,8 @@ export async function* findSessionFiles(): AsyncGenerator<string> {
 
   const glob = new Glob("**/*.jsonl")
   for await (const file of glob.scan({ cwd: pdir, absolute: true })) {
-    if (file.includes("/memory/")) continue
+    const rel = path.relative(pdir, file)
+    if (!isTranscriptShape(rel)) continue
     if (isRecallIgnored(file)) continue
     yield file
   }
@@ -478,6 +503,9 @@ export interface IndexResult {
   codexErrors?: number
   codexFailures?: CodexFailureRecord[]
   codexReasonCounts?: Record<string, number>
+  claudeSkipped?: number
+  claudeVanished?: number
+  claudeFailures?: ClaudeFailureRecord[]
 }
 
 /**
@@ -675,9 +703,10 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     }
   }
 
-  // Pre-flight ag binary and schema readiness before any index modification
+  // Pre-flight ag binary and schema readiness before any index modification (A3: reuse catalog)
+  let preloadedCatalog: CodexCatalog | undefined
   if (!options.skipCodex && process.env.RECALL_SKIP_CODEX !== "1" && (!options.path || !isClaudeTarget)) {
-    await validateAgReadiness(options.agBin)
+    preloadedCatalog = await validateAgReadiness(options.agBin)
   }
 
   let totalFiles = 0
@@ -688,6 +717,9 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   let totalSummaries = 0
   let totalFirstPrompts = 0
   let skippedOld = 0
+  let claudeSkipped = 0
+  let claudeVanished = 0
+  const claudeFailures: ClaudeFailureRecord[] = []
 
   // Index Claude session files
   if (!options.path) {
@@ -716,6 +748,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
         stats = fs.statSync(sessionFile)
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+          claudeVanished++
           continue
         }
         throw err
@@ -743,6 +776,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
           existing.mtime_ms === stats.mtime.getTime() &&
           existing.size_bytes === stats.size
         ) {
+          claudeSkipped++
           continue
         }
       }
@@ -772,6 +806,11 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
           stats,
         )
         seenSessionIds.add(sessionInfo.id)
+        claudeFailures.push({
+          id: sessionInfo.id,
+          file: relativePath,
+          reason: errMsg,
+        })
       }
     }
   } else if (isClaudeTarget) {
@@ -797,6 +836,11 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
         agentId: sessionInfo.agentId,
       })
       seenSessionIds.add(sessionInfo.id)
+      claudeFailures.push({
+        id: sessionInfo.id,
+        file: relativePath,
+        reason: errMsg,
+      })
     }
   }
 
@@ -817,6 +861,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
       path: options.path,
       projectRoot: options.projectRoot,
       agBin: options.agBin,
+      catalog: preloadedCatalog,
       cutoffTime: options.full ? undefined : cutoffTime,
       onProgress: (p) => {
         options.onProgress?.({
@@ -1013,6 +1058,9 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     codexErrors,
     codexFailures,
     codexReasonCounts,
+    claudeSkipped,
+    claudeVanished,
+    claudeFailures,
     ...projectSourceResult,
   }
 }
