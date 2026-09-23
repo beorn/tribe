@@ -521,28 +521,25 @@ describe("runInjectDelta — a busy project-source step is skipped, never waited
       "another connection holds SQLite's write lock",
       async () => new (await import("../src/history/project-sources.ts")).ProjectSourcesBusyError("database is locked"),
     ],
-  ])("%s: recall still runs, and the skip is recorded with its reason", async (_case, busy) => {
+  ])("%s: recall still runs, and the result names the skipped step and why", async (_case, busy) => {
     const error = await busy()
     ensureProjectSourcesIndexedMock.mockImplementation(() => {
       throw error
     })
     mockRecall([])
-    const skippedSteps: Record<string, string> = {}
 
-    const result = await runInjectDelta(salientPrompt, createMemorySeenStore(), { skippedSteps })
+    // No caller-supplied record: the daemon passes none, so the skip must travel in the result (25071 row 3 review).
+    const result = await runInjectDelta(salientPrompt, createMemorySeenStore())
 
     expect(recallMock).toHaveBeenCalled()
-    expect(result).toEqual({ skipped: true, reason: "no_results" })
-    expect(skippedSteps.project_sources).toBe(error.message)
+    expect(result).toEqual({ skipped: true, reason: "no_results", skippedSteps: { project_sources: error.message } })
   })
 
   test("any other project-source failure still fails the hook", async () => {
     ensureProjectSourcesIndexedMock.mockImplementation(() => {
       throw new Error("disk I/O error")
     })
-    await expect(runInjectDelta(salientPrompt, createMemorySeenStore(), { skippedSteps: {} })).rejects.toThrow(
-      "disk I/O error",
-    )
+    await expect(runInjectDelta(salientPrompt, createMemorySeenStore())).rejects.toThrow("disk I/O error")
     expect(recallMock).not.toHaveBeenCalled()
   })
 })

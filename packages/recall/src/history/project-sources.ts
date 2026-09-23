@@ -20,6 +20,8 @@ export class ProjectSourcesBusyError extends Error {}
  * without waiting: if another connection holds it, it throws ProjectSourcesBusyError before writing anything.
  * All its writes then run in that one transaction, so a failure rolls them back together, and readers never see
  * the blanked completion time in between. The index writer's own contention still throws IndexWriterBusyError.
+ * The cost: the transaction holds the write lock for the whole refresh (353 ms on a scratch index, about 700 ms for
+ * a large project), so another writer on the 5 s busy timeout waits that long.
  */
 export function ensureProjectSourcesIndexed(): void {
   const projectRoot = process.env.CLAUDE_PROJECT_DIR
@@ -45,7 +47,12 @@ export function ensureProjectSourcesIndexed(): void {
     refreshProjectSources(db, projectRoot)
     db.run("COMMIT")
   } catch (error) {
-    db.run("ROLLBACK")
+    try {
+      db.run("ROLLBACK")
+    } catch (rollbackError) {
+      // Keep both: the refresh's own failure is the cause, and the failed rollback is why the transaction may linger.
+      throw new AggregateError([error, rollbackError], "Recall project sources failed, and so did the rollback")
+    }
     throw error
   }
   // Keep the shared DB connection open for callers, as this API has always done.
