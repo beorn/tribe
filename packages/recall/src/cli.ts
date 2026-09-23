@@ -110,6 +110,10 @@ program
   .option("--plan-timeout <ms>", "Planner per-call timeout (default 2500)", uint)
   .option("--no-speculative-synth", "Disable speculative synthesis on round-1 (runs synth only after round 2 merge)")
   .option(
+    "--vault-db <path>",
+    "The km vault database to search (outranks KM_VAULT_DB); recall never discovers one from the cwd",
+  )
+  .option(
     "--no-refresh",
     "Compatibility flag: skip freshness classification; index provenance is unknown and search exits 3",
   )

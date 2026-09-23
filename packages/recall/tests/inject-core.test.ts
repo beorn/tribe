@@ -20,6 +20,7 @@ const {
   createMemorySeenStore,
   rewriteImperativeAsReported,
   runInjectDelta: runInjectDeltaImpl,
+  VAULT_UNBOUND_NOTICE,
 } = await import("../src/lib/inject-core.ts")
 
 const recallMock = vi.fn()
@@ -36,6 +37,8 @@ function runInjectDelta(
       recall: recallMock as unknown as typeof import("../src/history/search.ts").recall,
       ensureProjectSourcesIndexed: ensureProjectSourcesIndexedMock,
       findGlossaryAnchor: () => null,
+      // A bound vault by default: the unbound notice has its own describe below.
+      getVaultDbPath: () => "/fixture/vault/.km/state.db",
       ...opts.deps,
     },
   })
@@ -422,6 +425,82 @@ describe("runInjectDelta — recall query bound (@ag/tribe/25071)", () => {
     expect(query.length).toBeLessThanOrEqual(500)
     expect(prompt.startsWith(query)).toBe(true)
     expect(MAX_RECALL_QUERY_CHARS).toBe(500)
+  })
+})
+
+// 25149 (@cto Q1, condition 4): recall binds a vault only explicitly, and an
+// injection with nothing bound says so instead of reading as "no vault hits".
+// The notice is framed like every injection: inside one <injected_context>
+// envelope and followed by the protocol footer, never as bare user-role text.
+describe("runInjectDelta — an unbound vault is said, once per session (25149)", () => {
+  const unbound = { deps: { getVaultDbPath: () => null } }
+
+  /** The envelope's inner text; throws if anything sits outside envelope + footer. */
+  function framedInner(additionalContext: string, mode: string): string {
+    const framed = new RegExp(
+      `^<injected_context source="recall" mode="${mode}" trust="untrusted-reference"[^>]*tool_trigger="forbidden"[^>]*>\\n([\\s\\S]*)\\n</injected_context>\\n\\n`,
+    ).exec(additionalContext)
+    expect(framed, additionalContext).not.toBeNull()
+    expect(additionalContext.slice(framed![0].length)).toBe(CONTEXT_PROTOCOL_FOOTER)
+    return framed![1]!
+  }
+
+  beforeEach(() => {
+    recallMock.mockReset()
+  })
+
+  test("the first injection of an unbound session carries the framed notice; the next does not", async () => {
+    mockRecall([])
+    const store = createMemorySeenStore()
+
+    const first = await runInjectDelta("what is the status of km-storage-sync right now?", store, unbound)
+    expect(first.skipped).toBe(false)
+    if (first.skipped) return
+    expect(framedInner(first.additionalContext, "notice")).toBe(`<vault-notice>${VAULT_UNBOUND_NOTICE}</vault-notice>`)
+    expect(VAULT_UNBOUND_NOTICE).toContain("vault: not bound (pass --vault-db)")
+
+    const second = await runInjectDelta("what is the status of km-storage-sync right now?", store, unbound)
+    expect(second).toEqual({ skipped: true, reason: "no_results" })
+  })
+
+  // 25149 a1 re-cut over 25071 row 3: the notice replaces an empty injection, never the steps it skipped.
+  test("an unbound first injection whose project-source step was skipped still names the skipped step", async () => {
+    const { ProjectSourcesBusyError } = await import("../src/history/project-sources.ts")
+    const busy = new ProjectSourcesBusyError("database is locked")
+    ensureProjectSourcesIndexedMock.mockImplementation(() => {
+      throw busy
+    })
+    try {
+      mockRecall([])
+      const first = await runInjectDelta("what is the status of km-storage-sync right now?", createMemorySeenStore(), unbound)
+      expect(first.skipped).toBe(false)
+      expect(first.skippedSteps).toEqual({ project_sources: busy.message })
+    } finally {
+      ensureProjectSourcesIndexedMock.mockReset()
+    }
+  })
+
+  test("with snippets the notice sits inside the same envelope ahead of <recall-memory>; bound, it is absent", async () => {
+    mockRecall([
+      {
+        sessionId: "sess-00000001",
+        sessionTitle: "prior",
+        type: "message",
+        snippet: "A reasonably long descriptive snippet about prior work on the project.",
+      },
+    ])
+
+    const unboundRun = await runInjectDelta("what did we last do on km-board-state?", createMemorySeenStore(), unbound)
+    expect(unboundRun.skipped).toBe(false)
+    if (unboundRun.skipped) return
+    const inner = framedInner(unboundRun.additionalContext, "snippet")
+    expect(inner.startsWith(`<vault-notice>${VAULT_UNBOUND_NOTICE}</vault-notice>\n<recall-memory>\n`)).toBe(true)
+
+    const boundRun = await runInjectDelta("what did we last do on km-board-state?", createMemorySeenStore())
+    expect(boundRun.skipped).toBe(false)
+    if (boundRun.skipped) return
+    expect(framedInner(boundRun.additionalContext, "snippet").startsWith("<recall-memory>\n")).toBe(true)
+    expect(boundRun.additionalContext).not.toContain("not bound")
   })
 })
 

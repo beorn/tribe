@@ -400,7 +400,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     const projectContentResults = searchAll(db, query, projectContentOpts)
     const projectMs = Date.now() - projectStart
 
-    // Vault FTS — opt-in: searches the km tree db (.km/state.db) when found.
+    // Vault FTS — opt-in: searches the km tree db (.km/state.db) when bound.
     // Beads, design docs, CLAUDE.md, and hub/* docs are higher signal than
     // transcript fragments, so we boost vault hits with a strong negative
     // rank (more negative = better).
