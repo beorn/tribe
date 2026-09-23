@@ -807,11 +807,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
       }
     }
 
-    const chunkTx = new ChunkedTransaction(
-      db,
-      options.chunkSize ?? 25,
-      options.chunkTimeMs ?? 2000,
-    )
+    const chunkTx = new ChunkedTransaction(db, options.chunkSize ?? 25, options.chunkTimeMs ?? 2000)
 
     try {
       for await (const sessionFile of findSessionFiles()) {

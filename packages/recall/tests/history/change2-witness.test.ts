@@ -112,9 +112,9 @@ describe("Change 2 Witness Tests (CTO Ruling 2026-09-22: A7 & A8)", () => {
     expect(malformedMsgs.c).toBe(0) // 0 messages committed for malformed file!
 
     // Verify all 99 other files succeeded and committed their messages
-    const completeSessions = db
-      .prepare("SELECT COUNT(*) as c FROM sessions WHERE status = 'complete'")
-      .get() as { c: number }
+    const completeSessions = db.prepare("SELECT COUNT(*) as c FROM sessions WHERE status = 'complete'").get() as {
+      c: number
+    }
     expect(completeSessions.c).toBe(99)
 
     const totalMessages = db.prepare("SELECT COUNT(*) as c FROM messages").get() as { c: number }

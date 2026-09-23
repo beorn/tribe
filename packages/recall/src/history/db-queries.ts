@@ -227,9 +227,7 @@ export function insertMessage(
 }
 
 export function getMessageCount(db: Database, sessionId: string): number {
-  const row = getCachedStatement(db, "SELECT COUNT(*) as count FROM messages WHERE session_id = ?").get(
-    sessionId,
-  ) as {
+  const row = getCachedStatement(db, "SELECT COUNT(*) as count FROM messages WHERE session_id = ?").get(sessionId) as {
     count: number
   }
   return row.count

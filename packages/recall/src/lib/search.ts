@@ -596,8 +596,12 @@ function printResultEntries(results: RecallSearchResult[]): void {
       .replace("T", " ")
       .replace(/\.\d+Z$/, "Z")
     const lineInfo = r.line
-      ? (r.duplicateLine ? ` L${r.line}, also line ${r.duplicateLine}` : ` L${r.line}`)
-      : (r.duplicateLine ? ` also line ${r.duplicateLine}` : "")
+      ? r.duplicateLine
+        ? ` L${r.line}, also line ${r.duplicateLine}`
+        : ` L${r.line}`
+      : r.duplicateLine
+        ? ` also line ${r.duplicateLine}`
+        : ""
     const detail = lineInfo ? `,${lineInfo}` : ""
     const typeLabel = formatType(r.type)
     const sessionLabel = r.sessionTitle ? `${r.sessionTitle}` : `${r.sessionId.slice(0, 8)}...`
@@ -1059,8 +1063,12 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
         const role = r.type === "user" ? "User" : r.type === "assistant" ? "Assistant" : r.type
         const dupLine = (r as { duplicate_line?: number | null }).duplicate_line
         const lineDetail = r.line
-          ? (dupLine ? `, L${r.line}, also line ${dupLine}` : `, L${r.line}`)
-          : (dupLine ? `, also line ${dupLine}` : "")
+          ? dupLine
+            ? `, L${r.line}, also line ${dupLine}`
+            : `, L${r.line}`
+          : dupLine
+            ? `, also line ${dupLine}`
+            : ""
         console.log(`\n${icon} ${role} (${time}${lineDetail}):`)
         console.log("\u2500".repeat(60))
         if (r.snippet) {
