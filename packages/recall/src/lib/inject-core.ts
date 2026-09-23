@@ -216,8 +216,9 @@ export async function runInjectDelta(
   if (vaultDbPath() !== null || store.get(VAULT_UNBOUND_NOTICE_KEY) !== undefined) return result
   store.set(VAULT_UNBOUND_NOTICE_KEY, Number.MAX_SAFE_INTEGER)
   store.flush?.()
-  if (result.skipped)
-    {return { skipped: false, additionalContext: VAULT_UNBOUND_NOTICE, newKeys: [], turn: store.turn() }}
+  if (result.skipped) {
+    return { skipped: false, additionalContext: VAULT_UNBOUND_NOTICE, newKeys: [], turn: store.turn() }
+  }
   return { ...result, additionalContext: `${VAULT_UNBOUND_NOTICE}\n\n${result.additionalContext}` }
 }
 
