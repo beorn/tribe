@@ -685,10 +685,14 @@ describe("recall search output", () => {
   test("the no-refresh compatibility flag preserves unknown provenance", async () => {
     mockAgent.result = async (query, options) => zeroAgentResult(query, options) as never
     const prevHome = process.env.HOME
+    const previousVaultDb = process.env.KM_VAULT_DB
     const home = mkdtempSync(join(tmpdir(), "recall-home-"))
 
     try {
       process.env.HOME = home
+      // Unbound on purpose, so stderr is exactly the one line an unbound search owes (25149).
+      delete process.env.KM_VAULT_DB
+      resetVaultDbCacheForTests()
       await cmdSearch("nohits", {
         agent: true,
         limit: "5",
@@ -698,12 +702,15 @@ describe("recall search output", () => {
     } finally {
       if (prevHome === undefined) delete process.env.HOME
       else process.env.HOME = prevHome
+      if (previousVaultDb === undefined) delete process.env.KM_VAULT_DB
+      else process.env.KM_VAULT_DB = previousVaultDb
+      resetVaultDbCacheForTests()
       rmSync(home, { recursive: true, force: true })
     }
 
     const errors = callsText(errSpy)
     const output = callsText(logSpy)
-    expect(errors).toBe("")
+    expect(errors).toBe("vault: not bound (pass --vault-db)")
     expect(output).toContain('0 results — UNPROVEN (unknown index) for "nohits"')
   })
 
