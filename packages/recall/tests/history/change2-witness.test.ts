@@ -170,7 +170,7 @@ describe("Change 2 Witness Tests (CTO Ruling 2026-09-22: A7 & A8)", () => {
 
     const search0 = ftsSearch(db, "48291")
     expect(search0.results.length).toBe(1)
-    expect(search0.results[0].session_id).toBe("session-vanish")
+    expect(search0.results[0]!.session_id).toBe("session-vanish")
 
     // Delete the file from disk
     fs.unlinkSync(sessionFile)
@@ -186,7 +186,7 @@ describe("Change 2 Witness Tests (CTO Ruling 2026-09-22: A7 & A8)", () => {
     // Search STILL finds it on first miss!
     const search1 = ftsSearch(db, "48291")
     expect(search1.results.length).toBe(1)
-    expect(search1.results[0].session_id).toBe("session-vanish")
+    expect(search1.results[0]!.session_id).toBe("session-vanish")
 
     // Run 2: Second consecutive miss -> deleted, pruned count = 1
     const res2 = await rebuildIndex(db, { skipCodex: true, incremental: true })
