@@ -32,6 +32,7 @@ import { recall } from "../history/search.ts"
 import { findGlossaryAnchor } from "../history/vault-glossary.ts"
 import { ensureProjectSourcesIndexed, ProjectSourcesBusyError } from "../history/project-sources.ts"
 import { IndexWriterBusyError } from "../history/db.ts"
+import { RecallDeadlineError } from "./recall-deadline.ts"
 // Envelope framing primitives live in the shared library. Re-exported here so
 // existing callers (and the plugin's own tests) keep working without churn.
 // Relative import because plugins/ is not a declared workspace inside bearly
@@ -254,7 +255,6 @@ export async function runInjectDelta(
   const minLength = opts.minSnippetLength ?? 20
   const snippetChars = opts.snippetChars ?? 300
   const minRank = opts.minRank ?? MIN_RANK_THRESHOLD
-  const recallImpl = opts.deps?.recall ?? recall
   const ensureProjectSourcesIndexedImpl = opts.deps?.ensureProjectSourcesIndexed ?? ensureProjectSourcesIndexed
   const findGlossaryAnchorImpl = opts.deps?.findGlossaryAnchor ?? findGlossaryAnchor
 
@@ -369,14 +369,25 @@ export async function runInjectDelta(
     // so users can still grep their live session explicitly.
     excludeCurrentSession: true,
   } as const
-  let result = await timeStepAsync(steps, "recall", () => recallImpl(recallQuery, recallOpts))
+  // In-thread by default. The prompt hook, the one caller that exits, passes a deadline recall (@ag/tribe/25071
+  // stopgap); a long-lived caller (the daemon, the plugin server) would stack queries a deadline abandons.
+  const recallImpl = opts.deps?.recall ?? recall
+  let result: Awaited<ReturnType<typeof recall>>
+  try {
+    result = await timeStepAsync(steps, "recall", () => recallImpl(recallQuery, recallOpts))
 
-  // Fallback: full-prompt FTS found nothing, but the prompt has a known
-  // project anchor (camelCase symbol, framework name) buried in generic
-  // English. Retry with the glossary anchor alone — this rescues prompts
-  // where the salient term is dominated by surrounding common words.
-  if (result.results.length === 0 && glossaryHit && recallQuery !== glossaryHit) {
-    result = await timeStepAsync(steps, "recall_fallback", () => recallImpl(glossaryHit, recallOpts))
+    // Fallback: full-prompt FTS found nothing, but the prompt has a known
+    // project anchor (camelCase symbol, framework name) buried in generic
+    // English. Retry with the glossary anchor alone — this rescues prompts
+    // where the salient term is dominated by surrounding common words.
+    if (result.results.length === 0 && glossaryHit && recallQuery !== glossaryHit) {
+      result = await timeStepAsync(steps, "recall_fallback", () => recallImpl(glossaryHit, recallOpts))
+    }
+  } catch (error) {
+    if (!(error instanceof RecallDeadlineError)) throw error
+    // Said in the hook output, not only its log: the turn runs without recall, and the reader should know why.
+    skippedSteps.recall = error.message
+    return withSkippedSteps({ skipped: false, additionalContext: error.message, newKeys: [], turn })
   }
 
   if (result.results.length === 0) {

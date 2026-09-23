@@ -30,6 +30,7 @@ import { createLogger, drainOutput } from "loggily"
 import { hookRecall } from "../history/recall"
 import { summarizeUnprocessedDays } from "./summarize-daily"
 import { roundSteps, timeStepAsync } from "./inject-core"
+import { createDeadlineRecall } from "./recall-deadline.ts"
 import { withDaemonCall } from "../../../../plugins/claude/recall/lib/socket.ts"
 import { resolveRecallSocketPath } from "../../../../plugins/claude/recall/lib/config.ts"
 import {
@@ -428,7 +429,14 @@ export async function cmdHook(): Promise<void> {
       // kind === "error" — fall through to library path below.
     }
 
-    const result = await hookRecall(prompt, { steps })
+    // A hard wall clock on recall, run in a Worker this process leaves behind when it exits (@ag/tribe/25071 stopgap).
+    const deadlineRecall = createDeadlineRecall()
+    let result: Awaited<ReturnType<typeof hookRecall>>
+    try {
+      result = await hookRecall(prompt, { steps, recall: deadlineRecall })
+    } finally {
+      deadlineRecall.close()
+    }
     const elapsed = Date.now() - startTime
     warnSkippedSteps(result.skippedSteps, "library", startTime, steps)
     if (result.skipped) {
@@ -450,6 +458,10 @@ export async function cmdHook(): Promise<void> {
     })
     // The hook's JSON response: console.log is the sanctioned channel.
     console.log(envelopeEmitHookJson("UserPromptSubmit", additionalContext, prompt))
+    // Exit, never wait for the loop to drain: a recall Worker left behind at its deadline can sit in one native SQLite
+    // call and would hold this process open past Claude Code's kill (@ag/tribe/25071 stopgap).
+    // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
+    return drainOutput().then(() => process.exit(0))
   } catch (e) {
     const elapsed = Date.now() - startTime
     hookLog.error?.(e instanceof Error ? e : new Error(String(e)), "FATAL: unhandled error", {

@@ -30,7 +30,7 @@
     "tribe-wire": "workspace:*"
   },
   "engines": {
-    "bun": ">=1.3.13",
+    "bun": ">=1.4.0",
     "node": ">=22.5.0"
   }
 }
