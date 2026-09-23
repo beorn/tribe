@@ -524,6 +524,10 @@ export async function cmdHook(): Promise<void> {
     })
     // The hook's JSON response: console.log is the sanctioned channel.
     console.log(envelopeEmitHookJson("UserPromptSubmit", additionalContext, prompt))
+    // Exit, never wait for the loop to drain: a recall Worker left behind at its deadline can sit in one native SQLite
+    // call and would hold this process open past Claude Code's kill (@ag/tribe/25071 stopgap).
+    // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
+    return drainOutput().then(() => process.exit(0))
   } catch (e) {
     const elapsed = Date.now() - startTime
     hookLog.error?.(e instanceof Error ? e : new Error(String(e)), "FATAL: unhandled error", {
