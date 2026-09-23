@@ -9,8 +9,8 @@
  * A Worker stuck inside one native SQLite call outlives terminate() until that call returns (measured: 48 s), and
  * keeps its process alive meanwhile. So only a caller that EXITS may use this: the prompt hook (cmdHook), where every
  * path ends in process.exit. A long-lived caller (the daemon, the plugin server) would stack abandoned queries, so
- * runInjectDelta stays in-thread by default. process.exit ends such a process on bun 1.4.2 (the fleet's runtime) but
- * not on 1.3.14 (measured by review2). The 5 s is a stopgap figure, not the budget: 25071 row 2 sets that.
+ * runInjectDelta stays in-thread by default. process.exit ends such a process on bun 1.4.2 (the fleet's runtime and
+ * tribe's .bun-version) but not on 1.3.14 (measured by review2). The 5 s is a stopgap figure, not the budget: 25071 row 2 sets that.
  */
 import { IndexWriterBusyError } from "../history/db.ts"
 import type { RecallOptions, RecallResult } from "../history/recall-shared.ts"
