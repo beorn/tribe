@@ -58,6 +58,10 @@ beforeEach(() => {
   vi.stubEnv("RECALL_DB_PATH", dbPath)
   vi.stubEnv("RECALL_SKIP_CODEX", "1")
   vi.stubEnv("CLAUDE_DIR", root)
+
+  vi.spyOn(console, "log").mockImplementation(() => {})
+  vi.spyOn(console, "error").mockImplementation(() => {})
+  vi.spyOn(console, "warn").mockImplementation(() => {})
 })
 
 afterEach(() => {

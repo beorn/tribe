@@ -462,7 +462,12 @@ describe("Change 1 Tier B1 Witness Tests (CTO Ruling 2026-09-22: B1)", () => {
     insertMessage(db, "codex:B:1", "codex:B", "user", "bravo zebra", null, null, 200, null, 1)
 
     // Run migration v3
-    runMigrations(db)
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
+    try {
+      runMigrations(db)
+    } finally {
+      logSpy.mockRestore()
+    }
 
     const ver = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version
     expect(ver).toBe(CURRENT_SCHEMA_VERSION)

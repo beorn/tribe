@@ -1009,7 +1009,12 @@ if (args[0] === "transcript" && args[1] === "list") {
       checkDbAfter.close()
 
       // 4. Explicit migrate command (cmdIndex with migrate: true) migrates it
-      await cmdIndex({ migrate: true })
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
+      try {
+        await cmdIndex({ migrate: true })
+      } finally {
+        logSpy.mockRestore()
+      }
 
       // 5. user_version is now 3!
       const afterMigrateDb = new Database(v2FixturePath, { readonly: true })
