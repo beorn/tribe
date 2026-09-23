@@ -354,8 +354,12 @@ export const MIGRATION_STEPS: MigrationStep[] = [
           parts.push(`cleared ${clearedCount} stale-unreadable session(s)`)
         }
         if (unconvertibleRowIds.length > 0) {
+          const sampleIds =
+            unconvertibleRowIds.length > 5
+              ? `${unconvertibleRowIds.slice(0, 5).join(", ")}...`
+              : unconvertibleRowIds.join(", ")
           parts.push(
-            `warning: ${unconvertibleRowIds.length} colliding row(s) could not be converted (id: ${unconvertibleRowIds.join(", ")})`,
+            `warning: ${unconvertibleRowIds.length} colliding row(s) could not be converted (id: ${sampleIds})`,
           )
         }
         console.log(`[migration] ${parts.join("; ")}.`)
@@ -370,24 +374,24 @@ export const CURRENT_SCHEMA_VERSION = MIGRATION_STEPS.at(-1)?.version ?? 1
 export const MIGRATIONS: string[] = MIGRATION_STEPS.map((s) => s.name)
 
 export function runMigrations(db: Database): void {
-  const currentVersion = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version
   for (const step of MIGRATION_STEPS) {
-    if (currentVersion < step.version) {
-      db.exec("BEGIN TRANSACTION")
-      try {
+    db.exec("BEGIN IMMEDIATE")
+    try {
+      const currentVersion = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version
+      if (currentVersion < step.version) {
         step.up(db)
         db.exec(`PRAGMA user_version = ${step.version}`)
-        db.exec("COMMIT")
-      } catch (err) {
-        try {
-          db.exec("ROLLBACK")
-        } catch {
-          // Ignore if transaction was already aborted/rolled back by SQLite error
-        }
-        throw new Error(`[migration v${step.version}] ${step.name} failed: ${(err as Error).message}`, {
-          cause: err,
-        })
       }
+      db.exec("COMMIT")
+    } catch (err) {
+      try {
+        db.exec("ROLLBACK")
+      } catch {
+        // Ignore if transaction was already aborted/rolled back by SQLite error
+      }
+      throw new Error(`[migration v${step.version}] ${step.name} failed: ${(err as Error).message}`, {
+        cause: err,
+      })
     }
   }
 }

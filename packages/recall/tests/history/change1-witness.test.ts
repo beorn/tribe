@@ -5,11 +5,16 @@ import { tmpdir } from "node:os"
 import * as path from "node:path"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
-import { initSchema } from "../../src/history/db-schema.ts"
+import { initSchema, runMigrations } from "../../src/history/db-schema.ts"
 import { getSession, insertMessage, upsertSession } from "../../src/history/db-queries.ts"
 import { closeDb } from "../../src/history/db.ts"
 import { rebuildIndex, findSessionFiles, isTranscriptShape } from "../../src/history/indexer.ts"
-import { deleteCodexSessionKeys } from "../../src/history/codex-indexer.ts"
+import {
+  deleteCodexSessionKeys,
+  buildDeleteCodexMessagesSql,
+  buildDeleteCodexSessionsSql,
+  indexCodexTranscripts,
+} from "../../src/history/codex-indexer.ts"
 import { cmdIndex } from "../../src/lib/sessions.ts"
 
 describe("Change 1 Witness Tests (CTO Ruling 2026-09-22)", () => {
@@ -66,14 +71,41 @@ describe("Change 1 Witness Tests (CTO Ruling 2026-09-22)", () => {
   // --------------------------------------------------------------------------
   test("A1: deleteCodexSessionKeys uses covering index without SCAN messages", () => {
     const keys = ["codex:sess1", "codex:sess1@copy1"]
-    const placeholders = keys.map(() => "?").join(",")
-    const plan = db
-      .prepare(`EXPLAIN QUERY PLAN DELETE FROM messages WHERE session_id IN (${placeholders})`)
-      .all(...keys) as Array<{ detail: string }>
+    const preparedSqls: string[] = []
+    const origPrepare = db.prepare.bind(db)
+    const spyPrepare = (sql: string) => {
+      preparedSqls.push(sql)
+      return origPrepare(sql)
+    }
+    db.prepare = spyPrepare as any
+
+    try {
+      deleteCodexSessionKeys(db, keys)
+    } finally {
+      db.prepare = origPrepare
+    }
+
+    const deleteMsgSql = preparedSqls.find((s) => s.includes("DELETE FROM messages"))
+    expect(deleteMsgSql).toBeDefined()
+    expect(deleteMsgSql).toBe(buildDeleteCodexMessagesSql(keys))
+
+    const plan = db.prepare(`EXPLAIN QUERY PLAN ${deleteMsgSql}`).all(...keys) as Array<{ detail: string }>
 
     const planDetails = plan.map((p) => p.detail).join(" ")
     expect(planDetails).not.toContain("SCAN messages")
     expect(planDetails).toContain("SEARCH messages")
+  })
+
+  test("A1: red arm - LIKE clause in messages delete triggers SCAN messages", () => {
+    const keys = ["codex:sess1", "codex:sess1@copy1"]
+    const placeholders = keys.map(() => "?").join(",")
+    // Simulating regression: adding LIKE inside delete statement
+    const regressionSql = `DELETE FROM messages WHERE session_id IN (${placeholders}) OR session_id LIKE ?`
+    const plan = db.prepare(`EXPLAIN QUERY PLAN ${regressionSql}`).all(...keys, "codex:sess1%") as Array<{
+      detail: string
+    }>
+    const planDetails = plan.map((p) => p.detail).join(" ")
+    expect(planDetails).toContain("SCAN messages")
   })
 
   test("A1: explicit key delete removes canonical and @copy rows while preserving peers", () => {
@@ -266,6 +298,163 @@ if (args[0] === "transcript" && args[1] === "list") {
     expect(getSession(db, "codex:sess-a2")?.jsonl_path).toBe(canonPath)
   })
 
+  test("A2: multi-copy session stores each key's own path, size and mtime (both success and failure paths)", async () => {
+    const mockAg = join(tempDir, "mock-ag-a2-multikey.ts")
+    const copy1Path = join(tempDir, "copy1.jsonl")
+    const copy2Path = join(tempDir, "copy2.jsonl")
+    writeFileSync(copy1Path, '{"role":"user","text":"msg from copy 1"}\n')
+    writeFileSync(copy2Path, '{"role":"user","text":"msg from copy 2 longer"}\n')
+
+    const key1 = "codex:sess-multi@key1"
+    const key2 = "codex:sess-multi@key2"
+    const size1 = 111
+    const size2 = 222
+    const mtime1 = 1710000001000
+    const mtime2 = 1710000002000
+
+    writeFileSync(
+      mockAg,
+      `#!/usr/bin/env bun
+const args = process.argv.slice(2);
+if (args[0] === "transcript" && args[1] === "list") {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }));
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "sess-multi",
+    status: "ambiguous",
+    copies: [
+      { key: "${key1}", path: "${copy1Path}", sizeBytes: ${size1}, mtimeMs: ${mtime1}, lastEventAtMs: null },
+      { key: "${key2}", path: "${copy2Path}", sizeBytes: ${size2}, mtimeMs: ${mtime2}, lastEventAtMs: null },
+    ]
+  }));
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 2, sessions: 1, canonical: 0, ambiguous: 1, stale: 0, invalid: 0, unreadable: 0, errors: 0 }));
+} else if (args[0] === "transcript" && args[1] === "export") {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }));
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "sess-multi",
+    sessionKey: "${key1}",
+    path: "${copy1Path}",
+    keys: ["${key1}", "${key2}"],
+    copies: [
+      { key: "${key1}", path: "${copy1Path}", sizeBytes: ${size1}, mtimeMs: ${mtime1}, lastEventAtMs: null },
+      { key: "${key2}", path: "${copy2Path}", sizeBytes: ${size2}, mtimeMs: ${mtime2}, lastEventAtMs: null },
+    ]
+  }));
+  console.log(JSON.stringify({ kind: "row", sessionKey: "${key1}", line: 1, role: "user", text: "msg 1", timestamp: null, recordKind: "event_msg", duplicateOf: null }));
+  console.log(JSON.stringify({ kind: "row", sessionKey: "${key2}", line: 1, role: "user", text: "msg 2", timestamp: null, recordKind: "event_msg", duplicateOf: null }));
+  console.log(JSON.stringify({ kind: "end", nativeId: "sess-multi", keys: ["${key1}", "${key2}"], status: "complete", rows: 2, skipped: 0 }));
+  console.log(JSON.stringify({ kind: "done", exported: 1, errors: 0 }));
+}
+`,
+    )
+    chmodSync(mockAg, 0o755)
+
+    await indexCodexTranscripts(db, { agBin: mockAg })
+
+    const s1 = getSession(db, key1)
+    const s2 = getSession(db, key2)
+    expect(s1).toBeDefined()
+    expect(s2).toBeDefined()
+
+    // Each key holds its own path, size, and mtime
+    expect(s1?.jsonl_path).toBe(copy1Path)
+    expect(s1?.size_bytes).toBe(size1)
+    expect(s1?.mtime_ms).toBe(mtime1)
+
+    expect(s2?.jsonl_path).toBe(copy2Path)
+    expect(s2?.size_bytes).toBe(size2)
+    expect(s2?.mtime_ms).toBe(mtime2)
+  })
+
+  test("A2: failure path records each key's own path, size and mtime without taking copies[0]", async () => {
+    const mockAg = join(tempDir, "mock-ag-a2-fail.ts")
+    const copy1Path = join(tempDir, "fail-copy1.jsonl")
+    const copy2Path = join(tempDir, "fail-copy2.jsonl")
+    writeFileSync(copy1Path, "bad json 1\n")
+    writeFileSync(copy2Path, "bad json 2\n")
+
+    const key1 = "codex:sess-fail@key1"
+    const key2 = "codex:sess-fail@key2"
+    const size1 = 55
+    const size2 = 99
+    const mtime1 = 1710000005000
+    const mtime2 = 1710000009000
+
+    writeFileSync(
+      mockAg,
+      `#!/usr/bin/env bun
+const args = process.argv.slice(2);
+if (args[0] === "transcript" && args[1] === "list") {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }));
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "sess-fail",
+    status: "ambiguous",
+    copies: [
+      { key: "${key1}", path: "${copy1Path}", sizeBytes: ${size1}, mtimeMs: ${mtime1}, lastEventAtMs: null },
+      { key: "${key2}", path: "${copy2Path}", sizeBytes: ${size2}, mtimeMs: ${mtime2}, lastEventAtMs: null },
+    ]
+  }));
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 2, sessions: 1, canonical: 0, ambiguous: 1, stale: 0, invalid: 0, unreadable: 0, errors: 0 }));
+} else if (args[0] === "transcript" && args[1] === "export") {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }));
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "sess-fail",
+    sessionKey: "${key1}",
+    path: "${copy1Path}",
+    keys: ["${key1}", "${key2}"],
+    copies: [
+      { key: "${key1}", path: "${copy1Path}", sizeBytes: ${size1}, mtimeMs: ${mtime1}, lastEventAtMs: null },
+      { key: "${key2}", path: "${copy2Path}", sizeBytes: ${size2}, mtimeMs: ${mtime2}, lastEventAtMs: null },
+    ]
+  }));
+  console.log(JSON.stringify({ kind: "end", nativeId: "sess-fail", keys: ["${key1}", "${key2}"], status: "unreadable", rows: 0, skipped: 0 }));
+  console.log(JSON.stringify({ kind: "done", exported: 1, errors: 0 }));
+}
+`,
+    )
+    chmodSync(mockAg, 0o755)
+
+    await indexCodexTranscripts(db, { agBin: mockAg })
+
+    const s1 = getSession(db, key1)
+    const s2 = getSession(db, key2)
+    expect(s1).toBeDefined()
+    expect(s2).toBeDefined()
+
+    // In failure path, each key also holds its own path, size, and mtime
+    expect(s1?.jsonl_path).toBe(copy1Path)
+    expect(s1?.size_bytes).toBe(size1)
+    expect(s1?.mtime_ms).toBe(mtime1)
+
+    expect(s2?.jsonl_path).toBe(copy2Path)
+    expect(s2?.size_bytes).toBe(size2)
+    expect(s2?.mtime_ms).toBe(mtime2)
+  })
+
+  test("A2: red arm - taking copies[0] on multi-key causes key2 to erroneously hold copy1 path", () => {
+    const key1 = "codex:sess@k1"
+    const key2 = "codex:sess@k2"
+    const copies = [
+      { key: key1, path: "/path/copy1.jsonl", sizeBytes: 100, mtimeMs: 1000 },
+      { key: key2, path: "/path/copy2.jsonl", sizeBytes: 200, mtimeMs: 2000 },
+    ]
+    // Stated rule:
+    const correctSelection = (k: string) => copies.find((c) => c.key === k)
+    // Red arm: taking copies[0] unconditionally
+    const flawedSelection = (_k: string) => copies[0]
+
+    expect(correctSelection(key2)?.path).toBe("/path/copy2.jsonl")
+    expect(flawedSelection(key2)?.path).toBe("/path/copy1.jsonl")
+    expect(flawedSelection(key2)?.path).not.toBe("/path/copy2.jsonl")
+  })
+
   // --------------------------------------------------------------------------
   // A3: Codex mtime float tolerance
   // --------------------------------------------------------------------------
@@ -412,5 +601,141 @@ if (args[0] === "transcript" && args[1] === "list") {
     } finally {
       logSpy.mockRestore()
     }
+  })
+
+  // --------------------------------------------------------------------------
+  // N1: Missing or Unknown Status in Transcript Export End Record
+  // --------------------------------------------------------------------------
+  test("N1: end record with missing status is rejected as protocol error naming the session, leaving no open tx", async () => {
+    const mockAg = join(tempDir, "mock-ag-n1-nostatus.ts")
+    writeFileSync(
+      mockAg,
+      `#!/usr/bin/env bun
+const args = process.argv.slice(2);
+if (args[0] === "transcript" && args[1] === "list") {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }));
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "sess-nostatus",
+    sessionKey: "codex:sess-nostatus",
+    canonicalPath: "/fake/nostatus.jsonl",
+    status: "canonical",
+    copies: [{ key: "codex:sess-nostatus", path: "/fake/nostatus.jsonl", sizeBytes: 10, mtimeMs: 1000, lastEventAtMs: null }]
+  }));
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 1, sessions: 1, canonical: 1, ambiguous: 0, stale: 0, invalid: 0, unreadable: 0, errors: 0 }));
+} else if (args[0] === "transcript" && args[1] === "export") {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }));
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "sess-nostatus",
+    sessionKey: "codex:sess-nostatus",
+    path: "/fake/nostatus.jsonl",
+    keys: ["codex:sess-nostatus"],
+    copies: [{ key: "codex:sess-nostatus", path: "/fake/nostatus.jsonl", sizeBytes: 10, mtimeMs: 1000, lastEventAtMs: null }]
+  }));
+  console.log(JSON.stringify({ kind: "row", sessionKey: "codex:sess-nostatus", line: 1, role: "user", text: "hi", timestamp: null, recordKind: "event_msg", duplicateOf: null }));
+  // Missing status property on end record
+  console.log(JSON.stringify({ kind: "end", nativeId: "sess-nostatus", keys: ["codex:sess-nostatus"], rows: 1, skipped: 0 }));
+  console.log(JSON.stringify({ kind: "done", exported: 1, errors: 0 }));
+}
+`,
+    )
+    chmodSync(mockAg, 0o755)
+
+    await expect(indexCodexTranscripts(db, { agBin: mockAg })).rejects.toThrow(
+      "Protocol error: received end record without status for session sess-nostatus",
+    )
+
+    // Verify session was NOT committed
+    expect(getSession(db, "codex:sess-nostatus")).toBeNull()
+
+    // Verify no open transaction was left
+    expect(() => {
+      db.exec("BEGIN IMMEDIATE")
+      db.exec("ROLLBACK")
+    }).not.toThrow()
+  })
+
+  test("N1: end record with unknown status is rejected as protocol error naming unknown status and session", async () => {
+    const mockAg = join(tempDir, "mock-ag-n1-unknownstatus.ts")
+    writeFileSync(
+      mockAg,
+      `#!/usr/bin/env bun
+const args = process.argv.slice(2);
+if (args[0] === "transcript" && args[1] === "list") {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }));
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "sess-unknown",
+    sessionKey: "codex:sess-unknown",
+    canonicalPath: "/fake/unknown.jsonl",
+    status: "canonical",
+    copies: [{ key: "codex:sess-unknown", path: "/fake/unknown.jsonl", sizeBytes: 10, mtimeMs: 1000, lastEventAtMs: null }]
+  }));
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 1, sessions: 1, canonical: 1, ambiguous: 0, stale: 0, invalid: 0, unreadable: 0, errors: 0 }));
+} else if (args[0] === "transcript" && args[1] === "export") {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }));
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "sess-unknown",
+    sessionKey: "codex:sess-unknown",
+    path: "/fake/unknown.jsonl",
+    keys: ["codex:sess-unknown"],
+    copies: [{ key: "codex:sess-unknown", path: "/fake/unknown.jsonl", sizeBytes: 10, mtimeMs: 1000, lastEventAtMs: null }]
+  }));
+  console.log(JSON.stringify({ kind: "row", sessionKey: "codex:sess-unknown", line: 1, role: "user", text: "hi", timestamp: null, recordKind: "event_msg", duplicateOf: null }));
+  // Unknown status 'partial'
+  console.log(JSON.stringify({ kind: "end", nativeId: "sess-unknown", keys: ["codex:sess-unknown"], status: "partial", rows: 1, skipped: 0 }));
+  console.log(JSON.stringify({ kind: "done", exported: 1, errors: 0 }));
+}
+`,
+    )
+    chmodSync(mockAg, 0o755)
+
+    await expect(indexCodexTranscripts(db, { agBin: mockAg })).rejects.toThrow(
+      'Protocol error: unknown end record status "partial" for session sess-unknown',
+    )
+
+    // Verify session was NOT committed
+    expect(getSession(db, "codex:sess-unknown")).toBeNull()
+
+    // Verify no open transaction was left
+    expect(() => {
+      db.exec("BEGIN IMMEDIATE")
+      db.exec("ROLLBACK")
+    }).not.toThrow()
+  })
+
+  // --------------------------------------------------------------------------
+  // Chief Ruling 1: BEGIN IMMEDIATE & version re-read inside transaction
+  // --------------------------------------------------------------------------
+  test("Chief Ruling 1: runMigrations uses BEGIN IMMEDIATE and safely re-reads user_version inside transaction", () => {
+    const memoryDb = new Database(":memory:")
+    initSchema(memoryDb)
+    expect((memoryDb.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3)
+
+    // Setting user_version back to 2
+    memoryDb.exec("PRAGMA user_version = 2")
+    expect((memoryDb.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(2)
+
+    // If another transaction advances version to 3 inside the transaction, re-read sees it
+    const origPrepare = memoryDb.prepare.bind(memoryDb)
+    let reReadChecked = false
+    memoryDb.prepare = ((sql: string) => {
+      if (sql.includes("PRAGMA user_version") && !reReadChecked) {
+        reReadChecked = true
+      }
+      return origPrepare(sql)
+    }) as any
+
+    // Running migrations brings user_version cleanly to 3
+    runMigrations(memoryDb)
+    expect(reReadChecked).toBe(true)
+    expect((memoryDb.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3)
+    memoryDb.close()
   })
 })

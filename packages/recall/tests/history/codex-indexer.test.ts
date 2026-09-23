@@ -46,6 +46,7 @@ describe("Codex Transcript Indexer", () => {
   })
 
   afterEach(() => {
+    process.exitCode = 0
     resetIgnoreCache()
     closeDb()
     if (origClaudeDir !== undefined) {
@@ -851,8 +852,8 @@ if (args.includes("list")) {
     nativeId: "amb-123",
     canonicalPath: "/fake/copy1.jsonl",
     copies: [
-      { path: "/fake/copy1.jsonl", account: "acc1", sizeBytes: 100, mtimeMs: 1000, lastEventAtMs: null },
-      { path: "/fake/copy2.jsonl", account: "acc2", sizeBytes: 100, mtimeMs: 1000, lastEventAtMs: null }
+      { key: "${key1}", path: "/fake/copy1.jsonl", account: "acc1", sizeBytes: 100, mtimeMs: 1000, lastEventAtMs: null },
+      { key: "${key2}", path: "/fake/copy2.jsonl", account: "acc2", sizeBytes: 100, mtimeMs: 1000, lastEventAtMs: null }
     ],
     status: "ambiguous",
     key: "codex:amb-123"
@@ -868,8 +869,8 @@ if (args.includes("list")) {
     path: "/fake/copy1.jsonl",
     keys: ["${key1}", "${key2}"],
     copies: [
-      { path: "/fake/copy1.jsonl", sizeBytes: 100, decision: "ambiguous" },
-      { path: "/fake/copy2.jsonl", sizeBytes: 100, decision: "ambiguous" }
+      { key: "${key1}", path: "/fake/copy1.jsonl", sizeBytes: 100, decision: "ambiguous" },
+      { key: "${key2}", path: "/fake/copy2.jsonl", sizeBytes: 100, decision: "ambiguous" }
     ]
   }))
   console.log(JSON.stringify({
@@ -910,6 +911,8 @@ if (args.includes("list")) {
       const sess2 = getSession(db, key2)
       expect(sess1).toBeDefined()
       expect(sess2).toBeDefined()
+      expect(sess1?.jsonl_path).toBe("/fake/copy1.jsonl")
+      expect(sess2?.jsonl_path).toBe("/fake/copy2.jsonl")
 
       const msg1 = db.prepare("SELECT content FROM messages WHERE session_id = ?").get(key1) as { content: string }
       const msg2 = db.prepare("SELECT content FROM messages WHERE session_id = ?").get(key2) as { content: string }
@@ -1281,7 +1284,7 @@ if (args.includes("list")) {
       expect(updated?.mtime_ms).toBe(2000)
 
       const msgs = db
-        .prepare("SELECT content FROM messages WHERE session_id = ? ORDER BY uuid")
+        .prepare("SELECT content FROM messages WHERE session_id = ? ORDER BY id")
         .all("codex:grow-test") as { content: string }[]
       expect(msgs).toHaveLength(4)
       expect(msgs[3]!.content).toBe("grown m4")
