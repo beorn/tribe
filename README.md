@@ -194,9 +194,10 @@ bun packages/recall/src/cli.ts summarize
 bun packages/recall/src/cli.ts show week
 ```
 
-**Freshness.** SessionStart starts a detached incremental index when the index
-is older than `RECALL_STALE_THRESHOLD` (default `5m`), and SessionEnd starts one
-after new transcript content. Search itself is read-only: every result envelope
+**Freshness.** The session hooks never write the index: run
+`recall index --incremental` outside them, for example on a schedule, so the
+index has one writer. An index older than `RECALL_STALE_THRESHOLD` (default
+`5m`) reads as stale. Search itself is read-only: every result envelope
 identifies index `provenance`, and a stale or unavailable index exits 3 while
 preserving positive hits. A degraded empty response is `results: null`,
 `total: null`, never `[]`/`0`. The legacy `--no-refresh` flag skips freshness
