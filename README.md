@@ -366,7 +366,7 @@ custom paths, and observability.
 
 ## Requirements
 
-- **Bun ≥ 1.3.13.** Bun is the runtime, package manager, and SQLite driver
+- **Bun ≥ 1.4.0.** Bun is the runtime, package manager, and SQLite driver
   (`bun:sqlite`, WAL mode + FTS5) — no separate SQLite install needed.
 - **macOS or Linux.** The daemon is a Unix-domain-socket server; run it under
   WSL on Windows.

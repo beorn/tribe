@@ -132,4 +132,25 @@ describe("repository Bun runtime manifest consistency", () => {
     expect(source.match(/^\s*bun-version-file:\s*["']?\.bun-version["']?\s*$/gm)).toHaveLength(1)
     expect(source).not.toMatch(/^\s*bun-version:\s/m)
   })
+
+  /**
+   * Below 1.4 a process whose recall Worker sits in a native SQLite call does
+   * not exit, even on process.exit, so the prompt hook's 5 s deadline cannot
+   * end it. A lower floor would promise a runtime the hook is known to hang on.
+   */
+  it("declares one engines.bun floor, no lower than 1.4.0, in every manifest", () => {
+    const manifests = [
+      "package.json",
+      ...["packages", "plugins"].flatMap((dir) =>
+        readdirSync(join(repoDir, dir)).map((name) => join(dir, name, "package.json")),
+      ),
+    ].filter((path) => existsSync(join(repoDir, path)))
+    const floors = manifests.flatMap((path) => {
+      const engines = (JSON.parse(readFileSync(join(repoDir, path), "utf8")) as { engines?: { bun?: string } }).engines
+      return engines?.bun === undefined ? [] : [{ path, floor: engines.bun }]
+    })
+
+    expect(floors.length, "at least the root manifest declares engines.bun").toBeGreaterThan(0)
+    expect(floors.filter(({ floor }) => floor !== ">=1.4.0")).toEqual([])
+  })
 })
