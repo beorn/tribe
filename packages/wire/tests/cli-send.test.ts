@@ -24,6 +24,7 @@ import {
 import { AG_SESSION_AUTH_ENV } from "../src/lib/self-mailbox-authority.ts"
 import { oversizedMessageError } from "../src/lib/send-validation.ts"
 import { safeRemoveSync } from "removely"
+import { tribeAmbientEnvironmentNames } from "../src/daemon-environment.ts"
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "../src/cli.ts")
 const BUN_BIN = process.env.BUN_EXECUTABLE ?? "bun"
@@ -792,9 +793,7 @@ describe("registerSendCommands", () => {
 
   test("send --reply fails loudly when no pending owner identity is available", async () => {
     const env: NodeJS.ProcessEnv = { ...process.env, TRIBE_SOCKET: "/tmp/tribe-wire-no-owner.sock" }
-    delete env.TRIBE_NAME
-    delete env.TRIBE_SESSION_NAME
-    delete env.TRIBE_LAUNCH_ID
+    for (const name of tribeAmbientEnvironmentNames()) delete env[name]
 
     const res = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProc) => {
       const child = spawn(BUN_BIN, [CLI, "send", "@agent/3", "done", "--type", "response", "--reply", "req-123"], {

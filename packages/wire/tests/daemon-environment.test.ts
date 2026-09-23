@@ -6,13 +6,19 @@
  * @consumer root hab.yml wire service
  */
 
-import { closeSync, mkdtempSync, openSync, rmSync, writeFileSync } from "node:fs"
+import { closeSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, test } from "vitest"
 import tribeProject from "../../../hab.projects.ts"
-import { sanitizeDaemonProcessEnvironment, sanitizeStandaloneDaemonEnvironment } from "../src/daemon-environment.ts"
+import {
+  sanitizeDaemonProcessEnvironment,
+  sanitizeStandaloneDaemonEnvironment,
+  tribeAmbientEnvironmentNames,
+} from "../src/daemon-environment.ts"
+import * as wire from "../src/index.ts"
+import { tribeSessionIdentityEnvironmentNames } from "../src/launch-environment.ts"
 import { readSelfMailboxAuthorityFromEnvironment } from "../src/lib/self-mailbox-authority.ts"
 
 const ambientIdentity = {
@@ -216,5 +222,76 @@ describe("the scalar journal root survives standalone sanitizing (@i/4-supervisi
     expect(kept.HAB_SESSION_DIR).toBeUndefined()
     expect(kept.HAB_SERVICE_KIND).toBeUndefined()
     expect(kept.HAB_SERVICE_NAME).toBeUndefined()
+  })
+})
+
+/**
+ * 24644 bullet 3 (@cto's fixture-environment amendment and 14f4c81e): a
+ * disposable fixture inherits none of the seat-scoped names tribe reads.
+ * `tribeAmbientEnvironmentNames` is tribe's single statement of them, and it
+ * replaced three hand-rolled delete lists -- the recovery journey's BASE_ENV
+ * here, and two tent-script fixtures in a host repository.
+ */
+describe("the ambient names tribe reads", () => {
+  // The three replaced lists exactly as they read, so nothing silently narrows.
+  // AG_HOST_SESSION_STATE_DIR has no tribe reader; it is ag's to scrub.
+  const replacedHandLists: Record<string, readonly string[]> = {
+    "recovery journey BASE_ENV": [
+      "CLAUDE_SESSION_ID",
+      "CLAUDE_SESSION_NAME",
+      "BD_ACTOR",
+      "AG_SESSION_AUTH",
+      "TRIBE_DELIVERY_FALLBACKS",
+      "TRIBE_EXPECTED_MEMBERS",
+      "TRIBE_EXPECTED_MEMBERS_FILE",
+      "HAB_SESSION_HABITAT_ROOT",
+      "AG_HOST_SESSION_STATE_DIR",
+    ],
+    "pending-backlog alarm fixture": ["TRIBE_EXPECTED_MEMBERS", "TRIBE_EXPECTED_MEMBERS_FILE"],
+    "operator-delivery fixture": [
+      ...tribeSessionIdentityEnvironmentNames(),
+      "CLAUDE_SESSION_ID",
+      "CLAUDE_SESSION_NAME",
+      "BD_ACTOR",
+      "TRIBE_DELIVERY_FALLBACKS",
+    ],
+  }
+
+  test("are exactly the union of the lists they replaced, less the one name tribe never reads", () => {
+    const union = new Set(Object.values(replacedHandLists).flat())
+    union.delete("AG_HOST_SESSION_STATE_DIR")
+    const names = tribeAmbientEnvironmentNames()
+    expect(new Set(names).size).toBe(names.length)
+    expect([...names].sort()).toEqual([...union].sort())
+    expect(names).not.toContain("PATH")
+    expect(names).not.toContain("HOME")
+  })
+
+  test("are exported from the package entry", () => {
+    expect(wire.tribeAmbientEnvironmentNames()).toEqual(tribeAmbientEnvironmentNames())
+  })
+
+  // One hand delete is a test controlling its own precondition; two or more
+  // ambient names deleted in one file is a hand-rolled scrub list.
+  test("are deleted through the helper, never by a hand-rolled list in a tribe test", () => {
+    const packagesDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..")
+    const names = tribeAmbientEnvironmentNames()
+    const handRolled: string[] = []
+    for (const pkg of readdirSync(packagesDir)) {
+      let files: string[]
+      try {
+        files = readdirSync(join(packagesDir, pkg, "tests"), { recursive: true }) as string[]
+      } catch {
+        continue
+      }
+      for (const file of files.filter((name) => /\.test\.tsx?$/u.test(name))) {
+        const source = readFileSync(join(packagesDir, pkg, "tests", file), "utf8")
+        const deleted = names.filter((name) =>
+          new RegExp("delete\\s+[\\w.]+(?:\\." + name + "\\b|\\[[\"']" + name + "[\"']\\])", "u").test(source),
+        )
+        if (deleted.length >= 2) handRolled.push(`${pkg}/tests/${file}: ${deleted.join(", ")}`)
+      }
+    }
+    expect(handRolled).toEqual([])
   })
 })

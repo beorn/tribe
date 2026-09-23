@@ -18,11 +18,17 @@ import { tribeSessionIdentityEnvironmentNames } from "./launch-environment.ts"
  * the management markers are gone. Defined beside the sanitizer that makes that
  * true; the daemon's health source and the client spawn gate both read it here.
  */
+export const HAB_SESSION_HABITAT_ROOT_ENV = "HAB_SESSION_HABITAT_ROOT"
+
 export const HAB_SESSION_MARKERS = [
-  "HAB_SESSION_HABITAT_ROOT",
+  HAB_SESSION_HABITAT_ROOT_ENV,
   "HAB_SESSION_LAUNCH_ID",
   "HAB_SESSION_INSTRUCTION_ANCHOR",
 ] as const
+
+/** The declared roster, inline and by file; the daemon's roster reader and the standalone sanitizer both read them. */
+export const TRIBE_EXPECTED_MEMBERS_ENV = "TRIBE_EXPECTED_MEMBERS"
+export const TRIBE_EXPECTED_MEMBERS_FILE_ENV = "TRIBE_EXPECTED_MEMBERS_FILE"
 
 export const TRIBE_OPERATOR_CAPABILITY_FD_ENV = "TRIBE_OPERATOR_CAPABILITY_FD"
 export const TRIBE_OPERATOR_CAPABILITY_ENV = "TRIBE_OPERATOR_CAPABILITY"
@@ -91,11 +97,33 @@ export function sanitizeStandaloneDaemonEnvironment(source: Readonly<NodeJS.Proc
   // 24589 row 3 / 24591: a client's TRIBE_EXPECTED_MEMBERS is frozen at that
   // client's launch. When hab has pinned the JSON on disk, drop the inherited
   // snapshot so the daemon cannot quote a list older than the config.
-  const habitatFile = env.HAB_SESSION_HABITAT_ROOT?.trim()
-    ? join(env.HAB_SESSION_HABITAT_ROOT, "tribe-expected-members.json")
-    : undefined
-  if (env.TRIBE_EXPECTED_MEMBERS_FILE?.trim() || (habitatFile !== undefined && existsSync(habitatFile))) {
-    delete env.TRIBE_EXPECTED_MEMBERS
+  const habitatRoot = env[HAB_SESSION_HABITAT_ROOT_ENV]
+  const habitatFile = habitatRoot?.trim() ? join(habitatRoot, "tribe-expected-members.json") : undefined
+  if (env[TRIBE_EXPECTED_MEMBERS_FILE_ENV]?.trim() || (habitatFile !== undefined && existsSync(habitatFile))) {
+    delete env[TRIBE_EXPECTED_MEMBERS_ENV]
   }
   return env
+}
+
+/**
+ * The ambient names tribe reads (24644; @cto's fixture-environment amendment
+ * and 14f4c81e, 2026-09-23): session identity, the declared-roster pair, the
+ * LLM-sender classification, delivery fallbacks, and the habitat root the
+ * daemon reads its pinned roster from. A disposable fixture deletes these
+ * rather than inheriting them, since inheriting any makes a test's result a
+ * function of who ran it and when their seat launched. Never PATH or HOME.
+ * Each package owns its own list; this is tribe's, and a name comes from its
+ * reader's constant wherever the reader has one.
+ */
+export function tribeAmbientEnvironmentNames(): readonly string[] {
+  return [
+    ...tribeSessionIdentityEnvironmentNames(),
+    TRIBE_EXPECTED_MEMBERS_ENV,
+    TRIBE_EXPECTED_MEMBERS_FILE_ENV,
+    "CLAUDE_SESSION_ID",
+    "CLAUDE_SESSION_NAME",
+    "BD_ACTOR",
+    "TRIBE_DELIVERY_FALLBACKS",
+    HAB_SESSION_HABITAT_ROOT_ENV,
+  ]
 }

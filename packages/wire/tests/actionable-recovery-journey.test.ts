@@ -37,6 +37,7 @@ import { safeRemoveSync } from "removely"
 import { createStatements, openDatabase } from "../../daemon/src/lib/database.ts"
 import { connectToDaemon, type DaemonClient } from "../src/client.ts"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
+import { tribeAmbientEnvironmentNames } from "../src/daemon-environment.ts"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ADAPTER = resolve(HERE, "../src/stdio-adapter.ts")
@@ -73,18 +74,11 @@ const NAME = "@agent/3"
 // spawned daemon/adapter/CLI via `{ ...process.env }`, flipping the summaryless
 // `send` calls below into a "summary required" error and diverging from the
 // config that ships. Strip them once so every child sees the same
-// classification everywhere the suite runs.
+// classification everywhere the suite runs -- through tribe's one statement of
+// the ambient names it reads (24644), never a hand-rolled copy of it.
 const BASE_ENV: NodeJS.ProcessEnv = (() => {
   const env = { ...process.env }
-  delete env.CLAUDE_SESSION_ID
-  delete env.CLAUDE_SESSION_NAME
-  delete env.BD_ACTOR
-  delete env.AG_SESSION_AUTH
-  delete env.TRIBE_DELIVERY_FALLBACKS
-  delete env.TRIBE_EXPECTED_MEMBERS
-  delete env.TRIBE_EXPECTED_MEMBERS_FILE
-  delete env.HAB_SESSION_HABITAT_ROOT
-  delete env.AG_HOST_SESSION_STATE_DIR
+  for (const name of tribeAmbientEnvironmentNames()) delete env[name]
   return env
 })()
 

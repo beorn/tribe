@@ -23,6 +23,7 @@
  * @ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded
  */
 
+import { TRIBE_EXPECTED_MEMBERS_ENV, TRIBE_EXPECTED_MEMBERS_FILE_ENV } from "../../../wire/src/daemon-environment.ts"
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 
@@ -68,7 +69,8 @@ export interface DeclaredRoster {
  * roster — an empty roster (`"[]"`) is a real declaration that happens to
  * name nobody, and reads every durable launch as undeclared/departed.
  */
-export const TRIBE_EXPECTED_MEMBERS_FILE_ENV = "TRIBE_EXPECTED_MEMBERS_FILE"
+// One spelling: the constants live beside the sanitizer that also reads them (24644).
+export { TRIBE_EXPECTED_MEMBERS_ENV, TRIBE_EXPECTED_MEMBERS_FILE_ENV } from "../../../wire/src/daemon-environment.ts"
 /** Must match @hab/plugin-ag pin-expected-members. */
 export const TRIBE_EXPECTED_MEMBERS_HABITAT_FILE = "tribe-expected-members.json"
 
@@ -162,7 +164,7 @@ function rosterDisagreement(hab: DeclaredRoster, inherited: DeclaredRoster): str
  */
 export function loadDeclaredRosterFromEnv(env: Readonly<NodeJS.ProcessEnv>): DeclaredRoster | undefined {
   const filePath = resolvedRosterFile(env)
-  const envRaw = env.TRIBE_EXPECTED_MEMBERS
+  const envRaw = env[TRIBE_EXPECTED_MEMBERS_ENV]
   if (filePath !== undefined) {
     const fromFile = readRosterFile(filePath)
     if (envRaw !== undefined && envRaw.trim() !== "") {
