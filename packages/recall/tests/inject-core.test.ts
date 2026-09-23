@@ -504,6 +504,76 @@ describe("runInjectDelta — per-step durations (@ag/tribe/25071 row 1)", () => 
   })
 })
 
+describe("runInjectDelta — a busy project-source step is skipped, never waited on (@ag/tribe/25071)", () => {
+  beforeEach(() => {
+    recallMock.mockReset()
+    ensureProjectSourcesIndexedMock.mockReset()
+  })
+
+  const salientPrompt = "why does src/lib/inject-core.ts stall the prompt hook past thirty seconds tonight?"
+
+  test.each([
+    [
+      "the index writer is held by a run",
+      async () => new (await import("../src/history/db.ts")).IndexWriterBusyError("Recall index already active"),
+    ],
+    [
+      "another connection holds SQLite's write lock",
+      async () => new (await import("../src/history/project-sources.ts")).ProjectSourcesBusyError("database is locked"),
+    ],
+  ])("%s: recall still runs, and the result names the skipped step and why", async (_case, busy) => {
+    const error = await busy()
+    ensureProjectSourcesIndexedMock.mockImplementation(() => {
+      throw error
+    })
+    mockRecall([])
+
+    // No caller-supplied record: the daemon passes none, so the skip must travel in the result (25071 row 3 review).
+    const result = await runInjectDelta(salientPrompt, createMemorySeenStore())
+
+    expect(recallMock).toHaveBeenCalled()
+    expect(result).toEqual({ skipped: true, reason: "no_results", skippedSteps: { project_sources: error.message } })
+  })
+
+  test.each([
+    [
+      "the index writer is held by a run",
+      async () => new (await import("../src/history/db.ts")).IndexWriterBusyError("busy"),
+    ],
+    [
+      "another connection holds SQLite's write lock",
+      async () => new (await import("../src/history/project-sources.ts")).ProjectSourcesBusyError("database is locked"),
+    ],
+  ])("%s, and recall finds a hit: the injected result names the skipped step too", async (_case, busy) => {
+    const error = await busy()
+    ensureProjectSourcesIndexedMock.mockImplementation(() => {
+      throw error
+    })
+    mockRecall([
+      {
+        sessionId: "sess-abcd1234",
+        sessionTitle: "sess-title",
+        type: "message",
+        snippet: "A descriptive snippet that is plenty long enough to pass the minimum filter.",
+      },
+    ])
+
+    // The common path (25071 row 3 review, round 2): a successful injection carries the skip as well.
+    const result = await runInjectDelta("what did we decide about km-storage-sync layering?", createMemorySeenStore())
+
+    expect(result.skipped).toBe(false)
+    expect(result.skippedSteps).toEqual({ project_sources: error.message })
+  })
+
+  test("any other project-source failure still fails the hook", async () => {
+    ensureProjectSourcesIndexedMock.mockImplementation(() => {
+      throw new Error("disk I/O error")
+    })
+    await expect(runInjectDelta(salientPrompt, createMemorySeenStore())).rejects.toThrow("disk I/O error")
+    expect(recallMock).not.toHaveBeenCalled()
+  })
+})
+
 // 25071: the harness wraps what it hands a session in envelopes (Monitor events, tribe channel
 // messages, reminders). They are not the operator's words, yet their boilerplate picked the glossary
 // anchor "tribe", whose recall_fallback ran 3.1 s at p50 and 29.6 s at worst, against the 30 s kill.
