@@ -2,9 +2,12 @@ import { describe, expect, test, vi } from "vitest"
 import { BoundedProcessCommandError } from "../../../recall/src/lib/bounded-process.ts"
 import {
   createAlertState,
+  defaultThresholds,
+  evaluateAlerts,
   formatCollectedHealthAlert,
   recordAttributionBlindness,
   type HealthAlert,
+  type HealthMetrics,
 } from "./health-monitor-plugin.ts"
 import { createHealthProcessSource, SYSMON_COMMAND_TIMEOUT_MS } from "./health-process-source.ts"
 
@@ -156,5 +159,67 @@ describe("the monitor counts its own failure to attribute", () => {
     const message = format("source-command-timeout", 1)
 
     expect(message).not.toMatch(/consecutive samples/)
+  })
+})
+
+describe("attribution blindness alerts when sustained (acceptance 2)", () => {
+  test("fires attribution:blind alert after sustained consecutive unavailable samples and resets on recovery", () => {
+    const state = createAlertState()
+    const thresholds = defaultThresholds()
+
+    const unavailableMetrics: HealthMetrics = {
+      cpu: { topProcesses: [] },
+      processObservation: {
+        diagnostic: {
+          excluded: EXCLUDED,
+          location: SESSION_DIR,
+          query: "latest exact process census with owner attribution",
+        },
+        kind: "canonical-unavailable",
+        reason: "process-census-incomplete",
+      },
+      scalarObservation: { kind: "standalone-os", unavailable: ["disk.bytes", "disk.inodes"] },
+      timestamp: Date.now(),
+      worktrees: 0,
+    }
+
+    const r1 = evaluateAlerts(unavailableMetrics, thresholds, state)
+    expect(r1.filter((a) => a.type === "attribution")).toHaveLength(0)
+    expect(state.attributionBlindSamples).toBe(1)
+
+    const r2 = evaluateAlerts(unavailableMetrics, thresholds, state)
+    expect(r2.filter((a) => a.type === "attribution")).toHaveLength(0)
+    expect(state.attributionBlindSamples).toBe(2)
+
+    const r3 = evaluateAlerts(unavailableMetrics, thresholds, state)
+    const blindAlerts = r3.filter((a) => a.type === "attribution")
+    expect(blindAlerts).toHaveLength(1)
+    expect(blindAlerts[0]!.severity).toBe("warning")
+    expect(blindAlerts[0]!.message).toContain("Process census attribution is BLIND")
+    expect(blindAlerts[0]!.message).toContain("failed for 3 consecutive samples")
+    expect(blindAlerts[0]!.message).toContain("process-census-incomplete")
+    expect(state.firedAlerts.has("attribution:blind")).toBe(true)
+
+    // Sustained: does not repeat every sample (holds ONE live condition)
+    const r4 = evaluateAlerts(unavailableMetrics, thresholds, state)
+    expect(r4.filter((a) => a.type === "attribution")).toHaveLength(0)
+    expect(state.attributionBlindSamples).toBe(4)
+
+    // Resets on first complete/available census
+    const availableMetrics: HealthMetrics = {
+      cpu: { topProcesses: [] },
+      processObservation: {
+        kind: "canonical-available",
+        observedAt: Date.now(),
+        source: { epoch: "host-live", sequence: 100 },
+      },
+      scalarObservation: { kind: "standalone-os", unavailable: ["disk.bytes", "disk.inodes"] },
+      timestamp: Date.now(),
+      worktrees: 0,
+    }
+    const r5 = evaluateAlerts(availableMetrics, thresholds, state)
+    expect(r5.filter((a) => a.type === "attribution")).toHaveLength(0)
+    expect(state.attributionBlindSamples).toBe(0)
+    expect(state.firedAlerts.has("attribution:blind")).toBe(false)
   })
 })
