@@ -201,9 +201,10 @@ export function evaluateSocketOwner(input: {
   }
   const service = habServiceOf(input.lastOwner)
   if (service === null) return { allow: true, reason: null }
+  // `hh-hab` is the hh habitat's wrapper command (renamed from main-hab, 25149).
   return {
     allow: false,
-    reason: `this socket was last bound by hab service "${service}", which hab restarts — refusing to start a daemon outside hab in its place; restart it with: main-hab up ${service} (24906)`,
+    reason: `this socket was last bound by hab service "${service}", which hab restarts — refusing to start a daemon outside hab in its place; restart it with: hh-hab up ${service} (24906)`,
   }
 }
 
@@ -229,7 +230,7 @@ export function evaluateHabLaunchedClient(input: {
   if (!HAB_SESSION_MARKERS.every((name) => env[name]?.trim())) return { allow: true, reason: null }
   return {
     allow: false,
-    reason: `this process was launched by hab (habitat ${env.HAB_SESSION_HABITAT_ROOT}), which owns the daemon for ${socketPath} — not starting one here; restart it with: main-hab up wire (24906)`,
+    reason: `this process was launched by hab (habitat ${env.HAB_SESSION_HABITAT_ROOT}), which owns the daemon for ${socketPath} — not starting one here; restart it with: hh-hab up wire (24906)`,
   }
 }
 

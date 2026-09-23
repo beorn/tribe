@@ -403,7 +403,7 @@ try {
     const attempt = await attemptConnectOrStart(dbPath)
     expect(attempt.connected, `a client started a daemon in place of hab's wire: ${attempt.detail}`).toBe(false)
     expect(attempt.detail).toContain('hab service "wire"')
-    expect(attempt.detail).toContain("main-hab up wire")
+    expect(attempt.detail).toContain("hh-hab up wire")
     expect(existsSync(socketPath), "no daemon bound the hab-owned socket").toBe(false)
   }, 30_000)
 
@@ -429,7 +429,7 @@ try {
     )
     expect(attempt.connected, `a hab-launched client started its own daemon: ${attempt.detail}`).toBe(false)
     expect(attempt.detail).toContain(habitat)
-    expect(attempt.detail).toContain("main-hab up wire")
+    expect(attempt.detail).toContain("hh-hab up wire")
     expect(existsSync(socketPath), "no daemon bound the socket hab handed the client").toBe(false)
   }, 30_000)
 
@@ -470,7 +470,7 @@ writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify(outcome))
     )
     expect(outcome.action).toBe("spawn-failed")
     expect(outcome.error).toContain(habitat)
-    expect(outcome.error).toContain("main-hab up wire")
+    expect(outcome.error).toContain("hh-hab up wire")
   }, 30_000)
 
   it("the daemon's own door refuses a binder outside hab when hab owned the socket last, and admits hab's", async () => {

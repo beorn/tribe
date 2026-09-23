@@ -154,7 +154,7 @@ describe("socket owner — hab's socket is never taken by a standalone daemon (2
     const decision = evaluateSocketOwner({ lastOwner: "hab:wire", binderOwner: "standalone" })
     expect(decision.allow).toBe(false)
     expect(decision.reason).toContain('hab service "wire"')
-    expect(decision.reason).toContain("main-hab up wire")
+    expect(decision.reason).toContain("hh-hab up wire")
   })
 
   test("hab's own binder proceeds, a standalone-owned socket allows silently, and an unknown owner allows loudly", () => {
@@ -178,7 +178,7 @@ describe("socket owner — hab's socket is never taken by a standalone daemon (2
     })
     expect(decision.allow).toBe(false)
     expect(decision.reason).toContain("/hh/main.hab")
-    expect(decision.reason).toContain("main-hab up wire")
+    expect(decision.reason).toContain("hh-hab up wire")
   })
 
   test("the launch rule is scoped to hab's socket and to a caller hab actually launched", () => {
