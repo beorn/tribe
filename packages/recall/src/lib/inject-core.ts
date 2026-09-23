@@ -125,6 +125,11 @@ export interface SeenStore {
 
 export interface RunInjectDeltaOptions {
   /**
+   * Filled with each step's wall time in ms, keyed by step name (@ag/tribe/25071 row 1). The caller owns the
+   * record, so a step that throws is still recorded when the caller logs the failure.
+   */
+  steps?: Record<string, number>
+  /**
    * Max snippets to include. Default 1.
    *
    * V2 lowered this from 3 → 1: dogfooding showed multi-snippet emits dilute
@@ -187,6 +192,30 @@ export type RunInjectDeltaResult =
       emptyRecallReason?: Extract<InjectSkipReason, "no_results" | "all_seen">
     }
 
+/** Adds `run`'s wall time to `steps[name]`, and records it even when `run` throws (@ag/tribe/25071 row 1). */
+export function timeStep<T>(steps: Record<string, number> | undefined, name: string, run: () => T): T {
+  const start = performance.now()
+  try {
+    return run()
+  } finally {
+    if (steps) steps[name] = Math.round((steps[name] ?? 0) + performance.now() - start)
+  }
+}
+
+/** {@link timeStep} for a step that returns a promise: the time runs until it settles. */
+export async function timeStepAsync<T>(
+  steps: Record<string, number> | undefined,
+  name: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  const start = performance.now()
+  try {
+    return await run()
+  } finally {
+    if (steps) steps[name] = Math.round((steps[name] ?? 0) + performance.now() - start)
+  }
+}
+
 /**
  * Run the recall + dedup + format pipeline against the supplied seen-store.
  * Pure logic aside from the recall call itself and the store reads/writes;
@@ -206,7 +235,8 @@ export async function runInjectDelta(
   const ensureProjectSourcesIndexedImpl = opts.deps?.ensureProjectSourcesIndexed ?? ensureProjectSourcesIndexed
   const findGlossaryAnchorImpl = opts.deps?.findGlossaryAnchor ?? findGlossaryAnchor
 
-  const skipReason = classifyPromptSkip(prompt)
+  const steps = opts.steps
+  const skipReason = timeStep(steps, "classify", () => classifyPromptSkip(prompt))
   if (skipReason && TRIVIAL_SKIP_REASONS.has(skipReason)) {
     emitInjectionDebugEvent({
       source: "recall",
@@ -234,7 +264,7 @@ export async function runInjectDelta(
   // path where a directive happens to be 120+ chars, AND prompts with
   // legitimate salience patterns (kebab-id, file paths) that are still
   // commands.
-  if (looksLikeDirective(prompt)) {
+  if (timeStep(steps, "classify", () => looksLikeDirective(prompt))) {
     emitInjectionDebugEvent({
       source: "recall",
       action: "skip",
@@ -252,8 +282,8 @@ export async function runInjectDelta(
   // salience pattern AND a glossary anchor (e.g. "white-box ...
   // createTestApp ..."). The full prompt runs first; if it returns no
   // results, we retry with the glossary anchor before giving up.
-  const promptHasSalience = hasSalience(prompt)
-  const glossaryHit = findGlossaryAnchorImpl(prompt)
+  const promptHasSalience = timeStep(steps, "classify", () => hasSalience(prompt))
+  const glossaryHit = timeStep(steps, "glossary", () => findGlossaryAnchorImpl(prompt))
   const recallQuerySeed: string | null = !promptHasSalience ? glossaryHit : null
 
   // Question-shaped prompts get a more permissive bypass threshold:
@@ -274,9 +304,9 @@ export async function runInjectDelta(
     return { skipped: true, reason: "low_salience" }
   }
 
-  ensureProjectSourcesIndexedImpl()
+  timeStep(steps, "project_sources", () => ensureProjectSourcesIndexedImpl())
 
-  const turn = store.advanceTurn()
+  const turn = timeStep(steps, "advance_turn", () => store.advanceTurn())
 
   // When salience came from a glossary anchor, use the anchor itself as
   // the recall query — it's the highest-signal token in the prompt and
@@ -295,14 +325,14 @@ export async function runInjectDelta(
     // so users can still grep their live session explicitly.
     excludeCurrentSession: true,
   } as const
-  let result = await recallImpl(recallQuery, recallOpts)
+  let result = await timeStepAsync(steps, "recall", () => recallImpl(recallQuery, recallOpts))
 
   // Fallback: full-prompt FTS found nothing, but the prompt has a known
   // project anchor (camelCase symbol, framework name) buried in generic
   // English. Retry with the glossary anchor alone — this rescues prompts
   // where the salient term is dominated by surrounding common words.
   if (result.results.length === 0 && glossaryHit && recallQuery !== glossaryHit) {
-    result = await recallImpl(glossaryHit, recallOpts)
+    result = await timeStepAsync(steps, "recall", () => recallImpl(glossaryHit, recallOpts))
   }
 
   if (result.results.length === 0) {
