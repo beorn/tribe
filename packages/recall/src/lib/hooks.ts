@@ -26,11 +26,9 @@
 import * as path from "path"
 import * as os from "os"
 import * as fs from "fs"
-import { spawn } from "child_process"
-import { fileURLToPath } from "node:url"
 import { createLogger, drainOutput } from "loggily"
 import { hookRecall } from "../history/recall"
-import { getDb, closeDb, getIndexMeta, IndexWriterBusyError } from "../history/db"
+import { IndexWriterBusyError } from "../history/db"
 import { summarizeUnprocessedDays } from "./summarize-daily"
 import { withDaemonCall } from "../../../../plugins/claude/recall/lib/socket.ts"
 import { resolveRecallSocketPath } from "../../../../plugins/claude/recall/lib/config.ts"
@@ -118,68 +116,6 @@ export function writeSessionSentinel(sentinel: Omit<SessionSentinel, "ts">): voi
 }
 
 // ============================================================================
-// Background FTS index refresh (shared by SessionStart + SessionEnd hooks)
-// ============================================================================
-
-import { getStaleThresholdMs } from "./staleness"
-
-/**
- * SessionStart/End auto-refresh threshold — shares RECALL_STALE_THRESHOLD env
- * + 5m default with search's read-only provenance classification (see search.ts).
- * Per @km/bearly/19216-recall-freshness-shrink-threshold: 1h was too coarse
- * for active sessions (chief recall'd 6h-stale design discussions and got
- * "no results"); 5m matches Anthropic's prompt-cache TTL.
- */
-
-function indexIsStale(maxAgeMs: number): boolean {
-  try {
-    const db = getDb()
-    try {
-      const lastRebuild = getIndexMeta(db, "last_rebuild")
-      if (!lastRebuild) return true
-      const rebuiltAt = new Date(lastRebuild).getTime()
-      return !Number.isFinite(rebuiltAt) || Date.now() - rebuiltAt > maxAgeMs
-    } finally {
-      closeDb()
-    }
-  } catch {
-    return true
-  }
-}
-
-/**
- * Fire `recall index --incremental` detached and return immediately.
- * Used by SessionStart (if stale) and SessionEnd (always — a session just
- * finished, so there is guaranteed to be new content).
- *
- * Never blocks, never throws, never holds the hook open.
- */
-function spawnBackgroundIncrementalIndex(reason: string): void {
-  try {
-    // The parent can be Tribe or the Ag host; only Recall owns this command.
-    const scriptPath = fileURLToPath(new URL("../cli.ts", import.meta.url))
-    const logDir = path.join(os.homedir(), ".claude", "bearly-sessions")
-    fs.mkdirSync(logDir, { recursive: true })
-    const logPath = path.join(logDir, "index-bg.log")
-    const out = fs.openSync(logPath, "a")
-    const header = `\n[${new Date().toISOString()}] incremental index: ${reason}\n`
-    fs.writeSync(out, header)
-    const child = spawn(process.execPath, [scriptPath, "index", "--incremental"], {
-      detached: true,
-      stdio: ["ignore", out, out],
-      env: { ...process.env, RECALL_BG: "1" },
-    })
-    child.on("error", (error) => {
-      sessionStartLog.error?.(error, "background index process failed to start")
-    })
-    child.unref()
-    fs.closeSync(out)
-  } catch (error) {
-    sessionStartLog.error?.(error instanceof Error ? error : new Error(String(error)), "background index launch failed")
-  }
-}
-
-// ============================================================================
 // SessionStart hook — writes the sentinel ONCE per session
 // ============================================================================
 
@@ -237,20 +173,14 @@ export async function cmdSessionStart(): Promise<void> {
       daemonStatus = await registerWithRecallDaemon({ claudePid, sessionId, transcriptPath, cwd })
     }
 
-    // If the FTS5 index is older than the configured threshold, kick off an
-    // incremental refresh in the background. Never blocks session startup.
-    let indexStatus = "fresh"
-    if (process.env.RECALL_NO_BG_INDEX !== "1" && indexIsStale(getStaleThresholdMs())) {
-      spawnBackgroundIncrementalIndex("SessionStart (stale)")
-      indexStatus = "refreshing"
-    }
+    // No index refresh here (@ag/tribe/25071 row 4): indexing runs outside the hooks, never from a seat's session
+    // lifecycle. A hook-spawned indexer was a second writer into the live index from every seat.
 
     sessionStartLog.info?.("ok", {
       claude_pid: claudePid,
       session: sessionId.slice(0, 8),
       sentinel: "ok",
       daemon: daemonStatus,
-      index: indexStatus,
       elapsed_ms: Date.now() - startTime,
     })
   } catch (e) {
@@ -260,13 +190,13 @@ export async function cmdSessionStart(): Promise<void> {
 }
 
 // ============================================================================
-// SessionEnd hook — always triggers incremental index refresh
+// SessionEnd hook — drains stdin and logs; it never writes the index
 // ============================================================================
 
 /**
- * Claude Code fires SessionEnd when a session ends. A session just produced
- * new JSONL content, so an incremental index refresh is always worthwhile.
- * Runs detached — the hook returns immediately.
+ * Claude Code fires SessionEnd when a session ends. The session's new JSONL
+ * content reaches the index through indexing that runs outside the hooks,
+ * never through this hook (@ag/tribe/25071 row 4).
  *
  * Install in .claude/settings.json:
  *   {
@@ -287,10 +217,7 @@ export async function cmdSessionEnd(): Promise<void> {
     } catch {
       /* best effort */
     }
-    if (process.env.RECALL_NO_BG_INDEX !== "1") {
-      spawnBackgroundIncrementalIndex("SessionEnd")
-    }
-    sessionEndLog.info?.("background incremental index spawned", {
+    sessionEndLog.info?.("ok", {
       elapsed_ms: Date.now() - startTime,
     })
   } catch (e) {
