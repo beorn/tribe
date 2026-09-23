@@ -28,11 +28,11 @@ import {
   stripHarnessEnvelopes,
   type InjectSkipReason,
 } from "./prompt-filter.ts"
-import type { recall } from "../history/search.ts"
+import { recall } from "../history/search.ts"
 import { findGlossaryAnchor } from "../history/vault-glossary.ts"
 import { ensureProjectSourcesIndexed, ProjectSourcesBusyError } from "../history/project-sources.ts"
 import { IndexWriterBusyError } from "../history/db.ts"
-import { createDeadlineRecall, isDeadlineRecall, RecallDeadlineError } from "./recall-deadline.ts"
+import { RecallDeadlineError } from "./recall-deadline.ts"
 // Envelope framing primitives live in the shared library. Re-exported here so
 // existing callers (and the plugin's own tests) keep working without churn.
 // Relative import because plugins/ is not a declared workspace inside bearly
@@ -369,8 +369,9 @@ export async function runInjectDelta(
     // so users can still grep their live session explicitly.
     excludeCurrentSession: true,
   } as const
-  // One hard wall clock over both queries, run off this thread (@ag/tribe/25071 stopgap): recall is synchronous SQLite.
-  const recallImpl = opts.deps?.recall ?? createDeadlineRecall()
+  // In-thread by default. The prompt hook, the one caller that exits, passes a deadline recall (@ag/tribe/25071
+  // stopgap); a long-lived caller (the daemon, the plugin server) would stack queries a deadline abandons.
+  const recallImpl = opts.deps?.recall ?? recall
   let result: Awaited<ReturnType<typeof recall>>
   try {
     result = await timeStepAsync(steps, "recall", () => recallImpl(recallQuery, recallOpts))
@@ -387,8 +388,6 @@ export async function runInjectDelta(
     // Said in the hook output, not only its log: the turn runs without recall, and the reader should know why.
     skippedSteps.recall = error.message
     return withSkippedSteps({ skipped: false, additionalContext: error.message, newKeys: [], turn })
-  } finally {
-    if (isDeadlineRecall(recallImpl)) recallImpl.close()
   }
 
   if (result.results.length === 0) {
