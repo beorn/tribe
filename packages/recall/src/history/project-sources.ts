@@ -3,21 +3,62 @@
  */
 
 import { statSync } from "node:fs"
-import { getDb, acquireIndexWriter, getIndexMeta, setIndexMeta } from "./db.ts"
+import { getDb, acquireIndexWriter, getIndexMeta, setIndexMeta, DB_BUSY_TIMEOUT_MS } from "./db.ts"
 import { indexProjectSources } from "./indexer.ts"
 import { log } from "./recall-shared.ts"
+
+/** Another connection holds SQLite's write lock, so this project-source refresh did not run (@ag/tribe/25071). */
+export class ProjectSourcesBusyError extends Error {}
 
 /**
  * Explicit synchronous compatibility entry; never called from the search path.
  * A project-only update retains the prior session completion time on success.
- * Contention and failures propagate; failed writes leave provenance invalid.
+ *
+ * It never waits on another connection (@ag/tribe/25071). The prompt hook calls it, and each of its writes used
+ * to autocommit on its own, so under another writer every write could wait out the connection's busy timeout
+ * (5 s), and the hook died past Claude Code's 30 s limit. It now takes SQLite's write lock once, up front and
+ * without waiting: if another connection holds it, it throws ProjectSourcesBusyError before writing anything.
+ * All its writes then run in that one transaction, so a failure rolls them back together, and readers never see
+ * the blanked completion time in between. The index writer's own contention still throws IndexWriterBusyError.
+ * The cost: the transaction holds the write lock for the whole refresh (353 ms on a scratch index, about 700 ms for
+ * a large project), so another writer on the 5 s busy timeout waits that long.
  */
 export function ensureProjectSourcesIndexed(): void {
   const projectRoot = process.env.CLAUDE_PROJECT_DIR
   if (!projectRoot) return
 
   const db = getDb()
-  using lock = acquireIndexWriter(db)
+  using _lock = acquireIndexWriter(db)
+  db.run("PRAGMA busy_timeout = 0")
+  try {
+    db.run("BEGIN IMMEDIATE")
+  } catch (error) {
+    if (error instanceof Error && /database is locked|SQLITE_BUSY/.test(error.message)) {
+      throw new ProjectSourcesBusyError(
+        `Recall project sources skipped: another connection holds the write lock (${error.message})`,
+        { cause: error },
+      )
+    }
+    throw error
+  } finally {
+    db.run(`PRAGMA busy_timeout = ${DB_BUSY_TIMEOUT_MS}`)
+  }
+  try {
+    refreshProjectSources(db, projectRoot)
+    db.run("COMMIT")
+  } catch (error) {
+    try {
+      db.run("ROLLBACK")
+    } catch (rollbackError) {
+      // Keep both: the refresh's own failure is the cause, and the failed rollback is why the transaction may linger.
+      throw new AggregateError([error, rollbackError], "Recall project sources failed, and so did the rollback")
+    }
+    throw error
+  }
+  // Keep the shared DB connection open for callers, as this API has always done.
+}
+
+function refreshProjectSources(db: ReturnType<typeof getDb>, projectRoot: string): void {
   const previousCompletion = getIndexMeta(db, "last_rebuild") ?? ""
   setIndexMeta(db, "last_rebuild", "")
   if (!statSync(projectRoot).isDirectory()) {
@@ -34,5 +75,4 @@ export function ensureProjectSourcesIndexed(): void {
   }
   // This did not refresh sessions: restore their original age, never a new one.
   setIndexMeta(db, "last_rebuild", previousCompletion)
-  // Keep the shared DB connection open for callers, as this API has always done.
 }

@@ -36,6 +36,8 @@ export interface SessionRecord {
   failure_time?: number | null
   shrink_old_count?: number | null
   shrink_new_count?: number | null
+  parent_session_id?: string | null
+  agent_id?: string | null
 }
 
 // Entry from sessions-index.json
@@ -114,6 +116,8 @@ export interface MessageRecord {
   id: number
   uuid: string
   session_id: string
+  parent_session_id?: string | null
+  agent_id?: string | null
   type: string
   content: string | null
   tool_name: string | null
@@ -193,4 +197,10 @@ export interface SimilarResult {
   projectPath: string
   timestamp: number
   rank: number
+}
+
+export interface ClaudeFailureRecord {
+  id: string
+  file: string
+  reason: string
 }

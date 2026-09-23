@@ -94,7 +94,7 @@ incident.
 
 ### Freshness — `RECALL_STALE_THRESHOLD`
 
-SessionStart starts a detached incremental index when the index is stale, and SessionEnd starts one after a session produces new transcript content. Search itself is read-only: `bun recall <query>` checks the index age, reports degraded provenance when it is stale or unavailable, and never starts index work.
+The session hooks never write the index: run `recall index --incremental` outside them, for example on a schedule, so the index has one writer. An index older than the threshold reads as stale. Search itself is read-only: `bun recall <query>` checks the index age, reports degraded provenance when it is stale or unavailable, and never starts index work.
 
 - Default threshold: **5m** (matches Anthropic's prompt-cache TTL).
 - Override: `RECALL_STALE_THRESHOLD=10m` (or `1h`, `30s`, `500ms`, bare number = minutes).

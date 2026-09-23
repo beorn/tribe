@@ -26,13 +26,11 @@
 import * as path from "path"
 import * as os from "os"
 import * as fs from "fs"
-import { spawn } from "child_process"
-import { fileURLToPath } from "node:url"
 import { createLogger, drainOutput } from "loggily"
 import { hookRecall } from "../history/recall"
-import { getDb, closeDb, getIndexMeta, IndexWriterBusyError } from "../history/db"
 import { summarizeUnprocessedDays } from "./summarize-daily"
 import { roundSteps, timeStepAsync } from "./inject-core"
+import { createDeadlineRecall } from "./recall-deadline.ts"
 import { withDaemonCall } from "../../../../plugins/claude/recall/lib/socket.ts"
 import { resolveRecallSocketPath } from "../../../../plugins/claude/recall/lib/config.ts"
 import {
@@ -119,68 +117,6 @@ export function writeSessionSentinel(sentinel: Omit<SessionSentinel, "ts">): voi
 }
 
 // ============================================================================
-// Background FTS index refresh (shared by SessionStart + SessionEnd hooks)
-// ============================================================================
-
-import { getStaleThresholdMs } from "./staleness"
-
-/**
- * SessionStart/End auto-refresh threshold — shares RECALL_STALE_THRESHOLD env
- * + 5m default with search's read-only provenance classification (see search.ts).
- * Per @km/bearly/19216-recall-freshness-shrink-threshold: 1h was too coarse
- * for active sessions (chief recall'd 6h-stale design discussions and got
- * "no results"); 5m matches Anthropic's prompt-cache TTL.
- */
-
-function indexIsStale(maxAgeMs: number): boolean {
-  try {
-    const db = getDb()
-    try {
-      const lastRebuild = getIndexMeta(db, "last_rebuild")
-      if (!lastRebuild) return true
-      const rebuiltAt = new Date(lastRebuild).getTime()
-      return !Number.isFinite(rebuiltAt) || Date.now() - rebuiltAt > maxAgeMs
-    } finally {
-      closeDb()
-    }
-  } catch {
-    return true
-  }
-}
-
-/**
- * Fire `recall index --incremental` detached and return immediately.
- * Used by SessionStart (if stale) and SessionEnd (always — a session just
- * finished, so there is guaranteed to be new content).
- *
- * Never blocks, never throws, never holds the hook open.
- */
-function spawnBackgroundIncrementalIndex(reason: string): void {
-  try {
-    // The parent can be Tribe or the Ag host; only Recall owns this command.
-    const scriptPath = fileURLToPath(new URL("../cli.ts", import.meta.url))
-    const logDir = path.join(os.homedir(), ".claude", "bearly-sessions")
-    fs.mkdirSync(logDir, { recursive: true })
-    const logPath = path.join(logDir, "index-bg.log")
-    const out = fs.openSync(logPath, "a")
-    const header = `\n[${new Date().toISOString()}] incremental index: ${reason}\n`
-    fs.writeSync(out, header)
-    const child = spawn(process.execPath, [scriptPath, "index", "--incremental"], {
-      detached: true,
-      stdio: ["ignore", out, out],
-      env: { ...process.env, RECALL_BG: "1" },
-    })
-    child.on("error", (error) => {
-      sessionStartLog.error?.(error, "background index process failed to start")
-    })
-    child.unref()
-    fs.closeSync(out)
-  } catch (error) {
-    sessionStartLog.error?.(error instanceof Error ? error : new Error(String(error)), "background index launch failed")
-  }
-}
-
-// ============================================================================
 // SessionStart hook — writes the sentinel ONCE per session
 // ============================================================================
 
@@ -238,20 +174,14 @@ export async function cmdSessionStart(): Promise<void> {
       daemonStatus = await registerWithRecallDaemon({ claudePid, sessionId, transcriptPath, cwd })
     }
 
-    // If the FTS5 index is older than the configured threshold, kick off an
-    // incremental refresh in the background. Never blocks session startup.
-    let indexStatus = "fresh"
-    if (process.env.RECALL_NO_BG_INDEX !== "1" && indexIsStale(getStaleThresholdMs())) {
-      spawnBackgroundIncrementalIndex("SessionStart (stale)")
-      indexStatus = "refreshing"
-    }
+    // No index refresh here (@ag/tribe/25071 row 4): indexing runs outside the hooks, never from a seat's session
+    // lifecycle. A hook-spawned indexer was a second writer into the live index from every seat.
 
     sessionStartLog.info?.("ok", {
       claude_pid: claudePid,
       session: sessionId.slice(0, 8),
       sentinel: "ok",
       daemon: daemonStatus,
-      index: indexStatus,
       elapsed_ms: Date.now() - startTime,
     })
   } catch (e) {
@@ -261,13 +191,13 @@ export async function cmdSessionStart(): Promise<void> {
 }
 
 // ============================================================================
-// SessionEnd hook — always triggers incremental index refresh
+// SessionEnd hook — drains stdin and logs; it never writes the index
 // ============================================================================
 
 /**
- * Claude Code fires SessionEnd when a session ends. A session just produced
- * new JSONL content, so an incremental index refresh is always worthwhile.
- * Runs detached — the hook returns immediately.
+ * Claude Code fires SessionEnd when a session ends. The session's new JSONL
+ * content reaches the index through indexing that runs outside the hooks,
+ * never through this hook (@ag/tribe/25071 row 4).
  *
  * Install in .claude/settings.json:
  *   {
@@ -288,10 +218,7 @@ export async function cmdSessionEnd(): Promise<void> {
     } catch {
       /* best effort */
     }
-    if (process.env.RECALL_NO_BG_INDEX !== "1") {
-      spawnBackgroundIncrementalIndex("SessionEnd")
-    }
-    sessionEndLog.info?.("background incremental index spawned", {
+    sessionEndLog.info?.("ok", {
       elapsed_ms: Date.now() - startTime,
     })
   } catch (e) {
@@ -338,8 +265,15 @@ async function registerWithRecallDaemon(input: {
 // ============================================================================
 
 type InjectDeltaOutcome =
-  | { kind: "skipped"; reason: string }
-  | { kind: "ok"; additionalContext: string; contextLen: number; seenCount: number; turnNumber: number }
+  | { kind: "skipped"; reason: string; skippedSteps?: Record<string, string> }
+  | {
+      kind: "ok"
+      additionalContext: string
+      contextLen: number
+      seenCount: number
+      turnNumber: number
+      skippedSteps?: Record<string, string>
+    }
   | { kind: "error"; message: string }
 
 /**
@@ -358,7 +292,7 @@ async function tryInjectDeltaViaDaemon(prompt: string, sessionId?: string): Prom
       })
       const result = (await client.call(TRIBE_METHODS.injectDelta, { prompt, sessionId })) as InjectDeltaResult
       if (result.skipped) {
-        return { kind: "skipped", reason: result.reason ?? "unknown" }
+        return { kind: "skipped", reason: result.reason ?? "unknown", skippedSteps: result.skippedSteps }
       }
       const ctx = result.additionalContext ?? ""
       return {
@@ -367,6 +301,7 @@ async function tryInjectDeltaViaDaemon(prompt: string, sessionId?: string): Prom
         contextLen: ctx.length,
         seenCount: result.seenCount ?? 0,
         turnNumber: result.turnNumber ?? 0,
+        skippedSteps: result.skippedSteps,
       }
     },
   )
@@ -397,6 +332,25 @@ export async function readStdin(): Promise<string> {
 // ============================================================================
 // Hook command — UserPromptSubmit
 // ============================================================================
+
+/**
+ * A step skipped rather than waited on is said out loud, never silent (@ag/tribe/25071): today the project-source
+ * refresh, when the index writer or SQLite's write lock is held. Recall still ran, on the daemon or the library path.
+ */
+function warnSkippedSteps(
+  skippedSteps: Record<string, string> | undefined,
+  path: "daemon" | "library",
+  startTime: number,
+  steps: Record<string, number>,
+): void {
+  if (!skippedSteps || Object.keys(skippedSteps).length === 0) return
+  hookLog.warn?.("step skipped rather than waited on", {
+    path,
+    skipped_steps: skippedSteps,
+    elapsed_ms: Date.now() - startTime,
+    steps: roundSteps(steps),
+  })
+}
 
 export async function cmdHook(): Promise<void> {
   // Return drain promises so failures bypass the hook catch and remain nonzero.
@@ -447,6 +401,7 @@ export async function cmdHook(): Promise<void> {
     // boundaries as long as the daemon is alive.
     if (process.env.TRIBE_NO_DAEMON !== "1") {
       const daemonOutput = await timeStepAsync(steps, "daemon", () => tryInjectDeltaViaDaemon(prompt, input.session_id))
+      if (daemonOutput.kind !== "error") warnSkippedSteps(daemonOutput.skippedSteps, "daemon", startTime, steps)
       if (daemonOutput.kind === "skipped") {
         hookLog.info?.("daemon skipped", {
           reason: daemonOutput.reason,
@@ -474,8 +429,16 @@ export async function cmdHook(): Promise<void> {
       // kind === "error" — fall through to library path below.
     }
 
-    const result = await hookRecall(prompt, { steps })
+    // A hard wall clock on recall, run in a Worker this process leaves behind when it exits (@ag/tribe/25071 stopgap).
+    const deadlineRecall = createDeadlineRecall()
+    let result: Awaited<ReturnType<typeof hookRecall>>
+    try {
+      result = await hookRecall(prompt, { steps, recall: deadlineRecall })
+    } finally {
+      deadlineRecall.close()
+    }
     const elapsed = Date.now() - startTime
+    warnSkippedSteps(result.skippedSteps, "library", startTime, steps)
     if (result.skipped) {
       hookLog.info?.("library skipped", {
         reason: result.reason,
@@ -495,19 +458,12 @@ export async function cmdHook(): Promise<void> {
     })
     // The hook's JSON response: console.log is the sanctioned channel.
     console.log(envelopeEmitHookJson("UserPromptSubmit", additionalContext, prompt))
+    // Exit, never wait for the loop to drain: a recall Worker left behind at its deadline can sit in one native SQLite
+    // call and would hold this process open past Claude Code's kill (@ag/tribe/25071 stopgap).
+    // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
+    return drainOutput().then(() => process.exit(0))
   } catch (e) {
     const elapsed = Date.now() - startTime
-    // Another process holds the index rebuild lock. That is contention, not
-    // failure: `acquireIndexWriter` admits exactly one writer, and a burst of
-    // prompts — ~15 queued tribe channel messages flushed at once on
-    // 2026-09-16 ~14:10 PDT — puts every loser here. Enrichment is optional,
-    // so a prompt we merely cannot enrich succeeds without context, exactly
-    // like the daemon/library skips above.
-    if (e instanceof IndexWriterBusyError) {
-      hookLog.info?.("index writer busy — recall enrichment skipped", { elapsed_ms: elapsed, steps: roundSteps(steps) })
-      // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
-      return drainOutput().then(() => process.exit(0))
-    }
     hookLog.error?.(e instanceof Error ? e : new Error(String(e)), "FATAL: unhandled error", {
       elapsed_ms: elapsed,
       steps: roundSteps(steps),
