@@ -32,7 +32,7 @@ import { createLogger, drainOutput } from "loggily"
 import { hookRecall } from "../history/recall"
 import { getDb, closeDb, getIndexMeta, IndexWriterBusyError } from "../history/db"
 import { summarizeUnprocessedDays } from "./summarize-daily"
-import { timeStepAsync } from "./inject-core"
+import { roundSteps, timeStepAsync } from "./inject-core"
 import { withDaemonCall } from "../../../../plugins/claude/recall/lib/socket.ts"
 import { resolveRecallSocketPath } from "../../../../plugins/claude/recall/lib/config.ts"
 import {
@@ -411,7 +411,7 @@ export async function cmdHook(): Promise<void> {
     } catch (e) {
       hookLog.error?.(e instanceof Error ? e : new Error(String(e)), "FATAL: invalid JSON on stdin", {
         elapsed_ms: Date.now() - startTime,
-        steps,
+        steps: roundSteps(steps),
         stdin_preview: stdin.slice(0, 200),
       })
       reportHookFailure("prompt", `invalid JSON on stdin: ${e instanceof Error ? e.message : String(e)}`)
@@ -436,7 +436,7 @@ export async function cmdHook(): Promise<void> {
 
     const prompt = input.prompt
     if (!prompt) {
-      hookLog.warn?.("no prompt in stdin", { elapsed_ms: Date.now() - startTime, steps })
+      hookLog.warn?.("no prompt in stdin", { elapsed_ms: Date.now() - startTime, steps: roundSteps(steps) })
       // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
       return drainOutput().then(() => process.exit(0))
     }
@@ -451,7 +451,7 @@ export async function cmdHook(): Promise<void> {
         hookLog.info?.("daemon skipped", {
           reason: daemonOutput.reason,
           elapsed_ms: Date.now() - startTime,
-          steps,
+          steps: roundSteps(steps),
           prompt_preview: prompt.slice(0, 60),
         })
         // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
@@ -461,7 +461,7 @@ export async function cmdHook(): Promise<void> {
         hookLog.info?.("daemon ok", {
           context_len: daemonOutput.contextLen,
           elapsed_ms: Date.now() - startTime,
-          steps,
+          steps: roundSteps(steps),
           seen_count: daemonOutput.seenCount,
           turn_number: daemonOutput.turnNumber,
           prompt_preview: prompt.slice(0, 60),
@@ -480,7 +480,7 @@ export async function cmdHook(): Promise<void> {
       hookLog.info?.("library skipped", {
         reason: result.reason,
         elapsed_ms: elapsed,
-        steps,
+        steps: roundSteps(steps),
         prompt_preview: prompt.slice(0, 60),
       })
       // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
@@ -490,7 +490,7 @@ export async function cmdHook(): Promise<void> {
     hookLog.info?.("library ok", {
       context_len: additionalContext.length,
       elapsed_ms: elapsed,
-      steps,
+      steps: roundSteps(steps),
       prompt_preview: prompt.slice(0, 60),
     })
     // The hook's JSON response: console.log is the sanctioned channel.
@@ -504,13 +504,13 @@ export async function cmdHook(): Promise<void> {
     // so a prompt we merely cannot enrich succeeds without context, exactly
     // like the daemon/library skips above.
     if (e instanceof IndexWriterBusyError) {
-      hookLog.info?.("index writer busy — recall enrichment skipped", { elapsed_ms: elapsed, steps })
+      hookLog.info?.("index writer busy — recall enrichment skipped", { elapsed_ms: elapsed, steps: roundSteps(steps) })
       // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
       return drainOutput().then(() => process.exit(0))
     }
     hookLog.error?.(e instanceof Error ? e : new Error(String(e)), "FATAL: unhandled error", {
       elapsed_ms: elapsed,
-      steps,
+      steps: roundSteps(steps),
     })
     reportHookFailure("prompt", e)
     // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch

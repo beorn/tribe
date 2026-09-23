@@ -192,14 +192,22 @@ export type RunInjectDeltaResult =
       emptyRecallReason?: Extract<InjectSkipReason, "no_results" | "all_seen">
     }
 
-/** Adds `run`'s wall time to `steps[name]`, and records it even when `run` throws (@ag/tribe/25071 row 1). */
+/**
+ * Adds `run`'s wall time to `steps[name]`, and records it even when `run` throws (@ag/tribe/25071 row 1). The sum is
+ * kept raw, so steps under a millisecond still add up; {@link roundSteps} rounds it for a log row.
+ */
 export function timeStep<T>(steps: Record<string, number> | undefined, name: string, run: () => T): T {
   const start = performance.now()
   try {
     return run()
   } finally {
-    if (steps) steps[name] = Math.round((steps[name] ?? 0) + performance.now() - start)
+    if (steps) steps[name] = (steps[name] ?? 0) + performance.now() - start
   }
+}
+
+/** A copy of `steps` with each duration rounded to whole milliseconds, for a log row. */
+export function roundSteps(steps: Record<string, number>): Record<string, number> {
+  return Object.fromEntries(Object.entries(steps).map(([name, ms]) => [name, Math.round(ms)]))
 }
 
 /** {@link timeStep} for a step that returns a promise: the time runs until it settles. */
@@ -212,7 +220,7 @@ export async function timeStepAsync<T>(
   try {
     return await run()
   } finally {
-    if (steps) steps[name] = Math.round((steps[name] ?? 0) + performance.now() - start)
+    if (steps) steps[name] = (steps[name] ?? 0) + performance.now() - start
   }
 }
 
@@ -332,7 +340,7 @@ export async function runInjectDelta(
   // English. Retry with the glossary anchor alone — this rescues prompts
   // where the salient term is dominated by surrounding common words.
   if (result.results.length === 0 && glossaryHit && recallQuery !== glossaryHit) {
-    result = await timeStepAsync(steps, "recall", () => recallImpl(glossaryHit, recallOpts))
+    result = await timeStepAsync(steps, "recall_fallback", () => recallImpl(glossaryHit, recallOpts))
   }
 
   if (result.results.length === 0) {

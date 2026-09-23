@@ -454,6 +454,25 @@ describe("runInjectDelta — per-step durations (@ag/tribe/25071 row 1)", () => 
     expect(steps.classify).toBeLessThan(55)
   })
 
+  test("the glossary fallback is its own step, so a slow fallback is named apart from the first query", async () => {
+    ensureProjectSourcesIndexedMock.mockImplementation(() => {})
+    recallMock
+      .mockImplementationOnce(() => Promise.resolve({ results: [] }))
+      .mockImplementationOnce(() => new Promise((resolve) => setTimeout(() => resolve({ results: [] }), 40)))
+    const steps: Record<string, number> = {}
+
+    await runInjectDelta(salientPrompt, createMemorySeenStore(), { steps, deps: { findGlossaryAnchor: () => "tribe" } })
+
+    expect(recallMock).toHaveBeenCalledTimes(2)
+    expect(steps.recall_fallback).toBeGreaterThanOrEqual(35)
+    expect(steps.recall).toBeLessThan(35)
+  })
+
+  test("steps under a millisecond add up raw and are rounded only for the log row", async () => {
+    const { roundSteps } = await import("../src/lib/inject-core.ts")
+    expect(roundSteps({ classify: 0.4 + 0.4 + 0.4, recall: 1499.6 })).toEqual({ classify: 1, recall: 1500 })
+  })
+
   test("a step that throws still records how long it ran before throwing", async () => {
     ensureProjectSourcesIndexedMock.mockImplementation(() => {
       busyWait(30)
