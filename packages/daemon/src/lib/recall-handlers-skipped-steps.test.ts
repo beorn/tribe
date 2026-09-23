@@ -30,6 +30,12 @@ vi.mock("../../../recall/src/history/search.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../recall/src/history/search.ts")>()),
   recall: async () => ({ results: fake.results }),
 }))
+// A bound vault, so the first injection is not the unbound-vault notice (25149 a1): this suite asks about the
+// skipped step, and the notice's own carriage of it is pinned in inject-core's tests.
+vi.mock("../../../recall/src/history/vault-fts.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../recall/src/history/vault-fts.ts")>()),
+  getVaultDbPath: () => "/bound/vault.db",
+}))
 vi.mock("../../../recall/src/history/vault-glossary.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../recall/src/history/vault-glossary.ts")>()),
   findGlossaryAnchor: () => null,

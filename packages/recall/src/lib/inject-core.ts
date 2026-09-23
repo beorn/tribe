@@ -291,11 +291,13 @@ export async function runInjectDelta(
   store.set(VAULT_UNBOUND_NOTICE_KEY, Number.MAX_SAFE_INTEGER)
   store.flush?.()
   if (!result.skipped) return result
+  // The notice replaces an empty injection, never the steps it skipped (@ag/tribe/25071).
   return {
     skipped: false,
     additionalContext: recallEnvelope("notice", VAULT_UNBOUND_ELEMENT),
     newKeys: [],
     turn: store.turn(),
+    ...(result.skippedSteps === undefined ? {} : { skippedSteps: result.skippedSteps }),
   }
 }
 

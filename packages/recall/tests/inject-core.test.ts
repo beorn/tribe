@@ -463,6 +463,23 @@ describe("runInjectDelta — an unbound vault is said, once per session (25149)"
     expect(second).toEqual({ skipped: true, reason: "no_results" })
   })
 
+  // 25149 a1 re-cut over 25071 row 3: the notice replaces an empty injection, never the steps it skipped.
+  test("an unbound first injection whose project-source step was skipped still names the skipped step", async () => {
+    const { ProjectSourcesBusyError } = await import("../src/history/project-sources.ts")
+    const busy = new ProjectSourcesBusyError("database is locked")
+    ensureProjectSourcesIndexedMock.mockImplementation(() => {
+      throw busy
+    })
+    try {
+      mockRecall([])
+      const first = await runInjectDelta("what is the status of km-storage-sync right now?", createMemorySeenStore(), unbound)
+      expect(first.skipped).toBe(false)
+      expect(first.skippedSteps).toEqual({ project_sources: busy.message })
+    } finally {
+      ensureProjectSourcesIndexedMock.mockReset()
+    }
+  })
+
   test("with snippets the notice sits inside the same envelope ahead of <recall-memory>; bound, it is absent", async () => {
     mockRecall([
       {
