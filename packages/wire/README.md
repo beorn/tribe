@@ -80,6 +80,13 @@ launch controller, not the Tribe daemon.
 
 ### Library exports
 
+Outside tribe's own packages, import the narrowest subpath, never the root barrel (one root import depends on all of the package's modules). Each name has exactly one subpath:
+
+- `tribe-wire/launch-environment`: launch identity (read the launch id; project or apply the tribe launch environment).
+- `tribe-wire/client`: talk to the daemon (connect or start it, reconnecting client, socket paths, launch registration, JSON-RPC framing).
+- `tribe-wire/trust`: trust tiers for senders and topics.
+- `tribe-wire/records`: the protocol's shared records and constants (incident keys, inbox-wait options, ball outcomes, command descriptors, runtime id).
+
 ```ts
 import { connectToDaemon, resolveSocketPath } from "tribe-wire/lib/socket"
 import { TRIBE_PROTOCOL_VERSION } from "tribe-wire/lib/socket"

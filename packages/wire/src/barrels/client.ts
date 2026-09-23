@@ -41,20 +41,17 @@ export { resolvePeerSocketPath, resolveSocketPath } from "../paths.ts"
 export { connectTribeLaunch } from "../launch-registration.ts"
 export type { TribeLaunchConnection, TribeLaunchDeps, TribeLaunchRequest } from "../launch-registration.ts"
 
-// Launch identity. Already inside this barrel's closure via launch-registration,
-// so re-exporting costs nothing and saves a straddling consumer a second import.
-export type { TribeLaunchEnvironment } from "../launch-environment.ts"
-export {
-  projectTribeLaunchEnvironment,
-  readTribeLaunchId,
-  tribeLaunchEnvironmentNames,
-  tribeSessionIdentityEnvironmentNames,
-  withTribeLaunchEnvironment,
-} from "../launch-environment.ts"
-
 // JSON-RPC framing and the line parser. Already inside this barrel's closure
 // (client.ts imports both), so a consumer that fakes a daemon in a test takes
 // them from here rather than the root barrel.
 export type { JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse } from "../rpc.ts"
-export { isNotification, isRequest, isResponse, makeError, makeNotification, makeRequest, makeResponse } from "../rpc.ts"
+export {
+  isNotification,
+  isRequest,
+  isResponse,
+  makeError,
+  makeNotification,
+  makeRequest,
+  makeResponse,
+} from "../rpc.ts"
 export { createLineParser } from "../parser.ts"

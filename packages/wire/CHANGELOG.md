@@ -4,6 +4,12 @@
 
 ### Added
 
+- **Four consumer subpaths: `tribe-wire/launch-environment`, `tribe-wire/client`,
+  `tribe-wire/trust` and `tribe-wire/records`.** Additive public surface (a minor
+  bump on the next release): each re-exports leaf modules only, the four name sets
+  are disjoint, and every name is also on the root barrel, whose exports are
+  unchanged. A consumer outside tribe's own packages imports these instead of the root
+  barrel, which makes it a graph dependent of the whole package.
 - **Reconnect-stable inbox-wait baselines.** Protocol v10 gives the installed
   CLI a private durable cursor across its 30-second transport chunks while
   keeping that cursor out of public MCP and CLI results. A fresh logical wait

@@ -48,14 +48,14 @@ export { resolvePeerSocketPath, resolveSocketPath } from "./barrels/client.ts"
 
 // Process-boundary projection for a neutral launchId. Tribe owns its private
 // environment representation; launchers pass only the structural value.
-export type { TribeLaunchEnvironment } from "./barrels/client.ts"
+export type { TribeLaunchEnvironment } from "./launch-environment.ts"
 export {
   projectTribeLaunchEnvironment,
   readTribeLaunchId,
   tribeLaunchEnvironmentNames,
   tribeSessionIdentityEnvironmentNames,
   withTribeLaunchEnvironment,
-} from "./barrels/client.ts"
+} from "./launch-environment.ts"
 
 // Reaper-exempt markers — exempt a PID from the health-reaper auto-kill (gap 1)
 export type { ReaperExemptEntry } from "./barrels/records.ts"
