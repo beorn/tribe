@@ -8,6 +8,7 @@
  * @level     l4 — real hook process with both output pipes consumed.
  * @consumer  The Bash pipe readers delay consumption before collecting
  *            bytes, leaving the child to exercise its exit-time completion.
+ * @reach fs-walk <fixture-only: base = mkdtempSync(join(tmpdir(), ...)); readdirSync(join(base, "run")) only scans this temp dir; DAEMON is only a path to spawn, not walked.>
  */
 
 import { describe, expect, test } from "vitest"

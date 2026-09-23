@@ -10,6 +10,7 @@
  * hardcoded subpath list — so adding/removing/renaming an export only
  * requires editing `exports` + `tsdown.entry` + `publishConfig.exports`
  * together; a slip in any one of the three fails here first.
+ * @reach fs-walk vendor/tribe/.github/workflows/** vendor/tribe/packages/wire/** vendor/tribe/.bun-version
  */
 
 import { existsSync, readFileSync, readdirSync } from "node:fs"

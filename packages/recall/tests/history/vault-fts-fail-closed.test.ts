@@ -32,6 +32,7 @@
  * `.km/state.db` with `new Database(path, { readonly: true })` + `PRAGMA
  * query_only = ON` and does no walk-up spawn; no module in the injection path
  * invokes km, `ensureServer`, or `km daemon`.
+ * @reach fs-walk vendor/tribe/packages/daemon/src/** vendor/tribe/packages/recall/src/**
  */
 
 import { describe, test, expect, afterEach, vi } from "vitest"
