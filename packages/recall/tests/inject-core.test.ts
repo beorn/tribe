@@ -468,9 +468,24 @@ describe("runInjectDelta — per-step durations (@ag/tribe/25071 row 1)", () => 
     expect(steps.recall).toBeLessThan(35)
   })
 
-  test("steps under a millisecond add up raw and are rounded only for the log row", async () => {
-    const { roundSteps } = await import("../src/lib/inject-core.ts")
-    expect(roundSteps({ classify: 0.4 + 0.4 + 0.4, recall: 1499.6 })).toEqual({ classify: 1, recall: 1500 })
+  test("three 0.4 ms steps under one name read 1 ms on the row, not 0: sums stay raw until roundSteps", async () => {
+    const { roundSteps, timeStep, timeStepAsync } = await import("../src/lib/inject-core.ts")
+    let now = 0
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => now)
+    try {
+      const steps: Record<string, number> = {}
+      for (let i = 0; i < 3; i++) {
+        timeStep(steps, "classify", () => {
+          now += 0.4
+        })
+        await timeStepAsync(steps, "recall", async () => {
+          now += 0.4
+        })
+      }
+      expect(roundSteps(steps)).toEqual({ classify: 1, recall: 1 })
+    } finally {
+      clock.mockRestore()
+    }
   })
 
   test("a step that throws still records how long it ran before throwing", async () => {
