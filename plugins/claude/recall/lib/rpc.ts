@@ -304,6 +304,8 @@ export type InjectDeltaResult = {
   seenCount?: number
   /** Current turn counter for the session. Daemon-only; omitted on library fallback. */
   turnNumber?: number
+  /** Each step skipped rather than waited on, and why (@ag/tribe/25071). Absent when nothing was skipped. */
+  skippedSteps?: Record<string, string>
 }
 
 // ---------------------------------------------------------------------------

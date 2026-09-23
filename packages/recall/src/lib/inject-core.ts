@@ -30,7 +30,8 @@ import {
 import { recall } from "../history/search.ts"
 import { getVaultDbPath } from "../history/vault-fts.ts"
 import { findGlossaryAnchor } from "../history/vault-glossary.ts"
-import { ensureProjectSourcesIndexed } from "../history/project-sources.ts"
+import { ensureProjectSourcesIndexed, ProjectSourcesBusyError } from "../history/project-sources.ts"
+import { IndexWriterBusyError } from "../history/db.ts"
 // Envelope framing primitives live in the shared library. Re-exported here so
 // existing callers (and the plugin's own tests) keep working without churn.
 // Relative import because plugins/ is not a declared workspace inside bearly
@@ -182,9 +183,22 @@ const TRIVIAL_SKIP_REASONS: ReadonlySet<InjectSkipReason> = new Set<InjectSkipRe
 
 /** Outcome of a single injection attempt — pure data, no side effects. */
 export type RunInjectDeltaResult =
-  | { skipped: true; reason: InjectSkipReason }
+  | {
+      skipped: true
+      reason: InjectSkipReason
+      /**
+       * Each step skipped rather than waited on, and why (@ag/tribe/25071): today the project-source refresh, when
+       * the index writer or SQLite's write lock is held. Absent when nothing was skipped.
+       */
+      skippedSteps?: Record<string, string>
+    }
   | {
       skipped: false
+      /**
+       * Each step skipped rather than waited on, and why (@ag/tribe/25071): today the project-source refresh, when
+       * the index writer or SQLite's write lock is held. Absent when nothing was skipped.
+       */
+      skippedSteps?: Record<string, string>
       additionalContext: string
       newKeys: string[]
       turn: number
@@ -368,7 +382,17 @@ async function runRecallInjection(
     return { skipped: true, reason: "low_salience" }
   }
 
-  timeStep(steps, "project_sources", () => ensureProjectSourcesIndexedImpl())
+  // Carried in the result, so every caller (the hook library path and the daemon) can say what was skipped.
+  const skippedSteps: Record<string, string> = {}
+  const withSkippedSteps = <R extends RunInjectDeltaResult>(result: R): R =>
+    Object.keys(skippedSteps).length > 0 ? { ...result, skippedSteps } : result
+  try {
+    timeStep(steps, "project_sources", () => ensureProjectSourcesIndexedImpl())
+  } catch (error) {
+    // Busy is contention, not failure: recall reads the index as it stands. Anything else still fails the hook.
+    if (!(error instanceof IndexWriterBusyError || error instanceof ProjectSourcesBusyError)) throw error
+    skippedSteps.project_sources = error.message
+  }
 
   const turn = timeStep(steps, "advance_turn", () => store.advanceTurn())
 
@@ -413,7 +437,7 @@ async function runRecallInjection(
       reason: "no_results",
       prompt: prompt.slice(0, 200),
     })
-    return { skipped: true, reason: "no_results" }
+    return withSkippedSteps({ skipped: true, reason: "no_results" })
   }
 
   const snippets: string[] = []
@@ -466,7 +490,7 @@ async function runRecallInjection(
       reason,
       prompt: prompt.slice(0, 200),
     })
-    return { skipped: true, reason }
+    return withSkippedSteps({ skipped: true, reason })
   }
 
   // The recall emit path is wrapped in the canonical `<injected_context>`
@@ -488,12 +512,12 @@ async function runRecallInjection(
     additionalContext,
   })
 
-  return {
+  return withSkippedSteps({
     skipped: false,
     additionalContext,
     newKeys,
     turn,
-  }
+  })
 }
 
 /**
