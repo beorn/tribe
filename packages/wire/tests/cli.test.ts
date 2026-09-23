@@ -16,6 +16,7 @@ import { tmpdir } from "node:os"
 import { resolve, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
+import { tribeAmbientEnvironmentNames } from "../src/daemon-environment.ts"
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "../src/cli.ts")
 const DAEMON = resolve(dirname(fileURLToPath(import.meta.url)), "../../daemon/src/daemon.ts")
@@ -168,13 +169,16 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-doctor-canary-"))
     const socketPath = join(dir, "tribe.sock")
     const dbPath = join(dir, "tribe.db")
-    const env = {
+    const env: NodeJS.ProcessEnv = {
       ...process.env,
       TRIBE_SOCKET: socketPath,
       TRIBE_DB: dbPath,
       TRIBE_NO_AUTOSTART: "1",
       TRIBE_SUMMARIZER_MODEL: "off",
     }
+    // A disposable daemon declares its own world (24644): a seat's inherited
+    // roster made every live seat read as never-registered here.
+    for (const name of tribeAmbientEnvironmentNames()) delete env[name]
     const daemon = spawn(
       BUN_BIN,
       [DAEMON, "--socket", socketPath, "--db", dbPath, "--quit-timeout", "-1", "--no-lore"],
