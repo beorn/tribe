@@ -17,6 +17,8 @@ tribe-wire mcp --socket /path/to/tribe.sock
 tribe-wire status
 ```
 
+> Install from npm; a git install resolves the TypeScript source and runs only under Bun.
+
 ## What's in the box
 
 This package is the **wire/protocol surface** for the tribe daemon —

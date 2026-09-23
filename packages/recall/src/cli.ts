@@ -44,6 +44,7 @@ import { cmdExport } from "./qmd-export"
 const SUBCOMMANDS = new Set([
   "search",
   "index",
+  "migrate",
   "status",
   "sessions",
   "files",
@@ -109,6 +110,10 @@ program
   .option("--plan-timeout <ms>", "Planner per-call timeout (default 2500)", uint)
   .option("--no-speculative-synth", "Disable speculative synthesis on round-1 (runs synth only after round 2 merge)")
   .option(
+    "--vault-db <path>",
+    "The km vault database to search (outranks KM_VAULT_DB); recall never discovers one from the cwd",
+  )
+  .option(
     "--no-refresh",
     "Compatibility flag: skip freshness classification; index provenance is unknown and search exits 3",
   )
@@ -126,11 +131,27 @@ program
   .option("--force", "Force commit even if session rows shrunk")
   .option("--path <file>", "Index specific transcript file")
   .option("--project-root <path>", "Project root for indexing project sources (beads, docs, memory)")
+  .option("--migrate", "Run pending database schema migrations")
   .action(
-    async (opts: { incremental?: boolean; full?: boolean; force?: boolean; path?: string; projectRoot?: string }) => {
+    async (opts: {
+      incremental?: boolean
+      full?: boolean
+      force?: boolean
+      path?: string
+      projectRoot?: string
+      migrate?: boolean
+    }) => {
       await cmdIndex(opts)
     },
   )
+
+// ── migrate ─────────────────────────────────────────────────────────────
+program
+  .command("migrate")
+  .description("Run pending database schema migrations (e.g. v2 -> v3)")
+  .action(async () => {
+    await cmdIndex({ migrate: true })
+  })
 
 // ── status ──────────────────────────────────────────────────────────────
 program

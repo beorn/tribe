@@ -1,0 +1,2 @@
+{"sessionId":"parent-sess","type":"user","message":{"content":"subagent instructions"},"timestamp":"2026-08-01T12:00:10.000Z"}
+{"sessionId":"parent-sess","type":"assistant","message":{"content":[{"type":"text","text":"subagent finished task"}]},"timestamp":"2026-08-01T12:00:15.000Z"}

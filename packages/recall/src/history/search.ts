@@ -400,7 +400,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     const projectContentResults = searchAll(db, query, projectContentOpts)
     const projectMs = Date.now() - projectStart
 
-    // Vault FTS — opt-in: searches the km tree db (.km/state.db) when found.
+    // Vault FTS — opt-in: searches the km tree db (.km/state.db) when bound.
     // Beads, design docs, CLAUDE.md, and hub/* docs are higher signal than
     // transcript fragments, so we boost vault hits with a strong negative
     // rank (more negative = better).
@@ -544,7 +544,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
 
     let droppedCurrent = 0
     for (const r of messageResults.results) {
-      if (currentSessionId && r.session_id === currentSessionId) {
+      if (currentSessionId && (r.session_id === currentSessionId || r.parent_session_id === currentSessionId)) {
         droppedCurrent++
         continue
       }
@@ -562,6 +562,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         rank: r.rank / corroborationBoost,
         line: r.line ?? null,
         duplicateLine: (r as { duplicate_line?: number | null }).duplicate_line ?? null,
+        parentSessionId: r.parent_session_id ?? null,
+        agentId: r.agent_id ?? null,
       })
     }
 

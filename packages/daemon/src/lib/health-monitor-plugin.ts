@@ -124,6 +124,7 @@ export interface HealthAlert {
     | "gh-rate-limit"
     | "reaper"
     | "chief-absent"
+    | "attribution"
   severity: "warning" | "critical"
   message: string
   metrics: Partial<HealthMetrics>
@@ -641,11 +642,15 @@ function censusBoundNote(reason: string): string {
  * ever counts one (@i/1-instruments/24962).
  */
 export function recordAttributionBlindness(
-  state: { attributionBlindSamples: number },
+  state: { attributionBlindSamples: number; firedAlerts?: Set<string> },
   observation: { readonly kind: string },
 ): number {
-  if (observation.kind === "unavailable") state.attributionBlindSamples++
-  else state.attributionBlindSamples = 0
+  if (observation.kind === "unavailable" || observation.kind === "canonical-unavailable") {
+    state.attributionBlindSamples++
+  } else {
+    state.attributionBlindSamples = 0
+    state.firedAlerts?.delete("attribution:blind")
+  }
   return state.attributionBlindSamples
 }
 
@@ -1528,6 +1533,32 @@ export function evaluateAlerts(
     }
   }
 
+  // --- Attribution blindness ---
+  // A census that fails to attribute for sustained samples is BLIND.
+  // When attributionBlindSamples reaches the threshold, fire an alert so 30 hours of failure cannot pass silently again.
+  if (metrics.processObservation.kind === "canonical-unavailable") {
+    state.attributionBlindSamples++
+    if (
+      state.attributionBlindSamples >= thresholds.sustainedSamples &&
+      !state.firedAlerts.has("attribution:blind")
+    ) {
+      state.firedAlerts.add("attribution:blind")
+      alerts.push({
+        type: "attribution",
+        severity: "warning",
+        message:
+          `Process census attribution is BLIND: process census has failed for ${String(state.attributionBlindSamples)} consecutive samples (${metrics.processObservation.reason}). ` +
+          `Run \`hab sysmon snapshot --state-root ${metrics.processObservation.diagnostic.location}\` to attribute by hand; ` +
+          `queried ${metrics.processObservation.diagnostic.query}; excluded ${metrics.processObservation.diagnostic.excluded.join(",")}`,
+        metrics: {},
+        topOffenders: [],
+      })
+    }
+  } else {
+    state.attributionBlindSamples = 0
+    state.firedAlerts.delete("attribution:blind")
+  }
+
   // --- Worktrees ---
   if (metrics.worktrees > thresholds.worktreeWarning) {
     if (!state.firedAlerts.has("worktree:warning")) {
@@ -2205,10 +2236,7 @@ export const healthMonitorPlugin: TribePluginApi = {
         const scalarFact = scalarFactIdentity(metrics.scalarObservation)
         const alerts = evaluateAlerts(metrics, thresholds, alertState, activeAgentCount)
 
-        // Count the blindness once per SAMPLE, not once per alert: two alerts
-        // in one census are one failure to attribute, not two
-        // (@i/1-instruments/24962).
-        const blindRun = recordAttributionBlindness(alertState, processObservation)
+        const blindRun = alertState.attributionBlindSamples
 
         for (const alert of alerts) {
           const formatted = formatCollectedHealthAlert(alert, processObservation, pidToParent, sessions, blindRun)

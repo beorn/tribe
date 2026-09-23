@@ -140,6 +140,33 @@ describe("24581: tracked send to mailbox-deaf recipient is refused", () => {
     expect(remaining).toHaveLength(0)
   })
 
+  /**
+   * @failure A watcher's incident cannot be raised because its owner's mailbox is unreadable.
+   * @level l2
+   * @consumer The incident rail (tools/lib/tribe-incident.ts sends --type request --incident).
+   */
+  it("admits an incident edge to a mailbox-deaf owner: a condition promises no answer (24644)", () => {
+    addSession(db, stmts, "sess-chief", "@chief", null)
+    const sender = makeContext(db, stmts, "sess-watch", "@watch")
+    const sent = parseToolJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        {
+          to: "@chief",
+          message: "this tick observed nothing",
+          type: "request",
+          incident: { emitter: "@watch", subject: "claude-seats", condition: "blind-sweep" },
+        },
+        optsWithLive([liveInfo("sess-chief", "@chief")]),
+      ),
+    )
+    expect(sent.error).toBeUndefined()
+    expect(sent.sent).toBe(true)
+    // Still a tracked ball: the ball is what puts the live condition in the fleet's attention.
+    expect(stmts.selectPendingForRecipient.all({ $recipient: "@chief" })).toHaveLength(1)
+  })
+
   it("NEGATIVE: tracked request to a seat with registered mailbox authority still opens", () => {
     addSession(db, stmts, "sess-dev6", "@dev/6", VALID_HASH)
     const sender = makeContext(db, stmts, "sess-dev12", "@dev/12")

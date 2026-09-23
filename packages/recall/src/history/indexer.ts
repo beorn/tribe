@@ -12,7 +12,12 @@ import * as fs from "fs"
 import * as readline from "readline"
 import * as os from "os"
 import { spawnSync } from "node:child_process"
-import { indexCodexTranscripts, validateAgReadiness, type CodexFailureRecord } from "./codex-indexer.ts"
+import {
+  indexCodexTranscripts,
+  validateAgReadiness,
+  type CodexFailureRecord,
+  type CodexCatalog,
+} from "./codex-indexer.ts"
 import {
   PROJECTS_DIR,
   MAX_CONTENT_SIZE,
@@ -29,8 +34,7 @@ import {
   findPlanFiles,
   findTodoFiles,
 } from "./db"
-import type { TodoItem, BeadRecord } from "./types"
-import type { JsonlRecord, ToolUse } from "./types"
+import type { TodoItem, BeadRecord, JsonlRecord, ToolUse, ClaudeFailureRecord } from "./types"
 import { formatBead, extractMarkdownTitle } from "./formatters"
 
 export interface IndexProgress {
@@ -124,6 +128,26 @@ export function currentProjectsDir(): string {
   return process.env.CLAUDE_DIR ? path.join(process.env.CLAUDE_DIR, "projects") : PROJECTS_DIR
 }
 
+/**
+ * Restricts Claude transcript discovery to valid transcript shapes (A4):
+ * 1. Root sessions: <project>/<uuid>.jsonl (no subdirectories)
+ * 2. Subagents: <project>/<parentSessionId>/subagents/.../agent-*.jsonl
+ *
+ * This excludes non-transcript files such as <project>/memory/*.jsonl
+ */
+export function isTranscriptShape(relativePath: string): boolean {
+  const norm = relativePath.replace(/\\/g, "/")
+  // Root transcript: <proj>/<name>.jsonl (exactly one slash)
+  if (/^[^/]+\/[^/]+\.jsonl$/.test(norm)) {
+    return true
+  }
+  // Subagent transcript: <proj>/<parent>/subagents/**/agent-*.jsonl
+  if (/^[^/]+\/[^/]+\/subagents\/(?:.+\/)?agent-[^/]+\.jsonl$/.test(norm)) {
+    return true
+  }
+  return false
+}
+
 export async function* findSessionFiles(): AsyncGenerator<string> {
   const pdir = currentProjectsDir()
   if (!fs.existsSync(pdir)) {
@@ -132,6 +156,8 @@ export async function* findSessionFiles(): AsyncGenerator<string> {
 
   const glob = new Glob("**/*.jsonl")
   for await (const file of glob.scan({ cwd: pdir, absolute: true })) {
+    const rel = path.relative(pdir, file)
+    if (!isTranscriptShape(rel)) continue
     if (isRecallIgnored(file)) continue
     yield file
   }
@@ -169,7 +195,9 @@ export function extractTextContent(record: JsonlRecord): string | null {
   // Handle assistant messages
   if (record.type === "assistant" && record.message) {
     const content = record.message.content
-    if (Array.isArray(content)) {
+    if (typeof content === "string") {
+      parts.push(content)
+    } else if (Array.isArray(content)) {
       for (const item of content) {
         if (item && typeof item === "object") {
           const obj = item as Record<string, unknown>
@@ -237,14 +265,50 @@ export function extractToolInfo(record: JsonlRecord): {
   }
 }
 
+export function parseSessionPath(
+  relativePath: string,
+  filePath?: string,
+): { id: string; parentSessionId: string | null; agentId: string | null } {
+  const normPath = (filePath ?? relativePath).replace(/\\/g, "/")
+  const match = normPath.match(/(?:^|\/)([^/]+)\/subagents\/(?:.+\/)?([^/]+)\.jsonl$/)
+  if (match && match[1] && match[2]) {
+    const parent = match[1]
+    const agent = match[2]
+    return {
+      id: `${parent}:${agent}`,
+      parentSessionId: parent,
+      agentId: agent,
+    }
+  }
+  const id = path.basename(filePath ?? relativePath, ".jsonl")
+  return {
+    id,
+    parentSessionId: null,
+    agentId: null,
+  }
+}
+
 export async function indexSessionFile(
   db: Database,
   filePath: string,
   options: IndexOptions = {},
+  existingStats?: fs.Stats,
 ): Promise<{ messages: number; writes: number }> {
   const relativePath = path.relative(currentProjectsDir(), filePath)
   const projectPath = projectPathFromRelative(relativePath)
-  const stats = fs.statSync(filePath)
+  let stats: fs.Stats
+  if (existingStats) {
+    stats = existingStats
+  } else {
+    try {
+      stats = fs.statSync(filePath)
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        return { messages: 0, writes: 0 }
+      }
+      throw err
+    }
+  }
   const mtime = stats.mtime.getTime()
 
   // Check if we can skip (incremental mode)
@@ -252,7 +316,10 @@ export async function indexSessionFile(
     const existing = getSessionByPath(db, relativePath)
     if (
       existing &&
-      (existing.status == null || existing.status === "complete") &&
+      (existing.status == null ||
+        existing.status === "complete" ||
+        existing.status === "stale-unreadable" ||
+        existing.status === "unreadable") &&
       existing.mtime_ms != null &&
       existing.size_bytes != null &&
       existing.mtime_ms === mtime &&
@@ -268,7 +335,14 @@ export async function indexSessionFile(
     crlfDelay: Infinity,
   })
 
-  let sessionId = path.basename(filePath, ".jsonl")
+  const sessionInfo = parseSessionPath(relativePath, filePath)
+  const sessionId = sessionInfo.id
+  let parentSessionId = sessionInfo.parentSessionId
+  const agentId = sessionInfo.agentId
+  const expectedSessionId = parentSessionId ?? sessionId
+  let mismatchedRecords = 0
+  let lastMismatchedSessionId: string | null = null
+
   let firstTimestamp: number | null = null
   let lastTimestamp: number | null = null
   let messageCount = 0
@@ -295,16 +369,14 @@ export async function indexSessionFile(
       try {
         record = JSON.parse(line) as JsonlRecord
       } catch (parseErr) {
-        throw new Error(`Malformed JSON in Claude transcript at line ${lineNum}: ${(parseErr as Error).message}`, { cause: parseErr })
+        throw new Error(`Malformed JSON in Claude transcript at line ${lineNum}: ${(parseErr as Error).message}`, {
+          cause: parseErr,
+        })
       }
 
-      if (record.sessionId && record.sessionId !== sessionId) {
-        if (!touchedSessionIds.has(record.sessionId)) {
-          touchedSessionIds.add(record.sessionId)
-          db.prepare("DELETE FROM messages WHERE session_id = ?").run(record.sessionId)
-          db.prepare("DELETE FROM writes WHERE session_id = ?").run(record.sessionId)
-        }
-        sessionId = record.sessionId
+      if (record.sessionId && record.sessionId !== expectedSessionId) {
+        mismatchedRecords++
+        lastMismatchedSessionId = record.sessionId
       }
 
       // Use actual record timestamp for session date tracking;
@@ -327,7 +399,8 @@ export async function indexSessionFile(
       const { toolName, filePaths } = extractToolInfo(record)
 
       if (textContent || toolName) {
-        insertMessage(db, record.uuid || null, sessionId, record.type, textContent, toolName, filePaths, timestamp)
+        const msgUuid = record.uuid ?? null
+        insertMessage(db, msgUuid, sessionId, record.type, textContent, toolName, filePaths, timestamp)
         messageCount++
       }
 
@@ -372,16 +445,37 @@ export async function indexSessionFile(
       }
     }
 
-    upsertSession(db, sessionId, projectPath, relativePath, firstTimestamp || mtime, lastTimestamp || mtime, messageCount, null, {
-      status: "complete",
-      sizeBytes: stats.size,
-      mtimeMs: mtime,
-      lastEventAtMs: lastTimestamp,
-    })
+    if (mismatchedRecords > 0) {
+      console.warn(
+        `[recall] Warning: ${mismatchedRecords} record(s) in ${relativePath} had mismatched sessionId (last: "${lastMismatchedSessionId}", expected: "${expectedSessionId}"). Ignored.`,
+      )
+    }
+
+    upsertSession(
+      db,
+      sessionId,
+      projectPath,
+      relativePath,
+      firstTimestamp || mtime,
+      lastTimestamp || mtime,
+      messageCount,
+      null,
+      {
+        status: "complete",
+        sizeBytes: stats.size,
+        mtimeMs: mtime,
+        lastEventAtMs: lastTimestamp,
+        parentSessionId,
+        agentId,
+      },
+    )
     db.run(`RELEASE SAVEPOINT ${spId}`)
   } catch (err) {
     db.run(`ROLLBACK TO SAVEPOINT ${spId}`)
     db.run(`RELEASE SAVEPOINT ${spId}`)
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { messages: 0, writes: 0 }
+    }
     throw err
   }
 
@@ -410,6 +504,9 @@ export interface IndexResult {
   codexErrors?: number
   codexFailures?: CodexFailureRecord[]
   codexReasonCounts?: Record<string, number>
+  claudeSkipped?: number
+  claudeVanished?: number
+  claudeFailures?: ClaudeFailureRecord[]
 }
 
 /**
@@ -511,27 +608,39 @@ function recordClaudeFailure(
   sessionId: string,
   filePath: string,
   errMsg: string,
+  meta?: { parentSessionId?: string | null; agentId?: string | null },
+  stats?: fs.Stats,
 ): void {
   const existing = getSession(db, sessionId)
   const now = Date.now()
+  let fileStats = stats
+  if (!fileStats) {
+    try {
+      fileStats = fs.statSync(filePath)
+    } catch {
+      // ignore
+    }
+  }
+  const mtime = fileStats ? fileStats.mtime.getTime() : now
+  const size = fileStats ? fileStats.size : null
   if (existing) {
     updateSessionStatus(db, sessionId, "stale-unreadable", {
       failureReason: errMsg,
       failureTime: now,
+      mtimeMs: mtime,
+      sizeBytes: size,
     })
   } else {
-    let mtime = now
-    try {
-      mtime = fs.statSync(filePath).mtime.getTime()
-    } catch {
-      // ignore
-    }
     const relativePath = path.relative(currentProjectsDir(), filePath)
     const projectPath = projectPathFromRelative(relativePath)
     upsertSession(db, sessionId, projectPath, relativePath, mtime, mtime, 0, null, {
       status: "stale-unreadable",
       failureReason: errMsg,
       failureTime: now,
+      mtimeMs: mtime,
+      sizeBytes: size,
+      parentSessionId: meta?.parentSessionId,
+      agentId: meta?.agentId,
     })
   }
 }
@@ -577,7 +686,8 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
         if (err instanceof SyntaxError) {
           // not JSON in first line -> not a Claude transcript
         } else {
-          const baseSessionId = path.basename(absPath, ".jsonl")
+          const sessionInfo = parseSessionPath(path.relative(currentProjectsDir(), absPath), absPath)
+          const baseSessionId = sessionInfo.id
           const existing = getSession(db, baseSessionId)
           if (existing) {
             updateSessionStatus(db, baseSessionId, "stale-unreadable", {
@@ -594,9 +704,10 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     }
   }
 
-  // Pre-flight ag binary and schema readiness before any index modification
+  // Pre-flight ag binary and schema readiness before any index modification (A3: reuse catalog)
+  let preloadedCatalog: CodexCatalog | undefined
   if (!options.skipCodex && process.env.RECALL_SKIP_CODEX !== "1" && (!options.path || !isClaudeTarget)) {
-    await validateAgReadiness(options.agBin)
+    preloadedCatalog = await validateAgReadiness(options.agBin)
   }
 
   let totalFiles = 0
@@ -607,22 +718,70 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   let totalSummaries = 0
   let totalFirstPrompts = 0
   let skippedOld = 0
+  let claudeSkipped = 0
+  let claudeVanished = 0
+  const claudeFailures: ClaudeFailureRecord[] = []
 
   // Index Claude session files
   if (!options.path) {
+    const existingSessionMap = new Map<
+      string,
+      { status: string | null; mtime_ms: number | null; size_bytes: number | null }
+    >()
+    if (options.incremental) {
+      const rows = db
+        .prepare("SELECT jsonl_path, status, mtime_ms, size_bytes FROM sessions WHERE jsonl_path IS NOT NULL")
+        .all() as Array<{
+        jsonl_path: string
+        status: string | null
+        mtime_ms: number | null
+        size_bytes: number | null
+      }>
+      for (const r of rows) {
+        existingSessionMap.set(r.jsonl_path, r)
+      }
+    }
+
     for await (const sessionFile of findSessionFiles()) {
       // Skip sessions older than 180 days
-      const stats = fs.statSync(sessionFile)
+      let stats: fs.Stats
+      try {
+        stats = fs.statSync(sessionFile)
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+          claudeVanished++
+          continue
+        }
+        throw err
+      }
       if (cutoffTime !== undefined && stats.mtime.getTime() < cutoffTime) {
         skippedOld++
         continue
       }
 
       totalFiles++
-      const baseSessionId = path.basename(sessionFile, ".jsonl")
-      seenSessionIds.add(baseSessionId)
-
       const relativePath = path.relative(currentProjectsDir(), sessionFile)
+      const sessionInfo = parseSessionPath(relativePath, sessionFile)
+      seenSessionIds.add(sessionInfo.id)
+
+      if (options.incremental) {
+        const existing = existingSessionMap.get(relativePath)
+        if (
+          existing &&
+          (existing.status == null ||
+            existing.status === "complete" ||
+            existing.status === "stale-unreadable" ||
+            existing.status === "unreadable") &&
+          existing.mtime_ms != null &&
+          existing.size_bytes != null &&
+          existing.mtime_ms === stats.mtime.getTime() &&
+          existing.size_bytes === stats.size
+        ) {
+          claudeSkipped++
+          continue
+        }
+      }
+
       options.onProgress?.({
         filesProcessed: totalFiles,
         messagesIndexed: totalMessages,
@@ -631,18 +790,35 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
       })
 
       try {
-        const { messages, writes } = await indexSessionFile(db, sessionFile, options)
+        const { messages, writes } = await indexSessionFile(db, sessionFile, options, stats)
         totalMessages += messages
         totalWrites += writes
       } catch (err) {
         const errMsg = (err as Error).message || String(err)
-        recordClaudeFailure(db, baseSessionId, sessionFile, errMsg)
-        seenSessionIds.add(baseSessionId)
+        recordClaudeFailure(
+          db,
+          sessionInfo.id,
+          sessionFile,
+          errMsg,
+          {
+            parentSessionId: sessionInfo.parentSessionId,
+            agentId: sessionInfo.agentId,
+          },
+          stats,
+        )
+        seenSessionIds.add(sessionInfo.id)
+        claudeFailures.push({
+          id: sessionInfo.id,
+          file: relativePath,
+          reason: errMsg,
+        })
       }
     }
   } else if (isClaudeTarget) {
     totalFiles++
     const relativePath = path.relative(currentProjectsDir(), options.path)
+    const sessionInfo = parseSessionPath(relativePath, options.path)
+    seenSessionIds.add(sessionInfo.id)
     options.onProgress?.({
       filesProcessed: totalFiles,
       messagesIndexed: totalMessages,
@@ -650,15 +826,22 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
       currentFile: relativePath,
     })
 
-    const baseSessionId = path.basename(options.path, ".jsonl")
     try {
       const { messages, writes } = await indexSessionFile(db, options.path, options)
       totalMessages += messages
       totalWrites += writes
     } catch (err) {
       const errMsg = (err as Error).message || String(err)
-      recordClaudeFailure(db, baseSessionId, options.path, errMsg)
-      seenSessionIds.add(baseSessionId)
+      recordClaudeFailure(db, sessionInfo.id, options.path, errMsg, {
+        parentSessionId: sessionInfo.parentSessionId,
+        agentId: sessionInfo.agentId,
+      })
+      seenSessionIds.add(sessionInfo.id)
+      claudeFailures.push({
+        id: sessionInfo.id,
+        file: relativePath,
+        reason: errMsg,
+      })
     }
   }
 
@@ -671,11 +854,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   let codexFailures: CodexFailureRecord[] = []
   let codexReasonCounts: Record<string, number> = {}
 
-  if (
-    !options.skipCodex &&
-    process.env.RECALL_SKIP_CODEX !== "1" &&
-    (!options.path || !isClaudeTarget)
-  ) {
+  if (!options.skipCodex && process.env.RECALL_SKIP_CODEX !== "1" && (!options.path || !isClaudeTarget)) {
     const codexResult = await indexCodexTranscripts(db, {
       incremental: options.incremental,
       full: options.full,
@@ -683,6 +862,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
       path: options.path,
       projectRoot: options.projectRoot,
       agBin: options.agBin,
+      catalog: preloadedCatalog,
       cutoffTime: options.full ? undefined : cutoffTime,
       onProgress: (p) => {
         options.onProgress?.({
@@ -879,6 +1059,9 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     codexErrors,
     codexFailures,
     codexReasonCounts,
+    claudeSkipped,
+    claudeVanished,
+    claudeFailures,
     ...projectSourceResult,
   }
 }

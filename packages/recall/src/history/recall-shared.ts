@@ -68,6 +68,8 @@ export interface RecallResult {
 export interface RecallSearchResult {
   type: ContentType
   sessionId: string
+  parentSessionId?: string | null
+  agentId?: string | null
   sessionTitle: string | null
   timestamp: number
   snippet: string

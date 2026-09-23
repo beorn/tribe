@@ -28,7 +28,7 @@ import {
   formatRelativeTime,
   displayProjectPath,
 } from "./format"
- 
+
 export interface PersistedFailedSession {
   id: string
   jsonl_path: string
@@ -163,7 +163,10 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
       console.log(`  Failed/stale sessions (${failedSessions.length}):`)
       for (const s of failedSessions.slice(0, 10)) {
         const timeStr = s.failure_time
-          ? ` (${new Date(s.failure_time).toISOString().replace("T", " ").replace(/\.\d+Z$/, "Z")})`
+          ? ` (${new Date(s.failure_time)
+              .toISOString()
+              .replace("T", " ")
+              .replace(/\.\d+Z$/, "Z")})`
           : ""
         const reasonStr = s.failure_reason ? `: ${s.failure_reason}` : ""
         const pathStr = s.jsonl_path ? ` [${s.jsonl_path}]` : ""
@@ -193,10 +196,16 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
         if (failures.length > 0) {
           console.log(`  Codex failures (${failures.length}):`)
           for (const f of failures.slice(0, 5)) {
-            const timeStr = new Date(f.timestamp).toISOString().replace("T", " ").replace(/\.\d+Z$/, "Z")
+            const timeStr = new Date(f.timestamp)
+              .toISOString()
+              .replace("T", " ")
+              .replace(/\.\d+Z$/, "Z")
             const idStr = f.nativeId ? ` [${f.nativeId}]` : ""
             const pathStr = f.path ? ` ${f.path}` : ""
-            const shrinkStr = f.oldRowCount !== undefined && f.newRowCount !== undefined ? ` (rows: ${f.oldRowCount} -> ${f.newRowCount})` : ""
+            const shrinkStr =
+              f.oldRowCount !== undefined && f.newRowCount !== undefined
+                ? ` (rows: ${f.oldRowCount} -> ${f.newRowCount})`
+                : ""
             console.log(`    - ${f.kind}: ${f.reason}${idStr}${pathStr}${shrinkStr} (${timeStr})`)
           }
           if (failures.length > 5) {

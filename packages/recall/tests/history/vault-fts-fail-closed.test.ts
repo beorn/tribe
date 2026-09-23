@@ -15,8 +15,8 @@
  *     and WAL bytes stay identical and no sidecar is created, removed, or
  *     resized. SQLite may update an existing `-shm` WAL index in any way;
  *     that coordination state is not database content.
- *  2. TYPED DEGRADE — with no vault db resolvable (`KM_VAULT_DB` unset, none
- *     up the cwd walk), resolution is a pure fs probe: `getVaultDb()` returns
+ *  2. TYPED DEGRADE — with no vault db bound (no `--vault-db`, `KM_VAULT_DB`
+ *     unset; recall never walks the cwd, 25149), resolution is a pure fs probe: `getVaultDb()` returns
  *     null and `searchVault()` returns an empty typed result — no throw, no
  *     process spawn. The reachable-graph guard proves the no-spawn half
  *     structurally: it denies spawn edges in the vault-history module graph by
@@ -43,7 +43,13 @@ import { tmpdir } from "node:os"
 import { join, resolve, dirname, extname, relative } from "node:path"
 import { fileURLToPath } from "node:url"
 
-import { getVaultDb, getVaultDbPath, searchVault, resetVaultDbCacheForTests } from "../../src/history/vault-fts.ts"
+import {
+  bindVaultDb,
+  getVaultDb,
+  getVaultDbPath,
+  searchVault,
+  resetVaultDbCacheForTests,
+} from "../../src/history/vault-fts.ts"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 // packages/recall/tests/history -> repo root
@@ -432,7 +438,9 @@ describe("vault-fts fail-closed guards", () => {
       process.env.KM_VAULT_DB = dbPath
       resetVaultDbCacheForTests()
 
-      expect(() => searchVault("termless", 5)).toThrowError(/KM_VAULT_DB=.*Run 'km sync'.*unset KM_VAULT_DB/)
+      expect(() => searchVault("termless", 5)).toThrowError(
+        /bound by --vault-db or KM_VAULT_DB.*Run 'km sync'.*drop the binding/,
+      )
     } finally {
       resetVaultDbCacheForTests()
       rmSync(dir, { recursive: true, force: true })
@@ -446,7 +454,9 @@ describe("vault-fts fail-closed guards", () => {
       process.env.KM_VAULT_DB = dbPath
       resetVaultDbCacheForTests()
 
-      expect(() => getVaultDb()).toThrowError(/KM_VAULT_DB=.*does not exist.*Run 'km sync'.*unset KM_VAULT_DB/)
+      expect(() => getVaultDb()).toThrowError(
+        /bound by --vault-db or KM_VAULT_DB.*does not exist.*Run 'km sync'.*drop the binding/,
+      )
     } finally {
       resetVaultDbCacheForTests()
       rmSync(dir, { recursive: true, force: true })
@@ -497,6 +507,41 @@ describe("vault-fts fail-closed guards", () => {
       expect(result).toEqual([])
     } finally {
       rmSync(isolated, { recursive: true, force: true })
+    }
+  })
+
+  test("NO DISCOVERY: a vault database up the cwd is never opened when nothing is bound (25149)", () => {
+    delete process.env.KM_VAULT_DB
+    resetVaultDbCacheForTests()
+    const vaultRoot = mkdtempSync(join(tmpdir(), "tribe-vault-guard-nodiscovery-"))
+    mkdirSync(join(vaultRoot, ".km"))
+    makeKmVaultDb(join(vaultRoot, ".km", "state.db"))
+    const deep = join(vaultRoot, "a", "b")
+    mkdirSync(deep, { recursive: true })
+    vi.spyOn(process, "cwd").mockReturnValue(deep)
+    try {
+      expect(getVaultDbPath()).toBeNull()
+      expect(searchVault("termless", 5)).toEqual([])
+    } finally {
+      rmSync(vaultRoot, { recursive: true, force: true })
+    }
+  })
+
+  test("BINDING: --vault-db outranks KM_VAULT_DB, and an empty one refuses (25149)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-vault-guard-bind-"))
+    const dbPath = join(dir, "state.db")
+    try {
+      makeKmVaultDb(dbPath)
+      process.env.KM_VAULT_DB = join(dir, "missing.db")
+      resetVaultDbCacheForTests()
+
+      bindVaultDb(dbPath)
+      expect(getVaultDbPath()).toBe(dbPath)
+      expect(searchVault("termless", 5)).toHaveLength(1)
+      expect(() => bindVaultDb("")).toThrowError(/--vault-db is empty/)
+    } finally {
+      resetVaultDbCacheForTests()
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 

@@ -21,7 +21,7 @@ import type { ContentType } from "./types.ts"
 import { loadLlm, selectAvailableCheapModels } from "../lib/llm-backend.ts"
 import { log, ONE_HOUR_MS, THIRTY_DAYS_MS } from "./recall-shared.ts"
 import type { RecallSearchResult } from "./recall-shared.ts"
-import { runInjectDelta, createTmpfileSeenStore } from "../lib/inject-core.ts"
+import { runInjectDelta, createTmpfileSeenStore, timeStep } from "../lib/inject-core.ts"
 import { recall, parseTimeToMs } from "./search.ts"
 import { SYNTHESIS_PROMPT, raceLlmModels, formatResultsForLlm, type LlmRaceModelResult } from "./synthesize.ts"
 
@@ -86,6 +86,8 @@ export function extractTranscriptMessages(transcriptPath: string): string | null
 export interface HookResult {
   skipped: boolean
   reason?: import("../lib/prompt-filter.ts").InjectSkipReason
+  /** Each step skipped rather than waited on, and why (@ag/tribe/25071). Absent when nothing was skipped. */
+  skippedSteps?: Record<string, string>
   hookOutput?: {
     hookSpecificOutput: {
       hookEventName: "UserPromptSubmit"
@@ -99,14 +101,22 @@ export interface HookResult {
  * Returns { skipped: true } for trivial prompts, { hookOutput } for results.
  * Throws on actual errors (fail loud).
  */
-export async function hookRecall(prompt: string): Promise<HookResult> {
+export async function hookRecall(
+  prompt: string,
+  opts: { steps?: Record<string, number>; recall?: typeof recall } = {},
+): Promise<HookResult> {
   const claudeSessionId = process.env.CLAUDE_SESSION_ID
   const seenFile = claudeSessionId ? path.join(os.tmpdir(), `recall-hook-seen-${claudeSessionId}.json`) : null
-  const store = createTmpfileSeenStore(seenFile)
-  const core = await runInjectDelta(prompt, store)
-  if (core.skipped) return { skipped: true, reason: core.reason }
+  const store = timeStep(opts.steps, "seen_store", () => createTmpfileSeenStore(seenFile))
+  const core = await runInjectDelta(prompt, store, {
+    steps: opts.steps,
+    ...(opts.recall === undefined ? {} : { deps: { recall: opts.recall } }),
+  })
+  const skipped = core.skippedSteps ? { skippedSteps: core.skippedSteps } : {}
+  if (core.skipped) return { skipped: true, reason: core.reason, ...skipped }
   return {
     skipped: false,
+    ...skipped,
     hookOutput: {
       hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: core.additionalContext },
     },

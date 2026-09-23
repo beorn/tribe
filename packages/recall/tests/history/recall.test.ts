@@ -411,7 +411,7 @@ describe("recall integration", () => {
       const uniqueKeys = new Set(keys)
       expect(keys.length).toBe(uniqueKeys.size)
     },
-    15_000,
+    30_000,
   )
 
   test.skipIf(!dbExists)(

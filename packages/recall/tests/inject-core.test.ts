@@ -20,6 +20,7 @@ const {
   createMemorySeenStore,
   rewriteImperativeAsReported,
   runInjectDelta: runInjectDeltaImpl,
+  VAULT_UNBOUND_NOTICE,
 } = await import("../src/lib/inject-core.ts")
 
 const recallMock = vi.fn()
@@ -36,6 +37,8 @@ function runInjectDelta(
       recall: recallMock as unknown as typeof import("../src/history/search.ts").recall,
       ensureProjectSourcesIndexed: ensureProjectSourcesIndexedMock,
       findGlossaryAnchor: () => null,
+      // A bound vault by default: the unbound notice has its own describe below.
+      getVaultDbPath: () => "/fixture/vault/.km/state.db",
       ...opts.deps,
     },
   })
@@ -422,5 +425,270 @@ describe("runInjectDelta — recall query bound (@ag/tribe/25071)", () => {
     expect(query.length).toBeLessThanOrEqual(500)
     expect(prompt.startsWith(query)).toBe(true)
     expect(MAX_RECALL_QUERY_CHARS).toBe(500)
+  })
+})
+
+// 25149 (@cto Q1, condition 4): recall binds a vault only explicitly, and an
+// injection with nothing bound says so instead of reading as "no vault hits".
+// The notice is framed like every injection: inside one <injected_context>
+// envelope and followed by the protocol footer, never as bare user-role text.
+describe("runInjectDelta — an unbound vault is said, once per session (25149)", () => {
+  const unbound = { deps: { getVaultDbPath: () => null } }
+
+  /** The envelope's inner text; throws if anything sits outside envelope + footer. */
+  function framedInner(additionalContext: string, mode: string): string {
+    const framed = new RegExp(
+      `^<injected_context source="recall" mode="${mode}" trust="untrusted-reference"[^>]*tool_trigger="forbidden"[^>]*>\\n([\\s\\S]*)\\n</injected_context>\\n\\n`,
+    ).exec(additionalContext)
+    expect(framed, additionalContext).not.toBeNull()
+    expect(additionalContext.slice(framed![0].length)).toBe(CONTEXT_PROTOCOL_FOOTER)
+    return framed![1]!
+  }
+
+  beforeEach(() => {
+    recallMock.mockReset()
+  })
+
+  test("the first injection of an unbound session carries the framed notice; the next does not", async () => {
+    mockRecall([])
+    const store = createMemorySeenStore()
+
+    const first = await runInjectDelta("what is the status of km-storage-sync right now?", store, unbound)
+    expect(first.skipped).toBe(false)
+    if (first.skipped) return
+    expect(framedInner(first.additionalContext, "notice")).toBe(`<vault-notice>${VAULT_UNBOUND_NOTICE}</vault-notice>`)
+    expect(VAULT_UNBOUND_NOTICE).toContain("vault: not bound (pass --vault-db)")
+
+    const second = await runInjectDelta("what is the status of km-storage-sync right now?", store, unbound)
+    expect(second).toEqual({ skipped: true, reason: "no_results" })
+  })
+
+  // 25149 a1 re-cut over 25071 row 3: the notice replaces an empty injection, never the steps it skipped.
+  test("an unbound first injection whose project-source step was skipped still names the skipped step", async () => {
+    const { ProjectSourcesBusyError } = await import("../src/history/project-sources.ts")
+    const busy = new ProjectSourcesBusyError("database is locked")
+    ensureProjectSourcesIndexedMock.mockImplementation(() => {
+      throw busy
+    })
+    try {
+      mockRecall([])
+      const first = await runInjectDelta("what is the status of km-storage-sync right now?", createMemorySeenStore(), unbound)
+      expect(first.skipped).toBe(false)
+      expect(first.skippedSteps).toEqual({ project_sources: busy.message })
+    } finally {
+      ensureProjectSourcesIndexedMock.mockReset()
+    }
+  })
+
+  test("with snippets the notice sits inside the same envelope ahead of <recall-memory>; bound, it is absent", async () => {
+    mockRecall([
+      {
+        sessionId: "sess-00000001",
+        sessionTitle: "prior",
+        type: "message",
+        snippet: "A reasonably long descriptive snippet about prior work on the project.",
+      },
+    ])
+
+    const unboundRun = await runInjectDelta("what did we last do on km-board-state?", createMemorySeenStore(), unbound)
+    expect(unboundRun.skipped).toBe(false)
+    if (unboundRun.skipped) return
+    const inner = framedInner(unboundRun.additionalContext, "snippet")
+    expect(inner.startsWith(`<vault-notice>${VAULT_UNBOUND_NOTICE}</vault-notice>\n<recall-memory>\n`)).toBe(true)
+
+    const boundRun = await runInjectDelta("what did we last do on km-board-state?", createMemorySeenStore())
+    expect(boundRun.skipped).toBe(false)
+    if (boundRun.skipped) return
+    expect(framedInner(boundRun.additionalContext, "snippet").startsWith("<recall-memory>\n")).toBe(true)
+    expect(boundRun.additionalContext).not.toContain("not bound")
+  })
+})
+
+describe("runInjectDelta — per-step durations (@ag/tribe/25071 row 1)", () => {
+  beforeEach(() => {
+    recallMock.mockReset()
+    ensureProjectSourcesIndexedMock.mockReset()
+  })
+
+  const salientPrompt = "why does src/lib/inject-core.ts stall the prompt hook past thirty seconds tonight?"
+  const busyWait = (ms: number): void => {
+    const until = performance.now() + ms
+    while (performance.now() < until) {
+      // A synchronous step, like the SQLite writes it stands in for.
+    }
+  }
+
+  test("each step records its own duration, so a slow run names its slow step", async () => {
+    ensureProjectSourcesIndexedMock.mockImplementation(() => busyWait(60))
+    recallMock.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve({ results: [] }), 40)))
+    const steps: Record<string, number> = {}
+
+    await runInjectDelta(salientPrompt, createMemorySeenStore(), { steps })
+
+    expect(Object.keys(steps)).toEqual(
+      expect.arrayContaining(["classify", "glossary", "project_sources", "advance_turn", "recall"]),
+    )
+    expect(steps.project_sources).toBeGreaterThanOrEqual(55)
+    expect(steps.recall).toBeGreaterThanOrEqual(35)
+    expect(steps.classify).toBeLessThan(55)
+  })
+
+  test("the glossary fallback is its own step, so a slow fallback is named apart from the first query", async () => {
+    ensureProjectSourcesIndexedMock.mockImplementation(() => {})
+    recallMock
+      .mockImplementationOnce(() => Promise.resolve({ results: [] }))
+      .mockImplementationOnce(() => new Promise((resolve) => setTimeout(() => resolve({ results: [] }), 40)))
+    const steps: Record<string, number> = {}
+
+    await runInjectDelta(salientPrompt, createMemorySeenStore(), { steps, deps: { findGlossaryAnchor: () => "tribe" } })
+
+    expect(recallMock).toHaveBeenCalledTimes(2)
+    expect(steps.recall_fallback).toBeGreaterThanOrEqual(35)
+    expect(steps.recall).toBeLessThan(35)
+  })
+
+  test("three 0.4 ms steps under one name read 1 ms on the row, not 0: sums stay raw until roundSteps", async () => {
+    const { roundSteps, timeStep, timeStepAsync } = await import("../src/lib/inject-core.ts")
+    let now = 0
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => now)
+    try {
+      const steps: Record<string, number> = {}
+      for (let i = 0; i < 3; i++) {
+        timeStep(steps, "classify", () => {
+          now += 0.4
+        })
+        await timeStepAsync(steps, "recall", async () => {
+          now += 0.4
+        })
+      }
+      expect(roundSteps(steps)).toEqual({ classify: 1, recall: 1 })
+    } finally {
+      clock.mockRestore()
+    }
+  })
+
+  test("a step that throws still records how long it ran before throwing", async () => {
+    ensureProjectSourcesIndexedMock.mockImplementation(() => {
+      busyWait(30)
+      throw new Error("database is locked")
+    })
+    const steps: Record<string, number> = {}
+
+    await expect(runInjectDelta(salientPrompt, createMemorySeenStore(), { steps })).rejects.toThrow(
+      "database is locked",
+    )
+
+    expect(steps.project_sources).toBeGreaterThanOrEqual(25)
+    expect(steps.recall).toBeUndefined()
+  })
+})
+
+describe("runInjectDelta — a busy project-source step is skipped, never waited on (@ag/tribe/25071)", () => {
+  beforeEach(() => {
+    recallMock.mockReset()
+    ensureProjectSourcesIndexedMock.mockReset()
+  })
+
+  const salientPrompt = "why does src/lib/inject-core.ts stall the prompt hook past thirty seconds tonight?"
+
+  test.each([
+    [
+      "the index writer is held by a run",
+      async () => new (await import("../src/history/db.ts")).IndexWriterBusyError("Recall index already active"),
+    ],
+    [
+      "another connection holds SQLite's write lock",
+      async () => new (await import("../src/history/project-sources.ts")).ProjectSourcesBusyError("database is locked"),
+    ],
+  ])("%s: recall still runs, and the result names the skipped step and why", async (_case, busy) => {
+    const error = await busy()
+    ensureProjectSourcesIndexedMock.mockImplementation(() => {
+      throw error
+    })
+    mockRecall([])
+
+    // No caller-supplied record: the daemon passes none, so the skip must travel in the result (25071 row 3 review).
+    const result = await runInjectDelta(salientPrompt, createMemorySeenStore())
+
+    expect(recallMock).toHaveBeenCalled()
+    expect(result).toEqual({ skipped: true, reason: "no_results", skippedSteps: { project_sources: error.message } })
+  })
+
+  test.each([
+    [
+      "the index writer is held by a run",
+      async () => new (await import("../src/history/db.ts")).IndexWriterBusyError("busy"),
+    ],
+    [
+      "another connection holds SQLite's write lock",
+      async () => new (await import("../src/history/project-sources.ts")).ProjectSourcesBusyError("database is locked"),
+    ],
+  ])("%s, and recall finds a hit: the injected result names the skipped step too", async (_case, busy) => {
+    const error = await busy()
+    ensureProjectSourcesIndexedMock.mockImplementation(() => {
+      throw error
+    })
+    mockRecall([
+      {
+        sessionId: "sess-abcd1234",
+        sessionTitle: "sess-title",
+        type: "message",
+        snippet: "A descriptive snippet that is plenty long enough to pass the minimum filter.",
+      },
+    ])
+
+    // The common path (25071 row 3 review, round 2): a successful injection carries the skip as well.
+    const result = await runInjectDelta("what did we decide about km-storage-sync layering?", createMemorySeenStore())
+
+    expect(result.skipped).toBe(false)
+    expect(result.skippedSteps).toEqual({ project_sources: error.message })
+  })
+
+  test("any other project-source failure still fails the hook", async () => {
+    ensureProjectSourcesIndexedMock.mockImplementation(() => {
+      throw new Error("disk I/O error")
+    })
+    await expect(runInjectDelta(salientPrompt, createMemorySeenStore())).rejects.toThrow("disk I/O error")
+    expect(recallMock).not.toHaveBeenCalled()
+  })
+})
+
+// 25071: the harness wraps what it hands a session in envelopes (Monitor events, tribe channel
+// messages, reminders). They are not the operator's words, yet their boilerplate picked the glossary
+// anchor "tribe", whose recall_fallback ran 3.1 s at p50 and 29.6 s at worst, against the 30 s kill.
+describe("25071: harness envelopes never reach salience, the glossary or recall", () => {
+  beforeEach(() => {
+    recallMock.mockReset()
+    ensureProjectSourcesIndexedMock.mockReset()
+  })
+
+  // The return reuses "low_salience" (no user text is salient): InjectSkipReason is public API. The
+  // injection debug record names it "harness_envelope".
+  test("a prompt that is only harness envelopes skips without salience, glossary or recall", async () => {
+    const glossary = vi.fn(() => "tribe")
+    for (const prompt of [
+      '<task-notification>\n<task-id>b1</task-id>\n<summary>Monitor event: "@dev/11 queue"</summary>\n<event>QUEUE: task/dev11-25229-agy-trust-home pending</event>\n</task-notification>',
+      '<channel source="plugin:tribe:tribe" from="@chief" type="request" message_id="m1">\nplease look at km-storage-sync\n</channel>',
+      "<system-reminder>\nwhat did we decide about km-board-state?\n</system-reminder>",
+      '<agent-message from="a8e4e5faade7d267e">\n25186 evidence: km-storage-sync is green\n</agent-message>',
+    ]) {
+      const result = await runInjectDelta(prompt, createMemorySeenStore(), { deps: { findGlossaryAnchor: glossary } })
+      expect(result, prompt.slice(0, 40)).toMatchObject({ skipped: true, reason: "low_salience" })
+    }
+    expect(glossary).not.toHaveBeenCalled()
+    expect(recallMock).not.toHaveBeenCalled()
+  })
+
+  test("typed text beside an envelope is all that salience and the glossary see", async () => {
+    const glossary = vi.fn(() => null)
+    mockRecall([])
+    const typed = "what did we decide about km-storage-sync layering?"
+    await runInjectDelta(
+      `<system-reminder>\nthe tribe hook said tribe\n</system-reminder>\n${typed}\n<task-notification>\n<event>x</event>\n</task-notification>`,
+      createMemorySeenStore(),
+      { deps: { findGlossaryAnchor: glossary } },
+    )
+    expect(glossary).toHaveBeenCalledWith(typed)
+    expect(recallMock.mock.calls[0]?.[0]).toBe(typed)
   })
 })

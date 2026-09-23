@@ -458,8 +458,26 @@ describe("21714 wire retro response latency", () => {
       reply: fanoutReqId,
     })
     // Production tracker writes settled_by: winner (@agent/2) for both released owner rows
-    insertSettlement(db, fanoutReqId, "answered", now - 8 * MINUTE, "@agent/2", now - 10 * MINUTE, fanoutReqId, "@agent/2")
-    insertSettlement(db, fanoutReqId, "answered", now - 8 * MINUTE, "@agent/3", now - 10 * MINUTE, fanoutReqId, "@agent/2")
+    insertSettlement(
+      db,
+      fanoutReqId,
+      "answered",
+      now - 8 * MINUTE,
+      "@agent/2",
+      now - 10 * MINUTE,
+      fanoutReqId,
+      "@agent/2",
+    )
+    insertSettlement(
+      db,
+      fanoutReqId,
+      "answered",
+      now - 8 * MINUTE,
+      "@agent/3",
+      now - 10 * MINUTE,
+      fanoutReqId,
+      "@agent/2",
+    )
 
     const report = generateRetro(db, 6 * HOUR)
     const entryWinner = report.review_corpus.find((r) => r.request_id === fanoutReqId && r.owner === "@agent/2")

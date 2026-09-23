@@ -23,8 +23,8 @@ vi.mock("../../src/history/db", async (original) => ({
 
 const { rebuildIndex, indexSessionFile } = await import("../../src/history/indexer")
 const { cmdIndex } = await import("../../src/lib/sessions")
-const { ensureProjectSourcesIndexed } = await import("../../src/history/project-sources")
-const { closeDb, initSchema, getIndexMeta, setIndexMeta } = await import("../../src/history/db")
+const { ensureProjectSourcesIndexed, ProjectSourcesBusyError } = await import("../../src/history/project-sources")
+const { closeDb, getDb, initSchema, getIndexMeta, setIndexMeta } = await import("../../src/history/db")
 let root: string
 let db: Database
 let dbPath: string
@@ -142,6 +142,23 @@ describe("Recall refresh completion", () => {
     })
     expect(lock).not.toBeNull()
     expect(() => ensureProjectSourcesIndexed()).toThrow("already active")
+    expect(getIndexMeta(db, "last_rebuild")).toBe(marker)
+  })
+
+  test("the project-source helper never waits on another connection's write lock (25071)", () => {
+    vi.stubEnv("CLAUDE_PROJECT_DIR", root)
+    getDb() // opened (WAL, schema) before the lock, as the live DB always is
+    const marker = getIndexMeta(db, "last_rebuild")
+    const holder = new Database(dbPath)
+    holder.run("BEGIN IMMEDIATE")
+    try {
+      const start = performance.now()
+      expect(() => ensureProjectSourcesIndexed()).toThrow(ProjectSourcesBusyError)
+      expect(performance.now() - start).toBeLessThan(1000)
+    } finally {
+      holder.run("ROLLBACK")
+      holder.close()
+    }
     expect(getIndexMeta(db, "last_rebuild")).toBe(marker)
   })
 
@@ -414,5 +431,134 @@ describe("Recall refresh completion", () => {
     // Subsequent pass: now size_bytes matches -> skips
     const run3 = await indexSessionFile(db, sessionFile, { incremental: true })
     expect(run3.messages).toBe(0)
+  })
+
+  test("incremental index with Claude parent session and subagents re-parses 0 files when unchanged and preserves all messages", async () => {
+    const projectDir = join(corpus.projects, "test-parent-subagent")
+    const subagentsDir = join(projectDir, "parent-sess", "subagents")
+    mkdirSync(subagentsDir, { recursive: true })
+
+    const parentFile = join(projectDir, "parent-sess.jsonl")
+    const subagentFile = join(subagentsDir, "agent-sub1.jsonl")
+
+    const parentContent =
+      JSON.stringify({
+        sessionId: "parent-sess",
+        type: "user",
+        message: { content: "parent user question" },
+        timestamp: "2026-08-01T12:00:00.000Z",
+      }) +
+      "\n" +
+      JSON.stringify({
+        sessionId: "parent-sess",
+        type: "assistant",
+        message: { content: "parent assistant reply" },
+        timestamp: "2026-08-01T12:00:05.000Z",
+      }) +
+      "\n"
+
+    // In Claude Code, subagent transcripts have record.sessionId set to the parent session id
+    const subagentContent =
+      JSON.stringify({
+        sessionId: "parent-sess",
+        type: "user",
+        message: { content: "subagent instructions" },
+        timestamp: "2026-08-01T12:00:10.000Z",
+      }) +
+      "\n" +
+      JSON.stringify({
+        sessionId: "parent-sess",
+        type: "assistant",
+        message: { content: "subagent finished task" },
+        timestamp: "2026-08-01T12:00:15.000Z",
+      }) +
+      "\n"
+
+    writeFileSync(parentFile, parentContent)
+    writeFileSync(subagentFile, subagentContent)
+
+    // First rebuild: indexes both files
+    const run1 = await rebuildIndex(db, { incremental: true })
+    expect(run1.messages).toBe(4)
+
+    // Verify both files have distinct entries in sessions table
+    const parentRow = db.query("SELECT * FROM sessions WHERE jsonl_path LIKE '%parent-sess.jsonl'").get() as any
+    const subagentRow = db.query("SELECT * FROM sessions WHERE jsonl_path LIKE '%agent-sub1.jsonl'").get() as any
+    expect(parentRow).toBeDefined()
+    expect(subagentRow).toBeDefined()
+    expect(parentRow.jsonl_path).not.toBe(subagentRow.jsonl_path)
+    expect(parentRow.id).not.toBe(subagentRow.id)
+
+    // Verify total messages in database is 4
+    const totalMessages1 = (db.query("SELECT COUNT(*) as c FROM messages").get() as any).c
+    expect(totalMessages1).toBe(4)
+
+    // Second incremental pass: files are unchanged, MUST index 0 messages
+    const run2 = await rebuildIndex(db, { incremental: true })
+    expect(run2.messages).toBe(0)
+
+    // Total messages must still be 4 (neither parent nor subagent wiped out)
+    const totalMessages2 = (db.query("SELECT COUNT(*) as c FROM messages").get() as any).c
+    expect(totalMessages2).toBe(4)
+  })
+
+  test("a session file that vanishes mid-run (ENOENT on stat) is skipped without killing rebuildIndex", async () => {
+    const projectDir = join(corpus.projects, "test-vanished")
+    mkdirSync(projectDir, { recursive: true })
+
+    const firstFile = join(projectDir, "00-first.jsonl")
+    const vanishingFile = join(projectDir, "01-vanishing.jsonl")
+    const stableFile = join(projectDir, "02-stable.jsonl")
+
+    writeFileSync(
+      firstFile,
+      JSON.stringify({
+        sessionId: "first",
+        type: "user",
+        message: { content: "first message" },
+        timestamp: new Date().toISOString(),
+      }) + "\n",
+    )
+
+    writeFileSync(
+      vanishingFile,
+      JSON.stringify({
+        sessionId: "vanishing",
+        type: "user",
+        message: { content: "vanishing message" },
+        timestamp: new Date().toISOString(),
+      }) + "\n",
+    )
+
+    writeFileSync(
+      stableFile,
+      JSON.stringify({
+        sessionId: "stable",
+        type: "user",
+        message: { content: "stable message" },
+        timestamp: new Date().toISOString(),
+      }) + "\n",
+    )
+
+    const fs = await import("node:fs")
+
+    // rebuildIndex must NOT throw when 01-vanishing.jsonl disappears mid-run;
+    // it must skip the vanished file and successfully index 00-first and 02-stable
+    const result = await rebuildIndex(db, {
+      incremental: true,
+      onProgress: (p) => {
+        if (p.currentFile.includes("02-stable.jsonl") && fs.existsSync(vanishingFile)) {
+          fs.unlinkSync(vanishingFile)
+        }
+      },
+    })
+    expect(result.messages).toBe(2)
+
+    const firstRow = db.query("SELECT * FROM sessions WHERE jsonl_path LIKE '%00-first.jsonl'").get() as any
+    const stableRow = db.query("SELECT * FROM sessions WHERE jsonl_path LIKE '%02-stable.jsonl'").get() as any
+    expect(firstRow).toBeDefined()
+    expect(stableRow).toBeDefined()
+    expect(firstRow.message_count).toBe(1)
+    expect(stableRow.message_count).toBe(1)
   })
 })
