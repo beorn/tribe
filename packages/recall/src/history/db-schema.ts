@@ -1,3 +1,4 @@
+/* oxlint-disable typescript/no-deprecated */
 /**
  * Database schema, migrations, initialization, and path constants.
  */

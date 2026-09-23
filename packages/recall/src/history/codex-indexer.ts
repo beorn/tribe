@@ -344,7 +344,7 @@ export async function fetchCodexCatalog(agBin: string): Promise<{
  */
 export async function validateAgReadiness(agBin?: string): Promise<CodexCatalog> {
   const bin = resolveAgBin(agBin)
-  return await fetchCodexCatalog(bin)
+  return fetchCodexCatalog(bin)
 }
 
 /**

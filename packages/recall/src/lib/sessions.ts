@@ -31,7 +31,7 @@ export async function cmdIndex(opts: {
     return
   }
   try {
-    using lock = acquireIndexWriter(db)
+    using _lock = acquireIndexWriter(db)
 
     console.log(opts.incremental ? "Updating session index..." : "Building session index...")
     console.log("(indexing sessions from the last 180 days)\n")
