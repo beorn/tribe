@@ -244,7 +244,7 @@ export function parseSessionPath(
   filePath?: string,
 ): { id: string; parentSessionId: string | null; agentId: string | null } {
   const normPath = (filePath ?? relativePath).replace(/\\/g, "/")
-  const match = normPath.match(/(?:^|\/)([^/]+)\/subagents\/([^/]+)\.jsonl$/)
+  const match = normPath.match(/(?:^|\/)([^/]+)\/subagents\/(?:.+\/)?([^/]+)\.jsonl$/)
   if (match && match[1] && match[2]) {
     const parent = match[1]
     const agent = match[2]

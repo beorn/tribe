@@ -397,7 +397,8 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
           stored.status === "stale-unreadable"
         if (!skippable) return false
         if (stored.jsonl_path !== path) return false
-        if (stored.size_bytes !== c.sizeBytes || stored.mtime_ms !== c.mtimeMs) return false
+        if (stored.size_bytes !== c.sizeBytes) return false
+        if (stored.mtime_ms == null || Math.abs(stored.mtime_ms - c.mtimeMs) >= 1) return false
         if (c.lastEventAtMs != null && stored.last_event_at_ms !== c.lastEventAtMs) return false
         return true
       }
@@ -691,9 +692,16 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
           let sessionMtimeMs = currentSession.mtimeMs
           if (sessionSizeBytes == null || sessionMtimeMs == null) {
             try {
-              const st = fs.statSync(currentSession.path)
-              if (sessionSizeBytes == null) sessionSizeBytes = st.size
-              if (sessionMtimeMs == null) sessionMtimeMs = st.mtime.getTime()
+              const matchedCopy = currentSession.copies?.[0]
+              if (matchedCopy) {
+                if (sessionSizeBytes == null) sessionSizeBytes = matchedCopy.sizeBytes ?? null
+                if (sessionMtimeMs == null) sessionMtimeMs = matchedCopy.mtimeMs ?? null
+              }
+              if (sessionSizeBytes == null || sessionMtimeMs == null) {
+                const st = fs.statSync(currentSession.path)
+                if (sessionSizeBytes == null) sessionSizeBytes = st.size
+                if (sessionMtimeMs == null) sessionMtimeMs = st.mtimeMs ?? st.mtime.getTime()
+              }
             } catch {
               // file might have been deleted or inaccessible
             }
