@@ -52,6 +52,10 @@ export {
   withTribeLaunchEnvironment,
 } from "./launch-environment.ts"
 
+// The ambient names tribe reads, which a disposable fixture deletes rather
+// than inherits (24644); each package owns its own such list.
+export { tribeAmbientEnvironmentNames } from "./daemon-environment.ts"
+
 // Reaper-exempt markers — exempt a PID from the health-reaper auto-kill (gap 1)
 export type { ReaperExemptEntry } from "./reaper-exempt.ts"
 export {
