@@ -1,5 +1,22 @@
 # tribe-wire
 
+## 0.3.0 — 2026-09-22
+
+### Added
+
+- **Declared `./launch-environment` subpath export.** Leaf environment projection
+  functions and types (`projectTribeLaunchEnvironment`, `readTribeLaunchId`,
+  `tribeLaunchEnvironmentNames`, `tribeSessionIdentityEnvironmentNames`,
+  `withTribeLaunchEnvironment`, and type `TribeLaunchEnvironment`) are now
+  exported through the declared subpath `tribe-wire/launch-environment`.
+
+### Breaking Changes
+
+- **Removed `launch-environment` re-exports from root barrel `tribe-wire`.**
+  Consumers importing launch environment utilities must import them directly
+  from `tribe-wire/launch-environment`. This prevents changes to leaf
+  environment projection from invalidating transitive root barrel importers.
+
 ## Unreleased
 
 ### Added

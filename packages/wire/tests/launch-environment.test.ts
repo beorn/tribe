@@ -41,4 +41,13 @@ describe("Tribe launch environment boundary", () => {
       TRIBE_LAUNCH_PARENT_PID: undefined,
     })
   })
+
+  test("root barrel does not re-export launch-environment symbols (subpath decoupling, bead 24905)", async () => {
+    const rootIndex = await import("../src/index.ts")
+    expect("projectTribeLaunchEnvironment" in rootIndex).toBe(false)
+    expect("readTribeLaunchId" in rootIndex).toBe(false)
+    expect("tribeLaunchEnvironmentNames" in rootIndex).toBe(false)
+    expect("withTribeLaunchEnvironment" in rootIndex).toBe(false)
+  })
 })
+
