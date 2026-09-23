@@ -33,6 +33,7 @@ import { hookRecall } from "../history/recall"
 import { getDb, closeDb, getIndexMeta } from "../history/db"
 import { summarizeUnprocessedDays } from "./summarize-daily"
 import { roundSteps, timeStepAsync } from "./inject-core"
+import { createDeadlineRecall } from "./recall-deadline.ts"
 import { withDaemonCall } from "../../../../plugins/claude/recall/lib/socket.ts"
 import { resolveRecallSocketPath } from "../../../../plugins/claude/recall/lib/config.ts"
 import {
@@ -502,7 +503,14 @@ export async function cmdHook(): Promise<void> {
       // kind === "error" — fall through to library path below.
     }
 
-    const result = await hookRecall(prompt, { steps })
+    // A hard wall clock on recall, run in a Worker this process leaves behind when it exits (@ag/tribe/25071 stopgap).
+    const deadlineRecall = createDeadlineRecall()
+    let result: Awaited<ReturnType<typeof hookRecall>>
+    try {
+      result = await hookRecall(prompt, { steps, recall: deadlineRecall })
+    } finally {
+      deadlineRecall.close()
+    }
     const elapsed = Date.now() - startTime
     warnSkippedSteps(result.skippedSteps, "library", startTime, steps)
     if (result.skipped) {
