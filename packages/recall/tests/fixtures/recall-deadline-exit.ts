@@ -14,6 +14,10 @@ try {
   await recall(`sqlite:${process.argv[3] ?? "20000"}`, {})
   console.log("answered")
 } catch (error) {
-  console.log(error instanceof RecallDeadlineError ? `deadline ${String(Math.round(performance.now() - started))}` : String(error))
+  console.log(
+    error instanceof RecallDeadlineError
+      ? `deadline ${String(Math.round(performance.now() - started))}`
+      : String(error),
+  )
 }
 process.exit(0)
