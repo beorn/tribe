@@ -27,7 +27,7 @@ import { DEFAULT_SYNTHESIS_TIMEOUT_MS } from "../history/recall-shared.ts"
 import type { AgentRecallOptions, AgentRecallResult } from "./agent.ts"
 import type { QueryPlan } from "./plan.ts"
 import { searchLiveSession } from "../history/search"
-import { searchVault, type VaultMatch } from "../history/vault-fts.ts"
+import { bindVaultDb, getVaultDbPath, searchVault, type VaultMatch } from "../history/vault-fts.ts"
 import { findSessionFiles, extractTextContent } from "../history/indexer"
 import type { ContentType, ContentRecord, MessageRecord, JsonlRecord } from "../history/types"
 import {
@@ -79,6 +79,8 @@ export interface SearchOptions {
    * Default (undefined) = speculative synth enabled.
    */
   speculativeSynth?: boolean
+  /** `--vault-db`: the vault database bound on the call line (outranks KM_VAULT_DB). */
+  vaultDb?: string
   /**
    * Commander maps --no-refresh to refresh:false. Retained for compatibility:
    * it skips the read-only freshness classification and reports unknown provenance.
@@ -178,6 +180,19 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
     include,
   } = options
   const project = resolveProjectScope(options.project)
+
+  // The vault is bound only explicitly (25149): --vault-db, else KM_VAULT_DB.
+  // An empty --vault-db is a failed substitution, a usage error; nothing bound
+  // is said out loud, so an absent vault never reads as "no vault hits".
+  if (options.vaultDb !== undefined) {
+    try {
+      bindVaultDb(options.vaultDb)
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error))
+      process.exit(2)
+    }
+  }
+  if (!regexMode && getVaultDbPath() === null) console.error("vault: not bound (pass --vault-db)")
 
   // Search is a read path: classify the index without starting index work.
   // Lifecycle hints and the host scheduler own incremental indexing cadence.
@@ -596,8 +611,12 @@ function printResultEntries(results: RecallSearchResult[]): void {
       .replace("T", " ")
       .replace(/\.\d+Z$/, "Z")
     const lineInfo = r.line
-      ? (r.duplicateLine ? ` L${r.line}, also line ${r.duplicateLine}` : ` L${r.line}`)
-      : (r.duplicateLine ? ` also line ${r.duplicateLine}` : "")
+      ? r.duplicateLine
+        ? ` L${r.line}, also line ${r.duplicateLine}`
+        : ` L${r.line}`
+      : r.duplicateLine
+        ? ` also line ${r.duplicateLine}`
+        : ""
     const detail = lineInfo ? `,${lineInfo}` : ""
     const typeLabel = formatType(r.type)
     const sessionLabel = r.sessionTitle ? `${r.sessionTitle}` : `${r.sessionId.slice(0, 8)}...`
@@ -1059,8 +1078,12 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
         const role = r.type === "user" ? "User" : r.type === "assistant" ? "Assistant" : r.type
         const dupLine = (r as { duplicate_line?: number | null }).duplicate_line
         const lineDetail = r.line
-          ? (dupLine ? `, L${r.line}, also line ${dupLine}` : `, L${r.line}`)
-          : (dupLine ? `, also line ${dupLine}` : "")
+          ? dupLine
+            ? `, L${r.line}, also line ${dupLine}`
+            : `, L${r.line}`
+          : dupLine
+            ? `, also line ${dupLine}`
+            : ""
         console.log(`\n${icon} ${role} (${time}${lineDetail}):`)
         console.log("\u2500".repeat(60))
         if (r.snippet) {

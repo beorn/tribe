@@ -322,6 +322,52 @@ describe("recall search output", () => {
     }
   })
 
+  // 25149: recall binds a vault only explicitly, so an unbound search says so
+  // instead of reading as "no vault hits"; --vault-db binds it on the call line.
+  test("an unbound search says the vault is not bound; --vault-db binds it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tribe-vault-bound-"))
+    const dbPath = join(dir, "state.db")
+    const previousVaultDb = process.env.KM_VAULT_DB
+    try {
+      seedVaultDb(dbPath, "vaultboundneedle only lives in the km vault")
+      delete process.env.KM_VAULT_DB
+      resetVaultDbCacheForTests()
+
+      await cmdSearch("vaultboundneedle", { raw: true, project: "*" })
+      expect(callsText(errSpy)).toContain("vault: not bound (pass --vault-db)")
+      expect(callsText(logSpy)).not.toContain("vaultboundneedle only lives")
+
+      errSpy.mockClear()
+      logSpy.mockClear()
+      resetVaultDbCacheForTests()
+      await cmdSearch("vaultboundneedle", { raw: true, project: "*", vaultDb: dbPath })
+      expect(callsText(errSpy)).not.toContain("vault: not bound")
+      expect(callsText(logSpy)).toContain("vaultboundneedle")
+    } finally {
+      resetVaultDbCacheForTests()
+      if (previousVaultDb === undefined) delete process.env.KM_VAULT_DB
+      else process.env.KM_VAULT_DB = previousVaultDb
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // 25149 Q4: an empty --vault-db is what a failed substitution passes. The CLI
+  // refuses it with exit 2, never a silent "not bound".
+  test("an empty --vault-db exits 2 naming the empty binding, never 'not bound'", async () => {
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`process.exit(${code})`)
+    }) as typeof process.exit)
+    try {
+      resetVaultDbCacheForTests()
+      await expect(cmdSearch("anything", { raw: true, project: "*", vaultDb: "" })).rejects.toThrow("process.exit(2)")
+      expect(callsText(errSpy)).toContain("--vault-db is empty")
+      expect(callsText(errSpy)).not.toContain("not bound")
+    } finally {
+      exitSpy.mockRestore()
+      resetVaultDbCacheForTests()
+    }
+  })
+
   test('raw mode JSON includes vault matches with contentType "vault"', async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-raw-vault-json-"))
     const dbPath = join(dir, "state.db")
@@ -639,10 +685,14 @@ describe("recall search output", () => {
   test("the no-refresh compatibility flag preserves unknown provenance", async () => {
     mockAgent.result = async (query, options) => zeroAgentResult(query, options) as never
     const prevHome = process.env.HOME
+    const previousVaultDb = process.env.KM_VAULT_DB
     const home = mkdtempSync(join(tmpdir(), "recall-home-"))
 
     try {
       process.env.HOME = home
+      // Unbound on purpose, so stderr is exactly the one line an unbound search owes (25149).
+      delete process.env.KM_VAULT_DB
+      resetVaultDbCacheForTests()
       await cmdSearch("nohits", {
         agent: true,
         limit: "5",
@@ -652,12 +702,15 @@ describe("recall search output", () => {
     } finally {
       if (prevHome === undefined) delete process.env.HOME
       else process.env.HOME = prevHome
+      if (previousVaultDb === undefined) delete process.env.KM_VAULT_DB
+      else process.env.KM_VAULT_DB = previousVaultDb
+      resetVaultDbCacheForTests()
       rmSync(home, { recursive: true, force: true })
     }
 
     const errors = callsText(errSpy)
     const output = callsText(logSpy)
-    expect(errors).toBe("")
+    expect(errors).toBe("vault: not bound (pass --vault-db)")
     expect(output).toContain('0 results — UNPROVEN (unknown index) for "nohits"')
   })
 
