@@ -521,6 +521,7 @@ describe("25071: harness envelopes never reach salience, the glossary or recall"
       '<task-notification>\n<task-id>b1</task-id>\n<summary>Monitor event: "@dev/11 queue"</summary>\n<event>QUEUE: task/dev11-25229-agy-trust-home pending</event>\n</task-notification>',
       '<channel source="plugin:tribe:tribe" from="@chief" type="request" message_id="m1">\nplease look at km-storage-sync\n</channel>',
       "<system-reminder>\nwhat did we decide about km-board-state?\n</system-reminder>",
+      '<agent-message from="a8e4e5faade7d267e">\n25186 evidence: km-storage-sync is green\n</agent-message>',
     ]) {
       const result = await runInjectDelta(prompt, createMemorySeenStore(), { deps: { findGlossaryAnchor: glossary } })
       expect(result, prompt.slice(0, 40)).toMatchObject({ skipped: true, reason: "low_salience" })
