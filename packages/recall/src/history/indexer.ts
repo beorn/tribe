@@ -169,7 +169,9 @@ export function extractTextContent(record: JsonlRecord): string | null {
   // Handle assistant messages
   if (record.type === "assistant" && record.message) {
     const content = record.message.content
-    if (Array.isArray(content)) {
+    if (typeof content === "string") {
+      parts.push(content)
+    } else if (Array.isArray(content)) {
       for (const item of content) {
         if (item && typeof item === "object") {
           const obj = item as Record<string, unknown>
@@ -237,6 +239,29 @@ export function extractToolInfo(record: JsonlRecord): {
   }
 }
 
+export function parseSessionPath(
+  relativePath: string,
+  filePath?: string,
+): { id: string; parentSessionId: string | null; agentId: string | null } {
+  const normPath = (filePath ?? relativePath).replace(/\\/g, "/")
+  const match = normPath.match(/(?:^|\/)([^/]+)\/subagents\/([^/]+)\.jsonl$/)
+  if (match) {
+    const parent = match[1]
+    const agent = match[2]
+    return {
+      id: `${parent}:${agent}`,
+      parentSessionId: parent,
+      agentId: agent,
+    }
+  }
+  const id = path.basename(filePath ?? relativePath, ".jsonl")
+  return {
+    id,
+    parentSessionId: null,
+    agentId: null,
+  }
+}
+
 export async function indexSessionFile(
   db: Database,
   filePath: string,
@@ -244,7 +269,15 @@ export async function indexSessionFile(
 ): Promise<{ messages: number; writes: number }> {
   const relativePath = path.relative(currentProjectsDir(), filePath)
   const projectPath = projectPathFromRelative(relativePath)
-  const stats = fs.statSync(filePath)
+  let stats: fs.Stats
+  try {
+    stats = fs.statSync(filePath)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { messages: 0, writes: 0 }
+    }
+    throw err
+  }
   const mtime = stats.mtime.getTime()
 
   // Check if we can skip (incremental mode)
@@ -268,7 +301,13 @@ export async function indexSessionFile(
     crlfDelay: Infinity,
   })
 
-  let sessionId = path.basename(filePath, ".jsonl")
+  const sessionInfo = parseSessionPath(relativePath, filePath)
+  const sessionId = sessionInfo.id
+  const { parentSessionId, agentId } = sessionInfo
+  const expectedSessionId = parentSessionId ?? sessionId
+  let mismatchedRecords = 0
+  let lastMismatchedSessionId: string | null = null
+
   let firstTimestamp: number | null = null
   let lastTimestamp: number | null = null
   let messageCount = 0
@@ -295,16 +334,14 @@ export async function indexSessionFile(
       try {
         record = JSON.parse(line) as JsonlRecord
       } catch (parseErr) {
-        throw new Error(`Malformed JSON in Claude transcript at line ${lineNum}: ${(parseErr as Error).message}`, { cause: parseErr })
+        throw new Error(`Malformed JSON in Claude transcript at line ${lineNum}: ${(parseErr as Error).message}`, {
+          cause: parseErr,
+        })
       }
 
-      if (record.sessionId && record.sessionId !== sessionId) {
-        if (!touchedSessionIds.has(record.sessionId)) {
-          touchedSessionIds.add(record.sessionId)
-          db.prepare("DELETE FROM messages WHERE session_id = ?").run(record.sessionId)
-          db.prepare("DELETE FROM writes WHERE session_id = ?").run(record.sessionId)
-        }
-        sessionId = record.sessionId
+      if (record.sessionId && record.sessionId !== expectedSessionId) {
+        mismatchedRecords++
+        lastMismatchedSessionId = record.sessionId
       }
 
       // Use actual record timestamp for session date tracking;
@@ -372,16 +409,37 @@ export async function indexSessionFile(
       }
     }
 
-    upsertSession(db, sessionId, projectPath, relativePath, firstTimestamp || mtime, lastTimestamp || mtime, messageCount, null, {
-      status: "complete",
-      sizeBytes: stats.size,
-      mtimeMs: mtime,
-      lastEventAtMs: lastTimestamp,
-    })
+    if (mismatchedRecords > 0) {
+      console.warn(
+        `[recall] Warning: ${mismatchedRecords} record(s) in ${relativePath} had mismatched sessionId (last: "${lastMismatchedSessionId}", expected: "${expectedSessionId}"). Ignored.`,
+      )
+    }
+
+    upsertSession(
+      db,
+      sessionId,
+      projectPath,
+      relativePath,
+      firstTimestamp || mtime,
+      lastTimestamp || mtime,
+      messageCount,
+      null,
+      {
+        status: "complete",
+        sizeBytes: stats.size,
+        mtimeMs: mtime,
+        lastEventAtMs: lastTimestamp,
+        parentSessionId,
+        agentId,
+      },
+    )
     db.run(`RELEASE SAVEPOINT ${spId}`)
   } catch (err) {
     db.run(`ROLLBACK TO SAVEPOINT ${spId}`)
     db.run(`RELEASE SAVEPOINT ${spId}`)
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { messages: 0, writes: 0 }
+    }
     throw err
   }
 
@@ -511,6 +569,7 @@ function recordClaudeFailure(
   sessionId: string,
   filePath: string,
   errMsg: string,
+  meta?: { parentSessionId?: string | null; agentId?: string | null },
 ): void {
   const existing = getSession(db, sessionId)
   const now = Date.now()
@@ -532,6 +591,8 @@ function recordClaudeFailure(
       status: "stale-unreadable",
       failureReason: errMsg,
       failureTime: now,
+      parentSessionId: meta?.parentSessionId,
+      agentId: meta?.agentId,
     })
   }
 }
@@ -577,7 +638,8 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
         if (err instanceof SyntaxError) {
           // not JSON in first line -> not a Claude transcript
         } else {
-          const baseSessionId = path.basename(absPath, ".jsonl")
+          const sessionInfo = parseSessionPath(path.relative(currentProjectsDir(), absPath), absPath)
+          const baseSessionId = sessionInfo.id
           const existing = getSession(db, baseSessionId)
           if (existing) {
             updateSessionStatus(db, baseSessionId, "stale-unreadable", {
@@ -612,17 +674,25 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   if (!options.path) {
     for await (const sessionFile of findSessionFiles()) {
       // Skip sessions older than 180 days
-      const stats = fs.statSync(sessionFile)
+      let stats: fs.Stats
+      try {
+        stats = fs.statSync(sessionFile)
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+          continue
+        }
+        throw err
+      }
       if (cutoffTime !== undefined && stats.mtime.getTime() < cutoffTime) {
         skippedOld++
         continue
       }
 
       totalFiles++
-      const baseSessionId = path.basename(sessionFile, ".jsonl")
-      seenSessionIds.add(baseSessionId)
-
       const relativePath = path.relative(currentProjectsDir(), sessionFile)
+      const sessionInfo = parseSessionPath(relativePath, sessionFile)
+      seenSessionIds.add(sessionInfo.id)
+
       options.onProgress?.({
         filesProcessed: totalFiles,
         messagesIndexed: totalMessages,
@@ -636,13 +706,18 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
         totalWrites += writes
       } catch (err) {
         const errMsg = (err as Error).message || String(err)
-        recordClaudeFailure(db, baseSessionId, sessionFile, errMsg)
-        seenSessionIds.add(baseSessionId)
+        recordClaudeFailure(db, sessionInfo.id, sessionFile, errMsg, {
+          parentSessionId: sessionInfo.parentSessionId,
+          agentId: sessionInfo.agentId,
+        })
+        seenSessionIds.add(sessionInfo.id)
       }
     }
   } else if (isClaudeTarget) {
     totalFiles++
     const relativePath = path.relative(currentProjectsDir(), options.path)
+    const sessionInfo = parseSessionPath(relativePath, options.path)
+    seenSessionIds.add(sessionInfo.id)
     options.onProgress?.({
       filesProcessed: totalFiles,
       messagesIndexed: totalMessages,
@@ -650,15 +725,17 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
       currentFile: relativePath,
     })
 
-    const baseSessionId = path.basename(options.path, ".jsonl")
     try {
       const { messages, writes } = await indexSessionFile(db, options.path, options)
       totalMessages += messages
       totalWrites += writes
     } catch (err) {
       const errMsg = (err as Error).message || String(err)
-      recordClaudeFailure(db, baseSessionId, options.path, errMsg)
-      seenSessionIds.add(baseSessionId)
+      recordClaudeFailure(db, sessionInfo.id, options.path, errMsg, {
+        parentSessionId: sessionInfo.parentSessionId,
+        agentId: sessionInfo.agentId,
+      })
+      seenSessionIds.add(sessionInfo.id)
     }
   }
 
@@ -671,11 +748,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   let codexFailures: CodexFailureRecord[] = []
   let codexReasonCounts: Record<string, number> = {}
 
-  if (
-    !options.skipCodex &&
-    process.env.RECALL_SKIP_CODEX !== "1" &&
-    (!options.path || !isClaudeTarget)
-  ) {
+  if (!options.skipCodex && process.env.RECALL_SKIP_CODEX !== "1" && (!options.path || !isClaudeTarget)) {
     const codexResult = await indexCodexTranscripts(db, {
       incremental: options.incremental,
       full: options.full,

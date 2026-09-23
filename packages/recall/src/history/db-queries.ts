@@ -35,11 +35,13 @@ export function upsertSession(
     failureTime?: number | null
     shrinkOldCount?: number | null
     shrinkNewCount?: number | null
+    parentSessionId?: string | null
+    agentId?: string | null
   },
 ): void {
   db.prepare(`
-    INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title, status, size_bytes, mtime_ms, last_event_at_ms, failure_reason, failure_time, shrink_old_count, shrink_new_count)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title, status, size_bytes, mtime_ms, last_event_at_ms, failure_reason, failure_time, shrink_old_count, shrink_new_count, parent_session_id, agent_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       jsonl_path = excluded.jsonl_path,
       updated_at = excluded.updated_at,
@@ -52,7 +54,9 @@ export function upsertSession(
       failure_reason = excluded.failure_reason,
       failure_time = excluded.failure_time,
       shrink_old_count = excluded.shrink_old_count,
-      shrink_new_count = excluded.shrink_new_count
+      shrink_new_count = excluded.shrink_new_count,
+      parent_session_id = COALESCE(excluded.parent_session_id, sessions.parent_session_id),
+      agent_id = COALESCE(excluded.agent_id, sessions.agent_id)
   `).run(
     id,
     projectPath,
@@ -69,6 +73,8 @@ export function upsertSession(
     meta?.failureTime ?? null,
     meta?.shrinkOldCount ?? null,
     meta?.shrinkNewCount ?? null,
+    meta?.parentSessionId ?? null,
+    meta?.agentId ?? null,
   )
 }
 
@@ -81,6 +87,9 @@ export function updateSessionStatus(
     failureTime?: number | null
     shrinkOldCount?: number | null
     shrinkNewCount?: number | null
+    sizeBytes?: number | null
+    mtimeMs?: number | null
+    lastEventAtMs?: number | null
   },
 ): void {
   db.prepare(`
@@ -89,7 +98,10 @@ export function updateSessionStatus(
         failure_reason = ?,
         failure_time = ?,
         shrink_old_count = ?,
-        shrink_new_count = ?
+        shrink_new_count = ?,
+        size_bytes = COALESCE(?, size_bytes),
+        mtime_ms = COALESCE(?, mtime_ms),
+        last_event_at_ms = COALESCE(?, last_event_at_ms)
     WHERE id = ?
   `).run(
     status,
@@ -97,33 +109,45 @@ export function updateSessionStatus(
     details?.failureTime ?? null,
     details?.shrinkOldCount ?? null,
     details?.shrinkNewCount ?? null,
+    details?.sizeBytes ?? null,
+    details?.mtimeMs ?? null,
+    details?.lastEventAtMs ?? null,
     id,
   )
 }
 
-export function getSessionStatus(db: Database, id: string): {
-  id: string
-  status: string | null
-  messageCount: number
-  failureReason: string | null
-  failureTime: number | null
-  shrinkOldCount: number | null
-  shrinkNewCount: number | null
-} | undefined {
-  const row = db.prepare(`
+export function getSessionStatus(
+  db: Database,
+  id: string,
+):
+  | {
+      id: string
+      status: string | null
+      messageCount: number
+      failureReason: string | null
+      failureTime: number | null
+      shrinkOldCount: number | null
+      shrinkNewCount: number | null
+    }
+  | undefined {
+  const row = db
+    .prepare(`
     SELECT id, status, message_count as messageCount, failure_reason as failureReason, failure_time as failureTime, shrink_old_count as shrinkOldCount, shrink_new_count as shrinkNewCount
     FROM sessions
     WHERE id = ?
-  `).get(id) as any
-  return row ? {
-    id: row.id,
-    status: row.status ?? null,
-    messageCount: row.messageCount ?? 0,
-    failureReason: row.failureReason ?? null,
-    failureTime: row.failureTime ?? null,
-    shrinkOldCount: row.shrinkOldCount ?? null,
-    shrinkNewCount: row.shrinkNewCount ?? null,
-  } : undefined
+  `)
+    .get(id) as any
+  return row
+    ? {
+        id: row.id,
+        status: row.status ?? null,
+        messageCount: row.messageCount ?? 0,
+        failureReason: row.failureReason ?? null,
+        failureTime: row.failureTime ?? null,
+        shrinkOldCount: row.shrinkOldCount ?? null,
+        shrinkNewCount: row.shrinkNewCount ?? null,
+      }
+    : undefined
 }
 
 export function updateSessionTitle(db: Database, id: string, title: string | null): void {
@@ -266,7 +290,7 @@ export function ftsSearch(
       AND (m.duplicate_of IS NULL)
   `
   let searchQuery = `
-    SELECT m.*, s.project_path, ${MESSAGE_RANK_SQL} as rank
+    SELECT m.*, s.project_path, s.parent_session_id, s.agent_id, ${MESSAGE_RANK_SQL} as rank
     FROM messages_fts f
     JOIN messages m ON f.rowid = m.id
     JOIN sessions s ON m.session_id = s.id
@@ -337,7 +361,7 @@ export function ftsSearchWithSnippet(
       AND (m.duplicate_of IS NULL)
   `
   let searchQuery = `
-    SELECT m.*, s.project_path,
+    SELECT m.*, s.project_path, s.parent_session_id, s.agent_id,
            (SELECT d.line FROM messages d WHERE d.session_id = m.session_id AND d.duplicate_of = m.line LIMIT 1) as duplicate_line,
            snippet(messages_fts, 0, '>>>', '<<<', '...', ${snippetTokens}) as snippet,
            ${MESSAGE_RANK_SQL} as rank
@@ -379,10 +403,10 @@ export function ftsSearchWithSnippet(
   }
 
   if (sessionId) {
-    const sessionClause = ` AND m.session_id = ?`
+    const sessionClause = ` AND (m.session_id = ? OR m.session_id IN (SELECT id FROM sessions WHERE parent_session_id = ?))`
     countQuery += sessionClause
     searchQuery += sessionClause
-    params.push(sessionId)
+    params.push(sessionId, sessionId)
   }
 
   searchQuery += ` ORDER BY rank LIMIT ? OFFSET ?`

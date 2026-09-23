@@ -5,9 +5,28 @@ import { tmpdir, homedir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 import { initSchema } from "../../src/history/db-schema.ts"
-import { getSession, upsertSession, insertMessage, ftsSearchWithSnippet, getSessionStatus } from "../../src/history/db-queries.ts"
-import { resolveAgBin, fetchCodexCatalog, indexCodexTranscripts, safeRollback } from "../../src/history/codex-indexer.ts"
-import { rebuildIndex, INDEX_WINDOW_DAYS, INDEX_WINDOW_MS, pruneOldSessions, isRecallIgnored, resetIgnoreCache } from "../../src/history/indexer.ts"
+import {
+  getSession,
+  upsertSession,
+  insertMessage,
+  ftsSearchWithSnippet,
+  getSessionStatus,
+} from "../../src/history/db-queries.ts"
+import { closeDb } from "../../src/history/db.ts"
+import {
+  resolveAgBin,
+  fetchCodexCatalog,
+  indexCodexTranscripts,
+  safeRollback,
+} from "../../src/history/codex-indexer.ts"
+import {
+  rebuildIndex,
+  INDEX_WINDOW_DAYS,
+  INDEX_WINDOW_MS,
+  pruneOldSessions,
+  isRecallIgnored,
+  resetIgnoreCache,
+} from "../../src/history/indexer.ts"
 import { getPersistedFailedSessions } from "../../src/lib/status.ts"
 import { cmdIndex } from "../../src/lib/sessions.ts"
 
@@ -28,6 +47,7 @@ describe("Codex Transcript Indexer", () => {
 
   afterEach(() => {
     resetIgnoreCache()
+    closeDb()
     if (origClaudeDir !== undefined) {
       process.env.CLAUDE_DIR = origClaudeDir
     } else {
@@ -1493,31 +1513,9 @@ if (args.includes("list")) {
       upsertSession(db, sessId, "/test/path", "/test/dup.jsonl", 1000, 1000, 2)
 
       // Canonical row (e.g. from response_item) at line 10
-      insertMessage(
-        db,
-        `${sessId}:10`,
-        sessId,
-        "user",
-        "quantum superposition query",
-        null,
-        null,
-        1000,
-        null,
-        10,
-      )
+      insertMessage(db, `${sessId}:10`, sessId, "user", "quantum superposition query", null, null, 1000, null, 10)
       // Duplicate row (e.g. from event_msg) at line 11 pointing to line 10
-      insertMessage(
-        db,
-        `${sessId}:11`,
-        sessId,
-        "user",
-        "quantum superposition query",
-        null,
-        null,
-        1000,
-        10,
-        11,
-      )
+      insertMessage(db, `${sessId}:11`, sessId, "user", "quantum superposition query", null, null, 1000, 10, 11)
 
       // Both physical rows exist in messages table
       const rows = db.prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY line").all(sessId) as {
@@ -1543,31 +1541,9 @@ if (args.includes("list")) {
       upsertSession(db, sessId, "/test/path", "/test/turns.jsonl", 1000, 1000, 2)
 
       // Turn 1 utterance
-      insertMessage(
-        db,
-        `${sessId}:10`,
-        sessId,
-        "user",
-        "recurrent deployment trigger",
-        null,
-        null,
-        1000,
-        null,
-        10,
-      )
+      insertMessage(db, `${sessId}:10`, sessId, "user", "recurrent deployment trigger", null, null, 1000, null, 10)
       // Turn 2 utterance (after tool/agent events) - duplicate_of is null
-      insertMessage(
-        db,
-        `${sessId}:30`,
-        sessId,
-        "user",
-        "recurrent deployment trigger",
-        null,
-        null,
-        2000,
-        null,
-        30,
-      )
+      insertMessage(db, `${sessId}:30`, sessId, "user", "recurrent deployment trigger", null, null, 2000, null, 30)
 
       const searchRes = ftsSearchWithSnippet(db, "recurrent deployment trigger")
       expect(searchRes.results).toHaveLength(2)
@@ -1723,8 +1699,13 @@ if (args.includes("list")) {
       const rolloutFile = join(sessionDir, "rollout-2026-09-21T10-00-00-019fce85-test-skip.jsonl")
       writeFileSync(
         rolloutFile,
-        JSON.stringify({ type: "session_meta", payload: { id: "019fce85-test-skip", cwd: "/home/work", timestamp: "2026-09-21T10:00:00.000Z" } }) + "\n" +
-        JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Real producer message 1" } }) + "\n",
+        JSON.stringify({
+          type: "session_meta",
+          payload: { id: "019fce85-test-skip", cwd: "/home/work", timestamp: "2026-09-21T10:00:00.000Z" },
+        }) +
+          "\n" +
+          JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Real producer message 1" } }) +
+          "\n",
       )
 
       // Pass 1: explicit path indexing
@@ -1748,8 +1729,13 @@ if (args.includes("list")) {
       const rolloutFile = join(sessionDir, "rollout-2026-09-21T11-00-00-019fce85-test-grow.jsonl")
       writeFileSync(
         rolloutFile,
-        JSON.stringify({ type: "session_meta", payload: { id: "019fce85-test-grow", cwd: "/home/work", timestamp: "2026-09-21T11:00:00.000Z" } }) + "\n" +
-        JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Initial message" } }) + "\n",
+        JSON.stringify({
+          type: "session_meta",
+          payload: { id: "019fce85-test-grow", cwd: "/home/work", timestamp: "2026-09-21T11:00:00.000Z" },
+        }) +
+          "\n" +
+          JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Initial message" } }) +
+          "\n",
       )
 
       const pass1 = await indexCodexTranscripts(db, { agBin: realAg })
@@ -1759,9 +1745,18 @@ if (args.includes("list")) {
       // Grow file by adding a second message
       writeFileSync(
         rolloutFile,
-        JSON.stringify({ type: "session_meta", payload: { id: "019fce85-test-grow", cwd: "/home/work", timestamp: "2026-09-21T11:00:00.000Z" } }) + "\n" +
-        JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Initial message" } }) + "\n" +
-        JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "text", text: "Grown message 2" }] } }) + "\n",
+        JSON.stringify({
+          type: "session_meta",
+          payload: { id: "019fce85-test-grow", cwd: "/home/work", timestamp: "2026-09-21T11:00:00.000Z" },
+        }) +
+          "\n" +
+          JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Initial message" } }) +
+          "\n" +
+          JSON.stringify({
+            type: "response_item",
+            payload: { type: "message", role: "assistant", content: [{ type: "text", text: "Grown message 2" }] },
+          }) +
+          "\n",
       )
 
       const pass2 = await indexCodexTranscripts(db, { agBin: realAg })
@@ -1786,8 +1781,13 @@ if (args.includes("list")) {
       const file2 = join(acc2Dir, "rollout-2026-09-21T12-00-00-019fce85-test-ambig.jsonl")
 
       const content =
-        JSON.stringify({ type: "session_meta", payload: { id: "019fce85-test-ambig", cwd: "/home/work", timestamp: "2026-09-21T12:00:00.000Z" } }) + "\n" +
-        JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Ambiguous message" } }) + "\n"
+        JSON.stringify({
+          type: "session_meta",
+          payload: { id: "019fce85-test-ambig", cwd: "/home/work", timestamp: "2026-09-21T12:00:00.000Z" },
+        }) +
+        "\n" +
+        JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Ambiguous message" } }) +
+        "\n"
       writeFileSync(file1, content)
       writeFileSync(file2, content)
       const fixedTime = new Date("2026-09-21T12:00:00.000Z")
@@ -1798,7 +1798,11 @@ if (args.includes("list")) {
       expect(result.sessions).toBe(1)
       expect(result.ambiguous).toBe(1)
 
-      const allSessions = db.prepare("SELECT id, status, size_bytes FROM sessions WHERE id LIKE 'codex:%'").all() as { id: string; status: string; size_bytes: number }[]
+      const allSessions = db.prepare("SELECT id, status, size_bytes FROM sessions WHERE id LIKE 'codex:%'").all() as {
+        id: string
+        status: string
+        size_bytes: number
+      }[]
       expect(allSessions).toHaveLength(2)
       expect(allSessions[0]?.id).not.toBe(allSessions[1]?.id)
       for (const s of allSessions) {
@@ -1817,8 +1821,16 @@ if (args.includes("list")) {
       mkdirSync(claudeDir, { recursive: true })
       const claudeFile = join(claudeDir, "claude-45d.jsonl")
       const claudeLines = [
-        JSON.stringify({ type: "user", message: { content: "Searching ancient forty-five day old topic claude" }, timestamp: new Date(fortyFiveDaysAgo).toISOString() }),
-        JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Answer from forty-five days ago" }] }, timestamp: new Date(fortyFiveDaysAgo + 1000).toISOString() }),
+        JSON.stringify({
+          type: "user",
+          message: { content: "Searching ancient forty-five day old topic claude" },
+          timestamp: new Date(fortyFiveDaysAgo).toISOString(),
+        }),
+        JSON.stringify({
+          type: "assistant",
+          message: { content: [{ type: "text", text: "Answer from forty-five days ago" }] },
+          timestamp: new Date(fortyFiveDaysAgo + 1000).toISOString(),
+        }),
       ]
       writeFileSync(claudeFile, claudeLines.join("\n") + "\n", "utf8")
       utimesSync(claudeFile, new Date(fortyFiveDaysAgo), new Date(fortyFiveDaysAgo))
@@ -1829,9 +1841,24 @@ if (args.includes("list")) {
       mkdirSync(sessionDir, { recursive: true })
       const codexFile = join(sessionDir, "rollout-2026-08-07T10-00-00-019fce85-test-45d.jsonl")
       const codexLines = [
-        JSON.stringify({ type: "session_meta", payload: { id: "019fce85-test-45d", cwd: "/home/work", timestamp: new Date(fortyFiveDaysAgo).toISOString() } }),
-        JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Searching ancient forty-five day old topic codex" }, timestamp: new Date(fortyFiveDaysAgo).toISOString() }),
-        JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "text", text: "Codex answer from forty-five days ago" }] }, timestamp: new Date(fortyFiveDaysAgo + 1000).toISOString() }),
+        JSON.stringify({
+          type: "session_meta",
+          payload: { id: "019fce85-test-45d", cwd: "/home/work", timestamp: new Date(fortyFiveDaysAgo).toISOString() },
+        }),
+        JSON.stringify({
+          type: "event_msg",
+          payload: { type: "user_message", message: "Searching ancient forty-five day old topic codex" },
+          timestamp: new Date(fortyFiveDaysAgo).toISOString(),
+        }),
+        JSON.stringify({
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "text", text: "Codex answer from forty-five days ago" }],
+          },
+          timestamp: new Date(fortyFiveDaysAgo + 1000).toISOString(),
+        }),
       ]
       writeFileSync(codexFile, codexLines.join("\n") + "\n", "utf8")
       utimesSync(codexFile, new Date(fortyFiveDaysAgo), new Date(fortyFiveDaysAgo))
@@ -1912,7 +1939,10 @@ if (args.includes("list")) {
       // Write initial valid transcript
       const lines = [
         JSON.stringify({ type: "user", message: { content: "Original preserved query" } }),
-        JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Original preserved response" }] } }),
+        JSON.stringify({
+          type: "assistant",
+          message: { content: [{ type: "text", text: "Original preserved response" }] },
+        }),
       ]
       writeFileSync(sessionPath, lines.join("\n") + "\n", "utf8")
 
@@ -1998,7 +2028,10 @@ if (args.includes("list")) {
       // Recovery: repair the file with 2 valid records
       const recoveryLines = [
         JSON.stringify({ type: "user", message: { content: "Recovered brand new query" } }),
-        JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Recovered brand new response" }] } }),
+        JSON.stringify({
+          type: "assistant",
+          message: { content: [{ type: "text", text: "Recovered brand new response" }] },
+        }),
       ]
       writeFileSync(sessionPath, recoveryLines.join("\n") + "\n", "utf8")
 
@@ -2021,7 +2054,10 @@ if (args.includes("list")) {
 
       const lines = [
         JSON.stringify({ type: "user", message: { content: "Async read fail query" } }),
-        JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Async read fail response" }] } }),
+        JSON.stringify({
+          type: "assistant",
+          message: { content: [{ type: "text", text: "Async read fail response" }] },
+        }),
       ]
       writeFileSync(sessionPath, lines.join("\n") + "\n", "utf8")
 
@@ -2052,9 +2088,15 @@ if (args.includes("list")) {
 
       // Version 1: 3 rows
       const v1Lines = [
-        JSON.stringify({ type: "session_meta", payload: { id: "019fce85-test-shrink", cwd: "/home/work", timestamp: "2026-09-21T12:00:00.000Z" } }),
+        JSON.stringify({
+          type: "session_meta",
+          payload: { id: "019fce85-test-shrink", cwd: "/home/work", timestamp: "2026-09-21T12:00:00.000Z" },
+        }),
         JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Shrink test message 1" } }),
-        JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "text", text: "Shrink test message 2" }] } }),
+        JSON.stringify({
+          type: "response_item",
+          payload: { type: "message", role: "assistant", content: [{ type: "text", text: "Shrink test message 2" }] },
+        }),
         JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Shrink test message 3" } }),
       ]
       writeFileSync(rolloutPath, v1Lines.join("\n") + "\n", "utf8")
@@ -2069,7 +2111,10 @@ if (args.includes("list")) {
 
       // Version 2: truncated to 1 row (shrink)
       const v2Lines = [
-        JSON.stringify({ type: "session_meta", payload: { id: "019fce85-test-shrink", cwd: "/home/work", timestamp: "2026-09-21T12:00:00.000Z" } }),
+        JSON.stringify({
+          type: "session_meta",
+          payload: { id: "019fce85-test-shrink", cwd: "/home/work", timestamp: "2026-09-21T12:00:00.000Z" },
+        }),
         JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Shrink test message 1" } }),
       ]
       writeFileSync(rolloutPath, v2Lines.join("\n") + "\n", "utf8")
@@ -2171,7 +2216,9 @@ if (process.argv.includes("list")) {
 }
 `)
 
-      await expect(indexCodexTranscripts(db, { agBin: mockInterruptedAg })).rejects.toThrow(/sess-2-interrupted.*committed 1 sessions \[codex:sess-1\]/)
+      await expect(indexCodexTranscripts(db, { agBin: mockInterruptedAg })).rejects.toThrow(
+        /sess-2-interrupted.*committed 1 sessions \[codex:sess-1\]/,
+      )
     })
 
     test("nonzero producer failure includes failed path, wire reason, and timestamp", async () => {
@@ -2184,7 +2231,9 @@ if (process.argv.includes("list")) {
 }
 `)
 
-      await expect(indexCodexTranscripts(db, { agBin: mockListError })).rejects.toThrow(/unreadable:permission-denied-eacces.*\/var\/unreadable-path\.jsonl/)
+      await expect(indexCodexTranscripts(db, { agBin: mockListError })).rejects.toThrow(
+        /unreadable:permission-denied-eacces.*\/var\/unreadable-path\.jsonl/,
+      )
     })
 
     test("handles multi-byte UTF-8 split across chunk boundaries without Unicode corruption", async () => {
@@ -2618,7 +2667,139 @@ if (process.argv.includes("list")) {
         delete process.env.RECALL_DB_PATH
       }
     })
+
+    test("incremental index skips known bad Codex files (exit 0) and exits 5 only on new bad files", async () => {
+      const origExitCode = process.exitCode
+      const origAgBin = process.env.AG_BIN
+      try {
+        closeDb()
+        process.exitCode = undefined
+        const isolatedDbPath = join(tempDir, "isolated-bad-skip-test.db")
+        const isolatedDb = new Database(isolatedDbPath)
+        initSchema(isolatedDb)
+        isolatedDb.close()
+        process.env.RECALL_DB_PATH = isolatedDbPath
+
+        const bad1File = join(tempDir, "bad1.jsonl")
+        writeFileSync(bad1File, "")
+        const bad2File = join(tempDir, "bad2.jsonl")
+        const now = Date.now()
+
+        const scriptPath = join(tempDir, "mock-incremental-bad-ag.ts")
+        writeFileSync(
+          scriptPath,
+          `#!/usr/bin/env bun
+import * as fs from "node:fs"
+const args = process.argv.slice(2)
+
+if (args.includes("list")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "bad-sess-1",
+    sessionKey: "codex:bad-sess-1",
+    canonicalPath: "${bad1File}",
+    sizeBytes: 100,
+    mtimeMs: ${now - 10000},
+    status: "canonical",
+    copies: [{ path: "${bad1File}", sizeBytes: 100, mtimeMs: ${now - 10000}, decision: "canonical", key: "codex:bad-sess-1" }]
+  }))
+  if (fs.existsSync("${bad2File}")) {
+    console.log(JSON.stringify({
+      kind: "session",
+      provider: "codex",
+      nativeId: "bad-sess-2",
+      sessionKey: "codex:bad-sess-2",
+      canonicalPath: "${bad2File}",
+      sizeBytes: 200,
+      mtimeMs: ${now - 5000},
+      status: "canonical",
+      copies: [{ path: "${bad2File}", sizeBytes: 200, mtimeMs: ${now - 5000}, decision: "canonical", key: "codex:bad-sess-2" }]
+    }))
+  }
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: fs.existsSync("${bad2File}") ? 2 : 1, sessions: fs.existsSync("${bad2File}") ? 2 : 1, canonical: fs.existsSync("${bad2File}") ? 2 : 1, ambiguous: 0, stale: 0, invalid: 0 }))
+} else if (args.includes("export")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  const hasBad1 = args.includes("${bad1File}") || !args.includes("--path")
+  const hasBad2 = args.includes("${bad2File}")
+
+  if (hasBad1) {
+    console.log(JSON.stringify({
+      kind: "session",
+      provider: "codex",
+      nativeId: "bad-sess-1",
+      sessionKey: "codex:bad-sess-1",
+      path: "${bad1File}",
+      sizeBytes: 100,
+      mtimeMs: ${now - 10000},
+      status: "canonical"
+    }))
+    console.log(JSON.stringify({
+      kind: "unreadable",
+      path: "${bad1File}",
+      nativeId: "bad-sess-1",
+      reason: "bad-header"
+    }))
+    console.log(JSON.stringify({ kind: "end", sessionKey: "codex:bad-sess-1", status: "bad-header", nativeId: "bad-sess-1" }))
+  }
+
+  if (hasBad2) {
+    console.log(JSON.stringify({
+      kind: "session",
+      provider: "codex",
+      nativeId: "bad-sess-2",
+      sessionKey: "codex:bad-sess-2",
+      path: "${bad2File}",
+      sizeBytes: 200,
+      mtimeMs: ${now - 5000},
+      status: "canonical"
+    }))
+    console.log(JSON.stringify({
+      kind: "unreadable",
+      path: "${bad2File}",
+      nativeId: "bad-sess-2",
+      reason: "corrupt-file"
+    }))
+    console.log(JSON.stringify({ kind: "end", sessionKey: "codex:bad-sess-2", status: "bad-header", nativeId: "bad-sess-2" }))
+  }
+
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 1, sessions: 1, canonical: 0, ambiguous: 0, stale: 0, invalid: 0, unreadable: (hasBad1 ? 1 : 0) + (hasBad2 ? 1 : 0), errors: 0 }))
+  process.exit(1)
+}
+`,
+        )
+        chmodSync(scriptPath, 0o755)
+        process.env.AG_BIN = scriptPath
+
+        const logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
+
+        // Run 1: bad1 encountered for the first time -> exits 5
+        await cmdIndex({ incremental: true })
+        expect(process.exitCode).toBe(5)
+
+        // Run 2: incremental pass with no file changes -> bad1 skipped -> exits 0
+        process.exitCode = undefined
+        await cmdIndex({ incremental: true })
+        expect(process.exitCode).toBe(0)
+
+        // Run 3: new bad file introduced -> bad2 encountered -> exits 5
+        writeFileSync(bad2File, "")
+        process.exitCode = undefined
+        await cmdIndex({ incremental: true })
+        expect(process.exitCode).toBe(5)
+
+        logSpy.mockRestore()
+      } finally {
+        closeDb()
+        process.exitCode = origExitCode
+        if (origAgBin !== undefined) {
+          process.env.AG_BIN = origAgBin
+        } else {
+          delete process.env.AG_BIN
+        }
+        delete process.env.RECALL_DB_PATH
+      }
+    })
   })
 })
-
-

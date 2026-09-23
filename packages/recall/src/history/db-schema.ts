@@ -53,7 +53,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   failure_reason TEXT,
   failure_time INTEGER,
   shrink_old_count INTEGER,
-  shrink_new_count INTEGER
+  shrink_new_count INTEGER,
+  parent_session_id TEXT,
+  agent_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_path);
@@ -163,6 +165,9 @@ export const MIGRATIONS = [
   `ALTER TABLE sessions ADD COLUMN failure_time INTEGER`,
   `ALTER TABLE sessions ADD COLUMN shrink_old_count INTEGER`,
   `ALTER TABLE sessions ADD COLUMN shrink_new_count INTEGER`,
+  `ALTER TABLE sessions ADD COLUMN parent_session_id TEXT`,
+  `ALTER TABLE sessions ADD COLUMN agent_id TEXT`,
+  `CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)`,
   // Unique index for upsert support on content table
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_content_type_source ON content(content_type, source_id)`,
   // Update trigger for content FTS (needed for upsert)
@@ -181,6 +186,26 @@ export function runMigrations(db: Database): void {
     } catch {
       // Column/table already exists, skip
     }
+  }
+
+  // Idempotent migration: clean clobbered rows where jsonl_path is under /subagents/
+  // and agent_id is NULL (rows written by the old indexer that clobbered parent session)
+  try {
+    const clobbered = db
+      .prepare("SELECT id FROM sessions WHERE jsonl_path LIKE '%/subagents/%' AND agent_id IS NULL")
+      .all() as { id: string }[]
+    if (clobbered.length > 0) {
+      const ids = clobbered.map((s) => s.id)
+      const placeholders = ids.map(() => "?").join(",")
+      const msgDel = db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...ids)
+      const wrDel = db.prepare(`DELETE FROM writes WHERE session_id IN (${placeholders})`).run(...ids)
+      const sessDel = db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...ids)
+      console.log(
+        `[migration] Cleaned ${sessDel.changes} clobbered subagent session(s), ${msgDel.changes} message(s), ${wrDel.changes} write(s); will re-index cleanly.`,
+      )
+    }
+  } catch {
+    // sessions table might not exist yet or other transient error
   }
 }
 

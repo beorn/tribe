@@ -33,11 +33,7 @@ export interface CodexIndexOptions {
   projectRoot?: string
   agBin?: string
   cutoffTime?: number
-  onProgress?: (progress: {
-    sessionsProcessed: number
-    messagesIndexed: number
-    currentSession?: string
-  }) => void
+  onProgress?: (progress: { sessionsProcessed: number; messagesIndexed: number; currentSession?: string }) => void
 }
 
 export interface CodexFailureRecord {
@@ -269,19 +265,24 @@ export async function fetchCodexCatalog(agBin: string): Promise<{
         if (!handleLine(buffer)) return
       }
       if (!doneRecord) {
-        const failureDetails = failures.length > 0
-          ? ` (recorded ${failures.length} catalog failures: ${failures.map((f) => `${f.kind}:${f.reason}${f.path ? ` [${f.path}]` : ""}${f.timestamp ? ` (at ${new Date(f.timestamp).toISOString()})` : ""}`).join(", ")})`
-          : ""
-        const err = new Error(`ag transcript list ${code !== 0 ? `exited with code ${code}: ` : "stream ended without done record"}${stderr.trim()}${failureDetails}`)
+        const failureDetails =
+          failures.length > 0
+            ? ` (recorded ${failures.length} catalog failures: ${failures.map((f) => `${f.kind}:${f.reason}${f.path ? ` [${f.path}]` : ""}${f.timestamp ? ` (at ${new Date(f.timestamp).toISOString()})` : ""}`).join(", ")})`
+            : ""
+        const err = new Error(
+          `ag transcript list ${code !== 0 ? `exited with code ${code}: ` : "stream ended without done record"}${stderr.trim()}${failureDetails}`,
+        )
         ;(err as any).failures = failures
         reject(err)
         return
       }
-      const hasCatalogIssues = failures.length > 0 || Number(doneRecord.unreadable ?? 0) > 0 || Number(doneRecord.errors ?? 0) > 0
+      const hasCatalogIssues =
+        failures.length > 0 || Number(doneRecord.unreadable ?? 0) > 0 || Number(doneRecord.errors ?? 0) > 0
       if (code !== 0 && !(code === 1 && hasCatalogIssues)) {
-        const failureDetails = failures.length > 0
-          ? ` (recorded ${failures.length} catalog failures: ${failures.map((f) => `${f.kind}:${f.reason}${f.path ? ` [${f.path}]` : ""}${f.timestamp ? ` (at ${new Date(f.timestamp).toISOString()})` : ""}`).join(", ")})`
-          : ""
+        const failureDetails =
+          failures.length > 0
+            ? ` (recorded ${failures.length} catalog failures: ${failures.map((f) => `${f.kind}:${f.reason}${f.path ? ` [${f.path}]` : ""}${f.timestamp ? ` (at ${new Date(f.timestamp).toISOString()})` : ""}`).join(", ")})`
+            : ""
         const err = new Error(`ag transcript list exited with code ${code}: ${stderr.trim()}${failureDetails}`)
         ;(err as any).failures = failures
         reject(err)
@@ -359,7 +360,9 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
       }
 
       // Check time window: sessions older than cutoffTime are skipped if specified
-      const copy = (session.canonicalPath ? session.copies.find((c) => c.path === session.canonicalPath) : null) ?? session.copies[0]
+      const copy =
+        (session.canonicalPath ? session.copies.find((c) => c.path === session.canonicalPath) : null) ??
+        session.copies[0]
       if (!copy || !copy.path) {
         failures.push({
           kind: "unreadable",
@@ -379,6 +382,26 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         }
       }
 
+      const isUnchangedStoredCopy = (
+        stored: ReturnType<typeof getSession>,
+        path: string,
+        c: { sizeBytes: number; mtimeMs: number; lastEventAtMs: number | null },
+      ): boolean => {
+        if (!stored) return false
+        const skippable =
+          stored.status === "complete" ||
+          stored.status === "incomplete-tail" ||
+          stored.status === "bad-header" ||
+          stored.status === "unreadable" ||
+          stored.status === "stale-bad-header" ||
+          stored.status === "stale-unreadable"
+        if (!skippable) return false
+        if (stored.jsonl_path !== path) return false
+        if (stored.size_bytes !== c.sizeBytes || stored.mtime_ms !== c.mtimeMs) return false
+        if (c.lastEventAtMs != null && stored.last_event_at_ms !== c.lastEventAtMs) return false
+        return true
+      }
+
       // Check skip key using real copy metadata and copy keys
       if (session.status === "ambiguous") {
         let allCopiesSkipped = true
@@ -386,14 +409,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
           if (!c.path) continue
           const copyKey = c.key ?? `codex:${session.nativeId}`
           const stored = getSession(db, copyKey)
-          if (
-            stored &&
-            stored.status === "complete" &&
-            stored.jsonl_path === c.path &&
-            stored.size_bytes === c.sizeBytes &&
-            stored.mtime_ms === c.mtimeMs &&
-            stored.last_event_at_ms === c.lastEventAtMs
-          ) {
+          if (isUnchangedStoredCopy(stored, c.path, c)) {
             // this copy unchanged
             skippedSessionIds.push(copyKey)
           } else {
@@ -408,14 +424,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         const targetPath = session.canonicalPath ?? copy.path
         const copyKey = session.key ?? session.sessionKey ?? `codex:${session.nativeId}`
         const stored = getSession(db, copyKey)
-        if (
-          stored &&
-          stored.status === "complete" &&
-          stored.jsonl_path === targetPath &&
-          stored.size_bytes === copy.sizeBytes &&
-          stored.mtime_ms === copy.mtimeMs &&
-          stored.last_event_at_ms === copy.lastEventAtMs
-        ) {
+        if (targetPath && isUnchangedStoredCopy(stored, targetPath, copy)) {
           skipped++
           skippedSessionIds.push(copyKey)
           continue
@@ -566,10 +575,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
             `codex:${nativeId}`,
             `codex:${nativeId}@%`,
           )
-          db.prepare("DELETE FROM sessions WHERE id = ? OR id LIKE ?").run(
-            `codex:${nativeId}`,
-            `codex:${nativeId}@%`,
-          )
+          db.prepare("DELETE FROM sessions WHERE id = ? OR id LIKE ?").run(`codex:${nativeId}`, `codex:${nativeId}@%`)
         } catch (err) {
           safeRollback(db)
           inTx = false
@@ -681,29 +687,37 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
             timestamp: now,
           })
 
+          let sessionSizeBytes = currentSession.sizeBytes
+          let sessionMtimeMs = currentSession.mtimeMs
+          if (sessionSizeBytes == null || sessionMtimeMs == null) {
+            try {
+              const st = fs.statSync(currentSession.path)
+              if (sessionSizeBytes == null) sessionSizeBytes = st.size
+              if (sessionMtimeMs == null) sessionMtimeMs = st.mtime.getTime()
+            } catch {
+              // file might have been deleted or inaccessible
+            }
+          }
+
           for (const key of keys) {
             const existing = getSession(db, key)
             if (existing) {
               updateSessionStatus(db, key, `stale-${status}`, {
                 failureReason: reason,
                 failureTime: now,
+                sizeBytes: sessionSizeBytes,
+                mtimeMs: sessionMtimeMs,
+                lastEventAtMs: currentSession.lastEventAtMs,
               })
             } else {
-              upsertSession(
-                db,
-                key,
-                currentSession.cwd || "",
-                currentSession.path,
-                createdAtMs,
-                Date.now(),
-                0,
-                null,
-                {
-                  status: status,
-                  failureReason: reason,
-                  failureTime: now,
-                },
-              )
+              upsertSession(db, key, currentSession.cwd || "", currentSession.path, createdAtMs, Date.now(), 0, null, {
+                status: status,
+                failureReason: reason,
+                failureTime: now,
+                sizeBytes: sessionSizeBytes,
+                mtimeMs: sessionMtimeMs,
+                lastEventAtMs: currentSession.lastEventAtMs,
+              })
             }
           }
           batchRetainedSessionIds.push(...keys)
@@ -762,22 +776,12 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
                 const copyMtime = matchedCopy?.mtimeMs ?? session.mtimeMs ?? Date.now()
                 const copyLastEvent = matchedCopy?.lastEventAtMs ?? session.lastEventAtMs ?? null
 
-                upsertSession(
-                  db,
-                  key,
-                  session.cwd || "",
-                  copyPath,
-                  createdAtMs,
-                  copyMtime,
-                  count,
-                  null,
-                  {
-                    status: status,
-                    sizeBytes: copySize,
-                    mtimeMs: copyMtime,
-                    lastEventAtMs: copyLastEvent,
-                  },
-                )
+                upsertSession(db, key, session.cwd || "", copyPath, createdAtMs, copyMtime, count, null, {
+                  status: status,
+                  sizeBytes: copySize,
+                  mtimeMs: copyMtime,
+                  lastEventAtMs: copyLastEvent,
+                })
               }
 
               db.run("COMMIT")
@@ -838,9 +842,10 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         return
       }
       if (!doneRecord) {
-        const failureDetails = failures.length > 0
-          ? ` (recorded ${failures.length} failures: ${failures.map((f) => `${f.kind}:${f.reason}${f.path ? ` [${f.path}]` : ""}${f.timestamp ? ` (at ${new Date(f.timestamp).toISOString()})` : ""}${f.oldRowCount !== undefined ? ` [rows: ${f.oldRowCount} -> ${f.newRowCount}]` : ""}`).join(", ")})`
-          : ""
+        const failureDetails =
+          failures.length > 0
+            ? ` (recorded ${failures.length} failures: ${failures.map((f) => `${f.kind}:${f.reason}${f.path ? ` [${f.path}]` : ""}${f.timestamp ? ` (at ${new Date(f.timestamp).toISOString()})` : ""}${f.oldRowCount !== undefined ? ` [rows: ${f.oldRowCount} -> ${f.newRowCount}]` : ""}`).join(", ")})`
+            : ""
         const committedProgress = ` (committed ${batchSessionCount} sessions [${batchIndexedSessionIds.join(", ")}], ${batchRowCount} rows prior to error)`
         const err = new Error(
           `ag transcript export ${code !== 0 ? `exited with code ${code}: ` : "stream ended without done record"}${stderr.trim()}${failureDetails}${committedProgress}`,
@@ -851,11 +856,14 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
       }
       const hasLedgeredIssues = failures.length > 0 || batchUnreadableCount > 0 || batchErrorCount > 0
       if (code !== 0 && !(code === 1 && hasLedgeredIssues)) {
-        const failureDetails = failures.length > 0
-          ? ` (recorded ${failures.length} failures: ${failures.map((f) => `${f.kind}:${f.reason}${f.path ? ` [${f.path}]` : ""}${f.timestamp ? ` (at ${new Date(f.timestamp).toISOString()})` : ""}${f.oldRowCount !== undefined ? ` [rows: ${f.oldRowCount} -> ${f.newRowCount}]` : ""}`).join(", ")})`
-          : ""
+        const failureDetails =
+          failures.length > 0
+            ? ` (recorded ${failures.length} failures: ${failures.map((f) => `${f.kind}:${f.reason}${f.path ? ` [${f.path}]` : ""}${f.timestamp ? ` (at ${new Date(f.timestamp).toISOString()})` : ""}${f.oldRowCount !== undefined ? ` [rows: ${f.oldRowCount} -> ${f.newRowCount}]` : ""}`).join(", ")})`
+            : ""
         const committedProgress = ` (committed ${batchSessionCount} sessions [${batchIndexedSessionIds.join(", ")}], ${batchRowCount} rows prior to error)`
-        const err = new Error(`ag transcript export exited with code ${code}: ${stderr.trim()}${failureDetails}${committedProgress}`)
+        const err = new Error(
+          `ag transcript export exited with code ${code}: ${stderr.trim()}${failureDetails}${committedProgress}`,
+        )
         ;(err as any).failures = failures
         reject(err)
         return

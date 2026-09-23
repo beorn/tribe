@@ -1,0 +1,2 @@
+{"sessionId":"parent-sess","type":"user","message":{"content":"parent user question"},"timestamp":"2026-08-01T12:00:00.000Z"}
+{"sessionId":"parent-sess","type":"assistant","message":{"content":[{"type":"text","text":"parent assistant reply"}]},"timestamp":"2026-08-01T12:00:05.000Z"}
