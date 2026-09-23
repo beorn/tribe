@@ -163,8 +163,6 @@ CREATE TRIGGER IF NOT EXISTS content_au AFTER UPDATE ON content BEGIN
 END;
 `
 
-export const CURRENT_SCHEMA_VERSION = 3
-
 export interface MigrationStep {
   version: number
   name: string
@@ -177,12 +175,8 @@ export const MIGRATION_STEPS: MigrationStep[] = [
     name: "baseline-columns-and-indexes",
     up: (db: Database) => {
       const getColumns = (table: string): Set<string> => {
-        try {
-          const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
-          return new Set(rows.map((r) => r.name))
-        } catch {
-          return new Set()
-        }
+        const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+        return new Set(rows.map((r) => r.name))
       }
 
       const sessionCols = getColumns("sessions")
@@ -241,141 +235,155 @@ export const MIGRATION_STEPS: MigrationStep[] = [
     up: (db: Database) => {
       // 1. Check if messages table has old uuid UNIQUE constraint (single-column unique on uuid)
       let needsTableRecreation = false
-      try {
-        const indexList = db.prepare("PRAGMA index_list('messages')").all() as Array<{
-          name: string
-          unique: number
-        }>
-        for (const idx of indexList) {
-          if (idx.unique) {
-            const cols = db.prepare(`PRAGMA index_info('${idx.name}')`).all() as Array<{ name: string }>
-            if (cols.length === 1 && cols[0]?.name === "uuid") {
-              needsTableRecreation = true
-              break
-            }
+      const indexList = db.prepare("PRAGMA index_list('messages')").all() as Array<{
+        name: string
+        unique: number
+      }>
+      for (const idx of indexList) {
+        if (idx.unique) {
+          const cols = db.prepare(`PRAGMA index_info('${idx.name}')`).all() as Array<{ name: string }>
+          if (cols.length === 1 && cols[0]?.name === "uuid") {
+            needsTableRecreation = true
+            break
           }
         }
-      } catch {
-        // messages table might not exist yet
       }
 
       if (needsTableRecreation) {
-        db.exec("BEGIN TRANSACTION")
-        try {
-          db.exec(`
-            DROP TRIGGER IF EXISTS messages_ai;
-            DROP TRIGGER IF EXISTS messages_ad;
-            DROP TRIGGER IF EXISTS messages_au;
-            CREATE TABLE messages_new (
-              id INTEGER PRIMARY KEY,
-              uuid TEXT,
-              session_id TEXT NOT NULL REFERENCES sessions(id),
-              type TEXT NOT NULL,
-              content TEXT,
-              tool_name TEXT,
-              file_paths TEXT,
-              timestamp INTEGER NOT NULL,
-              duplicate_of INTEGER,
-              line INTEGER,
-              UNIQUE(session_id, uuid)
-            );
-            INSERT OR IGNORE INTO messages_new (id, uuid, session_id, type, content, tool_name, file_paths, timestamp, duplicate_of, line)
-            SELECT id, uuid, session_id, type, content, tool_name, file_paths, timestamp, duplicate_of, line
-            FROM messages;
-            DROP TABLE messages;
-            ALTER TABLE messages_new RENAME TO messages;
-            CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
-            CREATE INDEX IF NOT EXISTS idx_messages_type ON messages(type);
-            CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_messages_tool ON messages(tool_name);
-            CREATE INDEX IF NOT EXISTS idx_messages_uuid ON messages(uuid);
+        db.exec(`
+          DROP TRIGGER IF EXISTS messages_ai;
+          DROP TRIGGER IF EXISTS messages_ad;
+          DROP TRIGGER IF EXISTS messages_au;
+          CREATE TABLE messages_new (
+            id INTEGER PRIMARY KEY,
+            uuid TEXT,
+            session_id TEXT NOT NULL REFERENCES sessions(id),
+            type TEXT NOT NULL,
+            content TEXT,
+            tool_name TEXT,
+            file_paths TEXT,
+            timestamp INTEGER NOT NULL,
+            duplicate_of INTEGER,
+            line INTEGER,
+            UNIQUE(session_id, uuid)
+          );
+          INSERT OR IGNORE INTO messages_new (id, uuid, session_id, type, content, tool_name, file_paths, timestamp, duplicate_of, line)
+          SELECT id, uuid, session_id, type, content, tool_name, file_paths, timestamp, duplicate_of, line
+          FROM messages;
+          DROP TABLE messages;
+          ALTER TABLE messages_new RENAME TO messages;
+          CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+          CREATE INDEX IF NOT EXISTS idx_messages_type ON messages(type);
+          CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
+          CREATE INDEX IF NOT EXISTS idx_messages_tool ON messages(tool_name);
+          CREATE INDEX IF NOT EXISTS idx_messages_uuid ON messages(uuid);
 
-            CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-              INSERT INTO messages_fts(rowid, content, tool_name, file_paths)
-              VALUES (new.id, new.content, new.tool_name, new.file_paths);
-            END;
-            CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-              INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, file_paths)
-              VALUES ('delete', old.id, old.content, old.tool_name, old.file_paths);
-            END;
-            CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-              INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, file_paths)
-              VALUES ('delete', old.id, old.content, old.tool_name, old.file_paths);
-              INSERT INTO messages_fts(rowid, content, tool_name, file_paths)
-              VALUES (new.id, new.content, new.tool_name, new.file_paths);
-            END;
-          `)
-          db.exec("COMMIT")
-        } catch (err) {
-          db.exec("ROLLBACK")
-          throw err
-        }
+          CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+            INSERT INTO messages_fts(rowid, content, tool_name, file_paths)
+            VALUES (new.id, new.content, new.tool_name, new.file_paths);
+          END;
+          CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+            INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, file_paths)
+            VALUES ('delete', old.id, old.content, old.tool_name, old.file_paths);
+          END;
+          CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+            INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, file_paths)
+            VALUES ('delete', old.id, old.content, old.tool_name, old.file_paths);
+            INSERT INTO messages_fts(rowid, content, tool_name, file_paths)
+            VALUES (new.id, new.content, new.tool_name, new.file_paths);
+          END;
+        `)
       } else {
         db.exec("CREATE INDEX IF NOT EXISTS idx_messages_uuid ON messages(uuid)")
       }
 
-      // 2. Convert garage sessionId:uuid rows back to raw uuid (substring after last ':')
-      let convertedCount = 0
-      try {
-        const colonRows = db.prepare("SELECT id, uuid FROM messages WHERE uuid LIKE '%:%'").all() as Array<{
-          id: number
-          uuid: string
-        }>
-        if (colonRows.length > 0) {
-          const updateStmt = db.prepare("UPDATE OR IGNORE messages SET uuid = ? WHERE id = ?")
-          db.exec("BEGIN TRANSACTION")
-          try {
-            for (const row of colonRows) {
-              const rawUuid = row.uuid.slice(row.uuid.lastIndexOf(":") + 1)
-              updateStmt.run(rawUuid, row.id)
-              convertedCount++
-            }
-            db.exec("COMMIT")
-          } catch (err) {
-            db.exec("ROLLBACK")
-            throw err
+      // 2. Convert colon uuid rows: set codex rows to NULL, convert garage sessionId:uuid rows back to raw uuid
+      let garageConvertedCount = 0
+      let codexConvertedCount = 0
+      const unconvertibleRowIds: number[] = []
+
+      // Direct SQL update for codex rows avoids loading millions of rows into JavaScript heap
+      const codexCountRes = db.prepare("SELECT COUNT(*) as c FROM messages WHERE uuid LIKE 'codex:%'").get() as { c: number }
+      if (codexCountRes.c > 0) {
+        db.exec("UPDATE messages SET uuid = NULL WHERE uuid LIKE 'codex:%'")
+        codexConvertedCount = codexCountRes.c
+      }
+
+      // Remaining colon rows are garage sessionId:uuid rows
+      const garageRows = db
+        .prepare("SELECT id, session_id, uuid FROM messages WHERE uuid LIKE '%:%'")
+        .all() as Array<{
+        id: number
+        session_id: string
+        uuid: string
+      }>
+
+      if (garageRows.length > 0) {
+        const updateStmt = db.prepare("UPDATE OR IGNORE messages SET uuid = ? WHERE id = ?")
+        for (const row of garageRows) {
+          const rawUuid = row.uuid.slice(row.uuid.lastIndexOf(":") + 1)
+          const res = updateStmt.run(rawUuid, row.id)
+          if (res.changes > 0) {
+            garageConvertedCount++
+          } else {
+            unconvertibleRowIds.push(row.id)
           }
         }
-      } catch {
-        // Ignore if messages table doesn't have uuid column or similar
       }
 
       // 3. Clear stale-unreadable status of sessions whose recorded error was uuid UNIQUE
-      let clearedCount = 0
-      try {
-        const result = db
-          .prepare(
-            `UPDATE sessions
-             SET status = NULL, failure_reason = NULL, failure_time = NULL
-             WHERE status = 'stale-unreadable'
-               AND (failure_reason LIKE '%UNIQUE%messages.uuid%' OR failure_reason LIKE '%messages.uuid%' OR failure_reason LIKE '%UNIQUE constraint failed: messages.session_id, messages.uuid%')`,
-          )
-          .run()
-        clearedCount = result.changes
-      } catch {
-        // Ignore if sessions table not yet present
-      }
-
-      if (convertedCount > 0 || clearedCount > 0) {
-        console.log(
-          `[migration] Converted ${convertedCount} garage sessionId:uuid row(s) back to raw uuid; cleared ${clearedCount} stale-unreadable session(s).`,
+      const result = db
+        .prepare(
+          `UPDATE sessions
+           SET status = NULL, failure_reason = NULL, failure_time = NULL
+           WHERE status = 'stale-unreadable'
+             AND failure_reason = 'UNIQUE constraint failed: messages.uuid'`,
         )
+        .run()
+      const clearedCount = result.changes
+
+      if (garageConvertedCount > 0 || codexConvertedCount > 0 || clearedCount > 0 || unconvertibleRowIds.length > 0) {
+        const parts: string[] = []
+        if (garageConvertedCount > 0 || unconvertibleRowIds.length > 0) {
+          parts.push(`Converted ${garageConvertedCount} garage sessionId:uuid row(s) back to raw uuid`)
+        }
+        if (codexConvertedCount > 0) {
+          parts.push(`reset ${codexConvertedCount} legacy codex row(s) to NULL uuid`)
+        }
+        if (clearedCount > 0) {
+          parts.push(`cleared ${clearedCount} stale-unreadable session(s)`)
+        }
+        if (unconvertibleRowIds.length > 0) {
+          parts.push(
+            `warning: ${unconvertibleRowIds.length} colliding row(s) could not be converted (id: ${unconvertibleRowIds.join(", ")})`,
+          )
+        }
+        console.log(`[migration] ${parts.join("; ")}.`)
       }
     },
   },
 ]
 
+export const CURRENT_SCHEMA_VERSION = MIGRATION_STEPS.at(-1)?.version ?? 1
+
 // Backward compatibility export for legacy callers
-export const MIGRATIONS: string[] = []
+export const MIGRATIONS: string[] = MIGRATION_STEPS.map((s) => s.name)
 
 export function runMigrations(db: Database): void {
   const currentVersion = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version
   for (const step of MIGRATION_STEPS) {
     if (currentVersion < step.version) {
+      db.exec("BEGIN TRANSACTION")
       try {
         step.up(db)
         db.exec(`PRAGMA user_version = ${step.version}`)
+        db.exec("COMMIT")
       } catch (err) {
+        try {
+          db.exec("ROLLBACK")
+        } catch {
+          // Ignore if transaction was already aborted/rolled back by SQLite error
+        }
         throw new Error(`[migration v${step.version}] ${step.name} failed: ${(err as Error).message}`, {
           cause: err,
         })

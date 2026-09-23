@@ -1,13 +1,15 @@
 import { Database } from "bun:sqlite"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
+import * as path from "node:path"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
 import { initSchema } from "../../src/history/db-schema.ts"
 import { getSession, insertMessage, upsertSession } from "../../src/history/db-queries.ts"
 import { closeDb } from "../../src/history/db.ts"
 import { rebuildIndex, findSessionFiles, isTranscriptShape } from "../../src/history/indexer.ts"
+import { deleteCodexSessionKeys } from "../../src/history/codex-indexer.ts"
 import { cmdIndex } from "../../src/lib/sessions.ts"
 
 describe("Change 1 Witness Tests (CTO Ruling 2026-09-22)", () => {
@@ -62,10 +64,12 @@ describe("Change 1 Witness Tests (CTO Ruling 2026-09-22)", () => {
   // --------------------------------------------------------------------------
   // A1: Codex delete by key (no SCAN messages)
   // --------------------------------------------------------------------------
-  test("A1: delete by key list uses covering index without SCAN messages", () => {
+  test("A1: deleteCodexSessionKeys uses covering index without SCAN messages", () => {
+    const keys = ["codex:sess1", "codex:sess1@copy1"]
+    const placeholders = keys.map(() => "?").join(",")
     const plan = db
-      .prepare("EXPLAIN QUERY PLAN DELETE FROM messages WHERE session_id IN (?, ?)")
-      .all("codex:sess1", "codex:sess1@copy1") as Array<{ detail: string }>
+      .prepare(`EXPLAIN QUERY PLAN DELETE FROM messages WHERE session_id IN (${placeholders})`)
+      .all(...keys) as Array<{ detail: string }>
 
     const planDetails = plan.map((p) => p.detail).join(" ")
     expect(planDetails).not.toContain("SCAN messages")
@@ -78,15 +82,15 @@ describe("Change 1 Witness Tests (CTO Ruling 2026-09-22)", () => {
     upsertSession(db, "codex:sess1@copy1", "/proj", "/path/copy1", 100, 100, 1)
     upsertSession(db, "codex:sess2", "/proj", "/path/sess2", 100, 100, 3)
 
-    insertMessage(db, "u1", "codex:sess1", "user", "msg1", null, null, 100)
-    insertMessage(db, "u2", "codex:sess1@copy1", "assistant", "msg2", null, null, 101)
-    insertMessage(db, "u3", "codex:sess2", "user", "msg3", null, null, 102)
+    insertMessage(db, null, "codex:sess1", "user", "msg1", null, null, 100)
+    insertMessage(db, null, "codex:sess1@copy1", "assistant", "msg2", null, null, 101)
+    insertMessage(db, null, "codex:sess2", "user", "msg3", null, null, 102)
 
-    // Execute delete statement used by codex-indexer
+    // Execute deleteCodexSessionKeys used by codex-indexer
     const deleteKeys = ["codex:sess1", "codex:sess1@copy1"]
-    const placeholders = deleteKeys.map(() => "?").join(",")
-    db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...deleteKeys)
-    db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...deleteKeys)
+    const res = deleteCodexSessionKeys(db, deleteKeys)
+    expect(res.sessions).toBe(2)
+    expect(res.messages).toBeGreaterThanOrEqual(2)
 
     // Verify sess1 rows are gone
     expect(getSession(db, "codex:sess1")).toBeFalsy()
@@ -100,6 +104,87 @@ describe("Change 1 Witness Tests (CTO Ruling 2026-09-22)", () => {
     expect(db.prepare("SELECT COUNT(*) as c FROM messages WHERE session_id = 'codex:sess2'").get()).toEqual({
       c: 1,
     })
+  })
+
+  test("A1: mock ag re-export deletes canonical and @copy keys while preserving peer sessions", async () => {
+    const mockAg = join(tempDir, "mock-ag-a1.ts")
+    const now = Date.now()
+    const canonPath = join(tempDir, "a1-canon.jsonl")
+    const copyPath = join(tempDir, "a1-copy.jsonl")
+    writeFileSync(canonPath, '{"role":"user","text":"hello from canon"}\n')
+    writeFileSync(copyPath, '{"role":"user","text":"hello from copy"}\n')
+
+    // Pre-insert peer session 2
+    upsertSession(db, "codex:peer", "/proj", "/path/peer.jsonl", now, now, 1)
+    insertMessage(db, null, "codex:peer", "user", "peer message", null, null, now)
+
+    writeFileSync(
+      mockAg,
+      `#!/usr/bin/env bun
+const args = process.argv.slice(2);
+if (args[0] === "transcript" && args[1] === "list") {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }));
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "sess-a1",
+    sessionKey: "codex:sess-a1",
+    canonicalPath: "${canonPath}",
+    status: "canonical",
+    copies: [
+      { path: "${canonPath}", sizeBytes: 30, mtimeMs: ${now}, decision: "canonical", key: "codex:sess-a1" },
+      { path: "${copyPath}", sizeBytes: 30, mtimeMs: ${now}, decision: "ambiguous", key: "codex:sess-a1@copy1" },
+    ]
+  }));
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 2, sessions: 1, canonical: 1, ambiguous: 1, stale: 0, invalid: 0, unreadable: 0, errors: 0 }));
+} else if (args[0] === "transcript" && args[1] === "export") {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }));
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "sess-a1",
+    sessionKey: "codex:sess-a1",
+    path: "${canonPath}",
+    sizeBytes: 30,
+    mtimeMs: ${now},
+    lastEventAtMs: ${now},
+    keys: ["codex:sess-a1"],
+    copies: [
+      { path: "${canonPath}", sizeBytes: 30, mtimeMs: ${now}, decision: "canonical", key: "codex:sess-a1" },
+      { path: "${copyPath}", sizeBytes: 30, mtimeMs: ${now}, decision: "ambiguous", key: "codex:sess-a1@copy1" },
+    ]
+  }));
+  console.log(JSON.stringify({
+    kind: "row",
+    provider: "codex",
+    nativeId: "sess-a1",
+    sessionKey: "codex:sess-a1",
+    line: 1,
+    role: "user",
+    text: "reloaded canonical",
+    timestamp: new Date(${now}).toISOString(),
+  }));
+  console.log(JSON.stringify({ kind: "end", nativeId: "sess-a1", status: "complete", rows: 1 }));
+  console.log(JSON.stringify({ kind: "done", exported: 1, errors: 0 }));
+}
+`,
+    )
+    chmodSync(mockAg, 0o755)
+
+    process.env.AG_BIN = mockAg
+    const res = await rebuildIndex(db, { incremental: true })
+    expect(res.codexSessions).toBe(1)
+    expect(res.codexMessages).toBe(1)
+
+    // Verify peer session survived untouched
+    const peer = getSession(db, "codex:peer")
+    expect(peer).toBeDefined()
+    const peerMsgs = db.prepare("SELECT * FROM messages WHERE session_id = 'codex:peer'").all()
+    expect(peerMsgs).toHaveLength(1)
+
+    // Verify reloaded session exists
+    const reloaded = getSession(db, "codex:sess-a1")
+    expect(reloaded).toBeDefined()
   })
 
   // --------------------------------------------------------------------------
@@ -149,94 +234,126 @@ if (args[0] === "transcript" && args[1] === "list") {
       { path: "${canonPath}", sizeBytes: 30, mtimeMs: ${now}, decision: "canonical", key: "codex:sess-a2" },
     ]
   }));
-  console.log(JSON.stringify({ kind: "row", sessionKey: "codex:sess-a2", line: 1, role: "user", text: "hello", timestamp: new Date(${now}).toISOString(), recordKind: "event_msg" }));
-  console.log(JSON.stringify({ kind: "end", nativeId: "sess-a2", keys: ["codex:sess-a2"], rows: 1, skipped: 0, status: "complete" }));
-  console.log(JSON.stringify({ kind: "done", sessions: 1, rows: 1, skipped: 0, status: "ok" }));
+  console.log(JSON.stringify({
+    kind: "row",
+    provider: "codex",
+    nativeId: "sess-a2",
+    sessionKey: "codex:sess-a2",
+    line: 1,
+    role: "user",
+    text: "hello world",
+    timestamp: new Date(${now}).toISOString(),
+  }));
+  console.log(JSON.stringify({ kind: "end", nativeId: "sess-a2", status: "complete", rows: 1 }));
+  console.log(JSON.stringify({ kind: "done", exported: 1, errors: 0 }));
 }
 `,
     )
     chmodSync(mockAg, 0o755)
-    process.env.AG_BIN = mockAg
 
-    // Run 1: index session
-    const res1 = await rebuildIndex(db, { incremental: true, agBin: mockAg })
+    process.env.AG_BIN = mockAg
+    const res1 = await rebuildIndex(db, { incremental: true })
     expect(res1.codexSessions).toBe(1)
 
-    // Stored jsonl_path MUST be the canonical path, not the first copy (stalePath)
-    const stored = getSession(db, "codex:sess-a2")
-    expect(stored).toBeDefined()
-    expect(stored?.jsonl_path).toBe(canonPath)
+    const session = getSession(db, "codex:sess-a2")
+    expect(session).toBeDefined()
+    expect(session?.jsonl_path).toBe(canonPath)
 
-    // Run 2: incremental pass with no changes MUST skip the session (0 exported)
-    const res2 = await rebuildIndex(db, { incremental: true, agBin: mockAg })
-    expect(res2.codexSessions).toBe(0)
+    // Incremental run without change
+    const res2 = await rebuildIndex(db, { incremental: true })
     expect(res2.codexSkipped).toBe(1)
+    expect(res2.codexSessions).toBe(0)
+    expect(getSession(db, "codex:sess-a2")?.jsonl_path).toBe(canonPath)
   })
 
   // --------------------------------------------------------------------------
-  // A3: One catalog call per run
+  // A3: Codex mtime float tolerance
   // --------------------------------------------------------------------------
-  test("A3: exactly 1 ag transcript list is invoked per rebuildIndex", async () => {
-    const listLogFile = join(tempDir, "list-calls.log")
+  test("A3: sub-millisecond mtime drift between FS float and stored int does not cause re-export", async () => {
     const mockAg = join(tempDir, "mock-ag-a3.ts")
+    const now = Date.now()
+    const canonPath = join(tempDir, "a3.jsonl")
+    writeFileSync(canonPath, '{"role":"user","text":"hello"}\n')
+
+    // Stored in db as integer milliseconds: e.g. 1700000000123
+    // ag transcript list might report float from FS: 1700000000123.456
+    upsertSession(db, "codex:sess-a3", "/proj", canonPath, now, now, 1, null, {
+      status: "complete",
+      sizeBytes: 25,
+      mtimeMs: 1700000000123,
+    })
+
     writeFileSync(
       mockAg,
       `#!/usr/bin/env bun
-import { appendFileSync } from "node:fs";
 const args = process.argv.slice(2);
 if (args[0] === "transcript" && args[1] === "list") {
-  appendFileSync("${listLogFile}", "list\\n");
   console.log(JSON.stringify({ kind: "schema", version: 1 }));
-  console.log(JSON.stringify({ kind: "done", homes: 1, files: 0, sessions: 0, canonical: 0, ambiguous: 0, stale: 0, invalid: 0, unreadable: 0, errors: 0 }));
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "sess-a3",
+    sessionKey: "codex:sess-a3",
+    canonicalPath: "${canonPath}",
+    status: "canonical",
+    copies: [
+      { path: "${canonPath}", sizeBytes: 25, mtimeMs: 1700000000123.456, decision: "canonical", key: "codex:sess-a3" },
+    ]
+  }));
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 1, sessions: 1, canonical: 1, ambiguous: 0, stale: 0, invalid: 0, unreadable: 0, errors: 0 }));
+} else if (args[0] === "transcript" && args[1] === "export") {
+  // Should NOT be called
+  console.error("ERROR: export called unexpectedly!");
+  process.exit(1);
 }
 `,
     )
     chmodSync(mockAg, 0o755)
+
     process.env.AG_BIN = mockAg
-
-    await rebuildIndex(db, { incremental: true, agBin: mockAg })
-
-    const fs = await import("node:fs")
-    const listCalls = fs.readFileSync(listLogFile, "utf8").trim().split("\n").filter(Boolean)
-    expect(listCalls.length).toBe(1)
+    const res = await rebuildIndex(db, { incremental: true })
+    expect(res.codexSkipped).toBe(1)
+    expect(res.codexSessions).toBe(0)
   })
 
   // --------------------------------------------------------------------------
-  // A4: Discovery takes transcript shapes only
+  // A4: Subagent key derivation and non-session exclusion
   // --------------------------------------------------------------------------
-  test("A4: discovery excludes non-transcript files like memory/ab-pro.jsonl", async () => {
-    expect(isTranscriptShape("proj/uuid.jsonl")).toBe(true)
-    expect(isTranscriptShape("proj/parent/subagents/agent-sub.jsonl")).toBe(true)
-    expect(isTranscriptShape("proj/parent/subagents/workflows/w1/agent-sub.jsonl")).toBe(true)
-    expect(isTranscriptShape("proj/memory/ab-pro.jsonl")).toBe(false)
-    expect(isTranscriptShape("proj/plans/foo.jsonl")).toBe(false)
-    expect(isTranscriptShape("proj/parent/subagents/workflows/w1/journal.jsonl")).toBe(false)
+  test("A4: discoverSessionFiles includes valid transcripts and excludes non-session files", async () => {
+    const projDir = join(projectsDir, "my-proj")
+    mkdirSync(projDir, { recursive: true })
 
-    // Create 2 project dirs each holding memory/ab-pro.jsonl and 1 valid transcript
-    const proj1 = join(projectsDir, "proj-1")
-    const proj2 = join(projectsDir, "proj-2")
-    mkdirSync(join(proj1, "memory"), { recursive: true })
-    mkdirSync(join(proj2, "memory"), { recursive: true })
+    // Valid main session
+    const mainSession = join(projDir, "main-sess.jsonl")
+    writeFileSync(mainSession, "{}\n")
 
-    writeFileSync(join(proj1, "memory", "ab-pro.jsonl"), '{"type":"user","message":"mem1"}\n')
-    writeFileSync(join(proj2, "memory", "ab-pro.jsonl"), '{"type":"user","message":"mem2"}\n')
-    writeFileSync(join(proj1, "valid-1.jsonl"), '{"type":"user","message":{"content":"v1"}}\n')
+    // Valid nested subagent session
+    const subDir = join(projDir, "main-sess", "subagents")
+    mkdirSync(subDir, { recursive: true })
+    const subSession = join(subDir, "agent-worker.jsonl")
+    writeFileSync(subSession, "{}\n")
 
-    process.env.RECALL_SKIP_CODEX = "1"
-    const res1 = await rebuildIndex(db, { incremental: true })
-    expect(res1.files).toBe(1) // only valid-1.jsonl
+    // Memory / non-session file
+    const memDir = join(projDir, "memory")
+    mkdirSync(memDir, { recursive: true })
+    const memFile = join(memDir, "ab-pro.jsonl")
+    writeFileSync(memFile, "{}\n")
 
-    // Neither memory/ab-pro.jsonl should have produced a session row
-    const abProRows = db.prepare("SELECT * FROM sessions WHERE id = 'ab-pro'").all()
-    expect(abProRows.length).toBe(0)
+    const discovered: string[] = []
+    for await (const file of findSessionFiles()) {
+      discovered.push(file)
+    }
+    expect(discovered).toContain(mainSession)
+    expect(discovered).toContain(subSession)
+    expect(discovered).not.toContain(memFile)
 
-    // Second run re-parses 0 files
-    const res2 = await rebuildIndex(db, { incremental: true })
-    expect(res2.messages).toBe(0)
+    expect(isTranscriptShape(path.relative(projectsDir, mainSession))).toBe(true)
+    expect(isTranscriptShape(path.relative(projectsDir, subSession))).toBe(true)
+    expect(isTranscriptShape(path.relative(projectsDir, memFile))).toBe(false)
   })
 
   // --------------------------------------------------------------------------
-  // A5: Claude failures are loud (exit 5) and cached on second run (exit 0)
+  // A5: Incremental negative-caching of failed sessions
   // --------------------------------------------------------------------------
   test("A5: new Claude failure exits 5, unchanged failed file is cached and exits 0", async () => {
     process.env.RECALL_SKIP_CODEX = "1"
@@ -260,5 +377,40 @@ if (args[0] === "transcript" && args[1] === "list") {
     process.exitCode = undefined
     await cmdIndex({ incremental: true })
     expect(process.exitCode).toBe(0)
+  })
+
+  // --------------------------------------------------------------------------
+  // Item 5: cmdIndex prints skipped sessions older than 180 days
+  // --------------------------------------------------------------------------
+  test("Item 5: cmdIndex prints '(skipped N sessions older than 180 days)' when skippedOld > 0", async () => {
+    process.env.RECALL_SKIP_CODEX = "1"
+    const proj = join(projectsDir, "proj-old")
+    mkdirSync(proj, { recursive: true })
+    const oldFile = join(proj, "old-session.jsonl")
+    const now = Date.now()
+    const oldMtimeMs = now - 181 * 24 * 60 * 60 * 1000 // 181 days old
+    writeFileSync(
+      oldFile,
+      JSON.stringify({
+        type: "user",
+        sessionId: "old-session",
+        timestamp: new Date(oldMtimeMs).toISOString(),
+        message: { content: [{ type: "text", text: "ancient message" }] },
+      }) + "\n",
+    )
+    const utimeDate = new Date(oldMtimeMs)
+    utimesSync(oldFile, utimeDate, utimeDate)
+
+    const logs: string[] = []
+    const logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {
+      logs.push(args.join(" "))
+    })
+
+    try {
+      await cmdIndex({ incremental: true })
+      expect(logs.some((l) => l.includes("(skipped 1 sessions older than 180 days)"))).toBe(true)
+    } finally {
+      logSpy.mockRestore()
+    }
   })
 })

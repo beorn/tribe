@@ -103,6 +103,9 @@ export async function cmdIndex(opts: {
     if (result.claudeMd > 0) {
       console.log(`  ${result.claudeMd.toLocaleString()} CLAUDE.md files`)
     }
+    if (result.skippedOld > 0) {
+      console.log(`  (skipped ${result.skippedOld} sessions older than 180 days)`)
+    }
     if (result.claudeSkipped !== undefined && result.claudeSkipped > 0) {
       console.log(`  (skipped ${result.claudeSkipped} unchanged Claude sessions)`)
     }

@@ -379,14 +379,6 @@ export async function indexSessionFile(
         lastMismatchedSessionId = record.sessionId
       }
 
-      if (!parentSessionId) {
-        if ((record as any).parentSessionId) {
-          parentSessionId = String((record as any).parentSessionId)
-        } else if ((record as any).parent_session_id) {
-          parentSessionId = String((record as any).parent_session_id)
-        }
-      }
-
       // Use actual record timestamp for session date tracking;
       // fall back to Date.now() only for message insertion (not session bounds)
       const hasRecordTimestamp = !!record.timestamp

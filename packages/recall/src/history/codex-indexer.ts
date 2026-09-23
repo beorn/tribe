@@ -26,6 +26,19 @@ export function safeRollback(db: Database): void {
   }
 }
 
+/**
+ * Delete old messages and session rows for explicit session keys (A1: fully indexed).
+ * Uses covering indexes (idx_messages_session and PRIMARY KEY on sessions) without scanning.
+ */
+export function deleteCodexSessionKeys(db: Database, keys: string[]): { messages: number; sessions: number } {
+  if (keys.length === 0) return { messages: 0, sessions: 0 }
+  const uniqueKeys = Array.from(new Set(keys))
+  const placeholders = uniqueKeys.map(() => "?").join(",")
+  const msgRes = db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...uniqueKeys)
+  const sessRes = db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...uniqueKeys)
+  return { messages: msgRes.changes, sessions: sessRes.changes }
+}
+
 export interface CodexCatalog {
   sessions: TranscriptCatalogSession[]
   discovered: number
@@ -593,10 +606,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
 
         try {
           // Delete old rows for this native id inside the transaction by explicit keys list (A1: fully indexed)
-          const deleteKeys = Array.from(new Set([`codex:${nativeId}`, ...keys]))
-          const placeholders = deleteKeys.map(() => "?").join(",")
-          db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...deleteKeys)
-          db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...deleteKeys)
+          deleteCodexSessionKeys(db, [`codex:${nativeId}`, ...keys])
         } catch (err) {
           safeRollback(db)
           inTx = false
@@ -623,7 +633,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         try {
           insertMessage(
             db,
-            row.line != null ? String(row.line) : null,
+            null,
             key,
             row.role,
             row.text,
@@ -683,7 +693,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         }
 
         const endRecord = record as unknown as TranscriptExportEndRecord
-        const status = endRecord.status
+        const status = endRecord.status ?? "complete"
         const nativeId = endRecord.nativeId
         const keys =
           currentSession.keys && currentSession.keys.length > 0
@@ -729,11 +739,14 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
 
           const session = currentSession
           for (const key of keys) {
+            // Stated rule: for ambiguous copies (multiple keys), the copy matching key or position; for single key, the copy whose path the export reported (session.path)
             const matchedCopy =
-              session.copies?.find((c) => c.key === key && c.decision === "ambiguous") ??
-              session.copies?.find((c) => c.path === session.path) ??
-              session.copies?.find((c) => c.decision === "canonical") ??
-              session.copies?.find((c) => c.key === key)
+              keys.length > 1
+                ? (session.copies?.find((c) => c.key === key) ??
+                  (session.copies && session.copies.length === keys.length
+                    ? session.copies[keys.indexOf(key)]
+                    : undefined))
+                : session.copies?.find((c) => c.path === session.path)
             const copyPath = matchedCopy?.path ?? session.path
             const copySize = matchedCopy?.sizeBytes ?? sessionSizeBytes
             const copyMtime = matchedCopy?.mtimeMs ?? sessionMtimeMs
@@ -806,14 +819,14 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
               const session = currentSession
               for (const key of keys) {
                 const count = currentRowCounts.get(key) ?? 0
+                // Stated rule: for ambiguous copies (multiple keys), the copy matching key or position; for single key, the copy whose path the export reported (session.path)
                 const matchedCopy =
-                  session.copies?.find((c) => c.key === key && c.decision === "ambiguous") ??
-                  (session.copies && keys.length === session.copies.length
-                    ? session.copies[keys.indexOf(key)]
-                    : undefined) ??
-                  session.copies?.find((c) => c.path === session.path) ??
-                  session.copies?.find((c) => c.decision === "canonical") ??
-                  session.copies?.find((c) => c.key === key)
+                  keys.length > 1
+                    ? (session.copies?.find((c) => c.key === key) ??
+                      (session.copies && session.copies.length === keys.length
+                        ? session.copies[keys.indexOf(key)]
+                        : undefined))
+                    : session.copies?.find((c) => c.path === session.path)
                 const copyPath = matchedCopy?.path ?? session.path
                 const copySize = matchedCopy?.sizeBytes ?? session.sizeBytes
                 const copyMtime = matchedCopy?.mtimeMs ?? session.mtimeMs ?? Date.now()
