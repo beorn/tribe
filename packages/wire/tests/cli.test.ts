@@ -486,6 +486,20 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     expect(calls).toEqual([{ method: "cli_session_pending_read_v1", params: { authority } }])
   })
 
+  it("a managed read served by the bearer after a token fault says so on stderr (25074, @cto 03cff4b5)", async () => {
+    const { result } = await runManagedPendingCliAgainst(() => ({
+      result: {
+        structuredContent: { owner: "@dev/2", count: 0, pending: [] },
+        session_authority: { authority: "bearer", fault: "token undecided: seat-starting; served by bearer" },
+      },
+    }))
+
+    expect(result).toMatchObject({
+      code: 0,
+      stderr: "tribe pending: token undecided: seat-starting; served by bearer\n",
+    })
+  })
+
   it("pending --all renders every owner and --json preserves the typed snapshot", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-pending-all-"))
     const socketPath = join(dir, "tribe.sock")

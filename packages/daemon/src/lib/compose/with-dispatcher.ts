@@ -329,7 +329,7 @@ export function withDispatcher<
       | { kind: "pending-prune"; owner: string; staleMs: number }
 
     type SessionAuthorityResolution =
-      | { context: TribeContext }
+      | { context: TribeContext; servedBy?: { readonly authority: "bearer"; readonly fault: string } }
       | { errorCode: number; errorMessage: string; errorData: Record<string, unknown> }
 
     function invalidPendingReadFilter(params: Record<string, unknown>): string | undefined {
@@ -406,8 +406,15 @@ export function withDispatcher<
      * Dual-key (@cto §9): a verified token whose sid has no session yet (registered before the verifier, or before its
      * adapter re-registered with the token) falls back to the bearer on the same call. The authority stays the
      * bearer's session, and the token upgrades nothing; a bearer whose session is another name is refused naming both.
+     * A verifier fault (an undecided liveness, §8) beside a valid bearer is served by that bearer too, and the answer
+     * names the fault (@cto 03cff4b5). On the registered path another seat's bearer is recorded on the holder's session
+     * as a foreign transport, and the call answers as the token's seat (@cto 975a22e2). 3d retires all of it.
      */
-    async function resolveSessionAuthority(value: unknown, idToken: unknown): Promise<SessionAuthorityResolution> {
+    async function resolveSessionAuthority(
+      value: unknown,
+      idToken: unknown,
+      connId: string,
+    ): Promise<SessionAuthorityResolution> {
       const token = requiredNonEmptyString(idToken)
       const verifier = hooks.identityVerifier
       if (token !== null && verifier) {
@@ -416,10 +423,26 @@ export function withDispatcher<
           verdict = await verifier.verify(token)
         } catch (error) {
           const fault = error instanceof Error ? error.message : String(error)
+          const supplied = requiredNonEmptyString(value)
+          const bearer = supplied === null ? null : resolveBearerAuthority(supplied)
+          if (bearer !== null && !("errorCode" in bearer)) {
+            log.warn?.(
+              `identity verifier ${verifier.path} could not decide a one-shot caller's token (${fault}); ` +
+                `served by ${bearer.row.name}'s bearer`,
+            )
+            const resolution = contextForAuthorityRow(bearer.row)
+            return "context" in resolution
+              ? {
+                  ...resolution,
+                  servedBy: { authority: "bearer", fault: `token undecided: ${fault}; served by bearer` },
+                }
+              : resolution
+          }
           log.error?.(`identity verifier ${verifier.path} failed on a one-shot caller's token: ${fault}`)
           return rejected(
             "identity-verifier-fault",
-            `current session authority could not be evaluated: the identity verifier failed: ${fault}`,
+            `current session authority could not be evaluated: the identity verifier failed: ${fault}` +
+              (bearer === null ? "" : `; the ${AG_SESSION_AUTH_ENV} beside it did not match a live managed session`),
           )
         }
         if (verdict.result === "contradicted") {
@@ -434,15 +457,17 @@ export function withDispatcher<
             .get({ $sid: verdict.sid, $name: verdict.actor }) as AuthorityRow | null
           if (row === null || isTombstonedSessionName(row.name)) {
             const supplied = requiredNonEmptyString(value)
-            if (supplied === null) {
+            const notRegistered =
+              `current session authority was rejected: ${verdict.actor}'s token is verified, but no session registered ` +
+              `under its sid ${verdict.sid}; the seat's own adapter registers it`
+            if (supplied === null) return rejected("identity-not-registered", notRegistered)
+            const bearer = resolveBearerAuthority(supplied)
+            if ("errorCode" in bearer) {
               return rejected(
                 "identity-not-registered",
-                `current session authority was rejected: ${verdict.actor}'s token is verified, but no session registered ` +
-                  `under its sid ${verdict.sid}; the seat's own adapter registers it`,
+                `${notRegistered}, and the ${AG_SESSION_AUTH_ENV} beside it did not match a live managed session`,
               )
             }
-            const bearer = resolveBearerAuthority(supplied)
-            if ("errorCode" in bearer) return bearer
             if (bearer.row.name !== verdict.actor) {
               const message =
                 `current session authority was rejected: the bearer belongs to ${bearer.row.name}, but the identity token ` +
@@ -463,6 +488,20 @@ export function withDispatcher<
                 `${verdict.sid}; resolved by its bearer until its adapter registers with the token`,
             )
             return contextForAuthorityRow(bearer.row)
+          }
+          const supplied = requiredNonEmptyString(value)
+          const bearerRow = supplied === null ? null : bearerAuthorityRow(supplied)
+          if (bearerRow !== null && bearerRow.name !== row.name) {
+            registry.recordForeignIdentityTransport(row.id, {
+              name: bearerRow.name,
+              launch_id: bearerRow.launch_id ?? "(no launch)",
+              pid: clients.get(connId)?.pid ?? 0,
+              refused_at: new Date().toISOString(),
+            })
+            log.warn?.(
+              `one-shot caller ${row.name}'s verified token arrived beside ${bearerRow.name}'s bearer; ` +
+                `answered as ${row.name} and recorded the foreign transport on its session`,
+            )
           }
           return contextForAuthorityRow(row)
         }
@@ -488,9 +527,7 @@ export function withDispatcher<
     function resolveBearerAuthority(
       supplied: string,
     ): { readonly row: AuthorityRow } | Extract<SessionAuthorityResolution, { errorCode: number }> {
-      const row = db
-        .prepare(`SELECT ${AUTHORITY_ROW_COLUMNS} FROM sessions WHERE mailbox_authority_hash = $hash`)
-        .get({ $hash: hashSelfMailboxAuthority(supplied) }) as AuthorityRow | null
+      const row = bearerAuthorityRow(supplied)
       if (row === null || !hasLaunchAuthority(row)) {
         return rejected(
           "session-authority-rejected",
@@ -498,6 +535,13 @@ export function withDispatcher<
         )
       }
       return { row }
+    }
+
+    /** The session a bearer hashes to, live or not. */
+    function bearerAuthorityRow(supplied: string): AuthorityRow | null {
+      return db
+        .prepare(`SELECT ${AUTHORITY_ROW_COLUMNS} FROM sessions WHERE mailbox_authority_hash = $hash`)
+        .get({ $hash: hashSelfMailboxAuthority(supplied) }) as AuthorityRow | null
     }
 
     function contextForAuthorityRow(row: AuthorityRow): SessionAuthorityResolution {
@@ -532,7 +576,7 @@ export function withDispatcher<
       | { result: Awaited<ReturnType<typeof handleToolCall>> }
       | { errorCode: number; errorMessage: string; errorData: Record<string, unknown> }
     > {
-      const resolution = await resolveSessionAuthority(credentials.authority, credentials.idToken)
+      const resolution = await resolveSessionAuthority(credentials.authority, credentials.idToken, connId)
       if (!("context" in resolution)) {
         if (capability.kind === "pending-close" || capability.kind === "pending-prune") {
           const closeIds =
@@ -562,49 +606,60 @@ export function withDispatcher<
         }
         return resolution
       }
+      // 25074 (@cto 03cff4b5): a bearer that served the call because the token faulted says so in the answer.
+      const annotate = <R extends object>(result: R): R =>
+        resolution.servedBy === undefined ? result : { ...result, session_authority: resolution.servedBy }
       switch (capability.kind) {
         case "inbox-ack":
           return {
-            result: await handleToolCall(
-              resolution.context,
-              TRIBE_COORD_METHODS.fetch,
-              { limit: capability.limit, advance: capability.peek ? false : undefined },
-              DAEMON_HANDLER_OPTS,
-              connId,
+            result: annotate(
+              await handleToolCall(
+                resolution.context,
+                TRIBE_COORD_METHODS.fetch,
+                { limit: capability.limit, advance: capability.peek ? false : undefined },
+                DAEMON_HANDLER_OPTS,
+                connId,
+              ),
             ),
           }
         case "pending-read":
           return {
-            result: await handleToolCall(
-              resolution.context,
-              TRIBE_COORD_METHODS.pending,
-              {
-                ...(capability.expired ? { expired: true } : {}),
-                ...(capability.owed ? { owed: true } : {}),
-                ...(capability.staleMs === undefined ? {} : { stale_ms: capability.staleMs }),
-              },
-              DAEMON_HANDLER_OPTS,
-              connId,
+            result: annotate(
+              await handleToolCall(
+                resolution.context,
+                TRIBE_COORD_METHODS.pending,
+                {
+                  ...(capability.expired ? { expired: true } : {}),
+                  ...(capability.owed ? { owed: true } : {}),
+                  ...(capability.staleMs === undefined ? {} : { stale_ms: capability.staleMs }),
+                },
+                DAEMON_HANDLER_OPTS,
+                connId,
+              ),
             ),
           }
         case "pending-close":
           return {
-            result: await handleToolCall(
-              resolution.context,
-              TRIBE_COORD_METHODS.pending,
-              { owner: capability.owner, close: capability.close },
-              DAEMON_HANDLER_OPTS,
-              connId,
+            result: annotate(
+              await handleToolCall(
+                resolution.context,
+                TRIBE_COORD_METHODS.pending,
+                { owner: capability.owner, close: capability.close },
+                DAEMON_HANDLER_OPTS,
+                connId,
+              ),
             ),
           }
         case "pending-prune":
           return {
-            result: await handleToolCall(
-              resolution.context,
-              TRIBE_COORD_METHODS.pending,
-              { owner: capability.owner, prune: true, stale_ms: capability.staleMs },
-              DAEMON_HANDLER_OPTS,
-              connId,
+            result: annotate(
+              await handleToolCall(
+                resolution.context,
+                TRIBE_COORD_METHODS.pending,
+                { owner: capability.owner, prune: true, stale_ms: capability.staleMs },
+                DAEMON_HANDLER_OPTS,
+                connId,
+              ),
             ),
           }
         default: {

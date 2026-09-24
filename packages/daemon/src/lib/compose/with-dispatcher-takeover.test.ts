@@ -33,6 +33,7 @@ import { openDatabase, createStatements } from "../database.ts"
 import type { ClientSession } from "./with-client-registry.ts"
 import { withDispatcher, type DispatcherRuntimeHooks } from "./with-dispatcher.ts"
 import type { IdentityVerdict } from "../identity-verifier.ts"
+import type { ForeignIdentityTransport } from "../session-transport-state.ts"
 
 beforeEach(() => {
   // Takeover specimens intentionally exercise the dispatcher's loud ownership
@@ -637,6 +638,7 @@ function createDispatcherHarness(hooks: DispatcherRuntimeHooks = {}) {
   })
   const clients = new Map<string, ClientSession>()
   const socketToClient = new Map<NetSocket, string>()
+  const foreignIdentityTransports = new Map<string, ForeignIdentityTransport>()
   const fakeServer = createFakeServer()
 
   const shape = {
@@ -682,9 +684,11 @@ function createDispatcherHarness(hooks: DispatcherRuntimeHooks = {}) {
         return 0
       },
       forgetTransportSessions() {},
-      recordForeignIdentityTransport() {},
-      getForeignIdentityTransport() {
-        return undefined
+      recordForeignIdentityTransport(sessionId: string, transport: ForeignIdentityTransport) {
+        foreignIdentityTransports.set(sessionId, transport)
+      },
+      getForeignIdentityTransport(sessionId: string) {
+        return foreignIdentityTransports.get(sessionId)
       },
       onTransportDisconnected() {},
       getActiveSessionInfo() {
@@ -1048,6 +1052,9 @@ describe("one-shot session authority by identity token (25074 3b)", () => {
       if (token === "token-dev7") return { result: "verified", actor: "@dev/7", sid: "sid-dev7" }
       if (token === "token-dev8") return { result: "verified", actor: "@dev/8", sid: "sid-dev8" }
       if (token === "token-dead") return { result: "contradicted", reason: "instance-is-live: not live" }
+      if (token === "token-undecided") {
+        throw new Error("the liveness of @dev/9 sid-dev9@2 is undecided (seat-starting: no transport yet); retry")
+      }
       return { result: "unreadable", reason: "malformed token" }
     },
   }
@@ -1161,6 +1168,117 @@ describe("one-shot session authority by identity token (25074 3b)", () => {
       code: -32004,
       message: expect.stringContaining("HAB_ID_TOKEN or AG_SESSION_AUTH must be inherited"),
     })
+  })
+})
+
+describe("one-shot session authority P3 rows (25074, @cto 03cff4b5 and 975a22e2, review-adhoc5 4293dae2)", () => {
+  const identityVerifier = {
+    path: "/stub/identity-verifier.ts",
+    verify: async (token: string): Promise<IdentityVerdict> => {
+      if (token === "token-dev7") return { result: "verified", actor: "@dev/7", sid: "sid-dev7" }
+      if (token === "token-dev8") return { result: "verified", actor: "@dev/8", sid: "sid-dev8" }
+      if (token === "token-dead") return { result: "contradicted", reason: "instance-is-live: not live" }
+      throw new Error("the liveness of @dev/9 sid-dev9@2 is undecided (seat-starting: no transport yet); retry")
+    },
+  }
+  beforeEach(() => {
+    // A verifier fault with no usable bearer is logged at error; the refusal it produces is what these rows assert.
+    vi.spyOn(console, "error").mockImplementation(() => {})
+  })
+  const bearer = `${"D".repeat(42)}0`
+  const staleBearer = `${"E".repeat(42)}0`
+  const bearerHash = createHash("sha256").update(bearer).digest("hex")
+  const selfInbox = (harness: ReturnType<typeof createDispatcherHarness>, credentials: Record<string, unknown>) =>
+    harness.request("cli_self_inbox_v1", { ...credentials, limit: 5, peek: true })
+  const pendingOwner = async (
+    harness: ReturnType<typeof createDispatcherHarness>,
+    credentials: Record<string, unknown>,
+  ) => {
+    const result = parseResult<{ content: Array<{ text: string }> }>(
+      await harness.request("cli_session_pending_read_v1", credentials),
+    )
+    return (JSON.parse(result.content[0]!.text) as { owner: string }).owner
+  }
+  const registerBearerSeat = async (harness: ReturnType<typeof createDispatcherHarness>, name: string, pid: number) => {
+    harness.addPendingClient(`conn-${pid}`)
+    parseResult<RegisterResult>(
+      await harness.register(`conn-${pid}`, { name, pid, project: "/tmp/p", mailboxAuthorityHash: bearerHash }),
+    )
+  }
+
+  it("a faulting token beside a valid bearer is served by the bearer and the answer names the fault", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    await registerBearerSeat(harness, "@dev/9", 4901)
+
+    const inbox = parseResult<{ session_authority?: unknown }>(
+      await selfInbox(harness, { authority: bearer, idToken: "token-undecided" }),
+    )
+    expect(inbox.session_authority).toEqual({
+      authority: "bearer",
+      fault:
+        "token undecided: the liveness of @dev/9 sid-dev9@2 is undecided (seat-starting: no transport yet); retry; " +
+        "served by bearer",
+    })
+    expect(await pendingOwner(harness, { authority: bearer, idToken: "token-undecided" })).toBe("@dev/9")
+    // A plain bearer call carries no annotation: only the fault is news.
+    expect(
+      parseResult<{ session_authority?: unknown }>(await selfInbox(harness, { authority: bearer })),
+    ).not.toHaveProperty("session_authority")
+  })
+
+  it("a faulting token without a valid bearer still refuses, and a contradicted token refuses beside one", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    await registerBearerSeat(harness, "@dev/9", 4911)
+
+    expect(parseError(await selfInbox(harness, { authority: null, idToken: "token-undecided" }))).toMatchObject({
+      code: -32003,
+      data: { kind: "unauthenticated", reason: "identity-verifier-fault" },
+    })
+    expect(parseError(await selfInbox(harness, { authority: staleBearer, idToken: "token-undecided" }))).toMatchObject({
+      code: -32003,
+      message: expect.stringMatching(/identity verifier failed: .*undecided.*AG_SESSION_AUTH beside it did not match/),
+      data: { kind: "unauthenticated", reason: "identity-verifier-fault" },
+    })
+    expect(parseError(await selfInbox(harness, { authority: bearer, idToken: "token-dead" }))).toMatchObject({
+      code: -32003,
+      data: { kind: "unauthenticated", reason: "identity-contradicted" },
+    })
+  })
+
+  it("another seat's bearer beside a registered verified token is recorded on the holder and answered as the token's seat", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-seat")
+    parseResult<RegisterResult>(
+      await harness.register("conn-seat", { name: "@dev/7", pid: 4921, project: "/tmp/p", idToken: "token-dev7" }),
+    )
+    await registerBearerSeat(harness, "@dev/9", 4922)
+
+    expect(await pendingOwner(harness, { authority: bearer, idToken: "token-dev7" })).toBe("@dev/7")
+    const members = parseResult<{ content: Array<{ text: string }> }>(await harness.request("tribe.members", {}))
+    const sessions = (
+      JSON.parse(members.content[0]!.text) as {
+        sessions: Array<{ name: string; foreign_transport?: { name: string; launch_id: string } }>
+      }
+    ).sessions
+    expect(sessions.find((session) => session.name === "@dev/7")?.foreign_transport).toMatchObject({ name: "@dev/9" })
+    expect(sessions.find((session) => session.name === "@dev/9")).not.toHaveProperty("foreign_transport")
+  })
+
+  it("a verified token with no session beside a stale bearer is refused naming both facts", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    await registerBearerSeat(harness, "@dev/9", 4931)
+
+    const refusal = parseError(await selfInbox(harness, { authority: staleBearer, idToken: "token-dev8" }))
+    expect(refusal).toMatchObject({
+      code: -32003,
+      data: { kind: "unauthenticated", reason: "identity-not-registered" },
+    })
+    expect(refusal.message).toContain("@dev/8's token is verified, but no session registered under its sid sid-dev8")
+    expect(refusal.message).toContain("AG_SESSION_AUTH beside it did not match a live managed session")
   })
 })
 
