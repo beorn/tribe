@@ -5,8 +5,12 @@
 import { createLogger } from "loggily"
 import { randomUUID } from "node:crypto"
 import {
+  ballFactKey,
+  describeSettlementConflict,
+  foldSettlementFacts,
   parseBallOutcomeFact,
   resolveInboxWaitOptions,
+  settlementConflictEntries,
   type BallDeadlineObservationPayload,
   type BallFactEvidence,
   type BallOutcomeFactRow,
@@ -1407,6 +1411,30 @@ type PendingBall = {
 
 type PendingBallWithOwnerTransport = PendingBall & OwnerTransportObservation
 
+type PendingSettlementConflictEntry = { settlement: BallSettlementReason; settled_at: string; settled_by: string }
+
+function pendingSettlementConflict(facts: readonly BallSettlementFact[]): PendingSettlementConflictEntry[] {
+  return settlementConflictEntries(facts).map((entry) => ({
+    ...entry,
+    settled_at: new Date(entry.settled_at).toISOString(),
+  }))
+}
+
+/** The one line a pending answer carries when any of its rows is conflicted:
+ * the ball ids and their facts, so a reader never mistakes the latest
+ * settlement for the whole story. */
+function settlementConflictWarning(rows: readonly PendingOutcomeBall[]): string | undefined {
+  const conflicted = rows.flatMap((row) =>
+    row.settlement_conflict === undefined ? [] : [{ request_id: row.request_id, facts: row.settlement_conflict }],
+  )
+  if (conflicted.length === 0) return undefined
+  const detail = conflicted.map((row) => `${row.request_id} (${describeSettlementConflict(row.facts)})`).join("; ")
+  return (
+    `${conflicted.length} ball(s) carry settlement facts that disagree; each row's settlement is the latest ` +
+    `and settlement_conflict holds every fact: ${detail}`
+  )
+}
+
 type PendingOutcomeBall = PendingBall & {
   status: "expired" | "unanswered"
   settlement: BallSettlementReason | null
@@ -1416,6 +1444,10 @@ type PendingOutcomeBall = PendingBall & {
    * ids, and each generation's deadline fact would otherwise render as its
    * own obligation. History is disclosed here, never multiplied. */
   superseded_count?: number
+  /** Every settlement fact this ball carries when they DISAGREE (25654), in
+   * settled_at order; `settlement` above is the latest. Absent on a ball
+   * with one consistent story. */
+  settlement_conflict?: PendingSettlementConflictEntry[]
   /** Which store stands behind the row: "live" = a pending_request row still
    * exists (declared deadline passed, still open — genuinely owed, and
    * closable); "journal" = reconstructed from journal facts alone (history:
@@ -1518,6 +1550,7 @@ function pendingOutcomeBall(
   now: number,
   settlement: BallSettlementReason | null,
   settledAt: number | null,
+  conflict?: readonly BallSettlementFact[],
 ): PendingOutcomeBall {
   return {
     request_id: fact.request_id,
@@ -1533,6 +1566,7 @@ function pendingOutcomeBall(
     settlement,
     settled_at: settledAt === null ? null : new Date(settledAt).toISOString(),
     backing: "journal",
+    ...(conflict === undefined ? {} : { settlement_conflict: pendingSettlementConflict(conflict) }),
   }
 }
 
@@ -1576,9 +1610,7 @@ function withQuestionBodies<T extends { message_id: string }>(
   })
 }
 
-function pendingFactKey(fact: Pick<BallFactEvidence, "request_id" | "recipient" | "message_id">): string {
-  return JSON.stringify([fact.request_id, fact.recipient, fact.message_id])
-}
+const pendingFactKey = ballFactKey
 
 function indexPendingReplies(replies: readonly PendingReplyFactRow[]): Map<string, Set<string>> {
   const respondersByRef = new Map<string, Set<string>>()
@@ -1609,18 +1641,14 @@ function expiredPendingBalls(ctx: TribeContext, now: number): PendingOutcomeBall
   const replies = ctx.stmts.selectPendingReplyFacts.all() as PendingReplyFactRow[]
   const respondersByRef = indexPendingReplies(replies)
   const facts = rows.map(parseBallOutcomeFact)
-  const settlements = new Map<string, BallSettlementFact>()
-  for (const fact of facts) {
-    if (fact.kind !== "settled") continue
-    const key = pendingFactKey(fact)
-    const prior = settlements.get(key)
-    if (prior !== undefined && prior.settlement !== fact.settlement) {
-      throw new Error(
-        `conflicting ball settlement facts for ${fact.request_id}: ${prior.settlement} vs ${fact.settlement}`,
-      )
-    }
-    settlements.set(key, fact)
-  }
+  // Two facts that disagree on one key are REPORTED on that ball (25654),
+  // never thrown: a throw here answered exit 2 to every owner's expired view.
+  // A conflicted ball is always listed, even when its latest fact is
+  // "answered" — the answered skips below exist to hide settled history, and
+  // a ball whose history contradicts itself is exactly what must show.
+  const { latest: settlements, conflicts } = foldSettlementFacts(
+    facts.filter((fact): fact is BallSettlementFact => fact.kind === "settled"),
+  )
 
   const live = allPendingBalls(ctx, now).filter(
     (ball): ball is PendingBall & { status: "expired" } => ball.status === "expired",
@@ -1640,18 +1668,23 @@ function expiredPendingBalls(ctx: TribeContext, now: number): PendingOutcomeBall
   for (const fact of facts) {
     if (fact.kind !== "deadline-passed") continue
     const key = pendingFactKey(fact)
-    if (liveKeys.has(key) || pendingFactWasAnswered(fact, respondersByRef)) continue
+    const conflict = conflicts.get(key)
+    if (liveKeys.has(key) || (conflict === undefined && pendingFactWasAnswered(fact, respondersByRef))) continue
     const settlement = settlements.get(key)
-    if (settlement?.settlement === "answered") continue
+    if (settlement?.settlement === "answered" && conflict === undefined) continue
     if (settlement) representedSettlements.add(key)
-    outcomes.push(pendingOutcomeBall(fact, now, settlement?.settlement ?? null, settlement?.settled_at ?? null))
+    outcomes.push(
+      pendingOutcomeBall(fact, now, settlement?.settlement ?? null, settlement?.settled_at ?? null, conflict),
+    )
   }
 
   for (const fact of settlements.values()) {
-    if (fact.settlement === "answered") continue
     const key = pendingFactKey(fact)
-    if (liveKeys.has(key) || representedSettlements.has(key) || pendingFactWasAnswered(fact, respondersByRef)) continue
-    outcomes.push(pendingOutcomeBall(fact, now, fact.settlement, fact.settled_at))
+    const conflict = conflicts.get(key)
+    if (fact.settlement === "answered" && conflict === undefined) continue
+    if (liveKeys.has(key) || representedSettlements.has(key)) continue
+    if (conflict === undefined && pendingFactWasAnswered(fact, respondersByRef)) continue
+    outcomes.push(pendingOutcomeBall(fact, now, fact.settlement, fact.settled_at, conflict))
   }
   return sortPendingBalls(collapseOutcomeGenerations(outcomes))
 }
@@ -1680,6 +1713,8 @@ function collapseOutcomeGenerations(outcomes: PendingOutcomeBall[]): PendingOutc
     // been owed since the first opening, not since the newest re-send.
     latest.opened_at = prior.opened_at <= row.opened_at ? prior.opened_at : row.opened_at
     latest.age_ms = Math.max(prior.age_ms, row.age_ms)
+    // A conflict on an older generation is still this obligation's history.
+    latest.settlement_conflict ??= prior.settlement_conflict ?? row.settlement_conflict
     byIdentity.set(key, latest)
   }
   return [...byIdentity.values()]
@@ -2140,11 +2175,17 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
     if (refusal !== undefined) return jsonResult({ error: refusal })
     const outcome = ctx.db.transaction(() => closeOneBall(ctx, owner, closeId, now))()
     const warning = outcome.closed === 0 ? pendingCloseMissWarning(ctx, owner, undefined, closeId) : undefined
+    // The one query that ASKS ABOUT a ball: a close aimed at a conflicted id
+    // carries every fact in its own result (25654), so the CLI can exit
+    // non-zero for that ball alone while every list view keeps answering.
+    const cause = outcome.closed === 0 ? pendingCloseCause(ctx, outcome.request_id, owner) : undefined
+    const conflict = cause?.kind === "settled" ? cause.conflict : undefined
     return jsonResult({
       owner,
       request_id: outcome.request_id,
       closed: outcome.closed,
       ...(warning ? { warning } : {}),
+      ...(conflict === undefined ? {} : { settlement_conflict: pendingSettlementConflict(conflict) }),
     })
   }
 
@@ -2159,6 +2200,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
       : allPendingBallsWithContent(ctx, now).filter((row) => staleMs === null || row.age_ms >= staleMs)
     const pending: PendingBallWithOwnerTransport[] = withOwnerTransport(rows)
     const owners = pendingOwnerGroups(pending)
+    const warning = expired ? settlementConflictWarning(rows as PendingOutcomeBall[]) : undefined
     return jsonResult({
       all: true,
       expired,
@@ -2169,6 +2211,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
       owner_count: owners.length,
       oldest_age_ms: pending.reduce((oldest, row) => Math.max(oldest, row.age_ms), 0),
       count: pending.length,
+      ...(warning ? { warning } : {}),
     })
   }
 
@@ -2182,7 +2225,15 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
       )
     : pendingBallsForOwnerWithContent(ctx, owner, now).filter((row) => staleMs === null || row.age_ms >= staleMs)
   const pending: PendingBallWithOwnerTransport[] = withOwnerTransport(rows)
-  return jsonResult({ owner, expired, ...(owed ? { owed: true } : {}), pending, count: pending.length })
+  const warning = expired ? settlementConflictWarning(rows as PendingOutcomeBall[]) : undefined
+  return jsonResult({
+    owner,
+    expired,
+    ...(owed ? { owed: true } : {}),
+    pending,
+    count: pending.length,
+    ...(warning ? { warning } : {}),
+  })
 }
 
 type MembershipSessionRow = {

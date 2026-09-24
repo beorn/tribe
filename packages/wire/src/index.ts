@@ -95,7 +95,12 @@ export { resolveJoinDelivery } from "./lib/delivery.ts"
 export {
   BALL_SETTLEMENT_REASONS,
   NON_REPLY_BALL_SETTLEMENT_REASONS,
+  ballFactKey,
+  describeSettlementConflict,
+  foldSettlementFacts,
   parseBallOutcomeFact,
+  settlementConflictEntries,
+  type BallSettlementConflictEntry,
   type BallDeadlineFact,
   type BallDeadlineObservationPayload,
   type BallFactEvidence,

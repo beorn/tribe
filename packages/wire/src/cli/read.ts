@@ -33,7 +33,7 @@ import {
   type GitProbe,
   type PinDirection,
 } from "../lib/code-identity.ts"
-import type { BallSettlementReason } from "../lib/ball-outcome.ts"
+import { describeSettlementConflict, type BallSettlementReason } from "../lib/ball-outcome.ts"
 import { AG_SESSION_AUTH_ENV, readSelfMailboxAuthorityFromEnvironment } from "../lib/self-mailbox-authority.ts"
 import { HAB_ID_TOKEN_ENV, readIdentityTokenFromEnvironment } from "../lib/identity-token.ts"
 
@@ -535,7 +535,11 @@ function parseDurationMs(spec: string): number | undefined {
  * @km/tribe/message-ball-tracker Phase 2a. Used by §C1 chief loop step 0.5
  * (call with `--owner @chief --stale 15m` to surface dropped balls).
  */
+type PendingCliConflictEntry = { settlement: BallSettlementReason; settled_at: string; settled_by: string }
+
 type PendingCliRow = {
+  /** Every settlement fact when they disagree (25654); `settlement` is the latest. */
+  settlement_conflict?: PendingCliConflictEntry[]
   request_id: string
   recipient: string
   sender: string
@@ -659,6 +663,8 @@ async function cmdPending(
       owner_count?: number
       oldest_age_ms?: number
       count?: number
+      /** A close aimed at a conflicted ball (25654) carries every fact. */
+      settlement_conflict?: PendingCliConflictEntry[]
     }
   }
   const payload = result.structuredContent ?? (mcpJsonContent(result) as NonNullable<typeof result.structuredContent>)
@@ -695,6 +701,9 @@ async function cmdPending(
       `Closed ${payload.closed ?? 0} pending request(s) for ${payload.owner ?? owner ?? "(caller)"}: ${payload.request_id ?? close}`,
     )
     if (payload.warning) console.warn(`Warning: ${payload.warning}`)
+    // The ball asked about carries contradicting facts: that, and only that,
+    // is a non-zero exit (25654) — a list view naming it in `warning` is not.
+    if (payload.settlement_conflict) process.exitCode = 2
     return
   }
   const count = payload.count ?? 0
@@ -716,10 +725,12 @@ async function cmdPending(
         const summary = p.summary?.trim() || "(no summary)"
         const outcome = expired ? `  settlement=${p.settlement ?? "unsettled"}` : ""
         console.log(
-          `    ${p.request_id}  from ${p.sender}  to ${p.recipient}  ${summary}${outcome}  (msg ${p.message_id})`,
+          `    ${p.request_id}  from ${p.sender}  to ${p.recipient}  ${summary}${outcome}  (msg ${p.message_id})` +
+            pendingSettlementConflictLine(p),
         )
       }
     }
+    if (payload.warning) console.warn(`Warning: ${payload.warning}`)
     return
   }
   const displayOwner = payload.owner ?? owner ?? "(caller)"
@@ -734,9 +745,16 @@ async function cmdPending(
     const outcome = expired ? `  settlement=${p.settlement ?? "unsettled"}` : ""
     console.log(
       `  ${p.request_id}  from ${p.sender}  ${age} ago  fanout=${p.fanout}${outcome}  ` +
-        `(msg ${p.message_id})${pendingOwnerTransportWarning(p)}`,
+        `(msg ${p.message_id})${pendingOwnerTransportWarning(p)}${pendingSettlementConflictLine(p)}`,
     )
   }
+  if (payload.warning) console.warn(`Warning: ${payload.warning}`)
+}
+
+/** `  CONFLICT: manual-close by @dev/6 at …; answered by @dev/6 at …` (25654). */
+function pendingSettlementConflictLine(row: PendingCliRow): string {
+  if (row.settlement_conflict === undefined) return ""
+  return `  CONFLICT: ${describeSettlementConflict(row.settlement_conflict)}`
 }
 
 export type WireHealthDocument = {
