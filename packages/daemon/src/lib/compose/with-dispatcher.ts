@@ -1216,10 +1216,13 @@ export function withDispatcher<
     ): void {
       const result = db
         .prepare(
-          `UPDATE sessions SET launch_id = ?, launch_parent_pid = ?, updated_at = ?
+          // 24604 (a): the stored start time belongs to the old parent pid, so a new pid drops it (pid-only).
+          `UPDATE sessions SET launch_id = ?, launch_parent_pid = ?,
+             launch_parent_start_time = CASE WHEN launch_parent_pid IS ? THEN launch_parent_start_time ELSE NULL END,
+             updated_at = ?
            WHERE id = ? AND launch_id = ? AND launch_parent_pid = ?`,
         )
-        .run(to.id, to.parentPid, Date.now(), holder.ctx.sessionId, from.id, from.parentPid)
+        .run(to.id, to.parentPid, to.parentPid, Date.now(), holder.ctx.sessionId, from.id, from.parentPid)
       if (result.changes !== 1) {
         throw new Error(`refusing bootstrap-fallback promotion for ${holder.ctx.sessionId}: its launch moved`)
       }
@@ -1396,6 +1399,13 @@ export function withDispatcher<
         }
         switch (method) {
           case "register": {
+            // 24604 (a): the holders this registration displaced by its own authority (takeover, identity precedence,
+            // same-pid replacement). registerSession may replace their rows; any other live durable launch keeps its name.
+            const displacedSessionIds = new Set<string>()
+            const displaceClient = (client: ClientSession, reason: TransportRetirementReason): void => {
+              displacedSessionIds.add(client.ctx.sessionId)
+              retireReplacedClient(client, reason)
+            }
             const clientProtocolVersion = p.protocolVersion === undefined ? undefined : Number(p.protocolVersion)
             const clientProtocolVersions = supportedProtocolVersionsFromAdvertisement(
               p.supportedProtocolVersions,
@@ -1767,7 +1777,7 @@ export function withDispatcher<
                 role = samePidHolder.role
               }
               log.info?.(`Replacing live self-registration for ${resolvedName} pid=${clientPid}`)
-              retireReplacedClient(samePidHolder, "self-registration-replaced")
+              displaceClient(samePidHolder, "self-registration-replaced")
             }
 
             // 25074 3b/3c — authority precedence on a name (displacementRule, @cto §10). A registration the rule bars
@@ -1858,7 +1868,7 @@ export function withDispatcher<
                   new_pid: clientPid,
                   reason: "a verified identity displaced a claimed holder (25074)",
                 })
-                retireReplacedClient(holder, "identity-displacement")
+                displaceClient(holder, "identity-displacement")
               }
             }
 
@@ -1900,7 +1910,7 @@ export function withDispatcher<
                   new_pid: clientPid,
                   reason: "explicit-persona takeover (20703)",
                 })
-                for (const replaced of holders) retireReplacedClient(replaced, "explicit-takeover")
+                for (const replaced of holders) displaceClient(replaced, "explicit-takeover")
               } else if (holder) {
                 log.warn?.(
                   `takeover replay refused for "${resolvedName}" (launch ${launchIdentity?.id ?? "legacy"}, holder pid ${holder.pid}, claimant pid ${clientPid})`,
@@ -1936,7 +1946,7 @@ export function withDispatcher<
                     new_pid: clientPid,
                     reason: "identity displacement of token-less holder (21052)",
                   })
-                  retireReplacedClient(holder, "identity-displacement")
+                  displaceClient(holder, "identity-displacement")
                 }
               }
             }
@@ -1978,6 +1988,7 @@ export function withDispatcher<
               launchIdentity?.id ?? null,
               launchIdentity?.parentPid ?? null,
               mailboxAuthorityHash,
+              displacedSessionIds,
             )
             db.prepare("UPDATE sessions SET principal_class = ? WHERE id = ?").run(principalClass, clientCtx.sessionId)
             // Every register restates the session's verification: an adopted session re-registering without a token

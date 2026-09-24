@@ -16,6 +16,8 @@
  * last-seen age is activity evidence, not liveness.
  */
 
+import { existsSync, readFileSync } from "node:fs"
+
 export type TransportState = "connected" | "disconnected"
 export type OwnerState = "live" | "dead" | "unknown"
 
@@ -73,6 +75,29 @@ export type SessionTransportEvidence = SessionTransportProjection & {
   answer_reason: SessionAnswerReason
   /** Age of the mailbox's last canonical read; null when it never read. */
   last_mailbox_read_age_ms: number | null
+}
+
+/**
+ * A process's start time, the identity that tells a live pid from a reused one (24604 (a)): field 22 of
+ * /proc/<pid>/stat, clock ticks since boot. "unsupported" when this platform has no /proc; null when the pid has no
+ * readable stat, which is a process that is gone.
+ */
+export function readProcessStartTime(pid: number): string | null | "unsupported" {
+  if (!existsSync("/proc/self/stat")) return "unsupported"
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null
+  let stat: string
+  try {
+    stat = readFileSync(`/proc/${pid}/stat`, "utf8")
+  } catch (error) {
+    // Only an absent process reads as gone; any other failure is not evidence either way.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ESRCH") {
+      return null
+    }
+    throw error
+  }
+  // The command name (field 2) is parenthesised and may hold spaces or parentheses, so count from the last ")".
+  const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ")
+  return fields[19] ?? null
 }
 
 /** Probe OS process existence without turning an unfamiliar error into death. */

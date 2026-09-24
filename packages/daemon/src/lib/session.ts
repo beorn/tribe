@@ -6,10 +6,10 @@ import { createLogger } from "loggily"
 import type { Database } from "bun:sqlite"
 import { readTranscriptSlug } from "tribe-wire/lib/transcript"
 import type { TribeContext } from "./context.ts"
-import { probeProcessState } from "./session-transport-state.ts"
+import { probeProcessState, readProcessStartTime } from "./session-transport-state.ts"
 
 const log = createLogger("tribe:session")
-import { sendMessage, logEvent, settlePendingRows, type PendingSettlementRow } from "./messaging.ts"
+import { sendMessage, logEvent, logSessionLeft, settlePendingRows, type PendingSettlementRow } from "./messaging.ts"
 import { DEFAULT_LIVE_WINDOW_MS } from "./retention.ts"
 
 // ---------------------------------------------------------------------------
@@ -35,6 +35,33 @@ export class NameConflictError extends Error {
         : `Name "${desiredName}" is already taken`,
     )
     this.name = "NameConflictError"
+  }
+}
+
+/** How a durable holder's launch parent was judged alive: by its start time, or by pid alone (named in the text). */
+export type LaunchParentComparison = "start-time" | "pid-only-row" | "pid-only-platform"
+
+/** A registration refused because the name's row belongs to another launch whose parent process is alive (24604 (a),
+ *  @cto cdb79aad). The row's transport is only between connections: that is never proof the launch is over. */
+export class DurableLaunchHolderError extends NameConflictError {
+  constructor(
+    desiredName: string,
+    existing_names: string[],
+    readonly holder_launch_id: string,
+    readonly holder_parent_pid: number,
+    readonly comparison: LaunchParentComparison,
+  ) {
+    super(desiredName, existing_names, holder_parent_pid)
+    const judged =
+      comparison === "start-time"
+        ? "alive (same start time)"
+        : comparison === "pid-only-row"
+          ? "alive (compared by pid only: the row predates start times, so a reused pid also reads alive)"
+          : "alive (compared by pid only: this platform has no /proc, so a reused pid also reads alive)"
+    this.message =
+      `Name "${desiredName}" belongs to launch ${holder_launch_id}, whose parent process ${holder_parent_pid} is ${judged}. ` +
+      "Its session is between connections, not gone. Stop that process or wait for it to exit, then register again."
+    this.name = "DurableLaunchHolderError"
   }
 }
 
@@ -314,6 +341,41 @@ export function isPidAlive(pid: number): boolean {
 // Registration
 // ---------------------------------------------------------------------------
 
+type HolderRow = {
+  id: string
+  pid: number
+  name: string
+  role: string
+  domains: string
+  launch_id: string | null
+  launch_parent_pid: number | null
+  launch_parent_start_time: string | null
+}
+
+function launchParentStartTimeOf(pid: number | null | undefined): string | null {
+  if (pid === null || pid === undefined || pid <= 0) return null
+  const startTime = readProcessStartTime(pid)
+  return startTime === "unsupported" ? null : startTime
+}
+
+function parseDomains(raw: string): string[] {
+  const parsed = JSON.parse(raw) as unknown
+  if (!Array.isArray(parsed)) throw new Error(`session domains is not a JSON array: ${raw}`)
+  return parsed.map(String)
+}
+
+/** Whether a durable row's launch parent is still the process that registered it. A row carrying a start time is
+ *  judged by it (a reused pid differs); one without, or on a platform without /proc, by pid alone. */
+function judgeLaunchParent(
+  pid: number,
+  storedStartTime: string | null,
+): { alive: boolean; comparison: LaunchParentComparison } {
+  const current = readProcessStartTime(pid)
+  if (current === "unsupported") return { alive: isPidAlive(pid), comparison: "pid-only-platform" }
+  if (storedStartTime === null) return { alive: isPidAlive(pid), comparison: "pid-only-row" }
+  return { alive: current === storedStartTime, comparison: "start-time" }
+}
+
 /**
  * Register a session in the DB.
  *
@@ -342,6 +404,9 @@ export function registerSession(
   launchId?: string | null,
   launchParentPid?: number | null,
   mailboxAuthorityHash?: string | null,
+  /** Sessions the caller already displaced by its own authority (takeover, identity precedence): their rows may be
+   *  replaced even while their launch lives. */
+  displacedSessionIds: ReadonlySet<string> = new Set(),
 ): void {
   const desiredName = ctx.getName()
   const now = Date.now()
@@ -359,13 +424,61 @@ export function registerSession(
   // L4 of @km/tribe/spawn-time-identity-binding requires that no two live
   // PIDs share a persona at once, but a dead-pid placeholder must yield.
   const holder = ctx.db
-    .prepare("SELECT id, pid FROM sessions WHERE name = $name AND id != $id")
-    .get({ $name: desiredName, $id: ctx.sessionId }) as { id: string; pid: number } | null
+    .prepare(
+      `SELECT id, pid, name, role, domains, launch_id, launch_parent_pid, launch_parent_start_time
+       FROM sessions WHERE name = $name AND id != $id`,
+    )
+    .get({ $name: desiredName, $id: ctx.sessionId }) as HolderRow | null
   if (holder) {
     const holderActive = isActive ? isActive(holder.id) : false
     if (!holderActive) {
+      // 24604 (a), @cto cdb79aad: a durable-launch row belongs to its launch. An inactive transport is a transient
+      // reading, never proof the launch is over; only the same launch id or a parent proven dead replaces the row.
+      const durable =
+        holder.launch_id !== null &&
+        holder.launch_parent_pid !== null &&
+        classifySessionRegistrationLifetime({
+          launchId: holder.launch_id,
+          launchParentPid: holder.launch_parent_pid,
+        }) === "durable-launch"
+          ? { launchId: holder.launch_id, parentPid: holder.launch_parent_pid }
+          : null
+      const sameLaunch = holder.launch_id === (launchId ?? null)
+      const displaced = displacedSessionIds.has(holder.id)
+      if (durable !== null && !sameLaunch && !displaced) {
+        const parent = judgeLaunchParent(durable.parentPid, holder.launch_parent_start_time)
+        if (parent.alive) {
+          throw new DurableLaunchHolderError(
+            desiredName,
+            listSessionNames(ctx, isActive),
+            durable.launchId,
+            durable.parentPid,
+            parent.comparison,
+          )
+        }
+      }
       ctx.db.prepare("DELETE FROM sessions WHERE id = $id").run({ $id: holder.id })
-      log.debug?.(`evicted stale session row holding name "${desiredName}"`)
+      if (durable !== null) {
+        // The replaced row's departure is journaled, so its loss is attributed rather than found as "0 stored".
+        logSessionLeft(ctx, {
+          memberId: holder.id,
+          name: holder.name,
+          role: holder.role,
+          domains: parseDomains(holder.domains),
+          launchId: holder.launch_id,
+          launchParentPid: holder.launch_parent_pid,
+          reason: sameLaunch
+            ? "replaced-by-same-launch"
+            : displaced
+              ? "replaced-by-displacement"
+              : "replaced-parent-gone",
+        })
+        log.info?.(
+          `replaced durable session row ${holder.id} holding "${desiredName}" (launch ${holder.launch_id}, parent ${holder.launch_parent_pid})`,
+        )
+      } else {
+        log.debug?.(`evicted stale session row holding name "${desiredName}"`)
+      }
     } else if (!isPidAlive(holder.pid)) {
       // Daemon's clients map still has this session, but its PID is dead.
       // The socket-close handler will catch up eventually, but spawn-time
@@ -442,6 +555,7 @@ export function registerSession(
       $mailbox_authority_hash: mailboxAuthorityHash ?? null,
       $launch_id: launchId ?? null,
       $launch_parent_pid: launchParentPid ?? null,
+      $launch_parent_start_time: launchParentStartTimeOf(launchParentPid),
       $now: now,
       $delivery: delivery ?? "push",
       $account: account ?? null,

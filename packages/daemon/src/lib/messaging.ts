@@ -725,7 +725,14 @@ export function logEvent(
  * a signal, a crash, the daemon going away — is `transport-closed`, and
  * proves nothing about the launch.
  */
-export type SessionLeftReason = "harness-exited" | "transport-closed"
+/** `replaced-*`: a registration replaced the row's name (24604 (a)): the same launch registering again, a launch the
+ *  registrant displaced by its own authority (takeover), or one whose parent was proven gone. None is terminal. */
+export type SessionLeftReason =
+  | "harness-exited"
+  | "transport-closed"
+  | "replaced-by-same-launch"
+  | "replaced-by-displacement"
+  | "replaced-parent-gone"
 
 /** The reasons that are positive evidence the LAUNCH is over, not merely
  *  that a socket closed. The membership projection finishes a launch on

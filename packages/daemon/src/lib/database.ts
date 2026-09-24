@@ -32,6 +32,7 @@ export function openDatabase(path: string): Database {
 		identity_gen INTEGER,
 		launch_id TEXT,
 		launch_parent_pid INTEGER,
+		launch_parent_start_time TEXT,
 		started_at INTEGER NOT NULL,
 		updated_at INTEGER NOT NULL,
 		last_delivered_ts INTEGER,
@@ -1266,6 +1267,20 @@ const MIGRATIONS: readonly Migration[] = [
       if (!columns.has("identity_gen")) db.run("ALTER TABLE sessions ADD COLUMN identity_gen INTEGER")
     },
   },
+  {
+    version: 35,
+    name: "session-launch-parent-start-time",
+    up(db) {
+      // 24604 (a) — the launch parent's start time beside its pid, so registration can tell a live durable launch
+      // from a reused pid before it replaces the row (@cto cdb79aad). A row without one compares by pid only.
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>).map((row) => row.name),
+      )
+      if (!columns.has("launch_parent_start_time")) {
+        db.run("ALTER TABLE sessions ADD COLUMN launch_parent_start_time TEXT")
+      }
+    },
+  },
 ]
 
 /** The schema terminus `openDatabase` upgrades to — derived from the same
@@ -1514,8 +1529,8 @@ export function createStatements(db: Database) {
     // adopted durable member must retain the provenance that child promoted.
     // Explicit non-null values still replace the prior identity.
     upsertSession: db.prepare(`
-		INSERT INTO sessions (id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, identity_token, mailbox_authority_hash, launch_id, launch_parent_pid, started_at, updated_at, delivery, account, provider)
-		VALUES ($id, $name, $role, $domains, $pid, $cwd, $project_id, $claude_session_id, $claude_session_name, $identity_token, $mailbox_authority_hash, $launch_id, $launch_parent_pid, $now, $now, COALESCE($delivery, 'push'), $account, $provider)
+		INSERT INTO sessions (id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, identity_token, mailbox_authority_hash, launch_id, launch_parent_pid, launch_parent_start_time, started_at, updated_at, delivery, account, provider)
+		VALUES ($id, $name, $role, $domains, $pid, $cwd, $project_id, $claude_session_id, $claude_session_name, $identity_token, $mailbox_authority_hash, $launch_id, $launch_parent_pid, $launch_parent_start_time, $now, $now, COALESCE($delivery, 'push'), $account, $provider)
 		ON CONFLICT(id) DO UPDATE SET
 			name = $name, role = $role, domains = $domains,
 			pid = $pid, cwd = $cwd, project_id = $project_id, claude_session_id = $claude_session_id,
@@ -1524,6 +1539,8 @@ export function createStatements(db: Database) {
 			mailbox_authority_hash = COALESCE($mailbox_authority_hash, mailbox_authority_hash),
 			launch_id = COALESCE($launch_id, launch_id),
 			launch_parent_pid = COALESCE($launch_parent_pid, launch_parent_pid),
+			-- The start time belongs to the pid it was read for: a new pid brings its own, even none.
+			launch_parent_start_time = CASE WHEN $launch_parent_pid IS NULL THEN launch_parent_start_time ELSE $launch_parent_start_time END,
 			started_at = $now, updated_at = $now,
 			delivery = COALESCE($delivery, delivery, 'push'),
 			account = COALESCE($account, account),
@@ -2099,6 +2116,7 @@ export function createStatements(db: Database) {
 			identity_token = COALESCE(identity_token, $identity_token),
 			launch_id = $launch_id,
 			launch_parent_pid = $launch_parent_pid,
+			launch_parent_start_time = CASE WHEN launch_parent_pid IS $launch_parent_pid THEN launch_parent_start_time ELSE NULL END,
 			updated_at = $now
 		WHERE id = $id
 			AND (
