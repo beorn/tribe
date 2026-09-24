@@ -27,6 +27,11 @@ export function deriveTribePersonaLaunchIdentity(
 ): TribePersonaLaunchIdentity {
   const normalizedPersona = requireIdentityPart("Tribe persona", persona)
   const normalizedProviderLaunchId = requireIdentityPart("Tribe provider launch id", providerLaunchId)
+  // A raw "@" opens a verified session's generation (providerLaunchIdOf), so one inside a provider launch id would
+  // read as another launch's generation; the persona is URI-encoded and carries none.
+  if (normalizedProviderLaunchId.includes("@")) {
+    throw new TypeError(`Tribe provider launch id ${normalizedProviderLaunchId} must not contain @`)
+  }
   const launchId = `${normalizedProviderLaunchId}::${encodeURIComponent(normalizedPersona)}`
   return {
     persona: normalizedPersona,

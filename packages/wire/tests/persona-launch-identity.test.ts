@@ -23,6 +23,12 @@ describe("persona launch identity", () => {
     expect(providerLaunchIdOf("e8b19c270@1")).not.toBe(providerLaunchIdOf(persona))
   })
 
+  // review-adhoc5 P4 (60f1932f): a raw "@" opens a verified session's generation, so a provider launch id carrying
+  // one would read as that generation's launch: "user@host" and "user@other" would merge in the foreign-identity check.
+  test.each(["user@host", "@provider-launch"])("refuses a provider launch id %j carrying a raw @", (launchId) => {
+    expect(() => deriveTribePersonaLaunchIdentity("@dev/3", launchId)).toThrow(/Tribe provider launch id .* @/u)
+  })
+
   test.each(["", " ", "@chief#other"])("refuses an invalid persona %j", (persona) => {
     expect(() => deriveTribePersonaLaunchIdentity(persona, "provider-launch")).toThrow(/Tribe persona/u)
   })
