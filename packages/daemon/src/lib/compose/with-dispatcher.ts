@@ -732,7 +732,9 @@ export function withDispatcher<
       }
       const derivedPrefix = `${launchId}::`
       const derivedPrefixUpper = derivedLaunchPrefixUpperBound(derivedPrefix)
-      if (derivedPrefixUpper === null) {
+      const verifiedPrefix = `${launchId}@`
+      const verifiedPrefixUpper = derivedLaunchPrefixUpperBound(verifiedPrefix)
+      if (derivedPrefixUpper === null || verifiedPrefixUpper === null) {
         // Unreachable: launchId is non-empty above, so the prefix is too. A
         // null bound would silently widen or void the range, so refuse rather
         // than run a query whose result would not mean what it claims.
@@ -742,6 +744,8 @@ export function withDispatcher<
         $launch_id: launchId,
         $derived_prefix: derivedPrefix,
         $derived_prefix_upper: derivedPrefixUpper,
+        $verified_prefix: verifiedPrefix,
+        $verified_prefix_upper: verifiedPrefixUpper,
       }) as Array<
         LaunchAuthorityRow & {
           updated_at: number
@@ -765,7 +769,8 @@ export function withDispatcher<
           ? routableLaunchSessions.filter(
               (session) =>
                 session.launch_id === deriveTribePersonaLaunchIdentity(persona, launchId).launchId ||
-                (session.launch_id === launchId && session.name === persona),
+                ((session.launch_id === launchId || session.launch_id?.startsWith(verifiedPrefix) === true) &&
+                  session.name === persona),
             )
           : routableLaunchSessions
       const launchSession = resolvedLaunchSessions[0]

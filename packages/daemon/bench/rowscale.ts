@@ -127,6 +127,8 @@ for (const rowCount of ROW_COUNTS) {
       $launch_id: "launch-42",
       $derived_prefix: derivedPrefix,
       $derived_prefix_upper: derivedPrefixUpper,
+      $verified_prefix: "launch-42@",
+      $verified_prefix_upper: derivedLaunchPrefixUpperBound("launch-42@"),
     })
   })
   const plainMs = timeIt(REPS, () => readAttentionProjection(plain.ctx, "@reader"))

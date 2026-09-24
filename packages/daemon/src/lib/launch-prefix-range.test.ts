@@ -144,6 +144,9 @@ describe("getSessionsByProviderLaunchId", () => {
       // it must not be swept in by the range.
       ["s6", "prefix-lookalike", "launch-10"],
       ["s7", "null-launch", null],
+      // A verified session is keyed "<sid>@<gen>" (25074 3c-2b); its sid is the managed launch id.
+      ["s8", "verified", "launch-1@3"],
+      ["s9", "verified-lookalike", "launch-10@1"],
     ]
     for (const [id, name, launchId] of rows) insert.run({ $id: id, $name: name, $launch_id: launchId })
   })
@@ -155,31 +158,38 @@ describe("getSessionsByProviderLaunchId", () => {
 
   function queryFor(launchId: string): string[] {
     const prefix = `${launchId}::`
+    const verified = `${launchId}@`
     const rows = stmts.getSessionsByProviderLaunchId.all({
       $launch_id: launchId,
       $derived_prefix: prefix,
       $derived_prefix_upper: derivedLaunchPrefixUpperBound(prefix),
+      $verified_prefix: verified,
+      $verified_prefix_upper: derivedLaunchPrefixUpperBound(verified),
     }) as Array<{ name: string }>
     return rows.map((row) => row.name)
   }
 
   it("returns the exact launch row and its derived children, and nothing else", () => {
-    expect(queryFor("launch-1").sort()).toEqual(["derived-a", "derived-b", "exact"])
+    expect(queryFor("launch-1").sort()).toEqual(["derived-a", "derived-b", "exact", "verified"])
   })
 
   it("does not sweep in a launch id that merely shares a textual prefix", () => {
     // "launch-10" starts with "launch-1" but is a different launch. Only the
     // "launch-1::" separator marks a derived child.
     expect(queryFor("launch-1")).not.toContain("prefix-lookalike")
+    expect(queryFor("launch-1")).not.toContain("verified-lookalike")
   })
 
   it("agrees exactly with the substr predicate it replaced", () => {
     const legacy = db
       .prepare(
         "SELECT name FROM sessions WHERE launch_id = $launch_id " +
-          "OR substr(launch_id, 1, length($derived_prefix)) = $derived_prefix ORDER BY id",
+          "OR substr(launch_id, 1, length($derived_prefix)) = $derived_prefix " +
+          "OR substr(launch_id, 1, length($verified_prefix)) = $verified_prefix ORDER BY id",
       )
-      .all({ $launch_id: "launch-1", $derived_prefix: "launch-1::" }) as Array<{ name: string }>
+      .all({ $launch_id: "launch-1", $derived_prefix: "launch-1::", $verified_prefix: "launch-1@" }) as Array<{
+      name: string
+    }>
     expect(queryFor("launch-1")).toEqual(legacy.map((row) => row.name))
   })
 
@@ -188,12 +198,15 @@ describe("getSessionsByProviderLaunchId", () => {
       .prepare(
         "EXPLAIN QUERY PLAN SELECT name, launch_id, launch_parent_pid FROM sessions " +
           "WHERE launch_id = $launch_id " +
-          "OR (launch_id >= $derived_prefix AND launch_id < $derived_prefix_upper) ORDER BY id",
+          "OR (launch_id >= $derived_prefix AND launch_id < $derived_prefix_upper) " +
+          "OR (launch_id >= $verified_prefix AND launch_id < $verified_prefix_upper) ORDER BY id",
       )
       .all({
         $launch_id: "launch-1",
         $derived_prefix: "launch-1::",
         $derived_prefix_upper: derivedLaunchPrefixUpperBound("launch-1::"),
+        $verified_prefix: "launch-1@",
+        $verified_prefix_upper: derivedLaunchPrefixUpperBound("launch-1@"),
       }) as Array<{ detail: string }>
     const detail = plan.map((row) => row.detail).join(" | ")
 

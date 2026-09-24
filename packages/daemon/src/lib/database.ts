@@ -2057,7 +2057,10 @@ export function createStatements(db: Database) {
     getSessionsByProviderLaunchId: db.prepare(
       "SELECT id, name, principal_class, launch_id, launch_parent_pid, updated_at, delivery, mailbox_authority_hash, identity_sid FROM sessions " +
         "WHERE launch_id = $launch_id " +
-        "OR (launch_id >= $derived_prefix AND launch_id < $derived_prefix_upper) ORDER BY id",
+        "OR (launch_id >= $derived_prefix AND launch_id < $derived_prefix_upper) " +
+        // A verified session is keyed "<sid>@<gen>" (25074 3c-2b), and the managed launch id IS that sid: the same
+        // index-served half-open range, over "<launch id>@".
+        "OR (launch_id >= $verified_prefix AND launch_id < $verified_prefix_upper) ORDER BY id",
     ),
     insertTurnStartReceipt: db.prepare(`
       INSERT OR IGNORE INTO turn_start_receipts (

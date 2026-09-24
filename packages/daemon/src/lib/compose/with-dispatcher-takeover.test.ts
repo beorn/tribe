@@ -900,6 +900,39 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
     expect(await membersAuthority(harness)).toMatchObject({ "@dev/7": "verified", "@dev/9": "claimed" })
   })
 
+  // 25074 step 3 went live at 2026-09-24 08:02 PDT and every verified seat's `tribe inbox-status` answered "resolved to
+  // 0 sessions": the CLI asks by the seat's bare launch id (HAB_SESSION_LAUNCH_ID, which IS the token's sid), and a
+  // verified session is keyed "<sid>@<gen>", which neither the exact nor the "<id>::" arm of the lookup matched.
+  it("a verified seat's inbox status resolves by its bare launch id, the token's sid", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-verified")
+    parseResult<RegisterResult>(
+      await harness.register("conn-verified", {
+        name: "@dev/7",
+        pid: 4101,
+        project: "/tmp/p",
+        launchParentPid: process.pid,
+        idToken: "token-dev7",
+      }),
+    )
+    for (const params of [{ launch_id: "sid-dev7" }, { launch_id: "sid-dev7", persona: "@dev/7" }]) {
+      expect(
+        parseResult<{ session: string }>(
+          await harness.dispatcher.handleRequest(
+            {
+              jsonrpc: "2.0",
+              id: `verified-inbox-${params.persona ?? "bare"}`,
+              method: "cli_inbox_status_by_launch_v1",
+              params,
+            },
+            "conn-status",
+          ),
+        ),
+      ).toMatchObject({ session: "@dev/7" })
+    }
+  })
+
   it("a token naming another actor, a contradicted token and a verifier fault each refuse register", async () => {
     const harness = createDispatcherHarness({ identityVerifier })
     cleanup = harness.dispose
