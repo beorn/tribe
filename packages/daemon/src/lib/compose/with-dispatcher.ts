@@ -1117,13 +1117,7 @@ export function withDispatcher<
       clientPid: number,
       launchIdentity: LaunchIdentity | null,
       connId: string,
-      tokenSid: string | null = null,
-    ): {
-      holder: ClientSession
-      launch: LaunchIdentity
-      transportClass: string
-      promotedFrom?: LaunchIdentity
-    } | null {
+    ): { holder: ClientSession; launch: LaunchIdentity; transportClass: string } | null {
       for (const holder of clients.values()) {
         if (holder.id === connId || holder.name !== name) continue
 
@@ -1138,26 +1132,6 @@ export function withDispatcher<
           holderLaunch.parentPid === launchIdentity.parentPid
         ) {
           return { holder, launch: launchIdentity, transportClass: "same-launch-fan-in" }
-        }
-
-        // 25074 3c-2b (@cto def441bf): a token-keyed register fans into its own seat's bootstrap that fell back to
-        // bearer under the launch id, whose provider part IS the token's sid, from the same launcher pid. The holder is
-        // promoted in place to `<sid>@<gen>`. Another launcher pid is a previous generation and is not fanned into; a
-        // verified holder is 3c-2a's fence's to judge.
-        if (
-          tokenSid !== null &&
-          launchIdentity !== null &&
-          holderLaunch !== null &&
-          providerLaunchIdOf(holderLaunch.id) === tokenSid &&
-          holderLaunch.parentPid === launchIdentity.parentPid &&
-          holderIdentity(holder.ctx.sessionId).authority !== "verified"
-        ) {
-          return {
-            holder,
-            launch: launchIdentity,
-            transportClass: "bootstrap-fallback-promoted",
-            promotedFrom: holderLaunch,
-          }
         }
 
         const launchChildFoundLegacyParent =
@@ -1194,45 +1168,6 @@ export function withDispatcher<
         sibling.launchId = launch.id
         sibling.launchParentPid = launch.parentPid
       }
-    }
-
-    /**
-     * 25074 3c-2b — a bootstrap that fell back to bearer is re-keyed from its launch id to its seat token's
-     * `<sid>@<gen>`, guarded on the launch it held, and the promotion is its own journal row so a fallback that was
-     * later promoted stays visible (@cto def441bf).
-     */
-    function rekeyPromotedFallbackLaunch(
-      holder: ClientSession,
-      from: LaunchIdentity,
-      to: LaunchIdentity,
-      token: { readonly sid: string; readonly gen: number },
-    ): void {
-      const result = db
-        .prepare(
-          `UPDATE sessions SET launch_id = ?, launch_parent_pid = ?, updated_at = ?
-           WHERE id = ? AND launch_id = ? AND launch_parent_pid = ?`,
-        )
-        .run(to.id, to.parentPid, Date.now(), holder.ctx.sessionId, from.id, from.parentPid)
-      if (result.changes !== 1) {
-        throw new Error(`refusing bootstrap-fallback promotion for ${holder.ctx.sessionId}: its launch moved`)
-      }
-      for (const sibling of clients.values()) {
-        if (sibling.ctx.sessionId !== holder.ctx.sessionId) continue
-        sibling.launchId = to.id
-        sibling.launchParentPid = to.parentPid
-      }
-      log.info?.(
-        `identity promotion: ${holder.name}'s bearer bootstrap (launch ${from.id}) is promoted in place to ${to.id}`,
-      )
-      logEvent(holder.ctx, "session.identity-promoted", undefined, {
-        name: holder.name,
-        session_id: holder.ctx.sessionId,
-        sid: token.sid,
-        gen: token.gen,
-        parent_pid: to.parentPid,
-        from_launch_id: from.id,
-        transport_class: "bootstrap-fallback-promoted",
-      })
     }
 
     function retireReplacedClient(client: ClientSession, reason: TransportRetirementReason): void {
@@ -1669,29 +1604,15 @@ export function withDispatcher<
                 )
               }
             }
-            const launchFanIn = findLaunchFanIn(
-              resolvedName,
-              clientPid,
-              launchIdentity,
-              connId,
-              tokenKeyed ? verifiedSid : null,
-            )
+            const launchFanIn = findLaunchFanIn(resolvedName, clientPid, launchIdentity, connId)
             if (launchFanIn) {
-              const { holder, launch, transportClass, promotedFrom } = launchFanIn
+              const { holder, launch, transportClass } = launchFanIn
               // Backfill the durable one-shot fence when multiple transports
               // from a launch fan in before any cross-launch contention.
               if (p.takeover === true && typeof p.name === "string") {
                 claimLaunchTakeover(resolvedName, launch, connId)
               }
-              if (promotedFrom === undefined) {
-                promoteSessionLaunchIdentity(holder.ctx.sessionId, launch, identityToken)
-              } else {
-                // findLaunchFanIn promotes only for a token-keyed register, which carries both.
-                rekeyPromotedFallbackLaunch(holder, promotedFrom, launch, {
-                  sid: verifiedSid as string,
-                  gen: verifiedGen as number,
-                })
-              }
+              promoteSessionLaunchIdentity(holder.ctx.sessionId, launch, identityToken)
               if (verifiedSid !== null) {
                 db.prepare(
                   "UPDATE sessions SET identity_sid = ?, verified_id_token = ?, identity_gen = ? WHERE id = ?",
@@ -1725,10 +1646,6 @@ export function withDispatcher<
                 .all(projectId) as Array<{ key: string; value: string | null }>
               return makeResponse(id, {
                 sessionId: client.ctx.sessionId,
-                // 25074 3c-2b (@cto b58e4715): the launch identity this register was keyed under, which the client
-                // certifies its members row against; for a token register only the daemon knows it (`<sid>@<gen>`).
-                launchId: client.launchId,
-                launchParentPid: client.launchParentPid,
                 name: client.name,
                 role: client.role,
                 principalClass: client.principalClass,
@@ -2009,10 +1926,6 @@ export function withDispatcher<
 
             return makeResponse(id, {
               sessionId: clientCtx.sessionId,
-              // 25074 3c-2b (@cto b58e4715): the launch identity this register was keyed under (null for a legacy
-              // per-transport register), which the client certifies its members row against.
-              launchId: client.launchId,
-              launchParentPid: client.launchParentPid,
               name,
               role,
               principalClass,

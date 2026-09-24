@@ -361,14 +361,7 @@ const baseRegisterParams = {
   identityToken,
   ...(selfMailboxAuthority === null ? {} : { mailboxAuthorityHash: hashSelfMailboxAuthority(selfMailboxAuthority) }),
   ...(launchIdentityToken === null ? {} : { idToken: launchIdentityToken }),
-  // 25074 3c-2b (@cto def441bf): a launcher that registered by the seat's token projects no TRIBE_LAUNCH_ID, so the
-  // adapter registers by the token with its launch parent pid and the daemon keys it `<sid>@<gen>`. A launch id the
-  // launcher did project (a tokenless launch, or one started before 3c-2b) is still sent until 3d.
-  ...(LAUNCH_IDENTITY
-    ? { launchId: LAUNCH_IDENTITY.id, launchParentPid: LAUNCH_IDENTITY.parentPid }
-    : launchIdentityToken !== null
-      ? { launchParentPid: resolveLaunchParentPid() }
-      : {}),
+  ...(LAUNCH_IDENTITY ? { launchId: LAUNCH_IDENTITY.id, launchParentPid: LAUNCH_IDENTITY.parentPid } : {}),
   ...(ADAPTER_EXIT_RECORD === undefined ? {} : { adapterExitRecord: ADAPTER_EXIT_RECORD }),
   ...(INITIAL_FILTER_MODE === undefined ? {} : { filterMode: INITIAL_FILTER_MODE }),
   // @km/infra/15641 Phase 1 — per-session account/provider label sourced
