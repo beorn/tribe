@@ -392,7 +392,7 @@ export function withDispatcher<
     const AUTHORITY_ROW_COLUMNS =
       "id, name, role, domains, principal_class, launch_id, launch_parent_pid, claude_session_id, claude_session_name"
 
-    function rejected(reason: string, message: string): SessionAuthorityResolution {
+    function rejected(reason: string, message: string): Extract<SessionAuthorityResolution, { errorCode: number }> {
       return { errorCode: -32003, errorMessage: message, errorData: { kind: "unauthenticated", reason } }
     }
 
@@ -402,6 +402,10 @@ export function withDispatcher<
      * session its registration recorded under the token's sid; the verifier already proved the instance live, so a
      * service needs no connected owner transport beside it. A contradicted token, or a verifier fault, refuses; an
      * unreadable token falls back to the bearer, which is its own authority, and says so in the log.
+     *
+     * Dual-key (@cto §9): a verified token whose sid has no session yet (registered before the verifier, or before its
+     * adapter re-registered with the token) falls back to the bearer on the same call. The authority stays the
+     * bearer's session, and the token upgrades nothing; a bearer whose session is another name is refused naming both.
      */
     async function resolveSessionAuthority(value: unknown, idToken: unknown): Promise<SessionAuthorityResolution> {
       const token = requiredNonEmptyString(idToken)
@@ -429,11 +433,36 @@ export function withDispatcher<
             .prepare(`SELECT ${AUTHORITY_ROW_COLUMNS} FROM sessions WHERE identity_sid = $sid AND name = $name`)
             .get({ $sid: verdict.sid, $name: verdict.actor }) as AuthorityRow | null
           if (row === null || isTombstonedSessionName(row.name)) {
-            return rejected(
-              "identity-not-registered",
-              `current session authority was rejected: ${verdict.actor}'s token is verified, but no session registered ` +
-                `under its sid ${verdict.sid}; the seat's own adapter registers it`,
+            const supplied = requiredNonEmptyString(value)
+            if (supplied === null) {
+              return rejected(
+                "identity-not-registered",
+                `current session authority was rejected: ${verdict.actor}'s token is verified, but no session registered ` +
+                  `under its sid ${verdict.sid}; the seat's own adapter registers it`,
+              )
+            }
+            const bearer = resolveBearerAuthority(supplied)
+            if ("errorCode" in bearer) return bearer
+            if (bearer.row.name !== verdict.actor) {
+              const message =
+                `current session authority was rejected: the bearer belongs to ${bearer.row.name}, but the identity token ` +
+                `names ${verdict.actor} (sid ${verdict.sid}); a call carries one seat's credentials, never two`
+              log.warn?.(message)
+              return {
+                errorCode: -32003,
+                errorMessage: message,
+                errorData: {
+                  kind: "foreign-identity-transport",
+                  transport: { name: verdict.actor, sid: verdict.sid },
+                  authority: { name: bearer.row.name, launch_id: bearer.row.launch_id },
+                },
+              }
+            }
+            log.info?.(
+              `one-shot caller ${verdict.actor}'s token is verified but no session is registered under its sid ` +
+                `${verdict.sid}; resolved by its bearer until its adapter registers with the token`,
             )
+            return contextForAuthorityRow(bearer.row)
           }
           return contextForAuthorityRow(row)
         }
@@ -451,6 +480,14 @@ export function withDispatcher<
           errorData: { kind: "could-not-evaluate", reason: "session-authority-missing" },
         }
       }
+      const bearer = resolveBearerAuthority(supplied)
+      return "errorCode" in bearer ? bearer : contextForAuthorityRow(bearer.row)
+    }
+
+    /** The live managed session a bearer names, or the refusal; one lookup for both keys of the dual-key rule. */
+    function resolveBearerAuthority(
+      supplied: string,
+    ): { readonly row: AuthorityRow } | Extract<SessionAuthorityResolution, { errorCode: number }> {
       const row = db
         .prepare(`SELECT ${AUTHORITY_ROW_COLUMNS} FROM sessions WHERE mailbox_authority_hash = $hash`)
         .get({ $hash: hashSelfMailboxAuthority(supplied) }) as AuthorityRow | null
@@ -460,7 +497,7 @@ export function withDispatcher<
           `current session authority was rejected or revoked; ${AG_SESSION_AUTH_ENV} did not match a live managed session`,
         )
       }
-      return contextForAuthorityRow(row)
+      return { row }
     }
 
     function contextForAuthorityRow(row: AuthorityRow): SessionAuthorityResolution {
