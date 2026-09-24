@@ -881,6 +881,82 @@ process.exit(await child.exited)
     generation.client.close()
   }, 30_000)
 
+  // 25661. On 2026-09-24 @chief's and @dev/3's adapter children exited 0 while
+  // their hosts lived, the wrapper read code 0 as a clean exit and quit, and
+  // both seats lost their bridge for five hours. A signal aimed at the child
+  // alone (never through the wrapper, which forwards the host's own) exited 0
+  // exactly like the host closing its pipe. Only the closed pipe is final: a
+  // replacement child would inherit fd 0 at EOF. A signalled child is not.
+  it("retries an adapter child that a signal stopped while the host lives (25661)", async () => {
+    const dbPath = join(tmpDir, "tribe-signalled-child.db")
+    const launchStateDir = join(tmpDir, "signalled-child-state")
+    mkdirSync(launchStateDir)
+    const recordPath = join(launchStateDir, "tribe-adapter-exits.jsonl")
+    const readRecord = (): JsonObject[] =>
+      existsSync(recordPath)
+        ? readFileSync(recordPath, "utf8")
+            .split("\n")
+            .filter((line) => line.length > 0)
+            .map((line) => JSON.parse(line) as JsonObject)
+        : []
+    spawnTestDaemon(dbPath, join(tmpDir, "daemon-signalled-child.log"))
+    await waitFor(() => existsSync(socketPath), "signalled-child daemon socket")
+    const generation = await connectToGeneration(socketPath)
+    daemonPids.add(generation.pid)
+
+    const plugin = spawnTestPlugin({
+      dbPath,
+      logPath: join(tmpDir, "adapter-signalled-child.log"),
+      name: PERSONA,
+      launchId: "signalled-child-launch",
+      providerParentPid: String(process.pid),
+      launchStateDir,
+      delivery: "push",
+      requireJoin: true,
+    })
+    const stdout = collectJsonLines(plugin)
+    writeJson(plugin, initializePayload(50))
+    await waitFor(() => stdout.some((line) => line.id === 50), "signalled-child plugin initialization")
+    writeJson(plugin, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+
+    const connectedMember = async (label: string, replacedPid?: number): Promise<Member> => {
+      let found: Member | undefined
+      await waitFor(async () => {
+        const roster = parseToolJson(await generation.client.call("tribe.members", { all: true }))
+        const candidate = roster.sessions?.find(
+          (session) => session.name === PERSONA && session.transport_state === "connected",
+        )
+        if (candidate?.transport_pids?.length === 1 && candidate.transport_pids[0] !== replacedPid) found = candidate
+        return found !== undefined
+      }, label)
+      for (const pid of found?.transport_pids ?? []) adapterPids.add(pid)
+      return found!
+    }
+
+    const first = await connectedMember("signalled-child initial membership")
+    const signalledPid = first.transport_pids![0]!
+    process.kill(signalledPid, "SIGTERM")
+    await waitFor(() => readRecord().length === 1, "signalled child exit recorded")
+    expect(readRecord()[0]).toMatchObject({ adapter_pid: signalledPid, code: 143, signal: null, decision: "retry" })
+
+    const restored = await connectedMember("signalled-child supervised recovery", signalledPid)
+    expect(restored.member_id).toBe(first.member_id)
+    expect(plugin.exitCode).toBeNull()
+    writeJson(plugin, callToolPayload(51, "members", { all: true }))
+    await waitFor(() => stdout.some((line) => line.id === 51), "post-signal MCP tool call")
+    expect(mcpToolJson(stdout, 51).sessions?.find((session) => session.name === PERSONA)).toMatchObject({
+      transport_pids: restored.transport_pids,
+    })
+
+    // The host closing its end of the pipe stays final: the child leaves with
+    // code 0 and the wrapper goes with it, as the host's own close expects.
+    plugin.stdin.end()
+    await waitFor(() => plugin.exitCode !== null, "wrapper exit after the host closed its pipe")
+    expect(plugin.exitCode).toBe(0)
+    expect(readRecord()[1]).toMatchObject({ adapter_pid: restored.transport_pids![0], code: 0, decision: "clean-exit" })
+    generation.client.close()
+  }, 30_000)
+
   it.each([
     ["a launch state directory that does not exist", "missing-launch-state"],
     ["no launch state directory", undefined],

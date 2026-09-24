@@ -40,6 +40,7 @@ import {
 import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
 import { createReconnectWatchdog } from "./lib/reconnect-watchdog.ts"
 import { createHash } from "node:crypto"
+import { constants as osConstants } from "node:os"
 import { hashSelfMailboxAuthority, readSelfMailboxAuthorityFromEnvironment } from "./lib/self-mailbox-authority.ts"
 import { readIdentityTokenFromEnvironment } from "./lib/identity-token.ts"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
@@ -1023,11 +1024,15 @@ using _reload = setupHotReload({
   replaceProcess: (reason) => requestPluginReexec(reason),
 })
 
-const shutdown = () => {
+const shutdown = (exitCode = 0) => {
   proxyAc.abort()
   daemon?.close()
-  process.exit(0)
+  process.exit(exitCode)
 }
+// A signal exits 128+signo, never 0 (25661). Code 0 is the host closing our
+// stdin, which the plugin wrapper treats as final because a replacement would
+// inherit fd 0 at EOF; a signal aimed at this child alone is a crash to retry.
+const shutdownOnSignal = (signal: "SIGINT" | "SIGTERM") => () => shutdown(128 + osConstants.signals[signal])
 // The harness closing our stdin is the end of this launch — the provider
 // process is gone and nothing will reconnect under this launch id. Say so to
 // the daemon before closing, so the `session.left` fact carries a reason a
@@ -1041,10 +1046,10 @@ const shutdownAfterHarnessExit = () => {
   const deadline = new Promise<void>((resolve) => {
     setTimeout(resolve, 500)
   })
-  void Promise.race([announced ?? Promise.resolve(), deadline]).finally(shutdown)
+  void Promise.race([announced ?? Promise.resolve(), deadline]).finally(() => shutdown(0))
 }
-process.on("SIGINT", shutdown)
-process.on("SIGTERM", shutdown)
+process.on("SIGINT", shutdownOnSignal("SIGINT"))
+process.on("SIGTERM", shutdownOnSignal("SIGTERM"))
 process.stdin.once("end", shutdownAfterHarnessExit)
 process.stdin.once("close", shutdownAfterHarnessExit)
 
