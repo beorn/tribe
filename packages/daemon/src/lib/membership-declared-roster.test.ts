@@ -28,7 +28,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
-import { handleToolCall, type HandlerOpts } from "./handlers.ts"
+import { handleToolCall, readSeatTransportFacts, type HandlerOpts } from "./handlers.ts"
 import { logSessionLeft } from "./messaging.ts"
 import {
   createDeclaredRosterReader,
@@ -170,6 +170,12 @@ describe("membership projection: declared-roster membership is a function of a p
         membership_discrepancy?: Record<string, unknown>
       }
       expect(health.membership_discrepancy).toEqual(members.membership_discrepancy)
+      // 25662: the bridge-lost check reads this projection; a settled exit is not a lost bridge.
+      const seats = readSeatTransportFacts(opCtx, opts)
+      expect(seats.missing).toEqual([])
+      expect(seats.exited).toEqual(
+        new Map([["@agent/restart-always", `harness-exited at ${new Date(leftAt).toISOString()}`]]),
+      )
     } finally {
       nowSpy.mockRestore()
     }
@@ -209,6 +215,10 @@ describe("membership projection: declared-roster membership is a function of a p
           state: "missing-transport",
         },
       ])
+      // 25662: the same row is what the bridge-lost check pages about.
+      const seats = readSeatTransportFacts(opCtx, opts)
+      expect(seats.missing).toEqual([{ name: "@agent/restart-onfailure", launchParentPid: 30002 }])
+      expect(seats.exited).toEqual(new Map())
     } finally {
       nowSpy.mockRestore()
     }

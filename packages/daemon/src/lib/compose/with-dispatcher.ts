@@ -61,6 +61,7 @@ import {
   readUnackedAttentionRows,
   removedTribeMethodMessage,
   TRIBE_COORD_METHODS,
+  readSeatTransportFacts,
 } from "../handlers.ts"
 import { createLifecycleStore } from "../lifecycle-store.ts"
 import type { TribePluginHandle } from "../plugin-api.ts"
@@ -177,6 +178,8 @@ export interface Dispatcher {
   register: (method: string, handler: MethodHandler) => void
   /** Answer pending long-polls before the daemon closes client sockets. */
   shutdown: () => void
+  /** Seats by transport from tribe.health's membership projection, for the bridge-lost check (25662). */
+  seatTransportFacts: () => ReturnType<typeof readSeatTransportFacts>
 }
 
 export interface WithDispatcher {
@@ -2183,7 +2186,7 @@ export function withDispatcher<
 
           case "cli_health": {
             const health = await handleToolCall(daemonCtx, TRIBE_COORD_METHODS.health, {}, DAEMON_HANDLER_OPTS)
-            const { getHealthSnapshot } = await import("../health-monitor-plugin.ts")
+            const { getBridgeLostArming, getHealthSnapshot } = await import("../health-monitor-plugin.ts")
             let machine: unknown = null
             try {
               machine = await getHealthSnapshot()
@@ -2210,6 +2213,8 @@ export function withDispatcher<
             return makeResponse(id, {
               ...health,
               machine,
+              // 25662: doctor prints "bridge-lost paging disarmed: <reason>" from this; never a silent default.
+              bridge_lost: getBridgeLostArming(),
               sessions: roster,
               daemon: {
                 pid: process.pid,
@@ -2990,6 +2995,7 @@ export function withDispatcher<
         handleRequest,
         register,
         shutdown: inboxWait.shutdown,
+        seatTransportFacts: () => readSeatTransportFacts(daemonCtx, DAEMON_HANDLER_OPTS),
       },
     }
   }

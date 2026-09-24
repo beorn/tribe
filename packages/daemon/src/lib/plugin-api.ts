@@ -140,4 +140,20 @@ export interface TribeClientApi {
    * staleness consumes the richer `health.cadence.inbox_lag` projection.
    */
   getUnreadDms(sessionName: string): { count: number; oldestTs: number }
+
+  /**
+   * Optional (25662): seats by transport, from the same membership projection tribe.health answers from. `missing`
+   * is every seat hab expects up whose transport is gone; `exited` maps a settled exit to its reason.
+   */
+  getSeatTransportFacts?(): {
+    missing: Array<{ name: string; launchParentPid: number | null }>
+    exited: Map<string, string>
+    connected: Set<string>
+  }
+
+  /**
+   * Optional (25662): the open incidents one watcher holds for one condition, read from the durable ball tracker
+   * (never a watcher's memory), each with the recipient that owes it.
+   */
+  listOpenIncidents?(emitter: string, condition: string): Array<{ subject: string; recipient: string }>
 }
