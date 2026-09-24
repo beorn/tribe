@@ -1174,6 +1174,7 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
     "token-g2": { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 2 },
     "token-nogen": { result: "verified", actor: "@dev/7", sid: "sid-dev7" },
     "token-dead": { result: "contradicted", reason: "instance-is-live: @dev/7 is not live at generation 3" },
+    "token-job": { result: "verified", actor: "state-checkout-sync", sid: "state-checkout-sync:1790263588867", gen: 0 },
   }
   const identityVerifier = {
     path: "/stub/identity-verifier.ts",
@@ -1276,6 +1277,42 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
       launch_id: "sid-dev7@3",
       identity_sid: "sid-dev7",
     })
+  })
+
+  // 25074 P1 (@chief 2e492d1c): a hab job's environment carries its persona launch id `<svc>:<occurrence>::<svc>`,
+  // while its verified session is keyed `<svc>:<occurrence>@<gen>`. The one-shot send resolves its caller by that
+  // launch id, so the verified range is over the provider part, or every scheduled job's page is refused.
+  it("a hab job's verified session resolves by the persona launch id its environment carries", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    const launchId = "state-checkout-sync:1790263588867::state-checkout-sync"
+    harness.addPendingClient("conn-job")
+    const registered = parseResult<RegisterResult & { launchId?: string }>(
+      await harness.register("conn-job", {
+        name: "state-checkout-sync",
+        pid: 5351,
+        project: "/tmp/p",
+        launchId,
+        launchParentPid: 5350,
+        idToken: "token-job",
+      }),
+    )
+    expect(registered.launchId).toBe("state-checkout-sync:1790263588867@0")
+    for (const params of [{ launch_id: launchId }, { launch_id: launchId, persona: "state-checkout-sync" }]) {
+      expect(
+        parseResult<{ session: string; launch_id: string }>(
+          await harness.dispatcher.handleRequest(
+            {
+              jsonrpc: "2.0",
+              id: `job-inbox-${params.persona ?? "bare"}`,
+              method: "cli_inbox_status_by_launch_v1",
+              params,
+            },
+            "conn-status",
+          ),
+        ),
+      ).toMatchObject({ session: "state-checkout-sync", launch_id: "state-checkout-sync:1790263588867@0" })
+    }
   })
 
   it("(a) a verified token beside a launch id of another sid is refused by name, and nothing registers", async () => {

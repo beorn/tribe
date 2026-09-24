@@ -732,7 +732,9 @@ export function withDispatcher<
       }
       const derivedPrefix = `${launchId}::`
       const derivedPrefixUpper = derivedLaunchPrefixUpperBound(derivedPrefix)
-      const verifiedPrefix = `${launchId}@`
+      // A verified session is keyed by its provider launch, `<sid>@<gen>`, whether the caller's environment carries
+      // that bare launch id (a seat) or its persona form `<launch>::<persona>` (a hab job's one-shot).
+      const verifiedPrefix = `${providerLaunchIdOf(launchId)}@`
       const verifiedPrefixUpper = derivedLaunchPrefixUpperBound(verifiedPrefix)
       if (derivedPrefixUpper === null || verifiedPrefixUpper === null) {
         // Unreachable: launchId is non-empty above, so the prefix is too. A
