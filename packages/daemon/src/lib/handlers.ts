@@ -842,6 +842,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       resolveRecipient,
       transport,
       observedAt,
+      willTrack,
     })
   }
 
@@ -931,6 +932,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     maybeDerivedSummaryWarning(summaryDerived),
     maybeTruncationWarning(truncation),
     trackerMissWarning(ctx, sender, [recipients], tracker),
+    maybeUntrackedDeliveryNote(msgType, recipients, willTrack, transport),
   )
   return jsonResult({
     sent: true,
@@ -967,6 +969,7 @@ function handleMultiSend(input: {
   resolveRecipient: (recipient: string, tracked: boolean) => DirectDeliveryResolution
   transport: OwnerTransportProjector
   observedAt: number
+  willTrack: boolean
 }): ToolResult {
   const implicitlyTracked =
     AUTO_TRACK_TYPES_SET.has(input.msgType) && input.recipients.some((recipient) => recipient !== input.sender)
@@ -1026,6 +1029,7 @@ function handleMultiSend(input: {
     maybeDerivedSummaryWarning(input.summaryDerived),
     maybeTruncationWarning(input.truncation),
     trackerMissWarning(input.ctx, input.sender, input.recipients, tracker),
+    maybeUntrackedDeliveryNote(input.msgType, input.recipients, input.willTrack, input.transport),
   )
   const deliveries = deliveryReport(results, input.transport)
   logEvent(input.ctx, `message.sent.${input.msgType}`, input.args.bead as string | undefined, {
@@ -1283,6 +1287,52 @@ function maybeTruncationWarning(truncation: SanitizedMessage): string | undefine
   if (!truncation.truncated) return undefined
   const dropped = truncation.originalLength - MESSAGE_MAX_LENGTH
   return `message truncated to ${MESSAGE_MAX_LENGTH} chars — ${dropped} of ${truncation.originalLength} were dropped and the recipient did NOT receive them; resend the remainder or link the full text.`
+}
+
+/** 24526: describe a named untracked send using the existing admission snapshot. */
+function maybeUntrackedDeliveryNote(
+  msgType: string,
+  recipients: string | readonly string[],
+  willTrack: boolean,
+  transport: OwnerTransportProjector,
+): string | undefined {
+  if (willTrack || (msgType !== "notify" && msgType !== "status")) return undefined
+  const names = typeof recipients === "string" ? [recipients] : recipients
+  const absent: string[] = []
+  const unobserved: string[] = []
+  for (const name of names) {
+    if (name === "*") continue
+    const observation = transport.observe(name)
+    switch (observation.owner_transport_reason) {
+      case "connected-pid-live-transport":
+      case "connected-no-consumer":
+        break
+      case "no-session-record":
+      case "owner-unknown-no-transport":
+      case "registered-transport-pids-dead":
+      case "registered-owner-pid-dead":
+        absent.push(name)
+        break
+      default:
+        unobserved.push(`${name}: ${observation.owner_transport_reason}`)
+    }
+  }
+  if (absent.length === 0 && unobserved.length === 0) return undefined
+  const parts: string[] = []
+  if (absent.length > 0) {
+    parts.push(
+      `${absent.join(", ")} ${absent.length === 1 ? "is" : "are"} not answer-capable at send time (no live transport); ` +
+        `this ${msgType} opens no obligation and pages nobody. ` +
+        "Send type=request if you need a reply; it opens a tracked ball that outlives a recipient's absence, " +
+        "or refuses with a reason if the mailbox is unknown. Sending anyway.",
+    )
+  }
+  if (unobserved.length > 0) {
+    parts.push(
+      `answer capability unobserved: ${unobserved.join(", ")}; check delivery before relying on a reply. Sending anyway.`,
+    )
+  }
+  return `delivery note — ${parts.join(" ")}`
 }
 
 type Tracker = {

@@ -369,6 +369,75 @@ describe("registerSendCommands", () => {
     }
   })
 
+  // 24526: the daemon warning is additive to the existing warning envelope.
+  // The CLI shows its delivery note once, without reprinting unrelated
+  // summary/truncation warnings already reported through their own fields.
+  test("successful send prints only the daemon's delivery note on stderr", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-send-delivery-note-"))
+    const socketPath = join(tmp, "tribe.sock")
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as { id: number; method: string }
+          const result =
+            request.method === "cli_inbox_status_by_launch_v1"
+              ? { session: "@dev/12", launch_id: "launch-dev12", launch_parent_pid: 123 }
+              : request.method === "register"
+                ? { name: "@dev/12", role: "member" }
+                : request.method === "tribe.pending"
+                  ? { pending: [], count: 0 }
+                  : request.method === "tribe.send"
+                    ? {
+                        sent: true,
+                        id: "msg-1",
+                        warning:
+                          "no `summary` provided — derived a one-liner from the message; " +
+                          "delivery note — @ci is not answer-capable; this notify opens no obligation. Send type=request for a tracked reply.",
+                        delivery: { state: "offline", recipient: "@ci" },
+                      }
+                    : { error: `unexpected call ${request.method}` }
+          socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`)
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const sent = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProcess) => {
+        const child = spawn(BUN_BIN, [CLI, "send", "@ci", "note", "--type", "notify", "--summary", "note"], {
+          env: { ...process.env, TRIBE_SOCKET: socketPath, TRIBE_LAUNCH_ID: "launch-dev12" },
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+        let stdout = ""
+        let stderr = ""
+        child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+        child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+        child.on("close", (code) => resolveProcess({ code, stdout, stderr }))
+      })
+      expect(sent.code).toBe(0)
+      expect(sent.stdout).toContain("Sent message to @ci")
+      expect(sent.stderr).toContain("delivery note — @ci is not answer-capable")
+      expect(sent.stderr).toContain("type=request")
+      expect(sent.stderr).not.toContain("no `summary` provided")
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
+    }
+  })
+
   test("options validation failures output canonical tribe.send: invalid --<opt> shape (24994)", async () => {
     const runCliRaw = (args: string[]) =>
       new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProcess) => {

@@ -305,4 +305,99 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
       db.prepare("SELECT recipient FROM pending_request WHERE request_id = 'req-broadcast' ORDER BY recipient").all(),
     ).toEqual([{ recipient: "@chief" }, { recipient: "@ci" }])
   })
+
+  /**
+   * 24526: sender guidance must use the same transport snapshot as delivery.
+   * `connected-no-consumer` is an ordinary pull seat between reads, while a
+   * mailbox-read failure is unknown rather than proof that a seat is gone.
+   */
+  it("warns only for untracked named sends with no live recipient transport", () => {
+    SEATS.forEach((seat, index) => addSeat(seat, index + 2))
+    const send = (to: string, type = "notify", request?: true) =>
+      toolJson(
+        handleToolCall(
+          sender,
+          "tribe.send",
+          { to, message: "please inspect", type, summary: "inspection", request },
+          opts(),
+        ),
+      )
+
+    expect(send("@push/joined").warning).toBeUndefined()
+    expect(send("@pull/idle").warning).toBeUndefined()
+    expect(send("@pull/waiting").warning).toBeUndefined()
+
+    const gone = send("@pull/gone")
+    expect(gone.sent).toBe(true)
+    expect(String(gone.warning)).toContain("@pull/gone")
+    expect(String(gone.warning)).toContain("opens no obligation")
+    expect(String(gone.warning)).toContain("type=request")
+    expect(db.prepare("SELECT COUNT(*) AS count FROM pending_request WHERE recipient = '@pull/gone'").get()).toEqual({
+      count: 0,
+    })
+    expect(String(send("@pull/gone", "status").warning)).toContain("this status opens no obligation")
+
+    const unknown = send("@pull/deaf", "status")
+    expect(unknown.sent).toBe(true)
+    expect(String(unknown.warning)).toContain("answer capability unobserved:")
+    expect(String(unknown.warning)).toContain("@pull/deaf: mailbox-read-unavailable")
+    expect(String(unknown.warning)).not.toContain("not answer-capable")
+
+    expect(send("*", "notify").warning).toBeUndefined()
+    const multi = toolJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        { to: ["@push/joined", "@pull/gone"], message: "fleet note", type: "notify", summary: "note" },
+        opts(),
+      ),
+    )
+    expect(multi.sent).toBe(true)
+    expect(String(multi.warning)).toContain("@pull/gone")
+    expect(String(multi.warning)).not.toContain("@push/joined")
+    const tracked = send("@pull/gone", "status", true)
+    expect(tracked.sent).toBe(true)
+    expect(tracked.request_id).toBeTypeOf("string")
+    expect(tracked.warning).toBeUndefined()
+  })
+
+  it("warns for the original target of a bounced untracked send", () => {
+    addSeat(
+      {
+        name: "@ci",
+        delivery: "pull",
+        connected: false,
+        readableMailbox: true,
+        ownerWaiting: false,
+        lastReadAgeMs: null,
+      },
+      2,
+    )
+    addSeat(
+      {
+        name: "@chief",
+        delivery: "push",
+        connected: true,
+        readableMailbox: true,
+        ownerWaiting: false,
+        lastReadAgeMs: null,
+      },
+      3,
+    )
+    const resolveDelivery = prefixFallbackDeliveryResolver(tribeHabModule.services.wire.env.TRIBE_DELIVERY_FALLBACKS)
+    const sent = toolJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        { to: "@ci", message: "fleet note", type: "notify", summary: "note" },
+        opts({ resolveDelivery }),
+      ),
+    )
+    expect(sent).toMatchObject({
+      sent: true,
+      delivery: { state: "bounced", original_target: "@ci", recipient: "@chief" },
+    })
+    expect(String(sent.warning)).toContain("@ci")
+    expect(String(sent.warning)).not.toContain("@chief")
+  })
 })

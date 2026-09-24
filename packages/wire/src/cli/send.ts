@@ -655,6 +655,13 @@ async function cmdSend(input: SendPayloadInput): Promise<void> {
   } else {
     console.log(`Sent message to ${input.to}`)
   }
+  // The daemon appends this delivery note last in its existing warning field.
+  // Other warning classes have their own CLI output below.
+  const deliveryWarning = result.warning
+  const deliveryNoteAt = deliveryWarning?.indexOf("delivery note — ") ?? -1
+  if (deliveryWarning !== undefined && deliveryNoteAt >= 0) {
+    console.error(`tribe-wire send: ${deliveryWarning.slice(deliveryNoteAt)}`)
+  }
   // Derive-not-reject: surface (no-silent) when the daemon derived a one-liner
   // because none was authored, so the sender learns to pass `--summary`.
   if (result.summary_derived) {
