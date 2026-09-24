@@ -472,7 +472,11 @@ describe("runInjectDelta — an unbound vault is said, once per session (25149)"
     })
     try {
       mockRecall([])
-      const first = await runInjectDelta("what is the status of km-storage-sync right now?", createMemorySeenStore(), unbound)
+      const first = await runInjectDelta(
+        "what is the status of km-storage-sync right now?",
+        createMemorySeenStore(),
+        unbound,
+      )
       expect(first.skipped).toBe(false)
       expect(first.skippedSteps).toEqual({ project_sources: busy.message })
     } finally {
@@ -727,7 +731,9 @@ describe("25071 row 2: the hook's recall runs in hook mode, inside the wall's bu
       })
 
       expect(recallMock).toHaveBeenCalledTimes(1)
-      expect(result.skippedSteps).toEqual({ recall_fallback: 'recall_fallback skipped: anchor "tribe", 300 ms left (25071)' })
+      expect(result.skippedSteps).toEqual({
+        recall_fallback: 'recall_fallback skipped: anchor "tribe", 300 ms left (25071)',
+      })
     } finally {
       vi.useRealTimers()
     }

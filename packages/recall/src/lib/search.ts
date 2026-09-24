@@ -851,7 +851,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
   const searchContent = !question && !response && (!types || (contentTypes && contentTypes.length > 0))
 
   // Build search options
-  const messageOpts: MessageSearchOptions = {
+  const messageOpts: MessageSearchOptions & { mode?: "exact" } = {
     limit,
     sinceTime,
     messageType,

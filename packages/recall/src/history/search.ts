@@ -427,7 +427,9 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
           `survivors ${hookSearch.survivors}${hookSearch.widened ? ", widened" : ""}]`,
       )
     } else {
-      log(`FTS5 messages: ${String(messageResults.total)} total, ${messageResults.results.length} returned (${msgMs}ms)`)
+      log(
+        `FTS5 messages: ${String(messageResults.total)} total, ${messageResults.results.length} returned (${msgMs}ms)`,
+      )
     }
 
     // Search session-scoped content (plans, summaries, todos, first_prompts) with time filter
@@ -570,23 +572,25 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     const corroborationBegan = performance.now()
     const ftsQuery = toFts5Query(query)
     const sessionDepths = hookSearch ? new Map(hookSearch.sessionDepths) : new Map<string, number>()
-    if (!hookSearch) try {
-      const depthRows = db
-        .prepare(
-          `SELECT m.session_id, COUNT(*) as depth
+    if (!hookSearch) {
+      try {
+        const depthRows = db
+          .prepare(
+            `SELECT m.session_id, COUNT(*) as depth
            FROM messages_fts f
            JOIN messages m ON f.rowid = m.id
            WHERE messages_fts MATCH ?
            GROUP BY m.session_id
            ORDER BY depth DESC
            LIMIT 100`,
-        )
-        .all(ftsQuery) as { session_id: string; depth: number }[]
-      for (const r of depthRows) {
-        sessionDepths.set(r.session_id, r.depth)
+          )
+          .all(ftsQuery) as { session_id: string; depth: number }[]
+        for (const r of depthRows) {
+          sessionDepths.set(r.session_id, r.depth)
+        }
+      } catch {
+        // FTS5 query parsing can fail for some edge cases — skip corroboration
       }
-    } catch {
-      // FTS5 query parsing can fail for some edge cases — skip corroboration
     }
     phases.corroboration = performance.now() - corroborationBegan
     const corroborationMs = Date.now() - corroborationStart

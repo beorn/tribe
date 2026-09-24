@@ -48,7 +48,11 @@ function seed(rows: Seed[]): void {
 
 /** `n` old, short, strong matches: they own the all-time bm25 order, and the 30-day window drops every one. */
 function oldStrong(n: number): Seed[] {
-  return Array.from({ length: n }, (_, i) => ({ session: `old-${i % 50}`, content: `${ANCHOR} ${ANCHOR}`, ageDays: 40 }))
+  return Array.from({ length: n }, (_, i) => ({
+    session: `old-${i % 50}`,
+    content: `${ANCHOR} ${ANCHOR}`,
+    ageDays: 40,
+  }))
 }
 
 /** `n` recent, long, weak matches: in the window, but below every old strong match in bm25. */
@@ -62,7 +66,11 @@ function recentWeak(n: number): Seed[] {
 
 /** `n` rows without the anchor, in the window: the corpus a real anchor is rare in. */
 function unmatched(n: number): Seed[] {
-  return Array.from({ length: n }, (_, i) => ({ session: `other-${i % 20}`, content: `${FILLER} ${String(i)}`, ageDays: 3 }))
+  return Array.from({ length: n }, (_, i) => ({
+    session: `other-${i % 20}`,
+    content: `${FILLER} ${String(i)}`,
+    ageDays: 3,
+  }))
 }
 
 /** Every SQL string prepared on the index while `run` runs. */
@@ -175,7 +183,13 @@ describe("25071 row 2 B2: hook mode ranks a candidate set", () => {
 
 describe("25071 row 2 B3: phases run only while the budget covers them", () => {
   test("a synonym variant the remaining budget cannot cover is skipped, naming the phase, the anchor and the ms left", async () => {
-    seed(Array.from({ length: 12 }, (_, i) => ({ session: `auth-${i}`, content: `auth token note ${String(i)}`, ageDays: 1 })))
+    seed(
+      Array.from({ length: 12 }, (_, i) => ({
+        session: `auth-${i}`,
+        content: `auth token note ${String(i)}`,
+        ageDays: 1,
+      })),
+    )
 
     const hook = await recall("auth", { mode: "hook", raw: true, limit: 5, deadlineAt: Date.now() + 100 })
 
@@ -190,7 +204,16 @@ describe("25071 row 2 B3: phases run only while the budget covers them", () => {
     const hook = await recall(ANCHOR, { mode: "hook", raw: true, limit: 5 })
 
     expect(Object.keys(hook.timing?.phases ?? {}).sort()).toEqual(
-      ["corroboration", "live_session", "messages", "project_content", "proximity", "session_content", "titles", "vault"].sort(),
+      [
+        "corroboration",
+        "live_session",
+        "messages",
+        "project_content",
+        "proximity",
+        "session_content",
+        "titles",
+        "vault",
+      ].sort(),
     )
   })
 })
