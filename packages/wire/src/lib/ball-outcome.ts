@@ -115,3 +115,57 @@ export function parseBallOutcomeFact(row: BallOutcomeFactRow): BallDeadlineFact 
   }
   return { ...fact, kind: "settled" } as BallSettlementFact
 }
+
+/** One ball's settlement facts as a reader reports them: the taxonomy reason,
+ * when, and by whom. `settled_at` stays a number here; the daemon's pending
+ * view renders it ISO like every other timestamp on its rows. */
+export type BallSettlementConflictEntry = Pick<BallSettlementFact, "settlement" | "settled_at" | "settled_by">
+
+export type SettlementFold = {
+  /** The fact that stands for each key — the latest by settled_at. */
+  latest: Map<string, BallSettlementFact>
+  /** Keys whose facts disagree, each with every fact in settled_at order.
+   * @i/21-wire/25654: yrd closed by hand on one day and its records replay
+   * re-sent the same request and message id fourteen days later, which was
+   * answered — two facts, one key. A throw here blinded every seat's expired
+   * view; a conflict is REPORTED on that one ball and folds like any other. */
+  conflicts: Map<string, BallSettlementFact[]>
+}
+
+export function ballFactKey(fact: Pick<BallFactEvidence, "request_id" | "recipient" | "message_id">): string {
+  return JSON.stringify([fact.request_id, fact.recipient, fact.message_id])
+}
+
+export function foldSettlementFacts(facts: Iterable<BallSettlementFact>): SettlementFold {
+  const byKey = new Map<string, BallSettlementFact[]>()
+  for (const fact of facts) {
+    const key = ballFactKey(fact)
+    const rows = byKey.get(key) ?? []
+    rows.push(fact)
+    byKey.set(key, rows)
+  }
+  const latest = new Map<string, BallSettlementFact>()
+  const conflicts = new Map<string, BallSettlementFact[]>()
+  for (const [key, rows] of byKey) {
+    const ordered = [...rows].sort((left, right) => left.settled_at - right.settled_at)
+    const last = ordered.at(-1)
+    const first = ordered[0]
+    if (last === undefined || first === undefined) continue
+    latest.set(key, last)
+    if (ordered.some((fact) => fact.settlement !== first.settlement)) conflicts.set(key, ordered)
+  }
+  return { latest, conflicts }
+}
+
+export function settlementConflictEntries(facts: readonly BallSettlementFact[]): BallSettlementConflictEntry[] {
+  return facts.map(({ settlement, settled_at, settled_by }) => ({ settlement, settled_at, settled_by }))
+}
+
+/** `manual-close by @dev/6 at 2026-09-10T08:33:42.762Z; answered by @dev/6 at …` */
+export function describeSettlementConflict(
+  facts: ReadonlyArray<Omit<BallSettlementConflictEntry, "settled_at"> & { settled_at: number | string }>,
+): string {
+  return facts
+    .map((fact) => `${fact.settlement} by ${fact.settled_by} at ${new Date(fact.settled_at).toISOString()}`)
+    .join("; ")
+}

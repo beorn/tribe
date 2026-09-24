@@ -7,6 +7,7 @@
 
 import { TRIBE_AUTO_TRACK_TYPES } from "../command-descriptors.ts"
 import {
+  foldSettlementFacts,
   parseBallOutcomeFact,
   type BallOutcomeFactRow,
   type BallSettlementFact,
@@ -155,6 +156,9 @@ export interface RetroReport {
     longest_response_member: string | null
     /** Read-derived terminal outcomes. Deadline observations are not settlements. */
     settlements: SettlementCounts
+    /** Request ids whose settlement facts disagree (25654); each is counted
+     * once above, by its latest fact. */
+    settlement_conflicts: Array<{ request_id: string; settlements: BallSettlementReason[] }>
   }
 }
 
@@ -233,24 +237,30 @@ function deriveBallAnalysis(db: RetroDatabase, messages: Message[], windowStart:
     })
   }
 
-  const settlements = new Map<string, BallSettlementFact>()
   const settlementRows = db
     .prepare(
       "SELECT id, type, content, ts FROM messages WHERE kind = 'event' AND type = 'event.ball.settled' AND ts >= ?",
     )
     .all(windowStart) as BallOutcomeFactRow[]
+  const settlementFacts: BallSettlementFact[] = []
   for (const row of settlementRows) {
     const fact = parseBallOutcomeFact(row)
     if (fact.kind !== "settled") throw new Error(`expected ball settlement fact ${row.id}`)
     if (fact.opened_at < windowStart) continue
+    settlementFacts.push(fact)
+  }
+  // Facts that disagree on one key are REPORTED, never thrown (25654): the
+  // latest stands for the record, the ball's id is named in
+  // settlementConflicts, and the rest of the report still computes.
+  const { latest: settlements, conflicts } = foldSettlementFacts(settlementFacts)
+  const settlementConflicts = [...conflicts.values()].flatMap((facts) => {
+    const first = facts[0]
+    return first === undefined
+      ? []
+      : [{ request_id: first.request_id, settlements: facts.map((fact) => fact.settlement) }]
+  })
+  for (const fact of settlements.values()) {
     const key = ballIdentity(fact.request_id, fact.recipient, fact.message_id)
-    const prior = settlements.get(key)
-    if (prior !== undefined && prior.settlement !== fact.settlement) {
-      throw new Error(
-        `conflicting ball settlement facts for ${fact.request_id}: ${prior.settlement} vs ${fact.settlement}`,
-      )
-    }
-    settlements.set(key, fact)
     if (!records.has(key)) {
       records.set(key, {
         requestId: fact.request_id,
@@ -407,7 +417,7 @@ function deriveBallAnalysis(db: RetroDatabase, messages: Message[], windowStart:
         default_acceptance: null,
       }),
     )
-  return { records: [...records.values()], metricsByOwner, reviewCorpus }
+  return { records: [...records.values()], metricsByOwner, reviewCorpus, settlementConflicts }
 }
 
 function collectMemberActivity(messages: Message[], sessions: Session[]) {
@@ -602,6 +612,7 @@ export function generateRetro(db: RetroDatabase, sinceMs?: number): RetroReport 
       longest_response: durationOrNull(longestResponse),
       longest_response_member: longestResponseMember,
       settlements,
+      settlement_conflicts: ballAnalysis.settlementConflicts,
     },
   }
 }
@@ -616,6 +627,13 @@ function getEarliestTimestamp(db: RetroDatabase): number {
 // ---------------------------------------------------------------------------
 // Markdown formatter
 // ---------------------------------------------------------------------------
+
+function formatSettlementConflicts(report: RetroReport): string {
+  const conflicts = report.coordination.settlement_conflicts
+  if (conflicts.length === 0) return "- Settlement conflicts: 0"
+  const detail = conflicts.map((conflict) => `${conflict.request_id}: ${conflict.settlements.join(", ")}`).join("; ")
+  return `- Settlement conflicts: ${conflicts.length} (${detail})`
+}
 
 export function formatMarkdown(report: RetroReport): string {
   const TIMELINE_LIMIT = 10
@@ -670,6 +688,7 @@ export function formatMarkdown(report: RetroReport): string {
   lines.push(
     `- Settlements: answered=${report.coordination.settlements.answered}, manual-close=${report.coordination.settlements["manual-close"]}, incident-cleared=${report.coordination.settlements["incident-cleared"]}, gc-expired=${report.coordination.settlements["gc-expired"]}, sender-withdrawn=${report.coordination.settlements["sender-withdrawn"]}`,
   )
+  lines.push(formatSettlementConflicts(report))
   if (report.coordination.response_p50 || report.coordination.response_p90) {
     lines.push(
       `- Response p50 / p90: ${report.coordination.response_p50 ?? "—"} / ${report.coordination.response_p90 ?? "—"}`,

@@ -571,3 +571,52 @@ describe("21714 wire retro response latency", () => {
     expect(entry!.reply!.ts - entry!.request.ts).toBe(5 * MINUTE)
   })
 })
+
+describe("25654 one ball with two settlement facts", () => {
+  let db: Database
+  const now = Date.now()
+
+  beforeEach(() => {
+    db = makeDb()
+    insertSession(db, "@chief", "chief", now)
+    insertSession(db, "@agent/1", "member", now)
+  })
+  afterEach(() => {
+    db.close()
+  })
+
+  it("counts the ball once by its latest fact and names the conflict instead of throwing", () => {
+    insertMessage(db, {
+      id: "twice-req",
+      type: "request",
+      sender: "@agent/1",
+      recipient: "@chief",
+      ts: now - 5 * MINUTE,
+      request: "twice-req",
+    })
+    insertSettlement(db, "twice-req", "manual-close", now - 4 * MINUTE, "@chief", now - 5 * MINUTE)
+    insertSettlement(db, "twice-req", "answered", now - 2 * MINUTE, "@chief", now - 5 * MINUTE)
+    insertBall(db, { id: "clean-req", from: "@agent/1", to: "@chief", openedAt: now - 3 * MINUTE, latencyMs: MINUTE })
+
+    const report = generateRetro(db, 6 * HOUR)
+    // twice-req counts ONCE, by its latest fact (answered), beside clean-req.
+    expect(report.coordination.settlements).toEqual({
+      answered: 2,
+      "manual-close": 0,
+      "incident-cleared": 0,
+      "gc-expired": 0,
+      "sender-withdrawn": 0,
+    })
+    expect(report.coordination.settlement_conflicts).toEqual([
+      { request_id: "twice-req", settlements: ["manual-close", "answered"] },
+    ])
+    expect(formatMarkdown(report)).toContain("- Settlement conflicts: 1 (twice-req: manual-close, answered)")
+  })
+
+  it("prints zero conflicts when every ball carries one fact", () => {
+    insertBall(db, { id: "clean-req", from: "@agent/1", to: "@chief", openedAt: now - 3 * MINUTE, latencyMs: MINUTE })
+    const report = generateRetro(db, 6 * HOUR)
+    expect(report.coordination.settlement_conflicts).toEqual([])
+    expect(formatMarkdown(report)).toContain("- Settlement conflicts: 0")
+  })
+})

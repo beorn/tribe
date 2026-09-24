@@ -6,6 +6,8 @@ import { randomUUID } from "node:crypto"
 import type { TribeContext } from "./context.ts"
 import { AUTO_TRACK_TYPES_SET } from "./database.ts"
 import {
+  describeSettlementConflict,
+  foldSettlementFacts,
   incidentKey,
   parseBallOutcomeFact,
   type BallOutcomeFactRow,
@@ -261,6 +263,9 @@ export type PendingCloseCause =
       /** Newest `event.ball.expired` deadline observation for this owner, if
        *  any — the ball's declared deadline passed before it was settled. */
       expired_at?: number
+      /** Every settlement fact for this owner when they DISAGREE (25654), in
+       *  settled_at order; the fields above describe the latest. */
+      conflict?: BallSettlementFact[]
     }
   | {
       kind: "settled-for-other-owner"
@@ -284,14 +289,17 @@ export function pendingCloseCause(ctx: TribeContext, requestId: string, owner: s
 
   let ownerSettlement: BallSettlementFact | undefined
   let otherSettlement: BallSettlementFact | undefined
+  const ownerFacts: BallSettlementFact[] = []
   for (const fact of facts) {
     if (fact.kind !== "settled") continue
     if (fact.recipient === owner) {
+      ownerFacts.push(fact)
       if (ownerSettlement === undefined || fact.settled_at > ownerSettlement.settled_at) ownerSettlement = fact
     } else if (otherSettlement === undefined || fact.settled_at > otherSettlement.settled_at) {
       otherSettlement = fact
     }
   }
+  const ownerConflict = [...foldSettlementFacts(ownerFacts).conflicts.values()].flat()
   const settled = ownerSettlement ?? otherSettlement
   if (settled === undefined) return { kind: "never-tracked" }
 
@@ -324,6 +332,7 @@ export function pendingCloseCause(ctx: TribeContext, requestId: string, owner: s
     fanout: ownerSettlement.fanout,
     by_another_owner: ownerSettlement.settled_by !== owner,
     ...(expiredAt === undefined ? {} : { expired_at: expiredAt }),
+    ...(ownerConflict.length === 0 ? {} : { conflict: ownerConflict }),
   }
 }
 
@@ -367,7 +376,12 @@ export function formatPendingCloseCause(cause: PendingCloseCause, requestId: str
       : ""
   const expiredClause =
     cause.expired_at === undefined ? "" : `; its deadline had passed at ${new Date(cause.expired_at).toISOString()}`
-  return `${lead}${verb} at ${iso}${fanoutClause}${expiredClause}`
+  const conflictClause =
+    cause.conflict === undefined
+      ? ""
+      : `; this ball carries ${cause.conflict.length} settlement facts that disagree ` +
+        `(${describeSettlementConflict(cause.conflict)}) — the latest stands, every fact is reported`
+  return `${lead}${verb} at ${iso}${fanoutClause}${expiredClause}${conflictClause}`
 }
 
 /** Resolve the mechanism-owned deadline default. Explicitly tracked message
