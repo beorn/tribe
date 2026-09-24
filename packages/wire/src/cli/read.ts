@@ -76,6 +76,12 @@ function pendingReadCliError(method: string, error: unknown, recoveryCommand: st
   )
 }
 
+/** 25074 (@cto 03cff4b5): the daemon served a managed read by its bearer because the identity token faulted. */
+function warnServedByBearer(command: string, raw: unknown): void {
+  const fault = (raw as { session_authority?: { fault?: unknown } } | null)?.session_authority?.fault
+  if (typeof fault === "string") console.error(`${command}: ${fault}`)
+}
+
 function invalidAuthenticatedPendingSnapshot(
   method: string,
   payload: { owner?: string; count?: number; pending?: PendingCliRow[] },
@@ -672,6 +678,7 @@ async function cmdPending(
     process.exitCode = 2
     return
   }
+  warnServedByBearer("tribe pending", rawResult)
   if (invalidAuthenticatedPendingSnapshot(method, payload)) {
     console.error(
       "tribe pending: daemon returned an invalid authenticated pending snapshot; expected non-empty owner, a pending array, and non-negative integer count matching its length. Run 'tribe doctor' to compare the running daemon with this checkout before retrying.",
@@ -1596,14 +1603,14 @@ async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean }
       `${HAB_ID_TOKEN_ENV} and ${AG_SESSION_AUTH_ENV} are both missing; this managed session has no self-mailbox authority source`,
     )
   }
-  const result = mcpJsonContent(
-    await callDaemon("cli_self_inbox_v1", {
-      authority,
-      ...(idToken === null ? {} : { idToken }),
-      limit: opts.limit ?? 50,
-      peek: opts.peek,
-    }),
-  ) as SelfInboxResult
+  const raw = await callDaemon("cli_self_inbox_v1", {
+    authority,
+    ...(idToken === null ? {} : { idToken }),
+    limit: opts.limit ?? 50,
+    peek: opts.peek,
+  })
+  warnServedByBearer("tribe inbox", raw)
+  const result = mcpJsonContent(raw) as SelfInboxResult
   if (opts.json) {
     if (!opts.peek) {
       console.error(
