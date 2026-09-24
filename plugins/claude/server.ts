@@ -119,6 +119,9 @@ async function superviseAdapter(): Promise<void> {
       recordAdapterExit(exitRecord, { ...exit, decision: "host-stop" })
       return
     }
+    // Code 0 means only that the host closed the adapter's stdin: a replacement
+    // would inherit fd 0 at EOF, so this endpoint is done. A signal aimed at the
+    // child alone exits 128+signo and takes the retry path below (25661).
     if (!result.error && result.code === 0) {
       recordAdapterExit(exitRecord, { ...exit, decision: "clean-exit" })
       process.exitCode = 0
