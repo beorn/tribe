@@ -12,6 +12,7 @@
 import { describe, expect, test } from "vitest"
 import { Command } from "@silvery/commander"
 import {
+  evaluateWireHealthDocument,
   formatRestartResult,
   formatInboxStatus,
   registerReadCommands,
@@ -98,10 +99,69 @@ describe("registerReadCommands", () => {
     expect(flags).toEqual(expect.arrayContaining(["--limit", "--all", "--follow", "--json", "--ref-prefix"]))
   })
 
-  test("health verb is registered with description", () => {
+  test("health verb is registered with description and accepts --json", () => {
     const cmd = findCmd(buildProgram(), "health")
     expect(cmd).toBeDefined()
     expect(cmd!.description()).toMatch(/diagnostics/i)
+    expect(optionFlags(cmd!)).toContain("--json")
+  })
+
+  describe("evaluateWireHealthDocument", () => {
+    test("reports healthy running document and exit code 0 when daemon answers", () => {
+      const { exitCode, document } = evaluateWireHealthDocument({
+        daemon: { pid: 12345, uptime: 3600, clients: 12 },
+        sessions: [{ name: "@chief" }, { name: "@dev/1" }],
+      })
+      expect(exitCode).toBe(0)
+      expect(document).toEqual({
+        schema: "hab-service-health/2",
+        service: "wire",
+        state: "healthy",
+        verdict: { kind: "running" },
+        facts: {
+          pid: 12345,
+          uptime: 3600,
+          clients: 12,
+          sessions: 2,
+        },
+      })
+    })
+
+    test("reports absent stopped document and exit code 1 on ECONNREFUSED or ENOENT", () => {
+      for (const code of ["ECONNREFUSED", "ENOENT"]) {
+        const { exitCode, document } = evaluateWireHealthDocument(
+          null,
+          Object.assign(new Error("connect failed"), { code }),
+        )
+        expect(exitCode).toBe(1)
+        expect(document).toEqual({
+          schema: "hab-service-health/2",
+          service: "wire",
+          state: "absent",
+          verdict: { kind: "stopped" },
+        })
+      }
+    })
+
+    test("reports unhealthy running document with typed failure and exit code 2 on unexpected error", () => {
+      const { exitCode, document } = evaluateWireHealthDocument(
+        null,
+        new Error("RPC timeout or transport broke"),
+        "/run/tribe.sock",
+      )
+      expect(exitCode).toBe(2)
+      expect(document).toEqual({
+        schema: "hab-service-health/2",
+        service: "wire",
+        state: "unhealthy",
+        verdict: { kind: "running" },
+        error: {
+          code: "wire-health-failed",
+          cause: "RPC timeout or transport broke",
+          resolution: ["Check socket /run/tribe.sock and daemon status."],
+        },
+      })
+    })
   })
 
   test("inbox-status verb accepts --session and --json", () => {

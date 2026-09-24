@@ -727,7 +727,113 @@ async function cmdPending(
   }
 }
 
-async function cmdHealth(): Promise<void> {
+export type WireHealthDocument = {
+  schema: "hab-service-health/2"
+  service: "wire"
+  state: "healthy" | "absent" | "unhealthy"
+  verdict:
+    | { kind: "running" }
+    | { kind: "stopped" }
+    | { kind: "unknown"; reason: "absent" | "unparsed" | "timeout"; observed: string | null }
+  error?: {
+    code: string
+    cause: string
+    resolution: string[]
+  }
+  facts?: Record<string, unknown>
+}
+
+export function evaluateWireHealthDocument(
+  result: {
+    daemon?: { pid: number; uptime: number; clients: number }
+    sessions?: unknown[]
+  } | null,
+  error?: unknown,
+  socketPath = resolveSocketPath(),
+): { exitCode: 0 | 1 | 2; document: WireHealthDocument } {
+  if (error !== undefined) {
+    const code = (error as { code?: string | number }).code
+    if (code === "ECONNREFUSED" || code === "ENOENT") {
+      return {
+        exitCode: 1,
+        document: {
+          schema: "hab-service-health/2",
+          service: "wire",
+          state: "absent",
+          verdict: { kind: "stopped" },
+        },
+      }
+    }
+    return {
+      exitCode: 2,
+      document: {
+        schema: "hab-service-health/2",
+        service: "wire",
+        state: "unhealthy",
+        verdict: { kind: "running" },
+        error: {
+          code: "wire-health-failed",
+          cause: error instanceof Error ? error.message : String(error),
+          resolution: [`Check socket ${socketPath} and daemon status.`],
+        },
+      },
+    }
+  }
+
+  return {
+    exitCode: 0,
+    document: {
+      schema: "hab-service-health/2",
+      service: "wire",
+      state: "healthy",
+      verdict: { kind: "running" },
+      facts: {
+        pid: result?.daemon?.pid,
+        uptime: result?.daemon?.uptime,
+        clients: result?.daemon?.clients,
+        sessions: Array.isArray(result?.sessions) ? result.sessions.length : 0,
+      },
+    },
+  }
+}
+
+async function cmdHealth(opts?: { json?: boolean }): Promise<void> {
+  if (opts?.json) {
+    const socketPath = resolveSocketPath()
+    let client: DaemonClient
+    try {
+      client = await connectToDaemon(socketPath)
+    } catch (error) {
+      const { exitCode, document } = evaluateWireHealthDocument(null, error, socketPath)
+      await writeJsonStdout(document, 2)
+      process.exitCode = exitCode
+      return
+    }
+
+    let result: {
+      content: Array<{ type: string; text: string }>
+      sessions?: Array<{ name: string; role: string; pid: number; cwd?: string; uptimeMs: number; idleMs: number }>
+      daemon: { pid: number; uptime: number; clients: number }
+    }
+    try {
+      try {
+        result = (await client.call("cli_health")) as typeof result
+      } finally {
+        client.close()
+      }
+    } catch (error) {
+      const { exitCode, document } = evaluateWireHealthDocument(null, error, socketPath)
+      await writeJsonStdout(document, 2)
+      process.exitCode = exitCode
+      return
+    }
+
+    const { exitCode, document } = evaluateWireHealthDocument(result, undefined, socketPath)
+    await writeJsonStdout(document, 2)
+    process.exitCode = exitCode
+    return
+  }
+
   const result = (await callDaemon("cli_health")) as {
     content: Array<{ type: string; text: string }>
     sessions?: Array<{ name: string; role: string; pid: number; cwd?: string; uptimeMs: number; idleMs: number }>
@@ -2032,7 +2138,8 @@ export function registerReadCommands(program: Command): void {
   program
     .command("health")
     .description("Run health diagnostics")
-    .action(() => cmdHealth())
+    .option("--json", "Emit one hab-service-health/2 JSON document")
+    .action((opts: { json?: boolean }) => cmdHealth(opts))
 
   program
     .command("doctor")
