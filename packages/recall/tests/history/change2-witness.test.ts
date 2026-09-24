@@ -78,15 +78,19 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
     for (let i = 1; i <= 10; i++) {
       const file = join(projDir, `sess-${i.toString().padStart(3, "0")}.jsonl`)
       const content = [
-        JSON.stringify({ type: "user", message: { uuid: `u-${i}-1`, text: `hello ${i}` } }),
-        JSON.stringify({ type: "assistant", message: { uuid: `u-${i}-2`, text: `reply ${i}` } }),
+        JSON.stringify({ type: "user", message: { uuid: `u-${i}-1`, content: `hello ${i}` } }),
+        JSON.stringify({ type: "assistant", message: { uuid: `u-${i}-2`, content: `reply ${i}` } }),
       ].join("\n")
       writeFileSync(file, content, "utf8")
     }
 
-    // Malformed file in the middle (line 2 invalid JSON)
+    // Malformed file in the middle (line 2 invalid JSON, line 1 valid message to verify rollback)
     const badFile = join(projDir, "sess-005.jsonl")
-    writeFileSync(badFile, '{"type":"user"}\nINVALID JSON SYNTAX\n', "utf8")
+    writeFileSync(
+      badFile,
+      JSON.stringify({ type: "user", uuid: "u-5-1", message: { role: "user", content: "hello 5" } }) + "\nINVALID JSON SYNTAX\n",
+      "utf8"
+    )
 
     const result = await rebuildIndex(db, { incremental: true, skipCodex: true })
 
@@ -95,10 +99,12 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
     const sess1 = getSession(db, "sess-001")
     expect(sess1).toBeDefined()
     expect(sess1?.status).toBe("complete")
+    expect(getMessageCount(db, "sess-001")).toBe(2)
 
     const sess10 = getSession(db, "sess-010")
     expect(sess10).toBeDefined()
     expect(sess10?.status).toBe("complete")
+    expect(getMessageCount(db, "sess-010")).toBe(2)
 
     // The malformed file should have rolled back its messages and marked stale-unreadable
     const badSess = getSession(db, "sess-005")
