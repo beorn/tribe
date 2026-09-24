@@ -492,15 +492,17 @@ export function withDispatcher<
           const supplied = requiredNonEmptyString(value)
           const bearerRow = supplied === null ? null : bearerAuthorityRow(supplied)
           if (bearerRow !== null && bearerRow.name !== row.name) {
-            registry.recordForeignIdentityTransport(row.id, {
-              name: bearerRow.name,
-              launch_id: bearerRow.launch_id ?? "(no launch)",
+            // As the register path records it (24767, and the precedence refusal; @cto 46063770): on the session
+            // whose authority the call presented, the bearer's owner, describing the transport that presented it.
+            registry.recordForeignIdentityTransport(bearerRow.id, {
+              name: row.name,
+              launch_id: row.launch_id ?? "(no launch)",
               pid: clients.get(connId)?.pid ?? 0,
               refused_at: new Date().toISOString(),
             })
             log.warn?.(
               `one-shot caller ${row.name}'s verified token arrived beside ${bearerRow.name}'s bearer; ` +
-                `answered as ${row.name} and recorded the foreign transport on its session`,
+                `answered as ${row.name} and recorded the foreign transport on ${bearerRow.name}'s session`,
             )
           }
           return contextForAuthorityRow(row)

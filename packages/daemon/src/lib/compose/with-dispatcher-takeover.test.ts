@@ -1315,12 +1315,22 @@ describe("one-shot session authority P3 rows (25074, @cto 03cff4b5 and 975a22e2,
     })
   })
 
-  it("another seat's bearer beside a registered verified token is recorded on the holder and answered as the token's seat", async () => {
+  // @cto 46063770: the register path's convention (24767, and the precedence refusal) records a foreign transport on
+  // the session whose authority it presented, describing the transport. Here the bearer is the leaked authority, so
+  // the record goes on the bearer owner's session and names the token's seat, its launch and the caller's pid.
+  it("another seat's bearer beside a registered verified token is recorded on the bearer's owner and answered as the token's seat", async () => {
     const harness = createDispatcherHarness({ identityVerifier })
     cleanup = harness.dispose
     harness.addPendingClient("conn-seat")
     parseResult<RegisterResult>(
-      await harness.register("conn-seat", { name: "@dev/7", pid: 4921, project: "/tmp/p", idToken: "token-dev7" }),
+      await harness.register("conn-seat", {
+        name: "@dev/7",
+        pid: 4921,
+        project: "/tmp/p",
+        idToken: "token-dev7",
+        launchId: "launch-dev7",
+        launchParentPid: 4921,
+      }),
     )
     await registerBearerSeat(harness, "@dev/9", 4922)
 
@@ -1331,8 +1341,11 @@ describe("one-shot session authority P3 rows (25074, @cto 03cff4b5 and 975a22e2,
         sessions: Array<{ name: string; foreign_transport?: { name: string; launch_id: string } }>
       }
     ).sessions
-    expect(sessions.find((session) => session.name === "@dev/7")?.foreign_transport).toMatchObject({ name: "@dev/9" })
-    expect(sessions.find((session) => session.name === "@dev/9")).not.toHaveProperty("foreign_transport")
+    expect(sessions.find((session) => session.name === "@dev/9")?.foreign_transport).toMatchObject({
+      name: "@dev/7",
+      launch_id: "launch-dev7",
+    })
+    expect(sessions.find((session) => session.name === "@dev/7")).not.toHaveProperty("foreign_transport")
   })
 
   it("a verified token with no session beside a stale bearer is refused naming both facts", async () => {
