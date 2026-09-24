@@ -16,6 +16,11 @@ import { acquireIndexWriter, IndexWriterBusyError } from "../history/db.ts"
 // Index
 // ============================================================================
 
+/** Index writer already active: the scheduled index tick has nothing to do. */
+export const RECALL_INDEX_BUSY_EXIT = 4
+/** Index committed with ledgered skips: report the incomplete provenance. */
+export const RECALL_INDEX_SKIPS_EXIT = 5
+
 export async function cmdIndex(opts: {
   incremental?: boolean
   projectRoot?: string
@@ -144,14 +149,14 @@ export async function cmdIndex(opts: {
       (result.claudeFailures !== undefined && result.claudeFailures.length > 0)
 
     if (hasFailures) {
-      process.exitCode = 5
+      process.exitCode = RECALL_INDEX_SKIPS_EXIT
     } else {
       process.exitCode = 0
     }
   } catch (error) {
     if (error instanceof IndexWriterBusyError) {
       console.error(error.message)
-      process.exitCode = 4
+      process.exitCode = RECALL_INDEX_BUSY_EXIT
       return
     }
     throw error

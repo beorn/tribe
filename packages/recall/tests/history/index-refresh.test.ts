@@ -31,7 +31,7 @@ vi.mock("../../src/history/db", async (original) => ({
 }))
 
 const { rebuildIndex, indexSessionFile } = await import("../../src/history/indexer")
-const { cmdIndex } = await import("../../src/lib/sessions")
+const { cmdIndex, RECALL_INDEX_BUSY_EXIT } = await import("../../src/lib/sessions")
 const { ensureProjectSourcesIndexed, ProjectSourcesBusyError } = await import("../../src/history/project-sources")
 const { closeDb, getDb, initSchema, getIndexMeta, setIndexMeta } = await import("../../src/history/db")
 let root: string
@@ -126,7 +126,7 @@ describe("Recall refresh completion", () => {
     const out = vi.spyOn(console, "log").mockImplementation(() => {})
     const err = vi.spyOn(console, "error").mockImplementation(() => {})
     await cmdIndex({ projectRoot: root })
-    expect(process.exitCode).toBe(4)
+    expect(process.exitCode).toBe(RECALL_INDEX_BUSY_EXIT)
     expect(err.mock.calls.flat().join(" ")).toContain("already active")
     expect(out).not.toHaveBeenCalled()
     expect(getIndexMeta(db, "last_rebuild")).toBe(marker)

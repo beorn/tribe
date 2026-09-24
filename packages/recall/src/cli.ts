@@ -34,7 +34,7 @@ import { cmdSearch, type SearchOptions } from "./lib/search"
 import { resolveVaultDbFlag } from "./lib/vault-db"
 import { bindVaultDb } from "./history/vault-fts"
 import { cmdStatus } from "./lib/status"
-import { cmdSessions, cmdIndex } from "./lib/sessions"
+import { cmdSessions, cmdIndex, RECALL_INDEX_BUSY_EXIT, RECALL_INDEX_SKIPS_EXIT } from "./lib/sessions"
 import { cmdFiles } from "./lib/files"
 import { cmdRemember } from "./lib/hooks"
 import { cmdSummarize, cmdWeekly, cmdShow } from "./lib/summarize-daily"
@@ -88,8 +88,8 @@ program
       `  3  degraded — index provenance is stale, missing, or unknown, or LLM\n` +
       `     synthesis failed. Positive hits still print; degraded empty JSON is\n` +
       `     discriminated with results:null and total:null, never []/0.\n` +
-      `  4  busy — index writer lock is held by another process\n` +
-      `  5  clean with ledgered skips — index committed successfully, but some\n` +
+      `  ${RECALL_INDEX_BUSY_EXIT}  busy — index writer lock is held by another process\n` +
+      `  ${RECALL_INDEX_SKIPS_EXIT}  clean with ledgered skips — index committed successfully, but some\n` +
       `     transcripts were unreadable, bad-header, shrunk, or skipped\n`,
   )
 
