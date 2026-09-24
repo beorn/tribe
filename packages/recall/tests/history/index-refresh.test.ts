@@ -59,8 +59,10 @@ describe("Recall refresh completion", () => {
     db.prepare(
       "INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count) VALUES (?, ?, ?, ?, ?, ?)",
     ).run("old", root, "old.jsonl", 1, 1, 1)
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
     await expect(rebuildIndex(db, { incremental: true })).rejects.toThrow("prune failed")
     expect(getIndexMeta(db, "last_rebuild")).toBe("")
+    expect(warn.mock.calls.flat().join(" ")).toContain("1 legacy session(s) have relative paths")
   })
 
   test("a missing required session root cannot become a fresh empty corpus", async () => {
@@ -513,7 +515,7 @@ describe("Recall refresh completion", () => {
     writeFileSync(
       firstFile,
       JSON.stringify({
-        sessionId: "first",
+        sessionId: "00-first",
         type: "user",
         message: { content: "first message" },
         timestamp: new Date().toISOString(),
@@ -523,7 +525,7 @@ describe("Recall refresh completion", () => {
     writeFileSync(
       vanishingFile,
       JSON.stringify({
-        sessionId: "vanishing",
+        sessionId: "01-vanishing",
         type: "user",
         message: { content: "vanishing message" },
         timestamp: new Date().toISOString(),
@@ -533,7 +535,7 @@ describe("Recall refresh completion", () => {
     writeFileSync(
       stableFile,
       JSON.stringify({
-        sessionId: "stable",
+        sessionId: "02-stable",
         type: "user",
         message: { content: "stable message" },
         timestamp: new Date().toISOString(),
