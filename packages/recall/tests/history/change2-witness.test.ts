@@ -448,6 +448,7 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
       // Miss 2: would prune 2 sessions (40% > 20%), so belt refuses loudly and prunes 0
       const r2 = await rebuildIndex(probeDb, { incremental: true, skipCodex: true })
       expect(r2.pruned).toBe(0)
+      expect(r2.pruneRefused).toEqual({ count: 2, total: 5 })
       expect(probeDb.prepare("SELECT count(*) as c FROM sessions").get()).toEqual({ c: 5 })
       expect(warnings.some((w) => w.includes("2 of 5 sessions") && w.includes("exceed max prune share"))).toBe(true)
 
@@ -458,6 +459,7 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
         allowLargePrune: true,
       })
       expect(r3.pruned).toBe(2)
+      expect(r3.pruneRefused).toBeUndefined()
       expect(probeDb.prepare("SELECT count(*) as c FROM sessions").get()).toEqual({ c: 3 })
       expect(log).toHaveBeenCalledWith("pruned: 2")
     } finally {
