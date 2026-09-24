@@ -116,7 +116,7 @@ describe("recall --vault-db <path> <verb>: a leading global binding (25149 d)", 
   )
 
   test("one spelling: search no longer takes its own --vault-db", async () => {
-    await expect(main(["search", "q", "--vault-db", vault])).rejects.toThrow("process.exit(1)")
+    await expect(main(["search", "q", "--vault-db", vault])).rejects.toThrow("process.exit(2)")
     expect(errText()).toMatch(/unknown option '--vault-db'/)
     expect(calls).toEqual([])
   })

@@ -318,8 +318,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       if (e.exitCode === 0) {
         process.exit(0)
       }
-      // Commander already printed the error
-      process.exit(e.exitCode)
+      // Commander already printed the error. Any non-zero commander exit is a bad flag or argument, which the
+      // exit-code table above documents as 2 (review-adhoc5 P3 on 25149 d, placed by @chief 6b9943f6).
+      process.exit(2)
     }
     throw e
   }
