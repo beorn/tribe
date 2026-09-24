@@ -13,6 +13,10 @@
  *   session-end   — SessionEnd hook
  *   pre-compact   — PreCompact hook (currently a no-op passthrough to cmdHook)
  *
+ * Options, after the event:
+ *   --vault-db <path> — the km vault the in-process recall searches, bound through recall's bindVaultDb
+ *                       (25149 a3). A prompt the daemon answers searches the daemon's own `--vault-db`.
+ *
  * These handlers control the Claude Code hook protocol (exit codes, stdout
  * JSON). We must not swallow errors or rewrite output — just dispatch.
  *
@@ -31,8 +35,10 @@
 
 import { createLogger, setSuppressConsole } from "loggily"
 import { ensureTribeDaemonIfConfigured } from "./autostart.ts"
+import { existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import { parseArgs } from "node:util"
 
 export type HookEvent = "session-start" | "prompt" | "session-end" | "pre-compact"
 
@@ -65,6 +71,7 @@ type HookEngine = {
   cmdSessionStart: (typeof import("../../../recall/src/lib/hooks.ts"))["cmdSessionStart"]
   cmdSessionEnd: (typeof import("../../../recall/src/lib/hooks.ts"))["cmdSessionEnd"]
   cmdHook: (typeof import("../../../recall/src/lib/hooks.ts"))["cmdHook"]
+  bindVaultDb: (typeof import("../../../recall/src/lib/hooks.ts"))["bindVaultDb"]
 }
 
 type InjectionDebug = {
@@ -80,8 +87,13 @@ async function loadHookEngine(): Promise<HookEngine | null> {
     // override seam for forks/experiments only.
     const dir = process.env.TRIBE_RECALL_ENGINE_DIR ?? new URL("../../../recall/src", import.meta.url).pathname
     try {
-      const hooks = await import(`${dir}/lib/hooks.ts`)
-      return { cmdSessionStart: hooks.cmdSessionStart, cmdSessionEnd: hooks.cmdSessionEnd, cmdHook: hooks.cmdHook }
+      const hooks = await (import(`${dir}/lib/hooks.ts`) as Promise<typeof import("../../../recall/src/lib/hooks.ts")>)
+      return {
+        cmdSessionStart: hooks.cmdSessionStart,
+        cmdSessionEnd: hooks.cmdSessionEnd,
+        cmdHook: hooks.cmdHook,
+        bindVaultDb: hooks.bindVaultDb,
+      }
     } catch (err) {
       log.error?.(
         `recall hook engine FAILED to load from ${dir}${process.env.TRIBE_RECALL_ENGINE_DIR ? " (TRIBE_RECALL_ENGINE_DIR override)" : " (in-repo default)"}: ${err instanceof Error ? err.message : String(err)} — session indexing/injection skipped`,
@@ -101,7 +113,9 @@ async function loadInjectionDebug(): Promise<InjectionDebug | null> {
     const dir =
       process.env.TRIBE_INJECTION_DEBUG_DIR ?? new URL("../../../injection-envelope/src", import.meta.url).pathname
     try {
-      const mod = await import(`${dir}/debug.ts`)
+      const mod = await (import(`${dir}/debug.ts`) as Promise<
+        typeof import("../../../injection-envelope/src/debug.ts")
+      >)
       return {
         emitInjectionDebugEvent: mod.emitInjectionDebugEvent,
         installInjectionFileWriter: mod.installInjectionFileWriter,
@@ -176,7 +190,43 @@ async function muzzleHookProcess(): Promise<void> {
   }
 }
 
-export async function dispatchHook(event: HookEvent): Promise<void> {
+/** The options a hook line carries after its event. */
+export interface HookArgs {
+  /** `--vault-db <path>`: the vault the prompt hook's in-process recall searches (25149 a3). */
+  readonly vaultDb?: string
+}
+
+/**
+ * Parse the options after `hook <event>`. Strict: an unknown option, an empty `--vault-db` (what a failed
+ * `$(…)` substitution passes) or a `--vault-db` naming no file is an error the caller prints, never an unbound
+ * vault.
+ */
+export function parseHookArgs(
+  argv: readonly string[],
+  exists: (path: string) => boolean = existsSync,
+): HookArgs | { readonly error: string } {
+  let values: { "vault-db"?: string }
+  try {
+    ;({ values } = parseArgs({
+      args: [...argv],
+      options: { "vault-db": { type: "string" } },
+      strict: true,
+      allowPositionals: false,
+    }))
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) }
+  }
+  const vaultDb = values["vault-db"]
+  if (vaultDb === undefined) return {}
+  if (vaultDb.trim().length === 0) {
+    return { error: "--vault-db is empty (a failed substitution?); pass the vault's state.db path" }
+  }
+  // A named vault that is not there is refused here, naming the path; "vault: not bound" is only for no flag.
+  if (!exists(vaultDb)) return { error: `--vault-db ${vaultDb} does not exist; pass the vault's state.db path` }
+  return { vaultDb }
+}
+
+export async function dispatchHook(event: HookEvent, args: HookArgs = {}): Promise<void> {
   // Muzzle BEFORE anything else — autostart, recall handlers, daemon
   // RPCs, plugin loading all use loggily and would otherwise leak text
   // into the hook's stdout/stderr. See muzzleHookProcess docstring.
@@ -197,6 +247,8 @@ export async function dispatchHook(event: HookEvent): Promise<void> {
     // went to the loggily rail (NEVER stdout — the hook protocol channel).
     return
   }
+  // Recall's own binding, carried through from the call line — the vault is never found from the cwd.
+  if (args.vaultDb !== undefined) engine.bindVaultDb(args.vaultDb)
 
   switch (event) {
     case "session-start":

@@ -19,8 +19,9 @@
  * standalone daemons keep 1800s.
  */
 
+import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
-import { parseIdleQuitAfterSec, resolveIdleQuit, withConfig } from "./with-config.ts"
+import { parseIdleQuitAfterSec, resolveIdleQuit, resolveVaultDbFlag, withConfig } from "./with-config.ts"
 
 const ENV_KEYS = [
   "TRIBE_AUTOQUIT_ON_IDLE",
@@ -206,5 +207,31 @@ describe("resolveIdleQuit (pure)", () => {
       idleQuitSource: "hab-managed",
     })
     expect(resolveIdleQuit({ env: {} })).toEqual({ idleQuitAfterSec: 1800, idleQuitSource: "default" })
+  })
+})
+
+describe("--vault-db, the vault the daemon's recall searches (25149 a3)", () => {
+  test("the launch line's path reaches the config", () => {
+    expect(resolve(["--vault-db", "/vault/state.db"]).vaultDbPath).toBe("/vault/state.db")
+  })
+
+  test("a valueless --vault-db on the launch line refuses", () => {
+    expect(() => resolve(["--vault-db"])).toThrow(/--vault-db is empty/)
+  })
+
+  test("a relative --vault-db is resolved against the launch cwd, so the boot log names the real file", () => {
+    expect(resolve(["--vault-db", "../pm/.km/state.db"]).vaultDbPath).toBe(join(process.cwd(), "../pm/.km/state.db"))
+  })
+
+  test("a launch line with no --vault-db leaves the vault unbound", () => {
+    expect(resolve().vaultDbPath).toBeNull()
+  })
+
+  test.each([
+    ["an empty value", ""],
+    ["a blank value", "  "],
+    ["a valueless flag", true],
+  ] as const)("%s refuses at startup instead of reading as unbound", (_case, raw) => {
+    expect(() => resolveVaultDbFlag(raw)).toThrow(/--vault-db is empty/)
   })
 })

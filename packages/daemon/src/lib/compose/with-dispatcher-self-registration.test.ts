@@ -2378,6 +2378,7 @@ function createDispatcherHarness(
       socketPath: join(tempDir, "tribe.sock"),
       dbPath: join(tempDir, "tribe.sqlite"),
       recallDbPath: join(tempDir, "recall.sqlite"),
+      vaultDbPath: null,
       idleQuitAfterSec: -1,
       idleQuitSource: "flag" as const,
       inheritFd: null,

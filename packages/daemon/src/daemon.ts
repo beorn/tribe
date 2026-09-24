@@ -76,8 +76,16 @@ if (process.argv[2] === "hook") {
     await drainOutput()
     process.exit(2)
   }
-  const { dispatchHook } = await import("./lib/hook-dispatch.ts")
-  await dispatchHook(event)
+  const { dispatchHook, parseHookArgs } = await import("./lib/hook-dispatch.ts")
+  const hookArgs = parseHookArgs(process.argv.slice(4))
+  if ("error" in hookArgs) {
+    // Exit 1, not 2: Claude Code reads a UserPromptSubmit exit 2 as "block this prompt", and a bad hook line must
+    // be loud without stopping every prompt a seat types. The stderr line names the fault.
+    process.stderr.write(`tribe-daemon hook ${event}: ${hookArgs.error}\n`)
+    await drainOutput()
+    process.exit(1)
+  }
+  await dispatchHook(event, hookArgs)
   await drainOutput()
   process.exit(0)
 }
@@ -348,7 +356,10 @@ log.info?.(`Starting tribe daemon`)
 log.info?.(`Socket: ${tribe.config.socketPath}`)
 log.info?.(`DB: ${tribe.config.dbPath}`)
 log.info?.(`PID: ${process.pid}`)
-if (tribe.recall) log.info?.(`Recall DB: ${tribe.config.recallDbPath}`)
+if (tribe.recall) {
+  log.info?.(`Recall DB: ${tribe.config.recallDbPath}`)
+  log.info?.(`Recall vault: ${tribe.config.vaultDbPath ?? "not bound (pass --vault-db)"}`)
+}
 log.info?.(`Daemon ready (pid=${process.pid}, clients=${tribe.registry.clients.size})`)
 
 // Stale-code startup guard (@km/tribe/20033). At startup running == on-disk
