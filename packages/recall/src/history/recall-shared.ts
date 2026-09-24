@@ -44,15 +44,16 @@ export interface RecallOptions {
   /** Index state established by the caller; direct library calls default to unknown. */
   provenance?: IndexProvenance
   /**
-   * "exact" (the default, and the CLI's) ranks every match and counts totals. "hook" ranks an FTS-native candidate
-   * set inside the prompt hook's budget and counts nothing (@ag/tribe/25071 row 2); see recall-budget.ts.
+   * "exact" (the default, and the CLI's) ranks every match and counts totals. "hook" ranks the time window's matches,
+   * at most HOOK_CANDIDATE_LIMIT of them with a loud cap line, inside the prompt hook's budget and counts nothing
+   * (@ag/tribe/25071 row 2); see recall-budget.ts.
    */
   mode?: SearchMode
   /** Hook mode: when the budget runs out, as epoch ms. Defaults to the call's start plus RECALL_WALL_MS. */
   deadlineAt?: number
 }
 
-/** How a search reaches FTS: every match ranked and counted, or a budgeted candidate set (@ag/tribe/25071 row 2). */
+/** How a search reaches FTS: every match ranked and counted, or the window's matches ranked under a cap (@ag/tribe/25071 row 2). */
 export type SearchMode = "exact" | "hook"
 
 /** A phase recall skipped rather than ran, said out loud (@ag/tribe/25071 row 2). */

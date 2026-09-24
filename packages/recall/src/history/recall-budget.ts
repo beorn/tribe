@@ -24,7 +24,9 @@ export const RECALL_WALL_MS = 1500
 export const HOOK_CANDIDATE_LIMIT = 1000
 
 /**
- * The measured cost of one candidate pass (median of ten, candidate-pass-cost.txt). A budgeted phase (each synonym
- * variant, the glossary fallback) starts only while more than this is left before the wall.
+ * The measured cost of one window-first candidate pass: the messages phase's median over the 25071 row 2 replay
+ * (160 recalled prompts from 14 days, 492 ms; 25397). A budgeted phase (each synonym variant, the glossary fallback)
+ * starts only while more than this is left before the wall. A synonym variant costs less (median 297 ms) and the
+ * fallback, a whole recall, more (median 826 ms); the wall bounds either way.
  */
-export const HOOK_CANDIDATE_PASS_MS = 400
+export const HOOK_CANDIDATE_PASS_MS = 500

@@ -355,8 +355,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     `search query="${query.slice(0, 80)}" limit=${limit} since=${sinceLabel} raw=${raw} timeout=${timeout}ms mode=${mode}`,
   )
 
-  // Hook mode (@ag/tribe/25071 row 2): a candidate set instead of every match, no counts, and each budgeted phase
-  // (the widening, each synonym variant) only while more than one candidate pass is left before the wall.
+  // Hook mode (@ag/tribe/25071 row 2): the window's matches ranked under a cap instead of every match, no counts, and
+  // each budgeted phase (each synonym variant) only while more than one candidate pass is left before the wall.
   const hook = mode === "hook"
   const deadlineAt = options.deadlineAt ?? startTime + RECALL_WALL_MS
   const skipped: RecallSkip[] = []
