@@ -3,7 +3,7 @@
  * resolveVaultDbFlag, so its refusals are witnessed once, here.
  */
 import { describe, expect, test } from "vitest"
-import { resolveVaultDbFlag } from "../../src/lib/vault-db.ts"
+import { classifyVaultDbFlag, resolveVaultDbFlag } from "../../src/lib/vault-db.ts"
 
 describe("resolveVaultDbFlag", () => {
   test("absent is unbound", () => {
@@ -23,5 +23,17 @@ describe("resolveVaultDbFlag", () => {
     expect(() => resolveVaultDbFlag("/vault/state.db", () => false)).toThrow(
       "--vault-db /vault/state.db does not exist",
     )
+  })
+
+  // The daemon maps a missing file to a refused vault instead of an exit (@cto 405805a7); the rule classifies it.
+  test("classify returns a missing file as refused, naming it; an empty flag still throws", () => {
+    expect(classifyVaultDbFlag(undefined)).toEqual({ state: "unbound" })
+    expect(classifyVaultDbFlag("/vault/state.db", () => true)).toEqual({ state: "bound", path: "/vault/state.db" })
+    expect(classifyVaultDbFlag("/vault/state.db", () => false)).toEqual({
+      state: "refused",
+      path: "/vault/state.db",
+      reason: "/vault/state.db does not exist (pass the vault's state.db path)",
+    })
+    expect(() => classifyVaultDbFlag("")).toThrow(/--vault-db is empty/)
   })
 })

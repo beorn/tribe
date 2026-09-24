@@ -14,7 +14,7 @@ import { resolveSocketPath } from "tribe-wire/lib/socket"
 import { parseTribeArgs, resolveDbPath } from "tribe-wire/lib/config"
 import { resolveRecallDbPath } from "../../../../../plugins/claude/recall/lib/config.ts"
 import { resolveSummarizerMode, type SummarizerMode } from "../../../../../plugins/claude/recall/lib/summarizer.ts"
-import { resolveVaultDbFlag } from "../../../../recall/src/lib/vault-db.ts"
+import { classifyVaultDbFlag, type VaultDbFlag } from "../../../../recall/src/lib/vault-db.ts"
 import type { BaseTribe } from "./base.ts"
 
 const log = createLogger("tribe:config")
@@ -35,6 +35,12 @@ export interface TribeConfig {
    * the launch names none, and the injections then say "vault: not bound" (25149 a3).
    */
   readonly vaultDbPath: string | null
+  /**
+   * Set when `--vault-db` names no file. The bus outranks the vault (@cto 405805a7): the daemon boots, the boot
+   * line and the health document carry this refusal, every recall call that needs the vault refuses naming the
+   * path, and one incident page goes to @chief until a restart finds the file. vaultDbPath is then null.
+   */
+  readonly vaultDbRefusal?: { readonly path: string; readonly reason: string } | null
   /** Idle-quit delay in seconds. -1 ("never") disables auto-quit, 0 quits immediately on idle. */
   readonly idleQuitAfterSec: number
   /** Which surface set idleQuitAfterSec — see IdleQuitSource. */
@@ -133,6 +139,12 @@ export function resolveIdleQuit(input: {
   return { idleQuitAfterSec: 1800, idleQuitSource: "default" }
 }
 
+/** An empty flag throws (the launch line is broken); a missing file boots with the vault refused, not bound. */
+function vaultDbConfig(flag: VaultDbFlag): Pick<TribeConfig, "vaultDbPath" | "vaultDbRefusal"> {
+  if (flag.state === "refused") return { vaultDbPath: null, vaultDbRefusal: { path: flag.path, reason: flag.reason } }
+  return { vaultDbPath: flag.state === "bound" ? flag.path : null, vaultDbRefusal: null }
+}
+
 function readOperatorCapabilityFromInheritedFd(fdRaw: string | undefined): string | null {
   if (fdRaw === undefined) return null
   const fd = Number(fdRaw)
@@ -191,7 +203,7 @@ export function withConfig<T extends BaseTribe>(opts: ConfigOpts = {}): (t: T) =
       dbPath: String(resolveDbPath(tribeArgs, { migrateLegacy: false })),
       migrateLegacyDb,
       recallDbPath: resolveRecallDbPath(daemonArgs["recall-db"] as string | undefined),
-      vaultDbPath: resolveVaultDbFlag(daemonArgs["vault-db"]),
+      ...vaultDbConfig(classifyVaultDbFlag(daemonArgs["vault-db"])),
       idleQuitAfterSec: idleQuit.idleQuitAfterSec,
       idleQuitSource: idleQuit.idleQuitSource,
       inheritFd: daemonArgs.fd ? parseInt(String(daemonArgs.fd), 10) : null,

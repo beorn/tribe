@@ -230,9 +230,19 @@ describe("--vault-db, the vault the daemon's recall searches (25149 a3)", () => 
     expect(resolve().vaultDbPath).toBeNull()
   })
 
-  test("a daemon launched with --vault-db on a missing file refuses at startup, naming the path", () => {
+  // The bus outranks the vault (@cto 405805a7): a missing file boots with the vault refused, never exits.
+  test("a daemon launched with --vault-db on a missing file boots with the vault refused, naming the path", () => {
     const missing = join(dir, "moved", "state.db")
-    expect(() => resolve(["--vault-db", missing])).toThrow(`--vault-db ${missing} does not exist`)
+    const config = resolve(["--vault-db", missing])
+    expect(config.vaultDbPath).toBeNull()
+    expect(config.vaultDbRefusal).toEqual({
+      path: missing,
+      reason: `${missing} does not exist (pass the vault's state.db path)`,
+    })
+  })
+
+  test("a present vault carries no refusal", () => {
+    expect(resolve(["--vault-db", vault]).vaultDbRefusal).toBeNull()
   })
 
   test("a valueless --vault-db on the launch line refuses", () => {

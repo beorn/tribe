@@ -12,7 +12,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest"
-import { TRIBE_METHODS, type InjectDeltaResult } from "../../../../plugins/claude/recall/lib/rpc.ts"
+import { RECALL_ERRORS, TRIBE_METHODS, type InjectDeltaResult } from "../../../../plugins/claude/recall/lib/rpc.ts"
 import { VAULT_UNBOUND_NOTICE } from "../../../recall/src/lib/inject-core.ts"
 import { getVaultDbPath } from "../../../recall/src/history/vault-fts.ts"
 import { createRecallHandlers } from "./recall-handlers.ts"
@@ -72,5 +72,32 @@ describe("the daemon binds --vault-db into recall (25149 a3)", () => {
     const result = await injectOnce("bound", vaultDb)
     expect(getVaultDbPath()).toBe(vaultDb)
     expect(result.additionalContext ?? "").not.toContain(VAULT_UNBOUND_NOTICE)
+  })
+})
+
+// The bus outranks the vault (@cto 405805a7): a launch line naming no file boots, and every recall call that needs
+// the vault refuses naming the path, while the rest of recall still answers.
+describe("a daemon whose --vault-db names no file refuses the calls that need the vault (25149)", () => {
+  test("ask, plan and inject_delta refuse naming the path; status still answers", async () => {
+    const missing = join(base, "moved", "state.db")
+    const handlers = createRecallHandlers({
+      dbPath: join(base, "lore-refused.db"),
+      socketPath: join(base, "lore.sock"),
+      daemonVersion: "test",
+      vaultDbPath: null,
+      vaultDbRefusal: { path: missing, reason: `${missing} does not exist (pass the vault's state.db path)` },
+    })
+    try {
+      const conn = { sessionId: "s-refused", claudePid: null }
+      for (const method of [TRIBE_METHODS.ask, TRIBE_METHODS.planOnly, TRIBE_METHODS.injectDelta]) {
+        await expect(handlers.dispatch(conn, method, { prompt: "q", query: "q" }), method).rejects.toMatchObject({
+          message: `recall vault REFUSED: ${missing} does not exist (pass the vault's state.db path)`,
+          code: RECALL_ERRORS.vaultRefused,
+        })
+      }
+      await expect(handlers.dispatch(conn, TRIBE_METHODS.status, {})).resolves.toMatchObject({ daemonVersion: "test" })
+    } finally {
+      await handlers.close()
+    }
   })
 })

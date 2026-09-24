@@ -55,6 +55,7 @@ import { TOOLS_LIST } from "tribe-wire/lib/tools-list"
 import { pruneOldActivityLogs } from "./lib/activity-log.ts"
 import { countDurableSessionRows } from "./lib/session.ts"
 import { gatherCodePin, STARTUP_SHA } from "./lib/code-pin.ts"
+import { pageVaultDbRefusal } from "./lib/vault-db-page.ts"
 import { parseDeliveryFallbackPolicy } from "./lib/delivery-resolution.ts"
 import { createDeclaredRosterReader } from "./lib/membership-declared-roster.ts"
 import { drainOutput } from "loggily"
@@ -358,7 +359,10 @@ log.info?.(`DB: ${tribe.config.dbPath}`)
 log.info?.(`PID: ${process.pid}`)
 if (tribe.recall) {
   log.info?.(`Recall DB: ${tribe.config.recallDbPath}`)
-  log.info?.(`Recall vault: ${tribe.config.vaultDbPath ?? "not bound (pass --vault-db)"}`)
+  const refusal = tribe.config.vaultDbRefusal
+  if (refusal) log.error?.(`Recall vault: REFUSED ${refusal.reason}`)
+  else log.info?.(`Recall vault: ${tribe.config.vaultDbPath ?? "not bound (pass --vault-db)"}`)
+  pageVaultDbRefusal(tribe.daemonCtx, refusal ?? null)
 }
 log.info?.(`Daemon ready (pid=${process.pid}, clients=${tribe.registry.clients.size})`)
 

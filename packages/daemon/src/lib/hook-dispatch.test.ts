@@ -132,7 +132,7 @@ describe("tribe hook --vault-db binds recall's vault before the handler runs (25
 
   test("a --vault-db naming no file refuses and names the path", () => {
     expect(parseHookArgs(["--vault-db", "/moved/state.db"], present)).toEqual({
-      error: "--vault-db /moved/state.db does not exist; pass the vault's state.db path",
+      error: "--vault-db /moved/state.db does not exist (pass the vault's state.db path)",
     })
   })
 

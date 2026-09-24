@@ -276,6 +276,8 @@ export type HandlerOpts = {
    * (@ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded).
    */
   getExpectedMembers?: () => DeclaredRoster | undefined
+  /** Set when the daemon booted with `--vault-db` naming no file; `tribe health` carries it (25149). */
+  recallVaultRefusal?: { readonly path: string; readonly reason: string } | null
   /** Optional: dump daemon internals for `tribe.debug`. Daemon-only (tests using
    *  handlers directly can omit this — `tribe.debug` then returns a minimal
    *  snapshot synthesized from the other accessors). */
@@ -3387,7 +3389,9 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     // alarms. One known producer is @ag/tribe/no-tribe-flag-does-not-gate-the-join.
     anonymous_disconnected: disconnected.anonymousDurable.length,
     ...(membershipDiscrepancy === undefined ? {} : { membership_discrepancy: membershipDiscrepancy }),
+    ...(opts.recallVaultRefusal ? { recall_vault: { state: "refused", ...opts.recallVaultRefusal } } : {}),
     issues: [
+      ...(opts.recallVaultRefusal ? [`recall vault REFUSED: --vault-db ${opts.recallVaultRefusal.reason}`] : []),
       ...transportWedges.map(
         (wedge) =>
           `transport wedge ${wedge.name}: transport_state=${wedge.transport_state} owner_state=${wedge.owner_state} reason=${wedge.wedge_reason}`,

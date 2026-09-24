@@ -179,6 +179,8 @@ export type RecallHandlerOpts = {
   summarizerMode?: SummarizerMode
   /** `--vault-db` from the daemon's launch line; bound into the engine once it loads (25149 a3). */
   vaultDbPath?: string | null
+  /** `--vault-db` named no file: the calls that search the vault refuse, naming it (@cto 405805a7). */
+  vaultDbRefusal?: { readonly path: string; readonly reason: string } | null
   signal?: AbortSignal
 }
 
@@ -187,6 +189,9 @@ export type RecallHandlerOpts = {
 // ---------------------------------------------------------------------------
 
 const RECALL_METHOD_SET = new Set<string>(Object.values(TRIBE_METHODS))
+
+/** The recall calls that search the km vault; with the vault refused, each refuses rather than answer without it. */
+const VAULT_METHODS = new Set<string>([TRIBE_METHODS.ask, TRIBE_METHODS.planOnly, TRIBE_METHODS.injectDelta])
 
 export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
   const log = createLogger("tribe:recall")
@@ -473,6 +478,11 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
   // ---------------------------------------------------------------------------
 
   async function dispatch(conn: RecallConnState, method: string, params: Record<string, unknown>): Promise<unknown> {
+    if (opts.vaultDbRefusal && VAULT_METHODS.has(method)) {
+      const err = new Error(`recall vault REFUSED: ${opts.vaultDbRefusal.reason}`) as Error & { code?: number }
+      err.code = RECALL_ERRORS.vaultRefused
+      throw err
+    }
     switch (method) {
       case TRIBE_METHODS.hello:
         return handleHello(conn, params as unknown as HelloParams)

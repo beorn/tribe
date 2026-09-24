@@ -334,4 +334,6 @@ export const RECALL_ERRORS = {
   invalidParams: -32602,
   notImplemented: -32003,
   fallthrough: -32010,
+  /** The daemon's `--vault-db` names no file: every call that needs the vault refuses, naming it (25149). */
+  vaultRefused: -32011,
 } as const

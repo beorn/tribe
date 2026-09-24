@@ -795,6 +795,7 @@ export function withDispatcher<
       resolveDelivery: hooks.resolveDelivery,
       retiredNames: hooks.retiredNames,
       getExpectedMembers: hooks.getExpectedMembers,
+      recallVaultRefusal: t.config.vaultDbRefusal ?? null,
       // tribe.stop actuator — absent (handler refuses loudly) unless the
       // composing daemon supplied its shutdown.
       triggerStop: hooks.triggerShutdown,
