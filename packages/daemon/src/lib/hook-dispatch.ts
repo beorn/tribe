@@ -18,8 +18,12 @@
  *
  * Before forwarding, we consult the autostart config and (if configured)
  * ensure the unified tribe daemon is running. The stable standalone owner is
- * detached + unref'd while the daemon remains its child, so the overall
- * 300 ms budget guarantees Claude Code never waits on us.
+ * detached + unref'd while the daemon remains its child, and that check has
+ * its own 300 ms budget (autostart.ts). The prompt hook as a whole is bounded
+ * by its recall: a 1.0 s target and a 1.5 s wall, both stated in
+ * tribe-recall's history/recall-budget.ts with their measurements
+ * (@ag/tribe/25071 row 2; the prompt hook measured 2 to 4 s against a 300 ms
+ * figure once written here).
  *
  * km-bear.unified-daemon Phase 5d: collapsed from two parallel probes
  * (lore + tribe) to one — the unified daemon hosts both surfaces.

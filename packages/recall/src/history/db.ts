@@ -155,4 +155,10 @@ export {
 } from "./db-queries.ts"
 
 // Re-export types
-export type { MessageSearchOptions, ContentSearchOptions } from "./db-queries.ts"
+export type {
+  MessageSearchOptions,
+  ContentSearchOptions,
+  MessageSearchHit,
+  ContentSearchHit,
+  HookMessageSearch,
+} from "./db-queries.ts"

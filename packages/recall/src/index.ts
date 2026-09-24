@@ -57,7 +57,15 @@ export {
 export { hookRecall, extractTranscriptMessages, reviewMemorySystem } from "./history/scanner.ts"
 export { ensureProjectSourcesIndexed } from "./history/project-sources.ts"
 
-export type { IndexProvenance, RecallOptions, RecallResult, RecallSearchResult } from "./history/recall-shared.ts"
+export type {
+  HookSearchSummary,
+  IndexProvenance,
+  RecallOptions,
+  RecallResult,
+  RecallSearchResult,
+  RecallSkip,
+  SearchMode,
+} from "./history/recall-shared.ts"
 export type {
   LlmRaceModelResult,
   LlmRaceResult,

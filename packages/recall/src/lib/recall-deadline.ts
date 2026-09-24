@@ -1,5 +1,6 @@
 /**
- * A hard wall clock on the prompt hook's recall (@ag/tribe/25071 stopgap, @chief c348476a).
+ * The hard wall on the prompt hook's recall (@ag/tribe/25071: the stopgap by @chief c348476a, and the wall's figure
+ * by row 2, @cto's ruling 2026-09-23; the budget and its measurements are stated in history/recall-budget.ts).
  *
  * Recall is synchronous SQLite, so no timer on the caller's thread can fire until it returns: measured on
  * 2026-09-23, the glossary fallback alone took over 25 s 28 times, and Claude Code's 30 s kill then discards the
@@ -10,18 +11,18 @@
  * keeps its process alive meanwhile. So only a caller that EXITS may use this: the prompt hook (cmdHook), where every
  * path ends in process.exit. A long-lived caller (the daemon, the plugin server) would stack abandoned queries, so
  * runInjectDelta stays in-thread by default. process.exit ends such a process on bun 1.4.2 (the fleet's runtime and
- * tribe's .bun-version) but not on 1.3.14 (measured by review2). The 5 s is a stopgap figure, not the budget: 25071 row 2 sets that.
+ * tribe's .bun-version) but not on 1.3.14 (measured by review2). Hook-mode recall aims for RECALL_TARGET_MS; the wall
+ * only bounds the failure.
  */
 import { IndexWriterBusyError } from "../history/db.ts"
 import type { RecallOptions, RecallResult } from "../history/recall-shared.ts"
+import { RECALL_WALL_MS } from "../history/recall-budget.ts"
 import type { recall } from "../history/search.ts"
-
-export const RECALL_DEADLINE_MS = 5000
 
 /** Recall outlived its deadline; the message is the line the hook says in its output. */
 export class RecallDeadlineError extends Error {
   constructor(deadlineMs: number) {
-    super(`recall skipped: over ${String(deadlineMs / 1000)} s (25071 stopgap)`)
+    super(`recall skipped: over the ${String(deadlineMs / 1000)} s wall (25071)`)
     this.name = "RecallDeadlineError"
   }
 }
@@ -40,7 +41,7 @@ type WorkerAnswer =
  * together get `deadlineMs`, not each. The clock starts at the first call.
  */
 export function createDeadlineRecall(opts: { deadlineMs?: number; workerUrl?: URL | string } = {}): DeadlineRecall {
-  const deadlineMs = opts.deadlineMs ?? RECALL_DEADLINE_MS
+  const deadlineMs = opts.deadlineMs ?? RECALL_WALL_MS
   const workerUrl = opts.workerUrl ?? new URL("./recall-worker.ts", import.meta.url)
   const pending = new Map<number, { resolve: (result: RecallResult) => void; reject: (error: Error) => void }>()
   let worker: Worker | undefined

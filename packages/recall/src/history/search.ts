@@ -12,7 +12,9 @@ import {
   toFts5Query,
   type MessageSearchOptions,
   type ContentSearchOptions,
+  type HookMessageSearch,
 } from "./db.ts"
+import { HOOK_CANDIDATE_PASS_MS, RECALL_WALL_MS } from "./recall-budget.ts"
 import type { ContentType } from "./types.ts"
 import { synthesizeResults } from "./synthesize.ts"
 import {
@@ -28,6 +30,7 @@ import type {
   RecallOptions,
   RecallResult,
   RecallSearchResult,
+  RecallSkip,
   SynthesisDiagnostics,
 } from "./recall-shared.ts"
 
@@ -37,7 +40,15 @@ import { searchVault, getVaultDbPath } from "./vault-fts.ts"
 
 // Re-export shared items so existing internal imports continue to work
 export { setRecallLogging, log, ONE_HOUR_MS, ONE_DAY_MS, THIRTY_DAYS_MS } from "./recall-shared.ts"
-export type { IndexProvenance, RecallOptions, RecallResult, RecallSearchResult } from "./recall-shared.ts"
+export type {
+  HookSearchSummary,
+  IndexProvenance,
+  RecallOptions,
+  RecallResult,
+  RecallSearchResult,
+  RecallSkip,
+  SearchMode,
+} from "./recall-shared.ts"
 
 // ============================================================================
 // Time parsing
@@ -333,13 +344,45 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     snippetTokens = 200,
     projectFilter,
     excludeCurrentSession = false,
+    mode = "exact",
   } = options
   const provenance: IndexProvenance = options.provenance ?? "unknown"
   const currentSessionId = excludeCurrentSession ? process.env.CLAUDE_SESSION_ID : undefined
 
   const startTime = Date.now()
   const sinceLabel = since ?? "30d"
-  log(`search query="${query.slice(0, 80)}" limit=${limit} since=${sinceLabel} raw=${raw} timeout=${timeout}ms`)
+  log(
+    `search query="${query.slice(0, 80)}" limit=${limit} since=${sinceLabel} raw=${raw} timeout=${timeout}ms mode=${mode}`,
+  )
+
+  // Hook mode (@ag/tribe/25071 row 2): a candidate set instead of every match, no counts, and each budgeted phase
+  // (the widening, each synonym variant) only while more than one candidate pass is left before the wall.
+  const hook = mode === "hook"
+  const deadlineAt = options.deadlineAt ?? startTime + RECALL_WALL_MS
+  const skipped: RecallSkip[] = []
+  const phases: Record<string, number> = {}
+  const phase = <T>(name: string, run: () => T): T => {
+    const began = performance.now()
+    try {
+      return run()
+    } finally {
+      phases[name] = (phases[name] ?? 0) + performance.now() - began
+    }
+  }
+  let hookSearch: HookMessageSearch | undefined
+  const said = (): Pick<RecallResult, "hookSearch" | "skipped"> => ({
+    ...(hookSearch === undefined
+      ? {}
+      : {
+          hookSearch: {
+            candidateLimit: hookSearch.candidateLimit,
+            widened: hookSearch.widened,
+            firstSurvivors: hookSearch.firstSurvivors,
+            survivors: hookSearch.survivors,
+          },
+        }),
+    ...(skipped.length === 0 ? {} : { skipped }),
+  })
 
   const db = getDb()
 
@@ -368,12 +411,24 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       sinceTime,
       projectFilter,
       snippetTokens,
+      mode,
+      deadlineAt,
     }
 
     const searchStart = Date.now()
-    const messageResults = ftsSearchWithSnippet(db, query, messageOpts)
+    const messageResults = phase("messages", () => ftsSearchWithSnippet(db, query, messageOpts))
     const msgMs = Date.now() - searchStart
-    log(`FTS5 messages: ${messageResults.total} total, ${messageResults.results.length} returned (${msgMs}ms)`)
+    hookSearch = messageResults.hook
+    if (hookSearch) skipped.push(...hookSearch.skipped)
+    if (hookSearch) {
+      log(
+        `FTS5 messages: total: not counted (hook mode), ${messageResults.results.length} returned (${msgMs}ms) ` +
+          `[candidates ${hookSearch.candidateLimit}, first-pass survivors ${hookSearch.firstSurvivors}, ` +
+          `survivors ${hookSearch.survivors}${hookSearch.widened ? ", widened" : ""}]`,
+      )
+    } else {
+      log(`FTS5 messages: ${String(messageResults.total)} total, ${messageResults.results.length} returned (${msgMs}ms)`)
+    }
 
     // Search session-scoped content (plans, summaries, todos, first_prompts) with time filter
     const sessionContentOpts: ContentSearchOptions = {
@@ -382,10 +437,11 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       projectFilter,
       snippetTokens,
       types: ["plan", "summary", "todo", "first_prompt"] as ContentType[],
+      mode,
     }
 
     const contentStart = Date.now()
-    const sessionContentResults = searchAll(db, query, sessionContentOpts)
+    const sessionContentResults = phase("session_content", () => searchAll(db, query, sessionContentOpts))
     const sessionMs = Date.now() - contentStart
 
     // Search project knowledge sources (beads, memory, docs) WITHOUT time filter
@@ -395,9 +451,10 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       projectFilter,
       snippetTokens,
       types: ["bead", "session_memory", "project_memory", "doc", "claude_md", "llm_research"] as ContentType[],
+      mode,
     }
 
-    const projectContentResults = searchAll(db, query, projectContentOpts)
+    const projectContentResults = phase("project_content", () => searchAll(db, query, projectContentOpts))
     const projectMs = Date.now() - projectStart
 
     // Vault FTS — opt-in: searches the km tree db (.km/state.db) when bound.
@@ -405,7 +462,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     // transcript fragments, so we boost vault hits with a strong negative
     // rank (more negative = better).
     const vaultStart = Date.now()
-    const vaultMatches = searchVault(query, limit * 2)
+    const vaultMatches = phase("vault", () => searchVault(query, limit * 2))
     const vaultMs = Date.now() - vaultStart
     if (vaultMatches.length > 0) {
       log(`vault FTS: ${vaultMatches.length} matches (${vaultMs}ms) [${getVaultDbPath() ?? "?"}]`)
@@ -429,6 +486,18 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       ])
 
       for (const variant of queryVariants.slice(0, 4)) {
+        if (hook) {
+          const left = deadlineAt - Date.now()
+          if (left <= HOOK_CANDIDATE_PASS_MS) {
+            skipped.push({
+              phase: "synonym",
+              anchor: variant,
+              message: `recall synonym skipped: anchor "${variant}", ${String(left)} ms left (25071)`,
+            })
+            continue
+          }
+        }
+        const began = performance.now()
         try {
           // Search messages with variant
           const varMsgs = ftsSearchWithSnippet(db, variant, {
@@ -473,6 +542,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
           }
         } catch {
           // Skip variants that fail FTS5 parsing
+        } finally {
+          phases.synonyms = (phases.synonyms ?? 0) + performance.now() - began
         }
       }
 
@@ -484,20 +555,22 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     // Merge both content result sets
     const contentResults = {
       results: [...sessionContentResults.results, ...projectContentResults.results],
-      total: sessionContentResults.total + projectContentResults.total,
     }
     const searchMs = Date.now() - searchStart
     log(`FTS5 search: ${searchMs}ms (messages=${msgMs}ms session=${sessionMs}ms project=${projectMs}ms)`)
 
     // Get session titles for enrichment
-    const sessionTitles = getAllSessionTitles()
+    const sessionTitles = phase("titles", () => getAllSessionTitles())
 
     // Session depth corroboration: sessions with more matching messages are more relevant.
     // A session with 10 messages about the topic is more authoritative than one with 1 passing mention.
+    // Hook mode reads each session's depth from its candidate set, since this GROUP BY scans every all-time match
+    // (14.5 s on tribe*); that depth is within the candidates, not all-time (@cto 9665a0ec).
     const corroborationStart = Date.now()
+    const corroborationBegan = performance.now()
     const ftsQuery = toFts5Query(query)
-    const sessionDepths = new Map<string, number>()
-    try {
+    const sessionDepths = hookSearch ? new Map(hookSearch.sessionDepths) : new Map<string, number>()
+    if (!hookSearch) try {
       const depthRows = db
         .prepare(
           `SELECT m.session_id, COUNT(*) as depth
@@ -515,6 +588,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     } catch {
       // FTS5 query parsing can fail for some edge cases — skip corroboration
     }
+    phases.corroboration = performance.now() - corroborationBegan
     const corroborationMs = Date.now() - corroborationStart
     if (sessionDepths.size > 0) {
       const maxDepth = Math.max(...sessionDepths.values())
@@ -526,7 +600,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     // break the autocatalytic loop where current-session transcript fragments
     // get re-emitted as if they were prior memory).
     const liveStart = Date.now()
-    const liveResults = excludeCurrentSession ? [] : searchLiveSession(query, limit)
+    const liveResults = phase("live_session", () => (excludeCurrentSession ? [] : searchLiveSession(query, limit)))
     const liveMs = Date.now() - liveStart
     if (liveResults.length > 0) {
       log(`live session: ${liveResults.length} matches (${liveMs}ms)`)
@@ -616,6 +690,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
 
     // Session proximity: expand top message results with neighboring context
     const proximityStart = Date.now()
+    const proximityBegan = performance.now()
     const TOP_N = Math.min(5, deduped.length)
     let contextExpanded = 0
     for (let i = 0; i < TOP_N; i++) {
@@ -641,6 +716,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         }
       }
     }
+    phases.proximity = performance.now() - proximityBegan
     if (contextExpanded > 0) {
       log(
         `session proximity: expanded ${contextExpanded} results with neighboring context (${Date.now() - proximityStart}ms)`,
@@ -656,6 +732,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         synthesis: null,
         results: [],
         durationMs: Date.now() - startTime,
+        timing: { searchMs, phases },
+        ...said(),
       }
     }
 
@@ -668,7 +746,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         synthesis: null,
         results: deduped,
         durationMs: Date.now() - startTime,
-        timing: { searchMs },
+        timing: { searchMs, phases },
+        ...said(),
       }
     }
 
@@ -694,8 +773,9 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
         synthesis: null,
         results: deduped,
         durationMs: totalMs,
-        timing: { searchMs, llmMs },
+        timing: { searchMs, llmMs, phases },
         synthesisFailure: synthesisDiagnosticsFromError(err, timeout),
+        ...said(),
       }
     }
     const llmMs = Date.now() - llmStart
@@ -712,7 +792,8 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       results: deduped,
       durationMs: totalMs,
       llmCost: synthesis.cost,
-      timing: { searchMs, llmMs },
+      timing: { searchMs, llmMs, phases },
+      ...said(),
     }
   } finally {
     closeDb()
