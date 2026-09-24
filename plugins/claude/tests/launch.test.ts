@@ -24,7 +24,8 @@ function fakeBun(probeExit: number, installExit: number): string {
     [
       "#!/bin/sh",
       `echo "$*" >> "${log}"`,
-      `case "$1" in *server.ts) pwd > "${log}.cwd" ;; esac`,
+      // Every call records the directory it ran in, so a check or install that leaves the plugin root shows up.
+      `printf '%s\\t%s\\n' "$1" "$(pwd)" >> "${log}.cwd"`,
       `case "$1" in -e) exit ${probeExit} ;; install) echo "install failed: registry down" >&2; exit ${installExit} ;; esac`,
       "exit 0",
       "",
@@ -32,6 +33,17 @@ function fakeBun(probeExit: number, installExit: number): string {
   )
   chmodSync(script, 0o755)
   return bin
+}
+
+/** Each fake-bun call as its first argument and the directory it ran in, in call order. */
+function callDirectories(): string[][] {
+  return readFileSync(`${log}.cwd`, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => {
+      const [arg = "", cwd = ""] = line.split("\t")
+      return [arg, realpathSync(cwd)]
+    })
 }
 
 function launch(bin: string) {
@@ -73,7 +85,21 @@ describe("plugin launch", () => {
   test("the server starts in the caller's directory, not the plugin root", () => {
     const result = launch(fakeBun(1, 0))
     expect(result.status, result.stderr).toBe(0)
-    expect(readFileSync(`${log}.cwd`, "utf8").trim()).toBe(realpathSync(dir))
+    expect(callDirectories().at(-1)).toEqual([join(PLUGIN_ROOT, "server.ts"), realpathSync(dir)])
+  })
+
+  /**
+   * @failure The resolve check ran in the caller's directory: from a host checkout it exits 1, so every launch there
+   * reinstalled into the plugin tree under running processes (25513, review2's launch-cwd verdict).
+   */
+  test("the resolve check and the install run in the plugin root", () => {
+    const result = launch(fakeBun(1, 0))
+    expect(result.status, result.stderr).toBe(0)
+    const root = realpathSync(PLUGIN_ROOT)
+    expect(callDirectories().slice(0, 2)).toEqual([
+      ["-e", root],
+      ["install", root],
+    ])
   })
 
   test("a failed install stops the start and keeps its stderr", () => {
