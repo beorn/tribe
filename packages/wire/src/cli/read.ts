@@ -35,6 +35,7 @@ import {
 } from "../lib/code-identity.ts"
 import type { BallSettlementReason } from "../lib/ball-outcome.ts"
 import { AG_SESSION_AUTH_ENV, readSelfMailboxAuthorityFromEnvironment } from "../lib/self-mailbox-authority.ts"
+import { HAB_ID_TOKEN_ENV, readIdentityTokenFromEnvironment } from "../lib/identity-token.ts"
 
 const PENDING_CLI = visibleCliProjectionForMcp("pending")
 const MEMBERS_CLI = visibleCliProjectionForMcp("members")
@@ -614,6 +615,8 @@ async function cmdPending(
       // Null is deliberate: the daemon records the refused capability attempt
       // and returns a typed -32004 without ever reaching pending-row mutation.
       args.authority = authority
+      const idToken = readIdentityTokenFromEnvironment(process.env)
+      if (idToken !== null) args.idToken = idToken
     } else if (!all && owner === undefined) {
       // A one-shot CLI socket starts life under a pending-* placeholder. An
       // implicit owner must therefore come from the launcher-minted current-
@@ -622,6 +625,8 @@ async function cmdPending(
       // managed-session bearer is absent instead of answering count:0 for nobody.
       method = "cli_session_pending_read_v1"
       args.authority = readSelfMailboxAuthorityFromEnvironment(process.env)
+      const idToken = readIdentityTokenFromEnvironment(process.env)
+      if (idToken !== null) args.idToken = idToken
     }
     rawResult = await callDaemon(method, args)
   } catch (error) {
@@ -1585,11 +1590,19 @@ function printSelfInboxEvent(event: SelfInboxEvent): void {
 
 async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean }): Promise<void> {
   const authority = readSelfMailboxAuthorityFromEnvironment(process.env)
-  if (authority === null) {
-    throw new Error(`${AG_SESSION_AUTH_ENV} is missing; this managed session has no self-mailbox authority source`)
+  const idToken = readIdentityTokenFromEnvironment(process.env)
+  if (authority === null && idToken === null) {
+    throw new Error(
+      `${HAB_ID_TOKEN_ENV} and ${AG_SESSION_AUTH_ENV} are both missing; this managed session has no self-mailbox authority source`,
+    )
   }
   const result = mcpJsonContent(
-    await callDaemon("cli_self_inbox_v1", { authority, limit: opts.limit ?? 50, peek: opts.peek }),
+    await callDaemon("cli_self_inbox_v1", {
+      authority,
+      ...(idToken === null ? {} : { idToken }),
+      limit: opts.limit ?? 50,
+      peek: opts.peek,
+    }),
   ) as SelfInboxResult
   if (opts.json) {
     if (!opts.peek) {

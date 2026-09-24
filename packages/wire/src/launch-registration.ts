@@ -203,7 +203,10 @@ function exactLaunchMember(
       mailboxReadCapability !== null &&
       (mailboxReadCapability as Record<string, unknown>)["state"] === "available" &&
       (mailboxReadCapability as Record<string, unknown>)["evidence_kind"] === "observed" &&
-      (mailboxReadCapability as Record<string, unknown>)["reason"] === "self-mailbox-authority-registered"
+      // 25074 3b: dual-keyed with the daemon's session resolution — a bearer-registered or a token-verified
+      // session re-certifies; the two move together or a verified seat fails its own re-certification.
+      ((mailboxReadCapability as Record<string, unknown>)["reason"] === "self-mailbox-authority-registered" ||
+        (mailboxReadCapability as Record<string, unknown>)["reason"] === "self-mailbox-authority-token")
     ) {
       return { member, mailboxReadCapabilityDetail: null }
     }

@@ -352,11 +352,12 @@ function readLastMailboxReadAt(stmts: TribeContext["stmts"], name: string): numb
 
 function ownerTransportObservationProjector(ctx: TribeContext, opts: HandlerOpts, observedAt: number) {
   const sessionRows = ctx.db
-    .prepare("SELECT id, name, mailbox_authority_hash, delivery, updated_at FROM sessions")
+    .prepare("SELECT id, name, mailbox_authority_hash, identity_sid, delivery, updated_at FROM sessions")
     .all() as Array<{
     id: string
     name: string
     mailbox_authority_hash: string | null
+    identity_sid: string | null
     delivery: string
     updated_at: number
   }>
@@ -366,7 +367,7 @@ function ownerTransportObservationProjector(ctx: TribeContext, opts: HandlerOpts
   const mailboxDeafNames = new Set<string>()
   const mailboxDeafReasons = new Map<string, MailboxReadCapability["reason"]>()
   for (const row of sessionRows) {
-    const capability = projectMailboxReadCapability(row.mailbox_authority_hash)
+    const capability = projectMailboxReadCapability(row)
     if (capability.state === "unavailable") {
       mailboxDeafNames.add(row.name)
       mailboxDeafReasons.set(row.name, capability.reason)
@@ -2148,7 +2149,11 @@ type DurableMembershipSessionRow = MembershipSessionRow & {
 type MailboxReadCapability = {
   state: "available" | "unavailable"
   evidence_kind: "observed"
-  reason: "self-mailbox-authority-registered" | "self-mailbox-authority-missing" | "self-mailbox-authority-invalid"
+  reason:
+    | "self-mailbox-authority-registered"
+    | "self-mailbox-authority-token"
+    | "self-mailbox-authority-missing"
+    | "self-mailbox-authority-invalid"
 }
 
 /**
@@ -2157,7 +2162,15 @@ type MailboxReadCapability = {
  * can send and heartbeat while remaining unable to read their own canonical
  * inbox. A malformed stored hash is unavailable, never an optimistic unknown.
  */
-function projectMailboxReadCapability(mailboxAuthorityHash: string | null): MailboxReadCapability {
+function projectMailboxReadCapability(session: {
+  readonly mailbox_authority_hash: string | null
+  readonly identity_sid: string | null
+}): MailboxReadCapability {
+  // 25074 3b — a session registered with a verified identity token reads its own inbox by that token.
+  if (session.identity_sid !== null) {
+    return { state: "available", evidence_kind: "observed", reason: "self-mailbox-authority-token" }
+  }
+  const mailboxAuthorityHash = session.mailbox_authority_hash
   if (mailboxAuthorityHash === null) {
     return {
       state: "unavailable",
@@ -2729,6 +2742,7 @@ export function projectSessionRowTransport(
     readonly updated_at: number
     readonly delivery: string
     readonly mailbox_authority_hash: string | null
+    readonly identity_sid: string | null
   },
   activeIds: ReadonlySet<string>,
   activeInfo: readonly ActiveSessionInfo[],
@@ -2760,7 +2774,7 @@ export function projectSessionRowTransport(
       clientRegistered: transportConnected,
       ownerWaiting: mailbox.hasLiveWaiter?.(row.name) === true,
     }),
-    mailboxReadable: projectMailboxReadCapability(row.mailbox_authority_hash).state === "available",
+    mailboxReadable: projectMailboxReadCapability(row).state === "available",
     lastMailboxReadAt: readLastMailboxReadAt(mailbox.stmts, row.name),
     now,
   })
@@ -2859,7 +2873,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
       cwd: r.cwd,
       claude_session_id: r.claude_session_id,
       claude_session_name: r.claude_session_name,
-      mailbox_read_capability: projectMailboxReadCapability(r.mailbox_authority_hash),
+      mailbox_read_capability: projectMailboxReadCapability(r),
       // 25074 3b — how the daemon knows this session is who it says: verified (its identity token), bearer (a
       // launch-minted mailbox authority), or claimed (its name alone). A facet, never an exit code.
       authority: sessionAuthority(r),
@@ -3316,7 +3330,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
       launch_id: active.launchId,
       launch_parent_pid: active.launchParentPid,
       transport_pids: transportPids,
-      mailbox_read_capability: projectMailboxReadCapability(s.mailbox_authority_hash),
+      mailbox_read_capability: projectMailboxReadCapability(s),
       authority: sessionAuthority(s),
       ...transport,
       ...liveness,
@@ -3366,7 +3380,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     // self-read bearer, so keep health loud without manufacturing incidents
     // for processes that have no canonical seat mailbox to read.
     if (!isDurableMembershipSessionRow(session)) return []
-    const capability = projectMailboxReadCapability(session.mailbox_authority_hash)
+    const capability = projectMailboxReadCapability(session)
     return capability.state === "available"
       ? []
       : [

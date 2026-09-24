@@ -638,7 +638,7 @@ describe("registerSendCommands", () => {
                   error: {
                     code: -32004,
                     message:
-                      "current session authority is missing; AG_SESSION_AUTH must be inherited from the managed launch",
+                      "current session authority is missing; HAB_ID_TOKEN or AG_SESSION_AUTH must be inherited from the managed launch",
                     data: {
                       kind: "could-not-evaluate",
                       reason: "session-authority-missing",
@@ -734,7 +734,7 @@ describe("registerSendCommands", () => {
       expect(missingAuthorityClose.code).toBe(2)
       expect(missingAuthorityClose.stdout).toBe("")
       expect(missingAuthorityClose.stderr).toBe(
-        `tribe pending: current session authority is missing; ${AG_SESSION_AUTH_ENV} must be inherited from the managed launch\n`,
+        `tribe pending: current session authority is missing; HAB_ID_TOKEN or ${AG_SESSION_AUTH_ENV} must be inherited from the managed launch\n`,
       )
       expect(pendingOpen).toBe(true)
 

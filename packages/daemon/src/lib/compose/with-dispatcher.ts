@@ -36,6 +36,7 @@ import { createLogger } from "loggily"
 import { DEFAULT_INBOX_WAIT_SESSION, resolveInboxWaitOptions } from "tribe-wire"
 import { deriveTribePersonaLaunchIdentity, providerLaunchIdOf } from "tribe-wire/lib/persona-launch-identity"
 import { AG_SESSION_AUTH_ENV, hashSelfMailboxAuthority } from "tribe-wire/lib/self-mailbox-authority"
+import { HAB_ID_TOKEN_ENV } from "tribe-wire/lib/identity-token"
 import {
   createLineParser,
   isRequest,
@@ -382,38 +383,87 @@ export function withDispatcher<
       )
     }
 
-    function resolveSessionAuthority(value: unknown): SessionAuthorityResolution {
+    type AuthorityRow = LaunchAuthorityRow & {
+      role: TribeRole
+      domains: string
+      claude_session_id: string | null
+      claude_session_name: string | null
+    }
+    const AUTHORITY_ROW_COLUMNS =
+      "id, name, role, domains, principal_class, launch_id, launch_parent_pid, claude_session_id, claude_session_name"
+
+    function rejected(reason: string, message: string): SessionAuthorityResolution {
+      return { errorCode: -32003, errorMessage: message, errorData: { kind: "unauthenticated", reason } }
+    }
+
+    /**
+     * 25074 3b — one decision for a one-shot caller's authority, dual-keyed until 3d deletes the bearer: the launch's
+     * identity token when the daemon has a verifier, else the launcher-minted bearer. A verified token resolves the
+     * session its registration recorded under the token's sid; the verifier already proved the instance live, so a
+     * service needs no connected owner transport beside it. A contradicted token, or a verifier fault, refuses; an
+     * unreadable token falls back to the bearer, which is its own authority, and says so in the log.
+     */
+    async function resolveSessionAuthority(value: unknown, idToken: unknown): Promise<SessionAuthorityResolution> {
+      const token = requiredNonEmptyString(idToken)
+      const verifier = hooks.identityVerifier
+      if (token !== null && verifier) {
+        let verdict: IdentityVerdict
+        try {
+          verdict = await verifier.verify(token)
+        } catch (error) {
+          const fault = error instanceof Error ? error.message : String(error)
+          log.error?.(`identity verifier ${verifier.path} failed on a one-shot caller's token: ${fault}`)
+          return rejected(
+            "identity-verifier-fault",
+            `current session authority could not be evaluated: the identity verifier failed: ${fault}`,
+          )
+        }
+        if (verdict.result === "contradicted") {
+          return rejected(
+            "identity-contradicted",
+            `current session authority was rejected: the identity token is contradicted: ${verdict.reason}`,
+          )
+        }
+        if (verdict.result === "verified") {
+          const row = db
+            .prepare(`SELECT ${AUTHORITY_ROW_COLUMNS} FROM sessions WHERE identity_sid = $sid AND name = $name`)
+            .get({ $sid: verdict.sid, $name: verdict.actor }) as AuthorityRow | null
+          if (row === null || isTombstonedSessionName(row.name)) {
+            return rejected(
+              "identity-not-registered",
+              `current session authority was rejected: ${verdict.actor}'s token is verified, but no session registered ` +
+                `under its sid ${verdict.sid}; the seat's own adapter registers it`,
+            )
+          }
+          return contextForAuthorityRow(row)
+        }
+        if (verdict.result === "unreadable") {
+          log.warn?.(`one-shot caller's identity token is unreadable (${verdict.reason}); resolving by its bearer`)
+        }
+      }
       const supplied = requiredNonEmptyString(value)
       if (supplied === null) {
         return {
           errorCode: -32004,
-          errorMessage: `current session authority is missing; ${AG_SESSION_AUTH_ENV} must be inherited from the managed launch`,
+          errorMessage:
+            `current session authority is missing; ${HAB_ID_TOKEN_ENV} or ${AG_SESSION_AUTH_ENV} ` +
+            "must be inherited from the managed launch",
           errorData: { kind: "could-not-evaluate", reason: "session-authority-missing" },
         }
       }
       const row = db
-        .prepare(
-          `SELECT id, name, role, domains, principal_class, launch_id, launch_parent_pid, claude_session_id, claude_session_name
-           FROM sessions WHERE mailbox_authority_hash = $hash`,
-        )
-        .get({ $hash: hashSelfMailboxAuthority(supplied) }) as {
-        id: string
-        name: string
-        role: TribeRole
-        domains: string
-        principal_class: "agent" | "service"
-        launch_id: string | null
-        launch_parent_pid: number | null
-        claude_session_id: string | null
-        claude_session_name: string | null
-      } | null
+        .prepare(`SELECT ${AUTHORITY_ROW_COLUMNS} FROM sessions WHERE mailbox_authority_hash = $hash`)
+        .get({ $hash: hashSelfMailboxAuthority(supplied) }) as AuthorityRow | null
       if (row === null || !hasLaunchAuthority(row)) {
-        return {
-          errorCode: -32003,
-          errorMessage: `current session authority was rejected or revoked; ${AG_SESSION_AUTH_ENV} did not match a live managed session`,
-          errorData: { kind: "unauthenticated", reason: "session-authority-rejected" },
-        }
+        return rejected(
+          "session-authority-rejected",
+          `current session authority was rejected or revoked; ${AG_SESSION_AUTH_ENV} did not match a live managed session`,
+        )
       }
+      return contextForAuthorityRow(row)
+    }
+
+    function contextForAuthorityRow(row: AuthorityRow): SessionAuthorityResolution {
       const domains = JSON.parse(row.domains) as unknown
       if (!Array.isArray(domains) || !domains.every((domain): domain is string => typeof domain === "string")) {
         return {
@@ -438,14 +488,14 @@ export function withDispatcher<
     }
 
     async function dispatchAuthenticatedSessionCapability(
-      authority: unknown,
+      credentials: { readonly authority: unknown; readonly idToken: unknown },
       capability: AuthenticatedSessionCapability,
       connId: string,
     ): Promise<
       | { result: Awaited<ReturnType<typeof handleToolCall>> }
       | { errorCode: number; errorMessage: string; errorData: Record<string, unknown> }
     > {
-      const resolution = resolveSessionAuthority(authority)
+      const resolution = await resolveSessionAuthority(credentials.authority, credentials.idToken)
       if (!("context" in resolution)) {
         if (capability.kind === "pending-close" || capability.kind === "pending-prune") {
           const closeIds =
@@ -539,6 +589,7 @@ export function withDispatcher<
             updated_at: number
             delivery: string
             mailbox_authority_hash: string | null
+            identity_sid: string | null
           }
         }
       | { errorCode: number; errorMessage: string }
@@ -597,7 +648,14 @@ export function withDispatcher<
         $launch_id: launchId,
         $derived_prefix: derivedPrefix,
         $derived_prefix_upper: derivedPrefixUpper,
-      }) as Array<LaunchAuthorityRow & { updated_at: number; delivery: string; mailbox_authority_hash: string | null }>
+      }) as Array<
+        LaunchAuthorityRow & {
+          updated_at: number
+          delivery: string
+          mailbox_authority_hash: string | null
+          identity_sid: string | null
+        }
+      >
       const routableLaunchSessions = launchSessions.filter(hasLaunchAuthority)
       const persona = hasPersona && typeof params.persona === "string" ? params.persona.trim() : ""
       if (hasPersona && persona.length === 0) {
@@ -652,6 +710,7 @@ export function withDispatcher<
           updated_at: launchSession.updated_at,
           delivery: launchSession.delivery,
           mailbox_authority_hash: launchSession.mailbox_authority_hash,
+          identity_sid: launchSession.identity_sid,
         },
       }
     }
@@ -2042,7 +2101,7 @@ export function withDispatcher<
               )
             }
             const outcome = await dispatchAuthenticatedSessionCapability(
-              p.authority,
+              { authority: p.authority, idToken: p.idToken },
               { kind: "inbox-ack", limit: p.limit, peek: p.peek === true },
               connId,
             )
@@ -2073,7 +2132,7 @@ export function withDispatcher<
             const invalidFilter = invalidPendingReadFilter(p)
             if (invalidFilter !== undefined) return makeError(id, -32602, invalidFilter)
             const outcome = await dispatchAuthenticatedSessionCapability(
-              p.authority,
+              { authority: p.authority, idToken: p.idToken },
               {
                 kind: "pending-read",
                 expired: p.expired === true,
@@ -2117,7 +2176,7 @@ export function withDispatcher<
               return makeError(id, -32602, "Authenticated pending close requires owner and close")
             }
             const outcome = await dispatchAuthenticatedSessionCapability(
-              p.authority,
+              { authority: p.authority, idToken: p.idToken },
               { kind: "pending-close", owner, close },
               connId,
             )
