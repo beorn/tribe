@@ -88,6 +88,7 @@ type DeepRecallEngine = {
   createMemorySeenStore: (typeof import("../../../recall/src/lib/inject-core.ts"))["createMemorySeenStore"]
   runInjectDelta: (typeof import("../../../recall/src/lib/inject-core.ts"))["runInjectDelta"]
   readIndexProvenance: (typeof import("../../../recall/src/lib/search.ts"))["readIndexProvenance"]
+  bindVaultDb: (typeof import("../../../recall/src/history/vault-fts.ts"))["bindVaultDb"]
 }
 
 type SeenStore = ReturnType<DeepRecallEngine["createMemorySeenStore"]>
@@ -107,7 +108,7 @@ async function loadDeepRecallEngine(log: ReturnType<typeof createLogger>): Promi
     // override seam for forks/experiments only.
     const dir = process.env.TRIBE_RECALL_ENGINE_DIR ?? new URL("../../../recall/src", import.meta.url).pathname
     try {
-      const [agent, plan, context, sessionContext, shared, injectCore, search] = await Promise.all([
+      const [agent, plan, context, sessionContext, shared, injectCore, search, vaultFts] = await Promise.all([
         import(`${dir}/lib/agent.ts`) as Promise<typeof import("../../../recall/src/lib/agent.ts")>,
         import(`${dir}/lib/plan.ts`) as Promise<typeof import("../../../recall/src/lib/plan.ts")>,
         import(`${dir}/lib/context.ts`) as Promise<typeof import("../../../recall/src/lib/context.ts")>,
@@ -117,6 +118,7 @@ async function loadDeepRecallEngine(log: ReturnType<typeof createLogger>): Promi
         >,
         import(`${dir}/lib/inject-core.ts`) as Promise<typeof import("../../../recall/src/lib/inject-core.ts")>,
         import(`${dir}/lib/search.ts`) as Promise<typeof import("../../../recall/src/lib/search.ts")>,
+        import(`${dir}/history/vault-fts.ts`) as Promise<typeof import("../../../recall/src/history/vault-fts.ts")>,
       ])
       deepRecallEngine = {
         recallAgent: agent.recallAgent,
@@ -129,6 +131,7 @@ async function loadDeepRecallEngine(log: ReturnType<typeof createLogger>): Promi
         createMemorySeenStore: injectCore.createMemorySeenStore,
         runInjectDelta: injectCore.runInjectDelta,
         readIndexProvenance: search.readIndexProvenance,
+        bindVaultDb: vaultFts.bindVaultDb,
       }
       log.info?.(`deep-recall engine loaded from ${dir}`)
       return deepRecallEngine
@@ -175,6 +178,8 @@ export type RecallHandlerOpts = {
   focusPollMs?: number
   summaryPollMs?: number
   summarizerMode?: SummarizerMode
+  /** `--vault-db` from the daemon's launch line; bound into the engine once it loads (25149 a3). */
+  vaultDbPath?: string | null
   signal?: AbortSignal
 }
 
@@ -189,8 +194,14 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
   // Probe the engine eagerly so (a) the availability warning lands at boot,
   // not on first use, and (b) the sync focus poller sees `deepRecallEngine`
   // populated by the time its first 60s tick fires.
-  void loadDeepRecallEngine(log).then((engine) => {
-    return engine?.setRecallLogging(process.env.TRIBE_LOG === "1")
+  // The vault is bound before any handler can reach the engine: every handler awaits this promise, not the probe.
+  const engineReady = loadDeepRecallEngine(log).then((engine) => {
+    engine?.setRecallLogging(process.env.TRIBE_LOG === "1")
+    if (engine && opts.vaultDbPath != null) engine.bindVaultDb(opts.vaultDbPath)
+    return engine
+  })
+  void engineReady.catch((err: unknown) => {
+    log.error?.(`recall vault binding FAILED: ${err instanceof Error ? err.message : String(err)}`)
   })
 
   const db = openRecallDatabase(opts.dbPath)
@@ -233,7 +244,7 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
   }
 
   async function handleAsk(_conn: RecallConnState, params: AskParams): Promise<AskResult> {
-    const engine = await loadDeepRecallEngine(log)
+    const engine = await engineReady
     if (!engine) throw new Error(ENGINE_UNAVAILABLE)
     const result = await engine.recallAgent(params.query, {
       limit: params.limit,
@@ -273,7 +284,7 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
     // Engine-backed fallback: without the engine the cached-focus path above
     // is the only source — degrade to detected:false (probe already logged
     // the availability warning loudly at boot).
-    const engine = await loadDeepRecallEngine(log)
+    const engine = await engineReady
     if (!engine) return { sessionId: override ?? null, detected: false }
     const ctx = engine.getCurrentSessionContext(override ? { sessionIdOverride: override } : {})
     if (!ctx) return { sessionId: null, detected: false }
@@ -290,7 +301,7 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
   }
 
   async function handlePlanOnly(_conn: RecallConnState, params: PlanOnlyParams): Promise<PlanOnlyResult> {
-    const engine = await loadDeepRecallEngine(log)
+    const engine = await engineReady
     if (!engine) return { ok: false, elapsedMs: 0, cost: 0, error: ENGINE_UNAVAILABLE }
     const context = engine.buildQueryContext()
     try {
@@ -412,7 +423,7 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
   }
 
   async function handleInjectDelta(conn: RecallConnState, params: InjectDeltaParams): Promise<InjectDeltaResult> {
-    const engine = await loadDeepRecallEngine(log)
+    const engine = await engineReady
     if (!engine) throw new Error(ENGINE_UNAVAILABLE)
     const sessionId = params.sessionId ?? conn.sessionId ?? "unknown"
     const store = injectStoreFor(engine, sessionId)

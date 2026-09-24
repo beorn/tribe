@@ -36,6 +36,7 @@ function makeConfig(overrides: Partial<TribeConfig> = {}): TribeConfig {
     socketPath: "/nonexistent/idle-quit-test/tribe.sock",
     dbPath: ":memory:",
     recallDbPath: ":memory:",
+    vaultDbPath: null,
     idleQuitAfterSec: 1800,
     idleQuitSource: "default",
     inheritFd: null,

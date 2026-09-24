@@ -8,6 +8,7 @@
  */
 
 import { readFileSync } from "node:fs"
+import { resolve as resolvePath } from "node:path"
 import { parseArgs } from "node:util"
 import { createLogger } from "loggily"
 import { resolveSocketPath } from "tribe-wire/lib/socket"
@@ -29,6 +30,11 @@ export interface TribeConfig {
   /** True only for the default XDG path, whose legacy migration precedes open. */
   readonly migrateLegacyDb?: boolean
   readonly recallDbPath: string
+  /**
+   * The km vault database the daemon's recall engine searches, from `--vault-db` on its launch line; null when
+   * the launch names none, and the injections then say "vault: not bound" (25149 a3).
+   */
+  readonly vaultDbPath: string | null
   /** Idle-quit delay in seconds. -1 ("never") disables auto-quit, 0 quits immediately on idle. */
   readonly idleQuitAfterSec: number
   /** Which surface set idleQuitAfterSec — see IdleQuitSource. */
@@ -127,6 +133,19 @@ export function resolveIdleQuit(input: {
   return { idleQuitAfterSec: 1800, idleQuitSource: "default" }
 }
 
+/**
+ * `--vault-db` as the daemon was launched with it. Absent is unbound; an empty or valueless flag is what a failed
+ * `$(…)` substitution passes, so it refuses at startup instead of reading as unbound.
+ */
+export function resolveVaultDbFlag(raw: string | boolean | undefined): string | null {
+  if (raw === undefined) return null
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    throw new Error("tribe-daemon: --vault-db is empty (a failed substitution?); pass the vault's state.db path")
+  }
+  // Absolute, so the boot log names the file the engine opens rather than a path relative to the launch cwd.
+  return resolvePath(raw)
+}
+
 function readOperatorCapabilityFromInheritedFd(fdRaw: string | undefined): string | null {
   if (fdRaw === undefined) return null
   const fd = Number(fdRaw)
@@ -156,6 +175,9 @@ export function withConfig<T extends BaseTribe>(opts: ConfigOpts = {}): (t: T) =
         "quit-timeout": { type: "string" },
         foreground: { type: "boolean", default: false },
         "recall-db": { type: "string" },
+        // The vault recall searches, bound on the declared launch line (25149 a3); recall's own
+        // bindVaultDb applies it, so this is the option carried through, not a second resolver.
+        "vault-db": { type: "string" },
         "focus-poll-ms": { type: "string", default: process.env.TRIBE_FOCUS_POLL_MS ?? "60000" },
         "summary-poll-ms": { type: "string", default: process.env.TRIBE_SUMMARY_POLL_MS ?? "120000" },
         "summarizer-model": { type: "string", default: process.env.TRIBE_SUMMARIZER_MODEL ?? "off" },
@@ -182,6 +204,7 @@ export function withConfig<T extends BaseTribe>(opts: ConfigOpts = {}): (t: T) =
       dbPath: String(resolveDbPath(tribeArgs, { migrateLegacy: false })),
       migrateLegacyDb,
       recallDbPath: resolveRecallDbPath(daemonArgs["recall-db"] as string | undefined),
+      vaultDbPath: resolveVaultDbFlag(daemonArgs["vault-db"]),
       idleQuitAfterSec: idleQuit.idleQuitAfterSec,
       idleQuitSource: idleQuit.idleQuitSource,
       inheritFd: daemonArgs.fd ? parseInt(String(daemonArgs.fd), 10) : null,
