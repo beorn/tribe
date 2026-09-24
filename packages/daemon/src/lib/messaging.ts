@@ -732,6 +732,7 @@ export type SessionLeftReason =
   | "transport-closed"
   | "replaced-by-same-launch"
   | "replaced-by-displacement"
+  | "replaced-by-successor-generation"
   | "replaced-parent-gone"
 
 /** The reasons that are positive evidence the LAUNCH is over, not merely
@@ -762,6 +763,8 @@ export function logSessionLeft(
     launchId: string | null
     launchParentPid: number | null
     reason: SessionLeftReason
+    /** A successor-generation replacement names both generations (24604 (a), @cto 5b98b2a1). */
+    generation?: { readonly holder: number; readonly successor: number }
   },
 ): string {
   return logEvent(
@@ -776,6 +779,9 @@ export function logSessionLeft(
       launch_id: member.launchId,
       launch_parent_pid: member.launchParentPid,
       reason: member.reason,
+      ...(member.generation === undefined
+        ? {}
+        : { holder_gen: member.generation.holder, successor_gen: member.generation.successor }),
     },
     { ref: member.memberId },
   )

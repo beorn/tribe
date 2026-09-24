@@ -342,6 +342,8 @@ export function isPidAlive(pid: number): boolean {
 // ---------------------------------------------------------------------------
 
 type HolderRow = {
+  identity_sid: string | null
+  identity_gen: number | null
   id: string
   pid: number
   name: string
@@ -407,6 +409,9 @@ export function registerSession(
   /** Sessions the caller already displaced by its own authority (takeover, identity precedence): their rows may be
    *  replaced even while their launch lives. */
   displacedSessionIds: ReadonlySet<string> = new Set(),
+  /** The registrant's verified identity, when its token verified: a higher generation of the holder's own sid is
+   *  that lineage's successor, minted by hab, and replaces the holder (@cto 5b98b2a1). */
+  verifiedIdentity: { readonly sid: string; readonly gen: number } | null = null,
 ): void {
   const desiredName = ctx.getName()
   const now = Date.now()
@@ -425,7 +430,8 @@ export function registerSession(
   // PIDs share a persona at once, but a dead-pid placeholder must yield.
   const holder = ctx.db
     .prepare(
-      `SELECT id, pid, name, role, domains, launch_id, launch_parent_pid, launch_parent_start_time
+      `SELECT id, pid, name, role, domains, launch_id, launch_parent_pid, launch_parent_start_time,
+         identity_sid, identity_gen
        FROM sessions WHERE name = $name AND id != $id`,
     )
     .get({ $name: desiredName, $id: ctx.sessionId }) as HolderRow | null
@@ -443,9 +449,21 @@ export function registerSession(
         }) === "durable-launch"
           ? { launchId: holder.launch_id, parentPid: holder.launch_parent_pid }
           : null
-      const sameLaunch = holder.launch_id === (launchId ?? null)
+      // A verified `<sid>@<gen>` is one launch under one parent: claimed from another parent it is a second instance
+      // of that generation, not the launch registering again (@cto 5b98b2a1 (b)). An unverified launch id proves no
+      // lineage, so a new provider that inherited it registers as that launch (19442).
+      const sameLaunch =
+        holder.launch_id === (launchId ?? null) &&
+        (verifiedIdentity === null || holder.launch_parent_pid === (launchParentPid ?? null))
       const displaced = displacedSessionIds.has(holder.id)
-      if (durable !== null && !sameLaunch && !displaced) {
+      const successor =
+        verifiedIdentity !== null &&
+        holder.identity_sid === verifiedIdentity.sid &&
+        holder.identity_gen !== null &&
+        verifiedIdentity.gen > holder.identity_gen
+          ? { holder: holder.identity_gen, successor: verifiedIdentity.gen }
+          : null
+      if (durable !== null && !sameLaunch && !displaced && successor === null) {
         const parent = judgeLaunchParent(durable.parentPid, holder.launch_parent_start_time)
         if (parent.alive) {
           throw new DurableLaunchHolderError(
@@ -471,7 +489,10 @@ export function registerSession(
             ? "replaced-by-same-launch"
             : displaced
               ? "replaced-by-displacement"
-              : "replaced-parent-gone",
+              : successor !== null
+                ? "replaced-by-successor-generation"
+                : "replaced-parent-gone",
+          ...(successor === null ? {} : { generation: successor }),
         })
         log.info?.(
           `replaced durable session row ${holder.id} holding "${desiredName}" (launch ${holder.launch_id}, parent ${holder.launch_parent_pid})`,

@@ -1989,6 +1989,7 @@ export function withDispatcher<
               launchIdentity?.parentPid ?? null,
               mailboxAuthorityHash,
               displacedSessionIds,
+              verifiedSid !== null && verifiedGen !== null ? { sid: verifiedSid, gen: verifiedGen } : null,
             )
             db.prepare("UPDATE sessions SET principal_class = ? WHERE id = ?").run(principalClass, clientCtx.sessionId)
             // Every register restates the session's verification: an adopted session re-registering without a token

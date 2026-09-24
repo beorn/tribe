@@ -1195,6 +1195,86 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
       filter_mode: string | null
     }
 
+  // 24604 (a), @cto 5b98b2a1: a verified successor generation replaces a predecessor that is between connections,
+  // even while the predecessor's launch parent lives; the same generation from another parent stays refused.
+  const departures = (harness: ReturnType<typeof createDispatcherHarness>) =>
+    (
+      harness.db.prepare("SELECT content, ref FROM messages WHERE type = 'event.session.left'").all() as Array<{
+        content: string
+        ref: string
+      }>
+    ).map((row) => ({ ref: row.ref, ...(JSON.parse(row.content) as Record<string, unknown>) }))
+
+  it("a successor generation displaces a predecessor between connections with a live parent, naming both gens", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-g3")
+    const predecessor = parseResult<RegisterResult>(
+      await harness.register("conn-g3", {
+        name: "@dev/7",
+        pid: 5201,
+        project: "/tmp/p",
+        launchParentPid: process.pid,
+        idToken: "token-g3",
+      }),
+    )
+    harness.dropClient("conn-g3")
+    harness.addPendingClient("conn-g4")
+    const successor = parseResult<RegisterResult>(
+      await harness.register("conn-g4", {
+        name: "@dev/7",
+        pid: 5202,
+        project: "/tmp/p",
+        launchParentPid: process.pid,
+        idToken: "token-g4",
+      }),
+    )
+    expect(successor.sessionId).not.toBe(predecessor.sessionId)
+    expect(sessionRow(harness, successor.sessionId)).toMatchObject({ launch_id: "sid-dev7@4" })
+    expect(harness.db.prepare("SELECT id FROM sessions WHERE id = ?").get(predecessor.sessionId)).toBeNull()
+    expect(departures(harness)).toContainEqual(
+      expect.objectContaining({
+        ref: predecessor.sessionId,
+        reason: "replaced-by-successor-generation",
+        holder_gen: 3,
+        successor_gen: 4,
+      }),
+    )
+  })
+
+  it("the same generation from another parent is refused while the holder's parent lives", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-g3")
+    const holder = parseResult<RegisterResult>(
+      await harness.register("conn-g3", {
+        name: "@dev/7",
+        pid: 5301,
+        project: "/tmp/p",
+        launchParentPid: process.pid,
+        idToken: "token-g3",
+      }),
+    )
+    harness.dropClient("conn-g3")
+    harness.addPendingClient("conn-g3-other")
+    const refused = parseError(
+      await harness.register("conn-g3-other", {
+        name: "@dev/7",
+        pid: 5302,
+        project: "/tmp/p",
+        launchParentPid: process.ppid,
+        idToken: "token-g3",
+      }),
+    )
+    expect(refused.message).toBe(
+      `Name "@dev/7" belongs to launch sid-dev7@3, whose parent process ${process.pid} is alive (same start time). ` +
+        "Its session is between connections, not gone. Stop that process or wait for it to exit, then register again.",
+    )
+    expect(harness.db.prepare("SELECT id FROM sessions WHERE id = ?").get(holder.sessionId)).toEqual({
+      id: holder.sessionId,
+    })
+  })
+
   it("the bootstrap and the adapter of one generation fan into ONE session keyed sid@gen, and the filter applies", async () => {
     const harness = createDispatcherHarness({ identityVerifier })
     cleanup = harness.dispose
