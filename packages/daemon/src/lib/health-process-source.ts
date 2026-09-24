@@ -40,12 +40,12 @@ const SYSMON_DRAIN_GRACE_MS = 2_500
  * One JSON line of process-observation/1.
  *
  * Measured 2026-09-23 live host census: 886 processes yielded 278,044 bytes
- * (~313.8 bytes/process). Sized to host process counts with room (up to 2,000
- * concurrent processes at ~350 bytes/process = 700,000 bytes, ~684 KiB),
- * admitting about twice today's census (~556 KB) while staying well below the
- * 1 MB budget and keeping pathological multi-GB journal walks bounded.
+ * (~313.8 bytes/process). Sized to host process counts with generous room
+ * (up to ~6,500 concurrent processes at ~310 bytes/process = 2,000,000 bytes,
+ * ~1.9 MiB), admitting ~7x today's census while keeping pathological multi-GB
+ * journal walks bounded.
  */
-export const SYSMON_MAX_OUTPUT_BYTES = 700_000
+export const SYSMON_MAX_OUTPUT_BYTES = 2_000_000
 /** Consecutive hard failures (timeout / oversized output / uncertain settlement) before opening the circuit. */
 export const SYSMON_CIRCUIT_FAILURES = 2
 /** How long the circuit stays open — 6× default 10s poll, not forever. */
@@ -289,7 +289,8 @@ function isProcess(value: unknown): value is ProcessObservationRow["process"] {
     isPositiveInteger(value.pid) &&
     Number.isSafeInteger(value.ppid) &&
     (value.ppid as number) >= 0 &&
-    isPositiveInteger(value.pgid) &&
+    Number.isSafeInteger(value.pgid) &&
+    (value.pgid as number) >= 0 &&
     typeof value.startTime === "string" &&
     value.startTime.length > 0 &&
     typeof value.command === "string" &&
