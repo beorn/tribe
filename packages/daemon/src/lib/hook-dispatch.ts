@@ -17,6 +17,10 @@
  *   --vault-db <path> — the km vault the in-process recall searches, bound through recall's bindVaultDb
  *                       (25149 a3). A prompt the daemon answers searches the daemon's own `--vault-db`.
  *
+ * The engine's surface is its lib files. A host loads the engine by its directory and reaches it only through
+ * lib/ (here lib/hooks.ts; the daemon uses lib/search.ts), never its internals under history/, which may move
+ * without a host noticing. When a host needs an internal, lib/ re-exports it, as bindVaultDb is.
+ *
  * These handlers control the Claude Code hook protocol (exit codes, stdout
  * JSON). We must not swallow errors or rewrite output — just dispatch.
  *
