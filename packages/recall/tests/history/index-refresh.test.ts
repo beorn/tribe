@@ -3,7 +3,16 @@ import { Database } from "bun:sqlite"
 import { tryAcquireFlock } from "@bearly/flock"
 import { spawn } from "node:child_process"
 import { once } from "node:events"
-import { mkdirSync, mkdtempSync, realpathSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -502,6 +511,30 @@ describe("Recall refresh completion", () => {
     // Total messages must still be 4 (neither parent nor subagent wiped out)
     const totalMessages2 = (db.query("SELECT COUNT(*) as c FROM messages").get() as any).c
     expect(totalMessages2).toBe(4)
+  })
+
+  /** @failure The share-cap refusal was a console.warn with exit 0, so the unattended recall-index service never saw it (25462). */
+  test("an incremental index that refuses a prune over the share cap exits non-zero and says why", async () => {
+    const projectDir = join(corpus.projects, "p1")
+    mkdirSync(projectDir, { recursive: true })
+    const files = [1, 2, 3, 4, 5].map((i) => {
+      const file = join(projectDir, `sess-00${i}.jsonl`)
+      writeFileSync(
+        file,
+        JSON.stringify({ type: "user", uuid: `u-${i}`, message: { role: "user", content: `msg ${i}` } }) + "\n",
+      )
+      return file
+    })
+    vi.spyOn(console, "warn").mockImplementation(() => {})
+    const err = vi.spyOn(console, "error").mockImplementation(() => {})
+    await cmdIndex({ incremental: true })
+    expect(process.exitCode).toBe(0)
+    unlinkSync(files[0]!)
+    unlinkSync(files[1]!)
+    await cmdIndex({ incremental: true }) // miss 1 marks them stale-missing
+    await cmdIndex({ incremental: true }) // miss 2 would prune 2 of 5 (40% > 20%)
+    expect(process.exitCode).toBe(5)
+    expect(err.mock.calls.flat().join(" ")).toContain("refused to prune 2 of 5 sessions")
   })
 
   test("a session file that vanishes mid-run (ENOENT on stat) is skipped without killing rebuildIndex", async () => {
