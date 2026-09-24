@@ -123,6 +123,8 @@ function readLastRebuild(): string | null {
 
 import { refreshIndexIfStaleWithDeps, makeRefreshDeps, type RefreshDeps } from "./refresh"
 export { refreshIndexIfStaleWithDeps, type RefreshDeps } from "./refresh"
+/** The call-line vault binding (`--vault-db`), for hosts that load this engine by path (25149 a3). */
+export { bindVaultDb }
 
 /** Compatibility surface for direct callers. Search no longer invokes it. */
 export async function refreshIndexIfStale(

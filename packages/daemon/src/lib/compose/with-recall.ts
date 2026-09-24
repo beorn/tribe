@@ -22,6 +22,7 @@ export function withRecall<T extends BaseTribe & WithConfig>(): (t: T) => T & Wi
 
     const recall = createRecallHandlers({
       dbPath: t.config.recallDbPath,
+      vaultDbPath: t.config.vaultDbPath,
       socketPath: t.config.socketPath,
       daemonVersion: t.daemonVersion,
       focusPollMs: t.config.focusPollMs,
