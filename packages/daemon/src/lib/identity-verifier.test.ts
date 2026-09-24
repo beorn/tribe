@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { displacementRefused, loadIdentityVerifier, sessionAuthority } from "./identity-verifier.ts"
+import { displacementRule, loadIdentityVerifier, sessionAuthority } from "./identity-verifier.ts"
 
 const dir = mkdtempSync(join(tmpdir(), "tribe-identity-verifier-"))
 afterAll(() => rmSync(dir, { recursive: true, force: true }))
@@ -75,11 +75,13 @@ describe("session authority", () => {
     expect(sessionAuthority({ identity_sid: null, mailbox_authority_hash: null })).toBe("claimed")
   })
 
-  it("bars only a claimed registration from displacing a managed holder, until 3c registers the bootstrap by token", () => {
-    expect(displacementRefused("verified", "claimed")).toBe(true)
-    expect(displacementRefused("bearer", "claimed")).toBe(true)
-    expect(displacementRefused("claimed", "claimed")).toBe(false)
-    expect(displacementRefused("verified", "bearer")).toBe(false)
-    expect(displacementRefused("bearer", "verified")).toBe(false)
+  it("bars a claimed registration from a managed holder and asks a verified holder's liveness of a bearer one (3c)", () => {
+    expect(displacementRule("verified", "claimed")).toBe("refused")
+    expect(displacementRule("bearer", "claimed")).toBe("refused")
+    expect(displacementRule("claimed", "claimed")).toBe("allowed")
+    expect(displacementRule("verified", "bearer")).toBe("holder-liveness")
+    expect(displacementRule("bearer", "bearer")).toBe("allowed")
+    expect(displacementRule("bearer", "verified")).toBe("allowed")
+    expect(displacementRule("verified", "verified")).toBe("allowed")
   })
 })

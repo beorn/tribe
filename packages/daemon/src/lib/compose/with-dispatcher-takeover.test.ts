@@ -983,19 +983,13 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
     expect(seat.name).toBe("@dev/7")
   })
 
-  // @cto 8acb5a01 (§6): the interim until 3c registers the harness bootstrap by token. Today a bearer takeover
-  // supersedes a live verified holder, loudly, and the name's authority reads bearer afterwards. 3c flips this
-  // test red on purpose: verified then outranks bearer.
-  it("interim until 3c: a bearer takeover supersedes a verified holder, tells it, and the name reads bearer", async () => {
-    const harness = createDispatcherHarness({ identityVerifier })
-    cleanup = harness.dispose
-    const verifiedSocket = harness.addPendingClient("conn-verified")
-    parseResult<RegisterResult>(
-      await harness.register("conn-verified", { name: "@dev/7", pid: 4551, project: "/tmp/p", idToken: "token-dev7" }),
-    )
-    harness.addPendingClient("conn-relaunch")
-    parseResult<RegisterResult>(
-      await harness.register("conn-relaunch", {
+  // @cto §10 (2), 25074 3c: a bearer takeover of a verified holder asks whether that holder's instance is still live,
+  // by re-verifying the token it registered with. Live refuses (verified outranks bearer); dead or superseded yields,
+  // loudly; undecided refuses as a fault the claimant retries. Each case flips the holder's verdict after it registers.
+  describe("a bearer takeover of a verified holder is gated on the holder's liveness (25074 3c)", () => {
+    const relaunch = (harness: ReturnType<typeof createDispatcherHarness>) => {
+      harness.addPendingClient("conn-relaunch")
+      return harness.register("conn-relaunch", {
         name: "@dev/7",
         pid: 4552,
         project: "/tmp/p",
@@ -1003,15 +997,89 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
         launchId: "provider-launch-relaunch",
         launchParentPid: 4552,
         mailboxAuthorityHash: "b".repeat(64),
-      }),
-    )
+      })
+    }
+    const registerHolder = async (harness: ReturnType<typeof createDispatcherHarness>) => {
+      verdicts["token-holder"] = { result: "verified", actor: "@dev/7", sid: "sid-holder" }
+      const socket = harness.addPendingClient("conn-verified")
+      parseResult<RegisterResult>(
+        await harness.register("conn-verified", {
+          name: "@dev/7",
+          pid: 4551,
+          project: "/tmp/p",
+          idToken: "token-holder",
+        }),
+      )
+      return socket
+    }
+    const holderUntouched = async (
+      harness: ReturnType<typeof createDispatcherHarness>,
+      socket: { destroyedByDispatcher: boolean },
+    ) => {
+      expect(socket.destroyedByDispatcher).toBe(false)
+      expect(harness.supersededEvents("@dev/7")).toEqual([])
+      expect(identitySid(harness, "@dev/7")).toBe("sid-holder")
+      expect(await membersAuthority(harness)).toMatchObject({ "@dev/7": "verified" })
+    }
+    afterEach(() => {
+      delete verdicts["token-holder"]
+    })
 
-    expect(verifiedSocket.destroyedByDispatcher).toBe(true)
-    expect(harness.supersededEvents("@dev/7")).toEqual([
-      expect.objectContaining({ old_pid: 4551, new_pid: 4552, reason: "explicit-persona takeover (20703)" }),
-    ])
-    expect(identitySid(harness, "@dev/7")).toBeNull()
-    expect(await membersAuthority(harness)).toMatchObject({ "@dev/7": "bearer" })
+    it("a live verified holder is never displaced: the bearer takeover is refused and the holder is untouched", async () => {
+      const harness = createDispatcherHarness({ identityVerifier })
+      cleanup = harness.dispose
+      const holder = await registerHolder(harness)
+
+      expect(parseError(await relaunch(harness))).toMatchObject({
+        code: -32003,
+        message: expect.stringContaining("claims @dev/7 with bearer authority, but a live verified session holds it"),
+        data: {
+          kind: "foreign-identity-transport",
+          reason: "identity-precedence",
+          transport: { name: "@dev/7", authority: "bearer" },
+          holder: { name: "@dev/7", authority: "verified" },
+        },
+      })
+      await holderUntouched(harness, holder)
+    })
+
+    it("a dead or superseded verified holder is displaced by the bearer takeover, told, and the name reads bearer", async () => {
+      const harness = createDispatcherHarness({ identityVerifier })
+      cleanup = harness.dispose
+      const holder = await registerHolder(harness)
+      verdicts["token-holder"] = {
+        result: "contradicted",
+        reason: "instance-is-live: seat-other-generation: @dev/7 runs generation 4, the token names 3",
+      }
+      parseResult<RegisterResult>(await relaunch(harness))
+
+      expect(holder.destroyedByDispatcher).toBe(true)
+      expect(harness.supersededEvents("@dev/7")).toEqual([
+        expect.objectContaining({ old_pid: 4551, new_pid: 4552, reason: "explicit-persona takeover (20703)" }),
+      ])
+      expect(identitySid(harness, "@dev/7")).toBeNull()
+      expect(await membersAuthority(harness)).toMatchObject({ "@dev/7": "bearer" })
+    })
+
+    it("a holder whose liveness is undecided refuses the takeover as a verifier fault, and the holder is untouched", async () => {
+      const harness = createDispatcherHarness({ identityVerifier })
+      cleanup = harness.dispose
+      const holder = await registerHolder(harness)
+      verdicts["token-holder"] = new Error("@dev/7 is undecided (seat-starting: start in flight)")
+      const warnings = vi.spyOn(console, "warn").mockImplementation(() => {})
+
+      expect(parseError(await relaunch(harness))).toMatchObject({
+        code: -32003,
+        message: expect.stringContaining("can be judged neither live nor gone right now (@dev/7 is undecided"),
+        data: {
+          kind: "identity-verifier-fault",
+          reason: "holder-liveness-undecided",
+          holder: { name: "@dev/7", authority: "verified" },
+        },
+      })
+      warnings.mockRestore()
+      await holderUntouched(harness, holder)
+    })
   })
 
   it("a verified registration displaces a holder that only claimed the name, and the holder's journal says why", async () => {

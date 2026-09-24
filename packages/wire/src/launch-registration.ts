@@ -145,10 +145,13 @@ export async function connectTribeLaunch(
       }
     }
   }
+  // The last refusal is the cause, so a caller can read its typed kind (a daemon refusal's `data.kind`) rather than
+  // parse the message: 25074 3c's bootstrap falls back to its bearer on an identity-verifier-fault and on nothing else.
   throw new Error(
     `managed Tribe bootstrap failed after ${CONNECT_ATTEMPTS} attempts: ${
       lastError instanceof Error ? lastError.message : String(lastError)
     }`,
+    { cause: lastError },
   )
 }
 

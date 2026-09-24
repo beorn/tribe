@@ -39,15 +39,19 @@ export function sessionAuthority(row: {
 }
 
 /**
- * Whether a registration of `claimant` authority is barred from displacing a live holder of `holder` authority.
- * A claimed registration never displaces a managed one. Between bearer and verified the interim is today's
- * takeover (20703): the harness bootstrap of every managed launch still registers by bearer, so barring bearer
- * from a verified holder would refuse each seat's relaunch against its own live predecessor. 25074 3c moves that
- * registration onto the token, and verified then outranks bearer here too. Accepted by @cto 8acb5a01 as a two-way
- * door bounded by 3c; the takeover test "interim until 3c" pins it, so 3c's flip is a red test.
+ * Whether a registration of `claimant` authority may displace a connected holder of `holder` authority (25074 3c,
+ * @cto §10). A claimed registration never displaces a managed one. A bearer registration displaces a verified holder
+ * only when that holder's instance is gone: its liveness decides, asked by re-verifying the token it registered with
+ * (a live holder refuses, a dead or superseded one is displaced and told, an undecided one refuses as a fault the
+ * claimant retries). A bearer registration arrives from a managed launch whose bootstrap fell back after a verifier
+ * fault, so a relaunch against its own dead predecessor still proceeds. Every other pairing is today's precedence.
  */
-export function displacementRefused(holder: SessionAuthority, claimant: SessionAuthority): boolean {
-  return claimant === "claimed" && holder !== "claimed"
+export type DisplacementRule = "allowed" | "refused" | "holder-liveness"
+
+export function displacementRule(holder: SessionAuthority, claimant: SessionAuthority): DisplacementRule {
+  if (claimant === "claimed" && holder !== "claimed") return "refused"
+  if (claimant === "bearer" && holder === "verified") return "holder-liveness"
+  return "allowed"
 }
 
 /** Refuses loudly, naming the path, for every way the named module can fail the contract. */

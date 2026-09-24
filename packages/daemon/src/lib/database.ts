@@ -28,6 +28,7 @@ export function openDatabase(path: string): Database {
 		identity_token TEXT,
 		mailbox_authority_hash TEXT,
 		identity_sid TEXT,
+		verified_id_token TEXT,
 		launch_id TEXT,
 		launch_parent_pid INTEGER,
 		started_at INTEGER NOT NULL,
@@ -1238,6 +1239,18 @@ const MIGRATIONS: readonly Migration[] = [
         (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>).map((row) => row.name),
       )
       if (!columns.has("identity_sid")) db.run("ALTER TABLE sessions ADD COLUMN identity_sid TEXT")
+    },
+  },
+  {
+    version: 33,
+    name: "session-verified-id-token",
+    up(db) {
+      // 25074 3c — the token a verified session registered with, so a later bearer registration for the same name
+      // can ask whether that holder's instance is still live (by re-verifying it) before it displaces the holder.
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>).map((row) => row.name),
+      )
+      if (!columns.has("verified_id_token")) db.run("ALTER TABLE sessions ADD COLUMN verified_id_token TEXT")
     },
   },
 ]

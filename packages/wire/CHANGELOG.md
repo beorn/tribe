@@ -4,6 +4,13 @@
 
 ### Added
 
+- **Verified outranks bearer on a live seat.** A bearer registration that would
+  take over a verified holder first re-verifies the token that holder
+  registered with: a live holder refuses it as `identity-precedence`, a dead or
+  superseded one is displaced and told, and one whose liveness is undecided
+  refuses it as `identity-verifier-fault` (`holder-liveness-undecided`), to be
+  retried. The launch registration's final failure carries the last refusal as
+  its `cause`.
 - **One-shot calls authenticate by identity token.** `cli_self_inbox_v1` and
   the managed pending read and close take `idToken` beside the bearer
   `authority`: a verified token resolves the session its registration recorded
