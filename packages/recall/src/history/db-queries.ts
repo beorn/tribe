@@ -143,7 +143,15 @@ export function getSessionStatus(
     FROM sessions
     WHERE id = ?
   `)
-    .get(id) as any
+    .get(id) as {
+    id: string
+    status: string | null
+    messageCount: number | null
+    failureReason: string | null
+    failureTime: number | null
+    shrinkOldCount: number | null
+    shrinkNewCount: number | null
+  } | null
   return row
     ? {
         id: row.id,
@@ -214,8 +222,17 @@ export function insertMessage(
   duplicateOf?: number | null,
   line?: number | null,
 ): number {
-  const result = getCachedStatement(db, INSERT_MESSAGE_SQL)
-    .run(uuid, sessionId, type, content, toolName, filePaths, timestamp, duplicateOf ?? null, line ?? null)
+  const result = getCachedStatement(db, INSERT_MESSAGE_SQL).run(
+    uuid,
+    sessionId,
+    type,
+    content,
+    toolName,
+    filePaths,
+    timestamp,
+    duplicateOf ?? null,
+    line ?? null,
+  )
   return Number(result.lastInsertRowid)
 }
 
@@ -247,7 +264,14 @@ export function insertWrite(
   content: string | null,
 ): void {
   getCachedStatement(db, INSERT_WRITE_SQL).run(
-    sessionId, sessionFile, toolUseId, timestamp, filePath, contentHash, contentSize, content
+    sessionId,
+    sessionFile,
+    toolUseId,
+    timestamp,
+    filePath,
+    contentHash,
+    contentSize,
+    content,
   )
 }
 
