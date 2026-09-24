@@ -60,6 +60,11 @@ function recentWeak(n: number): Seed[] {
   }))
 }
 
+/** `n` rows without the anchor, in the window: the corpus a real anchor is rare in. */
+function unmatched(n: number): Seed[] {
+  return Array.from({ length: n }, (_, i) => ({ session: `other-${i % 20}`, content: `${FILLER} ${String(i)}`, ageDays: 3 }))
+}
+
 /** Every SQL string prepared on the index while `run` runs. */
 async function preparedSql(run: () => Promise<unknown>): Promise<string[]> {
   const db = getDb()
@@ -119,23 +124,27 @@ describe("25071 row 2 B1: hook mode counts nothing", () => {
 
 describe("25071 row 2 B2: hook mode ranks a candidate set", () => {
   test("on a plentiful index, hook and exact inject the same five, and hook says it ranked candidates", async () => {
-    seed([
+    // recall() closes the index when it returns, and an in-memory index closes empty: seed before each call.
+    // The unmatched rows give the anchor a real IDF, so bm25 orders the matches instead of tying them all.
+    const plentiful = (): Seed[] => [
+      ...unmatched(200),
       ...recentWeak(40),
       ...Array.from({ length: 30 }, (_, i) => ({
         session: `mid-${i}`,
         content: `${ANCHOR} ${i % 3 === 0 ? ANCHOR : ""} note ${String(i)}`,
         ageDays: 2 + (i % 20),
       })),
-    ])
-
+    ]
+    seed(plentiful())
     const exact = await recall(ANCHOR, { raw: true, limit: 5 })
+    seed(plentiful())
     const hook = await recall(ANCHOR, { mode: "hook", raw: true, limit: 5 })
 
-    expect(hook.hookSearch).toMatchObject({ candidateLimit: 1000, widened: false })
+    expect(hook.hookSearch).toMatchObject({ candidateLimit: 1000, widened: false, firstSurvivors: 70, survivors: 70 })
+    expect(hook.results).toHaveLength(5)
     expect(hook.results.map((r) => `${r.sessionId}:${r.type}`)).toEqual(
       exact.results.map((r) => `${r.sessionId}:${r.type}`),
     )
-    expect(hook.results).toHaveLength(5)
   })
 
   test("when the window keeps too few of the first candidates, hook widens once and finds the recent matches", async () => {
