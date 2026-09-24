@@ -106,11 +106,14 @@ describe("recall --vault-db <path> <verb>: a leading global binding (25149 d)", 
       ["--vault-db", "/missing/state.db", "summarize"],
       /--vault-db \/missing\/state\.db does not exist/,
     ],
-  ] as const)("%s refuses with exit 1 naming the fault, and no verb runs", async (_case, argv, fault) => {
-    await expect(main([...argv])).rejects.toThrow("process.exit(1)")
-    expect(errText()).toMatch(fault)
-    expect(calls).toEqual([])
-  })
+  ] as const)(
+    "%s refuses with exit 2 (a usage error) naming the fault, and no verb runs",
+    async (_case, argv, fault) => {
+      await expect(main([...argv])).rejects.toThrow("process.exit(2)")
+      expect(errText()).toMatch(fault)
+      expect(calls).toEqual([])
+    },
+  )
 
   test("one spelling: search no longer takes its own --vault-db", async () => {
     await expect(main(["search", "q", "--vault-db", vault])).rejects.toThrow("process.exit(1)")

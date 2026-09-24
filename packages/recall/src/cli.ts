@@ -274,8 +274,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     const bound = resolveVaultDbFlag(leading.raw)
     if (bound !== null) bindVaultDb(bound)
   } catch (error) {
+    // A refused --vault-db is a usage error, exit 2 as the table above documents. The one rule returns the
+    // refusal and each surface maps it to its own documented exit; the hook line keeps 1.
     console.error(`[recall] ${error instanceof Error ? error.message : String(error)}`)
-    process.exit(1)
+    process.exit(2)
   }
   argv = leading.rest
 
