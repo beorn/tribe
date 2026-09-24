@@ -22,7 +22,7 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { dispatchHook } from "./hook-dispatch.ts"
+import { dispatchHook, parseHookArgs } from "./hook-dispatch.ts"
 
 type HookDispatchTestGlobal = typeof globalThis & { __hookDispatchTestCalls?: string[] }
 
@@ -50,6 +50,8 @@ beforeAll(() => {
       'export async function cmdSessionEnd() { globalThis.__hookDispatchTestCalls.push("session-end") }',
       'export async function cmdHook() { globalThis.__hookDispatchTestCalls.push("hook") }',
       'export async function cmdRemember() { globalThis.__hookDispatchTestCalls.push("remember") }',
+      // The engine's own vault binding (recall's bindVaultDb): the call line's --vault-db must reach it.
+      "export function bindVaultDb(path) { globalThis.__hookDispatchTestCalls.push(`bind:${path}`) }",
       "",
     ].join("\n"),
   )
@@ -104,5 +106,42 @@ describe("dispatchHook — cmdRemember stays unreachable (manual-only by design)
     await dispatchHook("pre-compact")
     expect(calls).not.toContain("remember")
     expect(calls).toEqual(["session-start", "hook", "session-end", "hook"])
+  })
+})
+
+describe("tribe hook --vault-db binds recall's vault before the handler runs (25149 a3)", () => {
+  test("the call line's vault reaches the engine's bindVaultDb, ahead of cmdHook", async () => {
+    calls.length = 0
+    await dispatchHook("prompt", { vaultDb: "/vault/state.db" })
+    expect(calls).toEqual(["bind:/vault/state.db", "hook"])
+  })
+
+  test("a hook line with no --vault-db binds nothing", async () => {
+    calls.length = 0
+    await dispatchHook("prompt")
+    expect(calls).toEqual(["hook"])
+  })
+
+  const present = (path: string) => path === "/vault/state.db"
+
+  test("parseHookArgs reads --vault-db and nothing else", () => {
+    expect(parseHookArgs([], present)).toEqual({})
+    expect(parseHookArgs(["--vault-db", "/vault/state.db"], present)).toEqual({ vaultDb: "/vault/state.db" })
+    expect(parseHookArgs(["--vault-db=/vault/state.db"], present)).toEqual({ vaultDb: "/vault/state.db" })
+  })
+
+  test("a --vault-db naming no file refuses and names the path", () => {
+    expect(parseHookArgs(["--vault-db", "/moved/state.db"], present)).toEqual({
+      error: "--vault-db /moved/state.db does not exist; pass the vault's state.db path",
+    })
+  })
+
+  test.each([
+    ["an empty --vault-db, what a failed substitution passes", ["--vault-db", ""]],
+    ["a valueless --vault-db", ["--vault-db"]],
+    ["an unknown option", ["--vault", "/vault/state.db"]],
+    ["a stray positional", ["/vault/state.db"]],
+  ])("%s is a usage error, never an unbound vault", (_case, argv) => {
+    expect(parseHookArgs(argv, present)).toHaveProperty("error")
   })
 })

@@ -42,6 +42,9 @@ import {
 // activity log catches it (km-tribe.activity-log phase 2).
 import { emitHookJson as envelopeEmitHookJson } from "../../../injection-envelope/src/emit.ts"
 
+/** The call-line vault binding (`tribe hook <event> --vault-db`), for the dispatcher that loads this by path (25149 a3). */
+export { bindVaultDb } from "../history/vault-fts.ts"
+
 // Loggily namespaces — kept narrow so a reader can grep `producer` /
 // namespace in the JSONL and attribute lines to the right hook event.
 const sessionStartLog = createLogger("recall:hook:session-start")
