@@ -441,7 +441,12 @@ async function runRecallInjection(
     for (const [name, ms] of Object.entries(answer.timing?.phases ?? {})) {
       if (steps) steps[`${step}.${name}`] = (steps[`${step}.${name}`] ?? 0) + ms
     }
-    for (const skip of answer.skipped ?? []) skippedSteps[`${step}.${skip.phase}`] = skip.message
+    // Several skips of one phase (a skipped synonym variant per anchor) are all said, in order (25397).
+    for (const skip of answer.skipped ?? []) {
+      const key = `${step}.${skip.phase}`
+      const said = skippedSteps[key]
+      skippedSteps[key] = said === undefined ? skip.message : `${said}; ${skip.message}`
+    }
   }
   try {
     result = await timeStepAsync(steps, "recall", () => recallImpl(recallQuery, recallOpts))
