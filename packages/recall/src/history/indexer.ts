@@ -121,6 +121,7 @@ export interface IndexOptions {
   path?: string
   agBin?: string
   skipCodex?: boolean
+  chunkSize?: number // Number of files per commit chunk (default 50)
   onProgress?: (progress: IndexProgress) => void
 }
 
@@ -507,6 +508,7 @@ export interface IndexResult {
   claudeSkipped?: number
   claudeVanished?: number
   claudeFailures?: ClaudeFailureRecord[]
+  pruned?: number
 }
 
 /**
@@ -649,6 +651,10 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   const startTime = Date.now()
   const cutoffTime = options.full ? undefined : Date.now() - INDEX_WINDOW_MS
 
+  // A7: Configure connection PRAGMAs for index throughput
+  db.run("PRAGMA synchronous = NORMAL;")
+  db.run("PRAGMA cache_size = -64000;")
+
   if (options.force && !options.path) {
     throw new Error("--force is only permitted when an explicit --path is specified")
   }
@@ -720,6 +726,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   let skippedOld = 0
   let claudeSkipped = 0
   let claudeVanished = 0
+  let prunedCount = 0
   const claudeFailures: ClaudeFailureRecord[] = []
 
   // Index Claude session files
@@ -742,76 +749,113 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
       }
     }
 
-    for await (const sessionFile of findSessionFiles()) {
-      // Skip sessions older than 180 days
-      let stats: fs.Stats
-      try {
-        stats = fs.statSync(sessionFile)
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-          claudeVanished++
+    const chunkSize = options.chunkSize ?? 50
+    let inTransaction = false
+    let uncommittedFiles = 0
+
+    const ensureTransaction = () => {
+      if (!inTransaction) {
+        db.run("BEGIN IMMEDIATE")
+        inTransaction = true
+        uncommittedFiles = 0
+      }
+    }
+
+    const commitChunk = () => {
+      if (inTransaction) {
+        db.run("COMMIT")
+        inTransaction = false
+        uncommittedFiles = 0
+      }
+    }
+
+    try {
+      for await (const sessionFile of findSessionFiles()) {
+        // Skip sessions older than 180 days
+        let stats: fs.Stats
+        try {
+          stats = fs.statSync(sessionFile)
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+            claudeVanished++
+            continue
+          }
+          throw err
+        }
+        if (cutoffTime !== undefined && stats.mtime.getTime() < cutoffTime) {
+          skippedOld++
           continue
         }
-        throw err
-      }
-      if (cutoffTime !== undefined && stats.mtime.getTime() < cutoffTime) {
-        skippedOld++
-        continue
-      }
 
-      totalFiles++
-      const relativePath = path.relative(currentProjectsDir(), sessionFile)
-      const sessionInfo = parseSessionPath(relativePath, sessionFile)
-      seenSessionIds.add(sessionInfo.id)
-
-      if (options.incremental) {
-        const existing = existingSessionMap.get(relativePath)
-        if (
-          existing &&
-          (existing.status == null ||
-            existing.status === "complete" ||
-            existing.status === "stale-unreadable" ||
-            existing.status === "unreadable") &&
-          existing.mtime_ms != null &&
-          existing.size_bytes != null &&
-          existing.mtime_ms === stats.mtime.getTime() &&
-          existing.size_bytes === stats.size
-        ) {
-          claudeSkipped++
-          continue
-        }
-      }
-
-      options.onProgress?.({
-        filesProcessed: totalFiles,
-        messagesIndexed: totalMessages,
-        writesIndexed: totalWrites,
-        currentFile: relativePath,
-      })
-
-      try {
-        const { messages, writes } = await indexSessionFile(db, sessionFile, options, stats)
-        totalMessages += messages
-        totalWrites += writes
-      } catch (err) {
-        const errMsg = (err as Error).message || String(err)
-        recordClaudeFailure(
-          db,
-          sessionInfo.id,
-          sessionFile,
-          errMsg,
-          {
-            parentSessionId: sessionInfo.parentSessionId,
-            agentId: sessionInfo.agentId,
-          },
-          stats,
-        )
+        totalFiles++
+        const relativePath = path.relative(currentProjectsDir(), sessionFile)
+        const sessionInfo = parseSessionPath(relativePath, sessionFile)
         seenSessionIds.add(sessionInfo.id)
-        claudeFailures.push({
-          id: sessionInfo.id,
-          file: relativePath,
-          reason: errMsg,
+
+        if (options.incremental) {
+          const existing = existingSessionMap.get(relativePath)
+          if (
+            existing &&
+            (existing.status == null ||
+              existing.status === "complete" ||
+              existing.status === "stale-unreadable" ||
+              existing.status === "unreadable") &&
+            existing.mtime_ms != null &&
+            existing.size_bytes != null &&
+            existing.mtime_ms === stats.mtime.getTime() &&
+            existing.size_bytes === stats.size
+          ) {
+            claudeSkipped++
+            continue
+          }
+        }
+
+        options.onProgress?.({
+          filesProcessed: totalFiles,
+          messagesIndexed: totalMessages,
+          writesIndexed: totalWrites,
+          currentFile: relativePath,
         })
+
+        ensureTransaction()
+        try {
+          const { messages, writes } = await indexSessionFile(db, sessionFile, options, stats)
+          totalMessages += messages
+          totalWrites += writes
+        } catch (err) {
+          const errMsg = (err as Error).message || String(err)
+          recordClaudeFailure(
+            db,
+            sessionInfo.id,
+            sessionFile,
+            errMsg,
+            {
+              parentSessionId: sessionInfo.parentSessionId,
+              agentId: sessionInfo.agentId,
+            },
+            stats,
+          )
+          seenSessionIds.add(sessionInfo.id)
+          claudeFailures.push({
+            id: sessionInfo.id,
+            file: relativePath,
+            reason: errMsg,
+          })
+        }
+
+        uncommittedFiles++
+        if (uncommittedFiles >= chunkSize) {
+          commitChunk()
+        }
+      }
+
+      commitChunk()
+    } finally {
+      if (inTransaction) {
+        try {
+          db.run("ROLLBACK")
+        } catch {}
+        inTransaction = false
       }
     }
   } else if (isClaudeTarget) {
@@ -826,10 +870,12 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
       currentFile: relativePath,
     })
 
+    db.run("BEGIN IMMEDIATE")
     try {
       const { messages, writes } = await indexSessionFile(db, options.path, options)
       totalMessages += messages
       totalWrites += writes
+      db.run("COMMIT")
     } catch (err) {
       const errMsg = (err as Error).message || String(err)
       recordClaudeFailure(db, sessionInfo.id, options.path, errMsg, {
@@ -842,6 +888,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
         file: relativePath,
         reason: errMsg,
       })
+      db.run("COMMIT")
     }
   }
 
@@ -1019,6 +1066,46 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
         pruneOldSessions(db, cutoffTime)
       }
       pruneIgnoredSessions(db)
+
+      // A8: Safe two-miss pruning of vanished files in incremental mode
+      if (options.incremental) {
+        const dbSessions = db
+          .prepare("SELECT id, jsonl_path, status FROM sessions WHERE jsonl_path IS NOT NULL")
+          .all() as Array<{ id: string; jsonl_path: string; status: string | null }>
+
+        for (const s of dbSessions) {
+          if (seenSessionIds.has(s.id)) {
+            if (s.status === "stale-missing") {
+              updateSessionStatus(db, s.id, "complete")
+            }
+            continue
+          }
+          if ((options.skipCodex || process.env.RECALL_SKIP_CODEX === "1") && s.id.startsWith("codex:")) {
+            continue
+          }
+
+          const fullPath = path.isAbsolute(s.jsonl_path)
+            ? s.jsonl_path
+            : path.join(currentProjectsDir(), s.jsonl_path)
+
+          if (!fs.existsSync(fullPath)) {
+            if (s.status !== "stale-missing") {
+              // Miss 1: mark stale-missing, remains searchable
+              updateSessionStatus(db, s.id, "stale-missing")
+            } else {
+              // Miss 2: delete from messages, writes, sessions
+              db.prepare("DELETE FROM messages WHERE session_id = ?").run(s.id)
+              db.prepare("DELETE FROM writes WHERE session_id = ?").run(s.id)
+              db.prepare("DELETE FROM sessions WHERE id = ?").run(s.id)
+              prunedCount++
+            }
+          }
+        }
+
+        if (prunedCount > 0) {
+          console.log(`pruned: ${prunedCount}`)
+        }
+      }
     }
 
     // Store metadata
@@ -1036,12 +1123,18 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     setIndexMeta(db, "total_docs", String(projectSourceResult.docs))
     setIndexMeta(db, "total_claude_md", String(projectSourceResult.claudeMd))
     setIndexMeta(db, "total_research", String(projectSourceResult.research))
+    if (prunedCount > 0) {
+      setIndexMeta(db, "total_pruned", String(prunedCount))
+    }
     // Publish success last, including after completion metadata writes.
     setIndexMeta(db, "last_rebuild", new Date().toISOString())
   }
 
   setIndexMeta(db, "last_codex_failures", JSON.stringify(codexFailures))
   setIndexMeta(db, "last_codex_reason_counts", JSON.stringify(codexReasonCounts))
+
+  // A7: Optimize SQLite query planner stats after indexing completes
+  db.run("PRAGMA optimize;")
 
   return {
     files: totalFiles,
@@ -1062,6 +1155,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     claudeSkipped,
     claudeVanished,
     claudeFailures,
+    pruned: prunedCount,
     ...projectSourceResult,
   }
 }

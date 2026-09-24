@@ -170,8 +170,37 @@ export function getSessionByPath(db: Database, jsonlPath: string): SessionRecord
 }
 
 // ============================================================================
-// Message operations
+// Statement caching (A7: hoisted / cached statements)
 // ============================================================================
+
+const statementCache = new WeakMap<Database, Map<string, ReturnType<Database["prepare"]>>>()
+
+export function getCachedStatement(db: Database, sql: string) {
+  let map = statementCache.get(db)
+  if (!map) {
+    map = new Map()
+    statementCache.set(db, map)
+  }
+  let stmt = map.get(sql)
+  if (!stmt) {
+    stmt = db.prepare(sql)
+    map.set(sql, stmt)
+  }
+  return stmt
+}
+
+const INSERT_MESSAGE_SQL = `
+    INSERT INTO messages (uuid, session_id, type, content, tool_name, file_paths, timestamp, duplicate_of, line)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(session_id, uuid) DO UPDATE SET
+      type = excluded.type,
+      content = excluded.content,
+      tool_name = excluded.tool_name,
+      file_paths = excluded.file_paths,
+      timestamp = excluded.timestamp,
+      duplicate_of = excluded.duplicate_of,
+      line = excluded.line
+`
 
 export function insertMessage(
   db: Database,
@@ -185,19 +214,7 @@ export function insertMessage(
   duplicateOf?: number | null,
   line?: number | null,
 ): number {
-  const result = db
-    .prepare(`
-    INSERT INTO messages (uuid, session_id, type, content, tool_name, file_paths, timestamp, duplicate_of, line)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(session_id, uuid) DO UPDATE SET
-      type = excluded.type,
-      content = excluded.content,
-      tool_name = excluded.tool_name,
-      file_paths = excluded.file_paths,
-      timestamp = excluded.timestamp,
-      duplicate_of = excluded.duplicate_of,
-      line = excluded.line
-  `)
+  const result = getCachedStatement(db, INSERT_MESSAGE_SQL)
     .run(uuid, sessionId, type, content, toolName, filePaths, timestamp, duplicateOf ?? null, line ?? null)
   return Number(result.lastInsertRowid)
 }
@@ -213,6 +230,11 @@ export function getMessageCount(db: Database, sessionId: string): number {
 // Write operations (backwards compatible)
 // ============================================================================
 
+const INSERT_WRITE_SQL = `
+    INSERT INTO writes (session_id, session_file, tool_use_id, timestamp, file_path, content_hash, content_size, content)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`
+
 export function insertWrite(
   db: Database,
   sessionId: string,
@@ -224,10 +246,9 @@ export function insertWrite(
   contentSize: number,
   content: string | null,
 ): void {
-  db.prepare(`
-    INSERT INTO writes (session_id, session_file, tool_use_id, timestamp, file_path, content_hash, content_size, content)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(sessionId, sessionFile, toolUseId, timestamp, filePath, contentHash, contentSize, content)
+  getCachedStatement(db, INSERT_WRITE_SQL).run(
+    sessionId, sessionFile, toolUseId, timestamp, filePath, contentHash, contentSize, content
+  )
 }
 
 // ============================================================================
