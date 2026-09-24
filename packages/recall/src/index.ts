@@ -56,6 +56,7 @@ export {
 } from "./history/synthesize.ts"
 export { hookRecall, extractTranscriptMessages, reviewMemorySystem } from "./history/scanner.ts"
 export { ensureProjectSourcesIndexed } from "./history/project-sources.ts"
+export { RECALL_INDEX_BUSY_EXIT, RECALL_INDEX_SKIPS_EXIT } from "./lib/sessions.ts"
 
 export type {
   HookSearchSummary,
