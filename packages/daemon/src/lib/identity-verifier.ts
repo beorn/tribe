@@ -43,7 +43,8 @@ export function sessionAuthority(row: {
  * A claimed registration never displaces a managed one. Between bearer and verified the interim is today's
  * takeover (20703): the harness bootstrap of every managed launch still registers by bearer, so barring bearer
  * from a verified holder would refuse each seat's relaunch against its own live predecessor. 25074 3c moves that
- * registration onto the token, and verified then outranks bearer here too.
+ * registration onto the token, and verified then outranks bearer here too. Accepted by @cto 8acb5a01 as a two-way
+ * door bounded by 3c; the takeover test "interim until 3c" pins it, so 3c's flip is a red test.
  */
 export function displacementRefused(holder: SessionAuthority, claimant: SessionAuthority): boolean {
   return claimant === "claimed" && holder !== "claimed"

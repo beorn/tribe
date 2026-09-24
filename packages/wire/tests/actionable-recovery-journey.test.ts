@@ -1312,7 +1312,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(missingAuthority.exitCode).toBe(2)
     expect(missingAuthority.stdout).toBe("")
     expect(missingAuthority.stderr).toBe(
-      "tribe pending: current session authority is missing; AG_SESSION_AUTH must be inherited from the managed launch. " +
+      "tribe pending: current session authority is missing; HAB_ID_TOKEN or AG_SESSION_AUTH must be inherited from the managed launch. " +
         "No pending query ran. For an explicit recovery or audit read, run " +
         "'tribe pending --owner <seat> --expired --owed --json'.\n",
     )
@@ -1387,7 +1387,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(missingClose.exitCode).toBe(2)
     expect(missingClose.stdout).toBe("")
     expect(missingClose.stderr).toBe(
-      `tribe pending: current session authority is missing; AG_SESSION_AUTH must be inherited from the managed launch\n`,
+      `tribe pending: current session authority is missing; HAB_ID_TOKEN or AG_SESSION_AUTH must be inherited from the managed launch\n`,
     )
 
     await open(77, rejectedAuthorityRequestId)
