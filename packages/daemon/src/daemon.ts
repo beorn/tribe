@@ -56,6 +56,7 @@ import { pruneOldActivityLogs } from "./lib/activity-log.ts"
 import { countDurableSessionRows } from "./lib/session.ts"
 import { gatherCodePin, STARTUP_SHA } from "./lib/code-pin.ts"
 import { pageVaultDbRefusal } from "./lib/vault-db-page.ts"
+import { loadIdentityVerifier, type LoadedIdentityVerifier } from "./lib/identity-verifier.ts"
 import { parseDeliveryFallbackPolicy } from "./lib/delivery-resolution.ts"
 import { createDeclaredRosterReader } from "./lib/membership-declared-roster.ts"
 import { drainOutput } from "loggily"
@@ -206,6 +207,19 @@ if (partialShape.config.inheritFd === null) {
   }
 }
 
+// The composing layer's identity verifier (25074 3b), loaded before the socket binds so a launch line naming a
+// module that breaks the contract refuses startup naming the path, never serves a fleet it cannot verify.
+let identityVerifier: LoadedIdentityVerifier | null = null
+if (partialShape.config.identityVerifierPath) {
+  try {
+    identityVerifier = await loadIdentityVerifier(partialShape.config.identityVerifierPath)
+  } catch (error) {
+    log.error?.(`Refusing to start: ${error instanceof Error ? error.message : String(error)}`)
+    await rootScope[Symbol.asyncDispose]()
+    process.exit(1)
+  }
+}
+
 // One-shot retention sweep: remove activity-*.jsonl files older than 30 days.
 // Best-effort; failures never block daemon startup. See @km/tribe/activity-log
 // (acceptance criterion "Daily rotation at midnight, no event loss across
@@ -277,6 +291,7 @@ const withDispatcherShape = withDispatcher<typeof withIdleQuitShape>({
   resolveDelivery: deliveryFallbackPolicy?.resolveDelivery,
   retiredNames: deliveryFallbackPolicy?.retiredNames,
   getExpectedMembers,
+  identityVerifier,
 })(withIdleQuitShape)
 // MCP-spec surface — reads the tool registry, registers initialize / tools/list
 // / tools/call on the dispatcher. tools/call routes through the dispatcher's
@@ -364,6 +379,9 @@ if (tribe.recall) {
   else log.info?.(`Recall vault: ${tribe.config.vaultDbPath ?? "not bound (pass --vault-db)"}`)
   pageVaultDbRefusal(tribe.daemonCtx, refusal ?? null)
 }
+log.info?.(
+  `Identity verifier: ${identityVerifier?.path ?? "not configured (sessions are served on bearer or claimed names)"}`,
+)
 log.info?.(`Daemon ready (pid=${process.pid}, clients=${tribe.registry.clients.size})`)
 
 // Stale-code startup guard (@km/tribe/20033). At startup running == on-disk

@@ -27,6 +27,7 @@ export function openDatabase(path: string): Database {
 		claude_session_name TEXT,
 		identity_token TEXT,
 		mailbox_authority_hash TEXT,
+		identity_sid TEXT,
 		launch_id TEXT,
 		launch_parent_pid INTEGER,
 		started_at INTEGER NOT NULL,
@@ -1227,6 +1228,18 @@ const MIGRATIONS: readonly Migration[] = [
       if (!columns.has("adapter_exit_record")) db.run("ALTER TABLE sessions ADD COLUMN adapter_exit_record TEXT")
     },
   },
+  {
+    version: 32,
+    name: "session-identity-sid",
+    up(db) {
+      // 25074 3b — the sid of the identity token the daemon's verifier accepted at register; NULL for a session
+      // served on its bearer or its claimed name. Its presence is what ranks a session "verified".
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>).map((row) => row.name),
+      )
+      if (!columns.has("identity_sid")) db.run("ALTER TABLE sessions ADD COLUMN identity_sid TEXT")
+    },
+  },
 ]
 
 /** The schema terminus `openDatabase` upgrades to — derived from the same
@@ -1968,7 +1981,7 @@ export function createStatements(db: Database) {
 	`),
 
     allSessions: db.prepare(
-      "SELECT id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, mailbox_authority_hash, launch_id, launch_parent_pid, started_at, updated_at, filter_mode, filter_until, filter_mute, last_inbox_pull_seq, delivery FROM sessions",
+      "SELECT id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, mailbox_authority_hash, identity_sid, launch_id, launch_parent_pid, started_at, updated_at, filter_mode, filter_until, filter_mute, last_inbox_pull_seq, delivery FROM sessions",
     ),
 
     /** Look up a connected session's delivery mode by id. Used by the broadcast

@@ -41,6 +41,7 @@ import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
 import { createReconnectWatchdog } from "./lib/reconnect-watchdog.ts"
 import { createHash } from "node:crypto"
 import { hashSelfMailboxAuthority, readSelfMailboxAuthorityFromEnvironment } from "./lib/self-mailbox-authority.ts"
+import { readIdentityTokenFromEnvironment } from "./lib/identity-token.ts"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
@@ -216,7 +217,7 @@ const PROJECT_NAME = resolveProjectName()
 // MCP server reference — constructed + connected to Claude Code BEFORE the
 // daemon connection resolves, so the MCP `initialize` handshake is answered
 // in milliseconds rather than blocked on daemon spawn/connect.
-// oxlint-disable-next-line eslint(prefer-const) -- deferred init, assigned before use
+// oxlint-disable-next-line prefer-const, typescript/no-deprecated -- deferred init, assigned before use; the adapter is built on the low-level Server, and moving it to McpServer is its own change
 let mcp: Server
 // Daemon client — populated asynchronously by `daemonReady` (the daemon
 // block below). Stays `undefined` until the background connect resolves;
@@ -338,6 +339,9 @@ const identityToken = createHash("sha256")
   .digest("hex")
   .slice(0, 16)
 const selfMailboxAuthority = readSelfMailboxAuthorityFromEnvironment(process.env)
+// 25074 3b — only a registration under the launch's own name presents the launch's token: an unnamed or renamed
+// child inheriting it would be refused as a mismatch, where today it is served on its claimed name.
+const launchIdentityToken = REGISTER_WITH_LAUNCH_NAME ? readIdentityTokenFromEnvironment(process.env) : null
 
 const baseRegisterParams = {
   ...(REGISTER_WITH_LAUNCH_NAME ? { name: LAUNCH_NAME } : {}),
@@ -356,6 +360,7 @@ const baseRegisterParams = {
   claudeSessionName: CLAUDE_SESSION_NAME,
   identityToken,
   ...(selfMailboxAuthority === null ? {} : { mailboxAuthorityHash: hashSelfMailboxAuthority(selfMailboxAuthority) }),
+  ...(launchIdentityToken === null ? {} : { idToken: launchIdentityToken }),
   ...(LAUNCH_IDENTITY ? { launchId: LAUNCH_IDENTITY.id, launchParentPid: LAUNCH_IDENTITY.parentPid } : {}),
   ...(ADAPTER_EXIT_RECORD === undefined ? {} : { adapterExitRecord: ADAPTER_EXIT_RECORD }),
   ...(INITIAL_FILTER_MODE === undefined ? {} : { filterMode: INITIAL_FILTER_MODE }),
@@ -453,7 +458,10 @@ let foreignIdentityRefusal: string | null = null
 
 function isForeignIdentityRefusal(err: unknown): boolean {
   const data = (err as { data?: unknown } | null)?.data
-  return typeof data === "object" && data !== null && (data as { kind?: unknown }).kind === "foreign-identity-transport"
+  // 25074 3b — a token the daemon's verifier contradicts, or one naming another actor, is refused the same way:
+  // retrying cannot change what the token proves. A verifier fault is not here; it may clear, so it retries.
+  const kind = typeof data === "object" && data !== null ? (data as { kind?: unknown }).kind : undefined
+  return kind === "foreign-identity-transport" || kind === "identity-contradicted" || kind === "identity-name-mismatch"
 }
 
 function failManagedPersonaRegistration(err: unknown): never {
@@ -878,6 +886,7 @@ Coordination protocol:
 // not wake an idle REPL). Channels-as-delivery is still correct: messages
 // arrive, queue, and drain on the next turn. The `/loop` heartbeat is the
 // interim wake mechanism until #44380 lands.
+// oxlint-disable-next-line typescript/no-deprecated -- the adapter is built on the low-level Server (see its declaration)
 mcp = new Server(
   { name: "tribe", version: "0.14.1" },
   {
@@ -988,7 +997,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     return result as { content: Array<{ type: string; text: string }> }
   } catch (err) {
     return {
-      content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : err}` }],
+      content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
     }
   }
 })
@@ -1022,7 +1031,9 @@ const shutdownAfterHarnessExit = () => {
   if (harnessExitAnnounced) return
   harnessExitAnnounced = true
   const announced = daemon?.call("leave", { reason: "harness-exited" }).catch(() => undefined)
-  const deadline = new Promise<void>((resolve) => setTimeout(resolve, 500))
+  const deadline = new Promise<void>((resolve) => {
+    setTimeout(resolve, 500)
+  })
   void Promise.race([announced ?? Promise.resolve(), deadline]).finally(shutdown)
 }
 process.on("SIGINT", shutdown)
@@ -1077,6 +1088,7 @@ import { resolveTranscriptPath, readTranscriptSlug } from "./lib/transcript.ts"
           } catch {
             /* ignore */
           }
+          return undefined
         })
         .catch(() => {
           /* rename failed — name taken or similar */
@@ -1097,7 +1109,8 @@ function tryAutoRenameOnClaim(content: string): void {
   // Match "[by:claude:XXXXXXXX]" in claim message and check if it's this session
   const byMatch = content.match(/\[by:claude:([a-f0-9]+)\]/)
   if (!byMatch) return
-  const claimSessionPrefix = byMatch[1]!
+  const claimSessionPrefix = byMatch[1]
+  if (claimSessionPrefix === undefined) return
   if (!CLAUDE_SESSION_ID || !CLAUDE_SESSION_ID.startsWith(claimSessionPrefix)) return
   // Extract bead scope from "Claimed: km-<scope>.<suffix> — ..."
   const beadMatch = content.match(/^Claimed: (km-[a-z][\w-]*?)\./)
@@ -1118,6 +1131,7 @@ function tryAutoRenameOnClaim(content: string): void {
       } catch {
         /* ignore */
       }
+      return undefined
     })
     .catch(() => {
       /* rename failed, e.g. name taken — that's fine */
@@ -1264,9 +1278,9 @@ void daemonReady
         })
       } else if (method === "session.joined" || method === "session.left") {
         const action = method === "session.joined" ? "joined" : "left"
-        sendChannel(`${params?.name ?? "unknown"} ${action} the tribe`, { from: "daemon", type: "status" })
+        sendChannel(`${String(params?.name ?? "unknown")} ${action} the tribe`, { from: "daemon", type: "status" })
       } else if (method === "reload") {
-        log.info?.(`Daemon requests reload: ${params?.reason}`)
+        log.info?.(`Daemon requests reload: ${String(params?.reason)}`)
         timers.setTimeout(() => {
           requestPluginReexec(`daemon requested reload: ${String(params?.reason ?? "unspecified")}`)
         }, 500)
