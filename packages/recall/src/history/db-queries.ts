@@ -8,7 +8,7 @@ import * as fs from "fs"
 import type { SessionRecord, MessageRecord, ContentType, ContentRecord, SessionIndexEntry } from "./types.ts"
 import { PROJECTS_DIR, PLANS_DIR, TODOS_DIR } from "./db-schema.ts"
 import { HOOK_CANDIDATE_LIMIT } from "./recall-budget.ts"
-import type { HookSearchSummary, SearchMode } from "./recall-shared.ts"
+import type { HookSearchSummary, RecallSkip, SearchMode } from "./recall-shared.ts"
 
 // Assistant rows containing tool_use blocks mix prose with serialized tool
 // inputs. Keep them searchable for --tool and forensic lookup, but prevent a
@@ -374,6 +374,8 @@ export interface HookMessageSearch extends HookSearchSummary {
    * it already holds instead of a GROUP BY over every all-time match (14.5 s on tribe*, @cto 9665a0ec).
    */
   sessionDepths: Map<string, number>
+  /** Present when the cap cut the window: the line the hook says. */
+  capped?: RecallSkip
 }
 
 /**
@@ -492,7 +494,8 @@ function hookMessageSearch(
   const ftsQuery = toFts5Query(query)
   const filter = messageFilterSql(options)
   type Candidate = { id: number; session_id: string; rank: number }
-  const survivors = db
+  // One row past the cap says whether the cap cut the window, without a COUNT (B1).
+  const ranked = db
     .prepare(
       `SELECT m.id AS id, m.session_id AS session_id, ${MESSAGE_RANK_SQL} AS rank
        FROM messages_fts f
@@ -501,11 +504,29 @@ function hookMessageSearch(
        WHERE messages_fts MATCH ? AND ${filter.sql}
        ORDER BY rank LIMIT ?`,
     )
-    .all(ftsQuery, ...filter.params, HOOK_CANDIDATE_LIMIT) as Candidate[]
+    .all(ftsQuery, ...filter.params, HOOK_CANDIDATE_LIMIT + 1) as Candidate[]
+  const survivors = ranked.slice(0, HOOK_CANDIDATE_LIMIT)
+  const anchor = query.length > 80 ? `${query.slice(0, 80)}…` : query
 
   const sessionDepths = new Map<string, number>()
   for (const c of survivors) sessionDepths.set(c.session_id, (sessionDepths.get(c.session_id) ?? 0) + 1)
-  const hook: HookMessageSearch = { candidateLimit: HOOK_CANDIDATE_LIMIT, survivors: survivors.length, sessionDepths }
+  const hook: HookMessageSearch = {
+    candidateLimit: HOOK_CANDIDATE_LIMIT,
+    survivors: survivors.length,
+    sessionDepths,
+    // Loud, because a cut window is the one case where hook can differ from exact (@cto 4b15f0bc).
+    ...(ranked.length > HOOK_CANDIDATE_LIMIT
+      ? {
+          capped: {
+            phase: "messages",
+            anchor,
+            message:
+              `recall messages capped: survivors capped at ${String(HOOK_CANDIDATE_LIMIT)} of more than ` +
+              `${String(HOOK_CANDIDATE_LIMIT)} window matches for anchor "${anchor}" (25071)`,
+          },
+        }
+      : {}),
+  }
   const total = withTotal ? countMessages(db, ftsQuery, filter) : null
 
   const top = survivors.slice(offset, offset + limit)

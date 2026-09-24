@@ -88,7 +88,7 @@ export interface RecallResult {
   }
   /** Hook mode only: how the candidate search went. */
   hookSearch?: HookSearchSummary
-  /** Each phase skipped rather than run; absent when none was. */
+  /** Each phase skipped rather than run, or cut short (the hook's capped window); absent when none was. */
   skipped?: RecallSkip[]
   /**
    * Set when the lexical search succeeded (results is non-empty) but LLM

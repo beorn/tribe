@@ -416,6 +416,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     const messageResults = phase("messages", () => ftsSearchWithSnippet(db, query, messageOpts))
     const msgMs = Date.now() - searchStart
     hookSearch = messageResults.hook
+    if (hookSearch?.capped) skipped.push(hookSearch.capped)
     if (hookSearch) {
       log(
         `FTS5 messages: total: not counted (hook mode), ${messageResults.results.length} returned (${msgMs}ms) ` +

@@ -166,12 +166,29 @@ describe("25071 row 2 B2: hook mode ranks the window first (@cto re-ruling 516d4
     expect(hook.results.every((r) => r.sessionId.startsWith("new-"))).toBe(true)
   }, 30_000)
 
-  test("N caps the ranked window matches", async () => {
+  test("N caps the ranked window matches, and says so: the one case where hook can differ from exact", async () => {
     seed([...unmatched(50), ...recentWeak(1003)])
 
     const hook = await recall(ANCHOR, { mode: "hook", raw: true, limit: 5 })
 
     expect(hook.hookSearch).toEqual({ candidateLimit: 1000, survivors: 1000 })
+    // B1 counts nothing, so the cap is seen by fetching one row past it, not by a COUNT.
+    expect(hook.skipped).toEqual([
+      {
+        phase: "messages",
+        anchor: ANCHOR,
+        message: `recall messages capped: survivors capped at 1000 of more than 1000 window matches for anchor "${ANCHOR}" (25071)`,
+      },
+    ])
+  }, 30_000)
+
+  test("a window at the cap exactly is not reported as capped", async () => {
+    seed([...unmatched(50), ...recentWeak(1000)])
+
+    const hook = await recall(ANCHOR, { mode: "hook", raw: true, limit: 5 })
+
+    expect(hook.hookSearch).toEqual({ candidateLimit: 1000, survivors: 1000 })
+    expect(hook.skipped ?? []).toEqual([])
   }, 30_000)
 
   test("every statement hook mode runs against the message index applies the window in the same statement", async () => {
