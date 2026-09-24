@@ -4,6 +4,18 @@
 
 ### Added
 
+- **Verified identity on register.** The daemon takes an absolute module path
+  in `--identity-verifier`: the composing layer's module exports
+  `IDENTITY_VERIFIER_INTERFACE = 1` and `verifyIdentity(token)`, and a module
+  that breaks that contract refuses startup naming the path. `register` takes
+  `idToken`; a verified token keys the session by its sid, while a token that is
+  contradicted, names another actor, or makes the verifier throw refuses the
+  registration. `tribe members` rows and `tribe health` carry an `authority`
+  facet (`verified` / `bearer` / `claimed`), never an exit code. A claimed
+  registration never displaces a live managed session; a verified one displaces
+  a holder that only claimed its name. The stdio adapter sends the launch's
+  `HAB_ID_TOKEN` when it registers under the launch's own name, and
+  `connectTribeLaunch` takes an optional `idToken`.
 - **Reconnect-stable inbox-wait baselines.** Protocol v10 gives the installed
   CLI a private durable cursor across its 30-second transport chunks while
   keeping that cursor out of public MCP and CLI results. A fresh logical wait
