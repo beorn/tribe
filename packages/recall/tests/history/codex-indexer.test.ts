@@ -28,7 +28,7 @@ import {
   resetIgnoreCache,
 } from "../../src/history/indexer.ts"
 import { getPersistedFailedSessions } from "../../src/lib/status.ts"
-import { cmdIndex } from "../../src/lib/sessions.ts"
+import { cmdIndex, RECALL_INDEX_SKIPS_EXIT } from "../../src/lib/sessions.ts"
 
 describe("Codex Transcript Indexer", () => {
   let tempDir: string
@@ -2588,7 +2588,7 @@ if (process.argv.includes("list")) {
 
         const logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
         await cmdIndex({ path: skipFile })
-        expect(process.exitCode).toBe(5)
+        expect(process.exitCode).toBe(RECALL_INDEX_SKIPS_EXIT)
         logSpy.mockRestore()
       } finally {
         process.exitCode = origExitCode
