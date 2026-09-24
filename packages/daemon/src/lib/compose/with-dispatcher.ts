@@ -87,6 +87,13 @@ import type { DeclaredRoster } from "../membership-declared-roster.ts"
 import { STARTUP_SHA, TRIBE_SOURCE_ROOT } from "../code-pin.ts"
 import { shouldLogSlowRequest } from "../slow-request-log.ts"
 import { derivedLaunchPrefixUpperBound } from "../launch-prefix-range.ts"
+import {
+  displacementRefused,
+  sessionAuthority,
+  type IdentityVerdict,
+  type LoadedIdentityVerifier,
+  type SessionAuthority,
+} from "../identity-verifier.ts"
 
 const log = createLogger("tribe:dispatcher")
 
@@ -119,6 +126,9 @@ export interface DispatcherRuntimeHooks {
    *  daemon follows the pin file (24660). Absent means no declaration —
    *  membership classification runs unchanged. */
   getExpectedMembers?: () => DeclaredRoster | undefined
+  /** The composing layer's identity verifier, loaded at boot (25074 3b). Null or absent: no session is verified,
+   *  and every registration is served on its bearer or its claimed name. */
+  identityVerifier?: LoadedIdentityVerifier | null
 }
 
 /**
@@ -796,6 +806,7 @@ export function withDispatcher<
       retiredNames: hooks.retiredNames,
       getExpectedMembers: hooks.getExpectedMembers,
       recallVaultRefusal: t.config.vaultDbRefusal ?? null,
+      identityVerifierPath: hooks.identityVerifier?.path ?? null,
       // tribe.stop actuator — absent (handler refuses loudly) unless the
       // composing daemon supplied its shutdown.
       triggerStop: hooks.triggerShutdown,
@@ -835,6 +846,65 @@ export function withDispatcher<
       // disconnected-owner identity by callers.
       const connectedNames = live.map((c) => c.name).sort()
       throw new NameConflictError(name, connectedNames, holder.pid || null)
+    }
+
+    type RegistrationRefusal = { readonly message: string; readonly data: Record<string, unknown> }
+
+    /** 25074 3b — verify a register's identity token through the composing layer's verifier. The sid is null when
+     *  the session is served on its bearer or its claimed name: no token, no verifier, or a token the verifier could
+     *  not read. A token that is contradicted, names another actor, or makes the verifier fail refuses. */
+    async function verifyRegistrationIdentity(
+      token: string | null,
+      requestedName: unknown,
+    ): Promise<{ readonly sid: string | null } | { readonly refusal: RegistrationRefusal }> {
+      const verifier = hooks.identityVerifier
+      if (token === null || !verifier) return { sid: null }
+      const claimed = typeof requestedName === "string" ? requestedName : "(no name)"
+      let verdict: IdentityVerdict
+      try {
+        verdict = await verifier.verify(token)
+      } catch (error) {
+        const fault = error instanceof Error ? error.message : String(error)
+        log.error?.(`identity verifier ${verifier.path} failed on the token ${claimed} presented: ${fault}`)
+        return {
+          refusal: {
+            message: `register refused: the identity verifier failed on the token ${claimed} presented: ${fault}`,
+            data: { kind: "identity-verifier-fault", verifier: verifier.path },
+          },
+        }
+      }
+      switch (verdict.result) {
+        case "verified":
+          if (verdict.actor === requestedName) return { sid: verdict.sid }
+          return {
+            refusal: {
+              message: `register refused: this transport claims ${claimed}, but its identity token names ${verdict.actor}`,
+              data: { kind: "identity-name-mismatch", claimed, actor: verdict.actor },
+            },
+          }
+        case "contradicted":
+          return {
+            refusal: {
+              message: `register refused: the identity token ${claimed} presented is contradicted: ${verdict.reason}`,
+              data: { kind: "identity-contradicted", claimed, reason: verdict.reason },
+            },
+          }
+        case "unreadable":
+          log.warn?.(`register: ${claimed}'s identity token is unreadable (${verdict.reason}); not verified`)
+          return { sid: null }
+        case "absent":
+          return { sid: null }
+      }
+    }
+
+    function holderIdentity(sessionId: string): { authority: SessionAuthority } {
+      const row = db
+        .prepare("SELECT identity_sid, mailbox_authority_hash FROM sessions WHERE id = ?")
+        .get(sessionId) as {
+        identity_sid: string | null
+        mailbox_authority_hash: string | null
+      } | null
+      return { authority: row === null ? "claimed" : sessionAuthority(row) }
     }
 
     function findSamePidNameHolder(name: string, clientPid: number, connId: string): ClientSession | null {
@@ -1103,6 +1173,21 @@ export function withDispatcher<
             if (p.principalClass !== undefined && p.principalClass !== "agent" && p.principalClass !== "service") {
               return makeError(id, -32602, "register principalClass must be agent or service")
             }
+            if (p.idToken !== undefined && (typeof p.idToken !== "string" || p.idToken.length === 0)) {
+              return makeError(
+                id,
+                -32602,
+                "register idToken must be a non-empty string; omit it when the launch has none",
+              )
+            }
+            const identity = await verifyRegistrationIdentity(typeof p.idToken === "string" ? p.idToken : null, p.name)
+            if ("refusal" in identity) {
+              log.warn?.(identity.refusal.message)
+              return makeError(id, -32003, identity.refusal.message, identity.refusal.data)
+            }
+            const verifiedSid = identity.sid
+            const claimantAuthority: SessionAuthority =
+              verifiedSid !== null ? "verified" : mailboxAuthorityHash !== null ? "bearer" : "claimed"
             const hasLaunchId = p.launchId !== undefined && p.launchId !== null
             const hasLaunchParentPid = p.launchParentPid !== undefined && p.launchParentPid !== null
             if (hasLaunchId !== hasLaunchParentPid) {
@@ -1316,6 +1401,9 @@ export function withDispatcher<
                 claimLaunchTakeover(resolvedName, launch, connId)
               }
               promoteSessionLaunchIdentity(holder.ctx.sessionId, launch, identityToken)
+              if (verifiedSid !== null) {
+                db.prepare("UPDATE sessions SET identity_sid = ? WHERE id = ?").run(verifiedSid, holder.ctx.sessionId)
+              }
               if (filterMode !== undefined) applyLaunchDeclaredFilter(holder.ctx, filterMode)
               const client = applyClient(connId, {
                 name: holder.name,
@@ -1363,6 +1451,48 @@ export function withDispatcher<
               retireReplacedClient(samePidHolder, "self-registration-replaced")
             }
 
+            // 25074 3b — authority precedence on a name. A claimed registration that would displace a live managed
+            // holder (takeover, or 21052's token displacement, below) never does: it is refused as a foreign identity
+            // (24767) and the holder's session and inbox are untouched. A verified registration displaces a holder
+            // that only claimed the name, and the holder's journal says why. Bearer and verified: displacementRefused.
+            const precedenceRefusal = (holder: ClientSession): string | null => {
+              const holderAuthority = holderIdentity(holder.ctx.sessionId).authority
+              if (!displacementRefused(holderAuthority, claimantAuthority)) return null
+              registry.recordForeignIdentityTransport(holder.ctx.sessionId, {
+                name: resolvedName,
+                launch_id: launchIdentity?.id ?? "(no launch)",
+                pid: clientPid,
+                refused_at: new Date().toISOString(),
+              })
+              const message =
+                `register refused: this transport claims ${resolvedName} with ${claimantAuthority} authority, ` +
+                `but a live ${holderAuthority} session holds it (pid ${holder.pid}). A claimed registration never ` +
+                "displaces a managed session; start this transport from the seat's own managed launch."
+              log.warn?.(message)
+              return makeError(id, -32003, message, {
+                kind: "foreign-identity-transport",
+                reason: "identity-precedence",
+                transport: { name: resolvedName, authority: claimantAuthority },
+                holder: { name: holder.name, authority: holderAuthority },
+              })
+            }
+            if (claimantAuthority === "verified") {
+              for (const holder of Array.from(clients.values())) {
+                if (holder.id === connId || holder.name !== resolvedName) continue
+                if (holderIdentity(holder.ctx.sessionId).authority !== "claimed") continue
+                log.warn?.(
+                  `identity displacement: a verified registration supersedes the claimed holder of "${resolvedName}" (old pid ${holder.pid}, old session ${holder.ctx.sessionId}, new pid ${clientPid})`,
+                )
+                logEvent(holder.ctx, "session.superseded", undefined, {
+                  name: resolvedName,
+                  old_pid: holder.pid,
+                  new_pid: clientPid,
+                  reason: "a verified identity displaced a claimed holder (25074)",
+                })
+                retireReplacedClient(holder, "identity-displacement")
+              }
+            }
+
             // 20703 — explicit-persona takeover. A managed respawn (adapter sends
             // takeover=true only for explicit @persona launch names) supersedes a
             // LIVE holder of the same name instead of failing loud: a stale MCP
@@ -1386,6 +1516,10 @@ export function withDispatcher<
               )
               const holder = holders[0]
               if (holder && takeoverAuthorized) {
+                for (const displaced of holders) {
+                  const refusal = precedenceRefusal(displaced)
+                  if (refusal !== null) return refusal
+                }
                 const oldPids = [...new Set(holders.map((client) => client.pid))]
                 log.warn?.(
                   `takeover: superseding live holder of "${resolvedName}" (old pid ${holder.pid}, old pids ${oldPids.join(",")}, old session ${holder.ctx.sessionId}, new pid ${clientPid})`,
@@ -1422,6 +1556,8 @@ export function withDispatcher<
                   .prepare("SELECT identity_token FROM sessions WHERE id = ?")
                   .get(holder.ctx.sessionId) as { identity_token: string | null } | null
                 if (!holderRow?.identity_token) {
+                  const refusal = precedenceRefusal(holder)
+                  if (refusal !== null) return refusal
                   log.warn?.(
                     `identity displacement: superseding token-less holder of "${resolvedName}" (old pid ${holder.pid}, old session ${holder.ctx.sessionId}, new pid ${clientPid})`,
                   )
@@ -1475,6 +1611,9 @@ export function withDispatcher<
               mailboxAuthorityHash,
             )
             db.prepare("UPDATE sessions SET principal_class = ? WHERE id = ?").run(principalClass, clientCtx.sessionId)
+            // Every register restates the session's verification: an adopted session re-registering without a token
+            // it can verify is no longer served as verified.
+            db.prepare("UPDATE sessions SET identity_sid = ? WHERE id = ?").run(verifiedSid, clientCtx.sessionId)
             // G9 P0 row 7 — the launch's adapter-exit record, named by the plugin
             // supervisor that appends to it. Omission keeps a reconnecting
             // session's stored path, as it does for account and provider.

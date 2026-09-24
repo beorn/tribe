@@ -59,6 +59,7 @@ import {
   type OwnerState,
   type SessionTransportEvidence,
 } from "./session-transport-state.ts"
+import { sessionAuthority, type SessionAuthority } from "./identity-verifier.ts"
 import type { DirectDeliveryResolution, DirectDeliveryResolver } from "./delivery-resolution.ts"
 import { bothDeclaredUnrun, type DeclaredRoster } from "./membership-declared-roster.ts"
 import { isUnidentifiedSessionName } from "./resolve-name.ts"
@@ -278,6 +279,8 @@ export type HandlerOpts = {
   getExpectedMembers?: () => DeclaredRoster | undefined
   /** Set when the daemon booted with `--vault-db` naming no file; `tribe health` carries it (25149). */
   recallVaultRefusal?: { readonly path: string; readonly reason: string } | null
+  /** The identity-verifier module the daemon booted with (25074 3b); `tribe health` names it, null when none. */
+  identityVerifierPath?: string | null
   /** Optional: dump daemon internals for `tribe.debug`. Daemon-only (tests using
    *  handlers directly can omit this — `tribe.debug` then returns a minimal
    *  snapshot synthesized from the other accessors). */
@@ -2785,7 +2788,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     .prepare(`
       SELECT s.id, s.name, s.role, s.domains, s.pid, s.cwd,
         s.claude_session_id, s.claude_session_name, s.started_at, s.updated_at,
-        s.account, s.provider, s.mailbox_authority_hash, s.launch_id, s.launch_parent_pid, s.delivery,
+        s.account, s.provider, s.mailbox_authority_hash, s.identity_sid, s.launch_id, s.launch_parent_pid, s.delivery,
         s.adapter_exit_record
       FROM sessions s
       ORDER BY s.started_at
@@ -2804,6 +2807,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     account: string | null
     provider: string | null
     mailbox_authority_hash: string | null
+    identity_sid: string | null
     launch_id: string | null
     launch_parent_pid: number | null
     delivery: "push" | "pull"
@@ -2856,6 +2860,9 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
       claude_session_id: r.claude_session_id,
       claude_session_name: r.claude_session_name,
       mailbox_read_capability: projectMailboxReadCapability(r.mailbox_authority_hash),
+      // 25074 3b — how the daemon knows this session is who it says: verified (its identity token), bearer (a
+      // launch-minted mailbox authority), or claimed (its name alone). A facet, never an exit code.
+      authority: sessionAuthority(r),
       ...evidence,
       // `alive` (plus transport_alive/agent_alive/pid_alive/is_silent) is
       // derived above, never asserted from transport-registry presence — see
@@ -3208,6 +3215,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     started_at: number
     updated_at: number
     mailbox_authority_hash: string | null
+    identity_sid: string | null
     launch_id: string | null
     launch_parent_pid: number | null
   }>
@@ -3309,6 +3317,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
       launch_parent_pid: active.launchParentPid,
       transport_pids: transportPids,
       mailbox_read_capability: projectMailboxReadCapability(s.mailbox_authority_hash),
+      authority: sessionAuthority(s),
       ...transport,
       ...liveness,
       last_message: lastMsgAge ? `${Math.round(lastMsgAge / 60_000)} min ago` : "never",
@@ -3390,6 +3399,18 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     anonymous_disconnected: disconnected.anonymousDurable.length,
     ...(membershipDiscrepancy === undefined ? {} : { membership_discrepancy: membershipDiscrepancy }),
     ...(opts.recallVaultRefusal ? { recall_vault: { state: "refused", ...opts.recallVaultRefusal } } : {}),
+    // 25074 3b — the verifier the daemon booted with and how many live sessions each authority serves. 3d's gate
+    // reads zero bearer and zero claimed here; until then the tokenless sessions stay visible, never an exit code.
+    identity: {
+      verifier: opts.identityVerifierPath ?? null,
+      authority: liveSessions.reduce<Record<SessionAuthority, number>>(
+        (counts, session) => {
+          counts[sessionAuthority(session)] += 1
+          return counts
+        },
+        { verified: 0, bearer: 0, claimed: 0 },
+      ),
+    },
     issues: [
       ...(opts.recallVaultRefusal ? [`recall vault REFUSED: --vault-db ${opts.recallVaultRefusal.reason}`] : []),
       ...transportWedges.map(
