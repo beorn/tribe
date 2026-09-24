@@ -380,7 +380,11 @@ if (tribe.recall) {
   pageVaultDbRefusal(tribe.daemonCtx, refusal ?? null)
 }
 log.info?.(
-  `Identity verifier: ${identityVerifier?.path ?? "not configured (sessions are served on bearer or claimed names)"}`,
+  `Identity verifier: ${
+    identityVerifier === null
+      ? "not configured (sessions are served on bearer or claimed names)"
+      : `${identityVerifier.path} (${identityVerifier.suppliesGen ? "supplies gen" : "no gen: a launch-id-less register refuses"})`
+  }`,
 )
 log.info?.(`Daemon ready (pid=${process.pid}, clients=${tribe.registry.clients.size})`)
 

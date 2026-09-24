@@ -29,6 +29,7 @@ export function openDatabase(path: string): Database {
 		mailbox_authority_hash TEXT,
 		identity_sid TEXT,
 		verified_id_token TEXT,
+		identity_gen INTEGER,
 		launch_id TEXT,
 		launch_parent_pid INTEGER,
 		started_at INTEGER NOT NULL,
@@ -1251,6 +1252,18 @@ const MIGRATIONS: readonly Migration[] = [
         (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>).map((row) => row.name),
       )
       if (!columns.has("verified_id_token")) db.run("ALTER TABLE sessions ADD COLUMN verified_id_token TEXT")
+    },
+  },
+  {
+    version: 34,
+    name: "session-identity-gen",
+    up(db) {
+      // 25074 3c-2a — the instance generation a verified session registered at, so the takeover fence can tell the
+      // same instance (fan-in), a successor (takeover) and a stale one (refused) apart.
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>).map((row) => row.name),
+      )
+      if (!columns.has("identity_gen")) db.run("ALTER TABLE sessions ADD COLUMN identity_gen INTEGER")
     },
   },
 ]

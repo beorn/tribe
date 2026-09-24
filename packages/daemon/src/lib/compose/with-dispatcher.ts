@@ -958,6 +958,7 @@ export function withDispatcher<
       getExpectedMembers: hooks.getExpectedMembers,
       recallVaultRefusal: t.config.vaultDbRefusal ?? null,
       identityVerifierPath: hooks.identityVerifier?.path ?? null,
+      identityVerifierSuppliesGen: hooks.identityVerifier ? hooks.identityVerifier.suppliesGen : null,
       // tribe.stop actuator — absent (handler refuses loudly) unless the
       // composing daemon supplied its shutdown.
       triggerStop: hooks.triggerShutdown,
@@ -1007,9 +1008,11 @@ export function withDispatcher<
     async function verifyRegistrationIdentity(
       token: string | null,
       requestedName: unknown,
-    ): Promise<{ readonly sid: string | null } | { readonly refusal: RegistrationRefusal }> {
+    ): Promise<
+      { readonly sid: string | null; readonly gen: number | null } | { readonly refusal: RegistrationRefusal }
+    > {
       const verifier = hooks.identityVerifier
-      if (token === null || !verifier) return { sid: null }
+      if (token === null || !verifier) return { sid: null, gen: null }
       const claimed = typeof requestedName === "string" ? requestedName : "(no name)"
       let verdict: IdentityVerdict
       try {
@@ -1026,7 +1029,7 @@ export function withDispatcher<
       }
       switch (verdict.result) {
         case "verified":
-          if (verdict.actor === requestedName) return { sid: verdict.sid }
+          if (verdict.actor === requestedName) return { sid: verdict.sid, gen: verdict.gen ?? null }
           return {
             refusal: {
               message: `register refused: this transport claims ${claimed}, but its identity token names ${verdict.actor}`,
@@ -1042,23 +1045,36 @@ export function withDispatcher<
           }
         case "unreadable":
           log.warn?.(`register: ${claimed}'s identity token is unreadable (${verdict.reason}); not verified`)
-          return { sid: null }
+          return { sid: null, gen: null }
         case "absent":
-          return { sid: null }
+          return { sid: null, gen: null }
       }
     }
 
-    function holderIdentity(sessionId: string): { authority: SessionAuthority; token: string | null } {
+    function holderIdentity(sessionId: string): {
+      authority: SessionAuthority
+      token: string | null
+      sid: string | null
+      gen: number | null
+    } {
       const row = db
-        .prepare("SELECT identity_sid, mailbox_authority_hash, verified_id_token FROM sessions WHERE id = ?")
+        .prepare(
+          "SELECT identity_sid, mailbox_authority_hash, verified_id_token, identity_gen FROM sessions WHERE id = ?",
+        )
         .get(sessionId) as {
         identity_sid: string | null
         mailbox_authority_hash: string | null
         verified_id_token: string | null
+        identity_gen: number | null
       } | null
       return row === null
-        ? { authority: "claimed", token: null }
-        : { authority: sessionAuthority(row), token: row.verified_id_token }
+        ? { authority: "claimed", token: null, sid: null, gen: null }
+        : {
+            authority: sessionAuthority(row),
+            token: row.verified_id_token,
+            sid: row.identity_sid,
+            gen: row.identity_gen,
+          }
     }
 
     /** A verified holder's liveness, asked by re-verifying the token it registered with (25074 3c, @cto §10):
@@ -1357,6 +1373,7 @@ export function withDispatcher<
               return makeError(id, -32003, identity.refusal.message, identity.refusal.data)
             }
             const verifiedSid = identity.sid
+            const verifiedGen = identity.gen
             // The token itself is kept beside the sid so a later bearer registration can ask whether this holder's
             // instance is still live before displacing it (displacementRule's "holder-liveness").
             const verifiedToken = verifiedSid === null ? null : (p.idToken as string)
@@ -1364,18 +1381,35 @@ export function withDispatcher<
               verifiedSid !== null ? "verified" : mailboxAuthorityHash !== null ? "bearer" : "claimed"
             const hasLaunchId = p.launchId !== undefined && p.launchId !== null
             const hasLaunchParentPid = p.launchParentPid !== undefined && p.launchParentPid !== null
-            if (hasLaunchId !== hasLaunchParentPid) {
+            // 25074 3c-2a (@cto aa2918fd): a verified register that sends no launch id takes its launch identity from
+            // the token, `<sid>@<gen>`, with launchParentPid still sent. A sender that still sends a launch id keeps
+            // that path until 3d; a verdict without gen cannot key a launch-id-less session and refuses by name.
+            const tokenKeyed = !hasLaunchId && verifiedSid !== null
+            if (tokenKeyed && verifiedGen === null) {
+              const message =
+                `register refused: ${String(p.name)}'s token verified, but the verifier verdict carries no gen; ` +
+                "the daemon cannot key this session without a launch id"
+              log.warn?.(message)
+              return makeError(id, -32003, message, { kind: "identity-verdict-without-gen", claimed: p.name })
+            }
+            if (tokenKeyed ? !hasLaunchParentPid : hasLaunchId !== hasLaunchParentPid) {
               return makeError(
                 id,
                 -32602,
-                "register requires launchId and launchParentPid together; omit both for legacy transport registration",
+                tokenKeyed
+                  ? "a register keyed by its identity token still requires launchParentPid"
+                  : "register requires launchId and launchParentPid together; omit both for legacy transport registration",
               )
             }
-            const launchIdRaw = typeof p.launchId === "string" ? p.launchId.trim() : ""
+            const launchIdRaw = tokenKeyed
+              ? `${verifiedSid}@${verifiedGen}`
+              : typeof p.launchId === "string"
+                ? p.launchId.trim()
+                : ""
             const launchParentPidRaw = Number(p.launchParentPid ?? 0)
             const launchIdentityValid =
               launchIdRaw.length > 0 && Number.isSafeInteger(launchParentPidRaw) && launchParentPidRaw > 0
-            if (hasLaunchId && !launchIdentityValid) {
+            if ((hasLaunchId || tokenKeyed) && !launchIdentityValid) {
               return makeError(
                 id,
                 -32602,
@@ -1391,7 +1425,9 @@ export function withDispatcher<
             // baked it), so it can never become that seat. Refuse it naming both
             // identities; the unique authority index used to surface this as a
             // bare "name taken" and the adapter retried forever.
-            if (mailboxAuthorityHash !== null && launchIdentity !== null) {
+            // A token-keyed register has proven its identity; a bearer minted under the seat's pre-3c-2b launch id is
+            // no evidence against it.
+            if (mailboxAuthorityHash !== null && launchIdentity !== null && !tokenKeyed) {
               const authorityHolder = db
                 .prepare("SELECT id, name, launch_id FROM sessions WHERE mailbox_authority_hash = ?")
                 .get(mailboxAuthorityHash) as { id: string; name: string; launch_id: string | null } | null
@@ -1576,11 +1612,9 @@ export function withDispatcher<
               }
               promoteSessionLaunchIdentity(holder.ctx.sessionId, launch, identityToken)
               if (verifiedSid !== null) {
-                db.prepare("UPDATE sessions SET identity_sid = ?, verified_id_token = ? WHERE id = ?").run(
-                  verifiedSid,
-                  verifiedToken,
-                  holder.ctx.sessionId,
-                )
+                db.prepare(
+                  "UPDATE sessions SET identity_sid = ?, verified_id_token = ?, identity_gen = ? WHERE id = ?",
+                ).run(verifiedSid, verifiedToken, verifiedGen, holder.ctx.sessionId)
               }
               if (filterMode !== undefined) applyLaunchDeclaredFilter(holder.ctx, filterMode)
               const client = applyClient(connId, {
@@ -1636,7 +1670,39 @@ export function withDispatcher<
             // a fault the claimant retries. A verified registration displaces a holder that only claimed the name, and
             // the holder's journal says why.
             const precedenceRefusal = async (holder: ClientSession): Promise<string | null> => {
-              const { authority: holderAuthority, token } = holderIdentity(holder.ctx.sessionId)
+              const held = holderIdentity(holder.ctx.sessionId)
+              const { authority: holderAuthority, token } = held
+              // 25074 3c-2a — the fence is generation-aware between two verified instances of one session: a higher
+              // gen is the successor's takeover (the holder is told), a lower one is stale and refused by name.
+              // The same gen fanned in above; reaching here with it is a second instance claiming one generation.
+              if (
+                claimantAuthority === "verified" &&
+                holderAuthority === "verified" &&
+                held.sid === verifiedSid &&
+                held.gen !== null &&
+                verifiedGen !== null &&
+                verifiedGen <= held.gen
+              ) {
+                const stale = verifiedGen < held.gen
+                registry.recordForeignIdentityTransport(holder.ctx.sessionId, {
+                  name: resolvedName,
+                  launch_id: launchIdentity?.id ?? "(no launch)",
+                  pid: clientPid,
+                  refused_at: new Date().toISOString(),
+                })
+                const message = stale
+                  ? `register refused: ${resolvedName} generation ${verifiedGen} is older than the live ` +
+                    `holder's generation ${held.gen} (pid ${holder.pid}); a stale instance never displaces its successor`
+                  : `register refused: ${resolvedName} generation ${verifiedGen} is already held by a live instance ` +
+                    `(pid ${holder.pid}) under another launch parent`
+                log.warn?.(message)
+                return makeError(id, -32003, message, {
+                  kind: "foreign-identity-transport",
+                  reason: stale ? "identity-generation-stale" : "identity-generation-duplicate",
+                  transport: { name: resolvedName, gen: verifiedGen },
+                  holder: { name: holder.name, gen: held.gen },
+                })
+              }
               const rule = displacementRule(holderAuthority, claimantAuthority)
               if (rule === "allowed") return null
               if (rule === "holder-liveness") {
@@ -1809,11 +1875,9 @@ export function withDispatcher<
             db.prepare("UPDATE sessions SET principal_class = ? WHERE id = ?").run(principalClass, clientCtx.sessionId)
             // Every register restates the session's verification: an adopted session re-registering without a token
             // it can verify is no longer served as verified.
-            db.prepare("UPDATE sessions SET identity_sid = ?, verified_id_token = ? WHERE id = ?").run(
-              verifiedSid,
-              verifiedToken,
-              clientCtx.sessionId,
-            )
+            db.prepare(
+              "UPDATE sessions SET identity_sid = ?, verified_id_token = ?, identity_gen = ? WHERE id = ?",
+            ).run(verifiedSid, verifiedToken, verifiedSid === null ? null : verifiedGen, clientCtx.sessionId)
             // G9 P0 row 7 — the launch's adapter-exit record, named by the plugin
             // supervisor that appends to it. Omission keeps a reconnecting
             // session's stored path, as it does for account and provider.

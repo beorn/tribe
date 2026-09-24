@@ -80,6 +80,7 @@ type RegisterParams = {
   launchParentPid?: number
   idToken?: string
   mailboxAuthorityHash?: string
+  filterMode?: string
 }
 
 let cleanup: (() => Promise<void>) | null = null
@@ -848,14 +849,15 @@ function createDispatcherHarness(hooks: DispatcherRuntimeHooks = {}) {
 // states exactly what the composing layer answered; hh's real module has its own test at the root.
 describe("dispatcher identity verification on register (25074 3b)", () => {
   const verdicts: Record<string, IdentityVerdict | Error> = {
-    "token-dev7": { result: "verified", actor: "@dev/7", sid: "sid-dev7" },
-    "token-dev8": { result: "verified", actor: "@dev/8", sid: "sid-dev8" },
+    "token-dev7": { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 1 },
+    "token-dev8": { result: "verified", actor: "@dev/8", sid: "sid-dev8", gen: 1 },
     "token-dead": { result: "contradicted", reason: "instance-is-live: @dev/7 is not live at generation 3" },
     "token-garbled": { result: "unreadable", reason: "malformed token" },
     "token-fault": new Error("signing key unreadable"),
   }
   const identityVerifier = {
     path: "/stub/identity-verifier.ts",
+    suppliesGen: false,
     verify: async (token: string): Promise<IdentityVerdict> => {
       const verdict = verdicts[token]
       if (verdict === undefined) throw new Error(`stub has no verdict for ${token}`)
@@ -881,7 +883,13 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
     cleanup = harness.dispose
     harness.addPendingClient("conn-verified")
     parseResult<RegisterResult>(
-      await harness.register("conn-verified", { name: "@dev/7", pid: 4101, project: "/tmp/p", idToken: "token-dev7" }),
+      await harness.register("conn-verified", {
+        name: "@dev/7",
+        pid: 4101,
+        project: "/tmp/p",
+        launchParentPid: 4100,
+        idToken: "token-dev7",
+      }),
     )
     harness.addPendingClient("conn-claimed")
     parseResult<RegisterResult>(
@@ -960,7 +968,13 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
     cleanup = harness.dispose
     const seatSocket = harness.addPendingClient("conn-seat")
     const seat = parseResult<RegisterResult>(
-      await harness.register("conn-seat", { name: "@dev/7", pid: 4401, project: "/tmp/p", idToken: "token-dev7" }),
+      await harness.register("conn-seat", {
+        name: "@dev/7",
+        pid: 4401,
+        project: "/tmp/p",
+        launchParentPid: 4400,
+        idToken: "token-dev7",
+      }),
     )
     harness.addPendingClient("conn-squatter")
     const refusal = parseError(
@@ -1004,13 +1018,14 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
       })
     }
     const registerHolder = async (harness: ReturnType<typeof createDispatcherHarness>) => {
-      verdicts["token-holder"] = { result: "verified", actor: "@dev/7", sid: "sid-holder" }
+      verdicts["token-holder"] = { result: "verified", actor: "@dev/7", sid: "sid-holder", gen: 1 }
       const socket = harness.addPendingClient("conn-verified")
       parseResult<RegisterResult>(
         await harness.register("conn-verified", {
           name: "@dev/7",
           pid: 4551,
           project: "/tmp/p",
+          launchParentPid: 4550,
           idToken: "token-holder",
         }),
       )
@@ -1095,7 +1110,13 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
     )
     harness.addPendingClient("conn-verified")
     parseResult<RegisterResult>(
-      await harness.register("conn-verified", { name: "@dev/7", pid: 4502, project: "/tmp/p", idToken: "token-dev7" }),
+      await harness.register("conn-verified", {
+        name: "@dev/7",
+        pid: 4502,
+        project: "/tmp/p",
+        launchParentPid: 4500,
+        idToken: "token-dev7",
+      }),
     )
 
     expect(claimedSocket.destroyedByDispatcher).toBe(true)
@@ -1110,15 +1131,201 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
   })
 })
 
+// 25074 3c-2a (@cto aa2918fd): a verified register that sends no launch id takes its launch identity from the token,
+// `<sid>@<gen>`, so fan-in, the takeover fence and the launch-declared filter key on it unchanged. A verdict without
+// gen cannot key such a session and refuses by name; a sender that still sends a launch id keeps that path.
+describe("token-keyed launch identity (25074 3c-2a)", () => {
+  const verdicts: Record<string, IdentityVerdict> = {
+    "token-g3": { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 3 },
+    "token-g4": { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 4 },
+    "token-g2": { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 2 },
+    "token-nogen": { result: "verified", actor: "@dev/7", sid: "sid-dev7" },
+  }
+  const identityVerifier = {
+    path: "/stub/identity-verifier.ts",
+    suppliesGen: true,
+    verify: async (token: string): Promise<IdentityVerdict> => {
+      const verdict = verdicts[token]
+      if (verdict === undefined) throw new Error(`stub has no verdict for ${token}`)
+      return verdict
+    },
+  }
+  const sessionRow = (harness: ReturnType<typeof createDispatcherHarness>, sessionId: string) =>
+    harness.db
+      .prepare("SELECT launch_id, launch_parent_pid, identity_sid, filter_mode FROM sessions WHERE id = ?")
+      .get(sessionId) as {
+      launch_id: string | null
+      launch_parent_pid: number | null
+      identity_sid: string | null
+      filter_mode: string | null
+    }
+
+  it("the bootstrap and the adapter of one generation fan into ONE session keyed sid@gen, and the filter applies", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    const bootstrapSocket = harness.addPendingClient("conn-bootstrap")
+    const bootstrap = parseResult<RegisterResult>(
+      await harness.register("conn-bootstrap", {
+        name: "@dev/7",
+        pid: 5101,
+        project: "/tmp/p",
+        takeover: true,
+        launchParentPid: 5100,
+        idToken: "token-g3",
+      }),
+    )
+    const adapterSocket = harness.addPendingClient("conn-adapter")
+    const adapter = parseResult<RegisterResult>(
+      await harness.register("conn-adapter", {
+        name: "@dev/7",
+        pid: 5102,
+        project: "/tmp/p",
+        takeover: true,
+        launchParentPid: 5100,
+        idToken: "token-g3",
+        filterMode: "focus",
+      }),
+    )
+
+    expect(adapter.sessionId).toBe(bootstrap.sessionId)
+    expect(bootstrapSocket.destroyedByDispatcher).toBe(false)
+    expect(adapterSocket.destroyedByDispatcher).toBe(false)
+    expect(harness.supersededEvents("@dev/7")).toEqual([])
+    expect(sessionRow(harness, bootstrap.sessionId)).toEqual({
+      launch_id: "sid-dev7@3",
+      launch_parent_pid: 5100,
+      identity_sid: "sid-dev7",
+      filter_mode: "focus",
+    })
+  })
+
+  it("a verified verdict without gen, from a sender that sent no launch id, refuses by name", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-nogen")
+    expect(
+      parseError(
+        await harness.register("conn-nogen", {
+          name: "@dev/7",
+          pid: 5201,
+          project: "/tmp/p",
+          launchParentPid: 5200,
+          idToken: "token-nogen",
+        }),
+      ),
+    ).toMatchObject({
+      code: -32003,
+      message: expect.stringContaining("verifier verdict carries no gen; the daemon cannot key this session"),
+      data: { kind: "identity-verdict-without-gen" },
+    })
+    expect(harness.db.prepare("SELECT count(*) AS n FROM sessions WHERE name = '@dev/7'").get()).toEqual({ n: 0 })
+  })
+
+  it("a sender that still sends a launch id keeps that launch identity, with or without gen", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-legacy")
+    const registered = parseResult<RegisterResult>(
+      await harness.register("conn-legacy", {
+        name: "@dev/7",
+        pid: 5301,
+        project: "/tmp/p",
+        launchId: "provider-launch-legacy",
+        launchParentPid: 5300,
+        idToken: "token-nogen",
+      }),
+    )
+    expect(sessionRow(harness, registered.sessionId)).toMatchObject({
+      launch_id: "provider-launch-legacy",
+      identity_sid: "sid-dev7",
+    })
+  })
+
+  it("a higher generation of the same seat is the successor takeover, and the holder is told", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    const holderSocket = harness.addPendingClient("conn-g3")
+    parseResult<RegisterResult>(
+      await harness.register("conn-g3", {
+        name: "@dev/7",
+        pid: 5401,
+        project: "/tmp/p",
+        takeover: true,
+        launchParentPid: 5400,
+        idToken: "token-g3",
+      }),
+    )
+    harness.addPendingClient("conn-g4")
+    const successor = parseResult<RegisterResult>(
+      await harness.register("conn-g4", {
+        name: "@dev/7",
+        pid: 5411,
+        project: "/tmp/p",
+        takeover: true,
+        launchParentPid: 5410,
+        idToken: "token-g4",
+      }),
+    )
+
+    expect(holderSocket.destroyedByDispatcher).toBe(true)
+    expect(harness.supersededEvents("@dev/7")).toEqual([expect.objectContaining({ old_pid: 5401, new_pid: 5411 })])
+    expect(sessionRow(harness, successor.sessionId)).toMatchObject({ launch_id: "sid-dev7@4" })
+  })
+
+  it("a lower generation of the same seat is refused as stale by name, and the holder is untouched", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    const holderSocket = harness.addPendingClient("conn-g3")
+    parseResult<RegisterResult>(
+      await harness.register("conn-g3", {
+        name: "@dev/7",
+        pid: 5501,
+        project: "/tmp/p",
+        takeover: true,
+        launchParentPid: 5500,
+        idToken: "token-g3",
+      }),
+    )
+    harness.addPendingClient("conn-g2")
+    expect(
+      parseError(
+        await harness.register("conn-g2", {
+          name: "@dev/7",
+          pid: 5491,
+          project: "/tmp/p",
+          takeover: true,
+          launchParentPid: 5490,
+          idToken: "token-g2",
+        }),
+      ),
+    ).toMatchObject({
+      code: -32003,
+      message: expect.stringContaining("generation 2 is older than the live holder's generation 3"),
+      data: { kind: "foreign-identity-transport", reason: "identity-generation-stale" },
+    })
+    expect(holderSocket.destroyedByDispatcher).toBe(false)
+    expect(harness.supersededEvents("@dev/7")).toEqual([])
+  })
+
+  it("health's identity facet says whether the loaded verifier supplies gen", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    const result = parseResult<{ content: Array<{ text: string }> }>(await harness.request("tribe.health", {}))
+    const health = JSON.parse(result.content[0]!.text) as { identity: { verifier: string; supplies_gen: boolean } }
+    expect(health.identity).toMatchObject({ verifier: "/stub/identity-verifier.ts", supplies_gen: true })
+  })
+})
+
 // 25074 3b — one-shot callers are dual-keyed until 3d: the launch's identity token beside the bearer. The
 // capability projection and the resolution move together, so a verified seat both reads its inbox by token and
 // re-certifies (launch-registration's exactLaunchMember accepts the token reason).
 describe("one-shot session authority by identity token (25074 3b)", () => {
   const identityVerifier = {
     path: "/stub/identity-verifier.ts",
+    suppliesGen: false,
     verify: async (token: string): Promise<IdentityVerdict> => {
-      if (token === "token-dev7") return { result: "verified", actor: "@dev/7", sid: "sid-dev7" }
-      if (token === "token-dev8") return { result: "verified", actor: "@dev/8", sid: "sid-dev8" }
+      if (token === "token-dev7") return { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 1 }
+      if (token === "token-dev8") return { result: "verified", actor: "@dev/8", sid: "sid-dev8", gen: 1 }
       if (token === "token-dead") return { result: "contradicted", reason: "instance-is-live: not live" }
       if (token === "token-undecided") {
         throw new Error("the liveness of @dev/9 sid-dev9@2 is undecided (seat-starting: no transport yet); retry")
@@ -1135,7 +1342,13 @@ describe("one-shot session authority by identity token (25074 3b)", () => {
     cleanup = harness.dispose
     harness.addPendingClient("conn-seat")
     parseResult<RegisterResult>(
-      await harness.register("conn-seat", { name: "@dev/7", pid: 4601, project: "/tmp/p", idToken: "token-dev7" }),
+      await harness.register("conn-seat", {
+        name: "@dev/7",
+        pid: 4601,
+        project: "/tmp/p",
+        launchParentPid: 4600,
+        idToken: "token-dev7",
+      }),
     )
 
     parseResult(await selfInbox(harness, { authority: null, idToken: "token-dev7" }))
@@ -1242,9 +1455,10 @@ describe("one-shot session authority by identity token (25074 3b)", () => {
 describe("one-shot session authority P3 rows (25074, @cto 03cff4b5 and 975a22e2, review-adhoc5 4293dae2)", () => {
   const identityVerifier = {
     path: "/stub/identity-verifier.ts",
+    suppliesGen: true,
     verify: async (token: string): Promise<IdentityVerdict> => {
-      if (token === "token-dev7") return { result: "verified", actor: "@dev/7", sid: "sid-dev7" }
-      if (token === "token-dev8") return { result: "verified", actor: "@dev/8", sid: "sid-dev8" }
+      if (token === "token-dev7") return { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 1 }
+      if (token === "token-dev8") return { result: "verified", actor: "@dev/8", sid: "sid-dev8", gen: 1 }
       if (token === "token-dead") return { result: "contradicted", reason: "instance-is-live: not live" }
       throw new Error("the liveness of @dev/9 sid-dev9@2 is undecided (seat-starting: no transport yet); retry")
     },
@@ -1320,7 +1534,13 @@ describe("one-shot session authority P3 rows (25074, @cto 03cff4b5 and 975a22e2,
     cleanup = harness.dispose
     harness.addPendingClient("conn-seat")
     parseResult<RegisterResult>(
-      await harness.register("conn-seat", { name: "@dev/7", pid: 4921, project: "/tmp/p", idToken: "token-dev7" }),
+      await harness.register("conn-seat", {
+        name: "@dev/7",
+        pid: 4921,
+        project: "/tmp/p",
+        launchParentPid: 4920,
+        idToken: "token-dev7",
+      }),
     )
     await registerBearerSeat(harness, "@dev/9", 4922)
 

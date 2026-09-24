@@ -4,6 +4,16 @@
 
 ### Added
 
+- **A verified register keys its launch by the token.** The identity-verifier
+  contract gains an optional `gen` on a verified verdict; a module that fills it
+  exports `IDENTITY_VERIFIER_SUPPLIES_GEN = true`, and `tribe health`'s
+  `identity.supplies_gen` says so. A verified `register` that sends no
+  `launchId` is keyed `<sid>@<gen>` with its `launchParentPid`, so fan-in, the
+  takeover fence and the launch-declared filter work unchanged; a sender that
+  still sends `launchId` keeps it. Without `gen` such a register refuses as
+  `identity-verdict-without-gen`. Between two verified instances of one
+  session a higher generation takes over, and a lower one is refused as
+  `identity-generation-stale`.
 - **Verified outranks bearer on a live seat.** A bearer registration that would
   take over a verified holder first re-verifies the token that holder
   registered with: a live holder refuses it as `identity-precedence`, a dead or

@@ -85,13 +85,16 @@ describe("the daemon's --identity-verifier boot check (25074 3b)", () => {
     expect(existsSync(socketPath)).toBe(false)
   })
 
-  it("boots with a stub verifier, names it, and serves a verified registration as verified", async () => {
+  it("boots with a stub verifier, names it and its gen supply, and serves a token-keyed registration as verified", async () => {
     const verifierPath = join(dir, "verifier.ts")
     writeFileSync(
       verifierPath,
       `export const IDENTITY_VERIFIER_INTERFACE = 1
+       export const IDENTITY_VERIFIER_SUPPLIES_GEN = true
        export async function verifyIdentity(token) {
-         return token === "token-dev7" ? { result: "verified", actor: "@dev/7", sid: "sid-dev7" } : { result: "absent" }
+         return token === "token-dev7"
+           ? { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 1 }
+           : { result: "absent" }
        }`,
     )
     const socketPath = startDaemon(verifierPath)
@@ -105,13 +108,20 @@ describe("the daemon's --identity-verifier boot check (25074 3b)", () => {
       pid: process.pid,
       project: dir,
       delivery: "pull",
+      launchParentPid: process.pid,
       idToken: "token-dev7",
     })
     const health = (
       (await client.call("cli_health")) as {
-        structuredContent: { identity: { verifier: string | null; authority: Record<string, number> } }
+        structuredContent: {
+          identity: { verifier: string | null; supplies_gen: boolean | null; authority: Record<string, number> }
+        }
       }
     ).structuredContent
-    expect(health.identity).toEqual({ verifier: verifierPath, authority: { verified: 1, bearer: 0, claimed: 0 } })
+    expect(health.identity).toEqual({
+      verifier: verifierPath,
+      supplies_gen: true,
+      authority: { verified: 1, bearer: 0, claimed: 0 },
+    })
   })
 })

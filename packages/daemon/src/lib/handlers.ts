@@ -281,6 +281,8 @@ export type HandlerOpts = {
   recallVaultRefusal?: { readonly path: string; readonly reason: string } | null
   /** The identity-verifier module the daemon booted with (25074 3b); `tribe health` names it, null when none. */
   identityVerifierPath?: string | null
+  /** 25074 3c-2a — whether the loaded verifier declares `gen` on its verified verdicts; null with no verifier. */
+  identityVerifierSuppliesGen?: boolean | null
   /** Optional: dump daemon internals for `tribe.debug`. Daemon-only (tests using
    *  handlers directly can omit this — `tribe.debug` then returns a minimal
    *  snapshot synthesized from the other accessors). */
@@ -3417,6 +3419,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     // reads zero bearer and zero claimed here; until then the tokenless sessions stay visible, never an exit code.
     identity: {
       verifier: opts.identityVerifierPath ?? null,
+      supplies_gen: opts.identityVerifierSuppliesGen ?? null,
       authority: liveSessions.reduce<Record<SessionAuthority, number>>(
         (counts, session) => {
           counts[sessionAuthority(session)] += 1

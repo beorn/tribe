@@ -15,8 +15,13 @@ import { existsSync } from "node:fs"
 
 export const IDENTITY_VERIFIER_INTERFACE_VERSION = 1
 
+/**
+ * `gen` (25074 3c-2a, @cto aa2918fd) is optional and additive on interface 1: the token's instance generation. With it a
+ * register that sends no launch id is keyed `<sid>@<gen>`; without it such a register refuses by name. A module that
+ * fills it says so by exporting `IDENTITY_VERIFIER_SUPPLIES_GEN = true`, which the daemon reports in health.
+ */
 export type IdentityVerdict =
-  | { readonly result: "verified"; readonly actor: string; readonly sid: string }
+  | { readonly result: "verified"; readonly actor: string; readonly sid: string; readonly gen?: number }
   | { readonly result: "absent" }
   | { readonly result: "unreadable"; readonly reason: string }
   | { readonly result: "contradicted"; readonly reason: string }
@@ -26,6 +31,8 @@ export type IdentityVerifier = (token: string) => Promise<IdentityVerdict>
 export interface LoadedIdentityVerifier {
   readonly path: string
   readonly verify: IdentityVerifier
+  /** Whether the module declares that its verified verdicts carry `gen`. */
+  readonly suppliesGen: boolean
 }
 
 export type SessionAuthority = "verified" | "bearer" | "claimed"
@@ -75,9 +82,14 @@ export async function loadIdentityVerifier(path: string): Promise<LoadedIdentity
   }
   const verify = module.verifyIdentity
   if (typeof verify !== "function") return refuse("exports no verifyIdentity function")
+  const suppliesGen = module.IDENTITY_VERIFIER_SUPPLIES_GEN
+  if (suppliesGen !== undefined && typeof suppliesGen !== "boolean") {
+    refuse(`exports IDENTITY_VERIFIER_SUPPLIES_GEN ${JSON.stringify(suppliesGen)}, not a boolean`)
+  }
   return {
     path,
     verify: async (token) => checkedVerdict(await (verify as (token: string) => unknown)(token), path),
+    suppliesGen: suppliesGen === true,
   }
 }
 
@@ -88,7 +100,10 @@ function checkedVerdict(value: unknown, path: string): IdentityVerdict {
   switch (verdict?.result) {
     case "verified":
       if (nonEmpty(verdict.actor) && nonEmpty(verdict.sid)) {
-        return { result: "verified", actor: verdict.actor, sid: verdict.sid }
+        if (verdict.gen === undefined) return { result: "verified", actor: verdict.actor, sid: verdict.sid }
+        if (typeof verdict.gen === "number" && Number.isSafeInteger(verdict.gen) && verdict.gen >= 0) {
+          return { result: "verified", actor: verdict.actor, sid: verdict.sid, gen: verdict.gen }
+        }
       }
       break
     case "absent":
