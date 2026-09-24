@@ -171,6 +171,13 @@ export { formatRuntimeId, gitShortHead, tribeWireRuntimeId, wireVersion } from "
 export { deriveTribePersonaLaunchIdentity, type TribePersonaLaunchIdentity } from "./lib/persona-launch-identity.ts"
 
 export { connectTribeLaunch } from "./launch-registration.ts"
+export {
+  describeDaemonOutcome,
+  TRIBE_DAEMON_DEADLINE_MS,
+  tribeDaemonCalls,
+  type TribeDaemonCalls,
+} from "./service-send.ts"
+export { mcpJsonContent } from "./cli/mcp-json-content.ts"
 export type { TribeLaunchRequest, TribeLaunchConnection, TribeLaunchDeps } from "./launch-registration.ts"
 
 // Convenient reply and taking resolution (bead 25028)
