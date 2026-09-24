@@ -1098,6 +1098,51 @@ describe("one-shot session authority by identity token (25074 3b)", () => {
     })
   })
 
+  // 25074 @cto §9 (review-adhoc5 c09a4b05): one-shot resolution is dual-key. A verified token whose sid has no
+  // session yet (a session registered before the verifier, or before its adapter re-registered with the token) falls
+  // back to the bearer on the same call; the authority stays the bearer's until the adapter's verified register.
+  it("a verified token with no session under its sid falls back to the bearer on the same call", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-bearer")
+    parseResult<RegisterResult>(
+      await harness.register("conn-bearer", {
+        name: "@dev/7",
+        pid: 4751,
+        project: "/tmp/p",
+        mailboxAuthorityHash: createHash("sha256").update(bearer).digest("hex"),
+      }),
+    )
+
+    parseResult(await selfInbox(harness, { authority: bearer }))
+    parseResult(await selfInbox(harness, { authority: bearer, idToken: "token-dev7" }))
+    parseResult(await harness.request("cli_session_pending_read_v1", { authority: bearer, idToken: "token-dev7" }))
+  })
+
+  it("a bearer for one seat beside a verified token for another is refused, naming both", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-bearer")
+    parseResult<RegisterResult>(
+      await harness.register("conn-bearer", {
+        name: "@dev/9",
+        pid: 4761,
+        project: "/tmp/p",
+        mailboxAuthorityHash: createHash("sha256").update(bearer).digest("hex"),
+      }),
+    )
+
+    expect(parseError(await selfInbox(harness, { authority: bearer, idToken: "token-dev8" }))).toMatchObject({
+      code: -32003,
+      message: expect.stringMatching(/the bearer belongs to @dev\/9, but the identity token names @dev\/8/),
+      data: {
+        kind: "foreign-identity-transport",
+        transport: { name: "@dev/8", sid: "sid-dev8" },
+        authority: { name: "@dev/9" },
+      },
+    })
+  })
+
   it("an unreadable token falls back to the bearer; with neither, the authority is missing", async () => {
     const harness = createDispatcherHarness({ identityVerifier })
     cleanup = harness.dispose
