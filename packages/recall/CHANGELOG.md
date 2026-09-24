@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The recall index report exits 4 (busy) and 5 (ledgered skips) are exported from the runtime and shared with CLI help.
+
 ### Changed — the vault is bound only explicitly
 
 - `recall --vault-db <path> <command|query…>` binds the km vault database for the whole call and outranks `KM_VAULT_DB`. It is a leading global option, so every command reads the same binding (`recall --vault-db X summarize`, `recall --vault-db X "some query"`, `recall --vault-db X --agent q`). `search` takes no `--vault-db` of its own. The flag refuses with exit 2 (a usage error), naming the fault, when it has no value, has an empty value (a failed `$(…)` substitution), or names a missing file. The `tribe hook` lines apply the same rule and exit 1. The tribe daemon, the bus, refuses an empty flag at startup, but a missing file boots with the vault REFUSED: its boot line and `tribe health` say so, `tribe.ask`, `tribe.plan` and `tribe.inject_delta` refuse naming the path, and one incident page goes to @chief until a restart finds the file.
