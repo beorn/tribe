@@ -2,8 +2,8 @@
  * The prompt hook's recall runs in hook mode, inside a stated budget (@ag/tribe/25071 row 2, @cto ruling 2026-09-23).
  *
  * B1: hook mode issues no COUNT, not the message total, the content total, or the session-depth corroboration.
- * B2: hook mode ranks an FTS-native candidate set instead of every match; it widens once when too few candidates fall
- *     in the window, and skips the message phase loudly when even the wide set leaves too few.
+ * B2: hook mode ranks the window first, like exact, capped at N ranked matches (@cto re-ruling 516d4c10: the all-time
+ *     top-N candidate set was refuted by the real-prompt replay, where hook was slower than exact on 84 of 150).
  * B3: the synonym variants run only while the remaining budget covers one candidate pass; a skipped phase says the
  *     phase, the anchor and the ms left.
  * Exact mode, the default and the CLI's, keeps every count.
@@ -130,8 +130,8 @@ describe("25071 row 2 B1: hook mode counts nothing", () => {
   })
 })
 
-describe("25071 row 2 B2: hook mode ranks a candidate set", () => {
-  test("on a plentiful index, hook and exact inject the same five, and hook says it ranked candidates", async () => {
+describe("25071 row 2 B2: hook mode ranks the window first (@cto re-ruling 516d4c10)", () => {
+  test("on a plentiful index, hook and exact inject the same five, and hook says how many window matches it ranked", async () => {
     // recall() closes the index when it returns, and an in-memory index closes empty: seed before each call.
     // The unmatched rows give the anchor a real IDF, so bm25 orders the matches instead of tying them all.
     const plentiful = (): Seed[] => [
@@ -148,37 +148,46 @@ describe("25071 row 2 B2: hook mode ranks a candidate set", () => {
     seed(plentiful())
     const hook = await recall(ANCHOR, { mode: "hook", raw: true, limit: 5 })
 
-    expect(hook.hookSearch).toMatchObject({ candidateLimit: 1000, widened: false, firstSurvivors: 70, survivors: 70 })
+    expect(hook.hookSearch).toEqual({ candidateLimit: 1000, survivors: 70 })
     expect(hook.results).toHaveLength(5)
     expect(hook.results.map((r) => `${r.sessionId}:${r.type}`)).toEqual(
       exact.results.map((r) => `${r.sessionId}:${r.type}`),
     )
   })
 
-  test("when the window keeps too few of the first candidates, hook widens once and finds the recent matches", async () => {
+  test("old strong matches outside the window never crowd out the recent weak ones: one pass finds them", async () => {
     seed([...oldStrong(1200), ...recentWeak(12)])
 
     const hook = await recall(ANCHOR, { mode: "hook", raw: true, limit: 5 })
 
-    expect(hook.hookSearch).toMatchObject({ candidateLimit: 5000, widened: true, firstSurvivors: 0, survivors: 12 })
+    expect(hook.hookSearch).toEqual({ candidateLimit: 1000, survivors: 12 })
+    expect(hook.skipped ?? []).toEqual([])
     expect(hook.results.length).toBeGreaterThan(0)
     expect(hook.results.every((r) => r.sessionId.startsWith("new-"))).toBe(true)
   }, 30_000)
 
-  test("when even the wide set leaves fewer than ten in the window, the message phase is skipped loudly with both counts", async () => {
-    seed([...oldStrong(5100), ...recentWeak(3)])
+  test("N caps the ranked window matches", async () => {
+    seed([...unmatched(50), ...recentWeak(1003)])
 
     const hook = await recall(ANCHOR, { mode: "hook", raw: true, limit: 5 })
 
-    expect(hook.results.filter((r) => r.type === "message")).toEqual([])
-    expect(hook.skipped).toEqual([
-      {
-        phase: "messages",
-        anchor: ANCHOR,
-        message: `recall messages skipped: anchor "${ANCHOR}" kept 0 of 1000, then 0 of 5000 candidates in the window (25071)`,
-      },
-    ])
-  }, 60_000)
+    expect(hook.hookSearch).toEqual({ candidateLimit: 1000, survivors: 1000 })
+  }, 30_000)
+
+  test("every statement hook mode runs against the message index applies the window in the same statement", async () => {
+    seed([...oldStrong(20), ...recentWeak(20)])
+
+    const sql = await preparedSql(() => recall(ANCHOR, { mode: "hook", raw: true, limit: 5 }))
+
+    // Each ranked query (an ORDER BY) whose WHERE matches the message index must hold the window in that same WHERE:
+    // ranking every all-time match before the window is the pass the replay refuted.
+    const rankedWheres = sql.flatMap((q) =>
+      [...q.matchAll(/ORDER BY/g)].map((m) => q.slice(0, m.index).slice(q.slice(0, m.index).lastIndexOf("WHERE"))),
+    )
+    const rankedMatches = rankedWheres.filter((where) => /messages_fts\s+MATCH/i.test(where))
+    expect(rankedMatches.length).toBeGreaterThan(0)
+    for (const where of rankedMatches) expect(where).toMatch(/m\.timestamp >= \?/)
+  })
 })
 
 describe("25071 row 2 B3: phases run only while the budget covers them", () => {
@@ -219,15 +228,15 @@ describe("25071 row 2 B3: phases run only while the budget covers them", () => {
 })
 
 describe("25071 row 2: the budget is stated once, as named constants", () => {
-  test("a 1.5 s wall, a 1.0 s target, candidate sets of 1000 then 5000, never under 500, and ten survivors", async () => {
+  test("a 1.5 s wall, a 1.0 s target, a cap of 1000 ranked window matches, and the cost of one pass", async () => {
     const budget = await import("../../src/history/recall-budget.ts")
     expect(budget.RECALL_WALL_MS).toBe(1500)
     expect(budget.RECALL_TARGET_MS).toBe(1000)
     expect(budget.HOOK_CANDIDATE_LIMIT).toBe(1000)
-    expect(budget.HOOK_WIDE_CANDIDATE_LIMIT).toBe(5000)
-    expect(budget.HOOK_CANDIDATE_LIMIT).toBeGreaterThanOrEqual(budget.HOOK_CANDIDATE_FLOOR)
-    expect(budget.HOOK_CANDIDATE_FLOOR).toBe(500)
-    expect(budget.HOOK_MIN_SURVIVORS).toBe(10)
     expect(budget.HOOK_CANDIDATE_PASS_MS).toBeGreaterThan(0)
+    // The all-time candidate set's widening, its floor and its survivor minimum went with it (re-ruling 516d4c10).
+    expect(Object.keys(budget).sort()).toEqual(
+      ["HOOK_CANDIDATE_LIMIT", "HOOK_CANDIDATE_PASS_MS", "RECALL_TARGET_MS", "RECALL_WALL_MS"].sort(),
+    )
   })
 })
