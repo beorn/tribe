@@ -179,14 +179,14 @@ describe("25071 row 2 B2: hook mode ranks the window first (@cto re-ruling 516d4
 
     const sql = await preparedSql(() => recall(ANCHOR, { mode: "hook", raw: true, limit: 5 }))
 
-    // Each ranked query (an ORDER BY) whose WHERE matches the message index must hold the window in that same WHERE:
-    // ranking every all-time match before the window is the pass the replay refuted.
-    const rankedWheres = sql.flatMap((q) =>
-      [...q.matchAll(/ORDER BY/g)].map((m) => q.slice(0, m.index).slice(q.slice(0, m.index).lastIndexOf("WHERE"))),
-    )
-    const rankedMatches = rankedWheres.filter((where) => /messages_fts\s+MATCH/i.test(where))
-    expect(rankedMatches.length).toBeGreaterThan(0)
-    for (const where of rankedMatches) expect(where).toMatch(/m\.timestamp >= \?/)
+    // Ranking the bare index (MATCH, then ORDER BY with nothing between) scores every all-time match before the
+    // window: the pass the replay refuted. Each statement that matches the message index holds the window instead.
+    const messageMatches = sql.filter((q) => /messages_fts\s+MATCH/i.test(q))
+    expect(messageMatches.length).toBeGreaterThan(0)
+    for (const q of messageMatches) {
+      expect(q).toMatch(/m\.timestamp >= \?/)
+      expect(q).not.toMatch(/messages_fts\s+MATCH\s+\?\s+ORDER BY/i)
+    }
   })
 })
 

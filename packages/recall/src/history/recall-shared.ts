@@ -67,12 +67,9 @@ export interface RecallSkip {
 
 /** How hook mode's message search went (@ag/tribe/25071 row 2). */
 export interface HookSearchSummary {
-  /** The candidate set the results came from: HOOK_CANDIDATE_LIMIT, or HOOK_WIDE_CANDIDATE_LIMIT after widening. */
+  /** The cap on ranked window matches: HOOK_CANDIDATE_LIMIT. */
   candidateLimit: number
-  widened: boolean
-  /** Candidates in the window after the first pass. */
-  firstSurvivors: number
-  /** Candidates in the window after the last pass. */
+  /** Window matches ranked, at most candidateLimit. */
   survivors: number
 }
 

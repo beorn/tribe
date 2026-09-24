@@ -7,14 +7,8 @@ import * as path from "path"
 import * as fs from "fs"
 import type { SessionRecord, MessageRecord, ContentType, ContentRecord, SessionIndexEntry } from "./types.ts"
 import { PROJECTS_DIR, PLANS_DIR, TODOS_DIR } from "./db-schema.ts"
-import {
-  HOOK_CANDIDATE_LIMIT,
-  HOOK_CANDIDATE_PASS_MS,
-  HOOK_MIN_SURVIVORS,
-  HOOK_WIDE_CANDIDATE_LIMIT,
-  RECALL_WALL_MS,
-} from "./recall-budget.ts"
-import type { HookSearchSummary, RecallSkip, SearchMode } from "./recall-shared.ts"
+import { HOOK_CANDIDATE_LIMIT } from "./recall-budget.ts"
+import type { HookSearchSummary, SearchMode } from "./recall-shared.ts"
 
 // Assistant rows containing tool_use blocks mix prose with serialized tool
 // inputs. Keep them searchable for --tool and forensic lookup, but prevent a
@@ -359,14 +353,12 @@ export interface MessageSearchOptions {
   sessionId?: string // Filter by session ID
   snippetTokens?: number // Snippet window size (default 64)
   /**
-   * "exact" (the default) ranks and counts every match. "hook" ranks an FTS-native candidate set inside the prompt
-   * hook's budget and counts nothing (@ag/tribe/25071 row 2).
+   * "exact" (the default) ranks and counts every match in the window. "hook" ranks at most HOOK_CANDIDATE_LIMIT of
+   * them and counts nothing (@ag/tribe/25071 row 2).
    */
   mode?: SearchMode
   /** Hook mode only: count the total too (default false). Exact mode always counts. */
   withTotal?: boolean
-  /** Hook mode only: when the budget runs out, as epoch ms (default: now plus RECALL_WALL_MS). */
-  deadlineAt?: number
 }
 
 export type MessageSearchHit = MessageRecord & {
@@ -378,12 +370,10 @@ export type MessageSearchHit = MessageRecord & {
 /** Hook mode's account of its candidate search (@ag/tribe/25071 row 2). */
 export interface HookMessageSearch extends HookSearchSummary {
   /**
-   * Each candidate session's number of candidates: hook mode's session-depth corroboration, read from the rows it
-   * already holds instead of a GROUP BY over every all-time match (14.5 s on tribe*, @cto 9665a0ec).
+   * Each ranked session's number of ranked window matches: hook mode's session-depth corroboration, read from the rows
+   * it already holds instead of a GROUP BY over every all-time match (14.5 s on tribe*, @cto 9665a0ec).
    */
   sessionDepths: Map<string, number>
-  /** Each budgeted step skipped: the widening, or the whole message phase. */
-  skipped: RecallSkip[]
 }
 
 /**
@@ -488,10 +478,10 @@ function countMessages(db: Database, ftsQuery: string, filter: { sql: string; pa
 }
 
 /**
- * Hook mode (@ag/tribe/25071 row 2, @cto ruling 2026-09-23): rank the top candidates by bm25 inside FTS5, then apply
- * the same filter and rank as exact mode to those alone, counting nothing. When the window keeps fewer than `limit`
- * of a full first pass, widen once, budget permitting; when even the wide set keeps fewer than HOOK_MIN_SURVIVORS,
- * skip the message phase and say so with both counts.
+ * Hook mode (@ag/tribe/25071 row 2; @cto re-ruling 516d4c10): exact mode's order, the window filter first and bm25
+ * over the survivors, capped at HOOK_CANDIDATE_LIMIT ranked matches, counting nothing. The all-time top-N candidate
+ * set it replaced was refuted by the real-prompt replay: hook was slower than exact on 84 of 150 prompts, because on
+ * this corpus the window, not bm25, is the selective predicate (/hh/var/@dev/11/25071-r2/replay.jsonl).
  */
 function hookMessageSearch(
   db: Database,
@@ -499,70 +489,26 @@ function hookMessageSearch(
   options: MessageSearchOptions,
 ): { results: MessageSearchHit[]; total: number | null; hook: HookMessageSearch } {
   const { limit = 50, offset = 0, snippetTokens = 64, withTotal = false } = options
-  const deadlineAt = options.deadlineAt ?? Date.now() + RECALL_WALL_MS
   const ftsQuery = toFts5Query(query)
   const filter = messageFilterSql(options)
-  const anchor = query.length > 80 ? `${query.slice(0, 80)}…` : query
-  const candidateQuery = db.prepare(`
-    WITH cand AS (
-      SELECT rowid AS id, ${MESSAGE_BM25_SQL} AS b FROM messages_fts
-      WHERE messages_fts MATCH ? ORDER BY b LIMIT ?
+  type Candidate = { id: number; session_id: string; rank: number }
+  const survivors = db
+    .prepare(
+      `SELECT m.id AS id, m.session_id AS session_id, ${MESSAGE_RANK_SQL} AS rank
+       FROM messages_fts f
+       JOIN messages m ON f.rowid = m.id
+       JOIN sessions s ON m.session_id = s.id
+       WHERE messages_fts MATCH ? AND ${filter.sql}
+       ORDER BY rank LIMIT ?`,
     )
-    SELECT m.id AS id, m.session_id AS session_id, cand.b * ${MESSAGE_TOOL_FACTOR_SQL} AS rank,
-           (${filter.sql}) AS survives
-    FROM cand
-    JOIN messages m ON m.id = cand.id
-    JOIN sessions s ON m.session_id = s.id
-  `)
-  type Candidate = { id: number; session_id: string; rank: number; survives: number }
-  const pass = (n: number): Candidate[] => candidateQuery.all(ftsQuery, n, ...filter.params) as Candidate[]
-
-  const skipped: RecallSkip[] = []
-  let candidateLimit = HOOK_CANDIDATE_LIMIT
-  let candidates = pass(candidateLimit)
-  let survivors = candidates.filter((c) => c.survives)
-  const firstSurvivors = survivors.length
-  let widened = false
-  if (survivors.length < limit && candidates.length === candidateLimit) {
-    const left = deadlineAt - Date.now()
-    if (left > HOOK_CANDIDATE_PASS_MS) {
-      candidateLimit = HOOK_WIDE_CANDIDATE_LIMIT
-      candidates = pass(candidateLimit)
-      survivors = candidates.filter((c) => c.survives)
-      widened = true
-    } else {
-      skipped.push({
-        phase: "widen",
-        anchor,
-        message: `recall widen skipped: anchor "${anchor}", ${String(left)} ms left (25071)`,
-      })
-    }
-  }
+    .all(ftsQuery, ...filter.params, HOOK_CANDIDATE_LIMIT) as Candidate[]
 
   const sessionDepths = new Map<string, number>()
-  for (const c of candidates) sessionDepths.set(c.session_id, (sessionDepths.get(c.session_id) ?? 0) + 1)
-  const hook: HookMessageSearch = {
-    candidateLimit,
-    widened,
-    firstSurvivors,
-    survivors: survivors.length,
-    sessionDepths,
-    skipped,
-  }
+  for (const c of survivors) sessionDepths.set(c.session_id, (sessionDepths.get(c.session_id) ?? 0) + 1)
+  const hook: HookMessageSearch = { candidateLimit: HOOK_CANDIDATE_LIMIT, survivors: survivors.length, sessionDepths }
   const total = withTotal ? countMessages(db, ftsQuery, filter) : null
 
-  if (widened && survivors.length < HOOK_MIN_SURVIVORS) {
-    skipped.push({
-      phase: "messages",
-      anchor,
-      message:
-        `recall messages skipped: anchor "${anchor}" kept ${String(firstSurvivors)} of ${String(HOOK_CANDIDATE_LIMIT)}, ` +
-        `then ${String(survivors.length)} of ${String(HOOK_WIDE_CANDIDATE_LIMIT)} candidates in the window (25071)`,
-    })
-    return { results: [], total, hook }
-  }
-
-  const top = survivors.sort((a, b) => a.rank - b.rank || a.id - b.id).slice(offset, offset + limit)
+  const top = survivors.slice(offset, offset + limit)
   if (top.length === 0) return { results: [], total, hook }
   const rows = db
     .prepare(

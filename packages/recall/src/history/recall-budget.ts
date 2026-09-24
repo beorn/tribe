@@ -7,7 +7,9 @@
  * - the exact path's COUNT over every match costs up to 10x its ranked search cold (yrd*: 36 s against 3.4 s), and
  *   the session-depth corroboration's GROUP BY over every all-time match took 14.5 s on tribe*;
  * - an FTS-native candidate pass (top N by bm25, then join, window and collapse) took 36 to 775 ms at N=1000 and 52
- *   to 686 ms at N=5000, median about 400 ms either way (candidate-pass-cost.txt).
+ *   to 686 ms at N=5000, median about 400 ms either way (candidate-pass-cost.txt), on single anchors. On real prompts
+ *   (about 160 characters of common words) that pass was slower than exact's window-first ranking on 84 of 150, so
+ *   hook mode ranks the window first (@cto re-ruling 516d4c10; /hh/var/@dev/11/25071-r2/replay.jsonl).
  *
  * The target is what the user waits for; the wall is the failure bound, where recall is skipped loudly.
  */
@@ -18,20 +20,11 @@ export const RECALL_TARGET_MS = 1000
 /** The hard wall: past it the hook skips recall loudly instead of waiting (the Worker in recall-deadline.ts). */
 export const RECALL_WALL_MS = 1500
 
-/** Hook mode ranks this many FTS candidates first. */
+/** Hook mode ranks at most this many window matches (the window first, then bm25; @cto re-ruling 516d4c10). */
 export const HOOK_CANDIDATE_LIMIT = 1000
 
-/** The one widening, when the window keeps too few of the first candidates. */
-export const HOOK_WIDE_CANDIDATE_LIMIT = 5000
-
-/** No hook candidate set is ever smaller: at 200 the window kept 0 of the top ten for tribe* and queue*. */
-export const HOOK_CANDIDATE_FLOOR = 500
-
-/** Fewer in-window survivors than this, even after widening, skips the message phase loudly. */
-export const HOOK_MIN_SURVIVORS = 10
-
 /**
- * The measured cost of one candidate pass (median of ten, candidate-pass-cost.txt). A budgeted phase (the widening,
- * each synonym variant, the glossary fallback) starts only while more than this is left before the wall.
+ * The measured cost of one candidate pass (median of ten, candidate-pass-cost.txt). A budgeted phase (each synonym
+ * variant, the glossary fallback) starts only while more than this is left before the wall.
  */
 export const HOOK_CANDIDATE_PASS_MS = 400

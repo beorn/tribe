@@ -376,8 +376,6 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       : {
           hookSearch: {
             candidateLimit: hookSearch.candidateLimit,
-            widened: hookSearch.widened,
-            firstSurvivors: hookSearch.firstSurvivors,
             survivors: hookSearch.survivors,
           },
         }),
@@ -412,19 +410,16 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
       projectFilter,
       snippetTokens,
       mode,
-      deadlineAt,
     }
 
     const searchStart = Date.now()
     const messageResults = phase("messages", () => ftsSearchWithSnippet(db, query, messageOpts))
     const msgMs = Date.now() - searchStart
     hookSearch = messageResults.hook
-    if (hookSearch) skipped.push(...hookSearch.skipped)
     if (hookSearch) {
       log(
         `FTS5 messages: total: not counted (hook mode), ${messageResults.results.length} returned (${msgMs}ms) ` +
-          `[candidates ${hookSearch.candidateLimit}, first-pass survivors ${hookSearch.firstSurvivors}, ` +
-          `survivors ${hookSearch.survivors}${hookSearch.widened ? ", widened" : ""}]`,
+          `[window matches ranked ${hookSearch.survivors}, cap ${hookSearch.candidateLimit}]`,
       )
     } else {
       log(
