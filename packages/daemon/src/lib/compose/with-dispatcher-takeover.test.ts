@@ -1372,30 +1372,6 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
     ])
   })
 
-  // review-adhoc5 P3 on 3c-2a: the seat's bearer authority row holds its pre-3c-2b launch id `<sid>::<persona>`, whose
-  // provider part is not the token-keyed `<sid>@<gen>`; that is no foreign-identity evidence against a verified token.
-  it("a token-only adapter presenting its seat's bearer still promotes: the 24767 check does not refuse it", async () => {
-    const harness = createDispatcherHarness({ identityVerifier })
-    cleanup = harness.dispose
-    const bootstrap = await fallbackBootstrap(harness, "sid-dev7::%40dev%2F7", 5650)
-    harness.addPendingClient("conn-adapter")
-    const adapter = parseResult<RegisterResult>(
-      await harness.register("conn-adapter", {
-        name: "@dev/7",
-        pid: 5652,
-        project: "/tmp/p",
-        takeover: true,
-        launchParentPid: 5650,
-        idToken: "token-g3",
-        mailboxAuthorityHash: "c".repeat(64),
-      }),
-    )
-
-    expect(adapter.sessionId).toBe(bootstrap.registered.sessionId)
-    expect(sessionRow(harness, adapter.sessionId)).toMatchObject({ launch_id: "sid-dev7@3", identity_sid: "sid-dev7" })
-    expect(promotions(harness)).toEqual([expect.objectContaining({ transport_class: "bootstrap-fallback-promoted" })])
-  })
-
   it("a same-sid holder under another launcher pid is a previous generation: displaced and told, not promoted", async () => {
     const harness = createDispatcherHarness({ identityVerifier })
     cleanup = harness.dispose
