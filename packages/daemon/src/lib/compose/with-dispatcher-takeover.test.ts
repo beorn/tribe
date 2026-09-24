@@ -1553,6 +1553,22 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
     expect(promotions(harness)).toEqual([expect.objectContaining({ transport_class: "bootstrap-fallback-promoted" })])
   })
 
+  // 25074 08:06 PDT outage: a daemon restarted WITHOUT the verifier inherits authority rows a verifier daemon keyed
+  // `<sid>@<gen>`. The seat's tokenless re-register presents `<sid>::<persona>` and its own bearer; the 24767 check
+  // must read both as the same provider launch, or a flag-off restart refuses the whole fleet as foreign identities.
+  it("a flag-off daemon re-registers a seat whose authority row a verifier daemon keyed sid@gen", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const previous = await fallbackBootstrap(harness, "sid-dev7::%40dev%2F7", 5670)
+    harness.db
+      .prepare("UPDATE sessions SET launch_id = ? WHERE id = ?")
+      .run("sid-dev7@3", previous.registered.sessionId)
+    harness.dropClient("conn-bootstrap")
+
+    const again = await fallbackBootstrap(harness, "sid-dev7::%40dev%2F7", 5670)
+    expect(again.registered.sessionId).toBe(previous.registered.sessionId)
+  })
+
   it("(e) an adapter sending its token AND its projected launch id still promotes its own fallback bootstrap", async () => {
     const harness = createDispatcherHarness({ identityVerifier })
     cleanup = harness.dispose

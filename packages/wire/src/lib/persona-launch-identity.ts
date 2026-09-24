@@ -36,8 +36,14 @@ export function deriveTribePersonaLaunchIdentity(
   }
 }
 
-/** The provider launch a stored launch id belongs to, whether or not it carries a persona. */
+/**
+ * The provider launch a stored launch id belongs to, whether it carries a persona (`<launch>::<persona>`) or is a
+ * verified session's key (`<sid>@<gen>`, whose sid IS the provider launch id). A persona is URI-encoded, so a raw `@`
+ * only ever opens a generation.
+ */
 export function providerLaunchIdOf(launchId: string): string {
-  const separator = launchId.indexOf("::")
-  return separator === -1 ? launchId : launchId.slice(0, separator)
+  const persona = launchId.indexOf("::")
+  const generation = launchId.indexOf("@")
+  const cut = [persona, generation].filter((index) => index !== -1)
+  return cut.length === 0 ? launchId : launchId.slice(0, Math.min(...cut))
 }
