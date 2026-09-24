@@ -112,6 +112,15 @@ export function isRecallIgnored(filePath: string): boolean {
   return false
 }
 
+/**
+ * Maximum fraction of sessions allowed to be pruned in a single incremental pass
+ * without explicit override (--allow-large-prune or RECALL_ALLOW_LARGE_PRUNE=1).
+ *
+ * Belt-and-suspenders guard against cross-profile transcript data loss or
+ * accidental wiping when run against an unexpected directory structure.
+ */
+export const MAX_PRUNE_SHARE = 0.2
+
 export interface IndexOptions {
   incremental?: boolean // Only index new/updated sessions
   messagesOnly?: boolean // Skip writes table (faster)
@@ -122,6 +131,7 @@ export interface IndexOptions {
   agBin?: string
   skipCodex?: boolean
   chunkSize?: number // Number of files per commit chunk (default 50)
+  allowLargePrune?: boolean
   onProgress?: (progress: IndexProgress) => void
 }
 
@@ -314,7 +324,7 @@ export async function indexSessionFile(
 
   // Check if we can skip (incremental mode)
   if (options.incremental) {
-    const existing = getSessionByPath(db, relativePath)
+    const existing = getSessionByPath(db, filePath) ?? getSessionByPath(db, relativePath)
     if (
       existing &&
       (existing.status == null ||
@@ -456,7 +466,7 @@ export async function indexSessionFile(
       db,
       sessionId,
       projectPath,
-      relativePath,
+      filePath,
       firstTimestamp || mtime,
       lastTimestamp || mtime,
       messageCount,
@@ -635,7 +645,7 @@ function recordClaudeFailure(
   } else {
     const relativePath = path.relative(currentProjectsDir(), filePath)
     const projectPath = projectPathFromRelative(relativePath)
-    upsertSession(db, sessionId, projectPath, relativePath, mtime, mtime, 0, null, {
+    upsertSession(db, sessionId, projectPath, filePath, mtime, mtime, 0, null, {
       status: "stale-unreadable",
       failureReason: errMsg,
       failureTime: now,
@@ -731,6 +741,33 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
 
   // Index Claude session files
   if (!options.path) {
+    // Migration: Rewrite legacy relative jsonl_path rows to absolute paths when found in currentProjectsDir()
+    const relativeRows = db
+      .prepare(
+        "SELECT id, jsonl_path FROM sessions WHERE jsonl_path IS NOT NULL AND jsonl_path NOT LIKE 'codex:%'",
+      )
+      .all() as Array<{ id: string; jsonl_path: string }>
+
+    let unresolvedRelativeCount = 0
+    const pdir = currentProjectsDir()
+
+    for (const r of relativeRows) {
+      if (path.isAbsolute(r.jsonl_path)) continue
+
+      const candidateAbsPath = path.resolve(pdir, r.jsonl_path)
+      if (fs.existsSync(candidateAbsPath)) {
+        db.prepare("UPDATE sessions SET jsonl_path = ? WHERE id = ?").run(candidateAbsPath, r.id)
+      } else {
+        unresolvedRelativeCount++
+      }
+    }
+
+    if (unresolvedRelativeCount > 0) {
+      console.warn(
+        `[recall] Warning: ${unresolvedRelativeCount} legacy session(s) have relative paths that could not be resolved against ${pdir}. They will remain relative and exempt from incremental pruning. Run with --rebuild or from their original CLAUDE_DIR to resolve.`,
+      )
+    }
+
     const existingSessionMap = new Map<
       string,
       { status: string | null; mtime_ms: number | null; size_bytes: number | null }
@@ -793,7 +830,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
         seenSessionIds.add(sessionInfo.id)
 
         if (options.incremental) {
-          const existing = existingSessionMap.get(relativePath)
+          const existing = existingSessionMap.get(sessionFile) ?? existingSessionMap.get(relativePath)
           if (
             existing &&
             (existing.status == null ||
@@ -860,8 +897,9 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     }
   } else if (isClaudeTarget) {
     totalFiles++
-    const relativePath = path.relative(currentProjectsDir(), options.path)
-    const sessionInfo = parseSessionPath(relativePath, options.path)
+    const absPath = path.resolve(options.path!)
+    const relativePath = path.relative(currentProjectsDir(), absPath)
+    const sessionInfo = parseSessionPath(relativePath, absPath)
     seenSessionIds.add(sessionInfo.id)
     options.onProgress?.({
       filesProcessed: totalFiles,
@@ -872,13 +910,13 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
 
     db.run("BEGIN IMMEDIATE")
     try {
-      const { messages, writes } = await indexSessionFile(db, options.path, options)
+      const { messages, writes } = await indexSessionFile(db, absPath, options)
       totalMessages += messages
       totalWrites += writes
       db.run("COMMIT")
     } catch (err) {
       const errMsg = (err as Error).message || String(err)
-      recordClaudeFailure(db, sessionInfo.id, options.path, errMsg, {
+      recordClaudeFailure(db, sessionInfo.id, absPath, errMsg, {
         parentSessionId: sessionInfo.parentSessionId,
         agentId: sessionInfo.agentId,
       })
@@ -1073,6 +1111,8 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
           .prepare("SELECT id, jsonl_path, status FROM sessions WHERE jsonl_path IS NOT NULL")
           .all() as Array<{ id: string; jsonl_path: string; status: string | null }>
 
+        const toPrune: Array<{ id: string; jsonl_path: string }> = []
+
         for (const s of dbSessions) {
           if (seenSessionIds.has(s.id)) {
             if (s.status === "stale-missing") {
@@ -1084,21 +1124,41 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
             continue
           }
 
-          const fullPath = path.isAbsolute(s.jsonl_path)
-            ? s.jsonl_path
-            : path.join(currentProjectsDir(), s.jsonl_path)
+          // A8: Rows with relative jsonl_path that could not be resolved are exempt from incremental pruning
+          if (!path.isAbsolute(s.jsonl_path)) {
+            continue
+          }
 
-          if (!fs.existsSync(fullPath)) {
+          if (!fs.existsSync(s.jsonl_path)) {
             if (s.status !== "stale-missing") {
               // Miss 1: mark stale-missing, remains searchable
               updateSessionStatus(db, s.id, "stale-missing")
             } else {
-              // Miss 2: delete from messages, writes, sessions
-              db.prepare("DELETE FROM messages WHERE session_id = ?").run(s.id)
-              db.prepare("DELETE FROM writes WHERE session_id = ?").run(s.id)
-              db.prepare("DELETE FROM sessions WHERE id = ?").run(s.id)
-              prunedCount++
+              // Miss 2: candidate for pruning
+              toPrune.push(s)
             }
+          } else {
+            // File exists on disk at its absolute path; un-mark if previously marked stale-missing
+            if (s.status === "stale-missing") {
+              updateSessionStatus(db, s.id, "complete")
+            }
+          }
+        }
+
+        const totalSessions = dbSessions.length
+        const pruneShare = totalSessions > 0 ? toPrune.length / totalSessions : 0
+        const allowLarge = options.allowLargePrune || process.env.RECALL_ALLOW_LARGE_PRUNE === "1"
+
+        if (toPrune.length > 1 && pruneShare > MAX_PRUNE_SHARE && !allowLarge) {
+          console.warn(
+            `[recall] Refusing to prune ${toPrune.length} of ${totalSessions} sessions (${Math.round(pruneShare * 100)}%): would exceed max prune share of ${Math.round(MAX_PRUNE_SHARE * 100)}%. First paths to prune:\n${toPrune.slice(0, 5).map((p) => `  ${p.jsonl_path}`).join("\n")}\nPass --allow-large-prune or set RECALL_ALLOW_LARGE_PRUNE=1 to override.`,
+          )
+        } else {
+          for (const s of toPrune) {
+            db.prepare("DELETE FROM messages WHERE session_id = ?").run(s.id)
+            db.prepare("DELETE FROM writes WHERE session_id = ?").run(s.id)
+            db.prepare("DELETE FROM sessions WHERE id = ?").run(s.id)
+            prunedCount++
           }
         }
 

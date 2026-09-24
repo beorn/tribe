@@ -122,14 +122,16 @@ describe("Subagent Migration Witness (CTO Ruling 25158)", () => {
     // Verify sessions table now has two distinct rows with stable keys
     const parentRow = db.query("SELECT * FROM sessions WHERE id = 'parent-sess'").get() as any
     expect(parentRow).toBeDefined()
-    expect(parentRow.jsonl_path).toBe("test-legacy-proj/parent-sess.jsonl")
+    expect(parentRow.jsonl_path).toBe(path.join(corpus.projects, "test-legacy-proj", "parent-sess.jsonl"))
     expect(parentRow.parent_session_id).toBeNull()
     expect(parentRow.agent_id).toBeNull()
     expect(parentRow.message_count).toBe(2)
 
     const subagentRow = db.query("SELECT * FROM sessions WHERE id = 'parent-sess:agent-sub1'").get() as any
     expect(subagentRow).toBeDefined()
-    expect(subagentRow.jsonl_path).toBe("test-legacy-proj/parent-sess/subagents/agent-sub1.jsonl")
+    expect(subagentRow.jsonl_path).toBe(
+      path.join(corpus.projects, "test-legacy-proj", "parent-sess", "subagents", "agent-sub1.jsonl"),
+    )
     expect(subagentRow.parent_session_id).toBe("parent-sess")
     expect(subagentRow.agent_id).toBe("agent-sub1")
     expect(subagentRow.message_count).toBe(2)

@@ -285,4 +285,202 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
     expect(restored).toBeDefined()
     expect(restored?.status).toBe("complete")
   })
+
+  // --------------------------------------------------------------------------
+  // CTO Ruling 2026-09-23: A8 wrong-root pruning prevention & migration
+  // --------------------------------------------------------------------------
+
+  test("CTO Ruling 4.1: review2 wrongroot probe — two runs from another CLAUDE_DIR prune nothing", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cto-wrongroot-"))
+    const a = join(root, "claudeA")
+    const b = join(root, "claudeB")
+    mkdirSync(join(a, "projects", "-p1"), { recursive: true })
+    mkdirSync(join(b, "projects"), { recursive: true })
+    const file = join(a, "projects", "-p1", "11111111-1111-4111-8111-111111111111.jsonl")
+    writeFileSync(
+      file,
+      JSON.stringify({ type: "user", uuid: "m1", message: { role: "user", content: "kept transcript" } }) + "\n",
+      "utf8"
+    )
+    const probeDb = new Database(join(root, "test.db"))
+    initSchema(probeDb)
+
+    const savedEnv = process.env.CLAUDE_DIR
+    try {
+      process.env.CLAUDE_DIR = a
+      await rebuildIndex(probeDb, { incremental: true, skipCodex: true })
+      const id = "11111111-1111-4111-8111-111111111111"
+      expect(getSession(probeDb, id)?.status).toBe("complete")
+      expect(getMessageCount(probeDb, id)).toBe(1)
+
+      process.env.CLAUDE_DIR = b
+      for (const _n of [1, 2]) {
+        const r = await rebuildIndex(probeDb, { incremental: true, skipCodex: true })
+        expect(getSession(probeDb, id)?.status).toBe("complete")
+        expect(getMessageCount(probeDb, id)).toBe(1)
+        expect(r.pruned).toBe(0)
+      }
+      expect(existsSync(file)).toBe(true)
+    } finally {
+      if (savedEnv !== undefined) process.env.CLAUDE_DIR = savedEnv
+      else delete process.env.CLAUDE_DIR
+      probeDb.close()
+      safeRemoveSync(root, { within: tmpdir() })
+    }
+  })
+
+  test("CTO Ruling 4.2: a relative row is rewritten absolute on the run whose root holds it", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cto-migrate-"))
+    const claudeDir = join(root, "claude")
+    const projDir = join(claudeDir, "projects", "-p1")
+    mkdirSync(projDir, { recursive: true })
+    const fileName = "22222222-2222-4222-8222-222222222222.jsonl"
+    const file = join(projDir, fileName)
+    writeFileSync(
+      file,
+      JSON.stringify({ type: "user", uuid: "m2", message: { role: "user", content: "relative to abs" } }) + "\n",
+      "utf8"
+    )
+
+    const probeDb = new Database(join(root, "test.db"))
+    initSchema(probeDb)
+
+    // Seed a legacy relative row in sessions table
+    const id = "22222222-2222-4222-8222-222222222222"
+    const relativePath = join("-p1", fileName)
+    probeDb
+      .prepare(
+        "INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, status) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      )
+      .run(id, "/p1", relativePath, Date.now(), Date.now(), 1, "complete")
+
+    expect(getSession(probeDb, id)?.jsonl_path).toBe(relativePath)
+
+    const savedEnv = process.env.CLAUDE_DIR
+    try {
+      process.env.CLAUDE_DIR = claudeDir
+      await rebuildIndex(probeDb, { incremental: true, skipCodex: true })
+
+      // The relative row must have been rewritten to the absolute path
+      const session = getSession(probeDb, id)
+      expect(session?.jsonl_path).toBe(file)
+      expect(session?.status).toBe("complete")
+    } finally {
+      if (savedEnv !== undefined) process.env.CLAUDE_DIR = savedEnv
+      else delete process.env.CLAUDE_DIR
+      probeDb.close()
+      safeRemoveSync(root, { within: tmpdir() })
+    }
+  })
+
+  test("CTO Ruling 4.3: a row missing twice at its own absolute path is pruned", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cto-abs-prune-"))
+    const claudeDir = join(root, "claude")
+    const projDir = join(claudeDir, "projects", "-p1")
+    mkdirSync(projDir, { recursive: true })
+    const file = join(projDir, "33333333-3333-4333-8333-333333333333.jsonl")
+    writeFileSync(
+      file,
+      JSON.stringify({ type: "user", uuid: "m3", message: { role: "user", content: "will vanish" } }) + "\n",
+      "utf8"
+    )
+
+    const probeDb = new Database(join(root, "test.db"))
+    initSchema(probeDb)
+
+    const savedEnv = process.env.CLAUDE_DIR
+    try {
+      process.env.CLAUDE_DIR = claudeDir
+      await rebuildIndex(probeDb, { incremental: true, skipCodex: true })
+      const id = "33333333-3333-4333-8333-333333333333"
+      expect(getSession(probeDb, id)?.jsonl_path).toBe(file)
+      expect(getSession(probeDb, id)?.status).toBe("complete")
+
+      // Delete the file at its absolute path
+      unlinkSync(file)
+
+      // Miss 1: marked stale-missing
+      await rebuildIndex(probeDb, { incremental: true, skipCodex: true })
+      expect(getSession(probeDb, id)?.status).toBe("stale-missing")
+
+      // Miss 2: pruned
+      const r2 = await rebuildIndex(probeDb, { incremental: true, skipCodex: true })
+      expect(getSession(probeDb, id)).toBeFalsy()
+      expect(r2.pruned).toBe(1)
+    } finally {
+      if (savedEnv !== undefined) process.env.CLAUDE_DIR = savedEnv
+      else delete process.env.CLAUDE_DIR
+      probeDb.close()
+      safeRemoveSync(root, { within: tmpdir() })
+    }
+  })
+
+  test("CTO Ruling 4.4: a run above max prune share refuses loudly with the count", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cto-share-refuse-"))
+    const claudeDir = join(root, "claude")
+    const projDir = join(claudeDir, "projects", "-p1")
+    mkdirSync(projDir, { recursive: true })
+
+    const probeDb = new Database(join(root, "test.db"))
+    initSchema(probeDb)
+
+    // Create 5 sessions
+    const files: string[] = []
+    for (let i = 1; i <= 5; i++) {
+      const f = join(projDir, `sess-00${i}.jsonl`)
+      writeFileSync(
+        f,
+        JSON.stringify({ type: "user", uuid: `u-${i}`, message: { role: "user", content: `msg ${i}` } }) + "\n",
+        "utf8"
+      )
+      files.push(f)
+    }
+
+    const savedEnv = process.env.CLAUDE_DIR
+    try {
+      process.env.CLAUDE_DIR = claudeDir
+      await rebuildIndex(probeDb, { incremental: true, skipCodex: true })
+      expect(probeDb.prepare("SELECT count(*) as c FROM sessions").get()).toEqual({ c: 5 })
+
+      // Delete 2 of 5 files (40% > 20% max prune share)
+      unlinkSync(files[0]!)
+      unlinkSync(files[1]!)
+
+      // Miss 1
+      await rebuildIndex(probeDb, { incremental: true, skipCodex: true })
+
+      const warnings: string[] = []
+      const origWarn = console.warn
+      console.warn = (...args: any[]) => {
+        warnings.push(args.join(" "))
+        origWarn(...args)
+      }
+
+      try {
+        // Miss 2: would prune 2 sessions (40% > 20%), so belt refuses loudly and prunes 0
+        const r2 = await rebuildIndex(probeDb, { incremental: true, skipCodex: true })
+        expect(r2.pruned).toBe(0)
+        expect(probeDb.prepare("SELECT count(*) as c FROM sessions").get()).toEqual({ c: 5 })
+        expect(
+          warnings.some((w) => w.includes("2 of 5 sessions") && w.includes("exceed max prune share"))
+        ).toBe(true)
+
+        // Now run with allowLargePrune: true — prunes the 2 sessions
+        const r3 = await rebuildIndex(probeDb, {
+          incremental: true,
+          skipCodex: true,
+          allowLargePrune: true,
+        })
+        expect(r3.pruned).toBe(2)
+        expect(probeDb.prepare("SELECT count(*) as c FROM sessions").get()).toEqual({ c: 3 })
+      } finally {
+        console.warn = origWarn
+      }
+    } finally {
+      if (savedEnv !== undefined) process.env.CLAUDE_DIR = savedEnv
+      else delete process.env.CLAUDE_DIR
+      probeDb.close()
+      safeRemoveSync(root, { within: tmpdir() })
+    }
+  })
 })

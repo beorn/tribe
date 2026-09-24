@@ -128,6 +128,8 @@ program
   .description("Build/rebuild FTS5 index")
   .option("--incremental", "Only index new sessions")
   .option("--full", "Full re-index of all sessions including codex transcripts")
+  .option("--rebuild", "Full re-index of all sessions including codex transcripts (alias for --full)")
+  .option("--allow-large-prune", "Allow pruning more than 20% of sessions during incremental pruning")
   .option("--force", "Force commit even if session rows shrunk")
   .option("--path <file>", "Index specific transcript file")
   .option("--project-root <path>", "Project root for indexing project sources (beads, docs, memory)")
@@ -136,12 +138,17 @@ program
     async (opts: {
       incremental?: boolean
       full?: boolean
+      rebuild?: boolean
+      allowLargePrune?: boolean
       force?: boolean
       path?: string
       projectRoot?: string
       migrate?: boolean
     }) => {
-      await cmdIndex(opts)
+      await cmdIndex({
+        ...opts,
+        full: opts.full || opts.rebuild,
+      })
     },
   )
 

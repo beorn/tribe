@@ -20,6 +20,7 @@ export async function cmdIndex(opts: {
   incremental?: boolean
   projectRoot?: string
   full?: boolean
+  allowLargePrune?: boolean
   force?: boolean
   path?: string
   migrate?: boolean
@@ -41,6 +42,7 @@ export async function cmdIndex(opts: {
       incremental: opts.incremental,
       projectRoot: opts.projectRoot,
       full: opts.full,
+      allowLargePrune: opts.allowLargePrune,
       force: opts.force,
       path: opts.path,
       onProgress: (progress) => {
