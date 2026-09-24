@@ -4,6 +4,14 @@
 
 ### Added
 
+- **One-shot calls authenticate by identity token.** `cli_self_inbox_v1` and
+  the managed pending read and close take `idToken` beside the bearer
+  `authority`: a verified token resolves the session its registration recorded
+  under the token's sid, a contradicted token or a verifier fault refuses, and
+  an unreadable one falls back to the bearer. A verified session's
+  `mailbox_read_capability` reads `self-mailbox-authority-token`, and launch
+  re-certification accepts it. The CLI sends `HAB_ID_TOKEN` when the launch has
+  one.
 - **Verified identity on register.** The daemon takes an absolute module path
   in `--identity-verifier`: the composing layer's module exports
   `IDENTITY_VERIFIER_INTERFACE = 1` and `verifyIdentity(token)`, and a module
