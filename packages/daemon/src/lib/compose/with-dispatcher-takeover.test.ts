@@ -1358,6 +1358,52 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
     // Same launch id under the same parent is the launch itself: it adopts its own session, never a second row.
     expect(reconnected.sessionId).toBe(holder.sessionId)
     expect(departures(harness)).toEqual([])
+    // @cto 7b5b85c7: the proof was about the launch, not the connection, so the restatement keeps it.
+    expect(sessionRow(harness, holder.sessionId)).toMatchObject({ launch_id: "sid-dev7@3", identity_sid: "sid-dev7" })
+  })
+
+  it("a reused parent pid (same pid, another start time) does not inherit the verified identity", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    const holder = await verifiedHolderBetweenConnections(harness)
+    // The stored parent started at another time: this pid is a different process now.
+    harness.db.prepare("UPDATE sessions SET launch_parent_start_time = '1' WHERE id = ?").run(holder.sessionId)
+    harness.addPendingClient("conn-reused-pid")
+    await harness.register("conn-reused-pid", {
+      name: "@dev/7",
+      pid: 5406,
+      project: "/tmp/p",
+      launchId: "sid-dev7@3",
+      launchParentPid: process.pid,
+    })
+    expect(sessionRow(harness, holder.sessionId)).toMatchObject({ identity_sid: null })
+  })
+
+  it("after a token-less own-parent reconnect, an unverified claim from another parent is still refused", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    const holder = await verifiedHolderBetweenConnections(harness)
+    harness.addPendingClient("conn-own-parent")
+    await harness.register("conn-own-parent", {
+      name: "@dev/7",
+      pid: 5404,
+      project: "/tmp/p",
+      launchId: "sid-dev7@3",
+      launchParentPid: process.pid,
+    })
+    harness.dropClient("conn-own-parent")
+    harness.addPendingClient("conn-other-parent")
+    const refused = parseError(
+      await harness.register("conn-other-parent", {
+        name: "@dev/7",
+        pid: 5405,
+        project: "/tmp/p",
+        launchId: "sid-dev7@3",
+        launchParentPid: process.ppid,
+      }),
+    )
+    expect(refused.message).toContain(`belongs to launch sid-dev7@3, whose parent process ${process.pid} is alive`)
+    expect(sessionRow(harness, holder.sessionId)).toMatchObject({ identity_sid: "sid-dev7" })
   })
 
   it("the bootstrap and the adapter of one generation fan into ONE session keyed sid@gen, and the filter applies", async () => {

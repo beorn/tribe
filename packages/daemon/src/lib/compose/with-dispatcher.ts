@@ -67,6 +67,7 @@ import type { TribePluginHandle } from "../plugin-api.ts"
 import { createInboxWaitManager } from "../inbox-wait.ts"
 import { isTerminalSessionLeftReason, logEvent, logSessionLeft, sendMessage } from "../messaging.ts"
 import { registerSession, NameConflictError, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
+import { readProcessStartTime } from "../session-transport-state.ts"
 import {
   adoptByPidCwd,
   adoptIdentity,
@@ -1582,13 +1583,23 @@ export function withDispatcher<
               launchIdentity && typeof p.name === "string"
                 ? (db
                     .prepare(
-                      `SELECT id, name, role FROM sessions
+                      `SELECT id, name, role, launch_parent_start_time FROM sessions
                        WHERE name = ? AND launch_id = ? AND launch_parent_pid = ?
                        LIMIT 1`,
                     )
-                    .get(p.name, launchIdentity.id, launchIdentity.parentPid) as PriorSession | null)
+                    .get(p.name, launchIdentity.id, launchIdentity.parentPid) as
+                    | (PriorSession & { launch_parent_start_time: string | null })
+                    | null)
                 : null
             const launchAdopted = launchPersisted && !isActive(launchPersisted.id) ? launchPersisted : null
+            // 25688 (@cto 7b5b85c7): the launch's own parent, by pid AND start time (by pid alone when either side
+            // has no start time), is the launch itself; its token-less reconnect keeps the row's verified identity.
+            const launchParentNow = launchIdentity === null ? null : readProcessStartTime(launchIdentity.parentPid)
+            const ownParentAdoption =
+              launchAdopted !== null &&
+              (launchAdopted.launch_parent_start_time === null ||
+                launchParentNow === "unsupported" ||
+                launchAdopted.launch_parent_start_time === launchParentNow)
             // A validated launch identity is stronger than the legacy weak
             // identity token. Never let a new launch with different provenance
             // adopt a dead member merely because cwd/role hashed the same.
@@ -1993,10 +2004,16 @@ export function withDispatcher<
             )
             db.prepare("UPDATE sessions SET principal_class = ? WHERE id = ?").run(principalClass, clientCtx.sessionId)
             // Every register restates the session's verification: an adopted session re-registering without a token
-            // it can verify is no longer served as verified.
-            db.prepare(
-              "UPDATE sessions SET identity_sid = ?, verified_id_token = ?, identity_gen = ? WHERE id = ?",
-            ).run(verifiedSid, verifiedToken, verifiedSid === null ? null : verifiedGen, clientCtx.sessionId)
+            // it can verify is no longer served as verified, unless it is the launch's own parent re-adopting its own
+            // row. The proof was about the launch, not the connection (25688, @cto 7b5b85c7), so that restatement keeps
+            // it; otherwise one token-less reconnect would leave the row open to 25666's id-alone match.
+            const keepsVerifiedIdentity =
+              verifiedSid === null && ownParentAdoption && clientCtx.sessionId === launchAdopted?.id
+            if (!keepsVerifiedIdentity) {
+              db.prepare(
+                "UPDATE sessions SET identity_sid = ?, verified_id_token = ?, identity_gen = ? WHERE id = ?",
+              ).run(verifiedSid, verifiedToken, verifiedSid === null ? null : verifiedGen, clientCtx.sessionId)
+            }
             // G9 P0 row 7 — the launch's adapter-exit record, named by the plugin
             // supervisor that appends to it. Omission keeps a reconnecting
             // session's stored path, as it does for account and provider.
