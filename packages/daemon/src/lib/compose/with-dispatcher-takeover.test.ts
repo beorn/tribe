@@ -30,7 +30,8 @@ import type { TribeRole } from "tribe-wire/lib/config"
 import { createTribeContext } from "../context.ts"
 import { openDatabase, createStatements } from "../database.ts"
 import type { ClientSession } from "./with-client-registry.ts"
-import { withDispatcher } from "./with-dispatcher.ts"
+import { withDispatcher, type DispatcherRuntimeHooks } from "./with-dispatcher.ts"
+import type { IdentityVerdict } from "../identity-verifier.ts"
 
 beforeEach(() => {
   // Takeover specimens intentionally exercise the dispatcher's loud ownership
@@ -75,6 +76,8 @@ type RegisterParams = {
   identityToken?: string
   launchId?: string
   launchParentPid?: number
+  idToken?: string
+  mailboxAuthorityHash?: string
 }
 
 let cleanup: (() => Promise<void>) | null = null
@@ -612,7 +615,7 @@ describe("one-shot CLI join checkpoint (@ag/tribe/22429)", () => {
   })
 })
 
-function createDispatcherHarness() {
+function createDispatcherHarness(hooks: DispatcherRuntimeHooks = {}) {
   const tempDir = mkdtempSync(join(tmpdir(), "tribe-dispatcher-takeover-"))
   const scope = createScope("dispatcher-takeover-test")
   const db = openDatabase(join(tempDir, "tribe.sqlite"))
@@ -719,7 +722,7 @@ function createDispatcherHarness() {
       handedOff: false,
     },
   }
-  const daemon = withDispatcher({ suppressWindowMs: Number.MAX_SAFE_INTEGER })(shape)
+  const daemon = withDispatcher({ suppressWindowMs: Number.MAX_SAFE_INTEGER, ...hooks })(shape)
 
   return {
     dispatcher: daemon.dispatcher,
@@ -835,6 +838,173 @@ function createDispatcherHarness() {
     },
   }
 }
+
+// 25074 3b — the verifier seam on register (@cto 4a194bbf). The verifier is a stub keyed by token, so each case
+// states exactly what the composing layer answered; hh's real module has its own test at the root.
+describe("dispatcher identity verification on register (25074 3b)", () => {
+  const verdicts: Record<string, IdentityVerdict | Error> = {
+    "token-dev7": { result: "verified", actor: "@dev/7", sid: "sid-dev7" },
+    "token-dev8": { result: "verified", actor: "@dev/8", sid: "sid-dev8" },
+    "token-dead": { result: "contradicted", reason: "instance-is-live: @dev/7 is not live at generation 3" },
+    "token-garbled": { result: "unreadable", reason: "malformed token" },
+    "token-fault": new Error("signing key unreadable"),
+  }
+  const identityVerifier = {
+    path: "/stub/identity-verifier.ts",
+    verify: async (token: string): Promise<IdentityVerdict> => {
+      const verdict = verdicts[token]
+      if (verdict === undefined) throw new Error(`stub has no verdict for ${token}`)
+      if (verdict instanceof Error) throw verdict
+      return verdict
+    },
+  }
+  const identitySid = (harness: ReturnType<typeof createDispatcherHarness>, name: string) =>
+    (
+      harness.db.prepare("SELECT identity_sid FROM sessions WHERE name = ?").get(name) as {
+        identity_sid: string | null
+      }
+    ).identity_sid
+  const membersAuthority = async (harness: ReturnType<typeof createDispatcherHarness>) => {
+    const result = parseResult<{ content: Array<{ text: string }> }>(await harness.request("tribe.members", {}))
+    const sessions = (JSON.parse(result.content[0]!.text) as { sessions: Array<{ name: string; authority: string }> })
+      .sessions
+    return Object.fromEntries(sessions.map((session) => [session.name, session.authority]))
+  }
+
+  it("a verified token registers the session keyed by its sid, and members reads it as verified", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-verified")
+    parseResult<RegisterResult>(
+      await harness.register("conn-verified", { name: "@dev/7", pid: 4101, project: "/tmp/p", idToken: "token-dev7" }),
+    )
+    harness.addPendingClient("conn-claimed")
+    parseResult<RegisterResult>(
+      await harness.register("conn-claimed", { name: "@dev/9", pid: 4102, project: "/tmp/p" }),
+    )
+
+    expect(identitySid(harness, "@dev/7")).toBe("sid-dev7")
+    expect(await membersAuthority(harness)).toMatchObject({ "@dev/7": "verified", "@dev/9": "claimed" })
+  })
+
+  it("a token naming another actor, a contradicted token and a verifier fault each refuse register", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    const refused = async (connId: string, idToken: string) => {
+      harness.addPendingClient(connId)
+      return parseError(await harness.register(connId, { name: "@dev/7", pid: 4201, project: "/tmp/p", idToken }))
+    }
+
+    expect(await refused("conn-mismatch", "token-dev8")).toMatchObject({
+      code: -32003,
+      message: "register refused: this transport claims @dev/7, but its identity token names @dev/8",
+      data: { kind: "identity-name-mismatch" },
+    })
+    expect(await refused("conn-dead", "token-dead")).toMatchObject({
+      code: -32003,
+      message: expect.stringContaining("is contradicted: instance-is-live"),
+      data: { kind: "identity-contradicted" },
+    })
+    // A throwing verifier is a fault, never "unreadable": serving the seat as claimed would hide a broken verifier.
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {})
+    expect(await refused("conn-fault", "token-fault")).toMatchObject({
+      code: -32003,
+      message: expect.stringContaining(
+        "the identity verifier failed on the token @dev/7 presented: signing key unreadable",
+      ),
+      data: { kind: "identity-verifier-fault", verifier: "/stub/identity-verifier.ts" },
+    })
+    expect(String(errors.mock.calls.flat())).toContain("identity verifier /stub/identity-verifier.ts failed")
+    expect(harness.db.prepare("SELECT count(*) AS n FROM sessions WHERE name = '@dev/7'").get()).toEqual({ n: 0 })
+  })
+
+  it("an unreadable token is served on its claimed name", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-garbled")
+    parseResult<RegisterResult>(
+      await harness.register("conn-garbled", {
+        name: "@dev/7",
+        pid: 4301,
+        project: "/tmp/p",
+        idToken: "token-garbled",
+      }),
+    )
+    expect(identitySid(harness, "@dev/7")).toBeNull()
+    expect(await membersAuthority(harness)).toMatchObject({ "@dev/7": "claimed" })
+  })
+
+  it("with no verifier configured a token verifies nothing: the session is served on its claimed name", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-standalone")
+    parseResult<RegisterResult>(
+      await harness.register("conn-standalone", {
+        name: "@dev/7",
+        pid: 4302,
+        project: "/tmp/p",
+        idToken: "token-dev7",
+      }),
+    )
+    expect(identitySid(harness, "@dev/7")).toBeNull()
+    expect(await membersAuthority(harness)).toMatchObject({ "@dev/7": "claimed" })
+  })
+
+  it("a tokenless takeover of a live verified seat is refused as a foreign identity and the seat is untouched", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    const seatSocket = harness.addPendingClient("conn-seat")
+    const seat = parseResult<RegisterResult>(
+      await harness.register("conn-seat", { name: "@dev/7", pid: 4401, project: "/tmp/p", idToken: "token-dev7" }),
+    )
+    harness.addPendingClient("conn-squatter")
+    const refusal = parseError(
+      await harness.register("conn-squatter", { name: "@dev/7", pid: 4402, project: "/tmp/p", takeover: true }),
+    )
+
+    expect(refusal).toMatchObject({
+      code: -32003,
+      message: expect.stringContaining("claims @dev/7 with claimed authority, but a live verified session holds it"),
+      data: {
+        kind: "foreign-identity-transport",
+        reason: "identity-precedence",
+        transport: { name: "@dev/7", authority: "claimed" },
+        holder: { name: "@dev/7", authority: "verified" },
+      },
+    })
+    expect(seatSocket.destroyedByDispatcher).toBe(false)
+    expect(harness.supersededEvents("@dev/7")).toEqual([])
+    const status = parseResult<CliStatusResult>(await harness.cliStatus())
+    expect(status.sessions.filter((session) => session.name === "@dev/7")).toEqual([
+      expect.objectContaining({ pid: 4401 }),
+    ])
+    expect(identitySid(harness, "@dev/7")).toBe("sid-dev7")
+    expect(seat.name).toBe("@dev/7")
+  })
+
+  it("a verified registration displaces a holder that only claimed the name, and the holder's journal says why", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    const claimedSocket = harness.addPendingClient("conn-claimed")
+    parseResult<RegisterResult>(
+      await harness.register("conn-claimed", { name: "@dev/7", pid: 4501, project: "/tmp/p" }),
+    )
+    harness.addPendingClient("conn-verified")
+    parseResult<RegisterResult>(
+      await harness.register("conn-verified", { name: "@dev/7", pid: 4502, project: "/tmp/p", idToken: "token-dev7" }),
+    )
+
+    expect(claimedSocket.destroyedByDispatcher).toBe(true)
+    expect(harness.supersededEvents("@dev/7")).toEqual([
+      expect.objectContaining({
+        old_pid: 4501,
+        new_pid: 4502,
+        reason: "a verified identity displaced a claimed holder (25074)",
+      }),
+    ])
+    expect(await membersAuthority(harness)).toMatchObject({ "@dev/7": "verified" })
+  })
+})
 
 function parseResult<T>(line: string): T {
   const response = JSON.parse(line) as JsonRpcResponse<T>

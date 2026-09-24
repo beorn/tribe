@@ -2137,8 +2137,12 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(readFileSync(refused.logPath, "utf8")).toContain(`Name "${NAME}" is already taken by live pid`)
 
     // A deliberate new launch with takeover supersedes the whole old launch
-    // as one set, leaving no suffixed or -dead- session rows.
-    const successor = await spawnLaunchAdapter(socketPath, "launch-b-successor.log", "provider-launch-b")
+    // as one set, leaving no suffixed or -dead- session rows. Like every
+    // managed launch it carries its own bearer: a claimed registration never
+    // displaces a managed holder (25074 3b).
+    const successor = await spawnLaunchAdapter(socketPath, "launch-b-successor.log", "provider-launch-b", {
+      selfMailboxAuthority: `${"B".repeat(42)}0`,
+    })
     const successorMembers = (await callLaunchToolWhenRegistered(successor, 41, "members", {})) as {
       sessions?: Array<{ name?: string; member_id?: string; launch_id?: string; transport_pids?: number[] }>
     }

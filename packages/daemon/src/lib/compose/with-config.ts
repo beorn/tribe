@@ -41,6 +41,11 @@ export interface TribeConfig {
    * path, and one incident page goes to @chief until a restart finds the file. vaultDbPath is then null.
    */
   readonly vaultDbRefusal?: { readonly path: string; readonly reason: string } | null
+  /**
+   * The composing layer's identity-verifier module, from `--identity-verifier` (25074 3b); null runs without one.
+   * The daemon loads and checks it at boot (identity-verifier.ts) and refuses startup naming the path.
+   */
+  readonly identityVerifierPath?: string | null
   /** Idle-quit delay in seconds. -1 ("never") disables auto-quit, 0 quits immediately on idle. */
   readonly idleQuitAfterSec: number
   /** Which surface set idleQuitAfterSec — see IdleQuitSource. */
@@ -145,6 +150,15 @@ function vaultDbConfig(flag: VaultDbFlag): Pick<TribeConfig, "vaultDbPath" | "va
   return { vaultDbPath: flag.state === "bound" ? flag.path : null, vaultDbRefusal: null }
 }
 
+/** Absent runs without a verifier; a bare or empty flag is a broken launch line, refused before anything binds. */
+function identityVerifierFlag(value: string | boolean | undefined): string | null {
+  if (value === undefined) return null
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error("--identity-verifier requires the absolute path of the verifier module")
+  }
+  return value
+}
+
 function readOperatorCapabilityFromInheritedFd(fdRaw: string | undefined): string | null {
   if (fdRaw === undefined) return null
   const fd = Number(fdRaw)
@@ -177,6 +191,7 @@ export function withConfig<T extends BaseTribe>(opts: ConfigOpts = {}): (t: T) =
         // The vault recall searches, bound on the declared launch line (25149 a3); recall's own
         // bindVaultDb applies it, so this is the option carried through, not a second resolver.
         "vault-db": { type: "string" },
+        "identity-verifier": { type: "string" },
         "focus-poll-ms": { type: "string", default: process.env.TRIBE_FOCUS_POLL_MS ?? "60000" },
         "summary-poll-ms": { type: "string", default: process.env.TRIBE_SUMMARY_POLL_MS ?? "120000" },
         "summarizer-model": { type: "string", default: process.env.TRIBE_SUMMARIZER_MODEL ?? "off" },
@@ -204,6 +219,7 @@ export function withConfig<T extends BaseTribe>(opts: ConfigOpts = {}): (t: T) =
       migrateLegacyDb,
       recallDbPath: resolveRecallDbPath(daemonArgs["recall-db"] as string | undefined),
       ...vaultDbConfig(classifyVaultDbFlag(daemonArgs["vault-db"])),
+      identityVerifierPath: identityVerifierFlag(daemonArgs["identity-verifier"]),
       idleQuitAfterSec: idleQuit.idleQuitAfterSec,
       idleQuitSource: idleQuit.idleQuitSource,
       inheritFd: daemonArgs.fd ? parseInt(String(daemonArgs.fd), 10) : null,

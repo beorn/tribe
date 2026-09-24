@@ -16,6 +16,8 @@ export interface TribeLaunchRequest {
   readonly account?: string
   /** Agents require certified mailbox authority; sender-only services omit it. */
   readonly mailboxAuthorityHash?: string
+  /** The launch's identity token (25074 3b), verified by the daemon's composing-layer verifier when it has one. */
+  readonly idToken?: string
 }
 
 export interface TribeLaunchConnection {
@@ -86,6 +88,7 @@ export async function connectTribeLaunch(
         delivery: "pull",
         ...(request.provider === undefined ? {} : { provider: request.provider }),
         ...(request.mailboxAuthorityHash === undefined ? {} : { mailboxAuthorityHash: request.mailboxAuthorityHash }),
+        ...(request.idToken === undefined ? {} : { idToken: request.idToken }),
         ...(request.account === undefined ? {} : { account: request.account }),
         takeover: request.takeover,
       })) as { readonly name?: unknown; readonly principalClass?: unknown }
