@@ -8,7 +8,12 @@ import { TRIBE_PROTOCOL_VERSION, TRIBE_SUPPORTED_PROTOCOL_VERSIONS } from "./lib
 export interface TribeLaunchRequest {
   readonly name: string
   readonly principalClass: "agent" | "service"
-  readonly launchId: string
+  /**
+   * The launch id this process was given. Absent, it is the identity token's `sid` claim (25074 §18(a), @cto
+   * 027f0c0c): a hab-launched sender presents the launch it was given, never a minted one. A supplied id that is not the
+   * token's sid is refused naming both; neither an id nor a token is refused.
+   */
+  readonly launchId?: string
   readonly cwd: string
   readonly domains: readonly string[]
   readonly takeover: boolean
@@ -58,12 +63,13 @@ export async function connectTribeLaunch(
   request: TribeLaunchRequest,
   deps: TribeLaunchDeps = defaultTribeLaunchDeps,
 ): Promise<TribeLaunchConnection> {
+  const providerLaunchId = launchIdFor(request)
   let lastError: unknown
   for (let attempt = 0; attempt < CONNECT_ATTEMPTS; attempt++) {
     let client: TribeLaunchClient | undefined
     try {
       const processId = deps.processId()
-      const identity = deriveTribePersonaLaunchIdentity(request.name, request.launchId)
+      const identity = deriveTribePersonaLaunchIdentity(request.name, providerLaunchId)
       // 25074 (@cto 95c2be2d): the client never omits the launch id it was given. A register with a token sends both,
       // the daemon decides the keying (`<sid>@<gen>` for a verified token) and returns it, and this client certifies
       // against what the daemon keyed (@cto b58e4715).
@@ -164,6 +170,43 @@ export async function connectTribeLaunch(
     }`,
     { cause: lastError },
   )
+}
+
+/**
+ * The provider launch id this register presents (25074 §18(a)): the one it was given, which must be its token's sid
+ * when the token names one, or else that sid. The claim is read unverified — the daemon verifies the token — so a token
+ * whose claims cannot be read leaves a supplied id to the daemon's judgement.
+ */
+function launchIdFor(request: TribeLaunchRequest): string {
+  const sid = request.idToken === undefined ? undefined : tokenSidClaim(request.idToken)
+  if (request.launchId === undefined) {
+    if (sid !== undefined) return sid
+    throw new Error(
+      request.idToken === undefined
+        ? `Tribe register for ${request.name} has neither a launch id nor an identity token`
+        : `Tribe register for ${request.name} has no launch id and its identity token names no sid`,
+    )
+  }
+  if (sid !== undefined && sid !== request.launchId) {
+    throw new Error(
+      `Tribe register refused by this client: launch id ${request.launchId} is not this token's sid ${sid}; ` +
+        "a hab-launched sender presents the launch it was given, never a minted one",
+    )
+  }
+  return request.launchId
+}
+
+/** The `sid` claim of a JWT-shaped identity token, read without verifying it; undefined when there is none to read. */
+function tokenSidClaim(token: string): string | undefined {
+  const payload = token.split(".")[1]
+  if (payload === undefined) return undefined
+  try {
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { readonly sid?: unknown }
+    return typeof claims.sid === "string" && claims.sid.length > 0 ? claims.sid : undefined
+  } catch {
+    // silent-fallback-allow: an unreadable claim set is the daemon's to judge (unreadable); this read only forms an id.
+    return undefined
+  }
 }
 
 /**

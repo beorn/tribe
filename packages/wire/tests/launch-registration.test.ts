@@ -20,6 +20,12 @@ const REQUEST: TribeLaunchRequest = {
 }
 const DERIVED = "sid-dev7::%40dev%2F7"
 
+/** An unsigned JWT-shaped token carrying `claims`: the client reads claims unverified, and only the daemon verifies. */
+function tokenWithClaims(claims: Record<string, unknown>): string {
+  const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url")
+  return `${part({ alg: "EdDSA", typ: "hab-id+jwt" })}.${part(claims)}.signature`
+}
+
 /** A daemon that answers register with `registered` and lists one member row keyed `rowLaunchId`. */
 function fakeDaemon(registered: Record<string, unknown>, rowLaunchId: string) {
   const calls: Array<{ method: string; params: Record<string, unknown> }> = []
@@ -92,6 +98,42 @@ describe("connectTribeLaunch certifies the launch identity the daemon keyed (250
       expect(joined.launchId).toBe(DERIVED)
       expect(joined.environment.TRIBE_LAUNCH_ID).toBe(DERIVED)
     }
+  })
+
+  // 25074 §18(a) (@cto 027f0c0c): a hab-launched sender presents the launch id it was given — its token's sid — never
+  // a minted one. The client reads the sid unverified to form the id; the daemon verifies the token.
+  describe("a launch id from the token's sid", () => {
+    const RUN_SID = "state-checkout-sync:manual:1790253346128"
+    const runToken = tokenWithClaims({ sid: RUN_SID, gen: 0, act: { sub: "state-checkout-sync", kind: "service" } })
+    const { launchId: _given, ...withoutLaunchId } = REQUEST
+
+    it("a verifying run token with no launch id registers under its sid and certifies the daemon's <sid>@<gen>", async () => {
+      const derived = `${RUN_SID}::${encodeURIComponent(REQUEST.name)}`
+      const { deps, calls } = fakeDaemon({ launchId: `${RUN_SID}@0`, launchParentPid: PID }, `${RUN_SID}@0`)
+
+      const joined = await connectTribeLaunch({ ...withoutLaunchId, idToken: runToken }, deps)
+
+      expect(calls.find((call) => call.method === "register")?.params).toMatchObject({ launchId: derived })
+      expect(joined.launchId).toBe(`${RUN_SID}@0`)
+    })
+
+    it("a minted launch id beside a token naming another sid is refused before any register, naming both", async () => {
+      const { deps, calls } = fakeDaemon({}, DERIVED)
+
+      await expect(
+        connectTribeLaunch({ ...withoutLaunchId, launchId: "0b6f7f2e-minted", idToken: runToken }, deps),
+      ).rejects.toThrow(`launch id 0b6f7f2e-minted is not this token's sid ${RUN_SID}`)
+      expect(calls).toEqual([])
+    })
+
+    it("a register with neither a launch id nor a token is refused before any register", async () => {
+      const { deps, calls } = fakeDaemon({}, DERIVED)
+
+      await expect(connectTribeLaunch(withoutLaunchId, deps)).rejects.toThrow(
+        "has neither a launch id nor an identity token",
+      )
+      expect(calls).toEqual([])
+    })
   })
 
   it("a returned parent pid that is not this client's refuses, naming both", async () => {
