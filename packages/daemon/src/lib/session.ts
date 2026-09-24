@@ -450,11 +450,14 @@ export function registerSession(
           ? { launchId: holder.launch_id, parentPid: holder.launch_parent_pid }
           : null
       // A verified `<sid>@<gen>` is one launch under one parent: claimed from another parent it is a second instance
-      // of that generation, not the launch registering again (@cto 5b98b2a1 (b)). An unverified launch id proves no
-      // lineage, so a new provider that inherited it registers as that launch (19442).
+      // of that generation, not the launch registering again (@cto 5b98b2a1 (b)). The parent test applies when EITHER
+      // side is verified: an unverified claim proves no lineage, so it never takes a verified holder's row by launch id
+      // alone (25666). Between two unverified launches the id is all there is, so a new provider that inherited a stale
+      // one registers as that launch (19442).
       const sameLaunch =
         holder.launch_id === (launchId ?? null) &&
-        (verifiedIdentity === null || holder.launch_parent_pid === (launchParentPid ?? null))
+        ((verifiedIdentity === null && holder.identity_sid === null) ||
+          holder.launch_parent_pid === (launchParentPid ?? null))
       const displaced = displacedSessionIds.has(holder.id)
       const successor =
         verifiedIdentity !== null &&
