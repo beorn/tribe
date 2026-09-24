@@ -19,8 +19,10 @@
  * standalone daemons keep 1800s.
  */
 
-import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join, relative } from "node:path"
+import { afterAll, afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 import { parseIdleQuitAfterSec, resolveIdleQuit, resolveVaultDbFlag, withConfig } from "./with-config.ts"
 
 const ENV_KEYS = [
@@ -211,20 +213,30 @@ describe("resolveIdleQuit (pure)", () => {
 })
 
 describe("--vault-db, the vault the daemon's recall searches (25149 a3)", () => {
-  test("the launch line's path reaches the config", () => {
-    expect(resolve(["--vault-db", "/vault/state.db"]).vaultDbPath).toBe("/vault/state.db")
-  })
+  const dir = mkdtempSync(join(tmpdir(), "with-config-vault-"))
+  const vault = join(dir, "state.db")
+  writeFileSync(vault, "")
+  afterAll(() => rmSync(dir, { recursive: true, force: true }))
 
-  test("a valueless --vault-db on the launch line refuses", () => {
-    expect(() => resolve(["--vault-db"])).toThrow(/--vault-db is empty/)
+  test("the launch line's path reaches the config", () => {
+    expect(resolve(["--vault-db", vault]).vaultDbPath).toBe(vault)
   })
 
   test("a relative --vault-db is resolved against the launch cwd, so the boot log names the real file", () => {
-    expect(resolve(["--vault-db", "../pm/.km/state.db"]).vaultDbPath).toBe(join(process.cwd(), "../pm/.km/state.db"))
+    expect(resolve(["--vault-db", relative(process.cwd(), vault)]).vaultDbPath).toBe(vault)
   })
 
   test("a launch line with no --vault-db leaves the vault unbound", () => {
     expect(resolve().vaultDbPath).toBeNull()
+  })
+
+  test("a daemon launched with --vault-db on a missing file refuses at startup, naming the path", () => {
+    const missing = join(dir, "moved", "state.db")
+    expect(() => resolve(["--vault-db", missing])).toThrow(`--vault-db ${missing} does not exist`)
+  })
+
+  test("a valueless --vault-db on the launch line refuses", () => {
+    expect(() => resolve(["--vault-db"])).toThrow(/--vault-db is empty/)
   })
 
   test.each([
@@ -233,5 +245,12 @@ describe("--vault-db, the vault the daemon's recall searches (25149 a3)", () => 
     ["a valueless flag", true],
   ] as const)("%s refuses at startup instead of reading as unbound", (_case, raw) => {
     expect(() => resolveVaultDbFlag(raw)).toThrow(/--vault-db is empty/)
+  })
+
+  test("the one rule takes an injectable existence check, as the hook line uses it", () => {
+    expect(resolveVaultDbFlag("/vault/state.db", (path) => path === "/vault/state.db")).toBe("/vault/state.db")
+    expect(() => resolveVaultDbFlag("/vault/state.db", () => false)).toThrow(
+      "--vault-db /vault/state.db does not exist",
+    )
   })
 })

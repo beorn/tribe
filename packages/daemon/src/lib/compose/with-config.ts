@@ -7,7 +7,7 @@
  * a fully-formed `TribeConfig`.
  */
 
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { resolve as resolvePath } from "node:path"
 import { parseArgs } from "node:util"
 import { createLogger } from "loggily"
@@ -134,16 +134,22 @@ export function resolveIdleQuit(input: {
 }
 
 /**
- * `--vault-db` as the daemon was launched with it. Absent is unbound; an empty or valueless flag is what a failed
- * `$(…)` substitution passes, so it refuses at startup instead of reading as unbound.
+ * `--vault-db` as a launch line or a hook line carries it: the one rule both surfaces apply (25149 a3). Absent is
+ * unbound. An empty or valueless flag is what a failed `$(…)` substitution passes, and a path naming no file is a
+ * stale line; both refuse, naming the fault, instead of reading as unbound or failing later at the first search.
+ * A present path is returned absolute, so logs name the file the engine opens.
  */
-export function resolveVaultDbFlag(raw: string | boolean | undefined): string | null {
+export function resolveVaultDbFlag(
+  raw: string | boolean | undefined,
+  exists: (path: string) => boolean = existsSync,
+): string | null {
   if (raw === undefined) return null
   if (typeof raw !== "string" || raw.trim().length === 0) {
-    throw new Error("tribe-daemon: --vault-db is empty (a failed substitution?); pass the vault's state.db path")
+    throw new Error("--vault-db is empty (a failed substitution?); pass the vault's state.db path")
   }
-  // Absolute, so the boot log names the file the engine opens rather than a path relative to the launch cwd.
-  return resolvePath(raw)
+  const path = resolvePath(raw)
+  if (!exists(path)) throw new Error(`--vault-db ${path} does not exist; pass the vault's state.db path`)
+  return path
 }
 
 function readOperatorCapabilityFromInheritedFd(fdRaw: string | undefined): string | null {

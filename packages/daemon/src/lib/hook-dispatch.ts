@@ -36,6 +36,7 @@
 import { createLogger, setSuppressConsole } from "loggily"
 import { ensureTribeDaemonIfConfigured } from "./autostart.ts"
 import { existsSync } from "node:fs"
+import { resolveVaultDbFlag } from "./compose/with-config.ts"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { parseArgs } from "node:util"
@@ -79,13 +80,16 @@ type InjectionDebug = {
   installInjectionFileWriter: (typeof import("../../../injection-envelope/src/debug.ts"))["installInjectionFileWriter"]
 }
 
+/** In-repo engine is the default since the 19273 move; the env var is an override seam for forks/experiments only. */
+function engineDir(): string {
+  return process.env.TRIBE_RECALL_ENGINE_DIR ?? new URL("../../../recall/src", import.meta.url).pathname
+}
+
 let hookEngineProbe: Promise<HookEngine | null> | undefined
 async function loadHookEngine(): Promise<HookEngine | null> {
   if (hookEngineProbe !== undefined) return hookEngineProbe
   hookEngineProbe = (async () => {
-    // In-repo engine is the default since the 19273 move; the env var is an
-    // override seam for forks/experiments only.
-    const dir = process.env.TRIBE_RECALL_ENGINE_DIR ?? new URL("../../../recall/src", import.meta.url).pathname
+    const dir = engineDir()
     try {
       const hooks = await (import(`${dir}/lib/hooks.ts`) as Promise<typeof import("../../../recall/src/lib/hooks.ts")>)
       return {
@@ -216,14 +220,12 @@ export function parseHookArgs(
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) }
   }
-  const vaultDb = values["vault-db"]
-  if (vaultDb === undefined) return {}
-  if (vaultDb.trim().length === 0) {
-    return { error: "--vault-db is empty (a failed substitution?); pass the vault's state.db path" }
+  try {
+    const vaultDb = resolveVaultDbFlag(values["vault-db"], exists)
+    return vaultDb === null ? {} : { vaultDb }
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) }
   }
-  // A named vault that is not there is refused here, naming the path; "vault: not bound" is only for no flag.
-  if (!exists(vaultDb)) return { error: `--vault-db ${vaultDb} does not exist; pass the vault's state.db path` }
-  return { vaultDb }
 }
 
 export async function dispatchHook(event: HookEvent, args: HookArgs = {}): Promise<void> {
@@ -248,7 +250,14 @@ export async function dispatchHook(event: HookEvent, args: HookArgs = {}): Promi
     return
   }
   // Recall's own binding, carried through from the call line — the vault is never found from the cwd.
-  if (args.vaultDb !== undefined) engine.bindVaultDb(args.vaultDb)
+  if (args.vaultDb !== undefined) {
+    if (typeof engine.bindVaultDb !== "function") {
+      throw new Error(
+        `tribe hook: the recall engine at ${engineDir()} has no bindVaultDb export (it predates --vault-db, 25149 a3)`,
+      )
+    }
+    engine.bindVaultDb(args.vaultDb)
+  }
 
   switch (event) {
     case "session-start":

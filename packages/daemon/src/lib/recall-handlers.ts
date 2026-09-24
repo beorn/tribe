@@ -196,7 +196,14 @@ export function createRecallHandlers(opts: RecallHandlerOpts): RecallHandlers {
   // The vault is bound before any handler can reach the engine: every handler awaits this promise, not the probe.
   const engineReady = loadDeepRecallEngine(log).then((engine) => {
     engine?.setRecallLogging(process.env.TRIBE_LOG === "1")
-    if (engine && opts.vaultDbPath != null) engine.bindVaultDb(opts.vaultDbPath)
+    if (engine && opts.vaultDbPath != null) {
+      if (typeof engine.bindVaultDb !== "function") {
+        throw new Error(
+          `the recall engine at ${process.env.TRIBE_RECALL_ENGINE_DIR ?? "the in-repo default"} has no bindVaultDb export (it predates --vault-db, 25149 a3)`,
+        )
+      }
+      engine.bindVaultDb(opts.vaultDbPath)
+    }
     return engine
   })
   void engineReady.catch((err: unknown) => {
