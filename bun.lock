@@ -42,7 +42,7 @@
       },
       "dependencies": {
         "@bearly/flock": "0.1.0",
-        "@silvery/commander": "^0.19.2",
+        "@silvery/commander": "^0.24.0",
         "@tobilu/qmd": "2.5.3",
         "loggily": "^0.11.0",
         "zod": "^4.3.6",
@@ -57,7 +57,7 @@
       "dependencies": {
         "@bearly/flock": "0.1.0",
         "@modelcontextprotocol/sdk": "^1.27.1",
-        "@silvery/commander": "^0.19.2",
+        "@silvery/commander": "^0.24.0",
         "loggily": "^0.11.0",
         "removely": "^0.2.1",
       },
@@ -244,11 +244,11 @@
 
     "@rolldown/pluginutils": ["@rolldown/pluginutils@1.0.0-rc.17", "", {}, "sha512-n8iosDOt6Ig1UhJ2AYqoIhHWh/isz0xpicHTzpKBeotdVsTEcxsSA/i3EVM7gQAj0rU27OLAxCjzlj15IWY7bg=="],
 
-    "@silvery/ansi": ["@silvery/ansi@0.19.2", "", { "dependencies": { "@silvery/color": "0.19.2", "string-width": "^8.2.0" } }, "sha512-sttrsyCamuPGMdmUqI9Q0w1z2na12Ozrnvvo+2F6gGvvt9WFQtJhsw/UA+LC8uDEdu4yhok0hzd9LvV+Ug8Z3g=="],
+    "@silvery/ansi": ["@silvery/ansi@0.24.0", "", { "dependencies": { "@silvery/color": "0.24.0", "string-width": "^8.2.2" } }, "sha512-LpPrwg1KFM+AKy0NHvWLtYDBxu3BvESOwe9pJAeXrQwAw/fcQGP9dP9tUq2bt6bw05NCNYx7FTJFLZ410RW5fg=="],
 
-    "@silvery/color": ["@silvery/color@0.19.2", "", {}, "sha512-CjziKx4wfTy2DvP0JtgAowhPRT9FElppmCz9t9WSfdh6gLkO2jxS+vmRcbGoG1agYwSw65ZoaXYWPrTnY471wQ=="],
+    "@silvery/color": ["@silvery/color@0.24.0", "", {}, "sha512-wavyqnqsg2bsEKrChOmiHZvlElgzjjv9EdELLMmkp+3iZmpM8R9jchPwdPTXvW4FQwRz8cQAPH74taBIGywtww=="],
 
-    "@silvery/commander": ["@silvery/commander@0.19.2", "", { "dependencies": { "@silvery/ansi": "0.19.2", "commander": ">=13.0.0", "zod": ">=3.0.0" } }, "sha512-CwEjmQb1cCtYLPHu71uXzhGL4A/UAZlG55o2ewKCcKv/5oKtkUobR67vN7XtwyNt5nP2Ss9jkGjX9qwK0TNmDw=="],
+    "@silvery/commander": ["@silvery/commander@0.24.0", "", { "dependencies": { "@silvery/ansi": "0.24.0", "commander": ">=15.0.0", "zod": ">=3.0.0" } }, "sha512-/Hv3GyLppOK+uA+TMvTLwiNNSYu2rb9axzs+f8OgQtqLA9RdV3KxXV0+RMim1hpMnuxt/DO2H6lQkjzbn/syng=="],
 
     "@simple-git/args-pathspec": ["@simple-git/args-pathspec@1.0.3", "", {}, "sha512-ngJMaHlsWDTfjyq9F3VIQ8b7NXbBLq5j9i5bJ6XLYtD6qlDXT7fdKY2KscWWUF8t18xx052Y/PUO1K1TRc9yKA=="],
 
@@ -356,7 +356,7 @@
 
     "color-name": ["color-name@1.1.4", "", {}, "sha512-dOy+3AuW3a2wNbZHIuMZpTcgjGuLU/uBL/ubcZF9OXbDo8ff4O8yVp5Bf0efS8uEoYo5q4Fx7dY9OgQGXgAsQA=="],
 
-    "commander": ["commander@14.0.3", "", {}, "sha512-H+y0Jo/T1RZ9qPP4Eh1pkcQcLRglraJaSLoyOtHxu6AapkjWVCy2Sit1QQ4x3Dng8qDlSsZEet7g5Pq06MvTgw=="],
+    "commander": ["commander@15.0.0", "", {}, "sha512-z67u4ZhzCL/Tydu1lJARtEZYWbWaN7oYLHbsuzocr6y4N6WZAagG3RQ4FW61V1/0+jImpj293XfrcYnd1qxtPg=="],
 
     "content-disposition": ["content-disposition@1.1.0", "", {}, "sha512-5jRCH9Z/+DRP7rkvY83B+yGIGX96OYdJmzngqnw2SBSxqCFPd0w2km3s5iawpGX8krnwSGmF0FW5Nhr0Hfai3g=="],
 
@@ -760,7 +760,7 @@
 
     "steno": ["steno@4.0.2", "", {}, "sha512-yhPIQXjrlt1xv7dyPQg2P17URmXbuM5pdGkpiMB3RenprfiBlvK415Lctfe0eshk90oA7/tNq7WEiMK8RSP39A=="],
 
-    "string-width": ["string-width@8.2.1", "", { "dependencies": { "get-east-asian-width": "^1.5.0", "strip-ansi": "^7.1.2" } }, "sha512-IIaP0g3iy9Cyy18w3M9YcaDudujEAVHKt3a3QJg1+sr/oX96TbaGUubG0hJyCjCBThFH+tFpcIyoUHUn1ogaLA=="],
+    "string-width": ["string-width@8.2.2", "", { "dependencies": { "get-east-asian-width": "^1.5.0", "strip-ansi": "^7.1.2" } }, "sha512-GaPUh5gfdrYzqeVNZvUfT23vYYxXzKYidUcnMtJg/3rxRV63EFZy3k6xfKlmfeJD0176lnUV/Usr3XcwSvFzpg=="],
 
     "string_decoder": ["string_decoder@1.3.0", "", { "dependencies": { "safe-buffer": "~5.2.0" } }, "sha512-hkRX8U1WjJFd8LsDJ2yQ/wWWxaopEsABU1XfkM8A+j0+85JAGppt16cr1Whg6KIbb4okU6Mql6BOj+uup/wKeA=="],
 
@@ -889,6 +889,8 @@
     "node-llama-cpp/which": ["which@6.0.1", "", { "dependencies": { "isexe": "^4.0.0" }, "bin": { "node-which": "bin/which.js" } }, "sha512-oGLe46MIrCRqX7ytPUf66EAYvdeMIZYn3WaocqqKZAxrBpkqHfL/qvTyJ/bTk5+AqHCjXmrv3CEWgy368zhRUg=="],
 
     "ora/cli-spinners": ["cli-spinners@3.4.0", "", {}, "sha512-bXfOC4QcT1tKXGorxL3wbJm6XJPDqEnij2gQ2m7ESQuE+/z9YFIWnl/5RpTiKWbMq3EVKR4fRLJGn6DVfu0mpw=="],
+
+    "ora/string-width": ["string-width@8.2.1", "", { "dependencies": { "get-east-asian-width": "^1.5.0", "strip-ansi": "^7.1.2" } }, "sha512-IIaP0g3iy9Cyy18w3M9YcaDudujEAVHKt3a3QJg1+sr/oX96TbaGUubG0hJyCjCBThFH+tFpcIyoUHUn1ogaLA=="],
 
     "postcss/nanoid": ["nanoid@3.3.12", "", { "bin": { "nanoid": "bin/nanoid.cjs" } }, "sha512-ZB9RH/39qpq5Vu6Y+NmUaFhQR6pp+M2Xt76XBnEwDaGcVAqhlvxrl3B2bKS5D3NH3QR76v3aSrKaF/Kiy7lEtQ=="],
 
