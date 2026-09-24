@@ -395,9 +395,11 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
   function spawnDaemon(
     socketPath: string,
     dbPath: string,
-    opts: { operatorCapabilityFd?: number } = {},
+    opts: { operatorCapabilityFd?: number; identityVerifier?: string } = {},
   ): ChildProcessWithoutNullStreams {
-    const proc = spawn(BUN_BIN, [DAEMON, "--socket", socketPath, "--db", dbPath, "--foreground", "--no-lore"], {
+    const verifierArgs = opts.identityVerifier === undefined ? [] : ["--identity-verifier", opts.identityVerifier]
+    const daemonArgs = [DAEMON, "--socket", socketPath, "--db", dbPath, "--foreground", "--no-lore", ...verifierArgs]
+    const proc = spawn(BUN_BIN, daemonArgs, {
       cwd: tmpDir,
       env: {
         ...BASE_ENV,
@@ -567,6 +569,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       delivery?: "push" | "pull"
       filterMode?: "focus" | "normal" | "ambient"
       selfMailboxAuthority?: string
+      idToken?: string
     } = {},
   ): Promise<{ child: ChildProcessWithoutNullStreams; stdout: Record<string, unknown>[]; logPath: string }> {
     const logPath = join(tmpDir, logName)
@@ -600,6 +603,8 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
           // direct adapters ignore stale provenance without the child marker.
           TRIBE_PLUGIN_PROVIDER_PARENT_PID: opts.throughPluginSupervisor ? String(process.pid) : "1",
           ...(opts.selfMailboxAuthority === undefined ? {} : { AG_SESSION_AUTH: opts.selfMailboxAuthority }),
+          // Explicit, never the runner's own: an empty token is a launch without one (25074 3b).
+          HAB_ID_TOKEN: opts.idToken ?? "",
           ...(opts.distinctProviderParent
             ? {
                 // Hostile/unsanitized nested launch: both identity inputs are
@@ -1880,6 +1885,55 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       timed_out: false,
     })
   }, 120_000)
+
+  // 25074 3b P2 (review-adhoc5 5298309b): a contradicted token can be transient (the seat reads "starting", or its
+  // control socket did not answer under load), so the adapter must not treat it as final the way it treats a token
+  // naming another actor. Its first register is refused; a later tool call re-registers once liveness reads.
+  it("a seat whose first register is contradicted registers verified on a later call once its liveness reads", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const verdictPath = join(tmpDir, "verdict")
+    const verifierPath = join(tmpDir, "verifier.ts")
+    writeFileSync(verdictPath, "contradicted")
+    writeFileSync(
+      verifierPath,
+      `import { readFileSync } from "node:fs"
+       export const IDENTITY_VERIFIER_INTERFACE = 1
+       export async function verifyIdentity(token) {
+         if (readFileSync(${JSON.stringify(verdictPath)}, "utf8") === "contradicted") {
+           return { result: "contradicted", reason: "instance-is-live: the seat reads starting" }
+         }
+         return { result: "verified", actor: ${JSON.stringify(NAME)}, sid: "sid-p2" }
+       }`,
+    )
+    daemonProc = spawnDaemon(socketPath, join(tmpDir, "tribe.db"), { identityVerifier: verifierPath })
+    await waitForDaemonSocket(daemonProc, socketPath)
+    const adapter = await spawnLaunchAdapter(socketPath, "contradicted-then-live.log", "provider-launch-p2", {
+      idToken: "token-p2",
+    })
+    await waitForCondition(
+      () => existsSync(adapter.logPath) && readFileSync(adapter.logPath, "utf8").includes("is contradicted"),
+      "the first register's contradicted refusal",
+    )
+
+    writeFileSync(verdictPath, "verified")
+    const deadline = Date.now() + 30_000
+    let id = 50
+    let members: { sessions?: Array<{ name?: string; authority?: string }> } | undefined
+    while (members === undefined) {
+      try {
+        const result = (await callLaunchTool(adapter, id, "members", {})) as typeof members
+        if (result?.sessions?.some((session) => session.name === NAME && session.authority === "verified")) {
+          members = result
+        }
+      } catch (error) {
+        if (Date.now() >= deadline) throw error
+      }
+      if (members === undefined && Date.now() >= deadline) throw new Error("the seat never re-registered verified")
+      id += 1
+      await Bun.sleep(500)
+    }
+    expect(adapter.child.exitCode).toBeNull()
+  })
 
   it("fans three native adapters from one provider launch into one live member", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
