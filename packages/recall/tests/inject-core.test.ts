@@ -753,4 +753,22 @@ describe("25071 row 2: the hook's recall runs in hook mode, inside the wall's bu
     expect(steps["recall.corroboration"]).toBe(3)
     expect(result.skippedSteps).toEqual({ "recall.messages": "recall messages skipped: (fixture)" })
   })
+
+  /** @failure Several skipped synonym variants share one phase key, so only the last anchor was named (25397). */
+  test("several skips of one phase are all said, each with its own anchor", async () => {
+    recallMock.mockResolvedValue({
+      results: [],
+      timing: { searchMs: 20, phases: {} },
+      skipped: [
+        { phase: "synonym", anchor: "tribe", message: 'recall synonym skipped: anchor "tribe"' },
+        { phase: "synonym", anchor: "wire", message: 'recall synonym skipped: anchor "wire"' },
+      ],
+    })
+
+    const result = await runInjectDelta(salientPrompt, createMemorySeenStore(), { steps: {} })
+
+    expect(result.skippedSteps).toEqual({
+      "recall.synonym": 'recall synonym skipped: anchor "tribe"; recall synonym skipped: anchor "wire"',
+    })
+  })
 })
