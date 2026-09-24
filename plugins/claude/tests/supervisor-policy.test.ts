@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest"
-import { ADAPTER_STABLE_MS, evaluateAdapterRestart, REEXEC_BACKOFF_MAX_MS } from "../supervisor-policy.ts"
+import {
+  ADAPTER_STABLE_MS,
+  evaluateAdapterRestart,
+  REEXEC_BACKOFF_MAX_MS,
+  LEGACY_PARENT_WARNING,
+  PROVIDER_PARENT_REMEDY,
+  resolveProviderParentPid,
+} from "../supervisor-policy.ts"
 import {
   buildPluginAdapterEnvironment,
   PLUGIN_REEXEC_EXIT_CODE,
@@ -58,5 +65,37 @@ describe("Claude plugin adapter restart budget", () => {
       retry: true,
       retryDelayMs: 250,
     })
+  })
+})
+
+// 25074 3c-2b (@cto def441bf): a seat that registered by its token is launched with no TRIBE_LAUNCH_ID, so its wrapper
+// must accept the token as the managed identity beside a supplied provider parent, never throw its remedy.
+describe("provider-parent provenance", () => {
+  const self = { pid: 100, ppid: 50 }
+  const alive = () => true
+
+  it("a token launch with a supplied provider parent resolves it, where TRIBE_LAUNCH_ID used to be required", () => {
+    expect(
+      resolveProviderParentPid(
+        { HAB_ID_TOKEN: "seat-token", TRIBE_PLUGIN_PROVIDER_PARENT_PID: "4321" },
+        self,
+        alive,
+        () => {},
+      ),
+    ).toBe(4321)
+  })
+
+  it("a supplied provider parent with no managed identity at all is an incomplete tuple and throws the remedy", () => {
+    expect(() => resolveProviderParentPid({ TRIBE_PLUGIN_PROVIDER_PARENT_PID: "4321" }, self, alive, () => {})).toThrow(
+      PROVIDER_PARENT_REMEDY,
+    )
+  })
+
+  it("a managed launch with no provider parent falls back to the real parent, loudly", () => {
+    const warnings: string[] = []
+    expect(resolveProviderParentPid({ HAB_ID_TOKEN: "seat-token" }, self, alive, (line) => warnings.push(line))).toBe(
+      50,
+    )
+    expect(warnings).toEqual([LEGACY_PARENT_WARNING])
   })
 })

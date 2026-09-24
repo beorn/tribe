@@ -1140,6 +1140,7 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
     "token-g4": { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 4 },
     "token-g2": { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 2 },
     "token-nogen": { result: "verified", actor: "@dev/7", sid: "sid-dev7" },
+    "token-dead": { result: "contradicted", reason: "instance-is-live: @dev/7 is not live at generation 3" },
   }
   const identityVerifier = {
     path: "/stub/identity-verifier.ts",
@@ -1221,7 +1222,51 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
     expect(harness.db.prepare("SELECT count(*) AS n FROM sessions WHERE name = '@dev/7'").get()).toEqual({ n: 0 })
   })
 
-  it("a sender that still sends a launch id keeps that launch identity, with or without gen", async () => {
+  // 25074 3c-2b forward fix (@cto 95c2be2d): the client never omits a launch id it was given, and the daemon decides
+  // the keying from the one register that carries both.
+  it("(a) a verified token with gen keys sid@gen even beside a launch id whose provider part is its sid", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-both")
+    const registered = parseResult<RegisterResult & { launchId?: string }>(
+      await harness.register("conn-both", {
+        name: "@dev/7",
+        pid: 5301,
+        project: "/tmp/p",
+        launchId: "sid-dev7::%40dev%2F7",
+        launchParentPid: 5300,
+        idToken: "token-g3",
+      }),
+    )
+    expect(registered.launchId).toBe("sid-dev7@3")
+    expect(sessionRow(harness, registered.sessionId)).toMatchObject({
+      launch_id: "sid-dev7@3",
+      identity_sid: "sid-dev7",
+    })
+  })
+
+  it("(a) a verified token beside a launch id of another sid is refused by name, and nothing registers", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-mismatch")
+    const refused = parseError(
+      await harness.register("conn-mismatch", {
+        name: "@dev/7",
+        pid: 5311,
+        project: "/tmp/p",
+        launchId: "sid-other::%40dev%2F7",
+        launchParentPid: 5310,
+        idToken: "token-g3",
+      }),
+    )
+    expect(refused).toMatchObject({
+      code: -32003,
+      data: { kind: "identity-mismatch", launch_id: "sid-other::%40dev%2F7", sid: "sid-dev7" },
+    })
+    expect(harness.db.prepare("SELECT count(*) AS n FROM sessions WHERE name = '@dev/7'").get()).toEqual({ n: 0 })
+  })
+
+  it("a verified token without gen beside its own launch id keeps that launch identity", async () => {
     const harness = createDispatcherHarness({ identityVerifier })
     cleanup = harness.dispose
     harness.addPendingClient("conn-legacy")
@@ -1230,15 +1275,94 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
         name: "@dev/7",
         pid: 5301,
         project: "/tmp/p",
-        launchId: "provider-launch-legacy",
+        launchId: "sid-dev7::%40dev%2F7",
         launchParentPid: 5300,
         idToken: "token-nogen",
       }),
     )
     expect(sessionRow(harness, registered.sessionId)).toMatchObject({
-      launch_id: "provider-launch-legacy",
+      launch_id: "sid-dev7::%40dev%2F7",
       identity_sid: "sid-dev7",
     })
+  })
+
+  // @cto ab05bc5c dropped 95c2be2d's (b): hab's job and controller tokens verify to no sid (they were refused -32602,
+  // after verification), so the launch id the client now always sends is their whole cure. A fault stays a refusal,
+  // so an adapter keeps retrying until its token verifies (P2-A).
+  it("an undecided token is refused as a verifier fault even beside a launch id; nothing registers", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    vi.spyOn(console, "error").mockImplementation(() => {})
+    harness.addPendingClient("conn-undecided")
+    expect(
+      parseError(
+        await harness.register("conn-undecided", {
+          name: "@dev/7",
+          pid: 5321,
+          project: "/tmp/p",
+          launchId: "sid-dev7::%40dev%2F7",
+          launchParentPid: 5320,
+          idToken: "token-undecided",
+        }),
+      ),
+    ).toMatchObject({ code: -32003, data: { kind: "identity-verifier-fault" } })
+    expect(harness.db.prepare("SELECT count(*) AS n FROM sessions WHERE name = '@dev/7'").get()).toEqual({ n: 0 })
+  })
+
+  it("a token that verifies to no sid beside a launch id registers on that launch id: hab's jobs and controller", async () => {
+    const harness = createDispatcherHarness({
+      identityVerifier: { ...identityVerifier, verify: async () => ({ result: "absent" }) as IdentityVerdict },
+    })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-job")
+    const registered = parseResult<RegisterResult & { launchId?: string }>(
+      await harness.register("conn-job", {
+        name: "state-checkout-sync",
+        pid: 5351,
+        project: "/tmp/p",
+        launchId: "job-launch-7",
+        launchParentPid: 5350,
+        idToken: "hab-job-token",
+      }),
+    )
+    expect(registered.launchId).toBe("job-launch-7")
+    expect(sessionRow(harness, registered.sessionId)).toMatchObject({ launch_id: "job-launch-7", identity_sid: null })
+  })
+
+  it("(c) a contradicted token is refused whatever launch id it carries", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-dead")
+    expect(
+      parseError(
+        await harness.register("conn-dead", {
+          name: "@dev/7",
+          pid: 5331,
+          project: "/tmp/p",
+          launchId: "sid-dev7::%40dev%2F7",
+          launchParentPid: 5330,
+          idToken: "token-dead",
+        }),
+      ),
+    ).toMatchObject({ code: -32003, data: { kind: "identity-contradicted" } })
+  })
+
+  it("(d) an undecided token with no launch id is still refused as a verifier fault", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    vi.spyOn(console, "error").mockImplementation(() => {})
+    harness.addPendingClient("conn-nolaunch")
+    expect(
+      parseError(
+        await harness.register("conn-nolaunch", {
+          name: "@dev/7",
+          pid: 5341,
+          project: "/tmp/p",
+          launchParentPid: 5340,
+          idToken: "token-hab-job",
+        }),
+      ),
+    ).toMatchObject({ code: -32003, data: { kind: "identity-verifier-fault" } })
   })
 
   it("a higher generation of the same seat is the successor takeover, and the holder is told", async () => {
@@ -1305,6 +1429,162 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
     })
     expect(holderSocket.destroyedByDispatcher).toBe(false)
     expect(harness.supersededEvents("@dev/7")).toEqual([])
+  })
+
+  // 25074 3c-2b (@cto def441bf): a bootstrap that hit a verifier fault registered by bearer under its launch id, which
+  // is the Hab session id, `<sid>::<persona>`. The same seat's token-only adapter (keyed `<sid>@<gen>`) promotes that
+  // session in place: the token's sid IS that launch's provider part and both carry the launcher pid.
+  const fallbackBootstrap = async (
+    harness: ReturnType<typeof createDispatcherHarness>,
+    launchId: string,
+    launchParentPid: number,
+  ) => {
+    const socket = harness.addPendingClient("conn-bootstrap")
+    const registered = parseResult<RegisterResult>(
+      await harness.register("conn-bootstrap", {
+        name: "@dev/7",
+        pid: launchParentPid,
+        project: "/tmp/p",
+        takeover: true,
+        launchId,
+        launchParentPid,
+        mailboxAuthorityHash: "c".repeat(64),
+      }),
+    )
+    return { socket, registered }
+  }
+  const promotions = (harness: ReturnType<typeof createDispatcherHarness>) =>
+    (
+      harness.db
+        .prepare("SELECT content FROM messages WHERE type = 'event.session.identity-promoted' ORDER BY ts ASC")
+        .all() as Array<{ content: string }>
+    ).map((row) => JSON.parse(row.content) as Record<string, unknown>)
+
+  it("a token-only adapter promotes its own fallback bootstrap's session in place, and says so", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    const bootstrap = await fallbackBootstrap(harness, "sid-dev7::%40dev%2F7", 5600)
+    harness.addPendingClient("conn-adapter")
+    const adapter = parseResult<RegisterResult>(
+      await harness.register("conn-adapter", {
+        name: "@dev/7",
+        pid: 5602,
+        project: "/tmp/p",
+        takeover: true,
+        launchParentPid: 5600,
+        idToken: "token-g3",
+      }),
+    )
+
+    expect(adapter.sessionId).toBe(bootstrap.registered.sessionId)
+    expect(bootstrap.socket.destroyedByDispatcher).toBe(false)
+    expect(harness.supersededEvents("@dev/7")).toEqual([])
+    expect(sessionRow(harness, adapter.sessionId)).toMatchObject({
+      launch_id: "sid-dev7@3",
+      launch_parent_pid: 5600,
+      identity_sid: "sid-dev7",
+    })
+    expect(promotions(harness)).toEqual([
+      expect.objectContaining({
+        name: "@dev/7",
+        sid: "sid-dev7",
+        gen: 3,
+        parent_pid: 5600,
+        from_launch_id: "sid-dev7::%40dev%2F7",
+        transport_class: "bootstrap-fallback-promoted",
+      }),
+    ])
+  })
+
+  // review-adhoc5 P3 on 3c-2a: the seat's bearer authority row holds its pre-3c-2b launch id `<sid>::<persona>`, whose
+  // provider part is not the token-keyed `<sid>@<gen>`; that is no foreign-identity evidence against a verified token.
+  it("a token-only adapter presenting its seat's bearer still promotes: the 24767 check does not refuse it", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    const bootstrap = await fallbackBootstrap(harness, "sid-dev7::%40dev%2F7", 5650)
+    harness.addPendingClient("conn-adapter")
+    const adapter = parseResult<RegisterResult>(
+      await harness.register("conn-adapter", {
+        name: "@dev/7",
+        pid: 5652,
+        project: "/tmp/p",
+        takeover: true,
+        launchParentPid: 5650,
+        idToken: "token-g3",
+        mailboxAuthorityHash: "c".repeat(64),
+      }),
+    )
+
+    expect(adapter.sessionId).toBe(bootstrap.registered.sessionId)
+    expect(sessionRow(harness, adapter.sessionId)).toMatchObject({ launch_id: "sid-dev7@3", identity_sid: "sid-dev7" })
+    expect(promotions(harness)).toEqual([expect.objectContaining({ transport_class: "bootstrap-fallback-promoted" })])
+  })
+
+  it("(e) an adapter sending its token AND its projected launch id still promotes its own fallback bootstrap", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    const bootstrap = await fallbackBootstrap(harness, "sid-dev7::%40dev%2F7", 5660)
+    harness.addPendingClient("conn-adapter")
+    const adapter = parseResult<RegisterResult>(
+      await harness.register("conn-adapter", {
+        name: "@dev/7",
+        pid: 5662,
+        project: "/tmp/p",
+        takeover: true,
+        launchId: "sid-dev7::%40dev%2F7",
+        launchParentPid: 5660,
+        idToken: "token-g3",
+        mailboxAuthorityHash: "c".repeat(64),
+      }),
+    )
+
+    expect(adapter.sessionId).toBe(bootstrap.registered.sessionId)
+    expect(harness.supersededEvents("@dev/7")).toEqual([])
+    expect(sessionRow(harness, adapter.sessionId)).toMatchObject({ launch_id: "sid-dev7@3", identity_sid: "sid-dev7" })
+    expect(promotions(harness)).toEqual([expect.objectContaining({ transport_class: "bootstrap-fallback-promoted" })])
+  })
+
+  it("a same-sid holder under another launcher pid is a previous generation: displaced and told, not promoted", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    const previous = await fallbackBootstrap(harness, "sid-dev7::%40dev%2F7", 5700)
+    harness.addPendingClient("conn-adapter")
+    const adapter = parseResult<RegisterResult>(
+      await harness.register("conn-adapter", {
+        name: "@dev/7",
+        pid: 5712,
+        project: "/tmp/p",
+        takeover: true,
+        launchParentPid: 5710,
+        idToken: "token-g3",
+      }),
+    )
+
+    expect(adapter.sessionId).not.toBe(previous.registered.sessionId)
+    expect(previous.socket.destroyedByDispatcher).toBe(true)
+    expect(harness.supersededEvents("@dev/7")).toEqual([expect.objectContaining({ old_pid: 5700, new_pid: 5712 })])
+    expect(promotions(harness)).toEqual([])
+  })
+
+  it("a token-only adapter whose sid is not the bearer holder's launch takes over as before", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    const other = await fallbackBootstrap(harness, "sid-other::%40dev%2F7", 5800)
+    harness.addPendingClient("conn-adapter")
+    parseResult<RegisterResult>(
+      await harness.register("conn-adapter", {
+        name: "@dev/7",
+        pid: 5802,
+        project: "/tmp/p",
+        takeover: true,
+        launchParentPid: 5800,
+        idToken: "token-g3",
+      }),
+    )
+
+    expect(other.socket.destroyedByDispatcher).toBe(true)
+    expect(harness.supersededEvents("@dev/7")).toHaveLength(1)
+    expect(promotions(harness)).toEqual([])
   })
 
   it("health's identity facet says whether the loaded verifier supplies gen", async () => {
@@ -1542,7 +1822,8 @@ describe("one-shot session authority P3 rows (25074, @cto 03cff4b5 and 975a22e2,
         pid: 4921,
         project: "/tmp/p",
         idToken: "token-dev7",
-        launchId: "launch-dev7",
+        // A seat's launch id is its token's sid, persona-qualified (@cto 95c2be2d (a)); the verified token keys it.
+        launchId: "sid-dev7::%40dev%2F7",
         launchParentPid: 4921,
       }),
     )
@@ -1557,7 +1838,7 @@ describe("one-shot session authority P3 rows (25074, @cto 03cff4b5 and 975a22e2,
     ).sessions
     expect(sessions.find((session) => session.name === "@dev/9")?.foreign_transport).toMatchObject({
       name: "@dev/7",
-      launch_id: "launch-dev7",
+      launch_id: "sid-dev7@1",
     })
     expect(sessions.find((session) => session.name === "@dev/7")).not.toHaveProperty("foreign_transport")
   })

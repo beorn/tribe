@@ -613,6 +613,35 @@ describe("stdio adapter delivery modes", () => {
     expect(register?.params && "launchParentPid" in register.params).toBe(false)
   })
 
+  // 25074 3c-2b (@cto def441bf): a seat launched by its token inherits no TRIBE_LAUNCH_ID. Its adapter registers by the
+  // token with its launch parent pid, and the daemon keys it `<sid>@<gen>`.
+  it("25074: a token with no launch id registers by the token and its launch parent pid, sending no launch id", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath)
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/9"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "pull",
+        TRIBE_TAKEOVER: "1",
+        TRIBE_LAUNCH_ID: "",
+        HAB_ID_TOKEN: "seat-token",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+
+    const register = daemon.requests.find((msg) => msg.method === "register") as
+      | { params?: { launchId?: string; launchParentPid?: number; idToken?: string } }
+      | undefined
+    expect(register?.params?.idToken).toBe("seat-token")
+    expect(register?.params && "launchId" in register.params).toBe(false)
+    expect(register?.params?.launchParentPid).toBe(process.pid)
+  })
+
   it("21049: takeover is a launch capability and is not replayed after reconnect", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath)

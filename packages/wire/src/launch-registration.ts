@@ -1,7 +1,7 @@
 /** One scoped, daemon-certified launch registration shared by agent hosts and service producers. */
 import { connectToDaemon, type DaemonClient } from "./client.ts"
 import { resolveSocketPath } from "./paths.ts"
-import { deriveTribePersonaLaunchIdentity } from "./lib/persona-launch-identity.ts"
+import { deriveTribePersonaLaunchIdentity, providerLaunchIdOf } from "./lib/persona-launch-identity.ts"
 import { projectTribeLaunchEnvironment, tribeSessionIdentityEnvironmentNames } from "./launch-environment.ts"
 import { TRIBE_PROTOCOL_VERSION, TRIBE_SUPPORTED_PROTOCOL_VERSIONS } from "./lib/socket.ts"
 
@@ -64,6 +64,10 @@ export async function connectTribeLaunch(
     try {
       const processId = deps.processId()
       const identity = deriveTribePersonaLaunchIdentity(request.name, request.launchId)
+      // 25074 (@cto 95c2be2d): the client never omits the launch id it was given. A register with a token sends both,
+      // the daemon decides the keying (`<sid>@<gen>` for a verified token) and returns it, and this client certifies
+      // against what the daemon keyed (@cto b58e4715).
+      const byToken = request.idToken !== undefined
       client = await deps.connect(deps.socketPath(), { callTimeoutMs: CONNECT_TIMEOUT_MS })
       const registration = (await client.call("register", {
         name: request.name,
@@ -91,7 +95,12 @@ export async function connectTribeLaunch(
         ...(request.idToken === undefined ? {} : { idToken: request.idToken }),
         ...(request.account === undefined ? {} : { account: request.account }),
         takeover: request.takeover,
-      })) as { readonly name?: unknown; readonly principalClass?: unknown }
+      })) as {
+        readonly name?: unknown
+        readonly principalClass?: unknown
+        readonly launchId?: unknown
+        readonly launchParentPid?: unknown
+      }
       if (registration.name !== request.name) {
         throw new Error(
           `Tribe registered ${JSON.stringify(registration.name)} instead of ${JSON.stringify(request.name)}`,
@@ -102,9 +111,10 @@ export async function connectTribeLaunch(
           `Tribe did not certify service lifetime for ${request.name}; the daemon must support service principals`,
         )
       }
+      const launchId = keyedLaunchId(registration, identity.launchId, byToken, processId)
       const certification = exactLaunchMember(await client.call("tribe.members", {}), {
         persona: request.name,
-        launchId: identity.launchId,
+        launchId,
         launchParentPid: processId,
         ...(request.provider === undefined ? {} : { provider: request.provider }),
         account: request.account,
@@ -113,7 +123,7 @@ export async function connectTribeLaunch(
       })
       if (certification.member === null) {
         throw new Error(
-          `Tribe member row did not certify ${request.name} launch ${identity.launchId} under harness pid ${processId}` +
+          `Tribe member row did not certify ${request.name} launch ${launchId} under harness pid ${processId}` +
             (certification.mailboxReadCapabilityDetail === null
               ? ""
               : `: ${certification.mailboxReadCapabilityDetail}`),
@@ -126,9 +136,10 @@ export async function connectTribeLaunch(
       return {
         joinRetries: attempt,
         launchParentPid: processId,
-        launchId: identity.launchId,
+        launchId,
         environment: {
           ...Object.fromEntries(tribeSessionIdentityEnvironmentNames().map((key) => [key, undefined])),
+          // The derived launch id stays projected until 3d; a child sends it beside the token, as this register did.
           ...projectTribeLaunchEnvironment(identity.launchId),
           TRIBE_LAUNCH_PARENT_PID: String(processId),
           TRIBE_NAME: request.name,
@@ -152,6 +163,38 @@ export async function connectTribeLaunch(
       lastError instanceof Error ? lastError.message : String(lastError)
     }`,
     { cause: lastError },
+  )
+}
+
+/**
+ * The launch identity this register was keyed under (@cto b58e4715, 95c2be2d). The daemon keys a verified token
+ * `<sid>@<gen>`, and the sid is the derived launch id's provider part, so a token register certifies the returned id
+ * when it is the derived one or that seat's `<sid>@<gen>`, and refuses any other. Without a token the returned id must
+ * equal the derived one. A daemon that returns none keyed the launch id it was sent, so the derived id certifies: an old
+ * daemon plus this client keeps joining (@cto 57e5f42a). A returned parent pid that is not this harness's refuses.
+ */
+function keyedLaunchId(
+  registration: { readonly launchId?: unknown; readonly launchParentPid?: unknown },
+  derived: string,
+  byToken: boolean,
+  processId: number,
+): string {
+  const returned =
+    typeof registration.launchId === "string" && registration.launchId.length > 0 ? registration.launchId : null
+  if (registration.launchParentPid !== undefined && registration.launchParentPid !== null) {
+    if (registration.launchParentPid !== processId) {
+      throw new Error(
+        `Tribe register refused by this client: the daemon keyed launch parent pid ${String(registration.launchParentPid)}, ` +
+          `not this harness's ${processId}`,
+      )
+    }
+  }
+  if (returned === null || returned === derived) return derived
+  const sid = providerLaunchIdOf(derived)
+  if (byToken && returned.startsWith(`${sid}@`) && /^\d+$/u.test(returned.slice(sid.length + 1))) return returned
+  throw new Error(
+    `Tribe register refused by this client: the daemon keyed launch ${returned}, not the derived ${derived}` +
+      (byToken ? ` or its seat's ${sid}@<gen>` : ""),
   )
 }
 

@@ -15,22 +15,17 @@
 import { spawn, type ChildProcess } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { isTribeNameShape } from "tribe-wire/lib/persona-name"
-import { evaluateAdapterRestart } from "./supervisor-policy.ts"
+import { evaluateAdapterRestart, PROVIDER_PARENT_REMEDY, resolveProviderParentPid } from "./supervisor-policy.ts"
 import { buildPluginAdapterEnvironment, PLUGIN_REEXEC_EXIT_CODE } from "./supervisor-environment.ts"
 import { recordAdapterExit, resolveAdapterExitRecord } from "./supervisor-exit-record.ts"
 
 const PLUGIN_CHILD = "TRIBE_PLUGIN_ADAPTER_CHILD"
-const PLUGIN_PROVIDER_PARENT_PID = "TRIBE_PLUGIN_PROVIDER_PARENT_PID"
 const REEXEC_EXIT_CODE = PLUGIN_REEXEC_EXIT_CODE
 const REEXEC_JOINED_OFFSET = 1
 const GENERATION_REEXEC_OFFSET = 2
 const LAST_REEXEC_EXIT_CODE = REEXEC_EXIT_CODE + GENERATION_REEXEC_OFFSET + REEXEC_JOINED_OFFSET
 const REMEDY =
   "tribe plugin adapter refused a repeated deterministic replacement; run /mcp reconnect after repairing the reported cause or reinstall the Tribe plugin."
-const PROVIDER_PARENT_REMEDY =
-  "tribe plugin wrapper requires valid provider-parent provenance from a complete live managed launch; restart the host session or reinstall the Tribe plugin."
-const LEGACY_PARENT_WARNING =
-  "tribe plugin wrapper: managed launch supplied no provider-parent PID; falling back to the wrapper's real provider parent. Relaunch the host session to restore full launch provenance."
 
 function supervisedIdentity(message: unknown): { name: string; joined: boolean } | undefined {
   if (typeof message !== "object" || message === null || !("tribePluginIdentity" in message)) return undefined
@@ -66,33 +61,6 @@ function processExists(pid: number): boolean {
   }
 }
 
-function resolveProviderParentPid(): number {
-  const raw = process.env[PLUGIN_PROVIDER_PARENT_PID]?.trim() ?? ""
-  const launchId = process.env.TRIBE_LAUNCH_ID?.trim() ?? ""
-  // An ABSENT parent PID is indistinguishable from a standalone install or a
-  // host launched before the bootstrap started injecting it, so it falls back to
-  // the wrapper's real provider parent — loudly, never silently. Rejecting it
-  // strands every already-running seat: a host's env is fixed at launch, so the
-  // only remedy is relaunching every seat, and the refusal surfaces to the
-  // provider as a bare transport error with the remedy text nowhere in view.
-  // A SUPPLIED-but-invalid PID is a genuine incomplete tuple and still throws.
-  if (raw.length === 0) {
-    if (launchId.length > 0) process.stderr.write(`${LEGACY_PARENT_WARNING}\n`)
-    return process.ppid
-  }
-  const pid = Number(raw)
-  if (
-    launchId.length === 0 ||
-    !/^[1-9]\d*$/u.test(raw) ||
-    !Number.isSafeInteger(pid) ||
-    pid === process.pid ||
-    !processExists(pid)
-  ) {
-    throw new Error(PROVIDER_PARENT_REMEDY)
-  }
-  return pid
-}
-
 async function superviseAdapter(): Promise<void> {
   // The wrapper is an implementation detail between the provider host and
   // the adapter. A managed Hab launch supplies the authoritative harness PID;
@@ -100,7 +68,9 @@ async function superviseAdapter(): Promise<void> {
   // resolved boundary once so every child/re-exec reports one logical owner.
   let providerParentPid: number
   try {
-    providerParentPid = resolveProviderParentPid()
+    providerParentPid = resolveProviderParentPid(process.env, process, processExists, (line) =>
+      process.stderr.write(`${line}\n`),
+    )
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : PROVIDER_PARENT_REMEDY}\n`)
     process.exitCode = 2

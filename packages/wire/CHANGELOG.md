@@ -4,6 +4,21 @@
 
 ### Added
 
+- **A register carries its token and its launch id; the daemon keys it.**
+  `register` returns the launch identity it keyed (`launchId`,
+  `launchParentPid`), an additive field. connectTribeLaunch always sends and
+  projects the launch id it was given, beside its token, and certifies its
+  members row against the returned id: the derived one, or that seat's
+  `<sid>@<gen>`; any other refuses by name, and a daemon that returns none keeps
+  the derived-id certification, so an old daemon keeps joining. A verified token
+  keys the session `<sid>@<gen>` even beside a launch id, and a launch id whose
+  provider part is not the token's sid refuses as `identity-mismatch`; a
+  verifier fault stays a refusal whatever launch id the register carries. The
+  stdio adapter registers by the token with its launch parent pid when no launch
+  id was projected, and the Claude plugin wrapper accepts `HAB_ID_TOKEN` as a
+  managed launch's identity. A token register from the same launcher pid
+  promotes that seat's bearer fallback bootstrap in place
+  (`session.identity-promoted`).
 - **A verified register keys its launch by the token.** The identity-verifier
   contract gains an optional `gen` on a verified verdict; a module that fills it
   exports `IDENTITY_VERIFIER_SUPPLIES_GEN = true`, and `tribe health`'s

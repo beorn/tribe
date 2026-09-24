@@ -1939,7 +1939,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     writeStubVerifier(verifierPath, verdictPath)
     daemonProc = spawnDaemon(socketPath, join(tmpDir, "tribe.db"), { identityVerifier: verifierPath })
     await waitForDaemonSocket(daemonProc, socketPath)
-    const adapter = await spawnLaunchAdapter(socketPath, "undecided-then-live.log", "provider-launch-p2", {
+    const adapter = await spawnLaunchAdapter(socketPath, "undecided-then-live.log", "sid-p2", {
       idToken: "token-p2",
     })
     await waitForCondition(
@@ -1962,7 +1962,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     writeStubVerifier(verifierPath, verdictPath)
     daemonProc = spawnDaemon(socketPath, join(tmpDir, "tribe.db"), { identityVerifier: verifierPath })
     await waitForDaemonSocket(daemonProc, socketPath)
-    const adapter = await spawnLaunchAdapter(socketPath, "contradicted-final.log", "provider-launch-p2", {
+    const adapter = await spawnLaunchAdapter(socketPath, "contradicted-final.log", "sid-p2", {
       idToken: "token-p2",
     })
     await waitForCondition(
