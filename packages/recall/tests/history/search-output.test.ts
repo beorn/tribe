@@ -41,7 +41,7 @@ vi.mock("../../src/lib/refresh.ts", async (importOriginal) => {
 
 const { cmdSearch, resolveProjectScope } = await import("../../src/lib/search")
 const { closeDb, ftsSearchWithSnippet, getDb, setIndexMeta } = await import("../../src/history/db")
-const { resetVaultDbCacheForTests } = await import("../../src/history/vault-fts.ts")
+const { bindVaultDb, resetVaultDbCacheForTests } = await import("../../src/history/vault-fts.ts")
 const { _resetLlmBackendForTests } = await import("../../src/lib/llm-backend")
 
 function seedMessage(content: string, id = "a", projectPath = "/test/km"): void {
@@ -323,8 +323,9 @@ describe("recall search output", () => {
   })
 
   // 25149: recall binds a vault only explicitly, so an unbound search says so
-  // instead of reading as "no vault hits"; --vault-db binds it on the call line.
-  test("an unbound search says the vault is not bound; --vault-db binds it", async () => {
+  // instead of reading as "no vault hits"; the CLI's leading --vault-db binds it
+  // through bindVaultDb (the CLI half is witnessed in cli-vault-db.test.ts).
+  test("an unbound search says the vault is not bound; a bound vault is searched", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-vault-bound-"))
     const dbPath = join(dir, "state.db")
     const previousVaultDb = process.env.KM_VAULT_DB
@@ -340,7 +341,8 @@ describe("recall search output", () => {
       errSpy.mockClear()
       logSpy.mockClear()
       resetVaultDbCacheForTests()
-      await cmdSearch("vaultboundneedle", { raw: true, project: "*", vaultDb: dbPath })
+      bindVaultDb(dbPath)
+      await cmdSearch("vaultboundneedle", { raw: true, project: "*" })
       expect(callsText(errSpy)).not.toContain("vault: not bound")
       expect(callsText(logSpy)).toContain("vaultboundneedle")
     } finally {
@@ -348,23 +350,6 @@ describe("recall search output", () => {
       if (previousVaultDb === undefined) delete process.env.KM_VAULT_DB
       else process.env.KM_VAULT_DB = previousVaultDb
       rmSync(dir, { recursive: true, force: true })
-    }
-  })
-
-  // 25149 Q4: an empty --vault-db is what a failed substitution passes. The CLI
-  // refuses it with exit 2, never a silent "not bound".
-  test("an empty --vault-db exits 2 naming the empty binding, never 'not bound'", async () => {
-    const exitSpy = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
-      throw new Error(`process.exit(${code})`)
-    }) as typeof process.exit)
-    try {
-      resetVaultDbCacheForTests()
-      await expect(cmdSearch("anything", { raw: true, project: "*", vaultDb: "" })).rejects.toThrow("process.exit(2)")
-      expect(callsText(errSpy)).toContain("--vault-db is empty")
-      expect(callsText(errSpy)).not.toContain("not bound")
-    } finally {
-      exitSpy.mockRestore()
-      resetVaultDbCacheForTests()
     }
   })
 

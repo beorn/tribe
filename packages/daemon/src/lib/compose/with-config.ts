@@ -7,14 +7,14 @@
  * a fully-formed `TribeConfig`.
  */
 
-import { existsSync, readFileSync } from "node:fs"
-import { resolve as resolvePath } from "node:path"
+import { readFileSync } from "node:fs"
 import { parseArgs } from "node:util"
 import { createLogger } from "loggily"
 import { resolveSocketPath } from "tribe-wire/lib/socket"
 import { parseTribeArgs, resolveDbPath } from "tribe-wire/lib/config"
 import { resolveRecallDbPath } from "../../../../../plugins/claude/recall/lib/config.ts"
 import { resolveSummarizerMode, type SummarizerMode } from "../../../../../plugins/claude/recall/lib/summarizer.ts"
+import { resolveVaultDbFlag } from "../../../../recall/src/lib/vault-db.ts"
 import type { BaseTribe } from "./base.ts"
 
 const log = createLogger("tribe:config")
@@ -131,25 +131,6 @@ export function resolveIdleQuit(input: {
     return { idleQuitAfterSec: -1, idleQuitSource: "hab-managed" }
   }
   return { idleQuitAfterSec: 1800, idleQuitSource: "default" }
-}
-
-/**
- * `--vault-db` as a launch line or a hook line carries it: the one rule both surfaces apply (25149 a3). Absent is
- * unbound. An empty or valueless flag is what a failed `$(…)` substitution passes, and a path naming no file is a
- * stale line; both refuse, naming the fault, instead of reading as unbound or failing later at the first search.
- * A present path is returned absolute, so logs name the file the engine opens.
- */
-export function resolveVaultDbFlag(
-  raw: string | boolean | undefined,
-  exists: (path: string) => boolean = existsSync,
-): string | null {
-  if (raw === undefined) return null
-  if (typeof raw !== "string" || raw.trim().length === 0) {
-    throw new Error("--vault-db is empty (a failed substitution?); pass the vault's state.db path")
-  }
-  const path = resolvePath(raw)
-  if (!exists(path)) throw new Error(`--vault-db ${path} does not exist; pass the vault's state.db path`)
-  return path
 }
 
 function readOperatorCapabilityFromInheritedFd(fdRaw: string | undefined): string | null {

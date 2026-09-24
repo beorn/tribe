@@ -20,6 +20,7 @@ import { Database } from "bun:sqlite"
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 import { toFts5Query } from "./db-queries.ts"
+import { resolveVaultDbFlag } from "../lib/vault-db.ts"
 
 let cachedDb: Database | null = null
 let cachedPath: string | null = null
@@ -28,14 +29,12 @@ let boundVaultDb: string | null = null
 
 /**
  * Bind the vault database from the call line (`--vault-db`). It outranks
- * `KM_VAULT_DB`. An empty path refuses: it is what a failed `$(…)`
- * substitution passes, and treating it as "unbound" would hide that failure.
+ * `KM_VAULT_DB`. The path passes the one {@link resolveVaultDbFlag} rule: an
+ * empty path (what a failed `$(…)` substitution passes) or a missing file
+ * refuses, rather than reading as "unbound" and hiding that failure.
  */
 export function bindVaultDb(path: string): void {
-  if (path.trim().length === 0) {
-    throw new Error("recall: --vault-db is empty (a failed substitution?); pass the vault's state.db path")
-  }
-  const bound = resolve(path)
+  const bound = resolveVaultDbFlag(path)
   if (bound === boundVaultDb) return
   resetVaultDbCache()
   boundVaultDb = bound

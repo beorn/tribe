@@ -4,7 +4,7 @@
 
 ### Changed — the vault is bound only explicitly
 
-- `recall search --vault-db <path>` binds the km vault database on the call line and outranks `KM_VAULT_DB`. An empty `--vault-db` (a failed `$(…)` substitution) is a usage error, exit 2.
+- `recall --vault-db <path> <command|query…>` binds the km vault database for the whole call and outranks `KM_VAULT_DB`. It is a leading global option, so every command reads the same binding (`recall --vault-db X summarize`, `recall --vault-db X "some query"`, `recall --vault-db X --agent q`). `search` takes no `--vault-db` of its own. The flag refuses with exit 1, naming the fault, when it has no value, has an empty value (a failed `$(…)` substitution), or names a missing file. The tribe daemon's launch line and `tribe hook` lines apply the same rule.
 - Recall no longer walks up from the cwd looking for `.km/state.db`. With nothing bound, search prints `vault: not bound (pass --vault-db)` on stderr instead of silently searching no vault.
 - Prompt injection (the hook and the tribe daemon's `inject_delta`) says the same once per session: with no vault bound, the session's first injection carries `recall: vault: not bound (pass --vault-db); vault notes were not searched`, framed inside the recall `<injected_context>` envelope (as `<vault-notice>`, `mode="notice"` when there are no snippets) and followed by the protocol footer.
 

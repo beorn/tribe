@@ -14,6 +14,7 @@
  *   recall files [pattern]            # List/search file writes
  *   recall files --restore <file>     # Recover file content
  *   recall export [session|--all]      # Export transcript markdown for qmd
+ *   recall --vault-db <path> <verb…>  # Bind the km vault for any verb (leading, global)
  *
  * Internal/manual (hook-shaped, but NOT hook-dispatched):
  *   recall remember                   # daily summarization, stdin-JSON shaped
@@ -30,6 +31,8 @@
 import { Command, CommanderError, int, uint } from "@silvery/commander"
 import { DEFAULT_SYNTHESIS_TIMEOUT_MS } from "./history/recall-shared"
 import { cmdSearch, type SearchOptions } from "./lib/search"
+import { resolveVaultDbFlag } from "./lib/vault-db"
+import { bindVaultDb } from "./history/vault-fts"
 import { cmdStatus } from "./lib/status"
 import { cmdSessions, cmdIndex } from "./lib/sessions"
 import { cmdFiles } from "./lib/files"
@@ -67,13 +70,17 @@ program
   .name("recall")
   .description("Search and manage Claude Code session history")
   .version("1.0.0")
+  .usage("[--vault-db <path>] [command|query] [options]")
   .exitOverride()
   .configureOutput({
     writeErr: (str) => console.error(str.trimEnd()),
   })
   .addHelpText(
     "after",
-    `\nExit codes:\n` +
+    `\nThe km vault is bound only on the call line, before any command:\n` +
+      `  --vault-db <path>  the vault database every command reads (outranks\n` +
+      `                     KM_VAULT_DB); recall never discovers one from the cwd\n` +
+      `\nExit codes:\n` +
       `  0  clean success — the index provenance is complete; an empty result\n` +
       `     is authoritative\n` +
       `  1  hard failure — an unexpected crash, not the degraded path below\n` +
@@ -109,10 +116,6 @@ program
   .option("--debug-plan", "Print full planner output each round (implies --agent)")
   .option("--plan-timeout <ms>", "Planner per-call timeout (default 2500)", uint)
   .option("--no-speculative-synth", "Disable speculative synthesis on round-1 (runs synth only after round 2 merge)")
-  .option(
-    "--vault-db <path>",
-    "The km vault database to search (outranks KM_VAULT_DB); recall never discovers one from the cwd",
-  )
   .option(
     "--no-refresh",
     "Compatibility flag: skip freshness classification; index provenance is unknown and search exits 3",
@@ -264,6 +267,18 @@ program
 // ============================================================================
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
+  // A leading --vault-db binds the vault for the whole process (25149 d), so every verb routes as before and
+  // reads it; it is stripped before the search-prepend below, which would otherwise search for its path.
+  const leading = takeLeadingVaultDb(argv)
+  try {
+    const bound = resolveVaultDbFlag(leading.raw)
+    if (bound !== null) bindVaultDb(bound)
+  } catch (error) {
+    console.error(`[recall] ${error instanceof Error ? error.message : String(error)}`)
+    process.exit(1)
+  }
+  argv = leading.rest
+
   // No args → show help (Step 0: fix exitOverride crash)
   if (argv.length === 0) {
     try {
@@ -306,6 +321,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     }
     throw e
   }
+}
+
+/** Split a leading `--vault-db <path>` / `--vault-db=<path>` off argv; a valueless flag carries `true`. */
+function takeLeadingVaultDb(argv: string[]): { raw: string | boolean | undefined; rest: string[] } {
+  const first = argv[0]
+  if (first === "--vault-db") return { raw: argv.length > 1 ? argv[1] : true, rest: argv.slice(2) }
+  if (first?.startsWith("--vault-db=")) return { raw: first.slice("--vault-db=".length), rest: argv.slice(1) }
+  return { raw: undefined, rest: argv }
 }
 
 if (import.meta.main) {

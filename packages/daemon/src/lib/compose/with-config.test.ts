@@ -23,7 +23,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
 import { afterAll, afterEach, beforeEach, describe, expect, test, vi } from "vitest"
-import { parseIdleQuitAfterSec, resolveIdleQuit, resolveVaultDbFlag, withConfig } from "./with-config.ts"
+import { parseIdleQuitAfterSec, resolveIdleQuit, withConfig } from "./with-config.ts"
 
 const ENV_KEYS = [
   "TRIBE_AUTOQUIT_ON_IDLE",
@@ -237,20 +237,5 @@ describe("--vault-db, the vault the daemon's recall searches (25149 a3)", () => 
 
   test("a valueless --vault-db on the launch line refuses", () => {
     expect(() => resolve(["--vault-db"])).toThrow(/--vault-db is empty/)
-  })
-
-  test.each([
-    ["an empty value", ""],
-    ["a blank value", "  "],
-    ["a valueless flag", true],
-  ] as const)("%s refuses at startup instead of reading as unbound", (_case, raw) => {
-    expect(() => resolveVaultDbFlag(raw)).toThrow(/--vault-db is empty/)
-  })
-
-  test("the one rule takes an injectable existence check, as the hook line uses it", () => {
-    expect(resolveVaultDbFlag("/vault/state.db", (path) => path === "/vault/state.db")).toBe("/vault/state.db")
-    expect(() => resolveVaultDbFlag("/vault/state.db", () => false)).toThrow(
-      "--vault-db /vault/state.db does not exist",
-    )
   })
 })

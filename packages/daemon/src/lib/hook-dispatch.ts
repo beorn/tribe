@@ -36,7 +36,7 @@
 import { createLogger, setSuppressConsole } from "loggily"
 import { ensureTribeDaemonIfConfigured } from "./autostart.ts"
 import { existsSync } from "node:fs"
-import { resolveVaultDbFlag } from "./compose/with-config.ts"
+import { resolveVaultDbFlag } from "../../../recall/src/lib/vault-db.ts"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { parseArgs } from "node:util"

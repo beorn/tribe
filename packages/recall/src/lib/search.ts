@@ -79,8 +79,6 @@ export interface SearchOptions {
    * Default (undefined) = speculative synth enabled.
    */
   speculativeSynth?: boolean
-  /** `--vault-db`: the vault database bound on the call line (outranks KM_VAULT_DB). */
-  vaultDb?: string
   /**
    * Commander maps --no-refresh to refresh:false. Retained for compatibility:
    * it skips the read-only freshness classification and reports unknown provenance.
@@ -183,17 +181,9 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
   } = options
   const project = resolveProjectScope(options.project)
 
-  // The vault is bound only explicitly (25149): --vault-db, else KM_VAULT_DB.
-  // An empty --vault-db is a failed substitution, a usage error; nothing bound
-  // is said out loud, so an absent vault never reads as "no vault hits".
-  if (options.vaultDb !== undefined) {
-    try {
-      bindVaultDb(options.vaultDb)
-    } catch (error) {
-      console.error(error instanceof Error ? error.message : String(error))
-      process.exit(2)
-    }
-  }
+  // The vault is bound only explicitly (25149): the CLI's leading --vault-db,
+  // else KM_VAULT_DB. Nothing bound is said out loud, so an absent vault never
+  // reads as "no vault hits".
   if (!regexMode && getVaultDbPath() === null) console.error("vault: not bound (pass --vault-db)")
 
   // Search is a read path: classify the index without starting index work.
