@@ -130,12 +130,6 @@ export async function cmdIndex(opts: {
       }
     }
 
-    if (result.pruneRefused !== undefined) {
-      console.error(
-        `recall index: refused to prune ${result.pruneRefused.count} of ${result.pruneRefused.total} sessions (over the max prune share); rerun with --allow-large-prune once the vanished files are confirmed gone`,
-      )
-    }
-
     const hasFailures =
       result.pruneRefused !== undefined ||
       (result.codexFailures !== undefined && result.codexFailures.length > 0) ||

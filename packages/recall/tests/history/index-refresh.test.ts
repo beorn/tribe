@@ -525,7 +525,7 @@ describe("Recall refresh completion", () => {
       )
       return file
     })
-    vi.spyOn(console, "warn").mockImplementation(() => {})
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
     const err = vi.spyOn(console, "error").mockImplementation(() => {})
     await cmdIndex({ incremental: true })
     expect(process.exitCode).toBe(0)
@@ -534,7 +534,9 @@ describe("Recall refresh completion", () => {
     await cmdIndex({ incremental: true }) // miss 1 marks them stale-missing
     await cmdIndex({ incremental: true }) // miss 2 would prune 2 of 5 (40% > 20%)
     expect(process.exitCode).toBe(5)
-    expect(err.mock.calls.flat().join(" ")).toContain("refused to prune 2 of 5 sessions")
+    const said = [...warn.mock.calls, ...err.mock.calls].flat().join(" ")
+    expect(said).toContain("Refusing to prune 2 of 5 sessions")
+    expect(said.match(/refus\w* to prune/gi)).toHaveLength(1)
   })
 
   test("a session file that vanishes mid-run (ENOENT on stat) is skipped without killing rebuildIndex", async () => {
