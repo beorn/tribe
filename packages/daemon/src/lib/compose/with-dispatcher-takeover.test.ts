@@ -1587,6 +1587,70 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
     expect(promotions(harness)).toEqual([])
   })
 
+  // 25074 P3 (review-adhoc5 8fdd03db, Arm F3): a verified holder is judged by 3c-2a's fence, never promoted
+  // in place like a bearer fallback bootstrap.
+  it("a verified holder at gen N, then a register at gen N or lower under the same launcher, is refused, not promoted", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    const holderSocket = harness.addPendingClient("conn-holder")
+    parseResult<RegisterResult>(
+      await harness.register("conn-holder", {
+        name: "@dev/7",
+        pid: 5901,
+        project: "/tmp/p",
+        takeover: true,
+        launchParentPid: 5900,
+        idToken: "token-g3",
+      }),
+    )
+    harness.addPendingClient("conn-lower")
+    const refused = parseError(
+      await harness.register("conn-lower", {
+        name: "@dev/7",
+        pid: 5902,
+        project: "/tmp/p",
+        takeover: true,
+        launchParentPid: 5900,
+        idToken: "token-g2",
+      }),
+    )
+    expect(refused).toMatchObject({
+      code: -32003,
+      data: { kind: "foreign-identity-transport", reason: "identity-generation-stale" },
+    })
+    expect(holderSocket.destroyedByDispatcher).toBe(false)
+    expect(promotions(harness)).toEqual([])
+
+    // Arm F3 witness: a verified holder under its launch id is never promoted by a token register
+    // from the same launcher PID, even when its provider launch matches the token sid.
+    const legacyHolderSocket = harness.addPendingClient("conn-legacy-holder")
+    const legacy = parseResult<RegisterResult>(
+      await harness.register("conn-legacy-holder", {
+        name: "@dev/7",
+        pid: 5911,
+        project: "/tmp/p",
+        takeover: true,
+        launchId: "sid-dev7::%40dev%2F7",
+        launchParentPid: 5910,
+        idToken: "token-nogen",
+      }),
+    )
+    harness.addPendingClient("conn-legacy-token")
+    const tokenClient = parseResult<RegisterResult>(
+      await harness.register("conn-legacy-token", {
+        name: "@dev/7",
+        pid: 5912,
+        project: "/tmp/p",
+        takeover: true,
+        launchParentPid: 5910,
+        idToken: "token-g3",
+      }),
+    )
+    expect(tokenClient.sessionId).not.toBe(legacy.sessionId)
+    expect(legacyHolderSocket.destroyedByDispatcher).toBe(true)
+    expect(promotions(harness)).toEqual([])
+  })
+
   it("health's identity facet says whether the loaded verifier supplies gen", async () => {
     const harness = createDispatcherHarness({ identityVerifier })
     cleanup = harness.dispose
