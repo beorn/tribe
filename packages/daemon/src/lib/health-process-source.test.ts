@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest"
-import { BoundedProcessCommandError } from "../../../recall/src/lib/bounded-process.ts"
+import { BoundedProcessCommandError, runBoundedProcessCommand } from "../../../recall/src/lib/bounded-process.ts"
 import {
   createHealthProcessSource,
   SYSMON_CIRCUIT_FAILURES,
@@ -489,6 +489,73 @@ describe("neutral health process source", () => {
       expect(SYSMON_COMMAND_TIMEOUT_MS).toBeLessThanOrEqual(5_000)
       expect(SYSMON_CIRCUIT_FAILURES).toBeGreaterThanOrEqual(2)
       expect(SYSMON_CIRCUIT_OPEN_MS).toBeGreaterThanOrEqual(30_000)
+    })
+
+    it("sizes the output bound to host process counts with room to admit a census twice today's size", () => {
+      // Measured 2026-09-23 live host census (live-verification-report.md): 886 processes produced 278,044 bytes.
+      const liveSpecimenBytes = 278_044
+      const twiceTodaySize = liveSpecimenBytes * 2 // 556,088 bytes (~1,772 processes)
+
+      // The historical 256 KiB (262,144 bytes) cap refused the live 278 KB census.
+      const previousCapBytes = 256 * 1024
+      expect(liveSpecimenBytes).toBeGreaterThan(previousCapBytes)
+
+      // The new cap admits a census about twice today's size, sized to host process counts with room
+      expect(SYSMON_MAX_OUTPUT_BYTES).toBeGreaterThan(twiceTodaySize)
+      expect(SYSMON_MAX_OUTPUT_BYTES).toBeLessThan(1_000_000)
+    })
+
+    it("refuses output above the byte bound as source-output-too-large and stays loud", async () => {
+      // Red arm: under the old 256 KiB cap, today's 278,044-byte census exceeds the bound and is refused
+      const oldCap = 256 * 1024
+      const liveSpecimenBytes = 278_044
+      expect(liveSpecimenBytes).toBeGreaterThan(oldCap)
+
+      await expect(
+        runBoundedProcessCommand([process.execPath, "-e", `process.stdout.write("x".repeat(${liveSpecimenBytes}))`], {
+          timeoutMs: 2_500,
+          killGraceMs: 500,
+          reapGraceMs: 500,
+          drainGraceMs: 500,
+          maxOutputBytes: oldCap,
+        }),
+      ).rejects.toMatchObject({
+        failure: {
+          kind: "output-too-large",
+          stream: "stdout",
+        },
+      })
+
+      // Green arm: with the new production bound, twice today's census is admitted
+      const twiceTodayBytes = liveSpecimenBytes * 2
+      const admitted = await runBoundedProcessCommand(
+        [process.execPath, "-e", `process.stdout.write("x".repeat(${twiceTodayBytes}))`],
+        {
+          timeoutMs: 2_500,
+          killGraceMs: 500,
+          reapGraceMs: 500,
+          drainGraceMs: 500,
+          maxOutputBytes: SYSMON_MAX_OUTPUT_BYTES,
+        },
+      )
+      expect(admitted.stdout.length).toBe(twiceTodayBytes)
+
+      // Refusal stays loud above the new bound
+      const overBoundBytes = SYSMON_MAX_OUTPUT_BYTES + 1_024
+      await expect(
+        runBoundedProcessCommand([process.execPath, "-e", `process.stdout.write("x".repeat(${overBoundBytes}))`], {
+          timeoutMs: 2_500,
+          killGraceMs: 500,
+          reapGraceMs: 500,
+          drainGraceMs: 500,
+          maxOutputBytes: SYSMON_MAX_OUTPUT_BYTES,
+        }),
+      ).rejects.toMatchObject({
+        failure: {
+          kind: "output-too-large",
+          stream: "stdout",
+        },
+      })
     })
 
     it("maps a timeout throw to source-command-timeout without rethrowing", async () => {

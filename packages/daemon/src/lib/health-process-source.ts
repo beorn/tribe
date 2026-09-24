@@ -36,8 +36,16 @@ export const SYSMON_COMMAND_TIMEOUT_MS = 2_500
 const SYSMON_KILL_GRACE_MS = 2_000
 const SYSMON_REAP_GRACE_MS = 2_000
 const SYSMON_DRAIN_GRACE_MS = 2_500
-/** One JSON line of process-observation/1; 256 KiB is already generous. */
-export const SYSMON_MAX_OUTPUT_BYTES = 256 * 1024
+/**
+ * One JSON line of process-observation/1.
+ *
+ * Measured 2026-09-23 live host census: 886 processes yielded 278,044 bytes
+ * (~313.8 bytes/process). Sized to host process counts with room (up to 2,000
+ * concurrent processes at ~350 bytes/process = 700,000 bytes, ~684 KiB),
+ * admitting about twice today's census (~556 KB) while staying well below the
+ * 1 MB budget and keeping pathological multi-GB journal walks bounded.
+ */
+export const SYSMON_MAX_OUTPUT_BYTES = 700_000
 /** Consecutive hard failures (timeout / oversized output / uncertain settlement) before opening the circuit. */
 export const SYSMON_CIRCUIT_FAILURES = 2
 /** How long the circuit stays open — 6× default 10s poll, not forever. */
