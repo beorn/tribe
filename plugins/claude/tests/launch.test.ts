@@ -3,7 +3,7 @@
  * stderr and exit code, relinking the host's node_modules under running processes.
  */
 import { spawnSync } from "node:child_process"
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { safeRemoveSync } from "removely"
@@ -24,6 +24,7 @@ function fakeBun(probeExit: number, installExit: number): string {
     [
       "#!/bin/sh",
       `echo "$*" >> "${log}"`,
+      `case "$1" in *server.ts) pwd > "${log}.cwd" ;; esac`,
       `case "$1" in -e) exit ${probeExit} ;; install) echo "install failed: registry down" >&2; exit ${installExit} ;; esac`,
       "exit 0",
       "",
@@ -35,6 +36,7 @@ function fakeBun(probeExit: number, installExit: number): string {
 
 function launch(bin: string) {
   return spawnSync("bash", [LAUNCH], {
+    cwd: dir,
     encoding: "utf8",
     env: { ...process.env, CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT, PATH: `${bin}:${process.env.PATH ?? ""}` },
   })
@@ -56,7 +58,7 @@ describe("plugin launch", () => {
     expect(result.status, result.stderr).toBe(0)
     const calls = readFileSync(log, "utf8").trim().split("\n")
     expect(calls.some((call) => call.startsWith("install"))).toBe(false)
-    expect(calls.at(-1)).toBe("server.ts")
+    expect(calls.at(-1)).toBe(join(PLUGIN_ROOT, "server.ts"))
   })
 
   test("a checkout whose imports do not resolve installs, says so, then starts", () => {
@@ -64,7 +66,14 @@ describe("plugin launch", () => {
     expect(result.status, result.stderr).toBe(0)
     expect(result.stderr).toContain("dependencies do not resolve")
     const calls = readFileSync(log, "utf8").trim().split("\n")
-    expect(calls.map((call) => call.split(" ")[0])).toEqual(["-e", "install", "server.ts"])
+    expect(calls.map((call) => call.split(" ")[0])).toEqual(["-e", "install", join(PLUGIN_ROOT, "server.ts")])
+  })
+
+  /** @failure launch.sh changed into the plugin root before exec, so every seat's adapter registered the plugin root as its project. */
+  test("the server starts in the caller's directory, not the plugin root", () => {
+    const result = launch(fakeBun(1, 0))
+    expect(result.status, result.stderr).toBe(0)
+    expect(readFileSync(`${log}.cwd`, "utf8").trim()).toBe(realpathSync(dir))
   })
 
   test("a failed install stops the start and keeps its stderr", () => {
