@@ -4,11 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, unlinkSync, writeFileSync } from "n
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
-import {
-  CURRENT_SCHEMA_VERSION,
-  MIGRATION_STEPS,
-  initSchema,
-} from "../../src/history/db-schema.ts"
+import { CURRENT_SCHEMA_VERSION, MIGRATION_STEPS, initSchema } from "../../src/history/db-schema.ts"
 import { getMessageCount, getSession, insertMessage, upsertSession } from "../../src/history/db-queries.ts"
 import { closeDb, getDb } from "../../src/history/db.ts"
 import { rebuildIndex } from "../../src/history/indexer.ts"
@@ -51,6 +47,7 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
       delete process.env.RECALL_DB_PATH
     }
     process.exitCode = 0
+    vi.restoreAllMocks()
     safeRemoveSync(tempDir, { within: tmpdir() })
   })
 
@@ -88,8 +85,9 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
     const badFile = join(projDir, "sess-005.jsonl")
     writeFileSync(
       badFile,
-      JSON.stringify({ type: "user", uuid: "u-5-1", message: { role: "user", content: "hello 5" } }) + "\nINVALID JSON SYNTAX\n",
-      "utf8"
+      JSON.stringify({ type: "user", uuid: "u-5-1", message: { role: "user", content: "hello 5" } }) +
+        "\nINVALID JSON SYNTAX\n",
+      "utf8",
     )
 
     const result = await rebuildIndex(db, { incremental: true, skipCodex: true })
@@ -119,11 +117,7 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
 
     for (let i = 1; i <= 25; i++) {
       const file = join(projDir, `sess-${i.toString().padStart(3, "0")}.jsonl`)
-      writeFileSync(
-        file,
-        JSON.stringify({ type: "user", message: { uuid: `u-${i}`, content: `hello ${i}` } }),
-        "utf8"
-      )
+      writeFileSync(file, JSON.stringify({ type: "user", message: { uuid: `u-${i}`, content: `hello ${i}` } }), "utf8")
     }
 
     const executedSql: string[] = []
@@ -211,7 +205,7 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
     writeFileSync(
       file,
       JSON.stringify({ type: "user", message: { uuid: "trans-1", content: "ephemeral message queryable" } }),
-      "utf8"
+      "utf8",
     )
 
     // Initial indexing
@@ -227,34 +221,28 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
     expect(existsSync(file)).toBe(false)
 
     const logs: string[] = []
-    const origLog = console.log
-    console.log = (...args: any[]) => {
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
       logs.push(args.join(" "))
-      origLog(...args)
-    }
+    })
 
-    try {
-      // Run 1: First miss!
-      await rebuildIndex(db, { incremental: true, skipCodex: true })
+    // Run 1: First miss!
+    await rebuildIndex(db, { incremental: true, skipCodex: true })
 
-      const sessMiss1 = getSession(db, "transient-sess")
-      expect(sessMiss1).toBeDefined()
-      expect(sessMiss1?.status).toBe("stale-missing")
-      // Messages MUST still exist and be searchable on miss 1
-      expect(getMessageCount(db, "transient-sess")).toBe(1)
-      expect(logs.some((l) => l.includes("pruned: 1"))).toBe(false)
+    const sessMiss1 = getSession(db, "transient-sess")
+    expect(sessMiss1).toBeDefined()
+    expect(sessMiss1?.status).toBe("stale-missing")
+    // Messages MUST still exist and be searchable on miss 1
+    expect(getMessageCount(db, "transient-sess")).toBe(1)
+    expect(logs.some((l) => l.includes("pruned: 1"))).toBe(false)
 
-      // Run 2: Second miss!
-      await rebuildIndex(db, { incremental: true, skipCodex: true })
+    // Run 2: Second miss!
+    await rebuildIndex(db, { incremental: true, skipCodex: true })
 
-      const sessMiss2 = getSession(db, "transient-sess")
-      // Completely pruned on miss 2
-      expect(sessMiss2).toBeFalsy()
-      expect(getMessageCount(db, "transient-sess")).toBe(0)
-      expect(logs.some((l) => l.includes("pruned: 1"))).toBe(true)
-    } finally {
-      console.log = origLog
-    }
+    const sessMiss2 = getSession(db, "transient-sess")
+    // Completely pruned on miss 2
+    expect(sessMiss2).toBeFalsy()
+    expect(getMessageCount(db, "transient-sess")).toBe(0)
+    expect(logs.some((l) => l.includes("pruned: 1"))).toBe(true)
   })
 
   test("A8: vanished file that reappears before miss 2 is un-marked and restored to complete", async () => {
@@ -300,7 +288,7 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
     writeFileSync(
       file,
       JSON.stringify({ type: "user", uuid: "m1", message: { role: "user", content: "kept transcript" } }) + "\n",
-      "utf8"
+      "utf8",
     )
     const probeDb = new Database(join(root, "test.db"))
     initSchema(probeDb)
@@ -339,7 +327,7 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
     writeFileSync(
       file,
       JSON.stringify({ type: "user", uuid: "m2", message: { role: "user", content: "relative to abs" } }) + "\n",
-      "utf8"
+      "utf8",
     )
 
     const probeDb = new Database(join(root, "test.db"))
@@ -350,7 +338,7 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
     const relativePath = join("-p1", fileName)
     probeDb
       .prepare(
-        "INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, status) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
       )
       .run(id, "/p1", relativePath, Date.now(), Date.now(), 1, "complete")
 
@@ -382,7 +370,7 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
     writeFileSync(
       file,
       JSON.stringify({ type: "user", uuid: "m3", message: { role: "user", content: "will vanish" } }) + "\n",
-      "utf8"
+      "utf8",
     )
 
     const probeDb = new Database(join(root, "test.db"))
@@ -403,10 +391,12 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
       await rebuildIndex(probeDb, { incremental: true, skipCodex: true })
       expect(getSession(probeDb, id)?.status).toBe("stale-missing")
 
-      // Miss 2: pruned
+      // Miss 2: pruned, and the count is printed
+      const log = vi.spyOn(console, "log").mockImplementation(() => {})
       const r2 = await rebuildIndex(probeDb, { incremental: true, skipCodex: true })
       expect(getSession(probeDb, id)).toBeFalsy()
       expect(r2.pruned).toBe(1)
+      expect(log).toHaveBeenCalledWith("pruned: 1")
     } finally {
       if (savedEnv !== undefined) process.env.CLAUDE_DIR = savedEnv
       else delete process.env.CLAUDE_DIR
@@ -431,7 +421,7 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
       writeFileSync(
         f,
         JSON.stringify({ type: "user", uuid: `u-${i}`, message: { role: "user", content: `msg ${i}` } }) + "\n",
-        "utf8"
+        "utf8",
       )
       files.push(f)
     }
@@ -450,32 +440,26 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
       await rebuildIndex(probeDb, { incremental: true, skipCodex: true })
 
       const warnings: string[] = []
-      const origWarn = console.warn
-      console.warn = (...args: any[]) => {
+      vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
         warnings.push(args.join(" "))
-        origWarn(...args)
-      }
+      })
+      const log = vi.spyOn(console, "log").mockImplementation(() => {})
 
-      try {
-        // Miss 2: would prune 2 sessions (40% > 20%), so belt refuses loudly and prunes 0
-        const r2 = await rebuildIndex(probeDb, { incremental: true, skipCodex: true })
-        expect(r2.pruned).toBe(0)
-        expect(probeDb.prepare("SELECT count(*) as c FROM sessions").get()).toEqual({ c: 5 })
-        expect(
-          warnings.some((w) => w.includes("2 of 5 sessions") && w.includes("exceed max prune share"))
-        ).toBe(true)
+      // Miss 2: would prune 2 sessions (40% > 20%), so belt refuses loudly and prunes 0
+      const r2 = await rebuildIndex(probeDb, { incremental: true, skipCodex: true })
+      expect(r2.pruned).toBe(0)
+      expect(probeDb.prepare("SELECT count(*) as c FROM sessions").get()).toEqual({ c: 5 })
+      expect(warnings.some((w) => w.includes("2 of 5 sessions") && w.includes("exceed max prune share"))).toBe(true)
 
-        // Now run with allowLargePrune: true — prunes the 2 sessions
-        const r3 = await rebuildIndex(probeDb, {
-          incremental: true,
-          skipCodex: true,
-          allowLargePrune: true,
-        })
-        expect(r3.pruned).toBe(2)
-        expect(probeDb.prepare("SELECT count(*) as c FROM sessions").get()).toEqual({ c: 3 })
-      } finally {
-        console.warn = origWarn
-      }
+      // Now run with allowLargePrune: true — prunes the 2 sessions
+      const r3 = await rebuildIndex(probeDb, {
+        incremental: true,
+        skipCodex: true,
+        allowLargePrune: true,
+      })
+      expect(r3.pruned).toBe(2)
+      expect(probeDb.prepare("SELECT count(*) as c FROM sessions").get()).toEqual({ c: 3 })
+      expect(log).toHaveBeenCalledWith("pruned: 2")
     } finally {
       if (savedEnv !== undefined) process.env.CLAUDE_DIR = savedEnv
       else delete process.env.CLAUDE_DIR

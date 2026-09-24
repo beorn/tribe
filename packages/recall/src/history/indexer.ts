@@ -348,7 +348,7 @@ export async function indexSessionFile(
 
   const sessionInfo = parseSessionPath(relativePath, filePath)
   const sessionId = sessionInfo.id
-  let parentSessionId = sessionInfo.parentSessionId
+  const parentSessionId = sessionInfo.parentSessionId
   const agentId = sessionInfo.agentId
   const expectedSessionId = parentSessionId ?? sessionId
   let mismatchedRecords = 0
@@ -743,9 +743,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   if (!options.path) {
     // Migration: Rewrite legacy relative jsonl_path rows to absolute paths when found in currentProjectsDir()
     const relativeRows = db
-      .prepare(
-        "SELECT id, jsonl_path FROM sessions WHERE jsonl_path IS NOT NULL AND jsonl_path NOT LIKE 'codex:%'",
-      )
+      .prepare("SELECT id, jsonl_path FROM sessions WHERE jsonl_path IS NOT NULL AND jsonl_path NOT LIKE 'codex:%'")
       .all() as Array<{ id: string; jsonl_path: string }>
 
     let unresolvedRelativeCount = 0
@@ -895,9 +893,9 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
         inTransaction = false
       }
     }
-  } else if (isClaudeTarget) {
+  } else if (isClaudeTarget && options.path) {
     totalFiles++
-    const absPath = path.resolve(options.path!)
+    const absPath = path.resolve(options.path)
     const relativePath = path.relative(currentProjectsDir(), absPath)
     const sessionInfo = parseSessionPath(relativePath, absPath)
     seenSessionIds.add(sessionInfo.id)
@@ -1151,7 +1149,10 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
 
         if (toPrune.length > 1 && pruneShare > MAX_PRUNE_SHARE && !allowLarge) {
           console.warn(
-            `[recall] Refusing to prune ${toPrune.length} of ${totalSessions} sessions (${Math.round(pruneShare * 100)}%): would exceed max prune share of ${Math.round(MAX_PRUNE_SHARE * 100)}%. First paths to prune:\n${toPrune.slice(0, 5).map((p) => `  ${p.jsonl_path}`).join("\n")}\nPass --allow-large-prune or set RECALL_ALLOW_LARGE_PRUNE=1 to override.`,
+            `[recall] Refusing to prune ${toPrune.length} of ${totalSessions} sessions (${Math.round(pruneShare * 100)}%): would exceed max prune share of ${Math.round(MAX_PRUNE_SHARE * 100)}%. First paths to prune:\n${toPrune
+              .slice(0, 5)
+              .map((p) => `  ${p.jsonl_path}`)
+              .join("\n")}\nPass --allow-large-prune or set RECALL_ALLOW_LARGE_PRUNE=1 to override.`,
           )
         } else {
           for (const s of toPrune) {

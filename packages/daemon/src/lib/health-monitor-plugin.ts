@@ -1538,10 +1538,7 @@ export function evaluateAlerts(
   // When attributionBlindSamples reaches the threshold, fire an alert so 30 hours of failure cannot pass silently again.
   if (metrics.processObservation.kind === "canonical-unavailable") {
     state.attributionBlindSamples++
-    if (
-      state.attributionBlindSamples >= thresholds.sustainedSamples &&
-      !state.firedAlerts.has("attribution:blind")
-    ) {
+    if (state.attributionBlindSamples >= thresholds.sustainedSamples && !state.firedAlerts.has("attribution:blind")) {
       state.firedAlerts.add("attribution:blind")
       alerts.push({
         type: "attribution",
