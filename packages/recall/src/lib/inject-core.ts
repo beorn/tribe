@@ -34,6 +34,7 @@ import { findGlossaryAnchor } from "../history/vault-glossary.ts"
 import { ensureProjectSourcesIndexed, ProjectSourcesBusyError } from "../history/project-sources.ts"
 import { IndexWriterBusyError } from "../history/db.ts"
 import { RecallDeadlineError } from "./recall-deadline.ts"
+import { HOOK_CANDIDATE_PASS_MS, RECALL_WALL_MS } from "../history/recall-budget.ts"
 // Envelope framing primitives live in the shared library. Re-exported here so
 // existing callers (and the plugin's own tests) keep working without churn.
 // Relative import because plugins/ is not a declared workspace inside bearly
@@ -415,7 +416,11 @@ async function runRecallInjection(
   // produces a tightly-targeted result instead of broad lexical noise.
   // Bounded: FTS cost grows super-linearly with query length (25071).
   const recallQuery = recallQuerySeed ?? prompt.slice(0, MAX_RECALL_QUERY_CHARS)
+  // One budget for the first query and the fallback, the same one the hook's Worker wall enforces (25071 row 2).
+  const deadlineAt = Date.now() + RECALL_WALL_MS
   const recallOpts = {
+    mode: "hook",
+    deadlineAt,
     limit: 5,
     raw: true,
     timeout: 2000,
@@ -431,15 +436,30 @@ async function runRecallInjection(
   // stopgap); a long-lived caller (the daemon, the plugin server) would stack queries a deadline abandons.
   const recallImpl = opts.deps?.recall ?? recall
   let result: Awaited<ReturnType<typeof recall>>
+  // Recall's own phases join the steps under the step's name, and a phase it skipped is said like a skipped step.
+  const absorb = (step: string, answer: Awaited<ReturnType<typeof recall>>): void => {
+    for (const [name, ms] of Object.entries(answer.timing?.phases ?? {})) {
+      if (steps) steps[`${step}.${name}`] = (steps[`${step}.${name}`] ?? 0) + ms
+    }
+    for (const skip of answer.skipped ?? []) skippedSteps[`${step}.${skip.phase}`] = skip.message
+  }
   try {
     result = await timeStepAsync(steps, "recall", () => recallImpl(recallQuery, recallOpts))
+    absorb("recall", result)
 
     // Fallback: full-prompt FTS found nothing, but the prompt has a known
     // project anchor (camelCase symbol, framework name) buried in generic
     // English. Retry with the glossary anchor alone — this rescues prompts
     // where the salient term is dominated by surrounding common words.
+    // It runs only while the budget left covers one candidate pass (25071 row 2).
     if (result.results.length === 0 && glossaryHit && recallQuery !== glossaryHit) {
-      result = await timeStepAsync(steps, "recall_fallback", () => recallImpl(glossaryHit, recallOpts))
+      const left = deadlineAt - Date.now()
+      if (left > HOOK_CANDIDATE_PASS_MS) {
+        result = await timeStepAsync(steps, "recall_fallback", () => recallImpl(glossaryHit, recallOpts))
+        absorb("recall_fallback", result)
+      } else {
+        skippedSteps.recall_fallback = `recall_fallback skipped: anchor "${glossaryHit}", ${String(left)} ms left (25071)`
+      }
     }
   } catch (error) {
     if (!(error instanceof RecallDeadlineError)) throw error

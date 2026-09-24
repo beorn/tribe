@@ -43,6 +43,34 @@ export interface RecallOptions {
   excludeCurrentSession?: boolean // Drop matches from CLAUDE_SESSION_ID (default false)
   /** Index state established by the caller; direct library calls default to unknown. */
   provenance?: IndexProvenance
+  /**
+   * "exact" (the default, and the CLI's) ranks every match and counts totals. "hook" ranks an FTS-native candidate
+   * set inside the prompt hook's budget and counts nothing (@ag/tribe/25071 row 2); see recall-budget.ts.
+   */
+  mode?: SearchMode
+  /** Hook mode: when the budget runs out, as epoch ms. Defaults to the call's start plus RECALL_WALL_MS. */
+  deadlineAt?: number
+}
+
+/** How a search reaches FTS: every match ranked and counted, or a budgeted candidate set (@ag/tribe/25071 row 2). */
+export type SearchMode = "exact" | "hook"
+
+/** A phase recall skipped rather than ran, said out loud (@ag/tribe/25071 row 2). */
+export interface RecallSkip {
+  /** The phase: "messages", "synonym", ... */
+  phase: string
+  /** The query the phase would have searched. */
+  anchor: string
+  /** The line the hook prints. */
+  message: string
+}
+
+/** How hook mode's message search went (@ag/tribe/25071 row 2). */
+export interface HookSearchSummary {
+  /** The cap on ranked window matches: HOOK_CANDIDATE_LIMIT. */
+  candidateLimit: number
+  /** Window matches ranked, at most candidateLimit. */
+  survivors: number
 }
 
 export interface RecallResult {
@@ -55,7 +83,13 @@ export interface RecallResult {
   timing?: {
     searchMs: number
     llmMs?: number
+    /** Each search phase's wall time in ms, so a slow run names the slow phase (@ag/tribe/25071). */
+    phases?: Record<string, number>
   }
+  /** Hook mode only: how the candidate search went. */
+  hookSearch?: HookSearchSummary
+  /** Each phase skipped rather than run, or cut short (the hook's capped window); absent when none was. */
+  skipped?: RecallSkip[]
   /**
    * Set when the lexical search succeeded (results is non-empty) but LLM
    * synthesis failed — the tool is BROKEN, not "no prior knowledge found".

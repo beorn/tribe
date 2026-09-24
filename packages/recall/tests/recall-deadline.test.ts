@@ -10,29 +10,30 @@ import { fileURLToPath } from "node:url"
 import { describe, expect, test } from "vitest"
 
 const { createMemorySeenStore, runInjectDelta } = await import("../src/lib/inject-core.ts")
-const { createDeadlineRecall, RECALL_DEADLINE_MS, RecallDeadlineError } = await import("../src/lib/recall-deadline.ts")
+const { createDeadlineRecall, RecallDeadlineError } = await import("../src/lib/recall-deadline.ts")
+const { RECALL_WALL_MS } = await import("../src/history/recall-budget.ts")
 
 const BLOCKS = new URL("./fixtures/recall-blocks.worker.ts", import.meta.url)
 const SALIENT = "what did we decide about km-storage-sync layering?"
 
 describe("25071 stopgap: recall that outlives its deadline is skipped, loudly", () => {
-  test("the deadline is 5 s, and its skip says so", () => {
-    expect(RECALL_DEADLINE_MS).toBe(5000)
-    expect(new RecallDeadlineError(RECALL_DEADLINE_MS).message).toBe("recall skipped: over 5 s (25071 stopgap)")
+  test("the deadline is the 1.5 s wall, and its skip says so (25071 row 2)", () => {
+    expect(RECALL_WALL_MS).toBe(1500)
+    expect(new RecallDeadlineError(RECALL_WALL_MS).message).toBe("recall skipped: over the 1.5 s wall (25071)")
   })
 
-  test("a recall that holds its thread for 10 s returns in under 6 s and names the skip", async () => {
+  test("a recall that holds its thread for 10 s returns in under 2.5 s and names the skip", async () => {
     const recall = createDeadlineRecall({ workerUrl: BLOCKS })
     const started = performance.now()
     try {
       const result = await runInjectDelta(SALIENT, createMemorySeenStore(), {
         deps: { recall, ensureProjectSourcesIndexed: () => {}, findGlossaryAnchor: () => null },
       })
-      expect(performance.now() - started).toBeLessThan(6000)
+      expect(performance.now() - started).toBeLessThan(2500)
       expect(result).toMatchObject({
         skipped: false,
-        additionalContext: "recall skipped: over 5 s (25071 stopgap)",
-        skippedSteps: { recall: "recall skipped: over 5 s (25071 stopgap)" },
+        additionalContext: "recall skipped: over the 1.5 s wall (25071)",
+        skippedSteps: { recall: "recall skipped: over the 1.5 s wall (25071)" },
       })
     } finally {
       recall.close()

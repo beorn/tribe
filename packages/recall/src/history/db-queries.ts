@@ -7,11 +7,15 @@ import * as path from "path"
 import * as fs from "fs"
 import type { SessionRecord, MessageRecord, ContentType, ContentRecord, SessionIndexEntry } from "./types.ts"
 import { PROJECTS_DIR, PLANS_DIR, TODOS_DIR } from "./db-schema.ts"
+import { HOOK_CANDIDATE_LIMIT } from "./recall-budget.ts"
+import type { HookSearchSummary, RecallSkip, SearchMode } from "./recall-shared.ts"
 
 // Assistant rows containing tool_use blocks mix prose with serialized tool
 // inputs. Keep them searchable for --tool and forensic lookup, but prevent a
 // repetitive command payload from outranking an actual explanation.
-const MESSAGE_RANK_SQL = "bm25(messages_fts, 10.0, 1.0, 2.0) * CASE WHEN m.tool_name IS NULL THEN 1.0 ELSE 0.001 END"
+const MESSAGE_BM25_SQL = "bm25(messages_fts, 10.0, 1.0, 2.0)"
+const MESSAGE_TOOL_FACTOR_SQL = "CASE WHEN m.tool_name IS NULL THEN 1.0 ELSE 0.001 END"
+const MESSAGE_RANK_SQL = `${MESSAGE_BM25_SQL} * ${MESSAGE_TOOL_FACTOR_SQL}`
 
 // ============================================================================
 // Session operations
@@ -348,112 +352,216 @@ export interface MessageSearchOptions {
   toolName?: string // Filter by tool name
   sessionId?: string // Filter by session ID
   snippetTokens?: number // Snippet window size (default 64)
+  /**
+   * "exact" (the default) ranks and counts every match in the window. "hook" ranks at most HOOK_CANDIDATE_LIMIT of
+   * them and counts nothing (@ag/tribe/25071 row 2).
+   */
+  mode?: SearchMode
+  /** Hook mode only: count the total too (default false). Exact mode always counts. */
+  withTotal?: boolean
 }
 
-export function ftsSearchWithSnippet(
-  db: Database,
-  query: string,
-  options: MessageSearchOptions = {},
-): {
-  results: (MessageRecord & {
-    snippet: string
-    project_path: string
-    rank: number
-  })[]
-  total: number
-} {
-  const {
-    limit = 50,
-    offset = 0,
-    projectFilter,
-    sinceTime,
-    messageType,
-    toolName,
-    sessionId,
-    snippetTokens = 64,
-  } = options
+export type MessageSearchHit = MessageRecord & {
+  snippet: string
+  project_path: string
+  rank: number
+}
 
-  const ftsQuery = toFts5Query(query)
+/** Hook mode's account of its candidate search (@ag/tribe/25071 row 2). */
+export interface HookMessageSearch extends HookSearchSummary {
+  /**
+   * Each ranked session's number of ranked window matches: hook mode's session-depth corroboration, read from the rows
+   * it already holds instead of a GROUP BY over every all-time match (14.5 s on tribe*, @cto 9665a0ec).
+   */
+  sessionDepths: Map<string, number>
+  /** Present when the cap cut the window: the line the hook says. */
+  capped?: RecallSkip
+}
 
-  const uuidCollapseClause = `
-    AND (m.uuid IS NULL OR m.id = (
+/**
+ * The conditions a message must meet besides MATCH: not a duplicate, the canonical copy of its uuid, and the caller's
+ * window, project, type, tool and session. Both modes use this one statement of them.
+ */
+function messageFilterSql(options: MessageSearchOptions): { sql: string; params: (string | number)[] } {
+  const { projectFilter, sinceTime, messageType, toolName, sessionId } = options
+  const clauses = [
+    "m.duplicate_of IS NULL",
+    `(m.uuid IS NULL OR m.id = (
       SELECT m2.id FROM messages m2
       JOIN sessions s2 ON m2.session_id = s2.id
       WHERE m2.uuid = m.uuid
       ORDER BY CASE WHEN s2.parent_session_id IS NULL THEN 0 ELSE 1 END, m2.id ASC
       LIMIT 1
-    ))
-  `
+    ))`,
+  ]
+  const params: (string | number)[] = []
+  if (projectFilter) {
+    clauses.push("s.project_path LIKE ?")
+    params.push(`%${projectFilter}%`)
+  }
+  if (sinceTime !== undefined) {
+    clauses.push("m.timestamp >= ?")
+    params.push(sinceTime)
+  }
+  if (messageType) {
+    clauses.push("m.type = ?")
+    params.push(messageType)
+  }
+  if (toolName) {
+    clauses.push("m.tool_name = ?")
+    params.push(toolName)
+  }
+  if (sessionId) {
+    clauses.push("(m.session_id = ? OR m.session_id IN (SELECT id FROM sessions WHERE parent_session_id = ?))")
+    params.push(sessionId, sessionId)
+  }
+  return { sql: clauses.join(" AND "), params }
+}
 
-  let countQuery = `
-    SELECT COUNT(*) as total
-    FROM messages_fts f
-    JOIN messages m ON f.rowid = m.id
-    JOIN sessions s ON m.session_id = s.id
-    WHERE messages_fts MATCH ?
-      AND (m.duplicate_of IS NULL)
-      ${uuidCollapseClause}
-  `
-  let searchQuery = `
-    SELECT m.*, s.project_path, s.parent_session_id, s.agent_id,
-           (SELECT d.line FROM messages d WHERE d.session_id = m.session_id AND d.duplicate_of = m.line LIMIT 1) as duplicate_line,
+/** The columns a hit carries beside its snippet and rank, for `m` joined to its session `s`. */
+const MESSAGE_HIT_COLUMNS_SQL = `m.*, s.project_path, s.parent_session_id, s.agent_id,
+           (SELECT d.line FROM messages d WHERE d.session_id = m.session_id AND d.duplicate_of = m.line LIMIT 1) as duplicate_line`
+
+export function ftsSearchWithSnippet(
+  db: Database,
+  query: string,
+  options: MessageSearchOptions & { mode: "hook" },
+): { results: MessageSearchHit[]; total: number | null; hook: HookMessageSearch }
+export function ftsSearchWithSnippet(
+  db: Database,
+  query: string,
+  options?: MessageSearchOptions & { mode?: "exact" },
+): { results: MessageSearchHit[]; total: number }
+export function ftsSearchWithSnippet(
+  db: Database,
+  query: string,
+  options: MessageSearchOptions,
+): { results: MessageSearchHit[]; total: number | null; hook?: HookMessageSearch }
+export function ftsSearchWithSnippet(
+  db: Database,
+  query: string,
+  options: MessageSearchOptions = {},
+): { results: MessageSearchHit[]; total: number | null; hook?: HookMessageSearch } {
+  if (options.mode === "hook") return hookMessageSearch(db, query, options)
+  const { limit = 50, offset = 0, snippetTokens = 64 } = options
+  const ftsQuery = toFts5Query(query)
+  const filter = messageFilterSql(options)
+  const where = `WHERE messages_fts MATCH ? AND ${filter.sql}`
+
+  const searchQuery = `
+    SELECT ${MESSAGE_HIT_COLUMNS_SQL},
            snippet(messages_fts, 0, '>>>', '<<<', '...', ${snippetTokens}) as snippet,
            ${MESSAGE_RANK_SQL} as rank
     FROM messages_fts f
     JOIN messages m ON f.rowid = m.id
     JOIN sessions s ON m.session_id = s.id
-    WHERE messages_fts MATCH ?
-      AND (m.duplicate_of IS NULL)
-      ${uuidCollapseClause}
+    ${where}
+    ORDER BY rank LIMIT ? OFFSET ?
   `
+  const params = [ftsQuery, ...filter.params]
+  const total = countMessages(db, ftsQuery, filter)
+  const results = db.prepare(searchQuery).all(...params, limit, offset) as MessageSearchHit[]
 
-  const params: (string | number)[] = [ftsQuery]
+  return { results, total }
+}
 
-  if (projectFilter) {
-    const projectClause = ` AND s.project_path LIKE ?`
-    countQuery += projectClause
-    searchQuery += projectClause
-    params.push(`%${projectFilter}%`)
+/** Every match that meets the filter, counted: exact mode's total, and hook mode's only when asked for. */
+function countMessages(db: Database, ftsQuery: string, filter: { sql: string; params: (string | number)[] }): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) as total
+       FROM messages_fts f
+       JOIN messages m ON f.rowid = m.id
+       JOIN sessions s ON m.session_id = s.id
+       WHERE messages_fts MATCH ? AND ${filter.sql}`,
+    )
+    .get(ftsQuery, ...filter.params) as { total: number }
+  return row.total
+}
+
+/**
+ * Hook mode (@ag/tribe/25071 row 2; @cto re-ruling 516d4c10): exact mode's order, the window filter first and bm25
+ * over the survivors, capped at HOOK_CANDIDATE_LIMIT ranked matches, counting nothing. The all-time top-N candidate
+ * set it replaced was refuted by the real-prompt replay: hook was slower than exact on 84 of 150 prompts, because on
+ * this corpus the window, not bm25, is the selective predicate (/hh/var/@dev/11/25071-r2/replay.jsonl).
+ */
+function hookMessageSearch(
+  db: Database,
+  query: string,
+  options: MessageSearchOptions,
+): { results: MessageSearchHit[]; total: number | null; hook: HookMessageSearch } {
+  const { limit = 50, offset = 0, snippetTokens = 64, withTotal = false } = options
+  const ftsQuery = toFts5Query(query)
+  const filter = messageFilterSql(options)
+  type Candidate = { id: number; session_id: string; rank: number }
+  // One row past the cap says whether the cap cut the window, without a COUNT (B1).
+  const ranked = db
+    .prepare(
+      `SELECT m.id AS id, m.session_id AS session_id, ${MESSAGE_RANK_SQL} AS rank
+       FROM messages_fts f
+       JOIN messages m ON f.rowid = m.id
+       JOIN sessions s ON m.session_id = s.id
+       WHERE messages_fts MATCH ? AND ${filter.sql}
+       ORDER BY rank LIMIT ?`,
+    )
+    .all(ftsQuery, ...filter.params, HOOK_CANDIDATE_LIMIT + 1) as Candidate[]
+  const survivors = ranked.slice(0, HOOK_CANDIDATE_LIMIT)
+  const anchor = query.length > 80 ? `${query.slice(0, 80)}…` : query
+
+  const sessionDepths = new Map<string, number>()
+  for (const c of survivors) sessionDepths.set(c.session_id, (sessionDepths.get(c.session_id) ?? 0) + 1)
+  const hook: HookMessageSearch = {
+    candidateLimit: HOOK_CANDIDATE_LIMIT,
+    survivors: survivors.length,
+    sessionDepths,
+    // Loud, because a cut window is the one case where hook can differ from exact (@cto 4b15f0bc).
+    ...(ranked.length > HOOK_CANDIDATE_LIMIT
+      ? {
+          capped: {
+            phase: "messages",
+            anchor,
+            message:
+              `recall messages capped: survivors capped at ${String(HOOK_CANDIDATE_LIMIT)} of more than ` +
+              `${String(HOOK_CANDIDATE_LIMIT)} window matches for anchor "${anchor}" (25071)`,
+          },
+        }
+      : {}),
   }
+  const total = withTotal ? countMessages(db, ftsQuery, filter) : null
 
-  if (sinceTime !== undefined) {
-    const timeClause = ` AND m.timestamp >= ?`
-    countQuery += timeClause
-    searchQuery += timeClause
-    params.push(sinceTime)
+  const top = survivors.slice(offset, offset + limit)
+  if (top.length === 0) return { results: [], total, hook }
+  const rows = db
+    .prepare(
+      `SELECT ${MESSAGE_HIT_COLUMNS_SQL}
+       FROM messages m JOIN sessions s ON m.session_id = s.id
+       WHERE m.id IN (${top.map(() => "?").join(",")})`,
+    )
+    .all(...top.map((t) => t.id)) as (MessageRecord & { project_path: string })[]
+  const byId = new Map(rows.map((row) => [row.id, row]))
+  const results: MessageSearchHit[] = []
+  for (const t of top) {
+    const row = byId.get(t.id)
+    if (row) results.push({ ...row, rank: t.rank, snippet: contentSnippet(row.content ?? "", query, snippetTokens) })
   }
+  return { results, total, hook }
+}
 
-  if (messageType) {
-    const typeClause = ` AND m.type = ?`
-    countQuery += typeClause
-    searchQuery += typeClause
-    params.push(messageType)
-  }
-
-  if (toolName) {
-    const toolClause = ` AND m.tool_name = ?`
-    countQuery += toolClause
-    searchQuery += toolClause
-    params.push(toolName)
-  }
-
-  if (sessionId) {
-    const sessionClause = ` AND (m.session_id = ? OR m.session_id IN (SELECT id FROM sessions WHERE parent_session_id = ?))`
-    countQuery += sessionClause
-    searchQuery += sessionClause
-    params.push(sessionId, sessionId)
-  }
-
-  searchQuery += ` ORDER BY rank LIMIT ? OFFSET ?`
-
-  const totalRow = db.prepare(countQuery).get(...params) as { total: number }
-  const results = db.prepare(searchQuery).all(...params, limit, offset) as (MessageRecord & {
-    snippet: string
-    project_path: string
-    rank: number
-  })[]
-
-  return { results, total: totalRow.total }
+/**
+ * Hook mode's snippet: a window of the row's own text around the first query word it contains, marked like FTS5's.
+ * FTS5's snippet() re-reads the term's whole doclist for each row, about 50 ms a row for a common term
+ * (snippet-in-list-cost.txt), and the recall pipeline replaces the top message snippets with session context anyway.
+ */
+export function contentSnippet(content: string, query: string, tokens: number): string {
+  const terms = (query.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? []).filter((t) => !/^(and|or|not|near)$/.test(t))
+  const words = content.split(/\s+/).filter(Boolean)
+  const at = words.findIndex((w) => {
+    const lower = w.toLowerCase()
+    return terms.some((t) => lower.includes(t))
+  })
+  const start = Math.max(0, (at < 0 ? 0 : at) - Math.floor(tokens / 2))
+  const window = words.slice(start, start + tokens).map((w, i) => (start + i === at ? `>>>${w}<<<` : w))
+  return `${start > 0 ? "..." : ""}${window.join(" ")}${start + tokens < words.length ? "..." : ""}`
 }
 
 // ============================================================================
@@ -798,7 +906,11 @@ export interface ContentSearchOptions {
   projectFilter?: string
   sinceTime?: number // Filter content after this timestamp
   snippetTokens?: number // Snippet window size (default 64)
+  /** "hook" counts nothing (@ag/tribe/25071 row 2); "exact", the default, also counts the total. */
+  mode?: SearchMode
 }
+
+export type ContentSearchHit = ContentRecord & { snippet: string; rank: number }
 
 /**
  * Unified search across all content types
@@ -806,12 +918,24 @@ export interface ContentSearchOptions {
 export function searchAll(
   db: Database,
   query: string,
+  options: ContentSearchOptions & { mode: "hook" },
+): { results: ContentSearchHit[]; total: null }
+export function searchAll(
+  db: Database,
+  query: string,
+  options?: ContentSearchOptions & { mode?: "exact" },
+): { results: ContentSearchHit[]; total: number }
+export function searchAll(
+  db: Database,
+  query: string,
+  options: ContentSearchOptions,
+): { results: ContentSearchHit[]; total: number | null }
+export function searchAll(
+  db: Database,
+  query: string,
   options: ContentSearchOptions = {},
-): {
-  results: (ContentRecord & { snippet: string; rank: number })[]
-  total: number
-} {
-  const { limit = 50, offset = 0, types, projectFilter, sinceTime, snippetTokens = 64 } = options
+): { results: ContentSearchHit[]; total: number | null } {
+  const { limit = 50, offset = 0, types, projectFilter, sinceTime, snippetTokens = 64, mode = "exact" } = options
   const ftsQuery = toFts5Query(query)
 
   const params: (string | number)[] = [ftsQuery]
@@ -852,12 +976,9 @@ export function searchAll(
     LIMIT ? OFFSET ?
   `
 
+  const results = db.prepare(searchQuery).all(...params, limit, offset) as ContentSearchHit[]
+  if (mode === "hook") return { results, total: null }
   const totalRow = db.prepare(countQuery).get(...params) as { total: number }
-  const results = db.prepare(searchQuery).all(...params, limit, offset) as (ContentRecord & {
-    snippet: string
-    rank: number
-  })[]
-
   return { results, total: totalRow.total }
 }
 

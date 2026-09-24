@@ -472,7 +472,11 @@ describe("runInjectDelta — an unbound vault is said, once per session (25149)"
     })
     try {
       mockRecall([])
-      const first = await runInjectDelta("what is the status of km-storage-sync right now?", createMemorySeenStore(), unbound)
+      const first = await runInjectDelta(
+        "what is the status of km-storage-sync right now?",
+        createMemorySeenStore(),
+        unbound,
+      )
       expect(first.skipped).toBe(false)
       expect(first.skippedSteps).toEqual({ project_sources: busy.message })
     } finally {
@@ -690,5 +694,63 @@ describe("25071: harness envelopes never reach salience, the glossary or recall"
     )
     expect(glossary).toHaveBeenCalledWith(typed)
     expect(recallMock.mock.calls[0]?.[0]).toBe(typed)
+  })
+})
+
+describe("25071 row 2: the hook's recall runs in hook mode, inside the wall's budget", () => {
+  const salientPrompt = "why does src/lib/inject-core.ts stall the prompt hook past thirty seconds tonight?"
+
+  beforeEach(() => {
+    recallMock.mockReset()
+    ensureProjectSourcesIndexedMock.mockReset()
+  })
+
+  test("recall is asked for hook mode, with the wall's deadline", async () => {
+    const { RECALL_WALL_MS } = await import("../src/history/recall-budget.ts")
+    recallMock.mockResolvedValue({ results: [] })
+    const before = Date.now()
+
+    await runInjectDelta(salientPrompt, createMemorySeenStore())
+
+    const options = recallMock.mock.calls[0]?.[1] as { mode?: string; deadlineAt?: number }
+    expect(options.mode).toBe("hook")
+    expect(options.deadlineAt).toBeGreaterThanOrEqual(before + RECALL_WALL_MS)
+    expect(options.deadlineAt).toBeLessThanOrEqual(Date.now() + RECALL_WALL_MS)
+  })
+
+  test("the glossary fallback is skipped when the budget left cannot cover a candidate pass, and says so", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] })
+    try {
+      recallMock.mockImplementationOnce(() => {
+        vi.setSystemTime(Date.now() + 1200)
+        return Promise.resolve({ results: [] })
+      })
+
+      const result = await runInjectDelta(salientPrompt, createMemorySeenStore(), {
+        deps: { findGlossaryAnchor: () => "tribe" },
+      })
+
+      expect(recallMock).toHaveBeenCalledTimes(1)
+      expect(result.skippedSteps).toEqual({
+        recall_fallback: 'recall_fallback skipped: anchor "tribe", 300 ms left (25071)',
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test("recall's per-phase times join the steps, and a phase recall skipped is said in skippedSteps", async () => {
+    recallMock.mockResolvedValue({
+      results: [],
+      timing: { searchMs: 20, phases: { messages: 12, corroboration: 3 } },
+      skipped: [{ phase: "messages", anchor: "tribe", message: "recall messages skipped: (fixture)" }],
+    })
+    const steps: Record<string, number> = {}
+
+    const result = await runInjectDelta(salientPrompt, createMemorySeenStore(), { steps })
+
+    expect(steps["recall.messages"]).toBe(12)
+    expect(steps["recall.corroboration"]).toBe(3)
+    expect(result.skippedSteps).toEqual({ "recall.messages": "recall messages skipped: (fixture)" })
   })
 })

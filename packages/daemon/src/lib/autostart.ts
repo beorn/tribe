@@ -9,10 +9,11 @@
  * (`ensureTribeDaemonIfConfigured`) is pure side-effect-free given its deps —
  * tests inject `spawn`/`probe` implementations rather than stubbing globals.
  *
- * Hard rule: none of this may ever block a Claude Code hook. The whole
- * end-to-end budget is ~300ms; probe failures and spawn failures are
+ * Hard rule: none of this may ever block a Claude Code hook. This check's
+ * own budget is ~300ms (`budgetMs`); probe failures and spawn failures are
  * swallowed with a single stderr line, and the hook proceeds to its library
- * fallback.
+ * fallback. It is not the prompt hook's budget, which is its recall's
+ * (tribe-recall history/recall-budget.ts, @ag/tribe/25071 row 2).
  *
  * The tribe daemon hosts both coordination and memory RPC surfaces.
  */
