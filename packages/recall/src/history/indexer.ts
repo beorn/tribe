@@ -519,6 +519,8 @@ export interface IndexResult {
   claudeVanished?: number
   claudeFailures?: ClaudeFailureRecord[]
   pruned?: number
+  /** Set when the incremental pass refused to prune because it would exceed the max prune share. */
+  pruneRefused?: { count: number; total: number }
 }
 
 /**
@@ -737,6 +739,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   let claudeSkipped = 0
   let claudeVanished = 0
   let prunedCount = 0
+  let pruneRefused: IndexResult["pruneRefused"]
   const claudeFailures: ClaudeFailureRecord[] = []
 
   // Index Claude session files
@@ -1148,6 +1151,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
         const allowLarge = options.allowLargePrune || process.env.RECALL_ALLOW_LARGE_PRUNE === "1"
 
         if (toPrune.length > 1 && pruneShare > MAX_PRUNE_SHARE && !allowLarge) {
+          pruneRefused = { count: toPrune.length, total: totalSessions }
           console.warn(
             `[recall] Refusing to prune ${toPrune.length} of ${totalSessions} sessions (${Math.round(pruneShare * 100)}%): would exceed max prune share of ${Math.round(MAX_PRUNE_SHARE * 100)}%. First paths to prune:\n${toPrune
               .slice(0, 5)
@@ -1217,6 +1221,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     claudeVanished,
     claudeFailures,
     pruned: prunedCount,
+    pruneRefused,
     ...projectSourceResult,
   }
 }
