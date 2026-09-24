@@ -1943,7 +1943,8 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       idToken: "token-p2",
     })
     await waitForCondition(
-      () => existsSync(adapter.logPath) && readFileSync(adapter.logPath, "utf8").includes("is undecided (seat-starting"),
+      () =>
+        existsSync(adapter.logPath) && readFileSync(adapter.logPath, "utf8").includes("is undecided (seat-starting"),
       "the first register's verifier-fault refusal, naming the undecided resolution",
     )
 
