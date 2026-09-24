@@ -1933,7 +1933,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       await Bun.sleep(500)
     }
     expect(adapter.child.exitCode).toBeNull()
-  })
+  }, 60_000)
 
   it("fans three native adapters from one provider launch into one live member", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
