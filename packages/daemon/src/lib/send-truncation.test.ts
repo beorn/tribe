@@ -114,7 +114,9 @@ describe("tribe.send truncation reporting", () => {
     // "this daemon does not report", which is the ambiguity the bead closed.
     expect(res.truncated).toBe(false)
     expect(res.original_length).toBe(MESSAGE_MAX_LENGTH)
-    expect(res.warning).toBeUndefined()
+    // No truncation text. The warning field is shared: an untracked send to an absent recipient (this one, @agent/7)
+    // carries a delivery note there since 24526, so the row asserts the fact it owns rather than an empty field.
+    expect(String(res.warning)).not.toContain("truncated")
 
     const stored = db.prepare("SELECT content FROM messages WHERE id = ?").get(res.id as string) as { content: string }
     expect(stored.content).toBe(atCap)
