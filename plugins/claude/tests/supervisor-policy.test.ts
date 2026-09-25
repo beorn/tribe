@@ -50,14 +50,18 @@ describe("Claude plugin adapter restart budget", () => {
       expect(decision.consecutiveReexecs).toBe(attempt)
       expect(decision.retry).toBe(true)
       expect(decision.retryDelayMs).toBeGreaterThanOrEqual(REEXEC_BACKOFF_BASE_MS)
-      expect(decision.retryDelayMs).toBeLessThanOrEqual(Math.min(REEXEC_BACKOFF_MAX_MS, Math.max(REEXEC_BACKOFF_BASE_MS, previous) * 3))
+      expect(decision.retryDelayMs).toBeLessThanOrEqual(
+        Math.min(REEXEC_BACKOFF_MAX_MS, Math.max(REEXEC_BACKOFF_BASE_MS, previous) * 3),
+      )
       consecutiveReexecs = decision.consecutiveReexecs
       previous = decision.retryDelayMs
     }
   })
 
   it("never retries at zero delay, and reaches the cap from a long previous delay", () => {
-    expect(evaluateAdapterRestart(7, 0, 10_000, Number.POSITIVE_INFINITY, () => 0).retryDelayMs).toBe(REEXEC_BACKOFF_BASE_MS)
+    expect(evaluateAdapterRestart(7, 0, 10_000, Number.POSITIVE_INFINITY, () => 0).retryDelayMs).toBe(
+      REEXEC_BACKOFF_BASE_MS,
+    )
     expect(evaluateAdapterRestart(7, 20_000, 10_000, Number.POSITIVE_INFINITY, () => 1).retryDelayMs).toBe(
       REEXEC_BACKOFF_MAX_MS,
     )

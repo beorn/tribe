@@ -25,7 +25,12 @@ export function evaluateAdapterRestart(
 
   const previous = stable ? REEXEC_BACKOFF_BASE_MS : Math.max(REEXEC_BACKOFF_BASE_MS, previousRetryDelayMs)
   const retryDelayMs = Math.round(
-    decorrelatedJitter(REEXEC_BACKOFF_BASE_MS, REEXEC_BACKOFF_MAX_MS, Math.min(previous, REEXEC_BACKOFF_MAX_MS), random),
+    decorrelatedJitter(
+      REEXEC_BACKOFF_BASE_MS,
+      REEXEC_BACKOFF_MAX_MS,
+      Math.min(previous, REEXEC_BACKOFF_MAX_MS),
+      random,
+    ),
   )
   return { consecutiveReexecs, retry, retryDelayMs }
 }

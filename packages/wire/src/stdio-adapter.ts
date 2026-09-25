@@ -534,7 +534,9 @@ async function readReloadDaemonView(): Promise<ReloadDaemonView> {
       sessions?: Array<{ name?: unknown }>
       daemon?: { code_identity?: { cert?: unknown } }
     }
-    const liveNames = (status.sessions ?? []).flatMap((session) => (typeof session.name === "string" ? [session.name] : []))
+    const liveNames = (status.sessions ?? []).flatMap((session) =>
+      typeof session.name === "string" ? [session.name] : [],
+    )
     const cert = status.daemon?.code_identity?.cert
     return { liveNames, runningCert: typeof cert === "string" ? cert : null }
   } finally {
@@ -567,6 +569,7 @@ function requestPacedReexec(reason: string, supervisedExitCode: number | null): 
       },
       now: () => Date.now(),
       sleep: (ms) => new Promise<void>((resolve) => timers.setTimeout(resolve, ms)),
+      timeout: (ms) => new Promise<void>((resolve) => timers.setTimeout(resolve, ms)),
       warn: (message) => log.warn?.(message),
       reexec: (why) => requestPluginReexec(why, supervisedExitCode),
     },

@@ -1,4 +1,10 @@
 /**
+ * @failure A fleet-wide reload re-execs every adapter at once and takes every seat's bridge down together, or a daemon
+ *          that never answers holds a reload past the deadline 25662's bridge-lost grace is sized for.
+ * @level l0
+ * @consumer the stdio adapter's paced re-exec (25663) and 25662's bridge-lost grace
+ * @testonly none
+ *
  * A reload never re-execs the fleet's adapters at once (25663, @cto ce976914).
  *
  * The 2026-09-24 generation re-execs at 08:02 and 08:15 PDT took every seat's bridge down together; rejoins took 2 to
@@ -11,6 +17,7 @@ import { describe, expect, test } from "vitest"
 import {
   RELOAD_DEADLINE_MS,
   RELOAD_MAX_ABSENT,
+  RELOAD_PROBE_TIMEOUT_MS,
   RELOAD_READY_TIMEOUT_MS,
   RELOAD_SLOT_MS,
   RELOAD_WINDOW_CAP_MS,
@@ -43,19 +50,22 @@ const ranked = (random: () => number, ranks: readonly number[] = [...Array(FLEET
   ranks.map((rank) => planReloadDelay(rank, FLEET, RELOAD_SLOT_MS, RELOAD_WINDOW_CAP_MS, random))
 
 describe("the reload schedule, through the shipped planner", () => {
-  test("the constants carry their derivation: slot = rejoinMax / N, and the deadline is window cap + ready timeout", () => {
+  test("the constants carry their derivation: slot = rejoinMax / N, and the deadline adds two bounded reads", () => {
     expect(RELOAD_SLOT_MS).toBe(4_000)
     expect(FLEET * RELOAD_SLOT_MS).toBeLessThanOrEqual(RELOAD_WINDOW_CAP_MS)
-    expect(RELOAD_DEADLINE_MS).toBe(RELOAD_WINDOW_CAP_MS + RELOAD_READY_TIMEOUT_MS)
+    expect(RELOAD_DEADLINE_MS).toBe(RELOAD_WINDOW_CAP_MS + RELOAD_READY_TIMEOUT_MS + 2 * RELOAD_PROBE_TIMEOUT_MS)
   })
 
-  test.each([2_000, 16_000])("ranked: never more than N absent at a %i ms rejoin, and none absent past the deadline", (rejoinMs) => {
-    for (let seed = 0; seed < SEEDS; seed++) {
-      const delays = ranked(seeded(seed))
-      expect(peakAbsent(delays, rejoinMs), `seed ${seed}`).toBeLessThanOrEqual(RELOAD_MAX_ABSENT)
-      expect(Math.max(...delays) + rejoinMs).toBeLessThanOrEqual(RELOAD_DEADLINE_MS)
-    }
-  })
+  test.each([2_000, 16_000])(
+    "ranked: never more than N absent at a %i ms rejoin, and none absent past the deadline",
+    (rejoinMs) => {
+      for (let seed = 0; seed < SEEDS; seed++) {
+        const delays = ranked(seeded(seed))
+        expect(peakAbsent(delays, rejoinMs), `seed ${seed}`).toBeLessThanOrEqual(RELOAD_MAX_ABSENT)
+        expect(Math.max(...delays) + rejoinMs).toBeLessThanOrEqual(RELOAD_DEADLINE_MS)
+      }
+    },
+  )
 
   test("red arm: all at once is the whole fleet absent together", () => {
     expect(peakAbsent(Array<number>(FLEET).fill(0), 2_000)).toBe(FLEET)
@@ -66,7 +76,9 @@ describe("the reload schedule, through the shipped planner", () => {
       ...Array.from({ length: SEEDS }, (_, seed) => {
         const random = seeded(seed)
         return peakAbsent(
-          Array.from({ length: FLEET }, () => planReloadDelay(null, FLEET, RELOAD_SLOT_MS, RELOAD_WINDOW_CAP_MS, random)),
+          Array.from({ length: FLEET }, () =>
+            planReloadDelay(null, FLEET, RELOAD_SLOT_MS, RELOAD_WINDOW_CAP_MS, random),
+          ),
           16_000,
         )
       }),
@@ -89,7 +101,11 @@ describe("the reload schedule, through the shipped planner", () => {
 
 describe("reloadRank", () => {
   test("ranks by sorted, de-duplicated name", () => {
-    expect(reloadRank("@dev/3", ["@dev/4", "@chief", "@dev/3", "@dev/3"])).toEqual({ rank: 1, liveCount: 3, found: true })
+    expect(reloadRank("@dev/3", ["@dev/4", "@chief", "@dev/3", "@dev/3"])).toEqual({
+      rank: 1,
+      liveCount: 3,
+      found: true,
+    })
   })
 
   test("an adapter missing from the list goes last, never first", () => {
@@ -98,19 +114,26 @@ describe("reloadRank", () => {
 })
 
 describe("pacedReexec", () => {
-  function harness(views: Array<ReloadDaemonView | Error>, onDisk: string | null = "abc") {
+  function harness(views: Array<ReloadDaemonView | Error | "hang">, onDisk: string | null = "abc") {
     let now = 0
     const log: string[] = []
     const sleeps: number[] = []
     return {
       log,
       sleeps,
+      elapsed: () => now,
       deps: {
         self: "@dev/3",
         readDaemon: async () => {
           const next = views.length > 1 ? views.shift() : views[0]
+          if (next === "hang") return new Promise<ReloadDaemonView>(() => {})
           if (next instanceof Error) throw next
           return next as ReloadDaemonView
+        },
+        // The read bound fires only when the read hangs; it spends the fake clock the way a real timer spends time.
+        timeout: async (ms: number) => {
+          await new Promise<void>((resolve) => setImmediate(resolve))
+          now += ms
         },
         onDiskCert: () => onDisk,
         now: () => now,
@@ -172,7 +195,21 @@ describe("pacedReexec", () => {
   test("a daemon never on the disk's code re-execs anyway at the timeout, loudly", async () => {
     const run = harness([{ liveNames: ["@dev/3"], runningCert: "old" }])
     await pacedReexec(run.deps, "x")
-    expect(run.log[0]).toMatch(/daemon not ready after 30000 ms \(the daemon runs other code than the disk\); re-execing anyway/u)
+    expect(run.log[0]).toMatch(
+      /daemon not ready after 30000 ms \(the daemon runs other code than the disk\); re-execing anyway/u,
+    )
     expect(run.log[1]).toBe("reexec: x")
   })
+
+  test.each([0, 0.999])(
+    "a daemon that never answers still re-execs, loudly, within the deadline (random %d)",
+    async (unit) => {
+      const run = harness(["hang"])
+      await pacedReexec({ ...run.deps, random: () => unit }, "x")
+      expect(run.log[0]).toMatch(/cli_status read failed \(cli_status did not answer within 2000 ms\)/u)
+      expect(run.log.at(-2)).toMatch(/daemon not ready after \d+ ms \(cli_status did not answer within 2000 ms\)/u)
+      expect(run.log.at(-1)).toBe("reexec: x")
+      expect(run.elapsed()).toBeLessThanOrEqual(RELOAD_DEADLINE_MS)
+    },
+  )
 })
