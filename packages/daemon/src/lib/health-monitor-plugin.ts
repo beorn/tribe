@@ -1207,6 +1207,11 @@ export interface BridgeLostFacts {
   readonly connected: ReadonlySet<string>
   /** Seats whose launch exited with a settled reason, mapped to that reason. */
   readonly exited: ReadonlyMap<string, string>
+  /**
+   * Seats hab expects up that have no live transport and are not missing-transport, mapped to their membership state:
+   * a refused reconnect (`foreign-identity-transport`) or a launch with no row (`never-registered`).
+   */
+  readonly unreachable: ReadonlyMap<string, string>
   /** Open incidents from the durable tracker; never from memory, so a restart cannot lose a clear. */
   readonly openIncidents: ReadonlyArray<{ readonly subject: string; readonly recipient: string }>
 }
@@ -1215,8 +1220,10 @@ export interface BridgeLostFacts {
  *  at most one grace and never loses a clear, because clears read the tracker. */
 export interface BridgeLostMemory {
   readonly firstSeen: Map<string, number>
-  /** Seats already announced to "*" because no owner was reachable. */
+  /** Seats already announced to "*" because no owner was connected. */
   readonly broadcast: Set<string>
+  /** The unreachable state each open incident's owner was last told, so a state is named once per change. */
+  readonly namedState: Map<string, string>
 }
 
 let currentBridgeLostArming: BridgeLostArming = { armed: false, reason: "the health monitor has not started" }
@@ -1227,7 +1234,7 @@ export function getBridgeLostArming(): BridgeLostArming {
 }
 
 export function createBridgeLostMemory(): BridgeLostMemory {
-  return { firstSeen: new Map(), broadcast: new Set() }
+  return { firstSeen: new Map(), broadcast: new Set(), namedState: new Map() }
 }
 
 export interface BridgeLostAction {
@@ -1259,6 +1266,17 @@ export function checkBridgeLost(
 
   for (const [subject, recipient] of open) {
     if (missingNames.has(subject)) continue
+    const state = facts.unreachable.get(subject)
+    if (state !== undefined && facts.exited.get(subject) === undefined) {
+      if (memory.namedState.get(subject) !== state) {
+        memory.namedState.set(subject, state)
+        const content =
+          `${subject}'s tribe bridge is still lost: membership reads it ${state}, so the incident stays open. ` +
+          `Repair from its pane: /mcp, plugin:tribe:tribe, Reconnect.`
+        actions.push({ kind: "raise", recipient, content, incident: bridgeLostIncident(subject) })
+      }
+      continue
+    }
     const exit = facts.exited.get(subject)
     const why =
       exit !== undefined
@@ -1268,11 +1286,14 @@ export function checkBridgeLost(
           : `${subject} is no longer a seat hab expects up`
     actions.push({ kind: "clear", recipient, content: `cleared: ${why}`, incident: bridgeLostIncident(subject) })
   }
-  for (const seat of [...memory.firstSeen.keys()]) {
+  for (const seat of memory.firstSeen.keys()) {
     if (!missingNames.has(seat)) memory.firstSeen.delete(seat)
   }
-  for (const seat of [...memory.broadcast]) {
+  for (const seat of memory.broadcast) {
     if (!missingNames.has(seat)) memory.broadcast.delete(seat)
+  }
+  for (const seat of memory.namedState.keys()) {
+    if (!facts.unreachable.has(seat) || !open.has(seat)) memory.namedState.delete(seat)
   }
 
   for (const seat of facts.missing) {
@@ -1283,7 +1304,8 @@ export function checkBridgeLost(
     const content =
       `${seat.name}'s tribe bridge is lost ${minutes} min: hab expects it up, its launch parent ` +
       `${seat.launchParentPid ?? "unknown"} has no transport. Repair from its pane: /mcp, plugin:tribe:tribe, Reconnect.`
-    const owner = config.owners.find((candidate) => candidate !== seat.name && !missingNames.has(candidate))
+    // Only an owner with a live transport can read the page: a lost, exited or never-registered owner cannot.
+    const owner = config.owners.find((candidate) => candidate !== seat.name && facts.connected.has(candidate))
     if (owner !== undefined) {
       actions.push({ kind: "raise", recipient: owner, content, incident: bridgeLostIncident(seat.name) })
     } else if (!memory.broadcast.has(seat.name)) {
@@ -1291,7 +1313,7 @@ export function checkBridgeLost(
       actions.push({
         kind: "broadcast",
         recipient: "*",
-        content: `${content} Paged to everyone: no configured owner is reachable (${config.owners.join(", ")} are all lost).`,
+        content: `${content} Paged to everyone: no configured owner is connected (${config.owners.join(", ")}).`,
       })
     }
   }

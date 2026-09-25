@@ -8,8 +8,10 @@
  *
  * The check under test reads transport state only: a seat hab expects up whose
  * transport is gone. It opens ONE incident per seat to the first configured
- * owner that is not itself lost, and clears it from the durable ball tracker
- * (never from memory) when the transport is live again or the seat exited.
+ * owner whose transport is live, and clears it from the durable ball tracker
+ * (never from memory) when the transport is live again or the seat exited. A
+ * seat still unreachable in another state (a refused reconnect, a launch that
+ * never registered) keeps its incident open, and the owner is told the state.
  */
 
 import { Database } from "bun:sqlite"
@@ -37,20 +39,20 @@ const T0 = 1_000_000_000
 const CONFIG: BridgeLostConfig = { owners: ["@chief", "@cto", "@adhoc/0"], graceMs: 3 * MIN }
 
 function facts(over: Partial<BridgeLostFacts> = {}): BridgeLostFacts {
-  return { missing: [], connected: new Set(), exited: new Map(), openIncidents: [], ...over }
+  return { missing: [], connected: new Set(), exited: new Map(), unreachable: new Map(), openIncidents: [], ...over }
 }
 
 const lost = (name: string, launchParentPid = 4242) => ({ name, launchParentPid })
 
 /** In-memory grace clocks only; the open-incident set always comes from the durable tracker (facts). */
 function memory(seen: ReadonlyArray<readonly [string, number]> = []): BridgeLostMemory {
-  return { firstSeen: new Map(seen), broadcast: new Set() }
+  return { firstSeen: new Map(seen), broadcast: new Set(), namedState: new Map() }
 }
 
 describe("checkBridgeLost", () => {
   test("a seat missing-transport pages only once the grace has passed, once per incident", () => {
     const firstSeen = memory()
-    const lostDev = facts({ missing: [lost("@dev/3")] })
+    const lostDev = facts({ missing: [lost("@dev/3")], connected: new Set(["@chief"]) })
 
     expect(checkBridgeLost(lostDev, T0, firstSeen, CONFIG)).toEqual([])
     expect(checkBridgeLost(lostDev, T0 + 3 * MIN - 1, firstSeen, CONFIG)).toEqual([])
@@ -65,17 +67,21 @@ describe("checkBridgeLost", () => {
     expect(page?.content).toMatch(/@dev\/3.*bridge.*lost 3 min.*launch parent 4242.*\/mcp.*Reconnect/su)
 
     // The tracker already holds it: the next tick opens nothing new.
-    const held = facts({ missing: [lost("@dev/3")], openIncidents: [{ subject: "@dev/3", recipient: "@chief" }] })
+    const held = facts({
+      missing: [lost("@dev/3")],
+      connected: new Set(["@chief"]),
+      openIncidents: [{ subject: "@dev/3", recipient: "@chief" }],
+    })
     expect(checkBridgeLost(held, T0 + 4 * MIN, firstSeen, CONFIG)).toEqual([])
   })
 
   test("@chief's own bridge pages the next owner, and a lost owner is skipped", () => {
-    const chiefLost = facts({ missing: [lost("@chief")] })
+    const chiefLost = facts({ missing: [lost("@chief")], connected: new Set(["@cto", "@adhoc/0"]) })
     expect(checkBridgeLost(chiefLost, T0, memory([["@chief", T0 - CONFIG.graceMs]]), CONFIG)).toMatchObject([
       { kind: "raise", recipient: "@cto", incident: { subject: "@chief" } },
     ])
 
-    const both = facts({ missing: [lost("@chief"), lost("@cto")] })
+    const both = facts({ missing: [lost("@chief"), lost("@cto")], connected: new Set(["@adhoc/0"]) })
     const seen = memory([
       ["@chief", T0 - CONFIG.graceMs],
       ["@cto", T0 - CONFIG.graceMs],
@@ -87,7 +93,7 @@ describe("checkBridgeLost", () => {
   })
 
   test("two lost seats are two incidents, one per seat", () => {
-    const two = facts({ missing: [lost("@dev/3"), lost("@dev/4")] })
+    const two = facts({ missing: [lost("@dev/3"), lost("@dev/4")], connected: new Set(["@chief"]) })
     const seen = memory([
       ["@dev/3", T0 - CONFIG.graceMs],
       ["@dev/4", T0 - CONFIG.graceMs],
@@ -151,8 +157,61 @@ describe("checkBridgeLost", () => {
       ["broadcast", "*"],
       ["broadcast", "*"],
     ])
-    expect(first[0]?.content).toMatch(/no configured owner is reachable/u)
+    expect(first[0]?.content).toMatch(/no configured owner is connected/u)
     expect(checkBridgeLost(all, T0 + MIN, seen, CONFIG)).toEqual([])
+  })
+
+  // review-adhoc5 P3 1 (e47aafc674): an owner with no live transport cannot read the page, lost or not.
+  test("an owner with no live transport is skipped: an exited @chief does not get the page while @cto is live", () => {
+    const chiefGone = facts({
+      missing: [lost("@dev/3")],
+      exited: new Map([["@chief", "harness-exited at 2026-09-24T15:00:00.000Z"]]),
+      connected: new Set(["@cto"]),
+    })
+    expect(checkBridgeLost(chiefGone, T0, memory([["@dev/3", T0 - CONFIG.graceMs]]), CONFIG)).toMatchObject([
+      { kind: "raise", recipient: "@cto", incident: { subject: "@dev/3" } },
+    ])
+  })
+
+  test("with no owner connected, the page is an untracked notify to everyone that names the owners, once", () => {
+    const noOwner = facts({ missing: [lost("@dev/3")], connected: new Set(["@dev/4"]) })
+    const seen = memory([["@dev/3", T0 - CONFIG.graceMs]])
+    expect(checkBridgeLost(noOwner, T0, seen, CONFIG)).toMatchObject([
+      {
+        kind: "broadcast",
+        recipient: "*",
+        content: expect.stringMatching(/no configured owner is connected \(@chief, @cto, @adhoc\/0\)/u),
+      },
+    ])
+    expect(checkBridgeLost(noOwner, T0 + MIN, seen, CONFIG)).toEqual([])
+  })
+
+  // review-adhoc5 P3 2 (e47aafc674): a seat that tried to come back and was refused is still unreachable.
+  test("a seat unreachable in another state keeps its incident open and tells the owner the state, once per state", () => {
+    const refused = facts({
+      unreachable: new Map([["@dev/3", "foreign-identity-transport"]]),
+      connected: new Set(["@chief"]),
+      openIncidents: [{ subject: "@dev/3", recipient: "@chief" }],
+    })
+    const mem = memory()
+    const [named, ...rest] = checkBridgeLost(refused, T0, mem, CONFIG)
+    expect(rest).toEqual([])
+    expect(named).toMatchObject({ kind: "raise", recipient: "@chief", incident: { subject: "@dev/3" } })
+    expect(named?.content).toMatch(
+      /@dev\/3's tribe bridge is still lost: membership reads it foreign-identity-transport/u,
+    )
+    expect(checkBridgeLost(refused, T0 + MIN, mem, CONFIG)).toEqual([])
+
+    const never = facts({ ...refused, unreachable: new Map([["@dev/3", "never-registered"]]) })
+    expect(checkBridgeLost(never, T0 + 2 * MIN, mem, CONFIG).map((a) => [a.kind, a.content])).toEqual([
+      ["raise", expect.stringMatching(/membership reads it never-registered/u)],
+    ])
+
+    const back = facts({ connected: new Set(["@chief", "@dev/3"]), openIncidents: refused.openIncidents })
+    expect(checkBridgeLost(back, T0 + 3 * MIN, mem, CONFIG)).toMatchObject([
+      { kind: "clear", recipient: "@chief", content: expect.stringMatching(/transport is live again/u) },
+    ])
+    expect(mem.namedState.has("@dev/3")).toBe(false)
   })
 })
 
@@ -225,9 +284,17 @@ describe("runBridgeLostTick on the daemon's durable ball tracker", () => {
     }
     return {
       send: (recipient, content, type, beadId, classification, incident) =>
-        void sendMessage(ctx, recipient, content, type, beadId, undefined, "direct", classification ?? {}, {
-          ...(incident === undefined ? {} : { incident }),
-        }),
+        void sendMessage(
+          ctx,
+          recipient,
+          content,
+          type,
+          beadId,
+          undefined,
+          "direct",
+          classification ?? {},
+          incident === undefined ? {} : { incident },
+        ),
       broadcast: fail,
       claimDedup: fail,
       hasRecentMessage: fail,
@@ -236,7 +303,12 @@ describe("runBridgeLostTick on the daemon's durable ball tracker", () => {
       getUnreadDms: fail,
       getSeatTransportFacts: () => {
         const facts = transport()
-        return { missing: [...facts.missing], exited: new Map(facts.exited), connected: new Set(facts.connected) }
+        return {
+          missing: [...facts.missing],
+          exited: new Map(facts.exited),
+          connected: new Set(facts.connected),
+          unreachable: new Map(facts.unreachable),
+        }
       },
       listOpenIncidents: (emitter, condition) => readOpenIncidents(stmts, emitter, condition),
     }
@@ -249,7 +321,10 @@ describe("runBridgeLostTick on the daemon's durable ball tracker", () => {
   const armed = { armed: true as const, config: CONFIG }
 
   test("a restart in the middle of an open incident, then the seat recovers: the incident clears", () => {
-    let transport: Omit<BridgeLostFacts, "openIncidents"> = facts({ missing: [lost("@dev/3")] })
+    let transport: Omit<BridgeLostFacts, "openIncidents"> = facts({
+      missing: [lost("@dev/3")],
+      connected: new Set(["@chief"]),
+    })
     const api = daemonApi(() => transport)
 
     runBridgeLostTick(api, armed, memory([["@dev/3", T0 - CONFIG.graceMs]]), T0)
