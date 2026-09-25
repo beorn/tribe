@@ -257,9 +257,11 @@ describe("the ambient names tribe reads", () => {
     ],
   }
 
-  test("are exactly the union of the lists they replaced, less the one name tribe never reads", () => {
+  test("are exactly the union of the lists they replaced, less the one name tribe never reads, plus the launch token", () => {
     const union = new Set(Object.values(replacedHandLists).flat())
     union.delete("AG_HOST_SESSION_STATE_DIR")
+    // 25074 3d-1: the launch token tribe presents and now reads its launch from, which no replaced list carried.
+    union.add("HAB_ID_TOKEN")
     const names = tribeAmbientEnvironmentNames()
     expect(new Set(names).size).toBe(names.length)
     expect([...names].sort()).toEqual([...union].sort())
