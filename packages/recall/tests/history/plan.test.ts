@@ -3,7 +3,9 @@
  * (The LLM call path is tested via integration, not unit.)
  */
 
-import { describe, test, expect, vi } from "vitest"
+import { describe, test, expect, vi, beforeEach, afterEach } from "vitest"
+import { addWriter, setSuppressConsole, type LogEvent } from "loggily"
+import { setRecallLogging } from "../../src/history/recall-shared.ts"
 import { parsePlanResult, planQuery, planVariants, type QueryPlan } from "../../src/lib/plan"
 import type { QueryContext } from "../../src/lib/context.ts"
 import type { LlmBackend, LlmModel } from "../../src/lib/llm-backend.ts"
@@ -165,6 +167,24 @@ describe("planVariants", () => {
 })
 
 describe("planQuery provider fallback", () => {
+  let logEvents: LogEvent[] = []
+  let unsubLog: (() => void) | undefined
+
+  beforeEach(() => {
+    logEvents = []
+    setSuppressConsole(true)
+    setRecallLogging(true)
+    unsubLog = addWriter({ ns: "recall*" }, (_f, _l, _ns, ev) => {
+      if (ev.kind === "log") logEvents.push(ev)
+    })
+  })
+
+  afterEach(() => {
+    unsubLog?.()
+    setRecallLogging(false)
+    setSuppressConsole(false)
+  })
+
   test("uses the shared provider selector before dispatching a default planner model", async () => {
     const denied: LlmModel = { provider: "google", modelId: "gemini-2.0-flash-lite" }
     const selected: LlmModel = { provider: "openrouter", modelId: "deepseek/deepseek-chat" }
@@ -220,7 +240,6 @@ describe("planQuery provider fallback", () => {
   })
 
   test("tries the next available provider when the preferred provider rejects its credential", async () => {
-    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined)
     const gemini: LlmModel = { provider: "google", modelId: "gemini-2.0-flash-lite" }
     const anotherGemini: LlmModel = { provider: "google", modelId: "gemini-2.5-flash" }
     const fallback: LlmModel = { provider: "openrouter", modelId: "deepseek/deepseek-chat" }
@@ -257,14 +276,12 @@ describe("planQuery provider fallback", () => {
     expect(result.plan?.keywords).toEqual(["fallbackworked"])
     expect(result.model).toBe(fallback.modelId)
     expect(calls).toEqual([gemini.modelId, fallback.modelId])
-    expect(errorLog.mock.calls.map((args) => args.join(" "))).toContainEqual(
-      expect.stringContaining(`${gemini.modelId} failed`),
+    expect(logEvents).toContainEqual(
+      expect.objectContaining({ message: expect.stringContaining(`${gemini.modelId} failed`) }),
     )
-    errorLog.mockRestore()
   })
 
   test("reports every provider failure and accounts for billed failed responses", async () => {
-    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined)
     const gemini: LlmModel = { provider: "google", modelId: "gemini-2.0-flash-lite" }
     const fallback: LlmModel = { provider: "openrouter", modelId: "deepseek/deepseek-chat" }
     const llm = {
@@ -287,12 +304,10 @@ describe("planQuery provider fallback", () => {
     expect(result.error).toContain(`${gemini.modelId}: google failed`)
     expect(result.error).toContain(`${fallback.modelId}: openrouter failed`)
     expect(result.cost).toBe(0.25)
-    expect(errorLog).toHaveBeenCalledTimes(2)
-    errorLog.mockRestore()
+    expect(logEvents.filter((ev) => ev.message.includes("failed"))).toHaveLength(2)
   })
 
   test("does not start another provider after the shared planner deadline aborts", async () => {
-    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined)
     vi.useFakeTimers()
     const gemini: LlmModel = { provider: "google", modelId: "gemini-2.0-flash-lite" }
     const fallback: LlmModel = { provider: "openrouter", modelId: "deepseek/deepseek-chat" }
@@ -321,12 +336,10 @@ describe("planQuery provider fallback", () => {
       expect(calls).toEqual([gemini.modelId])
     } finally {
       vi.useRealTimers()
-      errorLog.mockRestore()
     }
   })
 
   test("keeps an explicitly selected planner model single-shot", async () => {
-    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined)
     const selected: LlmModel = { provider: "google", modelId: "gemini-explicit" }
     const fallback: LlmModel = { provider: "openrouter", modelId: "deepseek/deepseek-chat" }
     const calls: string[] = []
@@ -347,9 +360,8 @@ describe("planQuery provider fallback", () => {
     expect(result.plan).toBeNull()
     expect(result.error).toBe("selected model failed")
     expect(calls).toEqual([selected.modelId])
-    expect(errorLog.mock.calls.map((args) => args.join(" "))).toContainEqual(
-      expect.stringContaining(`${selected.modelId} failed`),
+    expect(logEvents).toContainEqual(
+      expect.objectContaining({ message: expect.stringContaining(`${selected.modelId} failed`) }),
     )
-    errorLog.mockRestore()
   })
 })
