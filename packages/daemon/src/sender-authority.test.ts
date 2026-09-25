@@ -58,7 +58,11 @@ function sender(sessionId: string, name: string, authority: "verified" | "bearer
   registerSession(ctx, undefined, () => true, null, 0, "pull", undefined, null, null, null, null, bearerHash)
   // The dispatcher records a verified token the same way after the register (with-dispatcher.ts, 25074 3b).
   if (authority === "verified") {
-    db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = ? WHERE id = ?").run(`${sessionId}-sid`, 1, sessionId)
+    db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = ? WHERE id = ?").run(
+      `${sessionId}-sid`,
+      1,
+      sessionId,
+    )
   }
   return ctx
 }
@@ -97,8 +101,9 @@ describe("every envelope carries its sender's authority (25074 3d-1a)", () => {
     sendMessage(sender("s-impostor", "@dev/1", "claimed"), RECIPIENT, "a claim", "notify")
     const reader = context("reader-2", RECIPIENT)
     const result = handleToolCall(reader, "tribe.fetch", { limit: 10 }, opts()) as { content: Array<{ text: string }> }
-    const events = (JSON.parse(result.content[0]?.text ?? "{}") as { events?: Array<{ content: string; from_authority?: unknown }> })
-      .events
+    const events = (
+      JSON.parse(result.content[0]?.text ?? "{}") as { events?: Array<{ content: string; from_authority?: unknown }> }
+    ).events
     expect(owner).toBe("verified")
     expect(events?.find((event) => event.content === "a claim")?.from_authority).toBe("claimed")
   })

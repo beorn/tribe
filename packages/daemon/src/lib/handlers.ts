@@ -3850,7 +3850,7 @@ export type FetchRow = {
   summary: string | null
   attention_required: number
   /** 25662 P3 3 — an incident edge: it woke the owner, so the owner's fetch that returns it acknowledges it. */
-  wakes_owner: number  /** 25074 3d-1a — the sending session's authority at insert; null when the daemon sent it or before v37. */
+  wakes_owner: number /** 25074 3d-1a — the sending session's authority at insert; null when the daemon sent it or before v37. */
   sender_authority?: string | null
 }
 

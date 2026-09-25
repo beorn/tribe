@@ -96,7 +96,10 @@ describe("the CLI's managed inbox reads its launch from the identity token (2507
 
   it("a tokenless process holding a seat's TRIBE_LAUNCH_ID and TRIBE_NAME is refused, and reaches no inbox", async () => {
     const inherited = { TRIBE_LAUNCH_ID: INHERITED_LAUNCH, TRIBE_NAME: "@chief", TRIBE_SESSION_NAME: "@chief" }
-    for (const verb of [["inbox-status", "--json"], ["inbox-drain", "--json"]]) {
+    for (const verb of [
+      ["inbox-status", "--json"],
+      ["inbox-drain", "--json"],
+    ]) {
       const run = await runCli(verb, inherited)
       expect(run.code, `${verb[0]}: ${run.stderr}`).not.toBe(0)
       expect(run.stderr).toContain("HAB_ID_TOKEN")
