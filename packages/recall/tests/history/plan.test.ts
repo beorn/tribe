@@ -172,6 +172,8 @@ describe("planQuery provider fallback", () => {
 
   beforeEach(() => {
     logEvents = []
+    // The root vitest setup pins LOG_LEVEL=warn; these failure lines are info (25392), so the rows name their level.
+    vi.stubEnv("LOG_LEVEL", "info")
     setSuppressConsole(true)
     setRecallLogging(true)
     unsubLog = addWriter({ ns: "recall*" }, (_f, _l, _ns, ev) => {
@@ -183,6 +185,7 @@ describe("planQuery provider fallback", () => {
     unsubLog?.()
     setRecallLogging(false)
     setSuppressConsole(false)
+    vi.unstubAllEnvs()
   })
 
   test("uses the shared provider selector before dispatching a default planner model", async () => {

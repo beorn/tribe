@@ -18,10 +18,6 @@ export function setRecallLogging(enabled: boolean): void {
 export function log(msg: string): void {
   if (_logEnabled) recallLog.info?.(msg)
 }
-/** A failure the caller must see, such as a billed provider failure: reported on stderr whether or not debug logging is on. */
-export function logFailure(msg: string): void {
-  recallLog.error?.(msg)
-}
 
 // ============================================================================
 // Time constants

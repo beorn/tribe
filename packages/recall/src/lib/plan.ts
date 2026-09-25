@@ -12,7 +12,7 @@
 
 import { loadLlm, selectAvailableCheapModels, type LlmBackend, type LlmModel } from "./llm-backend.ts"
 import type { RecallSearchResult } from "../history/recall-shared.ts"
-import { log, logFailure } from "../history/recall-shared.ts"
+import { log } from "../history/recall-shared.ts"
 import type { QueryContext } from "./context.ts"
 import { renderContextPrompt } from "./context.ts"
 
@@ -177,7 +177,7 @@ export async function planQuery(query: string, context: QueryContext, options: P
         })
       } catch (error) {
         const message = providerError(llm, model, error)
-        logFailure(`planner: ${model.modelId} failed (${message})`)
+        log(`planner: ${model.modelId} failed (${message})`)
         failures.push({ modelId: model.modelId, error: message })
         continue
       }
@@ -188,7 +188,7 @@ export async function planQuery(query: string, context: QueryContext, options: P
       }
       if (result.response.error) {
         const message = providerError(llm, model, result.response.error)
-        logFailure(`planner: ${model.modelId} failed (${message})`)
+        log(`planner: ${model.modelId} failed (${message})`)
         failures.push({ modelId: model.modelId, error: message })
         continue
       }

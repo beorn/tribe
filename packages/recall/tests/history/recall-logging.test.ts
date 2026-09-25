@@ -9,7 +9,7 @@
 
 import { describe, expect, test, vi, afterEach, beforeEach } from "vitest"
 import { addWriter, setSuppressConsole, type LogEvent } from "loggily"
-import { log, logFailure, setRecallLogging } from "../../src/history/recall-shared.ts"
+import { log, setRecallLogging } from "../../src/history/recall-shared.ts"
 
 describe("25392: recall log goes through loggily and is off by default outside the daemon", () => {
   beforeEach(() => {
@@ -31,20 +31,6 @@ describe("25392: recall log goes through loggily and is off by default outside t
     try {
       log("default is silent")
       expect(events).toHaveLength(0)
-    } finally {
-      unsub()
-    }
-  })
-
-  test("logFailure() reports at error level even when logging is off", () => {
-    const events: LogEvent[] = []
-    const unsub = addWriter({ ns: "recall:*" }, (_f, _l, _ns, ev) => {
-      if (ev.kind === "log") events.push(ev)
-    })
-    try {
-      setRecallLogging(false)
-      logFailure("planner: m failed (x)")
-      expect(events.map((ev) => [ev.level, ev.message])).toEqual([["error", "planner: m failed (x)"]])
     } finally {
       unsub()
     }
