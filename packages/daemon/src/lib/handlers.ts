@@ -3832,6 +3832,8 @@ export type FetchRow = {
   room_id: string | null
   summary: string | null
   attention_required: number
+  /** 25662 P3 3 — an incident edge: it woke the owner, so the owner's fetch that returns it acknowledges it. */
+  wakes_owner: number
 }
 
 export type FetchEvent = {
@@ -4002,7 +4004,7 @@ function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRo
   const rows = ctx.db
     .prepare(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-             attention_required
+             attention_required, wakes_owner
       FROM messages
       WHERE ${conditions.join("\n        AND ")}
       ORDER BY rowid ${order}
@@ -4111,7 +4113,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
     rows = ctx.db
       .prepare(`
         SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-               attention_required
+               attention_required, wakes_owner
         FROM messages
         WHERE id IN (${placeholders})
           AND kind != 'event'
@@ -4194,7 +4196,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
       if (
         (row.recipient === currentName || (row.recipient === "*" && projectedAttentionIds.has(row.id))) &&
         row.sender !== currentName &&
-        (ACTIONABLE_TYPES_SET.has(row.type) || row.attention_required === 1)
+        (ACTIONABLE_TYPES_SET.has(row.type) || row.attention_required === 1 || row.wakes_owner === 1)
       ) {
         lastAttention = Math.max(lastAttention, row.rowid)
       }

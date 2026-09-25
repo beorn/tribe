@@ -41,6 +41,9 @@ export type MessageInsertedInfo = {
   topic: string | null
   /** Matrix-shape room scope; null until populated by the room-aware path. */
   roomId: string | null
+  /** 25662 P3 3 — this row is an incident edge (its open, or a changed condition) and wakes its owner's inbox-wait
+   *  like an actionable type. Mirrors the row's durable `wakes_owner` column. */
+  wakesOwner?: boolean
   /** Mailboxes that received an open pending row for this tracked broadcast.
    * Absent for direct, untracked broadcast, and journal-only messages. */
   pendingOwners?: readonly string[]

@@ -531,6 +531,22 @@ export function sendMessage(
     const canonicalReplyId = pendingReply?.request_id ?? replyId
     const correlatedReply = pendingReply ? { requestId: pendingReply.request_id, requester: pendingReply.sender } : null
     let tracker = canonicalReplyId ? { request_id: canonicalReplyId, closed: 0 } : undefined
+    // 25662 P3 3: an incident send that opens its ball, or changes its condition (the summary), is an edge that wakes
+    // the owner's inbox-wait. Decided here, in the same transaction as the upsert below, so a concurrent repeat
+    // cannot read a half-written row. A repeat of the same condition and the clear never wake.
+    let wakesOwner = false
+    if (
+      resolvedKind === "direct" &&
+      incidentRequestId !== null &&
+      incidentActive &&
+      ballTracker.suppressOpen !== true
+    ) {
+      const standing = ctx.stmts.selectIncidentCondition.get({
+        $request_id: incidentRequestId,
+        $recipient: ballTracker.owner ?? recipient,
+      }) as { summary: string | null } | null
+      wakesOwner = standing === null || standing.summary !== (classification.summary ?? null)
+    }
     const result = ctx.stmts.insertMessage.run({
       $id: id,
       $type: type,
@@ -552,6 +568,7 @@ export function sendMessage(
       $correlated_reply_requester: correlatedReply?.requester ?? null,
       $summary: classification.summary ?? null,
       $attention_required: classification.attentionRequired === true ? 1 : 0,
+      $wakes_owner: wakesOwner ? 1 : 0,
       $between_personas: isExplicitTribePersonaName(sender) && isExplicitTribePersonaName(recipient) ? 1 : 0,
     })
     if (result.changes === 0) {
@@ -628,9 +645,9 @@ export function sendMessage(
         if (opened.changes > 0) openedOwners.push(owner)
       }
     }
-    return { rowid, ts, tracker, correlatedReply, openedOwners }
+    return { rowid, ts, tracker, correlatedReply, openedOwners, wakesOwner }
   })
-  const { rowid, ts: persistedTs, tracker, correlatedReply, openedOwners, deduplicated } = persist()
+  const { rowid, ts: persistedTs, tracker, correlatedReply, openedOwners, deduplicated, wakesOwner } = persist()
   if (deduplicated) return { id, ts: persistedTs, rowid, deduplicated: true }
   ctx.onMessageInserted?.({
     id,
@@ -648,6 +665,7 @@ export function sendMessage(
     roomId: classification.roomId ?? null,
     ...(resolvedKind === "broadcast" && requestId !== null ? { pendingOwners: openedOwners } : {}),
     correlatedReply,
+    wakesOwner: wakesOwner === true,
   })
   return { id, ts: persistedTs, rowid, ...(tracker ? { tracker } : {}) }
 }
@@ -726,6 +744,7 @@ export function logEvent(
     $correlated_reply_requester: null,
     $summary: options.summary ?? null,
     $attention_required: 0,
+    $wakes_owner: 0,
     $between_personas: 0,
   })
   return id

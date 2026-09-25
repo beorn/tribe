@@ -121,7 +121,8 @@ export function createInboxWaitManager(
       // while the seat remains armed — CTO residual 2026-07-25 on 21420
       // (@dev/3 sat in inbox-wait while type=assign had already landed).
       // Self-sends are excluded (same filter as getUnreadDms: sender != name).
-      if (ACTIONABLE_TYPES.has(info.type) && info.sender !== waiter.session) {
+      // 25662 P3 3: an incident edge wakes the same way (wakePredicateSql is the SQL half of this test).
+      if ((ACTIONABLE_TYPES.has(info.type) || info.wakesOwner === true) && info.sender !== waiter.session) {
         settle(waiter, { timedOut: false, aborted: false })
       }
     }

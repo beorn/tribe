@@ -240,7 +240,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             },
             required: ["emitter", "subject", "condition"],
             description:
-              "For cadence watchers: hold ONE ball per live condition instead of one per observation. Repeats on the same emitter/subject/condition upsert; `active: false` clears. Exactly one recipient, mutually exclusive with `request`. See /tribe.",
+              "For cadence watchers: hold ONE ball per live condition instead of one per observation. Repeats on the same emitter/subject/condition upsert; `active: false` clears. The summary is the condition and the body carries the observation: the open, and an upsert whose summary changed, wake the owner's inbox-wait; a repeat with the same summary and the clear never do. Exactly one recipient, mutually exclusive with `request`. See /tribe.",
           },
         },
         required: ["to", "message"],
@@ -534,11 +534,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     id: "tribe.inbox.wait",
     title: "Inbox Wait",
     description:
-      "Long-poll the actionable inbox for a session until a direct request/query/assign/verdict or an owned tracked actionable broadcast arrives, or the timeout elapses. MCP requests at or above the measured host ceiling return host_cut immediately with advice=cli_wait; use the CLI for longer waits. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the caller's session.",
+      "Long-poll the actionable inbox for a session until a direct request/query/assign/verdict, an incident opened or changed (its summary), or an owned tracked actionable broadcast arrives, or the timeout elapses. MCP requests at or above the measured host ceiling return host_cut immediately with advice=cli_wait; use the CLI for longer waits. Direct notify/status/response rows are inbox-visible but do not wake by default; callers may opt into replies correlated to their own tracked requests. Defaults to the caller's session.",
     lifetime: "live-session",
     mcp: {
       name: "inbox.wait",
-      description: `Short diagnostic wait for actionable inbox activity; defaults to the caller's session. The MCP default is ${DEFAULT_MCP_INBOX_WAIT_TIMEOUT_MS}ms and requests at or above the ${MCP_INBOX_WAIT_HOST_CEILING_MS}ms host ceiling return host_cut with advice=cli_wait, so use \`tribe inbox-wait\` for longer waits. Direct or owned tracked-broadcast request/query/assign/verdict rows wake it — notify/status/response are inbox-visible and never wake by default. See /tribe.`,
+      description: `Short diagnostic wait for actionable inbox activity; defaults to the caller's session. The MCP default is ${DEFAULT_MCP_INBOX_WAIT_TIMEOUT_MS}ms and requests at or above the ${MCP_INBOX_WAIT_HOST_CEILING_MS}ms host ceiling return host_cut with advice=cli_wait, so use \`tribe inbox-wait\` for longer waits. Direct or owned tracked-broadcast request/query/assign/verdict rows wake it, and so does an incident opened or changed (its summary) — notify/status/response are inbox-visible and never wake by default. See /tribe.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -638,7 +638,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     cli: available({
       name: "inbox-wait",
       description:
-        "Long-poll until unanswered actionable attention exists or the timeout elapses. This is the steady-state bounded-wait rail. Direct actionables and owned tracked actionable broadcasts wake it; notify/status/response rows do not wake by default. Callers may opt into reply settlements correlated to their own tracked requests. Defaults to the daemon-resolved launch identity.",
+        "Long-poll until unanswered actionable attention exists or the timeout elapses. This is the steady-state bounded-wait rail. Direct request/query/verdict/assign rows, an incident opened or changed (its summary), and owned tracked actionable broadcasts wake it; notify/status/response rows do not wake by default. Callers may opt into reply settlements correlated to their own tracked requests. Defaults to the daemon-resolved launch identity.",
       lifetime: "one-shot",
       mapsToMcp: "inbox.wait",
       options: [

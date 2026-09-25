@@ -78,6 +78,9 @@ export type EventClassification = {
   delivery?: "push" | "pull"
   /** Stable event topic (e.g. `git:commit`); used by tribe.filter mute globs. */
   topic?: string
+  /** One-line summary. On an incident send it is the CONDITION, and the body carries the observation: the open and
+   *  an upsert whose summary changed wake the owner, and a repeat with the same summary does not (25662). */
+  summary?: string
 }
 
 export interface TribeClientApi {
