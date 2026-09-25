@@ -14,10 +14,19 @@ import { awaitReady, fullJitter, type RandomUnit } from "@bearly/pacing"
 export const RELOAD_REJOIN_MAX_MS = 16_000
 /** At most this many adapters are absent at once. */
 export const RELOAD_MAX_ABSENT = 5
-/** rejoinMax / N, rounded up to a whole second: 16 s / 5 = 3.2 s, so 4 s. */
+/**
+ * rejoinMax / N, rounded up to a whole second: 16 s / 5 = 3.2 s, so 4 s. It is a floor, not a guess: a 3.9 s slot
+ * already lets a sixth adapter into a 16 s rejoin (simulated for 25663 r2), so a larger roster widens the window.
+ */
 export const RELOAD_SLOT_MS = Math.ceil(RELOAD_REJOIN_MAX_MS / RELOAD_MAX_ABSENT / 1_000) * 1_000
-/** 20 adapters × 4 s = 80 s, plus headroom; a larger fleet shares the last slot. */
-export const RELOAD_WINDOW_CAP_MS = 90_000
+/**
+ * The widest stagger the deadline holds (25663 r2, @cto 3b3c3d7a): 28 slots of 4 s. 25662's default bridge-lost grace
+ * (180 s) must exceed the deadline plus its 30 s tick, so the deadline stays under 150 s and the window under 116 s.
+ * A declared seat never shares a slot while the roster fits; see reloadCapacityRefusal.
+ */
+export const RELOAD_WINDOW_CAP_MS = 112_000
+/** The most declared seats the window gives a slot each: 28. */
+export const RELOAD_MAX_DECLARED = Math.floor(RELOAD_WINDOW_CAP_MS / RELOAD_SLOT_MS)
 /** How long an adapter waits for the daemon to answer on the new code before it re-execs anyway, loudly. */
 export const RELOAD_READY_TIMEOUT_MS = 30_000
 /**
@@ -26,11 +35,25 @@ export const RELOAD_READY_TIMEOUT_MS = 30_000
  */
 export const RELOAD_PROBE_TIMEOUT_MS = 2_000
 /**
- * The longest a paced reload can take: 124 s. That is the window cap and the ready timeout, plus one probe timeout for
+ * The longest a paced reload can take: 146 s. That is the window cap and the ready timeout, plus one probe timeout for
  * the rank read and one for the gate's last probe, which may start just before the ready timeout. 25662's bridge-lost
  * grace must exceed this plus one tick.
  */
 export const RELOAD_DEADLINE_MS = RELOAD_WINDOW_CAP_MS + RELOAD_READY_TIMEOUT_MS + 2 * RELOAD_PROBE_TIMEOUT_MS
+
+/**
+ * Why a declared roster cannot be paced: more declared seats than the window has slots, so the ones past the last slot
+ * would share it on every reload. Null when every declared seat gets its own slot. The daemon logs it at startup and
+ * each reloading adapter warns with it; neither clips silently.
+ */
+export function reloadCapacityRefusal(declaredCount: number): string | null {
+  if (declaredCount <= RELOAD_MAX_DECLARED) return null
+  return (
+    `the declared roster names ${declaredCount} seats but the paced reload holds ${RELOAD_MAX_DECLARED} ` +
+    `(${RELOAD_WINDOW_CAP_MS} ms window of ${RELOAD_SLOT_MS} ms slots inside the ${RELOAD_DEADLINE_MS} ms deadline); ` +
+    `declared seats past slot ${RELOAD_MAX_DECLARED - 1} share it`
+  )
+}
 
 /** The last slot a list of `peerCount` peers can use inside the cap; every rank past it shares it. */
 export function reloadLastSlot(peerCount: number, slotMs: number, capMs: number): number {
@@ -137,6 +160,7 @@ function boundedRead(deps: PacedReexecDeps): Promise<ReloadDaemonView> {
  * - a failed or unanswered list read spreads over the cap and warns;
  * - a daemon without reload_peers or without a roster ranks on the live list and warns;
  * - a missing self goes last and warns; an undeclared self, or one clipped into a shared last slot, warns;
+ * - a declared roster larger than the window warns with the count and the cap (reloadCapacityRefusal);
  * - a daemon that reports no code identity, or an adapter whose own disk commit is unresolved, is judged on liveness
  *   alone, warned once and named for 25670;
  * - a daemon never ready re-execs anyway at the timeout, with a warning naming the last probe error.
@@ -156,6 +180,9 @@ export async function pacedReexec(deps: PacedReexecDeps, reason: string): Promis
       deps.warn(
         "reload pacing: the daemon has no declared roster; ranking on the live adapters alone, where adapters that rejoined at different moments can share a slot",
       )
+    } else {
+      const refusal = reloadCapacityRefusal(new Set(peers.declared).size)
+      if (refusal !== null) deps.warn(`reload pacing: ${refusal}`)
     }
     const ranked = reloadRank(deps.self, peers)
     rank = ranked.rank
