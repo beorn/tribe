@@ -217,4 +217,50 @@ describe("daemon.ts hook entry", () => {
     expect(res.stderr).toContain("tribe hook prompt:")
     expect(res.stderr).toContain("invalid JSON on stdin")
   })
+
+  // 25392: The prompt hook writes [recall] debug lines to its stderr on every prompt that reaches recall.
+  // The prompt hook's stderr must be empty on a prompt that reaches recall, in the recall Worker and hook thread alike.
+  test("hook prompt stderr is empty on a prompt that reaches recall, in the worker and hook thread alike (25392)", () => {
+    const base = mkdtempSync(join(tmpdir(), "tribe-hook-recall-stderr-"))
+    const dbPath = join(base, "recall.db")
+    mkdirSync(join(base, "project"), { recursive: true })
+    writeFileSync(join(base, "project", "CLAUDE.md"), "# test project\n")
+
+    const prompt = "why does src/lib/inject-core.ts stall the prompt hook past thirty seconds tonight?"
+
+    // Worker path: real hook invocation spawning the recall Worker via createDeadlineRecall
+    const res = spawnSync(process.execPath, [DAEMON, "hook", "prompt"], {
+      env: {
+        ...hermeticEnv(base),
+        RECALL_DB_PATH: dbPath,
+        CLAUDE_PROJECT_DIR: join(base, "project"),
+      },
+      input: `${JSON.stringify({ session_id: "recall-stderr-probe", cwd: base, prompt })}\n`,
+      timeout: 30_000,
+      encoding: "utf8",
+    })
+
+    expect(res.status, `hook stderr: ${res.stderr}`).toBe(0)
+    expect(res.stderr).toBe("")
+
+    // Hook-thread path: hookRecall invoked directly with muzzled console sink
+    const inThreadScript = `
+      import { muzzleHookProcess } from ${JSON.stringify(resolve(import.meta.dirname, "hook-dispatch.ts"))};
+      import { hookRecall } from ${JSON.stringify(resolve(import.meta.dirname, "../../../recall/src/history/recall.ts"))};
+      await muzzleHookProcess();
+      await hookRecall(${JSON.stringify(prompt)});
+    `
+    const inThreadRes = spawnSync(process.execPath, ["-e", inThreadScript], {
+      env: {
+        ...hermeticEnv(base),
+        RECALL_DB_PATH: dbPath,
+        CLAUDE_PROJECT_DIR: join(base, "project"),
+      },
+      timeout: 30_000,
+      encoding: "utf8",
+    })
+
+    expect(inThreadRes.status, `in-thread stderr: ${inThreadRes.stderr}`).toBe(0)
+    expect(inThreadRes.stderr).toBe("")
+  })
 })

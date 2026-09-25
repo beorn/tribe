@@ -2,18 +2,24 @@
  * recall-shared.ts - Shared logging, constants, and types used across recall modules
  */
 
+import { createLogger } from "loggily"
 import type { ContentType } from "./types.ts"
 
 // ============================================================================
 // Logging
 // ============================================================================
 
-let _logEnabled = true
+const recallLog = createLogger("recall")
+
+let _logEnabled = process.env.TRIBE_LOG === "1"
 export function setRecallLogging(enabled: boolean): void {
   _logEnabled = enabled
 }
+export function isRecallLogging(): boolean {
+  return _logEnabled
+}
 export function log(msg: string): void {
-  if (_logEnabled) console.error(`[recall] ${msg}`)
+  if (_logEnabled) recallLog.info?.(msg)
 }
 
 // ============================================================================

@@ -3,9 +3,13 @@
  * synchronous SQLite; on the hook's own thread no timer could fire until it returned. Answers `{ id, ok, result }`
  * or `{ id, ok: false, busy, message }`. Loaded only by recall-deadline.ts.
  */
+import { setSuppressConsole } from "loggily"
 import { IndexWriterBusyError } from "../history/db.ts"
 import type { RecallOptions } from "../history/recall-shared.ts"
 import { recall } from "../history/search.ts"
+
+// Silence console sinks in the worker so recall logging never leaks to stderr (25392).
+setSuppressConsole(true)
 
 declare const self: Worker
 

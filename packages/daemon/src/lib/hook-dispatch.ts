@@ -168,7 +168,7 @@ async function loadInjectionDebug(): Promise<InjectionDebug | null> {
  * a hook code path, route it through loggily — don't intercept here.
  */
 let _muzzled = false
-async function muzzleHookProcess(): Promise<void> {
+export async function muzzleHookProcess(): Promise<void> {
   if (_muzzled) return
   _muzzled = true
 
