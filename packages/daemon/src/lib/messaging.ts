@@ -5,6 +5,7 @@
 import { randomUUID } from "node:crypto"
 import type { TribeContext } from "./context.ts"
 import { AUTO_TRACK_TYPES_SET, type TribeStatements } from "./database.ts"
+import { sessionAuthority, type SessionAuthority } from "./identity-verifier.ts"
 import {
   describeSettlementConflict,
   foldSettlementFacts,
@@ -570,6 +571,7 @@ export function sendMessage(
       $attention_required: classification.attentionRequired === true ? 1 : 0,
       $wakes_owner: wakesOwner ? 1 : 0,
       $between_personas: isExplicitTribePersonaName(sender) && isExplicitTribePersonaName(recipient) ? 1 : 0,
+      $sender_authority: senderAuthorityOf(ctx, sender),
     })
     if (result.changes === 0) {
       const existing = ctx.stmts.selectMessageById.get({ $id: id }) as { rowid: number; ts: number } | undefined
@@ -716,10 +718,11 @@ export function logEvent(
   options: { sender?: string; ref?: string; ts?: number; summary?: string } = {},
 ): string {
   const id = randomUUID()
+  const sender = options.sender ?? ctx.getName()
   ctx.stmts.insertMessage.run({
     $id: id,
     $type: `event.${type}`,
-    $sender: options.sender ?? ctx.getName(),
+    $sender: sender,
     // Stamped from the daemon's own connection context, never caller-asserted:
     // `sender` is a self-reported name, this is not. An event attributed to
     // "daemon" still records which connection provoked it.
@@ -746,8 +749,24 @@ export function logEvent(
     $attention_required: 0,
     $wakes_owner: 0,
     $between_personas: 0,
+    $sender_authority: senderAuthorityOf(ctx, sender),
   })
   return id
+}
+
+/**
+ * The authority a message is sent with, fixed on the row at insert (25074 3d-1a, @cto 2bfc1935 Q0): every envelope says
+ * whether its sender is verified, a bearer, or only claims its name. None is the daemon's voice alone: its own context,
+ * or a row it attributes to itself while serving a client's call. A connection without a session row has registered no
+ * identity, so it only claims its name.
+ */
+function senderAuthorityOf(ctx: TribeContext, sender: string): SessionAuthority | null {
+  if (ctx.getRole() === "daemon" || sender !== ctx.getName()) return null
+  const row = ctx.stmts.selectSessionAuthority.get({ $id: ctx.sessionId }) as {
+    identity_sid: string | null
+    mailbox_authority_hash: string | null
+  } | null
+  return row === null ? "claimed" : sessionAuthority(row)
 }
 
 /**

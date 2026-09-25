@@ -9,6 +9,7 @@
 import { existsSync, fstatSync } from "node:fs"
 import { join } from "node:path"
 import { tribeSessionIdentityEnvironmentNames } from "./launch-environment.ts"
+import { HAB_ID_TOKEN_ENV } from "./lib/identity-token.ts"
 
 /**
  * Variables that prove hab launched this process, WITHOUT proving it is
@@ -118,6 +119,9 @@ export function sanitizeStandaloneDaemonEnvironment(source: Readonly<NodeJS.Proc
 export function tribeAmbientEnvironmentNames(): readonly string[] {
   return [
     ...tribeSessionIdentityEnvironmentNames(),
+    // The launch's identity token: tribe presents it (25074 3b) and, since 3d-1, reads its launch from it, so a
+    // fixture that inherited the runner's own seat token would read that seat's inbox.
+    HAB_ID_TOKEN_ENV,
     TRIBE_EXPECTED_MEMBERS_ENV,
     TRIBE_EXPECTED_MEMBERS_FILE_ENV,
     "CLAUDE_SESSION_ID",

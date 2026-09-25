@@ -3851,6 +3851,8 @@ export type FetchRow = {
   attention_required: number
   /** 25662 P3 3 — an incident edge: it woke the owner, so the owner's fetch that returns it acknowledges it. */
   wakes_owner: number
+  /** 25074 3d-1a — the sender's authority at insert; null for the daemon's own voice and for rows before v37. */
+  sender_authority?: SessionAuthority | null
 }
 
 export type FetchEvent = {
@@ -3867,6 +3869,8 @@ export type FetchEvent = {
   topic: string | null
   room_id: string | null
   summary: string | null
+  /** Whether the sender was verified, a bearer, or only claimed its name (25074 3d-1a, @cto 2bfc1935 Q0). */
+  from_authority: SessionAuthority | null
 }
 
 export function fetchEvent(row: FetchRow): FetchEvent {
@@ -3884,6 +3888,7 @@ export function fetchEvent(row: FetchRow): FetchEvent {
     topic: row.topic,
     room_id: row.room_id,
     summary: row.summary,
+    from_authority: row.sender_authority ?? null,
   }
 }
 
@@ -4021,7 +4026,7 @@ function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRo
   const rows = ctx.db
     .prepare(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-             attention_required, wakes_owner
+             attention_required, wakes_owner, sender_authority
       FROM messages
       WHERE ${conditions.join("\n        AND ")}
       ORDER BY rowid ${order}
@@ -4130,7 +4135,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
     rows = ctx.db
       .prepare(`
         SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-               attention_required, wakes_owner
+               attention_required, wakes_owner, sender_authority
         FROM messages
         WHERE id IN (${placeholders})
           AND kind != 'event'
