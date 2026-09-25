@@ -17,6 +17,7 @@
  * to accept `claudeSessionName` and `takeover` register params and to expose
  * `db` for direct journal-row assertions.
  */
+import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -1399,6 +1400,64 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
     )
     expect(refused.message).toMatch(/belongs to launch sid-dev7@3, whose parent process \d+ is alive/u)
     expect(sessionRow(harness, holder.sessionId)).toMatchObject({ launch_id: "sid-dev7@3", identity_sid: "sid-dev7" })
+  })
+
+  // 25688 P4 (review-adhoc5 5ebaafe385): the carry-forward is for THIS launch only, id AND parent. Each row adopts the
+  // verified row by pid and cwd, so only the launch guard stands between it and the verification.
+  it("a token-less register of the same launch id from ANOTHER parent is not served as verified", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    // The holder's parent has exited, so another parent may take the row; it must not take the verification too.
+    const deadParent = spawnSync("true").pid as number
+    harness.addPendingClient("conn-dead-parent")
+    const holder = parseResult<RegisterResult>(
+      await harness.register("conn-dead-parent", {
+        name: "@dev/7",
+        pid: 5401,
+        project: "/tmp/p",
+        launchParentPid: deadParent,
+        idToken: "token-g3",
+      }),
+    )
+    harness.dropClient("conn-dead-parent")
+    harness.addPendingClient("conn-other-parent")
+    const claim = parseResult<RegisterResult>(
+      await harness.register("conn-other-parent", {
+        name: "@dev/7",
+        pid: 5401,
+        project: "/tmp/p",
+        launchId: "sid-dev7@3",
+        launchParentPid: process.pid,
+      }),
+    )
+    expect(claim.sessionId).toBe(holder.sessionId)
+    expect(sessionRow(harness, holder.sessionId)).toMatchObject({
+      identity_sid: null,
+      identity_gen: null,
+      verified_id_token: null,
+    })
+  })
+
+  it("a token-less register of ANOTHER launch id from the same parent is not served as verified", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    const holder = await verifiedHolderBetweenConnections(harness)
+    harness.addPendingClient("conn-other-launch")
+    const claim = parseResult<RegisterResult>(
+      await harness.register("conn-other-launch", {
+        name: "@dev/7",
+        pid: 5401,
+        project: "/tmp/p",
+        launchId: "sid-dev7@2",
+        launchParentPid: process.pid,
+      }),
+    )
+    expect(claim.sessionId).toBe(holder.sessionId)
+    expect(sessionRow(harness, holder.sessionId)).toMatchObject({
+      identity_sid: null,
+      identity_gen: null,
+      verified_id_token: null,
+    })
   })
 
   it("the bootstrap and the adapter of one generation fan into ONE session keyed sid@gen, and the filter applies", async () => {
