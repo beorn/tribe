@@ -545,6 +545,12 @@ async function readReloadDaemonView(): Promise<ReloadDaemonView> {
 }
 
 const ADAPTER_SOURCE_DIR = dirname(fileURLToPath(import.meta.url))
+
+function reloadDelay(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    timers.setTimeout(resolve, ms)
+  })
+}
 let pacedReexecPending = false
 
 /**
@@ -568,8 +574,8 @@ function requestPacedReexec(reason: string, supervisedExitCode: number | null): 
         return onDisk.ok ? onDisk.value : null
       },
       now: () => Date.now(),
-      sleep: (ms) => new Promise<void>((resolve) => timers.setTimeout(resolve, ms)),
-      timeout: (ms) => new Promise<void>((resolve) => timers.setTimeout(resolve, ms)),
+      sleep: reloadDelay,
+      timeout: reloadDelay,
       warn: (message) => log.warn?.(message),
       reexec: (why) => requestPluginReexec(why, supervisedExitCode),
     },
