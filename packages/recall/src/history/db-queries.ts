@@ -41,15 +41,11 @@ export function upsertSession(
     shrinkNewCount?: number | null
     parentSessionId?: string | null
     agentId?: string | null
-    cwd?: string | null
-    tailOffset?: number | null
-    headFingerprint?: string | null
-    tailFingerprint?: string | null
   },
 ): void {
   db.prepare(`
-    INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title, status, size_bytes, mtime_ms, last_event_at_ms, failure_reason, failure_time, shrink_old_count, shrink_new_count, parent_session_id, agent_id, cwd, tail_offset, head_fingerprint, tail_fingerprint)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title, status, size_bytes, mtime_ms, last_event_at_ms, failure_reason, failure_time, shrink_old_count, shrink_new_count, parent_session_id, agent_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       jsonl_path = excluded.jsonl_path,
       updated_at = excluded.updated_at,
@@ -64,11 +60,7 @@ export function upsertSession(
       shrink_old_count = excluded.shrink_old_count,
       shrink_new_count = excluded.shrink_new_count,
       parent_session_id = COALESCE(excluded.parent_session_id, sessions.parent_session_id),
-      agent_id = COALESCE(excluded.agent_id, sessions.agent_id),
-      cwd = COALESCE(excluded.cwd, sessions.cwd),
-      tail_offset = COALESCE(excluded.tail_offset, sessions.tail_offset),
-      head_fingerprint = COALESCE(excluded.head_fingerprint, sessions.head_fingerprint),
-      tail_fingerprint = COALESCE(excluded.tail_fingerprint, sessions.tail_fingerprint)
+      agent_id = COALESCE(excluded.agent_id, sessions.agent_id)
   `).run(
     id,
     projectPath,
@@ -87,10 +79,6 @@ export function upsertSession(
     meta?.shrinkNewCount ?? null,
     meta?.parentSessionId ?? null,
     meta?.agentId ?? null,
-    meta?.cwd ?? null,
-    meta?.tailOffset ?? null,
-    meta?.headFingerprint ?? null,
-    meta?.tailFingerprint ?? null,
   )
 }
 
@@ -107,10 +95,6 @@ export function updateSessionStatus(
     mtimeMs?: number | null
     lastEventAtMs?: number | null
     jsonlPath?: string | null
-    cwd?: string | null
-    tailOffset?: number | null
-    headFingerprint?: string | null
-    tailFingerprint?: string | null
   },
 ): void {
   db.prepare(`
@@ -123,11 +107,7 @@ export function updateSessionStatus(
         size_bytes = COALESCE(?, size_bytes),
         mtime_ms = COALESCE(?, mtime_ms),
         last_event_at_ms = COALESCE(?, last_event_at_ms),
-        jsonl_path = COALESCE(?, jsonl_path),
-        cwd = COALESCE(?, cwd),
-        tail_offset = COALESCE(?, tail_offset),
-        head_fingerprint = COALESCE(?, head_fingerprint),
-        tail_fingerprint = COALESCE(?, tail_fingerprint)
+        jsonl_path = COALESCE(?, jsonl_path)
     WHERE id = ?
   `).run(
     status,
@@ -139,39 +119,8 @@ export function updateSessionStatus(
     details?.mtimeMs ?? null,
     details?.lastEventAtMs ?? null,
     details?.jsonlPath ?? null,
-    details?.cwd ?? null,
-    details?.tailOffset ?? null,
-    details?.headFingerprint ?? null,
-    details?.tailFingerprint ?? null,
     id,
   )
-}
-
-export function updateSessionTail(
-  db: Database,
-  id: string,
-  tailOffset: number,
-  tailFingerprint: string,
-  newMessagesCount: number,
-  sizeBytes: number,
-  mtimeMs: number,
-  updatedAt: number,
-  lastEventAtMs: number | null,
-  cwd?: string | null,
-): void {
-  db.prepare(`
-    UPDATE sessions SET
-      tail_offset = ?,
-      tail_fingerprint = ?,
-      message_count = message_count + ?,
-      size_bytes = ?,
-      mtime_ms = ?,
-      updated_at = MAX(updated_at, ?),
-      last_event_at_ms = COALESCE(?, last_event_at_ms),
-      cwd = COALESCE(?, cwd),
-      status = 'complete'
-    WHERE id = ?
-  `).run(tailOffset, tailFingerprint, newMessagesCount, sizeBytes, mtimeMs, updatedAt, lastEventAtMs, cwd ?? null, id)
 }
 
 export function getSessionStatus(
@@ -386,7 +335,7 @@ export function ftsSearch(
   db: Database,
   query: string,
   options: { limit?: number; offset?: number; projectFilter?: string } = {},
-): { results: (MessageRecord & { cwd?: string | null; project_path?: string; rank?: number })[]; total: number } {
+): { results: MessageRecord[]; total: number } {
   const { limit = 50, offset = 0, projectFilter } = options
 
   // Convert search query to FTS5 syntax
@@ -412,7 +361,7 @@ export function ftsSearch(
       ${uuidCollapseClause}
   `
   let searchQuery = `
-    SELECT m.*, s.project_path, s.cwd, s.parent_session_id, s.agent_id, ${MESSAGE_RANK_SQL} as rank
+    SELECT m.*, s.project_path, s.parent_session_id, s.agent_id, ${MESSAGE_RANK_SQL} as rank
     FROM messages_fts f
     JOIN messages m ON f.rowid = m.id
     JOIN sessions s ON m.session_id = s.id
@@ -424,7 +373,7 @@ export function ftsSearch(
   const params: (string | number)[] = [ftsQuery]
 
   if (projectFilter) {
-    const projectClause = ` AND s.cwd LIKE ?`
+    const projectClause = ` AND s.project_path LIKE ?`
     countQuery += projectClause
     searchQuery += projectClause
     params.push(`%${projectFilter}%`)
@@ -433,11 +382,7 @@ export function ftsSearch(
   searchQuery += ` ORDER BY rank LIMIT ? OFFSET ?`
 
   const totalRow = db.prepare(countQuery).get(...params) as { total: number }
-  const results = db.prepare(searchQuery).all(...params, limit, offset) as (MessageRecord & {
-    cwd?: string | null
-    project_path?: string
-    rank?: number
-  })[]
+  const results = db.prepare(searchQuery).all(...params, limit, offset) as MessageRecord[]
 
   return { results, total: totalRow.total }
 }
@@ -464,7 +409,6 @@ export interface MessageSearchOptions {
 export type MessageSearchHit = MessageRecord & {
   snippet: string
   project_path: string
-  cwd?: string | null
   rank: number
 }
 
@@ -497,7 +441,7 @@ function messageFilterSql(options: MessageSearchOptions): { sql: string; params:
   ]
   const params: (string | number)[] = []
   if (projectFilter) {
-    clauses.push("s.cwd LIKE ?")
+    clauses.push("s.project_path LIKE ?")
     params.push(`%${projectFilter}%`)
   }
   if (sinceTime !== undefined) {
@@ -520,7 +464,7 @@ function messageFilterSql(options: MessageSearchOptions): { sql: string; params:
 }
 
 /** The columns a hit carries beside its snippet and rank, for `m` joined to its session `s`. */
-const MESSAGE_HIT_COLUMNS_SQL = `m.*, s.project_path, s.cwd, s.parent_session_id, s.agent_id,
+const MESSAGE_HIT_COLUMNS_SQL = `m.*, s.project_path, s.parent_session_id, s.agent_id,
            (SELECT d.line FROM messages d WHERE d.session_id = m.session_id AND d.duplicate_of = m.line LIMIT 1) as duplicate_line`
 
 export function ftsSearchWithSnippet(

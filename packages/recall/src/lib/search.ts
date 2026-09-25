@@ -860,7 +860,6 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     results: (MessageRecord & {
       snippet: string
       project_path: string
-      cwd?: string | null
       rank: number
     })[]
     total: number
@@ -869,7 +868,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     messageResults = ftsSearchWithSnippet(db, query, messageOpts)
   } else if (searchMessages && !query) {
     const recentQuery = `
-      SELECT m.*, s.project_path, s.cwd,
+      SELECT m.*, s.project_path,
              (SELECT d.line FROM messages d WHERE d.session_id = m.session_id AND d.duplicate_of = m.line LIMIT 1) as duplicate_line,
              '' as snippet, 0 as rank
       FROM messages m
@@ -887,7 +886,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
       ${messageType ? "AND m.type = ?" : ""}
       ${tool ? "AND m.tool_name = ?" : ""}
       ${session ? "AND m.session_id = ?" : ""}
-      ${project ? "AND s.cwd LIKE ?" : ""}
+      ${project ? "AND s.project_path LIKE ?" : ""}
       ORDER BY m.timestamp DESC
       LIMIT ?
     `
@@ -902,7 +901,6 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     const results = db.prepare(recentQuery).all(...params) as (MessageRecord & {
       snippet: string
       project_path: string
-      cwd?: string | null
       rank: number
     })[]
     messageResults = { results, total: results.length }
@@ -970,8 +968,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
       ...messageResults.results.map((r) => ({
         contentType: "message" as const,
         sourceId: r.session_id,
-        projectPath: r.cwd ?? r.project_path,
-        cwd: r.cwd ?? null,
+        projectPath: r.project_path,
         title: sessionTitles.get(r.session_id) || null,
         timestamp: r.timestamp,
         snippet: r.snippet,

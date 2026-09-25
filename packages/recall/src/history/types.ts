@@ -38,10 +38,6 @@ export interface SessionRecord {
   shrink_new_count?: number | null
   parent_session_id?: string | null
   agent_id?: string | null
-  cwd?: string | null
-  tail_offset?: number | null
-  head_fingerprint?: string | null
-  tail_fingerprint?: string | null
 }
 
 // Entry from sessions-index.json

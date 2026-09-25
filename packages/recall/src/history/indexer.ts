@@ -23,7 +23,6 @@ import {
   MAX_CONTENT_SIZE,
   upsertSession,
   updateSessionStatus,
-  updateSessionTail,
   getSession,
   insertMessage,
   insertWrite,
@@ -133,7 +132,6 @@ export interface IndexOptions {
   skipCodex?: boolean
   chunkSize?: number // Number of files per commit chunk (default 50)
   allowLargePrune?: boolean
-  windowMs?: number
   onProgress?: (progress: IndexProgress) => void
 }
 
@@ -301,43 +299,6 @@ export function parseSessionPath(
   }
 }
 
-const TAIL_BLOCK_SIZE = 4096
-
-function computeFingerprint(buf: Buffer): string {
-  return createHash("sha256").update(buf).digest("hex")
-}
-
-function computeBlockFingerprint(fd: number, start: number, length: number): string {
-  if (length <= 0) return ""
-  const buf = Buffer.alloc(length)
-  const bytesRead = fs.readSync(fd, buf, 0, length, start)
-  return computeFingerprint(buf.subarray(0, bytesRead))
-}
-
-function findValidEndOffset(fd: number, totalSize: number, searchFrom = 0): number {
-  if (totalSize <= searchFrom) return searchFrom
-  const lastByte = Buffer.alloc(1)
-  fs.readSync(fd, lastByte, 0, 1, totalSize - 1)
-  if (lastByte[0] === 0x0a) {
-    return totalSize
-  }
-
-  const CHUNK_SIZE = 65536
-  let currentEnd = totalSize
-  while (currentEnd > searchFrom) {
-    const chunkLen = Math.min(CHUNK_SIZE, currentEnd - searchFrom)
-    const chunkStart = currentEnd - chunkLen
-    const buf = Buffer.alloc(chunkLen)
-    fs.readSync(fd, buf, 0, chunkLen, chunkStart)
-    const lastNl = buf.lastIndexOf(0x0a)
-    if (lastNl !== -1) {
-      return chunkStart + lastNl + 1
-    }
-    currentEnd = chunkStart
-  }
-  return 0
-}
-
 export async function indexSessionFile(
   db: Database,
   filePath: string,
@@ -361,16 +322,9 @@ export async function indexSessionFile(
   }
   const mtime = stats.mtime.getTime()
 
-  const sessionInfo = parseSessionPath(relativePath, filePath)
-  const sessionId = sessionInfo.id
-  const parentSessionId = sessionInfo.parentSessionId
-  const agentId = sessionInfo.agentId
-  const expectedSessionId = parentSessionId ?? sessionId
-
-  const existing = getSessionByPath(db, filePath) ?? getSessionByPath(db, relativePath) ?? getSession(db, sessionId)
-
-  // Check if we can skip (incremental mode with unchanged file)
+  // Check if we can skip (incremental mode)
   if (options.incremental) {
+    const existing = getSessionByPath(db, filePath) ?? getSessionByPath(db, relativePath)
     if (
       existing &&
       (existing.status == null ||
@@ -386,401 +340,157 @@ export async function indexSessionFile(
     }
   }
 
-  // Check if candidate for tail indexing (B2)
-  let canTailIndex = false
-  if (
-    !options.force &&
-    existing &&
-    (existing.status == null || existing.status === "complete") &&
-    typeof existing.tail_offset === "number" &&
-    existing.tail_offset > 0 &&
-    typeof existing.head_fingerprint === "string" &&
-    existing.head_fingerprint.length > 0 &&
-    typeof existing.tail_fingerprint === "string" &&
-    existing.tail_fingerprint.length > 0 &&
-    stats.size >= existing.tail_offset
-  ) {
-    if (stats.size === existing.tail_offset) {
-      // Size-preserving rewrite: mtime changed but size is identical
-      canTailIndex = false
-    } else {
-      let fd: number | null = null
-      try {
-        fd = fs.openSync(filePath, "r")
-        const offset = existing.tail_offset
+  const fileStream = fs.createReadStream(filePath)
+  const rl = readline.createInterface({
+    input: fileStream,
+    crlfDelay: Infinity,
+  })
 
-        // 1. Byte at offset - 1 must be \n (0x0A)
-        const lastByte = Buffer.alloc(1)
-        fs.readSync(fd, lastByte, 0, 1, offset - 1)
-        if (lastByte[0] === 0x0a) {
-          // 2. Head fingerprint of first block [0 .. min(4096, offset)]
-          const headLen = Math.min(TAIL_BLOCK_SIZE, offset)
-          const currentHeadFp = computeBlockFingerprint(fd, 0, headLen)
-          if (currentHeadFp === existing.head_fingerprint) {
-            // 3. Tail fingerprint of last block [max(0, offset - 4096) .. offset]
-            const tailLen = Math.min(TAIL_BLOCK_SIZE, offset)
-            const tailStart = offset - tailLen
-            const currentTailFp = computeBlockFingerprint(fd, tailStart, tailLen)
-            if (currentTailFp === existing.tail_fingerprint) {
-              canTailIndex = true
-            }
-          }
-        }
-      } catch {
-        canTailIndex = false
-      } finally {
-        if (fd != null) {
-          try {
-            fs.closeSync(fd)
-          } catch {
-            // silent-fallback-allow: ignore error closing already-closed fd during contract check
-          }
-        }
-      }
-    }
-  }
+  const sessionInfo = parseSessionPath(relativePath, filePath)
+  const sessionId = sessionInfo.id
+  const parentSessionId = sessionInfo.parentSessionId
+  const agentId = sessionInfo.agentId
+  const expectedSessionId = parentSessionId ?? sessionId
+  let mismatchedRecords = 0
+  let lastMismatchedSessionId: string | null = null
 
-  // Branch 1: Incremental tail indexing
-  if (canTailIndex && existing && typeof existing.tail_offset === "number") {
-    const offset = existing.tail_offset
-    let fd: number | null = null
-    try {
-      fd = fs.openSync(filePath, "r")
-      const newValidEnd = findValidEndOffset(fd, stats.size, offset)
-      if (newValidEnd <= offset) {
-        // Partial last line without newline is not consumed until it completes
-        return { messages: 0, writes: 0 }
-      }
+  let firstTimestamp: number | null = null
+  let lastTimestamp: number | null = null
+  let messageCount = 0
+  let writeCount = 0
+  const seenUuids = new Set<string>()
+  const seenWriteHashes = new Set<string>()
 
-      const newTailLen = Math.min(TAIL_BLOCK_SIZE, newValidEnd)
-      const newTailStart = newValidEnd - newTailLen
-      const newTailFingerprint = computeBlockFingerprint(fd, newTailStart, newTailLen)
+  const touchedSessionIds = new Set<string>([sessionId])
+  const spId = "sp_claude_" + Date.now() + "_" + Math.random().toString(36).slice(2)
+  db.run(`SAVEPOINT ${spId}`)
 
-      const stream = fs.createReadStream(filePath, { start: offset, end: newValidEnd - 1 })
-      const rl = readline.createInterface({ input: stream, crlfDelay: Infinity })
-
-      let newMessageCount = 0
-      let newWriteCount = 0
-      let lastTimestamp: number | null = null
-      let extractedCwd: string | null = null
-      const seenUuids = new Set<string>()
-      const seenWriteHashes = new Set<string>()
-
-      const existingWrites = db
-        .prepare("SELECT file_path, content_hash FROM writes WHERE session_id = ?")
-        .all(sessionId) as Array<{ file_path: string; content_hash: string }>
-      for (const w of existingWrites) {
-        seenWriteHashes.add(`${w.file_path}:${w.content_hash}`)
-      }
-
-      const spId = "sp_claude_tail_" + Date.now() + "_" + Math.random().toString(36).slice(2)
-      db.run(`SAVEPOINT ${spId}`)
-
-      try {
-        let lineNum = 0
-        for await (const line of rl) {
-          lineNum++
-          if (!line.trim()) continue
-
-          let record: JsonlRecord
-          try {
-            record = JSON.parse(line) as JsonlRecord
-          } catch (parseErr) {
-            throw new Error(
-              `Malformed JSON in Claude transcript tail at line ${lineNum}: ${(parseErr as Error).message}`,
-              { cause: parseErr },
-            )
-          }
-
-          if (!extractedCwd && record.cwd && typeof record.cwd === "string" && record.cwd.trim().length > 0) {
-            extractedCwd = record.cwd.trim()
-          }
-
-          if (record.timestamp) {
-            lastTimestamp = new Date(record.timestamp).getTime()
-          }
-
-          if (record.uuid) {
-            if (seenUuids.has(record.uuid)) continue
-            seenUuids.add(record.uuid)
-          }
-
-          const textContent = extractTextContent(record)
-          const { toolName, filePaths } = extractToolInfo(record)
-
-          if (textContent || toolName) {
-            const msgUuid = record.uuid ?? null
-            insertMessage(
-              db,
-              msgUuid,
-              sessionId,
-              record.type,
-              textContent,
-              toolName,
-              filePaths,
-              lastTimestamp ?? Date.now(),
-            )
-            newMessageCount++
-          }
-
-          if (!options.messagesOnly && record.type === "assistant" && record.message?.content) {
-            for (const item of record.message.content) {
-              if (
-                item &&
-                typeof item === "object" &&
-                (item as ToolUse).type === "tool_use" &&
-                (item as ToolUse).name === "Write" &&
-                (item as ToolUse).input?.file_path &&
-                (item as ToolUse).input?.content
-              ) {
-                const toolUse = item as ToolUse
-                const content = toolUse.input.content
-                const fp = toolUse.input.file_path
-                if (!content || !fp) continue
-                const hash = hashContent(content)
-                const uniqueKey = `${fp}:${hash}`
-
-                if (seenWriteHashes.has(uniqueKey)) continue
-                seenWriteHashes.add(uniqueKey)
-
-                const contentSize = Buffer.byteLength(content, "utf8")
-                insertWrite(
-                  db,
-                  sessionId,
-                  relativePath,
-                  toolUse.id,
-                  record.timestamp || new Date().toISOString(),
-                  fp,
-                  hash,
-                  contentSize,
-                  contentSize <= MAX_CONTENT_SIZE ? content : null,
-                )
-                newWriteCount++
-              }
-            }
-          }
-        }
-
-        updateSessionTail(
-          db,
-          sessionId,
-          newValidEnd,
-          newTailFingerprint,
-          newMessageCount,
-          stats.size,
-          mtime,
-          Math.max(existing.updated_at, lastTimestamp ?? mtime),
-          lastTimestamp,
-          extractedCwd,
-        )
-        db.run(`RELEASE SAVEPOINT ${spId}`)
-        return { messages: newMessageCount, writes: newWriteCount }
-      } catch (err) {
-        db.run(`ROLLBACK TO SAVEPOINT ${spId}`)
-        db.run(`RELEASE SAVEPOINT ${spId}`)
-        throw err
-      }
-    } finally {
-      if (fd != null) {
-        try {
-          fs.closeSync(fd)
-        } catch {
-          // silent-fallback-allow: ignore error closing already-closed fd after tail index
-        }
-      }
-    }
-  }
-
-  // Branch 2: Full re-indexing (new session, shrink, rewrite, or contract mismatch)
-  let fd: number | null = null
   try {
-    fd = fs.openSync(filePath, "r")
-    const validEnd = findValidEndOffset(fd, stats.size, 0)
+    for (const sid of touchedSessionIds) {
+      db.prepare("DELETE FROM messages WHERE session_id = ?").run(sid)
+      db.prepare("DELETE FROM writes WHERE session_id = ?").run(sid)
+    }
 
-    if (validEnd === 0) {
-      const spId = "sp_claude_empty_" + Date.now() + "_" + Math.random().toString(36).slice(2)
-      db.run(`SAVEPOINT ${spId}`)
+    let lineNum = 0
+    for await (const line of rl) {
+      lineNum++
+      if (!line.trim()) continue
+
+      let record: JsonlRecord
       try {
-        db.prepare("DELETE FROM messages WHERE session_id = ?").run(sessionId)
-        db.prepare("DELETE FROM writes WHERE session_id = ?").run(sessionId)
-        upsertSession(db, sessionId, projectPath, filePath, mtime, mtime, 0, null, {
-          status: "complete",
-          sizeBytes: stats.size,
-          mtimeMs: mtime,
-          lastEventAtMs: null,
-          parentSessionId,
-          agentId,
-          tailOffset: 0,
-          headFingerprint: null,
-          tailFingerprint: null,
+        record = JSON.parse(line) as JsonlRecord
+      } catch (parseErr) {
+        throw new Error(`Malformed JSON in Claude transcript at line ${lineNum}: ${(parseErr as Error).message}`, {
+          cause: parseErr,
         })
-        db.run(`RELEASE SAVEPOINT ${spId}`)
-      } catch (err) {
-        db.run(`ROLLBACK TO SAVEPOINT ${spId}`)
-        db.run(`RELEASE SAVEPOINT ${spId}`)
-        throw err
       }
+
+      if (record.sessionId && record.sessionId !== expectedSessionId) {
+        mismatchedRecords++
+        lastMismatchedSessionId = record.sessionId
+      }
+
+      // Use actual record timestamp for session date tracking;
+      // fall back to Date.now() only for message insertion (not session bounds)
+      const hasRecordTimestamp = !!record.timestamp
+      const timestamp = record.timestamp ? new Date(record.timestamp).getTime() : Date.now()
+      if (hasRecordTimestamp) {
+        if (firstTimestamp === null) firstTimestamp = timestamp
+        lastTimestamp = timestamp
+      }
+
+      // Skip if we've seen this UUID (incremental dedup)
+      if (record.uuid) {
+        if (seenUuids.has(record.uuid)) continue
+        seenUuids.add(record.uuid)
+      }
+
+      // Index the message directly into SQLite
+      const textContent = extractTextContent(record)
+      const { toolName, filePaths } = extractToolInfo(record)
+
+      if (textContent || toolName) {
+        const msgUuid = record.uuid ?? null
+        insertMessage(db, msgUuid, sessionId, record.type, textContent, toolName, filePaths, timestamp)
+        messageCount++
+      }
+
+      // Also index writes for backwards compatibility directly into SQLite
+      if (!options.messagesOnly && record.type === "assistant" && record.message?.content) {
+        for (const item of record.message.content) {
+          if (
+            item &&
+            typeof item === "object" &&
+            (item as ToolUse).type === "tool_use" &&
+            (item as ToolUse).name === "Write" &&
+            (item as ToolUse).input?.file_path &&
+            (item as ToolUse).input?.content
+          ) {
+            const toolUse = item as ToolUse
+            const content = toolUse.input.content
+            const filePath = toolUse.input.file_path
+            if (!content || !filePath) continue
+            const hash = hashContent(content)
+            const uniqueKey = `${toolUse.input.file_path}:${hash}`
+
+            // Skip exact duplicates
+            if (seenWriteHashes.has(uniqueKey)) continue
+            seenWriteHashes.add(uniqueKey)
+
+            const contentSize = Buffer.byteLength(content, "utf8")
+
+            insertWrite(
+              db,
+              sessionId,
+              relativePath,
+              toolUse.id,
+              record.timestamp || new Date().toISOString(),
+              filePath,
+              hash,
+              contentSize,
+              contentSize <= MAX_CONTENT_SIZE ? content : null,
+            )
+            writeCount++
+          }
+        }
+      }
+    }
+
+    if (mismatchedRecords > 0) {
+      console.warn(
+        `[recall] Warning: ${mismatchedRecords} record(s) in ${relativePath} had mismatched sessionId (last: "${lastMismatchedSessionId}", expected: "${expectedSessionId}"). Ignored.`,
+      )
+    }
+
+    upsertSession(
+      db,
+      sessionId,
+      projectPath,
+      filePath,
+      firstTimestamp || mtime,
+      lastTimestamp || mtime,
+      messageCount,
+      null,
+      {
+        status: "complete",
+        sizeBytes: stats.size,
+        mtimeMs: mtime,
+        lastEventAtMs: lastTimestamp,
+        parentSessionId,
+        agentId,
+      },
+    )
+    db.run(`RELEASE SAVEPOINT ${spId}`)
+  } catch (err) {
+    db.run(`ROLLBACK TO SAVEPOINT ${spId}`)
+    db.run(`RELEASE SAVEPOINT ${spId}`)
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       return { messages: 0, writes: 0 }
     }
-
-    const headLen = Math.min(TAIL_BLOCK_SIZE, validEnd)
-    const headFingerprint = computeBlockFingerprint(fd, 0, headLen)
-
-    const tailLen = Math.min(TAIL_BLOCK_SIZE, validEnd)
-    const tailStart = validEnd - tailLen
-    const tailFingerprint = computeBlockFingerprint(fd, tailStart, tailLen)
-
-    const stream = fs.createReadStream(filePath, { start: 0, end: validEnd - 1 })
-    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity })
-
-    let firstTimestamp: number | null = null
-    let lastTimestamp: number | null = null
-    let messageCount = 0
-    let writeCount = 0
-    let extractedCwd: string | null = null
-    const seenUuids = new Set<string>()
-    const seenWriteHashes = new Set<string>()
-
-    let mismatchedRecords = 0
-    let lastMismatchedSessionId: string | null = null
-
-    const spId = "sp_claude_full_" + Date.now() + "_" + Math.random().toString(36).slice(2)
-    db.run(`SAVEPOINT ${spId}`)
-
-    try {
-      db.prepare("DELETE FROM messages WHERE session_id = ?").run(sessionId)
-      db.prepare("DELETE FROM writes WHERE session_id = ?").run(sessionId)
-
-      let lineNum = 0
-      for await (const line of rl) {
-        lineNum++
-        if (!line.trim()) continue
-
-        let record: JsonlRecord
-        try {
-          record = JSON.parse(line) as JsonlRecord
-        } catch (parseErr) {
-          throw new Error(`Malformed JSON in Claude transcript at line ${lineNum}: ${(parseErr as Error).message}`, {
-            cause: parseErr,
-          })
-        }
-
-        if (!extractedCwd && record.cwd && typeof record.cwd === "string" && record.cwd.trim().length > 0) {
-          extractedCwd = record.cwd.trim()
-        }
-
-        if (record.sessionId && record.sessionId !== expectedSessionId) {
-          mismatchedRecords++
-          lastMismatchedSessionId = record.sessionId
-        }
-
-        const hasRecordTimestamp = !!record.timestamp
-        const timestamp = record.timestamp ? new Date(record.timestamp).getTime() : Date.now()
-        if (hasRecordTimestamp) {
-          if (firstTimestamp === null) firstTimestamp = timestamp
-          lastTimestamp = timestamp
-        }
-
-        if (record.uuid) {
-          if (seenUuids.has(record.uuid)) continue
-          seenUuids.add(record.uuid)
-        }
-
-        const textContent = extractTextContent(record)
-        const { toolName, filePaths } = extractToolInfo(record)
-
-        if (textContent || toolName) {
-          const msgUuid = record.uuid ?? null
-          insertMessage(db, msgUuid, sessionId, record.type, textContent, toolName, filePaths, timestamp)
-          messageCount++
-        }
-
-        if (!options.messagesOnly && record.type === "assistant" && record.message?.content) {
-          for (const item of record.message.content) {
-            if (
-              item &&
-              typeof item === "object" &&
-              (item as ToolUse).type === "tool_use" &&
-              (item as ToolUse).name === "Write" &&
-              (item as ToolUse).input?.file_path &&
-              (item as ToolUse).input?.content
-            ) {
-              const toolUse = item as ToolUse
-              const content = toolUse.input.content
-              const fp = toolUse.input.file_path
-              if (!content || !fp) continue
-              const hash = hashContent(content)
-              const uniqueKey = `${fp}:${hash}`
-
-              if (seenWriteHashes.has(uniqueKey)) continue
-              seenWriteHashes.add(uniqueKey)
-
-              const contentSize = Buffer.byteLength(content, "utf8")
-
-              insertWrite(
-                db,
-                sessionId,
-                relativePath,
-                toolUse.id,
-                record.timestamp || new Date().toISOString(),
-                fp,
-                hash,
-                contentSize,
-                contentSize <= MAX_CONTENT_SIZE ? content : null,
-              )
-              writeCount++
-            }
-          }
-        }
-      }
-
-      if (mismatchedRecords > 0) {
-        console.warn(
-          `[recall] Warning: ${mismatchedRecords} record(s) in ${relativePath} had mismatched sessionId (last: "${lastMismatchedSessionId}", expected: "${expectedSessionId}"). Ignored.`,
-        )
-      }
-
-      const isShrink = existing && existing.tail_offset != null && stats.size < existing.tail_offset
-      upsertSession(
-        db,
-        sessionId,
-        projectPath,
-        filePath,
-        firstTimestamp || mtime,
-        lastTimestamp || mtime,
-        messageCount,
-        null,
-        {
-          status: "complete",
-          sizeBytes: stats.size,
-          mtimeMs: mtime,
-          lastEventAtMs: lastTimestamp,
-          parentSessionId,
-          agentId,
-          cwd: extractedCwd ?? existing?.cwd ?? null,
-          tailOffset: validEnd,
-          headFingerprint,
-          tailFingerprint,
-          shrinkOldCount: isShrink ? (existing?.message_count ?? null) : null,
-          shrinkNewCount: isShrink ? messageCount : null,
-        },
-      )
-      db.run(`RELEASE SAVEPOINT ${spId}`)
-      return { messages: messageCount, writes: writeCount }
-    } catch (err) {
-      db.run(`ROLLBACK TO SAVEPOINT ${spId}`)
-      db.run(`RELEASE SAVEPOINT ${spId}`)
-      throw err
-    }
-  } finally {
-    if (fd != null) {
-      try {
-        fs.closeSync(fd)
-      } catch {
-        // silent-fallback-allow: ignore error closing already-closed fd after full index
-      }
-    }
+    throw err
   }
+
+  return { messages: messageCount, writes: writeCount }
 }
 
 export interface IndexResult {
@@ -949,50 +659,6 @@ function recordClaudeFailure(
   }
 }
 
-export interface ProjectDiscoveryResult {
-  discovered: string[]
-  vanished: string[]
-}
-
-export function discoverProjectCwds(
-  db: Database,
-  options: { windowMs?: number; now?: number } = {},
-): ProjectDiscoveryResult {
-  const windowMs = options.windowMs ?? 7 * 24 * 60 * 60 * 1000 // 7 days default
-  const cutoff = (options.now ?? Date.now()) - windowMs
-
-  const rows = db
-    .prepare("SELECT DISTINCT cwd FROM sessions WHERE cwd IS NOT NULL AND updated_at >= ?")
-    .all(cutoff) as Array<{ cwd: string }>
-
-  const discovered: string[] = []
-  const vanished: string[] = []
-
-  for (const r of rows) {
-    const cwd = r.cwd.trim()
-    if (!cwd) continue
-    try {
-      if (fs.existsSync(cwd) && fs.statSync(cwd).isDirectory()) {
-        discovered.push(cwd)
-      } else {
-        vanished.push(cwd)
-      }
-    } catch {
-      // silent-fallback-allow: stat failure on vanished or inaccessible project cwd directory
-      vanished.push(cwd)
-    }
-  }
-
-  const uniqueDiscovered = [...new Set(discovered)]
-  const uniqueVanished = [...new Set(vanished)]
-
-  console.log(
-    `[recall] Discovered ${uniqueDiscovered.length} active project root(s) (${uniqueVanished.length} vanished) within window: ${uniqueDiscovered.join(", ")}`,
-  )
-
-  return { discovered: uniqueDiscovered, vanished: uniqueVanished }
-}
-
 export async function rebuildIndex(db: Database, options: IndexOptions = {}): Promise<IndexResult> {
   const startTime = Date.now()
   const cutoffTime = options.full ? undefined : Date.now() - INDEX_WINDOW_MS
@@ -1005,9 +671,10 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     throw new Error("--force is only permitted when an explicit --path is specified")
   }
 
-  // B3: last_rebuild is never blanked during runs; run_started_at is set on index run start (25104, 25158 B3)
+  // Commit invalidation before any corpus write. A failure or killed process
+  // must not leave the prior success timestamp over partially updated data.
   if (!options.path) {
-    setIndexMeta(db, "run_started_at", new Date(startTime).toISOString())
+    setIndexMeta(db, "last_rebuild", "")
   }
 
   if (options.projectRoot && !fs.statSync(options.projectRoot).isDirectory()) {
@@ -1314,7 +981,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   }
 
   // Index session summaries, plans, todos, and project sources only during corpus rebuilds
-  const projectSourceResult = {
+  let projectSourceResult = {
     beads: 0,
     sessionMemory: 0,
     projectMemory: 0,
@@ -1412,27 +1079,10 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
       }
     }
 
-    // B3: Timer run indexes project sources for every project it discovers under the same writer
-    const projectRootsToIndex = new Set<string>()
+    // Index project sources if projectRoot is provided
     if (options.projectRoot) {
-      projectRootsToIndex.add(path.resolve(options.projectRoot))
-    }
-
-    const { discovered } = discoverProjectCwds(db, {
-      windowMs: options.full ? Infinity : options.windowMs,
-    })
-    for (const root of discovered) {
-      projectRootsToIndex.add(path.resolve(root))
-    }
-
-    for (const projectPath of projectRootsToIndex) {
-      const res = indexProjectSources(db, projectPath)
-      projectSourceResult.beads += res.beads
-      projectSourceResult.sessionMemory += res.sessionMemory
-      projectSourceResult.projectMemory += res.projectMemory
-      projectSourceResult.docs += res.docs
-      projectSourceResult.claudeMd += res.claudeMd
-      projectSourceResult.research += res.research
+      const projectPath = options.projectRoot
+      projectSourceResult = indexProjectSources(db, projectPath)
     }
 
     // Prune unreferenced sessions after all sources (Claude + Codex) have been indexed

@@ -111,7 +111,6 @@ export {
   upsertSession,
   updateSessionTitle,
   updateSessionStatus,
-  updateSessionTail,
   getSessionStatus,
   getSession,
   getSessionByPath,

@@ -6,7 +6,6 @@
 import { Database } from "bun:sqlite"
 import * as path from "path"
 import * as os from "os"
-import * as fs from "node:fs"
 
 export const CLAUDE_DIR = path.join(os.homedir(), ".claude")
 export const DB_PATH = process.env.RECALL_DB_PATH?.trim() || path.join(CLAUDE_DIR, "session-index.db")
@@ -57,15 +56,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   shrink_old_count INTEGER,
   shrink_new_count INTEGER,
   parent_session_id TEXT,
-  agent_id TEXT,
-  cwd TEXT,
-  tail_offset INTEGER DEFAULT 0,
-  head_fingerprint TEXT,
-  tail_fingerprint TEXT
+  agent_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_path);
-CREATE INDEX IF NOT EXISTS idx_sessions_cwd ON sessions(cwd);
 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at);
 
 -- All messages (user, assistant, tool_use, tool_result, etc.)
@@ -370,67 +364,6 @@ export const MIGRATION_STEPS: MigrationStep[] = [
           )
         }
         console.log(`[migration] ${parts.join("; ")}.`)
-      }
-    },
-  },
-  {
-    version: 4,
-    name: "session-tail-and-cwd-contract",
-    up: (db: Database) => {
-      const getColumns = (table: string): Set<string> => {
-        const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
-        return new Set(rows.map((r) => r.name))
-      }
-
-      const sessionCols = getColumns("sessions")
-      if (sessionCols.size > 0) {
-        if (!sessionCols.has("cwd")) db.exec("ALTER TABLE sessions ADD COLUMN cwd TEXT")
-        if (!sessionCols.has("tail_offset")) db.exec("ALTER TABLE sessions ADD COLUMN tail_offset INTEGER DEFAULT 0")
-        if (!sessionCols.has("head_fingerprint")) db.exec("ALTER TABLE sessions ADD COLUMN head_fingerprint TEXT")
-        if (!sessionCols.has("tail_fingerprint")) db.exec("ALTER TABLE sessions ADD COLUMN tail_fingerprint TEXT")
-      }
-      db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_cwd ON sessions(cwd)")
-
-      // Backfill cwd on existing sessions by reading head of each jsonl_path
-      const unbackfilled = db
-        .prepare("SELECT id, jsonl_path FROM sessions WHERE cwd IS NULL AND jsonl_path IS NOT NULL")
-        .all() as Array<{ id: string; jsonl_path: string }>
-
-      let backfilledCount = 0
-      const updateCwd = db.prepare("UPDATE sessions SET cwd = ? WHERE id = ?")
-
-      for (const sess of unbackfilled) {
-        if (!fs.existsSync(sess.jsonl_path)) continue
-        try {
-          const fd = fs.openSync(sess.jsonl_path, "r")
-          const buf = Buffer.alloc(65536)
-          const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0)
-          fs.closeSync(fd)
-
-          if (bytesRead > 0) {
-            const text = buf.toString("utf8", 0, bytesRead)
-            const lines = text.split("\n")
-            for (const line of lines) {
-              if (!line.trim()) continue
-              try {
-                const rec = JSON.parse(line) as { cwd?: string }
-                if (rec.cwd && typeof rec.cwd === "string" && rec.cwd.trim().length > 0) {
-                  updateCwd.run(rec.cwd.trim(), sess.id)
-                  backfilledCount++
-                  break
-                }
-              } catch {
-                // silent-fallback-allow: partial line or unparseable JSON in read buffer during migration
-              }
-            }
-          }
-        } catch {
-          // silent-fallback-allow: unreadable or vanished transcript file during migration
-        }
-      }
-
-      if (backfilledCount > 0) {
-        console.log(`[migration] Backfilled ${backfilledCount} session(s) with exact cwd.`)
       }
     },
   },

@@ -3,7 +3,7 @@
  */
 
 import { statSync } from "node:fs"
-import { getDb, acquireIndexWriter, DB_BUSY_TIMEOUT_MS } from "./db.ts"
+import { getDb, acquireIndexWriter, getIndexMeta, setIndexMeta, DB_BUSY_TIMEOUT_MS } from "./db.ts"
 import { indexProjectSources } from "./indexer.ts"
 import { log } from "./recall-shared.ts"
 
@@ -59,6 +59,8 @@ export function ensureProjectSourcesIndexed(): void {
 }
 
 function refreshProjectSources(db: ReturnType<typeof getDb>, projectRoot: string): void {
+  const previousCompletion = getIndexMeta(db, "last_rebuild") ?? ""
+  setIndexMeta(db, "last_rebuild", "")
   if (!statSync(projectRoot).isDirectory()) {
     throw new Error(`Recall project source is not a directory: ${projectRoot}`)
   }
@@ -71,4 +73,6 @@ function refreshProjectSources(db: ReturnType<typeof getDb>, projectRoot: string
       `indexed ${total} project sources (${Date.now() - startTime}ms): beads=${result.beads} memory=${result.sessionMemory} project=${result.projectMemory} docs=${result.docs} claude=${result.claudeMd} research=${result.research}`,
     )
   }
+  // This did not refresh sessions: restore their original age, never a new one.
+  setIndexMeta(db, "last_rebuild", previousCompletion)
 }
