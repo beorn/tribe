@@ -88,7 +88,7 @@ describe("an unattributable incident carries its own explanation", () => {
     if (observation.kind !== "unavailable") throw new Error("unreachable")
     expect(observation.diagnostic.location).toBe(SESSION_DIR)
     expect(observation.diagnostic.location).not.toBe(controllerSessionDir)
-    expect(runCommand).toHaveBeenCalledWith(expect.arrayContaining(["--state-root", SESSION_DIR]))
+    expect(runCommand).toHaveBeenCalledWith(expect.arrayContaining(["--state-root", SESSION_DIR]), expect.any(Number))
 
     const message = formatCollectedHealthAlert(cpuCritical(), observation, new Map<number, number>(), [], 1).message
     expect(message).toContain(`hab sysmon snapshot --state-root ${SESSION_DIR}`)

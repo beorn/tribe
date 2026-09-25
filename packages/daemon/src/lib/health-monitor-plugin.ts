@@ -31,6 +31,7 @@ import { startSingleFlightTicker } from "./single-flight-ticker.ts"
 import type { TribePluginApi, TribeClientApi } from "./plugin-api.ts"
 import {
   createHealthProcessSource,
+  SYSMON_COMMAND_TIMEOUT_MAX_MS,
   SYSMON_COMMAND_TIMEOUT_MS,
   type CanonicalHostScalarObservation,
   type CanonicalProcessObservation,
@@ -631,7 +632,10 @@ type CollectedProcessObservation = CanonicalProcessObservation | { readonly kind
 // (@i/1-instruments/24962).
 function censusBoundNote(reason: string): string {
   if (reason !== "source-command-timeout") return ""
-  return `: the ${SYSMON_COMMAND_TIMEOUT_MS / 1000}s census bound fired, which is expected under load`
+  return (
+    `: the census bound fired (${SYSMON_COMMAND_TIMEOUT_MS / 1000}s idle, scaled with the load up to ` +
+    `${SYSMON_COMMAND_TIMEOUT_MAX_MS / 1000}s), which is expected under load`
+  )
 }
 
 /**
