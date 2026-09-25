@@ -39,6 +39,7 @@ import { connectToDaemon, type DaemonClient } from "../src/client.ts"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
 import { tribeAmbientEnvironmentNames } from "../src/daemon-environment.ts"
 import { launchToken } from "./launch-token.ts"
+import { tribeDaemonCalls } from "../src/service-send.ts"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ADAPTER = resolve(HERE, "../src/stdio-adapter.ts")
@@ -2001,6 +2002,97 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     )
     const { verified } = await pollVerified(adapter, 3_000)
     expect(verified).toBe(false)
+  }, 60_000)
+
+  // 25074 3d-1c (@cto 082a4259): ONE answer to "who am I on the wire" for every sender. The witnesses run through the
+  // one sender against a real daemon whose verifier reads the token's claims: a service token registers as the
+  // service; a seat token registers as the seat, with the producer riding in the message; no token refuses naming both.
+  function writeClaimsVerifier(verifierPath: string): void {
+    writeFileSync(
+      verifierPath,
+      `export const IDENTITY_VERIFIER_INTERFACE = 1
+       export async function verifyIdentity(token) {
+         const claims = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8"))
+         return { result: "verified", actor: claims.act.sub, sid: claims.sid, gen: claims.gen }
+       }`,
+    )
+  }
+
+  function sentRows(dbPath: string): Array<{ sender: string; content: string; sender_authority: string | null }> {
+    const db = openDatabase(dbPath)
+    try {
+      return db
+        .prepare("SELECT sender, content, sender_authority FROM messages WHERE kind = 'direct' ORDER BY rowid")
+        .all() as Array<{ sender: string; content: string; sender_authority: string | null }>
+    } finally {
+      db.close()
+    }
+  }
+
+  it("the one sender: a service token registers as the service, verified", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const dbPath = join(tmpDir, "tribe.db")
+    const verifierPath = join(tmpDir, "verifier.ts")
+    writeClaimsVerifier(verifierPath)
+    daemonProc = spawnDaemon(socketPath, dbPath, { identityVerifier: verifierPath })
+    await waitForDaemonSocket(daemonProc, socketPath)
+
+    const serviceToken = launchToken("quota-wall:1790361566026", "quota-wall", "service")
+    const outcome = await tribeDaemonCalls("quota-wall", {
+      socketPath,
+      env: { HAB_ID_TOKEN: serviceToken },
+    }).sendAs({ to: NAME, message: "quota wall: 7-day 100%", type: "notify" })
+
+    expect(outcome, JSON.stringify(outcome)).toMatchObject({ kind: "ok" })
+    expect(sentRows(dbPath)).toEqual([
+      { sender: "quota-wall", content: "quota wall: 7-day 100%", sender_authority: "verified" },
+    ])
+  }, 60_000)
+
+  it("the one sender: a seat token registers as the seat, the producer rides in the message, the seat stays live", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const dbPath = join(tmpDir, "tribe.db")
+    const verifierPath = join(tmpDir, "verifier.ts")
+    writeClaimsVerifier(verifierPath)
+    daemonProc = spawnDaemon(socketPath, dbPath, { identityVerifier: verifierPath })
+    await waitForDaemonSocket(daemonProc, socketPath)
+    const seatToken = launchToken("sid-seat-3d1c", NAME)
+    const seat = await spawnLaunchAdapter(socketPath, "seat-3d1c.log", "sid-seat-3d1c", { idToken: seatToken })
+    const { verified } = await pollVerified(seat, 30_000)
+    expect(verified).toBe(true)
+
+    const outcome = await tribeDaemonCalls("onfail", { socketPath, env: { HAB_ID_TOKEN: seatToken } }).sendAs({
+      to: "@peer",
+      message: "onfail: the scoped fix failed (raised by onfail)",
+      type: "notify",
+    })
+
+    expect(outcome, JSON.stringify(outcome)).toMatchObject({ kind: "ok" })
+    expect(sentRows(dbPath)).toEqual([
+      { sender: NAME, content: "onfail: the scoped fix failed (raised by onfail)", sender_authority: "verified" },
+    ])
+    // The one-shot send did not displace the seat's own transport.
+    expect(seat.child.exitCode).toBeNull()
+    expect((await pollVerified(seat, 10_000)).verified).toBe(true)
+  }, 90_000)
+
+  it("the one sender: no token refuses before the daemon, naming HAB_ID_TOKEN and the producer", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const dbPath = join(tmpDir, "tribe.db")
+    daemonProc = spawnDaemon(socketPath, dbPath)
+    await waitForDaemonSocket(daemonProc, socketPath)
+
+    const outcome = await tribeDaemonCalls("onfail", { socketPath, env: {} }).sendAs({
+      to: "@peer",
+      message: "should never land",
+      type: "notify",
+    })
+
+    expect(outcome).toMatchObject({ kind: "error" })
+    const message = (outcome as { message?: string }).message ?? ""
+    expect(message).toContain("HAB_ID_TOKEN")
+    expect(message).toContain("onfail")
+    expect(sentRows(dbPath)).toEqual([])
   }, 60_000)
 
   it("fans three native adapters from one provider launch into one live member", async () => {
