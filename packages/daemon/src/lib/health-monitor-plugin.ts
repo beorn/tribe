@@ -34,6 +34,7 @@ import {
   type CanonicalHostScalarObservation,
   type CanonicalProcessObservation,
   type HealthProcessSource,
+  type PendingProcRead,
 } from "./health-process-source.ts"
 import {
   checkCanonicalReaper,
@@ -1367,6 +1368,112 @@ export function runBridgeLostTick(
   }
 }
 
+export const PROC_READ_PINNED_EMITTER = "health-monitor"
+export const PROC_READ_PINNED_CONDITION = "proc-read-pinned"
+/** Runtime health is @chief's; a stuck process is a host condition no seat owns. */
+export const PROC_READ_PINNED_OWNER = "@chief"
+/**
+ * How long a census /proc read may stay pending before it names a stuck process (24248, @cto 0fb300a3): five minutes,
+ * ten census intervals at hab's default 30 s. A read of a process's own cmdline or environ waits on that process's
+ * mmap lock; on a loaded host it settles in milliseconds, so one held for ten censuses is a process holding its lock,
+ * not load.
+ */
+export const PROC_READ_PINNED_AFTER_MS = 5 * 60_000
+
+export interface ProcReadPinnedAction {
+  readonly kind: "raise" | "clear"
+  readonly recipient: string
+  readonly content: string
+  /** The condition line: stable while the condition holds, so a repeat never re-wakes the owner. */
+  readonly summary: string
+  readonly incident: { readonly emitter: string; readonly subject: string; readonly condition: string }
+}
+
+const procReadPinnedIncident = (subject: string) => ({
+  emitter: PROC_READ_PINNED_EMITTER,
+  subject,
+  condition: PROC_READ_PINNED_CONDITION,
+})
+
+/**
+ * One census's verdict on pinned /proc reads. Raises once per process incarnation (pid plus start time) whose read has
+ * been pending past the threshold, upserts only when its condition line changes, and clears when a later census no
+ * longer reports the read (it settled, or the process is gone). A census that says nothing about pending reads (the
+ * snapshot itself failed) changes nothing: absence of evidence there is not a settled read.
+ */
+export function checkPinnedProcReads(
+  observation: CollectedProcessObservation,
+  now: number,
+  openIncidents: ReadonlyArray<{ readonly subject: string; readonly recipient: string }>,
+  told: Map<string, string>,
+): ProcReadPinnedAction[] {
+  let pending: readonly PendingProcRead[]
+  if (observation.kind === "available") pending = []
+  else if (observation.kind === "unavailable" && observation.reason === "process-census-incomplete") {
+    pending = observation.pendingProcReads?.reads ?? []
+  } else return []
+
+  const pinned = new Map<string, PendingProcRead[]>()
+  for (const read of pending) {
+    if (now - Date.parse(read.since) < PROC_READ_PINNED_AFTER_MS) continue
+    const subject = `${read.pid}:${read.startTime ?? "start-unknown"}`
+    pinned.set(subject, [...(pinned.get(subject) ?? []), read])
+  }
+
+  const actions: ProcReadPinnedAction[] = []
+  const open = new Map(openIncidents.map((incident) => [incident.subject, incident.recipient]))
+  for (const [subject, recipient] of open) {
+    if (pinned.has(subject)) continue
+    told.delete(subject)
+    const why = `cleared: pid ${subject.split(":")[0]}'s /proc read settled or the process is gone`
+    actions.push({ kind: "clear", recipient, content: why, summary: why, incident: procReadPinnedIncident(subject) })
+  }
+  for (const [subject, reads] of pinned) {
+    const [oldest] = [...reads].sort((left, right) => left.since.localeCompare(right.since))
+    if (oldest === undefined) continue
+    const paths = [...new Set(reads.map((read) => read.path))].sort().join(", ")
+    const summary = `pid ${oldest.pid} has held a /proc read pending since ${oldest.since}: ${paths}`
+    if (told.get(subject) === summary) continue
+    told.set(subject, summary)
+    const minutes = Math.floor((now - Date.parse(oldest.since)) / 60_000)
+    const content =
+      `${summary} (${minutes} min; process start ${oldest.startTime ?? "unknown: its stat read is the one pending"}). ` +
+      "This process is blocking /proc reads of its own cmdline or environ; find it with `hab sysmon snapshot` and " +
+      "kill or fix it. Each pinned read holds one runtime I/O thread in habmod until the process releases its lock."
+    actions.push({
+      kind: "raise",
+      recipient: open.get(subject) ?? PROC_READ_PINNED_OWNER,
+      content,
+      summary,
+      incident: procReadPinnedIncident(subject),
+    })
+  }
+  return actions
+}
+
+/** Deliver checkPinnedProcReads's actions on the incident rail, reading open incidents from the durable tracker. */
+export function runProcReadPinnedTick(
+  api: TribeClientApi,
+  observation: CollectedProcessObservation,
+  told: Map<string, string>,
+  now: number,
+): void {
+  if (api.listOpenIncidents === undefined) return
+  const openIncidents = api.listOpenIncidents(PROC_READ_PINNED_EMITTER, PROC_READ_PINNED_CONDITION)
+  const type = `health:${PROC_READ_PINNED_CONDITION}`
+  for (const action of checkPinnedProcReads(observation, now, openIncidents, told)) {
+    log.info?.(`proc-read-pinned ${action.kind} -> ${action.recipient}: ${action.summary}`)
+    api.send(
+      action.recipient,
+      action.content,
+      type,
+      undefined,
+      { delivery: "push", topic: type, summary: action.summary },
+      { ...action.incident, active: action.kind === "raise" },
+    )
+  }
+}
+
 /**
  * Format the lock holder — prefer "<session> (PID <pid>)" when both are known,
  * since the session name is what a human remembers but the PID is still the
@@ -2448,6 +2555,10 @@ export const healthMonitorPlugin: TribePluginApi = {
     let ioSampleCount = 0
     let chiefPresenceSampleCount = 0
     const bridgeLostMemory = createBridgeLostMemory()
+    const procReadPinnedTold = new Map<string, string>()
+    if (api.listOpenIncidents === undefined) {
+      log.error?.("proc-read-pinned paging disarmed: this daemon's plugin API exposes no open incidents")
+    }
     const bridgeLostParsed = parseBridgeLostConfig(process.env, { tickMs: pollIntervalSec * 3 * 1000 })
     currentBridgeLostArming =
       bridgeLostParsed.armed && (api.getSeatTransportFacts === undefined || api.listOpenIncidents === undefined)
@@ -2516,6 +2627,12 @@ export const healthMonitorPlugin: TribePluginApi = {
           } catch (err) {
             log.error?.(`bridge-lost check failed: ${err instanceof Error ? err.message : String(err)}`)
           }
+        }
+
+        try {
+          runProcReadPinnedTick(api, processObservation, procReadPinnedTold, Date.now())
+        } catch (err) {
+          log.error?.(`proc-read-pinned check failed: ${err instanceof Error ? err.message : String(err)}`)
         }
 
         // --- Process reaper ---
