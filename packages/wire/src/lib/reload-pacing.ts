@@ -21,7 +21,7 @@ export const RELOAD_MAX_ABSENT = 5
 export const RELOAD_SLOT_MS = Math.ceil(RELOAD_REJOIN_MAX_MS / RELOAD_MAX_ABSENT / 1_000) * 1_000
 /**
  * The widest stagger the deadline holds (25663 r2, @cto 3b3c3d7a): 28 slots of 4 s. 25662's default bridge-lost grace
- * (180 s) must exceed the deadline plus its 30 s tick, so the deadline stays under 150 s and the window under 116 s.
+ * is derived from RELOAD_DEADLINE_MS (the deadline, one health tick and a margin), so widening this lengthens it.
  * A declared seat never shares a slot while the roster fits; see reloadCapacityRefusal.
  */
 export const RELOAD_WINDOW_CAP_MS = 112_000
@@ -36,8 +36,8 @@ export const RELOAD_READY_TIMEOUT_MS = 30_000
 export const RELOAD_PROBE_TIMEOUT_MS = 2_000
 /**
  * The longest a paced reload can take: 146 s. That is the window cap and the ready timeout, plus one probe timeout for
- * the rank read and one for the gate's last probe, which may start just before the ready timeout. 25662's bridge-lost
- * grace must exceed this plus one tick.
+ * the rank read and one for the gate's last probe, which may start just before the ready timeout. 25662's default
+ * bridge-lost grace is this plus one tick plus a margin, and an explicit grace is validated against it.
  */
 export const RELOAD_DEADLINE_MS = RELOAD_WINDOW_CAP_MS + RELOAD_READY_TIMEOUT_MS + 2 * RELOAD_PROBE_TIMEOUT_MS
 

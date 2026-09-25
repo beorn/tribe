@@ -28,6 +28,9 @@ import {
   BRIDGE_LOST_CONDITION,
   BRIDGE_LOST_EMITTER,
   checkBridgeLost,
+  BRIDGE_LOST_GRACE_MARGIN_MS,
+  DEFAULT_BRIDGE_LOST_GRACE_MS,
+  DEFAULT_BRIDGE_LOST_TICK_MS,
   parseBridgeLostConfig,
   runBridgeLostTick,
   type BridgeLostConfig,
@@ -217,10 +220,10 @@ describe("checkBridgeLost", () => {
 })
 
 describe("parseBridgeLostConfig", () => {
-  test("arms with the configured owners and a 180 s default grace", () => {
+  test("arms with the configured owners and the derived default grace", () => {
     expect(parseBridgeLostConfig({ TRIBE_BRIDGE_LOST_OWNERS: "@chief, @cto,@adhoc/0" })).toEqual({
       armed: true,
-      config: { owners: ["@chief", "@cto", "@adhoc/0"], graceMs: 180_000 },
+      config: { owners: ["@chief", "@cto", "@adhoc/0"], graceMs: DEFAULT_BRIDGE_LOST_GRACE_MS },
     })
   })
 
@@ -241,13 +244,19 @@ describe("parseBridgeLostConfig", () => {
     ).toEqual({ armed: false, reason: 'TRIBE_BRIDGE_LOST_GRACE_SEC must be a positive number of seconds, got "soon"' })
   })
 
-  // 25663 supplies the deadline: the shipped default grace outlasts a paced reload plus the monitor's ~30 s tick, so a
-  // later change to either constant fails loud here instead of paging every reload.
-  test("the default grace exceeds the shipped reload deadline plus one tick", () => {
-    const tickMs = 3 * 10_000
-    expect(RELOAD_DEADLINE_MS + tickMs).toBeLessThan(180_000)
+  // 25663 r3 (@cto 5d1adade): the default grace and the reload deadline are one relation, asserted here, not two
+  // literals that happen to fit: a change to either constant moves the other, and a zero margin fails loud.
+  test("the default grace is the reload deadline plus one tick plus a positive margin, and it arms", () => {
+    expect(DEFAULT_BRIDGE_LOST_GRACE_MS).toBe(
+      RELOAD_DEADLINE_MS + DEFAULT_BRIDGE_LOST_TICK_MS + BRIDGE_LOST_GRACE_MARGIN_MS,
+    )
+    expect(BRIDGE_LOST_GRACE_MARGIN_MS).toBeGreaterThan(0)
     const env = { TRIBE_BRIDGE_LOST_OWNERS: "@chief,@cto" }
-    expect(parseBridgeLostConfig(env, { reloadDeadlineMs: RELOAD_DEADLINE_MS, tickMs }).armed).toBe(true)
+    const bounds = { reloadDeadlineMs: RELOAD_DEADLINE_MS, tickMs: DEFAULT_BRIDGE_LOST_TICK_MS }
+    expect(parseBridgeLostConfig(env, bounds).armed).toBe(true)
+    // With no margin the same relation pages on the slowest reload, and the parser refuses it.
+    const noMargin = String((RELOAD_DEADLINE_MS + DEFAULT_BRIDGE_LOST_TICK_MS) / 1000)
+    expect(parseBridgeLostConfig({ ...env, TRIBE_BRIDGE_LOST_GRACE_SEC: noMargin }, bounds).armed).toBe(false)
   })
 
   // The refusal itself, on a stub deadline.

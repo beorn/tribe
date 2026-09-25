@@ -1144,7 +1144,20 @@ export function checkChiefAbsent(
 
 export const BRIDGE_LOST_EMITTER = "tribe-health"
 export const BRIDGE_LOST_CONDITION = "bridge-lost"
-const DEFAULT_BRIDGE_LOST_GRACE_SEC = 180
+/** The health poll's interval when HEALTH_POLL_INTERVAL is unset. */
+const DEFAULT_HEALTH_POLL_INTERVAL_SEC = 10
+/** Bridge-lost judges a seat once per this many polls: the lag between a grace running out and the page. */
+const BRIDGE_LOST_TICK_POLLS = 3
+export const DEFAULT_BRIDGE_LOST_TICK_MS = DEFAULT_HEALTH_POLL_INTERVAL_SEC * BRIDGE_LOST_TICK_POLLS * 1000
+/** Headroom past the slowest paced reload plus one tick. */
+export const BRIDGE_LOST_GRACE_MARGIN_MS = 4_000
+/**
+ * The default grace is DERIVED from the adapters' reload deadline (25663 r3, @cto 5d1adade): a paced reload plus one
+ * tick plus the margin, 180 s at the 146 s deadline. Widening the reload window lengthens the grace with it, so the
+ * two cannot cross. An explicit TRIBE_BRIDGE_LOST_GRACE_SEC is still validated against the deadline and the live tick.
+ */
+export const DEFAULT_BRIDGE_LOST_GRACE_MS =
+  RELOAD_DEADLINE_MS + DEFAULT_BRIDGE_LOST_TICK_MS + BRIDGE_LOST_GRACE_MARGIN_MS
 
 export interface BridgeLostConfig {
   /** Paged in order; the first that is not itself lost receives the incident. */
@@ -1159,8 +1172,8 @@ export type BridgeLostArming =
 
 /**
  * Arm bridge-lost paging from the daemon's environment, or refuse by name. There is no default owner: a daemon
- * other habitats run must not page a seat name it was never told about. `reloadDeadlineMs` binds the grace to the
- * adapters' reload deadline (25663) by validation, never by sharing a constant.
+ * other habitats run must not page a seat name it was never told about. The default grace is derived from the reload
+ * deadline; `reloadDeadlineMs` and `tickMs` validate an explicit grace against it (25663).
  */
 export function parseBridgeLostConfig(
   env: Readonly<Record<string, string | undefined>>,
@@ -1181,7 +1194,7 @@ export function parseBridgeLostConfig(
     }
   }
   const graceRaw = env.TRIBE_BRIDGE_LOST_GRACE_SEC
-  const graceSec = graceRaw === undefined ? DEFAULT_BRIDGE_LOST_GRACE_SEC : Number(graceRaw)
+  const graceSec = graceRaw === undefined ? DEFAULT_BRIDGE_LOST_GRACE_MS / 1000 : Number(graceRaw)
   if (!Number.isFinite(graceSec) || graceSec <= 0) {
     return {
       armed: false,
@@ -2558,7 +2571,9 @@ export const healthMonitorPlugin: TribePluginApi = {
   },
 
   start(api: TribeClientApi) {
-    const pollIntervalSec = parseInt(process.env.HEALTH_POLL_INTERVAL ?? "10", 10) || 10
+    const pollIntervalSec =
+      parseInt(process.env.HEALTH_POLL_INTERVAL ?? String(DEFAULT_HEALTH_POLL_INTERVAL_SEC), 10) ||
+      DEFAULT_HEALTH_POLL_INTERVAL_SEC
     const thresholds = defaultThresholds()
     const alertState = createAlertState()
     const processSource = createHealthProcessSource()
@@ -2577,7 +2592,7 @@ export const healthMonitorPlugin: TribePluginApi = {
     // 25663: a paced reload takes at most RELOAD_DEADLINE_MS, so the grace must outlast it plus one tick.
     const bridgeLostParsed = parseBridgeLostConfig(process.env, {
       reloadDeadlineMs: RELOAD_DEADLINE_MS,
-      tickMs: pollIntervalSec * 3 * 1000,
+      tickMs: pollIntervalSec * BRIDGE_LOST_TICK_POLLS * 1000,
     })
     currentBridgeLostArming =
       bridgeLostParsed.armed && (api.getSeatTransportFacts === undefined || api.listOpenIncidents === undefined)
