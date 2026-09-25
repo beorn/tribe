@@ -23,6 +23,7 @@
     "start": "bash launch.sh"
   },
   "dependencies": {
+    "@bearly/pacing": "0.1.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "tribe-daemon": "workspace:*",
     "tribe-wire": "workspace:*"

@@ -39,8 +39,12 @@ import {
 } from "./lib/socket.ts"
 import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
 import { createReconnectWatchdog } from "./lib/reconnect-watchdog.ts"
+import { resolveCheckoutCodeIdentity } from "./lib/code-identity.ts"
+import { pacedReexec, type ReloadDaemonView } from "./lib/reload-pacing.ts"
 import { createHash } from "node:crypto"
 import { constants as osConstants } from "node:os"
+import { dirname } from "node:path"
+import { fileURLToPath } from "node:url"
 import { hashSelfMailboxAuthority, readSelfMailboxAuthorityFromEnvironment } from "./lib/self-mailbox-authority.ts"
 import { readIdentityTokenFromEnvironment } from "./lib/identity-token.ts"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
@@ -515,8 +519,61 @@ function requestPluginReexec(reason: string, supervisedExitCode = supervisedReex
 
 function handleDaemonGenerationChange(reason: string): void {
   const supervisedExitCode = supervisedReexecExitCode(2)
-  if (supervisedExitCode !== null) requestPluginReexec(reason, supervisedExitCode)
+  if (supervisedExitCode !== null) {
+    requestPacedReexec(reason, supervisedExitCode)
+    return
+  }
   log.info?.(`tribe direct adapter re-registered without a host re-exec supervisor: ${reason}`)
+}
+
+/** The daemon view a paced reload reads: the live names for this adapter's rank, and the code the daemon runs. */
+async function readReloadDaemonView(): Promise<ReloadDaemonView> {
+  const probe = await connectToDaemon(SOCKET_PATH, { callTimeoutMs: 1_000 })
+  try {
+    const status = (await probe.call("cli_status")) as {
+      sessions?: Array<{ name?: unknown }>
+      daemon?: { code_identity?: { cert?: unknown } }
+    }
+    const liveNames = (status.sessions ?? []).flatMap((session) => (typeof session.name === "string" ? [session.name] : []))
+    const cert = status.daemon?.code_identity?.cert
+    return { liveNames, runningCert: typeof cert === "string" ? cert : null }
+  } finally {
+    probe.close()
+  }
+}
+
+const ADAPTER_SOURCE_DIR = dirname(fileURLToPath(import.meta.url))
+let pacedReexecPending = false
+
+/**
+ * A fleet-wide re-exec (a source change, a daemon generation change) waits for this adapter's slot in a rolling
+ * restart and for a daemon running the code on disk (25663). The first request wins; a second while one is pending
+ * is the same reload.
+ */
+function requestPacedReexec(reason: string, supervisedExitCode: number | null): void {
+  if (supervisedExitCode === null) requestPluginReexec(reason, supervisedExitCode)
+  if (pacedReexecPending) {
+    log.info?.(`paced re-exec already pending; also: ${reason}`)
+    return
+  }
+  pacedReexecPending = true
+  void pacedReexec(
+    {
+      self: myName,
+      readDaemon: readReloadDaemonView,
+      onDiskCert: () => {
+        const onDisk = resolveCheckoutCodeIdentity(ADAPTER_SOURCE_DIR).onDisk
+        return onDisk.ok ? onDisk.value : null
+      },
+      now: () => Date.now(),
+      sleep: (ms) => new Promise<void>((resolve) => timers.setTimeout(resolve, ms)),
+      warn: (message) => log.warn?.(message),
+      reexec: (why) => requestPluginReexec(why, supervisedExitCode),
+    },
+    reason,
+  ).catch((error: unknown) =>
+    requestPluginReexec(`${reason}; paced re-exec failed: ${errorMessage(error)}`, supervisedExitCode),
+  )
 }
 
 const reconnectWatchdog = createReconnectWatchdog({
@@ -1021,7 +1078,7 @@ using _reload = setupHotReload({
   logActivity: (type, content) => {
     daemon?.call("log_event", { type, content }).catch(() => {})
   },
-  replaceProcess: (reason) => requestPluginReexec(reason),
+  replaceProcess: (reason) => requestPacedReexec(reason, supervisedReexecExitCode()),
 })
 
 const shutdown = (exitCode = 0) => {
@@ -1291,11 +1348,6 @@ void daemonReady
       } else if (method === "session.joined" || method === "session.left") {
         const action = method === "session.joined" ? "joined" : "left"
         sendChannel(`${String(params?.name ?? "unknown")} ${action} the tribe`, { from: "daemon", type: "status" })
-      } else if (method === "reload") {
-        log.info?.(`Daemon requests reload: ${String(params?.reason)}`)
-        timers.setTimeout(() => {
-          requestPluginReexec(`daemon requested reload: ${String(params?.reason ?? "unspecified")}`)
-        }, 500)
       }
     }),
   )

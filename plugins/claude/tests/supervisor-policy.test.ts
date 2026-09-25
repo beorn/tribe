@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import {
   ADAPTER_STABLE_MS,
   evaluateAdapterRestart,
+  REEXEC_BACKOFF_BASE_MS,
   REEXEC_BACKOFF_MAX_MS,
   LEGACY_PARENT_WARNING,
   PROVIDER_PARENT_REMEDY,
@@ -23,7 +24,7 @@ describe("Claude plugin adapter restart budget", () => {
   })
 
   it("allows a second quick re-exec when two legitimate daemon generations arrive in one restart burst", () => {
-    expect(evaluateAdapterRestart(1, 10_000, Number.POSITIVE_INFINITY, 1)).toEqual({
+    expect(evaluateAdapterRestart(1, 250, 10_000, Number.POSITIVE_INFINITY, () => 0.5)).toEqual({
       consecutiveReexecs: 2,
       retry: true,
       retryDelayMs: 500,
@@ -31,39 +32,43 @@ describe("Claude plugin adapter restart budget", () => {
   })
 
   it("keeps non-generation re-exec failures on the one-retry fail-loud path", () => {
-    expect(evaluateAdapterRestart(1, 10_000, 1, 1)).toEqual({
+    expect(evaluateAdapterRestart(1, 250, 10_000, 1, () => 0.5)).toEqual({
       consecutiveReexecs: 2,
       retry: false,
       retryDelayMs: 0,
     })
   })
 
-  it("retries a persistently crashing adapter forever with capped backoff", () => {
+  // 25663: decorrelated jitter from the previous delay, never below the base and never above the cap.
+  it("retries a persistently crashing adapter forever, each delay in [base, min(cap, previous × 3)]", () => {
     let consecutiveReexecs = 0
-    for (let attempt = 1; attempt <= 12; attempt += 1) {
-      const decision = evaluateAdapterRestart(consecutiveReexecs, 10_000, Number.POSITIVE_INFINITY, 1)
-      expect(decision).toEqual({
-        consecutiveReexecs: attempt,
-        retry: true,
-        retryDelayMs: Math.min(250 * 2 ** (attempt - 1), REEXEC_BACKOFF_MAX_MS),
-      })
+    let previous = 0
+    let state = 7
+    const random = () => ((state = (state * 48271) % 2147483647) - 1) / 2147483646
+    for (let attempt = 1; attempt <= 200; attempt += 1) {
+      const decision = evaluateAdapterRestart(consecutiveReexecs, previous, 10_000, Number.POSITIVE_INFINITY, random)
+      expect(decision.consecutiveReexecs).toBe(attempt)
+      expect(decision.retry).toBe(true)
+      expect(decision.retryDelayMs).toBeGreaterThanOrEqual(REEXEC_BACKOFF_BASE_MS)
+      expect(decision.retryDelayMs).toBeLessThanOrEqual(Math.min(REEXEC_BACKOFF_MAX_MS, Math.max(REEXEC_BACKOFF_BASE_MS, previous) * 3))
       consecutiveReexecs = decision.consecutiveReexecs
+      previous = decision.retryDelayMs
     }
   })
 
-  it("jitters each retry below the cap without allowing a zero-delay hot loop", () => {
-    const low = evaluateAdapterRestart(7, 10_000, Number.POSITIVE_INFINITY, 0)
-    const high = evaluateAdapterRestart(7, 10_000, Number.POSITIVE_INFINITY, 1)
-    expect(low).toMatchObject({ retry: true, retryDelayMs: REEXEC_BACKOFF_MAX_MS * 0.75 })
-    expect(high).toMatchObject({ retry: true, retryDelayMs: REEXEC_BACKOFF_MAX_MS })
+  it("never retries at zero delay, and reaches the cap from a long previous delay", () => {
+    expect(evaluateAdapterRestart(7, 0, 10_000, Number.POSITIVE_INFINITY, () => 0).retryDelayMs).toBe(REEXEC_BACKOFF_BASE_MS)
+    expect(evaluateAdapterRestart(7, 20_000, 10_000, Number.POSITIVE_INFINITY, () => 1).retryDelayMs).toBe(
+      REEXEC_BACKOFF_MAX_MS,
+    )
   })
 
   it("re-arms one replacement after a genuinely stable adapter lifetime", () => {
     expect(ADAPTER_STABLE_MS).toBeGreaterThan(60_000)
-    expect(evaluateAdapterRestart(1, ADAPTER_STABLE_MS, Number.POSITIVE_INFINITY, 1)).toEqual({
+    expect(evaluateAdapterRestart(1, 20_000, ADAPTER_STABLE_MS, Number.POSITIVE_INFINITY, () => 0.5)).toEqual({
       consecutiveReexecs: 1,
       retry: true,
-      retryDelayMs: 250,
+      retryDelayMs: 500,
     })
   })
 })

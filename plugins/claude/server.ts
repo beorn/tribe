@@ -79,6 +79,7 @@ async function superviseAdapter(): Promise<void> {
   let active: ChildProcess | null = null
   let stopping = false
   let consecutiveReexecs = 0
+  let lastRetryDelayMs = 0
   let resumeJoined = false
   let reportedJoined = false
   const exitRecord = resolveAdapterExitRecord(process.env)
@@ -149,11 +150,12 @@ async function superviseAdapter(): Promise<void> {
     }
     const decision = evaluateAdapterRestart(
       consecutiveReexecs,
+      lastRetryDelayMs,
       Date.now() - startedAt,
       maxConsecutiveReexecs,
-      Math.random(),
     )
     consecutiveReexecs = decision.consecutiveReexecs
+    lastRetryDelayMs = decision.retryDelayMs
     recordAdapterExit(exitRecord, {
       ...exit,
       decision: decision.retry ? "retry" : "stop",
