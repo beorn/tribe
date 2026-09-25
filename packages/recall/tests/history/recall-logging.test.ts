@@ -9,7 +9,7 @@
 
 import { describe, expect, test, vi, afterEach, beforeEach } from "vitest"
 import { addWriter, setSuppressConsole, type LogEvent } from "loggily"
-import { isRecallLogging, log, setRecallLogging } from "../../src/history/recall-shared.ts"
+import { log, setRecallLogging } from "../../src/history/recall-shared.ts"
 
 describe("25392: recall log goes through loggily and is off by default outside the daemon", () => {
   beforeEach(() => {
@@ -23,7 +23,16 @@ describe("25392: recall log goes through loggily and is off by default outside t
   })
 
   test("recall logging is off by default outside the daemon", () => {
-    expect(isRecallLogging()).toBe(false)
+    const events: LogEvent[] = []
+    const unsub = addWriter({ ns: "recall:*" }, (_f, _l, _ns, ev) => {
+      if (ev.kind === "log") events.push(ev)
+    })
+    try {
+      log("this should not emit by default")
+      expect(events).toHaveLength(0)
+    } finally {
+      unsub()
+    }
   })
 
   test("log() does not emit when logging is off", () => {
