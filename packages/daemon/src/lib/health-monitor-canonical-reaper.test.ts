@@ -18,7 +18,7 @@ import { defaultThresholds } from "./health-monitor-plugin.ts"
 function observation(
   attribution: ProcessRoutingAttribution,
   options: { observedAt?: number; pid?: number; sequence?: number; startTime?: string } = {},
-): CanonicalProcessObservation {
+): Extract<CanonicalProcessObservation, { kind: "available" }> {
   const pid = options.pid ?? 10
   return {
     diagnostic: {
@@ -114,6 +114,25 @@ describe("canonical managed reaper", () => {
 
     expect(sink.sends).toEqual([expect.objectContaining({ recipient: "@dev/3", type: "health:reaper:owned" })])
     expect(sink.broadcasts.some(({ type }) => type === "health:reaper:query")).toBe(false)
+  })
+
+  it("says once that a suspect left the watch when its census row turned malformed; an exited one leaves silently (hh 25917)", () => {
+    const state = createCanonicalReaperState()
+    const sink = api()
+    checkCanonicalReaper(observation({ kind: "unowned" }, { pid: 10 }), thresholds, state, sink.client, sessions)
+    checkCanonicalReaper(observation({ kind: "unowned" }, { pid: 20, sequence: 8 }), thresholds, state, sink.client, [])
+    const excluded: CanonicalProcessObservation = {
+      ...observation({ kind: "unowned" }, { pid: 30, observedAt: 31_000, sequence: 9 }),
+      excludedRows: [{ command: "bun worker.ts", detail: "invalid pgid", field: "pgid", pid: 20, value: -1 }],
+    }
+    const before = sink.broadcasts.length
+
+    checkCanonicalReaper(excluded, thresholds, state, sink.client, sessions)
+
+    const notes = sink.broadcasts.slice(before).filter(({ type }) => type === "health:reaper:unknown")
+    expect(notes.map(({ message }) => message)).toEqual([
+      expect.stringContaining("PID 20 (bun worker.ts) left the watch: its census row is malformed (pgid=-1)"),
+    ])
   })
 
   it("counts one canonical source sequence once even when Tribe polls it repeatedly", () => {

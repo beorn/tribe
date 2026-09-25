@@ -368,6 +368,22 @@ describe("health monitor managed process source", () => {
     expect(unknown.message).toContain("/hab/session")
   })
 
+  it("names an excluded census row as excluded, never unowned (hh 25917)", () => {
+    const excludedRows = [{ command: "git super merge", detail: "invalid pgid", field: "pgid", pid: 20, value: -1 }]
+    const alert = {
+      message: "CPU warning",
+      topOffenders: [
+        { command: "git super merge", cpu: 95, mem: 0, pid: 20 },
+        { command: "bun stray.ts", cpu: 90, mem: 0, pid: 30 },
+      ],
+      type: "cpu" as const,
+    }
+    const { message } = formatCanonicalHealthAlertForDelivery(alert, { ...observation(), excludedRows })
+    expect(message).toContain("excluded (pgid=-1): pid=20")
+    expect(message).not.toContain("unowned: pid=20")
+    expect(message).toContain("unowned: pid=30")
+  })
+
   it("does not join a freshly observed lock-holder PID to an older canonical incarnation", () => {
     expect(
       ownerForLockHolder(10, observation(), new Map([[10, 1]]), [{ name: "@dev/3", pid: 10, role: "dev" }]),

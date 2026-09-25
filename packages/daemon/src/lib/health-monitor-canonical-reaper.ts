@@ -250,8 +250,18 @@ export function checkCanonicalReaper(
     )
   }
 
-  for (const key of state.suspects.keys()) {
-    if (!seen.has(key)) state.suspects.delete(key)
+  const excludedByPid = new Map((observation.excludedRows ?? []).map((row) => [row.pid, row]))
+  for (const [key, suspect] of state.suspects) {
+    if (seen.has(key)) continue
+    // A suspect whose census row turned malformed leaves the watch; say so rather than drop it silently (hh 25917).
+    const excluded = excludedByPid.get(suspect.pid)
+    if (excluded !== undefined) {
+      sendUnknown(
+        api,
+        `health:reaper: PID ${suspect.pid} (${suspect.command}) left the watch: its census row is malformed (${excluded.field}=${JSON.stringify(excluded.value) ?? "undefined"}), so its owner was not read; ${diagnosticContext(observation)}`,
+      )
+    }
+    state.suspects.delete(key)
   }
 
   const liveNames = new Set(sessions.map(({ name }) => name))

@@ -374,6 +374,28 @@ describe("neutral health process source", () => {
     })
   })
 
+  it("keeps hab sysmon's excludedRows, and refuses a malformed one as a protocol error (hh 25917)", async () => {
+    const read = async (excludedRows: unknown) => {
+      const source = createHealthProcessSource({
+        env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+        runCommand: async () => ({
+          exitCode: 0,
+          stderr: "",
+          stdout: `${JSON.stringify({ ...structuredClone(availablePayload), excludedRows })}\n`,
+        }),
+      })
+      if (source.kind !== "managed") throw new Error("expected managed source")
+      return source.read()
+    }
+    const excludedRows = [{ command: "git super merge", detail: "invalid pgid", field: "pgid", pid: 20, value: -1 }]
+
+    await expect(read(excludedRows)).resolves.toMatchObject({ kind: "available", excludedRows })
+    await expect(read([{ command: "git super merge", pid: 20 }])).resolves.toMatchObject({
+      kind: "unavailable",
+      reason: "source-protocol-invalid",
+    })
+  })
+
   it("admits kernel threads and root processes with pgid 0", async () => {
     const payload = structuredClone(availablePayload) as any
     payload.processes.push({
@@ -713,8 +735,9 @@ describe("neutral health process source", () => {
       const ceilings: number[] = []
       const runCommand = vi.fn(async (argv: readonly string[], timeoutMs: number) => {
         ceilings.push(timeoutMs)
-        if (failing)
-          {throw new BoundedProcessCommandError({ kind: "timeout", message: "timeout", settlementFailures: [] })}
+        if (failing) {
+          throw new BoundedProcessCommandError({ kind: "timeout", message: "timeout", settlementFailures: [] })
+        }
         const scalars = {
           ...scalarPayload,
           values: {

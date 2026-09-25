@@ -137,6 +137,18 @@ export interface PendingProcReads {
   readonly reads: readonly PendingProcRead[]
 }
 
+/**
+ * A census row hab sysmon set aside by name because it was malformed (hh 25912). It is not in `processes`, and it is
+ * not unowned: nothing about its owner was read (hh 25917).
+ */
+export interface ExcludedProcessRow {
+  readonly pid: number | "unknown"
+  readonly command: string
+  readonly field: string
+  readonly value?: unknown
+  readonly detail: string
+}
+
 export type CanonicalProcessObservation =
   | {
       readonly diagnostic: {
@@ -149,6 +161,8 @@ export type CanonicalProcessObservation =
       readonly processes: readonly ProcessObservationRow[]
       readonly schema: typeof PROCESS_OBSERVATION_SCHEMA
       readonly source: { readonly epoch: string; readonly sequence: number }
+      /** Present when hab sysmon excluded malformed rows (hh 25912). */
+      readonly excludedRows?: readonly ExcludedProcessRow[]
     }
   | {
       readonly diagnostic: {
@@ -361,6 +375,17 @@ function isPendingProcReads(value: unknown): value is PendingProcReads {
   )
 }
 
+function isExcludedRow(value: unknown): value is ExcludedProcessRow {
+  return (
+    isRecord(value) &&
+    (value.pid === "unknown" || isPositiveInteger(value.pid)) &&
+    typeof value.command === "string" &&
+    isBoundedText(value.field) &&
+    typeof value.detail === "string" &&
+    value.detail.length <= MAX_DIAGNOSTIC_CHARS
+  )
+}
+
 function parseObservation(value: unknown): CanonicalProcessObservation | undefined {
   if (!isRecord(value) || value.schema !== PROCESS_OBSERVATION_SCHEMA || typeof value.kind !== "string") {
     return undefined
@@ -386,6 +411,12 @@ function parseObservation(value: unknown): CanonicalProcessObservation | undefin
     value.source.epoch.length === 0 ||
     !isPositiveInteger(value.source.sequence) ||
     !Array.isArray(value.processes)
+  ) {
+    return undefined
+  }
+  if (
+    value.excludedRows !== undefined &&
+    !(Array.isArray(value.excludedRows) && value.excludedRows.every(isExcludedRow))
   ) {
     return undefined
   }

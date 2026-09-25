@@ -589,6 +589,7 @@ export function formatCanonicalHealthAlertForDelivery(
   observation: Extract<CanonicalProcessObservation, { kind: "available" }>,
 ): { message: string; attributedSessions: Set<string>; hasUnattributed: boolean } {
   const byPid = new Map(observation.processes.map((row) => [row.process.pid, row]))
+  const excludedByPid = new Map((observation.excludedRows ?? []).map((row) => [row.pid, row]))
   const attributedSessions = new Set<string>()
   const offenders: string[] = []
   let hasUnattributed = false
@@ -602,11 +603,15 @@ export function formatCanonicalHealthAlertForDelivery(
       continue
     }
     hasUnattributed = true
+    const excluded = row === undefined ? excludedByPid.get(process.pid) : undefined
     if (row?.attribution.kind === "unknown") {
       const evidence = row.attribution.evidence
       offenders.push(
         `unknown(${row.attribution.reason}; owners=${evidence.ownerIds.join(",") || "none"}; ownerCount=${evidence.ownerCount}; via=${evidence.vias.join(",") || "none"}; queried=${observation.diagnostic.query}; location=${observation.diagnostic.location}; excluded=${observation.diagnostic.excluded.join(",")}): ${prefix}`,
       )
+    } else if (excluded !== undefined) {
+      // Its census row was malformed and set aside (hh 25912): nothing about its owner was read, so it is not unowned.
+      offenders.push(`excluded (${excluded.field}=${JSON.stringify(excluded.value) ?? "undefined"}): ${prefix}`)
     } else {
       offenders.push(`unowned: ${prefix}`)
     }
