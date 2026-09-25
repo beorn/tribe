@@ -25,6 +25,7 @@ import { existsSync, readdirSync, statSync, statfsSync, unlinkSync } from "node:
 import { cpus, totalmem, freemem, loadavg } from "node:os"
 import { createLogger } from "loggily"
 import { isReaperExempt } from "tribe-wire"
+import { RELOAD_DEADLINE_MS } from "tribe-wire/lib/reload-pacing"
 import { createTimers } from "./timers.ts"
 import { startSingleFlightTicker } from "./single-flight-ticker.ts"
 import type { TribePluginApi, TribeClientApi } from "./plugin-api.ts"
@@ -2410,7 +2411,11 @@ export const healthMonitorPlugin: TribePluginApi = {
     let ioSampleCount = 0
     let chiefPresenceSampleCount = 0
     const bridgeLostMemory = createBridgeLostMemory()
-    const bridgeLostParsed = parseBridgeLostConfig(process.env, { tickMs: pollIntervalSec * 3 * 1000 })
+    // 25663: a paced reload takes at most RELOAD_DEADLINE_MS, so the grace must outlast it plus one tick.
+    const bridgeLostParsed = parseBridgeLostConfig(process.env, {
+      reloadDeadlineMs: RELOAD_DEADLINE_MS,
+      tickMs: pollIntervalSec * 3 * 1000,
+    })
     currentBridgeLostArming =
       bridgeLostParsed.armed && (api.getSeatTransportFacts === undefined || api.listOpenIncidents === undefined)
         ? { armed: false, reason: "this daemon's plugin API exposes no seat transport facts or open incidents" }

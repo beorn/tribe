@@ -17,6 +17,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, test } from "vitest"
+import { RELOAD_DEADLINE_MS } from "tribe-wire/lib/reload-pacing"
 import { createTribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { readOpenIncidents, sendMessage } from "./messaging.ts"
@@ -181,7 +182,16 @@ describe("parseBridgeLostConfig", () => {
     ).toEqual({ armed: false, reason: 'TRIBE_BRIDGE_LOST_GRACE_SEC must be a positive number of seconds, got "soon"' })
   })
 
-  // Bound to 25663's reload deadline by validation; until 25663 supplies it, a stub stands in.
+  // 25663 supplies the deadline: the shipped default grace outlasts a paced reload plus the monitor's ~30 s tick, so a
+  // later change to either constant fails loud here instead of paging every reload.
+  test("the default grace exceeds the shipped reload deadline plus one tick", () => {
+    const tickMs = 3 * 10_000
+    expect(RELOAD_DEADLINE_MS + tickMs).toBeLessThan(180_000)
+    const env = { TRIBE_BRIDGE_LOST_OWNERS: "@chief,@cto" }
+    expect(parseBridgeLostConfig(env, { reloadDeadlineMs: RELOAD_DEADLINE_MS, tickMs }).armed).toBe(true)
+  })
+
+  // The refusal itself, on a stub deadline.
   test("refuses a grace not greater than the reload deadline plus one tick", () => {
     const env = { TRIBE_BRIDGE_LOST_OWNERS: "@chief,@cto", TRIBE_BRIDGE_LOST_GRACE_SEC: "60" }
     expect(parseBridgeLostConfig(env, { reloadDeadlineMs: 55_000, tickMs: 10_000 })).toEqual({
