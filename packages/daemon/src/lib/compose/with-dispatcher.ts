@@ -1978,6 +1978,22 @@ export function withDispatcher<
             // quota poll + threshold logic live in ag, not tribe.
             const account = typeof p.account === "string" ? p.account : null
             const provider = typeof p.provider === "string" ? p.provider : null
+            // 25688 (@cto 7b5b85c7): a token-less register that adopts a verified row of its OWN launch (same launch id,
+            // same parent) is that launch reconnecting, so the row keeps its verification. Read before registerSession
+            // restates the row; any other token-less register still reads as unverified.
+            const ownLaunchVerification =
+              verifiedSid === null && launchIdentity !== null
+                ? (db
+                    .prepare(
+                      `SELECT identity_sid, verified_id_token, identity_gen FROM sessions
+                       WHERE id = ? AND launch_id = ? AND launch_parent_pid = ? AND identity_sid IS NOT NULL`,
+                    )
+                    .get(clientCtx.sessionId, launchIdentity.id, launchIdentity.parentPid) as {
+                    identity_sid: string
+                    verified_id_token: string | null
+                    identity_gen: number | null
+                  } | null)
+                : null
             registerSession(
               clientCtx,
               projectId,
@@ -1996,10 +2012,15 @@ export function withDispatcher<
             )
             db.prepare("UPDATE sessions SET principal_class = ? WHERE id = ?").run(principalClass, clientCtx.sessionId)
             // Every register restates the session's verification: an adopted session re-registering without a token
-            // it can verify is no longer served as verified.
+            // it can verify is no longer served as verified, unless it is its own launch reconnecting (25688).
+            const restated = ownLaunchVerification ?? {
+              identity_sid: verifiedSid,
+              verified_id_token: verifiedToken,
+              identity_gen: verifiedSid === null ? null : verifiedGen,
+            }
             db.prepare(
               "UPDATE sessions SET identity_sid = ?, verified_id_token = ?, identity_gen = ? WHERE id = ?",
-            ).run(verifiedSid, verifiedToken, verifiedSid === null ? null : verifiedGen, clientCtx.sessionId)
+            ).run(restated.identity_sid, restated.verified_id_token, restated.identity_gen, clientCtx.sessionId)
             // G9 P0 row 7 — the launch's adapter-exit record, named by the plugin
             // supervisor that appends to it. Omission keeps a reconnecting
             // session's stored path, as it does for account and provider.

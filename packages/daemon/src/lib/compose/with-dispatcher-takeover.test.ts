@@ -1187,11 +1187,15 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
   }
   const sessionRow = (harness: ReturnType<typeof createDispatcherHarness>, sessionId: string) =>
     harness.db
-      .prepare("SELECT launch_id, launch_parent_pid, identity_sid, filter_mode FROM sessions WHERE id = ?")
+      .prepare(
+        "SELECT launch_id, launch_parent_pid, identity_sid, identity_gen, verified_id_token, filter_mode FROM sessions WHERE id = ?",
+      )
       .get(sessionId) as {
       launch_id: string | null
       launch_parent_pid: number | null
       identity_sid: string | null
+      identity_gen: number | null
+      verified_id_token: string | null
       filter_mode: string | null
     }
 
@@ -1360,6 +1364,43 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
     expect(departures(harness)).toEqual([])
   })
 
+  // 25688: the own-parent reconnect restated the row with identity_sid null, so after ONE token-less reconnect the
+  // holder read as unverified and 25666's protection lapsed for the next claim from another parent.
+  it("a token-less reconnect from the launch's own parent keeps the verified identity, so 25666 still refuses", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    const holder = await verifiedHolderBetweenConnections(harness)
+    const verified = sessionRow(harness, holder.sessionId)
+    expect(verified).toMatchObject({ identity_sid: "sid-dev7", identity_gen: 3 })
+    harness.addPendingClient("conn-own-parent")
+    await harness.register("conn-own-parent", {
+      name: "@dev/7",
+      pid: 5403,
+      project: "/tmp/p",
+      launchId: "sid-dev7@3",
+      launchParentPid: process.pid,
+    })
+    expect(sessionRow(harness, holder.sessionId)).toMatchObject({
+      identity_sid: "sid-dev7",
+      identity_gen: 3,
+      verified_id_token: verified.verified_id_token,
+    })
+    harness.dropClient("conn-own-parent")
+
+    harness.addPendingClient("conn-unverified")
+    const refused = parseError(
+      await harness.register("conn-unverified", {
+        name: "@dev/7",
+        pid: 5404,
+        project: "/tmp/p",
+        launchId: "sid-dev7@3",
+        launchParentPid: process.ppid,
+      }),
+    )
+    expect(refused.message).toMatch(/belongs to launch sid-dev7@3, whose parent process \d+ is alive/u)
+    expect(sessionRow(harness, holder.sessionId)).toMatchObject({ launch_id: "sid-dev7@3", identity_sid: "sid-dev7" })
+  })
+
   it("the bootstrap and the adapter of one generation fan into ONE session keyed sid@gen, and the filter applies", async () => {
     const harness = createDispatcherHarness({ identityVerifier })
     cleanup = harness.dispose
@@ -1396,6 +1437,8 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
       launch_parent_pid: 5100,
       identity_sid: "sid-dev7",
       filter_mode: "focus",
+      identity_gen: 3,
+      verified_id_token: "token-g3",
     })
   })
 
