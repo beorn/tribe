@@ -224,6 +224,39 @@ describe("membership projection: declared-roster membership is a function of a p
     }
   })
 
+  it("2b. expected seat whose reconnect was refused: foreign-identity-transport, unreachable for the bridge-lost check", () => {
+    let now = 30_200_000
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now)
+    try {
+      const ctx = addSession(db, stmts, "exp-2b", "@agent/refused", { id: "launch-exp-2b", parentPid: 30022 })
+      now += 1_000
+      logSessionLeft(ctx, {
+        memberId: "exp-2b",
+        name: "@agent/refused",
+        role: "member",
+        domains: [],
+        launchId: "launch-exp-2b",
+        launchParentPid: 30022,
+        reason: "transport-closed",
+      })
+      const opCtx = makeContext(db, stmts, "operator", "@operator")
+      const opts = baseOpts({
+        getExpectedMembers: () => roster([{ name: "@agent/refused", expected: true }]),
+        getForeignIdentityTransport: (sessionId) =>
+          sessionId === "exp-2b"
+            ? { name: "@agent/refused", launch_id: "launch-other", pid: 4321, refused_at: new Date(now).toISOString() }
+            : undefined,
+      })
+      // 25662 (review-adhoc5 P3 2): not a missing-transport page, and not a reason to clear one either.
+      const seats = readSeatTransportFacts(opCtx, opts)
+      expect(seats.missing).toEqual([])
+      expect(seats.exited).toEqual(new Map())
+      expect(seats.unreachable).toEqual(new Map([["@agent/refused", "foreign-identity-transport"]]))
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+
   it("3. expected seat re-registered after the fact stays clean while connected (the 0e2fc4b restart case still holds)", () => {
     let now = 30_200_000
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now)
@@ -575,6 +608,10 @@ describe("membership projection: declared-roster membership is a function of a p
       missing: [{ name: "@dev/12", state: "never-registered" }],
       meaning: "missing transport does not establish agent absence",
     })
+    // 25662: an open bridge-lost incident on this seat stays open and names the state.
+    const seats = readSeatTransportFacts(opCtx, opts)
+    expect(seats.missing).toEqual([])
+    expect(seats.unreachable).toEqual(new Map([["@dev/12", "never-registered"]]))
   })
 
   it("8. no declaration present: byte-identical to the pre-declaration finished/missing-transport split for the same rows", () => {

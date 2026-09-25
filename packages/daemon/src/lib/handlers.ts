@@ -3367,17 +3367,22 @@ export function readSeatTransportFacts(
   missing: Array<{ name: string; launchParentPid: number | null }>
   exited: Map<string, string>
   connected: Set<string>
+  unreachable: Map<string, string>
 } {
   const { liveSessions, discrepancy } = projectHealthMembership(ctx, opts)
   const missing: Array<{ name: string; launchParentPid: number | null }> = []
   const exited = new Map<string, string>()
+  const unreachable = new Map<string, string>()
   for (const launch of discrepancy?.missing ?? []) {
-    if (launch.state === "missing-transport")
+    if (launch.state === "missing-transport") {
       missing.push({ name: launch.name, launchParentPid: launch.launch_parent_pid })
+    }
     // The only settled left-fact is a harness exit (isTerminalSessionLeftReason).
     else if (launch.state === "exited-not-remounted") exited.set(launch.name, `harness-exited at ${launch.left_at}`)
+    // Still no live transport, but not a page on its own: it keeps an open incident open (review-adhoc5 P3 2).
+    else unreachable.set(launch.name, launch.state)
   }
-  return { missing, exited, connected: new Set(liveSessions.map((session) => session.name)) }
+  return { missing, exited, unreachable, connected: new Set(liveSessions.map((session) => session.name)) }
 }
 
 function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {

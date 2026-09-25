@@ -143,12 +143,14 @@ export interface TribeClientApi {
 
   /**
    * Optional (25662): seats by transport, from the same membership projection tribe.health answers from. `missing`
-   * is every seat hab expects up whose transport is gone; `exited` maps a settled exit to its reason.
+   * is every seat hab expects up whose transport is gone; `exited` maps a settled exit to its reason; `unreachable`
+   * maps a seat with no live transport in any other membership state (a refused reconnect, no row) to that state.
    */
   getSeatTransportFacts?(): {
     missing: Array<{ name: string; launchParentPid: number | null }>
     exited: Map<string, string>
     connected: Set<string>
+    unreachable: Map<string, string>
   }
 
   /**
