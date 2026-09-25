@@ -1153,11 +1153,14 @@ export const DEFAULT_BRIDGE_LOST_TICK_MS = DEFAULT_HEALTH_POLL_INTERVAL_SEC * BR
 export const BRIDGE_LOST_GRACE_MARGIN_MS = 4_000
 /**
  * The default grace is DERIVED from the adapters' reload deadline (25663 r3, @cto 5d1adade): a paced reload plus one
- * tick plus the margin, 180 s at the 146 s deadline. Widening the reload window lengthens the grace with it, so the
- * two cannot cross. An explicit TRIBE_BRIDGE_LOST_GRACE_SEC is still validated against the deadline and the live tick.
+ * tick plus the margin. Widening the reload window, or slowing the health poll, lengthens the grace with it, so the
+ * grace never falls inside a reload (25663 r4). An explicit TRIBE_BRIDGE_LOST_GRACE_SEC is validated instead.
  */
-export const DEFAULT_BRIDGE_LOST_GRACE_MS =
-  RELOAD_DEADLINE_MS + DEFAULT_BRIDGE_LOST_TICK_MS + BRIDGE_LOST_GRACE_MARGIN_MS
+export function bridgeLostDefaultGraceMs(reloadDeadlineMs: number, tickMs: number): number {
+  return reloadDeadlineMs + tickMs + BRIDGE_LOST_GRACE_MARGIN_MS
+}
+/** The default grace at the default 10 s poll: 180 s at the 146 s deadline. */
+export const DEFAULT_BRIDGE_LOST_GRACE_MS = bridgeLostDefaultGraceMs(RELOAD_DEADLINE_MS, DEFAULT_BRIDGE_LOST_TICK_MS)
 
 export interface BridgeLostConfig {
   /** Paged in order; the first that is not itself lost receives the incident. */
@@ -1172,8 +1175,8 @@ export type BridgeLostArming =
 
 /**
  * Arm bridge-lost paging from the daemon's environment, or refuse by name. There is no default owner: a daemon
- * other habitats run must not page a seat name it was never told about. The default grace is derived from the reload
- * deadline; `reloadDeadlineMs` and `tickMs` validate an explicit grace against it (25663).
+ * other habitats run must not page a seat name it was never told about. `reloadDeadlineMs` and `tickMs` are the live
+ * bounds: the default grace is derived from them, and an explicit grace is validated against them (25663).
  */
 export function parseBridgeLostConfig(
   env: Readonly<Record<string, string | undefined>>,
@@ -1193,8 +1196,17 @@ export function parseBridgeLostConfig(
       reason: `TRIBE_BRIDGE_LOST_OWNERS names ${owners.length} owner (${owners.join(", ")}); a lost owner needs a second to page`,
     }
   }
+  const { reloadDeadlineMs, tickMs = 0 } = bounds
   const graceRaw = env.TRIBE_BRIDGE_LOST_GRACE_SEC
-  const graceSec = graceRaw === undefined ? DEFAULT_BRIDGE_LOST_GRACE_MS / 1000 : Number(graceRaw)
+  if (graceRaw === undefined) {
+    // The default follows the live tick and deadline this daemon runs with, so it cannot refuse itself.
+    const graceMs = bridgeLostDefaultGraceMs(
+      reloadDeadlineMs ?? RELOAD_DEADLINE_MS,
+      bounds.tickMs ?? DEFAULT_BRIDGE_LOST_TICK_MS,
+    )
+    return { armed: true, config: { owners, graceMs } }
+  }
+  const graceSec = Number(graceRaw)
   if (!Number.isFinite(graceSec) || graceSec <= 0) {
     return {
       armed: false,
@@ -1202,7 +1214,6 @@ export function parseBridgeLostConfig(
     }
   }
   const graceMs = graceSec * 1000
-  const { reloadDeadlineMs, tickMs = 0 } = bounds
   if (reloadDeadlineMs !== undefined && graceMs <= reloadDeadlineMs + tickMs) {
     return {
       armed: false,

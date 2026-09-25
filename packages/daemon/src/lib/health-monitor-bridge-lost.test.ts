@@ -259,6 +259,21 @@ describe("parseBridgeLostConfig", () => {
     expect(parseBridgeLostConfig({ ...env, TRIBE_BRIDGE_LOST_GRACE_SEC: noMargin }, bounds).armed).toBe(false)
   })
 
+  // 25663 r4 (review-adhoc5 26fdc8bfa0): the default grace follows the LIVE tick. Derived from the default 10 s poll, a
+  // 12 s poll refused the daemon's own default and blamed TRIBE_BRIDGE_LOST_GRACE_SEC, which nobody had set.
+  test("a slower health poll lengthens the default grace instead of disarming paging", () => {
+    const tickMs = 3 * 12_000
+    expect(
+      parseBridgeLostConfig(
+        { TRIBE_BRIDGE_LOST_OWNERS: "@chief,@cto" },
+        { reloadDeadlineMs: RELOAD_DEADLINE_MS, tickMs },
+      ),
+    ).toEqual({
+      armed: true,
+      config: { owners: ["@chief", "@cto"], graceMs: RELOAD_DEADLINE_MS + tickMs + BRIDGE_LOST_GRACE_MARGIN_MS },
+    })
+  })
+
   // The refusal itself, on a stub deadline.
   test("refuses a grace not greater than the reload deadline plus one tick", () => {
     const env = { TRIBE_BRIDGE_LOST_OWNERS: "@chief,@cto", TRIBE_BRIDGE_LOST_GRACE_SEC: "60" }
