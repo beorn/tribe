@@ -21,7 +21,7 @@ import {
 import { watchActivity } from "../lib/activity-watch.ts"
 import { describeDaemonStderrLog } from "../lib/daemon-stderr-log.ts"
 import { clearReaperExempt, listReaperExempt, setReaperExempt } from "../reaper-exempt.ts"
-import { readTribeLaunchId } from "../launch-environment.ts"
+import { readLaunchIdFromToken } from "../lib/identity-token.ts"
 import { withCliDaemonClient } from "./daemon-client.ts"
 import { writeJsonStdout } from "./json-output.ts"
 import { mcpJsonContent } from "./mcp-json-content.ts"
@@ -123,13 +123,16 @@ async function callDaemon(method: string, params?: Record<string, unknown>): Pro
 
 function cliInboxTargetParams(session: string | undefined): Record<string, unknown> {
   if (session !== undefined) return { session }
-  const launchId = readTribeLaunchId(process.env)
+  const launchId = readLaunchIdFromToken(process.env)
   const persona = process.env.TRIBE_SESSION_NAME?.trim() || process.env.TRIBE_NAME?.trim()
   if (launchId) {
     return { launch_id: launchId, ...(persona === undefined ? {} : { persona }) }
   }
+  // 25074 3d-1: the launch is the identity token's sid. A process without HAB_ID_TOKEN is not a hab launch, whatever
+  // TRIBE_LAUNCH_ID or TRIBE_NAME it inherited, so it is refused rather than resolved to that seat's inbox.
   throw new Error(
-    "Managed inbox request requires provider launch identity; use --session for an explicit operator target",
+    "Managed inbox request requires this launch's identity token (HAB_ID_TOKEN), which a hab seat carries; " +
+      "use --session for an explicit operator target",
   )
 }
 

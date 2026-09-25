@@ -31,7 +31,7 @@ import { TRIBE_PROTOCOL_VERSION, TRIBE_SUPPORTED_PROTOCOL_VERSIONS } from "../li
 import { resolveDbPath } from "../lib/config.ts"
 import { INCIDENT_KEY_SEPARATOR, parseIncidentKey, type IncidentIdentity } from "../lib/incident.ts"
 import { formatMarkdown, generateRetro, parseDuration } from "../lib/retro.ts"
-import { readTribeLaunchId } from "../launch-environment.ts"
+import { readLaunchIdFromToken } from "../lib/identity-token.ts"
 import { withCliDaemonClient } from "./daemon-client.ts"
 import { writeJsonStdout } from "./json-output.ts"
 import { mcpJsonContent } from "./mcp-json-content.ts"
@@ -254,7 +254,7 @@ function replyOwnerFromEnv(env: NodeJS.ProcessEnv = process.env): string | null 
 }
 
 async function resolveCallerNameHint(): Promise<string | null> {
-  const launchId = readTribeLaunchId(process.env)
+  const launchId = readLaunchIdFromToken(process.env)
   if (launchId) {
     try {
       const persona = replyOwnerFromEnv()
@@ -374,7 +374,7 @@ function rejectUnstructuredMessageIntent(input: SendPayloadInput): void {
 
 async function resolveSendCaller(reply?: string, anonymous = false): Promise<SendCaller | null> {
   if (anonymous) return null
-  const launchId = readTribeLaunchId(process.env)
+  const launchId = readLaunchIdFromToken(process.env)
   if (launchId) {
     let failure: string
     try {

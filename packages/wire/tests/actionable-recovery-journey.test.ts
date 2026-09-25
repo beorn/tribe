@@ -38,6 +38,7 @@ import { createStatements, openDatabase } from "../../daemon/src/lib/database.ts
 import { connectToDaemon, type DaemonClient } from "../src/client.ts"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
 import { tribeAmbientEnvironmentNames } from "../src/daemon-environment.ts"
+import { launchToken } from "./launch-token.ts"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ADAPTER = resolve(HERE, "../src/stdio-adapter.ts")
@@ -963,6 +964,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       ...BASE_ENV,
       TRIBE_SOCKET: socketPath,
       TRIBE_LAUNCH_ID: ownLaunchId,
+      HAB_ID_TOKEN: launchToken(ownLaunchId),
       // Neither mutable identity hint may select the mailbox.
       TRIBE_NAME: foreignName,
       TRIBE_SESSION_NAME: foreignName,
@@ -978,7 +980,10 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
 
     const absentAuthority = await runCli(["inbox", "--json"], cliEnv, { throughParent: true })
     expect(absentAuthority.exitCode).toBe(1)
-    expect(absentAuthority.stderr).toMatch(/AG_SESSION_AUTH.*missing/i)
+    // 25074 3d-1: the CLI carries its launch's token now, so the refusal is the daemon's, naming both credentials.
+    expect(absentAuthority.stderr).toContain(
+      "current session authority is missing; HAB_ID_TOKEN or AG_SESSION_AUTH must be inherited",
+    )
 
     const foreignRead = await runCli(["inbox", "--json"], cliEnv, {
       selfMailboxAuthority: foreignAuthority,
@@ -1087,7 +1092,13 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       selfMailboxAuthority: authority,
     })
     await callLaunchToolWhenRegistered(seat, 70, "members", {})
-    const cliEnv = { ...BASE_ENV, TRIBE_SOCKET: socketPath, TRIBE_LAUNCH_ID: launchId, TRIBE_NO_AUTOSTART: "1" }
+    const cliEnv = {
+      ...BASE_ENV,
+      TRIBE_SOCKET: socketPath,
+      TRIBE_LAUNCH_ID: launchId,
+      HAB_ID_TOKEN: launchToken(launchId),
+      TRIBE_NO_AUTOSTART: "1",
+    }
 
     const connected = await runCli(["inbox-status", "--json"], cliEnv, { throughParent: true })
     expect(connected.exitCode, connected.stderr).toBe(0)
@@ -1179,6 +1190,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         ...BASE_ENV,
         TRIBE_SOCKET: socketPath,
         TRIBE_LAUNCH_ID: launchId,
+        HAB_ID_TOKEN: launchToken(launchId),
         // Both spawn-time hints are intentionally stale after takeover.
         TRIBE_NAME: "@chief/next",
         TRIBE_SESSION_NAME: "@chief/next",
@@ -1196,6 +1208,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         ...BASE_ENV,
         TRIBE_SOCKET: socketPath,
         TRIBE_LAUNCH_ID: launchId,
+        HAB_ID_TOKEN: launchToken(launchId),
         TRIBE_NAME: "@chief/next",
         TRIBE_SESSION_NAME: "@chief/next",
         TRIBE_NO_AUTOSTART: "1",
@@ -1628,6 +1641,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
             ...BASE_ENV,
             TRIBE_SOCKET: socketPath,
             TRIBE_LAUNCH_ID: launchId,
+            HAB_ID_TOKEN: launchToken(launchId),
             TRIBE_NAME: persona,
             TRIBE_SESSION_NAME: persona,
             TRIBE_NO_AUTOSTART: "1",
@@ -1805,6 +1819,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         ...BASE_ENV,
         TRIBE_SOCKET: socketPath,
         TRIBE_LAUNCH_ID: launchId,
+        HAB_ID_TOKEN: launchToken(launchId),
         TRIBE_NAME: NAME,
         TRIBE_NO_AUTOSTART: "1",
       },
@@ -2124,6 +2139,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         TRIBE_NAME: NAME,
         TRIBE_TAKEOVER: "1",
         TRIBE_LAUNCH_ID: launchId,
+        HAB_ID_TOKEN: launchToken(launchId),
         TRIBE_NO_AUTOSTART: "1",
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -2156,6 +2172,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       TRIBE_NAME: NAME,
       TRIBE_TAKEOVER: "1",
       TRIBE_LAUNCH_ID: launchId,
+      HAB_ID_TOKEN: launchToken(launchId),
       TRIBE_NO_AUTOSTART: "1",
     })
     expect(cliJoin.exitCode, cliJoin.stderr).toBe(0)
