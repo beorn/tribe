@@ -96,7 +96,8 @@ export function openDatabase(path: string): Database {
 		summary    TEXT,
 		session_id TEXT,
 		attention_required INTEGER NOT NULL DEFAULT 0,
-		wakes_owner INTEGER NOT NULL DEFAULT 0
+		wakes_owner INTEGER NOT NULL DEFAULT 0,
+		sender_authority TEXT
 	)`)
 
   db.run(`CREATE TABLE IF NOT EXISTS messages_archive (
@@ -120,7 +121,8 @@ export function openDatabase(path: string): Database {
 		summary     TEXT,
 		session_id  TEXT,
 		attention_required INTEGER NOT NULL DEFAULT 0,
-		wakes_owner INTEGER NOT NULL DEFAULT 0
+		wakes_owner INTEGER NOT NULL DEFAULT 0,
+		sender_authority TEXT
 	)`)
 
   // Ball-tracker: per-(request_id, recipient) row for every open request.
@@ -1308,6 +1310,27 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 37,
+    name: "message-sender-authority",
+    /**
+     * 25074 3d-1a (@cto 2bfc1935 Q0): every envelope carries its sender's authority, so a claimed session's message
+     * never reads like a verified seat's. Like wakes_owner, it is a fact about the message fixed at insert, and the
+     * archive half carries it. Rows written before this version read NULL: their authority was never recorded.
+     */
+    up(db) {
+      for (const table of ["messages", "messages_archive"]) {
+        const exists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='${table}'`).get() as {
+          name: string
+        } | null
+        if (!exists) continue
+        const columns = new Set(
+          (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name),
+        )
+        if (!columns.has("sender_authority")) db.run(`ALTER TABLE ${table} ADD COLUMN sender_authority TEXT`)
+      }
+    },
+  },
 ]
 
 /** The schema terminus `openDatabase` upgrades to — derived from the same
@@ -1507,7 +1530,8 @@ const TRACKED_ATTENTION_FETCH_COLUMNS_SQL = `COALESCE(m.id, a.id) AS id,
   COALESCE(m.topic, a.topic) AS topic,
   COALESCE(m.room_id, a.room_id) AS room_id,
   COALESCE(m.summary, a.summary) AS summary,
-  COALESCE(m.attention_required, a.attention_required) AS attention_required`
+  COALESCE(m.attention_required, a.attention_required) AS attention_required,
+  COALESCE(m.sender_authority, a.sender_authority) AS sender_authority`
 
 /** Tracked attention belongs to a mailbox through its existing pending owner
  * row, independent of whether the original message was direct or broadcast.
@@ -1592,10 +1616,12 @@ export function createStatements(db: Database) {
      */
     insertMessage: db.prepare(`
 		INSERT OR IGNORE INTO messages (id, type, sender, recipient, kind, content, bead_id, ref, ts,
-			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id, wakes_owner,
-			attention_required)
+			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id, sender_authority,
+			wakes_owner, attention_required)
 		VALUES ($id, $type, $sender, $recipient, $kind, $content, $bead_id, $ref, $ts,
 			$delivery, $topic, $room_id, $request, $reply, $correlated_reply_requester, $summary, $session_id,
+			-- 25074 3d-1a: the sending session's authority at insert (sessionAuthority); NULL for a daemon-originated row.
+			$sender_authority,
 			-- Optional like the other classification params: an omitted $wakes_owner binds NULL, and INSERT OR IGNORE
 			-- would silently drop the row on the NOT NULL column instead of failing.
 			COALESCE($wakes_owner, 0),
@@ -1614,6 +1640,8 @@ export function createStatements(db: Database) {
 	`),
 
     selectMessageById: db.prepare("SELECT rowid, ts FROM messages WHERE id = $id"),
+    /** The sending session's authority facts (25074 3d-1a); no row for a daemon-originated send. */
+    selectSessionAuthority: db.prepare("SELECT identity_sid, mailbox_authority_hash FROM sessions WHERE id = $id"),
 
     /** The question body for an owed ball (22844). The messages table — not
      *  any windowed read — is the true retention bound; pending views join
@@ -2369,12 +2397,12 @@ export function createStatements(db: Database) {
 		INSERT OR IGNORE INTO messages_archive (
 			seq, id, type, sender, recipient, kind, content, bead_id, ref, ts,
 			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id,
-			attention_required, wakes_owner, archived_at
+			attention_required, wakes_owner, sender_authority, archived_at
 		)
 		SELECT
 			rowid, id, type, sender, recipient, kind, content, bead_id, ref, ts,
 			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id,
-			attention_required, wakes_owner, $archived_at
+			attention_required, wakes_owner, sender_authority, $archived_at
 		FROM messages AS m
 		WHERE m.ts < $cutoff
 			AND NOT (${protectedUnreadAttentionPredicateSql("m")})
@@ -2451,7 +2479,7 @@ export function createStatements(db: Database) {
      *  per-call `topics` snapshot — that one filters rows the seat IS owed. */
     getInboxRows: db.prepare(`
 		SELECT m.id, m.rowid, m.type, m.sender, m.recipient, m.content, m.bead_id, m.ref, m.ts,
-			m.delivery, m.topic, m.room_id, m.summary, m.attention_required, m.wakes_owner
+			m.delivery, m.topic, m.room_id, m.summary, m.attention_required, m.wakes_owner, m.sender_authority
 		FROM messages AS m
 		WHERE m.rowid > $since
 			AND (m.recipient = $name OR m.recipient = '*')
@@ -2576,7 +2604,7 @@ export function createStatements(db: Database) {
      */
     selectUnackedAttention: db.prepare(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-             attention_required, wakes_owner
+             attention_required, wakes_owner, sender_authority
       FROM messages AS m
       WHERE m.recipient = $name
         AND m.kind = 'direct'
@@ -2602,10 +2630,10 @@ export function createStatements(db: Database) {
      */
     selectAttention: db.prepare(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-             attention_required
+             attention_required, sender_authority
       FROM (
         SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-               attention_required
+               attention_required, sender_authority
         FROM messages AS m
         WHERE m.recipient = $name
           AND m.kind = 'direct'

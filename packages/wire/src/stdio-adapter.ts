@@ -289,6 +289,7 @@ type TribeFetchResult = {
       bead?: string | null
       topic?: string | null
       ts?: string
+      from_authority?: string | null
     }>
     pending_balls?: Array<{
       request_id?: string
@@ -317,6 +318,7 @@ type TribeFetchResult = {
     bead?: string | null
     topic?: string | null
     ts?: string
+    from_authority?: string | null
   }>
 }
 
@@ -1248,6 +1250,9 @@ function forwardFetchedEvent(event: NonNullable<TribeFetchResult["events"]>[numb
     type,
     bead: event.bead ? String(event.bead) : undefined,
     message_id: event.id ? String(event.id) : undefined,
+    // 25074 3d-1a (@cto 2bfc1935 Q0): whether the sender is verified, a bearer, or only claims its name. A row from
+    // before the daemon recorded it, or one the daemon sent, carries none.
+    authority: event.from_authority ? String(event.from_authority) : undefined,
   })
 }
 

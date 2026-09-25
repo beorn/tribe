@@ -5,6 +5,7 @@
 import { randomUUID } from "node:crypto"
 import type { TribeContext } from "./context.ts"
 import { AUTO_TRACK_TYPES_SET, type TribeStatements } from "./database.ts"
+import { sessionAuthority, type SessionAuthority } from "./identity-verifier.ts"
 import {
   describeSettlementConflict,
   foldSettlementFacts,
@@ -570,6 +571,7 @@ export function sendMessage(
       $attention_required: classification.attentionRequired === true ? 1 : 0,
       $wakes_owner: wakesOwner ? 1 : 0,
       $between_personas: isExplicitTribePersonaName(sender) && isExplicitTribePersonaName(recipient) ? 1 : 0,
+      $sender_authority: senderAuthorityOf(ctx),
     })
     if (result.changes === 0) {
       const existing = ctx.stmts.selectMessageById.get({ $id: id }) as { rowid: number; ts: number } | undefined
@@ -746,8 +748,22 @@ export function logEvent(
     $attention_required: 0,
     $wakes_owner: 0,
     $between_personas: 0,
+    $sender_authority: senderAuthorityOf(ctx),
   })
   return id
+}
+
+/**
+ * The authority of the session a message is sent from, fixed on the row at insert (25074 3d-1a, @cto 2bfc1935 Q0):
+ * every envelope says whether its sender is verified, a bearer, or only claims its name. A connection with no session
+ * row (the daemon's own) has none.
+ */
+function senderAuthorityOf(ctx: TribeContext): SessionAuthority | null {
+  const row = ctx.stmts.selectSessionAuthority.get({ $id: ctx.sessionId }) as {
+    identity_sid: string | null
+    mailbox_authority_hash: string | null
+  } | null
+  return row === null ? null : sessionAuthority(row)
 }
 
 /**
