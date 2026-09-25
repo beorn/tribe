@@ -31,8 +31,6 @@ import {
 import { recall } from "../history/search.ts"
 import { getVaultDbPath } from "../history/vault-fts.ts"
 import { findGlossaryAnchor } from "../history/vault-glossary.ts"
-import { ensureProjectSourcesIndexed, ProjectSourcesBusyError } from "../history/project-sources.ts"
-import { IndexWriterBusyError } from "../history/db.ts"
 import { RecallDeadlineError } from "./recall-deadline.ts"
 import { HOOK_CANDIDATE_PASS_MS, RECALL_WALL_MS } from "../history/recall-budget.ts"
 // Envelope framing primitives live in the shared library. Re-exported here so
@@ -163,7 +161,7 @@ export interface RunInjectDeltaOptions {
   /** Test seam for isolating recall/project-source dependencies. */
   deps?: {
     recall?: typeof recall
-    ensureProjectSourcesIndexed?: typeof ensureProjectSourcesIndexed
+    ensureProjectSourcesIndexed?: unknown
     findGlossaryAnchor?: typeof findGlossaryAnchor
     getVaultDbPath?: typeof getVaultDbPath
   }
@@ -314,7 +312,6 @@ async function runRecallInjection(
   const minLength = opts.minSnippetLength ?? 20
   const snippetChars = opts.snippetChars ?? 300
   const minRank = opts.minRank ?? MIN_RANK_THRESHOLD
-  const ensureProjectSourcesIndexedImpl = opts.deps?.ensureProjectSourcesIndexed ?? ensureProjectSourcesIndexed
   const findGlossaryAnchorImpl = opts.deps?.findGlossaryAnchor ?? findGlossaryAnchor
 
   const steps = opts.steps
@@ -401,13 +398,6 @@ async function runRecallInjection(
   const skippedSteps: Record<string, string> = {}
   const withSkippedSteps = <R extends RunInjectDeltaResult>(result: R): R =>
     Object.keys(skippedSteps).length > 0 ? { ...result, skippedSteps } : result
-  try {
-    timeStep(steps, "project_sources", () => ensureProjectSourcesIndexedImpl())
-  } catch (error) {
-    // Busy is contention, not failure: recall reads the index as it stands. Anything else still fails the hook.
-    if (!(error instanceof IndexWriterBusyError || error instanceof ProjectSourcesBusyError)) throw error
-    skippedSteps.project_sources = error.message
-  }
 
   const turn = timeStep(steps, "advance_turn", () => store.advanceTurn())
 

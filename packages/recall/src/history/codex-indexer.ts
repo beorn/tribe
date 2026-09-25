@@ -781,6 +781,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
                 sizeBytes: copySize,
                 mtimeMs: copyMtime,
                 lastEventAtMs: copyLastEvent,
+                cwd: currentSession.cwd || null,
               })
             }
           }
@@ -845,6 +846,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
                   sizeBytes: copySize,
                   mtimeMs: copyMtime,
                   lastEventAtMs: copyLastEvent,
+                  cwd: session.cwd || null,
                 })
               }
 

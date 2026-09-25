@@ -74,10 +74,11 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
     // Create 10 valid transcript files and 1 malformed file
     for (let i = 1; i <= 10; i++) {
       const file = join(projDir, `sess-${i.toString().padStart(3, "0")}.jsonl`)
-      const content = [
-        JSON.stringify({ type: "user", message: { uuid: `u-${i}-1`, content: `hello ${i}` } }),
-        JSON.stringify({ type: "assistant", message: { uuid: `u-${i}-2`, content: `reply ${i}` } }),
-      ].join("\n")
+      const content =
+        [
+          JSON.stringify({ type: "user", message: { uuid: `u-${i}-1`, content: `hello ${i}` } }),
+          JSON.stringify({ type: "assistant", message: { uuid: `u-${i}-2`, content: `reply ${i}` } }),
+        ].join("\n") + "\n"
       writeFileSync(file, content, "utf8")
     }
 
@@ -117,7 +118,11 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
 
     for (let i = 1; i <= 25; i++) {
       const file = join(projDir, `sess-${i.toString().padStart(3, "0")}.jsonl`)
-      writeFileSync(file, JSON.stringify({ type: "user", message: { uuid: `u-${i}`, content: `hello ${i}` } }), "utf8")
+      writeFileSync(
+        file,
+        JSON.stringify({ type: "user", message: { uuid: `u-${i}`, content: `hello ${i}` } }) + "\n",
+        "utf8",
+      )
     }
 
     const executedSql: string[] = []
@@ -204,7 +209,7 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
     const file = join(projDir, "transient-sess.jsonl")
     writeFileSync(
       file,
-      JSON.stringify({ type: "user", message: { uuid: "trans-1", content: "ephemeral message queryable" } }),
+      JSON.stringify({ type: "user", message: { uuid: "trans-1", content: "ephemeral message queryable" } }) + "\n",
       "utf8",
     )
 
@@ -250,7 +255,8 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
     mkdirSync(projDir, { recursive: true })
 
     const file = join(projDir, "reappearing-sess.jsonl")
-    const content = JSON.stringify({ type: "user", message: { uuid: "reappear-1", text: "I will vanish then return" } })
+    const content =
+      JSON.stringify({ type: "user", message: { uuid: "reappear-1", text: "I will vanish then return" } }) + "\n"
     writeFileSync(file, content, "utf8")
 
     // Initial index

@@ -53,6 +53,7 @@ function mockRecall(
     rank?: number
     timestamp?: number
   }>,
+  skipped?: Array<{ phase: string; anchor: string; message: string }>,
 ): void {
   // V2 gates require rank + timestamp on every result. Default to a strong
   // BM25-shape rank (-10 is well below MIN_RANK_THRESHOLD = -3) and a recent
@@ -63,6 +64,7 @@ function mockRecall(
       timestamp: Date.now(),
       ...r,
     })),
+    ...(skipped ? { skipped } : {}),
   })
 }
 
@@ -464,24 +466,15 @@ describe("runInjectDelta — an unbound vault is said, once per session (25149)"
   })
 
   // 25149 a1 re-cut over 25071 row 3: the notice replaces an empty injection, never the steps it skipped.
-  test("an unbound first injection whose project-source step was skipped still names the skipped step", async () => {
-    const { ProjectSourcesBusyError } = await import("../src/history/project-sources.ts")
-    const busy = new ProjectSourcesBusyError("database is locked")
-    ensureProjectSourcesIndexedMock.mockImplementation(() => {
-      throw busy
-    })
-    try {
-      mockRecall([])
-      const first = await runInjectDelta(
-        "what is the status of km-storage-sync right now?",
-        createMemorySeenStore(),
-        unbound,
-      )
-      expect(first.skipped).toBe(false)
-      expect(first.skippedSteps).toEqual({ project_sources: busy.message })
-    } finally {
-      ensureProjectSourcesIndexedMock.mockReset()
-    }
+  test("an unbound first injection whose recall step had skipped phases still names the skipped step", async () => {
+    mockRecall([], [{ phase: "messages", anchor: "test", message: "capped" }])
+    const first = await runInjectDelta(
+      "what is the status of km-storage-sync right now?",
+      createMemorySeenStore(),
+      unbound,
+    )
+    expect(first.skipped).toBe(false)
+    expect(first.skippedSteps).toEqual({ "recall.messages": "capped" })
   })
 
   test("with snippets the notice sits inside the same envelope ahead of <recall-memory>; bound, it is absent", async () => {
@@ -523,16 +516,18 @@ describe("runInjectDelta — per-step durations (@ag/tribe/25071 row 1)", () => 
   }
 
   test("each step records its own duration, so a slow run names its slow step", async () => {
-    ensureProjectSourcesIndexedMock.mockImplementation(() => busyWait(60))
+    const store = createMemorySeenStore()
+    vi.spyOn(store, "advanceTurn").mockImplementation(() => {
+      busyWait(60)
+      return 1
+    })
     recallMock.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve({ results: [] }), 40)))
     const steps: Record<string, number> = {}
 
-    await runInjectDelta(salientPrompt, createMemorySeenStore(), { steps })
+    await runInjectDelta(salientPrompt, store, { steps })
 
-    expect(Object.keys(steps)).toEqual(
-      expect.arrayContaining(["classify", "glossary", "project_sources", "advance_turn", "recall"]),
-    )
-    expect(steps.project_sources).toBeGreaterThanOrEqual(55)
+    expect(Object.keys(steps)).toEqual(expect.arrayContaining(["classify", "glossary", "advance_turn", "recall"]))
+    expect(steps.advance_turn).toBeGreaterThanOrEqual(55)
     expect(steps.recall).toBeGreaterThanOrEqual(35)
     expect(steps.classify).toBeLessThan(55)
   })
@@ -572,22 +567,21 @@ describe("runInjectDelta — per-step durations (@ag/tribe/25071 row 1)", () => 
   })
 
   test("a step that throws still records how long it ran before throwing", async () => {
-    ensureProjectSourcesIndexedMock.mockImplementation(() => {
+    const store = createMemorySeenStore()
+    vi.spyOn(store, "advanceTurn").mockImplementation(() => {
       busyWait(30)
-      throw new Error("database is locked")
+      throw new Error("store failed")
     })
     const steps: Record<string, number> = {}
 
-    await expect(runInjectDelta(salientPrompt, createMemorySeenStore(), { steps })).rejects.toThrow(
-      "database is locked",
-    )
+    await expect(runInjectDelta(salientPrompt, store, { steps })).rejects.toThrow("store failed")
 
-    expect(steps.project_sources).toBeGreaterThanOrEqual(25)
+    expect(steps.advance_turn).toBeGreaterThanOrEqual(25)
     expect(steps.recall).toBeUndefined()
   })
 })
 
-describe("runInjectDelta — a busy project-source step is skipped, never waited on (@ag/tribe/25071)", () => {
+describe("runInjectDelta — 25158 B3: project sources are off the prompt hook", () => {
   beforeEach(() => {
     recallMock.mockReset()
     ensureProjectSourcesIndexedMock.mockReset()
@@ -595,43 +589,13 @@ describe("runInjectDelta — a busy project-source step is skipped, never waited
 
   const salientPrompt = "why does src/lib/inject-core.ts stall the prompt hook past thirty seconds tonight?"
 
-  test.each([
-    [
-      "the index writer is held by a run",
-      async () => new (await import("../src/history/db.ts")).IndexWriterBusyError("Recall index already active"),
-    ],
-    [
-      "another connection holds SQLite's write lock",
-      async () => new (await import("../src/history/project-sources.ts")).ProjectSourcesBusyError("database is locked"),
-    ],
-  ])("%s: recall still runs, and the result names the skipped step and why", async (_case, busy) => {
-    const error = await busy()
-    ensureProjectSourcesIndexedMock.mockImplementation(() => {
-      throw error
-    })
+  test("prompt submit never calls ensureProjectSourcesIndexed", async () => {
     mockRecall([])
-
-    // No caller-supplied record: the daemon passes none, so the skip must travel in the result (25071 row 3 review).
-    const result = await runInjectDelta(salientPrompt, createMemorySeenStore())
-
-    expect(recallMock).toHaveBeenCalled()
-    expect(result).toEqual({ skipped: true, reason: "no_results", skippedSteps: { project_sources: error.message } })
+    await runInjectDelta(salientPrompt, createMemorySeenStore())
+    expect(ensureProjectSourcesIndexedMock).not.toHaveBeenCalled()
   })
 
-  test.each([
-    [
-      "the index writer is held by a run",
-      async () => new (await import("../src/history/db.ts")).IndexWriterBusyError("busy"),
-    ],
-    [
-      "another connection holds SQLite's write lock",
-      async () => new (await import("../src/history/project-sources.ts")).ProjectSourcesBusyError("database is locked"),
-    ],
-  ])("%s, and recall finds a hit: the injected result names the skipped step too", async (_case, busy) => {
-    const error = await busy()
-    ensureProjectSourcesIndexedMock.mockImplementation(() => {
-      throw error
-    })
+  test("prompt submit succeeds even when index writer is locked elsewhere", async () => {
     mockRecall([
       {
         sessionId: "sess-abcd1234",
@@ -640,20 +604,9 @@ describe("runInjectDelta — a busy project-source step is skipped, never waited
         snippet: "A descriptive snippet that is plenty long enough to pass the minimum filter.",
       },
     ])
-
-    // The common path (25071 row 3 review, round 2): a successful injection carries the skip as well.
     const result = await runInjectDelta("what did we decide about km-storage-sync layering?", createMemorySeenStore())
-
     expect(result.skipped).toBe(false)
-    expect(result.skippedSteps).toEqual({ project_sources: error.message })
-  })
-
-  test("any other project-source failure still fails the hook", async () => {
-    ensureProjectSourcesIndexedMock.mockImplementation(() => {
-      throw new Error("disk I/O error")
-    })
-    await expect(runInjectDelta(salientPrompt, createMemorySeenStore())).rejects.toThrow("disk I/O error")
-    expect(recallMock).not.toHaveBeenCalled()
+    expect(ensureProjectSourcesIndexedMock).not.toHaveBeenCalled()
   })
 })
 
