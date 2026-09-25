@@ -8,7 +8,7 @@ import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
 import { handleToolCall, type HandlerOpts } from "./handlers.ts"
 import { logEvent } from "./messaging.ts"
-import { parseDeliveryFallbackPolicy, prefixFallbackDeliveryResolver } from "./delivery-resolution.ts"
+import { nearestLiveName, parseDeliveryFallbackPolicy, prefixFallbackDeliveryResolver } from "./delivery-resolution.ts"
 import { registerSession } from "./session.ts"
 import { DEFAULT_MAX_SILENCE_SEC } from "./session-transport-state.ts"
 import tribeHabModule from "../../../../hab.projects.ts"
@@ -34,6 +34,15 @@ function resultJson(result: ReturnType<typeof handleToolCall>): Record<string, u
 }
 
 describe("generic direct-message delivery resolution", () => {
+  it("names the live seat a mistyped recipient most likely meant, and nothing when none is close (25807 row 1)", () => {
+    const live = ["@chief", "@cto", "@dev/1", "@dev/review-adhoc5"]
+    expect(nearestLiveName("review-adhoc5", live)).toBe("@dev/review-adhoc5")
+    expect(nearestLiveName("@review-adhoc5", live)).toBe("@dev/review-adhoc5")
+    expect(nearestLiveName("@chef", live)).toBe("@chief")
+    expect(nearestLiveName("@ci", live)).toBeUndefined()
+    expect(nearestLiveName("@never-seen", live)).toBeUndefined()
+  })
+
   it("validates one declared-order prefix fallback table and never infers hierarchy", () => {
     const resolve = prefixFallbackDeliveryResolver(
       JSON.stringify([
@@ -453,6 +462,20 @@ describe("generic direct-message delivery resolution", () => {
       delivery_failure_id: expect.any(String),
     })
     expect(refusedUnknownPull.detail).toContain('"@never-seen" (no-session-record)')
+
+    // 25807 row 1: an unknown name close to a live seat names it; @never-seen above is close to none, so its
+    // refusal is unchanged.
+    const refusedBareName = resultJson(
+      handleToolCall(
+        sender,
+        "tribe.send",
+        { to: "dev", message: "typo", type: "request", request: "req-bare" },
+        opts(),
+      ),
+    )
+    expect(refusedBareName.error).toBe(
+      "tribe.send: failed to deliver to dev - not online (no connected transport); nearest live seat: @dev",
+    )
     expect(db.prepare("SELECT request_id FROM pending_request WHERE request_id = 'req-unknown-pull'").get()).toBeNull()
 
     const offlineNotice = resultJson(

@@ -64,7 +64,7 @@ import {
   type SessionTransportEvidence,
 } from "./session-transport-state.ts"
 import { sessionAuthority, type SessionAuthority } from "./identity-verifier.ts"
-import type { DirectDeliveryResolution, DirectDeliveryResolver } from "./delivery-resolution.ts"
+import { nearestLiveName, type DirectDeliveryResolution, type DirectDeliveryResolver } from "./delivery-resolution.ts"
 import { bothDeclaredUnrun, type DeclaredRoster } from "./membership-declared-roster.ts"
 import { isUnidentifiedSessionName } from "./resolve-name.ts"
 
@@ -1131,9 +1131,20 @@ function resolveDirectDelivery(
     `at admission snapshot ${snapshot}, no connected, PID-live transport was observed for ` +
     `${JSON.stringify(recipient)} (${original.owner_transport_reason}); start or resume ${recipient}, ` +
     "address a declared live holder, or retry later"
+  // A name no session ever held is usually a typo of a live one (25807 row 1): name it. A known seat that is only
+  // offline keeps the plain refusal, so its author is never steered to a different seat.
+  const nearest =
+    original.owner_transport_reason === "no-session-record"
+      ? nearestLiveName(
+          recipient,
+          [...transport.liveTransportNames].filter((name) => !transport.mailboxDeafNames.has(name)),
+        )
+      : undefined
   return {
     status: "unresolved",
-    reason: `failed to deliver to ${recipient} - not online (no connected transport)`,
+    reason:
+      `failed to deliver to ${recipient} - not online (no connected transport)` +
+      (nearest === undefined ? "" : `; nearest live seat: ${nearest}`),
     detail: longDetail,
   }
 }

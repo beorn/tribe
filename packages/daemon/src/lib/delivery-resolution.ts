@@ -148,3 +148,53 @@ export function parseDeliveryFallbackPolicy(raw: string | undefined): DeliveryFa
 export function prefixFallbackDeliveryResolver(raw: string | undefined): DirectDeliveryResolver | undefined {
   return parseDeliveryFallbackPolicy(raw)?.resolveDelivery
 }
+
+/**
+ * The live name a refused recipient most likely meant, for the refusal's hint (25807 row 1): "review-adhoc5" means
+ * "@dev/review-adhoc5". A live name whose trailing path segments equal the recipient wins, fewest segments first;
+ * otherwise the nearest within a few edits, scaled so a two-letter name never borrows a neighbour. Undefined when
+ * nothing is that close, because a guess from further away sends the author to the wrong seat.
+ */
+export function nearestLiveName(recipient: string, liveNames: Iterable<string>): string | undefined {
+  const bare = (name: string): string => name.replace(/^@/, "")
+  const wanted = bare(recipient)
+  if (wanted.length === 0) return undefined
+  const live = [...liveNames].filter((name) => name !== recipient).sort()
+  const bySegments = live
+    .filter((name) => bare(name) === wanted || bare(name).endsWith(`/${wanted}`))
+    .sort((a, b) => a.split("/").length - b.split("/").length)
+  if (bySegments[0] !== undefined) return bySegments[0]
+  const reach = Math.min(2, Math.floor(wanted.length / 3))
+  let nearest: string | undefined
+  let nearestDistance = reach + 1
+  for (const name of live) {
+    const distance = editDistance(bare(name), wanted)
+    if (distance < nearestDistance) {
+      nearest = name
+      nearestDistance = distance
+    }
+  }
+  return nearest
+}
+
+function editDistance(a: string, b: string): number {
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index)
+  let distance = b.length
+  for (const [i, charA] of [...a].entries()) {
+    let left = i + 1
+    const current = [left]
+    let diagonal: number | undefined
+    let j = 0
+    for (const above of previous) {
+      if (diagonal !== undefined) {
+        left = Math.min(above + 1, left + 1, diagonal + (charA === b[j - 1] ? 0 : 1))
+        current.push(left)
+      }
+      diagonal = above
+      j++
+    }
+    previous = current
+    distance = left
+  }
+  return distance
+}
