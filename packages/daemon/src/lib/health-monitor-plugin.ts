@@ -1397,6 +1397,19 @@ const procReadPinnedIncident = (subject: string) => ({
 })
 
 /**
+ * The incident subject for one process incarnation. The incident key joins its parts with ":", which a part may not
+ * contain, and a Linux start time is `linux:<boot id>:<ticks>`; so the start time's ":" become "/" (review-adhoc5
+ * dc27b86b: with the raw start time every raise threw and no incident was ever sent).
+ */
+export function procReadPinnedSubject(pid: number, startTime: string | undefined): string {
+  return `pid-${pid}@${(startTime ?? "start-unknown").replaceAll(":", "/")}`
+}
+
+function procReadPinnedPid(subject: string): string {
+  return /^pid-(\d+)@/u.exec(subject)?.[1] ?? subject
+}
+
+/**
  * One census's verdict on pinned /proc reads. Raises once per process incarnation (pid plus start time) whose read has
  * been pending past the threshold, upserts only when its condition line changes, and clears when a later census no
  * longer reports the read (it settled, or the process is gone). A census that says nothing about pending reads (the
@@ -1406,7 +1419,7 @@ export function checkPinnedProcReads(
   observation: CollectedProcessObservation,
   now: number,
   openIncidents: ReadonlyArray<{ readonly subject: string; readonly recipient: string }>,
-  told: Map<string, string>,
+  told: ReadonlyMap<string, string>,
 ): ProcReadPinnedAction[] {
   let pending: readonly PendingProcRead[]
   if (observation.kind === "available") pending = []
@@ -1417,7 +1430,7 @@ export function checkPinnedProcReads(
   const pinned = new Map<string, PendingProcRead[]>()
   for (const read of pending) {
     if (now - Date.parse(read.since) < PROC_READ_PINNED_AFTER_MS) continue
-    const subject = `${read.pid}:${read.startTime ?? "start-unknown"}`
+    const subject = procReadPinnedSubject(read.pid, read.startTime)
     pinned.set(subject, [...(pinned.get(subject) ?? []), read])
   }
 
@@ -1425,8 +1438,7 @@ export function checkPinnedProcReads(
   const open = new Map(openIncidents.map((incident) => [incident.subject, incident.recipient]))
   for (const [subject, recipient] of open) {
     if (pinned.has(subject)) continue
-    told.delete(subject)
-    const why = `cleared: pid ${subject.split(":")[0]}'s /proc read settled or the process is gone`
+    const why = `cleared: pid ${procReadPinnedPid(subject)}'s /proc read settled or the process is gone`
     actions.push({ kind: "clear", recipient, content: why, summary: why, incident: procReadPinnedIncident(subject) })
   }
   for (const [subject, reads] of pinned) {
@@ -1435,7 +1447,6 @@ export function checkPinnedProcReads(
     const paths = [...new Set(reads.map((read) => read.path))].sort().join(", ")
     const summary = `pid ${oldest.pid} has held a /proc read pending since ${oldest.since}: ${paths}`
     if (told.get(subject) === summary) continue
-    told.set(subject, summary)
     const minutes = Math.floor((now - Date.parse(oldest.since)) / 60_000)
     const content =
       `${summary} (${minutes} min; process start ${oldest.startTime ?? "unknown: its stat read is the one pending"}). ` +
@@ -1472,6 +1483,9 @@ export function runProcReadPinnedTick(
       { delivery: "push", topic: type, summary: action.summary },
       { ...action.incident, active: action.kind === "raise" },
     )
+    // Recorded only once the send has landed: a send that throws is retried on the next tick, never silenced.
+    if (action.kind === "raise") told.set(action.incident.subject, action.summary)
+    else told.delete(action.incident.subject)
   }
 }
 

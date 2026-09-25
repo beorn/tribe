@@ -7,8 +7,11 @@
  */
 
 import { describe, expect, it } from "vitest"
+import { incidentKey } from "../../../wire/src/lib/incident.ts"
 import {
   checkPinnedProcReads,
+  procReadPinnedSubject,
+  runProcReadPinnedTick,
   PROC_READ_PINNED_AFTER_MS,
   PROC_READ_PINNED_CONDITION,
   PROC_READ_PINNED_EMITTER,
@@ -60,7 +63,7 @@ describe("the snapshot's pending /proc reads reach the monitor (24248)", () => {
 })
 
 describe("a pinned /proc read raises one incident per process incarnation (24248)", () => {
-  const subject = "80:linux:boot-a:4242"
+  const subject = "pid-80@linux/boot-a/4242"
   const incident = { condition: PROC_READ_PINNED_CONDITION, emitter: PROC_READ_PINNED_EMITTER, subject }
 
   it("raises once, to @chief, naming pid, path, since and the cure, when the read is older than five minutes", () => {
@@ -81,17 +84,18 @@ describe("a pinned /proc read raises one incident per process incarnation (24248
     ])
   })
 
+  const sentLine = `pid 80 has held a /proc read pending since ${since}: /proc/80/environ`
+
   it("does not re-raise while the condition line is unchanged", () => {
-    const told = new Map<string, string>()
-    checkPinnedProcReads(incomplete([read]), sinceMs + PROC_READ_PINNED_AFTER_MS, [], told)
+    // What the tick records once the raise has landed.
+    const told = new Map([[subject, sentLine]])
     const open = [{ recipient: PROC_READ_PINNED_OWNER, subject }]
 
     expect(checkPinnedProcReads(incomplete([read]), sinceMs + 2 * PROC_READ_PINNED_AFTER_MS, open, told)).toEqual([])
   })
 
   it("upserts when a second read of the same process pins, since the condition line changed", () => {
-    const told = new Map<string, string>()
-    checkPinnedProcReads(incomplete([read]), sinceMs + PROC_READ_PINNED_AFTER_MS, [], told)
+    const told = new Map([[subject, sentLine]])
     const open = [{ recipient: PROC_READ_PINNED_OWNER, subject }]
     const status = { ...read, path: "/proc/80/status", since: "2026-09-24T12:01:00.000Z" }
 
@@ -103,6 +107,38 @@ describe("a pinned /proc read raises one incident per process incarnation (24248
         summary: `pid 80 has held a /proc read pending since ${since}: /proc/80/environ, /proc/80/status`,
       },
     ])
+  })
+
+  it("keys a production start time into an incident the rail accepts", () => {
+    // A Linux start time is linux:<boot id>:<ticks>, and ":" separates the incident key's parts (review-adhoc5
+    // dc27b86b): with the raw start time as the subject, every raise threw and no incident was ever sent.
+    const production = { ...read, startTime: "linux:6f1c2e0a-7b44-4a51-9d0e-3c9a1f2b8e77:123456789" }
+    const [action] = checkPinnedProcReads(incomplete([production]), sinceMs + PROC_READ_PINNED_AFTER_MS, [], new Map())
+    if (action === undefined) throw new Error("expected a raise")
+    expect(action.incident.subject).toBe(procReadPinnedSubject(80, production.startTime))
+    expect(() => incidentKey(action.incident)).not.toThrow()
+    expect(procReadPinnedSubject(80, undefined)).toBe("pid-80@start-unknown")
+  })
+
+  it("a raise whose send throws is sent again on the next tick, never silenced", () => {
+    let attempts = 0
+    const sent: string[] = []
+    const api = {
+      listOpenIncidents: () => [],
+      send: (_to: string, _content: string, _type: string, _bead: unknown, meta: { summary: string }) => {
+        attempts += 1
+        if (attempts === 1) throw new Error("rail refused")
+        sent.push(meta.summary)
+      },
+    } as unknown as Parameters<typeof runProcReadPinnedTick>[0]
+    const told = new Map<string, string>()
+    const now = sinceMs + PROC_READ_PINNED_AFTER_MS
+
+    expect(() => runProcReadPinnedTick(api, incomplete([read]), told, now)).toThrow("rail refused")
+    runProcReadPinnedTick(api, incomplete([read]), told, now)
+
+    expect(sent).toEqual([sentLine])
+    expect(told.get(subject)).toBe(sentLine)
   })
 
   it("clears when a later census no longer reports the read", () => {
