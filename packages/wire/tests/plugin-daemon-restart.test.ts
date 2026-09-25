@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { connectToDaemon, type DaemonClient } from "../src/client.ts"
 import { deriveTribePersonaLaunchIdentity } from "../src/lib/persona-launch-identity.ts"
 import { RELOAD_SLOT_MS } from "../src/lib/reload-pacing.ts"
+import { REEXEC_BACKOFF_BASE_MS, REEXEC_BACKOFF_MAX_MS } from "../../../plugins/claude/supervisor-policy.ts"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -94,6 +95,15 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, label: strin
  */
 function pacedRestartBudgetMs(seats: number): number {
   return seats * RELOAD_SLOT_MS + 10_000
+}
+
+/**
+ * How long the wrapper can take to bring back its adapter after the n-th consecutive crash. Its backoff is decorrelated
+ * jitter (25663), which can triple the previous delay each time up to the cap, plus the new adapter's own rejoin. The
+ * wait ends as soon as the adapter is back, so this bounds only the rare long draw.
+ */
+function reexecRecoveryBudgetMs(consecutiveReexecs: number): number {
+  return Math.min(REEXEC_BACKOFF_MAX_MS, REEXEC_BACKOFF_BASE_MS * 3 ** consecutiveReexecs) + 5_000
 }
 
 function collectJsonLines(child: ChildProcessWithoutNullStreams): JsonObject[] {
@@ -727,7 +737,7 @@ process.exit(await child.exited)
         return restoredMember !== undefined
       },
       "adapter-crash supervised recovery",
-      5_000,
+      reexecRecoveryBudgetMs(1),
     )
 
     expect(plugin.pid).toBe(wrapperPid)
@@ -768,7 +778,7 @@ process.exit(await child.exited)
           return false
         },
         `persistent adapter recovery ${crash}`,
-        crash === 6 ? 12_000 : 6_000,
+        reexecRecoveryBudgetMs(crash),
       )
       if (crash === 2) {
         expect(recoveredMember).toMatchObject({
@@ -804,7 +814,7 @@ process.exit(await child.exited)
       transport_pids: [transportPid],
     })
     generation.client.close()
-  }, 45_000)
+  }, 180_000)
 
   // G9 P0 row 7 slice 2. A dead adapter used to leave only a supervisor stderr
   // line in the host's MCP log, which nobody can find by the time a seat reads
