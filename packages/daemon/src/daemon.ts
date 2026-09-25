@@ -52,6 +52,7 @@ import {
   withSocketServer,
 } from "./lib/compose/index.ts"
 import { TOOLS_LIST } from "tribe-wire/lib/tools-list"
+import { reloadCapacityRefusal } from "tribe-wire/lib/reload-pacing"
 import { pruneOldActivityLogs } from "./lib/activity-log.ts"
 import { countDurableSessionRows } from "./lib/session.ts"
 import { gatherCodePin, STARTUP_SHA } from "./lib/code-pin.ts"
@@ -171,6 +172,9 @@ sanitizeDaemonProcessEnvironment(process.env)
 const log = createLogger("tribe:daemon")
 const deliveryFallbackPolicy = parseDeliveryFallbackPolicy(process.env.TRIBE_DELIVERY_FALLBACKS)
 const getExpectedMembers = createDeclaredRosterReader(process.env)
+// 25663 r2: a roster larger than the reload window would make declared seats share its last slot; say so at boot.
+const bootReloadRefusal = reloadCapacityRefusal(getExpectedMembers()?.byName.size ?? 0)
+if (bootReloadRefusal !== null) log.error?.(`reload pacing refused the declared roster: ${bootReloadRefusal}`)
 
 // ---------------------------------------------------------------------------
 // Sync portion of the pipe — config, db, daemonCtx, recall, tools, registry,

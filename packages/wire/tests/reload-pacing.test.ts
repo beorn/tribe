@@ -21,12 +21,14 @@ import { describe, expect, test } from "vitest"
 import {
   RELOAD_DEADLINE_MS,
   RELOAD_MAX_ABSENT,
+  RELOAD_MAX_DECLARED,
   RELOAD_PROBE_TIMEOUT_MS,
   RELOAD_READY_TIMEOUT_MS,
   RELOAD_SLOT_MS,
   RELOAD_WINDOW_CAP_MS,
   pacedReexec,
   planReloadDelay,
+  reloadCapacityRefusal,
   reloadRank,
   type ReloadDaemonView,
   type ReloadPeers,
@@ -59,6 +61,9 @@ describe("the reload schedule, through the shipped planner", () => {
     expect(RELOAD_SLOT_MS).toBe(4_000)
     expect(FLEET * RELOAD_SLOT_MS).toBeLessThanOrEqual(RELOAD_WINDOW_CAP_MS)
     expect(RELOAD_DEADLINE_MS).toBe(RELOAD_WINDOW_CAP_MS + RELOAD_READY_TIMEOUT_MS + 2 * RELOAD_PROBE_TIMEOUT_MS)
+    // 25663 r2: the window holds 28 declared seats, one slot each; the live roster declared 23 on 2026-09-24.
+    expect(RELOAD_MAX_DECLARED).toBe(28)
+    expect(RELOAD_MAX_DECLARED * RELOAD_SLOT_MS).toBe(RELOAD_WINDOW_CAP_MS)
   })
 
   test.each([2_000, 16_000])(
@@ -239,7 +244,9 @@ describe("pacedReexec", () => {
     const run = harness([new Error("socket gone"), view([], "abc")])
     await pacedReexec({ ...run.deps, random: () => 0.5 }, "generation changed")
     expect(run.sleeps[0]).toBe(RELOAD_WINDOW_CAP_MS / 2)
-    expect(run.log[0]).toMatch(/cli_status read failed \(socket gone\); spreading over the 90000 ms cap/u)
+    expect(run.log[0]).toBe(
+      `warn: reload pacing: cli_status read failed (socket gone); spreading over the ${RELOAD_WINDOW_CAP_MS} ms cap`,
+    )
   })
 
   test("a missing self takes the last slot and says so", async () => {
@@ -273,12 +280,39 @@ describe("pacedReexec", () => {
     expect(run.log[0]).toMatch(/@dev\/3 is not in the declared roster; ranked 1 after it/u)
   })
 
-  test("a rank clipped into the shared last slot says so", async () => {
-    const declared = Array.from({ length: 30 }, (_, index) => `@dev/${String(index).padStart(2, "0")}`)
-    const run = harness([view(declared, "abc")])
-    await pacedReexec({ ...run.deps, self: "@dev/25" }, "x")
-    expect(run.sleeps[0]).toBe(21 * RELOAD_SLOT_MS)
-    expect(run.log[0]).toMatch(/rank 25 of 30 peers shares the last slot \(21\) inside the 90000 ms cap/u)
+  const roster = (count: number) =>
+    Array.from({ length: count }, (_, index) => `@dev/${String(index).padStart(2, "0")}`)
+
+  test("a 23-seat roster gives every declared seat its own slot, with no warning", async () => {
+    const declared = roster(23)
+    const slots: number[] = []
+    for (const self of declared) {
+      const run = harness([view(declared, "abc")])
+      await pacedReexec({ ...run.deps, self }, "x")
+      expect(run.log, self).toEqual(["reexec: x"])
+      slots.push(run.sleeps[0]! / RELOAD_SLOT_MS)
+    }
+    expect(slots).toEqual([...declared.keys()])
+  })
+
+  test("a roster larger than the window refuses, naming the count and the cap", async () => {
+    expect(reloadCapacityRefusal(RELOAD_MAX_DECLARED)).toBeNull()
+    const run = harness([view(roster(40), "abc")])
+    await pacedReexec({ ...run.deps, self: "@dev/35" }, "x")
+    expect(run.log[0]).toBe(
+      "warn: reload pacing: the declared roster names 40 seats but the paced reload holds 28 (112000 ms window of 4000 ms slots inside the 146000 ms deadline); declared seats past slot 27 share it",
+    )
+    expect(run.log[1]).toMatch(/rank 35 of 40 peers shares the last slot \(27\)/u)
+  })
+
+  test("only an undeclared adapter past a full roster shares the last slot, and says so", async () => {
+    const run = harness([
+      { liveNames: ["@grok/1"], peers: { declared: roster(28), liveUndeclared: ["@grok/1"] }, runningCert: "abc" },
+    ])
+    await pacedReexec({ ...run.deps, self: "@grok/1" }, "x")
+    expect(run.sleeps[0]).toBe(27 * RELOAD_SLOT_MS)
+    expect(run.log[0]).toMatch(/@grok\/1 is not in the declared roster; ranked 28 after it/u)
+    expect(run.log[1]).toMatch(/rank 28 of 29 peers shares the last slot \(27\) inside the 112000 ms cap/u)
   })
 
   test("a daemon with no code identity is judged on liveness, warned once, naming 25670", async () => {
