@@ -29,7 +29,6 @@ import {
   BRIDGE_LOST_EMITTER,
   checkBridgeLost,
   BRIDGE_LOST_GRACE_MARGIN_MS,
-  DEFAULT_BRIDGE_LOST_GRACE_MS,
   DEFAULT_BRIDGE_LOST_TICK_MS,
   parseBridgeLostConfig,
   runBridgeLostTick,
@@ -223,7 +222,10 @@ describe("parseBridgeLostConfig", () => {
   test("arms with the configured owners and the derived default grace", () => {
     expect(parseBridgeLostConfig({ TRIBE_BRIDGE_LOST_OWNERS: "@chief, @cto,@adhoc/0" })).toEqual({
       armed: true,
-      config: { owners: ["@chief", "@cto", "@adhoc/0"], graceMs: DEFAULT_BRIDGE_LOST_GRACE_MS },
+      config: {
+        owners: ["@chief", "@cto", "@adhoc/0"],
+        graceMs: RELOAD_DEADLINE_MS + DEFAULT_BRIDGE_LOST_TICK_MS + BRIDGE_LOST_GRACE_MARGIN_MS,
+      },
     })
   })
 
@@ -247,13 +249,13 @@ describe("parseBridgeLostConfig", () => {
   // 25663 r3 (@cto 5d1adade): the default grace and the reload deadline are one relation, asserted here, not two
   // literals that happen to fit: a change to either constant moves the other, and a zero margin fails loud.
   test("the default grace is the reload deadline plus one tick plus a positive margin, and it arms", () => {
-    expect(DEFAULT_BRIDGE_LOST_GRACE_MS).toBe(
-      RELOAD_DEADLINE_MS + DEFAULT_BRIDGE_LOST_TICK_MS + BRIDGE_LOST_GRACE_MARGIN_MS,
-    )
     expect(BRIDGE_LOST_GRACE_MARGIN_MS).toBeGreaterThan(0)
     const env = { TRIBE_BRIDGE_LOST_OWNERS: "@chief,@cto" }
     const bounds = { reloadDeadlineMs: RELOAD_DEADLINE_MS, tickMs: DEFAULT_BRIDGE_LOST_TICK_MS }
-    expect(parseBridgeLostConfig(env, bounds).armed).toBe(true)
+    expect(parseBridgeLostConfig(env, bounds)).toMatchObject({
+      armed: true,
+      config: { graceMs: RELOAD_DEADLINE_MS + DEFAULT_BRIDGE_LOST_TICK_MS + BRIDGE_LOST_GRACE_MARGIN_MS },
+    })
     // With no margin the same relation pages on the slowest reload, and the parser refuses it.
     const noMargin = String((RELOAD_DEADLINE_MS + DEFAULT_BRIDGE_LOST_TICK_MS) / 1000)
     expect(parseBridgeLostConfig({ ...env, TRIBE_BRIDGE_LOST_GRACE_SEC: noMargin }, bounds).armed).toBe(false)

@@ -1163,8 +1163,6 @@ export const BRIDGE_LOST_GRACE_MARGIN_MS = 4_000
 export function bridgeLostDefaultGraceMs(reloadDeadlineMs: number, tickMs: number): number {
   return reloadDeadlineMs + tickMs + BRIDGE_LOST_GRACE_MARGIN_MS
 }
-/** The default grace at the default 10 s poll: 180 s at the 146 s deadline. */
-export const DEFAULT_BRIDGE_LOST_GRACE_MS = bridgeLostDefaultGraceMs(RELOAD_DEADLINE_MS, DEFAULT_BRIDGE_LOST_TICK_MS)
 
 export interface BridgeLostConfig {
   /** Paged in order; the first that is not itself lost receives the incident. */
