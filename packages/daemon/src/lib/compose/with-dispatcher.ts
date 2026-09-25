@@ -2215,7 +2215,8 @@ export function withDispatcher<
 
           case "cli_health": {
             const health = await handleToolCall(daemonCtx, TRIBE_COORD_METHODS.health, {}, DAEMON_HANDLER_OPTS)
-            const { getBridgeLostArming, getHealthSnapshot } = await import("../health-monitor-plugin.ts")
+            const { getBridgeLostArming, getHealthSampleStats, getHealthSnapshot } =
+              await import("../health-monitor-plugin.ts")
             let machine: unknown = null
             try {
               machine = await getHealthSnapshot()
@@ -2244,6 +2245,8 @@ export function withDispatcher<
               machine,
               // 25662: doctor prints "bridge-lost paging disarmed: <reason>" from this; never a silent default.
               bridge_lost: getBridgeLostArming(),
+              // 24248: skipped health-sample ticks ride the rail; null means the monitor has not started.
+              health_sample: getHealthSampleStats() ?? null,
               sessions: roster,
               daemon: {
                 pid: process.pid,

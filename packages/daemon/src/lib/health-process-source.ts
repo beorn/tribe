@@ -649,7 +649,9 @@ function managedProcessSource(
   const stateRoot = dirname(controllerSessionDir)
   const maxAgeMs = options.maxAgeMs ?? DEFAULT_MAX_AGE_MS
   const now = options.now ?? Date.now
-  // The load hab last reported: a poll's snapshots take their ceiling from the scalars the previous poll read.
+  // The load hab last reported: a poll's snapshots take their ceiling from the scalars the previous poll read. The
+  // first successful scalar seeds the scale; until it lands (a cold start in a spike) the base holds, and if the circuit
+  // opens first, the success that follows its window seeds it (@cto ef3f9fdb).
   let lastLoad: { readonly load1: number; readonly cores: number } | undefined
   const ceilingMs = (): number =>
     options.commandTimeoutMs ??

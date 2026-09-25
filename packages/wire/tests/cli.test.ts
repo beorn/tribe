@@ -152,11 +152,21 @@ async function waitForSocket(socketPath: string, timeoutMs = 5_000): Promise<voi
 
 /** A daemon whose bridge-lost paging is armed (25662): doctor reads it from cli_health. */
 const ARMED_BRIDGE_LOST = { armed: true, config: { owners: ["@chief", "@cto"], graceMs: 180_000 } }
+/** A health sample on cadence (24248): doctor reads it from cli_health beside the arming. */
+const ON_CADENCE_SAMPLE = {
+  started: 12,
+  completed: 11,
+  failed: 0,
+  skipped: 0,
+  consecutiveSkips: 0,
+  maxObservedRunMs: 900,
+  inFlight: true,
+}
 
 function createDoctorCanaryResponder(mode: "pass" | "timeout" = "pass") {
   return (method: string): unknown | null => {
     if (method === "register") return { name: "tribe-doctor-canary" }
-    if (method === "cli_health") return { bridge_lost: ARMED_BRIDGE_LOST }
+    if (method === "cli_health") return { bridge_lost: ARMED_BRIDGE_LOST, health_sample: ON_CADENCE_SAMPLE }
     if (method === "cli_inbox_wait") {
       return mode === "pass"
         ? { status: "woken", timed_out: false, waited_ms: 3 }
@@ -1036,6 +1046,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
                       sessions: [holder],
                       daemon,
                       bridge_lost: ARMED_BRIDGE_LOST,
+                      health_sample: ON_CADENCE_SAMPLE,
                     }
                   : request.method === "cli_log"
                     ? { messages: [] }

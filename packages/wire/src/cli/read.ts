@@ -1258,6 +1258,45 @@ export function evaluateDoctorBridgeLost(arming: unknown): DoctorDiagnosticCheck
   }
 }
 
+/**
+ * The health sample's cadence (24248), as cli_health reports it. A tick skipped because the last sample is still
+ * running is a sample nobody took: while one is being skipped now, the host monitor is behind, and doctor warns.
+ */
+export function evaluateDoctorHealthSample(stats: unknown): DoctorDiagnosticCheck {
+  const shape = stats as
+    | { skipped?: unknown; consecutiveSkips?: unknown; maxObservedRunMs?: unknown; started?: unknown }
+    | null
+    | undefined
+  if (
+    typeof shape?.skipped !== "number" ||
+    typeof shape.consecutiveSkips !== "number" ||
+    typeof shape.maxObservedRunMs !== "number" ||
+    typeof shape.started !== "number"
+  ) {
+    return {
+      severity: "UNKNOWN",
+      diagnosis:
+        "health sample cadence unreported: the running daemon predates 24248's rail count or its health monitor is off",
+    }
+  }
+  const longest = `longest sample ${(shape.maxObservedRunMs / 1000).toFixed(1)}s`
+  if (shape.consecutiveSkips > 0) {
+    return {
+      severity: "WARNING",
+      diagnosis:
+        `health sample behind: ${shape.consecutiveSkips} tick(s) skipped in a row now, ${shape.skipped} since start ` +
+        `(${shape.started} samples, ${longest})`,
+      remedy:
+        "read the daemon log's `health-sample: skipped tick` lines for how long the running sample has taken; a census " +
+        "that outruns the tick is the host's load or a pathological journal walk",
+    }
+  }
+  return {
+    severity: "OK",
+    diagnosis: `health sample on cadence: ${shape.skipped} skipped tick(s) since start (${shape.started} samples, ${longest})`,
+  }
+}
+
 type DoctorConnect = typeof connectToDaemon
 
 /**
@@ -1449,13 +1488,15 @@ async function cmdDoctor(opts: { fix?: boolean; json?: boolean }): Promise<void>
     }
   }
   let bridgeLost: DoctorDiagnosticCheck
+  let healthSample: DoctorDiagnosticCheck
   try {
-    bridgeLost = evaluateDoctorBridgeLost(((await callDaemon("cli_health")) as { bridge_lost?: unknown }).bridge_lost)
+    const health = (await callDaemon("cli_health")) as { bridge_lost?: unknown; health_sample?: unknown }
+    bridgeLost = evaluateDoctorBridgeLost(health.bridge_lost)
+    healthSample = evaluateDoctorHealthSample(health.health_sample)
   } catch (error) {
-    bridgeLost = {
-      severity: "UNKNOWN",
-      diagnosis: `bridge-lost paging query failed: ${error instanceof Error ? error.message : String(error)}`,
-    }
+    const reason = error instanceof Error ? error.message : String(error)
+    bridgeLost = { severity: "UNKNOWN", diagnosis: `bridge-lost paging query failed: ${reason}` }
+    healthSample = { severity: "UNKNOWN", diagnosis: `health sample query failed: ${reason}` }
   }
   const rail = await probeDoctorRail()
   // @ag/tribe/24159 — informational only, never folded into `outcome`: a
@@ -1467,6 +1508,7 @@ async function cmdDoctor(opts: { fix?: boolean; json?: boolean }): Promise<void>
     versions.severity,
     membership.severity,
     bridgeLost.severity,
+    healthSample.severity,
     rail.severity,
   ])
 
@@ -1478,6 +1520,7 @@ async function cmdDoctor(opts: { fix?: boolean; json?: boolean }): Promise<void>
         versions,
         membership,
         bridge_lost: bridgeLost,
+        health_sample: healthSample,
         rail,
         daemon_stderr_log: daemonStderrLog,
       },
@@ -1511,6 +1554,12 @@ async function cmdDoctor(opts: { fix?: boolean; json?: boolean }): Promise<void>
   } else {
     console.error(`  ${bridgeLost.severity} — ${bridgeLost.diagnosis}`)
     if (bridgeLost.remedy) console.error(`  REMEDY — ${bridgeLost.remedy}`)
+  }
+  if (healthSample.severity === "OK") {
+    console.log(`  OK — ${healthSample.diagnosis}`)
+  } else {
+    console.error(`  ${healthSample.severity} — ${healthSample.diagnosis}`)
+    if (healthSample.remedy) console.error(`  REMEDY — ${healthSample.remedy}`)
   }
 
   if (rail.severity === "OK") {

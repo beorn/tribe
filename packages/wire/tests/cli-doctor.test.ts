@@ -15,6 +15,7 @@ import {
   evaluateDoctor,
   evaluateDoctorIdentity,
   evaluateDoctorBridgeLost,
+  evaluateDoctorHealthSample,
   evaluateDoctorMembership,
   evaluateDoctorVersions,
 } from "../src/cli/read.ts"
@@ -331,6 +332,36 @@ describe("status-backed doctor checks", () => {
     )
     const disconnected = evaluateDoctorMembership([{ name: "@dev/1", transport_state: "disconnected" }], undefined)
     expect(disconnected.remedy).toBe("rejoin each disconnected seat, then re-run `tribe doctor`")
+  })
+})
+
+describe("evaluateDoctorHealthSample (24248, @cto bace5ece)", () => {
+  const stats = { started: 90, completed: 89, failed: 0, inFlight: true, maxObservedRunMs: 12_400 }
+
+  test("a sample skipping ticks right now is a WARNING that counts them", () => {
+    expect(evaluateDoctorHealthSample({ ...stats, skipped: 5, consecutiveSkips: 2 })).toEqual({
+      severity: "WARNING",
+      diagnosis:
+        "health sample behind: 2 tick(s) skipped in a row now, 5 since start (90 samples, longest sample 12.4s)",
+      remedy:
+        "read the daemon log's `health-sample: skipped tick` lines for how long the running sample has taken; a census " +
+        "that outruns the tick is the host's load or a pathological journal walk",
+    })
+  })
+
+  test("a sample back on cadence is OK and still says how many ticks it skipped", () => {
+    expect(evaluateDoctorHealthSample({ ...stats, skipped: 5, consecutiveSkips: 0 })).toEqual({
+      severity: "OK",
+      diagnosis: "health sample on cadence: 5 skipped tick(s) since start (90 samples, longest sample 12.4s)",
+    })
+  })
+
+  test("a daemon that reports no cadence is UNKNOWN, never assumed on time", () => {
+    expect(evaluateDoctorHealthSample(null)).toEqual({
+      severity: "UNKNOWN",
+      diagnosis:
+        "health sample cadence unreported: the running daemon predates 24248's rail count or its health monitor is off",
+    })
   })
 })
 

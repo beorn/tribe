@@ -27,7 +27,7 @@ import { createLogger } from "loggily"
 import { isReaperExempt } from "tribe-wire"
 import { RELOAD_DEADLINE_MS } from "tribe-wire/lib/reload-pacing"
 import { createTimers } from "./timers.ts"
-import { startSingleFlightTicker } from "./single-flight-ticker.ts"
+import { startSingleFlightTicker, type SingleFlightRunner, type SingleFlightStats } from "./single-flight-ticker.ts"
 import type { TribePluginApi, TribeClientApi } from "./plugin-api.ts"
 import {
   createHealthProcessSource,
@@ -1261,6 +1261,16 @@ let currentBridgeLostArming: BridgeLostArming = { armed: false, reason: "the hea
 /** The running monitor's arming, for cli_health and `tribe doctor` ("bridge-lost paging disarmed: <reason>"). */
 export function getBridgeLostArming(): BridgeLostArming {
   return currentBridgeLostArming
+}
+
+let currentSampleTicker: SingleFlightRunner | undefined
+
+/**
+ * The health sample's own cadence, for cli_health and `tribe doctor`: a skipped tick is a sample nobody took, so its
+ * count rides the rail rather than only the daemon log (24248, @cto bace5ece). Undefined until the monitor starts.
+ */
+export function getHealthSampleStats(): SingleFlightStats | undefined {
+  return currentSampleTicker?.stats()
 }
 
 export function createBridgeLostMemory(): BridgeLostMemory {
@@ -2857,6 +2867,8 @@ export const healthMonitorPlugin: TribePluginApi = {
       timers,
       log: { warn: (message) => log.warn?.(message), error: (message) => log.error?.(message) },
     })
+
+    currentSampleTicker = sampleTicker
 
     // Initial sample after a short delay (let daemon finish startup). Routed
     // through the same ticker so it cannot overlap the first interval tick.

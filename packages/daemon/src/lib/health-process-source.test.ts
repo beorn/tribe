@@ -705,6 +705,53 @@ describe("neutral health process source", () => {
       expect(ceilings).toEqual([SYSMON_COMMAND_TIMEOUT_MS, 6_250, 6_250, SYSMON_COMMAND_TIMEOUT_MS])
     })
 
+    it("cold start under load: the base ceiling until the first scalar lands, then the scale from that report on", async () => {
+      // @cto ef3f9fdb: a daemon that starts in a spike has no scalar yet, so it keeps the base ceiling exactly when
+      // the snapshot is slow, and can open the circuit before its first report; the next success seeds the scale.
+      let nowMs = 1_000_000
+      let failing = true
+      const ceilings: number[] = []
+      const runCommand = vi.fn(async (argv: readonly string[], timeoutMs: number) => {
+        ceilings.push(timeoutMs)
+        if (failing)
+          {throw new BoundedProcessCommandError({ kind: "timeout", message: "timeout", settlementFailures: [] })}
+        const scalars = {
+          ...scalarPayload,
+          values: {
+            ...scalarPayload.values,
+            cpu: {
+              ...scalarPayload.values.cpu,
+              value: { ...scalarPayload.values.cpu.value, loadAverage1m: 60, logicalCores: 32 },
+            },
+          },
+        }
+        return {
+          exitCode: 0,
+          stderr: "",
+          stdout: `${JSON.stringify(argv.includes("scalars") ? scalars : availablePayload)}\n`,
+        }
+      })
+      const source = createHealthProcessSource({
+        env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+        runCommand,
+        now: () => nowMs,
+      })
+      if (source.kind !== "managed") throw new Error("expected managed source")
+      const poll = () => Promise.all([source.read(), source.readScalars()])
+
+      for (let failed = 0; failed < 3; failed += 1) await poll()
+      await expect(source.read()).resolves.toMatchObject({ reason: "source-circuit-open" })
+      expect(ceilings).toEqual(Array(SYSMON_CIRCUIT_FAILURES).fill(SYSMON_COMMAND_TIMEOUT_MS))
+
+      // The circuit heals after its window, and the first success is the first report: still the base.
+      nowMs += SYSMON_CIRCUIT_OPEN_MS + 1
+      failing = false
+      await poll()
+      // From that report on, every snapshot asks for 2.5 s × (1 + 60/32).
+      await poll()
+      expect(ceilings.slice(SYSMON_CIRCUIT_FAILURES)).toEqual([2_500, 2_500, 7_188, 7_188])
+    })
+
     it("keeps spawning through two whole failed polls and opens the circuit only on the third", async () => {
       const runCommand = vi.fn(async () => {
         throw new BoundedProcessCommandError({ kind: "timeout", message: "timeout", settlementFailures: [] })
