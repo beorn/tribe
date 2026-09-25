@@ -233,6 +233,39 @@ describe("journal retention sweep", () => {
       }
     })
 
+    it("an archived incident keeps its wakes_owner stamp (25662 P4)", () => {
+      const { db, stmts } = setup()
+      try {
+        const ctx = makeContext(db, stmts, "daemon")
+        const page = (summary: string) =>
+          sendMessage(
+            ctx,
+            "@chief",
+            `${summary} (body)`,
+            "health:bridge-lost",
+            undefined,
+            undefined,
+            "direct",
+            { summary },
+            { incident: { emitter: "daemon", subject: "@dev/3", condition: "bridge-lost", active: true } },
+          )
+        const opened = page("@dev/3's tribe bridge is lost")
+        const repeat = page("@dev/3's tribe bridge is lost")
+        setMessageTs(db, opened.id, Date.now() - 20 * DAY)
+        setMessageTs(db, repeat.id, Date.now() - 20 * DAY)
+
+        const result = runRetentionSweep(db, stmts, enabledConfig({ archiveWindowMs: 14 * DAY }))
+
+        expect(result.archiveMove.moved).toBe(2)
+        const archived = (id: string) => db.prepare("SELECT wakes_owner FROM messages_archive WHERE id = ?").get(id)
+        // The open edge woke its owner and the repeat did not; the archive keeps both facts as they were.
+        expect(archived(opened.id)).toEqual({ wakes_owner: 1 })
+        expect(archived(repeat.id)).toEqual({ wakes_owner: 0 })
+      } finally {
+        db.close()
+      }
+    })
+
     it("leaves a message younger than the archive window in the live table", () => {
       const { db, stmts } = setup()
       try {

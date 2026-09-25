@@ -48,7 +48,7 @@ import {
   registerSession,
   type StaleTransportReapReport,
 } from "./session.ts"
-import { incidentKey, type IncidentIdentity } from "tribe-wire"
+import { incidentConditionSummary, incidentKey, type IncidentIdentity } from "tribe-wire"
 import { gatherCodePin } from "./code-pin.ts"
 import { parseDbGrowthWarningBytes, projectHealthCadence } from "./health-cadence.ts"
 import { registeredTrustTierForTopic, senderMayUseRegisteredTrustTopic, type SessionRoster } from "./trust.ts"
@@ -813,7 +813,13 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   // callers still get the derived fallback so legacy CLI/human sends remain
   // ergonomic.
   const summaryDerived = summaryArg.length === 0
-  const summary = summaryDerived ? deriveSummary(sanitized) : summaryArg
+  // 25662 row 18A: an incident's summary is its wake edge, so one sent without a summary takes its identity, never
+  // its body; a body that leads with a count would otherwise wake the owner on every send.
+  const summary = !summaryDerived
+    ? summaryArg
+    : incident !== undefined
+      ? incidentConditionSummary(incident)
+      : deriveSummary(sanitized)
   const classification = {
     summary,
     ...(delivery ? { delivery } : {}),

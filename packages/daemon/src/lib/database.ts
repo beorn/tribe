@@ -1302,8 +1302,9 @@ const MIGRATIONS: readonly Migration[] = [
         const columns = new Set(
           (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name),
         )
-        if (!columns.has("wakes_owner"))
-          {db.run(`ALTER TABLE ${table} ADD COLUMN wakes_owner INTEGER NOT NULL DEFAULT 0`)}
+        if (!columns.has("wakes_owner")) {
+          db.run(`ALTER TABLE ${table} ADD COLUMN wakes_owner INTEGER NOT NULL DEFAULT 0`)
+        }
       }
     },
   },
@@ -2284,6 +2285,21 @@ export function createStatements(db: Database) {
           OR m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
         )
       ORDER BY m.rowid DESC
+      LIMIT 1
+    `),
+
+    /** 25662 row 17 — the row an inbox wait woke on, by the sequence its wake read. A tracked broadcast's sequence can
+     *  name an archived row (TRACKED_ATTENTION_SEQUENCE_SQL), so the archive is read second. */
+    selectInboxWaitWakeRow: db.prepare(`
+      SELECT id, type, sender, summary, request, reply, correlated_reply_requester
+      FROM (
+        SELECT 0 AS source, id, type, sender, summary, request, reply, correlated_reply_requester
+        FROM messages WHERE rowid = $seq
+        UNION ALL
+        SELECT 1 AS source, id, type, sender, summary, request, reply, correlated_reply_requester
+        FROM messages_archive WHERE seq = $seq
+      )
+      ORDER BY source
       LIMIT 1
     `),
 

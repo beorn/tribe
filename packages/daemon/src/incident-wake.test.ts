@@ -14,6 +14,7 @@
  * or after a CLI reconnect agree.
  */
 
+import { createHash } from "node:crypto"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -21,8 +22,9 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest"
 import { createTribeContext, type TribeContext } from "./lib/context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./lib/database.ts"
 import { handleToolCall, readAttentionProjection, type HandlerOpts } from "./lib/handlers.ts"
-import { createInboxWaitManager, type InboxStatus } from "./lib/inbox-wait.ts"
+import { createInboxWaitManager, readInboxWaitWokenBy, type InboxStatus } from "./lib/inbox-wait.ts"
 import { sendMessage } from "./lib/messaging.ts"
+import { registerSession } from "./lib/session.ts"
 
 const OWNER = "@chief"
 const INCIDENT = { emitter: "tribe-health", subject: "@dev/3", condition: "bridge-lost" }
@@ -78,6 +80,7 @@ function rig() {
     (session) => readAttentionProjection(reader, session).attention,
     (session) => latestWakeSeq(session, false),
     (session) => latestWakeSeq(session, true),
+    (session, seq, wakeOnCorrelatedReply) => readInboxWaitWokenBy(stmts, session, seq, wakeOnCorrelatedReply),
   )
   const watcher = context("daemon", "daemon", manager.onMessageInserted)
   const peer = context("peer", "@cto", manager.onMessageInserted)
@@ -94,7 +97,7 @@ function rig() {
       { summary },
       { incident: { ...INCIDENT, active } },
     )
-  return { manager, peer, owner, page }
+  return { manager, watcher, peer, owner, page }
 }
 
 const opts = (): HandlerOpts => ({
@@ -192,5 +195,173 @@ describe("an incident wakes its idle owner", () => {
 
     handleToolCall(owner, "tribe.fetch", { limit: 10 }, opts())
     await expect(manager.wait(OWNER, "conn-after-fetch", QUIET_MS)).resolves.toMatchObject({ status: "timeout" })
+  })
+
+  test("a relay read with receipt:false leaves the edge unread; the owner's own read acknowledges it, and a fresh wait sleeps (25662 P4)", async () => {
+    // review-adhoc5's RELAY-2 probe (probes/25662w/zz-adhoc5-relay.test.ts), kept as a row. A registered owner, so the
+    // relay read moves the ambient cursor past the edge; only the owner's own read may acknowledge it.
+    const active = new Set<string>()
+    const regOpts: HandlerOpts = {
+      ...opts(),
+      getActiveSessionIds: () => active,
+      hasActiveTransport: (id) => active.has(id),
+    }
+    const { manager, page } = rig()
+    const ownerCtx = context("sess-owner", "boot-sess-owner", manager.onMessageInserted)
+    active.add("sess-owner")
+    handleToolCall(ownerCtx, "tribe.join", { name: OWNER, delivery: "pull" }, regOpts)
+    registerSession(
+      ownerCtx,
+      undefined,
+      regOpts.hasActiveTransport,
+      null,
+      0,
+      "pull",
+      undefined,
+      null,
+      null,
+      null,
+      null,
+      createHash("sha256").update("sess-owner").digest("hex"),
+    )
+    const sent = page("@dev/3's tribe bridge is lost", "lost 3 min")
+    const read = (args: Record<string, unknown>) =>
+      JSON.parse(
+        (
+          handleToolCall(ownerCtx, "tribe.fetch", { limit: 10, ...args }, regOpts) as {
+            content: Array<{ text: string }>
+          }
+        ).content[0]?.text ?? "{}",
+      ) as { events?: Array<{ id: string }> }
+    const ambientCursor = () =>
+      (
+        db.prepare("SELECT last_inbox_pull_seq AS c FROM sessions WHERE id = 'sess-owner'").get() as {
+          c: number
+        } | null
+      )?.c
+
+    read({ receipt: false })
+    expect(ambientCursor()).toBeGreaterThanOrEqual(sent.rowid)
+    expect(latestWakeSeq(OWNER, true)).toBe(sent.rowid)
+
+    const own = read({})
+    expect((own.events ?? []).map((e) => e.id)).toContain(sent.id)
+    expect(latestWakeSeq(OWNER, true)).toBe(0)
+    await expect(manager.wait(OWNER, "conn-relay", QUIET_MS)).resolves.toMatchObject({ status: "timeout" })
+  })
+  test("a woken result names the edge that woke it, even behind 12 older incidents the preview shows first (25662 row 17)", async () => {
+    const { manager, watcher } = rig()
+    const pageSubject = (subject: string) =>
+      sendMessage(
+        watcher,
+        OWNER,
+        `${subject}'s tribe bridge is lost (body)`,
+        "health:bridge-lost",
+        undefined,
+        undefined,
+        "direct",
+        { summary: `${subject}'s tribe bridge is lost` },
+        { incident: { ...INCIDENT, subject } },
+      )
+    for (let n = 1; n <= 12; n++) pageSubject(`@dev/${n}`)
+    // The preview sorts by opened_at, then request_id: pages sent in one millisecond would order "@dev/13" before
+    // "@dev/2". The 12 are a minute older, as they would be live.
+    db.prepare("UPDATE pending_request SET opened_at = opened_at - 60000 WHERE recipient = ?").run(OWNER)
+    const parked = manager.wait(OWNER, "conn-edge", 5_000, { afterSeq: latestWakeSeq(OWNER, false) })
+    const edge = pageSubject("@dev/13")
+    const woken = await parked
+    const request = db.prepare("SELECT request FROM messages WHERE id = ?").get(edge.id) as { request: string }
+    // The preview is the 10 oldest balls, so the edge that woke the owner is not in it.
+    expect(woken.attention.pending_balls).toHaveLength(10)
+    expect(woken.attention.pending_balls.map((ball) => ball.summary)).not.toContain("@dev/13's tribe bridge is lost")
+    expect(woken.woken_by).toEqual({
+      kind: "message",
+      seq: edge.rowid,
+      message_id: edge.id,
+      type: "health:bridge-lost",
+      sender: "daemon",
+      summary: "@dev/13's tribe bridge is lost",
+      request_id: request.request,
+      settles_request_id: null,
+    })
+    // A fresh wait that wakes at once, on the SQL path, names the newest unread edge the same way.
+    const fresh = await manager.wait(OWNER, "conn-edge-fresh", 5_000)
+    expect(fresh.woken_by).toMatchObject({ kind: "message", message_id: edge.id })
+  })
+
+  test("a correlated reply names the request it settled and the reply (25662 row 17)", async () => {
+    const { manager, peer, owner } = rig()
+    const asked = sendMessage(
+      owner,
+      "@cto",
+      "please rule",
+      "request",
+      undefined,
+      undefined,
+      "direct",
+      {},
+      { request: true },
+    )
+    const parked = manager.wait(OWNER, "conn-reply", 5_000, { wakeOnCorrelatedReply: true })
+    const answer = sendMessage(
+      peer,
+      OWNER,
+      "ruled",
+      "response",
+      undefined,
+      undefined,
+      "direct",
+      { summary: "ruled" },
+      { reply: asked.id },
+    )
+    await expect(parked).resolves.toMatchObject({
+      status: "woken",
+      woken_by: {
+        kind: "message",
+        message_id: answer.id,
+        sender: "@cto",
+        type: "response",
+        settles_request_id: asked.id,
+      },
+    })
+  })
+  test("an incident with no summary takes its identity as its summary: a body that changes every send wakes once, still upserts, and the clear delivers (25662 row 18A)", async () => {
+    const { manager, watcher } = rig()
+    const send = (message: string, active = true) =>
+      handleToolCall(
+        watcher,
+        "tribe.send",
+        { to: OWNER, message, type: "notify", incident: { ...INCIDENT, active } },
+        opts(),
+      )
+    const opened = manager.wait(OWNER, "conn-18a-open", 5_000, { afterSeq: latestWakeSeq(OWNER, false) })
+    send("3 balls stale for 12 min")
+    await expect(opened).resolves.toMatchObject({
+      status: "woken",
+      woken_by: { summary: "tribe-health · @dev/3 · bridge-lost" },
+    })
+
+    const repeat = manager.wait(OWNER, "conn-18a-repeat", QUIET_MS, { afterSeq: latestWakeSeq(OWNER, false) })
+    send("4 balls stale for 19 min")
+    await expect(repeat).resolves.toMatchObject({ status: "timeout" })
+    // The repeat still upserted: the ball now points at the newest observation, which fetch returns.
+    expect(
+      db
+        .prepare(
+          `SELECT m.content, m.summary FROM pending_request AS p JOIN messages AS m ON m.id = p.message_id
+           WHERE p.recipient = ? AND p.request_kind = 'incident'`,
+        )
+        .get(OWNER),
+    ).toEqual({ content: "4 balls stale for 19 min", summary: "tribe-health · @dev/3 · bridge-lost" })
+
+    send("cleared: the bridge is back", false)
+    expect(
+      db.prepare("SELECT content, kind FROM messages WHERE recipient = ? ORDER BY rowid DESC LIMIT 1").get(OWNER),
+    ).toEqual({ content: "cleared: the bridge is back", kind: "direct" })
+    expect(
+      db
+        .prepare("SELECT COUNT(*) AS open FROM pending_request WHERE recipient = ? AND request_kind = 'incident'")
+        .get(OWNER),
+    ).toEqual({ open: 0 })
   })
 })

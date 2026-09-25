@@ -24,10 +24,9 @@ let delayedClient: DaemonClient | undefined
 const originalSocketConnect = Socket.prototype.connect
 Socket.prototype.connect = function (this: Socket, ...args: any[]) {
   if (connectDelayMs > 0) {
-    const socket = this
-    delayedClient = { socket } as unknown as DaemonClient
+    delayedClient = { socket: this } as unknown as DaemonClient
     setTimeout(() => {
-      originalSocketConnect.apply(socket, args as any)
+      originalSocketConnect.apply(this, args as any)
     }, connectDelayMs)
     return this
   }
@@ -420,6 +419,31 @@ describe("callTribeTool", () => {
         },
       },
     })
+  })
+
+  it("carries woken_by through the validated inbox-wait result, and refuses a malformed one (25662 row 17)", async () => {
+    const wokenBy = {
+      kind: "message",
+      seq: 42,
+      message_id: "m-42",
+      type: "health:bridge-lost",
+      sender: "daemon",
+      summary: "@dev/13's tribe bridge is lost",
+      request_id: "tribe-health\u001f@dev/13\u001fbridge-lost",
+      settles_request_id: null,
+    }
+    const woken = { ...canonicalInboxWaitResult, status: "woken", timed_out: false, woken_by: wokenBy }
+    const passes = await callTribeTool({ call: vi.fn(async () => woken) } as unknown as DaemonClient, "inbox.wait", {
+      timeout_ms: 1_000,
+    })
+    expect(passes).toMatchObject({ structuredContent: { woken_by: wokenBy } })
+
+    const malformed = { ...woken, woken_by: { kind: "message", seq: 42 } }
+    await expect(
+      callTribeTool({ call: vi.fn(async () => malformed) } as unknown as DaemonClient, "inbox.wait", {
+        timeout_ms: 1_000,
+      }),
+    ).rejects.toThrow(/inbox/i)
   })
 
   it("rejects an oversized send before it reaches the daemon and gives a file+SHA remedy", async () => {

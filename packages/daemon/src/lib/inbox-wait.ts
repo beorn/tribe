@@ -1,6 +1,42 @@
 import { settlesRequestOpenedBy, type MessageInsertedInfo } from "./context.ts"
-import type { InboxWaitResult as WireInboxWaitResult } from "tribe-wire"
-import { ACTIONABLE_TYPES_SET as ACTIONABLE_TYPES } from "./database.ts"
+import type { InboxWaitResult as WireInboxWaitResult, InboxWaitWokenBy } from "tribe-wire"
+import {
+  ACTIONABLE_TYPES_SET as ACTIONABLE_TYPES,
+  CORRELATED_REPLY_TYPES_SET,
+  type TribeStatements,
+} from "./database.ts"
+
+/** 25662 row 17 — name the row a wait woke on. `settles_request_id` is set only when the wait opted into correlated
+ *  replies and this row settled a request `session` opened, which is the only case where a reply is the wake. */
+export function readInboxWaitWokenBy(
+  stmts: TribeStatements,
+  session: string,
+  seq: number,
+  wakeOnCorrelatedReply: boolean,
+): InboxWaitWokenBy {
+  const row = stmts.selectInboxWaitWakeRow.get({ $seq: seq }) as {
+    id: string
+    type: string
+    sender: string
+    summary: string | null
+    request: string | null
+    reply: string | null
+    correlated_reply_requester: string | null
+  } | null
+  if (row === null) return { kind: "row-retired", seq }
+  const settles =
+    wakeOnCorrelatedReply && CORRELATED_REPLY_TYPES_SET.has(row.type) && row.correlated_reply_requester === session
+  return {
+    kind: "message",
+    seq,
+    message_id: row.id,
+    type: row.type,
+    sender: row.sender,
+    summary: row.summary,
+    request_id: row.request,
+    settles_request_id: settles ? row.reply : null,
+  }
+}
 
 export type InboxStatus = Pick<
   WireInboxWaitResult,
@@ -38,6 +74,8 @@ export function createInboxWaitManager(
   readAttention: (session: string) => WireInboxWaitResult["attention"],
   readLatestQualifyingSeq: (session: string, wakeOnCorrelatedReply: boolean) => number = () => 0,
   readCurrentQualifyingSeq: (session: string, wakeOnCorrelatedReply: boolean, status: InboxStatus) => number = () => 0,
+  /** Names the row a wake fired on. Rigs that do not pass it get no `woken_by`; the daemon always passes it. */
+  readWokenBy?: (session: string, seq: number, wakeOnCorrelatedReply: boolean) => InboxWaitWokenBy,
 ) {
   const waiters = new Set<Waiter>()
 
@@ -57,6 +95,7 @@ export function createInboxWaitManager(
     effectiveTimeoutMs: number,
     baselineSeq: number,
     flags: { timedOut: boolean; aborted: boolean },
+    wokenBy?: InboxWaitWokenBy,
   ): InboxWaitChunkResult {
     return {
       status: flags.aborted ? "aborted" : flags.timedOut ? "timeout" : "woken",
@@ -70,13 +109,34 @@ export function createInboxWaitManager(
       timed_out: flags.timedOut,
       aborted: flags.aborted,
       attention: snapshot.attention,
+      ...(wokenBy === undefined ? {} : { woken_by: wokenBy }),
       baseline_seq: baselineSeq,
     }
+  }
+
+  /** The waking row for a woken result; undefined for a timeout or an abort, which no row caused. */
+  function wokenBy(
+    session: string,
+    wakeOnCorrelatedReply: boolean,
+    seq: number,
+    flags: { timedOut: boolean; aborted: boolean },
+  ): InboxWaitWokenBy | undefined {
+    if (flags.timedOut || flags.aborted || readWokenBy === undefined) return undefined
+    return readWokenBy(session, seq, wakeOnCorrelatedReply)
+  }
+
+  /** The sequence a snapshot wake fired on: a fresh wait wakes on the newest unacknowledged row, a resumed wait on
+   *  the newest row past its baseline. */
+  function snapshotWakeSeq(snapshot: InboxWaitSnapshot, freshLogicalWait: boolean): number {
+    return freshLogicalWait && snapshot.currentQualifyingSeq > 0
+      ? snapshot.currentQualifyingSeq
+      : snapshot.latestQualifyingSeq
   }
 
   function settle(
     waiter: Waiter,
     flags: { timedOut: boolean; aborted: boolean },
+    wakeSeq = 0,
     snapshot = readSnapshot(waiter.session, waiter.wakeOnCorrelatedReply),
   ): void {
     if (waiter.done) return
@@ -84,7 +144,14 @@ export function createInboxWaitManager(
     clearTimeout(waiter.timer)
     waiters.delete(waiter)
     waiter.resolve(
-      assembleResult(snapshot, Date.now() - waiter.startedAt, waiter.effectiveTimeoutMs, waiter.baselineSeq, flags),
+      assembleResult(
+        snapshot,
+        Date.now() - waiter.startedAt,
+        waiter.effectiveTimeoutMs,
+        waiter.baselineSeq,
+        flags,
+        wokenBy(waiter.session, waiter.wakeOnCorrelatedReply, wakeSeq, flags),
+      ),
     )
   }
 
@@ -95,10 +162,14 @@ export function createInboxWaitManager(
     waiters.delete(waiter)
     const snapshot = readSnapshot(waiter.session, waiter.wakeOnCorrelatedReply)
     waiter.resolve({
-      ...assembleResult(snapshot, Date.now() - waiter.startedAt, waiter.effectiveTimeoutMs, waiter.baselineSeq, {
-        timedOut: false,
-        aborted: false,
-      }),
+      ...assembleResult(
+        snapshot,
+        Date.now() - waiter.startedAt,
+        waiter.effectiveTimeoutMs,
+        waiter.baselineSeq,
+        { timedOut: false, aborted: false },
+        readWokenBy === undefined ? undefined : { kind: "daemon-shutdown" },
+      ),
       reconnect: true,
     })
   }
@@ -112,7 +183,7 @@ export function createInboxWaitManager(
       if (!directForWaiter && !trackedBroadcastForWaiter) continue
       if (info.rowid <= waiter.baselineSeq) continue
       if (waiter.wakeOnCorrelatedReply && settlesRequestOpenedBy(info, waiter.session)) {
-        settle(waiter, { timedOut: false, aborted: false })
+        settle(waiter, { timedOut: false, aborted: false }, info.rowid)
         continue
       }
       // Default-wake on every actionable direct or owned tracked actionable message.
@@ -123,7 +194,7 @@ export function createInboxWaitManager(
       // Self-sends are excluded (same filter as getUnreadDms: sender != name).
       // 25662 P3 3: an incident edge wakes the same way (wakePredicateSql is the SQL half of this test).
       if ((ACTIONABLE_TYPES.has(info.type) || info.wakesOwner === true) && info.sender !== waiter.session) {
-        settle(waiter, { timedOut: false, aborted: false })
+        settle(waiter, { timedOut: false, aborted: false }, info.rowid)
       }
     }
   }
@@ -168,8 +239,16 @@ export function createInboxWaitManager(
     const baselineSeq = opts.afterSeq ?? snapshot.latestQualifyingSeq
     const shouldWake = freshLogicalWait ? snapshot.currentQualifyingSeq > 0 : snapshot.latestQualifyingSeq > baselineSeq
     if (shouldWake) {
+      const flags = { timedOut: false, aborted: false }
       return Promise.resolve(
-        assembleResult(snapshot, 0, effectiveTimeoutMs, baselineSeq, { timedOut: false, aborted: false }),
+        assembleResult(
+          snapshot,
+          0,
+          effectiveTimeoutMs,
+          baselineSeq,
+          flags,
+          wokenBy(session, wakeOnCorrelatedReply, snapshotWakeSeq(snapshot, freshLogicalWait), flags),
+        ),
       )
     }
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -200,7 +279,14 @@ export function createInboxWaitManager(
       const raced = freshLogicalWait
         ? afterSubscribe.currentQualifyingSeq > 0 || afterSubscribe.latestQualifyingSeq > baselineSeq
         : afterSubscribe.latestQualifyingSeq > baselineSeq
-      if (raced) settle(waiter, { timedOut: false, aborted: false }, afterSubscribe)
+      if (raced) {
+        settle(
+          waiter,
+          { timedOut: false, aborted: false },
+          snapshotWakeSeq(afterSubscribe, freshLogicalWait),
+          afterSubscribe,
+        )
+      }
     })
   }
 

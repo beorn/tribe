@@ -77,6 +77,15 @@ export function incidentKey(identity: IncidentIdentity): string {
 }
 
 /**
+ * The summary an incident carries when its emitter wrote none (25662 row 18A, @cto 67c0e295). A summary change is an
+ * incident's wake edge, so a default read off the body woke the owner on every send whose body led with a count. The
+ * identity never changes for a live condition, so a defaulted incident wakes on its open and never again.
+ */
+export function incidentConditionSummary(identity: IncidentIdentity): string {
+  return `${identity.emitter} · ${identity.subject} · ${identity.condition}`
+}
+
+/**
  * Recover the identity from a key, or null when `key` is not a well-formed
  * incident key. Callers use this to tell an incident-keyed obligation from an
  * ordinary message-id-keyed one without a second column.

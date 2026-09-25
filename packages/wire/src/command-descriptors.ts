@@ -595,6 +595,22 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
               description: "True when the daemon ended the wait before a qualifying DM arrived.",
             },
             attention: ATTENTION_SCHEMA,
+            woken_by: {
+              type: "object",
+              description:
+                "Set on every woken result: what woke the wait. kind=message names the row (seq, message_id, type, sender, summary), the ball it opened or moved (request_id), and, for a correlated reply, the request it settled (settles_request_id). kind=daemon-shutdown pairs with reconnect; kind=row-retired carries only seq.",
+              properties: {
+                kind: { type: "string", enum: ["message", "daemon-shutdown", "row-retired"] },
+                seq: { type: "number" },
+                message_id: { type: "string" },
+                type: { type: "string" },
+                sender: { type: "string" },
+                summary: { type: ["string", "null"] },
+                request_id: { type: ["string", "null"] },
+                settles_request_id: { type: ["string", "null"] },
+              },
+              required: ["kind"],
+            },
             requested_ms: { type: "number", description: "Requested MCP wait when status=host_cut." },
             ceiling_ms: { type: "number", description: "Measured host-safe MCP wait ceiling." },
             ceiling_source: {

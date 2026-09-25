@@ -46,6 +46,27 @@ export type InboxWaitAttention = {
 
 export type InboxWaitTerminalStatus = "woken" | "timeout" | "aborted"
 
+/** What woke an inbox wait (25662 row 17, @cto 67c0e295). The daemon sets it on every `woken` result, so a reader
+ *  holding more balls than the attention preview shows still has one place to see which one woke it. */
+export type InboxWaitWokenBy =
+  | {
+      readonly kind: "message"
+      /** The waking row's mailbox sequence. */
+      readonly seq: number
+      readonly message_id: string
+      readonly type: string
+      readonly sender: string
+      readonly summary: string | null
+      /** The ball this row opened or moved: an incident's key, or a tracked request's id. Null when untracked. */
+      readonly request_id: string | null
+      /** Set only when a correlated reply woke a `wake_on_correlated_reply` wait: the request of yours it settled. */
+      readonly settles_request_id: string | null
+    }
+  /** The daemon is shutting down; the caller redials (`reconnect: true`). */
+  | { readonly kind: "daemon-shutdown" }
+  /** Retention removed the waking row before the result was read, so only its sequence is known. */
+  | { readonly kind: "row-retired"; readonly seq: number }
+
 export type InboxWaitResult = {
   readonly status: InboxWaitTerminalStatus
   readonly session: string
@@ -59,6 +80,7 @@ export type InboxWaitResult = {
   /** Daemon shutdown is deliberate; callers should immediately redial. */
   readonly reconnect?: boolean
   readonly attention: InboxWaitAttention
+  readonly woken_by?: InboxWaitWokenBy
 }
 
 export type InboxWaitHostCutResult = {
@@ -120,7 +142,8 @@ export function parseInboxWaitResult(value: unknown): InboxWaitResult {
     !isFiniteNumber(attention.pending_balls_summary.total) ||
     !isFiniteNumber(attention.pending_balls_summary.oldest_age_ms) ||
     typeof attention.pending_balls_summary.truncated !== "boolean" ||
-    !isValidWithheldSummary(attention.pending_balls_summary.withheld)
+    !isValidWithheldSummary(attention.pending_balls_summary.withheld) ||
+    !isValidWokenBy(value.woken_by)
   ) {
     throw invalidInboxWaitResult()
   }
@@ -138,6 +161,7 @@ export function parseInboxWaitResult(value: unknown): InboxWaitResult {
     timed_out: value.timed_out,
     aborted: value.aborted,
     ...(value.reconnect === true ? { reconnect: true } : {}),
+    ...(value.woken_by === undefined ? {} : { woken_by: value.woken_by }),
     attention: {
       actionable_unread: attention.actionable_unread,
       pending_balls: attention.pending_balls,
@@ -159,6 +183,24 @@ function isValidWithheldSummary(value: unknown): value is InboxWaitWithheldSumma
   if (value === undefined) return true
   if (!isRecord(value) || !isFiniteNumber(value.total) || !isRecord(value.by_kind)) return false
   return isFiniteNumber(value.by_kind.request) && isFiniteNumber(value.by_kind.incident)
+}
+
+function isValidWokenBy(value: unknown): value is InboxWaitWokenBy | undefined {
+  if (value === undefined) return true
+  if (!isRecord(value)) return false
+  if (value.kind === "daemon-shutdown") return true
+  if (value.kind === "row-retired") return isFiniteNumber(value.seq)
+  const nullableString = (field: unknown) => field === null || typeof field === "string"
+  return (
+    value.kind === "message" &&
+    isFiniteNumber(value.seq) &&
+    typeof value.message_id === "string" &&
+    typeof value.type === "string" &&
+    typeof value.sender === "string" &&
+    nullableString(value.summary) &&
+    nullableString(value.request_id) &&
+    nullableString(value.settles_request_id)
+  )
 }
 
 export function resolveInboxWaitOptions(

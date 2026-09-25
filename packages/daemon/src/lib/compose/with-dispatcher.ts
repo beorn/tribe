@@ -65,7 +65,7 @@ import {
 } from "../handlers.ts"
 import { createLifecycleStore } from "../lifecycle-store.ts"
 import type { TribePluginHandle } from "../plugin-api.ts"
-import { createInboxWaitManager } from "../inbox-wait.ts"
+import { createInboxWaitManager, readInboxWaitWokenBy } from "../inbox-wait.ts"
 import { isTerminalSessionLeftReason, logEvent, logSessionLeft, sendMessage } from "../messaging.ts"
 import { registerSession, NameConflictError, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
 import {
@@ -830,6 +830,7 @@ export function withDispatcher<
         const current = latestInboxWaitMessage(sessionName, wakeOnCorrelatedReply, true)
         return current?.rowid ?? 0
       },
+      (sessionName, seq, wakeOnCorrelatedReply) => readInboxWaitWokenBy(stmts, sessionName, seq, wakeOnCorrelatedReply),
     )
     const previousOnMessageInserted = daemonCtx.onMessageInserted
     const onMessageInserted = (info: MessageInsertedInfo) => {

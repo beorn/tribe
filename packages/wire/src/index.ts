@@ -118,6 +118,7 @@ export {
   parseIncidentKey,
   isIncidentKey,
   INCIDENT_KEY_SEPARATOR,
+  incidentConditionSummary,
   type IncidentIdentity,
 } from "./lib/incident.ts"
 
@@ -131,6 +132,7 @@ export type {
   InboxWaitResult,
   InboxWaitTerminalStatus,
   InboxWaitToolResult,
+  InboxWaitWokenBy,
 } from "./lib/inbox-wait-options.ts"
 export {
   DEFAULT_INBOX_WAIT_SESSION,
