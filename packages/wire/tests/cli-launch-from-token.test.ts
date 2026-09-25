@@ -21,18 +21,13 @@ import { fileURLToPath } from "node:url"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { tribeAmbientEnvironmentNames } from "../src/daemon-environment.ts"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
+import { launchToken } from "./launch-token.ts"
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "../src/cli.ts")
 const BUN_BIN = process.env.BUN_EXECUTABLE ?? "bun"
 const SEAT = "@dev/2"
 const TOKEN_SID = "7b1c0d2e-token-sid"
 const INHERITED_LAUNCH = "37920dbf-another-seats-launch"
-
-/** A JWT-shaped token the client reads unverified; nothing here verifies it, the daemon would. */
-function identityToken(claims: Record<string, unknown>): string {
-  const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url")
-  return `${part({ alg: "EdDSA", typ: "hab-id+jwt" })}.${part(claims)}.c2ln`
-}
 
 let dir: string
 let server: Server
@@ -84,7 +79,7 @@ const byLaunchCalls = () => calls.filter((call) => call.method.endsWith("_by_lau
 describe("the CLI's managed inbox reads its launch from the identity token (25074 3d-1)", () => {
   it("a seat's inbox-status names the token's sid, not an inherited TRIBE_LAUNCH_ID beside it", async () => {
     const run = await runCli(["inbox-status", "--json"], {
-      HAB_ID_TOKEN: identityToken({ sid: TOKEN_SID, gen: 3, act: { sub: SEAT } }),
+      HAB_ID_TOKEN: launchToken(TOKEN_SID, SEAT),
       TRIBE_LAUNCH_ID: INHERITED_LAUNCH,
       TRIBE_NAME: SEAT,
     })
@@ -102,7 +97,10 @@ describe("the CLI's managed inbox reads its launch from the identity token (2507
     ]) {
       const run = await runCli(verb, inherited)
       expect(run.code, `${verb[0]}: ${run.stderr}`).not.toBe(0)
-      expect(run.stderr).toContain("HAB_ID_TOKEN")
+      // One line naming the verb and the cure, never an uncaught exception's source excerpt and stack.
+      expect(run.stderr.trim().split("\n")).toEqual([
+        expect.stringMatching(new RegExp(`^tribe ${verb[0]}: .*HAB_ID_TOKEN`)),
+      ])
     }
     expect(byLaunchCalls()).toEqual([])
   })
@@ -110,7 +108,9 @@ describe("the CLI's managed inbox reads its launch from the identity token (2507
   it("a malformed token fails locally, by name, before the daemon is asked", async () => {
     const run = await runCli(["inbox-status", "--json"], { HAB_ID_TOKEN: "not-a-jwt", TRIBE_NAME: SEAT })
     expect(run.code).not.toBe(0)
-    expect(run.stderr).toContain("HAB_ID_TOKEN is malformed")
+    expect(run.stderr.trim().split("\n")).toEqual([
+      expect.stringMatching(/^tribe inbox-status: HAB_ID_TOKEN is malformed: .*relaunch the seat through hab$/),
+    ])
     expect(byLaunchCalls()).toEqual([])
   })
 })

@@ -3850,8 +3850,9 @@ export type FetchRow = {
   summary: string | null
   attention_required: number
   /** 25662 P3 3 — an incident edge: it woke the owner, so the owner's fetch that returns it acknowledges it. */
-  wakes_owner: number /** 25074 3d-1a — the sending session's authority at insert; null when the daemon sent it or before v37. */
-  sender_authority?: string | null
+  wakes_owner: number
+  /** 25074 3d-1a — the sender's authority at insert; null for the daemon's own voice and for rows before v37. */
+  sender_authority?: SessionAuthority | null
 }
 
 export type FetchEvent = {
@@ -3869,7 +3870,7 @@ export type FetchEvent = {
   room_id: string | null
   summary: string | null
   /** Whether the sender was verified, a bearer, or only claimed its name (25074 3d-1a, @cto 2bfc1935 Q0). */
-  from_authority: string | null
+  from_authority: SessionAuthority | null
 }
 
 export function fetchEvent(row: FetchRow): FetchEvent {

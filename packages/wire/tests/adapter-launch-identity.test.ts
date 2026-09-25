@@ -15,18 +15,14 @@
 import { describe, expect, test } from "vitest"
 import { adapterLaunchIdentity } from "../src/lib/adapter-launch-identity.ts"
 import { deriveTribePersonaLaunchIdentity } from "../src/lib/persona-launch-identity.ts"
+import { launchToken } from "./launch-token.ts"
 
 const SEAT = "@dev/2"
 const TOKEN_SID = "7b1c0d2e-token-sid"
 const INHERITED = "37920dbf-inherited-launch"
 const PARENT = 4242
 
-function identityToken(claims: Record<string, unknown>): string {
-  const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url")
-  return `${part({ alg: "EdDSA" })}.${part(claims)}.c2ln`
-}
-
-const token = identityToken({ sid: TOKEN_SID, gen: 3, act: { sub: SEAT } })
+const token = launchToken(TOKEN_SID, SEAT)
 const resolveParentPid = () => PARENT
 
 describe("adapterLaunchIdentity (25074 3d-1)", () => {

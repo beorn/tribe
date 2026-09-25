@@ -9,17 +9,19 @@
  * nested unnamed provider child are class claimed, on the condition that the class is visible on the wire, in
  * members and on every envelope from that session. The authority is a fact about the message fixed at insert (the
  * v36 wakes_owner precedent), read from the sending session's row through sessionAuthority, and it survives archiving.
- * A message the daemon itself originates has no sending session and carries none.
+ * Null is the daemon's voice alone: its own context, or a row it attributes to itself while serving a client's call. A
+ * connection that never registered has no session row and so only claims its name.
  */
 
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, test } from "vitest"
+import type { TribeRole } from "tribe-wire/lib/config"
 import { createTribeContext, type TribeContext } from "./lib/context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./lib/database.ts"
 import { handleToolCall, type HandlerOpts } from "./lib/handlers.ts"
-import { sendMessage } from "./lib/messaging.ts"
+import { logEvent, sendMessage } from "./lib/messaging.ts"
 import { registerSession } from "./lib/session.ts"
 
 const RECIPIENT = "@dev/3"
@@ -38,12 +40,12 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-function context(sessionId: string, name: string): TribeContext {
+function context(sessionId: string, name: string, sessionRole: TribeRole = "member"): TribeContext {
   return createTribeContext({
     db,
     stmts,
     sessionId,
-    sessionRole: "member",
+    sessionRole,
     initialName: name,
     domains: [],
     claudeSessionId: null,
@@ -109,8 +111,39 @@ describe("every envelope carries its sender's authority (25074 3d-1a)", () => {
   })
 
   test("a message the daemon originates carries no sender authority", () => {
-    sendMessage(context("daemon", "daemon"), RECIPIENT, "a daemon notice", "notify")
+    sendMessage(context("daemon", "daemon", "daemon"), RECIPIENT, "a daemon notice", "notify")
     expect(fetchedAuthorities()).toEqual({ daemon: null })
+  })
+
+  test("a row the daemon attributes to itself carries none, even when a verified client's call provoked it", () => {
+    const provoker = sender("s-verified", "@dev/1", "verified")
+    // handlers.ts's health-recovery broadcast and the ball-settlement events speak as the daemon from a client's context.
+    sendMessage(
+      provoker,
+      RECIPIENT,
+      "a recovery notice",
+      "notify",
+      undefined,
+      undefined,
+      "direct",
+      {},
+      {},
+      {
+        sender: "daemon",
+        senderRole: "daemon",
+      },
+    )
+    const event = logEvent(provoker, "ball.settled", undefined, {}, { sender: "daemon" })
+    expect(fetchedAuthorities()).toEqual({ daemon: null })
+    expect(db.prepare("SELECT sender_authority FROM messages WHERE id = ?").get(event)).toEqual({
+      sender_authority: null,
+    })
+  })
+
+  test("a connection that never registered only claims its name; null stays the daemon's alone", () => {
+    // Every accepted socket speaks as pending-<connId> until it registers, with no session row behind it.
+    sendMessage(context("conn-7", "pending-conn-7", "pending"), RECIPIENT, "before any register", "notify")
+    expect(fetchedAuthorities()).toEqual({ "pending-conn-7": "claimed" })
   })
 
   test("the authority is fixed at insert and survives archiving", () => {

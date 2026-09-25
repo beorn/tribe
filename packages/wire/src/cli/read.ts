@@ -121,19 +121,31 @@ async function callDaemon(method: string, params?: Record<string, unknown>): Pro
   })
 }
 
-function cliInboxTargetParams(session: string | undefined): Record<string, unknown> {
+function cliInboxTargetParams(verb: string, session: string | undefined): Record<string, unknown> {
   if (session !== undefined) return { session }
-  const launchId = readLaunchIdFromToken(process.env)
+  let launchId: string | null
+  try {
+    launchId = readLaunchIdFromToken(process.env)
+  } catch (error) {
+    return refuseManagedInbox(verb, error instanceof Error ? error.message : String(error))
+  }
   const persona = process.env.TRIBE_SESSION_NAME?.trim() || process.env.TRIBE_NAME?.trim()
   if (launchId) {
     return { launch_id: launchId, ...(persona === undefined ? {} : { persona }) }
   }
   // 25074 3d-1: the launch is the identity token's sid. A process without HAB_ID_TOKEN is not a hab launch, whatever
   // TRIBE_LAUNCH_ID or TRIBE_NAME it inherited, so it is refused rather than resolved to that seat's inbox.
-  throw new Error(
-    "Managed inbox request requires this launch's identity token (HAB_ID_TOKEN), which a hab seat carries; " +
+  return refuseManagedInbox(
+    verb,
+    "a managed inbox request requires this launch's identity token (HAB_ID_TOKEN), which a hab seat carries; " +
       "use --session for an explicit operator target",
   )
+}
+
+/** A managed inbox request this process cannot make: one line before any daemon call, exit 1 as the uncaught error was. */
+function refuseManagedInbox(verb: string, reason: string): never {
+  console.error(`tribe ${verb}: ${reason}`)
+  process.exit(1)
 }
 
 function cliInboxMethod(base: "status" | "wait" | "drain", session: string | undefined): string {
@@ -1630,7 +1642,7 @@ export function formatInboxStatus(result: InboxStatusSummary): string {
 async function cmdInboxStatus(opts: { session?: string; json?: boolean }): Promise<void> {
   const result = (await callDaemon(
     cliInboxMethod("status", opts.session),
-    cliInboxTargetParams(opts.session),
+    cliInboxTargetParams("inbox-status", opts.session),
   )) as InboxStatusSummary
   warnIfSelfTransportDown("inbox-status", result)
   if (opts.json) {
@@ -1658,7 +1670,7 @@ async function cmdInboxDrain(opts: {
   peek?: boolean
 }): Promise<void> {
   const result = (await callDaemon(cliInboxMethod("drain", opts.session), {
-    ...cliInboxTargetParams(opts.session),
+    ...cliInboxTargetParams("inbox-drain", opts.session),
     limit: opts.limit ?? 10,
     peek: opts.peek,
     // The fd number is public process metadata; the capability content never
@@ -2008,7 +2020,7 @@ async function cmdInboxWait(opts: {
     timeout_ms: opts.timeoutMs,
     wake_on_correlated_reply: opts.wakeOnCorrelatedReply,
   })
-  const target = cliInboxTargetParams(opts.session)
+  const target = cliInboxTargetParams(verb, opts.session)
   let result: InboxWaitResult
   try {
     result = await waitForInboxWithReconnect({
