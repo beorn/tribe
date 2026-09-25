@@ -257,7 +257,9 @@ describe("planQuery provider fallback", () => {
     expect(result.plan?.keywords).toEqual(["fallbackworked"])
     expect(result.model).toBe(fallback.modelId)
     expect(calls).toEqual([gemini.modelId, fallback.modelId])
-    expect(errorLog).toHaveBeenCalledWith(expect.stringContaining(`${gemini.modelId} failed`))
+    expect(errorLog.mock.calls.map((args) => args.join(" "))).toContainEqual(
+      expect.stringContaining(`${gemini.modelId} failed`),
+    )
     errorLog.mockRestore()
   })
 
@@ -345,7 +347,9 @@ describe("planQuery provider fallback", () => {
     expect(result.plan).toBeNull()
     expect(result.error).toBe("selected model failed")
     expect(calls).toEqual([selected.modelId])
-    expect(errorLog).toHaveBeenCalledWith(expect.stringContaining(`${selected.modelId} failed`))
+    expect(errorLog.mock.calls.map((args) => args.join(" "))).toContainEqual(
+      expect.stringContaining(`${selected.modelId} failed`),
+    )
     errorLog.mockRestore()
   })
 })

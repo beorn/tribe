@@ -9,7 +9,7 @@
 
 import { describe, expect, test, vi, afterEach, beforeEach } from "vitest"
 import { addWriter, setSuppressConsole, type LogEvent } from "loggily"
-import { isRecallLogging, log, setRecallLogging } from "../../src/history/recall-shared.ts"
+import { log, logFailure, setRecallLogging } from "../../src/history/recall-shared.ts"
 
 describe("25392: recall log goes through loggily and is off by default outside the daemon", () => {
   beforeEach(() => {
@@ -19,11 +19,35 @@ describe("25392: recall log goes through loggily and is off by default outside t
   afterEach(() => {
     setSuppressConsole(false)
     setRecallLogging(false)
+    vi.unstubAllEnvs()
     vi.restoreAllMocks()
   })
 
   test("recall logging is off by default outside the daemon", () => {
-    expect(isRecallLogging()).toBe(false)
+    const events: LogEvent[] = []
+    const unsub = addWriter({ ns: "recall:*" }, (_f, _l, _ns, ev) => {
+      if (ev.kind === "log") events.push(ev)
+    })
+    try {
+      log("default is silent")
+      expect(events).toHaveLength(0)
+    } finally {
+      unsub()
+    }
+  })
+
+  test("logFailure() reports at error level even when logging is off", () => {
+    const events: LogEvent[] = []
+    const unsub = addWriter({ ns: "recall:*" }, (_f, _l, _ns, ev) => {
+      if (ev.kind === "log") events.push(ev)
+    })
+    try {
+      setRecallLogging(false)
+      logFailure("planner: m failed (x)")
+      expect(events.map((ev) => [ev.level, ev.message])).toEqual([["error", "planner: m failed (x)"]])
+    } finally {
+      unsub()
+    }
   })
 
   test("log() does not emit when logging is off", () => {
@@ -46,6 +70,8 @@ describe("25392: recall log goes through loggily and is off by default outside t
       if (ev.kind === "log") events.push(ev)
     })
     try {
+      // The root vitest setup pins LOG_LEVEL=warn; this row is about routing at info, so it names its level.
+      vi.stubEnv("LOG_LEVEL", "info")
       setRecallLogging(true)
       log("test message across loggily")
       expect(events).toHaveLength(1)

@@ -12,7 +12,7 @@
 
 import { loadLlm, selectAvailableCheapModels, type LlmBackend, type LlmModel } from "./llm-backend.ts"
 import type { RecallSearchResult } from "../history/recall-shared.ts"
-import { log } from "../history/recall-shared.ts"
+import { log, logFailure } from "../history/recall-shared.ts"
 import type { QueryContext } from "./context.ts"
 import { renderContextPrompt } from "./context.ts"
 
@@ -177,7 +177,7 @@ export async function planQuery(query: string, context: QueryContext, options: P
         })
       } catch (error) {
         const message = providerError(llm, model, error)
-        log(`planner: ${model.modelId} failed (${message})`)
+        logFailure(`planner: ${model.modelId} failed (${message})`)
         failures.push({ modelId: model.modelId, error: message })
         continue
       }
@@ -188,7 +188,7 @@ export async function planQuery(query: string, context: QueryContext, options: P
       }
       if (result.response.error) {
         const message = providerError(llm, model, result.response.error)
-        log(`planner: ${model.modelId} failed (${message})`)
+        logFailure(`planner: ${model.modelId} failed (${message})`)
         failures.push({ modelId: model.modelId, error: message })
         continue
       }
@@ -325,9 +325,7 @@ function buildUserPrompt(
 
     if (priorResults.length > 0) {
       parts.push("Round 1 top results (mine these for new keywords):")
-      const topN = Math.min(5, priorResults.length)
-      for (let i = 0; i < topN; i++) {
-        const r = priorResults[i]!
+      for (const r of priorResults.slice(0, 5)) {
         const sess = r.sessionTitle ? `${r.sessionTitle}` : r.sessionId.slice(0, 8)
         const snippet = r.snippet.replace(/>>>/g, "").replace(/<<</g, "").replace(/\s+/g, " ").trim().slice(0, 400)
         parts.push(`  [${r.type}] ${sess}: ${snippet}`)

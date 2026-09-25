@@ -118,11 +118,14 @@ describe("25071 row 2 B1: hook mode counts nothing", () => {
     const err = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
       lines.push(args.map(String).join(" "))
     })
+    // The root vitest setup pins LOG_LEVEL=warn; the count line is an info line (25392), so the row names its level.
+    vi.stubEnv("LOG_LEVEL", "info")
     try {
       setRecallLogging(true)
       await recall(ANCHOR, { mode: "hook", raw: true, limit: 5 })
     } finally {
       setRecallLogging(false)
+      vi.unstubAllEnvs()
       err.mockRestore()
     }
     const messageLine = lines.find((line) => line.includes("FTS5 messages:"))
