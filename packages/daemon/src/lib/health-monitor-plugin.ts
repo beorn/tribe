@@ -1136,6 +1136,199 @@ export function checkChiefAbsent(
   return null
 }
 
+// ---------------------------------------------------------------------------
+// Bridge-lost paging (25662, @cto 430ba377)
+// ---------------------------------------------------------------------------
+
+export const BRIDGE_LOST_EMITTER = "tribe-health"
+export const BRIDGE_LOST_CONDITION = "bridge-lost"
+const DEFAULT_BRIDGE_LOST_GRACE_SEC = 180
+
+export interface BridgeLostConfig {
+  /** Paged in order; the first that is not itself lost receives the incident. */
+  readonly owners: readonly string[]
+  /** How long a seat stays missing-transport before it pages; longer than a reload re-exec. */
+  readonly graceMs: number
+}
+
+export type BridgeLostArming =
+  | { readonly armed: true; readonly config: BridgeLostConfig }
+  | { readonly armed: false; readonly reason: string }
+
+/**
+ * Arm bridge-lost paging from the daemon's environment, or refuse by name. There is no default owner: a daemon
+ * other habitats run must not page a seat name it was never told about. `reloadDeadlineMs` binds the grace to the
+ * adapters' reload deadline (25663) by validation, never by sharing a constant.
+ */
+export function parseBridgeLostConfig(
+  env: Readonly<Record<string, string | undefined>>,
+  bounds: { readonly reloadDeadlineMs?: number; readonly tickMs?: number } = {},
+): BridgeLostArming {
+  const raw = env.TRIBE_BRIDGE_LOST_OWNERS
+  if (raw === undefined || raw.trim() === "") {
+    return { armed: false, reason: "TRIBE_BRIDGE_LOST_OWNERS is unset; name at least two owners" }
+  }
+  const owners = raw
+    .split(",")
+    .map((owner) => owner.trim())
+    .filter((owner) => owner.length > 0)
+  if (owners.length < 2) {
+    return {
+      armed: false,
+      reason: `TRIBE_BRIDGE_LOST_OWNERS names ${owners.length} owner (${owners.join(", ")}); a lost owner needs a second to page`,
+    }
+  }
+  const graceRaw = env.TRIBE_BRIDGE_LOST_GRACE_SEC
+  const graceSec = graceRaw === undefined ? DEFAULT_BRIDGE_LOST_GRACE_SEC : Number(graceRaw)
+  if (!Number.isFinite(graceSec) || graceSec <= 0) {
+    return {
+      armed: false,
+      reason: `TRIBE_BRIDGE_LOST_GRACE_SEC must be a positive number of seconds, got ${JSON.stringify(graceRaw)}`,
+    }
+  }
+  const graceMs = graceSec * 1000
+  const { reloadDeadlineMs, tickMs = 0 } = bounds
+  if (reloadDeadlineMs !== undefined && graceMs <= reloadDeadlineMs + tickMs) {
+    return {
+      armed: false,
+      reason:
+        `TRIBE_BRIDGE_LOST_GRACE_SEC=${graceSec} is not greater than the reload deadline (${reloadDeadlineMs / 1000} s) ` +
+        `plus one tick (${tickMs / 1000} s); a reload would page`,
+    }
+  }
+  return { armed: true, config: { owners, graceMs } }
+}
+
+/** What one tick knows: transport projection plus the durable ball tracker's open bridge-lost incidents. */
+export interface BridgeLostFacts {
+  /** Seats hab expects up whose transport is gone (membership state `missing-transport`). */
+  readonly missing: ReadonlyArray<{ readonly name: string; readonly launchParentPid: number | null }>
+  /** Names with a live transport now. */
+  readonly connected: ReadonlySet<string>
+  /** Seats whose launch exited with a settled reason, mapped to that reason. */
+  readonly exited: ReadonlyMap<string, string>
+  /** Open incidents from the durable tracker; never from memory, so a restart cannot lose a clear. */
+  readonly openIncidents: ReadonlyArray<{ readonly subject: string; readonly recipient: string }>
+}
+
+/** Grace clocks only. The durable row has no last-live time, so first-seen is in memory: a restart delays a page by
+ *  at most one grace and never loses a clear, because clears read the tracker. */
+export interface BridgeLostMemory {
+  readonly firstSeen: Map<string, number>
+  /** Seats already announced to "*" because no owner was reachable. */
+  readonly broadcast: Set<string>
+}
+
+let currentBridgeLostArming: BridgeLostArming = { armed: false, reason: "the health monitor has not started" }
+
+/** The running monitor's arming, for cli_health and `tribe doctor` ("bridge-lost paging disarmed: <reason>"). */
+export function getBridgeLostArming(): BridgeLostArming {
+  return currentBridgeLostArming
+}
+
+export function createBridgeLostMemory(): BridgeLostMemory {
+  return { firstSeen: new Map(), broadcast: new Set() }
+}
+
+export interface BridgeLostAction {
+  readonly kind: "raise" | "clear" | "broadcast"
+  readonly recipient: string
+  readonly content: string
+  readonly incident?: { readonly emitter: string; readonly subject: string; readonly condition: string }
+}
+
+const bridgeLostIncident = (seat: string) => ({
+  emitter: BRIDGE_LOST_EMITTER,
+  subject: seat,
+  condition: BRIDGE_LOST_CONDITION,
+})
+
+/**
+ * One tick of bridge-lost paging. Reads transport state only, never an unread count: on 2026-09-24 @chief reading
+ * over the CLI silenced the unread-driven alert while its bridge stayed dead for five hours.
+ */
+export function checkBridgeLost(
+  facts: BridgeLostFacts,
+  now: number,
+  memory: BridgeLostMemory,
+  config: BridgeLostConfig,
+): BridgeLostAction[] {
+  const actions: BridgeLostAction[] = []
+  const missingNames = new Set(facts.missing.map((seat) => seat.name))
+  const open = new Map(facts.openIncidents.map((incident) => [incident.subject, incident.recipient]))
+
+  for (const [subject, recipient] of open) {
+    if (missingNames.has(subject)) continue
+    const exit = facts.exited.get(subject)
+    const why =
+      exit !== undefined
+        ? `${subject} exited (${exit}); hab owns the restart`
+        : facts.connected.has(subject)
+          ? `${subject}'s transport is live again`
+          : `${subject} is no longer a seat hab expects up`
+    actions.push({ kind: "clear", recipient, content: `cleared: ${why}`, incident: bridgeLostIncident(subject) })
+  }
+  for (const seat of [...memory.firstSeen.keys()]) {
+    if (!missingNames.has(seat)) memory.firstSeen.delete(seat)
+  }
+  for (const seat of [...memory.broadcast]) {
+    if (!missingNames.has(seat)) memory.broadcast.delete(seat)
+  }
+
+  for (const seat of facts.missing) {
+    const since = memory.firstSeen.get(seat.name) ?? now
+    memory.firstSeen.set(seat.name, since)
+    if (now - since < config.graceMs || open.has(seat.name)) continue
+    const minutes = Math.floor((now - since) / 60_000)
+    const content =
+      `${seat.name}'s tribe bridge is lost ${minutes} min: hab expects it up, its launch parent ` +
+      `${seat.launchParentPid ?? "unknown"} has no transport. Repair from its pane: /mcp, plugin:tribe:tribe, Reconnect.`
+    const owner = config.owners.find((candidate) => candidate !== seat.name && !missingNames.has(candidate))
+    if (owner !== undefined) {
+      actions.push({ kind: "raise", recipient: owner, content, incident: bridgeLostIncident(seat.name) })
+    } else if (!memory.broadcast.has(seat.name)) {
+      memory.broadcast.add(seat.name)
+      actions.push({
+        kind: "broadcast",
+        recipient: "*",
+        content: `${content} Paged to everyone: no configured owner is reachable (${config.owners.join(", ")} are all lost).`,
+      })
+    }
+  }
+  return actions
+}
+
+/** Read the tick's facts from the daemon and deliver checkBridgeLost's actions on the incident rail. */
+export function runBridgeLostTick(
+  api: TribeClientApi,
+  arming: BridgeLostArming,
+  memory: BridgeLostMemory,
+  now: number,
+): void {
+  if (!arming.armed || api.getSeatTransportFacts === undefined || api.listOpenIncidents === undefined) return
+  const transport = api.getSeatTransportFacts()
+  const openIncidents = api.listOpenIncidents(BRIDGE_LOST_EMITTER, BRIDGE_LOST_CONDITION)
+  for (const action of checkBridgeLost({ ...transport, openIncidents }, now, memory, arming.config)) {
+    log.info?.(`bridge-lost ${action.kind} -> ${action.recipient}: ${action.content}`)
+    const type = `health:${BRIDGE_LOST_CONDITION}`
+    if (action.kind === "broadcast" || action.incident === undefined) {
+      api.broadcast(action.content, type, undefined, { delivery: "push", topic: type })
+    } else {
+      api.send(
+        action.recipient,
+        action.content,
+        type,
+        undefined,
+        { delivery: "push", topic: type },
+        {
+          ...action.incident,
+          active: action.kind === "raise",
+        },
+      )
+    }
+  }
+}
+
 /**
  * Format the lock holder — prefer "<session> (PID <pid>)" when both are known,
  * since the session name is what a human remembers but the PID is still the
@@ -2216,6 +2409,19 @@ export const healthMonitorPlugin: TribePluginApi = {
     let ghRateSampleCount = 0
     let ioSampleCount = 0
     let chiefPresenceSampleCount = 0
+    const bridgeLostMemory = createBridgeLostMemory()
+    const bridgeLostParsed = parseBridgeLostConfig(process.env, { tickMs: pollIntervalSec * 3 * 1000 })
+    currentBridgeLostArming =
+      bridgeLostParsed.armed && (api.getSeatTransportFacts === undefined || api.listOpenIncidents === undefined)
+        ? { armed: false, reason: "this daemon's plugin API exposes no seat transport facts or open incidents" }
+        : bridgeLostParsed
+    if (currentBridgeLostArming.armed) {
+      log.info?.(
+        `bridge-lost paging armed: owners=${currentBridgeLostArming.config.owners.join(",")} grace=${currentBridgeLostArming.config.graceMs / 1000}s`,
+      )
+    } else {
+      log.error?.(`bridge-lost paging disarmed: ${currentBridgeLostArming.reason}`)
+    }
     let lastIoScalarFact: string | undefined
 
     log.info?.(
@@ -2266,6 +2472,11 @@ export const healthMonitorPlugin: TribePluginApi = {
             }
           } catch (err) {
             log.error?.(`chief-absence check failed: ${err instanceof Error ? err.message : String(err)}`)
+          }
+          try {
+            runBridgeLostTick(api, currentBridgeLostArming, bridgeLostMemory, Date.now())
+          } catch (err) {
+            log.error?.(`bridge-lost check failed: ${err instanceof Error ? err.message : String(err)}`)
           }
         }
 

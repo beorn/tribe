@@ -3314,32 +3314,84 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   })
 }
 
-function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
-  const now = Date.now()
-  const silentThreshold = now - 300_000 // 5 minutes
+type HealthSessionRow = {
+  id: string
+  name: string
+  role: string
+  domains: string
+  pid: number
+  started_at: number
+  updated_at: number
+  mailbox_authority_hash: string | null
+  identity_sid: string | null
+  launch_id: string | null
+  launch_parent_pid: number | null
+}
 
-  // Liveness comes from the daemon's in-memory clients Map. Dead sessions
-  // are simply absent from activeSessionInfo — no DB pruning required.
+/** The membership read tribe.health answers from. Liveness comes from the daemon's in-memory clients Map: dead
+ *  sessions are simply absent from activeSessionInfo, no DB pruning required. The bridge-lost check (25662) reads
+ *  the same projection through readSeatTransportFacts, so the page and tribe.health never disagree. */
+function projectHealthMembership(ctx: TribeContext, opts: HandlerOpts) {
   const activeInfo = opts.getActiveSessionInfo()
   const retiredNames = opts.retiredNames ?? new Set<string>()
   const byId = new Map(activeInfo.map((s) => [s.id, s]))
-  const rows = ctx.stmts.allSessions.all() as Array<{
-    id: string
-    name: string
-    role: string
-    domains: string
-    pid: number
-    started_at: number
-    updated_at: number
-    mailbox_authority_hash: string | null
-    identity_sid: string | null
-    launch_id: string | null
-    launch_parent_pid: number | null
-  }>
+  const rows = ctx.stmts.allSessions.all() as HealthSessionRow[]
   const liveSessions = rows.filter((r) => byId.has(r.id))
   const activeIds = new Set(byId.keys())
   const disconnected = projectDisconnectedSessionRows(rows, activeIds)
   const diagnosticDisconnected = disconnected.diagnostic.filter((session) => !retiredNames.has(session.name))
+  // `.finished`/`.dormant`/`.departed` are deliberately unused here —
+  // tribe.health stays a pure liveness/degradation surface and never grows
+  // `finished_launches`/`dormant_launches`/`departed_launches` lists (or
+  // `unexpected_connected` — that is a members-only concern, see
+  // handleSessions above); their sibling counts still ride inside
+  // `membershipDiscrepancy` (finished_count/dormant_count/
+  // departed_sibling_count/departed_foreign_count).
+  const { discrepancy } = projectMembershipDiscrepancy(
+    rows,
+    activeIds,
+    diagnosticDisconnected,
+    retiredNames,
+    (row) => readSessionLeftFact(ctx, row),
+    opts.getExpectedMembers?.(),
+    opts.getForeignIdentityTransport,
+  )
+  return { retiredNames, byId, rows, liveSessions, activeIds, disconnected, diagnosticDisconnected, discrepancy }
+}
+
+/** Seats by transport for the bridge-lost check (25662): lost bridges, settled exits, and live names. */
+export function readSeatTransportFacts(
+  ctx: TribeContext,
+  opts: HandlerOpts,
+): {
+  missing: Array<{ name: string; launchParentPid: number | null }>
+  exited: Map<string, string>
+  connected: Set<string>
+} {
+  const { liveSessions, discrepancy } = projectHealthMembership(ctx, opts)
+  const missing: Array<{ name: string; launchParentPid: number | null }> = []
+  const exited = new Map<string, string>()
+  for (const launch of discrepancy?.missing ?? []) {
+    if (launch.state === "missing-transport")
+      missing.push({ name: launch.name, launchParentPid: launch.launch_parent_pid })
+    // The only settled left-fact is a harness exit (isTerminalSessionLeftReason).
+    else if (launch.state === "exited-not-remounted") exited.set(launch.name, `harness-exited at ${launch.left_at}`)
+  }
+  return { missing, exited, connected: new Set(liveSessions.map((session) => session.name)) }
+}
+
+function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
+  const now = Date.now()
+  const silentThreshold = now - 300_000 // 5 minutes
+
+  const {
+    retiredNames,
+    byId,
+    liveSessions,
+    disconnected,
+    diagnosticDisconnected,
+    discrepancy: membershipDiscrepancy,
+  } = projectHealthMembership(ctx, opts)
   const transportWedges = diagnosticDisconnected.flatMap((session) => {
     const lifetime = classifySessionRegistrationLifetime({
       launchId: session.launch_id,
@@ -3362,23 +3414,6 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
       },
     ]
   })
-  // `.finished`/`.dormant`/`.departed` are deliberately unused here —
-  // tribe.health stays a pure liveness/degradation surface and never grows
-  // `finished_launches`/`dormant_launches`/`departed_launches` lists (or
-  // `unexpected_connected` — that is a members-only concern, see
-  // handleSessions above); their sibling counts still ride inside
-  // `membershipDiscrepancy` (finished_count/dormant_count/
-  // departed_sibling_count/departed_foreign_count).
-  const { discrepancy: membershipDiscrepancy } = projectMembershipDiscrepancy(
-    rows,
-    activeIds,
-    diagnosticDisconnected,
-    retiredNames,
-    (row) => readSessionLeftFact(ctx, row),
-    opts.getExpectedMembers?.(),
-    opts.getForeignIdentityTransport,
-  )
-
   const members = liveSessions.map((s) => {
     const active = byId.get(s.id)
     if (active === undefined) throw new Error(`active session ${s.id} disappeared during membership projection`)

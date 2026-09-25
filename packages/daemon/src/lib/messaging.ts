@@ -4,11 +4,12 @@
 
 import { randomUUID } from "node:crypto"
 import type { TribeContext } from "./context.ts"
-import { AUTO_TRACK_TYPES_SET } from "./database.ts"
+import { AUTO_TRACK_TYPES_SET, type TribeStatements } from "./database.ts"
 import {
   describeSettlementConflict,
   foldSettlementFacts,
   incidentKey,
+  parseIncidentKey,
   parseBallOutcomeFact,
   type BallOutcomeFactRow,
   type BallSettlementFact,
@@ -753,6 +754,28 @@ export type SessionLeftReason =
  *  that a socket closed. The membership projection finishes a launch on
  *  these alone (@ag/tribe/tribe-membership-projection-counts-permanent-
  *  history-as-degraded). */
+/**
+ * The open incidents one watcher holds for one condition, from the durable ball tracker (pending_request is the
+ * open set: settling deletes the row). A watcher reads these, never its own memory, so a restart cannot lose a clear
+ * (25662).
+ */
+export function readOpenIncidents(
+  stmts: TribeStatements,
+  emitter: string,
+  condition: string,
+): Array<{ subject: string; recipient: string }> {
+  const rows = stmts.selectOpenIncidentsByEmitter.all({ $prefix: `${emitter}:` }) as Array<{
+    request_id: string
+    recipient: string
+  }>
+  return rows.flatMap((row) => {
+    const identity = parseIncidentKey(row.request_id)
+    return identity?.emitter === emitter && identity.condition === condition
+      ? [{ subject: identity.subject, recipient: row.recipient }]
+      : []
+  })
+}
+
 export function isTerminalSessionLeftReason(reason: unknown): reason is "harness-exited" {
   return reason === "harness-exited"
 }

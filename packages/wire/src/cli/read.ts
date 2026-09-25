@@ -1218,13 +1218,44 @@ export function evaluateDoctorMembership(
     return { severity: "UNKNOWN", diagnosis: `membership rail state unresolved: ${evidence}` }
   }
   if (discrepancy?.status === "degraded" || [...states.values()].some((state) => state !== "connected")) {
+    // 25662: a missing-transport seat's bridge is repaired from its own pane; no rejoin reaches it.
+    const lost = [...states].filter(([, state]) => state === "missing-transport").map(([name]) => name)
     return {
       severity: "WARNING",
       diagnosis: `membership degraded: ${evidence}`,
-      remedy: "rejoin each disconnected or missing-transport seat, then re-run `tribe doctor`",
+      remedy:
+        lost.length > 0
+          ? `in each missing-transport seat's pane run /mcp, select plugin:tribe:tribe, Reconnect (${lost.join(", ")}); rejoin any other disconnected seat; then re-run \`tribe doctor\``
+          : "rejoin each disconnected seat, then re-run `tribe doctor`",
     }
   }
   return { severity: "OK", diagnosis: `connected=${states.size} missing=0 ${evidence}` }
+}
+
+/** The daemon's bridge-lost paging arming (25662), as cli_health reports it. */
+export function evaluateDoctorBridgeLost(arming: unknown): DoctorDiagnosticCheck {
+  const shape = arming as
+    | { armed?: unknown; reason?: unknown; config?: { owners?: unknown; graceMs?: unknown } }
+    | null
+    | undefined
+  if (shape?.armed === true && Array.isArray(shape.config?.owners) && typeof shape.config?.graceMs === "number") {
+    return {
+      severity: "OK",
+      diagnosis: `bridge-lost paging armed: owners=${shape.config.owners.join(",")} grace=${shape.config.graceMs / 1000}s`,
+    }
+  }
+  if (shape?.armed === false && typeof shape.reason === "string") {
+    return {
+      severity: "WARNING",
+      diagnosis: `bridge-lost paging disarmed: ${shape.reason}`,
+      remedy:
+        "set TRIBE_BRIDGE_LOST_OWNERS to two or more seats (comma-separated) in the daemon's environment, then restart the daemon",
+    }
+  }
+  return {
+    severity: "UNKNOWN",
+    diagnosis: "bridge-lost paging state unreported: the running daemon predates 25662 or its health monitor is off",
+  }
 }
 
 type DoctorConnect = typeof connectToDaemon
@@ -1417,12 +1448,27 @@ async function cmdDoctor(opts: { fix?: boolean; json?: boolean }): Promise<void>
       diagnosis: `membership query failed: ${error instanceof Error ? error.message : String(error)}`,
     }
   }
+  let bridgeLost: DoctorDiagnosticCheck
+  try {
+    bridgeLost = evaluateDoctorBridgeLost(((await callDaemon("cli_health")) as { bridge_lost?: unknown }).bridge_lost)
+  } catch (error) {
+    bridgeLost = {
+      severity: "UNKNOWN",
+      diagnosis: `bridge-lost paging query failed: ${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
   const rail = await probeDoctorRail()
   // @ag/tribe/24159 — informational only, never folded into `outcome`: a
   // missing tee file just means no daemon has logged since the file was
   // last rotated/pruned, not a doctor failure.
   const daemonStderrLog = describeDaemonStderrLog()
-  const outcome = deriveDoctorOutcome([identity.severity, versions.severity, membership.severity, rail.severity])
+  const outcome = deriveDoctorOutcome([
+    identity.severity,
+    versions.severity,
+    membership.severity,
+    bridgeLost.severity,
+    rail.severity,
+  ])
 
   if (opts.json) {
     await writeJsonStdout(
@@ -1431,6 +1477,7 @@ async function cmdDoctor(opts: { fix?: boolean; json?: boolean }): Promise<void>
         identity,
         versions,
         membership,
+        bridge_lost: bridgeLost,
         rail,
         daemon_stderr_log: daemonStderrLog,
       },
@@ -1458,6 +1505,12 @@ async function cmdDoctor(opts: { fix?: boolean; json?: boolean }): Promise<void>
   } else {
     console.error(`  ${membership.severity} — ${membership.diagnosis}`)
     if (membership.remedy) console.error(`  REMEDY — ${membership.remedy}`)
+  }
+  if (bridgeLost.severity === "OK") {
+    console.log(`  OK — ${bridgeLost.diagnosis}`)
+  } else {
+    console.error(`  ${bridgeLost.severity} — ${bridgeLost.diagnosis}`)
+    if (bridgeLost.remedy) console.error(`  REMEDY — ${bridgeLost.remedy}`)
   }
 
   if (rail.severity === "OK") {

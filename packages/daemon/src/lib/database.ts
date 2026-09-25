@@ -1784,6 +1784,12 @@ export function createStatements(db: Database) {
 
     /** Ball-tracker query: open requests addressed to a particular recipient (the "owner"
      *  of the open ball). Sorted oldest-first so callers can act on the longest-pending. */
+    // 25662: a watcher's open incidents by emitter, from the durable tracker, so a restart cannot lose a clear.
+    selectOpenIncidentsByEmitter: db.prepare(`
+		SELECT request_id, recipient FROM pending_request
+		WHERE request_kind = 'incident' AND substr(request_id, 1, length($prefix)) = $prefix
+		ORDER BY request_id, recipient
+	`),
     selectPendingForRecipient: db.prepare(`
 		SELECT p.request_id, p.recipient, p.sender, p.opened_at, p.expires_at, p.message_id, p.fanout,
 			p.request_kind,

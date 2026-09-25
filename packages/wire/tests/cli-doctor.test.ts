@@ -14,6 +14,7 @@ import {
   deriveDoctorOutcome,
   evaluateDoctor,
   evaluateDoctorIdentity,
+  evaluateDoctorBridgeLost,
   evaluateDoctorMembership,
   evaluateDoctorVersions,
 } from "../src/cli/read.ts"
@@ -317,5 +318,42 @@ describe("status-backed doctor checks", () => {
     expect(check.diagnosis).toContain("@dev/0=connected")
     expect(check.diagnosis).toContain("@dev/1=disconnected")
     expect(check.diagnosis).toContain("@dev/2=missing-transport")
+  })
+
+  // 25662: a missing-transport seat's bridge is repaired from its own pane, which the remedy must name.
+  test("a missing-transport seat's remedy names the pane repair; a plain disconnect keeps the rejoin", () => {
+    const lost = evaluateDoctorMembership([{ name: "@dev/0", transport_state: "connected" }], {
+      status: "degraded",
+      missing: [{ name: "@dev/2", state: "missing-transport" }],
+    })
+    expect(lost.remedy).toBe(
+      "in each missing-transport seat's pane run /mcp, select plugin:tribe:tribe, Reconnect (@dev/2); rejoin any other disconnected seat; then re-run `tribe doctor`",
+    )
+    const disconnected = evaluateDoctorMembership([{ name: "@dev/1", transport_state: "disconnected" }], undefined)
+    expect(disconnected.remedy).toBe("rejoin each disconnected seat, then re-run `tribe doctor`")
+  })
+})
+
+describe("evaluateDoctorBridgeLost (25662)", () => {
+  test("armed paging is OK and names its owners and grace", () => {
+    expect(evaluateDoctorBridgeLost({ armed: true, config: { owners: ["@chief", "@cto"], graceMs: 180_000 } })).toEqual(
+      { severity: "OK", diagnosis: "bridge-lost paging armed: owners=@chief,@cto grace=180s" },
+    )
+  })
+
+  test("disarmed paging is a WARNING that prints its reason", () => {
+    expect(evaluateDoctorBridgeLost({ armed: false, reason: "TRIBE_BRIDGE_LOST_OWNERS is unset" })).toEqual({
+      severity: "WARNING",
+      diagnosis: "bridge-lost paging disarmed: TRIBE_BRIDGE_LOST_OWNERS is unset",
+      remedy:
+        "set TRIBE_BRIDGE_LOST_OWNERS to two or more seats (comma-separated) in the daemon's environment, then restart the daemon",
+    })
+  })
+
+  test("a daemon that reports no arming is UNKNOWN, never assumed armed", () => {
+    expect(evaluateDoctorBridgeLost(undefined)).toEqual({
+      severity: "UNKNOWN",
+      diagnosis: "bridge-lost paging state unreported: the running daemon predates 25662 or its health monitor is off",
+    })
   })
 })

@@ -150,9 +150,13 @@ async function waitForSocket(socketPath: string, timeoutMs = 5_000): Promise<voi
   throw new Error(`timed out waiting for daemon socket ${socketPath}`)
 }
 
+/** A daemon whose bridge-lost paging is armed (25662): doctor reads it from cli_health. */
+const ARMED_BRIDGE_LOST = { armed: true, config: { owners: ["@chief", "@cto"], graceMs: 180_000 } }
+
 function createDoctorCanaryResponder(mode: "pass" | "timeout" = "pass") {
   return (method: string): unknown | null => {
     if (method === "register") return { name: "tribe-doctor-canary" }
+    if (method === "cli_health") return { bridge_lost: ARMED_BRIDGE_LOST }
     if (method === "cli_inbox_wait") {
       return mode === "pass"
         ? { status: "woken", timed_out: false, waited_ms: 3 }
@@ -179,6 +183,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     // A disposable daemon declares its own world (24644): a seat's inherited
     // roster made every live seat read as never-registered here.
     for (const name of tribeAmbientEnvironmentNames()) delete env[name]
+    env.TRIBE_BRIDGE_LOST_OWNERS = "@chief,@cto"
     const daemon = spawn(
       BUN_BIN,
       [DAEMON, "--socket", socketPath, "--db", dbPath, "--quit-timeout", "-1", "--no-lore"],
@@ -191,6 +196,8 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
 
       expect(result, result.stderr).toMatchObject({ code: 0 })
       expect(result.stdout).toMatch(/OK — rail canary message=[0-9a-f-]+ waited_ms=\d+/)
+      // 25662, end to end: the real daemon armed paging from its env, and doctor read it from cli_health.
+      expect(result.stdout).toContain("OK — bridge-lost paging armed: owners=@chief,@cto grace=180s")
       expect(result.stdout).toContain(
         `OK — code identity running=${TRIBE_SHA} on_disk=${TRIBE_SHA} pin=${EXPECTED_HOST_PIN}`,
       )
@@ -1016,7 +1023,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
             code_identity: { cert: TRIBE_SHA, root: TRIBE_ROOT },
             protocol_version: TRIBE_PROTOCOL_VERSION,
           }
-          const canaryResult = doctorCanaryResponse(request.method)
+          const canaryResult = request.method === "cli_health" ? null : doctorCanaryResponse(request.method)
           const result =
             canaryResult ??
             (request.method === "tribe.members"
@@ -1024,7 +1031,12 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
               : request.method === "cli_status"
                 ? { sessions: [holder], daemon }
                 : request.method === "cli_health"
-                  ? { content: [{ type: "text", text: JSON.stringify({ issues: [] }) }], sessions: [holder], daemon }
+                  ? {
+                      content: [{ type: "text", text: JSON.stringify({ issues: [] }) }],
+                      sessions: [holder],
+                      daemon,
+                      bridge_lost: ARMED_BRIDGE_LOST,
+                    }
                   : request.method === "cli_log"
                     ? { messages: [] }
                     : request.method === "tribe.health"
@@ -1074,6 +1086,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       expect(methods).toEqual([
         "cli_status",
         "tribe.members",
+        "cli_health",
         "register",
         "cli_inbox_wait",
         "tribe.send",
@@ -1152,6 +1165,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       expect(methods).toEqual([
         "cli_status",
         "tribe.members",
+        "cli_health",
         "register",
         "cli_inbox_wait",
         "tribe.send",
@@ -1221,7 +1235,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         'REMEDY — run `tribe restart --reason "doctor rail canary failed"`, then re-run `tribe doctor`',
       )
       expect(result.stderr).toContain("FINAL FAIL — derived from the worst doctor check")
-      expect(methods).toEqual(["cli_status", "tribe.members", "register", "cli_inbox_wait", "tribe.send"])
+      expect(methods).toEqual(["cli_status", "tribe.members", "cli_health", "register", "cli_inbox_wait", "tribe.send"])
     } finally {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
       rmSync(dir, { recursive: true, force: true })

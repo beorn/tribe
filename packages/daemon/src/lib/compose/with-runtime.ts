@@ -28,7 +28,7 @@
  */
 
 import { createLogger } from "loggily"
-import { sendMessage } from "../messaging.ts"
+import { readOpenIncidents, sendMessage } from "../messaging.ts"
 import { cleanupOldData, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
 import { resolveRetentionConfig, runRetentionSweep } from "../retention.ts"
 import { loadPlugins } from "../plugin-loader.ts"
@@ -136,6 +136,12 @@ function defaultBuildPluginApi<T extends RuntimeShape>(t: T): TribeClientApi {
         count: attention?.count ?? 0,
         oldestTs: attention?.oldest_ts ?? 0,
       }
+    },
+    getSeatTransportFacts() {
+      return t.dispatcher.seatTransportFacts()
+    },
+    listOpenIncidents(emitter, condition) {
+      return readOpenIncidents(stmts, emitter, condition)
     },
   }
 }
