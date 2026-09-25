@@ -13,6 +13,9 @@ import { log, setRecallLogging } from "../../src/history/recall-shared.ts"
 
 describe("25392: recall log goes through loggily and is off by default outside the daemon", () => {
   beforeEach(() => {
+    // The root vitest setup pins LOG_LEVEL=warn, which would filter an info line whether or not log() is gated; every
+    // row here runs at info so the negative rows can fail.
+    vi.stubEnv("LOG_LEVEL", "info")
     setSuppressConsole(true)
   })
 
@@ -56,8 +59,6 @@ describe("25392: recall log goes through loggily and is off by default outside t
       if (ev.kind === "log") events.push(ev)
     })
     try {
-      // The root vitest setup pins LOG_LEVEL=warn; this row is about routing at info, so it names its level.
-      vi.stubEnv("LOG_LEVEL", "info")
       setRecallLogging(true)
       log("test message across loggily")
       expect(events).toHaveLength(1)
