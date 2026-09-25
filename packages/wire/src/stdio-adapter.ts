@@ -40,7 +40,7 @@ import {
 import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
 import { createReconnectWatchdog } from "./lib/reconnect-watchdog.ts"
 import { resolveCheckoutCodeIdentity } from "./lib/code-identity.ts"
-import { pacedReexec, type ReloadDaemonView } from "./lib/reload-pacing.ts"
+import { pacedReexec, type ReloadDaemonView, type ReloadPeers } from "./lib/reload-pacing.ts"
 import { createHash } from "node:crypto"
 import { constants as osConstants } from "node:os"
 import { dirname } from "node:path"
@@ -518,27 +518,48 @@ function requestPluginReexec(reason: string, supervisedExitCode = supervisedReex
 }
 
 function handleDaemonGenerationChange(reason: string): void {
-  const supervisedExitCode = supervisedReexecExitCode(2)
-  if (supervisedExitCode !== null) {
-    requestPacedReexec(reason, supervisedExitCode)
+  if (supervisedReexecExitCode(2) !== null) {
+    requestPacedReexec(reason, () => supervisedReexecExitCode(2))
     return
   }
   log.info?.(`tribe direct adapter re-registered without a host re-exec supervisor: ${reason}`)
 }
 
-/** The daemon view a paced reload reads: the live names for this adapter's rank, and the code the daemon runs. */
+/** cli_status `reload_peers`: absent from an older daemon (null), malformed from a broken one (a loud read failure). */
+function parseReloadPeers(raw: unknown): ReloadPeers | null {
+  if (raw === undefined) return null
+  const names = (value: unknown, field: string): string[] => {
+    if (!Array.isArray(value) || !value.every((name) => typeof name === "string")) {
+      throw new Error(`cli_status reload_peers.${field} is not a list of names`)
+    }
+    return value as string[]
+  }
+  if (typeof raw !== "object" || raw === null) throw new Error("cli_status reload_peers is not an object")
+  const peers = raw as { declared?: unknown; live_undeclared?: unknown }
+  return {
+    declared: names(peers.declared, "declared"),
+    liveUndeclared: names(peers.live_undeclared, "live_undeclared"),
+  }
+}
+
+/** The daemon view a paced reload reads: the peers for this adapter's rank, and the code the daemon runs. */
 async function readReloadDaemonView(): Promise<ReloadDaemonView> {
   const probe = await connectToDaemon(SOCKET_PATH, { callTimeoutMs: 1_000 })
   try {
     const status = (await probe.call("cli_status")) as {
       sessions?: Array<{ name?: unknown }>
+      reload_peers?: unknown
       daemon?: { code_identity?: { cert?: unknown } }
     }
     const liveNames = (status.sessions ?? []).flatMap((session) =>
       typeof session.name === "string" ? [session.name] : [],
     )
     const cert = status.daemon?.code_identity?.cert
-    return { liveNames, runningCert: typeof cert === "string" ? cert : null }
+    return {
+      liveNames,
+      peers: parseReloadPeers(status.reload_peers),
+      runningCert: typeof cert === "string" ? cert : null,
+    }
   } finally {
     probe.close()
   }
@@ -556,10 +577,11 @@ let pacedReexecPending = false
 /**
  * A fleet-wide re-exec (a source change, a daemon generation change) waits for this adapter's slot in a rolling
  * restart and for a daemon running the code on disk (25663). The first request wins; a second while one is pending
- * is the same reload.
+ * is the same reload. The exit code is read when the adapter re-execs, not when the reload is requested: it carries
+ * the joined bit, and a seat that joins during the paced wait must re-exec joined (25663 P4-1).
  */
-function requestPacedReexec(reason: string, supervisedExitCode: number | null): void {
-  if (supervisedExitCode === null) requestPluginReexec(reason, supervisedExitCode)
+function requestPacedReexec(reason: string, supervisedExitCode: () => number | null): void {
+  if (supervisedExitCode() === null) requestPluginReexec(reason, null)
   if (pacedReexecPending) {
     log.info?.(`paced re-exec already pending; also: ${reason}`)
     return
@@ -577,11 +599,12 @@ function requestPacedReexec(reason: string, supervisedExitCode: number | null): 
       sleep: reloadDelay,
       timeout: reloadDelay,
       warn: (message) => log.warn?.(message),
-      reexec: (why) => requestPluginReexec(why, supervisedExitCode),
+      info: (message) => log.info?.(message),
+      reexec: (why) => requestPluginReexec(why, supervisedExitCode()),
     },
     reason,
   ).catch((error: unknown) =>
-    requestPluginReexec(`${reason}; paced re-exec failed: ${errorMessage(error)}`, supervisedExitCode),
+    requestPluginReexec(`${reason}; paced re-exec failed: ${errorMessage(error)}`, supervisedExitCode()),
   )
 }
 
@@ -1087,7 +1110,7 @@ using _reload = setupHotReload({
   logActivity: (type, content) => {
     daemon?.call("log_event", { type, content }).catch(() => {})
   },
-  replaceProcess: (reason) => requestPacedReexec(reason, supervisedReexecExitCode()),
+  replaceProcess: (reason) => requestPacedReexec(reason, () => supervisedReexecExitCode()),
 })
 
 const shutdown = (exitCode = 0) => {

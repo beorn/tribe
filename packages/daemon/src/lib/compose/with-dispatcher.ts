@@ -2168,8 +2168,16 @@ export function withDispatcher<
           case "cli_status": {
             const now = Date.now()
             const sessions = canonicalSessionRows(now)
+            // 25663 P3 (@cto bf0417a0): the list a reloading adapter ranks itself in. The declared roster is the same
+            // for every adapter whenever it reads; sessions[] holds only those rejoined so far.
+            const declared = [...(hooks.getExpectedMembers?.()?.byName.keys() ?? [])].sort()
+            const declaredSet = new Set(declared)
+            const liveUndeclared = [...new Set(sessions.map((session) => session.name))]
+              .filter((name) => !declaredSet.has(name))
+              .sort()
             return makeResponse(id, {
               sessions,
+              reload_peers: { declared, live_undeclared: liveUndeclared },
               daemon: {
                 pid: process.pid,
                 uptime: Math.floor((Date.now() - socket.startedAt) / 1000),

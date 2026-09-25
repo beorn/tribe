@@ -423,6 +423,16 @@ process.exit(await child.exited)
         pacedRestartBudgetMs(expectedPersonas.length),
       )
 
+      // 25663 P3: each adapter read cli_status just after its own re-register, yet every one ranked itself from the
+      // declared roster, so each took its roster place and no two shared a slot. Ranking on sessions[].name collided.
+      const slots = expectedPersonas.map((persona) => {
+        const { logPath } = harnesses.find((harness) => harness.persona === persona)!
+        const lines = [...readFileSync(logPath, "utf8").matchAll(/rank \d+ of \d+ peers, slot (\d+)/gu)]
+        expect(lines.length, `${persona}'s reload rank lines after restart ${restart}`).toBeGreaterThanOrEqual(restart)
+        return Number(lines.at(-1)![1])
+      })
+      expect(slots).toEqual(expectedPersonas.map((persona) => personas.indexOf(persona)))
+
       for (const persona of expectedPersonas) {
         const member = rejoined.get(persona)!
         expect(member.member_id).toBe(initialMembers.get(persona)?.member_id)
@@ -1283,6 +1293,106 @@ process.exit(await child.exited)
     expect(plugin.exitCode, pluginStderr).toBeNull()
     successor.client.close()
   }, 45_000)
+
+  // 25663 P4-1: the re-exec exit code carries the joined bit. It was computed when the reload was requested, so a
+  // launch-less seat that joined during the paced wait (up to 124 s) re-exec'd unjoined and came back unknown-*.
+  it("a launch-less seat that joins during the paced reload wait re-execs joined", async () => {
+    const dbPath = join(tmpDir, "tribe-join-during-wait.db")
+    const daemonLog = join(tmpDir, "daemon-join-during-wait.log")
+    const adapterLog = join(tmpDir, "adapter-join-during-wait.log")
+    // Two declared names rank ahead of the undeclared launch-less adapter, so its wait is at least two 4 s slots.
+    spawnTestDaemon(dbPath, daemonLog, {
+      TRIBE_EXPECTED_MEMBERS: JSON.stringify([
+        { name: "@agent/declared-0", expected: false },
+        { name: "@agent/declared-1", expected: false },
+      ]),
+    })
+    await waitFor(() => existsSync(socketPath), "join-during-wait initial daemon socket")
+    const firstDaemon = await connectToGeneration(socketPath)
+    daemonPids.add(firstDaemon.pid)
+
+    const plugin = spawn(BUN_BIN, [PLUGIN_SERVER, "--socket", socketPath], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        CLAUDE_SESSION_ID: "25663-join-during-wait",
+        TRIBE_NAME: "",
+        TRIBE_LAUNCH_ID: "",
+        TRIBE_PLUGIN_ADAPTER_CHILD: "",
+        TRIBE_PLUGIN_PROVIDER_PARENT_PID: "",
+        TRIBE_PLUGIN_REEXEC_EXIT_CODE: "",
+        TRIBE_PLUGIN_RESUME_JOINED: "",
+        TRIBE_DELIVERY: "push",
+        TRIBE_TAKEOVER: "1",
+        TRIBE_NO_PLUGINS: "1",
+        TRIBE_NO_AUTORELOAD: "1",
+        DEBUG_LOG: adapterLog,
+        LOG_FILE: adapterLog,
+        LOG_LEVEL: "info",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    }) as ChildProcessWithoutNullStreams
+    plugins.add(plugin)
+    let pluginStderr = ""
+    plugin.stderr.on("data", (chunk: Buffer | string) => {
+      pluginStderr += chunk.toString()
+    })
+    const stdout = collectJsonLines(plugin)
+    writeJson(plugin, initializePayload(30))
+    await waitFor(() => stdout.some((line) => line.id === 30), "join-during-wait plugin initialize")
+    writeJson(plugin, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    let unjoined: Member | undefined
+    await waitFor(async () => {
+      const roster = parseToolJson(await firstDaemon.client.call("tribe.members", { all: true })).sessions ?? []
+      unjoined = roster.find(
+        (session) =>
+          session.name?.startsWith("unknown-") === true &&
+          session.transport_state === "connected" &&
+          session.transport_pids?.length === 1,
+      )
+      return unjoined !== undefined
+    }, "join-during-wait initial registration")
+    const initialTransportPid = unjoined!.transport_pids![0]!
+    adapterPids.add(initialTransportPid)
+
+    await firstDaemon.client.call("tribe.restart", { reason: "25663 join during the paced wait" })
+    firstDaemon.client.close()
+    const successor = await connectToGeneration(socketPath, (pid) => pid !== firstDaemon.pid)
+    daemonPids.add(successor.pid)
+
+    // The adapter has ranked itself (slot 2) and is waiting; it joins before its slot comes.
+    await waitFor(
+      () => /rank 2 of 3 peers, slot 2; waiting \d+ ms/u.test(readFileSync(adapterLog, "utf8")),
+      "join-during-wait rank read",
+    ).catch((error: unknown) => {
+      throw new Error(`${String(error)}\nadapter log:\n${readFileSync(adapterLog, "utf8").slice(-3_000)}`)
+    })
+    expect(pidExists(initialTransportPid)).toBe(true)
+    writeJson(plugin, callToolPayload(31, "join", { name: "@cto" }))
+    await waitFor(() => stdout.some((line) => line.id === 31), "join-during-wait explicit join")
+    expect(mcpToolJson(stdout, 31)).toMatchObject({ joined: true, name: "@cto" })
+    expect(pidExists(initialTransportPid), "the join landed before the paced re-exec").toBe(true)
+
+    let rejoined: Member | undefined
+    await waitFor(
+      async () => {
+        const roster = parseToolJson(await successor.client.call("tribe.members", { all: true })).sessions ?? []
+        rejoined = roster.find(
+          (session) =>
+            session.transport_state === "connected" &&
+            session.transport_pids?.length === 1 &&
+            session.transport_pids[0] !== initialTransportPid,
+        )
+        return rejoined !== undefined
+      },
+      "join-during-wait re-exec'd adapter registration",
+      pacedRestartBudgetMs(3),
+    )
+    expect(rejoined, pluginStderr).toMatchObject({ name: "@cto", transport_state: "connected" })
+    for (const pid of rejoined?.transport_pids ?? []) adapterPids.add(pid)
+    expect(plugin.exitCode, pluginStderr).toBeNull()
+    successor.client.close()
+  }, 60_000)
 
   it("keeps an unsupervised pull adapter alive after a daemon generation change", async () => {
     const dbPath = join(tmpDir, "tribe-direct.db")

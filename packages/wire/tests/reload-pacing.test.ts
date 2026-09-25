@@ -11,6 +11,10 @@
  * 16 s. The witness runs twenty adapters through the SAME planner the live path calls, at both measured rejoin times,
  * and counts how many are absent at once. Arms: all-at-once (the red arm, 20 absent), uniform jitter over the window
  * (fails N at 16 s, which is why the schedule ranks), and three colliding ranks (the stated tolerance, 6).
+ *
+ * On a daemon generation change each adapter reads the list just after its own re-register (25663 P3). The
+ * per-adapter-read rows model that: ranked on sessions[].name the adapters collide (the red arm); ranked on
+ * reload_peers each takes its roster place whenever it reads (@cto bf0417a0).
  */
 
 import { describe, expect, test } from "vitest"
@@ -25,6 +29,7 @@ import {
   planReloadDelay,
   reloadRank,
   type ReloadDaemonView,
+  type ReloadPeers,
 } from "../src/lib/reload-pacing.ts"
 
 const FLEET = 20
@@ -99,27 +104,99 @@ describe("the reload schedule, through the shipped planner", () => {
   })
 })
 
+describe("each adapter ranks from its own read, just after its own re-register", () => {
+  const names = Array.from({ length: FLEET }, (_, index) => `@dev/${String(index).padStart(2, "0")}`)
+
+  /**
+   * Adapters re-register over `spreadMs`, each reads cli_status 10-50 ms after its own re-register, and the live list
+   * it reads holds only those re-registered by then. Each leaves at its read plus its planned delay.
+   */
+  function generationChange(seed: number, spreadMs: number, peersAt: (live: string[]) => ReloadPeers) {
+    const random = seeded(seed)
+    const registeredAt = names.map(() => random() * spreadMs)
+    const readAt = registeredAt.map((at) => at + 10 + random() * 40)
+    const ranks: number[] = []
+    const leaves = names.map((self, index) => {
+      const live = names.filter((_, other) => registeredAt[other]! <= readAt[index]!)
+      const ranked = reloadRank(self, peersAt(live))
+      ranks.push(ranked.rank)
+      return (
+        readAt[index]! + planReloadDelay(ranked.rank, ranked.peerCount, RELOAD_SLOT_MS, RELOAD_WINDOW_CAP_MS, random)
+      )
+    })
+    return { ranks, peak: peakAbsent(leaves, 16_000) }
+  }
+  const mean = (values: readonly number[]) => values.reduce((sum, value) => sum + value, 0) / values.length
+  const seeds = [...Array(SEEDS).keys()]
+
+  test.each([250, 2_000])(
+    "red arm: ranked on sessions[].name, above N in every seed (%i ms re-register spread)",
+    (spreadMs) => {
+      const peaks = seeds.map(
+        (seed) => generationChange(seed, spreadMs, (live) => ({ declared: [], liveUndeclared: live })).peak,
+      )
+      expect(Math.min(...peaks)).toBeGreaterThan(RELOAD_MAX_ABSENT)
+    },
+  )
+
+  test.each([250, 2_000])(
+    "ranked on reload_peers, every adapter takes its roster place (%i ms re-register spread)",
+    (spreadMs) => {
+      const runs = seeds.map((seed) =>
+        generationChange(seed, spreadMs, (live) => ({ declared: names, liveUndeclared: live })),
+      )
+      for (const run of runs) expect(run.ranks).toEqual([...names.keys()])
+      // The full-list number: exactly N at a 250 ms spread. A 2 s spread shifts each slot by its adapter's read time,
+      // which costs at most the one more absent adapter the collision row states.
+      if (spreadMs === 250) expect(mean(runs.map((run) => run.peak))).toBe(RELOAD_MAX_ABSENT)
+      expect(Math.max(...runs.map((run) => run.peak))).toBeLessThanOrEqual(RELOAD_MAX_ABSENT + 1)
+    },
+  )
+})
+
 describe("reloadRank", () => {
-  test("ranks by sorted, de-duplicated name", () => {
-    expect(reloadRank("@dev/3", ["@dev/4", "@chief", "@dev/3", "@dev/3"])).toEqual({
+  const peers = (declared: string[], liveUndeclared: string[] = []): ReloadPeers => ({ declared, liveUndeclared })
+
+  test("ranks by sorted, de-duplicated declared name, live or not", () => {
+    expect(reloadRank("@dev/3", peers(["@dev/4", "@chief", "@dev/3", "@dev/3"]))).toEqual({
       rank: 1,
-      liveCount: 3,
+      peerCount: 3,
       found: true,
+      declared: true,
     })
   })
 
+  test("undeclared live adapters follow the declared set in name order, never one shared last slot", () => {
+    const shared = peers(["@dev/2", "@chief"], ["@grok/2", "@chief", "@grok/1"])
+    expect(reloadRank("@grok/1", shared)).toEqual({ rank: 2, peerCount: 4, found: true, declared: false })
+    expect(reloadRank("@grok/2", shared)).toEqual({ rank: 3, peerCount: 4, found: true, declared: false })
+  })
+
   test("an adapter missing from the list goes last, never first", () => {
-    expect(reloadRank("@dev/9", ["@chief", "@dev/3"])).toEqual({ rank: 2, liveCount: 3, found: false })
+    expect(reloadRank("@dev/9", peers(["@chief", "@dev/3"]))).toEqual({
+      rank: 2,
+      peerCount: 3,
+      found: false,
+      declared: false,
+    })
   })
 })
 
 describe("pacedReexec", () => {
+  /** A current daemon's view: every live name is declared. */
+  const view = (declared: string[], runningCert: string | null): ReloadDaemonView => ({
+    liveNames: declared,
+    peers: { declared, liveUndeclared: [] },
+    runningCert,
+  })
   function harness(views: Array<ReloadDaemonView | Error | "hang">, onDisk: string | null = "abc") {
     let now = 0
     const log: string[] = []
+    const infos: string[] = []
     const sleeps: number[] = []
     return {
       log,
+      infos,
       sleeps,
       elapsed: () => now,
       deps: {
@@ -142,6 +219,7 @@ describe("pacedReexec", () => {
           now += ms
         },
         warn: (message: string) => log.push(`warn: ${message}`),
+        info: (message: string) => infos.push(message),
         reexec: (reason: string) => log.push(`reexec: ${reason}`),
         random: () => 0,
       },
@@ -150,32 +228,61 @@ describe("pacedReexec", () => {
 
   test("waits for its rank's slot, then for a daemon on the disk's code, then re-execs", async () => {
     const live = ["@chief", "@dev/2", "@dev/3"]
-    const run = harness([
-      { liveNames: live, runningCert: "abc" },
-      { liveNames: live, runningCert: "old" },
-      { liveNames: live, runningCert: "abc" },
-    ])
+    const run = harness([view(live, "abc"), view(live, "old"), view(live, "abc")])
     await pacedReexec(run.deps, "source changed")
     expect(run.sleeps[0]).toBe(2 * RELOAD_SLOT_MS)
+    expect(run.infos).toEqual([`reload pacing: @dev/3 rank 2 of 3 peers, slot 2; waiting ${2 * RELOAD_SLOT_MS} ms`])
     expect(run.log).toEqual(["reexec: source changed"])
   })
 
   test("a failed list read spreads over the cap and says so", async () => {
-    const run = harness([new Error("socket gone"), { liveNames: [], runningCert: "abc" }])
+    const run = harness([new Error("socket gone"), view([], "abc")])
     await pacedReexec({ ...run.deps, random: () => 0.5 }, "generation changed")
     expect(run.sleeps[0]).toBe(RELOAD_WINDOW_CAP_MS / 2)
     expect(run.log[0]).toMatch(/cli_status read failed \(socket gone\); spreading over the 90000 ms cap/u)
   })
 
   test("a missing self takes the last slot and says so", async () => {
-    const run = harness([{ liveNames: ["@chief", "@dev/2"], runningCert: "abc" }])
+    const run = harness([view(["@chief", "@dev/2"], "abc")])
     await pacedReexec(run.deps, "x")
     expect(run.sleeps[0]).toBe(2 * RELOAD_SLOT_MS)
-    expect(run.log[0]).toMatch(/@dev\/3 is not in cli_status sessions\[\]\.name; taking the last slot \(2\)/u)
+    expect(run.log[0]).toMatch(/@dev\/3 is not in cli_status reload_peers; taking the last slot \(2\)/u)
+  })
+
+  test("a daemon older than reload_peers ranks on sessions[].name and says so", async () => {
+    const run = harness([{ liveNames: ["@chief", "@dev/3"], peers: null, runningCert: "abc" }])
+    await pacedReexec(run.deps, "x")
+    expect(run.sleeps[0]).toBe(RELOAD_SLOT_MS)
+    expect(run.log[0]).toMatch(/cli_status carries no reload_peers .*; ranking on sessions\[\]\.name/u)
+  })
+
+  test("a daemon with no declared roster ranks on the live adapters and says so", async () => {
+    const run = harness([
+      { liveNames: ["@dev/3"], peers: { declared: [], liveUndeclared: ["@dev/3"] }, runningCert: "abc" },
+    ])
+    await pacedReexec(run.deps, "x")
+    expect(run.log[0]).toMatch(/the daemon has no declared roster; ranking on the live adapters alone/u)
+  })
+
+  test("an undeclared adapter ranks after the roster and says an unseen one can share its slot", async () => {
+    const run = harness([
+      { liveNames: ["@dev/3"], peers: { declared: ["@chief"], liveUndeclared: ["@dev/3"] }, runningCert: "abc" },
+    ])
+    await pacedReexec(run.deps, "x")
+    expect(run.sleeps[0]).toBe(RELOAD_SLOT_MS)
+    expect(run.log[0]).toMatch(/@dev\/3 is not in the declared roster; ranked 1 after it/u)
+  })
+
+  test("a rank clipped into the shared last slot says so", async () => {
+    const declared = Array.from({ length: 30 }, (_, index) => `@dev/${String(index).padStart(2, "0")}`)
+    const run = harness([view(declared, "abc")])
+    await pacedReexec({ ...run.deps, self: "@dev/25" }, "x")
+    expect(run.sleeps[0]).toBe(21 * RELOAD_SLOT_MS)
+    expect(run.log[0]).toMatch(/rank 25 of 30 peers shares the last slot \(21\) inside the 90000 ms cap/u)
   })
 
   test("a daemon with no code identity is judged on liveness, warned once, naming 25670", async () => {
-    const run = harness([{ liveNames: ["@dev/3"], runningCert: null }])
+    const run = harness([view(["@dev/3"], null)])
     await pacedReexec(run.deps, "x")
     expect(run.log).toEqual([
       "warn: reload pacing: no code identity to compare (daemon reports none, disk abc); readiness is liveness alone until 25670",
@@ -184,7 +291,7 @@ describe("pacedReexec", () => {
   })
 
   test("an adapter whose disk commit is unresolved is judged on liveness too, never waiting out the timeout", async () => {
-    const run = harness([{ liveNames: ["@dev/3"], runningCert: "abc" }], null)
+    const run = harness([view(["@dev/3"], "abc")], null)
     await pacedReexec(run.deps, "x")
     expect(run.log).toEqual([
       "warn: reload pacing: no code identity to compare (daemon abc, disk unresolved); readiness is liveness alone until 25670",
@@ -193,7 +300,7 @@ describe("pacedReexec", () => {
   })
 
   test("a daemon never on the disk's code re-execs anyway at the timeout, loudly", async () => {
-    const run = harness([{ liveNames: ["@dev/3"], runningCert: "old" }])
+    const run = harness([view(["@dev/3"], "old")])
     await pacedReexec(run.deps, "x")
     expect(run.log[0]).toMatch(
       /daemon not ready after 30000 ms \(the daemon runs other code than the disk\); re-execing anyway/u,

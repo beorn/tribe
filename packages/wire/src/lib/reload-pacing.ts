@@ -1,10 +1,10 @@
 /**
  * Reload pacing (25663): an adapter re-execs on a source change or a daemon generation change, and a whole fleet
  * receives that signal at once. Re-execing together took every seat's bridge down at 08:02 and 08:15 PDT on
- * 2026-09-24. Each adapter instead waits for its slot in a rolling restart: its rank among the live adapters' sorted
- * names picks the slot, full jitter spreads it inside the slot, and it goes only once the daemon answers on the code
- * the adapter will re-exec into. Every adapter computes its own rank from the same list, so no coordinator is needed
- * (@cto ce976914).
+ * 2026-09-24. Each adapter instead waits for its slot in a rolling restart: its rank among the sorted peer names
+ * picks the slot, full jitter spreads it inside the slot, and it goes only once the daemon answers on the code the
+ * adapter will re-exec into. Every adapter computes its own rank from the same list (the declared roster, then the live
+ * adapters it does not name), so no coordinator is needed (@cto ce976914, bf0417a0).
  */
 
 import { awaitReady, fullJitter, type RandomUnit } from "@bearly/pacing"
@@ -32,39 +32,72 @@ export const RELOAD_PROBE_TIMEOUT_MS = 2_000
  */
 export const RELOAD_DEADLINE_MS = RELOAD_WINDOW_CAP_MS + RELOAD_READY_TIMEOUT_MS + 2 * RELOAD_PROBE_TIMEOUT_MS
 
+/** The last slot a list of `peerCount` peers can use inside the cap; every rank past it shares it. */
+export function reloadLastSlot(peerCount: number, slotMs: number, capMs: number): number {
+  return Math.max(0, Math.min(peerCount, Math.floor(capMs / slotMs)) - 1)
+}
+
 /**
  * One adapter's delay before it re-execs: rank × slot, clipped so it stays inside the cap, plus full jitter inside
- * the slot. A null rank (the live list could not be read) spreads uniformly over the whole cap. Both the live path
+ * the slot. A null rank (the peer list could not be read) spreads uniformly over the whole cap. Both the live path
  * and the witness call this, so the witness measures the code that ships.
  */
 export function planReloadDelay(
   rank: number | null,
-  liveCount: number,
+  peerCount: number,
   slotMs: number,
   capMs: number,
   random?: RandomUnit,
 ): number {
   if (rank === null) return fullJitter(capMs, capMs, 0, random)
-  const lastSlot = Math.max(0, Math.min(liveCount, Math.floor(capMs / slotMs)) - 1)
-  return Math.min(rank, lastSlot) * slotMs + fullJitter(slotMs, slotMs, 0, random)
+  return Math.min(rank, reloadLastSlot(peerCount, slotMs, capMs)) * slotMs + fullJitter(slotMs, slotMs, 0, random)
 }
 
-/** `self`'s rank among the live names, sorted. An adapter missing from the list goes LAST, never first. */
+/**
+ * cli_status `reload_peers` (25663 P3, @cto bf0417a0): the list every adapter ranks itself in. On a daemon
+ * generation change each adapter reads cli_status just after its own re-register, so `sessions[]` holds only the
+ * adapters that rejoined before it, and ranks read from it collide. The declared roster does not depend on when it is
+ * read.
+ */
+export interface ReloadPeers {
+  /** Every name in hab's declared roster, live or not. Empty when the daemon has no roster. */
+  readonly declared: readonly string[]
+  /** Live adapters the roster does not name. */
+  readonly liveUndeclared: readonly string[]
+}
+
+/**
+ * `self`'s rank among the peers: the declared names sorted, then the live undeclared names sorted after them. An
+ * adapter missing from both goes LAST, never first.
+ *
+ * - The declared half is identical for every adapter only because the roster is one file on one host, read by one
+ *   daemon. A roster that differs per adapter (another host, a stale copy) brings the collision back; one adapter
+ *   cannot see that, and the warning on a shared last slot is the only local detector.
+ * - Undeclared live adapters do not all take one last slot, which would collide them. They follow the declared set in
+ *   name order, which is deterministic once they are all live. An undeclared adapter that has not rejoined yet is
+ *   invisible to the others' reads, so an undeclared rank can still collide: pacedReexec warns, and the adapter
+ *   takes its sorted place at the next reload.
+ */
 export function reloadRank(
   self: string,
-  liveNames: readonly string[],
-): { rank: number; liveCount: number; found: boolean } {
-  const names = [...new Set(liveNames)].sort()
+  peers: ReloadPeers,
+): { rank: number; peerCount: number; found: boolean; declared: boolean } {
+  const declared = [...new Set(peers.declared)].sort()
+  const declaredSet = new Set(declared)
+  const undeclared = [...new Set(peers.liveUndeclared)].filter((name) => !declaredSet.has(name)).sort()
+  const names = [...declared, ...undeclared]
   const index = names.indexOf(self)
   return index === -1
-    ? { rank: names.length, liveCount: names.length + 1, found: false }
-    : { rank: index, liveCount: names.length, found: true }
+    ? { rank: names.length, peerCount: names.length + 1, found: false, declared: false }
+    : { rank: index, peerCount: names.length, found: true, declared: declaredSet.has(self) }
 }
 
 /** What the daemon's cli_status tells a reloading adapter: who is live, and which code the daemon runs. */
 export interface ReloadDaemonView {
-  /** cli_status `sessions[].name`. */
+  /** cli_status `sessions[].name`: the rank's fallback when the daemon predates `reload_peers`. */
   readonly liveNames: readonly string[]
+  /** cli_status `reload_peers`, or null from a daemon that predates it. */
+  readonly peers: ReloadPeers | null
   /** cli_status `daemon.code_identity.cert`: the commit the daemon is running, or null when it reports none. */
   readonly runningCert: string | null
 }
@@ -80,6 +113,8 @@ export interface PacedReexecDeps {
   readonly now: () => number
   readonly sleep: (ms: number) => Promise<void>
   readonly warn: (message: string) => void
+  /** The rank and slot each reload takes, so an operator (and the journey witness) can see who shared a slot. */
+  readonly info: (message: string) => void
   readonly reexec: (reason: string) => void
   readonly random?: RandomUnit
 }
@@ -100,28 +135,57 @@ function boundedRead(deps: PacedReexecDeps): Promise<ReloadDaemonView> {
  * Wait for this adapter's slot, then for a daemon running the code on disk, then re-exec, within RELOAD_DEADLINE_MS.
  * Nothing here fails silently:
  * - a failed or unanswered list read spreads over the cap and warns;
- * - a missing self goes last and warns;
+ * - a daemon without reload_peers or without a roster ranks on the live list and warns;
+ * - a missing self goes last and warns; an undeclared self, or one clipped into a shared last slot, warns;
  * - a daemon that reports no code identity, or an adapter whose own disk commit is unresolved, is judged on liveness
  *   alone, warned once and named for 25670;
  * - a daemon never ready re-execs anyway at the timeout, with a warning naming the last probe error.
  */
 export async function pacedReexec(deps: PacedReexecDeps, reason: string): Promise<void> {
   let rank: number | null = null
-  let liveCount = 0
+  let peerCount = 0
   try {
     const view = await boundedRead(deps)
-    const ranked = reloadRank(deps.self, view.liveNames)
+    let peers = view.peers
+    if (peers === null) {
+      deps.warn(
+        "reload pacing: cli_status carries no reload_peers (a daemon older than 25663 r1); ranking on sessions[].name, where adapters that rejoined at different moments can share a slot",
+      )
+      peers = { declared: [], liveUndeclared: view.liveNames }
+    } else if (peers.declared.length === 0) {
+      deps.warn(
+        "reload pacing: the daemon has no declared roster; ranking on the live adapters alone, where adapters that rejoined at different moments can share a slot",
+      )
+    }
+    const ranked = reloadRank(deps.self, peers)
     rank = ranked.rank
-    liveCount = ranked.liveCount
+    peerCount = ranked.peerCount
+    const lastSlot = reloadLastSlot(peerCount, RELOAD_SLOT_MS, RELOAD_WINDOW_CAP_MS)
     if (!ranked.found) {
-      deps.warn(`reload pacing: ${deps.self} is not in cli_status sessions[].name; taking the last slot (${rank})`)
+      deps.warn(`reload pacing: ${deps.self} is not in cli_status reload_peers; taking the last slot (${rank})`)
+    } else if (!ranked.declared && peers.declared.length > 0) {
+      deps.warn(
+        `reload pacing: ${deps.self} is not in the declared roster; ranked ${rank} after it among the live adapters this read saw, so an undeclared adapter not yet rejoined can share the slot`,
+      )
+    }
+    if (rank >= lastSlot && peerCount - 1 > lastSlot) {
+      deps.warn(
+        `reload pacing: rank ${rank} of ${peerCount} peers shares the last slot (${lastSlot}) inside the ${RELOAD_WINDOW_CAP_MS} ms cap`,
+      )
     }
   } catch (error) {
     deps.warn(
       `reload pacing: cli_status read failed (${errorText(error)}); spreading over the ${RELOAD_WINDOW_CAP_MS} ms cap`,
     )
   }
-  await deps.sleep(planReloadDelay(rank, liveCount, RELOAD_SLOT_MS, RELOAD_WINDOW_CAP_MS, deps.random))
+  const delay = planReloadDelay(rank, peerCount, RELOAD_SLOT_MS, RELOAD_WINDOW_CAP_MS, deps.random)
+  if (rank !== null) {
+    const slot = Math.min(rank, reloadLastSlot(peerCount, RELOAD_SLOT_MS, RELOAD_WINDOW_CAP_MS))
+    deps.info(
+      `reload pacing: ${deps.self} rank ${rank} of ${peerCount} peers, slot ${slot}; waiting ${Math.round(delay)} ms`,
+    )
+  }
+  await deps.sleep(delay)
 
   let identityGapWarned = false
   const outcome = await awaitReady(
