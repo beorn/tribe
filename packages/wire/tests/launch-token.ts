@@ -5,9 +5,10 @@
  * identity verifier keys the launch id it is sent, and one with a verifier judges the token itself.
  */
 
-export function launchToken(launchId: string, actor = "test-seat"): string {
+export function launchToken(launchId: string, actor = "test-seat", kind?: "service"): string {
   const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url")
-  return `${part({ alg: "EdDSA", typ: "hab-id+jwt" })}.${part({ sid: launchId, gen: 1, act: { sub: actor } })}.c2ln`
+  const act = kind === undefined ? { sub: actor } : { sub: actor, kind }
+  return `${part({ alg: "EdDSA", typ: "hab-id+jwt" })}.${part({ sid: launchId, gen: 1, act })}.c2ln`
 }
 
 /**
