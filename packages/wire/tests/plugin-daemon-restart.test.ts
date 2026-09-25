@@ -14,6 +14,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { connectToDaemon, type DaemonClient } from "../src/client.ts"
 import { deriveTribePersonaLaunchIdentity } from "../src/lib/persona-launch-identity.ts"
+import { RELOAD_SLOT_MS } from "../src/lib/reload-pacing.ts"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -85,6 +86,14 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, label: strin
     await new Promise((resolveTick) => setTimeout(resolveTick, 25))
   }
   throw new Error(`timed out waiting for ${label}`)
+}
+
+/**
+ * How long every seat may take to re-exec after a daemon generation change. Seats no longer re-exec at once: each waits
+ * for its rank's slot (25663), so the last of `seats` goes within seats × RELOAD_SLOT_MS, plus its own rejoin.
+ */
+function pacedRestartBudgetMs(seats: number): number {
+  return seats * RELOAD_SLOT_MS + 10_000
 }
 
 function collectJsonLines(child: ChildProcessWithoutNullStreams): JsonObject[] {
@@ -385,20 +394,24 @@ process.exit(await child.exited)
       daemonPids.add(generation.pid)
 
       const rejoined = new Map<string, Member>()
-      await waitFor(async () => {
-        const rosterRows = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
-        for (const persona of expectedPersonas) {
-          const candidate = rosterRows.find(
-            (session) =>
-              session.name === persona &&
-              session.transport_state === "connected" &&
-              session.transport_pids?.length === 1 &&
-              session.transport_pids[0] !== priorTransportPids.get(persona),
-          )
-          if (candidate) rejoined.set(persona, candidate)
-        }
-        return rejoined.size === expectedPersonas.length
-      }, `all ${opts.label} memberships after daemon restart ${restart}`)
+      await waitFor(
+        async () => {
+          const rosterRows = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
+          for (const persona of expectedPersonas) {
+            const candidate = rosterRows.find(
+              (session) =>
+                session.name === persona &&
+                session.transport_state === "connected" &&
+                session.transport_pids?.length === 1 &&
+                session.transport_pids[0] !== priorTransportPids.get(persona),
+            )
+            if (candidate) rejoined.set(persona, candidate)
+          }
+          return rejoined.size === expectedPersonas.length
+        },
+        `all ${opts.label} memberships after daemon restart ${restart}`,
+        pacedRestartBudgetMs(expectedPersonas.length),
+      )
 
       for (const persona of expectedPersonas) {
         const member = rejoined.get(persona)!
@@ -1470,20 +1483,24 @@ process.exit(await child.exited)
       daemonPids.add(generation.pid)
 
       const rejoined = new Map<string, Member>()
-      await waitFor(async () => {
-        const roster = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
-        for (const persona of expectedPersonas) {
-          const candidate = roster.find(
-            (session) =>
-              session.name === persona &&
-              session.transport_state === "connected" &&
-              session.transport_pids?.length === 1 &&
-              session.transport_pids[0] !== priorTransportPids.get(persona),
-          )
-          if (candidate) rejoined.set(persona, candidate)
-        }
-        return rejoined.size === expectedPersonas.length
-      }, `all multi-seat memberships after daemon restart ${restart}`)
+      await waitFor(
+        async () => {
+          const roster = parseToolJson(await generation.client.call("tribe.members", { all: true })).sessions ?? []
+          for (const persona of expectedPersonas) {
+            const candidate = roster.find(
+              (session) =>
+                session.name === persona &&
+                session.transport_state === "connected" &&
+                session.transport_pids?.length === 1 &&
+                session.transport_pids[0] !== priorTransportPids.get(persona),
+            )
+            if (candidate) rejoined.set(persona, candidate)
+          }
+          return rejoined.size === expectedPersonas.length
+        },
+        `all multi-seat memberships after daemon restart ${restart}`,
+        pacedRestartBudgetMs(expectedPersonas.length),
+      )
 
       for (const persona of expectedPersonas) {
         const member = rejoined.get(persona)!
@@ -1536,7 +1553,7 @@ process.exit(await child.exited)
         .sort(),
     ).toEqual(personas.filter((persona) => !goneBeforeRestart2.has(persona)).sort())
     generation.client.close()
-  }, 60_000)
+  }, 90_000)
 
   it("declared roster (all expected): an expected seat that settles without remounting is missing, not finished", async () => {
     const label = "declared-always"
@@ -1571,7 +1588,7 @@ process.exit(await child.exited)
         expect((rosterAfterRestart2 as { finished_launches?: unknown }).finished_launches).toBeUndefined()
       },
     })
-  }, 60_000)
+  }, 90_000)
 
   it("declared roster (restart-d not expected): its settled departure reads finished_launches exactly as the pre-declaration behavior did", async () => {
     const label = "declared-never-d"
@@ -1605,7 +1622,7 @@ process.exit(await child.exited)
         ])
       },
     })
-  }, 60_000)
+  }, 90_000)
 
   // 24660: the roster was read once at boot, so a running daemon judged seats by
   // a declaration four days older than the pin file hab had since rewritten.
@@ -1646,5 +1663,5 @@ process.exit(await child.exited)
       missing: [{ name: "@agent/roster-rewritten", state: "never-registered" }],
     })
     generation.client.close()
-  }, 60_000)
+  }, 90_000)
 })
