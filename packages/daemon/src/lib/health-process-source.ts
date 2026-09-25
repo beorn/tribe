@@ -33,6 +33,24 @@ const OBSERVATION_QUERY = "latest exact process census with owner attribution"
  * how often we *attempt*; the circuit below stops re-attempting after failure.
  */
 export const SYSMON_COMMAND_TIMEOUT_MS = 2_500
+/**
+ * The most any one snapshot may take, at any load. The single-flight health ticker never overlaps samples, so a
+ * slow one skips ticks (counted) and cannot pile up; past this cap a snapshot is a pathological walk, not load.
+ */
+export const SYSMON_COMMAND_TIMEOUT_MAX_MS = 10_000
+
+/**
+ * One snapshot's ceiling: the base on an idle host, growing with the one-minute load per core, capped at
+ * SYSMON_COMMAND_TIMEOUT_MAX_MS. A load of 30 to 60 on 32 cores is this host's normal evening, where the snapshot
+ * measured 0.5 to 1.7 s and the fixed 2.5 s bound fired five times in an hour (24248, ruled by @chief: fix the
+ * ceiling, not the load). An unreadable load (0 where the platform has none) keeps the base, never a larger bound.
+ * The load is the one hab last reported in this source's own scalar snapshot, never sampled here: the daemon reads
+ * the host only through hab sysmon (lint-tool-surface-boundaries, raw-host-sampler-outside-hab).
+ */
+export function sysmonCommandTimeoutMs(load1: number, cores: number): number {
+  const perCore = Number.isFinite(load1) && load1 > 0 && cores > 0 ? load1 / cores : 0
+  return Math.min(SYSMON_COMMAND_TIMEOUT_MAX_MS, Math.round(SYSMON_COMMAND_TIMEOUT_MS * (1 + perCore)))
+}
 const SYSMON_KILL_GRACE_MS = 2_000
 const SYSMON_REAP_GRACE_MS = 2_000
 const SYSMON_DRAIN_GRACE_MS = 2_500
@@ -46,8 +64,12 @@ const SYSMON_DRAIN_GRACE_MS = 2_500
  * journal walks bounded.
  */
 export const SYSMON_MAX_OUTPUT_BYTES = 2_000_000
-/** Consecutive hard failures (timeout / oversized output / uncertain settlement) before opening the circuit. */
-export const SYSMON_CIRCUIT_FAILURES = 2
+/**
+ * Consecutive hard failures (timeout / oversized output / uncertain settlement) before opening the circuit. A poll
+ * reads the census and the scalars together, so this is three whole failed polls: one slow poll at high load
+ * leaves the next poll free to answer, where two failures opened the circuit on a single slow poll (24248).
+ */
+export const SYSMON_CIRCUIT_FAILURES = 6
 /** How long the circuit stays open — 6× default 10s poll, not forever. */
 export const SYSMON_CIRCUIT_OPEN_MS = 60_000
 const ROUTING_VIAS = new Set(["env", "reactive", "root", "tree"])
@@ -229,6 +251,10 @@ export interface HealthProcessSourceOptions {
   readonly maxAgeMs?: number
   /** Injected clock for circuit-breaker tests. */
   readonly now?: () => number
+  /**
+   * A fixed ceiling for every snapshot. Unset, each snapshot's ceiling scales (sysmonCommandTimeoutMs) with the load
+   * and logical cores of this source's last available scalar observation, and is the base before the first.
+   */
   readonly commandTimeoutMs?: number
   readonly maxOutputBytes?: number
   readonly circuitFailures?: number
@@ -237,7 +263,7 @@ export interface HealthProcessSourceOptions {
    * Test seam. Production uses Tribe's shared bounded process-tree runner.
    * Injected doubles may throw BoundedProcessCommandError.
    */
-  readonly runCommand?: (argv: readonly string[]) => Promise<BoundedProcessCommandResult>
+  readonly runCommand?: (argv: readonly string[], timeoutMs: number) => Promise<BoundedProcessCommandResult>
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -623,12 +649,21 @@ function managedProcessSource(
   const stateRoot = dirname(controllerSessionDir)
   const maxAgeMs = options.maxAgeMs ?? DEFAULT_MAX_AGE_MS
   const now = options.now ?? Date.now
-  const timeoutMs = options.commandTimeoutMs ?? SYSMON_COMMAND_TIMEOUT_MS
+  // The load hab last reported: a poll's snapshots take their ceiling from the scalars the previous poll read.
+  let lastLoad: { readonly load1: number; readonly cores: number } | undefined
+  const ceilingMs = (): number =>
+    options.commandTimeoutMs ??
+    (lastLoad === undefined ? SYSMON_COMMAND_TIMEOUT_MS : sysmonCommandTimeoutMs(lastLoad.load1, lastLoad.cores))
+  function noteLoad(observation: CanonicalHostScalarObservation): void {
+    if (observation.kind !== "available" || observation.values.cpu.kind !== "supported") return
+    lastLoad = { load1: observation.values.cpu.value.loadAverage1m, cores: observation.values.cpu.value.logicalCores }
+  }
   const maxOutputBytes = options.maxOutputBytes ?? SYSMON_MAX_OUTPUT_BYTES
   const circuitFailures = options.circuitFailures ?? SYSMON_CIRCUIT_FAILURES
   const circuitOpenMs = options.circuitOpenMs ?? SYSMON_CIRCUIT_OPEN_MS
   const runCommand =
-    options.runCommand ?? ((argv: readonly string[]) => runHealthProcessCommand(argv, timeoutMs, maxOutputBytes))
+    options.runCommand ??
+    ((argv: readonly string[], timeoutMs: number) => runHealthProcessCommand(argv, timeoutMs, maxOutputBytes))
 
   // Shared across read() and readScalars(): both walk the same state-root.
   let consecutiveHardFailures = 0
@@ -662,7 +697,7 @@ function managedProcessSource(
     const blocked = circuitBlocks()
     if (blocked !== null) return { ok: false, reason: "source-circuit-open", detail: blocked }
     try {
-      const result = await runCommand(argv)
+      const result = await runCommand(argv, ceilingMs())
       noteSuccess()
       return { ok: true, result }
     } catch (error) {
@@ -728,7 +763,10 @@ function managedProcessSource(
           const line = lines[0]
           if (line === undefined) return scalarUnavailable(controllerSessionDir, "source-protocol-invalid")
           const parsed = parseScalarObservation(JSON.parse(line))
-          if (parsed !== undefined && (result.exitCode === 0 || parsed.kind === "unavailable")) return parsed
+          if (parsed !== undefined && (result.exitCode === 0 || parsed.kind === "unavailable")) {
+            noteLoad(parsed)
+            return parsed
+          }
         } catch {
           // silent-fallback-allow: parse failure falls through to typed unavailable
         }

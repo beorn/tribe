@@ -11,8 +11,10 @@ import {
   createHealthProcessSource,
   SYSMON_CIRCUIT_FAILURES,
   SYSMON_CIRCUIT_OPEN_MS,
+  SYSMON_COMMAND_TIMEOUT_MAX_MS,
   SYSMON_COMMAND_TIMEOUT_MS,
   SYSMON_MAX_OUTPUT_BYTES,
+  sysmonCommandTimeoutMs,
 } from "./health-process-source.ts"
 
 const availablePayload = {
@@ -168,7 +170,10 @@ describe("neutral health process source", () => {
     await expect(source.readScalars()).resolves.toEqual(scalarPayload)
     // The state root is the PARENT of the injected controller dir, so the
     // consumer spells neither `run/sessions` nor `habmod` anywhere.
-    expect(runCommand).toHaveBeenCalledWith(expect.arrayContaining(["--state-root", "/hh/main.hab/run/sessions"]))
+    expect(runCommand).toHaveBeenCalledWith(
+      expect.arrayContaining(["--state-root", "/hh/main.hab/run/sessions"]),
+      expect.any(Number),
+    )
   })
 
   /**
@@ -271,28 +276,14 @@ describe("neutral health process source", () => {
 
     await expect(source.read()).resolves.toEqual(availablePayload)
     await expect(source.readScalars()).resolves.toEqual(scalarPayload)
-    expect(runCommand).toHaveBeenCalledWith([
-      "hab",
-      "sysmon",
-      "snapshot",
-      "--state-root",
-      "/hab",
-      "--max-age-ms",
-      "90000",
-      "--json",
-    ])
-    expect(runCommand).toHaveBeenCalledWith([
-      "hab",
-      "sysmon",
-      "snapshot",
-      "--state-root",
-      "/hab",
-      "--kind",
-      "scalars",
-      "--max-age-ms",
-      "90000",
-      "--json",
-    ])
+    expect(runCommand).toHaveBeenCalledWith(
+      ["hab", "sysmon", "snapshot", "--state-root", "/hab", "--max-age-ms", "90000", "--json"],
+      expect.any(Number),
+    )
+    expect(runCommand).toHaveBeenCalledWith(
+      ["hab", "sysmon", "snapshot", "--state-root", "/hab", "--kind", "scalars", "--max-age-ms", "90000", "--json"],
+      expect.any(Number),
+    )
   })
 
   it("fails closed on command failure and names query, location, and excluded fallback", async () => {
@@ -662,6 +653,78 @@ describe("neutral health process source", () => {
       nowMs += 60_001
       await expect(source.read()).resolves.toMatchObject({ reason: "source-command-timeout" })
       expect(runCommand).toHaveBeenCalledTimes(3)
+    })
+
+    /**
+     * @failure At this host's normal evening load (30 to 60 on 32 cores) the snapshot outran its fixed 2.5 s
+     *          ceiling five times in an hour, and two hard failures opened the circuit, so host scalar
+     *          monitoring went BLIND at 21:46 PDT 2026-09-24 with the producer and reader both healthy (24248).
+     */
+    it("scales the snapshot ceiling with the load per core, from the base on an idle host to a fixed cap", () => {
+      expect(sysmonCommandTimeoutMs(0, 32)).toBe(SYSMON_COMMAND_TIMEOUT_MS)
+      expect(sysmonCommandTimeoutMs(32, 32)).toBe(2 * SYSMON_COMMAND_TIMEOUT_MS)
+      expect(sysmonCommandTimeoutMs(48, 32)).toBe(6_250)
+      expect(sysmonCommandTimeoutMs(500, 32)).toBe(SYSMON_COMMAND_TIMEOUT_MAX_MS)
+      // An unreadable load (0 on a platform without one, or not a number) is the base, never a larger bound.
+      expect(sysmonCommandTimeoutMs(Number.NaN, 32)).toBe(SYSMON_COMMAND_TIMEOUT_MS)
+      expect(sysmonCommandTimeoutMs(-1, 32)).toBe(SYSMON_COMMAND_TIMEOUT_MS)
+      expect(SYSMON_COMMAND_TIMEOUT_MAX_MS).toBeLessThanOrEqual(10_000)
+    })
+
+    it("takes each snapshot's ceiling from the load hab last reported, the base before any report", async () => {
+      const withLoad = (load1: number) => ({
+        ...scalarPayload,
+        values: {
+          ...scalarPayload.values,
+          cpu: {
+            ...scalarPayload.values.cpu,
+            value: { ...scalarPayload.values.cpu.value, loadAverage1m: load1, logicalCores: 32 },
+          },
+        },
+      })
+      const loads = [48, 0]
+      const ceilings: number[] = []
+      const runCommand = vi.fn(async (argv: readonly string[], timeoutMs: number) => {
+        ceilings.push(timeoutMs)
+        return {
+          exitCode: 0,
+          stderr: "",
+          stdout: `${JSON.stringify(argv.includes("scalars") ? withLoad(loads.shift() ?? 0) : availablePayload)}\n`,
+        }
+      })
+      const source = createHealthProcessSource({
+        env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+        runCommand,
+      })
+      if (source.kind !== "managed") throw new Error("expected managed source")
+
+      await source.readScalars() // no report yet: the base; hab reports load 48 on 32 cores
+      await source.read() // 2.5 s × (1 + 48/32)
+      await source.readScalars() // still 48; hab now reports an idle host
+      await source.read()
+      expect(ceilings).toEqual([SYSMON_COMMAND_TIMEOUT_MS, 6_250, 6_250, SYSMON_COMMAND_TIMEOUT_MS])
+    })
+
+    it("keeps spawning through two whole failed polls and opens the circuit only on the third", async () => {
+      const runCommand = vi.fn(async () => {
+        throw new BoundedProcessCommandError({ kind: "timeout", message: "timeout", settlementFailures: [] })
+      })
+      const source = createHealthProcessSource({
+        env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+        runCommand,
+      })
+      if (source.kind !== "managed") throw new Error("expected managed source")
+
+      // A poll reads the census and the scalars together, so each failed poll is two hard failures.
+      for (let poll = 0; poll < 3; poll += 1) {
+        await expect(Promise.all([source.read(), source.readScalars()])).resolves.toMatchObject([
+          { reason: "source-command-timeout" },
+          { reason: "source-command-timeout" },
+        ])
+      }
+      expect(runCommand).toHaveBeenCalledTimes(SYSMON_CIRCUIT_FAILURES)
+      await expect(source.read()).resolves.toMatchObject({ reason: "source-circuit-open" })
+      expect(runCommand).toHaveBeenCalledTimes(SYSMON_CIRCUIT_FAILURES)
     })
 
     it("does not open the circuit on ordinary exit-nonzero failures", async () => {
