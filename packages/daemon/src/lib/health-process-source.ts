@@ -102,6 +102,19 @@ export interface ProcessObservationRow {
   }
 }
 
+/** A census /proc read still pending, as hab's snapshot reports it (24248); startTime is absent while stat is pending. */
+export interface PendingProcRead {
+  readonly path: string
+  readonly pid: number
+  readonly since: string
+  readonly startTime?: string
+}
+
+export interface PendingProcReads {
+  readonly budget: number
+  readonly reads: readonly PendingProcRead[]
+}
+
 export type CanonicalProcessObservation =
   | {
       readonly diagnostic: {
@@ -123,6 +136,7 @@ export type CanonicalProcessObservation =
         readonly query: string
       }
       readonly kind: "unavailable"
+      readonly pendingProcReads?: PendingProcReads
       readonly reason: string
       readonly schema: typeof PROCESS_OBSERVATION_SCHEMA
     }
@@ -303,6 +317,24 @@ function isProcess(value: unknown): value is ProcessObservationRow["process"] {
   )
 }
 
+function isPendingProcReads(value: unknown): value is PendingProcReads {
+  return (
+    isRecord(value) &&
+    Number.isSafeInteger(value.budget) &&
+    (value.budget as number) >= 0 &&
+    Array.isArray(value.reads) &&
+    value.reads.every(
+      (read) =>
+        isRecord(read) &&
+        isBoundedText(read.path) &&
+        isPositiveInteger(read.pid) &&
+        isBoundedText(read.since) &&
+        !Number.isNaN(Date.parse(read.since)) &&
+        (read.startTime === undefined || isBoundedText(read.startTime)),
+    )
+  )
+}
+
 function parseObservation(value: unknown): CanonicalProcessObservation | undefined {
   if (!isRecord(value) || value.schema !== PROCESS_OBSERVATION_SCHEMA || typeof value.kind !== "string") {
     return undefined
@@ -312,7 +344,8 @@ function parseObservation(value: unknown): CanonicalProcessObservation | undefin
       !isBoundedText(value.reason) ||
       !hasExactDiagnostic(value.diagnostic) ||
       (value.diagnostic.detail !== undefined &&
-        (typeof value.diagnostic.detail !== "string" || value.diagnostic.detail.length > MAX_DIAGNOSTIC_CHARS))
+        (typeof value.diagnostic.detail !== "string" || value.diagnostic.detail.length > MAX_DIAGNOSTIC_CHARS)) ||
+      (value.pendingProcReads !== undefined && !isPendingProcReads(value.pendingProcReads))
     ) {
       return undefined
     }
@@ -585,7 +618,7 @@ export function createHealthProcessSource(options: HealthProcessSourceOptions = 
 function managedProcessSource(
   controllerSessionDir: string,
   options: HealthProcessSourceOptions,
-  env: NodeJS.ProcessEnv,
+  _env: NodeJS.ProcessEnv,
 ): HealthProcessSource {
   const stateRoot = dirname(controllerSessionDir)
   const maxAgeMs = options.maxAgeMs ?? DEFAULT_MAX_AGE_MS
