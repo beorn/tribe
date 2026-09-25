@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite"
-import { writeFileSync, mkdtempSync, chmodSync, mkdirSync, utimesSync, existsSync } from "node:fs"
+import { writeFileSync, mkdtempSync, chmodSync, mkdirSync, utimesSync, existsSync, statSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { tmpdir, homedir } from "node:os"
 import { join, resolve } from "node:path"
@@ -2157,6 +2157,94 @@ if (args.includes("list")) {
       const failedAfter = getPersistedFailedSessions(db)
       expect(failedAfter.find((f) => f.id === "codex:019fce85-test-shrink")).toBeUndefined()
     })
+
+    test("shrunk session records current size and mtime, skips on incremental without re-exporting, and cmdIndex exits 0", async () => {
+      const origExitCode = process.exitCode
+      const origAgBin = process.env.AG_BIN
+      const origDbPath = process.env.RECALL_DB_PATH
+      try {
+        process.exitCode = undefined
+        const isolatedDbPath = join(tempDir, "isolated-shrink-exit0-test.db")
+        const isolatedDb = new Database(isolatedDbPath)
+        initSchema(isolatedDb)
+        isolatedDb.close()
+        process.env.RECALL_DB_PATH = isolatedDbPath
+
+        const codexHome = join(tempDir, "codex-shrink-exit0-home")
+        const sessionDir = join(codexHome, ".codex/sessions/2026/09/21")
+        mkdirSync(sessionDir, { recursive: true })
+        const rolloutPath = join(sessionDir, "rollout-2026-09-21T12-00-00-019fce85-test-shrink-exit0.jsonl")
+
+        // Version 1: 3 rows
+        const v1Lines = [
+          JSON.stringify({
+            type: "session_meta",
+            payload: { id: "019fce85-test-shrink-exit0", cwd: "/home/work", timestamp: "2026-09-21T12:00:00.000Z" },
+          }),
+          JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Shrink test message 1" } }),
+          JSON.stringify({
+            type: "response_item",
+            payload: { type: "message", role: "assistant", content: [{ type: "text", text: "Shrink test message 2" }] },
+          }),
+          JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Shrink test message 3" } }),
+        ]
+        writeFileSync(rolloutPath, v1Lines.join("\n") + "\n", "utf8")
+
+        const realAg = makeRealAg(codexHome)
+        process.env.AG_BIN = realAg
+
+        // Initial run via cmdIndex: exitCode should be 0
+        const logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
+        await cmdIndex({ path: rolloutPath })
+        expect(process.exitCode).toBe(0)
+
+        // Version 2: truncated to 1 row (shrink)
+        const v2Lines = [
+          JSON.stringify({
+            type: "session_meta",
+            payload: { id: "019fce85-test-shrink-exit0", cwd: "/home/work", timestamp: "2026-09-21T12:00:00.000Z" },
+          }),
+          JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Shrink test message 1" } }),
+        ]
+        writeFileSync(rolloutPath, v2Lines.join("\n") + "\n", "utf8")
+        const later = new Date(Date.now() + 5000)
+        utimesSync(rolloutPath, later, later)
+
+        // Second run via cmdIndex: shrink is detected, reported, and process.exitCode must be 0 (clean with skips reported)
+        process.exitCode = undefined
+        await cmdIndex({ path: rolloutPath })
+        expect(process.exitCode).toBe(0)
+
+        // Stored session has status 'shrunk', 3 prior rows preserved, and size_bytes and mtime_ms updated to v2
+        const checkDb = new Database(isolatedDbPath)
+        const stored = getSession(checkDb, "codex:019fce85-test-shrink-exit0")
+        expect(stored?.status).toBe("shrunk")
+        expect(stored?.message_count).toBe(3)
+        const stat = statSync(rolloutPath)
+        expect(stored?.size_bytes).toBe(stat.size)
+        expect(stored?.mtime_ms).toBe(Math.floor(stat.mtimeMs))
+        checkDb.close()
+
+        // Third run (incremental): should recognize unchanged stored copy with status 'shrunk' and skip re-exporting
+        process.exitCode = undefined
+        await cmdIndex({ path: rolloutPath, incremental: true })
+        expect(process.exitCode).toBe(0)
+
+        logSpy.mockRestore()
+      } finally {
+        process.exitCode = origExitCode
+        if (origAgBin !== undefined) {
+          process.env.AG_BIN = origAgBin
+        } else {
+          delete process.env.AG_BIN
+        }
+        if (origDbPath !== undefined) {
+          process.env.RECALL_DB_PATH = origDbPath
+        } else {
+          delete process.env.RECALL_DB_PATH
+        }
+      }
+    })
   })
 
   describe("Chief Review 2150: Corrections 4 & 5 - Failure Contract, Committed IDs, and UTF-8 Chunk Splitting", () => {
@@ -2589,6 +2677,74 @@ if (process.argv.includes("list")) {
         const logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
         await cmdIndex({ path: skipFile })
         expect(process.exitCode).toBe(RECALL_INDEX_SKIPS_EXIT)
+        logSpy.mockRestore()
+      } finally {
+        process.exitCode = origExitCode
+        if (origAgBin !== undefined) {
+          process.env.AG_BIN = origAgBin
+        } else {
+          delete process.env.AG_BIN
+        }
+        delete process.env.RECALL_DB_PATH
+      }
+    })
+
+    test("cmdIndex does not set process.exitCode = 5 when failures are only named skips (e.g. shrunk)", async () => {
+      const origExitCode = process.exitCode
+      const origAgBin = process.env.AG_BIN
+      try {
+        process.exitCode = undefined
+        const isolatedDbPath = join(tempDir, "isolated-skipped-test.db")
+        const isolatedDb = new Database(isolatedDbPath)
+        initSchema(isolatedDb)
+        isolatedDb.close()
+        process.env.RECALL_DB_PATH = isolatedDbPath
+
+        const skipFile = join(tempDir, "shrunk.jsonl")
+        writeFileSync(skipFile, "")
+
+        const mockSkipsAg = makeMockAg(`
+if (process.argv.includes("list")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "shrunk-test-sess",
+    sessionKey: "codex:shrunk-test-sess",
+    canonicalPath: "${skipFile}",
+    sizeBytes: 100,
+    mtimeMs: 1000,
+    status: "canonical",
+    copies: [{ path: "${skipFile}", sizeBytes: 100, mtimeMs: 1000, decision: "canonical", key: "codex:shrunk-test-sess" }]
+  }))
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 1, sessions: 1, canonical: 1, ambiguous: 0, stale: 0, invalid: 0 }))
+} else if (process.argv.includes("export")) {
+  console.log(JSON.stringify({ kind: "schema", version: 1 }))
+  console.log(JSON.stringify({
+    kind: "session",
+    provider: "codex",
+    nativeId: "shrunk-test-sess",
+    sessionKey: "codex:shrunk-test-sess",
+    path: "${skipFile}",
+    sizeBytes: 100,
+    mtimeMs: 1000,
+    status: "canonical"
+  }))
+  console.log(JSON.stringify({
+    kind: "skipped",
+    path: "${skipFile}",
+    nativeId: "shrunk-test-sess",
+    reason: "shrunk: prior count 1341 > new count 0"
+  }))
+  console.log(JSON.stringify({ kind: "end", sessionKey: "codex:shrunk-test-sess", status: "complete", nativeId: "shrunk-test-sess" }))
+  console.log(JSON.stringify({ kind: "done", homes: 1, files: 1, sessions: 1, canonical: 0, ambiguous: 0, stale: 0, invalid: 0, unreadable: 0, errors: 0 }))
+}
+`)
+        process.env.AG_BIN = mockSkipsAg
+
+        const logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
+        await cmdIndex({ path: skipFile })
+        expect(process.exitCode).toBe(0)
         logSpy.mockRestore()
       } finally {
         process.exitCode = origExitCode

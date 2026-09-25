@@ -986,10 +986,6 @@ export function discoverProjectCwds(
   const uniqueDiscovered = [...new Set(discovered)]
   const uniqueVanished = [...new Set(vanished)]
 
-  console.log(
-    `[recall] Discovered ${uniqueDiscovered.length} active project root(s) (${uniqueVanished.length} vanished) within window: ${uniqueDiscovered.join(", ")}`,
-  )
-
   return { discovered: uniqueDiscovered, vanished: uniqueVanished }
 }
 
