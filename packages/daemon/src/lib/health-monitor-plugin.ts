@@ -1242,6 +1242,8 @@ export interface BridgeLostAction {
   readonly kind: "raise" | "clear" | "broadcast"
   readonly recipient: string
   readonly content: string
+  /** The condition line. An incident wakes its owner on the open and when this changes, never on a new count. */
+  readonly summary: string
   readonly incident?: { readonly emitter: string; readonly subject: string; readonly condition: string }
 }
 
@@ -1274,7 +1276,8 @@ export function checkBridgeLost(
         const content =
           `${subject}'s tribe bridge is still lost: membership reads it ${state}, so the incident stays open. ` +
           `Repair from its pane: /mcp, plugin:tribe:tribe, Reconnect.`
-        actions.push({ kind: "raise", recipient, content, incident: bridgeLostIncident(subject) })
+        const summary = `${subject}'s tribe bridge is still lost: ${state}`
+        actions.push({ kind: "raise", recipient, content, summary, incident: bridgeLostIncident(subject) })
       }
       continue
     }
@@ -1285,7 +1288,13 @@ export function checkBridgeLost(
         : facts.connected.has(subject)
           ? `${subject}'s transport is live again`
           : `${subject} is no longer a seat hab expects up`
-    actions.push({ kind: "clear", recipient, content: `cleared: ${why}`, incident: bridgeLostIncident(subject) })
+    actions.push({
+      kind: "clear",
+      recipient,
+      content: `cleared: ${why}`,
+      summary: `cleared: ${why}`,
+      incident: bridgeLostIncident(subject),
+    })
   }
   for (const seat of memory.firstSeen.keys()) {
     if (!missingNames.has(seat)) memory.firstSeen.delete(seat)
@@ -1308,13 +1317,20 @@ export function checkBridgeLost(
     // Only an owner with a live transport can read the page: a lost, exited or never-registered owner cannot.
     const owner = config.owners.find((candidate) => candidate !== seat.name && facts.connected.has(candidate))
     if (owner !== undefined) {
-      actions.push({ kind: "raise", recipient: owner, content, incident: bridgeLostIncident(seat.name) })
+      actions.push({
+        kind: "raise",
+        recipient: owner,
+        content,
+        summary: `${seat.name}'s tribe bridge is lost`,
+        incident: bridgeLostIncident(seat.name),
+      })
     } else if (!memory.broadcast.has(seat.name)) {
       memory.broadcast.add(seat.name)
       actions.push({
         kind: "broadcast",
         recipient: "*",
         content: `${content} Paged to everyone: no configured owner is connected (${config.owners.join(", ")}).`,
+        summary: `${seat.name}'s tribe bridge is lost; no owner is connected`,
       })
     }
   }
@@ -1335,14 +1351,14 @@ export function runBridgeLostTick(
     log.info?.(`bridge-lost ${action.kind} -> ${action.recipient}: ${action.content}`)
     const type = `health:${BRIDGE_LOST_CONDITION}`
     if (action.kind === "broadcast" || action.incident === undefined) {
-      api.broadcast(action.content, type, undefined, { delivery: "push", topic: type })
+      api.broadcast(action.content, type, undefined, { delivery: "push", topic: type, summary: action.summary })
     } else {
       api.send(
         action.recipient,
         action.content,
         type,
         undefined,
-        { delivery: "push", topic: type },
+        { delivery: "push", topic: type, summary: action.summary },
         {
           ...action.incident,
           active: action.kind === "raise",

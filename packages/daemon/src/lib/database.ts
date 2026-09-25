@@ -95,7 +95,8 @@ export function openDatabase(path: string): Database {
 		correlated_reply_requester TEXT,
 		summary    TEXT,
 		session_id TEXT,
-		attention_required INTEGER NOT NULL DEFAULT 0
+		attention_required INTEGER NOT NULL DEFAULT 0,
+		wakes_owner INTEGER NOT NULL DEFAULT 0
 	)`)
 
   db.run(`CREATE TABLE IF NOT EXISTS messages_archive (
@@ -118,7 +119,8 @@ export function openDatabase(path: string): Database {
 		correlated_reply_requester TEXT,
 		summary     TEXT,
 		session_id  TEXT,
-		attention_required INTEGER NOT NULL DEFAULT 0
+		attention_required INTEGER NOT NULL DEFAULT 0,
+		wakes_owner INTEGER NOT NULL DEFAULT 0
 	)`)
 
   // Ball-tracker: per-(request_id, recipient) row for every open request.
@@ -1281,6 +1283,30 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 36,
+    name: "message-wakes-owner",
+    /**
+     * 25662 P3 3 (@cto 66284cb6): "this row was an incident edge when inserted" is a fact about the message, fixed at
+     * insert, so a wait that scans past its cursor after a CLI reconnect sees the same edge the live insert path saw.
+     * The archive half carries it too, so an archived edge stays an edge (the v27 attention_required lesson). Rows
+     * written before this version read 0: an incident opened before the bump does not wake, and it is already in
+     * pending_balls.
+     */
+    up(db) {
+      for (const table of ["messages", "messages_archive"]) {
+        const exists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='${table}'`).get() as {
+          name: string
+        } | null
+        if (!exists) continue
+        const columns = new Set(
+          (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name),
+        )
+        if (!columns.has("wakes_owner"))
+          {db.run(`ALTER TABLE ${table} ADD COLUMN wakes_owner INTEGER NOT NULL DEFAULT 0`)}
+      }
+    },
+  },
 ]
 
 /** The schema terminus `openDatabase` upgrades to — derived from the same
@@ -1314,6 +1340,13 @@ export const CORRELATED_REPLY_TYPES_SQL = CORRELATED_REPLY_TYPES.map((type) => `
 /** One canonical durable-attention classification: default-wake actionables
  * plus rows atomically classified at insertion (currently direct responses). */
 export const ATTENTION_PREDICATE_SQL = `(type IN (${ACTIONABLE_TYPES_SQL}) OR attention_required = 1)`
+
+/** What wakes an idle owner's inbox-wait: an actionable type, or an incident edge (its open, or an upsert whose
+ * summary changed), stamped on the row at insert (25662, @cto 66284cb6). The live insert path wakes on the same
+ * bit, so the two halves of the wake cannot disagree. An edge is not attention: it never enters actionable_unread. */
+export function wakePredicateSql(alias: string): string {
+  return `(${alias}.type IN (${ACTIONABLE_TYPES_SQL}) OR ${alias}.wakes_owner = 1)`
+}
 
 /** An open incident is emitter-owned state, never recipient-actionable work.
  * Key this exclusion from the tracker classification rather than the message
@@ -1558,9 +1591,13 @@ export function createStatements(db: Database) {
      */
     insertMessage: db.prepare(`
 		INSERT OR IGNORE INTO messages (id, type, sender, recipient, kind, content, bead_id, ref, ts,
-			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id, attention_required)
+			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id, wakes_owner,
+			attention_required)
 		VALUES ($id, $type, $sender, $recipient, $kind, $content, $bead_id, $ref, $ts,
 			$delivery, $topic, $room_id, $request, $reply, $correlated_reply_requester, $summary, $session_id,
+			-- Optional like the other classification params: an omitted $wakes_owner binds NULL, and INSERT OR IGNORE
+			-- would silently drop the row on the NOT NULL column instead of failing.
+			COALESCE($wakes_owner, 0),
 			CASE
 				WHEN $attention_required = 1 THEN 1
 				WHEN $kind = 'direct' AND $sender != $recipient AND $type = 'response' THEN 1
@@ -1609,6 +1646,18 @@ export function createStatements(db: Database) {
      *  frozen at first-open — one incident named a specific ball as still
      *  waiting five minutes after that exact ball had been closed, with its
      *  age frozen at the ball's original two-day-old open time. */
+    /** 25662 P3 3 — the incident's standing condition for one owner, read inside sendMessage's transaction before
+     *  the upsert: no row means this send OPENS the incident; a row whose message summary differs means the condition
+     *  CHANGED. Both are edges that wake the owner. The summary is the condition and the body the observation, so a
+     *  repeat carrying a new count or timestamp compares equal (@cto 66284cb6). */
+    selectIncidentCondition: db.prepare(`
+		SELECT COALESCE(m.summary, a.summary) AS summary
+		FROM pending_request AS p
+		LEFT JOIN messages AS m ON m.id = p.message_id
+		LEFT JOIN messages_archive AS a ON a.id = p.message_id
+		WHERE p.request_id = $request_id AND p.recipient = $recipient AND p.request_kind = 'incident'
+	`),
+
     openIncidentRequest: db.prepare(`
 		INSERT INTO pending_request (
 			request_id, recipient, sender, opened_at, expires_at, message_id, fanout, request_kind
@@ -2220,10 +2269,10 @@ export function createStatements(db: Database) {
       WHERE m.recipient = $name
         AND m.kind = 'direct'
         AND m.sender != $name
-        AND ${noOpenIncidentAttentionPredicateSql("m", "$name")}
+        AND (m.wakes_owner = 1 OR ${noOpenIncidentAttentionPredicateSql("m", "$name")})
         AND ${unretiredAttentionPredicateSql("m")}
         AND (
-          type IN (${ACTIONABLE_TYPES_SQL})
+          ${wakePredicateSql("m")}
           OR (
             $include_correlated_replies = 1
             AND type IN (${CORRELATED_REPLY_TYPES_SQL})
@@ -2304,12 +2353,12 @@ export function createStatements(db: Database) {
 		INSERT OR IGNORE INTO messages_archive (
 			seq, id, type, sender, recipient, kind, content, bead_id, ref, ts,
 			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id,
-			attention_required, archived_at
+			attention_required, wakes_owner, archived_at
 		)
 		SELECT
 			rowid, id, type, sender, recipient, kind, content, bead_id, ref, ts,
 			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id,
-			attention_required, $archived_at
+			attention_required, wakes_owner, $archived_at
 		FROM messages AS m
 		WHERE m.ts < $cutoff
 			AND NOT (${protectedUnreadAttentionPredicateSql("m")})
@@ -2386,7 +2435,7 @@ export function createStatements(db: Database) {
      *  per-call `topics` snapshot — that one filters rows the seat IS owed. */
     getInboxRows: db.prepare(`
 		SELECT m.id, m.rowid, m.type, m.sender, m.recipient, m.content, m.bead_id, m.ref, m.ts,
-			m.delivery, m.topic, m.room_id, m.summary, m.attention_required
+			m.delivery, m.topic, m.room_id, m.summary, m.attention_required, m.wakes_owner
 		FROM messages AS m
 		WHERE m.rowid > $since
 			AND (m.recipient = $name OR m.recipient = '*')
@@ -2511,13 +2560,15 @@ export function createStatements(db: Database) {
      */
     selectUnackedAttention: db.prepare(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-             attention_required
+             attention_required, wakes_owner
       FROM messages AS m
       WHERE m.recipient = $name
         AND m.kind = 'direct'
         AND m.sender != $name
-        AND (m.type IN (${ACTIONABLE_TYPES_SQL}) OR m.attention_required = 1)
-        AND ${noOpenIncidentAttentionPredicateSql("m", "$name")}
+        -- 25662 P3 3: an unacknowledged incident edge is recovered too, so an edge a relay saw (receipt:false) is
+        -- re-offered until the owner's own read acknowledges it; otherwise every fresh inbox-wait would wake on it.
+        AND (m.type IN (${ACTIONABLE_TYPES_SQL}) OR m.attention_required = 1 OR m.wakes_owner = 1)
+        AND (m.wakes_owner = 1 OR ${noOpenIncidentAttentionPredicateSql("m", "$name")})
         AND ${unretiredAttentionPredicateSql("m")}
         AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
         AND m.rowid <= $upto
