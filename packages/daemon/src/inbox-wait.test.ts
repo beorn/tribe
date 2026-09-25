@@ -43,6 +43,7 @@ function createTestInboxWaitManager(readStatus: (session: string) => InboxStatus
         topic: null,
         room_id: null,
         summary: null,
+        from_authority: null,
       })),
       pending_balls: [],
       pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
