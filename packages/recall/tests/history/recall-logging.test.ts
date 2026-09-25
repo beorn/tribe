@@ -29,7 +29,7 @@ describe("25392: recall log goes through loggily and is off by default outside t
       if (ev.kind === "log") events.push(ev)
     })
     try {
-      log("default is silent")
+      log("this should not emit by default")
       expect(events).toHaveLength(0)
     } finally {
       unsub()
