@@ -56,6 +56,42 @@ describe("Change 1 Tier B1 Witness Tests (CTO Ruling 2026-09-22: B1)", () => {
     safeRemoveSync(tempDir, { within: tmpdir() })
   })
 
+  function insertV2Session(
+    targetDb: Database,
+    id: string,
+    projectPath: string,
+    jsonlPath: string,
+    createdAt: number,
+    updatedAt: number,
+    messageCount: number,
+    title: string | null = null,
+    opts: {
+      status?: string | null
+      failureReason?: string | null
+      failureTime?: number | null
+      parentSessionId?: string | null
+    } = {},
+  ): void {
+    targetDb
+      .prepare(`
+      INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title, status, failure_reason, failure_time, parent_session_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+      .run(
+        id,
+        projectPath,
+        jsonlPath,
+        createdAt,
+        updatedAt,
+        messageCount,
+        title,
+        opts.status ?? null,
+        opts.failureReason ?? null,
+        opts.failureTime ?? null,
+        opts.parentSessionId ?? null,
+      )
+  }
+
   // --------------------------------------------------------------------------
   // B1.1: Migration converts garage sessionId:uuid rows and clears stale-unreadable
   // --------------------------------------------------------------------------
@@ -122,10 +158,10 @@ describe("Change 1 Tier B1 Witness Tests (CTO Ruling 2026-09-22: B1)", () => {
     `)
 
     // Insert sessions: one normal, one stale-unreadable due to UNIQUE constraint
-    upsertSession(db, "sess-garage-1", "/p1", "/p1/s1.jsonl", 100, 100, 1)
-    upsertSession(db, "sess-garage-2", "/p2", "/p2/s2.jsonl", 100, 100, 1)
-    upsertSession(db, "sess-parent", "/p", "/p/parent.jsonl", 100, 100, 1)
-    upsertSession(db, "sess-fork", "/p", "/p/fork.jsonl", 100, 100, 1, null, {
+    insertV2Session(db, "sess-garage-1", "/p1", "/p1/s1.jsonl", 100, 100, 1)
+    insertV2Session(db, "sess-garage-2", "/p2", "/p2/s2.jsonl", 100, 100, 1)
+    insertV2Session(db, "sess-parent", "/p", "/p/parent.jsonl", 100, 100, 1)
+    insertV2Session(db, "sess-fork", "/p", "/p/fork.jsonl", 100, 100, 1, null, {
       status: "stale-unreadable",
       failureReason: "UNIQUE constraint failed: messages.uuid",
       failureTime: 100,
@@ -624,18 +660,18 @@ describe("Change 1 Tier B1 Witness Tests (CTO Ruling 2026-09-22: B1)", () => {
 
     // Pre-populate with:
     // 1. Garage sessionId:uuid rows
-    upsertSession(db, "sess-garage", "/proj", "/proj/garage.jsonl", 100, 100, 2)
+    insertV2Session(db, "sess-garage", "/proj", "/proj/garage.jsonl", 100, 100, 2)
     insertMessage(db, "sess-garage:raw-uuid-1", "sess-garage", "user", "garage search text", null, null, 100)
     insertMessage(db, "sess-garage:raw-uuid-2", "sess-garage", "assistant", "garage answer", null, null, 200)
 
     // 2. Main's codex:<key>:<line> uuids
-    upsertSession(db, "codex:sess-c1", "/proj", "/proj/codex1.jsonl", 100, 100, 1)
-    upsertSession(db, "codex:sess-c2", "/proj", "/proj/codex2.jsonl", 100, 100, 1)
+    insertV2Session(db, "codex:sess-c1", "/proj", "/proj/codex1.jsonl", 100, 100, 1)
+    insertV2Session(db, "codex:sess-c2", "/proj", "/proj/codex2.jsonl", 100, 100, 1)
     insertMessage(db, "codex:sess-c1:1", "codex:sess-c1", "user", "codex search text alpha", null, null, 100, null, 1)
     insertMessage(db, "codex:sess-c2:1", "codex:sess-c2", "user", "codex search text bravo", null, null, 200, null, 1)
 
     // 3. Stale-unreadable session with recorded UNIQUE failure
-    upsertSession(db, "sess-stale", "/proj", "/proj/stale.jsonl", 100, 100, 0, null, {
+    insertV2Session(db, "sess-stale", "/proj", "/proj/stale.jsonl", 100, 100, 0, null, {
       status: "stale-unreadable",
       failureReason: "UNIQUE constraint failed: messages.uuid",
       failureTime: 100,

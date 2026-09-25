@@ -35,6 +35,7 @@ interface SessionRecord {
   id: string
   title: string
   project_path: string
+  cwd?: string | null
   message_count: number
   created_at: number
   updated_at: number
@@ -137,10 +138,10 @@ export async function summarizeDay(
   let rows: SessionRecord[]
   try {
     const query = opts.projectFilter
-      ? `SELECT id, title, project_path, message_count, created_at, updated_at
-         FROM sessions WHERE updated_at >= ? AND updated_at <= ? AND project_path LIKE ?
+      ? `SELECT id, title, project_path, cwd, message_count, created_at, updated_at
+         FROM sessions WHERE updated_at >= ? AND updated_at <= ? AND cwd LIKE ?
          ORDER BY created_at ASC`
-      : `SELECT id, title, project_path, message_count, created_at, updated_at
+      : `SELECT id, title, project_path, cwd, message_count, created_at, updated_at
          FROM sessions WHERE updated_at >= ? AND updated_at <= ?
          ORDER BY created_at ASC`
 
@@ -220,7 +221,7 @@ export async function summarizeDay(
 
   // Build LLM context from per-session summaries
   const totalMessages = meaningfulSessions.reduce((s, sess) => s + (sess.message_count || 0), 0)
-  const projects = [...new Set(meaningfulSessions.map((s) => s.project_path))]
+  const projects = [...new Set(meaningfulSessions.map((s) => s.cwd || s.project_path))]
 
   let context = `# Daily Development Summary: ${date}\n\n`
   context += `${meaningfulSessions.length} sessions, ${totalMessages} messages across ${projects.length} project(s): ${projects.map(displayProject).join(", ")}\n\n`
