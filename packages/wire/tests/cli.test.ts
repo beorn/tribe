@@ -17,6 +17,7 @@ import { resolve, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
 import { tribeAmbientEnvironmentNames } from "../src/daemon-environment.ts"
+import { launchEnvironment } from "./launch-token.ts"
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "../src/cli.ts")
 const DAEMON = resolve(dirname(fileURLToPath(import.meta.url)), "../../daemon/src/daemon.ts")
@@ -1487,7 +1488,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
       const managedEnv = {
         ...process.env,
         TRIBE_SOCKET: socketPath,
-        TRIBE_LAUNCH_ID: "managed-stale-daemon-launch",
+        ...launchEnvironment("managed-stale-daemon-launch"),
         TRIBE_NAME: "@dev/2",
         TRIBE_SESSION_NAME: "@dev/2",
         TRIBE_NO_AUTOSTART: "1",

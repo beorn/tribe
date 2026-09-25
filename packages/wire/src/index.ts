@@ -52,6 +52,10 @@ export {
   withTribeLaunchEnvironment,
 } from "./launch-environment.ts"
 
+// A process's own launch is its identity token's sid, read unverified; the daemon verifies (25074 3d-1).
+export type { UnverifiedTokenClaims } from "./lib/identity-token.ts"
+export { readLaunchIdFromToken, readUnverifiedTokenClaims } from "./lib/identity-token.ts"
+
 // The ambient names tribe reads, which a disposable fixture deletes rather
 // than inherits (24644); each package owns its own such list.
 export { tribeAmbientEnvironmentNames } from "./daemon-environment.ts"

@@ -25,6 +25,7 @@ import { AG_SESSION_AUTH_ENV } from "../src/lib/self-mailbox-authority.ts"
 import { oversizedMessageError } from "../src/lib/send-validation.ts"
 import { safeRemoveSync } from "removely"
 import { tribeAmbientEnvironmentNames } from "../src/daemon-environment.ts"
+import { launchEnvironment } from "./launch-token.ts"
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "../src/cli.ts")
 const BUN_BIN = process.env.BUN_EXECUTABLE ?? "bun"
@@ -256,7 +257,7 @@ describe("registerSendCommands", () => {
             BUN_BIN,
             [CLI, "send", "@ci", ...message, "--type", "request", "--summary", "landing request"],
             {
-              env: { ...process.env, TRIBE_SOCKET: socketPath, TRIBE_LAUNCH_ID: "launch-dev2" },
+              env: { ...process.env, TRIBE_SOCKET: socketPath, ...launchEnvironment("launch-dev2") },
               stdio: ["ignore", "pipe", "pipe"],
             },
           )
@@ -331,7 +332,7 @@ describe("registerSendCommands", () => {
             BUN_BIN,
             [CLI, "send", "@adhoc/1", "hello", "--type", "request", "--summary", "ping", ...args],
             {
-              env: { ...process.env, TRIBE_SOCKET: socketPath, TRIBE_LAUNCH_ID: "launch-dev7" },
+              env: { ...process.env, TRIBE_SOCKET: socketPath, ...launchEnvironment("launch-dev7") },
               stdio: ["ignore", "pipe", "pipe"],
             },
           )
@@ -418,7 +419,7 @@ describe("registerSendCommands", () => {
       })
       const sent = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProcess) => {
         const child = spawn(BUN_BIN, [CLI, "send", "@ci", "note", "--type", "notify", "--summary", "note"], {
-          env: { ...process.env, TRIBE_SOCKET: socketPath, TRIBE_LAUNCH_ID: "launch-dev12" },
+          env: { ...process.env, TRIBE_SOCKET: socketPath, ...launchEnvironment("launch-dev12") },
           stdio: ["ignore", "pipe", "pipe"],
         })
         let stdout = ""
@@ -766,7 +767,7 @@ describe("registerSendCommands", () => {
             ...process.env,
             TRIBE_SOCKET: socketPath,
             TRIBE_SESSION_NAME: "@chief",
-            TRIBE_LAUNCH_ID: "",
+            ...launchEnvironment(""),
           }
           delete env[AG_SESSION_AUTH_ENV]
           if (authority !== undefined) env[AG_SESSION_AUTH_ENV] = authority
@@ -891,7 +892,7 @@ describe("registerSendCommands", () => {
             ...process.env,
             TRIBE_SOCKET: socketPath,
             TRIBE_NAME: "@chief",
-            TRIBE_LAUNCH_ID: "",
+            ...launchEnvironment(""),
           },
           stdio: ["ignore", "pipe", "pipe"],
         })
@@ -974,7 +975,7 @@ describe("registerSendCommands", () => {
               ...process.env,
               TRIBE_SOCKET: socketPath,
               TRIBE_NAME: "@chief",
-              TRIBE_LAUNCH_ID: "launch-id-with-no-stored-session",
+              ...launchEnvironment("launch-id-with-no-stored-session"),
             },
             stdio: ["ignore", "pipe", "pipe"],
           })
@@ -1058,7 +1059,7 @@ describe("registerSendCommands", () => {
               ...process.env,
               TRIBE_SOCKET: socketPath,
               TRIBE_NAME: "@chief",
-              TRIBE_LAUNCH_ID: "launch-id-with-no-stored-session",
+              ...launchEnvironment("launch-id-with-no-stored-session"),
             },
             stdio: ["ignore", "pipe", "pipe"],
           },
@@ -1127,7 +1128,7 @@ describe("registerSendCommands", () => {
               ...process.env,
               TRIBE_SOCKET: socketPath,
               TRIBE_NAME: sender,
-              TRIBE_LAUNCH_ID: `launch-${sender}`,
+              ...launchEnvironment(`launch-${sender}`),
             },
             stdio: ["ignore", "ignore", "pipe"],
           })
@@ -1206,7 +1207,7 @@ describe("registerSendCommands", () => {
               ...process.env,
               TRIBE_SOCKET: socketPath,
               TRIBE_NAME: "@chief",
-              TRIBE_LAUNCH_ID: "",
+              ...launchEnvironment(""),
             },
             stdio: ["ignore", "pipe", "pipe"],
           },
@@ -1298,7 +1299,7 @@ describe("send warns when it should have been a reply (22990)", () => {
             ...process.env,
             TRIBE_SOCKET: socketPath,
             TRIBE_SESSION_NAME: "@chief",
-            TRIBE_LAUNCH_ID: "launch-22990",
+            ...launchEnvironment("launch-22990"),
           },
           stdio: ["ignore", "pipe", "pipe"],
         })
@@ -1425,7 +1426,7 @@ describe("a second recipient must never be absorbed into the message body", () =
         env: {
           ...process.env,
           TRIBE_SOCKET: join(TEST_ROOT, "isolated-test-tribe.sock"),
-          TRIBE_LAUNCH_ID: "",
+          ...launchEnvironment(""),
           TRIBE_SESSION_NAME: "",
           TRIBE_NAME: "",
         },
@@ -1655,7 +1656,7 @@ describe("reply and taking convenience commands (25028)", () => {
             ...process.env,
             TRIBE_SOCKET: socketPath,
             TRIBE_SESSION_NAME: "@dev/8",
-            TRIBE_LAUNCH_ID: "launch-25028",
+            ...launchEnvironment("launch-25028"),
           },
           stdio: ["ignore", "pipe", "pipe"],
         })

@@ -51,7 +51,6 @@ import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
 import { isExplicitTribePersonaName, isTribeNameShape, TRIBE_NAME_SHAPE_ERROR } from "./lib/persona-name.ts"
-import { deriveTribePersonaLaunchIdentity } from "./lib/persona-launch-identity.ts"
 import { createLogger, setSuppressConsole } from "loggily"
 import { createTimers } from "./timers.ts"
 import { defangModelInput } from "./lib/defang.ts"
@@ -63,7 +62,7 @@ import {
   resolveJoinDelivery,
   type TribeDeliveryCapability,
 } from "./lib/delivery.ts"
-import { readTribeLaunchId } from "./launch-environment.ts"
+import { adapterLaunchIdentity } from "./lib/adapter-launch-identity.ts"
 
 // stdout IS the MCP wire — a single non-JSON line (a loggily INFO banner)
 // poisons the host's JSON-RPC parser and the session silently loses its
@@ -148,7 +147,6 @@ function currentDeliveryCapability(): TribeDeliveryCapability {
 // after the first successful registration; replaying it on reconnect lets two
 // displaced adapters evict each other forever (21049).
 const TAKEOVER = REGISTER_WITH_LAUNCH_NAME && process.env.TRIBE_TAKEOVER === "1"
-const LAUNCH_ID_RAW = readTribeLaunchId(process.env) ?? ""
 const PLUGIN_ADAPTER_CHILD = process.env.TRIBE_PLUGIN_ADAPTER_CHILD === "1"
 const PLUGIN_PROVIDER_PARENT_PID_RAW = process.env.TRIBE_PLUGIN_PROVIDER_PARENT_PID?.trim() ?? ""
 // G9 P0 row 7 — the launch's adapter-exit record, named by the supervisor that
@@ -180,16 +178,16 @@ function resolveLaunchParentPid(): number {
 // its stable wrapper: either the complete Hab launcher tuple or, for standalone
 // plugins, the wrapper's actual OS parent. Thus child replacements preserve one
 // launch owner without treating ambient adapter env as authoritative.
-const LAUNCH_IDENTITY =
-  LAUNCH_ID_RAW.length > 0
-    ? {
-        id:
-          REGISTER_WITH_LAUNCH_NAME && LAUNCH_NAME !== undefined
-            ? deriveTribePersonaLaunchIdentity(LAUNCH_NAME, LAUNCH_ID_RAW).launchId
-            : LAUNCH_ID_RAW,
-        parentPid: resolveLaunchParentPid(),
-      }
-    : null
+// 25074 3d-1: a launch-named adapter holding its token keys under the token's sid (adapter-launch-identity.ts).
+const LAUNCH_READ = adapterLaunchIdentity({
+  env: process.env,
+  launchName: REGISTER_WITH_LAUNCH_NAME ? LAUNCH_NAME : undefined,
+  resolveParentPid: resolveLaunchParentPid,
+})
+if (LAUNCH_READ.malformedToken !== null) {
+  process.stderr.write(`tribe adapter: ${LAUNCH_READ.malformedToken}; the daemon's verifier judges it\n`)
+}
+const LAUNCH_IDENTITY = LAUNCH_READ.identity
 
 // km 19442 — connect-time replay flood backstop. The wakeup→drain path is capped
 // by selectReplayEvents, but a stale/old daemon that still pushes message BODIES
@@ -289,6 +287,7 @@ type TribeFetchResult = {
       bead?: string | null
       topic?: string | null
       ts?: string
+      from_authority?: string | null
     }>
     pending_balls?: Array<{
       request_id?: string
@@ -317,6 +316,7 @@ type TribeFetchResult = {
     bead?: string | null
     topic?: string | null
     ts?: string
+    from_authority?: string | null
   }>
 }
 
@@ -1248,6 +1248,9 @@ function forwardFetchedEvent(event: NonNullable<TribeFetchResult["events"]>[numb
     type,
     bead: event.bead ? String(event.bead) : undefined,
     message_id: event.id ? String(event.id) : undefined,
+    // 25074 3d-1a (@cto 2bfc1935 Q0): whether the sender is verified, a bearer, or only claims its name. A row from
+    // before the daemon recorded it, or one the daemon sent, carries none.
+    authority: event.from_authority ? String(event.from_authority) : undefined,
   })
 }
 

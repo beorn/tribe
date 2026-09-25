@@ -2,6 +2,7 @@
 import { connectToDaemon, type DaemonClient } from "./client.ts"
 import { resolveSocketPath } from "./paths.ts"
 import { deriveTribePersonaLaunchIdentity, providerLaunchIdOf } from "./lib/persona-launch-identity.ts"
+import { readUnverifiedTokenClaims } from "./lib/identity-token.ts"
 import { projectTribeLaunchEnvironment, tribeSessionIdentityEnvironmentNames } from "./launch-environment.ts"
 import { TRIBE_PROTOCOL_VERSION, TRIBE_SUPPORTED_PROTOCOL_VERSIONS } from "./lib/socket.ts"
 
@@ -196,13 +197,10 @@ function launchIdFor(request: TribeLaunchRequest): string {
   return request.launchId
 }
 
-/** The `sid` claim of a JWT-shaped identity token, read without verifying it; undefined when there is none to read. */
+/** The `sid` claim of an identity token, read unverified; undefined when its claims cannot be read. */
 function tokenSidClaim(token: string): string | undefined {
-  const payload = token.split(".")[1]
-  if (payload === undefined) return undefined
   try {
-    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { readonly sid?: unknown }
-    return typeof claims.sid === "string" && claims.sid.length > 0 ? claims.sid : undefined
+    return readUnverifiedTokenClaims(token).sid
   } catch {
     // silent-fallback-allow: an unreadable claim set is the daemon's to judge (unreadable); this read only forms an id.
     return undefined
