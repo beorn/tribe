@@ -2203,6 +2203,45 @@ describe("one-shot session authority is the identity token alone (25074 3d-3)", 
     expect(refusal.message).toContain("2 sessions are registered under its sid sid-dev7")
     expect(refusal.message).toContain("--session")
   })
+
+  // @cto eabd0565: tribe members documents foreign_transport as the roster's answer to "why is this seat's transport
+  // refused" (24767). With the bearer gone, the token path's name mismatch is what records it.
+  it("(j) seat B's token registering as seat A is refused naming both, and A's roster row names B", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-dev7")
+    parseResult<RegisterResult>(
+      await harness.register("conn-dev7", {
+        name: "@dev/7",
+        pid: 4701,
+        project: "/tmp/p",
+        idToken: "token-dev7",
+        launchParentPid: 4701,
+      }),
+    )
+    harness.dropClient("conn-dev7")
+
+    harness.addPendingClient("conn-foreign")
+    expect(
+      parseError(
+        await harness.register("conn-foreign", { name: "@dev/7", pid: 4801, project: "/tmp/p", idToken: "token-dev8" }),
+      ),
+    ).toMatchObject({
+      code: -32003,
+      message: "register refused: this transport claims @dev/7, but its identity token names @dev/8",
+      data: { kind: "identity-name-mismatch", claimed: "@dev/7", actor: "@dev/8" },
+    })
+
+    // A's transport is gone, so its row is disconnected: `all` shows it.
+    const members = parseResult<{ content: Array<{ text: string }> }>(
+      await harness.request("tribe.members", { all: true }),
+    )
+    const sessions = (JSON.parse(members.content[0]!.text) as { sessions: Array<Record<string, unknown>> }).sessions
+    expect(sessions.find((session) => session.name === "@dev/7")).toMatchObject({
+      transport_reason: "transport-carries-another-seats-identity",
+      foreign_transport: { name: "@dev/8", pid: 4801, refused_at: expect.any(String) },
+    })
+  })
 })
 
 function parseResult<T>(line: string): T {

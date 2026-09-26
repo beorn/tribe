@@ -1371,6 +1371,23 @@ export function withDispatcher<
             // retries until its token verifies (P2-A), and a bootstrap has 3c-1's client-side fallback.
             if ("refusal" in identity) {
               log.warn?.(identity.refusal.message)
+              // A transport carrying seat B's token as seat A is a foreign transport on A (24767): A's owner reads
+              // the roster, not this log, so A's newest session row carries it (@cto eabd0565, kept through 3d-3).
+              if (identity.refusal.data.kind === "identity-name-mismatch" && typeof p.name === "string") {
+                const rightful = (
+                  db
+                    .prepare("SELECT id, name FROM sessions WHERE name = $name ORDER BY updated_at DESC")
+                    .all({ $name: p.name }) as Array<{ id: string; name: string }>
+                ).find((row) => !isTombstonedSessionName(row.name))
+                if (rightful !== undefined) {
+                  registry.recordForeignIdentityTransport(rightful.id, {
+                    name: String(identity.refusal.data.actor),
+                    launch_id: typeof p.launchId === "string" ? p.launchId : "(no launch)",
+                    pid: Number(p.pid ?? 0),
+                    refused_at: new Date().toISOString(),
+                  })
+                }
+              }
               return makeError(id, -32003, identity.refusal.message, identity.refusal.data)
             }
             const verifiedSid = identity.sid
