@@ -6,7 +6,19 @@
  */
 import { Database } from "bun:sqlite"
 import { afterEach, beforeEach, describe, expect, test } from "vitest"
-import { mkdirSync, mkdtempSync, writeFileSync, utimesSync, statSync } from "node:fs"
+import {
+  mkdirSync,
+  mkdtempSync,
+  writeFileSync,
+  utimesSync,
+  statSync,
+  readFileSync,
+  openSync,
+  readSync,
+  closeSync,
+  appendFileSync,
+} from "node:fs"
+import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
@@ -336,6 +348,71 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
     expect(rows2[1]!.content).toBe("second content")
   })
 
+  test("B2.6: Tail append refusal when byte at offset - 1 is not \\n (0x0A) despite matching fingerprints", async () => {
+    const projDir = join(projectsDir, "-test-proj")
+    mkdirSync(projDir, { recursive: true })
+    const sessFile = join(projDir, "sess-b2-6.jsonl")
+
+    const line1 =
+      JSON.stringify({
+        type: "user",
+        uuid: "u1",
+        cwd: "/test/proj",
+        timestamp: "2026-09-22T10:00:00.000Z",
+        message: { content: "first content" },
+      }) + "\n"
+
+    const line2 =
+      JSON.stringify({
+        type: "user",
+        uuid: "u2",
+        cwd: "/test/proj",
+        timestamp: "2026-09-22T10:01:00.000Z",
+        message: { content: "second content" },
+      }) + "\n"
+
+    writeFileSync(sessFile, line1, "utf8")
+    await rebuildIndex(db, { incremental: true })
+
+    // Tamper with the row in DB: if full re-index runs, this row will be deleted and re-indexed with "first content"
+    db.prepare("UPDATE messages SET content = 'tampered content' WHERE session_id = 'sess-b2-6'").run()
+
+    // Set tail_offset to an offset where byte at offset - 1 is NOT \n (e.g. offset = 10)
+    const badOffset = 10
+    const fileBuf = readFileSync(sessFile)
+    expect(fileBuf[badOffset - 1]).not.toBe(0x0a)
+
+    // Compute valid matching fingerprints for badOffset so fingerprints match
+    const headLen = Math.min(4096, badOffset)
+    const headFp = createHash("sha256").update(fileBuf.subarray(0, headLen)).digest("hex")
+    const tailLen = Math.min(4096, badOffset)
+    const tailStart = badOffset - tailLen
+    const tailFp = createHash("sha256")
+      .update(fileBuf.subarray(tailStart, tailStart + tailLen))
+      .digest("hex")
+
+    db.prepare(
+      "UPDATE sessions SET tail_offset = ?, head_fingerprint = ?, tail_fingerprint = ? WHERE id = 'sess-b2-6'",
+    ).run(badOffset, headFp, tailFp)
+
+    // Append line 2 to file so size/mtime change
+    writeFileSync(sessFile, line1 + line2, "utf8")
+
+    // Rebuild index incrementally. Even though head and tail fingerprints match for badOffset,
+    // byte at badOffset - 1 is NOT 0x0A, so tail append must be refused and full re-index triggered.
+    await rebuildIndex(db, { incremental: true })
+
+    const rows = db
+      .prepare("SELECT id, content FROM messages WHERE session_id = 'sess-b2-6' ORDER BY id ASC")
+      .all() as Array<{ id: number; content: string }>
+    expect(rows).toHaveLength(2)
+    expect(rows[0]!.content).toBe("first content") // Not 'tampered content'
+    expect(rows[1]!.content).toBe("second content")
+
+    const sessAfter = getSession(db, "sess-b2-6")
+    expect(sessAfter?.tail_offset).toBe(Buffer.byteLength(line1 + line2, "utf8"))
+  })
+
   // --------------------------------------------------------------------------
   // B3: Project sources off the hook & exact cwd discovery
   // --------------------------------------------------------------------------
@@ -550,7 +627,7 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
       .prepare(
         "INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count) VALUES (?, ?, ?, ?, ?, ?)",
       )
-      .run("sess-2", "/hh/dev-wt7", "/nonexistent/sess-2.jsonl", Date.now(), Date.now(), 1)
+      .run("codex:sess-2", "/hh/dev-wt7", "/nonexistent/.codex/sessions/sess-2.jsonl", Date.now(), Date.now(), 1)
 
     // Now call initSchema with allowMigration: true.
     // This MUST NOT throw 'SQLiteError: no such column: cwd'!
@@ -568,12 +645,311 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
     expect(row1.cwd).toBe("/hh/project-s1")
 
     // sess-2 backfilled from project_path by migration 5
-    const row2 = v3Db.prepare("SELECT cwd FROM sessions WHERE id = 'sess-2'").get() as { cwd: string | null }
+    const row2 = v3Db.prepare("SELECT cwd FROM sessions WHERE id = 'codex:sess-2'").get() as { cwd: string | null }
     expect(row2.cwd).toBe("/hh/dev-wt7")
 
     // idx_sessions_cwd index exists
     const idx = v3Db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_sessions_cwd'").get()
     expect(idx).toBeDefined()
+
+    v3Db.close()
+  })
+
+  test("B3.6: Claude session with cwd past 64KB migrates exact cwd and does not fall back to dash-split project_path", () => {
+    const v3Path = join(tempDir, "v3-deep-cwd-test.db")
+    const v3Db = new Database(v3Path)
+    v3Db.exec(`
+      PRAGMA user_version = 3;
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        project_path TEXT NOT NULL,
+        jsonl_path TEXT UNIQUE NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        message_count INTEGER DEFAULT 0,
+        title TEXT,
+        status TEXT,
+        size_bytes INTEGER,
+        mtime_ms REAL,
+        last_event_at_ms REAL,
+        failure_reason TEXT,
+        failure_time INTEGER,
+        shrink_old_count INTEGER,
+        shrink_new_count INTEGER,
+        parent_session_id TEXT,
+        agent_id TEXT
+      );
+      CREATE INDEX idx_sessions_project ON sessions(project_path);
+      CREATE INDEX idx_sessions_updated ON sessions(updated_at);
+      CREATE TABLE messages (
+        id INTEGER PRIMARY KEY,
+        uuid TEXT,
+        session_id TEXT NOT NULL REFERENCES sessions(id),
+        type TEXT NOT NULL,
+        content TEXT,
+        tool_name TEXT,
+        file_paths TEXT,
+        timestamp INTEGER NOT NULL,
+        duplicate_of INTEGER,
+        line INTEGER,
+        UNIQUE(session_id, uuid)
+      );
+    `)
+
+    // 1. Session with cwd past 64KB: 40 padding summary lines (80 KB) before user line with cwd
+    const deepFile = join(tempDir, "deep.jsonl")
+    const pad = "x".repeat(2000)
+    let content = ""
+    for (let i = 1; i <= 40; i++) {
+      content += JSON.stringify({ type: "summary", summary: `pad ${i} ${pad}` }) + "\n"
+    }
+    content +=
+      JSON.stringify({
+        type: "user",
+        sessionId: "sess-deep",
+        uuid: "u-deep-1",
+        cwd: "/hh/dev-wt1",
+        timestamp: "2026-09-25T10:03:00.000Z",
+        message: { role: "user", content: "question" },
+      }) + "\n"
+    writeFileSync(deepFile, content, "utf8")
+    expect(statSync(deepFile).size).toBeGreaterThan(65536)
+
+    v3Db
+      .prepare(
+        "INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run("sess-deep", "-hh-dev-wt1", deepFile, Date.now(), Date.now(), 1)
+
+    // 2. Claude session with NO cwd anywhere in transcript: must stay NULL, never guess /hh/dev/legacy
+    const noCwdFile = join(tempDir, "nocwd.jsonl")
+    writeFileSync(noCwdFile, JSON.stringify({ type: "summary", summary: "no cwd in this file" }) + "\n", "utf8")
+    v3Db
+      .prepare(
+        "INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run("sess-nocwd", "-hh-dev-legacy", noCwdFile, Date.now(), Date.now(), 1)
+
+    // 3. Codex session with no JSONL file on disk: project_path is exact, must be backfilled
+    v3Db
+      .prepare(
+        "INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        "codex:019fd047-90b4-71f1-837d-b5049830077b",
+        "/hh/dev-wt7",
+        "/nonexistent/codex.jsonl",
+        Date.now(),
+        Date.now(),
+        1,
+      )
+
+    initSchema(v3Db, { allowMigration: true })
+
+    const rowDeep = v3Db.prepare("SELECT cwd FROM sessions WHERE id = 'sess-deep'").get() as { cwd: string | null }
+    // Exact cwd from transcript, not lossy decode /hh/dev/wt1 and not null
+    expect(rowDeep.cwd).toBe("/hh/dev-wt1")
+
+    const rowNoCwd = v3Db.prepare("SELECT cwd FROM sessions WHERE id = 'sess-nocwd'").get() as { cwd: string | null }
+    // Must be NULL per CTO amendment: lossy decode is deleted, not kept as a fallback
+    expect(rowNoCwd.cwd).toBeNull()
+
+    const rowCodex = v3Db
+      .prepare("SELECT cwd FROM sessions WHERE id = 'codex:019fd047-90b4-71f1-837d-b5049830077b'")
+      .get() as { cwd: string | null }
+    expect(rowCodex.cwd).toBe("/hh/dev-wt7")
+
+    v3Db.close()
+  })
+
+  test("B3.7: migration 6 repairs contradicted subagent cwd rows on v5 database and nulls unverified rows", () => {
+    const v5Path = join(tempDir, "v5-repair-test.db")
+    const v5Db = new Database(v5Path)
+    v5Db.exec(`
+      PRAGMA user_version = 5;
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        project_path TEXT NOT NULL,
+        jsonl_path TEXT UNIQUE NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        message_count INTEGER DEFAULT 0,
+        title TEXT,
+        status TEXT,
+        size_bytes INTEGER,
+        mtime_ms REAL,
+        last_event_at_ms REAL,
+        failure_reason TEXT,
+        failure_time INTEGER,
+        shrink_old_count INTEGER,
+        shrink_new_count INTEGER,
+        parent_session_id TEXT,
+        agent_id TEXT,
+        cwd TEXT
+      );
+      CREATE TABLE messages (
+        id INTEGER PRIMARY KEY,
+        uuid TEXT,
+        session_id TEXT NOT NULL REFERENCES sessions(id),
+        type TEXT NOT NULL,
+        content TEXT,
+        tool_name TEXT,
+        file_paths TEXT,
+        timestamp INTEGER NOT NULL
+      );
+    `)
+
+    // 1. Contradicted Claude subagent session: stored cwd is lossy /hh/dev/wt6, transcript has /hh/dev-wt6 past 64KB
+    const subagentFile = join(tempDir, "subagent.jsonl")
+    const pad = "x".repeat(2000)
+    let content = ""
+    for (let i = 1; i <= 40; i++) {
+      content += JSON.stringify({ type: "summary", summary: `pad ${i} ${pad}` }) + "\n"
+    }
+    content +=
+      JSON.stringify({
+        type: "user",
+        sessionId: "subagent-1",
+        cwd: "/hh/dev-wt6",
+        message: { content: "subagent question" },
+      }) + "\n"
+    writeFileSync(subagentFile, content, "utf8")
+
+    v5Db
+      .prepare(
+        "INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, cwd) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run("sess-subagent-1", "/hh/dev/wt6", subagentFile, Date.now(), Date.now(), 1, "/hh/dev/wt6")
+
+    // 2. Unverified session: stored cwd was set to project_path /hh/dev/legacy, but transcript has no cwd
+    const emptyFile = join(tempDir, "empty.jsonl")
+    writeFileSync(emptyFile, JSON.stringify({ type: "summary", summary: "no cwd" }) + "\n", "utf8")
+    v5Db
+      .prepare(
+        "INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, cwd) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run("sess-unverified", "/hh/dev/legacy", emptyFile, Date.now(), Date.now(), 1, "/hh/dev/legacy")
+
+    // 3. Codex session: stored cwd is /hh/dev-wt7, must remain untouched
+    v5Db
+      .prepare(
+        "INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, cwd) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        "codex:sess-codex",
+        "/hh/dev-wt7",
+        "/nonexistent/.codex/sessions/sess.jsonl",
+        Date.now(),
+        Date.now(),
+        1,
+        "/hh/dev-wt7",
+      )
+
+    // 4. Matched session: stored cwd matches transcript
+    const matchedFile = join(tempDir, "matched.jsonl")
+    writeFileSync(matchedFile, JSON.stringify({ type: "user", cwd: "/hh", message: { content: "hi" } }) + "\n", "utf8")
+    v5Db
+      .prepare(
+        "INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, cwd) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run("sess-matched", "/hh", matchedFile, Date.now(), Date.now(), 1, "/hh")
+
+    // Run migration from 5 to 6
+    initSchema(v5Db, { allowMigration: true })
+
+    const ver = (v5Db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version
+    expect(ver).toBe(CURRENT_SCHEMA_VERSION)
+
+    // Subagent row repaired to exact transcript cwd
+    const rowSubagent = v5Db.prepare("SELECT cwd FROM sessions WHERE id = 'sess-subagent-1'").get() as {
+      cwd: string | null
+    }
+    expect(rowSubagent.cwd).toBe("/hh/dev-wt6")
+
+    // Unverified row with no cwd in transcript is set to null
+    const rowUnverified = v5Db.prepare("SELECT cwd FROM sessions WHERE id = 'sess-unverified'").get() as {
+      cwd: string | null
+    }
+    expect(rowUnverified.cwd).toBeNull()
+
+    // Codex row untouched
+    const rowCodex = v5Db.prepare("SELECT cwd FROM sessions WHERE id = 'codex:sess-codex'").get() as {
+      cwd: string | null
+    }
+    expect(rowCodex.cwd).toBe("/hh/dev-wt7")
+
+    // Matched row untouched
+    const rowMatched = v5Db.prepare("SELECT cwd FROM sessions WHERE id = 'sess-matched'").get() as {
+      cwd: string | null
+    }
+    expect(rowMatched.cwd).toBe("/hh")
+
+    v5Db.close()
+  })
+
+  test("B3.8: Codex rollout with cwd only in payload.cwd backfills via migration 4", () => {
+    const v3Path = join(tempDir, "v3-payload-cwd-test.db")
+    const v3Db = new Database(v3Path)
+    v3Db.exec(`
+      PRAGMA user_version = 3;
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        project_path TEXT NOT NULL,
+        jsonl_path TEXT UNIQUE NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        message_count INTEGER DEFAULT 0,
+        title TEXT,
+        status TEXT,
+        size_bytes INTEGER,
+        mtime_ms REAL,
+        last_event_at_ms REAL,
+        failure_reason TEXT,
+        failure_time INTEGER,
+        shrink_old_count INTEGER,
+        shrink_new_count INTEGER,
+        parent_session_id TEXT,
+        agent_id TEXT
+      );
+      CREATE TABLE messages (
+        id INTEGER PRIMARY KEY,
+        uuid TEXT,
+        session_id TEXT NOT NULL REFERENCES sessions(id),
+        type TEXT NOT NULL,
+        content TEXT,
+        tool_name TEXT,
+        file_paths TEXT,
+        timestamp INTEGER NOT NULL
+      );
+    `)
+
+    // Codex rollout transcript where cwd is only in payload.cwd, no top-level cwd
+    const rolloutFile = join(tempDir, "codex-rollout.jsonl")
+    writeFileSync(
+      rolloutFile,
+      JSON.stringify({
+        type: "session_meta",
+        payload: {
+          id: "019fd047-90b4-71f1-837d-b5049830077b",
+          cwd: "/hh/dev-wt8",
+        },
+      }) + "\n",
+      "utf8",
+    )
+
+    v3Db
+      .prepare(
+        "INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run("codex:019fd047-90b4-71f1-837d-b5049830077b", "-hh-dev-wt8", rolloutFile, Date.now(), Date.now(), 1)
+
+    initSchema(v3Db, { allowMigration: true })
+
+    const row = v3Db
+      .prepare("SELECT cwd FROM sessions WHERE id = 'codex:019fd047-90b4-71f1-837d-b5049830077b'")
+      .get() as { cwd: string | null }
+
+    expect(row.cwd).toBe("/hh/dev-wt8")
 
     v3Db.close()
   })

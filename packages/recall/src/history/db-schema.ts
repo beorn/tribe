@@ -402,27 +402,39 @@ export const MIGRATION_STEPS: MigrationStep[] = [
         if (!fs.existsSync(sess.jsonl_path)) continue
         try {
           const fd = fs.openSync(sess.jsonl_path, "r")
-          const buf = Buffer.alloc(65536)
-          const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0)
-          fs.closeSync(fd)
+          const CHUNK_SIZE = 65536
+          const buf = Buffer.alloc(CHUNK_SIZE)
+          let offset = 0
+          let foundCwd: string | null = null
+          let remainder = ""
 
-          if (bytesRead > 0) {
-            const text = buf.toString("utf8", 0, bytesRead)
+          while (true) {
+            const bytesRead = fs.readSync(fd, buf, 0, buf.length, offset)
+            if (bytesRead === 0) break
+            offset += bytesRead
+            const text = remainder + buf.toString("utf8", 0, bytesRead)
             const lines = text.split("\n")
+            remainder = lines.pop() ?? ""
             for (const line of lines) {
               if (!line.trim()) continue
               try {
                 const rec = JSON.parse(line) as { cwd?: string; payload?: { cwd?: string } }
                 const cwdVal = rec.cwd || rec.payload?.cwd
                 if (cwdVal && typeof cwdVal === "string" && cwdVal.trim().length > 0) {
-                  updateCwd.run(cwdVal.trim(), sess.id)
-                  backfilledCount++
+                  foundCwd = cwdVal.trim()
                   break
                 }
               } catch {
                 // silent-fallback-allow: partial line or unparseable JSON in read buffer during migration
               }
             }
+            if (foundCwd) break
+          }
+          fs.closeSync(fd)
+
+          if (foundCwd) {
+            updateCwd.run(foundCwd, sess.id)
+            backfilledCount++
           }
         } catch {
           // silent-fallback-allow: unreadable or vanished transcript file during migration
@@ -439,10 +451,89 @@ export const MIGRATION_STEPS: MigrationStep[] = [
     name: "backfill-sessions-cwd-from-project-path",
     up: (db: Database) => {
       const result = db
-        .prepare("UPDATE sessions SET cwd = project_path WHERE cwd IS NULL AND project_path LIKE '/%'")
+        .prepare(
+          "UPDATE sessions SET cwd = project_path WHERE cwd IS NULL AND project_path LIKE '/%' AND (id LIKE 'codex:%' OR jsonl_path LIKE '%/.codex/%')",
+        )
         .run()
       if (result.changes > 0) {
         console.log(`[migration] Backfilled ${result.changes} session(s) cwd from project_path.`)
+      }
+    },
+  },
+  {
+    version: 6,
+    name: "repair-lossy-subagent-cwd",
+    up: (db: Database) => {
+      // Repair sessions where cwd was incorrectly populated from lossy project_path
+      const rows = db
+        .prepare(
+          "SELECT id, jsonl_path, cwd FROM sessions WHERE cwd = project_path AND cwd LIKE '/%' AND id NOT LIKE 'codex:%' AND jsonl_path NOT LIKE '%/.codex/%'",
+        )
+        .all() as Array<{ id: string; jsonl_path: string; cwd: string }>
+
+      const updateCwd = db.prepare("UPDATE sessions SET cwd = ? WHERE id = ?")
+      let repairedCount = 0
+      let nulledCount = 0
+
+      const CHUNK_SIZE = 65536
+      const buf = Buffer.alloc(CHUNK_SIZE)
+
+      for (const sess of rows) {
+        if (!fs.existsSync(sess.jsonl_path)) {
+          updateCwd.run(null, sess.id)
+          nulledCount++
+          continue
+        }
+        try {
+          const fd = fs.openSync(sess.jsonl_path, "r")
+          let offset = 0
+          let foundCwd: string | null = null
+          let remainder = ""
+
+          while (true) {
+            const bytesRead = fs.readSync(fd, buf, 0, buf.length, offset)
+            if (bytesRead === 0) break
+            offset += bytesRead
+            const text = remainder + buf.toString("utf8", 0, bytesRead)
+            const lines = text.split("\n")
+            remainder = lines.pop() ?? ""
+            for (const line of lines) {
+              if (!line.trim()) continue
+              try {
+                const rec = JSON.parse(line) as { cwd?: string; payload?: { cwd?: string } }
+                const cwdVal = rec.cwd || rec.payload?.cwd
+                if (cwdVal && typeof cwdVal === "string" && cwdVal.trim().length > 0) {
+                  foundCwd = cwdVal.trim()
+                  break
+                }
+              } catch {
+                // silent-fallback-allow: partial line or unparseable JSON in read buffer during migration repair
+              }
+            }
+            if (foundCwd) break
+          }
+          fs.closeSync(fd)
+
+          if (foundCwd) {
+            if (foundCwd !== sess.cwd) {
+              updateCwd.run(foundCwd, sess.id)
+              repairedCount++
+            }
+          } else {
+            updateCwd.run(null, sess.id)
+            nulledCount++
+          }
+        } catch {
+          // silent-fallback-allow: unreadable or vanished transcript file during migration repair falls back to nulling unverified cwd
+          updateCwd.run(null, sess.id)
+          nulledCount++
+        }
+      }
+
+      if (repairedCount > 0 || nulledCount > 0) {
+        console.log(
+          `[migration] Repaired ${repairedCount} session(s) with contradicted cwd, set ${nulledCount} unverified session(s) to NULL.`,
+        )
       }
     },
   },

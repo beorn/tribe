@@ -82,7 +82,12 @@ export async function cmdStatus(opts: { json?: boolean; bench?: boolean }): Prom
   let db
   try {
     db = getDb()
-  } catch {
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("requires migration")) {
+      console.error(`${CROSS} ${err.message}`)
+      process.exitCode = 1
+      return
+    }
     console.log(`${CROSS} No index found. Run \`recall index\` to build.`)
     return
   }

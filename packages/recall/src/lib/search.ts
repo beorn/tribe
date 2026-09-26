@@ -1062,7 +1062,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     for (const [sessionId, sessionResults] of bySession) {
       const first = sessionResults[0]
       if (first === undefined) continue
-      const displayProject = displayProjectPath(first.project_path)
+      const displayProject = first.cwd ? first.cwd : displayProjectPath(first.project_path)
       const relTime = formatRelativeTime(first.timestamp)
       const sessionDisplay = formatSessionId(sessionId, sessionTitles)
 

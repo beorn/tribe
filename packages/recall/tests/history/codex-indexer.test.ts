@@ -575,6 +575,7 @@ if (args.includes("list")) {
       expect(stored?.message_count).toBe(2)
       expect(stored?.size_bytes).toBe(500)
       expect(stored?.mtime_ms).toBe(1700000000000)
+      expect(stored?.cwd).toBe("/workspace/project")
 
       // Verify messages table
       const msgs = db

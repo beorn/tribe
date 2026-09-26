@@ -10,7 +10,8 @@
  */
 import { describe, test, expect, beforeEach, afterEach } from "vitest"
 import { spawnSync } from "node:child_process"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, mkdirSync } from "node:fs"
+import { Database } from "bun:sqlite"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
@@ -95,9 +96,25 @@ describe("recall status (bounded by default)", () => {
   test("default JSON returns within a small bounded time (no live-LLM race path)", () => {
     const { status, elapsedMs } = runStatus(["--json"])
     expect(status).toBe(0)
-    // The slow path raced 5 queries at up to 10s each (30-50s). Bounded status
-    // does a DB read + a windowed FS scan — orders of magnitude faster. A 30s
-    // ceiling cleanly separates the two while tolerating cold start + CI load.
     expect(elapsedMs).toBeLessThan(30_000)
+  })
+
+  test("status on unmigrated database exits non-zero and names schema version and migrate command", () => {
+    const claudeDir = join(home, ".claude")
+    mkdirSync(claudeDir, { recursive: true })
+    const dbPath = join(claudeDir, "session-index.db")
+    const db = new Database(dbPath)
+    db.exec(`
+      PRAGMA user_version = 3;
+      CREATE TABLE sessions (id TEXT PRIMARY KEY, project_path TEXT, jsonl_path TEXT);
+      CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT);
+    `)
+    db.close()
+
+    const { status, stdout, stderr } = runStatus([])
+    expect(status).not.toBe(0)
+    const combined = stdout + stderr
+    expect(combined).toMatch(/Database schema version 3 requires migration to \d+/)
+    expect(combined).toContain("recall index --migrate")
   })
 })

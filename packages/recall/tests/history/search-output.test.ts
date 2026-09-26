@@ -759,7 +759,7 @@ describe("recall search output", () => {
       await cmdSearch("familyscope", { raw: true, refresh: false })
       const output = callsText(logSpy)
       expect(output).toContain("Found 2 matches")
-      expect(output).toContain("/hh/dev/wt7")
+      expect(output).toContain("/hh/dev-wt7")
       expect(output).toContain("/hh")
     } finally {
       process.chdir(prevCwd)
@@ -780,7 +780,7 @@ describe("recall search output", () => {
       await cmdSearch("familyscope", { raw: true, refresh: false, project: "dev" })
       const narrowedOutput = callsText(logSpy)
       expect(narrowedOutput).toContain("Found 1 matches")
-      expect(narrowedOutput).toContain("/hh/dev/wt7")
+      expect(narrowedOutput).toContain("/hh/dev-wt7")
       expect(narrowedOutput).not.toContain("/hh (")
     } finally {
       process.chdir(prevCwd)
