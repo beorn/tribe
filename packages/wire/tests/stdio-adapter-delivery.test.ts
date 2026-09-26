@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createLineParser } from "../src/parser.ts"
 import { isRequest, makeError, makeNotification, makeResponse } from "../src/rpc.ts"
 import { MAX_REPLAY_EVENTS } from "../src/lib/replay-cap.ts"
+import { launchEnvironment } from "./launch-token.ts"
 
 const ADAPTER = resolve(dirname(fileURLToPath(import.meta.url)), "../src/stdio-adapter.ts")
 const BUN_BIN = process.versions.bun ? process.execPath : "bun"
@@ -569,7 +570,7 @@ describe("stdio adapter delivery modes", () => {
         ...process.env,
         TRIBE_DELIVERY: "pull",
         TRIBE_TAKEOVER: "1",
-        TRIBE_LAUNCH_ID: "provider-launch-a",
+        ...launchEnvironment("provider-launch-a"),
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
       },
@@ -596,7 +597,7 @@ describe("stdio adapter delivery modes", () => {
         ...process.env,
         TRIBE_DELIVERY: "pull",
         TRIBE_TAKEOVER: "1",
-        TRIBE_LAUNCH_ID: "",
+        ...launchEnvironment(""),
         TRIBE_LAUNCH_PARENT_PID: "",
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
@@ -697,7 +698,7 @@ describe("stdio adapter delivery modes", () => {
         ...process.env,
         TRIBE_DELIVERY: "pull",
         TRIBE_TAKEOVER: "1",
-        TRIBE_LAUNCH_ID: "",
+        ...launchEnvironment(""),
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: join(tmpDir, "adapter.log"),
       },
@@ -791,7 +792,7 @@ describe("stdio adapter delivery modes", () => {
         ...process.env,
         TRIBE_DELIVERY: "pull",
         TRIBE_TAKEOVER: "1",
-        TRIBE_LAUNCH_ID: "provider-launch-a",
+        ...launchEnvironment("provider-launch-a"),
         TRIBE_NO_AUTOSTART: "1",
         DEBUG_LOG: logPath,
         LOG_LEVEL: "warn",

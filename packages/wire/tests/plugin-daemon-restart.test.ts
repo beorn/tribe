@@ -17,6 +17,7 @@ import { deriveTribePersonaLaunchIdentity } from "../src/lib/persona-launch-iden
 import { RELOAD_SLOT_MS } from "../src/lib/reload-pacing.ts"
 import { REEXEC_BACKOFF_BASE_MS, REEXEC_BACKOFF_MAX_MS } from "../../../plugins/claude/supervisor-policy.ts"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
+import { launchEnvironment } from "./launch-token.ts"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const DAEMON = resolve(HERE, "../../daemon/src/daemon.ts")
@@ -271,7 +272,7 @@ process.exit(await child.exited)
         ...(opts.delivery === "pull" ? { TRIBE_PULL_TRANSPORT: "mcp" } : {}),
         ...(opts.requireJoin ? {} : { TRIBE_REQUIRE_JOIN: "0" }),
         TRIBE_TAKEOVER: "1",
-        TRIBE_LAUNCH_ID: opts.launchId,
+        ...launchEnvironment(opts.launchId),
         ...(opts.claudeSessionId === undefined ? {} : { CLAUDE_SESSION_ID: opts.claudeSessionId }),
         ...(opts.sessionAuth === undefined ? {} : { AG_SESSION_AUTH: opts.sessionAuth }),
         ...(opts.launchStateDir === undefined
@@ -1217,7 +1218,7 @@ process.exit(await child.exited)
         ...process.env,
         CLAUDE_SESSION_ID: "22322-launchless-runtime-name",
         TRIBE_NAME: "",
-        TRIBE_LAUNCH_ID: "",
+        ...launchEnvironment(""),
         TRIBE_PLUGIN_ADAPTER_CHILD: "",
         TRIBE_PLUGIN_PROVIDER_PARENT_PID: "",
         TRIBE_PLUGIN_REEXEC_EXIT_CODE: "",
@@ -1317,7 +1318,7 @@ process.exit(await child.exited)
         ...process.env,
         CLAUDE_SESSION_ID: "25663-join-during-wait",
         TRIBE_NAME: "",
-        TRIBE_LAUNCH_ID: "",
+        ...launchEnvironment(""),
         TRIBE_PLUGIN_ADAPTER_CHILD: "",
         TRIBE_PLUGIN_PROVIDER_PARENT_PID: "",
         TRIBE_PLUGIN_REEXEC_EXIT_CODE: "",
@@ -1412,7 +1413,7 @@ process.exit(await child.exited)
         TRIBE_PULL_TRANSPORT: "mcp",
         TRIBE_REQUIRE_JOIN: "0",
         TRIBE_TAKEOVER: "1",
-        TRIBE_LAUNCH_ID: "restart-direct-launch",
+        ...launchEnvironment("restart-direct-launch"),
         TRIBE_NO_PLUGINS: "1",
         TRIBE_NO_AUTORELOAD: "1",
         DEBUG_LOG: adapterLog,
@@ -1478,7 +1479,7 @@ process.exit(await child.exited)
         TRIBE_DELIVERY: "pull",
         TRIBE_PULL_TRANSPORT: "mcp",
         TRIBE_REQUIRE_JOIN: "0",
-        TRIBE_LAUNCH_ID: "unnamed-health-launch",
+        ...launchEnvironment("unnamed-health-launch"),
         TRIBE_NO_PLUGINS: "1",
         TRIBE_NO_AUTORELOAD: "1",
         DEBUG_LOG: adapterLog,
