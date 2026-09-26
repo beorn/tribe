@@ -27,11 +27,11 @@ import {
   type TribeFanout as Fanout,
   type TribeMessageType as MessageType,
 } from "../command-descriptors.ts"
-import { TRIBE_PROTOCOL_VERSION, TRIBE_SUPPORTED_PROTOCOL_VERSIONS } from "../lib/socket.ts"
 import { resolveDbPath } from "../lib/config.ts"
 import { INCIDENT_KEY_SEPARATOR, parseIncidentKey, type IncidentIdentity } from "../lib/incident.ts"
 import { formatMarkdown, generateRetro, parseDuration } from "../lib/retro.ts"
 import { readLaunchIdFromToken } from "../lib/identity-token.ts"
+import { oneShotRegisterParams, resolveLaunchSeat } from "../launch-seat.ts"
 import { withCliDaemonClient } from "./daemon-client.ts"
 import { writeJsonStdout } from "./json-output.ts"
 import { mcpJsonContent } from "./mcp-json-content.ts"
@@ -102,22 +102,7 @@ async function callDaemon(
     // TRIBE_NAME caller (no launch), we omit it; the grant check below then
     // decides between fail-loud abort (tracked reply) and attributed warn.
     if (as) {
-      const registered = mcpJsonContent(
-        await client.call("register", {
-          name: as.name,
-          role: "member",
-          domains: [],
-          delivery: "pull",
-          project: process.cwd(),
-          projectName: process.cwd().split("/").filter(Boolean).at(-1) ?? "unknown",
-          pid: process.pid,
-          protocolVersion: TRIBE_PROTOCOL_VERSION - 1,
-          supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
-          ...(as.launchId !== undefined && as.launchParentPid !== undefined
-            ? { launchId: as.launchId, launchParentPid: as.launchParentPid }
-            : {}),
-        }),
-      ) as { name?: string }
+      const registered = mcpJsonContent(await client.call("register", oneShotRegisterParams(as))) as { name?: string }
       const grant = classifyIdentityGrant(as.name, registered?.name, requireIdentity)
       if (!grant.ok) {
         if (grant.fatal) {
@@ -254,22 +239,17 @@ function replyOwnerFromEnv(env: NodeJS.ProcessEnv = process.env): string | null 
 }
 
 async function resolveCallerNameHint(): Promise<string | null> {
-  const launchId = readLaunchIdFromToken(process.env)
-  if (launchId) {
-    try {
-      const persona = replyOwnerFromEnv()
-      const status = mcpJsonContent(
-        await callDaemon("cli_inbox_status_by_launch_v1", {
-          launch_id: launchId,
-          ...(persona === null ? {} : { persona }),
-        }),
-      ) as { session?: unknown }
-      if (typeof status.session === "string" && status.session.length > 0) {
-        return status.session
-      }
-    } catch {
-      // silent-fallback-allow: daemon session lookup by launch ID is opportunistic; falls back to environment session variables
+  try {
+    const launchId = readLaunchIdFromToken(process.env)
+    if (launchId) {
+      const seat = await resolveLaunchSeat((method, params) => callDaemon(method, params), {
+        launchId,
+        persona: replyOwnerFromEnv(),
+      })
+      return seat.session
     }
+  } catch {
+    // silent-fallback-allow: daemon session lookup by launch ID is opportunistic; falls back to environment session variables
   }
   return replyOwnerFromEnv()
 }
@@ -374,39 +354,26 @@ function rejectUnstructuredMessageIntent(input: SendPayloadInput): void {
 
 async function resolveSendCaller(reply?: string, anonymous = false): Promise<SendCaller | null> {
   if (anonymous) return null
-  const launchId = readLaunchIdFromToken(process.env)
+  let launchId: string | null
+  try {
+    launchId = readLaunchIdFromToken(process.env)
+  } catch (error) {
+    console.error(
+      `tribe.send: delivery refused - ${error instanceof Error ? error.message : String(error)}; not sending.`,
+    )
+    process.exit(1)
+  }
   if (launchId) {
     let failure: string
     try {
-      const persona = replyOwnerFromEnv()
-      const status = mcpJsonContent(
-        await callDaemon("cli_inbox_status_by_launch_v1", {
-          launch_id: launchId,
-          ...(persona === null ? {} : { persona }),
-        }),
-      ) as {
-        session?: unknown
-        launch_id?: unknown
-        launch_parent_pid?: unknown
-        transport_state?: unknown
-        transport_reason?: unknown
-      }
-      warnIfSelfTransportDown("send", status)
-      if (typeof status.session === "string" && status.session.length > 0) {
-        const caller: SendCaller = { name: status.session }
-        // The daemon owns the (launch_id, launch_parent_pid) tuple; forward it
-        // verbatim so callDaemon can fan into the live seat of this launch.
-        if (typeof status.launch_id === "string" && status.launch_id.length > 0) caller.launchId = status.launch_id
-        if (
-          typeof status.launch_parent_pid === "number" &&
-          Number.isSafeInteger(status.launch_parent_pid) &&
-          status.launch_parent_pid > 0
-        ) {
-          caller.launchParentPid = status.launch_parent_pid
-        }
-        return caller
-      }
-      failure = `daemon launch authority returned no current session for launch id ${launchId}`
+      // The daemon owns the (launch_id, launch_parent_pid) tuple; callDaemon registers under it verbatim so this
+      // one-shot fans into the live seat of this launch.
+      const seat = await resolveLaunchSeat((method, params) => callDaemon(method, params), {
+        launchId,
+        persona: replyOwnerFromEnv(),
+      })
+      warnIfSelfTransportDown("send", seat.status)
+      return { name: seat.session, launchId: seat.launchId, launchParentPid: seat.launchParentPid }
     } catch (error) {
       failure = `cannot resolve launch identity ${launchId}: ${error instanceof Error ? error.message : String(error)}`
     }

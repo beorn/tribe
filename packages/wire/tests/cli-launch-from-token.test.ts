@@ -3,7 +3,7 @@
  *          (a tokenless child of the controller, measured 2026-09-25), resolves and drains that seat's inbox.
  * @level l2
  * @consumer `tribe inbox-status|inbox-wait|inbox-drain` without --session: the /do authentication step, tent await,
- *           the session hooks (25074 3d-1)
+ *           the session hooks (25074 3d-1); `tribe send`'s caller lookup, for a malformed token
  * @testonly none
  *
  * The CLI's managed inbox request takes its launch id from the identity token's sid, never from TRIBE_LAUNCH_ID
@@ -112,5 +112,17 @@ describe("the CLI's managed inbox reads its launch from the identity token (2507
       expect.stringMatching(/^tribe inbox-status: HAB_ID_TOKEN is malformed: .*relaunch the seat through hab$/),
     ])
     expect(byLaunchCalls()).toEqual([])
+  })
+
+  it("send, given a malformed token, refuses in one line and sends nothing (review of 4c7f239adf, note 1)", async () => {
+    const run = await runCli(["send", "@chief", "hello", "--summary", "hello"], {
+      HAB_ID_TOKEN: "not-a-jwt",
+      TRIBE_NAME: SEAT,
+    })
+    expect(run.code).toBe(1)
+    expect(run.stderr.trim().split("\n")).toEqual([
+      expect.stringMatching(/^tribe\.send: delivery refused - HAB_ID_TOKEN is malformed: .*; not sending\.$/),
+    ])
+    expect(calls.filter((call) => call.method !== "cli_protocol")).toEqual([])
   })
 })

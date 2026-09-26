@@ -1316,7 +1316,8 @@ const MIGRATIONS: readonly Migration[] = [
     /**
      * 25074 3d-1a (@cto 2bfc1935 Q0): every envelope carries its sender's authority, so a claimed session's message
      * never reads like a verified seat's. Like wakes_owner, it is a fact about the message fixed at insert, and the
-     * archive half carries it. Rows written before this version read NULL: their authority was never recorded.
+     * archive half carries it. Every row already here predates it and reads 'unrecorded', stamped before any insert
+     * of this version, so NULL means the daemon's own voice and nothing else (@cto a534d184).
      */
     up(db) {
       for (const table of ["messages", "messages_archive"]) {
@@ -1328,6 +1329,8 @@ const MIGRATIONS: readonly Migration[] = [
           (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name),
         )
         if (!columns.has("sender_authority")) db.run(`ALTER TABLE ${table} ADD COLUMN sender_authority TEXT`)
+        // One pass over 705k live rows measured 1.2 s (2026-09-25), once, at the daemon's hand restart.
+        db.run(`UPDATE ${table} SET sender_authority = 'unrecorded' WHERE sender_authority IS NULL`)
       }
     },
   },

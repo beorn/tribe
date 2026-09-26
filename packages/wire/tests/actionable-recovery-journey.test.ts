@@ -2049,7 +2049,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     ])
   }, 60_000)
 
-  it("the one sender: a seat token registers as the seat, the producer rides in the message, the seat stays live", async () => {
+  it("the one sender: a seat token registers through registerLaunchSender as the seat, the producer rides in the message, and the seat's adapter stays live (@cto 26ff1f69 rider 2a)", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const dbPath = join(tmpDir, "tribe.db")
     const verifierPath = join(tmpDir, "verifier.ts")

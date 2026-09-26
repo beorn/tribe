@@ -146,6 +146,29 @@ describe("every envelope carries its sender's authority (25074 3d-1a)", () => {
     expect(fetchedAuthorities()).toEqual({ "pending-conn-7": "claimed" })
   })
 
+  test("a row written before v37 reads unrecorded, so null stays the daemon's own voice (@cto a534d184)", () => {
+    const path = join(dir, "v36.db")
+    const v36 = openDatabase(path)
+    for (const table of ["messages", "messages_archive"]) v36.run(`ALTER TABLE ${table} DROP COLUMN sender_authority`)
+    v36.run("UPDATE _schema_meta SET value = '36' WHERE key = 'version'")
+    const insert = v36.prepare(
+      "INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery) VALUES (?, 'notify', ?, ?, 'direct', 'before v37', 1, 'push')",
+    )
+    insert.run("from-a-seat", "@dev/1", RECIPIENT)
+    insert.run("from-the-daemon", "daemon", RECIPIENT)
+    v36.close()
+
+    const v37 = openDatabase(path)
+    try {
+      expect(v37.prepare("SELECT id, sender_authority FROM messages ORDER BY rowid").all()).toEqual([
+        { id: "from-a-seat", sender_authority: "unrecorded" },
+        { id: "from-the-daemon", sender_authority: "unrecorded" },
+      ])
+    } finally {
+      v37.close()
+    }
+  })
+
   test("the authority is fixed at insert and survives archiving", () => {
     const claimed = sender("s-claimed", "hand-shell", "claimed")
     const sent = sendMessage(claimed, RECIPIENT, "old claim", "notify")

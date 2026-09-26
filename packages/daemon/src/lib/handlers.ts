@@ -38,6 +38,7 @@ import {
   type Delivery,
   type PendingCloseCause,
   type PendingSettlementRow,
+  type SenderAuthority,
   isTerminalSessionLeftReason,
 } from "./messaging.ts"
 import { ACTIONABLE_TYPES_SET, AUTO_TRACK_TYPES_SET } from "./database.ts"
@@ -3851,8 +3852,8 @@ export type FetchRow = {
   attention_required: number
   /** 25662 P3 3 — an incident edge: it woke the owner, so the owner's fetch that returns it acknowledges it. */
   wakes_owner: number
-  /** 25074 3d-1a — the sender's authority at insert; null for the daemon's own voice and for rows before v37. */
-  sender_authority?: SessionAuthority | null
+  /** 25074 3d-1a — the sender's authority at insert, 'unrecorded' before v37; null for the daemon's own voice. */
+  sender_authority?: SenderAuthority | null
 }
 
 export type FetchEvent = {
@@ -3869,8 +3870,11 @@ export type FetchEvent = {
   topic: string | null
   room_id: string | null
   summary: string | null
-  /** Whether the sender was verified, a bearer, or only claimed its name (25074 3d-1a, @cto 2bfc1935 Q0). */
-  from_authority: SessionAuthority | null
+  /**
+   * Whether the sender was verified, a bearer, or only claimed its name (25074 3d-1a, @cto 2bfc1935 Q0); 'unrecorded'
+   * for a message older than that record, null for the daemon's own voice.
+   */
+  from_authority: SenderAuthority | null
 }
 
 export function fetchEvent(row: FetchRow): FetchEvent {

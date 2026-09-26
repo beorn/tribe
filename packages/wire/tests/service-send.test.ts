@@ -1,14 +1,14 @@
 /**
- * @failure  a hab job's page producer (`ag quota wall`, `hab attention`, `hab page project`) registers on a minted
- *           launch id with no identity token, so its session is never verified and 25074 3d cannot delete the
- *           minted-id path
+ * @failure  a producer registers on a launch id nobody gave it: a hab job's page producer on a minted id with no
+ *           token, a seat-run producer under its own name beside the seat, or a tokenless hand run as a claimed
+ *           producer, so no send says who really sent it
  * @level    l1
- * @consumer @i/2-agent-launch/25074-hab-signs-one-identity-token-per-launch (3d prerequisite, @cto 27ac3aed)
+ * @consumer @i/2-agent-launch/25074-hab-signs-one-identity-token-per-launch (3d-1c, @cto 082a4259)
  * @testonly none
  *
- * sendAs is the one register the three producers share. A process hab launched carries HAB_ID_TOKEN; its register
- * presents that token and the launch it names, never a minted id. A process with no token (a hand run) keeps a
- * minted id and says so, because that arm is the transition 3d deletes.
+ * sendAs is the one sender every non-seat producer shares. A hab service's token registers as that service, on its
+ * token. A seat's token registers as the seat under the daemon's own launch tuple, so the send fans into the live
+ * seat. No token refuses before the daemon, naming HAB_ID_TOKEN, the producer and the cure; nothing is minted.
  */
 import { mkdtempSync, realpathSync } from "node:fs"
 import { createServer, type Server } from "node:net"
@@ -16,15 +16,13 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { safeRemoveSync } from "removely"
 import { afterEach, describe, expect, it } from "vitest"
-import { tribeDaemonCalls } from "../src/service-send.ts"
+import { launchSender, tribeDaemonCalls } from "../src/service-send.ts"
+import { launchToken } from "./launch-token.ts"
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u
-
-/** An unsigned JWT-shaped hab service token: the client reads claims unverified; only the daemon verifies. */
-function serviceToken(service: string, sid: string): string {
-  const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url")
-  return `${part({ alg: "EdDSA", typ: "hab-id+jwt" })}.${part({ sid, act: { sub: service, kind: "service" } })}.signature`
-}
+const SEAT = "@dev/2"
+const SEAT_SID = "7b1c0d2e-seat-sid"
+/** The launch tuple the daemon keeps for the seat: its verified `<sid>@<gen>` key and the harness's pid. */
+const SEAT_TUPLE = { launch_id: `${SEAT_SID}@3`, launch_parent_pid: 4242 }
 
 const cleanups: Array<() => void> = []
 afterEach(() => {
@@ -93,8 +91,21 @@ async function fakeDaemon(): Promise<{
             cwd: registered["project"],
           }
           result = { content: [{ text: JSON.stringify({ sessions: [row] }) }] }
+        } else if (request.method === "cli_inbox_status_by_launch_v1") {
+          result =
+            params["launch_id"] === SEAT_SID
+              ? { content: [{ text: JSON.stringify({ session: SEAT, ...SEAT_TUPLE }) }] }
+              : {
+                  content: [
+                    { text: JSON.stringify({ error: `no session holds launch ${String(params["launch_id"])}` }) },
+                  ],
+                }
         } else if (request.method === "tribe.send") {
-          result = { sent: true }
+          // The daemon refuses a send in-band: a JSON-RPC result whose content carries `error` (handlers.ts handleSend).
+          result =
+            params["message"] === "refuse me"
+              ? { content: [{ text: JSON.stringify({ error: "tribe.send: invalid incident - subject is empty" }) }] }
+              : { content: [{ text: JSON.stringify({ sent: true }) }] }
         }
         socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`)
       }
@@ -111,7 +122,7 @@ async function fakeDaemon(): Promise<{
   return { socketPath, calls }
 }
 
-describe("a page producer's send registers on its own hab launch (25074 3d prerequisite)", () => {
+describe("the one sender registers as what its launch's token names (25074 3d-1c)", () => {
   // One row per producer (@cto 6fd50bd0): the register name is the launch's own, the token's actor, never the
   // producer's. quota-wall's job and producer share a name; wait-watch and hab-page are sent by other jobs, so a send
   // that still claimed the producer name would be refused as identity-name-mismatch.
@@ -122,13 +133,11 @@ describe("a page producer's send registers on its own hab launch (25074 3d prere
   ] as const) {
     it(`${producer}, sent by the ${job} job, registers as ${job} on that job's token, never a minted id`, async () => {
       const { socketPath, calls } = await fakeDaemon()
-      const token = serviceToken(job, `${job}:1790357359269`)
-      const said: string[] = []
+      const token = launchToken(`${job}:1790357359269`, job, "service")
 
       const outcome = await tribeDaemonCalls(producer, {
         socketPath,
         env: { HAB_ID_TOKEN: token },
-        say: (line) => said.push(line),
       }).sendAs({ to: "@chief", message: "m" })
 
       expect(outcome.kind).toBe("ok")
@@ -137,28 +146,65 @@ describe("a page producer's send registers on its own hab launch (25074 3d prere
       expect(register?.["idToken"]).toBe(token)
       expect(String(register?.["launchId"]).startsWith(`${job}:1790357359269`)).toBe(true)
       expect(calls.some((call) => call.method === "tribe.send")).toBe(true)
-      expect(said).toEqual([])
     })
   }
 
-  it("a process with no token registers on a minted id and says that is the transition 3d deletes", async () => {
+  it("a seat-run producer registers as the seat under the daemon's launch tuple, presenting no token of its own", async () => {
     const { socketPath, calls } = await fakeDaemon()
-    const said: string[] = []
 
-    const outcome = await tribeDaemonCalls("quota-wall", {
+    const outcome = await tribeDaemonCalls("onfail", {
       socketPath,
-      env: {},
-      say: (line) => said.push(line),
-    }).sendAs({
+      env: { HAB_ID_TOKEN: launchToken(SEAT_SID, SEAT) },
+    }).sendAs({ to: "@chief", message: "m" })
+
+    expect(outcome, JSON.stringify(outcome)).toMatchObject({ kind: "ok" })
+    expect(calls.map((call) => call.method)).toEqual(["cli_inbox_status_by_launch_v1", "register", "tribe.send"])
+    expect(calls[0]?.params).toEqual({ launch_id: SEAT_SID, persona: SEAT })
+    expect(calls[1]?.params).toMatchObject({
+      name: SEAT,
+      launchId: SEAT_TUPLE.launch_id,
+      launchParentPid: SEAT_TUPLE.launch_parent_pid,
+    })
+    expect(calls[1]?.params).not.toHaveProperty("idToken")
+  })
+
+  it("a process with no token is refused before the daemon, naming HAB_ID_TOKEN, the producer and the cure", async () => {
+    const { socketPath, calls } = await fakeDaemon()
+
+    const outcome = await tribeDaemonCalls("quota-wall", { socketPath, env: {} }).sendAs({ to: "@chief", message: "m" })
+
+    expect(outcome.kind).toBe("error")
+    const message = outcome.kind === "error" ? outcome.message : ""
+    expect(message).toMatch(/^quota-wall: no identity token \(HAB_ID_TOKEN\) to send as; run it from a hab seat/)
+    expect(calls).toEqual([])
+  })
+
+  it("a send the daemon refuses in-band is a refused outcome carrying the refusal, never ok", async () => {
+    const { socketPath } = await fakeDaemon()
+
+    const outcome = await tribeDaemonCalls("onfail", {
+      socketPath,
+      env: { HAB_ID_TOKEN: launchToken(SEAT_SID, SEAT) },
+    }).sendAs({ to: "@chief", message: "refuse me" })
+
+    expect(outcome).toEqual({ kind: "refused", refusal: "tribe.send: invalid incident - subject is empty" })
+  })
+
+  it("a tokenless standalone caller of launchSender fails by name, with no daemon to ask", () => {
+    expect(() => launchSender("standalone-tool", {})).toThrow(
+      /^standalone-tool: no identity token \(HAB_ID_TOKEN\) to send as; run it from a hab seat, or as the hab service/,
+    )
+  })
+
+  it("a malformed token is refused before the daemon, by name", async () => {
+    const { socketPath, calls } = await fakeDaemon()
+
+    const outcome = await tribeDaemonCalls("quota-wall", { socketPath, env: { HAB_ID_TOKEN: "not-a-jwt" } }).sendAs({
       to: "@chief",
       message: "m",
     })
 
-    expect(outcome.kind).toBe("ok")
-    const register = calls.find((call) => call.method === "register")?.params
-    expect(register?.["idToken"]).toBeUndefined()
-    expect(String(register?.["launchId"]).split("::")[0]).toMatch(UUID)
-    expect(said.join("")).toContain("quota-wall: registered on a minted launch id")
-    expect(said.join("")).toContain("the transition 25074 3d deletes")
+    expect(outcome.kind === "error" ? outcome.message : "").toMatch(/^quota-wall: HAB_ID_TOKEN is malformed: /)
+    expect(calls).toEqual([])
   })
 })

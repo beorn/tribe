@@ -755,6 +755,12 @@ export function logEvent(
 }
 
 /**
+ * What a message's row says of its sender's authority: the sending session's, or 'unrecorded' for a row written
+ * before the daemon recorded it (schema v37). NULL is the daemon's own voice.
+ */
+export type SenderAuthority = SessionAuthority | "unrecorded"
+
+/**
  * The authority a message is sent with, fixed on the row at insert (25074 3d-1a, @cto 2bfc1935 Q0): every envelope says
  * whether its sender is verified, a bearer, or only claims its name. None is the daemon's voice alone: its own context,
  * or a row it attributes to itself while serving a client's call. A connection without a session row has registered no

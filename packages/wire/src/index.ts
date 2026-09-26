@@ -184,8 +184,12 @@ export { deriveTribePersonaLaunchIdentity, type TribePersonaLaunchIdentity } fro
 export { connectTribeLaunch } from "./launch-registration.ts"
 export {
   describeDaemonOutcome,
+  launchSender,
+  registerLaunchSender,
   TRIBE_DAEMON_DEADLINE_MS,
   tribeDaemonCalls,
+  type LaunchSender,
+  type SendOutcome,
   type TribeDaemonCalls,
 } from "./service-send.ts"
 export { mcpJsonContent } from "./cli/mcp-json-content.ts"
