@@ -9,7 +9,16 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFil
 import { basename, dirname, parse, resolve } from "node:path"
 import { parseArgs } from "node:util"
 import { findAncestorWithin, findGitProjectRoot } from "removely"
-import { BD_ACTOR_ENV, CLAUDE_SESSION_ID_ENV, CLAUDE_SESSION_NAME_ENV, TRIBE_ACCOUNT_ENV, TRIBE_DOMAINS_ENV, TRIBE_NAME_ENV, TRIBE_PROVIDER_ENV, TRIBE_ROLE_ENV } from "../launch-environment.ts"
+import {
+  BD_ACTOR_ENV,
+  CLAUDE_SESSION_ID_ENV,
+  CLAUDE_SESSION_NAME_ENV,
+  TRIBE_ACCOUNT_ENV,
+  TRIBE_DOMAINS_ENV,
+  TRIBE_NAME_ENV,
+  TRIBE_PROVIDER_ENV,
+  TRIBE_ROLE_ENV,
+} from "../launch-environment.ts"
 
 // ---------------------------------------------------------------------------
 // Types

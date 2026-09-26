@@ -639,8 +639,7 @@ function formatExchange(e: Exchange): string {
 }
 
 function findLastTimestamp(lines: string[]): number | null {
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i]!
+  for (const line of [...lines].reverse()) {
     try {
       const obj = JSON.parse(line) as { timestamp?: string | number }
       const ts =

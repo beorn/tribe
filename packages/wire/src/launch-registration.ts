@@ -3,7 +3,12 @@ import { connectToDaemon, type DaemonClient } from "./client.ts"
 import { resolveSocketPath } from "./paths.ts"
 import { deriveTribePersonaLaunchIdentity, providerLaunchIdOf } from "./lib/persona-launch-identity.ts"
 import { readUnverifiedTokenClaims } from "./lib/identity-token.ts"
-import { TRIBE_LAUNCH_PARENT_PID_ENV, TRIBE_NAME_ENV, TRIBE_SESSION_NAME_ENV, tribeSessionIdentityEnvironmentNames } from "./launch-environment.ts"
+import {
+  TRIBE_LAUNCH_PARENT_PID_ENV,
+  TRIBE_NAME_ENV,
+  TRIBE_SESSION_NAME_ENV,
+  tribeSessionIdentityEnvironmentNames,
+} from "./launch-environment.ts"
 import { TRIBE_PROTOCOL_VERSION, TRIBE_SUPPORTED_PROTOCOL_VERSIONS } from "./lib/socket.ts"
 
 export interface TribeLaunchRequest {

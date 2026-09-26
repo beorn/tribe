@@ -62,7 +62,14 @@ import {
   type TribeDeliveryCapability,
 } from "./lib/delivery.ts"
 import { adapterLaunchIdentity } from "./lib/adapter-launch-identity.ts"
-import { TRIBE_PLUGIN_ADAPTER_CHILD_ENV, TRIBE_PLUGIN_ADAPTER_EXIT_RECORD_ENV, TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV, TRIBE_PLUGIN_REEXEC_EXIT_CODE_ENV, TRIBE_PLUGIN_RESUME_JOINED_ENV, TRIBE_TAKEOVER_ENV } from "./launch-environment.ts"
+import {
+  TRIBE_PLUGIN_ADAPTER_CHILD_ENV,
+  TRIBE_PLUGIN_ADAPTER_EXIT_RECORD_ENV,
+  TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV,
+  TRIBE_PLUGIN_REEXEC_EXIT_CODE_ENV,
+  TRIBE_PLUGIN_RESUME_JOINED_ENV,
+  TRIBE_TAKEOVER_ENV,
+} from "./launch-environment.ts"
 
 // stdout IS the MCP wire — a single non-JSON line (a loggily INFO banner)
 // poisons the host's JSON-RPC parser and the session silently loses its

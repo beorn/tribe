@@ -56,7 +56,6 @@ export function withTribeLaunchEnvironment(env: NodeJS.ProcessEnv): NodeJS.Proce
   return { ...env, [INHERITED_PARENT_PID_ENV]: undefined }
 }
 
-
 /** All caller-owned identity fields; services and daemons share this boundary. */
 const SESSION_IDENTITY_ENV = [
   TRIBE_ACCOUNT_ENV,
@@ -78,7 +77,6 @@ const SESSION_IDENTITY_ENV = [
 export function tribeSessionIdentityEnvironmentNames(): readonly string[] {
   return SESSION_IDENTITY_ENV
 }
-
 
 /**
  * Every key by which a child claims or inherits WHO it is on the wire (25074, @cto 559259ad): tribe's session
