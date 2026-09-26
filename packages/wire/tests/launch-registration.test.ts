@@ -161,6 +161,7 @@ describe("ensureRegistered re-registers a launch the daemon dropped (25074 accep
   function restartableDaemon() {
     const sockets: Array<{ destroyed: boolean; dead: boolean }> = []
     let refuseConnects = 0
+    let pid = PID
     const registers: Array<Record<string, unknown>> = []
     const connect: TribeLaunchDeps["connect"] = async () => {
       if (refuseConnects > 0) {
@@ -176,12 +177,12 @@ describe("ensureRegistered re-registers a launch the daemon dropped (25074 accep
           if (method === "cli_daemon") return { pid: 1 }
           if (method === "register") {
             registers.push(params)
-            return { name: REQUEST.name, principalClass: "service", launchId: DERIVED, launchParentPid: PID }
+            return { name: REQUEST.name, principalClass: "service", launchId: DERIVED, launchParentPid: pid }
           }
           const row = {
             name: REQUEST.name,
             launch_id: DERIVED,
-            launch_parent_pid: PID,
+            launch_parent_pid: pid,
             transport_state: "connected",
             delivery: "pull",
             alive: true,
@@ -203,7 +204,7 @@ describe("ensureRegistered re-registers a launch the daemon dropped (25074 accep
         now += ms
         vi.setSystemTime(now)
       },
-      processId: () => PID,
+      processId: () => pid,
     }
     return {
       deps,
@@ -211,6 +212,10 @@ describe("ensureRegistered re-registers a launch the daemon dropped (25074 accep
       restart: (refusedConnects: number) => {
         for (const socket of sockets) Object.assign(socket, { destroyed: true, dead: true })
         refuseConnects = refusedConnects
+      },
+      /** From the next register on, this client presents (and the daemon keys) another harness pid. */
+      changePid: (next: number) => {
+        pid = next
       },
       /** The daemon restarted, but this client has not consumed the EOF: its flag still reads connected. */
       restartHalfOpen: () => {
@@ -272,6 +277,26 @@ describe("ensureRegistered re-registers a launch the daemon dropped (25074 accep
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it("a re-register keyed under another pid throws at once, naming both, and is not retried for the window", async () => {
+    const daemon = restartableDaemon()
+    const joined = await connectTribeLaunch(SERVICE, daemon.deps)
+    daemon.restart(0)
+    daemon.changePid(PID + 1)
+    // The clock advances with each backoff sleep, so a retrying implementation fails fast, on its window message.
+    daemon.startClock()
+    try {
+      await expect(joined.ensureRegistered()).rejects.toThrow(
+        new RegExp(
+          `re-registered @dev/7 as launch ${DERIVED} under pid ${PID + 1}, not its own ${DERIVED} under pid ${PID}`,
+          "u",
+        ),
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(daemon.registers).toHaveLength(2)
   })
 
   it("refuses once its owner closed it", async () => {

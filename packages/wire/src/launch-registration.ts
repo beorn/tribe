@@ -81,6 +81,39 @@ export async function connectTribeLaunch(
   const first = await registerLaunch(request, deps, providerLaunchId)
   let current = first.client
   let closed = false
+  async function reregisterUnlessAnswering(): Promise<void> {
+    if (await ownerTransportAnswers(current)) return
+    current.close()
+    const startedAt = Date.now()
+    const deadline = startedAt + REREGISTER_WINDOW_MS
+    for (let delayMs = 250; ; delayMs = Math.min(delayMs * 2, 5_000)) {
+      let next: Awaited<ReturnType<typeof registerLaunch>>
+      try {
+        next = await registerLaunch(request, deps, providerLaunchId)
+      } catch (error) {
+        if (Date.now() + delayMs > deadline) {
+          throw new Error(
+            `Tribe could not re-register ${request.name} (launch ${first.launchId}) at ${deps.socketPath()} after ` +
+              `${Math.round((Date.now() - startedAt) / 1_000)}s of trying (window ${REREGISTER_WINDOW_MS / 1_000}s): ` +
+              (error instanceof Error ? error.message : String(error)),
+            { cause: error },
+          )
+        }
+        await deps.sleep(delayMs)
+        continue
+      }
+      // A different launch or pid is a wrong answer, not a transient fault: retrying it for the window only hides it.
+      if (next.launchId !== first.launchId || next.processId !== first.processId) {
+        next.client.close()
+        throw new Error(
+          `Tribe re-registered ${request.name} as launch ${next.launchId} under pid ${next.processId}, ` +
+            `not its own ${first.launchId} under pid ${first.processId}`,
+        )
+      }
+      current = next.client
+      return
+    }
+  }
   return {
     joinRetries: first.joinRetries,
     launchParentPid: first.processId,
@@ -94,33 +127,13 @@ export async function connectTribeLaunch(
     isConnected: () => current.socket.destroyed !== true,
     async ensureRegistered() {
       if (closed) throw new Error(`Tribe launch ${first.launchId} (${request.name}) was closed by its owner`)
-      if (await ownerTransportAnswers(current)) return
-      current.close()
-      const startedAt = Date.now()
-      const deadline = startedAt + REREGISTER_WINDOW_MS
-      for (let delayMs = 250; ; delayMs = Math.min(delayMs * 2, 5_000)) {
-        try {
-          const next = await registerLaunch(request, deps, providerLaunchId)
-          if (next.launchId !== first.launchId || next.processId !== first.processId) {
-            next.client.close()
-            throw new Error(
-              `Tribe re-registered ${request.name} as launch ${next.launchId} under pid ${next.processId}, ` +
-                `not its own ${first.launchId} under pid ${first.processId}`,
-            )
-          }
-          current = next.client
-          return
-        } catch (error) {
-          if (Date.now() + delayMs > deadline) {
-            throw new Error(
-              `Tribe could not re-register ${request.name} (launch ${first.launchId}) at ${deps.socketPath()} after ` +
-                `${Math.round((Date.now() - startedAt) / 1_000)}s of trying (window ${REREGISTER_WINDOW_MS / 1_000}s): ` +
-                (error instanceof Error ? error.message : String(error)),
-              { cause: error },
-            )
-          }
-          await deps.sleep(delayMs)
-        }
+      // The launch socket and the client's timers are unref'd, so a caller whose only handle is this launch would
+      // drain the event loop mid-wait and exit 0. Hold the loop for the whole wait, released on return or throw.
+      const hold = setTimeout(() => {}, REREGISTER_WINDOW_MS + OWNER_PROBE_TIMEOUT_MS + 5_000)
+      try {
+        await reregisterUnlessAnswering()
+      } finally {
+        clearTimeout(hold)
       }
     },
     close: () => {
