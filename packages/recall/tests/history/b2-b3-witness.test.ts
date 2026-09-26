@@ -5,7 +5,7 @@
  * @testonly none
  */
 import { Database } from "bun:sqlite"
-import { afterEach, beforeEach, describe, expect, test } from "vitest"
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 import {
   mkdirSync,
   mkdtempSync,
@@ -17,6 +17,7 @@ import {
   readSync,
   closeSync,
   appendFileSync,
+  chmodSync,
 } from "node:fs"
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
@@ -26,6 +27,7 @@ import { initSchema, CURRENT_SCHEMA_VERSION } from "../../src/history/db-schema.
 import { getSession, ftsSearch, getIndexMeta, setIndexMeta } from "../../src/history/db-queries.ts"
 import { closeDb, acquireIndexWriter } from "../../src/history/db.ts"
 import { rebuildIndex, discoverProjectCwds, indexSessionFile } from "../../src/history/indexer.ts"
+import { indexCodexTranscripts } from "../../src/history/codex-indexer.ts"
 import { runInjectDelta, createMemorySeenStore } from "../../src/lib/inject-core.ts"
 
 describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", () => {
@@ -36,7 +38,10 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
   let origClaudeDir: string | undefined
   let origDbPath: string | undefined
 
+  let consoleSpy: ReturnType<typeof vi.spyOn> | undefined
+
   beforeEach(() => {
+    consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {})
     tempDir = mkdtempSync(join(tmpdir(), "recall-b2-b3-witness-"))
     origClaudeDir = process.env.CLAUDE_DIR
     origDbPath = process.env.RECALL_DB_PATH
@@ -54,6 +59,8 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
   })
 
   afterEach(() => {
+    consoleSpy?.mockRestore()
+    vi.restoreAllMocks()
     closeDb()
     db.close()
     if (origClaudeDir !== undefined) {
@@ -952,5 +959,34 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
     expect(row.cwd).toBe("/hh/dev-wt8")
 
     v3Db.close()
+  })
+
+  test("B3.9: codex-indexer populates sessions.cwd from codex transcript cwd", async () => {
+    const mockAg = join(tempDir, "mock-ag.sh")
+    writeFileSync(
+      mockAg,
+      `#!/bin/sh
+cat << 'EOF'
+{"kind":"schema","version":1}
+{"kind":"session","provider":"codex","nativeId":"sess-codex-1","sessionKey":"codex:sess-codex-1","path":"/mock/codex.jsonl","home":"/home/user","account":null,"cwd":"/workspace/codex-proj","createdAt":"2026-09-25T10:00:00.000Z","sizeBytes":100,"mtimeMs":1000,"lastEventAtMs":1000,"keys":["codex:sess-codex-1"],"copies":[{"path":"/mock/codex.jsonl","key":"codex:sess-codex-1","sizeBytes":100,"mtimeMs":1000,"decision":"canonical"}]}
+{"kind":"row","sessionKey":"codex:sess-codex-1","line":1,"role":"user","text":"test prompt","timestamp":"2026-09-25T10:00:00.000Z","recordKind":"event_msg","duplicateOf":null}
+{"kind":"end","nativeId":"sess-codex-1","status":"complete"}
+{"kind":"done","sessions":1,"rows":1}
+EOF
+exit 0
+`,
+      "utf8",
+    )
+    chmodSync(mockAg, 0o755)
+
+    const res = await indexCodexTranscripts(db, {
+      agBin: mockAg,
+      path: "/mock/codex.jsonl",
+    })
+    expect(res.sessions).toBe(1)
+
+    const sess = getSession(db, "codex:sess-codex-1")
+    expect(sess).toBeDefined()
+    expect(sess?.cwd).toBe("/workspace/codex-proj")
   })
 })
