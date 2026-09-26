@@ -15,6 +15,18 @@ import { runRetentionSweep } from "../retention.ts"
 import { STARTUP_SHA, TRIBE_SOURCE_ROOT } from "../code-pin.ts"
 import type { ClientSession } from "./with-client-registry.ts"
 import { withDispatcher } from "./with-dispatcher.ts"
+import type { LoadedIdentityVerifier } from "../identity-verifier.ts"
+
+const managedToken = (name: string, sid: string) => `${name}|${sid}`
+const managedVerifier: LoadedIdentityVerifier = {
+  path: "/test/managed-verifier",
+  suppliesGen: false,
+  verify: async (token) => {
+    const separator = token.indexOf("|")
+    if (separator < 1 || separator === token.length - 1) return { result: "unreadable", reason: "invalid test token" }
+    return { result: "verified", actor: token.slice(0, separator), sid: token.slice(separator + 1) }
+  },
+}
 
 type TestSocket = NetSocket & {
   destroyedByDispatcher: boolean
@@ -847,7 +859,7 @@ describe("dispatcher operational logging", () => {
 
 describe("dispatcher bounded mailbox drain", () => {
   it("accepts turn-start receipts only from a launch-authenticated member and deduplicates provider turns", async () => {
-    const harness = createDispatcherHarness()
+    const harness = createDispatcherHarness({ identityVerifier: managedVerifier })
     cleanup = harness.dispose
     const params = {
       controller_session_id: "s1",
@@ -872,6 +884,7 @@ describe("dispatcher bounded mailbox drain", () => {
       project: "/tmp/hh",
       launchId: "launch-a",
       launchParentPid: process.pid,
+      idToken: managedToken("@agent/0", "launch-a"),
     })
 
     const spoofed = parseError(
@@ -908,7 +921,7 @@ describe("dispatcher bounded mailbox drain", () => {
           jsonrpc: "2.0",
           id: "latest-receipt",
           method: "cli_turn_start_receipt_by_launch_v1",
-          params: { launch_id: "launch-a" },
+          params: { launch_id: "launch-a", id_token: managedToken("@agent/0", "launch-a") },
         },
         "conn-status",
       ),
@@ -925,8 +938,18 @@ describe("dispatcher bounded mailbox drain", () => {
   })
 
   it("validates daemon-derived launch targets and fails closed on conflicting authorities", async () => {
-    const harness = createDispatcherHarness()
+    const harness = createDispatcherHarness({ identityVerifier: managedVerifier })
     cleanup = harness.dispose
+    const token = managedToken("@agent/managed", "managed-launch")
+    harness.addPendingClient("conn-managed")
+    await harness.register("conn-managed", {
+      name: "@agent/managed",
+      pid: liveHolderPid,
+      project: "/tmp/km",
+      launchId: "managed-launch",
+      launchParentPid: process.pid,
+      idToken: token,
+    })
 
     for (const [label, params, code] of [
       ["missing launch id", {}, -32602],
@@ -937,7 +960,12 @@ describe("dispatcher bounded mailbox drain", () => {
     ] as const) {
       const error = parseError(
         await harness.dispatcher.handleRequest(
-          { jsonrpc: "2.0", id: `invalid-${label}`, method: "cli_inbox_status_by_launch_v1", params },
+          {
+            jsonrpc: "2.0",
+            id: `invalid-${label}`,
+            method: "cli_inbox_status_by_launch_v1",
+            params: { ...params, id_token: token },
+          },
           "conn-status",
         ),
       )
@@ -955,6 +983,7 @@ describe("dispatcher bounded mailbox drain", () => {
         project,
         launchId: deriveTribePersonaLaunchIdentity(name, "shared-inherited-launch").launchId,
         launchParentPid: process.pid,
+        idToken: managedToken(name, "shared-inherited-launch"),
       })
     }
 
@@ -964,14 +993,17 @@ describe("dispatcher bounded mailbox drain", () => {
           jsonrpc: "2.0",
           id: "ambiguous-launch-inbox",
           method: "cli_inbox_status_by_launch_v1",
-          params: { launch_id: "shared-inherited-launch" },
+          params: {
+            launch_id: "shared-inherited-launch",
+            id_token: managedToken("@agent/missing", "shared-inherited-launch"),
+          },
         },
         "conn-status",
       ),
     )
 
     expect(ambiguous.code).toBe(-32003)
-    expect(ambiguous.message).toMatch(/resolved to 2 sessions|ambiguous/i)
+    expect(ambiguous.message).toMatch(/2 sessions are registered under its sid/)
 
     for (const persona of ["@agent/outer", "@agent/inner"] as const) {
       const scoped = parseResult<{ session: string; launch_id: string; launch_parent_pid: number }>(
@@ -980,7 +1012,11 @@ describe("dispatcher bounded mailbox drain", () => {
             jsonrpc: "2.0",
             id: `scoped-launch-inbox-${persona}`,
             method: "cli_inbox_status_by_launch_v1",
-            params: { launch_id: "shared-inherited-launch", persona },
+            params: {
+              launch_id: "shared-inherited-launch",
+              persona,
+              id_token: managedToken(persona, "shared-inherited-launch"),
+            },
           },
           "conn-status",
         ),
@@ -994,7 +1030,7 @@ describe("dispatcher bounded mailbox drain", () => {
   })
 
   it("resolves a launch to its sole routable session when connected tombstones share the launch id", async () => {
-    const harness = createDispatcherHarness()
+    const harness = createDispatcherHarness({ identityVerifier: managedVerifier })
     cleanup = harness.dispose
     const launchId = "retained-dead-launch"
 
@@ -1016,6 +1052,7 @@ describe("dispatcher bounded mailbox drain", () => {
       project: "/tmp/hh",
       launchId,
       launchParentPid: process.pid,
+      idToken: managedToken("@chief", launchId),
     })
 
     const status = parseResult<{ session: string; unread_count: number }>(
@@ -1024,7 +1061,7 @@ describe("dispatcher bounded mailbox drain", () => {
           jsonrpc: "2.0",
           id: "retained-dead-launch-inbox",
           method: "cli_inbox_status_by_launch_v1",
-          params: { launch_id: launchId },
+          params: { launch_id: launchId, id_token: managedToken("@chief", launchId) },
         },
         "conn-status",
       ),
@@ -1034,7 +1071,7 @@ describe("dispatcher bounded mailbox drain", () => {
   })
 
   it("projects the latest actionable cursor structurally without exposing message content", async () => {
-    const harness = createDispatcherHarness()
+    const harness = createDispatcherHarness({ identityVerifier: managedVerifier })
     cleanup = harness.dispose
     const launchId = "await-shadow-launch"
     const { connId } = harness.connectClient()
@@ -1044,6 +1081,7 @@ describe("dispatcher bounded mailbox drain", () => {
       project: "/tmp/hh",
       launchId,
       launchParentPid: process.pid,
+      idToken: managedToken("@agent/0", launchId),
     })
     harness.sendActionable("@agent/0", "older private body")
     const latest = harness.sendActionable("@agent/0", "newer private body")
@@ -1054,7 +1092,7 @@ describe("dispatcher bounded mailbox drain", () => {
           jsonrpc: "2.0",
           id: "await-shadow-inbox",
           method: "cli_inbox_status_by_launch_v1",
-          params: { launch_id: launchId },
+          params: { launch_id: launchId, id_token: managedToken("@agent/0", launchId) },
         },
         "conn-status",
       ),
@@ -1075,7 +1113,12 @@ describe("dispatcher bounded mailbox drain", () => {
           jsonrpc: "2.0",
           id: "await-shadow-delivery",
           method: "cli_inbox_delivery_by_launch_v1",
-          params: { launch_id: launchId, message_seq: latest.rowid, message_id: latest.id },
+          params: {
+            launch_id: launchId,
+            id_token: managedToken("@agent/0", launchId),
+            message_seq: latest.rowid,
+            message_id: latest.id,
+          },
         },
         "conn-status",
       ),
@@ -1102,7 +1145,7 @@ describe("dispatcher bounded mailbox drain", () => {
   })
 
   it("keeps legal names containing the tombstone marker routable", async () => {
-    const harness = createDispatcherHarness()
+    const harness = createDispatcherHarness({ identityVerifier: managedVerifier })
     cleanup = harness.dispose
     const launchId = "legal-dead-marker-launch"
     const name = "@agent/foo-dead-letter"
@@ -1113,6 +1156,7 @@ describe("dispatcher bounded mailbox drain", () => {
       project: "/tmp/hh",
       launchId,
       launchParentPid: process.pid,
+      idToken: managedToken(name, launchId),
     })
 
     const status = parseResult<{ session: string }>(
@@ -1121,7 +1165,7 @@ describe("dispatcher bounded mailbox drain", () => {
           jsonrpc: "2.0",
           id: "legal-dead-marker-inbox",
           method: "cli_inbox_status_by_launch_v1",
-          params: { launch_id: launchId },
+          params: { launch_id: launchId, id_token: managedToken(name, launchId) },
         },
         "conn-status",
       ),
@@ -1800,7 +1844,7 @@ describe("dispatcher inbox-wait parsing", () => {
   })
 
   it("projects one tracked broadcast request consistently across every inbox surface", async () => {
-    const harness = createDispatcherHarness()
+    const harness = createDispatcherHarness({ identityVerifier: managedVerifier })
     cleanup = harness.dispose
     const recipientLaunchId = "tracked-broadcast-launch"
 
@@ -1818,7 +1862,7 @@ describe("dispatcher inbox-wait parsing", () => {
             project: "/tmp/km-wt6",
             launchId: recipientLaunchId,
             launchParentPid: process.pid,
-            identitySid,
+            idToken: managedToken(name, recipientLaunchId),
           }),
         )
       } else {
@@ -1866,7 +1910,7 @@ describe("dispatcher inbox-wait parsing", () => {
           jsonrpc: "2.0",
           id: "broadcast-status",
           method: "cli_inbox_status_by_launch_v1",
-          params: { launch_id: recipientLaunchId },
+          params: { launch_id: recipientLaunchId, id_token: managedToken("@agent/recipient", recipientLaunchId) },
         },
         "conn-untrusted",
       ),
@@ -1880,6 +1924,7 @@ describe("dispatcher inbox-wait parsing", () => {
           method: "cli_inbox_delivery_by_launch_v1",
           params: {
             launch_id: recipientLaunchId,
+            id_token: managedToken("@agent/recipient", recipientLaunchId),
             message_seq: status.latest_actionable_seq,
             message_id: status.latest_message_id,
           },
@@ -2219,7 +2264,7 @@ describe("dispatcher inbox-wait parsing", () => {
   })
 
   it("records a launch-correlated CLI wait receipt but never an explicit operator wait receipt", async () => {
-    const harness = createDispatcherHarness()
+    const harness = createDispatcherHarness({ identityVerifier: managedVerifier })
     cleanup = harness.dispose
     const launchId = "managed-inbox-reader"
     const name = "@agent/launch-reader"
@@ -2230,6 +2275,7 @@ describe("dispatcher inbox-wait parsing", () => {
       project: "/tmp/km-wt-launch-reader",
       launchId,
       launchParentPid: process.pid,
+      idToken: managedToken(name, launchId),
     })
 
     const receiptAt = Date.now() + 5_000
@@ -2256,7 +2302,7 @@ describe("dispatcher inbox-wait parsing", () => {
             jsonrpc: "2.0",
             id: "wait-launch-correlated",
             method: "cli_inbox_wait_by_launch_v1",
-            params: { launch_id: launchId, timeoutMs: 0 },
+            params: { launch_id: launchId, id_token: managedToken(name, launchId), timeoutMs: 0 },
           },
           "conn-cli",
         ),
@@ -2274,7 +2320,7 @@ describe("dispatcher inbox-wait parsing", () => {
   // gets its own seat: a wake leaves an unread actionable that would end the
   // next fresh wait on the same mailbox at once.
   it("counts the owner's parked wait as a mailbox consumer, never an operator's wait on that mailbox", async () => {
-    const harness = createDispatcherHarness()
+    const harness = createDispatcherHarness({ identityVerifier: managedVerifier })
     cleanup = harness.dispose
     const launchId = "managed-consumer"
     const cliSeat = "@agent/consumer-cli"
@@ -2286,7 +2332,7 @@ describe("dispatcher inbox-wait parsing", () => {
       project: "/tmp/km-wt-consumer-cli",
       launchId,
       launchParentPid: process.pid,
-      identitySid: "sid-0c",
+      idToken: managedToken(cliSeat, launchId),
     })
     const mcpOwner = harness.connectClient()
     await harness.register(mcpOwner.connId, {
@@ -2319,7 +2365,12 @@ describe("dispatcher inbox-wait parsing", () => {
     const operatorMcp = wait("operator-mcp", "tribe.inbox.wait", { session: cliSeat }, watcher.connId)
     await parked()
     expect(await member(cliSeat)).toMatchObject(unconsumed)
-    const ownerCli = wait("owner-cli", "cli_inbox_wait_by_launch_v1", { launch_id: launchId }, "conn-cli")
+    const ownerCli = wait(
+      "owner-cli",
+      "cli_inbox_wait_by_launch_v1",
+      { launch_id: launchId, id_token: managedToken(cliSeat, launchId) },
+      "conn-cli",
+    )
     await parked()
     expect(await member(cliSeat)).toMatchObject(consumed)
     harness.sendActionable(cliSeat, "wake every wait on this mailbox")
@@ -2342,6 +2393,7 @@ function createDispatcherHarness(
     socketStartedAt?: number
     operatorCapability?: string
     retiredNames?: ReadonlySet<string>
+    identityVerifier?: LoadedIdentityVerifier
   } = {},
 ) {
   const tempDir = mkdtempSync(join(tmpdir(), "tribe-dispatcher-"))
@@ -2494,6 +2546,7 @@ function createDispatcherHarness(
   const daemon = withDispatcher({
     suppressWindowMs: options.suppressWindowMs ?? Number.MAX_SAFE_INTEGER,
     retiredNames: options.retiredNames,
+    identityVerifier: options.identityVerifier,
   })(shape)
 
   return {
@@ -2508,6 +2561,7 @@ function createDispatcherHarness(
         project: string
         launchId?: string
         launchParentPid?: number
+        idToken?: string
         filterMode?: string
         /** A readable mailbox: the sid a verified identity token records on the row (25074 3d-3). This harness
          *  loads no verifier, so the sid is written the way the dispatcher records it after the register. */

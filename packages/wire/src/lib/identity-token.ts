@@ -8,6 +8,10 @@ import { HAB_ID_TOKEN_ENV } from "./hab-session-env.ts"
 
 export { HAB_ID_TOKEN_ENV }
 
+export const MANAGED_INBOX_TOKEN_REQUIRED =
+  `a managed inbox request requires this launch's identity token (${HAB_ID_TOKEN_ENV}), which a hab seat carries; ` +
+  "use --session for an explicit operator target"
+
 export function readIdentityTokenFromEnvironment(env: Readonly<NodeJS.ProcessEnv>): string | null {
   const raw = env[HAB_ID_TOKEN_ENV]
   return raw === undefined || raw.length === 0 ? null : raw

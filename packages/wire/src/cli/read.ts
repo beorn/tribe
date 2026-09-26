@@ -34,7 +34,11 @@ import {
   type PinDirection,
 } from "../lib/code-identity.ts"
 import { describeSettlementConflict, type BallSettlementReason } from "../lib/ball-outcome.ts"
-import { HAB_ID_TOKEN_ENV, readIdentityTokenFromEnvironment } from "../lib/identity-token.ts"
+import {
+  HAB_ID_TOKEN_ENV,
+  MANAGED_INBOX_TOKEN_REQUIRED,
+  readIdentityTokenFromEnvironment,
+} from "../lib/identity-token.ts"
 import { HAB_SERVICE_NAME_ENV } from "../lib/hab-session-env.ts"
 import { TRIBE_NAME_ENV, TRIBE_SESSION_NAME_ENV } from "../launch-environment.ts"
 
@@ -123,15 +127,15 @@ function cliInboxTargetParams(verb: string, session: string | undefined): Record
   }
   const persona = process.env[TRIBE_SESSION_NAME_ENV]?.trim() || process.env[TRIBE_NAME_ENV]?.trim()
   if (launchId) {
-    return { launch_id: launchId, ...(persona === undefined ? {} : { persona }) }
+    return {
+      launch_id: launchId,
+      id_token: readIdentityTokenFromEnvironment(process.env),
+      ...(persona === undefined ? {} : { persona }),
+    }
   }
   // 25074 3d-1: the launch is the identity token's sid. A process without HAB_ID_TOKEN is not a hab launch, whatever
   // TRIBE_LAUNCH_ID or TRIBE_NAME it inherited, so it is refused rather than resolved to that seat's inbox.
-  return refuseManagedInbox(
-    verb,
-    "a managed inbox request requires this launch's identity token (HAB_ID_TOKEN), which a hab seat carries; " +
-      "use --session for an explicit operator target",
-  )
+  return refuseManagedInbox(verb, MANAGED_INBOX_TOKEN_REQUIRED)
 }
 
 /** A managed inbox request this process cannot make: one line before any daemon call, exit 1 as the uncaught error was. */
