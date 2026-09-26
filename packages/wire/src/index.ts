@@ -42,7 +42,14 @@ export { withDaemonCall } from "./util.ts"
 export { resolvePeerSocketPath, resolveSocketPath } from "./paths.ts"
 
 // Launch-environment scrub (25074 3d-2b): a launch id travels structurally, never in the environment.
-export { tribeSessionIdentityEnvironmentNames, withTribeLaunchEnvironment } from "./launch-environment.ts"
+export {
+  BD_ACTOR_ENV,
+  CLAUDE_SESSION_ID_ENV,
+  CLAUDE_SESSION_NAME_ENV,
+  launchIdentityEnvironmentNames,
+  tribeSessionIdentityEnvironmentNames,
+  withTribeLaunchEnvironment,
+} from "./launch-environment.ts"
 
 // A process's own launch is its identity token's sid, read unverified; the daemon verifies (25074 3d-1).
 export type { UnverifiedTokenClaims } from "./lib/identity-token.ts"

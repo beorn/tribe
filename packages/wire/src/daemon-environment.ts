@@ -8,8 +8,7 @@
 
 import { existsSync, fstatSync } from "node:fs"
 import { join } from "node:path"
-import { tribeSessionIdentityEnvironmentNames } from "./launch-environment.ts"
-import { HAB_ID_TOKEN_ENV } from "./lib/identity-token.ts"
+import { launchIdentityEnvironmentNames, tribeSessionIdentityEnvironmentNames } from "./launch-environment.ts"
 
 /**
  * Variables that prove hab launched this process, WITHOUT proving it is
@@ -130,15 +129,13 @@ export function sanitizeStandaloneDaemonEnvironment(source: Readonly<NodeJS.Proc
  */
 export function tribeAmbientEnvironmentNames(): readonly string[] {
   return [
-    ...tribeSessionIdentityEnvironmentNames(),
-    // The launch's identity token: tribe presents it (25074 3b) and, since 3d-1, reads its launch from it, so a
-    // fixture that inherited the runner's own seat token would read that seat's inbox.
-    HAB_ID_TOKEN_ENV,
+    // Every identity key a launch boundary strips (25074, @cto 559259ad): session identity, the launch's token (tribe
+    // reads its launch from it, so a fixture that inherited the runner's seat token would read that seat's inbox),
+    // the harness session and the bead actor.
+    ...launchIdentityEnvironmentNames(),
+    // Configuration, not identity: the declared roster, delivery fallbacks and the habitat root.
     TRIBE_EXPECTED_MEMBERS_ENV,
     TRIBE_EXPECTED_MEMBERS_FILE_ENV,
-    "CLAUDE_SESSION_ID",
-    "CLAUDE_SESSION_NAME",
-    "BD_ACTOR",
     "TRIBE_DELIVERY_FALLBACKS",
     HAB_SESSION_HABITAT_ROOT_ENV,
   ]
