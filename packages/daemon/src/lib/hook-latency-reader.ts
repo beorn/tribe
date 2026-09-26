@@ -50,9 +50,18 @@ export interface ReadHookLatencyOptions {
   timeoutMs?: number
 }
 
+export const HOOK_LATENCY_EMITTER = "prompt-hook-latency"
+export const HOOK_LATENCY_SUBJECT = "recall/hook/prompt"
+export const DEFAULT_HOOK_LATENCY_OWNER = "@chief"
+export const DEFAULT_HOOK_BUDGET_MS = 1500
+
+export type HookLatencyCondition = "hook-kill" | "hook-budget-exceeded"
+
 export interface PageHookLatencyOptions {
   owner?: string
+  subject?: string
   budgetMs?: number
+  condition?: HookLatencyCondition
 }
 
 export interface PageHookLatencyResult {
@@ -80,6 +89,74 @@ interface OpenRun {
   session: string
   startTime: number
   ts: string
+}
+
+interface RawHookLogRow {
+  namespace?: unknown
+  start_time?: unknown
+  ts?: unknown
+  pid?: unknown
+  session?: unknown
+  msg?: unknown
+  elapsed_ms?: unknown
+  steps?: unknown
+}
+
+interface ParsedHookEntry {
+  msg: string
+  tsNum: number
+  tsStr: string
+  pid?: number
+  session: string
+  elapsedMs?: number
+  steps?: Record<string, number>
+}
+
+// silent-fallback-allow: non-prompt-hook log lines or malformed lines in jsonl log are ignored
+function parseHookLogEntry(line: string): ParsedHookEntry | null {
+  const trimmed = line.trim()
+  if (!trimmed) return null
+
+  let parsed: RawHookLogRow
+  try {
+    parsed = JSON.parse(trimmed) as RawHookLogRow
+  } catch {
+    // silent-fallback-allow: malformed json line in jsonl log is ignored
+    return null
+  }
+
+  if (!parsed || typeof parsed !== "object" || parsed.namespace !== "recall:hook:prompt") {
+    return null
+  }
+
+  const tsNum =
+    typeof parsed.start_time === "number"
+      ? parsed.start_time
+      : typeof parsed.ts === "string"
+        ? new Date(parsed.ts).getTime()
+        : 0
+  const tsStr =
+    typeof parsed.ts === "string" ? parsed.ts : tsNum ? new Date(tsNum).toISOString() : new Date().toISOString()
+  const pid = typeof parsed.pid === "number" ? parsed.pid : undefined
+  const session = typeof parsed.session === "string" ? parsed.session : "unknown"
+  const elapsedMs = typeof parsed.elapsed_ms === "number" ? parsed.elapsed_ms : undefined
+  const rawSteps =
+    parsed.steps && typeof parsed.steps === "object" ? (parsed.steps as Record<string, unknown>) : undefined
+  const steps: Record<string, number> | undefined = rawSteps
+    ? Object.fromEntries(
+        Object.entries(rawSteps).filter((entry): entry is [string, number] => typeof entry[1] === "number"),
+      )
+    : undefined
+
+  return {
+    msg: typeof parsed.msg === "string" ? parsed.msg : "",
+    tsNum,
+    tsStr,
+    pid,
+    session,
+    elapsedMs,
+    steps,
+  }
 }
 
 /**
@@ -124,82 +201,55 @@ export function readHookLatencyStats(logPath: string, options?: ReadHookLatencyO
   const stepMaxMs: Record<string, number> = {}
 
   for (const line of lines) {
-    const trimmed = line.trim()
-    if (!trimmed) continue
+    const entry = parseHookLogEntry(line)
+    if (!entry) continue
 
-    let parsed: any
-    try {
-      parsed = JSON.parse(trimmed)
-    } catch {
-      continue
-    }
-
-    if (parsed.namespace !== "recall:hook:prompt") {
-      continue
-    }
-
-    const tsNum = typeof parsed.start_time === "number"
-      ? parsed.start_time
-      : parsed.ts
-        ? new Date(parsed.ts).getTime()
-        : 0
-    const tsStr = parsed.ts ?? (tsNum ? new Date(tsNum).toISOString() : new Date().toISOString())
-    const pid = typeof parsed.pid === "number" ? parsed.pid : undefined
-    const session = typeof parsed.session === "string" ? parsed.session : "unknown"
-
-    if (parsed.msg === "start") {
-      if (tsNum >= windowStartMs && tsNum <= windowEndMs) {
+    if (entry.msg === "start") {
+      if (entry.tsNum >= windowStartMs && entry.tsNum <= windowEndMs) {
         openRuns.push({
-          pid,
-          session,
-          startTime: tsNum,
-          ts: tsStr,
+          pid: entry.pid,
+          session: entry.session,
+          startTime: entry.tsNum,
+          ts: entry.tsStr,
         })
       }
     } else {
-      // Completion row
-      const elapsedMs = typeof parsed.elapsed_ms === "number" ? parsed.elapsed_ms : undefined
-      const steps = parsed.steps && typeof parsed.steps === "object" ? parsed.steps : undefined
-
-      // Attempt to correlate with an open run
       let matchedIndex = -1
-      if (pid !== undefined) {
-        matchedIndex = openRuns.findIndex((r) => r.pid === pid)
+      if (entry.pid !== undefined) {
+        matchedIndex = openRuns.findIndex((r) => r.pid === entry.pid)
       }
-      if (matchedIndex === -1 && session !== "unknown") {
-        matchedIndex = openRuns.findIndex((r) => r.session === session)
+      if (matchedIndex === -1 && entry.session !== "unknown") {
+        matchedIndex = openRuns.findIndex((r) => r.session === entry.session)
       }
 
       if (matchedIndex !== -1) {
-        const [matched] = openRuns.splice(matchedIndex, 1)
-        const effectiveElapsed = elapsedMs ?? (tsNum - matched!.startTime)
+        const matched = openRuns.splice(matchedIndex, 1)[0]
+        if (matched !== undefined) {
+          const effectiveElapsed = entry.elapsedMs ?? entry.tsNum - matched.startTime
+          completedRuns.push({
+            session: matched.session,
+            ts: matched.ts,
+            startTime: matched.startTime,
+            elapsedMs: effectiveElapsed,
+            steps: entry.steps,
+            pid: matched.pid,
+          })
+        }
+      } else if (entry.tsNum >= windowStartMs && entry.tsNum <= windowEndMs) {
+        const effectiveElapsed = entry.elapsedMs ?? 0
         completedRuns.push({
-          session: matched!.session,
-          ts: matched!.ts,
-          startTime: matched!.startTime,
+          session: entry.session,
+          ts: entry.tsStr,
+          startTime: entry.tsNum - effectiveElapsed,
           elapsedMs: effectiveElapsed,
-          steps,
-          pid: matched!.pid,
-        })
-      } else if (tsNum >= windowStartMs && tsNum <= windowEndMs) {
-        // Standalone completion row in window (e.g. start was before window or from older hook)
-        const effectiveElapsed = elapsedMs ?? 0
-        completedRuns.push({
-          session,
-          ts: tsStr,
-          startTime: tsNum - effectiveElapsed,
-          elapsedMs: effectiveElapsed,
-          steps,
-          pid,
+          steps: entry.steps,
+          pid: entry.pid,
         })
       }
 
-      // Track steps
-      if (steps) {
-        for (const [stepName, duration] of Object.entries(steps)) {
-          if (typeof duration === "number") {
-            stepMaxMs[stepName] = Math.max(stepMaxMs[stepName] ?? 0, duration)
-          }
+      if (entry.steps) {
+        for (const [stepName, duration] of Object.entries(entry.steps)) {
+          stepMaxMs[stepName] = Math.max(stepMaxMs[stepName] ?? 0, duration)
         }
       }
     }
@@ -225,9 +275,7 @@ export function readHookLatencyStats(logPath: string, options?: ReadHookLatencyO
   const maxMs = elapsedList.length > 0 ? Math.max(...elapsedList) : null
   const minMs = elapsedList.length > 0 ? Math.min(...elapsedList) : null
   const avgMs =
-    elapsedList.length > 0
-      ? Math.round(elapsedList.reduce((acc, v) => acc + v, 0) / elapsedList.length)
-      : null
+    elapsedList.length > 0 ? Math.round(elapsedList.reduce((acc, v) => acc + v, 0) / elapsedList.length) : null
   const p90Ms = nearestRank(elapsedList, 0.9)
 
   let slowestStepOverall: string | null = null
@@ -280,15 +328,13 @@ export function shouldPageHookLatency(stats: HookLatencyStats, budgetMs?: number
 /**
  * Format page message content, summary, and condition.
  */
-export function formatHookLatencyPage(
+export function formatHookLatencyConditionPage(
+  condition: HookLatencyCondition,
   stats: HookLatencyStats,
   options?: PageHookLatencyOptions,
-): { summary: string; content: string; condition: "hook-kill" | "hook-budget-exceeded" } {
-  const budgetMs = options?.budgetMs ?? stats.budgetMs ?? 1500
-  const isKill = stats.killCount > 0
-  const condition = isKill ? "hook-kill" : "hook-budget-exceeded"
-
-  if (isKill) {
+): { summary: string; content: string } {
+  const budgetMs = options?.budgetMs ?? stats.budgetMs ?? DEFAULT_HOOK_BUDGET_MS
+  if (condition === "hook-kill") {
     const summary = `Prompt hook kill detected: ${stats.killCount} run(s) killed`
     const killedLines = stats.killedRuns
       .map((r) => `- session: ${r.session}, started: ${r.ts} (${r.startTime})`)
@@ -300,7 +346,7 @@ export function formatHookLatencyPage(
       `Killed runs:`,
       killedLines,
     ].join("\n")
-    return { summary, content, condition }
+    return { summary, content }
   } else {
     const slowestStep = stats.slowestStepOverall ?? "unknown"
     const summary = `Prompt hook p90 latency ${stats.p90Ms}ms exceeded budget ${budgetMs}ms (slowest step: ${slowestStep})`
@@ -314,8 +360,18 @@ export function formatHookLatencyPage(
     ]
       .filter(Boolean)
       .join("\n")
-    return { summary, content, condition }
+    return { summary, content }
   }
+}
+
+export function formatHookLatencyPage(
+  stats: HookLatencyStats,
+  options?: PageHookLatencyOptions,
+): { summary: string; content: string; condition: HookLatencyCondition } {
+  const isKill = stats.killCount > 0
+  const condition: HookLatencyCondition = options?.condition ?? (isKill ? "hook-kill" : "hook-budget-exceeded")
+  const { summary, content } = formatHookLatencyConditionPage(condition, stats, options)
+  return { summary, content, condition }
 }
 
 /**
@@ -326,11 +382,20 @@ export function pageHookLatency(
   stats: HookLatencyStats,
   options?: PageHookLatencyOptions,
 ): PageHookLatencyResult {
-  const owner = options?.owner ?? "@dev/11"
-  const budgetMs = options?.budgetMs ?? stats.budgetMs ?? 1500
+  const owner = options?.owner ?? DEFAULT_HOOK_LATENCY_OWNER
+  const rawSubject = options?.subject ?? HOOK_LATENCY_SUBJECT
+  const subject = rawSubject.replaceAll(":", "/")
+  const budgetMs = options?.budgetMs ?? stats.budgetMs ?? DEFAULT_HOOK_BUDGET_MS
 
-  if (!shouldPageHookLatency(stats, budgetMs)) {
-    return { paged: false, reason: "ok" }
+  const targetCondition = options?.condition
+  if (targetCondition === "hook-kill") {
+    if (stats.killCount === 0) return { paged: false, reason: "ok" }
+  } else if (targetCondition === "hook-budget-exceeded") {
+    if (stats.p90Ms === null || stats.p90Ms <= budgetMs) return { paged: false, reason: "ok" }
+  } else {
+    if (!shouldPageHookLatency(stats, budgetMs)) {
+      return { paged: false, reason: "ok" }
+    }
   }
 
   const { summary, content, condition } = formatHookLatencyPage(stats, options)
@@ -347,12 +412,45 @@ export function pageHookLatency(
       summary,
     },
     {
-      emitter: "prompt-hook-latency",
-      subject: owner,
+      emitter: HOOK_LATENCY_EMITTER,
+      subject,
       condition,
       active: true,
     },
   )
 
   return { paged: true, reason: isKill ? "kill" : "budget-exceeded" }
+}
+
+/**
+ * Send incident clearing edge (active: false) when condition recovers.
+ */
+export function clearHookLatencyIncident(
+  api: TribeClientApi,
+  condition: HookLatencyCondition,
+  options?: PageHookLatencyOptions,
+): void {
+  const owner = options?.owner ?? DEFAULT_HOOK_LATENCY_OWNER
+  const rawSubject = options?.subject ?? HOOK_LATENCY_SUBJECT
+  const subject = rawSubject.replaceAll(":", "/")
+  const summary = `Prompt hook condition cleared: ${condition} for ${subject}`
+  const content = `Prompt hook condition '${condition}' for ${subject} has recovered and is now clear.`
+
+  api.send(
+    owner,
+    content,
+    "notify",
+    undefined,
+    {
+      delivery: "push",
+      topic: "prompt-hook-latency:clear",
+      summary,
+    },
+    {
+      emitter: HOOK_LATENCY_EMITTER,
+      subject,
+      condition,
+      active: false,
+    },
+  )
 }
