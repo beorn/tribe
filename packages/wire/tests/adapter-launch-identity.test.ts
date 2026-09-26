@@ -5,11 +5,10 @@
  * @consumer the stdio adapter's register (stdio-adapter.ts LAUNCH_IDENTITY) and every reconnect that replays it
  * @testonly none
  *
- * Which launch an adapter registers under (21049, 25074 3d-1, @cto 2bfc1935). A launch-named adapter with a token
- * takes the token's sid, which for a hab seat is the value TRIBE_LAUNCH_ID held. Tokenless launches (a standalone
- * `ag code`) and unnamed children keep reading TRIBE_LAUNCH_ID until 3d-2 stops projecting it; that fallback and its
- * row are 3d-2's deletion. A token whose claims cannot be read is named, never decides the launch, and never stops a
- * long-running adapter: the daemon's verifier judges the token itself.
+ * Which launch an adapter registers under (21049, 25074 3d-1 and 3d-2, @cto 2bfc1935). The launch is the token's sid,
+ * for a launch-named adapter and an unnamed child alike; for a hab seat that is the value TRIBE_LAUNCH_ID used to hold.
+ * TRIBE_LAUNCH_ID is never read (3d-2): a tokenless process has no launch identity. A token whose claims cannot be read
+ * is named, never decides the launch, and never stops a long-running adapter: the daemon's verifier judges the token.
  */
 
 import { describe, expect, test } from "vitest"
@@ -25,7 +24,7 @@ const PARENT = 4242
 const token = launchToken(TOKEN_SID, SEAT)
 const resolveParentPid = () => PARENT
 
-describe("adapterLaunchIdentity (25074 3d-1)", () => {
+describe("adapterLaunchIdentity (25074 3d-1, 3d-2)", () => {
   test("a launch-named adapter with a token registers under the token's sid, not an inherited TRIBE_LAUNCH_ID", () => {
     expect(
       adapterLaunchIdentity({
@@ -39,21 +38,26 @@ describe("adapterLaunchIdentity (25074 3d-1)", () => {
     })
   })
 
-  test("a tokenless launch keeps its projected TRIBE_LAUNCH_ID until 3d-2 removes the projection", () => {
-    expect(adapterLaunchIdentity({ env: { TRIBE_LAUNCH_ID: INHERITED }, launchName: SEAT, resolveParentPid })).toEqual({
-      identity: { id: deriveTribePersonaLaunchIdentity(SEAT, INHERITED).launchId, parentPid: PARENT },
-      malformedToken: null,
-    })
+  test("a tokenless process holding a TRIBE_LAUNCH_ID has no launch identity: the variable is never read (3d-2)", () => {
+    expect(
+      adapterLaunchIdentity({
+        env: { TRIBE_LAUNCH_ID: INHERITED },
+        launchName: SEAT,
+        resolveParentPid: () => {
+          throw new Error("resolved without an identity")
+        },
+      }),
+    ).toEqual({ identity: null, malformedToken: null })
   })
 
-  test("an unnamed child is unchanged: it forwards the raw TRIBE_LAUNCH_ID and never presents the token", () => {
+  test("an unnamed child keys by the raw sid of the token it inherited, not an inherited TRIBE_LAUNCH_ID (3d-2)", () => {
     expect(
       adapterLaunchIdentity({
         env: { HAB_ID_TOKEN: token, TRIBE_LAUNCH_ID: INHERITED },
         launchName: undefined,
         resolveParentPid,
       }),
-    ).toEqual({ identity: { id: INHERITED, parentPid: PARENT }, malformedToken: null })
+    ).toEqual({ identity: { id: TOKEN_SID, parentPid: PARENT }, malformedToken: null })
   })
 
   test("no token and no launch id is no launch identity, and the parent is never resolved", () => {
@@ -74,7 +78,7 @@ describe("adapterLaunchIdentity (25074 3d-1)", () => {
       launchName: SEAT,
       resolveParentPid,
     })
-    expect(read.identity).toEqual({ id: deriveTribePersonaLaunchIdentity(SEAT, INHERITED).launchId, parentPid: PARENT })
+    expect(read.identity).toBeNull()
     expect(read.malformedToken).toContain("HAB_ID_TOKEN is malformed")
   })
 })

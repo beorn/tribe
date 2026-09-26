@@ -1,14 +1,13 @@
 /**
- * Which launch an adapter registers under (21049, 25074 3d-1, @cto 2bfc1935).
+ * Which launch an adapter registers under (21049, 25074 3d-1 and 3d-2, @cto 2bfc1935).
  *
- * Adapters forward a complete launcher-given identity or nothing; they never mint one. A launch-named adapter that
- * holds its launch's identity token registers under the token's sid: for a hab seat that is the value TRIBE_LAUNCH_ID
- * carried, so a live seat keys exactly as before, and an inherited or stale TRIBE_LAUNCH_ID beside the token no longer
- * decides it. A tokenless launch (a standalone `ag code`) and an unnamed child still read TRIBE_LAUNCH_ID; 3d-2 stops
- * projecting it and deletes that fallback with it. The token is read unverified; the daemon verifies it.
+ * Adapters forward a complete launcher-given identity or nothing; they never mint one. The launch is the identity
+ * token's sid, for a launch-named adapter and an unnamed child alike: for a hab seat that is the value TRIBE_LAUNCH_ID
+ * used to carry, so a live seat and its children key exactly as before. TRIBE_LAUNCH_ID is never read (3d-2): a
+ * tokenless process has no launch identity, and registers as its bare name. Reading the sid presents nothing; only
+ * a launch-named adapter presents the token (stdio-adapter), and the daemon verifies it.
  */
 
-import { readTribeLaunchId } from "../launch-environment.ts"
 import { readIdentityTokenFromEnvironment, readUnverifiedTokenClaims } from "./identity-token.ts"
 import { deriveTribePersonaLaunchIdentity } from "./persona-launch-identity.ts"
 
@@ -28,7 +27,7 @@ export function adapterLaunchIdentity(input: {
   /** Why the token's claims could not be read; the adapter says so, and the daemon's verifier still judges the token. */
   readonly malformedToken: string | null
 } {
-  const token = input.launchName === undefined ? null : readIdentityTokenFromEnvironment(input.env)
+  const token = readIdentityTokenFromEnvironment(input.env)
   let sid: string | undefined
   let malformedToken: string | null = null
   if (token !== null) {
@@ -38,7 +37,7 @@ export function adapterLaunchIdentity(input: {
       malformedToken = error instanceof Error ? error.message : String(error)
     }
   }
-  const providerLaunchId = sid ?? readTribeLaunchId(input.env)
+  const providerLaunchId = sid
   if (providerLaunchId === undefined || providerLaunchId.length === 0) return { identity: null, malformedToken }
   return {
     identity: {
