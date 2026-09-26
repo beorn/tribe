@@ -292,7 +292,7 @@ describe("Tribe command descriptors", () => {
       type: "object",
       description: expect.stringMatching(/verifier.*authority/s),
     })
-    expect(health.mcp.outputSchema.properties?.identity?.description).not.toMatch(/bearer/)
+    expect(JSON.stringify(health.mcp.outputSchema.properties?.identity)).not.toMatch(/bearer/)
     const fetch = commandDescriptorByMcpName("fetch")!
     expect(fetch.mcp.outputSchema.properties).not.toHaveProperty("delivery_ack")
     expect(fetch.mcp.outputSchema.properties).not.toHaveProperty("ack_id")
