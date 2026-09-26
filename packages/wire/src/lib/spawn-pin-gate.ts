@@ -77,8 +77,14 @@ export function evaluateSpawnSource(input: {
   lastPinKnownToSource: boolean | null
   /** Is sourcePin an ancestor of lastBoundPin? (null = not provable). */
   sourceIsAncestorOfLast: boolean | null
+  /**
+   * Is lastBoundPin an ancestor of sourcePin, i.e. is this a forward upgrade? (null or absent = not asked or not
+   * provable). Without it, a forward move and a fork look alike: both answer false to the question above (25074).
+   */
+  lastIsAncestorOfSource?: boolean | null
 }): SpawnSourceDecision {
   const { sourcePin, lastBoundPin, lastPinKnownToSource, sourceIsAncestorOfLast } = input
+  const lastIsAncestorOfSource = input.lastIsAncestorOfSource ?? null
   if (!lastBoundPin) return { allow: true, reason: null } // nothing ever bound — first start
   if (!sourcePin) {
     return {
@@ -99,7 +105,8 @@ export function evaluateSpawnSource(input: {
       reason: `stale spawn source: ${short(sourcePin)} is an ancestor of last-bound pin ${short(lastBoundPin)} — refusing to resurrect older code (21052)`,
     }
   }
-  if (sourceIsAncestorOfLast === false) {
+  if (lastIsAncestorOfSource === true) return { allow: true, reason: null } // a forward upgrade
+  if (sourceIsAncestorOfLast === false && lastIsAncestorOfSource === false) {
     return {
       allow: true,
       reason: `spawn source ${short(sourcePin)} diverges from last-bound pin ${short(lastBoundPin)} (neither is the other's ancestor) — allowing loudly (dev fork?)`,
@@ -265,12 +272,23 @@ export function evaluateSpawnSourceForTree(tree: string, socketPath: string): Sp
   const sourcePin = head.status === 0 && head.stdout !== "" ? head.stdout : null
   let lastPinKnownToSource: boolean | null = null
   let sourceIsAncestorOfLast: boolean | null = null
+  let lastIsAncestorOfSource: boolean | null = null
   if (sourcePin && sourcePin !== sidecar.pin) {
     lastPinKnownToSource = git(tree, ["cat-file", "-e", `${sidecar.pin}^{commit}`]).status === 0
     if (lastPinKnownToSource) {
-      const anc = git(tree, ["merge-base", "--is-ancestor", sourcePin, sidecar.pin])
-      sourceIsAncestorOfLast = anc.status === 0 ? true : anc.status === 1 ? false : null
+      const ancestry = (from: string, to: string): boolean | null => {
+        const status = git(tree, ["merge-base", "--is-ancestor", from, to]).status
+        return status === 0 ? true : status === 1 ? false : null
+      }
+      sourceIsAncestorOfLast = ancestry(sourcePin, sidecar.pin)
+      lastIsAncestorOfSource = ancestry(sidecar.pin, sourcePin)
     }
   }
-  return evaluateSpawnSource({ sourcePin, lastBoundPin: sidecar.pin, lastPinKnownToSource, sourceIsAncestorOfLast })
+  return evaluateSpawnSource({
+    sourcePin,
+    lastBoundPin: sidecar.pin,
+    lastPinKnownToSource,
+    sourceIsAncestorOfLast,
+    lastIsAncestorOfSource,
+  })
 }

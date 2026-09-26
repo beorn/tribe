@@ -286,6 +286,13 @@ describe("Tribe command descriptors", () => {
     expect(health.mcp.outputSchema.properties?.members).toMatchObject({
       description: expect.stringMatching(/is_silent/),
     })
+    // 25074 3d-3 dropped bearer_served, and with it the whole identity block the daemon still emits (review-adhoc5
+    // b48cdc13): precondition 4 was read from identity.authority.
+    expect(health.mcp.outputSchema.properties?.identity).toMatchObject({
+      type: "object",
+      description: expect.stringMatching(/verifier.*authority/s),
+    })
+    expect(health.mcp.outputSchema.properties?.identity?.description).not.toMatch(/bearer/)
     const fetch = commandDescriptorByMcpName("fetch")!
     expect(fetch.mcp.outputSchema.properties).not.toHaveProperty("delivery_ack")
     expect(fetch.mcp.outputSchema.properties).not.toHaveProperty("ack_id")

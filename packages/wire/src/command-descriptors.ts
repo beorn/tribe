@@ -895,6 +895,12 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
               "Read-only 24h response latency, open-ball, connected-session cursor lag, and database growth projection. Every subprojection carries as_of_ms; inbox lag is explicitly projection-only and excludes pane/turn seat-liveness verdicts.",
             additionalProperties: true,
           },
+          identity: {
+            type: "object",
+            description:
+              "The identity verifier the daemon booted with (verifier path, null when none; supplies_gen) and live sessions per authority (verified, claimed). A claimed session registered without a verified token and cannot read its own mailbox.",
+            additionalProperties: true,
+          },
           issues: {
             type: "array",
             description:

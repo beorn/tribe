@@ -95,9 +95,32 @@ describe("evaluateSpawnSource — pure decision table", () => {
       lastBoundPin: B,
       lastPinKnownToSource: true,
       sourceIsAncestorOfLast: false,
+      lastIsAncestorOfSource: false,
     })
     expect(d.allow).toBe(true)
     expect(d.reason).toMatch(/diverges/)
+  })
+
+  test("the last-bound pin is an ancestor of the source — a forward upgrade, allow silently (25074)", () => {
+    const d = evaluateSpawnSource({
+      sourcePin: A,
+      lastBoundPin: B,
+      lastPinKnownToSource: true,
+      sourceIsAncestorOfLast: false,
+      lastIsAncestorOfSource: true,
+    })
+    expect(d).toEqual({ allow: true, reason: null })
+  })
+
+  test("one direction unasked is indeterminate, never called a divergence", () => {
+    const d = evaluateSpawnSource({
+      sourcePin: A,
+      lastBoundPin: B,
+      lastPinKnownToSource: true,
+      sourceIsAncestorOfLast: false,
+    })
+    expect(d.allow).toBe(true)
+    expect(d.reason).toMatch(/indeterminate/)
   })
 })
 
@@ -268,6 +291,14 @@ describe("evaluateSpawnSourceForScript — the observed race, against real git t
     ) as ReturnType<typeof evaluateSpawnSourceForScript>
     expect(stale.allow).toBe(false)
     expect(stale.reason).toMatch(/21052/)
+  })
+
+  // 25074, 2026-09-26 00:55 PDT: the wire restart onto b6969180a1 warned "diverges from last-bound pin 916c1bda75
+  // (neither is the other's ancestor)" though b6969180a1 contains 916c1bda75. Only one direction was ever asked.
+  test("a forward upgrade (the source contains the last-bound pin) allows silently, never 'diverges'", () => {
+    const sock = join(root, "tribe-forward.sock")
+    writePinSidecar(sock, pinA, 5555)
+    expect(evaluateSpawnSourceForScript(join(currentTree, "daemon.ts"), sock)).toEqual({ allow: true, reason: null })
   })
 
   test("stale tree that HAS fetched the newer pin is still refused (proven ancestor)", () => {
