@@ -41,7 +41,6 @@ const { resetVaultDbCacheForTests } = await import("../src/history/vault-fts.ts"
 
 let dir: string
 let vault: string
-let previousVaultDb: string | undefined
 let errSpy: ReturnType<typeof vi.spyOn>
 let exitSpy: ReturnType<typeof vi.spyOn>
 
@@ -49,8 +48,6 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "recall-cli-vault-"))
   vault = join(dir, "state.db")
   new Database(vault).close()
-  previousVaultDb = process.env.KM_VAULT_DB
-  delete process.env.KM_VAULT_DB
   resetVaultDbCacheForTests()
   calls.length = 0
   errSpy = vi.spyOn(console, "error").mockImplementation(() => {})
@@ -63,8 +60,6 @@ afterEach(() => {
   errSpy.mockRestore()
   exitSpy.mockRestore()
   resetVaultDbCacheForTests()
-  if (previousVaultDb === undefined) delete process.env.KM_VAULT_DB
-  else process.env.KM_VAULT_DB = previousVaultDb
   rmSync(dir, { recursive: true, force: true })
 })
 

@@ -1,7 +1,7 @@
 /**
  * The daemon's recall searches the vault its launch line names, and says so when it names none.
  *
- * @failure The daemon ran recall in-process with only the KM_VAULT_DB it happened to inherit from the seat that
+ * @failure The daemon ran recall in-process with only the vault variable it happened to inherit from the seat that
  *          started its supervisor, so a restart from any other environment searched no vault (25149 a3).
  * @level     l2 — the real handlers and the real in-repo engine and vault binding; project sources, search and the
  *            glossary are mocked at their modules, so no index or socket is touched.
@@ -32,15 +32,11 @@ vi.mock("../../../recall/src/history/vault-glossary.ts", async (importOriginal) 
 
 const base = mkdtempSync(join(realpathSync(tmpdir()), "recall-handlers-vault-"))
 const vaultDb = join(base, "state.db")
-const inheritedVault = process.env.KM_VAULT_DB
 
 beforeAll(() => {
-  // Only the launch line may bind: the runner's own environment must not.
-  delete process.env.KM_VAULT_DB
   new Database(vaultDb, { create: true }).close()
 })
 afterAll(() => {
-  if (inheritedVault !== undefined) process.env.KM_VAULT_DB = inheritedVault
   safeRemoveSync(base, { within: realpathSync(tmpdir()) })
 })
 
