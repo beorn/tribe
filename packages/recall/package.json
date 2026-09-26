@@ -26,6 +26,7 @@
     "@silvery/commander": "^0.24.0",
     "@tobilu/qmd": "2.5.3",
     "loggily": "^0.11.0",
+    "removely": "^0.3.0",
     "zod": "^4.3.6"
   }
 }

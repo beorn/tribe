@@ -12,6 +12,7 @@ import * as fs from "fs"
 import * as readline from "readline"
 import * as os from "os"
 import { spawnSync } from "node:child_process"
+import { gitEnvironmentWithoutRootOverrides } from "removely"
 import {
   indexCodexTranscripts,
   validateAgReadiness,
@@ -1716,14 +1717,6 @@ function projectDocumentationSourceId(
 ): string {
   const projectScope = createHash("sha256").update(path.resolve(projectPath)).digest("hex")
   return `${sourcePrefix}${projectScope}:${relativePath}`
-}
-
-function gitEnvironmentWithoutRootOverrides(): NodeJS.ProcessEnv {
-  const env = { ...process.env }
-  delete env.GIT_DIR
-  delete env.GIT_WORK_TREE
-  delete env.GIT_INDEX_FILE
-  return env
 }
 
 function gitAbsolutePath(directory: string, args: readonly string[]): string | null {
