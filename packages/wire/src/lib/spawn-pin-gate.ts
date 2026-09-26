@@ -48,6 +48,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, resolve } from "node:path"
 import { createLogger } from "loggily"
 import { HAB_LAUNCH_REQUIRED_MARKERS } from "../daemon-environment.ts"
+import { HAB_SERVICE_NAME_ENV, HAB_SESSION_HABITAT_ROOT_ENV } from "./hab-session-env.ts"
 
 const log = createLogger("tribe:spawn-pin-gate")
 
@@ -185,7 +186,7 @@ function habServiceOf(owner: SocketOwner): string | null {
 
 /** A binder's owner comes from its own env: `hab:<service>` under a hab service, else standalone. */
 export function socketOwnerForBinder(env: Readonly<NodeJS.ProcessEnv>): SocketOwner {
-  const service = env.HAB_SERVICE_NAME?.trim()
+  const service = env[HAB_SERVICE_NAME_ENV]?.trim()
   return service && !/\s/u.test(service) ? `hab:${service}` : "standalone"
 }
 
@@ -237,7 +238,7 @@ export function evaluateHabLaunchedClient(input: {
   if (!HAB_LAUNCH_REQUIRED_MARKERS.every((name) => env[name]?.trim())) return { allow: true, reason: null }
   return {
     allow: false,
-    reason: `this process was launched by hab (habitat ${env.HAB_SESSION_HABITAT_ROOT}), which owns the daemon for ${socketPath} — not starting one here; restart it with: hh-hab up wire (24906)`,
+    reason: `this process was launched by hab (habitat ${env[HAB_SESSION_HABITAT_ROOT_ENV]}), which owns the daemon for ${socketPath} — not starting one here; restart it with: hh-hab up wire (24906)`,
   }
 }
 

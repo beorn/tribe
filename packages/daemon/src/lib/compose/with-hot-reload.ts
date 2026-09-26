@@ -30,6 +30,7 @@ import type { BaseTribe } from "./base.ts"
 import type { WithBroadcast } from "./with-broadcast.ts"
 import type { WithConfig } from "./with-config.ts"
 import type { WithSocketServer } from "./with-socket-server.ts"
+import { HAB_SERVICE_KIND_ENV } from "tribe-wire/lib/hab-session-env"
 
 const log = createLogger("tribe:hot-reload")
 
@@ -64,7 +65,7 @@ export function reloadReplacementForEnvironment(
   shutdown: () => void,
   parentPid = process.ppid,
 ): ((reason: string) => void) | undefined {
-  if (env.HAB_SERVICE_KIND !== undefined) return () => shutdown()
+  if (env[HAB_SERVICE_KIND_ENV] !== undefined) return () => shutdown()
 
   const reloadExitCode = Number(env.TRIBE_DAEMON_RELOAD_EXIT_CODE)
   if (!hasStandaloneDaemonOwner(env, parentPid)) return undefined
@@ -75,7 +76,7 @@ export function reloadReplacementForEnvironment(
 }
 
 export function hotReloadSourceWatchEnabled(env: Readonly<NodeJS.ProcessEnv>, disableWatch = false): boolean {
-  return !disableWatch && env.HAB_SERVICE_KIND === undefined && !env.TRIBE_NO_AUTORELOAD
+  return !disableWatch && env[HAB_SERVICE_KIND_ENV] === undefined && !env.TRIBE_NO_AUTORELOAD
 }
 
 function buildSourceFiles(sourceDir: string, libTribeDir: string): string[] {

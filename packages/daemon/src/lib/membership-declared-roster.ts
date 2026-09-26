@@ -26,6 +26,7 @@
 import { TRIBE_EXPECTED_MEMBERS_ENV, TRIBE_EXPECTED_MEMBERS_FILE_ENV } from "../../../wire/src/daemon-environment.ts"
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
+import { HAB_SESSION_HABITAT_ROOT_ENV } from "tribe-wire/lib/hab-session-env"
 
 export interface DeclaredMember {
   readonly name: string
@@ -77,7 +78,7 @@ export const TRIBE_EXPECTED_MEMBERS_HABITAT_FILE = "tribe-expected-members.json"
 function resolvedRosterFile(env: Readonly<NodeJS.ProcessEnv>): string | undefined {
   const explicit = env[TRIBE_EXPECTED_MEMBERS_FILE_ENV]?.trim()
   if (explicit !== undefined && explicit !== "") return explicit
-  const root = env.HAB_SESSION_HABITAT_ROOT?.trim()
+  const root = env[HAB_SESSION_HABITAT_ROOT_ENV]?.trim()
   if (root === undefined || root === "") return undefined
   const derived = join(root, TRIBE_EXPECTED_MEMBERS_HABITAT_FILE)
   return existsSync(derived) ? derived : undefined

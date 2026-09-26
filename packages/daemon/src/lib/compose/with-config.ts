@@ -16,6 +16,7 @@ import { resolveRecallDbPath } from "../../../../../plugins/claude/recall/lib/co
 import { resolveSummarizerMode, type SummarizerMode } from "../../../../../plugins/claude/recall/lib/summarizer.ts"
 import { classifyVaultDbFlag, type VaultDbFlag } from "../../../../recall/src/lib/vault-db.ts"
 import type { BaseTribe } from "./base.ts"
+import { HAB_SERVICE_NAME_ENV } from "tribe-wire/lib/hab-session-env"
 
 const log = createLogger("tribe:config")
 
@@ -122,7 +123,7 @@ export function parseIdleQuitAfterSec(raw: string, surface: string): number {
 export function resolveIdleQuit(input: {
   idleQuitAfter?: string
   quitTimeout?: string
-  env: { TRIBE_AUTOQUIT_ON_IDLE?: string; HAB_SERVICE_NAME?: string }
+  env: { TRIBE_AUTOQUIT_ON_IDLE?: string; [HAB_SERVICE_NAME_ENV]?: string }
 }): { idleQuitAfterSec: number; idleQuitSource: IdleQuitSource } {
   if (input.idleQuitAfter !== undefined) {
     return { idleQuitAfterSec: parseIdleQuitAfterSec(input.idleQuitAfter, "--idle-quit-after"), idleQuitSource: "flag" }
@@ -138,7 +139,7 @@ export function resolveIdleQuit(input: {
       idleQuitSource: "env",
     }
   }
-  if (typeof input.env.HAB_SERVICE_NAME === "string" && input.env.HAB_SERVICE_NAME.trim() !== "") {
+  if (typeof input.env[HAB_SERVICE_NAME_ENV] === "string" && input.env[HAB_SERVICE_NAME_ENV].trim() !== "") {
     return { idleQuitAfterSec: -1, idleQuitSource: "hab-managed" }
   }
   return { idleQuitAfterSec: 1800, idleQuitSource: "default" }
@@ -209,7 +210,7 @@ export function withConfig<T extends BaseTribe>(opts: ConfigOpts = {}): (t: T) =
       quitTimeout: daemonArgs["quit-timeout"] as string | undefined,
       env: {
         TRIBE_AUTOQUIT_ON_IDLE: process.env.TRIBE_AUTOQUIT_ON_IDLE,
-        HAB_SERVICE_NAME: process.env.HAB_SERVICE_NAME,
+        [HAB_SERVICE_NAME_ENV]: process.env[HAB_SERVICE_NAME_ENV],
       },
     })
 

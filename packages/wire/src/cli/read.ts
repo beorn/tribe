@@ -35,6 +35,7 @@ import {
 } from "../lib/code-identity.ts"
 import { describeSettlementConflict, type BallSettlementReason } from "../lib/ball-outcome.ts"
 import { HAB_ID_TOKEN_ENV, readIdentityTokenFromEnvironment } from "../lib/identity-token.ts"
+import { HAB_SERVICE_NAME_ENV } from "../lib/hab-session-env.ts"
 
 const PENDING_CLI = visibleCliProjectionForMcp("pending")
 const MEMBERS_CLI = visibleCliProjectionForMcp("members")
@@ -171,8 +172,8 @@ export function formatStopResult(result: StopResult): string {
 /** The hab supervisor context — hab stamps HAB_SERVICE_NAME into every
  * service environment, so its own lifecycle tooling may stop the daemon
  * without the --force ceremony. */
-export function isHabSupervisorContext(env: { HAB_SERVICE_NAME?: string }): boolean {
-  return typeof env.HAB_SERVICE_NAME === "string" && env.HAB_SERVICE_NAME.trim() !== ""
+export function isHabSupervisorContext(env: { [HAB_SERVICE_NAME_ENV]?: string }): boolean {
+  return typeof env[HAB_SERVICE_NAME_ENV] === "string" && env[HAB_SERVICE_NAME_ENV].trim() !== ""
 }
 
 export const STOP_REFUSAL_MESSAGE =
@@ -2150,7 +2151,7 @@ async function cmdRestart(opts: { reason?: string; json?: boolean }): Promise<vo
  * so a raw socket caller cannot stop the rail casually either.
  */
 async function cmdStop(opts: { force?: boolean; reason?: string; json?: boolean }): Promise<void> {
-  if (!opts.force && !isHabSupervisorContext({ HAB_SERVICE_NAME: process.env.HAB_SERVICE_NAME })) {
+  if (!opts.force && !isHabSupervisorContext({ [HAB_SERVICE_NAME_ENV]: process.env[HAB_SERVICE_NAME_ENV] })) {
     console.error(STOP_REFUSAL_MESSAGE)
     process.exit(2)
   }
