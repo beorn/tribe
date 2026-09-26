@@ -88,17 +88,20 @@ const wrapLog = createLogger("injection:wrap")
 const skipLog = createLogger("injection:skip")
 
 const _installedPaths = new Set<string>()
-const _installedWriters = new Set<{ flush(): void }>()
+const _installedWriters = new Map<{ flush(): void }, string>()
 
 /**
- * Flush all active injection file writers synchronously to disk.
+ * Flush all active injection file writers synchronously to disk. A writer that cannot flush is named on stderr and the
+ * rest still flush: the caller flushes so a record survives a kill (25304), and a lost record must not be silent.
  */
 export function flushInjectionFileWriters(): void {
-  for (const writer of _installedWriters) {
+  for (const [writer, path] of _installedWriters) {
     try {
       writer.flush()
-    } catch {
-      // best-effort
+    } catch (error) {
+      console.error(
+        `injection-envelope: could not flush the debug log ${path}: ${error instanceof Error ? error.message : String(error)}`,
+      )
     }
   }
 }
@@ -128,7 +131,7 @@ export function installInjectionFileWriter(path: string): () => void {
     // right perms; let createFileWriter surface the real error.
   }
   const writer = createFileWriter(path)
-  _installedWriters.add(writer)
+  _installedWriters.set(writer, path)
   const sink = (_formatted: string, _level: string, _ns: string, event: Event): void => {
     // Span events flow past too — we only persist log records.
     if (event.kind !== "log") return
