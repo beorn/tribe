@@ -49,6 +49,7 @@
     "./lib/reload-pacing": "./src/lib/reload-pacing.ts",
     "./lib/identity-token": "./src/lib/identity-token.ts",
     "./lib/hab-session-env": "./src/lib/hab-session-env.ts",
+    "./lib/session-identity-env": "./src/lib/session-identity-env.ts",
     "./http": "./src/http-adapter.ts"
   },
   "publishConfig": {
@@ -124,6 +125,10 @@
         "types": "./dist/lib/hab-session-env.d.mts",
         "import": "./dist/lib/hab-session-env.mjs"
       },
+      "./lib/session-identity-env": {
+        "types": "./dist/lib/session-identity-env.d.mts",
+        "import": "./dist/lib/session-identity-env.mjs"
+      },
       "./http": {
         "types": "./dist/http-adapter.d.mts",
         "import": "./dist/http-adapter.mjs"
@@ -168,6 +173,7 @@
       "src/lib/reload-pacing.ts",
       "src/lib/identity-token.ts",
       "src/lib/hab-session-env.ts",
+      "src/lib/session-identity-env.ts",
       "src/http-adapter.ts"
     ],
     "format": "esm"

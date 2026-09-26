@@ -4,6 +4,7 @@ import {
   noOpenIncidentAttentionPredicateSql,
   unretiredAttentionPredicateSql,
 } from "./database.ts"
+import { TRIBE_SLA_ROLE_ENV } from "tribe-wire"
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
@@ -662,7 +663,7 @@ export function parseSlaTargetMs(raw: string | undefined): number | null {
 
 function resolveSlaRole(option: string | null | undefined): string | null {
   if (option !== undefined) return parseSlaRole(option ?? undefined)
-  return parseSlaRole(process.env.TRIBE_SLA_ROLE)
+  return parseSlaRole(process.env[TRIBE_SLA_ROLE_ENV])
 }
 
 function resolveSlaTargetMs(option: number | null | undefined): number {

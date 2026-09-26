@@ -37,6 +37,7 @@ import {
 } from "../../../wire/src/activity-log-contract.ts"
 import { isDaemonStderrLogFilename } from "../../../wire/src/lib/daemon-stderr-log.ts"
 import { stripLoneSurrogates, truncateSurrogateSafe } from "./validation.ts"
+import { CLAUDE_SESSION_ID_ENV } from "tribe-wire"
 
 // ---------------------------------------------------------------------------
 // Config
@@ -232,7 +233,7 @@ export function activityFromMessage(msg: {
  * `pid-<pid>` as a last resort.
  */
 export function writeInjectActivity(content: string, extra?: { meta?: Record<string, unknown> }): void {
-  const session = process.env.CLAUDE_SESSION_ID ?? `pid-${process.pid}`
+  const session = process.env[CLAUDE_SESSION_ID_ENV] ?? `pid-${process.pid}`
   const collapsed = content.replace(/\s+/g, " ").trim()
   writeActivity({
     ts: Date.now(),
@@ -263,7 +264,7 @@ export function writeGateActivity(args: {
   sessionId?: string
   meta?: Record<string, unknown>
 }): void {
-  const session = args.sessionId ?? process.env.CLAUDE_SESSION_ID ?? `pid-${process.pid}`
+  const session = args.sessionId ?? process.env[CLAUDE_SESSION_ID_ENV] ?? `pid-${process.pid}`
   const reasonClean = args.reason.replace(/\s+/g, " ").trim()
   const preview = stripLoneSurrogates(
     reasonClean.length <= 200 ? reasonClean : truncateSurrogateSafe(reasonClean, 199) + "…",

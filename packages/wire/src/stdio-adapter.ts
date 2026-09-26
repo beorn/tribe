@@ -62,6 +62,7 @@ import {
   type TribeDeliveryCapability,
 } from "./lib/delivery.ts"
 import { adapterLaunchIdentity } from "./lib/adapter-launch-identity.ts"
+import { TRIBE_PLUGIN_ADAPTER_CHILD_ENV, TRIBE_PLUGIN_ADAPTER_EXIT_RECORD_ENV, TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV, TRIBE_PLUGIN_REEXEC_EXIT_CODE_ENV, TRIBE_PLUGIN_RESUME_JOINED_ENV, TRIBE_TAKEOVER_ENV } from "./launch-environment.ts"
 
 // stdout IS the MCP wire — a single non-JSON line (a loggily INFO banner)
 // poisons the host's JSON-RPC parser and the session silently loses its
@@ -131,7 +132,7 @@ if (LAUNCH_NAME !== undefined && !isTribeNameShape(LAUNCH_NAME)) {
 }
 const REGISTER_WITH_LAUNCH_NAME =
   LAUNCH_NAME !== undefined && (!REQUIRE_EXPLICIT_JOIN || isExplicitTribePersonaName(LAUNCH_NAME))
-let joined = !REQUIRE_EXPLICIT_JOIN || process.env.TRIBE_PLUGIN_RESUME_JOINED === "1"
+let joined = !REQUIRE_EXPLICIT_JOIN || process.env[TRIBE_PLUGIN_RESUME_JOINED_ENV] === "1"
 /**
  * The delivery this session has now. Registration declares it to the daemon and
  * the model is told the same thing: a push session that has not called
@@ -145,14 +146,14 @@ function currentDeliveryCapability(): TribeDeliveryCapability {
 // respawn can supersede a stale live holder once. The capability is consumed
 // after the first successful registration; replaying it on reconnect lets two
 // displaced adapters evict each other forever (21049).
-const TAKEOVER = REGISTER_WITH_LAUNCH_NAME && process.env.TRIBE_TAKEOVER === "1"
-const PLUGIN_ADAPTER_CHILD = process.env.TRIBE_PLUGIN_ADAPTER_CHILD === "1"
-const PLUGIN_PROVIDER_PARENT_PID_RAW = process.env.TRIBE_PLUGIN_PROVIDER_PARENT_PID?.trim() ?? ""
+const TAKEOVER = REGISTER_WITH_LAUNCH_NAME && process.env[TRIBE_TAKEOVER_ENV] === "1"
+const PLUGIN_ADAPTER_CHILD = process.env[TRIBE_PLUGIN_ADAPTER_CHILD_ENV] === "1"
+const PLUGIN_PROVIDER_PARENT_PID_RAW = process.env[TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV]?.trim() ?? ""
 // G9 P0 row 7 — the launch's adapter-exit record, named by the supervisor that
 // appends to it (plugins/claude/supervisor-exit-record.ts). Registering it lets
 // tribe members name the file on this seat's row after this adapter is gone.
 const ADAPTER_EXIT_RECORD = PLUGIN_ADAPTER_CHILD
-  ? process.env.TRIBE_PLUGIN_ADAPTER_EXIT_RECORD?.trim() || undefined
+  ? process.env[TRIBE_PLUGIN_ADAPTER_EXIT_RECORD_ENV]?.trim() || undefined
   : undefined
 
 function reportSupervisedIdentity(name: string): void {
@@ -486,7 +487,7 @@ function reportProtocolVersion(reason: string): void {
 }
 
 function pluginReexecExitCode(): number | null {
-  const supervisedExitCode = Number(process.env.TRIBE_PLUGIN_REEXEC_EXIT_CODE)
+  const supervisedExitCode = Number(process.env[TRIBE_PLUGIN_REEXEC_EXIT_CODE_ENV])
   if (Number.isSafeInteger(supervisedExitCode) && supervisedExitCode > 0 && supervisedExitCode <= 252) {
     return supervisedExitCode
   }

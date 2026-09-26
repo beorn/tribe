@@ -36,6 +36,7 @@ import {
 import { describeSettlementConflict, type BallSettlementReason } from "../lib/ball-outcome.ts"
 import { HAB_ID_TOKEN_ENV, readIdentityTokenFromEnvironment } from "../lib/identity-token.ts"
 import { HAB_SERVICE_NAME_ENV } from "../lib/hab-session-env.ts"
+import { TRIBE_NAME_ENV, TRIBE_SESSION_NAME_ENV } from "../launch-environment.ts"
 
 const PENDING_CLI = visibleCliProjectionForMcp("pending")
 const MEMBERS_CLI = visibleCliProjectionForMcp("members")
@@ -120,7 +121,7 @@ function cliInboxTargetParams(verb: string, session: string | undefined): Record
   } catch (error) {
     return refuseManagedInbox(verb, error instanceof Error ? error.message : String(error))
   }
-  const persona = process.env.TRIBE_SESSION_NAME?.trim() || process.env.TRIBE_NAME?.trim()
+  const persona = process.env[TRIBE_SESSION_NAME_ENV]?.trim() || process.env[TRIBE_NAME_ENV]?.trim()
   if (launchId) {
     return { launch_id: launchId, ...(persona === undefined ? {} : { persona }) }
   }

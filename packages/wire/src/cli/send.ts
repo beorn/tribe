@@ -43,6 +43,7 @@ import { writeJsonStdout } from "./json-output.ts"
 import { mcpJsonContent } from "./mcp-json-content.ts"
 import { warnIfSelfTransportDown } from "./self-transport-warning.ts"
 import { oversizedMessageError } from "../lib/send-validation.ts"
+import { TRIBE_NAME_ENV, TRIBE_SESSION_NAME_ENV } from "../launch-environment.ts"
 
 const SEND_CLI = visibleCliProjectionForMcp("send")
 const JOIN_CLI = visibleCliProjectionForMcp("join")
@@ -240,7 +241,7 @@ export function deriveFirstLineSummary(message: string, fallback = ""): string {
 }
 
 function replyOwnerFromEnv(env: NodeJS.ProcessEnv = process.env): string | null {
-  const name = env.TRIBE_SESSION_NAME?.trim() || env.TRIBE_NAME?.trim() || ""
+  const name = env[TRIBE_SESSION_NAME_ENV]?.trim() || env[TRIBE_NAME_ENV]?.trim() || ""
   return name.length > 0 ? name : null
 }
 

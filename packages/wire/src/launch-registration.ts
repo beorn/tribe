@@ -3,7 +3,7 @@ import { connectToDaemon, type DaemonClient } from "./client.ts"
 import { resolveSocketPath } from "./paths.ts"
 import { deriveTribePersonaLaunchIdentity, providerLaunchIdOf } from "./lib/persona-launch-identity.ts"
 import { readUnverifiedTokenClaims } from "./lib/identity-token.ts"
-import { tribeSessionIdentityEnvironmentNames } from "./launch-environment.ts"
+import { TRIBE_LAUNCH_PARENT_PID_ENV, TRIBE_NAME_ENV, TRIBE_SESSION_NAME_ENV, tribeSessionIdentityEnvironmentNames } from "./launch-environment.ts"
 import { TRIBE_PROTOCOL_VERSION, TRIBE_SUPPORTED_PROTOCOL_VERSIONS } from "./lib/socket.ts"
 
 export interface TribeLaunchRequest {
@@ -123,9 +123,9 @@ export async function connectTribeLaunch(
     launchId: first.launchId,
     environment: {
       ...Object.fromEntries(tribeSessionIdentityEnvironmentNames().map((key) => [key, undefined])),
-      TRIBE_LAUNCH_PARENT_PID: String(first.processId),
-      TRIBE_NAME: request.name,
-      TRIBE_SESSION_NAME: request.name,
+      [TRIBE_LAUNCH_PARENT_PID_ENV]: String(first.processId),
+      [TRIBE_NAME_ENV]: request.name,
+      [TRIBE_SESSION_NAME_ENV]: request.name,
     },
     isConnected: () => current.socket.destroyed !== true,
     async ensureRegistered() {

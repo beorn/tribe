@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFil
 import { basename, dirname, parse, resolve } from "node:path"
 import { parseArgs } from "node:util"
 import { findAncestorWithin, findGitProjectRoot } from "removely"
+import { BD_ACTOR_ENV, CLAUDE_SESSION_ID_ENV, CLAUDE_SESSION_NAME_ENV, TRIBE_ACCOUNT_ENV, TRIBE_DOMAINS_ENV, TRIBE_NAME_ENV, TRIBE_PROVIDER_ENV, TRIBE_ROLE_ENV } from "../launch-environment.ts"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -82,16 +83,16 @@ export type ResolveDbPathOptions = {
 export function parseTribeArgs(): TribeArgs {
   const { values } = parseArgs({
     options: {
-      name: { type: "string", default: process.env.TRIBE_NAME },
-      role: { type: "string", default: process.env.TRIBE_ROLE },
-      domains: { type: "string", default: process.env.TRIBE_DOMAINS ?? "" },
+      name: { type: "string", default: process.env[TRIBE_NAME_ENV] },
+      role: { type: "string", default: process.env[TRIBE_ROLE_ENV] },
+      domains: { type: "string", default: process.env[TRIBE_DOMAINS_ENV] ?? "" },
       db: { type: "string", default: process.env.TRIBE_DB },
       socket: { type: "string", default: process.env.TRIBE_SOCKET },
       "auto-report": { type: "boolean", default: (process.env.TRIBE_AUTO_REPORT ?? "1") === "1" },
       // @km/infra/15641 Phase 1 — account/provider label, sourced from
       // ag via TRIBE_ACCOUNT / TRIBE_PROVIDER env vars at spawn time.
-      account: { type: "string", default: process.env.TRIBE_ACCOUNT },
-      provider: { type: "string", default: process.env.TRIBE_PROVIDER },
+      account: { type: "string", default: process.env[TRIBE_ACCOUNT_ENV] },
+      provider: { type: "string", default: process.env[TRIBE_PROVIDER_ENV] },
     },
     strict: false,
   })
@@ -267,11 +268,11 @@ export function detectName(db: Database, _role: TribeRole, args: TribeArgs): str
 
 /** Resolve the Claude Code session ID from env vars */
 export function resolveClaudeSessionId(): string | null {
-  return process.env.CLAUDE_SESSION_ID ?? process.env.BD_ACTOR?.replace("claude:", "") ?? null
+  return process.env[CLAUDE_SESSION_ID_ENV] ?? process.env[BD_ACTOR_ENV]?.replace("claude:", "") ?? null
 }
 
 export function resolveClaudeSessionName(): string | null {
-  return process.env.CLAUDE_SESSION_NAME ?? null
+  return process.env[CLAUDE_SESSION_NAME_ENV] ?? null
 }
 
 /** Canonical project identity — deterministic hash of the resolved project root path.
