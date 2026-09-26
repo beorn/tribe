@@ -149,8 +149,8 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
     port,
     url: `http://127.0.0.1:${port}/mcp`,
     close() {
-      http.stop(true)
-      void daemon.close()
+      void http.stop(true)
+      daemon.close()
     },
   }
 }
