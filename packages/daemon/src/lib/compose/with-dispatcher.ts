@@ -88,6 +88,7 @@ import type { DirectDeliveryResolver } from "../delivery-resolution.ts"
 import type { DeclaredRoster } from "../membership-declared-roster.ts"
 import { STARTUP_SHA, TRIBE_SOURCE_ROOT } from "../code-pin.ts"
 import { shouldLogSlowRequest } from "../slow-request-log.ts"
+import { recordBearerServed, type BearerServedBranch } from "../bearer-served.ts"
 import { derivedLaunchPrefixUpperBound } from "../launch-prefix-range.ts"
 import {
   displacementRule,
@@ -204,6 +205,9 @@ export function withDispatcher<
   return (t) => {
     const { db, stmts, daemonCtx, recall: recallHandlers, registry, broadcast, socket } = t
     const { clients, socketToClient } = registry
+    // The default start of `tribe health`'s bearer_served window (3d-3 prerequisite): this dispatcher comes up once
+    // per daemon process.
+    const daemonStartedAt = Date.now()
     const onActiveClient = hooks.onActiveClient ?? (() => {})
     const onIdle = hooks.onIdle ?? (() => {})
     const getActivePluginNames = hooks.getActivePluginNames ?? (() => [])
@@ -420,6 +424,8 @@ export function withDispatcher<
     ): Promise<SessionAuthorityResolution> {
       const token = requiredNonEmptyString(idToken)
       const verifier = hooks.identityVerifier
+      // Which bearer-served branch a call that reaches the bearer below counts under (3d-3 prerequisite).
+      let fallthrough: "token-unreadable" | "no-token" = "no-token"
       if (token !== null && verifier) {
         let verdict: IdentityVerdict
         try {
@@ -433,7 +439,7 @@ export function withDispatcher<
               `identity verifier ${verifier.path} could not decide a one-shot caller's token (${fault}); ` +
                 `served by ${bearer.row.name}'s bearer`,
             )
-            const resolution = contextForAuthorityRow(bearer.row)
+            const resolution = servedByBearer(bearer.row, "verifier-fault", { fault })
             return "context" in resolution
               ? {
                   ...resolution,
@@ -490,7 +496,7 @@ export function withDispatcher<
               `one-shot caller ${verdict.actor}'s token is verified but no session is registered under its sid ` +
                 `${verdict.sid}; resolved by its bearer until its adapter registers with the token`,
             )
-            return contextForAuthorityRow(bearer.row)
+            return servedByBearer(bearer.row, "no-session-for-sid", { sid: verdict.sid })
           }
           const supplied = requiredNonEmptyString(value)
           const bearerRow = supplied === null ? null : bearerAuthorityRow(supplied)
@@ -512,6 +518,7 @@ export function withDispatcher<
         }
         if (verdict.result === "unreadable") {
           log.warn?.(`one-shot caller's identity token is unreadable (${verdict.reason}); resolving by its bearer`)
+          fallthrough = "token-unreadable"
         }
       }
       const supplied = requiredNonEmptyString(value)
@@ -525,7 +532,20 @@ export function withDispatcher<
         }
       }
       const bearer = resolveBearerAuthority(supplied)
-      return "errorCode" in bearer ? bearer : contextForAuthorityRow(bearer.row)
+      return "errorCode" in bearer
+        ? bearer
+        : servedByBearer(bearer.row, fallthrough, { token_presented: token !== null, verifier: Boolean(verifier) })
+    }
+
+    /** A call the bearer serves: its session's context, recorded once as `session.bearer-served` (3d-3 prerequisite). */
+    function servedByBearer(
+      row: AuthorityRow,
+      branch: Exclude<BearerServedBranch, "register-bearer">,
+      detail: Readonly<Record<string, unknown>>,
+    ): SessionAuthorityResolution {
+      const resolution = contextForAuthorityRow(row)
+      if ("context" in resolution) recordBearerServed(resolution.context, branch, row.launch_id, detail)
+      return resolution
     }
 
     /** The live managed session a bearer names, or the refusal; one lookup for both keys of the dual-key rule. */
@@ -972,6 +992,7 @@ export function withDispatcher<
       recallVaultRefusal: t.config.vaultDbRefusal ?? null,
       identityVerifierPath: hooks.identityVerifier?.path ?? null,
       identityVerifierSuppliesGen: hooks.identityVerifier ? hooks.identityVerifier.suppliesGen : null,
+      daemonStartedAt,
       // tribe.stop actuator — absent (handler refuses loudly) unless the
       // composing daemon supplied its shutdown.
       triggerStop: hooks.triggerShutdown,
@@ -2057,6 +2078,8 @@ export function withDispatcher<
 
             resetOffsetsToTail(client)
             announceJoin(client)
+            // A registration the bearer keyed is the fifth bearer-served branch (3d-3 prerequisite).
+            if (claimantAuthority === "bearer") recordBearerServed(client.ctx, "register-bearer", client.launchId)
             log.info?.("session.identified", {
               ...identityLogFields(client),
               operation: "register",
@@ -2215,7 +2238,12 @@ export function withDispatcher<
           }
 
           case "cli_health": {
-            const health = await handleToolCall(daemonCtx, TRIBE_COORD_METHODS.health, {}, DAEMON_HANDLER_OPTS)
+            const health = await handleToolCall(
+              daemonCtx,
+              TRIBE_COORD_METHODS.health,
+              p.since === undefined ? {} : { since: p.since },
+              DAEMON_HANDLER_OPTS,
+            )
             const { getBridgeLostArming, getHealthSampleStats, getHealthSnapshot } =
               await import("../health-monitor-plugin.ts")
             let machine: unknown = null

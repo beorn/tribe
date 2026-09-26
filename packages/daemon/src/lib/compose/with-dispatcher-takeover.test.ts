@@ -30,7 +30,7 @@ import { createScope } from "tribe-wire"
 import { TRIBE_PROTOCOL_VERSION, type JsonRpcRequest } from "tribe-wire/lib/socket"
 import type { TribeRole } from "tribe-wire/lib/config"
 import { createTribeContext } from "../context.ts"
-import { openDatabase, createStatements } from "../database.ts"
+import { ATTENTION_PREDICATE_SQL, openDatabase, createStatements } from "../database.ts"
 import type { ClientSession } from "./with-client-registry.ts"
 import { withDispatcher, type DispatcherRuntimeHooks } from "./with-dispatcher.ts"
 import type { IdentityVerdict } from "../identity-verifier.ts"
@@ -2325,3 +2325,167 @@ function createFakeServer(): Server {
   }
   return server as unknown as Server
 }
+
+// 25074 3d-3 prerequisite (@cto 6a02149d rider 1, ruling 8c095897): every call the launcher-minted bearer serves is one
+// `session.bearer-served` journal row, so 3d-3's gate is a count over the relaunch window, never a members snapshot.
+describe("bearer-served resolutions are journalled countably (25074 3d-3 prerequisite)", () => {
+  const identityVerifier = {
+    path: "/stub/identity-verifier.ts",
+    suppliesGen: false,
+    verify: async (token: string): Promise<IdentityVerdict> => {
+      // @dev/7's token verifies under a sid no session is registered with yet (the dual-key fallback).
+      if (token === "token-dev7") return { result: "verified", actor: "@dev/7", sid: "sid-dev7-adapter", gen: 1 }
+      if (token === "token-dev8") return { result: "verified", actor: "@dev/8", sid: "sid-dev8", gen: 1 }
+      if (token === "token-undecided") throw new Error("the liveness of @dev/7 is undecided; retry")
+      return { result: "unreadable", reason: "malformed token" }
+    },
+  }
+  const bearer7 = `${"D".repeat(42)}0`
+  const bearer9 = `${"E".repeat(42)}0`
+  const hashOf = (bearer: string) => createHash("sha256").update(bearer).digest("hex")
+  const selfInbox = (harness: ReturnType<typeof createDispatcherHarness>, credentials: Record<string, unknown>) =>
+    harness.request("cli_self_inbox_v1", { ...credentials, limit: 5, peek: true })
+  const journalled = (harness: ReturnType<typeof createDispatcherHarness>): Array<Record<string, unknown>> =>
+    (
+      harness.db
+        .prepare("SELECT sender, content FROM messages WHERE type = 'event.session.bearer-served' ORDER BY rowid")
+        .all() as Array<{ sender: string; content: string }>
+    ).map((row) => ({ sender: row.sender, ...(JSON.parse(row.content) as Record<string, unknown>) }))
+  const bearerServedHealth = async (
+    harness: ReturnType<typeof createDispatcherHarness>,
+    params: Record<string, unknown> = {},
+  ) => {
+    const result = parseResult<{ content: Array<{ text: string }> }>(await harness.request("tribe.health", params))
+    return (JSON.parse(result.content[0]!.text) as { identity: { bearer_served: Record<string, unknown> } }).identity
+      .bearer_served
+  }
+  /** A bearer-registered managed seat: launch `<sid>::<persona>` and its launcher pid, as a fallback bootstrap has. */
+  const registerBearerSeat = async (
+    harness: ReturnType<typeof createDispatcherHarness>,
+    seat: { name: string; pid: number; bearer: string; launchId?: string },
+  ) => {
+    harness.addPendingClient(`conn-${seat.pid}`)
+    parseResult<RegisterResult>(
+      await harness.register(`conn-${seat.pid}`, {
+        name: seat.name,
+        pid: seat.pid,
+        project: "/tmp/p",
+        mailboxAuthorityHash: hashOf(seat.bearer),
+        ...(seat.launchId === undefined ? {} : { launchId: seat.launchId, launchParentPid: seat.pid }),
+      }),
+    )
+  }
+
+  it("each of the five branches journals one row named for its branch and seat; a verified call journals none", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    await registerBearerSeat(harness, { name: "@dev/7", pid: 4700, bearer: bearer7, launchId: "launch-dev7::@dev/7" })
+    harness.addPendingClient("conn-dev8")
+    parseResult<RegisterResult>(
+      await harness.register("conn-dev8", {
+        name: "@dev/8",
+        pid: 4801,
+        project: "/tmp/p",
+        launchParentPid: 4800,
+        idToken: "token-dev8",
+      }),
+    )
+
+    parseResult(await selfInbox(harness, { authority: bearer7 }))
+    parseResult(await selfInbox(harness, { authority: bearer7, idToken: "token-garbled" }))
+    parseResult(await selfInbox(harness, { authority: bearer7, idToken: "token-dev7" }))
+    parseResult(await selfInbox(harness, { authority: bearer7, idToken: "token-undecided" }))
+    parseResult(await selfInbox(harness, { authority: null, idToken: "token-dev8" }))
+
+    expect(journalled(harness).map((row) => [row.sender, row.branch, row.path, row.launch_id])).toEqual([
+      ["@dev/7", "register-bearer", "register", "launch-dev7::@dev/7"],
+      ["@dev/7", "no-token", "one-shot", "launch-dev7::@dev/7"],
+      ["@dev/7", "token-unreadable", "one-shot", "launch-dev7::@dev/7"],
+      ["@dev/7", "no-session-for-sid", "one-shot", "launch-dev7::@dev/7"],
+      ["@dev/7", "verifier-fault", "one-shot", "launch-dev7::@dev/7"],
+    ])
+    expect(journalled(harness).find((row) => row.branch === "no-token")).toMatchObject({ token_presented: false })
+  })
+
+  it("tribe.health counts the window by branch and seat, gate apart from hand, across both journal halves", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    await registerBearerSeat(harness, { name: "@dev/7", pid: 4700, bearer: bearer7, launchId: "launch-dev7::@dev/7" })
+    await registerBearerSeat(harness, { name: "@dev/9", pid: 4900, bearer: bearer9 })
+    // Retention moves the two register rows to the archive half; the count must still see them.
+    harness.db.run(
+      `INSERT INTO messages_archive (seq, id, type, sender, recipient, kind, content, ts, delivery, archived_at)
+       SELECT rowid, id, type, sender, recipient, kind, content, ts, delivery, ts FROM messages
+       WHERE type = 'event.session.bearer-served'`,
+    )
+    harness.db.run("DELETE FROM messages WHERE type = 'event.session.bearer-served'")
+    parseResult(await selfInbox(harness, { authority: bearer7 }))
+    parseResult(await selfInbox(harness, { authority: bearer9 }))
+
+    const block = await bearerServedHealth(harness)
+    expect(block.halves).toEqual(["messages", "messages_archive"])
+    expect(block).toMatchObject({
+      truncated_at: null,
+      gate: {
+        total: 2,
+        by_branch: {
+          "verifier-fault": 0,
+          "no-session-for-sid": 0,
+          "token-unreadable": 0,
+          "no-token": 1,
+          "register-bearer": 1,
+        },
+        by_name: { "@dev/7": 2 },
+      },
+      hand: { total: 2, by_name: { "@dev/9": 2 } },
+    })
+    expect(Date.parse(String(block.since))).toBeLessThanOrEqual(Date.parse(String(block.to)))
+
+    // A window that starts after every row counts nothing, and says so by its bounds.
+    const later = await bearerServedHealth(harness, { since: Date.now() })
+    expect(later).toMatchObject({ gate: { total: 0 }, hand: { total: 0 }, truncated_at: null })
+    expect(parseError(await harness.request("tribe.health", { since: "not-an-instant" }))).toMatchObject({
+      message: expect.stringContaining("since must be an ISO instant or epoch ms"),
+    })
+  })
+
+  it("a window older than what retention kept says it is truncated, never a silent 0", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    await registerBearerSeat(harness, { name: "@dev/7", pid: 4700, bearer: bearer7, launchId: "launch-dev7::@dev/7" })
+    const complete = await bearerServedHealth(harness, { since: 0 })
+    // The journal's first row is still here: nothing was deleted, so a window before it is complete.
+    expect(complete).toMatchObject({ truncated_at: null, gate: { total: 1 } })
+
+    // Retention deletes the oldest rows (the lowest seqs), as the archive-delete phase does.
+    const firstRow = harness.db.prepare("SELECT MIN(rowid) AS seq FROM messages").get() as { seq: number }
+    harness.db.run(`DELETE FROM messages WHERE rowid = ${firstRow.seq}`)
+    const truncated = await bearerServedHealth(harness, { since: 0 })
+    expect(truncated.truncated_at).toEqual(truncated.oldest_retained)
+    expect(String(truncated.note)).toMatch(/^window truncated at /u)
+  })
+
+  it("a bearer-served row is never actionable: it enters no attention and wakes no inbox wait", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    await registerBearerSeat(harness, { name: "@dev/7", pid: 4700, bearer: bearer7, launchId: "launch-dev7::@dev/7" })
+
+    const waiting = harness.dispatcher.handleRequest(
+      { jsonrpc: "2.0", id: "wait-dev7", method: "cli_inbox_wait", params: { session: "@dev/7", timeout_ms: 300 } },
+      "conn-wait",
+    )
+    parseResult(await selfInbox(harness, { authority: bearer7 }))
+    const wait = parseResult<{ timed_out: boolean; attention: { actionable_unread: unknown[] } }>(await waiting)
+
+    expect(journalled(harness).map((row) => row.branch)).toEqual(["register-bearer", "no-token"])
+    expect(wait.timed_out).toBe(true)
+    expect(wait.attention.actionable_unread).toEqual([])
+    expect(
+      harness.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM messages WHERE type = 'event.session.bearer-served' AND ${ATTENTION_PREDICATE_SQL}`,
+        )
+        .get(),
+    ).toEqual({ n: 0 })
+  })
+})
