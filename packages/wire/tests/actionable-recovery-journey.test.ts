@@ -610,8 +610,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
           // direct adapters ignore stale provenance without the child marker.
           TRIBE_PLUGIN_PROVIDER_PARENT_PID: opts.throughPluginSupervisor ? String(process.pid) : "1",
           ...(opts.selfMailboxAuthority === undefined ? {} : { AG_SESSION_AUTH: opts.selfMailboxAuthority }),
-          // Explicit, never the runner's own: an empty token is a launch without one (25074 3b).
-          HAB_ID_TOKEN: opts.idToken ?? "",
+          // Explicit, never the runner's own. A launch carries its own token, as hab gives every launch one: since 3d-2
+          // an adapter reads its launch from the token's sid alone. An empty token is a launch without one (25074 3b).
+          HAB_ID_TOKEN: opts.idToken ?? (launchId ? launchToken(launchId, name) : ""),
           ...(opts.distinctProviderParent
             ? {
                 // Hostile/unsanitized nested launch: both identity inputs are
@@ -1971,7 +1972,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     daemonProc = spawnDaemon(socketPath, join(tmpDir, "tribe.db"), { identityVerifier: verifierPath })
     await waitForDaemonSocket(daemonProc, socketPath)
     const adapter = await spawnLaunchAdapter(socketPath, "undecided-then-live.log", "sid-p2", {
-      idToken: "token-p2",
+      idToken: launchToken("sid-p2", NAME),
     })
     await waitForCondition(
       () =>
@@ -1994,7 +1995,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     daemonProc = spawnDaemon(socketPath, join(tmpDir, "tribe.db"), { identityVerifier: verifierPath })
     await waitForDaemonSocket(daemonProc, socketPath)
     const adapter = await spawnLaunchAdapter(socketPath, "contradicted-final.log", "sid-p2", {
-      idToken: "token-p2",
+      idToken: launchToken("sid-p2", NAME),
     })
     await waitForCondition(
       () => existsSync(adapter.logPath) && readFileSync(adapter.logPath, "utf8").includes("is contradicted"),

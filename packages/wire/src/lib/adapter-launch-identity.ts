@@ -8,7 +8,7 @@
  * a launch-named adapter presents the token (stdio-adapter), and the daemon verifies it.
  */
 
-import { readIdentityTokenFromEnvironment, readUnverifiedTokenClaims } from "./identity-token.ts"
+import { readTokenLaunch } from "./identity-token.ts"
 import { deriveTribePersonaLaunchIdentity } from "./persona-launch-identity.ts"
 
 export interface AdapterLaunchIdentity {
@@ -27,18 +27,8 @@ export function adapterLaunchIdentity(input: {
   /** Why the token's claims could not be read; the adapter says so, and the daemon's verifier still judges the token. */
   readonly malformedToken: string | null
 } {
-  const token = readIdentityTokenFromEnvironment(input.env)
-  let sid: string | undefined
-  let malformedToken: string | null = null
-  if (token !== null) {
-    try {
-      sid = readUnverifiedTokenClaims(token).sid
-    } catch (error) {
-      malformedToken = error instanceof Error ? error.message : String(error)
-    }
-  }
-  const providerLaunchId = sid
-  if (providerLaunchId === undefined || providerLaunchId.length === 0) return { identity: null, malformedToken }
+  const { launchId: providerLaunchId, malformedToken } = readTokenLaunch(input.env)
+  if (providerLaunchId === null) return { identity: null, malformedToken }
   return {
     identity: {
       id:

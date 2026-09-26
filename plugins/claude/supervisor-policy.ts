@@ -41,10 +41,10 @@ export const LEGACY_PARENT_WARNING =
   "tribe plugin wrapper: managed launch supplied no provider-parent PID; falling back to the wrapper's real provider parent. Relaunch the host session to restore full launch provenance."
 
 /**
- * The provider parent this wrapper reports as its launch owner. A managed launch names itself by TRIBE_LAUNCH_ID, or,
- * once it registered by the seat's token (25074 3c-2b, @cto def441bf), by HAB_ID_TOKEN alone: the launcher projects no
- * launch id then. An ABSENT parent PID is indistinguishable from a standalone install or a host launched before the
- * bootstrap started injecting it, so it falls back to the wrapper's real provider parent, loudly for a managed launch,
+ * The provider parent this wrapper reports as its launch owner. A managed launch names itself by its HAB_ID_TOKEN
+ * alone (25074 3c-2b, @cto def441bf; 3d-2: TRIBE_LAUNCH_ID is never read). An ABSENT parent PID is indistinguishable
+ * from a standalone install or a host launched before the bootstrap started injecting it, so it falls back to the
+ * wrapper's real provider parent, loudly for a managed launch,
  * never silently. Rejecting it would strand every already-running seat: a host's env is fixed at launch, so the only
  * remedy is relaunching every seat. A SUPPLIED parent PID without a managed identity, or an invalid one, is a genuine
  * incomplete tuple and throws.
@@ -56,7 +56,7 @@ export function resolveProviderParentPid(
   warn: (line: string) => void,
 ): number {
   const raw = env.TRIBE_PLUGIN_PROVIDER_PARENT_PID?.trim() ?? ""
-  const managed = (env.TRIBE_LAUNCH_ID?.trim() ?? "").length > 0 || (env.HAB_ID_TOKEN?.trim() ?? "").length > 0
+  const managed = (env.HAB_ID_TOKEN?.trim() ?? "").length > 0
   if (raw.length === 0) {
     if (managed) warn(LEGACY_PARENT_WARNING)
     return self.ppid

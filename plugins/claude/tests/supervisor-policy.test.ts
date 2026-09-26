@@ -100,6 +100,17 @@ describe("provider-parent provenance", () => {
     )
   })
 
+  it("a TRIBE_LAUNCH_ID without a token is no managed identity: a supplied parent beside it throws the remedy (3d-2)", () => {
+    expect(() =>
+      resolveProviderParentPid(
+        { TRIBE_LAUNCH_ID: "launch-1", TRIBE_PLUGIN_PROVIDER_PARENT_PID: "4321" },
+        self,
+        alive,
+        () => {},
+      ),
+    ).toThrow(PROVIDER_PARENT_REMEDY)
+  })
+
   it("a managed launch with no provider parent falls back to the real parent, loudly", () => {
     const warnings: string[] = []
     expect(resolveProviderParentPid({ HAB_ID_TOKEN: "seat-token" }, self, alive, (line) => warnings.push(line))).toBe(

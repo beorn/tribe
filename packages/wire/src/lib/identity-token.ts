@@ -46,3 +46,21 @@ export function readLaunchIdFromToken(env: Readonly<NodeJS.ProcessEnv>): string 
   const token = readIdentityTokenFromEnvironment(env)
   return token === null ? null : readUnverifiedTokenClaims(token).sid
 }
+
+/**
+ * The same read for a long-running process (the adapter, ag's controller and roster; review of 4c7f239adf, note 2). A
+ * malformed token is returned as `malformedToken` rather than thrown: the process names it and runs on, the token still
+ * decides nothing, and the daemon's verifier judges it when it is presented. A one-shot uses readLaunchIdFromToken and
+ * fails by name instead.
+ */
+export function readTokenLaunch(
+  env: Readonly<NodeJS.ProcessEnv>,
+): Readonly<{ launchId: string | null; malformedToken: string | null }> {
+  const token = readIdentityTokenFromEnvironment(env)
+  if (token === null) return { launchId: null, malformedToken: null }
+  try {
+    return { launchId: readUnverifiedTokenClaims(token).sid, malformedToken: null }
+  } catch (error) {
+    return { launchId: null, malformedToken: error instanceof Error ? error.message : String(error) }
+  }
+}
