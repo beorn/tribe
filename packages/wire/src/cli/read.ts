@@ -687,7 +687,6 @@ async function cmdPending(
     process.exitCode = 2
     return
   }
-  warnServedByBearer("tribe pending", rawResult)
   if (invalidAuthenticatedPendingSnapshot(method, payload)) {
     console.error(
       "tribe pending: daemon returned an invalid authenticated pending snapshot; expected non-empty owner, a pending array, and non-negative integer count matching its length. Run 'tribe doctor' to compare the running daemon with this checkout before retrying.",
