@@ -439,7 +439,8 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
           stored.status === "bad-header" ||
           stored.status === "unreadable" ||
           stored.status === "stale-bad-header" ||
-          stored.status === "stale-unreadable"
+          stored.status === "stale-unreadable" ||
+          stored.status === "shrunk"
         if (!skippable) return false
         if (stored.jsonl_path !== path) return false
         if (stored.size_bytes !== c.sizeBytes) return false
@@ -781,6 +782,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
                 sizeBytes: copySize,
                 mtimeMs: copyMtime,
                 lastEventAtMs: copyLastEvent,
+                cwd: currentSession.cwd || null,
               })
             }
           }
@@ -816,12 +818,36 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
               oldRowCount: shrinkOldCount,
               newRowCount: shrinkNewCount,
             })
+            const session = currentSession
             for (const key of keys) {
+              const matchedCopy =
+                keys.length > 1
+                  ? session?.copies?.find((c) => c.key === key)
+                  : session?.copies?.find((c) => c.path === session?.path)
+              const copyPath = matchedCopy?.path ?? session?.path ?? ""
+              let copySize = matchedCopy?.sizeBytes ?? (copyPath === session?.path ? session?.sizeBytes : null)
+              let copyMtime = matchedCopy?.mtimeMs ?? (copyPath === session?.path ? session?.mtimeMs : null)
+              const copyLastEvent = matchedCopy?.lastEventAtMs ?? session?.lastEventAtMs ?? null
+
+              if (copySize == null || copyMtime == null) {
+                try {
+                  const st = fs.statSync(copyPath)
+                  if (copySize == null) copySize = st.size
+                  if (copyMtime == null) copyMtime = st.mtimeMs ?? st.mtime.getTime()
+                } catch {
+                  // silent-fallback-allow: file might have been deleted or inaccessible
+                }
+              }
+
               updateSessionStatus(db, key, "shrunk", {
                 failureReason: shrinkReason,
                 failureTime: now,
                 shrinkOldCount,
                 shrinkNewCount,
+                sizeBytes: copySize,
+                mtimeMs: copyMtime,
+                lastEventAtMs: copyLastEvent,
+                jsonlPath: copyPath,
               })
             }
             batchRetainedSessionIds.push(...keys)
@@ -845,6 +871,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
                   sizeBytes: copySize,
                   mtimeMs: copyMtime,
                   lastEventAtMs: copyLastEvent,
+                  cwd: session.cwd || null,
                 })
               }
 

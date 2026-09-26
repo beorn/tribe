@@ -137,7 +137,7 @@ export async function cmdIndex(opts: {
 
     const hasFailures =
       result.pruneRefused !== undefined ||
-      (result.codexFailures !== undefined && result.codexFailures.length > 0) ||
+      (result.codexFailures !== undefined && result.codexFailures.some((f) => f.kind !== "skipped")) ||
       (result.codexUnreadable !== undefined && result.codexUnreadable > 0) ||
       (result.codexErrors !== undefined && result.codexErrors > 0) ||
       (result.claudeFailures !== undefined && result.claudeFailures.length > 0)

@@ -48,9 +48,9 @@ function seedMessage(content: string, id = "a", projectPath = "/test/km"): void 
   const db = getDb()
   const now = Date.now()
   db.prepare(
-    `INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(`sess-${id}`, projectPath, `/tmp/sess-${id}.jsonl`, now - 60_000, now, 1, `Session ${id}`)
+    `INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title, cwd)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(`sess-${id}`, projectPath, `/tmp/sess-${id}.jsonl`, now - 60_000, now, 1, `Session ${id}`, projectPath)
   db.prepare(`INSERT INTO messages (uuid, session_id, type, content, timestamp) VALUES (?, ?, ?, ?, ?)`).run(
     `msg-${id}`,
     `sess-${id}`,
@@ -64,9 +64,9 @@ function seedRankedMessage(id: string, content: string, toolName: string | null)
   const db = getDb()
   const now = Date.now()
   db.prepare(
-    `INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(`sess-${id}`, "/test/km", `/tmp/sess-${id}.jsonl`, now - 60_000, now, 1, `Session ${id}`)
+    `INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title, cwd)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(`sess-${id}`, "/test/km", `/tmp/sess-${id}.jsonl`, now - 60_000, now, 1, `Session ${id}`, "/test/km")
   db.prepare(
     `INSERT INTO messages (uuid, session_id, type, content, tool_name, file_paths, timestamp)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,

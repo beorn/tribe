@@ -197,3 +197,6 @@ export type { TribeLaunchRequest, TribeLaunchConnection, TribeLaunchDeps } from 
 
 // Convenient reply and taking resolution (bead 25028)
 export { deriveFirstLineSummary, resolveRequestSender } from "./cli/send.ts"
+
+// The client-side message cap, so a sender that must fit a body under it reads the one number (hh 25605)
+export { CLIENT_MESSAGE_MAX_LENGTH } from "./lib/send-validation.ts"

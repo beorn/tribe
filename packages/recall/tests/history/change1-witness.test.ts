@@ -748,7 +748,9 @@ if (args[0] === "transcript" && args[1] === "list") {
           return origUp(d)
         }
         runMigrations(dbA)
-        expect((dbA.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3)
+        expect((dbA.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(
+          CURRENT_SCHEMA_VERSION,
+        )
         // Now set spy for B's body run
         step3.up = (d) => {
           v3RunsInB++
@@ -765,7 +767,9 @@ if (args[0] === "transcript" && args[1] === "list") {
       // B must have run v3 body 0 times!
       expect(v3RunsInA).toBe(1)
       expect(v3RunsInB).toBe(0)
-      expect((dbB.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3)
+      expect((dbB.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(
+        CURRENT_SCHEMA_VERSION,
+      )
     } finally {
       step3.up = origUp
       dbA.close()
@@ -807,9 +811,11 @@ if (args[0] === "transcript" && args[1] === "list") {
     }
 
     try {
-      // A migrates to v3
+      // A migrates to latest
       runMigrations(dbA)
-      expect((dbA.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3)
+      expect((dbA.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(
+        CURRENT_SCHEMA_VERSION,
+      )
 
       // B uses defective runner
       step3.up = (d) => {
@@ -994,7 +1000,7 @@ if (args[0] === "transcript" && args[1] === "list") {
       // 1. Non-migrate opener (getDb() without allowMigration) throws loud error naming migrate command
       expect(() => {
         getDb()
-      }).toThrow(/Database schema version 2 requires migration to 3\. Run 'recall index --migrate' to migrate/)
+      }).toThrow(/Database schema version 2 requires migration to \d+\. Run 'recall index --migrate' to migrate/)
 
       // 2. sqlite_master is completely UNCHANGED: no DDL ran, idx_messages_uuid was NOT created
       const checkDbAfter = new Database(v2FixturePath, { readonly: true })
@@ -1016,9 +1022,11 @@ if (args[0] === "transcript" && args[1] === "list") {
         logSpy.mockRestore()
       }
 
-      // 5. user_version is now 3!
+      // 5. user_version is now CURRENT_SCHEMA_VERSION!
       const afterMigrateDb = new Database(v2FixturePath, { readonly: true })
-      expect((afterMigrateDb.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3)
+      expect((afterMigrateDb.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(
+        CURRENT_SCHEMA_VERSION,
+      )
       const masterMigrated = afterMigrateDb
         .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
         .all() as Array<{ type: string; name: string; sql: string }>
@@ -1083,7 +1091,7 @@ if (args[0] === "transcript" && args[1] === "list") {
       // Must STILL refuse even if RECALL_ALLOW_MIGRATE=1 is set in environment!
       expect(() => {
         getDb()
-      }).toThrow(/Database schema version 2 requires migration to 3\. Run 'recall index --migrate' to migrate/)
+      }).toThrow(/Database schema version 2 requires migration to \d+\. Run 'recall index --migrate' to migrate/)
 
       const checkDb = new Database(v2EnvTestPath, { readonly: true })
       expect((checkDb.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(2)
@@ -1120,8 +1128,10 @@ if (args[0] === "transcript" && args[1] === "list") {
         runnerWithEnvBypass(checkDb)
       }).not.toThrow()
 
-      // Defect verified: database was migrated to version 3 by non-migrate opener!
-      expect((checkDb.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3)
+      // Defect verified: database was migrated by non-migrate opener!
+      expect((checkDb.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(
+        CURRENT_SCHEMA_VERSION,
+      )
     } finally {
       delete process.env.RECALL_ALLOW_MIGRATE
       checkDb.close()

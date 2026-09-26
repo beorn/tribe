@@ -63,51 +63,59 @@ afterEach(() => {
 })
 
 describe("Recall refresh completion", () => {
-  test("invalidates prior success before the first corpus mutation can fail", async () => {
+  test("preserves prior success timestamp and stamps run_started_at on run start (B3)", async () => {
     db.exec("CREATE TRIGGER refuse_prune BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT, 'prune failed'); END")
     db.prepare(
       "INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count) VALUES (?, ?, ?, ?, ?, ?)",
     ).run("old", root, "old.jsonl", 1, 1, 1)
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const prior = getIndexMeta(db, "last_rebuild")
     await expect(rebuildIndex(db, { incremental: true })).rejects.toThrow("prune failed")
-    expect(getIndexMeta(db, "last_rebuild")).toBe("")
+    // B3: last_rebuild is never blanked during runs (25104, 25158 B3)
+    expect(getIndexMeta(db, "last_rebuild")).toBe(prior)
+    expect(getIndexMeta(db, "run_started_at")).toBeDefined()
     expect(warn.mock.calls.flat().join(" ")).toContain("1 legacy session(s) have relative paths")
   })
 
   test("a missing required session root cannot become a fresh empty corpus", async () => {
     corpus.projects = join(root, "missing-projects")
+    const prior = getIndexMeta(db, "last_rebuild")
     await expect(rebuildIndex(db, { incremental: true })).rejects.toThrow(corpus.projects)
-    expect(getIndexMeta(db, "last_rebuild")).toBe("")
+    expect(getIndexMeta(db, "last_rebuild")).toBe(prior)
   })
 
   test("an explicitly requested missing project cannot publish success", async () => {
     const missingProject = join(root, "missing-project")
+    const prior = getIndexMeta(db, "last_rebuild")
     await expect(rebuildIndex(db, { incremental: true, projectRoot: missingProject })).rejects.toThrow(missingProject)
-    expect(getIndexMeta(db, "last_rebuild")).toBe("")
+    expect(getIndexMeta(db, "last_rebuild")).toBe(prior)
   })
 
   test.each(["plan", "todo"])("a selected %s read failure cannot publish success", async (kind) => {
     const file = join(root, `missing.${kind === "plan" ? "md" : "json"}`)
     if (kind === "plan") corpus.plans = [file]
     else corpus.todos = [file]
+    const prior = getIndexMeta(db, "last_rebuild")
     await expect(rebuildIndex(db, { incremental: true })).rejects.toThrow(file)
-    expect(getIndexMeta(db, "last_rebuild")).toBe("")
+    expect(getIndexMeta(db, "last_rebuild")).toBe(prior)
   })
 
   test("a malformed selected todo cannot publish success", async () => {
     const file = join(root, "todo.json")
     writeFileSync(file, "invalid JSON")
     corpus.todos = [file]
+    const prior = getIndexMeta(db, "last_rebuild")
     await expect(rebuildIndex(db, { incremental: true })).rejects.toThrow(file)
-    expect(getIndexMeta(db, "last_rebuild")).toBe("")
+    expect(getIndexMeta(db, "last_rebuild")).toBe(prior)
   })
 
   test("completion is published after every other metadata write", async () => {
     db.exec(
       "CREATE TRIGGER refuse_meta BEFORE INSERT ON index_meta WHEN NEW.key = 'total_files' BEGIN SELECT RAISE(ABORT, 'metadata failed'); END",
     )
+    const prior = getIndexMeta(db, "last_rebuild")
     await expect(rebuildIndex(db, { incremental: true })).rejects.toThrow("metadata failed")
-    expect(getIndexMeta(db, "last_rebuild")).toBe("")
+    expect(getIndexMeta(db, "last_rebuild")).toBe(prior)
   })
 
   test("an empty existing corpus succeeds after an earlier failed attempt", async () => {
@@ -203,8 +211,9 @@ describe("Recall refresh completion", () => {
   test("a failed index command releases its writer lock for a later attempt", async () => {
     const source = corpus.projects
     corpus.projects = join(root, "missing-projects")
+    const prior = getIndexMeta(db, "last_rebuild")
     await expect(cmdIndex({ incremental: true })).rejects.toThrow(corpus.projects)
-    expect(getIndexMeta(db, "last_rebuild")).toBe("")
+    expect(getIndexMeta(db, "last_rebuild")).toBe(prior)
     corpus.projects = source
     await cmdIndex({ incremental: true })
     expect(Number.isFinite(Date.parse(getIndexMeta(db, "last_rebuild")!))).toBe(true)
@@ -431,11 +440,12 @@ describe("Recall refresh completion", () => {
     writeFileSync(sessionFile, line1 + line2)
     utimesSync(sessionFile, originalMtime / 1000, originalMtime / 1000)
 
-    // Incremental pass: mtime matches, but size_bytes has changed -> MUST reindex
+    // Incremental pass: mtime matches, but size_bytes has changed -> tail-indexes 1 new message (B2)
     const run2 = await indexSessionFile(db, sessionFile, { incremental: true })
-    expect(run2.messages).toBe(2)
+    expect(run2.messages).toBe(1)
 
     const row2 = db.query("SELECT * FROM sessions WHERE id = 'sess-same-mtime'").get() as any
+    expect(row2.message_count).toBe(2)
     expect(row2.mtime_ms).toBe(originalMtime)
     expect(row2.size_bytes).toBe(Buffer.byteLength(line1 + line2))
 

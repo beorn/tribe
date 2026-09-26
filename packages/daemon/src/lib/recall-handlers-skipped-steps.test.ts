@@ -14,21 +14,15 @@ import { afterAll, describe, expect, test, vi } from "vitest"
 import { TRIBE_METHODS, type InjectDeltaResult } from "../../../../plugins/claude/recall/lib/rpc.ts"
 import { createRecallHandlers } from "./recall-handlers.ts"
 
-const BUSY = "Recall project sources skipped: another connection holds the write lock (database is locked)"
+const SKIPPED_MSG = "recall messages capped: test"
 const fake = vi.hoisted(() => ({ results: [] as unknown[] }))
 
-vi.mock("../../../recall/src/history/project-sources.ts", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../../recall/src/history/project-sources.ts")>()
-  return {
-    ...actual,
-    ensureProjectSourcesIndexed: () => {
-      throw new actual.ProjectSourcesBusyError(BUSY)
-    },
-  }
-})
 vi.mock("../../../recall/src/history/search.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../recall/src/history/search.ts")>()),
-  recall: async () => ({ results: fake.results }),
+  recall: async () => ({
+    results: fake.results,
+    skipped: [{ phase: "messages", anchor: "test", message: SKIPPED_MSG }],
+  }),
 }))
 // A bound vault, so the first injection is not the unbound-vault notice (25149 a1): this suite asks about the
 // skipped step, and the notice's own carriage of it is pinned in inject-core's tests.
@@ -44,7 +38,7 @@ vi.mock("../../../recall/src/history/vault-glossary.ts", async (importOriginal) 
 const base = mkdtempSync(join(realpathSync(tmpdir()), "recall-handlers-skip-"))
 afterAll(() => safeRemoveSync(base, { within: realpathSync(tmpdir()) }))
 
-describe("tribe.inject_delta carries a skipped step (@ag/tribe/25071 row 3)", () => {
+describe("tribe.inject_delta carries a skipped step", () => {
   test.each([
     ["no hits, so the prompt is skipped", [], true],
     [
@@ -61,7 +55,7 @@ describe("tribe.inject_delta carries a skipped step (@ag/tribe/25071 row 3)", ()
       ],
       false,
     ],
-  ])("%s: the result names the busy project-source step", async (_case, results, skipped) => {
+  ])("%s: the result names the skipped recall phase", async (_case, results, skipped) => {
     fake.results = results
     const handlers = createRecallHandlers({
       dbPath: join(base, `lore-${String(skipped)}.db`),
@@ -77,7 +71,7 @@ describe("tribe.inject_delta carries a skipped step (@ag/tribe/25071 row 3)", ()
         },
       )) as InjectDeltaResult
       expect(result.skipped).toBe(skipped)
-      expect(result.skippedSteps).toEqual({ project_sources: BUSY })
+      expect(result.skippedSteps).toEqual({ "recall.messages": SKIPPED_MSG })
     } finally {
       await handlers.close()
     }
