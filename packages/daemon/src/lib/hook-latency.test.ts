@@ -4,7 +4,7 @@
  * @consumer @ag/tribe/25304-nothing-reads-the-prompt-hooks-latency-log-so-a-30-s-kill-is-found-by-the-operator
  * @testonly none
  */
-import { afterEach, beforeEach, describe, expect, test } from "vitest"
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 import { mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -460,6 +460,8 @@ describe("Prompt hook latency reader & paging (25304)", () => {
   test("P3 Criteria 4: Missing log names path and 3 sources considered, and broadcasts health row", async () => {
     const missingPath = join(tempDir, "non-existent-log.jsonl")
     process.env.INJECTION_DEBUG_LOG = missingPath
+    // The missing log is also said on the operator's console; capture it so the row can read it.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
 
     const details = resolveHookLogPathDetails()
     expect(details.path).toBe(missingPath)
@@ -493,9 +495,12 @@ describe("Prompt hook latency reader & paging (25304)", () => {
     expect(broadcasts[0]!.content).toContain("LOGGILY_FILE")
     expect(broadcasts[0]!.content).toContain("default")
 
+    expect(warn.mock.calls.flat().join(" ")).toContain(missingPath)
+
     // Second sample should dedup via claimDedup
     sampler.sample()
     expect(broadcasts).toHaveLength(1)
+    warn.mockRestore()
 
     delete process.env.INJECTION_DEBUG_LOG
   })
