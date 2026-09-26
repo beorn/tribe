@@ -44,24 +44,10 @@ function addSession(
   stmts: TribeStatements,
   sessionId: string,
   name: string,
-  mailboxAuthorityHash: string | null,
   updatedAt: number = Date.now(),
 ): void {
   const ctx = makeContext(db, stmts, sessionId, name)
-  registerSession(
-    ctx,
-    PROJECT_ID,
-    () => false,
-    null,
-    process.pid,
-    "pull",
-    "/repo",
-    null,
-    "codex",
-    null,
-    null,
-    mailboxAuthorityHash,
-  )
+  registerSession(ctx, PROJECT_ID, () => false, null, process.pid, "pull", "/repo", null, "codex", null, null)
   db.run("UPDATE sessions SET updated_at = ? WHERE id = ?", [updatedAt, sessionId])
 }
 
@@ -116,7 +102,7 @@ describe("24994: canonical one-line error shape for tribe.send", () => {
 
   it("pins self-mailbox-authority-missing refusal to one line with last seen time and preserves detail", () => {
     const fiveMinsAgo = Date.now() - 5 * 60_000
-    addSession(db, stmts, "sess-adhoc", "@adhoc/1", null, fiveMinsAgo)
+    addSession(db, stmts, "sess-adhoc", "@adhoc/1", fiveMinsAgo)
     const sender = makeContext(db, stmts, "sess-dev7", "@dev/7")
     const sent = parseToolJson(
       handleToolCall(

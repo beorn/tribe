@@ -19,12 +19,10 @@ import {
 } from "../src/daemon-environment.ts"
 import * as wire from "../src/index.ts"
 import { tribeSessionIdentityEnvironmentNames } from "../src/launch-environment.ts"
-import { readSelfMailboxAuthorityFromEnvironment } from "../src/lib/self-mailbox-authority.ts"
 
 const ambientIdentity = {
   TRIBE_ACCOUNT: "worker@example.test",
   TRIBE_DOMAINS: "runtime",
-  TRIBE_LAUNCH_ID: "launch-7",
   TRIBE_NAME: "@dev/7",
   TRIBE_PLUGIN_ADAPTER_CHILD: "1",
   TRIBE_PLUGIN_PROVIDER_PARENT_PID: "700",
@@ -32,7 +30,6 @@ const ambientIdentity = {
   TRIBE_PLUGIN_RESUME_JOINED: "1",
   TRIBE_PROVIDER: "codex",
   TRIBE_ROLE: "worker",
-  AG_SESSION_AUTH: "a".repeat(43),
   TRIBE_SESSION_NAME: "@dev/7",
   TRIBE_SLA_ROLE: "worker",
   TRIBE_TAKEOVER: "1",
@@ -176,12 +173,6 @@ describe("Tribe daemon environment ownership", () => {
 
     expect(env).toEqual({})
   })
-
-  test("the self-mailbox bearer is rereadable from inherited environment", () => {
-    const env = { AG_SESSION_AUTH: "a".repeat(43) }
-    expect(readSelfMailboxAuthorityFromEnvironment(env)).toBe("a".repeat(43))
-    expect(readSelfMailboxAuthorityFromEnvironment(env)).toBe("a".repeat(43))
-  })
 })
 
 /**
@@ -257,9 +248,11 @@ describe("the ambient names tribe reads", () => {
     ],
   }
 
-  test("are exactly the union of the lists they replaced, less the one name tribe never reads, plus the launch token", () => {
+  test("are exactly the union of the lists they replaced, less the names tribe never reads, plus the launch token", () => {
     const union = new Set(Object.values(replacedHandLists).flat())
     union.delete("AG_HOST_SESSION_STATE_DIR")
+    // 25074 3d-3: the launcher-minted bearer is gone, so tribe no longer reads AG_SESSION_AUTH either.
+    union.delete("AG_SESSION_AUTH")
     // 25074 3d-1: the launch token tribe presents and now reads its launch from, which no replaced list carried.
     union.add("HAB_ID_TOKEN")
     const names = tribeAmbientEnvironmentNames()

@@ -459,10 +459,24 @@ export function withDispatcher<
         case "absent":
           return refuse(authorityMissing(`the identity verifier found no identity in the ${HAB_ID_TOKEN_ENV}`))
         case "verified": {
-          const row = db
-            .prepare(`SELECT ${AUTHORITY_ROW_COLUMNS} FROM sessions WHERE identity_sid = $sid AND name = $name`)
-            .get({ $sid: verdict.sid, $name: verdict.actor }) as AuthorityRow | null
-          if (row === null || isTombstonedSessionName(row.name)) {
+          // The sid is the launch's; the session its adapter registered under it keeps that sid through a runtime
+          // rename, so its name is the token's actor only until the seat renames. Its own-named row wins; a sole row
+          // under the sid is that session renamed (the bearer used to serve this read); more than one is refused.
+          const rows = (
+            db
+              .prepare(`SELECT ${AUTHORITY_ROW_COLUMNS} FROM sessions WHERE identity_sid = $sid`)
+              .all({ $sid: verdict.sid }) as AuthorityRow[]
+          ).filter((candidate) => !isTombstonedSessionName(candidate.name))
+          const row = rows.find((candidate) => candidate.name === verdict.actor) ?? (rows.length === 1 ? rows[0] : undefined)
+          if (row === undefined && rows.length > 1) {
+            return rejected(
+              "identity-ambiguous",
+              `current session authority was rejected: ${verdict.actor}'s token is verified, but ${rows.length} ` +
+                `sessions are registered under its sid ${verdict.sid} (${rows.map((candidate) => candidate.name).join(", ")}) ` +
+                `and none is named ${verdict.actor}; read with --session <name>`,
+            )
+          }
+          if (row === undefined) {
             return rejected(
               "identity-not-registered",
               `current session authority was rejected: ${verdict.actor}'s token is verified, but no session is ` +

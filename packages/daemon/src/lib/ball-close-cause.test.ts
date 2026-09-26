@@ -109,47 +109,23 @@ describe("a closed: 0 ball result names its exact cause from the journal", () =>
     dev3 = makeContext(db, stmts, "@dev/3", "sess-dev3")
     dev9 = makeContext(db, stmts, "@dev/9", "sess-dev9")
 
-    registerSession(
-      ci,
-      PROJECT_ID,
-      () => true,
-      null,
-      2001,
-      "push",
-      "/repo",
-      null,
-      "claude",
-      null,
-      null,
-      "01".repeat(32),
+    registerSession(ci, PROJECT_ID, () => true, null, 2001, "push", "/repo", null, "claude", null, null)
+    // A readable mailbox: the sid its verified identity token recorded on the row (25074 3d-3).
+    db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = 1 WHERE id = ?").run(
+      `sid-${ci.sessionId}`,
+      ci.sessionId,
     )
-    registerSession(
-      dev3,
-      PROJECT_ID,
-      () => true,
-      null,
-      2002,
-      "push",
-      "/repo",
-      null,
-      "claude",
-      null,
-      null,
-      "02".repeat(32),
+    registerSession(dev3, PROJECT_ID, () => true, null, 2002, "push", "/repo", null, "claude", null, null)
+    // A readable mailbox: the sid its verified identity token recorded on the row (25074 3d-3).
+    db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = 1 WHERE id = ?").run(
+      `sid-${dev3.sessionId}`,
+      dev3.sessionId,
     )
-    registerSession(
-      dev9,
-      PROJECT_ID,
-      () => true,
-      null,
-      2003,
-      "push",
-      "/repo",
-      null,
-      "claude",
-      null,
-      null,
-      "03".repeat(32),
+    registerSession(dev9, PROJECT_ID, () => true, null, 2003, "push", "/repo", null, "claude", null, null)
+    // A readable mailbox: the sid its verified identity token recorded on the row (25074 3d-3).
+    db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = 1 WHERE id = ?").run(
+      `sid-${dev9.sessionId}`,
+      dev9.sessionId,
     )
   })
 

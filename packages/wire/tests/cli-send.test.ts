@@ -21,11 +21,10 @@ import {
   registerSendCommands,
   resolveRequestSender,
 } from "../src/cli/send.ts"
-import { AG_SESSION_AUTH_ENV } from "../src/lib/self-mailbox-authority.ts"
 import { oversizedMessageError } from "../src/lib/send-validation.ts"
 import { safeRemoveSync } from "removely"
 import { tribeAmbientEnvironmentNames } from "../src/daemon-environment.ts"
-import { launchEnvironment } from "./launch-token.ts"
+import { launchEnvironment, launchToken } from "./launch-token.ts"
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "../src/cli.ts")
 const BUN_BIN = process.env.BUN_EXECUTABLE ?? "bun"
@@ -700,7 +699,7 @@ describe("registerSendCommands", () => {
               },
             }
           } else if (request.method === "cli_session_pending_close_v1" && request.params?.close === "req-123") {
-            if (request.params.authority == null) {
+            if (request.params.idToken == null) {
               socket.write(
                 JSON.stringify({
                   jsonrpc: "2.0",
@@ -708,7 +707,8 @@ describe("registerSendCommands", () => {
                   error: {
                     code: -32004,
                     message:
-                      "current session authority is missing; HAB_ID_TOKEN or AG_SESSION_AUTH must be inherited from the managed launch",
+                      "current session authority is missing: this call carries no HAB_ID_TOKEN. A managed seat inherits HAB_ID_TOKEN from its launch; " +
+                      "from a hand session, read with --session <name> or send with --anonymous",
                     data: {
                       kind: "could-not-evaluate",
                       reason: "session-authority-missing",
@@ -761,7 +761,7 @@ describe("registerSendCommands", () => {
           resolveListen()
         })
       })
-      const runCli = (args: string[], authority?: string) =>
+      const runCli = (args: string[], idToken?: string) =>
         new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProc) => {
           const env: NodeJS.ProcessEnv = {
             ...process.env,
@@ -769,8 +769,7 @@ describe("registerSendCommands", () => {
             TRIBE_SESSION_NAME: "@chief",
             ...launchEnvironment(""),
           }
-          delete env[AG_SESSION_AUTH_ENV]
-          if (authority !== undefined) env[AG_SESSION_AUTH_ENV] = authority
+          if (idToken !== undefined) env.HAB_ID_TOKEN = idToken
           const child = spawn(BUN_BIN, [CLI, ...args], {
             env,
             stdio: ["ignore", "pipe", "pipe"],
@@ -804,12 +803,13 @@ describe("registerSendCommands", () => {
       expect(missingAuthorityClose.code).toBe(2)
       expect(missingAuthorityClose.stdout).toBe("")
       expect(missingAuthorityClose.stderr).toBe(
-        `tribe pending: current session authority is missing; HAB_ID_TOKEN or ${AG_SESSION_AUTH_ENV} must be inherited from the managed launch\n`,
+        "tribe pending: current session authority is missing: this call carries no HAB_ID_TOKEN. A managed seat inherits " +
+          "HAB_ID_TOKEN from its launch; from a hand session, read with --session <name> or send with --anonymous\n",
       )
       expect(pendingOpen).toBe(true)
 
-      const authority = "a".repeat(43)
-      const authenticatedClose = await runCli(["pending", "--owner", "@chief", "--close", "req-123"], authority)
+      const chiefToken = launchToken("sid-chief", "@chief")
+      const authenticatedClose = await runCli(["pending", "--owner", "@chief", "--close", "req-123"], chiefToken)
       expect(authenticatedClose).toMatchObject({ code: 0, stderr: "" })
       expect(authenticatedClose.stdout).toContain("Closed 1 pending request(s) for @chief: req-123")
 
@@ -847,11 +847,11 @@ describe("registerSendCommands", () => {
       expect(calls.filter((call) => call.method === "cli_session_pending_close_v1")).toEqual([
         {
           method: "cli_session_pending_close_v1",
-          params: { owner: "@chief", close: "req-123", authority: null },
+          params: { owner: "@chief", close: "req-123" },
         },
         {
           method: "cli_session_pending_close_v1",
-          params: { owner: "@chief", close: "req-123", authority },
+          params: { owner: "@chief", close: "req-123", idToken: chiefToken },
         },
       ])
       expect(calls.filter((call) => call.method === "tribe.send")).toHaveLength(5)

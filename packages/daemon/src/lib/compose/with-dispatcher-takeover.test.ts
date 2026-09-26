@@ -1035,106 +1035,6 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
     expect(seat.name).toBe("@dev/7")
   })
 
-  // @cto §10 (2), 25074 3c: a bearer takeover of a verified holder asks whether that holder's instance is still live,
-  // by re-verifying the token it registered with. Live refuses (verified outranks bearer); dead or superseded yields,
-  // loudly; undecided refuses as a fault the claimant retries. Each case flips the holder's verdict after it registers.
-  describe("a bearer takeover of a verified holder is gated on the holder's liveness (25074 3c)", () => {
-    const relaunch = (harness: ReturnType<typeof createDispatcherHarness>) => {
-      harness.addPendingClient("conn-relaunch")
-      return harness.register("conn-relaunch", {
-        name: "@dev/7",
-        pid: 4552,
-        project: "/tmp/p",
-        takeover: true,
-        launchId: "provider-launch-relaunch",
-        launchParentPid: 4552,
-        mailboxAuthorityHash: "b".repeat(64),
-      })
-    }
-    const registerHolder = async (harness: ReturnType<typeof createDispatcherHarness>) => {
-      verdicts["token-holder"] = { result: "verified", actor: "@dev/7", sid: "sid-holder", gen: 1 }
-      const socket = harness.addPendingClient("conn-verified")
-      parseResult<RegisterResult>(
-        await harness.register("conn-verified", {
-          name: "@dev/7",
-          pid: 4551,
-          project: "/tmp/p",
-          launchParentPid: 4550,
-          idToken: "token-holder",
-        }),
-      )
-      return socket
-    }
-    const holderUntouched = async (
-      harness: ReturnType<typeof createDispatcherHarness>,
-      socket: { destroyedByDispatcher: boolean },
-    ) => {
-      expect(socket.destroyedByDispatcher).toBe(false)
-      expect(harness.supersededEvents("@dev/7")).toEqual([])
-      expect(identitySid(harness, "@dev/7")).toBe("sid-holder")
-      expect(await membersAuthority(harness)).toMatchObject({ "@dev/7": "verified" })
-    }
-    afterEach(() => {
-      delete verdicts["token-holder"]
-    })
-
-    it("a live verified holder is never displaced: the bearer takeover is refused and the holder is untouched", async () => {
-      const harness = createDispatcherHarness({ identityVerifier })
-      cleanup = harness.dispose
-      const holder = await registerHolder(harness)
-
-      expect(parseError(await relaunch(harness))).toMatchObject({
-        code: -32003,
-        message: expect.stringContaining("claims @dev/7 with bearer authority, but a live verified session holds it"),
-        data: {
-          kind: "foreign-identity-transport",
-          reason: "identity-precedence",
-          transport: { name: "@dev/7", authority: "bearer" },
-          holder: { name: "@dev/7", authority: "verified" },
-        },
-      })
-      await holderUntouched(harness, holder)
-    })
-
-    it("a dead or superseded verified holder is displaced by the bearer takeover, told, and the name reads bearer", async () => {
-      const harness = createDispatcherHarness({ identityVerifier })
-      cleanup = harness.dispose
-      const holder = await registerHolder(harness)
-      verdicts["token-holder"] = {
-        result: "contradicted",
-        reason: "instance-is-live: seat-other-generation: @dev/7 runs generation 4, the token names 3",
-      }
-      parseResult<RegisterResult>(await relaunch(harness))
-
-      expect(holder.destroyedByDispatcher).toBe(true)
-      expect(harness.supersededEvents("@dev/7")).toEqual([
-        expect.objectContaining({ old_pid: 4551, new_pid: 4552, reason: "explicit-persona takeover (20703)" }),
-      ])
-      expect(identitySid(harness, "@dev/7")).toBeNull()
-      expect(await membersAuthority(harness)).toMatchObject({ "@dev/7": "bearer" })
-    })
-
-    it("a holder whose liveness is undecided refuses the takeover as a verifier fault, and the holder is untouched", async () => {
-      const harness = createDispatcherHarness({ identityVerifier })
-      cleanup = harness.dispose
-      const holder = await registerHolder(harness)
-      verdicts["token-holder"] = new Error("@dev/7 is undecided (seat-starting: start in flight)")
-      const warnings = vi.spyOn(console, "warn").mockImplementation(() => {})
-
-      expect(parseError(await relaunch(harness))).toMatchObject({
-        code: -32003,
-        message: expect.stringContaining("can be judged neither live nor gone right now (@dev/7 is undecided"),
-        data: {
-          kind: "identity-verifier-fault",
-          reason: "holder-liveness-undecided",
-          holder: { name: "@dev/7", authority: "verified" },
-        },
-      })
-      warnings.mockRestore()
-      await holderUntouched(harness, holder)
-    })
-  })
-
   it("a verified registration displaces a holder that only claimed the name, and the holder's journal says why", async () => {
     const harness = createDispatcherHarness({ identityVerifier })
     cleanup = harness.dispose
@@ -1768,8 +1668,8 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
     expect(harness.supersededEvents("@dev/7")).toEqual([])
   })
 
-  // 25074 3c-2b (@cto def441bf): a bootstrap that hit a verifier fault registered by bearer under its launch id, which
-  // is the Hab session id, `<sid>::<persona>`. The same seat's token-only adapter (keyed `<sid>@<gen>`) promotes that
+  // 25074 3c-2b (@cto def441bf): a bootstrap that hit a verifier fault registered on its claimed name under its launch
+  // id, which is the Hab session id, `<sid>::<persona>`. The same seat's token-only adapter (keyed `<sid>@<gen>`) promotes that
   // session in place: the token's sid IS that launch's provider part and both carry the launcher pid.
   const fallbackBootstrap = async (
     harness: ReturnType<typeof createDispatcherHarness>,
@@ -1785,7 +1685,6 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
         takeover: true,
         launchId,
         launchParentPid,
-        mailboxAuthorityHash: "c".repeat(64),
       }),
     )
     return { socket, registered }
@@ -1833,33 +1732,9 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
     ])
   })
 
-  // review-adhoc5 P3 on 3c-2a: the seat's bearer authority row holds its pre-3c-2b launch id `<sid>::<persona>`, whose
-  // provider part is not the token-keyed `<sid>@<gen>`; that is no foreign-identity evidence against a verified token.
-  it("a token-only adapter presenting its seat's bearer still promotes: the 24767 check does not refuse it", async () => {
-    const harness = createDispatcherHarness({ identityVerifier })
-    cleanup = harness.dispose
-    const bootstrap = await fallbackBootstrap(harness, "sid-dev7::%40dev%2F7", 5650)
-    harness.addPendingClient("conn-adapter")
-    const adapter = parseResult<RegisterResult>(
-      await harness.register("conn-adapter", {
-        name: "@dev/7",
-        pid: 5652,
-        project: "/tmp/p",
-        takeover: true,
-        launchParentPid: 5650,
-        idToken: "token-g3",
-        mailboxAuthorityHash: "c".repeat(64),
-      }),
-    )
-
-    expect(adapter.sessionId).toBe(bootstrap.registered.sessionId)
-    expect(sessionRow(harness, adapter.sessionId)).toMatchObject({ launch_id: "sid-dev7@3", identity_sid: "sid-dev7" })
-    expect(promotions(harness)).toEqual([expect.objectContaining({ transport_class: "bootstrap-fallback-promoted" })])
-  })
-
   // 25074 08:06 PDT outage: a daemon restarted WITHOUT the verifier inherits authority rows a verifier daemon keyed
-  // `<sid>@<gen>`. The seat's tokenless re-register presents `<sid>::<persona>` and its own bearer; the 24767 check
-  // must read both as the same provider launch, or a flag-off restart refuses the whole fleet as foreign identities.
+  // `<sid>@<gen>`. The seat's tokenless re-register presents `<sid>::<persona>`; it must read as the same provider
+  // launch and reuse its row, or a flag-off restart refuses the whole fleet as foreign identities.
   it("a flag-off daemon re-registers a seat whose authority row a verifier daemon keyed sid@gen", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose
@@ -1887,7 +1762,6 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
         launchId: "sid-dev7::%40dev%2F7",
         launchParentPid: 5660,
         idToken: "token-g3",
-        mailboxAuthorityHash: "c".repeat(64),
       }),
     )
 
@@ -1919,7 +1793,7 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
     expect(promotions(harness)).toEqual([])
   })
 
-  it("a token-only adapter whose sid is not the bearer holder's launch takes over as before", async () => {
+  it("a token-only adapter whose sid is not the fallback holder's launch takes over as before", async () => {
     const harness = createDispatcherHarness({ identityVerifier })
     cleanup = harness.dispose
     const other = await fallbackBootstrap(harness, "sid-other::%40dev%2F7", 5800)
@@ -1941,7 +1815,7 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
   })
 
   // 25074 P3 (review-adhoc5 8fdd03db, Arm F3): a verified holder is judged by 3c-2a's fence, never promoted
-  // in place like a bearer fallback bootstrap.
+  // in place like a fallback bootstrap.
   it("a verified holder at gen N, then a register at gen N or lower under the same launcher, is refused, not promoted", async () => {
     const harness = createDispatcherHarness({ identityVerifier })
     cleanup = harness.dispose
@@ -2013,9 +1887,9 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
   })
 })
 
-// 25074 3b — one-shot callers are dual-keyed until 3d: the launch's identity token beside the bearer. The
-// capability projection and the resolution move together, so a verified seat both reads its inbox by token and
-// re-certifies (launch-registration's exactLaunchMember accepts the token reason).
+// 25074 3b — a one-shot caller's authority is its launch's identity token. The capability projection and the
+// resolution move together, so a verified seat both reads its inbox by token and re-certifies (launch-registration's
+// exactLaunchMember accepts the token reason).
 describe("one-shot session authority by identity token (25074 3b)", () => {
   const identityVerifier = {
     path: "/stub/identity-verifier.ts",
@@ -2030,7 +1904,6 @@ describe("one-shot session authority by identity token (25074 3b)", () => {
       return { result: "unreadable", reason: "malformed token" }
     },
   }
-  const bearer = `${"C".repeat(42)}0`
   const selfInbox = (harness: ReturnType<typeof createDispatcherHarness>, credentials: Record<string, unknown>) =>
     harness.request("cli_self_inbox_v1", { ...credentials, limit: 5, peek: true })
 
@@ -2059,92 +1932,24 @@ describe("one-shot session authority by identity token (25074 3b)", () => {
     expect(row?.mailbox_read_capability).toMatchObject({ state: "available", reason: "self-mailbox-authority-token" })
   })
 
-  it("refuses a verified token no session registered under, and a contradicted token even beside a bearer", async () => {
+  it("refuses a verified token no session registered under, and a contradicted token", async () => {
     const harness = createDispatcherHarness({ identityVerifier })
     cleanup = harness.dispose
-    harness.addPendingClient("conn-bearer")
+    harness.addPendingClient("conn-claimed")
     parseResult<RegisterResult>(
-      await harness.register("conn-bearer", {
-        name: "@dev/9",
-        pid: 4701,
-        project: "/tmp/p",
-        mailboxAuthorityHash: createHash("sha256").update(bearer).digest("hex"),
-      }),
+      await harness.register("conn-claimed", { name: "@dev/9", pid: 4701, project: "/tmp/p" }),
     )
 
     expect(parseError(await selfInbox(harness, { authority: null, idToken: "token-dev8" }))).toMatchObject({
       code: -32003,
-      message: expect.stringContaining("@dev/8's token is verified, but no session registered under its sid sid-dev8"),
+      message: expect.stringContaining(
+        "@dev/8's token is verified, but no session is registered under its sid sid-dev8",
+      ),
       data: { kind: "unauthenticated", reason: "identity-not-registered" },
     })
-    expect(parseError(await selfInbox(harness, { authority: bearer, idToken: "token-dead" }))).toMatchObject({
+    expect(parseError(await selfInbox(harness, { authority: null, idToken: "token-dead" }))).toMatchObject({
       code: -32003,
       data: { kind: "unauthenticated", reason: "identity-contradicted" },
-    })
-  })
-
-  // 25074 @cto §9 (review-adhoc5 c09a4b05): one-shot resolution is dual-key. A verified token whose sid has no
-  // session yet (a session registered before the verifier, or before its adapter re-registered with the token) falls
-  // back to the bearer on the same call; the authority stays the bearer's until the adapter's verified register.
-  it("a verified token with no session under its sid falls back to the bearer on the same call", async () => {
-    const harness = createDispatcherHarness({ identityVerifier })
-    cleanup = harness.dispose
-    harness.addPendingClient("conn-bearer")
-    parseResult<RegisterResult>(
-      await harness.register("conn-bearer", {
-        name: "@dev/7",
-        pid: 4751,
-        project: "/tmp/p",
-        mailboxAuthorityHash: createHash("sha256").update(bearer).digest("hex"),
-      }),
-    )
-
-    parseResult(await selfInbox(harness, { authority: bearer }))
-    parseResult(await selfInbox(harness, { authority: bearer, idToken: "token-dev7" }))
-    parseResult(await harness.request("cli_session_pending_read_v1", { authority: bearer, idToken: "token-dev7" }))
-  })
-
-  it("a bearer for one seat beside a verified token for another is refused, naming both", async () => {
-    const harness = createDispatcherHarness({ identityVerifier })
-    cleanup = harness.dispose
-    harness.addPendingClient("conn-bearer")
-    parseResult<RegisterResult>(
-      await harness.register("conn-bearer", {
-        name: "@dev/9",
-        pid: 4761,
-        project: "/tmp/p",
-        mailboxAuthorityHash: createHash("sha256").update(bearer).digest("hex"),
-      }),
-    )
-
-    expect(parseError(await selfInbox(harness, { authority: bearer, idToken: "token-dev8" }))).toMatchObject({
-      code: -32003,
-      message: expect.stringMatching(/the bearer belongs to @dev\/9, but the identity token names @dev\/8/),
-      data: {
-        kind: "foreign-identity-transport",
-        transport: { name: "@dev/8", sid: "sid-dev8" },
-        authority: { name: "@dev/9" },
-      },
-    })
-  })
-
-  it("an unreadable token falls back to the bearer; with neither, the authority is missing", async () => {
-    const harness = createDispatcherHarness({ identityVerifier })
-    cleanup = harness.dispose
-    harness.addPendingClient("conn-bearer")
-    parseResult<RegisterResult>(
-      await harness.register("conn-bearer", {
-        name: "@dev/9",
-        pid: 4801,
-        project: "/tmp/p",
-        mailboxAuthorityHash: createHash("sha256").update(bearer).digest("hex"),
-      }),
-    )
-
-    parseResult(await selfInbox(harness, { authority: bearer, idToken: "token-garbled" }))
-    expect(parseError(await selfInbox(harness, { authority: null, idToken: "token-garbled" }))).toMatchObject({
-      code: -32004,
-      message: expect.stringContaining("HAB_ID_TOKEN or AG_SESSION_AUTH must be inherited"),
     })
   })
 })
@@ -2154,19 +1959,58 @@ describe("one-shot session authority P3 rows (25074, @cto 03cff4b5 and 975a22e2,
     path: "/stub/identity-verifier.ts",
     suppliesGen: true,
     verify: async (token: string): Promise<IdentityVerdict> => {
-      if (token === "token-dev7") return { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 1 }
-      if (token === "token-dev8") return { result: "verified", actor: "@dev/8", sid: "sid-dev8", gen: 1 }
       if (token === "token-dead") return { result: "contradicted", reason: "instance-is-live: not live" }
       throw new Error("the liveness of @dev/9 sid-dev9@2 is undecided (seat-starting: no transport yet); retry")
     },
   }
   beforeEach(() => {
-    // A verifier fault with no usable bearer is logged at error; the refusal it produces is what these rows assert.
+    // A verifier fault is logged at error; the refusal it produces is what these rows assert.
     vi.spyOn(console, "error").mockImplementation(() => {})
   })
-  const bearer = `${"D".repeat(42)}0`
-  const staleBearer = `${"E".repeat(42)}0`
-  const bearerHash = createHash("sha256").update(bearer).digest("hex")
+  const selfInbox = (harness: ReturnType<typeof createDispatcherHarness>, credentials: Record<string, unknown>) =>
+    harness.request("cli_self_inbox_v1", { ...credentials, limit: 5, peek: true })
+
+  it("a faulting token refuses as a verifier fault, and a contradicted token refuses", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-4911")
+    parseResult<RegisterResult>(await harness.register("conn-4911", { name: "@dev/9", pid: 4911, project: "/tmp/p" }))
+
+    expect(parseError(await selfInbox(harness, { authority: null, idToken: "token-undecided" }))).toMatchObject({
+      code: -32003,
+      data: { kind: "unauthenticated", reason: "identity-verifier-fault" },
+    })
+    expect(parseError(await selfInbox(harness, { authority: null, idToken: "token-dead" }))).toMatchObject({
+      code: -32003,
+      data: { kind: "unauthenticated", reason: "identity-contradicted" },
+    })
+    expect(parseError(await selfInbox(harness, { authority: "stale-bearer", idToken: "token-dead" }))).toMatchObject({
+      code: -32003,
+      message: expect.stringContaining("no longer accepted"),
+      data: { kind: "unauthenticated", reason: "identity-contradicted", stray_authority: true },
+    })
+  })
+})
+
+// 25074 3d-3 (@cto 657011c8): the launcher-minted bearer is gone. Each row names one refusal a pre-3d-3 daemon did not
+// give, because the bearer served the call. The bearer here is a live seat's own: its hash sits on its session row the
+// way a pre-cut register left it, so only the deleted bearer path could have served these calls.
+describe("one-shot session authority is the identity token alone (25074 3d-3)", () => {
+  const identityVerifier = {
+    path: "/stub/identity-verifier.ts",
+    suppliesGen: true,
+    verify: async (token: string): Promise<IdentityVerdict> => {
+      if (token === "token-dev7") return { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 1 }
+      if (token === "token-dev8") return { result: "verified", actor: "@dev/8", sid: "sid-dev8", gen: 1 }
+      if (token === "token-garbled") return { result: "unreadable", reason: "malformed token" }
+      throw new Error("the verifier's signing key is unreadable")
+    },
+  }
+  beforeEach(() => {
+    // A verifier fault is logged at error; the refusal it produces is what these rows assert.
+    vi.spyOn(console, "error").mockImplementation(() => {})
+  })
+  const bearer = `${"F".repeat(42)}0`
   const selfInbox = (harness: ReturnType<typeof createDispatcherHarness>, credentials: Record<string, unknown>) =>
     harness.request("cli_self_inbox_v1", { ...credentials, limit: 5, peek: true })
   const pendingOwner = async (
@@ -2178,100 +2022,186 @@ describe("one-shot session authority P3 rows (25074, @cto 03cff4b5 and 975a22e2,
     )
     return (JSON.parse(result.content[0]!.text) as { owner: string }).owner
   }
-  const registerBearerSeat = async (harness: ReturnType<typeof createDispatcherHarness>, name: string, pid: number) => {
-    harness.addPendingClient(`conn-${pid}`)
-    parseResult<RegisterResult>(
-      await harness.register(`conn-${pid}`, { name, pid, project: "/tmp/p", mailboxAuthorityHash: bearerHash }),
-    )
+  /** @dev/8, live and connected on its claimed name, whose row still carries the bearer's hash from before the cut. */
+  const preCutBearerSeat = async (harness: ReturnType<typeof createDispatcherHarness>) => {
+    harness.addPendingClient("conn-dev8")
+    parseResult<RegisterResult>(await harness.register("conn-dev8", { name: "@dev/8", pid: 4801, project: "/tmp/p" }))
+    harness.db
+      .prepare("UPDATE sessions SET mailbox_authority_hash = ? WHERE name = '@dev/8'")
+      .run(createHash("sha256").update(bearer).digest("hex"))
   }
+  const strayRefusal = (reason: string) => ({
+    code: -32003,
+    message: expect.stringMatching(/; the bearer authority it also carried is no longer accepted$/u),
+    data: { kind: "unauthenticated", reason, stray_authority: true },
+  })
 
-  it("a faulting token beside a valid bearer is served by the bearer and the answer names the fault", async () => {
+  it("(a) no token and no authority is missing authority, naming the token and the hand-session flags", async () => {
     const harness = createDispatcherHarness({ identityVerifier })
     cleanup = harness.dispose
-    await registerBearerSeat(harness, "@dev/9", 4901)
+    await preCutBearerSeat(harness)
 
-    const inbox = parseResult<{ session_authority?: unknown }>(
-      await selfInbox(harness, { authority: bearer, idToken: "token-undecided" }),
+    const refusal = parseError(await selfInbox(harness, { authority: null }))
+    expect(refusal).toMatchObject({
+      code: -32004,
+      data: { kind: "could-not-evaluate", reason: "session-authority-missing" },
+    })
+    expect(refusal.data).not.toHaveProperty("stray_authority")
+    expect(refusal.message).toContain("HAB_ID_TOKEN")
+    expect(refusal.message).toContain("--session")
+    expect(refusal.message).toContain("--anonymous")
+    expect(refusal.message).not.toContain("AG_SESSION_AUTH")
+  })
+
+  it("(b) no token beside a live seat's valid bearer is refused, and names the bearer as no longer accepted", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    await preCutBearerSeat(harness)
+
+    const refusal = parseError(await selfInbox(harness, { authority: bearer }))
+    expect(refusal).toMatchObject({
+      code: -32004,
+      data: { kind: "could-not-evaluate", reason: "session-authority-missing", stray_authority: true },
+    })
+    expect(refusal.message).toContain("no longer accepted")
+    expect(parseError(await harness.request("cli_session_pending_read_v1", { authority: bearer }))).toMatchObject({
+      code: -32004,
+      data: { reason: "session-authority-missing", stray_authority: true },
+    })
+  })
+
+  it("(c) a verifier fault beside that bearer refuses as a fault to retry, never served by the bearer", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    await preCutBearerSeat(harness)
+
+    const refusal = parseError(await selfInbox(harness, { authority: bearer, idToken: "token-undecided" }))
+    expect(refusal).toMatchObject(strayRefusal("identity-verifier-fault"))
+    expect(refusal.message).toContain(
+      "the identity verifier failed: the verifier's signing key is unreadable; retry; the bearer authority",
     )
-    expect(inbox.session_authority).toEqual({
-      authority: "bearer",
-      fault:
-        "token undecided: the liveness of @dev/9 sid-dev9@2 is undecided (seat-starting: no transport yet); retry; " +
-        "served by bearer",
-    })
-    expect(await pendingOwner(harness, { authority: bearer, idToken: "token-undecided" })).toBe("@dev/9")
-    // A plain bearer call carries no annotation: only the fault is news.
-    expect(
-      parseResult<{ session_authority?: unknown }>(await selfInbox(harness, { authority: bearer })),
-    ).not.toHaveProperty("session_authority")
   })
 
-  it("a faulting token without a valid bearer still refuses, and a contradicted token refuses beside one", async () => {
+  it("(d) a verified token whose sid has no session beside its own seat's bearer is not registered yet", async () => {
     const harness = createDispatcherHarness({ identityVerifier })
     cleanup = harness.dispose
-    await registerBearerSeat(harness, "@dev/9", 4911)
+    await preCutBearerSeat(harness)
 
-    expect(parseError(await selfInbox(harness, { authority: null, idToken: "token-undecided" }))).toMatchObject({
-      code: -32003,
-      data: { kind: "unauthenticated", reason: "identity-verifier-fault" },
-    })
-    expect(parseError(await selfInbox(harness, { authority: staleBearer, idToken: "token-undecided" }))).toMatchObject({
-      code: -32003,
-      message: expect.stringMatching(/identity verifier failed: .*undecided.*AG_SESSION_AUTH beside it did not match/),
-      data: { kind: "unauthenticated", reason: "identity-verifier-fault" },
-    })
-    expect(parseError(await selfInbox(harness, { authority: bearer, idToken: "token-dead" }))).toMatchObject({
-      code: -32003,
-      data: { kind: "unauthenticated", reason: "identity-contradicted" },
-    })
-  })
-
-  // @cto 46063770: the register path's convention (24767, and the precedence refusal) records a foreign transport on
-  // the session whose authority it presented, describing the transport. Here the bearer is the leaked authority, so
-  // the record goes on the bearer owner's session and names the token's seat, its launch and the caller's pid.
-  it("another seat's bearer beside a registered verified token is recorded on the bearer's owner and answered as the token's seat", async () => {
-    const harness = createDispatcherHarness({ identityVerifier })
-    cleanup = harness.dispose
-    harness.addPendingClient("conn-seat")
-    parseResult<RegisterResult>(
-      await harness.register("conn-seat", {
-        name: "@dev/7",
-        pid: 4921,
-        project: "/tmp/p",
-        idToken: "token-dev7",
-        // A seat's launch id is its token's sid, persona-qualified (@cto 95c2be2d (a)); the verified token keys it.
-        launchId: "sid-dev7::%40dev%2F7",
-        launchParentPid: 4921,
-      }),
-    )
-    await registerBearerSeat(harness, "@dev/9", 4922)
-
-    expect(await pendingOwner(harness, { authority: bearer, idToken: "token-dev7" })).toBe("@dev/7")
-    const members = parseResult<{ content: Array<{ text: string }> }>(await harness.request("tribe.members", {}))
-    const sessions = (
-      JSON.parse(members.content[0]!.text) as {
-        sessions: Array<{ name: string; foreign_transport?: { name: string; launch_id: string } }>
-      }
-    ).sessions
-    expect(sessions.find((session) => session.name === "@dev/9")?.foreign_transport).toMatchObject({
-      name: "@dev/7",
-      launch_id: "sid-dev7@1",
-    })
-    expect(sessions.find((session) => session.name === "@dev/7")).not.toHaveProperty("foreign_transport")
-  })
-
-  it("a verified token with no session beside a stale bearer is refused naming both facts", async () => {
-    const harness = createDispatcherHarness({ identityVerifier })
-    cleanup = harness.dispose
-    await registerBearerSeat(harness, "@dev/9", 4931)
-
-    const refusal = parseError(await selfInbox(harness, { authority: staleBearer, idToken: "token-dev8" }))
+    const refusal = parseError(await selfInbox(harness, { authority: bearer, idToken: "token-dev8" }))
     expect(refusal).toMatchObject({
       code: -32003,
       data: { kind: "unauthenticated", reason: "identity-not-registered" },
     })
-    expect(refusal.message).toContain("@dev/8's token is verified, but no session registered under its sid sid-dev8")
-    expect(refusal.message).toContain("AG_SESSION_AUTH beside it did not match a live managed session")
+    expect(refusal.message).toContain("the adapter registers with the token on its next connect")
+    // The token verified, so the bearer beside it is ignored, not named: the refusal is the token's alone.
+    expect(refusal.data).not.toHaveProperty("stray_authority")
+  })
+
+  it("(e) an unreadable token beside that bearer is refused as unreadable, never served by the bearer", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    await preCutBearerSeat(harness)
+
+    expect(parseError(await selfInbox(harness, { authority: bearer, idToken: "token-garbled" }))).toMatchObject(
+      strayRefusal("identity-token-unreadable"),
+    )
+    expect(parseError(await selfInbox(harness, { authority: null, idToken: "token-garbled" }))).toMatchObject({
+      code: -32003,
+      data: { kind: "unauthenticated", reason: "identity-token-unreadable" },
+    })
+  })
+
+  it("(f) a registered verified token is served as its own seat; a stray authority beside it is ignored", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    await preCutBearerSeat(harness)
+    harness.addPendingClient("conn-dev7")
+    parseResult<RegisterResult>(
+      await harness.register("conn-dev7", {
+        name: "@dev/7",
+        pid: 4701,
+        project: "/tmp/p",
+        idToken: "token-dev7",
+        launchParentPid: 4701,
+      }),
+    )
+
+    expect(await pendingOwner(harness, { authority: bearer, idToken: "token-dev7" })).toBe("@dev/7")
+    expect(await pendingOwner(harness, { authority: "not-any-bearer", idToken: "token-dev7" })).toBe("@dev/7")
+    parseResult(await selfInbox(harness, { authority: bearer, idToken: "token-dev7" }))
+    // Another seat's bearer beside the token is no longer a foreign transport on that seat's session.
+    const members = parseResult<{ content: Array<{ text: string }> }>(await harness.request("tribe.members", {}))
+    const sessions = (JSON.parse(members.content[0]!.text) as { sessions: Array<Record<string, unknown>> }).sessions
+    expect(sessions.find((session) => session.name === "@dev/8")).not.toHaveProperty("foreign_transport")
+  })
+
+  it("(g) a register carrying mailboxAuthorityHash, well-formed or not, registers and stores no hash", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-hex")
+    harness.addPendingClient("conn-malformed")
+
+    parseResult<RegisterResult>(
+      await harness.register("conn-hex", {
+        name: "@dev/5",
+        pid: 4501,
+        project: "/tmp/p",
+        mailboxAuthorityHash: "a".repeat(64),
+      }),
+    )
+    parseResult<RegisterResult>(
+      await harness.register("conn-malformed", {
+        name: "@dev/6",
+        pid: 4601,
+        project: "/tmp/p",
+        mailboxAuthorityHash: "zz",
+      }),
+    )
+    expect(
+      harness.db
+        .prepare("SELECT name, mailbox_authority_hash FROM sessions WHERE name IN ('@dev/5', '@dev/6') ORDER BY name")
+        .all(),
+    ).toEqual([
+      { name: "@dev/5", mailbox_authority_hash: null },
+      { name: "@dev/6", mailbox_authority_hash: null },
+    ])
+  })
+
+  /** @dev/7 registered on its verified token (sid-dev7), then renamed at runtime to @dev/7b; the sid stays. */
+  const renamedVerifiedSeat = async (harness: ReturnType<typeof createDispatcherHarness>) => {
+    harness.addPendingClient("conn-dev7")
+    parseResult<RegisterResult>(
+      await harness.register("conn-dev7", {
+        name: "@dev/7",
+        pid: 4701,
+        project: "/tmp/p",
+        idToken: "token-dev7",
+        launchParentPid: 4701,
+      }),
+    )
+    harness.db.prepare("UPDATE sessions SET name = '@dev/7b' WHERE name = '@dev/7'").run()
+  }
+
+  it("(h) a seat renamed at runtime still reads its own mailbox by its token: the sole session under its sid", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    await renamedVerifiedSeat(harness)
+
+    expect(await pendingOwner(harness, { idToken: "token-dev7" })).toBe("@dev/7b")
+    parseResult(await selfInbox(harness, { idToken: "token-dev7" }))
+  })
+
+  it("(i) two sessions under one sid, neither the token's actor, is refused by name, never guessed", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    await renamedVerifiedSeat(harness)
+    await preCutBearerSeat(harness)
+    harness.db.prepare("UPDATE sessions SET identity_sid = 'sid-dev7' WHERE name = '@dev/8'").run()
+
+    const refusal = parseError(await selfInbox(harness, { idToken: "token-dev7" }))
+    expect(refusal).toMatchObject({ code: -32003, data: { kind: "unauthenticated", reason: "identity-ambiguous" } })
+    expect(refusal.message).toContain("2 sessions are registered under its sid sid-dev7")
+    expect(refusal.message).toContain("--session")
   })
 })
 

@@ -149,7 +149,6 @@ describe("registration and a durable-launch holder (24604 a)", () => {
       null,
       "respawn-launch::x",
       process.pid,
-      null,
       new Set(["run"]),
     )
     expect(rowOf("run")).toBeNull()

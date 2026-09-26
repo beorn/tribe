@@ -17,7 +17,6 @@
  */
 
 import { Database } from "bun:sqlite"
-import { createHash } from "node:crypto"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -189,19 +188,11 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     active.add(sessionId)
     parseToolJson(handleToolCall(ctx, "tribe.join", { name, delivery: "pull" }, opts))
     // Join must reset the tail first; registration then supplies this adapter's readable mailbox authority.
-    registerSession(
-      ctx,
-      undefined,
-      opts.hasActiveTransport,
-      null,
-      0,
-      "pull",
-      undefined,
-      null,
-      null,
-      null,
-      null,
-      createHash("sha256").update(sessionId).digest("hex"),
+    registerSession(ctx, undefined, opts.hasActiveTransport, null, 0, "pull", undefined, null, null, null, null)
+    // A readable mailbox: the sid its verified identity token recorded on the row (25074 3d-3).
+    db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = 1 WHERE id = ?").run(
+      `sid-${ctx.sessionId}`,
+      ctx.sessionId,
     )
     return ctx
   }

@@ -121,7 +121,7 @@ describe("the daemon's --identity-verifier boot check (25074 3b)", () => {
     expect(health.identity).toEqual({
       verifier: verifierPath,
       supplies_gen: true,
-      authority: { verified: 1, bearer: 0, claimed: 0 },
+      authority: { verified: 1, claimed: 0 },
     })
   })
 })

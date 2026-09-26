@@ -18,7 +18,8 @@ import { handleToolCall, type ActiveSessionInfo, type HandlerOpts } from "./hand
 import { registerSession } from "./session.ts"
 
 const PROJECT_ID = "pending-mailbox-deaf-send"
-const VALID_HASH = "ab".repeat(32)
+/** The sid a verified identity token recorded on its session row: that seat reads its own mailbox (25074 3d-3). */
+const VERIFIED_SID = "sid-verified"
 
 function makeContext(db: Database, stmts: TribeStatements, sessionId: string, name: string): TribeContext {
   return createTribeContext({
@@ -38,23 +39,14 @@ function addSession(
   stmts: TribeStatements,
   sessionId: string,
   name: string,
-  mailboxAuthorityHash: string | null,
+  identitySid: string | null,
 ): void {
   const ctx = makeContext(db, stmts, sessionId, name)
-  registerSession(
-    ctx,
-    PROJECT_ID,
-    () => false,
-    null,
-    process.pid,
-    "pull",
-    "/repo",
-    null,
-    "codex",
-    null,
-    null,
-    mailboxAuthorityHash,
-  )
+  registerSession(ctx, PROJECT_ID, () => false, null, process.pid, "pull", "/repo", null, "codex", null, null)
+  // The dispatcher records a verified token's sid on the row after the register (with-dispatcher.ts, 25074 3b).
+  if (identitySid !== null) {
+    db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = 1 WHERE id = ?").run(identitySid, sessionId)
+  }
 }
 
 function parseToolJson(result: ReturnType<typeof handleToolCall>): Record<string, unknown> {
@@ -167,8 +159,8 @@ describe("24581: tracked send to mailbox-deaf recipient is refused", () => {
     expect(stmts.selectPendingForRecipient.all({ $recipient: "@chief" })).toHaveLength(1)
   })
 
-  it("NEGATIVE: tracked request to a seat with registered mailbox authority still opens", () => {
-    addSession(db, stmts, "sess-dev6", "@dev/6", VALID_HASH)
+  it("NEGATIVE: tracked request to a seat registered with a verified identity token still opens", () => {
+    addSession(db, stmts, "sess-dev6", "@dev/6", VERIFIED_SID)
     const sender = makeContext(db, stmts, "sess-dev12", "@dev/12")
     const sent = parseToolJson(
       handleToolCall(
@@ -190,9 +182,9 @@ describe("24581: tracked send to mailbox-deaf recipient is refused", () => {
    */
   it.each([
     ["unreadable", null, 0],
-    ["readable", VALID_HASH, 1],
-  ] as const)("checks the %s final owner before opening a fallback ball", (_state, hash, expectedBalls) => {
-    addSession(db, stmts, "sess-chief", "@chief", hash)
+    ["readable", VERIFIED_SID, 1],
+  ] as const)("checks the %s final owner before opening a fallback ball", (_state, sid, expectedBalls) => {
+    addSession(db, stmts, "sess-chief", "@chief", sid)
     const sender = makeContext(db, stmts, "sess-dev12", "@dev/12")
     const sent = parseToolJson(
       handleToolCall(

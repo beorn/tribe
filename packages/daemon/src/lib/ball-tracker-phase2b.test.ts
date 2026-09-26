@@ -91,61 +91,29 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     agent2 = makeContext(db, stmts, "@agent/2", "sess-agent-2")
     staleAgent = makeContext(db, stmts, "@agent/stale", "sess-stale")
 
-    registerSession(
-      chief,
-      PROJECT_ID,
-      () => true,
-      null,
-      1001,
-      "push",
-      "/repo",
-      null,
-      "claude",
-      null,
-      null,
-      "01".repeat(32),
+    registerSession(chief, PROJECT_ID, () => true, null, 1001, "push", "/repo", null, "claude", null, null)
+    // A readable mailbox: the sid its verified identity token recorded on the row (25074 3d-3).
+    db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = 1 WHERE id = ?").run(
+      `sid-${chief.sessionId}`,
+      chief.sessionId,
     )
-    registerSession(
-      agent1,
-      PROJECT_ID,
-      () => true,
-      null,
-      1002,
-      "push",
-      "/repo",
-      null,
-      "claude",
-      null,
-      null,
-      "02".repeat(32),
+    registerSession(agent1, PROJECT_ID, () => true, null, 1002, "push", "/repo", null, "claude", null, null)
+    // A readable mailbox: the sid its verified identity token recorded on the row (25074 3d-3).
+    db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = 1 WHERE id = ?").run(
+      `sid-${agent1.sessionId}`,
+      agent1.sessionId,
     )
-    registerSession(
-      agent2,
-      PROJECT_ID,
-      () => true,
-      null,
-      1003,
-      "push",
-      "/repo",
-      null,
-      "claude",
-      null,
-      null,
-      "03".repeat(32),
+    registerSession(agent2, PROJECT_ID, () => true, null, 1003, "push", "/repo", null, "claude", null, null)
+    // A readable mailbox: the sid its verified identity token recorded on the row (25074 3d-3).
+    db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = 1 WHERE id = ?").run(
+      `sid-${agent2.sessionId}`,
+      agent2.sessionId,
     )
-    registerSession(
-      staleAgent,
-      PROJECT_ID,
-      () => false,
-      null,
-      1004,
-      "push",
-      "/repo",
-      null,
-      "claude",
-      null,
-      null,
-      "04".repeat(32),
+    registerSession(staleAgent, PROJECT_ID, () => false, null, 1004, "push", "/repo", null, "claude", null, null)
+    // A readable mailbox: the sid its verified identity token recorded on the row (25074 3d-3).
+    db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = 1 WHERE id = ?").run(
+      `sid-${staleAgent.sessionId}`,
+      staleAgent.sessionId,
     )
   })
 

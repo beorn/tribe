@@ -54,10 +54,9 @@ function context(sessionId: string, name: string, sessionRole: TribeRole = "memb
 }
 
 /** A registered sender whose session row holds the given authority, as the register path leaves it. */
-function sender(sessionId: string, name: string, authority: "verified" | "bearer" | "claimed"): TribeContext {
+function sender(sessionId: string, name: string, authority: "verified" | "claimed"): TribeContext {
   const ctx = context(sessionId, name)
-  const bearerHash = authority === "bearer" ? "0a".repeat(32) : null
-  registerSession(ctx, undefined, () => true, null, 0, "pull", undefined, null, null, null, null, bearerHash)
+  registerSession(ctx, undefined, () => true, null, 0, "pull", undefined, null, null, null, null)
   // The dispatcher records a verified token the same way after the register (with-dispatcher.ts, 25074 3b).
   if (authority === "verified") {
     db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = ? WHERE id = ?").run(
@@ -88,12 +87,23 @@ function fetchedAuthorities(): Record<string, unknown> {
 }
 
 describe("every envelope carries its sender's authority (25074 3d-1a)", () => {
-  test("a fetched row names the sender's authority: verified, bearer or claimed", () => {
+  test("a fetched row names the sender's authority: verified or claimed", () => {
     sendMessage(sender("s-verified", "@dev/1", "verified"), RECIPIENT, "from a verified seat", "notify")
-    sendMessage(sender("s-bearer", "@dev/2", "bearer"), RECIPIENT, "from a bearer session", "notify")
     sendMessage(sender("s-claimed", "hand-shell", "claimed"), RECIPIENT, "from a claimed shell", "notify")
 
-    expect(fetchedAuthorities()).toEqual({ "@dev/1": "verified", "@dev/2": "bearer", "hand-shell": "claimed" })
+    expect(fetchedAuthorities()).toEqual({ "@dev/1": "verified", "hand-shell": "claimed" })
+  })
+
+  test("a pre-3d-3 session row's bearer hash earns nothing; a message written then still reads bearer", () => {
+    // A row an adapter registered before 3d-3 still carries its bearer's hash: the sender only claims its name now.
+    const preCut = sender("s-pre-cut", "@dev/2", "claimed")
+    db.prepare("UPDATE sessions SET mailbox_authority_hash = ? WHERE id = 's-pre-cut'").run("0a".repeat(32))
+    sendMessage(preCut, RECIPIENT, "after the cut", "notify")
+    // History keeps what the row was written with.
+    const historic = sendMessage(sender("s-historic", "@dev/4", "claimed"), RECIPIENT, "before the cut", "notify")
+    db.prepare("UPDATE messages SET sender_authority = 'bearer' WHERE id = ?").run(historic.id)
+
+    expect(fetchedAuthorities()).toEqual({ "@dev/2": "claimed", "@dev/4": "bearer" })
   })
 
   test("a claim of a verified seat's name reads claimed, never the owner's authority", () => {

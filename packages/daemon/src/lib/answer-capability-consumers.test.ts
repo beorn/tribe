@@ -122,20 +122,14 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
       claudeSessionId: null,
       claudeSessionName: null,
     })
-    registerSession(
-      ctx,
-      PROJECT_ID,
-      () => false,
-      null,
-      process.pid,
-      seat.delivery,
-      "/repo",
-      null,
-      "codex",
-      null,
-      null,
-      seat.readableMailbox ? index.toString(16).padStart(2, "0").repeat(32) : null,
-    )
+    registerSession(ctx, PROJECT_ID, () => false, null, process.pid, seat.delivery, "/repo", null, "codex", null, null)
+    // A readable mailbox is a session its verified identity token keyed: the sid on its row (25074 3d-3).
+    if (seat.readableMailbox) {
+      db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = 1 WHERE id = ?").run(
+        `sid-${index}`,
+        ctx.sessionId,
+      )
+    }
     if (seat.connected) {
       active.push({
         id: ctx.sessionId,

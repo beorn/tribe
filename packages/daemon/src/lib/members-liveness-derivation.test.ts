@@ -61,23 +61,14 @@ function addSession(
   sessionId: string,
   name: string,
   pid: number,
-  mailboxAuthorityHash: string | null = null,
+  identitySid: string | null = null,
 ): void {
   const ctx = makeContext(db, stmts, sessionId, name)
-  registerSession(
-    ctx,
-    PROJECT_ID,
-    () => false,
-    null,
-    pid,
-    "pull",
-    "/repo",
-    null,
-    "codex",
-    null,
-    null,
-    mailboxAuthorityHash,
-  )
+  registerSession(ctx, PROJECT_ID, () => false, null, pid, "pull", "/repo", null, "codex", null, null)
+  // The dispatcher records a verified token's sid on the row after the register (with-dispatcher.ts, 25074 3b).
+  if (identitySid !== null) {
+    db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = 1 WHERE id = ?").run(identitySid, sessionId)
+  }
 }
 
 function parseToolJson(result: ReturnType<typeof handleToolCall>): Record<string, unknown> {
@@ -182,9 +173,11 @@ describe("tribe.members derives alive from the pid, not stored transport-registr
     ])
   })
 
-  it("distinguishes a transport-live deaf seat from a bearer-backed seat in members and health", () => {
+  it("distinguishes a transport-live deaf seat from a token-verified seat in members and health", () => {
     addSession(db, stmts, "legacy-live", "legacy-live-agent", process.pid)
-    addSession(db, stmts, "readable-live", "readable-live-agent", process.pid, "a".repeat(64))
+    // A pre-3d-3 row still carries its launcher-minted bearer's hash; it earns no mailbox read and is never shown.
+    db.prepare("UPDATE sessions SET mailbox_authority_hash = ? WHERE id = 'legacy-live'").run("a".repeat(64))
+    addSession(db, stmts, "readable-live", "readable-live-agent", process.pid, "sid-readable-live")
     db.prepare("UPDATE sessions SET launch_id = $launch_id, launch_parent_pid = $launch_parent_pid WHERE id = $id").run(
       { $id: "legacy-live", $launch_id: "legacy-live-launch", $launch_parent_pid: process.pid },
     )
@@ -224,7 +217,7 @@ describe("tribe.members derives alive from the pid, not stored transport-registr
           mailbox_read_capability: {
             state: "available",
             evidence_kind: "observed",
-            reason: "self-mailbox-authority-registered",
+            reason: "self-mailbox-authority-token",
           },
         }),
       ]),

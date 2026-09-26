@@ -17,7 +17,7 @@ import { resolve, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
 import { tribeAmbientEnvironmentNames } from "../src/daemon-environment.ts"
-import { launchEnvironment } from "./launch-token.ts"
+import { launchEnvironment, launchToken } from "./launch-token.ts"
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "../src/cli.ts")
 const DAEMON = resolve(dirname(fileURLToPath(import.meta.url)), "../../daemon/src/daemon.ts")
@@ -94,6 +94,9 @@ function runCliAsync(
 type OneShotRpcRequest = { id: number; method: string; params?: Record<string, unknown> }
 type OneShotRpcOutcome = { result: unknown } | { error: { code: number; message: string } }
 
+/** The managed launch's identity token a one-shot pending read presents (25074 3d-3: its only self-read credential). */
+const MANAGED_PENDING_TOKEN = launchToken("sid-dev2", "@dev/2")
+
 async function runManagedPendingCliAgainst(outcomeFor: (request: OneShotRpcRequest) => OneShotRpcOutcome): Promise<{
   result: Awaited<ReturnType<typeof runCliAsync>>
   calls: Array<{ method: string; params?: Record<string, unknown> }>
@@ -125,7 +128,7 @@ async function runManagedPendingCliAgainst(outcomeFor: (request: OneShotRpcReque
       ...process.env,
       TRIBE_SOCKET: socketPath,
       TRIBE_NO_AUTOSTART: "1",
-      AG_SESSION_AUTH: "a".repeat(43),
+      HAB_ID_TOKEN: MANAGED_PENDING_TOKEN,
     })
     return { result, calls }
   } finally {
@@ -446,7 +449,6 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
   })
 
   it("managed pending reads name a stale daemon and exit through the CLI error contract", async () => {
-    const authority = "a".repeat(43)
     const { result, calls } = await runManagedPendingCliAgainst((request) => ({
       error: { code: -32601, message: `Method not found: ${request.method}` },
     }))
@@ -461,7 +463,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         "No pending query ran. For an explicit recovery or audit read, run " +
         "'tribe pending --owner <seat> --json'.\n",
     })
-    expect(calls).toEqual([{ method: "cli_session_pending_read_v1", params: { authority } }])
+    expect(calls).toEqual([{ method: "cli_session_pending_read_v1", params: { idToken: MANAGED_PENDING_TOKEN } }])
   })
 
   it("managed pending reads preserve non-identity RPC remedies", async () => {
@@ -481,7 +483,6 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
   })
 
   it("managed pending reads refuse contradictory success snapshots instead of reporting zero", async () => {
-    const authority = "a".repeat(43)
     const { result, calls } = await runManagedPendingCliAgainst(() => ({
       result: {
         structuredContent: {
@@ -501,21 +502,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         "a pending array, and non-negative integer count matching its length. Run 'tribe doctor' to compare the running daemon " +
         "with this checkout before retrying.\n",
     })
-    expect(calls).toEqual([{ method: "cli_session_pending_read_v1", params: { authority } }])
-  })
-
-  it("a managed read served by the bearer after a token fault says so on stderr (25074, @cto 03cff4b5)", async () => {
-    const { result } = await runManagedPendingCliAgainst(() => ({
-      result: {
-        structuredContent: { owner: "@dev/2", count: 0, pending: [] },
-        session_authority: { authority: "bearer", fault: "token undecided: seat-starting; served by bearer" },
-      },
-    }))
-
-    expect(result).toMatchObject({
-      code: 0,
-      stderr: "tribe pending: token undecided: seat-starting; served by bearer\n",
-    })
+    expect(calls).toEqual([{ method: "cli_session_pending_read_v1", params: { idToken: MANAGED_PENDING_TOKEN } }])
   })
 
   it("pending --all renders every owner and --json preserves the typed snapshot", async () => {

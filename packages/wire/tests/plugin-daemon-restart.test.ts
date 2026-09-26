@@ -17,7 +17,7 @@ import { deriveTribePersonaLaunchIdentity } from "../src/lib/persona-launch-iden
 import { RELOAD_SLOT_MS } from "../src/lib/reload-pacing.ts"
 import { REEXEC_BACKOFF_BASE_MS, REEXEC_BACKOFF_MAX_MS } from "../../../plugins/claude/supervisor-policy.ts"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
-import { launchEnvironment } from "./launch-token.ts"
+import { launchEnvironment, launchToken, writeClaimsVerifier } from "./launch-token.ts"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const DAEMON = resolve(HERE, "../../daemon/src/daemon.ts")
@@ -214,8 +214,11 @@ describe("Claude plugin daemon-restart self-heal", () => {
     dbPath: string,
     logPath: string,
     extraEnv: Record<string, string> = {},
+    opts: { identityVerifier?: string } = {},
   ): ChildProcessWithoutNullStreams {
-    const child = spawn(BUN_BIN, [DAEMON, "--socket", socketPath, "--db", dbPath, "--foreground", "--no-lore"], {
+    const verifierArgs = opts.identityVerifier === undefined ? [] : ["--identity-verifier", opts.identityVerifier]
+    const daemonArgs = [DAEMON, "--socket", socketPath, "--db", dbPath, "--foreground", "--no-lore", ...verifierArgs]
+    const child = spawn(BUN_BIN, daemonArgs, {
       cwd: tmpDir,
       env: {
         ...process.env,
@@ -243,7 +246,8 @@ describe("Claude plugin daemon-restart self-heal", () => {
     name: string
     launchId: string
     claudeSessionId?: string
-    sessionAuth?: string
+    /** The launch's identity token, in place of launchEnvironment's; the daemon's verifier judges it. */
+    idToken?: string
     providerParentPid?: string
     providerShim?: boolean
     launchStateDir?: string
@@ -274,7 +278,7 @@ process.exit(await child.exited)
         TRIBE_TAKEOVER: "1",
         ...launchEnvironment(opts.launchId),
         ...(opts.claudeSessionId === undefined ? {} : { CLAUDE_SESSION_ID: opts.claudeSessionId }),
-        ...(opts.sessionAuth === undefined ? {} : { AG_SESSION_AUTH: opts.sessionAuth }),
+        ...(opts.idToken === undefined ? {} : { HAB_ID_TOKEN: opts.idToken }),
         ...(opts.launchStateDir === undefined
           ? { AG_HOST_SESSION_STATE_DIR: "" }
           : { AG_HOST_SESSION_STATE_DIR: opts.launchStateDir }),
@@ -348,7 +352,6 @@ process.exit(await child.exited)
           name: persona,
           launchId: `${opts.label}-${index}`,
           claudeSessionId: `${opts.label}-session-${index}`,
-          sessionAuth: `${"A".repeat(42)}${String(index)}`,
           providerShim: true,
           delivery: "pull",
           requireJoin: false,
@@ -510,7 +513,10 @@ process.exit(await child.exited)
     const dbPath = join(tmpDir, "tribe.db")
     const daemonLog = join(tmpDir, "daemon.log")
     const adapterLog = join(tmpDir, "adapter.log")
-    spawnTestDaemon(dbPath, daemonLog)
+    // 25074 3d-3: a push seat reads its own mailbox (so a tracked request reaches it) only when its token verified.
+    const verifierPath = join(tmpDir, "verifier.ts")
+    writeClaimsVerifier(verifierPath, { gen: false })
+    spawnTestDaemon(dbPath, daemonLog, {}, { identityVerifier: verifierPath })
     await waitFor(() => existsSync(socketPath), "initial daemon socket")
     const firstDaemon = await connectToGeneration(socketPath)
     daemonPids.add(firstDaemon.pid)
@@ -522,7 +528,7 @@ process.exit(await child.exited)
       logPath: adapterLog,
       name: PERSONA,
       launchId: "restart-journey-launch",
-      sessionAuth: `${"A".repeat(42)}0`,
+      idToken: launchToken("restart-journey-launch", PERSONA),
       providerParentPid: String(harnessParentPid),
       delivery: "push",
       requireJoin: true,
@@ -1048,17 +1054,24 @@ process.exit(await child.exited)
   )
 
   // 24767. A grok seat's connector kept another seat's name and launch id from a
-  // shared provider config while inheriting its own seat's session authority. The
-  // daemon refused it as a bare name conflict, its tribe.join sat until the host's
-  // 120 s tool timeout, and tribe members read the seat as plain missing-transport.
-  it("refuses a connector that carries another seat's identity at once, and members names both (24767)", async () => {
+  // shared provider config while inheriting its own seat's launch identity. The
+  // daemon refused it as a bare name conflict, and its tribe.join sat until the
+  // host's 120 s tool timeout. 25074 3d-3: the inherited identity is the seat's
+  // token, which the daemon's verifier reads as naming the seat, so the register
+  // is refused as identity-name-mismatch and every tool call answers at once.
+  it("refuses a connector that carries another seat's identity at once, naming both (24767)", async () => {
     const dbPath = join(tmpDir, "tribe-foreign-identity.db")
     const seat = "@agent/foreign-seat"
     const foreign = "@agent/foreign-other"
-    const sessionAuth = "foreign-identity-authority".padEnd(43, "0")
-    spawnTestDaemon(dbPath, join(tmpDir, "daemon-foreign-identity.log"), {
-      TRIBE_EXPECTED_MEMBERS: JSON.stringify([{ name: seat, expected: true }]),
-    })
+    const seatToken = launchToken("foreign-seat-launch", seat)
+    const verifierPath = join(tmpDir, "verifier.ts")
+    writeClaimsVerifier(verifierPath, { gen: false })
+    spawnTestDaemon(
+      dbPath,
+      join(tmpDir, "daemon-foreign-identity.log"),
+      { TRIBE_EXPECTED_MEMBERS: JSON.stringify([{ name: seat, expected: true }]) },
+      { identityVerifier: verifierPath },
+    )
     await waitFor(() => existsSync(socketPath), "foreign-identity daemon socket")
     const generation = await connectToGeneration(socketPath)
     daemonPids.add(generation.pid)
@@ -1077,7 +1090,7 @@ process.exit(await child.exited)
       logPath: join(tmpDir, "adapter-foreign-identity-own.log"),
       name: seat,
       launchId: "foreign-seat-launch",
-      sessionAuth,
+      idToken: seatToken,
       providerParentPid: String(process.pid),
       delivery: "pull",
       requireJoin: true,
@@ -1095,40 +1108,21 @@ process.exit(await child.exited)
       "own connector departure",
     )
 
+    const leakedLog = join(tmpDir, "adapter-foreign-identity-leaked.log")
     const leaked = spawnTestPlugin({
       dbPath,
-      logPath: join(tmpDir, "adapter-foreign-identity-leaked.log"),
+      logPath: leakedLog,
       name: foreign,
       launchId: "foreign-other-launch",
-      sessionAuth,
+      idToken: seatToken,
       providerParentPid: String(process.pid),
       delivery: "pull",
       requireJoin: true,
     })
     const stdout = await initialize(leaked, 71)
-    const seatLaunchId = personaLaunchId("foreign-seat-launch", seat)
-    const foreignLaunchId = personaLaunchId("foreign-other-launch", foreign)
-
-    let reported: ToolJson = {}
-    await waitFor(async () => {
-      reported = await roster()
-      return (
-        reported.sessions?.find((row) => row.name === seat)?.transport_reason ===
-        "transport-carries-another-seats-identity"
-      )
-    }, "members names the foreign-identity transport")
-    expect(reported.sessions?.find((row) => row.name === seat)).toMatchObject({
-      launch_id: seatLaunchId,
-      transport_state: "disconnected",
-      foreign_transport: { name: foreign, launch_id: foreignLaunchId },
-    })
-    expect(reported.sessions?.some((row) => row.name === foreign)).toBe(false)
-    expect(reported.membership_discrepancy?.missing).toContainEqual(
-      expect.objectContaining({
-        name: seat,
-        state: "foreign-identity-transport",
-        foreign_transport: expect.objectContaining({ name: foreign, launch_id: foreignLaunchId }),
-      }),
+    await waitFor(
+      () => existsSync(leakedLog) && readFileSync(leakedLog, "utf8").includes(`its identity token names ${seat}`),
+      "the leaked connector's register refusal",
     )
 
     const joinStartedAt = Date.now()
@@ -1140,7 +1134,10 @@ process.exit(await child.exited)
       | undefined
     expect(answer?.isError).toBe(true)
     const text = answer?.content?.[0]?.text ?? ""
-    for (const expected of [foreign, foreignLaunchId, seat, seatLaunchId]) expect(text).toContain(expected)
+    expect(text).toContain(`this transport claims ${foreign}, but its identity token names ${seat}`)
+    const reported = await roster()
+    expect(reported.sessions?.find((row) => row.name === seat)).toMatchObject({ transport_state: "disconnected" })
+    expect(reported.sessions?.some((row) => row.name === foreign)).toBe(false)
     generation.client.close()
   }, 45_000)
 
@@ -1550,7 +1547,6 @@ process.exit(await child.exited)
           name: persona,
           launchId: `restart-multi-${index}`,
           claudeSessionId: `restart-multi-session-${index}`,
-          sessionAuth: `${"A".repeat(42)}${String(index)}`,
           providerShim: true,
           delivery: "pull",
           requireJoin: false,

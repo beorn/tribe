@@ -187,33 +187,17 @@ describe("generic direct-message delivery resolution", () => {
     stmts = createStatements(db)
     sender = makeContext(db, stmts, "@sender", "sess-sender")
     manager = makeContext(db, stmts, "@dev", "sess-manager")
-    registerSession(
-      sender,
-      PROJECT_ID,
-      () => true,
-      null,
-      1001,
-      "pull",
-      "/repo",
-      null,
-      "codex",
-      null,
-      null,
-      "01".repeat(32),
+    registerSession(sender, PROJECT_ID, () => true, null, 1001, "pull", "/repo", null, "codex", null, null)
+    // A readable mailbox: the sid its verified identity token recorded on the row (25074 3d-3).
+    db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = 1 WHERE id = ?").run(
+      `sid-${sender.sessionId}`,
+      sender.sessionId,
     )
-    registerSession(
-      manager,
-      PROJECT_ID,
-      () => true,
-      null,
-      1002,
-      "pull",
-      "/repo",
-      null,
-      "codex",
-      null,
-      null,
-      "02".repeat(32),
+    registerSession(manager, PROJECT_ID, () => true, null, 1002, "pull", "/repo", null, "codex", null, null)
+    // A readable mailbox: the sid its verified identity token recorded on the row (25074 3d-3).
+    db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = 1 WHERE id = ?").run(
+      `sid-${manager.sessionId}`,
+      manager.sessionId,
     )
   })
 
@@ -610,7 +594,11 @@ describe("generic direct-message delivery resolution", () => {
       "codex",
       "durable-launch",
       2003,
-      "03".repeat(32),
+    )
+    // A readable mailbox: the sid its verified identity token recorded on the row (25074 3d-3).
+    db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = 1 WHERE id = ?").run(
+      `sid-${durableRecipient.sessionId}`,
+      durableRecipient.sessionId,
     )
 
     const sent = resultJson(
@@ -631,19 +619,11 @@ describe("generic direct-message delivery resolution", () => {
 
   it("keeps explicit pull on the named mailbox when its configured fallback is disconnected", () => {
     const yrd = makeContext(db, stmts, "@yrd", "departed-yrd-session")
-    registerSession(
-      yrd,
-      PROJECT_ID,
-      () => true,
-      null,
-      1004,
-      "pull",
-      "/repo",
-      null,
-      "codex",
-      "yrd-launch",
-      2004,
-      "04".repeat(32),
+    registerSession(yrd, PROJECT_ID, () => true, null, 1004, "pull", "/repo", null, "codex", "yrd-launch", 2004)
+    // A readable mailbox: the sid its verified identity token recorded on the row (25074 3d-3).
+    db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = 1 WHERE id = ?").run(
+      `sid-${yrd.sessionId}`,
+      yrd.sessionId,
     )
     const pullOpts = {
       ...opts(),
@@ -714,19 +694,11 @@ describe("generic direct-message delivery resolution", () => {
     // nonetheless a currently-known session, so a tracked send must enqueue
     // into its mailbox, not refuse.
     const quietPull = makeContext(db, stmts, "@quiet-pull", "sess-quiet-pull")
-    registerSession(
-      quietPull,
-      PROJECT_ID,
-      () => true,
-      null,
-      1005,
-      "pull",
-      "/repo",
-      null,
-      "codex",
-      null,
-      null,
-      "05".repeat(32),
+    registerSession(quietPull, PROJECT_ID, () => true, null, 1005, "pull", "/repo", null, "codex", null, null)
+    // A readable mailbox: the sid its verified identity token recorded on the row (25074 3d-3).
+    db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = 1 WHERE id = ?").run(
+      `sid-${quietPull.sessionId}`,
+      quietPull.sessionId,
     )
     db.prepare("UPDATE messages SET ts = ? WHERE sender = ?").run(
       Date.now() - (DEFAULT_MAX_SILENCE_SEC + 1) * 1_000,

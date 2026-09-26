@@ -14,7 +14,6 @@
  * or after a CLI reconnect agree.
  */
 
-import { createHash } from "node:crypto"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -210,19 +209,11 @@ describe("an incident wakes its idle owner", () => {
     const ownerCtx = context("sess-owner", "boot-sess-owner", manager.onMessageInserted)
     active.add("sess-owner")
     handleToolCall(ownerCtx, "tribe.join", { name: OWNER, delivery: "pull" }, regOpts)
-    registerSession(
-      ownerCtx,
-      undefined,
-      regOpts.hasActiveTransport,
-      null,
-      0,
-      "pull",
-      undefined,
-      null,
-      null,
-      null,
-      null,
-      createHash("sha256").update("sess-owner").digest("hex"),
+    registerSession(ownerCtx, undefined, regOpts.hasActiveTransport, null, 0, "pull", undefined, null, null, null, null)
+    // A readable mailbox: the sid its verified identity token recorded on the row (25074 3d-3).
+    db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = 1 WHERE id = ?").run(
+      `sid-${ownerCtx.sessionId}`,
+      ownerCtx.sessionId,
     )
     const sent = page("@dev/3's tribe bridge is lost", "lost 3 min")
     const read = (args: Record<string, unknown>) =>

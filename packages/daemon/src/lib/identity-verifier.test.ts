@@ -69,19 +69,15 @@ describe("loadIdentityVerifier", () => {
 })
 
 describe("session authority", () => {
-  it("reads verified, bearer or claimed from the session row", () => {
-    expect(sessionAuthority({ identity_sid: "s1", mailbox_authority_hash: "h" })).toBe("verified")
-    expect(sessionAuthority({ identity_sid: null, mailbox_authority_hash: "h" })).toBe("bearer")
-    expect(sessionAuthority({ identity_sid: null, mailbox_authority_hash: null })).toBe("claimed")
+  it("reads verified or claimed from the session row's sid alone (3d-3)", () => {
+    expect(sessionAuthority({ identity_sid: "s1" })).toBe("verified")
+    expect(sessionAuthority({ identity_sid: null })).toBe("claimed")
   })
 
-  it("bars a claimed registration from a managed holder and asks a verified holder's liveness of a bearer one (3c)", () => {
+  it("bars a claimed registration from a verified holder; every other pairing is allowed (3d-3)", () => {
     expect(displacementRule("verified", "claimed")).toBe("refused")
-    expect(displacementRule("bearer", "claimed")).toBe("refused")
     expect(displacementRule("claimed", "claimed")).toBe("allowed")
-    expect(displacementRule("verified", "bearer")).toBe("holder-liveness")
-    expect(displacementRule("bearer", "bearer")).toBe("allowed")
-    expect(displacementRule("bearer", "verified")).toBe("allowed")
+    expect(displacementRule("claimed", "verified")).toBe("allowed")
     expect(displacementRule("verified", "verified")).toBe("allowed")
   })
 })

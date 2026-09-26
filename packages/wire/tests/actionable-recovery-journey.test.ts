@@ -38,7 +38,7 @@ import { createStatements, openDatabase } from "../../daemon/src/lib/database.ts
 import { connectToDaemon, type DaemonClient } from "../src/client.ts"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
 import { tribeAmbientEnvironmentNames } from "../src/daemon-environment.ts"
-import { launchToken } from "./launch-token.ts"
+import { launchToken, writeClaimsVerifier } from "./launch-token.ts"
 import { tribeDaemonCalls } from "../src/service-send.ts"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -436,6 +436,17 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
   }
 
   /**
+   * 25074 3d-3: a managed seat reads its own mailbox (so a tracked request reaches it, and a one-shot CLI resolves it)
+   * only by a verified token, so a journey about managed seats boots its daemon with this claims verifier. A verdict
+   * without gen keys each session by the launch id its adapter sent, so the journeys' launch ids read as before.
+   */
+  function launchVerifier(): string {
+    const verifierPath = join(tmpDir, "launch-verifier.ts")
+    writeClaimsVerifier(verifierPath, { gen: false })
+    return verifierPath
+  }
+
+  /**
    * CI flake, fourth rotating member (run 31771243082 attempt 1): the
    * parked-name journey died at `timed out waiting for daemon socket` — the
    * bare `existsSync(socketPath)` wait raced the daemon's cold start, before
@@ -575,7 +586,6 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       throughPluginSupervisor?: boolean
       delivery?: "push" | "pull"
       filterMode?: "focus" | "normal" | "ambient"
-      selfMailboxAuthority?: string
       idToken?: string
     } = {},
   ): Promise<{ child: ChildProcessWithoutNullStreams; stdout: Record<string, unknown>[]; logPath: string }> {
@@ -609,7 +619,6 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
           // A managed plugin wrapper preserves its explicit provider parent;
           // direct adapters ignore stale provenance without the child marker.
           TRIBE_PLUGIN_PROVIDER_PARENT_PID: opts.throughPluginSupervisor ? String(process.pid) : "1",
-          ...(opts.selfMailboxAuthority === undefined ? {} : { AG_SESSION_AUTH: opts.selfMailboxAuthority }),
           // Explicit, never the runner's own. A launch carries its own token, as hab gives every launch one: since 3d-2
           // an adapter reads its launch from the token's sid alone. An empty token is a launch without one (25074 3b).
           HAB_ID_TOKEN: opts.idToken ?? (launchId ? launchToken(launchId, name) : ""),
@@ -714,7 +723,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
   async function runCli(
     args: string[],
     env: NodeJS.ProcessEnv,
-    opts: { operatorCapabilityPath?: string; selfMailboxAuthority?: string; throughParent?: boolean } = {},
+    opts: { operatorCapabilityPath?: string; idToken?: string; throughParent?: boolean } = {},
   ): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
     const capabilityFd =
       opts.operatorCapabilityPath === undefined ? undefined : openSync(opts.operatorCapabilityPath, "r")
@@ -725,7 +734,8 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         ...env,
         ...(opts.throughParent ? { TRIBE_TEST_CHILD_COMMAND: JSON.stringify(command) } : {}),
         ...(capabilityFd === undefined ? {} : { TRIBE_OPERATOR_CAPABILITY_FD: "3" }),
-        ...(opts.selfMailboxAuthority === undefined ? {} : { AG_SESSION_AUTH: opts.selfMailboxAuthority }),
+        // The launch's identity token, in place of any the env carries: the one-shot self-read credential (3d-3).
+        ...(opts.idToken === undefined ? {} : { HAB_ID_TOKEN: opts.idToken }),
       },
       stdio: capabilityFd === undefined ? ["ignore", "pipe", "pipe"] : ["ignore", "pipe", "pipe", capabilityFd],
     })
@@ -747,7 +757,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const socketPath = join(tmpDir, "notification-diet.sock")
     const dbPath = join(tmpDir, "notification-diet.db")
     const observerName = "@notification-diet"
-    daemonProc = spawnDaemon(socketPath, dbPath)
+    daemonProc = spawnDaemon(socketPath, dbPath, { identityVerifier: launchVerifier() })
     await waitForDaemonSocket(daemonProc, socketPath)
 
     const observer = await spawnLaunchAdapter(
@@ -758,7 +768,6 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         name: observerName,
         delivery: "push",
         filterMode: "focus",
-        selfMailboxAuthority: `${"A".repeat(42)}0`,
       },
     )
     await callLaunchToolWhenRegistered(observer, 2, "members", {})
@@ -900,15 +909,15 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
   it("drains the managed launch mailbox instead of a foreign environment identity when MCP is unavailable", async () => {
     const socketPath = join(tmpDir, "managed-cli-inbox.sock")
     const dbPath = join(tmpDir, "managed-cli-inbox.db")
-    const ownAuthority = "managed-cli-own-secret-00000000000000000000"
-    const successorAuthority = "managed-cli-successor-secret-00000000000000"
-    const foreignAuthority = "managed-cli-foreign-secret-0000000000000000"
     const ownLaunchId = "managed-cli-own-launch"
     const spawnTimeName = "@agent/3-spawn"
     const runtimeName = "@agent/3-runtime"
     const foreignName = "@agent/foreign"
+    // Each launch's own token, as its adapter presents it: the only self-read credential since 25074 3d-3.
+    const ownToken = launchToken(ownLaunchId, spawnTimeName)
+    const foreignToken = launchToken("managed-cli-foreign-launch", foreignName)
 
-    daemonProc = spawnDaemon(socketPath, dbPath)
+    daemonProc = spawnDaemon(socketPath, dbPath, { identityVerifier: launchVerifier() })
     await waitForDaemonSocket(daemonProc, socketPath)
 
     // This test process stands in for one long-lived provider parent. The MCP
@@ -920,11 +929,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const own = await spawnLaunchAdapter(socketPath, "managed-cli-own.log", ownLaunchId, {
       name: spawnTimeName,
       throughPluginSupervisor: true,
-      selfMailboxAuthority: ownAuthority,
     })
     const foreign = await spawnLaunchAdapter(socketPath, "managed-cli-foreign.log", "managed-cli-foreign-launch", {
       name: foreignName,
-      selfMailboxAuthority: foreignAuthority,
     })
     await callLaunchToolWhenRegistered(own, 60, "members", {})
     await callLaunchToolWhenRegistered(foreign, 61, "members", {})
@@ -966,7 +973,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       ...BASE_ENV,
       TRIBE_SOCKET: socketPath,
       TRIBE_LAUNCH_ID: ownLaunchId,
-      HAB_ID_TOKEN: launchToken(ownLaunchId),
+      HAB_ID_TOKEN: ownToken,
       // Neither mutable identity hint may select the mailbox.
       TRIBE_NAME: foreignName,
       TRIBE_SESSION_NAME: foreignName,
@@ -980,15 +987,17 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(waitRun.exitCode, waitRun.stderr).toBe(0)
     expect(JSON.parse(waitRun.stdout)).toMatchObject({ session: runtimeName, unread_count: 1, timed_out: false })
 
-    const absentAuthority = await runCli(["inbox", "--json"], cliEnv, { throughParent: true })
+    // 25074 3d-3: with no token the CLI refuses before the daemon, naming the token and the hand-session cures.
+    const absentAuthority = await runCli(["inbox", "--json"], cliEnv, { idToken: "", throughParent: true })
     expect(absentAuthority.exitCode).toBe(1)
-    // 25074 3d-1: the CLI carries its launch's token now, so the refusal is the daemon's, naming both credentials.
     expect(absentAuthority.stderr).toContain(
-      "current session authority is missing; HAB_ID_TOKEN or AG_SESSION_AUTH must be inherited",
+      "HAB_ID_TOKEN is missing; tribe inbox consumes a managed launch's own mailbox",
     )
+    expect(absentAuthority.stderr).toContain("--session <name>")
+    expect(absentAuthority.stderr).toContain("--anonymous")
 
     const foreignRead = await runCli(["inbox", "--json"], cliEnv, {
-      selfMailboxAuthority: foreignAuthority,
+      idToken: foreignToken,
       throughParent: true,
     })
     expect(foreignRead.exitCode, foreignRead.stderr).toBe(0)
@@ -1002,10 +1011,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     })
     postForeignObserver.close()
 
-    const drainRun = await runCli(["inbox", "--json"], cliEnv, {
-      selfMailboxAuthority: ownAuthority,
-      throughParent: true,
-    })
+    const drainRun = await runCli(["inbox", "--json"], cliEnv, { throughParent: true })
     expect(drainRun.exitCode, drainRun.stderr).toBe(0)
 
     const drained = JSON.parse(drainRun.stdout) as {
@@ -1016,38 +1022,21 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(drained.events.some((event) => event.content === "own launch request")).toBe(true)
     expect(drained.events.some((event) => event.content === "foreign launch request")).toBe(false)
 
-    const secondRead = await runCli(["inbox", "--json"], cliEnv, {
-      selfMailboxAuthority: ownAuthority,
-      throughParent: true,
-    })
+    const secondRead = await runCli(["inbox", "--json"], cliEnv, { throughParent: true })
     expect(secondRead.exitCode, secondRead.stderr).toBe(0)
     expect(JSON.parse(secondRead.stdout)).toMatchObject({ attention: { actionable_unread: [] }, events: [] })
 
     const successor = await spawnLaunchAdapter(socketPath, "managed-cli-successor.log", ownLaunchId, {
       name: spawnTimeName,
       throughPluginSupervisor: true,
-      selfMailboxAuthority: successorAuthority,
     })
     await callLaunchToolWhenRegistered(successor, 63, "members", {})
 
-    const revokedRead = await runCli(["inbox", "--json"], cliEnv, {
-      selfMailboxAuthority: ownAuthority,
-      throughParent: true,
-    })
-    expect(revokedRead.exitCode).toBe(1)
-    expect(revokedRead.stderr).toMatch(/authority was rejected or revoked/i)
-
-    const successorRead = await runCli(["inbox", "--json"], cliEnv, {
-      selfMailboxAuthority: successorAuthority,
-      throughParent: true,
-    })
+    const successorRead = await runCli(["inbox", "--json"], cliEnv, { throughParent: true })
     expect(successorRead.exitCode, successorRead.stderr).toBe(0)
     expect(JSON.parse(successorRead.stdout)).toMatchObject({ attention: { actionable_unread: [] }, events: [] })
 
-    const humanRead = await runCli(["inbox"], cliEnv, {
-      selfMailboxAuthority: successorAuthority,
-      throughParent: true,
-    })
+    const humanRead = await runCli(["inbox"], cliEnv, { throughParent: true })
     expect(humanRead.exitCode, humanRead.stderr).toBe(0)
     expect(humanRead.stdout).toContain("inbox: 0 actionable unread; 0 pending ball(s)")
 
@@ -1080,7 +1069,6 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
   it("tells a managed seat its own tribe transport is gone, and says nothing while it is connected", async () => {
     const socketPath = join(tmpDir, "self-transport.sock")
     const dbPath = join(tmpDir, "self-transport.db")
-    const authority = "self-transport-secret-000000000000000000000"
     const launchId = "self-transport-launch"
     const seatName = "@agent/7"
     const derivedLaunchId = `${launchId}::${encodeURIComponent(seatName)}`
@@ -1091,7 +1079,6 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const seat = await spawnLaunchAdapter(socketPath, "self-transport.log", launchId, {
       name: seatName,
       throughPluginSupervisor: true,
-      selfMailboxAuthority: authority,
     })
     await callLaunchToolWhenRegistered(seat, 70, "members", {})
     const cliEnv = {
@@ -1132,10 +1119,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(dead.stderr).toContain("relaunch")
 
     // tribe send resolves its caller through the same launch read, so it warns too.
-    const send = await runCli(["send", "@chief", "still here", "--type", "notify"], cliEnv, {
-      selfMailboxAuthority: authority,
-      throughParent: true,
-    })
+    const send = await runCli(["send", "@chief", "still here", "--type", "notify"], cliEnv, { throughParent: true })
     expect(send.exitCode, send.stderr).toBe(0)
     expect(send.stderr).toContain(warning)
   }, 120_000)
@@ -1146,12 +1130,11 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const launchId = "successor-reply-launch"
     const requestId = "successor-reply-request"
 
-    daemonProc = spawnDaemon(socketPath, dbPath)
+    daemonProc = spawnDaemon(socketPath, dbPath, { identityVerifier: launchVerifier() })
     await waitForDaemonSocket(daemonProc, socketPath)
 
     const successor = await spawnLaunchAdapter(socketPath, "successor-reply.log", launchId, {
       name: "@chief/next",
-      selfMailboxAuthority: `${"A".repeat(42)}1`,
     })
     await callLaunchToolWhenRegistered(successor, 70, "members", {})
     await callLaunchTool(successor, 71, "rename", { new_name: "@chief" })
@@ -1198,7 +1181,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         TRIBE_SESSION_NAME: "@chief/next",
         TRIBE_NO_AUTOSTART: "1",
       },
-      { throughParent: true, selfMailboxAuthority: `${"A".repeat(42)}1` },
+      { throughParent: true },
     )
 
     expect(reply.exitCode, reply.stderr).toBe(0)
@@ -1231,39 +1214,41 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(attributed.sender).toBe("@chief")
   }, 120_000)
 
-  it("authenticates managed CLI pending reads and closes through the session authority bearer", async () => {
+  it("authenticates managed CLI pending reads and closes through the launch's identity token", async () => {
     const socketPath = join(tmpDir, "managed-cli-pending-close.sock")
     const dbPath = join(tmpDir, "managed-cli-pending-close.db")
     const owner = "@agent/pending-owner"
     const sender = "@agent/pending-sender"
     const thirdPersona = "@agent/pending-third"
-    const ownerAuthority = "o".repeat(43)
-    const senderAuthority = "s".repeat(43)
-    const thirdPersonaAuthority = "t".repeat(43)
+    // Each seat's launch token is its one-shot credential (25074 3d-3). A verified token naming no registered session
+    // stands in for a credential that matches no live managed session.
+    const ownerToken = launchToken("pending-owner-launch", owner)
+    const senderToken = launchToken("pending-sender-launch", sender)
+    const thirdPersonaToken = launchToken("pending-third-launch", thirdPersona)
+    const unregisteredToken = launchToken("pending-unregistered-launch", "@agent/pending-unregistered")
     const ownerRequestId = "11111111-1111-4111-8111-111111111111"
     const senderRequestId = "22222222-2222-4222-8222-222222222222"
     const thirdPersonaRequestId = "33333333-3333-4333-8333-333333333333"
     const missingAuthorityRequestId = "44444444-4444-4444-8444-444444444444"
     const rejectedAuthorityRequestId = "55555555-5555-4555-8555-555555555555"
 
-    daemonProc = spawnDaemon(socketPath, dbPath)
+    daemonProc = spawnDaemon(socketPath, dbPath, { identityVerifier: launchVerifier() })
     await waitForDaemonSocket(daemonProc, socketPath)
 
     const ownerAdapter = await spawnLaunchAdapter(socketPath, "managed-cli-pending-owner.log", "pending-owner-launch", {
       name: owner,
-      selfMailboxAuthority: ownerAuthority,
     })
     const senderAdapter = await spawnLaunchAdapter(
       socketPath,
       "managed-cli-pending-sender.log",
       "pending-sender-launch",
-      { name: sender, selfMailboxAuthority: senderAuthority },
+      { name: sender },
     )
     const thirdPersonaAdapter = await spawnLaunchAdapter(
       socketPath,
       "managed-cli-pending-third.log",
       "pending-third-launch",
-      { name: thirdPersona, selfMailboxAuthority: thirdPersonaAuthority },
+      { name: thirdPersona },
     )
     await callLaunchToolWhenRegistered(ownerAdapter, 70, "members", {})
     await callLaunchToolWhenRegistered(senderAdapter, 71, "members", {})
@@ -1307,7 +1292,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     // resolution can return the owner's known expired ball instead of a
     // plausible count:0 for nobody.
     const implicitOwner = await runCli(["pending", "--expired", "--owed", "--json"], cliEnv, {
-      selfMailboxAuthority: ownerAuthority,
+      idToken: ownerToken,
       throughParent: true,
     })
     expect(implicitOwner.exitCode, implicitOwner.stderr).toBe(0)
@@ -1337,37 +1322,27 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(missingAuthority.exitCode).toBe(2)
     expect(missingAuthority.stdout).toBe("")
     expect(missingAuthority.stderr).toBe(
-      "tribe pending: current session authority is missing; HAB_ID_TOKEN or AG_SESSION_AUTH must be inherited from the managed launch. " +
+      "tribe pending: current session authority is missing: this call carries no HAB_ID_TOKEN. A managed seat inherits " +
+        "HAB_ID_TOKEN from its launch; from a hand session, read with --session <name> or send with --anonymous. " +
         "No pending query ran. For an explicit recovery or audit read, run " +
         "'tribe pending --owner <seat> --expired --owed --json'.\n",
     )
 
     const rejectedAuthority = await runCli(["pending", "--expired", "--owed", "--json"], cliEnv, {
-      selfMailboxAuthority: "x".repeat(43),
+      idToken: unregisteredToken,
       throughParent: true,
     })
     expect(rejectedAuthority.exitCode).toBe(2)
     expect(rejectedAuthority.stdout).toBe("")
     expect(rejectedAuthority.stderr).toBe(
-      "tribe pending: current session authority was rejected or revoked; AG_SESSION_AUTH did not match a live managed session. " +
-        "No pending query ran. For an explicit recovery or audit read, run " +
-        "'tribe pending --owner <seat> --expired --owed --json'.\n",
-    )
-
-    const malformedAuthority = await runCli(["pending", "--expired", "--owed", "--json"], cliEnv, {
-      selfMailboxAuthority: "bad",
-      throughParent: true,
-    })
-    expect(malformedAuthority.exitCode).toBe(2)
-    expect(malformedAuthority.stdout).toBe("")
-    expect(malformedAuthority.stderr).toBe(
-      "tribe pending: AG_SESSION_AUTH must be a 32-byte base64url bearer. No pending query ran. " +
-        "For an explicit recovery or audit read, run " +
+      "tribe pending: current session authority was rejected: @agent/pending-unregistered's token is verified, but no " +
+        "session is registered under its sid pending-unregistered-launch yet; the adapter registers with the token on " +
+        "its next connect, so retry after it does. No pending query ran. For an explicit recovery or audit read, run " +
         "'tribe pending --owner <seat> --expired --owed --json'.\n",
     )
 
     const ownerClose = await runCli(["pending", "--owner", owner, "--close", ownerRequestId, "--json"], cliEnv, {
-      selfMailboxAuthority: ownerAuthority,
+      idToken: ownerToken,
       throughParent: true,
     })
     expect(ownerClose.exitCode, ownerClose.stderr).toBe(0)
@@ -1379,7 +1354,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
 
     await open(74, senderRequestId)
     const senderClose = await runCli(["pending", "--owner", owner, "--close", senderRequestId, "--json"], cliEnv, {
-      selfMailboxAuthority: senderAuthority,
+      idToken: senderToken,
       throughParent: true,
     })
     expect(senderClose.exitCode, senderClose.stderr).toBe(0)
@@ -1391,7 +1366,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
 
     await open(75, thirdPersonaRequestId)
     const thirdPersonaClose = await runCli(["pending", "--owner", owner, "--close", thirdPersonaRequestId], cliEnv, {
-      selfMailboxAuthority: thirdPersonaAuthority,
+      idToken: thirdPersonaToken,
       throughParent: true,
     })
     expect(thirdPersonaClose.exitCode).toBe(2)
@@ -1412,19 +1387,22 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(missingClose.exitCode).toBe(2)
     expect(missingClose.stdout).toBe("")
     expect(missingClose.stderr).toBe(
-      `tribe pending: current session authority is missing; HAB_ID_TOKEN or AG_SESSION_AUTH must be inherited from the managed launch\n`,
+      "tribe pending: current session authority is missing: this call carries no HAB_ID_TOKEN. A managed seat inherits " +
+        "HAB_ID_TOKEN from its launch; from a hand session, read with --session <name> or send with --anonymous\n",
     )
 
     await open(77, rejectedAuthorityRequestId)
     const rejectedClose = await runCli(
       ["pending", "--owner", owner, "--close", rejectedAuthorityRequestId, "--json"],
       cliEnv,
-      { selfMailboxAuthority: "x".repeat(43), throughParent: true },
+      { idToken: unregisteredToken, throughParent: true },
     )
     expect(rejectedClose.exitCode).toBe(2)
     expect(rejectedClose.stdout).toBe("")
     expect(rejectedClose.stderr).toBe(
-      `tribe pending: current session authority was rejected or revoked; AG_SESSION_AUTH did not match a live managed session\n`,
+      "tribe pending: current session authority was rejected: @agent/pending-unregistered's token is verified, but no " +
+        "session is registered under its sid pending-unregistered-launch yet; the adapter registers with the token on " +
+        "its next connect, so retry after it does\n",
     )
 
     const overrideProbe = await connectToDaemon(socketPath)
@@ -1451,7 +1429,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       expect(nullOwnerRead.structuredContent).not.toHaveProperty("count")
 
       const invalidFilter = (await overrideProbe.call("cli_session_pending_read_v1", {
-        authority: ownerAuthority,
+        idToken: ownerToken,
         owed: true,
       })) as { structuredContent?: { owner?: string; error?: string; count?: number } }
       expect(invalidFilter.structuredContent).toMatchObject({
@@ -1467,7 +1445,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       ] as const) {
         await expect(
           overrideProbe.call("cli_session_pending_read_v1", {
-            authority: ownerAuthority,
+            idToken: ownerToken,
             [field]: value,
           }),
         ).rejects.toThrow(message)
@@ -1475,7 +1453,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
 
       await expect(
         overrideProbe.call("cli_session_pending_read_v1", {
-          authority: ownerAuthority,
+          idToken: ownerToken,
           owner: sender,
           expired: true,
           owed: true,
@@ -1483,7 +1461,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       ).rejects.toThrow(/pending read derives owner identity from authority; owner override is forbidden/i)
       await expect(
         overrideProbe.call("cli_session_pending_close_v1", {
-          authority: ownerAuthority,
+          idToken: ownerToken,
           owner,
           close: rejectedAuthorityRequestId,
           prune: true,
@@ -1546,7 +1524,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
           content: expect.objectContaining({
             capability: "pending-close",
             reason: "session-authority-missing",
-            authority_env: "AG_SESSION_AUTH",
+            authority_env: "HAB_ID_TOKEN",
             owner,
             attempted_ids: [missingAuthorityRequestId],
             pending_mutation: "none",
@@ -1558,8 +1536,8 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
           ref: rejectedAuthorityRequestId,
           content: expect.objectContaining({
             capability: "pending-close",
-            reason: "session-authority-rejected",
-            authority_env: "AG_SESSION_AUTH",
+            reason: "identity-not-registered",
+            authority_env: "HAB_ID_TOKEN",
             owner,
             attempted_ids: [rejectedAuthorityRequestId],
             pending_mutation: "none",
@@ -1577,16 +1555,11 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const launchId = "shared-persona-launch"
     const personas = ["@chief", "@cto"] as const
 
-    daemonProc = spawnDaemon(socketPath, dbPath)
+    daemonProc = spawnDaemon(socketPath, dbPath, { identityVerifier: launchVerifier() })
     await waitForDaemonSocket(daemonProc, socketPath, "shared-persona daemon socket")
 
     const seats = await Promise.all(
-      personas.map((name, index) =>
-        spawnLaunchAdapter(socketPath, `shared-persona-${name.slice(1)}.log`, launchId, {
-          name,
-          selfMailboxAuthority: `${"A".repeat(42)}${index}`,
-        }),
-      ),
+      personas.map((name) => spawnLaunchAdapter(socketPath, `shared-persona-${name.slice(1)}.log`, launchId, { name })),
     )
     const firstSeat = seats.at(0)
     if (firstSeat === undefined) throw new Error("shared-persona journey started no seats")
@@ -1648,7 +1621,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
             TRIBE_SESSION_NAME: persona,
             TRIBE_NO_AUTOSTART: "1",
           },
-          { throughParent: true, selfMailboxAuthority: `${"A".repeat(42)}${index}` },
+          { throughParent: true },
         )
         expect(reply.exitCode, reply.stderr).toBe(0)
         expect(reply.stdout).toContain(`Closed 1 pending request row(s) for ${persona}: ${requestId}`)
@@ -1789,15 +1762,11 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
   it("keeps pull obligations readable while a managed persona transport is stopped", async () => {
     const socketPath = join(tmpDir, "stopped-persona.sock")
     const dbPath = join(tmpDir, "stopped-persona.db")
-    daemonProc = spawnDaemon(socketPath, dbPath)
+    daemonProc = spawnDaemon(socketPath, dbPath, { identityVerifier: launchVerifier() })
     await waitForDaemonSocket(daemonProc, socketPath)
 
     const launchId = "stopped-persona-launch"
-    const selfMailboxAuthority = `${"A".repeat(42)}0`
-    const initial = await spawnLaunchAdapter(socketPath, "stopped-persona-initial.log", launchId, {
-      name: NAME,
-      selfMailboxAuthority,
-    })
+    const initial = await spawnLaunchAdapter(socketPath, "stopped-persona-initial.log", launchId, { name: NAME })
     await callLaunchToolWhenRegistered(initial, 10, "members", {})
     initial.child.kill("SIGTERM")
     await once(initial.child, "exit")
@@ -1825,15 +1794,12 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         TRIBE_NAME: NAME,
         TRIBE_NO_AUTOSTART: "1",
       },
-      { throughParent: true, selfMailboxAuthority },
+      { throughParent: true },
     )
     expect(waitRun.exitCode, waitRun.stderr).toBe(0)
     expect(JSON.parse(waitRun.stdout)).toMatchObject({ session: NAME, unread_count: 1, timed_out: false })
 
-    const successor = await spawnLaunchAdapter(socketPath, "stopped-persona-successor.log", launchId, {
-      name: NAME,
-      selfMailboxAuthority,
-    })
+    const successor = await spawnLaunchAdapter(socketPath, "stopped-persona-successor.log", launchId, { name: NAME })
     const fetched = (await callLaunchToolWhenRegistered(successor, 30, "fetch", { limit: 10 })) as {
       attention?: {
         actionable_unread?: Array<{ id?: string; type?: string; from?: string }>
@@ -1846,76 +1812,6 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(fetched.attention?.pending_balls).toEqual([
       expect.objectContaining({ request_id: sent.id, message_id: sent.id, sender: "@chief" }),
     ])
-  }, 120_000)
-
-  it("keeps a quiet connection-scoped pull mailbox readable after its transport leaves", async () => {
-    const socketPath = join(tmpDir, "quiet-pull.sock")
-    const dbPath = join(tmpDir, "quiet-pull.db")
-    daemonProc = spawnDaemon(socketPath, dbPath)
-    await waitForDaemonSocket(daemonProc, socketPath)
-
-    const chief = await spawnLaunchAdapter(socketPath, "quiet-pull-chief.log", "quiet-pull-chief", {
-      name: "@chief",
-    })
-    await callLaunchToolWhenRegistered(chief, 10, "members", {})
-
-    // No launch id means this is the CLI-rail lifetime: the real adapter
-    // registers a connection-scoped pull member, sends once, then leaves.
-    const quietName = "@quiet-pull"
-    const quiet = await spawnLaunchAdapter(socketPath, "quiet-pull-member.log", undefined, {
-      name: quietName,
-      delivery: "pull",
-      selfMailboxAuthority: `${"A".repeat(42)}0`,
-    })
-    await callLaunchToolWhenRegistered(quiet, 20, "members", {})
-    await callLaunchTool(quiet, 21, "send", {
-      to: "@chief",
-      message: "connection-scoped mailbox is ready",
-      type: "notify",
-    })
-    quiet.child.kill("SIGTERM")
-    await once(quiet.child, "exit")
-
-    // Reproduce the actual missed case, not the fresh-join grace case: keep
-    // the current session registration but age every journal fact authored by
-    // the member beyond the recent-activity recognition window.
-    const db = openDatabase(dbPath)
-    try {
-      expect(
-        db.prepare("SELECT name, launch_id, launch_parent_pid, delivery FROM sessions WHERE name = ?").get(quietName),
-      ).toEqual({ name: quietName, launch_id: null, launch_parent_pid: null, delivery: "pull" })
-      db.prepare("UPDATE messages SET ts = ? WHERE sender = ?").run(Date.now() - 5 * 60 * 60_000, quietName)
-    } finally {
-      db.close()
-    }
-
-    const sent = (await callLaunchTool(chief, 30, "send", {
-      to: quietName,
-      message: "first request in hours to the quiet pull mailbox",
-      type: "request",
-      request: true,
-      delivery: "pull",
-    })) as { id?: string; delivery?: { state?: string; recipient?: string } }
-    expect(sent).toMatchObject({
-      id: expect.any(String),
-      delivery: { state: "offline", recipient: quietName },
-    })
-
-    const waitRun = await runCli(
-      ["inbox-wait", "--session", quietName, "--timeout", "0s", "--json"],
-      {
-        ...BASE_ENV,
-        TRIBE_SOCKET: socketPath,
-        TRIBE_NO_AUTOSTART: "1",
-      },
-      { throughParent: true },
-    )
-    expect(waitRun.exitCode, waitRun.stderr).toBe(0)
-    expect(JSON.parse(waitRun.stdout)).toMatchObject({
-      session: quietName,
-      unread_count: 1,
-      timed_out: false,
-    })
   }, 120_000)
 
   // 25074 P2-A (@cto §8): a seat that cannot be observed right now (starting, or live but silent) is undecided,
@@ -2008,17 +1904,6 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
   // 25074 3d-1c (@cto 082a4259): ONE answer to "who am I on the wire" for every sender. The witnesses run through the
   // one sender against a real daemon whose verifier reads the token's claims: a service token registers as the
   // service; a seat token registers as the seat, with the producer riding in the message; no token refuses naming both.
-  function writeClaimsVerifier(verifierPath: string): void {
-    writeFileSync(
-      verifierPath,
-      `export const IDENTITY_VERIFIER_INTERFACE = 1
-       export async function verifyIdentity(token) {
-         const claims = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8"))
-         return { result: "verified", actor: claims.act.sub, sid: claims.sid, gen: claims.gen }
-       }`,
-    )
-  }
-
   function sentRows(dbPath: string): Array<{ sender: string; content: string; sender_authority: string | null }> {
     const db = openDatabase(dbPath)
     try {
@@ -2034,7 +1919,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const socketPath = join(tmpDir, "tribe.sock")
     const dbPath = join(tmpDir, "tribe.db")
     const verifierPath = join(tmpDir, "verifier.ts")
-    writeClaimsVerifier(verifierPath)
+    writeClaimsVerifier(verifierPath, { gen: true })
     daemonProc = spawnDaemon(socketPath, dbPath, { identityVerifier: verifierPath })
     await waitForDaemonSocket(daemonProc, socketPath)
 
@@ -2054,7 +1939,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const socketPath = join(tmpDir, "tribe.sock")
     const dbPath = join(tmpDir, "tribe.db")
     const verifierPath = join(tmpDir, "verifier.ts")
-    writeClaimsVerifier(verifierPath)
+    writeClaimsVerifier(verifierPath, { gen: true })
     daemonProc = spawnDaemon(socketPath, dbPath, { identityVerifier: verifierPath })
     await waitForDaemonSocket(daemonProc, socketPath)
     const seatToken = launchToken("sid-seat-3d1c", NAME)
@@ -2099,20 +1984,15 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
   it("fans three native adapters from one provider launch into one live member", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const dbPath = join(tmpDir, "tribe.db")
-    daemonProc = spawnDaemon(socketPath, dbPath)
+    const verifierPath = launchVerifier()
+    daemonProc = spawnDaemon(socketPath, dbPath, { identityVerifier: verifierPath })
     await waitForDaemonSocket(daemonProc, socketPath)
 
     const launchId = "provider-launch-a"
     const launchAdapters = await Promise.all([
-      spawnLaunchAdapter(socketPath, "launch-adapter-1.log", launchId, {
-        selfMailboxAuthority: `${"A".repeat(42)}0`,
-      }),
-      spawnLaunchAdapter(socketPath, "launch-adapter-2.log", launchId, {
-        selfMailboxAuthority: `${"A".repeat(42)}1`,
-      }),
-      spawnLaunchAdapter(socketPath, "launch-adapter-3.log", launchId, {
-        selfMailboxAuthority: `${"A".repeat(42)}2`,
-      }),
+      spawnLaunchAdapter(socketPath, "launch-adapter-1.log", launchId),
+      spawnLaunchAdapter(socketPath, "launch-adapter-2.log", launchId),
+      spawnLaunchAdapter(socketPath, "launch-adapter-3.log", launchId),
     ])
 
     // Force every transport through daemon registration, then give displaced
@@ -2282,9 +2162,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     // logical member and restores the three-transport diagnostic set.
     launchAdapters[1]!.child.kill("SIGTERM")
     await once(launchAdapters[1]!.child, "exit")
-    const replacement = await spawnLaunchAdapter(socketPath, "launch-adapter-2b.log", launchId, {
-      selfMailboxAuthority: `${"A".repeat(42)}1`,
-    })
+    const replacement = await spawnLaunchAdapter(socketPath, "launch-adapter-2b.log", launchId)
     launchAdapters[1] = replacement
     const afterReconnect = await callLaunchToolUntil<{
       sessions?: Array<{ name?: string; member_id?: string; launch_id?: string; transport_pids?: number[] }>
@@ -2310,7 +2188,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     daemonProc.kill("SIGTERM")
     await once(daemonProc, "exit")
     await waitForCondition(() => !existsSync(socketPath), "old daemon socket removal")
-    daemonProc = spawnDaemon(socketPath, dbPath)
+    daemonProc = spawnDaemon(socketPath, dbPath, { identityVerifier: verifierPath })
     await waitForDaemonSocket(daemonProc, socketPath, "restarted daemon socket")
     // Each adapter reconnects and re-registers with the fresh daemon
     // independently; Promise.all resolves each leg on its OWN transport_pids
@@ -2355,11 +2233,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
 
     // A deliberate new launch with takeover supersedes the whole old launch
     // as one set, leaving no suffixed or -dead- session rows. Like every
-    // managed launch it carries its own bearer: a claimed registration never
-    // displaces a managed holder (25074 3b).
-    const successor = await spawnLaunchAdapter(socketPath, "launch-b-successor.log", "provider-launch-b", {
-      selfMailboxAuthority: `${"B".repeat(42)}0`,
-    })
+    // managed launch it carries its own verified token: a claimed registration
+    // never displaces a managed holder (25074 3b).
+    const successor = await spawnLaunchAdapter(socketPath, "launch-b-successor.log", "provider-launch-b")
     const successorMembers = (await callLaunchToolWhenRegistered(successor, 41, "members", {})) as {
       sessions?: Array<{ name?: string; member_id?: string; launch_id?: string; transport_pids?: number[] }>
     }

@@ -140,7 +140,6 @@ describe("standalone daemon lifecycle ownership", () => {
       `import { appendFileSync } from "node:fs"
 appendFileSync(${JSON.stringify(daemonEnvLog)}, JSON.stringify({
   account: process.env.TRIBE_ACCOUNT ?? null,
-  launchId: process.env.TRIBE_LAUNCH_ID ?? null,
   name: process.env.TRIBE_NAME ?? null,
   providerParentPid: process.env.TRIBE_PLUGIN_PROVIDER_PARENT_PID ?? null,
   reloadExitCode: process.env.TRIBE_DAEMON_RELOAD_EXIT_CODE ?? null,
@@ -170,7 +169,6 @@ client.close()
       "TRIBE_ACCOUNT",
       "TRIBE_DAEMON_SCRIPT",
       "TRIBE_DOMAINS",
-      "TRIBE_LAUNCH_ID",
       "TRIBE_NAME",
       "TRIBE_OPERATOR_CAPABILITY",
       "TRIBE_OPERATOR_CAPABILITY_FD",
@@ -187,7 +185,6 @@ client.close()
     Object.assign(env, {
       DEBUG_LOG: daemonLog,
       TRIBE_ACCOUNT: "must-not-leak@example.test",
-      TRIBE_LAUNCH_ID: "must-not-leak-launch",
       TRIBE_NAME: "@seat/must-not-leak",
       LOG_FILE: daemonLog,
       TRIBE_NO_AUTORELOAD: "1",
@@ -225,7 +222,6 @@ client.close()
     >
     expect.soft(initialEnv).toMatchObject({
       account: null,
-      launchId: null,
       name: null,
       providerParentPid: null,
       supervisorPid: String(ownerPid),
@@ -249,7 +245,6 @@ client.close()
     >
     expect(successorEnv).toMatchObject({
       account: null,
-      launchId: null,
       name: null,
       providerParentPid: null,
       reloadExitCode: expect.stringMatching(/^\d+$/u),
