@@ -27,7 +27,6 @@ import {
   writeTribeConfig,
   type TribeAutostart,
 } from "./autostart-config.ts"
-import { resolveRecallSocketPath } from "../../../../plugins/claude/recall/lib/config.ts"
 
 // ---------------------------------------------------------------------------
 // Marker — used to identify tribe-installed hook entries
@@ -206,18 +205,20 @@ export function planInstall(env: InstallEnv, opts: { autostart?: TribeAutostart 
     nextHooks[claudeName] = matchers
     const found = findTribeIndex(matchers, tribeArg)
     if (found) {
-      const m = matchers[found.mi]!
-      const existing = m.hooks[found.hi]!
-      if (existing.command === desiredCommand) {
-        hookChanges.push({ event: claudeName, action: "unchanged", command: desiredCommand })
-      } else {
-        hookChanges.push({
-          event: claudeName,
-          action: "update",
-          command: desiredCommand,
-          previousCommand: existing.command,
-        })
-        m.hooks[found.hi] = { type: "command", command: desiredCommand }
+      const m = matchers[found.mi]
+      const existing = m?.hooks[found.hi]
+      if (m && existing) {
+        if (existing.command === desiredCommand) {
+          hookChanges.push({ event: claudeName, action: "unchanged", command: desiredCommand })
+        } else {
+          hookChanges.push({
+            event: claudeName,
+            action: "update",
+            command: desiredCommand,
+            previousCommand: existing.command,
+          })
+          m.hooks[found.hi] = { type: "command", command: desiredCommand }
+        }
       }
     } else {
       hookChanges.push({ event: claudeName, action: "add", command: desiredCommand })
@@ -360,11 +361,11 @@ export function planUninstall(env: InstallEnv): UninstallPlan {
     const matchers = nextHooks[claudeName] ?? []
     let removed: string | undefined
     for (let mi = matchers.length - 1; mi >= 0; mi--) {
-      const m = matchers[mi]!
-      if (!Array.isArray(m.hooks)) continue
+      const m = matchers[mi]
+      if (!m || !Array.isArray(m.hooks)) continue
       for (let hi = m.hooks.length - 1; hi >= 0; hi--) {
-        const h = m.hooks[hi]!
-        if (typeof h.command === "string" && isTribeHookCommand(h.command, tribeArg)) {
+        const h = m.hooks[hi]
+        if (h && typeof h.command === "string" && isTribeHookCommand(h.command, tribeArg)) {
           removed = h.command
           m.hooks.splice(hi, 1)
         }
@@ -501,7 +502,7 @@ export async function doctorReport(env: InstallEnv): Promise<DoctorReport> {
           hint: "run `tribe install`",
         })
       } else {
-        const cmd = matchers[found.mi]!.hooks[found.hi]!.command
+        const cmd = matchers[found.mi]?.hooks[found.hi]?.command ?? ""
         // Command format: `<bun> <tribe-cli> hook <event>`. Extract the path.
         const parts = cmd.split(/\s+/).filter(Boolean)
         const cliPath = parts.find((p) => p.endsWith("daemon.ts") || p.endsWith("tribe-cli.ts"))
@@ -616,19 +617,19 @@ export async function doctorReport(env: InstallEnv): Promise<DoctorReport> {
       message: `library (TRIBE_NO_DAEMON=1 overrides ${mode}${configExists ? "" : " default"})`,
     })
   } else if (mode === "daemon") {
-    const loreSocket = resolveRecallSocketPath()
-    const loreAlive = existsSync(loreSocket)
-    if (loreAlive) {
+    const daemonSocket = resolveSocketPath()
+    const daemonAlive = existsSync(daemonSocket)
+    if (daemonAlive) {
       checks.push({
         name: "autostart",
         level: "pass",
-        message: `daemon (lore daemon alive at ${loreSocket})`,
+        message: `daemon (tribe daemon alive at ${daemonSocket})`,
       })
     } else {
       checks.push({
         name: "autostart",
         level: "pass",
-        message: `daemon (lore daemon not running — will spawn on next hook)`,
+        message: `daemon (tribe daemon not running — will spawn on next hook)`,
       })
     }
   } else {

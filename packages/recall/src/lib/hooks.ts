@@ -32,12 +32,8 @@ import { summarizeUnprocessedDays } from "./summarize-daily"
 import { roundSteps, timeStepAsync } from "./inject-core"
 import { createDeadlineRecall } from "./recall-deadline.ts"
 import { withDaemonCall } from "../../../../plugins/claude/recall/lib/socket.ts"
-import { resolveRecallSocketPath } from "../../../../plugins/claude/recall/lib/config.ts"
-import {
-  TRIBE_METHODS,
-  RECALL_PROTOCOL_VERSION,
-  type InjectDeltaResult,
-} from "../../../../plugins/claude/recall/lib/rpc.ts"
+import { resolveSocketPath } from "../../../wire/src/paths.ts"
+import { TRIBE_METHODS, RECALL_PROTOCOL_VERSION } from "../../../../plugins/claude/recall/lib/rpc.ts"
 // Route every UserPromptSubmit emission through the envelope so the unified
 // activity log catches it (km-tribe.activity-log phase 2).
 import { emitHookJson as envelopeEmitHookJson } from "../../../injection-envelope/src/emit.ts"
@@ -231,7 +227,7 @@ export async function cmdSessionEnd(): Promise<void> {
 }
 
 /**
- * Register the current session with the lore daemon. Returns a short status
+ * Register the current session with the tribe daemon. Returns a short status
  * string for the log line. Never throws — daemon registration is best-effort
  * and the sentinel file is the ground-truth fallback.
  */
@@ -242,7 +238,7 @@ async function registerWithRecallDaemon(input: {
   cwd: string
 }): Promise<string> {
   const outcome = await withDaemonCall(
-    { socketPath: resolveRecallSocketPath(), deadlineMs: 1500, callTimeoutMs: 1000 },
+    { socketPath: resolveSocketPath(), deadlineMs: 1500, callTimeoutMs: 1000 },
     async (client) => {
       await client.call(TRIBE_METHODS.hello, {
         clientName: "recall-hook",
@@ -265,63 +261,6 @@ async function registerWithRecallDaemon(input: {
 }
 
 // ============================================================================
-// Daemon path for UserPromptSubmit — tribe.inject_delta
-// ============================================================================
-
-type InjectDeltaOutcome =
-  | { kind: "skipped"; reason: string; skippedSteps?: Record<string, string> }
-  | {
-      kind: "ok"
-      additionalContext: string
-      contextLen: number
-      seenCount: number
-      turnNumber: number
-      skippedSteps?: Record<string, string>
-    }
-  | { kind: "error"; message: string }
-
-/**
- * Call tribe.inject_delta on the daemon. Short budget — if the daemon can't
- * answer in time we return `error` so the caller can fall back to the
- * library hookRecall path without blocking the user's prompt.
- */
-async function tryInjectDeltaViaDaemon(prompt: string, sessionId?: string): Promise<InjectDeltaOutcome> {
-  const outcome = await withDaemonCall(
-    { socketPath: resolveRecallSocketPath(), deadlineMs: 2500, callTimeoutMs: 2000 },
-    async (client): Promise<InjectDeltaOutcome> => {
-      await client.call(TRIBE_METHODS.hello, {
-        clientName: "recall-hook",
-        clientVersion: "0.1.0",
-        protocolVersion: RECALL_PROTOCOL_VERSION,
-      })
-      const result = (await client.call(TRIBE_METHODS.injectDelta, { prompt, sessionId })) as InjectDeltaResult
-      if (result.skipped) {
-        return { kind: "skipped", reason: result.reason ?? "unknown", skippedSteps: result.skippedSteps }
-      }
-      const ctx = result.additionalContext ?? ""
-      return {
-        kind: "ok",
-        additionalContext: ctx,
-        contextLen: ctx.length,
-        seenCount: result.seenCount ?? 0,
-        turnNumber: result.turnNumber ?? 0,
-        skippedSteps: result.skippedSteps,
-      }
-    },
-  )
-  switch (outcome.kind) {
-    case "ok":
-      return outcome.value
-    case "no-daemon":
-      return { kind: "error", message: "no-daemon" }
-    case "timeout":
-      return { kind: "error", message: "timeout" }
-    case "error":
-      return { kind: "error", message: outcome.message }
-  }
-}
-
-// ============================================================================
 // Stdin reader
 // ============================================================================
 
@@ -339,11 +278,11 @@ export async function readStdin(): Promise<string> {
 
 /**
  * A step skipped rather than waited on is said out loud, never silent (@ag/tribe/25071): today the project-source
- * refresh, when the index writer or SQLite's write lock is held. Recall still ran, on the daemon or the library path.
+ * refresh, when the index writer or SQLite's write lock is held. Recall ran on the library path.
  */
 function warnSkippedSteps(
   skippedSteps: Record<string, string> | undefined,
-  path: "daemon" | "library",
+  path: "library",
   startTime: number,
   steps: Record<string, number>,
 ): void {
@@ -405,46 +344,19 @@ export async function cmdHook(): Promise<void> {
 
     const prompt = input.prompt
     if (!prompt) {
-      hookLog.warn?.("no prompt in stdin", { session: sessionId, elapsed_ms: Date.now() - startTime, steps: roundSteps(steps) })
+      hookLog.warn?.("no prompt in stdin", {
+        session: sessionId,
+        elapsed_ms: Date.now() - startTime,
+        steps: roundSteps(steps),
+      })
       // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
       return drainOutput().then(() => process.exit(0))
     }
 
-    // Try daemon first. Daemon holds per-session dedup state
-    // in memory, so repeated injections across the same session don't
-    // rely on tmpfile round-trips and survive Claude Code session
-    // boundaries as long as the daemon is alive.
-    if (process.env.TRIBE_NO_DAEMON !== "1") {
-      const daemonOutput = await timeStepAsync(steps, "daemon", () => tryInjectDeltaViaDaemon(prompt, input.session_id))
-      if (daemonOutput.kind !== "error") warnSkippedSteps(daemonOutput.skippedSteps, "daemon", startTime, steps)
-      if (daemonOutput.kind === "skipped") {
-        hookLog.info?.("daemon skipped", {
-          session: sessionId,
-          reason: daemonOutput.reason,
-          elapsed_ms: Date.now() - startTime,
-          steps: roundSteps(steps),
-          prompt_preview: prompt.slice(0, 60),
-        })
-        // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
-        return drainOutput().then(() => process.exit(0))
-      }
-      if (daemonOutput.kind === "ok") {
-        hookLog.info?.("daemon ok", {
-          session: sessionId,
-          context_len: daemonOutput.contextLen,
-          elapsed_ms: Date.now() - startTime,
-          steps: roundSteps(steps),
-          seen_count: daemonOutput.seenCount,
-          turn_number: daemonOutput.turnNumber,
-          prompt_preview: prompt.slice(0, 60),
-        })
-        // The hook's JSON response: console.log is the sanctioned channel.
-        console.log(envelopeEmitHookJson("UserPromptSubmit", daemonOutput.additionalContext, prompt))
-        // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
-        return drainOutput().then(() => process.exit(0))
-      }
-      // kind === "error" — fall through to library path below.
-    }
+    // 25298: No daemon serves prompt hooks — a persistent wire loop must not
+    // run synchronous bun:sqlite FTS, which would block the entire fleet's
+    // message bus. Recall runs directly via the in-process Worker under
+    // createDeadlineRecall below.
 
     // A hard wall clock on recall, run in a Worker this process leaves behind when it exits (@ag/tribe/25071 stopgap).
     const deadlineRecall = createDeadlineRecall()

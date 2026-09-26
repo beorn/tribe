@@ -436,4 +436,32 @@ describe("doctorReport", () => {
     expect(formatInstallPlan(planInstall(env), true)).toContain("tribe install")
     expect(formatUninstallPlan(planUninstall(env), true)).toContain("tribe uninstall")
   })
+
+  test("doctorReport checks tribe.sock for daemon autostart", async () => {
+    writeJson(env.autostartConfigPath, { autostart: "daemon" })
+    writeJson(env.claudeSettingsPath, { hooks: {} })
+    const sock = resolve(root, "test-tribe.sock")
+    const prevSocket = process.env.TRIBE_SOCKET
+    try {
+      process.env.TRIBE_SOCKET = sock
+      // Socket not created yet
+      let report = await doctorReport(env)
+      let autostartCheck = report.checks.find((c) => c.name === "autostart")
+      expect(autostartCheck?.message).toBe("daemon (tribe daemon not running — will spawn on next hook)")
+      expect(autostartCheck?.message).not.toContain("lore")
+
+      // Socket exists
+      writeFileSync(sock, "")
+      report = await doctorReport(env)
+      autostartCheck = report.checks.find((c) => c.name === "autostart")
+      expect(autostartCheck?.message).toBe(`daemon (tribe daemon alive at ${sock})`)
+      expect(autostartCheck?.message).not.toContain("lore")
+    } finally {
+      if (prevSocket !== undefined) {
+        process.env.TRIBE_SOCKET = prevSocket
+      } else {
+        delete process.env.TRIBE_SOCKET
+      }
+    }
+  })
 })

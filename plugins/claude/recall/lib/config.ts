@@ -11,17 +11,6 @@ import { dirname, resolve } from "node:path"
 // Path resolution
 // ---------------------------------------------------------------------------
 
-/** Resolve daemon socket path. Priority: arg > TRIBE_RECALL_SOCKET env > XDG_RUNTIME_DIR > ~/.local/share/lore */
-export function resolveRecallSocketPath(socketArg?: string): string {
-  if (socketArg) return socketArg
-  const fromEnv = process.env.TRIBE_RECALL_SOCKET
-  if (fromEnv) return fromEnv
-  const xdg = process.env.XDG_RUNTIME_DIR
-  if (xdg) return resolve(xdg, "lore.sock")
-  const home = process.env.HOME ?? "/tmp"
-  return resolve(home, ".local/share/lore/lore.sock")
-}
-
 /** DB location: arg > TRIBE_RECALL_DB env > ~/.local/share/lore/lore.db */
 export function resolveRecallDbPath(dbArg?: string): string {
   if (dbArg) return dbArg
