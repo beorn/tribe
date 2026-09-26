@@ -143,8 +143,10 @@ export function withHotReload<T extends BaseTribe & WithBroadcast & WithConfig &
       const operatorCapability = t.config.operatorCapability?.trim() || null
       const child = (() => {
         try {
+          const daemonScript = argv[0]
+          if (daemonScript === undefined) throw new Error("the daemon's own script is missing from process.argv")
           return spawnStandaloneDaemonSupervisor({
-            daemonScript: argv[0]!,
+            daemonScript,
             socketPath: t.config.socketPath,
             daemonArgs: argv.slice(1),
             operatorCapability,
