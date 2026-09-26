@@ -150,7 +150,7 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
     url: `http://127.0.0.1:${port}/mcp`,
     close() {
       http.stop(true)
-      daemon.close()
+      void daemon.close()
     },
   }
 }
@@ -163,8 +163,10 @@ function createMcpServer(opts: {
   readonly getName: () => string
   readonly setName: (name: string) => void
   readonly setRole: (role: string) => void
+  // oxlint-disable-next-line typescript/no-deprecated -- the adapter is built on the low-level Server, as stdio-adapter is
 }): McpServer {
   const toolsList = toolListForDeliveryCapability(opts.deliveryCapability)
+  // oxlint-disable-next-line typescript/no-deprecated -- the adapter is built on the low-level Server (see its return type)
   const mcp = new McpServer(
     { name: "tribe", version: "0.14.1" },
     {
@@ -173,7 +175,7 @@ function createMcpServer(opts: {
     },
   )
 
-  mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolsList }))
+  mcp.setRequestHandler(ListToolsRequestSchema, () => ({ tools: toolsList }))
   mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     const { name, arguments: toolArgs } = req.params
     const a = (toolArgs ?? {}) as Record<string, unknown>

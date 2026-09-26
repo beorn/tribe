@@ -1691,7 +1691,7 @@ export function withDispatcher<
             // from displacing a connected holder (takeover, or 21052's token displacement, below) is refused as a
             // foreign identity (24767), and the holder's session and inbox are untouched. A verified registration
             // displaces a holder that only claimed the name, and the holder's journal says why.
-            const precedenceRefusal = async (holder: ClientSession): Promise<string | null> => {
+            const precedenceRefusal = (holder: ClientSession): string | null => {
               const held = holderIdentity(holder.ctx.sessionId)
               const holderAuthority = held.authority
               // 25074 3c-2a — the fence is generation-aware between two verified instances of one session: a higher
@@ -1785,7 +1785,7 @@ export function withDispatcher<
               const holder = holders[0]
               if (holder && takeoverAuthorized) {
                 for (const displaced of holders) {
-                  const refusal = await precedenceRefusal(displaced)
+                  const refusal = precedenceRefusal(displaced)
                   if (refusal !== null) return refusal
                 }
                 const oldPids = [...new Set(holders.map((client) => client.pid))]
@@ -1824,7 +1824,7 @@ export function withDispatcher<
                   .prepare("SELECT identity_token FROM sessions WHERE id = ?")
                   .get(holder.ctx.sessionId) as { identity_token: string | null } | null
                 if (!holderRow?.identity_token) {
-                  const refusal = await precedenceRefusal(holder)
+                  const refusal = precedenceRefusal(holder)
                   if (refusal !== null) return refusal
                   log.warn?.(
                     `identity displacement: superseding token-less holder of "${resolvedName}" (old pid ${holder.pid}, old session ${holder.ctx.sessionId}, new pid ${clientPid})`,
