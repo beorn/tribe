@@ -88,6 +88,20 @@ const wrapLog = createLogger("injection:wrap")
 const skipLog = createLogger("injection:skip")
 
 const _installedPaths = new Set<string>()
+const _installedWriters = new Set<{ flush(): void }>()
+
+/**
+ * Flush all active injection file writers synchronously to disk.
+ */
+export function flushInjectionFileWriters(): void {
+  for (const writer of _installedWriters) {
+    try {
+      writer.flush()
+    } catch {
+      // best-effort
+    }
+  }
+}
 
 /**
  * Pipe `injection:*`, `recall:*`, and `tribe:*` events to a JSONL file
@@ -114,6 +128,7 @@ export function installInjectionFileWriter(path: string): () => void {
     // right perms; let createFileWriter surface the real error.
   }
   const writer = createFileWriter(path)
+  _installedWriters.add(writer)
   const sink = (_formatted: string, _level: string, _ns: string, event: Event): void => {
     // Span events flow past too — we only persist log records.
     if (event.kind !== "log") return
@@ -138,6 +153,7 @@ export function installInjectionFileWriter(path: string): () => void {
     addWriter({ ns: "tribe:*" }, sink),
   ]
   return () => {
+    _installedWriters.delete(writer)
     for (const u of unsubs) u()
   }
 }
