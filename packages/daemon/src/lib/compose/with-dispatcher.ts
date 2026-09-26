@@ -633,7 +633,7 @@ export function withDispatcher<
             identity_sid: string | null
           }
         }
-      | { errorCode: number; errorMessage: string }
+      | { errorCode: number; errorMessage: string; errorData?: Record<string, unknown> }
 
     /**
      * Resolve an inbox target from durable daemon authority. Session names are
@@ -726,6 +726,18 @@ export function withDispatcher<
       if (resolvedLaunchSessions.length !== 1 || launchSession === undefined) {
         return {
           errorCode: -32003,
+          // 25074 (@cto P4): a launch whose every stored session has lost its owner transport (a service after a
+          // wire restart, before it re-registers) is typed, so a caller retries after re-registering rather than
+          // matching this message's prose.
+          ...(routableLaunchSessions.length === 0 && launchSessions.length > 0
+            ? {
+                errorData: {
+                  kind: "launch-unroutable",
+                  reason: "owner-transport-disconnected",
+                  stored: launchSessions.length,
+                },
+              }
+            : {}),
           errorMessage:
             `Inbox launch identity resolved to ${routableLaunchSessions.length} sessions (${launchSessions.length} stored)` +
             (persona.length > 0 ? `; persona ${persona} matched ${resolvedLaunchSessions.length}` : "") +
@@ -2004,7 +2016,7 @@ export function withDispatcher<
 
           case "cli_turn_start_receipt_by_launch_v1": {
             const target = resolveInboxTarget(p, { mode: "launch" })
-            if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage)
+            if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage, target.errorData)
             if (target.launchId === undefined || target.launchParentPid === undefined) {
               return makeError(id, -32003, "Turn-start receipt launch authority is incomplete")
             }
@@ -2243,7 +2255,7 @@ export function withDispatcher<
                 ? { mode: "launch" }
                 : { mode: "explicit", defaultSession: "@chief" },
             )
-            if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage)
+            if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage, target.errorData)
             // G9 P0 row 7: a seat's tribe adapter can die while the seat keeps
             // working through one-shot CLI calls like this one, so a launch-scoped
             // read names the caller's own transport when it is not connected,
@@ -2294,7 +2306,7 @@ export function withDispatcher<
            */
           case "cli_inbox_delivery_by_launch_v1": {
             const target = resolveInboxTarget(p, { mode: "launch" })
-            if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage)
+            if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage, target.errorData)
             const messageSeq = p.message_seq
             const messageId = requiredNonEmptyString(p.message_id)
             if (!Number.isSafeInteger(messageSeq) || Number(messageSeq) <= 0 || messageId === null) {
@@ -2481,7 +2493,7 @@ export function withDispatcher<
                   ? { mode: "launch" }
                   : { mode: "explicit", defaultSession: DEFAULT_INBOX_WAIT_SESSION },
               )
-              if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage)
+              if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage, target.errorData)
               sessionName = target.sessionName
             }
             const requestedLimit = Number(p.limit ?? 10)
@@ -2507,7 +2519,7 @@ export function withDispatcher<
                 ? { mode: "launch" }
                 : { mode: "explicit", defaultSession: DEFAULT_INBOX_WAIT_SESSION },
             )
-            if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage)
+            if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage, target.errorData)
             const { timeoutMs, wakeOnCorrelatedReply } = resolveInboxWaitOptions(p)
             const sessionName = target.sessionName
             const afterSeqRaw = p.after_seq

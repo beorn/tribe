@@ -7,7 +7,12 @@
  * daemon plus this client keeps joining (@cto 57e5f42a). sessionId alone never certifies.
  */
 import { describe, expect, it, vi } from "vitest"
-import { connectTribeLaunch, type TribeLaunchDeps, type TribeLaunchRequest } from "../src/launch-registration.ts"
+import {
+  REREGISTER_WINDOW_MS,
+  connectTribeLaunch,
+  type TribeLaunchDeps,
+  type TribeLaunchRequest,
+} from "../src/launch-registration.ts"
 
 const PID = 4242
 const REQUEST: TribeLaunchRequest = {
@@ -143,5 +148,162 @@ describe("connectTribeLaunch certifies the launch identity the daemon keyed (250
     await expect(connectTribeLaunch({ ...REQUEST, idToken: "seat-token" }, deps)).rejects.toThrow(
       `the daemon keyed launch parent pid ${PID + 1}, not this harness's ${PID}`,
     )
+  })
+})
+
+/**
+ * @failure 25074 acceptance 4: a long-lived service registers once, a wire restart drops its owner transport, and every
+ * later send is refused as an unroutable launch until the process restarts (coordination-watch never healed).
+ * ensureRegistered re-presents the same registration once the daemon is back, and only then.
+ */
+describe("ensureRegistered re-registers a launch the daemon dropped (25074 acceptance 4)", () => {
+  /** A daemon whose owner socket can be dropped, and whose connects can be refused while it restarts. */
+  function restartableDaemon() {
+    const sockets: Array<{ destroyed: boolean; dead: boolean }> = []
+    let refuseConnects = 0
+    let pid = PID
+    const registers: Array<Record<string, unknown>> = []
+    const connect: TribeLaunchDeps["connect"] = async () => {
+      if (refuseConnects > 0) {
+        refuseConnects -= 1
+        throw Object.assign(new Error("connect ECONNREFUSED /tmp/sock"), { code: "ECONNREFUSED" })
+      }
+      const socket = { unref: vi.fn(), destroyed: false, dead: false }
+      sockets.push(socket)
+      return {
+        call: vi.fn(async (method: string, params: Record<string, unknown> = {}) => {
+          // A dead peer never answers; a half-open socket still reads connected (destroyed false).
+          if (socket.dead) throw new Error(`request ${method} timed out`)
+          if (method === "cli_daemon") return { pid: 1 }
+          if (method === "register") {
+            registers.push(params)
+            return { name: REQUEST.name, principalClass: "service", launchId: DERIVED, launchParentPid: pid }
+          }
+          const row = {
+            name: REQUEST.name,
+            launch_id: DERIVED,
+            launch_parent_pid: pid,
+            transport_state: "connected",
+            delivery: "pull",
+            alive: true,
+            cwd: REQUEST.cwd,
+          }
+          return { content: [{ text: JSON.stringify({ sessions: [row] }) }] }
+        }) as never,
+        close: vi.fn(() => {
+          socket.destroyed = true
+        }),
+        socket,
+      }
+    }
+    let now = 1_000_000
+    const deps: TribeLaunchDeps = {
+      connect,
+      socketPath: () => "/tmp/sock",
+      sleep: async (ms) => {
+        now += ms
+        vi.setSystemTime(now)
+      },
+      processId: () => pid,
+    }
+    return {
+      deps,
+      registers,
+      restart: (refusedConnects: number) => {
+        for (const socket of sockets) Object.assign(socket, { destroyed: true, dead: true })
+        refuseConnects = refusedConnects
+      },
+      /** From the next register on, this client presents (and the daemon keys) another harness pid. */
+      changePid: (next: number) => {
+        pid = next
+      },
+      /** The daemon restarted, but this client has not consumed the EOF: its flag still reads connected. */
+      restartHalfOpen: () => {
+        for (const socket of sockets) socket.dead = true
+      },
+      startClock: () => {
+        vi.useFakeTimers({ toFake: ["Date"] })
+        vi.setSystemTime(now)
+      },
+    }
+  }
+  const SERVICE: TribeLaunchRequest = { ...REQUEST, principalClass: "service" }
+
+  it("is a no-op while the owner transport is connected", async () => {
+    const daemon = restartableDaemon()
+    const joined = await connectTribeLaunch(SERVICE, daemon.deps)
+    await joined.ensureRegistered()
+    expect(daemon.registers).toHaveLength(1)
+    expect(joined.isConnected()).toBe(true)
+  })
+
+  it("after a restart, waits out refused connects and re-presents the same registration", async () => {
+    const daemon = restartableDaemon()
+    const joined = await connectTribeLaunch(SERVICE, daemon.deps)
+    daemon.restart(5)
+    expect(joined.isConnected()).toBe(false)
+    daemon.startClock()
+    try {
+      await joined.ensureRegistered()
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(joined.isConnected()).toBe(true)
+    expect(daemon.registers).toHaveLength(2)
+    expect(daemon.registers[1]).toEqual(daemon.registers[0])
+  })
+
+  it("half-open: the flag still reads connected, but the daemon does not answer, so it re-registers (@cto 8ed8ce41 (a))", async () => {
+    const daemon = restartableDaemon()
+    const joined = await connectTribeLaunch(SERVICE, daemon.deps)
+    daemon.restartHalfOpen()
+    expect(joined.isConnected()).toBe(true)
+    await joined.ensureRegistered()
+    expect(daemon.registers).toHaveLength(2)
+  })
+
+  it("throws, naming the launch, socket and time spent, when the daemon does not come back within the window", async () => {
+    const daemon = restartableDaemon()
+    const joined = await connectTribeLaunch(SERVICE, daemon.deps)
+    daemon.restart(Number.POSITIVE_INFINITY)
+    daemon.startClock()
+    try {
+      await expect(joined.ensureRegistered()).rejects.toThrow(
+        new RegExp(
+          `could not re-register @dev/7 \\(launch ${DERIVED}\\) at /tmp/sock after \\d+s of trying \\(window ${REREGISTER_WINDOW_MS / 1_000}s\\)`,
+          "u",
+        ),
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("a re-register keyed under another pid throws at once, naming both, and is not retried for the window", async () => {
+    const daemon = restartableDaemon()
+    const joined = await connectTribeLaunch(SERVICE, daemon.deps)
+    daemon.restart(0)
+    daemon.changePid(PID + 1)
+    // The clock advances with each backoff sleep, so a retrying implementation fails fast, on its window message.
+    daemon.startClock()
+    try {
+      await expect(joined.ensureRegistered()).rejects.toThrow(
+        new RegExp(
+          `re-registered @dev/7 as launch ${DERIVED} under pid ${PID + 1}, not its own ${DERIVED} under pid ${PID}`,
+          "u",
+        ),
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(daemon.registers).toHaveLength(2)
+  })
+
+  it("refuses once its owner closed it", async () => {
+    const daemon = restartableDaemon()
+    const joined = await connectTribeLaunch(SERVICE, daemon.deps)
+    joined.close()
+    await expect(joined.ensureRegistered()).rejects.toThrow(/closed by its owner/u)
+    expect(daemon.registers).toHaveLength(1)
   })
 })

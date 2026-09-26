@@ -31,7 +31,13 @@ import { resolveDbPath } from "../lib/config.ts"
 import { INCIDENT_KEY_SEPARATOR, parseIncidentKey, type IncidentIdentity } from "../lib/incident.ts"
 import { formatMarkdown, generateRetro, parseDuration } from "../lib/retro.ts"
 import { readLaunchIdFromToken } from "../lib/identity-token.ts"
-import { oneShotRegisterParams, resolveLaunchSeat } from "../launch-seat.ts"
+import {
+  LAUNCH_UNROUTABLE,
+  LAUNCH_UNROUTABLE_EXIT_CODE,
+  isLaunchUnroutable,
+  oneShotRegisterParams,
+  resolveLaunchSeat,
+} from "../launch-seat.ts"
 import { withCliDaemonClient } from "./daemon-client.ts"
 import { writeJsonStdout } from "./json-output.ts"
 import { mcpJsonContent } from "./mcp-json-content.ts"
@@ -365,6 +371,7 @@ async function resolveSendCaller(reply?: string, anonymous = false): Promise<Sen
   }
   if (launchId) {
     let failure: string
+    let unroutable = false
     try {
       // The daemon owns the (launch_id, launch_parent_pid) tuple; callDaemon registers under it verbatim so this
       // one-shot fans into the live seat of this launch.
@@ -375,7 +382,16 @@ async function resolveSendCaller(reply?: string, anonymous = false): Promise<Sen
       warnIfSelfTransportDown("send", seat.status)
       return { name: seat.session, launchId: seat.launchId, launchParentPid: seat.launchParentPid }
     } catch (error) {
+      unroutable = isLaunchUnroutable(error)
       failure = `cannot resolve launch identity ${launchId}: ${error instanceof Error ? error.message : String(error)}`
+    }
+    if (unroutable) {
+      // The launch's owner transport is gone (a wire restart): retryable once it re-registers, so typed, not prose.
+      console.error(
+        `tribe.send: delivery refused [${LAUNCH_UNROUTABLE}] - ${failure}; not sending${reply ? ` --reply ${reply}` : ""}.`,
+      )
+      console.error("Its owner re-registers on its next connect; send again after it does.")
+      process.exit(LAUNCH_UNROUTABLE_EXIT_CODE)
     }
     console.error(`tribe.send: delivery refused - ${failure}; not sending${reply ? ` --reply ${reply}` : ""}.`)
     console.error(
@@ -861,6 +877,12 @@ export function registerSendCommands(program: Command): void {
     .option(sendIncident.flags, sendIncident.description)
     .option(sendIncidentCleared.flags, sendIncidentCleared.description)
     .option(sendVerbose.flags, sendVerbose.description)
+    .addHelpText(
+      "after",
+      "\nExit codes: 0 delivered; 1 not delivered; 2 identity or usage refused; 3 delivered, its ball close not " +
+        `confirmed; ${LAUNCH_UNROUTABLE_EXIT_CODE} not delivered because this launch's owner transport is down (a wire ` +
+        `restart), marked [${LAUNCH_UNROUTABLE}] on stderr: send again once the owner re-registers.`,
+    )
     .action(
       (
         to: string,
