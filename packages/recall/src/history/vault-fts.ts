@@ -7,8 +7,8 @@
  * are indexed by km in `nodes_fts` keyed on `(name, title, content)`.
  *
  * Adapter is opt-in and explicit: the vault database is bound on the call
- * line (`--vault-db <path>`, via {@link bindVaultDb}) or by `KM_VAULT_DB`,
- * its generic explicit form; the call line wins. Recall never discovers a
+ * line (`--vault-db <path>`, via {@link bindVaultDb}) and nowhere else; no
+ * environment variable binds it (25149 row 35). Recall never discovers a
  * vault from the cwd: a walk up could reach a real vault a caller never named,
  * or a stale copy (25149, @cto ruling Q1). With nothing bound, search and the
  * injection say so. Vault matches get a typed pointer (path + title + snippet)
@@ -18,7 +18,6 @@
 
 import { Database } from "bun:sqlite"
 import { existsSync } from "node:fs"
-import { resolve } from "node:path"
 import { toFts5Query } from "./db-queries.ts"
 import { resolveVaultDbFlag } from "../lib/vault-db.ts"
 
@@ -28,8 +27,8 @@ let resolveAttempted = false
 let boundVaultDb: string | null = null
 
 /**
- * Bind the vault database from the call line (`--vault-db`). It outranks
- * `KM_VAULT_DB`. The path passes the one {@link resolveVaultDbFlag} rule: an
+ * Bind the vault database from the call line (`--vault-db`), its only binding.
+ * The path passes the one {@link resolveVaultDbFlag} rule: an
  * empty path (what a failed `$(…)` substitution passes) or a missing file
  * refuses, rather than reading as "unbound" and hiding that failure.
  */
@@ -41,8 +40,7 @@ export function bindVaultDb(path: string): void {
 }
 
 function findVaultDb(): string | null {
-  const envPath = process.env.KM_VAULT_DB
-  const configured = boundVaultDb ?? (envPath ? resolve(envPath) : null)
+  const configured = boundVaultDb
   if (configured === null) return null
   if (!existsSync(configured)) {
     throw vaultDbError(configured, "does not exist")
@@ -368,7 +366,7 @@ function errorMessage(error: unknown): string {
 
 function vaultDbError(path: string, reason: string): Error {
   return new Error(
-    `Vault index ${path} (bound by --vault-db or KM_VAULT_DB) ${reason}. ` +
+    `Vault index ${path} (bound by --vault-db) ${reason}. ` +
       `Run 'km sync' in the vault root to repair it, or drop the binding to disable vault search.`,
   )
 }

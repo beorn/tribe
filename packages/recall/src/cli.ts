@@ -78,8 +78,8 @@ program
   .addHelpText(
     "after",
     `\nThe km vault is bound only on the call line, before any command:\n` +
-      `  --vault-db <path>  the vault database every command reads (outranks\n` +
-      `                     KM_VAULT_DB); recall never discovers one from the cwd\n` +
+      `  --vault-db <path>  the vault database every command reads; no environment\n` +
+      `                     variable binds it, and recall never discovers one from the cwd\n` +
       `\nExit codes:\n` +
       `  0  clean success — the index provenance is complete; an empty result\n` +
       `     is authoritative\n` +

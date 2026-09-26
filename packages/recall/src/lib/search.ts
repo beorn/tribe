@@ -181,8 +181,8 @@ export async function cmdSearch(query: string | undefined, options: SearchOption
   } = options
   const project = resolveProjectScope(options.project)
 
-  // The vault is bound only explicitly (25149): the CLI's leading --vault-db,
-  // else KM_VAULT_DB. Nothing bound is said out loud, so an absent vault never
+  // The vault is bound only explicitly (25149): the CLI's leading --vault-db.
+  // Nothing bound is said out loud, so an absent vault never
   // reads as "no vault hits".
   if (!regexMode && getVaultDbPath() === null) console.error("vault: not bound (pass --vault-db)")
 

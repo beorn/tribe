@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### BREAKING — `KM_VAULT_DB` no longer binds the vault (25149 row 35)
+
+- `--vault-db <path>` is the only binding. An inherited `KM_VAULT_DB` is ignored; a caller that relied on it passes `--vault-db` instead. Measured before removal: no launcher set it, and 0 of 207 live agent processes carried it.
+
 - The recall index report exits 4 (busy) and 5 (ledgered skips) are exported from the runtime and shared with CLI help.
 
 ### Changed — the vault is bound only explicitly
