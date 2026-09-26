@@ -104,6 +104,7 @@ describe("registerReadCommands", () => {
     expect(cmd).toBeDefined()
     expect(cmd!.description()).toMatch(/diagnostics/i)
     expect(optionFlags(cmd!)).toContain("--json")
+    expect(optionFlags(cmd!)).toContain("--since")
   })
 
   describe("evaluateWireHealthDocument", () => {
@@ -123,8 +124,29 @@ describe("registerReadCommands", () => {
           uptime: 3600,
           clients: 12,
           sessions: 2,
+          // A daemon whose health carries no identity.bearer_served says so, never an absent key (25074 3d-3).
+          bearer_served: {
+            unmeasured: "the running daemon's tribe.health has no identity.bearer_served; it predates 25074 3d-3",
+          },
         },
       })
+    })
+
+    test("carries the daemon's bearer_served block as a fact (25074 3d-3 prerequisite)", () => {
+      const bearerServed = {
+        since: "2026-09-25T00:00:00.000Z",
+        to: "2026-09-26T00:00:00.000Z",
+        halves: ["messages", "messages_archive"],
+        truncated_at: null,
+        gate: { total: 0, by_branch: {}, by_name: {} },
+        hand: { total: 1, by_branch: { "no-token": 1 }, by_name: { "@hand": 1 } },
+      }
+      const { document } = evaluateWireHealthDocument({
+        content: [{ type: "text", text: JSON.stringify({ identity: { bearer_served: bearerServed } }) }],
+        daemon: { pid: 1, uptime: 1, clients: 1 },
+        sessions: [],
+      })
+      expect(document.facts?.bearer_served).toEqual(bearerServed)
     })
 
     test("reports absent stopped document and exit code 1 on ECONNREFUSED or ENOENT", () => {
