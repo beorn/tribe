@@ -19,7 +19,7 @@
         "tribe-daemon": "./src/daemon.ts",
       },
       "dependencies": {
-        "@bearly/flock": "0.1.0",
+        "@bearly/flock": "^0.1.0",
         "loggily": "^0.11.0",
         "removely": "^0.2.1",
         "tribe-injection-envelope": "workspace:*",
@@ -41,7 +41,7 @@
         "recall": "./src/cli.ts",
       },
       "dependencies": {
-        "@bearly/flock": "0.1.0",
+        "@bearly/flock": "^0.1.0",
         "@silvery/commander": "^0.24.0",
         "@tobilu/qmd": "2.5.3",
         "loggily": "^0.11.0",
@@ -55,7 +55,7 @@
         "tribe-wire": "./dist/cli.mjs",
       },
       "dependencies": {
-        "@bearly/flock": "0.1.0",
+        "@bearly/flock": "^0.1.0",
         "@bearly/pacing": "0.1.0",
         "@modelcontextprotocol/sdk": "^1.27.1",
         "@silvery/commander": "^0.24.0",
