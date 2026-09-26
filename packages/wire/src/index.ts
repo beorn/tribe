@@ -41,16 +41,8 @@ export { withDaemonCall } from "./util.ts"
 // Socket path discovery
 export { resolvePeerSocketPath, resolveSocketPath } from "./paths.ts"
 
-// Process-boundary projection for a neutral launchId. Tribe owns its private
-// environment representation; launchers pass only the structural value.
-export type { TribeLaunchEnvironment } from "./launch-environment.ts"
-export {
-  projectTribeLaunchEnvironment,
-  readTribeLaunchId,
-  tribeLaunchEnvironmentNames,
-  tribeSessionIdentityEnvironmentNames,
-  withTribeLaunchEnvironment,
-} from "./launch-environment.ts"
+// Launch-environment scrub (25074 3d-2b): a launch id travels structurally, never in the environment.
+export { tribeSessionIdentityEnvironmentNames, withTribeLaunchEnvironment } from "./launch-environment.ts"
 
 // A process's own launch is its identity token's sid, read unverified; the daemon verifies (25074 3d-1).
 export type { UnverifiedTokenClaims } from "./lib/identity-token.ts"

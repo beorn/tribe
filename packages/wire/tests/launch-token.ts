@@ -12,10 +12,10 @@ export function launchToken(launchId: string, actor = "test-seat", kind?: "servi
 }
 
 /**
- * The environment names that make a process launch `launchId`, or no launch at all for "". TRIBE_LAUNCH_ID stays
- * beside the token for the adapter's tokenless path until 3d-2 stops projecting it; HAB_ID_TOKEN "" is read as no token,
- * so an inherited runner token never decides a fixture's launch.
+ * The environment that makes a process launch `launchId`, or no launch at all for "". HAB_ID_TOKEN "" is read as no
+ * token, so an inherited runner token never decides a fixture's launch. No launcher projects TRIBE_LAUNCH_ID since
+ * 25074 3d-2b and nothing reads it, so a fixture carries only the token.
  */
-export function launchEnvironment(launchId: string): { TRIBE_LAUNCH_ID: string; HAB_ID_TOKEN: string } {
-  return { TRIBE_LAUNCH_ID: launchId, HAB_ID_TOKEN: launchId === "" ? "" : launchToken(launchId) }
+export function launchEnvironment(launchId: string): { HAB_ID_TOKEN: string } {
+  return { HAB_ID_TOKEN: launchId === "" ? "" : launchToken(launchId) }
 }

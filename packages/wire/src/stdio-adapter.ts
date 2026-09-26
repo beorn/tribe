@@ -366,9 +366,8 @@ const baseRegisterParams = {
   identityToken,
   ...(selfMailboxAuthority === null ? {} : { mailboxAuthorityHash: hashSelfMailboxAuthority(selfMailboxAuthority) }),
   ...(launchIdentityToken === null ? {} : { idToken: launchIdentityToken }),
-  // 25074 3c-2b (@cto def441bf): a launcher that registered by the seat's token projects no TRIBE_LAUNCH_ID, so the
-  // adapter registers by the token with its launch parent pid and the daemon keys it `<sid>@<gen>`. A launch id the
-  // launcher did project (a tokenless launch, or one started before 3c-2b) is still sent until 3d.
+  // 25074 3c-2b (@cto def441bf): the adapter registers by the seat's token with its launch parent pid and the daemon
+  // keys it `<sid>@<gen>`. LAUNCH_IDENTITY is the token's sid (3d-1); no launcher projects TRIBE_LAUNCH_ID (3d-2b).
   ...(LAUNCH_IDENTITY
     ? { launchId: LAUNCH_IDENTITY.id, launchParentPid: LAUNCH_IDENTITY.parentPid }
     : launchIdentityToken !== null
