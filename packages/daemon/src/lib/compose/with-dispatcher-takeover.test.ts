@@ -2345,7 +2345,7 @@ describe("bearer-served resolutions are journalled countably (25074 3d-3 prerequ
   const hashOf = (bearer: string) => createHash("sha256").update(bearer).digest("hex")
   const selfInbox = (harness: ReturnType<typeof createDispatcherHarness>, credentials: Record<string, unknown>) =>
     harness.request("cli_self_inbox_v1", { ...credentials, limit: 5, peek: true })
-  const journalled = (harness: ReturnType<typeof createDispatcherHarness>) =>
+  const journalled = (harness: ReturnType<typeof createDispatcherHarness>): Array<Record<string, unknown>> =>
     (
       harness.db
         .prepare("SELECT sender, content FROM messages WHERE type = 'event.session.bearer-served' ORDER BY rowid")
