@@ -301,11 +301,10 @@ describe("recall search output", () => {
   test("raw mode includes vault matches (beads/docs), not just transcript hits", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-raw-vault-"))
     const dbPath = join(dir, "state.db")
-    const previousVaultDb = process.env.KM_VAULT_DB
     try {
       seedVaultDb(dbPath, "vaultrawneedle only lives in the km vault, never in a session transcript")
-      process.env.KM_VAULT_DB = dbPath
       resetVaultDbCacheForTests()
+      bindVaultDb(dbPath)
 
       await cmdSearch("vaultrawneedle", { raw: true, project: "*" })
 
@@ -316,8 +315,6 @@ describe("recall search output", () => {
       expect(output).toContain("vaultrawneedle")
     } finally {
       resetVaultDbCacheForTests()
-      if (previousVaultDb === undefined) delete process.env.KM_VAULT_DB
-      else process.env.KM_VAULT_DB = previousVaultDb
       rmSync(dir, { recursive: true, force: true })
     }
   })
@@ -328,10 +325,8 @@ describe("recall search output", () => {
   test("an unbound search says the vault is not bound; a bound vault is searched", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-vault-bound-"))
     const dbPath = join(dir, "state.db")
-    const previousVaultDb = process.env.KM_VAULT_DB
     try {
       seedVaultDb(dbPath, "vaultboundneedle only lives in the km vault")
-      delete process.env.KM_VAULT_DB
       resetVaultDbCacheForTests()
 
       await cmdSearch("vaultboundneedle", { raw: true, project: "*" })
@@ -347,8 +342,6 @@ describe("recall search output", () => {
       expect(callsText(logSpy)).toContain("vaultboundneedle")
     } finally {
       resetVaultDbCacheForTests()
-      if (previousVaultDb === undefined) delete process.env.KM_VAULT_DB
-      else process.env.KM_VAULT_DB = previousVaultDb
       rmSync(dir, { recursive: true, force: true })
     }
   })
@@ -356,11 +349,10 @@ describe("recall search output", () => {
   test('raw mode JSON includes vault matches with contentType "vault"', async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-raw-vault-json-"))
     const dbPath = join(dir, "state.db")
-    const previousVaultDb = process.env.KM_VAULT_DB
     try {
       seedVaultDb(dbPath, "vaultrawjsonneedle only lives in the km vault")
-      process.env.KM_VAULT_DB = dbPath
       resetVaultDbCacheForTests()
+      bindVaultDb(dbPath)
 
       await cmdSearch("vaultrawjsonneedle", { raw: true, json: true, project: "*" })
 
@@ -372,8 +364,6 @@ describe("recall search output", () => {
       expect(vaultRow!.snippet).toContain("vaultrawjsonneedle")
     } finally {
       resetVaultDbCacheForTests()
-      if (previousVaultDb === undefined) delete process.env.KM_VAULT_DB
-      else process.env.KM_VAULT_DB = previousVaultDb
       rmSync(dir, { recursive: true, force: true })
     }
   })
@@ -381,11 +371,10 @@ describe("recall search output", () => {
   test("raw mode applies limit to vault results", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-raw-vault-limit-"))
     const dbPath = join(dir, "state.db")
-    const previousVaultDb = process.env.KM_VAULT_DB
     try {
       seedVaultDb(dbPath, "vaultlimitneedle first", "vaultlimitneedle second")
-      process.env.KM_VAULT_DB = dbPath
       resetVaultDbCacheForTests()
+      bindVaultDb(dbPath)
 
       await cmdSearch("vaultlimitneedle", { raw: true, json: true, limit: "1", project: "*" })
 
@@ -393,8 +382,6 @@ describe("recall search output", () => {
       expect(payload.results?.filter((result) => result.contentType === "vault")).toHaveLength(1)
     } finally {
       resetVaultDbCacheForTests()
-      if (previousVaultDb === undefined) delete process.env.KM_VAULT_DB
-      else process.env.KM_VAULT_DB = previousVaultDb
       rmSync(dir, { recursive: true, force: true })
     }
   })
@@ -408,11 +395,10 @@ describe("recall search output", () => {
   ])("raw mode excludes unfilterable vault rows with %s", async (_label, filter) => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-raw-vault-filter-"))
     const dbPath = join(dir, "state.db")
-    const previousVaultDb = process.env.KM_VAULT_DB
     try {
       seedVaultDb(dbPath, "vaultfilterneedle only lives in the km vault")
-      process.env.KM_VAULT_DB = dbPath
       resetVaultDbCacheForTests()
+      bindVaultDb(dbPath)
 
       await cmdSearch("vaultfilterneedle", { raw: true, json: true, project: "*", ...filter })
 
@@ -420,8 +406,6 @@ describe("recall search output", () => {
       expect(payload.results?.some((result) => result.contentType === "vault") ?? false).toBe(false)
     } finally {
       resetVaultDbCacheForTests()
-      if (previousVaultDb === undefined) delete process.env.KM_VAULT_DB
-      else process.env.KM_VAULT_DB = previousVaultDb
       rmSync(dir, { recursive: true, force: true })
     }
   })
@@ -436,7 +420,6 @@ describe("recall search output", () => {
     // leaking into a query labeled "questions only" (23189).
     const dir = mkdtempSync(join(tmpdir(), "tribe-raw-role-filter-"))
     const dbPath = join(dir, "state.db")
-    const previousVaultDb = process.env.KM_VAULT_DB
     try {
       seedMessage("rolefilterneedle user question")
       seedRankedMessage("reply", "rolefilterneedle assistant response", null)
@@ -449,8 +432,8 @@ describe("recall search output", () => {
         ).run(type, type, "/test/km", type, "rolefilterneedle project knowledge", Date.now())
       }
       seedVaultDb(dbPath, "rolefilterneedle vault knowledge")
-      process.env.KM_VAULT_DB = dbPath
       resetVaultDbCacheForTests()
+      bindVaultDb(dbPath)
 
       await cmdSearch("rolefilterneedle", { raw: true, json: true, project: "*", ...filter })
 
@@ -460,8 +443,6 @@ describe("recall search output", () => {
       ).toEqual(expected)
     } finally {
       resetVaultDbCacheForTests()
-      if (previousVaultDb === undefined) delete process.env.KM_VAULT_DB
-      else process.env.KM_VAULT_DB = previousVaultDb
       rmSync(dir, { recursive: true, force: true })
     }
   })
@@ -670,13 +651,11 @@ describe("recall search output", () => {
   test("the no-refresh compatibility flag preserves unknown provenance", async () => {
     mockAgent.result = async (query, options) => zeroAgentResult(query, options) as never
     const prevHome = process.env.HOME
-    const previousVaultDb = process.env.KM_VAULT_DB
     const home = mkdtempSync(join(tmpdir(), "recall-home-"))
 
     try {
       process.env.HOME = home
       // Unbound on purpose, so stderr is exactly the one line an unbound search owes (25149).
-      delete process.env.KM_VAULT_DB
       resetVaultDbCacheForTests()
       await cmdSearch("nohits", {
         agent: true,
@@ -687,8 +666,6 @@ describe("recall search output", () => {
     } finally {
       if (prevHome === undefined) delete process.env.HOME
       else process.env.HOME = prevHome
-      if (previousVaultDb === undefined) delete process.env.KM_VAULT_DB
-      else process.env.KM_VAULT_DB = previousVaultDb
       resetVaultDbCacheForTests()
       rmSync(home, { recursive: true, force: true })
     }

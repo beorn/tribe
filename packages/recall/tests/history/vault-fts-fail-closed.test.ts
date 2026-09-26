@@ -15,8 +15,8 @@
  *     and WAL bytes stay identical and no sidecar is created, removed, or
  *     resized. SQLite may update an existing `-shm` WAL index in any way;
  *     that coordination state is not database content.
- *  2. TYPED DEGRADE — with no vault db bound (no `--vault-db`, `KM_VAULT_DB`
- *     unset; recall never walks the cwd, 25149), resolution is a pure fs probe: `getVaultDb()` returns
+ *  2. TYPED DEGRADE — with no vault db bound (no `--vault-db`; recall never
+ *     walks the cwd, 25149), resolution is a pure fs probe: `getVaultDb()` returns
  *     null and `searchVault()` returns an empty typed result — no throw, no
  *     process spawn. The reachable-graph guard proves the no-spawn half
  *     structurally: it denies spawn edges in the vault-history module graph by
@@ -343,7 +343,6 @@ function auditModuleGraph(entryPath: string, repoRoot: string): string[] {
 describe("vault-fts fail-closed guards", () => {
   afterEach(() => {
     resetVaultDbCacheForTests()
-    delete process.env.KM_VAULT_DB
     vi.restoreAllMocks()
   })
 
@@ -353,8 +352,8 @@ describe("vault-fts fail-closed guards", () => {
     try {
       makeKmVaultDb(dbPath)
 
-      process.env.KM_VAULT_DB = dbPath
       resetVaultDbCacheForTests()
+      bindVaultDb(dbPath)
 
       // Search over the read-only handle still returns real hits.
       const hits = searchVault("termless", 5)
@@ -412,8 +411,8 @@ describe("vault-fts fail-closed guards", () => {
       )
       db.close()
 
-      process.env.KM_VAULT_DB = dbPath
       resetVaultDbCacheForTests()
+      bindVaultDb(dbPath)
 
       const hits = searchVault("vaultneedle", 5)
       expect(hits).toHaveLength(1)
@@ -435,28 +434,28 @@ describe("vault-fts fail-closed guards", () => {
       db.exec("CREATE TABLE unrelated (id TEXT)")
       db.close()
 
-      process.env.KM_VAULT_DB = dbPath
       resetVaultDbCacheForTests()
+      bindVaultDb(dbPath)
 
-      expect(() => searchVault("termless", 5)).toThrowError(
-        /bound by --vault-db or KM_VAULT_DB.*Run 'km sync'.*drop the binding/,
-      )
+      expect(() => searchVault("termless", 5)).toThrowError(/bound by --vault-db\).*Run 'km sync'.*drop the binding/)
     } finally {
       resetVaultDbCacheForTests()
       rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  test("FAIL LOUD: a missing explicit KM_VAULT_DB does not fall through to discovery", () => {
+  test("FAIL LOUD: a --vault-db file that is missing refuses and does not fall through to discovery", () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-vault-guard-missing-"))
-    const dbPath = join(dir, "missing.db")
+    const dbPath = join(dir, "state.db")
     try {
-      process.env.KM_VAULT_DB = dbPath
       resetVaultDbCacheForTests()
+      expect(() => bindVaultDb(dbPath)).toThrowError(/--vault-db .*state\.db does not exist/)
 
-      expect(() => getVaultDb()).toThrowError(
-        /bound by --vault-db or KM_VAULT_DB.*does not exist.*Run 'km sync'.*drop the binding/,
-      )
+      // A file bound while present and gone by the first read refuses too, naming the binding.
+      makeKmVaultDb(dbPath)
+      bindVaultDb(dbPath)
+      rmSync(dbPath)
+      expect(() => getVaultDb()).toThrowError(/bound by --vault-db\).*does not exist.*Run 'km sync'.*drop the binding/)
     } finally {
       resetVaultDbCacheForTests()
       rmSync(dir, { recursive: true, force: true })
@@ -472,8 +471,8 @@ describe("vault-fts fail-closed guards", () => {
       const before = snapshotVaultFiles(dir)
       expect(Object.keys(before)).toEqual(expect.arrayContaining(["state.db", "state.db-wal", "state.db-shm"]))
 
-      process.env.KM_VAULT_DB = dbPath
       resetVaultDbCacheForTests()
+      bindVaultDb(dbPath)
       expect(searchVault("termless", 5)).toHaveLength(1)
       resetVaultDbCacheForTests()
 
@@ -489,7 +488,6 @@ describe("vault-fts fail-closed guards", () => {
   })
 
   test("TYPED DEGRADE: no vault db → null handle + empty typed result, no throw", () => {
-    delete process.env.KM_VAULT_DB
     resetVaultDbCacheForTests()
 
     // A cwd with no `.km/state.db` anywhere up the 8-level walk. The redirected
@@ -511,7 +509,6 @@ describe("vault-fts fail-closed guards", () => {
   })
 
   test("NO DISCOVERY: a vault database up the cwd is never opened when nothing is bound (25149)", () => {
-    delete process.env.KM_VAULT_DB
     resetVaultDbCacheForTests()
     const vaultRoot = mkdtempSync(join(tmpdir(), "tribe-vault-guard-nodiscovery-"))
     mkdirSync(join(vaultRoot, ".km"))
@@ -527,12 +524,11 @@ describe("vault-fts fail-closed guards", () => {
     }
   })
 
-  test("BINDING: --vault-db outranks KM_VAULT_DB, and an empty one refuses (25149)", () => {
+  test("BINDING: --vault-db binds the vault, and an empty one refuses (25149)", () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-vault-guard-bind-"))
     const dbPath = join(dir, "state.db")
     try {
       makeKmVaultDb(dbPath)
-      process.env.KM_VAULT_DB = join(dir, "missing.db")
       resetVaultDbCacheForTests()
 
       bindVaultDb(dbPath)

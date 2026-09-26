@@ -11,7 +11,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 
 process.env.RECALL_DB_PATH = ":memory:"
-delete process.env.KM_VAULT_DB
 
 const { closeDb, getDb } = await import("../../src/history/db")
 const { recall, setRecallLogging } = await import("../../src/history/search")
