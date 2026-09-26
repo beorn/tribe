@@ -33,6 +33,15 @@ export interface TribeLaunchConnection {
   /** Child-process patch: fresh launch proof and names, with caller authority removed. */
   readonly environment: NodeJS.ProcessEnv
   isConnected(): boolean
+  /**
+   * Re-register when the daemon dropped this owner transport (a wire restart): the same request and credentials,
+   * retried with backoff for up to {@link REREGISTER_WINDOW_MS}, then a loud throw naming the socket and the time spent.
+   * The daemon decides "dropped", never the local socket flag (a half-open unix socket reads connected until EOF): a
+   * round trip on the registered connection that answers within {@link OWNER_PROBE_TIMEOUT_MS} is a no-op, and a
+   * timeout or refusal counts as dropped (@cto 8ed8ce41 (a)). A long-lived service calls it before it sends, and again on
+   * a `tribe send` exit 75 before its one resend.
+   */
+  ensureRegistered(): Promise<void>
   /** Disconnect the owner. Service authority expires; agents retain recovery semantics. */
   close(): void
 }
@@ -50,6 +59,10 @@ export interface TribeLaunchDeps {
 
 const CONNECT_ATTEMPTS = 3
 const CONNECT_TIMEOUT_MS = 5_000
+/** How long {@link TribeLaunchConnection.ensureRegistered} waits across a daemon restart before it throws. */
+export const REREGISTER_WINDOW_MS = 60_000
+/** The deadline on the owner transport's round trip that decides whether the daemon still holds this launch. */
+export const OWNER_PROBE_TIMEOUT_MS = 2_000
 const defaultTribeLaunchDeps: TribeLaunchDeps = {
   connect: connectToDaemon,
   socketPath: resolveSocketPath,
@@ -65,6 +78,79 @@ export async function connectTribeLaunch(
   deps: TribeLaunchDeps = defaultTribeLaunchDeps,
 ): Promise<TribeLaunchConnection> {
   const providerLaunchId = launchIdFor(request)
+  const first = await registerLaunch(request, deps, providerLaunchId)
+  let current = first.client
+  let closed = false
+  return {
+    joinRetries: first.joinRetries,
+    launchParentPid: first.processId,
+    launchId: first.launchId,
+    environment: {
+      ...Object.fromEntries(tribeSessionIdentityEnvironmentNames().map((key) => [key, undefined])),
+      TRIBE_LAUNCH_PARENT_PID: String(first.processId),
+      TRIBE_NAME: request.name,
+      TRIBE_SESSION_NAME: request.name,
+    },
+    isConnected: () => current.socket.destroyed !== true,
+    async ensureRegistered() {
+      if (closed) throw new Error(`Tribe launch ${first.launchId} (${request.name}) was closed by its owner`)
+      if (await ownerTransportAnswers(current)) return
+      current.close()
+      const startedAt = Date.now()
+      const deadline = startedAt + REREGISTER_WINDOW_MS
+      for (let delayMs = 250; ; delayMs = Math.min(delayMs * 2, 5_000)) {
+        try {
+          const next = await registerLaunch(request, deps, providerLaunchId)
+          if (next.launchId !== first.launchId || next.processId !== first.processId) {
+            next.client.close()
+            throw new Error(
+              `Tribe re-registered ${request.name} as launch ${next.launchId} under pid ${next.processId}, ` +
+                `not its own ${first.launchId} under pid ${first.processId}`,
+            )
+          }
+          current = next.client
+          return
+        } catch (error) {
+          if (Date.now() + delayMs > deadline) {
+            throw new Error(
+              `Tribe could not re-register ${request.name} (launch ${first.launchId}) at ${deps.socketPath()} after ` +
+                `${Math.round((Date.now() - startedAt) / 1_000)}s of trying (window ${REREGISTER_WINDOW_MS / 1_000}s): ` +
+                (error instanceof Error ? error.message : String(error)),
+              { cause: error },
+            )
+          }
+          await deps.sleep(delayMs)
+        }
+      }
+    },
+    close: () => {
+      closed = true
+      current.close()
+    },
+  }
+}
+
+/**
+ * Whether the daemon still answers on the registered owner connection: one cheap round trip under a short deadline. A
+ * destroyed socket, a refusal or a timeout all mean the registration cannot be relied on, and the caller re-registers.
+ */
+async function ownerTransportAnswers(client: TribeLaunchClient): Promise<boolean> {
+  if (client.socket.destroyed === true) return false
+  try {
+    await client.call("cli_daemon", {}, { timeoutMs: OWNER_PROBE_TIMEOUT_MS })
+    return true
+  } catch {
+    // silent-fallback-allow: an unanswered probe IS the answer "dropped"; ensureRegistered re-registers, or throws loud.
+    return false
+  }
+}
+
+/** One certified registration, CONNECT_ATTEMPTS tries: the owner client it holds, and what the daemon keyed. */
+async function registerLaunch(
+  request: TribeLaunchRequest,
+  deps: TribeLaunchDeps,
+  providerLaunchId: string,
+): Promise<{ client: TribeLaunchClient; joinRetries: number; launchId: string; processId: number }> {
   let lastError: unknown
   for (let attempt = 0; attempt < CONNECT_ATTEMPTS; attempt++) {
     let client: TribeLaunchClient | undefined
@@ -139,20 +225,7 @@ export async function connectTribeLaunch(
       // The caller owns this lifetime. A live socket cannot keep a finished
       // service occurrence or provider host alive by itself.
       client.socket.unref()
-      const registeredClient = client
-      return {
-        joinRetries: attempt,
-        launchParentPid: processId,
-        launchId,
-        environment: {
-          ...Object.fromEntries(tribeSessionIdentityEnvironmentNames().map((key) => [key, undefined])),
-          TRIBE_LAUNCH_PARENT_PID: String(processId),
-          TRIBE_NAME: request.name,
-          TRIBE_SESSION_NAME: request.name,
-        },
-        isConnected: () => registeredClient.socket.destroyed !== true,
-        close: () => registeredClient.close(),
-      }
+      return { client, joinRetries: attempt, launchId, processId }
     } catch (error) {
       client?.close()
       lastError = error

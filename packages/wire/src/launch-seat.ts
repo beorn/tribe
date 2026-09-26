@@ -12,6 +12,21 @@ import { TRIBE_PROTOCOL_VERSION, TRIBE_SUPPORTED_PROTOCOL_VERSIONS } from "./lib
 
 export type DaemonCall = (method: string, params: Record<string, unknown>) => Promise<unknown>
 
+/**
+ * The daemon's typed refusal for a launch whose every stored session lost its owner transport (25074, @cto P4): a
+ * service after a wire restart, before it re-registers. `tribe send` exits {@link LAUNCH_UNROUTABLE_EXIT_CODE} on it
+ * (EX_TEMPFAIL: try again) and names it `[launch-unroutable]`, so a caller re-registers and retries without matching
+ * prose. Every other refusal keeps exit 1.
+ */
+export const LAUNCH_UNROUTABLE = "launch-unroutable"
+export const LAUNCH_UNROUTABLE_EXIT_CODE = 75
+
+/** Whether a daemon call failed with the {@link LAUNCH_UNROUTABLE} refusal. */
+export function isLaunchUnroutable(error: unknown): boolean {
+  const data = (error as { readonly data?: unknown } | null)?.data
+  return typeof data === "object" && data !== null && (data as { readonly kind?: unknown }).kind === LAUNCH_UNROUTABLE
+}
+
 /** The seat holding a launch, the tuple a one-shot registers under to fan into it, and the daemon's full answer. */
 export type LaunchSeat = Readonly<{
   session: string
