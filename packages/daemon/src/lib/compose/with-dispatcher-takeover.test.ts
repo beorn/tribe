@@ -2482,7 +2482,9 @@ describe("bearer-served resolutions are journalled countably (25074 3d-3 prerequ
     expect(wait.attention.actionable_unread).toEqual([])
     expect(
       harness.db
-        .prepare(`SELECT COUNT(*) AS n FROM messages WHERE type = 'event.session.bearer-served' AND ${ATTENTION_PREDICATE_SQL}`)
+        .prepare(
+          `SELECT COUNT(*) AS n FROM messages WHERE type = 'event.session.bearer-served' AND ${ATTENTION_PREDICATE_SQL}`,
+        )
         .get(),
     ).toEqual({ n: 0 })
   })

@@ -3426,7 +3426,9 @@ function bearerServedBlock(
   }
   const since = typeof raw === "number" ? raw : typeof raw === "string" ? Date.parse(raw) : Number.NaN
   if (!Number.isFinite(since) || since > now) {
-    throw new Error(`tribe.health: since must be an ISO instant or epoch ms not in the future, got ${JSON.stringify(raw)}`)
+    throw new Error(
+      `tribe.health: since must be an ISO instant or epoch ms not in the future, got ${JSON.stringify(raw)}`,
+    )
   }
   return countBearerServed(ctx.db, { since, to: now })
 }

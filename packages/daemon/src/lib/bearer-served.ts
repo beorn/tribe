@@ -164,7 +164,7 @@ export function countBearerServed(db: TribeContext["db"], window: { since: numbe
     note:
       truncated && oldest !== null
         ? `window truncated at ${new Date(oldest).toISOString()}: the journal retains nothing older, so rows between ${since} and then are not counted`
-      : `counted ${since} to ${to} across messages and messages_archive`,
+        : `counted ${since} to ${to} across messages and messages_archive`,
     gate,
     hand,
   }

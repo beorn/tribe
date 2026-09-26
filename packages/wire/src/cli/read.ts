@@ -795,7 +795,9 @@ export type WireHealthDocument = {
 function bearerServedFact(result: unknown): unknown {
   const health = mcpJsonContent(result) as { identity?: { bearer_served?: unknown } } | null
   const block = health?.identity?.bearer_served
-  return block ?? { unmeasured: "the running daemon's tribe.health has no identity.bearer_served; it predates 25074 3d-3" }
+  return (
+    block ?? { unmeasured: "the running daemon's tribe.health has no identity.bearer_served; it predates 25074 3d-3" }
+  )
 }
 
 export function evaluateWireHealthDocument(
@@ -2319,7 +2321,10 @@ export function registerReadCommands(program: Command): void {
     .command("health")
     .description("Run health diagnostics")
     .option("--json", "Emit one hab-service-health/2 JSON document")
-    .option("--since <instant>", "Start of the bearer_served window (ISO instant or epoch ms); default the daemon's start")
+    .option(
+      "--since <instant>",
+      "Start of the bearer_served window (ISO instant or epoch ms); default the daemon's start",
+    )
     .action((opts: { json?: boolean; since?: string }) => cmdHealth(opts))
 
   program
