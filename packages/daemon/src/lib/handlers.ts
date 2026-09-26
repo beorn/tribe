@@ -65,6 +65,7 @@ import {
   type SessionTransportEvidence,
 } from "./session-transport-state.ts"
 import { sessionAuthority, type SessionAuthority } from "./identity-verifier.ts"
+import { countBearerServed, type BearerServedCount } from "./bearer-served.ts"
 import { nearestLiveName, type DirectDeliveryResolution, type DirectDeliveryResolver } from "./delivery-resolution.ts"
 import { bothDeclaredUnrun, type DeclaredRoster } from "./membership-declared-roster.ts"
 import { isUnidentifiedSessionName } from "./resolve-name.ts"
@@ -288,6 +289,8 @@ export type HandlerOpts = {
   identityVerifierPath?: string | null
   /** 25074 3c-2a — whether the loaded verifier declares `gen` on its verified verdicts; null with no verifier. */
   identityVerifierSuppliesGen?: boolean | null
+  /** When this daemon's dispatcher came up (epoch ms): the default start of `tribe health`'s bearer_served window. */
+  daemonStartedAt?: number
   /** Optional: dump daemon internals for `tribe.debug`. Daemon-only (tests using
    *  handlers directly can omit this — `tribe.debug` then returns a minimal
    *  snapshot synthesized from the other accessors). */
@@ -567,7 +570,7 @@ export function handleToolCall(
     case TRIBE_COORD_METHODS.join:
       return handleJoin(ctx, a, opts)
     case TRIBE_COORD_METHODS.health:
-      return handleHealth(ctx, opts)
+      return handleHealth(ctx, a, opts)
     case TRIBE_COORD_METHODS.restart:
       return handleRestart(ctx, a, opts.cleanup)
     case TRIBE_COORD_METHODS.stop:
@@ -3403,7 +3406,32 @@ export function readSeatTransportFacts(
   return { missing, exited, unreachable, connected: new Set(liveSessions.map((session) => session.name)) }
 }
 
-function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
+/**
+ * `tribe health`'s bearer_served block over `since` (an ISO instant or epoch ms; default the daemon's start) to now.
+ * An unparseable or future `since` refuses by name. With neither a `since` nor a recorded daemon start there is no
+ * window, and the block says it is unmeasured rather than printing a 0 that was never counted.
+ */
+function bearerServedBlock(
+  ctx: TribeContext,
+  a: ToolArgs,
+  opts: HandlerOpts,
+  now: number,
+): BearerServedCount | { unmeasured: string } {
+  const raw = a.since
+  if (raw === undefined || raw === null || raw === "") {
+    if (opts.daemonStartedAt === undefined) {
+      return { unmeasured: "no since was given and this daemon recorded no start, so there is no window to count" }
+    }
+    return countBearerServed(ctx.db, { since: opts.daemonStartedAt, to: now })
+  }
+  const since = typeof raw === "number" ? raw : typeof raw === "string" ? Date.parse(raw) : Number.NaN
+  if (!Number.isFinite(since) || since > now) {
+    throw new Error(`tribe.health: since must be an ISO instant or epoch ms not in the future, got ${JSON.stringify(raw)}`)
+  }
+  return countBearerServed(ctx.db, { since, to: now })
+}
+
+function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
   const now = Date.now()
   const silentThreshold = now - 300_000 // 5 minutes
 
@@ -3586,6 +3614,9 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
         },
         { verified: 0, bearer: 0, claimed: 0 },
       ),
+      // 25074 3d-3 prerequisite (@cto 8c095897): every bearer-served resolution in the window, from the journal. The
+      // 3d-3 gate is `gate.total` at zero across the relaunch window; `hand` (no launch id) is visible, never blocking.
+      bearer_served: bearerServedBlock(ctx, a, opts, now),
     },
     issues: [
       ...(opts.recallVaultRefusal ? [`recall vault REFUSED: --vault-db ${opts.recallVaultRefusal.reason}`] : []),

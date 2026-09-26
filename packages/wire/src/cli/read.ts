@@ -788,8 +788,19 @@ export type WireHealthDocument = {
   facts?: Record<string, unknown>
 }
 
+/**
+ * The daemon's identity.bearer_served block (25074 3d-3 prerequisite), or a loud unmeasured marker when the running
+ * daemon's health carries none (it predates the count): never an absent key that reads as zero.
+ */
+function bearerServedFact(result: unknown): unknown {
+  const health = mcpJsonContent(result) as { identity?: { bearer_served?: unknown } } | null
+  const block = health?.identity?.bearer_served
+  return block ?? { unmeasured: "the running daemon's tribe.health has no identity.bearer_served; it predates 25074 3d-3" }
+}
+
 export function evaluateWireHealthDocument(
   result: {
+    content?: Array<{ type: string; text: string }>
     daemon?: { pid: number; uptime: number; clients: number }
     sessions?: unknown[]
   } | null,
@@ -837,12 +848,14 @@ export function evaluateWireHealthDocument(
         uptime: result?.daemon?.uptime,
         clients: result?.daemon?.clients,
         sessions: Array.isArray(result?.sessions) ? result.sessions.length : 0,
+        bearer_served: bearerServedFact(result),
       },
     },
   }
 }
 
-async function cmdHealth(opts?: { json?: boolean }): Promise<void> {
+async function cmdHealth(opts?: { json?: boolean; since?: string }): Promise<void> {
+  const healthParams = opts?.since === undefined ? undefined : { since: opts.since }
   if (opts?.json) {
     const socketPath = resolveSocketPath()
     let client: DaemonClient
@@ -862,7 +875,7 @@ async function cmdHealth(opts?: { json?: boolean }): Promise<void> {
     }
     try {
       try {
-        result = (await client.call("cli_health")) as typeof result
+        result = (await client.call("cli_health", healthParams)) as typeof result
       } finally {
         client.close()
       }
@@ -879,7 +892,7 @@ async function cmdHealth(opts?: { json?: boolean }): Promise<void> {
     return
   }
 
-  const result = (await callDaemon("cli_health")) as {
+  const result = (await callDaemon("cli_health", healthParams)) as {
     content: Array<{ type: string; text: string }>
     sessions?: Array<{ name: string; role: string; pid: number; cwd?: string; uptimeMs: number; idleMs: number }>
     daemon: { pid: number; uptime: number; clients: number }
@@ -899,6 +912,8 @@ async function cmdHealth(opts?: { json?: boolean }): Promise<void> {
         }
       }
     }
+    const bearerServed = (data.identity as { bearer_served?: Record<string, unknown> } | undefined)?.bearer_served
+    if (bearerServed !== undefined) console.log(`\n  Bearer-served: ${describeBearerServed(bearerServed)}`)
     // 15588 — show the live roster section so chief can answer "who is
     // connected / who is idle >15min" with one command. Roster comes from
     // the dispatcher's cli_health response (live `clients` map, not the
@@ -925,6 +940,16 @@ async function cmdHealth(opts?: { json?: boolean }): Promise<void> {
     // Fallback: just print the raw result
     await writeJsonStdout(result, 2)
   }
+}
+
+/** One line for `tribe health`: the 3d-3 gate count, the hand sessions apart, and the window it covers. */
+function describeBearerServed(block: Record<string, unknown>): string {
+  if (typeof block.unmeasured === "string") return `UNMEASURED (${block.unmeasured})`
+  const gate = (block.gate as { total?: number } | undefined)?.total
+  const hand = (block.hand as { total?: number } | undefined)?.total
+  const window = `${String(block.since)} to ${String(block.to)}`
+  const truncated = typeof block.truncated_at === "string" ? `; ${String(block.note)}` : ""
+  return `${String(gate)} with a launch id (3d-3 gate), ${String(hand)} hand, ${window}${truncated}`
 }
 
 // ---------------------------------------------------------------------------
@@ -2294,7 +2319,8 @@ export function registerReadCommands(program: Command): void {
     .command("health")
     .description("Run health diagnostics")
     .option("--json", "Emit one hab-service-health/2 JSON document")
-    .action((opts: { json?: boolean }) => cmdHealth(opts))
+    .option("--since <instant>", "Start of the bearer_served window (ISO instant or epoch ms); default the daemon's start")
+    .action((opts: { json?: boolean; since?: string }) => cmdHealth(opts))
 
   program
     .command("doctor")
