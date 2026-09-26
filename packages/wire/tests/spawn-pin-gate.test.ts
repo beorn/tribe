@@ -161,6 +161,8 @@ describe("pin sidecar round-trip", () => {
 })
 
 describe("socket owner — hab's socket is never taken by a standalone daemon (24906)", () => {
+  // An unnamed habplan's launch: no HAB_SESSION_HABITAT_NAME, which hab writes only for a named habplan. The gate
+  // requires HAB_LAUNCH_REQUIRED_MARKERS, not every HAB_SESSION_MARKER, so this launch is still refused.
   const habLaunch = {
     HAB_SESSION_HABITAT_ROOT: "/hh/main.hab",
     HAB_SESSION_LAUNCH_ID: "launch-under-hab",

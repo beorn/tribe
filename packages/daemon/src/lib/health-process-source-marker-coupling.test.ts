@@ -55,6 +55,7 @@ describe("the markers list and the standalone sanitizer agree on one vocabulary"
   // sample below is enough to exercise that, and it is a SAMPLE.
   const SAMPLE_HAB_SESSION_VARIABLES = [
     "HAB_SESSION_DIR",
+    "HAB_SESSION_HABITAT_NAME",
     "HAB_SESSION_HABITAT_ROOT",
     "HAB_SESSION_INSTRUCTION_ANCHOR",
     "HAB_SESSION_LAUNCH_ID",

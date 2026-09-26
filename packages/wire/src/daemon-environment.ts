@@ -23,9 +23,21 @@ export const HAB_SESSION_HABITAT_ROOT_ENV = "HAB_SESSION_HABITAT_ROOT"
 
 export const HAB_SESSION_MARKERS = [
   HAB_SESSION_HABITAT_ROOT_ENV,
+  "HAB_SESSION_HABITAT_NAME",
   "HAB_SESSION_LAUNCH_ID",
   "HAB_SESSION_INSTRUCTION_ANCHOR",
 ] as const
+
+/**
+ * The markers EVERY hab launch carries, which a gate that needs proof of a hab launch requires all of. Hab writes
+ * HAB_SESSION_HABITAT_NAME only when its habplan is named (hab-inventory, hab-core service-run-env), so a gate that
+ * required it would let an unnamed habplan's client start its own daemon on hab's socket (24906).
+ */
+export const HAB_LAUNCH_REQUIRED_MARKERS = [
+  HAB_SESSION_HABITAT_ROOT_ENV,
+  "HAB_SESSION_LAUNCH_ID",
+  "HAB_SESSION_INSTRUCTION_ANCHOR",
+] as const satisfies readonly (typeof HAB_SESSION_MARKERS)[number][]
 
 /** The declared roster, inline and by file; the daemon's roster reader and the standalone sanitizer both read them. */
 export const TRIBE_EXPECTED_MEMBERS_ENV = "TRIBE_EXPECTED_MEMBERS"

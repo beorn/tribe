@@ -47,7 +47,7 @@ import { execFileSync } from "node:child_process"
 import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, resolve } from "node:path"
 import { createLogger } from "loggily"
-import { HAB_SESSION_MARKERS } from "../daemon-environment.ts"
+import { HAB_LAUNCH_REQUIRED_MARKERS } from "../daemon-environment.ts"
 
 const log = createLogger("tribe:spawn-pin-gate")
 
@@ -225,7 +225,7 @@ export function evaluateSocketOwnerForSocket(socketPath: string, binderOwner: So
 /**
  * A client hab launched never starts a daemon for the socket hab handed it
  * (TRIBE_SOCKET): hab owns that daemon and brings it back. Scoped to hab's
- * socket and to a caller carrying every hab launch marker.
+ * socket and to a caller carrying every marker a hab launch always carries (HAB_LAUNCH_REQUIRED_MARKERS).
  */
 export function evaluateHabLaunchedClient(input: {
   env: Readonly<NodeJS.ProcessEnv>
@@ -234,7 +234,7 @@ export function evaluateHabLaunchedClient(input: {
   const { env, socketPath } = input
   const handed = env.TRIBE_SOCKET?.trim()
   if (!handed || resolve(handed) !== resolve(socketPath)) return { allow: true, reason: null }
-  if (!HAB_SESSION_MARKERS.every((name) => env[name]?.trim())) return { allow: true, reason: null }
+  if (!HAB_LAUNCH_REQUIRED_MARKERS.every((name) => env[name]?.trim())) return { allow: true, reason: null }
   return {
     allow: false,
     reason: `this process was launched by hab (habitat ${env.HAB_SESSION_HABITAT_ROOT}), which owns the daemon for ${socketPath} — not starting one here; restart it with: hh-hab up wire (24906)`,
