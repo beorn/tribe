@@ -1,8 +1,8 @@
 /**
  * Tribe's session identity variable names, and the harness session and bead actor names tribe strips with them,
- * each defined once (25074 one stripper S2c, @cto 559259ad, c04ba94d). Import-free on purpose: a package that
- * reads one of these imports this lib subpath, never tribe-wire's index. launch-environment.ts builds the stripper
- * list from these constants and re-exports them.
+ * each defined once (25074 one stripper S2c, @cto 559259ad, c04ba94d). This leaf has no imports; a new package
+ * edge imports its lib subpath instead of tribe-wire's index. Existing readers can use the index re-exports.
+ * launch-environment.ts builds the stripper list from these constants and re-exports them.
  */
 
 export const TRIBE_LAUNCH_PARENT_PID_ENV = "TRIBE_LAUNCH_PARENT_PID"

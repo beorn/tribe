@@ -2,7 +2,8 @@
  * The AG_HOST_* contract: the variable names the Ag host sets on a launched seat's environment, each defined once
  * (25074 one stripper S2c, @cto 68a3a2cc). They live at tribe-wire, the bottom package every reader reaches, because
  * tribe's claude plugin reads one of them and tribe cannot depend on Ag; @ag/harness re-exports every one, so Ag's
- * readers are unchanged. Import-free on purpose: a reader imports this lib subpath, never tribe-wire's index.
+ * readers are unchanged. This leaf has no imports; a new package edge imports its lib subpath instead of
+ * tribe-wire's index. Existing Ag readers can use the re-export from @ag/harness.
  */
 
 /** Neutral envelope through which a host marks exact fields as backend-private. */
