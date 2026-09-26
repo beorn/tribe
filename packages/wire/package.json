@@ -48,6 +48,7 @@
     "./lib/code-identity": "./src/lib/code-identity.ts",
     "./lib/reload-pacing": "./src/lib/reload-pacing.ts",
     "./lib/identity-token": "./src/lib/identity-token.ts",
+    "./lib/hab-session-env": "./src/lib/hab-session-env.ts",
     "./http": "./src/http-adapter.ts"
   },
   "publishConfig": {
@@ -119,6 +120,10 @@
         "types": "./dist/lib/identity-token.d.mts",
         "import": "./dist/lib/identity-token.mjs"
       },
+      "./lib/hab-session-env": {
+        "types": "./dist/lib/hab-session-env.d.mts",
+        "import": "./dist/lib/hab-session-env.mjs"
+      },
       "./http": {
         "types": "./dist/http-adapter.d.mts",
         "import": "./dist/http-adapter.mjs"
@@ -162,6 +167,7 @@
       "src/lib/code-identity.ts",
       "src/lib/reload-pacing.ts",
       "src/lib/identity-token.ts",
+      "src/lib/hab-session-env.ts",
       "src/http-adapter.ts"
     ],
     "format": "esm"
