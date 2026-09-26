@@ -425,7 +425,9 @@ export function withDispatcher<
       if (token === null) return refuse(authorityMissing(`this call carries no ${HAB_ID_TOKEN_ENV}`))
       if (!verifier) {
         return refuse(
-          authorityMissing(`this daemon runs without an identity verifier, so the ${HAB_ID_TOKEN_ENV} cannot be verified`),
+          authorityMissing(
+            `this daemon runs without an identity verifier, so the ${HAB_ID_TOKEN_ENV} cannot be verified`,
+          ),
         )
       }
       let verdict: IdentityVerdict
@@ -467,7 +469,8 @@ export function withDispatcher<
               .prepare(`SELECT ${AUTHORITY_ROW_COLUMNS} FROM sessions WHERE identity_sid = $sid`)
               .all({ $sid: verdict.sid }) as AuthorityRow[]
           ).filter((candidate) => !isTombstonedSessionName(candidate.name))
-          const row = rows.find((candidate) => candidate.name === verdict.actor) ?? (rows.length === 1 ? rows[0] : undefined)
+          const row =
+            rows.find((candidate) => candidate.name === verdict.actor) ?? (rows.length === 1 ? rows[0] : undefined)
           if (row === undefined && rows.length > 1) {
             return rejected(
               "identity-ambiguous",
@@ -570,46 +573,46 @@ export function withDispatcher<
         case "inbox-ack":
           return {
             result: await handleToolCall(
-                resolution.context,
-                TRIBE_COORD_METHODS.fetch,
-                { limit: capability.limit, advance: capability.peek ? false : undefined },
-                DAEMON_HANDLER_OPTS,
-                connId,
-              ),
+              resolution.context,
+              TRIBE_COORD_METHODS.fetch,
+              { limit: capability.limit, advance: capability.peek ? false : undefined },
+              DAEMON_HANDLER_OPTS,
+              connId,
+            ),
           }
         case "pending-read":
           return {
             result: await handleToolCall(
-                resolution.context,
-                TRIBE_COORD_METHODS.pending,
-                {
-                  ...(capability.expired ? { expired: true } : {}),
-                  ...(capability.owed ? { owed: true } : {}),
-                  ...(capability.staleMs === undefined ? {} : { stale_ms: capability.staleMs }),
-                },
-                DAEMON_HANDLER_OPTS,
-                connId,
-              ),
+              resolution.context,
+              TRIBE_COORD_METHODS.pending,
+              {
+                ...(capability.expired ? { expired: true } : {}),
+                ...(capability.owed ? { owed: true } : {}),
+                ...(capability.staleMs === undefined ? {} : { stale_ms: capability.staleMs }),
+              },
+              DAEMON_HANDLER_OPTS,
+              connId,
+            ),
           }
         case "pending-close":
           return {
             result: await handleToolCall(
-                resolution.context,
-                TRIBE_COORD_METHODS.pending,
-                { owner: capability.owner, close: capability.close },
-                DAEMON_HANDLER_OPTS,
-                connId,
-              ),
+              resolution.context,
+              TRIBE_COORD_METHODS.pending,
+              { owner: capability.owner, close: capability.close },
+              DAEMON_HANDLER_OPTS,
+              connId,
+            ),
           }
         case "pending-prune":
           return {
             result: await handleToolCall(
-                resolution.context,
-                TRIBE_COORD_METHODS.pending,
-                { owner: capability.owner, prune: true, stale_ms: capability.staleMs },
-                DAEMON_HANDLER_OPTS,
-                connId,
-              ),
+              resolution.context,
+              TRIBE_COORD_METHODS.pending,
+              { owner: capability.owner, prune: true, stale_ms: capability.staleMs },
+              DAEMON_HANDLER_OPTS,
+              connId,
+            ),
           }
         default: {
           const unreachable: never = capability
