@@ -576,7 +576,8 @@ export function registerSession(
       $claude_session_name: ctx.claudeSessionName,
       $identity_token: identityToken ?? null,
       // 25074 3d-3: the launcher-minted bearer is gone, so no register writes its hash; the column stays inert until
-      // DROP_BEAD_PENDING drops it (a NULL keeps any older row's value via the upsert's COALESCE, and nothing reads it).
+      // 25968 (drop the dead bearer columns) drops it. A NULL keeps any older row's value via the upsert's COALESCE,
+      // and nothing reads it.
       $mailbox_authority_hash: null,
       $launch_id: launchId ?? null,
       $launch_parent_pid: launchParentPid ?? null,

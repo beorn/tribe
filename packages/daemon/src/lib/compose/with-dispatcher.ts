@@ -1406,7 +1406,7 @@ export function withDispatcher<
             const verifiedGen = identity.gen
             const hasLaunchId = p.launchId !== undefined && p.launchId !== null
             // The token itself is kept beside the sid. Its one reader, the bearer's holder-liveness arm, went with the
-            // bearer (3d-3); the column is dropped with mailbox_authority_hash in DROP_BEAD_PENDING.
+            // bearer (3d-3); the column is dropped with mailbox_authority_hash in 25968 (drop the dead bearer columns).
             const verifiedToken = verifiedSid === null ? null : (p.idToken as string)
             const claimantAuthority: SessionAuthority = verifiedSid !== null ? "verified" : "claimed"
             const hasLaunchParentPid = p.launchParentPid !== undefined && p.launchParentPid !== null
