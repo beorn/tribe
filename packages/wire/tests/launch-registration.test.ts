@@ -52,7 +52,7 @@ function fakeDaemon(registered: Record<string, unknown>, rowLaunchId: string) {
 }
 
 describe("connectTribeLaunch certifies the launch identity the daemon keyed (25074)", () => {
-  it("a token register sends its launch id too, certifies the returned <sid>@<gen> and still projects TRIBE_LAUNCH_ID", async () => {
+  it("a token register sends its launch id too, certifies the returned <sid>@<gen>, and its child env projects no launch id (3d-2b)", async () => {
     const { deps, calls } = fakeDaemon({ launchId: "sid-dev7@3", launchParentPid: PID }, "sid-dev7@3")
 
     const joined = await connectTribeLaunch({ ...REQUEST, idToken: "seat-token" }, deps)
@@ -60,7 +60,8 @@ describe("connectTribeLaunch certifies the launch identity the daemon keyed (250
     const register = calls.find((call) => call.method === "register")?.params
     expect(register).toMatchObject({ launchId: DERIVED, launchParentPid: PID, idToken: "seat-token" })
     expect(joined.launchId).toBe("sid-dev7@3")
-    expect(joined.environment.TRIBE_LAUNCH_ID).toBe(DERIVED)
+    // 25074 3d-2b: the registered child keys by its own token's sid; the env clears TRIBE_LAUNCH_ID, never sets it.
+    expect(joined.environment).toHaveProperty("TRIBE_LAUNCH_ID", undefined)
     expect(joined.environment.TRIBE_LAUNCH_PARENT_PID).toBe(String(PID))
   })
 
@@ -96,7 +97,7 @@ describe("connectTribeLaunch certifies the launch identity the daemon keyed (250
 
       expect(calls.find((call) => call.method === "register")?.params).toMatchObject({ launchId: DERIVED })
       expect(joined.launchId).toBe(DERIVED)
-      expect(joined.environment.TRIBE_LAUNCH_ID).toBe(DERIVED)
+      expect(joined.environment).toHaveProperty("TRIBE_LAUNCH_ID", undefined)
     }
   })
 

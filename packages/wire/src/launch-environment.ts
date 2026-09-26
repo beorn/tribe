@@ -25,19 +25,13 @@ export function tribeLaunchEnvironmentNames(): readonly string[] {
 }
 
 /**
- * Start one provider launch with fresh provenance.
- *
- * A nested launch must never inherit its caller's launch id or parent hint.
- * The supplied structural id replaces the first; the adapter recomputes the
- * real OS parent and ignores any inherited hint.
+ * Start one provider launch with fresh provenance: clear an inherited launch id and parent hint, and project nothing
+ * (25074 3d-2b, @cto 0c284929). A launch's id travels structurally between its launchers; its adapter keys by the
+ * identity token's sid, and recomputes the real OS parent. The clear stays through the rollover, because a launcher
+ * built before 3d-2b still exports both names. Its deletion row is in 3d-3.
  */
-export function withTribeLaunchEnvironment(env: NodeJS.ProcessEnv, launchId: string | undefined): NodeJS.ProcessEnv {
-  return {
-    ...env,
-    [LAUNCH_ID_ENV]: undefined,
-    ...projectTribeLaunchEnvironment(launchId),
-    [INHERITED_PARENT_PID_ENV]: undefined,
-  }
+export function withTribeLaunchEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return { ...env, [LAUNCH_ID_ENV]: undefined, [INHERITED_PARENT_PID_ENV]: undefined }
 }
 
 /** All caller-owned identity fields; services and daemons share this boundary. */

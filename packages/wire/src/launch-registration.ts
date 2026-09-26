@@ -3,7 +3,7 @@ import { connectToDaemon, type DaemonClient } from "./client.ts"
 import { resolveSocketPath } from "./paths.ts"
 import { deriveTribePersonaLaunchIdentity, providerLaunchIdOf } from "./lib/persona-launch-identity.ts"
 import { readUnverifiedTokenClaims } from "./lib/identity-token.ts"
-import { projectTribeLaunchEnvironment, tribeSessionIdentityEnvironmentNames } from "./launch-environment.ts"
+import { tribeSessionIdentityEnvironmentNames } from "./launch-environment.ts"
 import { TRIBE_PROTOCOL_VERSION, TRIBE_SUPPORTED_PROTOCOL_VERSIONS } from "./lib/socket.ts"
 
 export interface TribeLaunchRequest {
@@ -146,8 +146,6 @@ export async function connectTribeLaunch(
         launchId,
         environment: {
           ...Object.fromEntries(tribeSessionIdentityEnvironmentNames().map((key) => [key, undefined])),
-          // The derived launch id stays projected until 3d; a child sends it beside the token, as this register did.
-          ...projectTribeLaunchEnvironment(identity.launchId),
           TRIBE_LAUNCH_PARENT_PID: String(processId),
           TRIBE_NAME: request.name,
           TRIBE_SESSION_NAME: request.name,

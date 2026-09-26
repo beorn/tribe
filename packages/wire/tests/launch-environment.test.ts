@@ -1,44 +1,27 @@
 import { describe, expect, test } from "vitest"
 
-import {
-  projectTribeLaunchEnvironment,
-  readTribeLaunchId,
-  tribeLaunchEnvironmentNames,
-  withTribeLaunchEnvironment,
-} from "../src/launch-environment.ts"
+import { tribeSessionIdentityEnvironmentNames, withTribeLaunchEnvironment } from "../src/launch-environment.ts"
 
+// 25074 3d-2b (@cto 0c284929): a launch's id travels structurally between its launchers, and its adapter keys by the
+// identity token's sid. The boundary projects nothing and clears what an older launcher may still export.
 describe("Tribe launch environment boundary", () => {
-  test("owns the adapter-private carrier behind a neutral launchId API", () => {
-    const projected = projectTribeLaunchEnvironment("provider-launch-a")
-
-    expect(projected).toEqual({ TRIBE_LAUNCH_ID: "provider-launch-a" })
-    expect(readTribeLaunchId(projected)).toBe("provider-launch-a")
-    expect(tribeLaunchEnvironmentNames()).toEqual(["TRIBE_LAUNCH_ID"])
-  })
-
-  test("overwrites inherited identity and removes stale parent provenance", () => {
+  test("clears an inherited launch id and stale parent provenance, and projects nothing", () => {
     expect(
-      withTribeLaunchEnvironment(
-        {
-          KEEP: "yes",
-          TRIBE_LAUNCH_ID: "parent-launch",
-          TRIBE_LAUNCH_PARENT_PID: "123",
-        },
-        "child-launch",
-      ),
+      withTribeLaunchEnvironment({
+        KEEP: "yes",
+        TRIBE_LAUNCH_ID: "parent-launch",
+        TRIBE_LAUNCH_PARENT_PID: "123",
+      }),
     ).toEqual({
       KEEP: "yes",
-      TRIBE_LAUNCH_ID: "child-launch",
-      TRIBE_LAUNCH_PARENT_PID: undefined,
-    })
-  })
-
-  test("omits absent launch identity and normalizes blank reads", () => {
-    expect(projectTribeLaunchEnvironment(undefined)).toEqual({})
-    expect(readTribeLaunchId({ TRIBE_LAUNCH_ID: "   " })).toBeUndefined()
-    expect(withTribeLaunchEnvironment({ TRIBE_LAUNCH_ID: "inherited" }, undefined)).toEqual({
       TRIBE_LAUNCH_ID: undefined,
       TRIBE_LAUNCH_PARENT_PID: undefined,
     })
+  })
+
+  test("the session identity scrub keeps both names through the rollover (deletion row: 3d-3)", () => {
+    expect(tribeSessionIdentityEnvironmentNames()).toEqual(
+      expect.arrayContaining(["TRIBE_LAUNCH_ID", "TRIBE_LAUNCH_PARENT_PID"]),
+    )
   })
 })
