@@ -50,6 +50,7 @@
     "./lib/identity-token": "./src/lib/identity-token.ts",
     "./lib/hab-session-env": "./src/lib/hab-session-env.ts",
     "./lib/session-identity-env": "./src/lib/session-identity-env.ts",
+    "./lib/ag-host-env": "./src/lib/ag-host-env.ts",
     "./http": "./src/http-adapter.ts"
   },
   "publishConfig": {
@@ -129,6 +130,10 @@
         "types": "./dist/lib/session-identity-env.d.mts",
         "import": "./dist/lib/session-identity-env.mjs"
       },
+      "./lib/ag-host-env": {
+        "types": "./dist/lib/ag-host-env.d.mts",
+        "import": "./dist/lib/ag-host-env.mjs"
+      },
       "./http": {
         "types": "./dist/http-adapter.d.mts",
         "import": "./dist/http-adapter.mjs"
@@ -174,6 +179,7 @@
       "src/lib/identity-token.ts",
       "src/lib/hab-session-env.ts",
       "src/lib/session-identity-env.ts",
+      "src/lib/ag-host-env.ts",
       "src/http-adapter.ts"
     ],
     "format": "esm"

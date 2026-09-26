@@ -15,8 +15,9 @@
 
 import { appendFileSync } from "node:fs"
 import { isAbsolute, join } from "node:path"
+import { AG_HOST_SESSION_STATE_DIR_ENV } from "tribe-wire/lib/ag-host-env"
 
-const LAUNCH_STATE_DIR_ENV = "AG_HOST_SESSION_STATE_DIR"
+const LAUNCH_STATE_DIR_ENV = AG_HOST_SESSION_STATE_DIR_ENV
 const ADAPTER_EXIT_RECORD_FILE = "tribe-adapter-exits.jsonl"
 
 export type AdapterExitRecordTarget = { readonly path: string } | { readonly path: null; readonly reason: string }
