@@ -37,7 +37,7 @@ import {
 } from "../../../wire/src/activity-log-contract.ts"
 import { isDaemonStderrLogFilename } from "../../../wire/src/lib/daemon-stderr-log.ts"
 import { stripLoneSurrogates, truncateSurrogateSafe } from "./validation.ts"
-import { CLAUDE_SESSION_ID_ENV } from "tribe-wire"
+import { CLAUDE_SESSION_ID_ENV } from "tribe-wire/lib/session-identity-env"
 
 // ---------------------------------------------------------------------------
 // Config

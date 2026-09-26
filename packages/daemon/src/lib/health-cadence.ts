@@ -4,7 +4,7 @@ import {
   noOpenIncidentAttentionPredicateSql,
   unretiredAttentionPredicateSql,
 } from "./database.ts"
-import { TRIBE_SLA_ROLE_ENV } from "tribe-wire"
+import { TRIBE_SLA_ROLE_ENV } from "tribe-wire/lib/session-identity-env"
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE

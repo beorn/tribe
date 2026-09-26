@@ -49,6 +49,7 @@ export type {
   RecallSkip,
   SearchMode,
 } from "./recall-shared.ts"
+import { CLAUDE_SESSION_ID_ENV } from "tribe-wire/lib/session-identity-env"
 
 // ============================================================================
 // Time parsing
@@ -198,7 +199,7 @@ export function boostedRank(rank: number, timestamp: number): number {
 // ============================================================================
 
 export function searchLiveSession(query: string, limit: number): RecallSearchResult[] {
-  const sessionId = process.env.CLAUDE_SESSION_ID
+  const sessionId = process.env[CLAUDE_SESSION_ID_ENV]
   if (!sessionId) return []
 
   // Find the live JSONL — Claude Code stores sessions at ~/.claude/projects/{slug}/{id}.jsonl
@@ -347,7 +348,7 @@ export async function recall(query: string, options: RecallOptions = {}): Promis
     mode = "exact",
   } = options
   const provenance: IndexProvenance = options.provenance ?? "unknown"
-  const currentSessionId = excludeCurrentSession ? process.env.CLAUDE_SESSION_ID : undefined
+  const currentSessionId = excludeCurrentSession ? process.env[CLAUDE_SESSION_ID_ENV] : undefined
 
   const startTime = Date.now()
   const sinceLabel = since ?? "30d"

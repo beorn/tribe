@@ -19,6 +19,7 @@ import {
   type SessionDiscoveryDiagnostics,
   type SessionFormat,
 } from "./session-discovery.ts"
+import { CLAUDE_SESSION_ID_ENV } from "tribe-wire/lib/session-identity-env"
 
 // ============================================================================
 // Types
@@ -123,7 +124,7 @@ export function getCurrentSessionContextWithDiagnostics(
   const diagnostics = discovery.diagnostics
 
   // Priority 1/2: explicit id / env / sentinel (Claude-only resolution).
-  let sessionId = sessionIdOverride ?? process.env.CLAUDE_SESSION_ID
+  let sessionId = sessionIdOverride ?? process.env[CLAUDE_SESSION_ID_ENV]
   let jsonlPath: string | null = null
   let format: SessionFormat = "claude"
   let via = "discovery"

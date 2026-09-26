@@ -24,6 +24,7 @@ import type { RecallSearchResult } from "./recall-shared.ts"
 import { runInjectDelta, createTmpfileSeenStore, timeStep } from "../lib/inject-core.ts"
 import { recall, parseTimeToMs } from "./search.ts"
 import { SYNTHESIS_PROMPT, raceLlmModels, formatResultsForLlm, type LlmRaceModelResult } from "./synthesize.ts"
+import { CLAUDE_SESSION_ID_ENV } from "tribe-wire/lib/session-identity-env"
 
 // ============================================================================
 // Transcript extraction
@@ -105,7 +106,7 @@ export async function hookRecall(
   prompt: string,
   opts: { steps?: Record<string, number>; recall?: typeof recall } = {},
 ): Promise<HookResult> {
-  const claudeSessionId = process.env.CLAUDE_SESSION_ID
+  const claudeSessionId = process.env[CLAUDE_SESSION_ID_ENV]
   const seenFile = claudeSessionId ? path.join(os.tmpdir(), `recall-hook-seen-${claudeSessionId}.json`) : null
   const store = timeStep(opts.steps, "seen_store", () => createTmpfileSeenStore(seenFile))
   const core = await runInjectDelta(prompt, store, {

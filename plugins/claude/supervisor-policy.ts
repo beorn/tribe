@@ -1,4 +1,6 @@
 import { decorrelatedJitter, type RandomUnit } from "@bearly/pacing"
+import { HAB_ID_TOKEN_ENV } from "tribe-wire/lib/hab-session-env"
+import { TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV } from "tribe-wire/lib/session-identity-env"
 
 /** Longer than the adapter's 60s fresh-daemon reconnect watchdog. */
 export const ADAPTER_STABLE_MS = 90_000
@@ -55,8 +57,8 @@ export function resolveProviderParentPid(
   processExists: (pid: number) => boolean,
   warn: (line: string) => void,
 ): number {
-  const raw = env.TRIBE_PLUGIN_PROVIDER_PARENT_PID?.trim() ?? ""
-  const managed = (env.HAB_ID_TOKEN?.trim() ?? "").length > 0
+  const raw = env[TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV]?.trim() ?? ""
+  const managed = (env[HAB_ID_TOKEN_ENV]?.trim() ?? "").length > 0
   if (raw.length === 0) {
     if (managed) warn(LEGACY_PARENT_WARNING)
     return self.ppid

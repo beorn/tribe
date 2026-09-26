@@ -18,8 +18,9 @@ import { isTribeNameShape } from "tribe-wire/lib/persona-name"
 import { evaluateAdapterRestart, PROVIDER_PARENT_REMEDY, resolveProviderParentPid } from "./supervisor-policy.ts"
 import { buildPluginAdapterEnvironment, PLUGIN_REEXEC_EXIT_CODE } from "./supervisor-environment.ts"
 import { recordAdapterExit, resolveAdapterExitRecord } from "./supervisor-exit-record.ts"
+import { TRIBE_NAME_ENV, TRIBE_PLUGIN_ADAPTER_CHILD_ENV } from "tribe-wire/lib/session-identity-env"
 
-const PLUGIN_CHILD = "TRIBE_PLUGIN_ADAPTER_CHILD"
+const PLUGIN_CHILD = TRIBE_PLUGIN_ADAPTER_CHILD_ENV
 const REEXEC_EXIT_CODE = PLUGIN_REEXEC_EXIT_CODE
 const REEXEC_JOINED_OFFSET = 1
 const GENERATION_REEXEC_OFFSET = 2
@@ -83,7 +84,7 @@ async function superviseAdapter(): Promise<void> {
   let resumeJoined = false
   let reportedJoined = false
   const exitRecord = resolveAdapterExitRecord(process.env)
-  const launchName = process.env.TRIBE_NAME?.trim()
+  const launchName = process.env[TRIBE_NAME_ENV]?.trim()
   let resumeName = launchName && isTribeNameShape(launchName) ? launchName : undefined
   const forward = (signal: NodeJS.Signals) => {
     stopping = true
