@@ -41,6 +41,7 @@ import {
 // Route every UserPromptSubmit emission through the envelope so the unified
 // activity log catches it (km-tribe.activity-log phase 2).
 import { emitHookJson as envelopeEmitHookJson } from "../../../injection-envelope/src/emit.ts"
+import { flushInjectionFileWriters } from "../../../injection-envelope/src/debug.ts"
 
 /** The call-line vault binding (`tribe hook <event> --vault-db`), for the dispatcher that loads this by path (25149 a3). */
 export { bindVaultDb } from "../history/vault-fts.ts"
@@ -360,6 +361,7 @@ export async function cmdHook(): Promise<void> {
   const startTime = Date.now()
   // Each step's wall time, carried on every row below, so a slow run names its slow step (@ag/tribe/25071 row 1).
   const steps: Record<string, number> = {}
+  let sessionId: string | undefined
   try {
     const stdin = await timeStepAsync(steps, "stdin", () => readStdin())
     let input: { prompt?: string; session_id?: string; transcript_path?: string; cwd?: string }
@@ -375,6 +377,16 @@ export async function cmdHook(): Promise<void> {
       // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
       return drainOutput().then(() => process.exit(1))
     }
+
+    sessionId = input.session_id
+
+    // Log start immediately so that if Claude Code kills this hook at 30s timeout,
+    // the run appears in the log as started and never finished (25304).
+    hookLog.info?.("start", {
+      session: sessionId,
+      start_time: startTime,
+    })
+    flushInjectionFileWriters()
 
     // Write a sentinel file keyed by the parent Claude Code PID so that
     // subsequent `bun recall` invocations (from the same session) can look
@@ -393,7 +405,7 @@ export async function cmdHook(): Promise<void> {
 
     const prompt = input.prompt
     if (!prompt) {
-      hookLog.warn?.("no prompt in stdin", { elapsed_ms: Date.now() - startTime, steps: roundSteps(steps) })
+      hookLog.warn?.("no prompt in stdin", { session: sessionId, elapsed_ms: Date.now() - startTime, steps: roundSteps(steps) })
       // oxlint-disable-next-line typescript/return-await -- drain failure must bypass this catch
       return drainOutput().then(() => process.exit(0))
     }
@@ -407,6 +419,7 @@ export async function cmdHook(): Promise<void> {
       if (daemonOutput.kind !== "error") warnSkippedSteps(daemonOutput.skippedSteps, "daemon", startTime, steps)
       if (daemonOutput.kind === "skipped") {
         hookLog.info?.("daemon skipped", {
+          session: sessionId,
           reason: daemonOutput.reason,
           elapsed_ms: Date.now() - startTime,
           steps: roundSteps(steps),
@@ -417,6 +430,7 @@ export async function cmdHook(): Promise<void> {
       }
       if (daemonOutput.kind === "ok") {
         hookLog.info?.("daemon ok", {
+          session: sessionId,
           context_len: daemonOutput.contextLen,
           elapsed_ms: Date.now() - startTime,
           steps: roundSteps(steps),
@@ -444,6 +458,7 @@ export async function cmdHook(): Promise<void> {
     warnSkippedSteps(result.skippedSteps, "library", startTime, steps)
     if (result.skipped) {
       hookLog.info?.("library skipped", {
+        session: sessionId,
         reason: result.reason,
         elapsed_ms: elapsed,
         steps: roundSteps(steps),
@@ -454,6 +469,7 @@ export async function cmdHook(): Promise<void> {
     }
     const additionalContext = result.hookOutput?.hookSpecificOutput.additionalContext ?? ""
     hookLog.info?.("library ok", {
+      session: sessionId,
       context_len: additionalContext.length,
       elapsed_ms: elapsed,
       steps: roundSteps(steps),
@@ -468,6 +484,7 @@ export async function cmdHook(): Promise<void> {
   } catch (e) {
     const elapsed = Date.now() - startTime
     hookLog.error?.(e instanceof Error ? e : new Error(String(e)), "FATAL: unhandled error", {
+      session: sessionId,
       elapsed_ms: elapsed,
       steps: roundSteps(steps),
     })

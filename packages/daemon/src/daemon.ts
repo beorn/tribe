@@ -28,6 +28,7 @@ import { gitPlugin } from "./lib/git-plugin.ts"
 import { githubPlugin } from "./lib/github-plugin.ts"
 import { healthMonitorPlugin } from "./lib/health-monitor-plugin.ts"
 import { accountlyPlugin } from "./lib/accountly-plugin.ts"
+import { hookLatencyPlugin } from "./lib/hook-latency-plugin.ts"
 import type { TribePluginHandle } from "./lib/plugin-api.ts"
 
 import {
@@ -346,7 +347,9 @@ const withSignalsShape = withSignals<typeof withHotReloadShape>({
   onReload: () => withHotReloadShape.hotReload.reload(),
 })(withHotReloadShape)
 const tribe = withRuntime<typeof withSignalsShape>({
-  plugins: process.env.TRIBE_NO_PLUGINS ? [] : [gitPlugin, githubPlugin, healthMonitorPlugin, accountlyPlugin],
+  plugins: process.env.TRIBE_NO_PLUGINS
+    ? []
+    : [gitPlugin, githubPlugin, healthMonitorPlugin, accountlyPlugin, hookLatencyPlugin],
   publishActivePluginNames: (n) => {
     refs.activePluginNames = n
   },
