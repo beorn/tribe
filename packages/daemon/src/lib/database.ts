@@ -1609,13 +1609,18 @@ export function createStatements(db: Database) {
 	`),
 
     /**
-     * `$between_personas` is 1 when sender and recipient are both explicit
-     * personas (tribe-wire/lib/persona-name). A direct status or notify between
-     * them is attention: a report one seat sends another otherwise reaches no
-     * instrument (P0 row 3, ruling C 2026-09-16). The exception is the ball
-     * owner's TAKING receipt on a request the recipient still has open — the
-     * same receipt `takingStatusMatchSql` reads — because pending shows it.
-     * Watchers and anonymous senders carry no sigil and stay ambient.
+     * The one attention classifier every "actionable" reader shares: requests,
+     * queries, assigns and verdicts are actionable by type (ACTIONABLE_TYPES),
+     * and this column carries the rest. A direct response is attention. A direct
+     * status or notify between explicit personas (`$between_personas`,
+     * tribe-wire/lib/persona-name) is attention ONLY when its ref names a ball
+     * the recipient is party to and that is still open — a TAKING receipt to the
+     * requester, a precision to the owner, a third seat's status on a live ball.
+     * Without one it is ambient: delivered, drained and in history, never
+     * attention and never counted (C2, @cto c49b6d2a, which replaced ruling C
+     * after @chief measured 66.6 attention rows an hour against a 15 bound).
+     * A closed ball's row is deleted, so its ref no longer counts; watchers,
+     * anonymous senders and broadcasts carry no sigil and stay ambient.
      */
     insertMessage: db.prepare(`
 		INSERT OR IGNORE INTO messages (id, type, sender, recipient, kind, content, bead_id, ref, ts,
@@ -1632,12 +1637,12 @@ export function createStatements(db: Database) {
 				WHEN $attention_required = 1 THEN 1
 				WHEN $kind = 'direct' AND $sender != $recipient AND $type = 'response' THEN 1
 				WHEN $kind = 'direct' AND $sender != $recipient AND $type IN ('status', 'notify') AND $between_personas = 1
-					AND NOT ($type = 'status' AND $ref IS NOT NULL AND EXISTS (
+					AND $ref IS NOT NULL AND EXISTS (
 						SELECT 1 FROM pending_request
 						WHERE (request_id = $ref OR message_id = $ref)
-							AND recipient = $sender
-							AND sender = $recipient
-					)) THEN 1
+							AND request_kind = 'request'
+							AND (recipient = $recipient OR sender = $recipient)
+					) THEN 1
 				ELSE 0
 			END)
 	`),
