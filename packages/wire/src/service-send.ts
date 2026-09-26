@@ -130,6 +130,11 @@ export async function registerLaunchSender(
         processId: () => process.pid,
       },
     )
+    // connectTribeLaunch unrefs the socket it registers, which is right for a long-running service connection. This one
+    // is the caller's one-shot: re-ref it, so that its close completes before the process exits. An unref'd socket
+    // let a notifier exit mid-close, and the daemon warned "managed bridge lost after socket error" on every send
+    // (review of d411211143).
+    client.socket.ref()
     return sender.name
   }
   const seat = await resolveLaunchSeat((method, params) => client.call(method, params), {
