@@ -110,32 +110,52 @@ export async function registerLaunchSender(
   context: Readonly<{ producer: string; socketPath: string }>,
 ): Promise<string> {
   if (sender.kind === "service") {
-    // connectTribeLaunch refuses any grant but the name it asked for.
-    await connectTribeLaunch(
-      {
-        name: sender.name,
-        idToken: sender.idToken,
-        principalClass: "service",
-        cwd: process.cwd(),
-        domains: ["service"],
-        takeover: false,
-      },
-      {
-        connect: () => Promise.resolve(client),
-        socketPath: () => context.socketPath,
-        sleep: (ms) =>
-          new Promise((resolve) => {
-            setTimeout(resolve, ms)
-          }),
-        processId: () => process.pid,
-      },
-    )
-    // connectTribeLaunch unrefs the socket it registers, which is right for a long-running service connection. This one
-    // is the caller's one-shot: re-ref it, so that its close completes before the process exits. An unref'd socket
-    // let a notifier exit mid-close, and the daemon warned "managed bridge lost after socket error" on every send
-    // (review of d411211143).
-    client.socket.ref()
-    return sender.name
+    // connectTribeLaunch unrefs the socket before its promise resolves. A one-shot
+    // service can otherwise exit 0 in that gap without sending its message.
+    // Hold the loop through registration and give a contended or stalled launch
+    // an explicit failure. The caller owns one client, so a retry after that
+    // client closes cannot be used to send its message.
+    let deadline: ReturnType<typeof setTimeout> | undefined
+    try {
+      // connectTribeLaunch refuses any grant but the name it asked for.
+      await Promise.race([
+        connectTribeLaunch(
+          {
+            name: sender.name,
+            idToken: sender.idToken,
+            principalClass: "service",
+            cwd: process.cwd(),
+            domains: ["service"],
+            takeover: false,
+          },
+          {
+            connect: () => Promise.resolve(client),
+            socketPath: () => context.socketPath,
+            sleep: (ms) =>
+              new Promise((resolve) => {
+                setTimeout(resolve, ms)
+              }),
+            processId: () => process.pid,
+          },
+        ),
+        new Promise<never>((_resolve, reject) => {
+          deadline = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `could not register service ${sender.name} at ${context.socketPath} within 20s; no message was sent`,
+                ),
+              ),
+            TRIBE_DAEMON_DEADLINE_MS * 2,
+          )
+        }),
+      ])
+      // A one-shot caller must keep the socket live until its final call and close.
+      client.socket.ref()
+      return sender.name
+    } finally {
+      if (deadline !== undefined) clearTimeout(deadline)
+    }
   }
   const seat = await resolveLaunchSeat((method, params) => client.call(method, params), {
     launchId: sender.launchId,
