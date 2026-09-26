@@ -2,9 +2,11 @@
  * The launch's identity token (25074 3b). A managed launch carries it, and `register` forwards it as `idToken`; the
  * daemon's composing-layer verifier alone decides what it proves. A client reads its claims only unverified, to name
  * its own launch and actor (readUnverifiedTokenClaims below). An unset or empty variable is a launch without a token,
- * served on its claimed name.
+ * served on its claimed name. The variable's name is defined once, in the hab-session-env leaf (25074 S2c, @cto c04ba94d).
  */
-export const HAB_ID_TOKEN_ENV = "HAB_ID_TOKEN"
+import { HAB_ID_TOKEN_ENV } from "./hab-session-env.ts"
+
+export { HAB_ID_TOKEN_ENV }
 
 export function readIdentityTokenFromEnvironment(env: Readonly<NodeJS.ProcessEnv>): string | null {
   const raw = env[HAB_ID_TOKEN_ENV]
