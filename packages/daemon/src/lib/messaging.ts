@@ -755,23 +755,21 @@ export function logEvent(
 }
 
 /**
- * What a message's row says of its sender's authority: the sending session's, or 'unrecorded' for a row written
+ * What a message's row says of its sender's authority: the sending session's; 'bearer' on a row written before 25074
+ * 3d-3 deleted the launcher-minted bearer (history keeps it, nothing writes it now); or 'unrecorded' for a row written
  * before the daemon recorded it (schema v37). NULL is the daemon's own voice.
  */
-export type SenderAuthority = SessionAuthority | "unrecorded"
+export type SenderAuthority = SessionAuthority | "bearer" | "unrecorded"
 
 /**
  * The authority a message is sent with, fixed on the row at insert (25074 3d-1a, @cto 2bfc1935 Q0): every envelope says
- * whether its sender is verified, a bearer, or only claims its name. None is the daemon's voice alone: its own context,
+ * whether its sender is verified or only claims its name. None is the daemon's voice alone: its own context,
  * or a row it attributes to itself while serving a client's call. A connection without a session row has registered no
  * identity, so it only claims its name.
  */
 function senderAuthorityOf(ctx: TribeContext, sender: string): SessionAuthority | null {
   if (ctx.getRole() === "daemon" || sender !== ctx.getName()) return null
-  const row = ctx.stmts.selectSessionAuthority.get({ $id: ctx.sessionId }) as {
-    identity_sid: string | null
-    mailbox_authority_hash: string | null
-  } | null
+  const row = ctx.stmts.selectSessionAuthority.get({ $id: ctx.sessionId }) as { identity_sid: string | null } | null
   return row === null ? "claimed" : sessionAuthority(row)
 }
 

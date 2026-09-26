@@ -65,7 +65,6 @@ import {
   type SessionTransportEvidence,
 } from "./session-transport-state.ts"
 import { sessionAuthority, type SessionAuthority } from "./identity-verifier.ts"
-import { countBearerServed, type BearerServedCount } from "./bearer-served.ts"
 import { nearestLiveName, type DirectDeliveryResolution, type DirectDeliveryResolver } from "./delivery-resolution.ts"
 import { bothDeclaredUnrun, type DeclaredRoster } from "./membership-declared-roster.ts"
 import { isUnidentifiedSessionName } from "./resolve-name.ts"
@@ -289,8 +288,6 @@ export type HandlerOpts = {
   identityVerifierPath?: string | null
   /** 25074 3c-2a — whether the loaded verifier declares `gen` on its verified verdicts; null with no verifier. */
   identityVerifierSuppliesGen?: boolean | null
-  /** When this daemon's dispatcher came up (epoch ms): the default start of `tribe health`'s bearer_served window. */
-  daemonStartedAt?: number
   /** Optional: dump daemon internals for `tribe.debug`. Daemon-only (tests using
    *  handlers directly can omit this — `tribe.debug` then returns a minimal
    *  snapshot synthesized from the other accessors). */
@@ -362,11 +359,10 @@ function readLastMailboxReadAt(stmts: TribeContext["stmts"], name: string): numb
 
 function ownerTransportObservationProjector(ctx: TribeContext, opts: HandlerOpts, observedAt: number) {
   const sessionRows = ctx.db
-    .prepare("SELECT id, name, mailbox_authority_hash, identity_sid, delivery, updated_at FROM sessions")
+    .prepare("SELECT id, name, identity_sid, delivery, updated_at FROM sessions")
     .all() as Array<{
     id: string
     name: string
-    mailbox_authority_hash: string | null
     identity_sid: string | null
     delivery: string
     updated_at: number
@@ -570,7 +566,7 @@ export function handleToolCall(
     case TRIBE_COORD_METHODS.join:
       return handleJoin(ctx, a, opts)
     case TRIBE_COORD_METHODS.health:
-      return handleHealth(ctx, a, opts)
+      return handleHealth(ctx, opts)
     case TRIBE_COORD_METHODS.restart:
       return handleRestart(ctx, a, opts.cleanup)
     case TRIBE_COORD_METHODS.stop:
@@ -2074,7 +2070,7 @@ function handlePending(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolR
       owner,
       error:
         `tribe.pending: implicit owner resolved to an unauthenticated one-shot session ${JSON.stringify(owner)}; ` +
-        "invoke from a managed launch carrying AG_SESSION_AUTH, or run 'tribe pending --owner <seat>' with the same filters",
+        "invoke from a managed launch carrying HAB_ID_TOKEN, or run 'tribe pending --owner <seat>' with the same filters",
     })
   }
 
@@ -2273,47 +2269,18 @@ type DurableMembershipSessionRow = MembershipSessionRow & {
 type MailboxReadCapability = {
   state: "available" | "unavailable"
   evidence_kind: "observed"
-  reason:
-    | "self-mailbox-authority-registered"
-    | "self-mailbox-authority-token"
-    | "self-mailbox-authority-missing"
-    | "self-mailbox-authority-invalid"
+  reason: "self-mailbox-authority-token" | "self-mailbox-authority-missing"
 }
 
 /**
- * Project the daemon's stored self-mailbox authority fact without exposing the
- * bearer hash. Transport liveness cannot answer this question: legacy seats
- * can send and heartbeat while remaining unable to read their own canonical
- * inbox. A malformed stored hash is unavailable, never an optimistic unknown.
+ * Project whether a session can read its own inbox. Transport liveness cannot answer this question: a relay can send
+ * and heartbeat while unable to read its own canonical inbox. A session reads by the identity token it registered with
+ * (its recorded sid); without one it is unavailable (25074 3d-3: the launcher-minted bearer that also counted is gone).
  */
-function projectMailboxReadCapability(session: {
-  readonly mailbox_authority_hash: string | null
-  readonly identity_sid: string | null
-}): MailboxReadCapability {
-  // 25074 3b — a session registered with a verified identity token reads its own inbox by that token.
-  if (session.identity_sid !== null) {
-    return { state: "available", evidence_kind: "observed", reason: "self-mailbox-authority-token" }
-  }
-  const mailboxAuthorityHash = session.mailbox_authority_hash
-  if (mailboxAuthorityHash === null) {
-    return {
-      state: "unavailable",
-      evidence_kind: "observed",
-      reason: "self-mailbox-authority-missing",
-    }
-  }
-  if (!/^[a-f0-9]{64}$/u.test(mailboxAuthorityHash)) {
-    return {
-      state: "unavailable",
-      evidence_kind: "observed",
-      reason: "self-mailbox-authority-invalid",
-    }
-  }
-  return {
-    state: "available",
-    evidence_kind: "observed",
-    reason: "self-mailbox-authority-registered",
-  }
+function projectMailboxReadCapability(session: { readonly identity_sid: string | null }): MailboxReadCapability {
+  return session.identity_sid !== null
+    ? { state: "available", evidence_kind: "observed", reason: "self-mailbox-authority-token" }
+    : { state: "unavailable", evidence_kind: "observed", reason: "self-mailbox-authority-missing" }
 }
 
 /** The "missing-transport" / "exited-not-remounted" shapes returned directly
@@ -2865,7 +2832,6 @@ export function projectSessionRowTransport(
     readonly name: string
     readonly updated_at: number
     readonly delivery: string
-    readonly mailbox_authority_hash: string | null
     readonly identity_sid: string | null
   },
   activeIds: ReadonlySet<string>,
@@ -2926,7 +2892,7 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     .prepare(`
       SELECT s.id, s.name, s.role, s.domains, s.pid, s.cwd,
         s.claude_session_id, s.claude_session_name, s.started_at, s.updated_at,
-        s.account, s.provider, s.mailbox_authority_hash, s.identity_sid, s.launch_id, s.launch_parent_pid, s.delivery,
+        s.account, s.provider, s.identity_sid, s.launch_id, s.launch_parent_pid, s.delivery,
         s.adapter_exit_record
       FROM sessions s
       ORDER BY s.started_at
@@ -2944,7 +2910,6 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
     updated_at: number
     account: string | null
     provider: string | null
-    mailbox_authority_hash: string | null
     identity_sid: string | null
     launch_id: string | null
     launch_parent_pid: number | null
@@ -2998,8 +2963,8 @@ function handleSessions(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): Tool
       claude_session_id: r.claude_session_id,
       claude_session_name: r.claude_session_name,
       mailbox_read_capability: projectMailboxReadCapability(r),
-      // 25074 3b — how the daemon knows this session is who it says: verified (its identity token), bearer (a
-      // launch-minted mailbox authority), or claimed (its name alone). A facet, never an exit code.
+      // 25074 3b — how the daemon knows this session is who it says: verified (its identity token) or claimed (its name
+      // alone). A facet, never an exit code.
       authority: sessionAuthority(r),
       ...evidence,
       // `alive` (plus transport_alive/agent_alive/pid_alive/is_silent) is
@@ -3343,7 +3308,6 @@ type HealthSessionRow = {
   pid: number
   started_at: number
   updated_at: number
-  mailbox_authority_hash: string | null
   identity_sid: string | null
   launch_id: string | null
   launch_parent_pid: number | null
@@ -3406,34 +3370,7 @@ export function readSeatTransportFacts(
   return { missing, exited, unreachable, connected: new Set(liveSessions.map((session) => session.name)) }
 }
 
-/**
- * `tribe health`'s bearer_served block over `since` (an ISO instant or epoch ms; default the daemon's start) to now.
- * An unparseable or future `since` refuses by name. With neither a `since` nor a recorded daemon start there is no
- * window, and the block says it is unmeasured rather than printing a 0 that was never counted.
- */
-function bearerServedBlock(
-  ctx: TribeContext,
-  a: ToolArgs,
-  opts: HandlerOpts,
-  now: number,
-): BearerServedCount | { unmeasured: string } {
-  const raw = a.since
-  if (raw === undefined || raw === null || raw === "") {
-    if (opts.daemonStartedAt === undefined) {
-      return { unmeasured: "no since was given and this daemon recorded no start, so there is no window to count" }
-    }
-    return countBearerServed(ctx.db, { since: opts.daemonStartedAt, to: now })
-  }
-  const since = typeof raw === "number" ? raw : typeof raw === "string" ? Date.parse(raw) : Number.NaN
-  if (!Number.isFinite(since) || since > now) {
-    throw new Error(
-      `tribe.health: since must be an ISO instant or epoch ms not in the future, got ${JSON.stringify(raw)}`,
-    )
-  }
-  return countBearerServed(ctx.db, { since, to: now })
-}
-
-function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
+function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
   const now = Date.now()
   const silentThreshold = now - 300_000 // 5 minutes
 
@@ -3567,9 +3504,9 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
   })
   const mailboxReadIssues = liveSessions.flatMap((session) => {
     // Connection-scoped tools and legacy diagnostic rows are not managed
-    // seats. Only a durable launch is required to carry the launcher-minted
-    // self-read bearer, so keep health loud without manufacturing incidents
-    // for processes that have no canonical seat mailbox to read.
+    // seats. Only a durable launch is required to register with its identity
+    // token, so keep health loud without manufacturing incidents for
+    // processes that have no canonical seat mailbox to read.
     if (!isDurableMembershipSessionRow(session)) return []
     const capability = projectMailboxReadCapability(session)
     return capability.state === "available"
@@ -3604,8 +3541,8 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
     anonymous_disconnected: disconnected.anonymousDurable.length,
     ...(membershipDiscrepancy === undefined ? {} : { membership_discrepancy: membershipDiscrepancy }),
     ...(opts.recallVaultRefusal ? { recall_vault: { state: "refused", ...opts.recallVaultRefusal } } : {}),
-    // 25074 3b — the verifier the daemon booted with and how many live sessions each authority serves. 3d's gate
-    // reads zero bearer and zero claimed here; until then the tokenless sessions stay visible, never an exit code.
+    // 25074 3b — the verifier the daemon booted with and how many live sessions each authority serves; tokenless
+    // (claimed) sessions stay visible, never an exit code. The bearer count went with the bearer (3d-3).
     identity: {
       verifier: opts.identityVerifierPath ?? null,
       supplies_gen: opts.identityVerifierSuppliesGen ?? null,
@@ -3614,11 +3551,8 @@ function handleHealth(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolRe
           counts[sessionAuthority(session)] += 1
           return counts
         },
-        { verified: 0, bearer: 0, claimed: 0 },
+        { verified: 0, claimed: 0 },
       ),
-      // 25074 3d-3 prerequisite (@cto 8c095897): every bearer-served resolution in the window, from the journal. The
-      // 3d-3 gate is `gate.total` at zero across the relaunch window; `hand` (no launch id) is visible, never blocking.
-      bearer_served: bearerServedBlock(ctx, a, opts, now),
     },
     issues: [
       ...(opts.recallVaultRefusal ? [`recall vault REFUSED: --vault-db ${opts.recallVaultRefusal.reason}`] : []),
@@ -3904,8 +3838,8 @@ export type FetchEvent = {
   room_id: string | null
   summary: string | null
   /**
-   * Whether the sender was verified, a bearer, or only claimed its name (25074 3d-1a, @cto 2bfc1935 Q0); 'unrecorded'
-   * for a message older than that record, null for the daemon's own voice.
+   * Whether the sender was verified or only claimed its name (25074 3d-1a, @cto 2bfc1935 Q0); 'bearer' on a message
+   * written before 3d-3 deleted the bearer, 'unrecorded' for one older than that record, null for the daemon's voice.
    */
   from_authority: SenderAuthority | null
 }

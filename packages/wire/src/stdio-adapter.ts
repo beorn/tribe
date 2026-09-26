@@ -45,7 +45,6 @@ import { createHash } from "node:crypto"
 import { constants as osConstants } from "node:os"
 import { dirname } from "node:path"
 import { fileURLToPath } from "node:url"
-import { hashSelfMailboxAuthority, readSelfMailboxAuthorityFromEnvironment } from "./lib/self-mailbox-authority.ts"
 import { readIdentityTokenFromEnvironment } from "./lib/identity-token.ts"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { callTribeTool } from "./lib/tool-daemon-call.ts"
@@ -343,7 +342,6 @@ const identityToken = createHash("sha256")
   .update(`${CLAUDE_SESSION_ID ?? ""}|${process.cwd()}|${args.role ?? "member"}`)
   .digest("hex")
   .slice(0, 16)
-const selfMailboxAuthority = readSelfMailboxAuthorityFromEnvironment(process.env)
 // 25074 3b — only a registration under the launch's own name presents the launch's token: an unnamed or renamed
 // child inheriting it would be refused as a mismatch, where today it is served on its claimed name.
 const launchIdentityToken = REGISTER_WITH_LAUNCH_NAME ? readIdentityTokenFromEnvironment(process.env) : null
@@ -364,7 +362,6 @@ const baseRegisterParams = {
   claudeSessionId: CLAUDE_SESSION_ID,
   claudeSessionName: CLAUDE_SESSION_NAME,
   identityToken,
-  ...(selfMailboxAuthority === null ? {} : { mailboxAuthorityHash: hashSelfMailboxAuthority(selfMailboxAuthority) }),
   ...(launchIdentityToken === null ? {} : { idToken: launchIdentityToken }),
   // 25074 3c-2b (@cto def441bf): the adapter registers by the seat's token with its launch parent pid and the daemon
   // keys it `<sid>@<gen>`. LAUNCH_IDENTITY is the token's sid (3d-1); no launcher projects TRIBE_LAUNCH_ID (3d-2b).

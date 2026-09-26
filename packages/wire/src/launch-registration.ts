@@ -20,8 +20,11 @@ export interface TribeLaunchRequest {
   readonly takeover: boolean
   readonly provider?: string
   readonly account?: string
-  /** Agents require certified mailbox authority; sender-only services omit it. */
-  readonly mailboxAuthorityHash?: string
+  /**
+   * Agents require a certified self-mailbox read (the daemon's token-verified `mailbox_read_capability`); sender-only
+   * services omit it. 25074 3d-3 replaced the bearer hash that used to both carry and imply it.
+   */
+  readonly requireMailboxAuthority?: boolean
   /** The launch's identity token (25074 3b), verified by the daemon's composing-layer verifier when it has one. */
   readonly idToken?: string
 }
@@ -98,7 +101,6 @@ export async function connectTribeLaunch(
         launchParentPid: processId,
         delivery: "pull",
         ...(request.provider === undefined ? {} : { provider: request.provider }),
-        ...(request.mailboxAuthorityHash === undefined ? {} : { mailboxAuthorityHash: request.mailboxAuthorityHash }),
         ...(request.idToken === undefined ? {} : { idToken: request.idToken }),
         ...(request.account === undefined ? {} : { account: request.account }),
         takeover: request.takeover,
@@ -126,7 +128,7 @@ export async function connectTribeLaunch(
         ...(request.provider === undefined ? {} : { provider: request.provider }),
         account: request.account,
         cwd: request.cwd,
-        requireMailboxAuthority: request.mailboxAuthorityHash !== undefined,
+        requireMailboxAuthority: request.requireMailboxAuthority === true,
       })
       if (certification.member === null) {
         throw new Error(
@@ -162,7 +164,7 @@ export async function connectTribeLaunch(
     }
   }
   // The last refusal is the cause, so a caller can read its typed kind (a daemon refusal's `data.kind`) rather than
-  // parse the message: 25074 3c's bootstrap falls back to its bearer on an identity-verifier-fault and on nothing else.
+  // parse the message.
   throw new Error(
     `managed Tribe bootstrap failed after ${CONNECT_ATTEMPTS} attempts: ${
       lastError instanceof Error ? lastError.message : String(lastError)
@@ -288,10 +290,8 @@ function exactLaunchMember(
       mailboxReadCapability !== null &&
       (mailboxReadCapability as Record<string, unknown>)["state"] === "available" &&
       (mailboxReadCapability as Record<string, unknown>)["evidence_kind"] === "observed" &&
-      // 25074 3b: dual-keyed with the daemon's session resolution — a bearer-registered or a token-verified
-      // session re-certifies; the two move together or a verified seat fails its own re-certification.
-      ((mailboxReadCapability as Record<string, unknown>)["reason"] === "self-mailbox-authority-registered" ||
-        (mailboxReadCapability as Record<string, unknown>)["reason"] === "self-mailbox-authority-token")
+      // 25074 3d-3: a token-verified session is the only one that reads its own mailbox.
+      (mailboxReadCapability as Record<string, unknown>)["reason"] === "self-mailbox-authority-token"
     ) {
       return { member, mailboxReadCapabilityDetail: null }
     }

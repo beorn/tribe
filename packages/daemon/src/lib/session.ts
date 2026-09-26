@@ -405,7 +405,6 @@ export function registerSession(
   provider?: string | null,
   launchId?: string | null,
   launchParentPid?: number | null,
-  mailboxAuthorityHash?: string | null,
   /** Sessions the caller already displaced by its own authority (takeover, identity precedence): their rows may be
    *  replaced even while their launch lives. */
   displacedSessionIds: ReadonlySet<string> = new Set(),
@@ -576,7 +575,9 @@ export function registerSession(
       $claude_session_id: ctx.claudeSessionId,
       $claude_session_name: ctx.claudeSessionName,
       $identity_token: identityToken ?? null,
-      $mailbox_authority_hash: mailboxAuthorityHash ?? null,
+      // 25074 3d-3: the launcher-minted bearer is gone, so no register writes its hash; the column stays inert until
+      // DROP_BEAD_PENDING drops it (a NULL keeps any older row's value via the upsert's COALESCE, and nothing reads it).
+      $mailbox_authority_hash: null,
       $launch_id: launchId ?? null,
       $launch_parent_pid: launchParentPid ?? null,
       $launch_parent_start_time: launchParentStartTimeOf(launchParentPid),

@@ -34,7 +34,6 @@ import {
   type PinDirection,
 } from "../lib/code-identity.ts"
 import { describeSettlementConflict, type BallSettlementReason } from "../lib/ball-outcome.ts"
-import { AG_SESSION_AUTH_ENV, readSelfMailboxAuthorityFromEnvironment } from "../lib/self-mailbox-authority.ts"
 import { HAB_ID_TOKEN_ENV, readIdentityTokenFromEnvironment } from "../lib/identity-token.ts"
 
 const PENDING_CLI = visibleCliProjectionForMcp("pending")
@@ -64,22 +63,13 @@ function pendingReadCliError(method: string, error: unknown, recoveryCommand: st
   const message = error instanceof Error ? error.message : String(error)
   const code = (error as { code?: unknown }).code
   const recoverableIdentityFailure =
-    code === -32004 ||
-    code === -32003 ||
-    message === STALE_MANAGED_PENDING_DAEMON_ERROR ||
-    message.startsWith(`${AG_SESSION_AUTH_ENV} must be`)
+    code === -32004 || code === -32003 || message === STALE_MANAGED_PENDING_DAEMON_ERROR
   if (method !== "cli_session_pending_read_v1" || !recoverableIdentityFailure) return message
   const punctuation = message.endsWith(".") ? "" : "."
   return (
     `${message}${punctuation} No pending query ran. ` +
     `For an explicit recovery or audit read, run '${recoveryCommand}'.`
   )
-}
-
-/** 25074 (@cto 03cff4b5): the daemon served a managed read by its bearer because the identity token faulted. */
-function warnServedByBearer(command: string, raw: unknown): void {
-  const fault = (raw as { session_authority?: { fault?: unknown } } | null)?.session_authority?.fault
-  if (typeof fault === "string") console.error(`${command}: ${fault}`)
 }
 
 function invalidAuthenticatedPendingSnapshot(
@@ -635,21 +625,19 @@ async function cmdPending(
   let rawResult: unknown
   try {
     if (close) {
-      const authority = readSelfMailboxAuthorityFromEnvironment(process.env)
       method = "cli_session_pending_close_v1"
-      // Null is deliberate: the daemon records the refused capability attempt
-      // and returns a typed -32004 without ever reaching pending-row mutation.
-      args.authority = authority
+      // No token is deliberate: the daemon records the refused capability
+      // attempt and returns a typed -32004 without ever reaching pending-row
+      // mutation.
       const idToken = readIdentityTokenFromEnvironment(process.env)
       if (idToken !== null) args.idToken = idToken
     } else if (!all && owner === undefined) {
       // A one-shot CLI socket starts life under a pending-* placeholder. An
-      // implicit owner must therefore come from the launcher-minted current-
-      // session authority, never from that transport context (or name hints).
-      // Null is deliberate: the daemon returns a typed, named refusal when the
-      // managed-session bearer is absent instead of answering count:0 for nobody.
+      // implicit owner must therefore come from the launch's identity token,
+      // never from that transport context (or name hints). No token is
+      // deliberate: the daemon returns a typed, named refusal instead of
+      // answering count:0 for nobody.
       method = "cli_session_pending_read_v1"
-      args.authority = readSelfMailboxAuthorityFromEnvironment(process.env)
       const idToken = readIdentityTokenFromEnvironment(process.env)
       if (idToken !== null) args.idToken = idToken
     }
@@ -788,21 +776,8 @@ export type WireHealthDocument = {
   facts?: Record<string, unknown>
 }
 
-/**
- * The daemon's identity.bearer_served block (25074 3d-3 prerequisite), or a loud unmeasured marker when the running
- * daemon's health carries none (it predates the count): never an absent key that reads as zero.
- */
-function bearerServedFact(result: unknown): unknown {
-  const health = mcpJsonContent(result) as { identity?: { bearer_served?: unknown } } | null
-  const block = health?.identity?.bearer_served
-  return (
-    block ?? { unmeasured: "the running daemon's tribe.health has no identity.bearer_served; it predates 25074 3d-3" }
-  )
-}
-
 export function evaluateWireHealthDocument(
   result: {
-    content?: Array<{ type: string; text: string }>
     daemon?: { pid: number; uptime: number; clients: number }
     sessions?: unknown[]
   } | null,
@@ -850,14 +825,12 @@ export function evaluateWireHealthDocument(
         uptime: result?.daemon?.uptime,
         clients: result?.daemon?.clients,
         sessions: Array.isArray(result?.sessions) ? result.sessions.length : 0,
-        bearer_served: bearerServedFact(result),
       },
     },
   }
 }
 
-async function cmdHealth(opts?: { json?: boolean; since?: string }): Promise<void> {
-  const healthParams = opts?.since === undefined ? undefined : { since: opts.since }
+async function cmdHealth(opts?: { json?: boolean }): Promise<void> {
   if (opts?.json) {
     const socketPath = resolveSocketPath()
     let client: DaemonClient
@@ -877,7 +850,7 @@ async function cmdHealth(opts?: { json?: boolean; since?: string }): Promise<voi
     }
     try {
       try {
-        result = (await client.call("cli_health", healthParams)) as typeof result
+        result = (await client.call("cli_health")) as typeof result
       } finally {
         client.close()
       }
@@ -894,7 +867,7 @@ async function cmdHealth(opts?: { json?: boolean; since?: string }): Promise<voi
     return
   }
 
-  const result = (await callDaemon("cli_health", healthParams)) as {
+  const result = (await callDaemon("cli_health")) as {
     content: Array<{ type: string; text: string }>
     sessions?: Array<{ name: string; role: string; pid: number; cwd?: string; uptimeMs: number; idleMs: number }>
     daemon: { pid: number; uptime: number; clients: number }
@@ -914,8 +887,6 @@ async function cmdHealth(opts?: { json?: boolean; since?: string }): Promise<voi
         }
       }
     }
-    const bearerServed = (data.identity as { bearer_served?: Record<string, unknown> } | undefined)?.bearer_served
-    if (bearerServed !== undefined) console.log(`\n  Bearer-served: ${describeBearerServed(bearerServed)}`)
     // 15588 — show the live roster section so chief can answer "who is
     // connected / who is idle >15min" with one command. Roster comes from
     // the dispatcher's cli_health response (live `clients` map, not the
@@ -942,16 +913,6 @@ async function cmdHealth(opts?: { json?: boolean; since?: string }): Promise<voi
     // Fallback: just print the raw result
     await writeJsonStdout(result, 2)
   }
-}
-
-/** One line for `tribe health`: the 3d-3 gate count, the hand sessions apart, and the window it covers. */
-function describeBearerServed(block: Record<string, unknown>): string {
-  if (typeof block.unmeasured === "string") return `UNMEASURED (${block.unmeasured})`
-  const gate = (block.gate as { total?: number } | undefined)?.total
-  const hand = (block.hand as { total?: number } | undefined)?.total
-  const window = `${String(block.since)} to ${String(block.to)}`
-  const truncated = typeof block.truncated_at === "string" ? `; ${String(block.note)}` : ""
-  return `${String(gate)} with a launch id (3d-3 gate), ${String(hand)} hand, ${window}${truncated}`
 }
 
 // ---------------------------------------------------------------------------
@@ -1758,20 +1719,14 @@ function printSelfInboxEvent(event: SelfInboxEvent): void {
 }
 
 async function cmdInbox(opts: { limit?: number; json?: boolean; peek?: boolean }): Promise<void> {
-  const authority = readSelfMailboxAuthorityFromEnvironment(process.env)
   const idToken = readIdentityTokenFromEnvironment(process.env)
-  if (authority === null && idToken === null) {
+  if (idToken === null) {
     throw new Error(
-      `${HAB_ID_TOKEN_ENV} and ${AG_SESSION_AUTH_ENV} are both missing; this managed session has no self-mailbox authority source`,
+      `${HAB_ID_TOKEN_ENV} is missing; tribe inbox consumes a managed launch's own mailbox. From a hand session, read ` +
+        "with --session <name> (tribe inbox-status --session <name>) or send with --anonymous",
     )
   }
-  const raw = await callDaemon("cli_self_inbox_v1", {
-    authority,
-    ...(idToken === null ? {} : { idToken }),
-    limit: opts.limit ?? 50,
-    peek: opts.peek,
-  })
-  warnServedByBearer("tribe inbox", raw)
+  const raw = await callDaemon("cli_self_inbox_v1", { idToken, limit: opts.limit ?? 50, peek: opts.peek })
   const result = mcpJsonContent(raw) as SelfInboxResult
   if (opts.json) {
     if (!opts.peek) {
@@ -2321,11 +2276,7 @@ export function registerReadCommands(program: Command): void {
     .command("health")
     .description("Run health diagnostics")
     .option("--json", "Emit one hab-service-health/2 JSON document")
-    .option(
-      "--since <instant>",
-      "Start of the bearer_served window (ISO instant or epoch ms); default the daemon's start",
-    )
-    .action((opts: { json?: boolean; since?: string }) => cmdHealth(opts))
+    .action((opts: { json?: boolean }) => cmdHealth(opts))
 
   program
     .command("doctor")

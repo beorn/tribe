@@ -851,16 +851,7 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
     mcp: {
       name: "health",
       description: "Diagnostic: check for silent members, stale beads, unread messages",
-      inputSchema: {
-        type: "object",
-        properties: {
-          since: {
-            type: "string",
-            description:
-              "Start of identity.bearer_served's window, an ISO instant or epoch ms; default the daemon's start (25074 3d-3).",
-          },
-        },
-      },
+      inputSchema: { type: "object", properties: {} },
       outputSchema: OBJ(
         {
           members: {
@@ -902,12 +893,6 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             type: "object",
             description:
               "Read-only 24h response latency, open-ball, connected-session cursor lag, and database growth projection. Every subprojection carries as_of_ms; inbox lag is explicitly projection-only and excludes pane/turn seat-liveness verdicts.",
-            additionalProperties: true,
-          },
-          identity: {
-            type: "object",
-            description:
-              "The identity verifier the daemon booted with, live sessions per authority, and bearer_served: every call the launcher-minted bearer served in the window (since, to), counted from the journal across messages and messages_archive. gate counts rows with a launch id (3d-3 needs it at zero across the relaunch window); hand counts rows without one (visible, never blocking). truncated_at is set when since predates the oldest retained row; unmeasured replaces the block when no window exists.",
             additionalProperties: true,
           },
           issues: {

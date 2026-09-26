@@ -3,11 +3,12 @@
  * itself: the composing layer names a module on the daemon's launch line (`--identity-verifier <absolute path>`),
  * and the daemon loads it once at boot. The module exports `IDENTITY_VERIFIER_INTERFACE = 1` and
  * `verifyIdentity(token)`; a missing file, a wrong interface number or a missing function refuses startup naming
- * the path. With no flag the daemon runs as before: sessions are served on their bearer or their claimed name.
+ * the path. With no flag the daemon serves sessions on their claimed name only, and a one-shot caller that needs its
+ * own session is refused by name (25074 3d-3: the launcher-minted bearer is gone).
  *
- * Authority is a facet of a session: verified, bearer or claimed. A claimed registration never displaces a live
- * managed holder (24767's refusal, the holder untouched); a verified registration displaces a holder that only
- * claimed the name.
+ * Authority is a facet of a session: verified or claimed. A claimed registration never displaces a live verified
+ * holder (24767's refusal, the holder untouched); a verified registration displaces a holder that only claimed the
+ * name.
  */
 
 import { isAbsolute } from "node:path"
@@ -35,29 +36,22 @@ export interface LoadedIdentityVerifier {
   readonly suppliesGen: boolean
 }
 
-export type SessionAuthority = "verified" | "bearer" | "claimed"
+export type SessionAuthority = "verified" | "claimed"
 
-export function sessionAuthority(row: {
-  readonly identity_sid: string | null
-  readonly mailbox_authority_hash: string | null
-}): SessionAuthority {
-  if (row.identity_sid !== null) return "verified"
-  return row.mailbox_authority_hash !== null ? "bearer" : "claimed"
+/** A session is verified when it registered with a verified identity token (its sid is recorded), else claimed. */
+export function sessionAuthority(row: { readonly identity_sid: string | null }): SessionAuthority {
+  return row.identity_sid !== null ? "verified" : "claimed"
 }
 
 /**
  * Whether a registration of `claimant` authority may displace a connected holder of `holder` authority (25074 3c,
- * @cto §10). A claimed registration never displaces a managed one. A bearer registration displaces a verified holder
- * only when that holder's instance is gone: its liveness decides, asked by re-verifying the token it registered with
- * (a live holder refuses, a dead or superseded one is displaced and told, an undecided one refuses as a fault the
- * claimant retries). A bearer registration arrives from a managed launch whose bootstrap fell back after a verifier
- * fault, so a relaunch against its own dead predecessor still proceeds. Every other pairing is today's precedence.
+ * @cto §10). A claimed registration never displaces a verified one; every other pairing is today's precedence. The
+ * bearer's holder-liveness arm went with the bearer (25074 3d-3).
  */
-export type DisplacementRule = "allowed" | "refused" | "holder-liveness"
+export type DisplacementRule = "allowed" | "refused"
 
 export function displacementRule(holder: SessionAuthority, claimant: SessionAuthority): DisplacementRule {
   if (claimant === "claimed" && holder !== "claimed") return "refused"
-  if (claimant === "bearer" && holder === "verified") return "holder-liveness"
   return "allowed"
 }
 

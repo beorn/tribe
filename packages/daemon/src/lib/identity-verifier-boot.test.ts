@@ -122,13 +122,6 @@ describe("the daemon's --identity-verifier boot check (25074 3b)", () => {
       verifier: verifierPath,
       supplies_gen: true,
       authority: { verified: 1, bearer: 0, claimed: 0 },
-      // 25074 3d-3 prerequisite: a booted daemon counts from its own start; a verified register journals no row.
-      bearer_served: expect.objectContaining({
-        halves: ["messages", "messages_archive"],
-        truncated_at: null,
-        gate: expect.objectContaining({ total: 0 }),
-        hand: expect.objectContaining({ total: 0 }),
-      }),
     })
   })
 })

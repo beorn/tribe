@@ -389,7 +389,7 @@ if (tribe.recall) {
 log.info?.(
   `Identity verifier: ${
     identityVerifier === null
-      ? "not configured (sessions are served on bearer or claimed names)"
+      ? "not configured (sessions are served on their claimed names)"
       : `${identityVerifier.path} (${identityVerifier.suppliesGen ? "supplies gen" : "no gen: a launch-id-less register refuses"})`
   }`,
 )

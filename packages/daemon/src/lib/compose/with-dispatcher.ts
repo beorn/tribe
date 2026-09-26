@@ -35,7 +35,6 @@ import { isAbsolute } from "node:path"
 import { createLogger } from "loggily"
 import { DEFAULT_INBOX_WAIT_SESSION, resolveInboxWaitOptions } from "tribe-wire"
 import { deriveTribePersonaLaunchIdentity, providerLaunchIdOf } from "tribe-wire/lib/persona-launch-identity"
-import { AG_SESSION_AUTH_ENV, hashSelfMailboxAuthority } from "tribe-wire/lib/self-mailbox-authority"
 import { HAB_ID_TOKEN_ENV } from "tribe-wire/lib/identity-token"
 import {
   createLineParser,
@@ -88,7 +87,6 @@ import type { DirectDeliveryResolver } from "../delivery-resolution.ts"
 import type { DeclaredRoster } from "../membership-declared-roster.ts"
 import { STARTUP_SHA, TRIBE_SOURCE_ROOT } from "../code-pin.ts"
 import { shouldLogSlowRequest } from "../slow-request-log.ts"
-import { recordBearerServed, type BearerServedBranch } from "../bearer-served.ts"
 import { derivedLaunchPrefixUpperBound } from "../launch-prefix-range.ts"
 import {
   displacementRule,
@@ -130,7 +128,7 @@ export interface DispatcherRuntimeHooks {
    *  membership classification runs unchanged. */
   getExpectedMembers?: () => DeclaredRoster | undefined
   /** The composing layer's identity verifier, loaded at boot (25074 3b). Null or absent: no session is verified,
-   *  and every registration is served on its bearer or its claimed name. */
+   *  and every registration is served on its claimed name. */
   identityVerifier?: LoadedIdentityVerifier | null
 }
 
@@ -205,9 +203,6 @@ export function withDispatcher<
   return (t) => {
     const { db, stmts, daemonCtx, recall: recallHandlers, registry, broadcast, socket } = t
     const { clients, socketToClient } = registry
-    // The default start of `tribe health`'s bearer_served window (3d-3 prerequisite): this dispatcher comes up once
-    // per daemon process.
-    const daemonStartedAt = Date.now()
     const onActiveClient = hooks.onActiveClient ?? (() => {})
     const onIdle = hooks.onIdle ?? (() => {})
     const getActivePluginNames = hooks.getActivePluginNames ?? (() => [])
@@ -336,7 +331,7 @@ export function withDispatcher<
       | { kind: "pending-prune"; owner: string; staleMs: number }
 
     type SessionAuthorityResolution =
-      | { context: TribeContext; servedBy?: { readonly authority: "bearer"; readonly fault: string } }
+      | { context: TribeContext }
       | { errorCode: number; errorMessage: string; errorData: Record<string, unknown> }
 
     function invalidPendingReadFilter(params: Record<string, unknown>): string | undefined {
@@ -356,10 +351,10 @@ export function withDispatcher<
     }
 
     /**
-     * Resolve the launcher-minted bearer exactly once for every authenticated
+     * Resolve the caller's identity token exactly once for every authenticated
      * one-shot operation. The capability union above is deliberately closed:
-     * extending what this bearer may do requires a new typed member and its
-     * own boundary test, never a caller-supplied method name.
+     * extending what a one-shot caller may do requires a new typed member and
+     * its own boundary test, never a caller-supplied method name.
      */
     type LaunchAuthorityRow = {
       id: string
@@ -369,7 +364,7 @@ export function withDispatcher<
       launch_parent_pid: number | null
     }
 
-    /** One authority decision for lookup, fan-in, bearer reads, and attributed
+    /** One authority decision for lookup, fan-in, one-shot reads, and attributed
      * operations (including the send transaction that creates a ball).
      * A service CLI transport cannot outlive its service owner's authority.
      * Agents intentionally retain disconnected launch recovery.
@@ -404,169 +399,95 @@ export function withDispatcher<
     }
 
     /**
-     * 25074 3b — one decision for a one-shot caller's authority, dual-keyed until 3d deletes the bearer: the launch's
-     * identity token when the daemon has a verifier, else the launcher-minted bearer. A verified token resolves the
-     * session its registration recorded under the token's sid; the verifier already proved the instance live, so a
-     * service needs no connected owner transport beside it. A contradicted token, or a verifier fault, refuses; an
-     * unreadable token falls back to the bearer, which is its own authority, and says so in the log.
+     * 25074 3d-3 — one decision for a one-shot caller's authority: its launch's identity token, and nothing else. A
+     * verified token resolves the session its registration recorded under the token's sid; the verifier already proved
+     * the instance live, so a service needs no connected owner transport beside it. Every other outcome is one named
+     * refusal: no token, no verifier, a verifier fault (retryable), an unreadable or contradicted token, or a verified
+     * token whose sid has no session yet (retryable: the adapter registers with the token on its next connect).
      *
-     * Dual-key (@cto §9): a verified token whose sid has no session yet (registered before the verifier, or before its
-     * adapter re-registered with the token) falls back to the bearer on the same call. The authority stays the
-     * bearer's session, and the token upgrades nothing; a bearer whose session is another name is refused naming both.
-     * A verifier fault (an undecided liveness, §8) beside a valid bearer is served by that bearer too, and the answer
-     * names the fault (@cto 03cff4b5). On the registered path another seat's bearer is recorded on the holder's session
-     * as a foreign transport, and the call answers as the token's seat (@cto 975a22e2). 3d retires all of it.
+     * The launcher-minted bearer is gone (@cto 657011c8). An older client may still send it as `authority`: ignored
+     * when the token verifies, and named in the refusal only when nothing verifies (rider 1), so a caller learns the
+     * credential it carried is no longer accepted rather than seeing it silently dropped.
      */
-    async function resolveSessionAuthority(
-      value: unknown,
-      idToken: unknown,
-      connId: string,
-    ): Promise<SessionAuthorityResolution> {
+    async function resolveSessionAuthority(value: unknown, idToken: unknown): Promise<SessionAuthorityResolution> {
       const token = requiredNonEmptyString(idToken)
       const verifier = hooks.identityVerifier
-      // Which bearer-served branch a call that reaches the bearer below counts under (3d-3 prerequisite).
-      let fallthrough: "token-unreadable" | "no-token" = "no-token"
-      if (token !== null && verifier) {
-        let verdict: IdentityVerdict
-        try {
-          verdict = await verifier.verify(token)
-        } catch (error) {
-          const fault = error instanceof Error ? error.message : String(error)
-          const supplied = requiredNonEmptyString(value)
-          const bearer = supplied === null ? null : resolveBearerAuthority(supplied)
-          if (bearer !== null && !("errorCode" in bearer)) {
-            log.warn?.(
-              `identity verifier ${verifier.path} could not decide a one-shot caller's token (${fault}); ` +
-                `served by ${bearer.row.name}'s bearer`,
-            )
-            const resolution = servedByBearer(bearer.row, "verifier-fault", { fault })
-            return "context" in resolution
-              ? {
-                  ...resolution,
-                  servedBy: { authority: "bearer", fault: `token undecided: ${fault}; served by bearer` },
-                }
-              : resolution
-          }
-          log.error?.(`identity verifier ${verifier.path} failed on a one-shot caller's token: ${fault}`)
-          return rejected(
+      const refuse = (
+        refusal: Extract<SessionAuthorityResolution, { errorCode: number }>,
+      ): Extract<SessionAuthorityResolution, { errorCode: number }> =>
+        requiredNonEmptyString(value) === null
+          ? refusal
+          : {
+              ...refusal,
+              errorMessage: `${refusal.errorMessage}; the bearer authority it also carried is no longer accepted`,
+              errorData: { ...refusal.errorData, stray_authority: true },
+            }
+      if (token === null) return refuse(authorityMissing(`this call carries no ${HAB_ID_TOKEN_ENV}`))
+      if (!verifier) {
+        return refuse(
+          authorityMissing(`this daemon runs without an identity verifier, so the ${HAB_ID_TOKEN_ENV} cannot be verified`),
+        )
+      }
+      let verdict: IdentityVerdict
+      try {
+        verdict = await verifier.verify(token)
+      } catch (error) {
+        const fault = error instanceof Error ? error.message : String(error)
+        log.error?.(`identity verifier ${verifier.path} failed on a one-shot caller's token: ${fault}`)
+        return refuse(
+          rejected(
             "identity-verifier-fault",
-            `current session authority could not be evaluated: the identity verifier failed: ${fault}` +
-              (bearer === null ? "" : `; the ${AG_SESSION_AUTH_ENV} beside it did not match a live managed session`),
+            `current session authority could not be evaluated: the identity verifier failed: ${fault}; retry`,
+          ),
+        )
+      }
+      switch (verdict.result) {
+        case "contradicted":
+          return refuse(
+            rejected(
+              "identity-contradicted",
+              `current session authority was rejected: the identity token is contradicted: ${verdict.reason}`,
+            ),
           )
-        }
-        if (verdict.result === "contradicted") {
-          return rejected(
-            "identity-contradicted",
-            `current session authority was rejected: the identity token is contradicted: ${verdict.reason}`,
+        case "unreadable":
+          return refuse(
+            rejected(
+              "identity-token-unreadable",
+              `current session authority was rejected: the ${HAB_ID_TOKEN_ENV} is unreadable: ${verdict.reason}`,
+            ),
           )
-        }
-        if (verdict.result === "verified") {
+        case "absent":
+          return refuse(authorityMissing(`the identity verifier found no identity in the ${HAB_ID_TOKEN_ENV}`))
+        case "verified": {
           const row = db
             .prepare(`SELECT ${AUTHORITY_ROW_COLUMNS} FROM sessions WHERE identity_sid = $sid AND name = $name`)
             .get({ $sid: verdict.sid, $name: verdict.actor }) as AuthorityRow | null
           if (row === null || isTombstonedSessionName(row.name)) {
-            const supplied = requiredNonEmptyString(value)
-            const notRegistered =
-              `current session authority was rejected: ${verdict.actor}'s token is verified, but no session registered ` +
-              `under its sid ${verdict.sid}; the seat's own adapter registers it`
-            if (supplied === null) return rejected("identity-not-registered", notRegistered)
-            const bearer = resolveBearerAuthority(supplied)
-            if ("errorCode" in bearer) {
-              return rejected(
-                "identity-not-registered",
-                `${notRegistered}, and the ${AG_SESSION_AUTH_ENV} beside it did not match a live managed session`,
-              )
-            }
-            if (bearer.row.name !== verdict.actor) {
-              const message =
-                `current session authority was rejected: the bearer belongs to ${bearer.row.name}, but the identity token ` +
-                `names ${verdict.actor} (sid ${verdict.sid}); a call carries one seat's credentials, never two`
-              log.warn?.(message)
-              return {
-                errorCode: -32003,
-                errorMessage: message,
-                errorData: {
-                  kind: "foreign-identity-transport",
-                  transport: { name: verdict.actor, sid: verdict.sid },
-                  authority: { name: bearer.row.name, launch_id: bearer.row.launch_id },
-                },
-              }
-            }
-            log.info?.(
-              `one-shot caller ${verdict.actor}'s token is verified but no session is registered under its sid ` +
-                `${verdict.sid}; resolved by its bearer until its adapter registers with the token`,
-            )
-            return servedByBearer(bearer.row, "no-session-for-sid", { sid: verdict.sid })
-          }
-          const supplied = requiredNonEmptyString(value)
-          const bearerRow = supplied === null ? null : bearerAuthorityRow(supplied)
-          if (bearerRow !== null && bearerRow.name !== row.name) {
-            // As the register path records it (24767, and the precedence refusal; @cto 46063770): on the session
-            // whose authority the call presented, the bearer's owner, describing the transport that presented it.
-            registry.recordForeignIdentityTransport(bearerRow.id, {
-              name: row.name,
-              launch_id: row.launch_id ?? "(no launch)",
-              pid: clients.get(connId)?.pid ?? 0,
-              refused_at: new Date().toISOString(),
-            })
-            log.warn?.(
-              `one-shot caller ${row.name}'s verified token arrived beside ${bearerRow.name}'s bearer; ` +
-                `answered as ${row.name} and recorded the foreign transport on ${bearerRow.name}'s session`,
+            return rejected(
+              "identity-not-registered",
+              `current session authority was rejected: ${verdict.actor}'s token is verified, but no session is ` +
+                `registered under its sid ${verdict.sid} yet; the adapter registers with the token on its next ` +
+                "connect, so retry after it does",
             )
           }
           return contextForAuthorityRow(row)
         }
-        if (verdict.result === "unreadable") {
-          log.warn?.(`one-shot caller's identity token is unreadable (${verdict.reason}); resolving by its bearer`)
-          fallthrough = "token-unreadable"
+        default: {
+          const unreachable: never = verdict
+          throw new Error(`identity verifier returned an unknown verdict ${JSON.stringify(unreachable)}`)
         }
       }
-      const supplied = requiredNonEmptyString(value)
-      if (supplied === null) {
-        return {
-          errorCode: -32004,
-          errorMessage:
-            `current session authority is missing; ${HAB_ID_TOKEN_ENV} or ${AG_SESSION_AUTH_ENV} ` +
-            "must be inherited from the managed launch",
-          errorData: { kind: "could-not-evaluate", reason: "session-authority-missing" },
-        }
+    }
+
+    /** No verifiable identity: a managed seat inherits the token; a hand session names its seat or sends anonymously. */
+    function authorityMissing(why: string): Extract<SessionAuthorityResolution, { errorCode: number }> {
+      return {
+        errorCode: -32004,
+        errorMessage:
+          `current session authority is missing: ${why}. A managed seat inherits ${HAB_ID_TOKEN_ENV} from its launch; ` +
+          "from a hand session, read with --session <name> or send with --anonymous",
+        errorData: { kind: "could-not-evaluate", reason: "session-authority-missing" },
       }
-      const bearer = resolveBearerAuthority(supplied)
-      return "errorCode" in bearer
-        ? bearer
-        : servedByBearer(bearer.row, fallthrough, { token_presented: token !== null, verifier: Boolean(verifier) })
-    }
-
-    /** A call the bearer serves: its session's context, recorded once as `session.bearer-served` (3d-3 prerequisite). */
-    function servedByBearer(
-      row: AuthorityRow,
-      branch: Exclude<BearerServedBranch, "register-bearer">,
-      detail: Readonly<Record<string, unknown>>,
-    ): SessionAuthorityResolution {
-      const resolution = contextForAuthorityRow(row)
-      if ("context" in resolution) recordBearerServed(resolution.context, branch, row.launch_id, detail)
-      return resolution
-    }
-
-    /** The live managed session a bearer names, or the refusal; one lookup for both keys of the dual-key rule. */
-    function resolveBearerAuthority(
-      supplied: string,
-    ): { readonly row: AuthorityRow } | Extract<SessionAuthorityResolution, { errorCode: number }> {
-      const row = bearerAuthorityRow(supplied)
-      if (row === null || !hasLaunchAuthority(row)) {
-        return rejected(
-          "session-authority-rejected",
-          `current session authority was rejected or revoked; ${AG_SESSION_AUTH_ENV} did not match a live managed session`,
-        )
-      }
-      return { row }
-    }
-
-    /** The session a bearer hashes to, live or not. */
-    function bearerAuthorityRow(supplied: string): AuthorityRow | null {
-      return db
-        .prepare(`SELECT ${AUTHORITY_ROW_COLUMNS} FROM sessions WHERE mailbox_authority_hash = $hash`)
-        .get({ $hash: hashSelfMailboxAuthority(supplied) }) as AuthorityRow | null
     }
 
     function contextForAuthorityRow(row: AuthorityRow): SessionAuthorityResolution {
@@ -601,7 +522,7 @@ export function withDispatcher<
       | { result: Awaited<ReturnType<typeof handleToolCall>> }
       | { errorCode: number; errorMessage: string; errorData: Record<string, unknown> }
     > {
-      const resolution = await resolveSessionAuthority(credentials.authority, credentials.idToken, connId)
+      const resolution = await resolveSessionAuthority(credentials.authority, credentials.idToken)
       if (!("context" in resolution)) {
         if (capability.kind === "pending-close" || capability.kind === "pending-prune") {
           const closeIds =
@@ -617,7 +538,7 @@ export function withDispatcher<
             {
               capability: capability.kind,
               reason: resolution.errorData.reason,
-              authority_env: AG_SESSION_AUTH_ENV,
+              authority_env: HAB_ID_TOKEN_ENV,
               owner: capability.owner,
               ...(capability.kind === "pending-prune" ? { stale_ms: capability.staleMs } : { attempted_ids: closeIds }),
               pending_mutation: "none",
@@ -631,26 +552,20 @@ export function withDispatcher<
         }
         return resolution
       }
-      // 25074 (@cto 03cff4b5): a bearer that served the call because the token faulted says so in the answer.
-      const annotate = <R extends object>(result: R): R =>
-        resolution.servedBy === undefined ? result : { ...result, session_authority: resolution.servedBy }
       switch (capability.kind) {
         case "inbox-ack":
           return {
-            result: annotate(
-              await handleToolCall(
+            result: await handleToolCall(
                 resolution.context,
                 TRIBE_COORD_METHODS.fetch,
                 { limit: capability.limit, advance: capability.peek ? false : undefined },
                 DAEMON_HANDLER_OPTS,
                 connId,
               ),
-            ),
           }
         case "pending-read":
           return {
-            result: annotate(
-              await handleToolCall(
+            result: await handleToolCall(
                 resolution.context,
                 TRIBE_COORD_METHODS.pending,
                 {
@@ -661,31 +576,26 @@ export function withDispatcher<
                 DAEMON_HANDLER_OPTS,
                 connId,
               ),
-            ),
           }
         case "pending-close":
           return {
-            result: annotate(
-              await handleToolCall(
+            result: await handleToolCall(
                 resolution.context,
                 TRIBE_COORD_METHODS.pending,
                 { owner: capability.owner, close: capability.close },
                 DAEMON_HANDLER_OPTS,
                 connId,
               ),
-            ),
           }
         case "pending-prune":
           return {
-            result: annotate(
-              await handleToolCall(
+            result: await handleToolCall(
                 resolution.context,
                 TRIBE_COORD_METHODS.pending,
                 { owner: capability.owner, prune: true, stale_ms: capability.staleMs },
                 DAEMON_HANDLER_OPTS,
                 connId,
               ),
-            ),
           }
         default: {
           const unreachable: never = capability
@@ -992,7 +902,6 @@ export function withDispatcher<
       recallVaultRefusal: t.config.vaultDbRefusal ?? null,
       identityVerifierPath: hooks.identityVerifier?.path ?? null,
       identityVerifierSuppliesGen: hooks.identityVerifier ? hooks.identityVerifier.suppliesGen : null,
-      daemonStartedAt,
       // tribe.stop actuator — absent (handler refuses loudly) unless the
       // composing daemon supplied its shutdown.
       triggerStop: hooks.triggerShutdown,
@@ -1037,7 +946,7 @@ export function withDispatcher<
     type RegistrationRefusal = { readonly message: string; readonly data: Record<string, unknown> }
 
     /** 25074 3b — verify a register's identity token through the composing layer's verifier. The sid is null when
-     *  the session is served on its bearer or its claimed name: no token, no verifier, or a token the verifier could
+     *  the session is served on its claimed name: no token, no verifier, or a token the verifier could
      *  not read. A token that is contradicted, names another actor, or makes the verifier fail refuses. */
     async function verifyRegistrationIdentity(
       token: string | null,
@@ -1087,45 +996,16 @@ export function withDispatcher<
 
     function holderIdentity(sessionId: string): {
       authority: SessionAuthority
-      token: string | null
       sid: string | null
       gen: number | null
     } {
-      const row = db
-        .prepare(
-          "SELECT identity_sid, mailbox_authority_hash, verified_id_token, identity_gen FROM sessions WHERE id = ?",
-        )
-        .get(sessionId) as {
+      const row = db.prepare("SELECT identity_sid, identity_gen FROM sessions WHERE id = ?").get(sessionId) as {
         identity_sid: string | null
-        mailbox_authority_hash: string | null
-        verified_id_token: string | null
         identity_gen: number | null
       } | null
       return row === null
-        ? { authority: "claimed", token: null, sid: null, gen: null }
-        : {
-            authority: sessionAuthority(row),
-            token: row.verified_id_token,
-            sid: row.identity_sid,
-            gen: row.identity_gen,
-          }
-    }
-
-    /** A verified holder's liveness, asked by re-verifying the token it registered with (25074 3c, @cto §10):
-     *  "live" refuses a bearer displacement, "gone" allows it, and a fault (undecided, or nothing to ask with)
-     *  refuses it the way a fault refuses any register, for the claimant to retry. */
-    async function verifiedHolderLiveness(token: string | null): Promise<"live" | "gone" | { readonly fault: string }> {
-      const verifier = hooks.identityVerifier
-      if (token === null) return { fault: "the holder's verified token is not on record" }
-      if (!verifier) return { fault: "no identity verifier is loaded" }
-      try {
-        const verdict = await verifier.verify(token)
-        if (verdict.result === "verified") return "live"
-        if (verdict.result === "contradicted") return "gone"
-        return { fault: `the holder's token now reads ${verdict.result}` }
-      } catch (error) {
-        return { fault: error instanceof Error ? error.message : String(error) }
-      }
+        ? { authority: "claimed", sid: null, gen: null }
+        : { authority: sessionAuthority(row), sid: row.identity_sid, gen: row.identity_gen }
     }
 
     function findSamePidNameHolder(name: string, clientPid: number, connId: string): ClientSession | null {
@@ -1454,13 +1334,9 @@ export function withDispatcher<
             const claudeSessionName = (p.claudeSessionName as string) ?? null
             const claudeSessionId = (p.claudeSessionId as string) ?? null
             const identityToken = (p.identityToken as string) ?? null
-            const mailboxAuthorityHash =
-              typeof p.mailboxAuthorityHash === "string" && /^[a-f0-9]{64}$/u.test(p.mailboxAuthorityHash)
-                ? p.mailboxAuthorityHash
-                : null
-            if (p.mailboxAuthorityHash !== undefined && mailboxAuthorityHash === null) {
-              return makeError(id, -32602, "register mailboxAuthorityHash must be a lowercase SHA-256 hex digest")
-            }
+            // 25074 3d-3 (@cto 657011c8 rider 1): an adapter from before the cut may still send mailboxAuthorityHash,
+            // the launcher-minted bearer's hash. It is ignored, never refused: the register stands on its token or its
+            // claimed name alone.
             const adapterExitRecord =
               typeof p.adapterExitRecord === "string" && isAbsolute(p.adapterExitRecord) ? p.adapterExitRecord : null
             if (p.adapterExitRecord !== undefined && adapterExitRecord === null) {
@@ -1486,11 +1362,10 @@ export function withDispatcher<
             const verifiedSid = identity.sid
             const verifiedGen = identity.gen
             const hasLaunchId = p.launchId !== undefined && p.launchId !== null
-            // The token itself is kept beside the sid so a later bearer registration can ask whether this holder's
-            // instance is still live before displacing it (displacementRule's "holder-liveness").
+            // The token itself is kept beside the sid. Its one reader, the bearer's holder-liveness arm, went with the
+            // bearer (3d-3); the column is dropped with mailbox_authority_hash in DROP_BEAD_PENDING.
             const verifiedToken = verifiedSid === null ? null : (p.idToken as string)
-            const claimantAuthority: SessionAuthority =
-              verifiedSid !== null ? "verified" : mailboxAuthorityHash !== null ? "bearer" : "claimed"
+            const claimantAuthority: SessionAuthority = verifiedSid !== null ? "verified" : "claimed"
             const hasLaunchParentPid = p.launchParentPid !== undefined && p.launchParentPid !== null
             // 25074 3c-2b forward fix (@cto 95c2be2d (a)): a verified token keys the session `<sid>@<gen>` whether or not
             // the client also sent its launch id, and a launch id it did send must be that token's seat: its provider
@@ -1542,42 +1417,6 @@ export function withDispatcher<
             }
             // Only complete absence selects legacy per-transport semantics.
             const launchIdentity = launchIdentityValid ? { id: launchIdRaw, parentPid: launchParentPidRaw } : null
-
-            // 24767 — a session authority is minted per provider launch. A
-            // transport presenting one under a different provider launch was
-            // started with another seat's identity (a shared provider config
-            // baked it), so it can never become that seat. Refuse it naming both
-            // identities; the unique authority index used to surface this as a
-            // bare "name taken" and the adapter retried forever.
-            // A token-keyed register has proven its identity; a bearer minted under the seat's pre-3c-2b launch id is
-            // no evidence against it.
-            if (mailboxAuthorityHash !== null && launchIdentity !== null && !tokenKeyed) {
-              const authorityHolder = db
-                .prepare("SELECT id, name, launch_id FROM sessions WHERE mailbox_authority_hash = ?")
-                .get(mailboxAuthorityHash) as { id: string; name: string; launch_id: string | null } | null
-              if (
-                authorityHolder?.launch_id != null &&
-                providerLaunchIdOf(authorityHolder.launch_id) !== providerLaunchIdOf(launchIdentity.id)
-              ) {
-                const claimedName = typeof p.name === "string" ? p.name : "(no name)"
-                registry.recordForeignIdentityTransport(authorityHolder.id, {
-                  name: claimedName,
-                  launch_id: launchIdentity.id,
-                  pid: Number(p.pid ?? 0),
-                  refused_at: new Date().toISOString(),
-                })
-                const message =
-                  `register refused: this transport claims ${claimedName} on launch ${launchIdentity.id}, ` +
-                  `but its session authority belongs to ${authorityHolder.name} on launch ${authorityHolder.launch_id}. ` +
-                  "It was started with another seat's identity; restart this MCP connector from its own seat's launch environment."
-                log.warn?.(message)
-                return makeError(id, -32003, message, {
-                  kind: "foreign-identity-transport",
-                  transport: { name: claimedName, launch_id: launchIdentity.id },
-                  authority: { name: authorityHolder.name, launch_id: authorityHolder.launch_id },
-                })
-              }
-            }
 
             const isServiceOwner =
               p.principalClass === "service" && launchIdentity !== null && Number(p.pid) === launchIdentity.parentPid
@@ -1807,13 +1646,11 @@ export function withDispatcher<
 
             // 25074 3b/3c — authority precedence on a name (displacementRule, @cto §10). A registration the rule bars
             // from displacing a connected holder (takeover, or 21052's token displacement, below) is refused as a
-            // foreign identity (24767), and the holder's session and inbox are untouched. A bearer registration
-            // displaces a verified holder only when that holder's instance is gone; an undecided holder refuses it as
-            // a fault the claimant retries. A verified registration displaces a holder that only claimed the name, and
-            // the holder's journal says why.
+            // foreign identity (24767), and the holder's session and inbox are untouched. A verified registration
+            // displaces a holder that only claimed the name, and the holder's journal says why.
             const precedenceRefusal = async (holder: ClientSession): Promise<string | null> => {
               const held = holderIdentity(holder.ctx.sessionId)
-              const { authority: holderAuthority, token } = held
+              const holderAuthority = held.authority
               // 25074 3c-2a — the fence is generation-aware between two verified instances of one session: a higher
               // gen is the successor's takeover (the holder is told), a lower one is stale and refused by name.
               // The same gen fanned in above; reaching here with it is a second instance claiming one generation.
@@ -1845,23 +1682,7 @@ export function withDispatcher<
                   holder: { name: holder.name, gen: held.gen },
                 })
               }
-              const rule = displacementRule(holderAuthority, claimantAuthority)
-              if (rule === "allowed") return null
-              if (rule === "holder-liveness") {
-                const liveness = await verifiedHolderLiveness(token)
-                if (liveness === "gone") return null
-                if (liveness !== "live") {
-                  const message =
-                    `register refused: ${resolvedName}'s verified holder (pid ${holder.pid}) can be judged neither ` +
-                    `live nor gone right now (${liveness.fault}); retry`
-                  log.warn?.(message)
-                  return makeError(id, -32003, message, {
-                    kind: "identity-verifier-fault",
-                    reason: "holder-liveness-undecided",
-                    holder: { name: holder.name, authority: holderAuthority },
-                  })
-                }
-              }
+              if (displacementRule(holderAuthority, claimantAuthority) === "allowed") return null
               registry.recordForeignIdentityTransport(holder.ctx.sessionId, {
                 name: resolvedName,
                 launch_id: launchIdentity?.id ?? "(no launch)",
@@ -2028,7 +1849,6 @@ export function withDispatcher<
               provider,
               launchIdentity?.id ?? null,
               launchIdentity?.parentPid ?? null,
-              mailboxAuthorityHash,
               displacedSessionIds,
               verifiedSid !== null && verifiedGen !== null ? { sid: verifiedSid, gen: verifiedGen } : null,
             )
@@ -2078,8 +1898,6 @@ export function withDispatcher<
 
             resetOffsetsToTail(client)
             announceJoin(client)
-            // A registration the bearer keyed is the fifth bearer-served branch (3d-3 prerequisite).
-            if (claimantAuthority === "bearer") recordBearerServed(client.ctx, "register-bearer", client.launchId)
             log.info?.("session.identified", {
               ...identityLogFields(client),
               operation: "register",
@@ -2238,12 +2056,7 @@ export function withDispatcher<
           }
 
           case "cli_health": {
-            const health = await handleToolCall(
-              daemonCtx,
-              TRIBE_COORD_METHODS.health,
-              p.since === undefined ? {} : { since: p.since },
-              DAEMON_HANDLER_OPTS,
-            )
+            const health = await handleToolCall(daemonCtx, TRIBE_COORD_METHODS.health, {}, DAEMON_HANDLER_OPTS)
             const { getBridgeLostArming, getHealthSampleStats, getHealthSnapshot } =
               await import("../health-monitor-plugin.ts")
             let machine: unknown = null
@@ -2477,7 +2290,7 @@ export function withDispatcher<
           }
 
           /**
-           * Canonical self-mailbox read for a one-shot CLI. The bearer maps to
+           * Canonical self-mailbox read for a one-shot CLI. The token maps to
            * one persisted session; no caller-supplied name, launch id, or pid
            * participates in target selection. Once authenticated, dispatch
            * enters the same tribe.fetch handler used by MCP.
@@ -2507,7 +2320,7 @@ export function withDispatcher<
 
           /**
            * Authenticated current-session pending read for a one-shot CLI.
-           * The bearer resolves the owner context; caller-supplied identity
+           * The token resolves the owner context; caller-supplied identity
            * selectors are forbidden, then the canonical pending handler owns
            * filtering, expiry folding, and the response shape.
            */
@@ -2543,7 +2356,7 @@ export function withDispatcher<
 
           /**
            * Authenticated one-shot pending close. `owner` selects the
-           * recipient-owned row; it never selects caller identity. The bearer
+           * recipient-owned row; it never selects caller identity. The token
            * resolves the caller context, then the canonical pending handler
            * performs the one close implementation shared with MCP.
            */

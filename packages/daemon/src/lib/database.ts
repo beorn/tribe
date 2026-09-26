@@ -1644,7 +1644,7 @@ export function createStatements(db: Database) {
 
     selectMessageById: db.prepare("SELECT rowid, ts FROM messages WHERE id = $id"),
     /** The sending session's authority facts (25074 3d-1a); no row for a daemon-originated send. */
-    selectSessionAuthority: db.prepare("SELECT identity_sid, mailbox_authority_hash FROM sessions WHERE id = $id"),
+    selectSessionAuthority: db.prepare("SELECT identity_sid FROM sessions WHERE id = $id"),
 
     /** The question body for an owed ball (22844). The messages table — not
      *  any windowed read — is the true retention bound; pending views join
@@ -2111,7 +2111,7 @@ export function createStatements(db: Database) {
 	`),
 
     allSessions: db.prepare(
-      "SELECT id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, mailbox_authority_hash, identity_sid, launch_id, launch_parent_pid, started_at, updated_at, filter_mode, filter_until, filter_mute, last_inbox_pull_seq, delivery FROM sessions",
+      "SELECT id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, identity_sid, launch_id, launch_parent_pid, started_at, updated_at, filter_mode, filter_until, filter_mute, last_inbox_pull_seq, delivery FROM sessions",
     ),
 
     /** Look up a connected session's delivery mode by id. Used by the broadcast
@@ -2159,7 +2159,7 @@ export function createStatements(db: Database) {
     // BINARY collation — while remaining a range scan idx_sessions_launch_id
     // can serve. See derivedLaunchPrefixUpperBound for the upper bound.
     getSessionsByProviderLaunchId: db.prepare(
-      "SELECT id, name, principal_class, launch_id, launch_parent_pid, updated_at, delivery, mailbox_authority_hash, identity_sid FROM sessions " +
+      "SELECT id, name, principal_class, launch_id, launch_parent_pid, updated_at, delivery, identity_sid FROM sessions " +
         "WHERE launch_id = $launch_id " +
         "OR (launch_id >= $derived_prefix AND launch_id < $derived_prefix_upper) " +
         // A verified session is keyed "<sid>@<gen>" (25074 3c-2b), and the managed launch id's provider part IS that
