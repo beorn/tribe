@@ -969,6 +969,18 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
       }),
     )
 
+    const refusalCount = async () => {
+      const result = parseResult<{ content: Array<{ text: string }> }>(await harness.request("tribe.health", {}))
+      return (
+        JSON.parse(result.content[0]!.text) as {
+          identity: {
+            tokenless_by_launch_refusals: { count: number; last_at: string | null; last_launch_id: string | null }
+          }
+        }
+      ).identity.tokenless_by_launch_refusals
+    }
+    expect(await refusalCount()).toEqual({ count: 0, last_at: null, last_launch_id: null })
+
     for (const [label, params, reason] of [
       ["missing", { launch_id: "sid-dev7" }, "session-authority-missing"],
       ["wrong-persona", { launch_id: "sid-dev7::%40dev%2F8", id_token: "token-dev7" }, "identity-sid-mismatch"],
@@ -984,6 +996,22 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
       expect(refusal.data, label).toMatchObject({ reason })
       expect(JSON.stringify(refusal)).not.toContain("token-dev8")
     }
+    expect(await refusalCount()).toMatchObject({ count: 1, last_launch_id: "sid-dev7" })
+    expect(Date.parse((await refusalCount()).last_at ?? "")).not.toBeNaN()
+
+    parseError(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "untrusted-launch-id",
+          method: "cli_inbox_status_by_launch_v1",
+          params: { launch_id: "token-leaky" },
+        },
+        "conn-status",
+      ),
+    )
+    expect(await refusalCount()).toMatchObject({ count: 2, last_launch_id: null })
+    expect(JSON.stringify(await refusalCount())).not.toContain("token-leaky")
     const members = parseResult<{ content: Array<{ text: string }> }>(await harness.request("tribe.members", {}))
     const rows = (JSON.parse(members.content[0]!.text) as { sessions: Array<Record<string, unknown>> }).sessions
     expect(rows.find((row) => row.name === "@dev/7")?.foreign_transport).toMatchObject({

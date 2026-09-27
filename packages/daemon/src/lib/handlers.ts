@@ -290,6 +290,12 @@ export type HandlerOpts = {
   identityVerifierSuppliesGen?: boolean | null
   /** An active verifier fault issue, restored from its durable incident after a restart. */
   getIdentityVerifierFault?: () => string | null
+  /** Daemon-local refusals at the tokenless by-launch inbox boundary. */
+  getTokenlessByLaunchRefusals?: () => {
+    count: number
+    last_at: string | null
+    last_launch_id: string | null
+  }
   /** Optional: dump daemon internals for `tribe.debug`. Daemon-only (tests using
    *  handlers directly can omit this — `tribe.debug` then returns a minimal
    *  snapshot synthesized from the other accessors). */
@@ -3549,6 +3555,9 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
     identity: {
       verifier: opts.identityVerifierPath ?? null,
       supplies_gen: opts.identityVerifierSuppliesGen ?? null,
+      ...(opts.getTokenlessByLaunchRefusals === undefined
+        ? {}
+        : { tokenless_by_launch_refusals: opts.getTokenlessByLaunchRefusals() }),
       authority: liveSessions.reduce<Record<SessionAuthority, number>>(
         (counts, session) => {
           counts[sessionAuthority(session)] += 1

@@ -220,6 +220,7 @@ export function withDispatcher<
       throw new Error("open identity-verifier incident has no diagnostic summary")
     }
     let identityVerifierFaultIssue = priorIdentityIncident?.summary ?? null
+    let tokenlessByLaunchRefusals = { count: 0, last_at: null as string | null, last_launch_id: null as string | null }
 
     function recordIdentityVerifierFault(verifier: string, cause: string): void {
       const issue = `identity verifier ${verifier} failed: ${cause}`
@@ -731,6 +732,23 @@ export function withDispatcher<
       // A by-launch read is an authenticated self-read. The token's verified sid and registered session select the
       // target; the caller's launch_id is only a consistency check until old callers stop sending it.
       if (requiredNonEmptyString(params.id_token) === null) {
+        const requestedLaunchId = requiredNonEmptyString(params.launch_id)
+        // Only repeat a known launch identity in health. This field is caller-controlled;
+        // an arbitrary value could itself contain bearer bytes.
+        const knownLaunchId =
+          requestedLaunchId !== null &&
+          Array.from(clients.values()).some(
+            (client) =>
+              client.launchId !== null &&
+              (client.launchId === requestedLaunchId || providerLaunchIdOf(client.launchId) === requestedLaunchId),
+          )
+            ? requestedLaunchId
+            : null
+        tokenlessByLaunchRefusals = {
+          count: tokenlessByLaunchRefusals.count + 1,
+          last_at: new Date().toISOString(),
+          last_launch_id: knownLaunchId,
+        }
         return {
           errorCode: -32004,
           errorMessage: `Managed inbox refused: ${MANAGED_INBOX_TOKEN_REQUIRED}`,
@@ -1036,6 +1054,7 @@ export function withDispatcher<
       identityVerifierPath: hooks.identityVerifier?.path ?? null,
       identityVerifierSuppliesGen: hooks.identityVerifier ? hooks.identityVerifier.suppliesGen : null,
       getIdentityVerifierFault: () => identityVerifierFaultIssue,
+      getTokenlessByLaunchRefusals: () => tokenlessByLaunchRefusals,
       // tribe.stop actuator — absent (handler refuses loudly) unless the
       // composing daemon supplied its shutdown.
       triggerStop: hooks.triggerShutdown,
