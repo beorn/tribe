@@ -78,14 +78,15 @@ const byLaunchCalls = () => calls.filter((call) => call.method.endsWith("_by_lau
 
 describe("the CLI's managed inbox reads its launch from the identity token (25074 3d-1)", () => {
   it("a seat's inbox-status names the token's sid, not an inherited TRIBE_LAUNCH_ID beside it", async () => {
+    const token = launchToken(TOKEN_SID, SEAT)
     const run = await runCli(["inbox-status", "--json"], {
-      HAB_ID_TOKEN: launchToken(TOKEN_SID, SEAT),
+      HAB_ID_TOKEN: token,
       TRIBE_LAUNCH_ID: INHERITED_LAUNCH,
       TRIBE_NAME: SEAT,
     })
     expect(run, run.stderr).toMatchObject({ code: 0 })
     expect(byLaunchCalls()).toEqual([
-      { method: "cli_inbox_status_by_launch_v1", params: { launch_id: TOKEN_SID, persona: SEAT } },
+      { method: "cli_inbox_status_by_launch_v1", params: { launch_id: TOKEN_SID, id_token: token, persona: SEAT } },
     ])
   })
 

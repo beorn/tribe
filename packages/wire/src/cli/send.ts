@@ -30,7 +30,7 @@ import {
 import { resolveDbPath } from "../lib/config.ts"
 import { INCIDENT_KEY_SEPARATOR, parseIncidentKey, type IncidentIdentity } from "../lib/incident.ts"
 import { formatMarkdown, generateRetro, parseDuration } from "../lib/retro.ts"
-import { readLaunchIdFromToken } from "../lib/identity-token.ts"
+import { readIdentityTokenFromEnvironment, readLaunchIdFromToken } from "../lib/identity-token.ts"
 import {
   LAUNCH_UNROUTABLE,
   LAUNCH_UNROUTABLE_EXIT_CODE,
@@ -249,8 +249,11 @@ async function resolveCallerNameHint(): Promise<string | null> {
   try {
     const launchId = readLaunchIdFromToken(process.env)
     if (launchId) {
+      const idToken = readIdentityTokenFromEnvironment(process.env)
+      if (idToken === null) throw new Error("HAB_ID_TOKEN disappeared during launch lookup")
       const seat = await resolveLaunchSeat((method, params) => callDaemon(method, params), {
         launchId,
+        idToken,
         persona: replyOwnerFromEnv(),
       })
       return seat.session
@@ -376,8 +379,11 @@ async function resolveSendCaller(reply?: string, anonymous = false): Promise<Sen
     try {
       // The daemon owns the (launch_id, launch_parent_pid) tuple; callDaemon registers under it verbatim so this
       // one-shot fans into the live seat of this launch.
+      const idToken = readIdentityTokenFromEnvironment(process.env)
+      if (idToken === null) throw new Error("HAB_ID_TOKEN disappeared during launch lookup")
       const seat = await resolveLaunchSeat((method, params) => callDaemon(method, params), {
         launchId,
+        idToken,
         persona: replyOwnerFromEnv(),
       })
       warnIfSelfTransportDown("send", seat.status)

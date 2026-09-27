@@ -857,9 +857,11 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
   const verdicts: Record<string, IdentityVerdict | Error> = {
     "token-dev7": { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 1 },
     "token-dev8": { result: "verified", actor: "@dev/8", sid: "sid-dev8", gen: 1 },
+    "token-watch": { result: "verified", actor: "coordination-watch", sid: "sid-watch", gen: 1 },
     "token-dead": { result: "contradicted", reason: "instance-is-live: @dev/7 is not live at generation 3" },
     "token-garbled": { result: "unreadable", reason: "malformed token" },
     "token-fault": new Error("signing key unreadable"),
+    "token-leaky": new Error("verifier failed on token-leaky"),
   }
   const identityVerifier = {
     path: "/stub/identity-verifier.ts",
@@ -922,7 +924,10 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
         idToken: "token-dev7",
       }),
     )
-    for (const params of [{ launch_id: "sid-dev7" }, { launch_id: "sid-dev7", persona: "@dev/7" }]) {
+    for (const params of [
+      { launch_id: "sid-dev7", id_token: "token-dev7" },
+      { launch_id: "sid-dev7", persona: "@dev/7", id_token: "token-dev7" },
+    ]) {
       expect(
         parseResult<{ session: string }>(
           await harness.dispatcher.handleRequest(
@@ -937,6 +942,127 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
         ),
       ).toMatchObject({ session: "@dev/7" })
     }
+  })
+
+  /** @failure 25074: a raw daemon by-launch call can read a seat by guessing its launch id. */
+  it("refuses a by-launch inbox read without a verified token or with another sid", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-verified")
+    parseResult<RegisterResult>(
+      await harness.register("conn-verified", {
+        name: "@dev/7",
+        pid: 4101,
+        project: "/tmp/p",
+        launchParentPid: process.pid,
+        idToken: "token-dev7",
+      }),
+    )
+    harness.addPendingClient("conn-other")
+    parseResult<RegisterResult>(
+      await harness.register("conn-other", {
+        name: "@dev/8",
+        pid: 4201,
+        project: "/tmp/p",
+        launchParentPid: process.pid,
+        idToken: "token-dev8",
+      }),
+    )
+
+    for (const [label, params, reason] of [
+      ["missing", { launch_id: "sid-dev7" }, "session-authority-missing"],
+      ["wrong-persona", { launch_id: "sid-dev7::%40dev%2F8", id_token: "token-dev7" }, "identity-sid-mismatch"],
+      ["wrong-sid", { launch_id: "sid-dev7", id_token: "token-dev8" }, "identity-sid-mismatch"],
+    ] as const) {
+      const refusal = parseError(
+        await harness.dispatcher.handleRequest(
+          { jsonrpc: "2.0", id: label, method: "cli_inbox_status_by_launch_v1", params },
+          "conn-status",
+        ),
+      )
+      expect(refusal.message, label).toContain(label === "missing" ? "HAB_ID_TOKEN" : "sid")
+      expect(refusal.data, label).toMatchObject({ reason })
+      expect(JSON.stringify(refusal)).not.toContain("token-dev8")
+    }
+    const members = parseResult<{ content: Array<{ text: string }> }>(await harness.request("tribe.members", {}))
+    const rows = (JSON.parse(members.content[0]!.text) as { sessions: Array<Record<string, unknown>> }).sessions
+    expect(rows.find((row) => row.name === "@dev/7")?.foreign_transport).toMatchObject({
+      name: "@dev/8",
+      launch_id: "sid-dev8",
+    })
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {})
+    const leaked = parseError(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "leaky-verifier",
+          method: "cli_inbox_status_by_launch_v1",
+          params: { launch_id: "sid-dev7", id_token: "token-leaky" },
+        },
+        "conn-status",
+      ),
+    )
+    expect(leaked.data).toMatchObject({ reason: "identity-verifier-fault" })
+    expect(JSON.stringify(leaked)).not.toContain("token-leaky")
+    expect(JSON.stringify(errors.mock.calls)).not.toContain("token-leaky")
+    errors.mockRestore()
+    const journal = harness.db.prepare("SELECT content FROM messages").all() as Array<{ content: string }>
+    expect(JSON.stringify(journal)).not.toContain("token-dev8")
+    expect(JSON.stringify(journal)).not.toContain("token-leaky")
+  })
+
+  /** @failure 25074: a cross-seat health reader loses turn receipts when by-launch reads become self-only. */
+  it("serves a turn receipt to a verified explicit reader and refuses tokenless or launch-targeted reads", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-seat")
+    parseResult<RegisterResult>(
+      await harness.register("conn-seat", {
+        name: "@dev/7",
+        pid: 4101,
+        project: "/tmp/p",
+        launchParentPid: process.pid,
+        idToken: "token-dev7",
+      }),
+    )
+    parseResult(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "turn-started",
+          method: "host_turn_started_v1",
+          params: {
+            controller_session_id: "controller-1",
+            provider_session_id: "provider-1",
+            provider_turn_id: "turn-1",
+            started_at: 1234,
+          },
+        },
+        "conn-seat",
+      ),
+    )
+    const read = (id: string, params: Record<string, unknown>) =>
+      harness.dispatcher.handleRequest({ jsonrpc: "2.0", id, method: "cli_turn_start_receipt", params }, "conn-status")
+    const received = parseResult<{ session: string; provider_turn_id: string }>(
+      await read("watcher", { session: "@dev/7", id_token: "token-watch" }),
+    )
+    expect(received).toMatchObject({ session: "@dev/7", provider_turn_id: "turn-1" })
+    expect(JSON.stringify(received)).not.toContain("token-watch")
+    expect(parseError(await read("missing-token", { session: "@dev/7" }))).toMatchObject({
+      code: -32004,
+      message: expect.stringContaining("HAB_ID_TOKEN"),
+    })
+    expect(
+      parseError(
+        await read("launch-override", {
+          session: "@dev/7",
+          launch_id: "sid-dev7",
+          id_token: "token-watch",
+        }),
+      ),
+    ).toMatchObject({ code: -32602, message: expect.stringContaining("not launch identity") })
+    const journal = harness.db.prepare("SELECT content FROM messages").all() as Array<{ content: string }>
+    expect(JSON.stringify(journal)).not.toContain("token-watch")
   })
 
   it("a token naming another actor, a contradicted token and a verifier fault each refuse register", async () => {
@@ -1606,7 +1732,10 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
       }),
     )
     expect(registered.launchId).toBe("state-checkout-sync:1790263588867@0")
-    for (const params of [{ launch_id: launchId }, { launch_id: launchId, persona: "state-checkout-sync" }]) {
+    for (const params of [
+      { launch_id: launchId, id_token: "token-job" },
+      { launch_id: launchId, persona: "state-checkout-sync", id_token: "token-job" },
+    ]) {
       expect(
         parseResult<{ session: string; launch_id: string }>(
           await harness.dispatcher.handleRequest(
