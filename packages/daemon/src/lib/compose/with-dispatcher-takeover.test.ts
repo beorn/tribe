@@ -944,6 +944,56 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
     }
   })
 
+  /**
+   * @failure 25074 row 166: a persona-suffixed by-launch read could choose a derived session beside the verified
+   * <sid>@<gen> holder instead of the session certified by the token (3d-3, @cto 657011c8).
+   * @level l1
+   * @consumer cli_inbox_status_by_launch_v1's token-context session filter.
+   */
+  it("a persona-suffixed inbox address selects its verified session beside a derived peer", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-verified")
+    const verified = parseResult<RegisterResult>(
+      await harness.register("conn-verified", {
+        name: "@dev/7",
+        pid: 4101,
+        project: "/tmp/p",
+        launchParentPid: process.pid,
+        idToken: "token-dev7",
+      }),
+    )
+    harness.addPendingClient("conn-derived")
+    const derived = parseResult<RegisterResult>(
+      await harness.register("conn-derived", {
+        name: "@dev/8",
+        pid: 4102,
+        project: "/tmp/p",
+        launchId: "sid-dev7::%40dev%2F8",
+        launchParentPid: process.pid,
+      }),
+    )
+    expect(derived.sessionId).not.toBe(verified.sessionId)
+    expect(harness.db.prepare("SELECT name, launch_id FROM sessions ORDER BY name").all()).toEqual([
+      { name: "@dev/7", launch_id: "sid-dev7@1" },
+      { name: "@dev/8", launch_id: "sid-dev7::%40dev%2F8" },
+    ])
+
+    expect(
+      parseResult<{ session: string; launch_id: string }>(
+        await harness.dispatcher.handleRequest(
+          {
+            jsonrpc: "2.0",
+            id: "mixed-inbox",
+            method: "cli_inbox_status_by_launch_v1",
+            params: { launch_id: "sid-dev7::%40dev%2F7", persona: "@dev/7", id_token: "token-dev7" },
+          },
+          "conn-status",
+        ),
+      ),
+    ).toMatchObject({ session: "@dev/7", launch_id: "sid-dev7@1" })
+  })
+
   /** @failure 25074: a raw daemon by-launch call can read a seat by guessing its launch id. */
   it("refuses a by-launch inbox read without a verified token or with another sid", async () => {
     const harness = createDispatcherHarness({ identityVerifier })
