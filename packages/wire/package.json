@@ -33,6 +33,11 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./launch-environment": "./src/launch-environment.ts",
+    "./client": "./src/barrels/client.ts",
+    "./trust": "./src/trust.ts",
+    "./records": "./src/barrels/records.ts",
+    "./service-send": "./src/service-send.ts",
     "./cli": "./src/cli.ts",
     "./stdio": "./src/stdio-adapter.ts",
     "./lib/socket": "./src/lib/socket.ts",
@@ -51,6 +56,7 @@
     "./lib/hab-session-env": "./src/lib/hab-session-env.ts",
     "./lib/session-identity-env": "./src/lib/session-identity-env.ts",
     "./lib/ag-host-env": "./src/lib/ag-host-env.ts",
+    "./lib/daemon-environment": "./src/lib/daemon-environment.ts",
     "./http": "./src/http-adapter.ts"
   },
   "publishConfig": {
@@ -61,6 +67,26 @@
       ".": {
         "types": "./dist/index.d.mts",
         "import": "./dist/index.mjs"
+      },
+      "./launch-environment": {
+        "types": "./dist/launch-environment.d.mts",
+        "import": "./dist/launch-environment.mjs"
+      },
+      "./client": {
+        "types": "./dist/barrels/client.d.mts",
+        "import": "./dist/barrels/client.mjs"
+      },
+      "./trust": {
+        "types": "./dist/trust.d.mts",
+        "import": "./dist/trust.mjs"
+      },
+      "./records": {
+        "types": "./dist/barrels/records.d.mts",
+        "import": "./dist/barrels/records.mjs"
+      },
+      "./service-send": {
+        "types": "./dist/service-send.d.mts",
+        "import": "./dist/service-send.mjs"
       },
       "./cli": {
         "types": "./dist/cli.d.mts",
@@ -134,6 +160,10 @@
         "types": "./dist/lib/ag-host-env.d.mts",
         "import": "./dist/lib/ag-host-env.mjs"
       },
+      "./lib/daemon-environment": {
+        "types": "./dist/lib/daemon-environment.d.mts",
+        "import": "./dist/lib/daemon-environment.mjs"
+      },
       "./http": {
         "types": "./dist/http-adapter.d.mts",
         "import": "./dist/http-adapter.mjs"
@@ -162,6 +192,11 @@
     "dts": true,
     "entry": [
       "src/index.ts",
+      "src/launch-environment.ts",
+      "src/barrels/client.ts",
+      "src/trust.ts",
+      "src/barrels/records.ts",
+      "src/service-send.ts",
       "src/cli.ts",
       "src/stdio-adapter.ts",
       "src/lib/socket.ts",
@@ -180,6 +215,7 @@
       "src/lib/hab-session-env.ts",
       "src/lib/session-identity-env.ts",
       "src/lib/ag-host-env.ts",
+      "src/lib/daemon-environment.ts",
       "src/http-adapter.ts"
     ],
     "format": "esm"

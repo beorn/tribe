@@ -82,6 +82,29 @@ launch controller, not the Tribe daemon.
 
 ### Library exports
 
+Outside tribe's own packages, import the narrowest subpath. The root barrel
+selects the full 44-file runtime graph. Each name has one subpath:
+
+| Need | Import | Runtime closure |
+| --- | --- | ---: |
+| Launch identity and environment projection | `tribe-wire/launch-environment` | 1 |
+| Connect to the daemon, reconnect, socket paths, launch registration, JSON-RPC framing | `tribe-wire/client` | 16 |
+| Trust tiers for senders and topics | `tribe-wire/trust` | 1 |
+| Shared protocol records, constants, incident keys, and pure MCP result parsing | `tribe-wire/records` | 10 |
+| Send as the current launch's identity, with daemon outcome handling | `tribe-wire/service-send` | 18 |
+| Read the daemon's ambient environment names for a fixture | `tribe-wire/lib/daemon-environment` | 6 |
+
+`service-send` alone reaches `src/service-send.ts`, `src/launch-seat.ts`, and
+`src/cli/mcp-json-content.ts`; `client` reaches none of those three. Keep this
+named service-only set current when adding a file to it. The reviewed baseline
+is [`closure-baseline.jsonl`](closure-baseline.jsonl). Remeasure and check the
+closure budgets with
+`@in -- bun vitest run --project vendor vendor/tribe/packages/wire/tests/sub-barrels.test.ts`.
+For a new external need, add the name to its defining module's subbarrel if
+that adds no client edge and stays within its measured closure. Otherwise
+export a `./lib/<module>` leaf. Add a top-level subbarrel only for a coherent
+multi-file API; never re-export one subpath from another.
+
 ```ts
 import { connectToDaemon, resolveSocketPath } from "tribe-wire/lib/socket"
 import { TRIBE_PROTOCOL_VERSION } from "tribe-wire/lib/socket"
