@@ -40,6 +40,8 @@ import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
 import { tribeAmbientEnvironmentNames } from "../src/daemon-environment.ts"
 import { launchToken, writeClaimsVerifier } from "./launch-token.ts"
 import { tribeDaemonCalls } from "../src/service-send.ts"
+import { activityLogDir } from "../src/activity-log-contract.ts"
+import { daemonStderrLogFilename } from "../src/lib/daemon-stderr-log.ts"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ADAPTER = resolve(HERE, "../src/stdio-adapter.ts")
@@ -413,6 +415,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         TRIBE_NO_PLUGINS: "1",
         ...(opts.operatorCapabilityFd === undefined ? {} : { TRIBE_OPERATOR_CAPABILITY_FD: "3" }),
         TRIBE_ACTIVITY_LOG: join(tmpDir, "activity.jsonl"),
+        TRIBE_DAEMON_STDERR_LOG: join(tmpDir, "daemon-stderr.log"),
         DEBUG: "tribe:*",
         DEBUG_LOG: join(tmpDir, "daemon.log"),
         LOG_FILE: join(tmpDir, "daemon.log"),
@@ -732,6 +735,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       cwd: tmpDir,
       env: {
         ...env,
+        TRIBE_DAEMON_STDERR_LOG: env.TRIBE_DAEMON_STDERR_LOG ?? join(tmpDir, "daemon-stderr.log"),
         ...(opts.throughParent ? { TRIBE_TEST_CHILD_COMMAND: JSON.stringify(command) } : {}),
         ...(capabilityFd === undefined ? {} : { TRIBE_OPERATOR_CAPABILITY_FD: "3" }),
         // The launch's identity token, in place of any the env carries: the one-shot self-read credential (3d-3).
@@ -904,6 +908,13 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       }),
     ).resolves.toMatchObject({ session: "@chief", drained_count: 0 })
     successor.client.close()
+
+    // 25664: the tests' daemons write to their own sink, never the production daemon-stderr log
+    const productionLog = join(activityLogDir(), daemonStderrLogFilename(new Date()))
+    expect(existsSync(productionLog), `production daemon-stderr log ${productionLog} was created by test`).toBe(false)
+    const ownSink = join(tmpDir, "daemon-stderr.log")
+    expect(existsSync(ownSink), `test daemon stderr sink ${ownSink} was not created`).toBe(true)
+    expect(readFileSync(ownSink, "utf8")).toContain("operator-lifecycle.sock")
   }, 120_000)
 
   it("drains the managed launch mailbox instead of a foreign environment identity when MCP is unavailable", async () => {
