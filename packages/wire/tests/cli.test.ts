@@ -1500,17 +1500,27 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         },
         {
           method: "cli_inbox_status_by_launch_v1",
-          params: { launch_id: "managed-stale-daemon-launch", persona: "@dev/2" },
+          params: {
+            launch_id: "managed-stale-daemon-launch",
+            id_token: launchToken("managed-stale-daemon-launch"),
+            persona: "@dev/2",
+          },
         },
         { method: "cli_protocol", params: undefined },
         {
           method: "cli_inbox_wait_by_launch_v1",
-          params: { launch_id: "managed-stale-daemon-launch", persona: "@dev/2", timeout_ms: 0 },
+          params: {
+            launch_id: "managed-stale-daemon-launch",
+            id_token: launchToken("managed-stale-daemon-launch"),
+            persona: "@dev/2",
+            timeout_ms: 0,
+          },
         },
         {
           method: "cli_inbox_drain_by_launch_v1",
           params: {
             launch_id: "managed-stale-daemon-launch",
+            id_token: launchToken("managed-stale-daemon-launch"),
             persona: "@dev/2",
             limit: 10,
             operator_capability: "fd-only-operator-secret",

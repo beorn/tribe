@@ -1074,7 +1074,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const derivedLaunchId = `${launchId}::${encodeURIComponent(seatName)}`
     const warning = "this seat's tribe transport is disconnected"
 
-    daemonProc = spawnDaemon(socketPath, dbPath)
+    daemonProc = spawnDaemon(socketPath, dbPath, { identityVerifier: launchVerifier() })
     await waitForDaemonSocket(daemonProc, socketPath)
     const seat = await spawnLaunchAdapter(socketPath, "self-transport.log", launchId, {
       name: seatName,
@@ -1085,7 +1085,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       ...BASE_ENV,
       TRIBE_SOCKET: socketPath,
       TRIBE_LAUNCH_ID: launchId,
-      HAB_ID_TOKEN: launchToken(launchId),
+      HAB_ID_TOKEN: launchToken(launchId, seatName),
       TRIBE_NO_AUTOSTART: "1",
     }
 
@@ -1616,7 +1616,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
             ...BASE_ENV,
             TRIBE_SOCKET: socketPath,
             TRIBE_LAUNCH_ID: launchId,
-            HAB_ID_TOKEN: launchToken(launchId),
+            HAB_ID_TOKEN: launchToken(launchId, persona),
             TRIBE_NAME: persona,
             TRIBE_SESSION_NAME: persona,
             TRIBE_NO_AUTOSTART: "1",
