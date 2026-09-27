@@ -262,6 +262,23 @@ describe("one ball per incident (habwire stage 2(d))", () => {
       expect(openKeys("@chief")).toEqual([incidentKey(INCIDENT)])
     })
 
+    it("reports each incident transition from the same transaction that opens or updates its ball", () => {
+      const watcher = makeContext(db, stmts, "@fleet")
+      const opened = call(watcher, { to: "@chief", message: "red A", summary: "red A", incident: INCIDENT })
+      const repeated = call(watcher, { to: "@chief", message: "red A again", summary: "red A", incident: INCIDENT })
+      const changed = call(watcher, { to: "@chief", message: "red B", summary: "red B", incident: INCIDENT })
+      const cleared = call(watcher, {
+        to: "@chief",
+        message: "green",
+        summary: "green",
+        incident: { ...INCIDENT, active: false },
+      })
+      expect(opened.incident).toEqual({ transition: "opened", wakesOwner: true })
+      expect(repeated.incident).toEqual({ transition: "repeated", wakesOwner: false })
+      expect(changed.incident).toEqual({ transition: "changed", wakesOwner: true })
+      expect(cleared.incident).toEqual({ transition: "cleared", wakesOwner: false })
+    })
+
     it("active:false over the wire closes the ball", () => {
       const watcher = makeContext(db, stmts, "@fleet")
       call(watcher, { to: "@chief", message: "wedged", incident: INCIDENT })
