@@ -122,6 +122,7 @@ describe("the daemon's --identity-verifier boot check (25074 3b)", () => {
       verifier: verifierPath,
       supplies_gen: true,
       authority: { verified: 1, claimed: 0 },
+      tokenless_by_launch_refusals: { count: 0, last_at: null, last_launch_id: null },
     })
   })
 })
