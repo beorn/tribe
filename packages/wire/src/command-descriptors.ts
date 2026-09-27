@@ -258,6 +258,22 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
             type: "string",
             description: "Shared explicit request id for a multi-recipient tracked send.",
           },
+          incident: {
+            type: "object",
+            properties: {
+              transition: {
+                type: "string",
+                enum: ["opened", "changed", "repeated", "cleared"],
+                description: "Incident edge decided in the send transaction.",
+              },
+              wakesOwner: {
+                type: "boolean",
+                description: "True for an opened or changed incident; false for a repeat or clear.",
+              },
+            },
+            required: ["transition", "wakesOwner"],
+            description: "Present only for an incident send; its transition is the atomic paging fact.",
+          },
           tracker: {
             type: "object",
             properties: {

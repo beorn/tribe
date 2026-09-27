@@ -956,6 +956,7 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     sent: true,
     id: result.id,
     ...(effectiveRequestId ? { request_id: effectiveRequestId } : {}),
+    ...(result.incident ? { incident: result.incident } : {}),
     delivery: deliveryReport([{ recipient: recipients, resolution }], transport)[0],
     ...(tracker ? { tracker } : {}),
     ...(result.deduplicated ? { deduplicated: true } : {}),
