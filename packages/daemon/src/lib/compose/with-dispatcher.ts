@@ -33,7 +33,7 @@ import { randomUUID, timingSafeEqual } from "node:crypto"
 import { type Socket as NetSocket } from "node:net"
 import { isAbsolute } from "node:path"
 import { createLogger } from "loggily"
-import { DEFAULT_INBOX_WAIT_SESSION, resolveInboxWaitOptions } from "tribe-wire"
+import { DEFAULT_INBOX_WAIT_SESSION, incidentKey, resolveInboxWaitOptions } from "tribe-wire"
 import { deriveTribePersonaLaunchIdentity, providerLaunchIdOf } from "tribe-wire/lib/persona-launch-identity"
 import { HAB_ID_TOKEN_ENV, MANAGED_INBOX_TOKEN_REQUIRED } from "tribe-wire/lib/identity-token"
 import {
@@ -97,6 +97,7 @@ import {
 } from "../identity-verifier.ts"
 
 const log = createLogger("tribe:dispatcher")
+const IDENTITY_VERIFIER_INCIDENT = { emitter: "wire", subject: "identity-verifier", condition: "fault" } as const
 
 export interface DispatcherRuntimeHooks {
   /** Called from accept(). Default: no-op. Wire to withIdleQuit. */
@@ -211,6 +212,51 @@ export function withDispatcher<
     const suppressWindowMs = hooks.suppressWindowMs ?? (process.env.TRIBE_NO_SUPPRESS ? 0 : 10_000)
     const sessionAnnounceGate = createSessionAnnounceGate(suppressWindowMs)
     const channelJoinAnnounced = new Set<string>()
+    const priorIdentityIncident = stmts.selectIncidentCondition.get({
+      $request_id: incidentKey(IDENTITY_VERIFIER_INCIDENT),
+      $recipient: "@chief",
+    }) as { summary: string | null } | null
+    if (priorIdentityIncident !== null && !priorIdentityIncident.summary) {
+      throw new Error("open identity-verifier incident has no diagnostic summary")
+    }
+    let identityVerifierFaultIssue = priorIdentityIncident?.summary ?? null
+
+    function recordIdentityVerifierFault(verifier: string, cause: string): void {
+      const issue = `identity verifier ${verifier} failed: ${cause}`
+      if (identityVerifierFaultIssue === issue) return
+      sendMessage(
+        daemonCtx,
+        "@chief",
+        `${issue}. Managed identity reads refuse until the verifier works again.`,
+        "health:identity-verifier-fault",
+        undefined,
+        undefined,
+        "direct",
+        {
+          delivery: "push",
+          topic: "health:identity-verifier-fault",
+          summary: issue,
+        },
+        { incident: { ...IDENTITY_VERIFIER_INCIDENT, active: true } },
+      )
+      identityVerifierFaultIssue = issue
+    }
+
+    function clearIdentityVerifierFault(): void {
+      if (identityVerifierFaultIssue === null) return
+      sendMessage(
+        daemonCtx,
+        "@chief",
+        "identity verifier repaired; a verified token succeeded and the identity-verifier incident is cleared.",
+        "health:identity-verifier-fault",
+        undefined,
+        undefined,
+        "direct",
+        { delivery: "push", topic: "health:identity-verifier-fault", summary: "identity verifier repaired" },
+        { incident: { ...IDENTITY_VERIFIER_INCIDENT, active: false } },
+      )
+      identityVerifierFaultIssue = null
+    }
 
     function identityLogFields(client: ClientSession): {
       connection_id: string
@@ -412,7 +458,7 @@ export function withDispatcher<
     type VerifiedOneShotToken = { verdict: Extract<IdentityVerdict, { result: "verified" }> }
 
     const redactIdentityToken = (message: string, token: string): string =>
-      message.replaceAll(token, "[redacted identity token]")
+      token.length === 0 ? message : message.replaceAll(token, "[redacted identity token]")
 
     async function verifyOneShotToken(
       value: unknown,
@@ -443,6 +489,7 @@ export function withDispatcher<
         verdict = await verifier.verify(token)
       } catch (error) {
         const fault = redactIdentityToken(error instanceof Error ? error.message : String(error), token)
+        recordIdentityVerifierFault(verifier.path, fault)
         log.error?.(`identity verifier ${verifier.path} failed on a one-shot caller's token: ${fault}`)
         return refuse(
           rejected(
@@ -451,6 +498,7 @@ export function withDispatcher<
           ),
         )
       }
+      if (verdict.result === "verified") clearIdentityVerifierFault()
       switch (verdict.result) {
         case "contradicted":
           return refuse(
@@ -987,6 +1035,7 @@ export function withDispatcher<
       recallVaultRefusal: t.config.vaultDbRefusal ?? null,
       identityVerifierPath: hooks.identityVerifier?.path ?? null,
       identityVerifierSuppliesGen: hooks.identityVerifier ? hooks.identityVerifier.suppliesGen : null,
+      getIdentityVerifierFault: () => identityVerifierFaultIssue,
       // tribe.stop actuator — absent (handler refuses loudly) unless the
       // composing daemon supplied its shutdown.
       triggerStop: hooks.triggerShutdown,
@@ -1047,6 +1096,7 @@ export function withDispatcher<
         verdict = await verifier.verify(token)
       } catch (error) {
         const fault = redactIdentityToken(error instanceof Error ? error.message : String(error), token)
+        recordIdentityVerifierFault(verifier.path, fault)
         log.error?.(`identity verifier ${verifier.path} failed on the token ${claimed} presented: ${fault}`)
         return {
           refusal: {
@@ -1055,6 +1105,7 @@ export function withDispatcher<
           },
         }
       }
+      if (verdict.result === "verified") clearIdentityVerifierFault()
       switch (verdict.result) {
         case "verified":
           if (verdict.actor === requestedName) return { sid: verdict.sid, gen: verdict.gen ?? null }

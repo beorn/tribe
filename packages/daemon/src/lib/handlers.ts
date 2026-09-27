@@ -288,6 +288,8 @@ export type HandlerOpts = {
   identityVerifierPath?: string | null
   /** 25074 3c-2a — whether the loaded verifier declares `gen` on its verified verdicts; null with no verifier. */
   identityVerifierSuppliesGen?: boolean | null
+  /** An active verifier fault issue, restored from its durable incident after a restart. */
+  getIdentityVerifierFault?: () => string | null
   /** Optional: dump daemon internals for `tribe.debug`. Daemon-only (tests using
    *  handlers directly can omit this — `tribe.debug` then returns a minimal
    *  snapshot synthesized from the other accessors). */
@@ -3516,6 +3518,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
             "replace the session-root owner (rearm/resume preserves it)",
         ]
   })
+  const identityVerifierFault = opts.getIdentityVerifierFault?.()
 
   // Stale-code detector (@km/tribe/20033): surface whether the running daemon
   // is provably older than the on-disk / superproject-pinned tribe code, so a
@@ -3561,6 +3564,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
           `transport wedge ${wedge.name}: transport_state=${wedge.transport_state} owner_state=${wedge.owner_state} reason=${wedge.wedge_reason}`,
       ),
       ...mailboxReadIssues,
+      ...(identityVerifierFault === undefined || identityVerifierFault === null ? [] : [identityVerifierFault]),
       ...retiredMemberIssues,
       ...pendingIssues,
       ...cadence.warnings,
