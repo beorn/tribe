@@ -12,6 +12,8 @@ import { resolveSocketPath } from "./paths.ts"
 import { withDaemonCall, type DaemonCallOutcome } from "./util.ts"
 import type { DaemonClient } from "./client.ts"
 
+export { LAUNCH_UNROUTABLE, LAUNCH_UNROUTABLE_EXIT_CODE, isLaunchUnroutable } from "./launch-seat.ts"
+
 /** Whole connect+call budget per daemon operation; tribe.health took ~5s under load. */
 export const TRIBE_DAEMON_DEADLINE_MS = 10_000
 

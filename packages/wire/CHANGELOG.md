@@ -4,6 +4,11 @@
 
 ### Added
 
+- **Narrow library imports.** External consumers can use
+  `tribe-wire/launch-environment`, `/client`, `/trust`, `/records`,
+  `/service-send`, and `/lib/daemon-environment` according to the README map.
+  The root export remains available inside tribe.
+
 - **A register carries its token and its launch id; the daemon keys it.**
   `register` returns the launch identity it keyed (`launchId`,
   `launchParentPid`), an additive field. connectTribeLaunch always sends and
