@@ -63,6 +63,16 @@ describe("Tribe daemon environment ownership", () => {
     })
   })
 
+  test("a name-only Hab service cannot inherit standalone ownership", () => {
+    const env: NodeJS.ProcessEnv = {
+      HAB_SERVICE_NAME: "wire",
+      TRIBE_DAEMON_RELOAD_EXIT_CODE: "75",
+      TRIBE_DAEMON_SUPERVISOR_PID: "999",
+      TRIBE_OPERATOR_CAPABILITY_FD: "3",
+    }
+    expect(sanitizeDaemonProcessEnvironment(env, 999)).toEqual({ HAB_SERVICE_NAME: "wire" })
+  })
+
   test("standalone pre-spawn sanitation also drops stale lifecycle ownership", () => {
     // HAB_SERVICE_NAME must drop with its siblings: it selects the hab-managed
     // never-idle-quit default, and a standalone daemon minted from a hab seat

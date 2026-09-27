@@ -261,6 +261,14 @@ describe("neutral health process source", () => {
     expect(runCommand).not.toHaveBeenCalled()
   })
 
+  it("selects the managed process source when a Hab service has only its name marker", () => {
+    const source = createHealthProcessSource({
+      env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
+      runCommand: vi.fn(),
+    })
+    expect(source.kind).toBe("managed")
+  })
+
   it("pulls one explicit managed snapshot command without a shell or codec import", async () => {
     const runCommand = vi.fn(async (argv: readonly string[]) => ({
       exitCode: 0,

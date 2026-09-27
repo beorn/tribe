@@ -19,6 +19,7 @@ describe("daemon reload lifecycle ownership", () => {
   it("leaves source watching to explicit reload when Hab owns lifecycle", () => {
     expect(hotReloadSourceWatchEnabled({ HAB_SERVICE_KIND: "service" })).toBe(false)
     expect(hotReloadSourceWatchEnabled({ HAB_SERVICE_KIND: "watcher" })).toBe(false)
+    expect(hotReloadSourceWatchEnabled({ HAB_SERVICE_NAME: "wire" })).toBe(false)
     expect(hotReloadSourceWatchEnabled({ TRIBE_NO_AUTORELOAD: "1" })).toBe(false)
     expect(hotReloadSourceWatchEnabled({}, true)).toBe(false)
   })
@@ -157,6 +158,11 @@ describe("daemon reload lifecycle ownership", () => {
     supervisedWatcher?.("operator requested reload")
     expect(shutdown).toHaveBeenCalledTimes(2)
 
+    const supervisedByName = reloadReplacementForEnvironment({ HAB_SERVICE_NAME: "wire" }, shutdown)
+    expect(supervisedByName).toBeTypeOf("function")
+    supervisedByName?.("operator requested reload")
+    expect(shutdown).toHaveBeenCalledTimes(3)
+
     const previousExitCode = process.exitCode
     try {
       const standalone = reloadReplacementForEnvironment(
@@ -170,7 +176,7 @@ describe("daemon reload lifecycle ownership", () => {
       expect(standalone).toBeTypeOf("function")
       standalone?.("operator requested reload")
       expect(process.exitCode).toBe(75)
-      expect(shutdown).toHaveBeenCalledTimes(3)
+      expect(shutdown).toHaveBeenCalledTimes(4)
 
       expect(
         reloadReplacementForEnvironment(

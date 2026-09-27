@@ -58,7 +58,7 @@ export const TRIBE_DAEMON_SUPERVISOR_PID_ENV = "TRIBE_DAEMON_SUPERVISOR_PID"
 export const TRIBE_DAEMON_RELOAD_EXIT_CODE_ENV = "TRIBE_DAEMON_RELOAD_EXIT_CODE"
 
 export function hasStandaloneDaemonOwner(env: Readonly<NodeJS.ProcessEnv>, parentPid = process.ppid): boolean {
-  if (env[HAB_SERVICE_KIND_ENV] !== undefined) return false
+  if (env[HAB_SERVICE_KIND_ENV] !== undefined || env[HAB_SERVICE_NAME_ENV] !== undefined) return false
   const supervisorPid = Number(env[TRIBE_DAEMON_SUPERVISOR_PID_ENV])
   const reloadExitCode = Number(env[TRIBE_DAEMON_RELOAD_EXIT_CODE_ENV])
   return (
@@ -81,7 +81,7 @@ function isOpenInheritedFd(fd: number): boolean {
 }
 
 function hasDirectInheritedOperatorCapability(env: Readonly<NodeJS.ProcessEnv>): boolean {
-  if (env[HAB_SERVICE_KIND_ENV] !== undefined) return false
+  if (env[HAB_SERVICE_KIND_ENV] !== undefined || env[HAB_SERVICE_NAME_ENV] !== undefined) return false
   const fd = Number(env[TRIBE_OPERATOR_CAPABILITY_FD_ENV])
   return Number.isSafeInteger(fd) && fd >= 3 && isOpenInheritedFd(fd)
 }
