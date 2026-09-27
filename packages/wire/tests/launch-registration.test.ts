@@ -106,6 +106,42 @@ describe("connectTribeLaunch certifies the launch identity the daemon keyed (250
     }
   })
 
+  it("carries daemon refusal as cause when register rejects with identity-verifier-fault (25526)", async () => {
+    const refusalError = Object.assign(new Error("verifier undecided"), {
+      code: -32003,
+      data: { kind: "identity-verifier-fault" },
+    })
+    const connect: TribeLaunchDeps["connect"] = async () => ({
+      call: vi.fn(async (method: string) => {
+        if (method === "register") throw refusalError
+        return {}
+      }) as never,
+      close: vi.fn(),
+      socket: { unref: vi.fn(), destroyed: false },
+    })
+    const deps: TribeLaunchDeps = {
+      connect,
+      socketPath: () => "/tmp/sock",
+      sleep: vi.fn(async () => {}),
+      processId: () => PID,
+    }
+
+    let capturedError: unknown
+    try {
+      await connectTribeLaunch({ ...REQUEST, idToken: "seat-token" }, deps)
+    } catch (error) {
+      capturedError = error
+    }
+
+    expect(capturedError).toBeInstanceOf(Error)
+    expect((capturedError as Error).message).toContain("managed Tribe bootstrap failed after 3 attempts")
+    expect((capturedError as { cause?: unknown }).cause).toBe(refusalError)
+    expect((capturedError as { cause?: { code?: number; data?: { kind?: string } } }).cause?.code).toBe(-32003)
+    expect((capturedError as { cause?: { code?: number; data?: { kind?: string } } }).cause?.data?.kind).toBe(
+      "identity-verifier-fault",
+    )
+  })
+
   // 25074 §18(a) (@cto 027f0c0c): a hab-launched sender presents the launch id it was given — its token's sid — never
   // a minted one. The client reads the sid unverified to form the id; the daemon verifies the token.
   describe("a launch id from the token's sid", () => {
