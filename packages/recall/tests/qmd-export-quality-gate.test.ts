@@ -6,6 +6,7 @@
  * containing stuck-loop content under a fake claude projects dir. Verifies
  * that the bad session lands in chats-rejected/ with a .reason sidecar
  * instead of chats/.
+ * @reach fs-walk <fixture-only: quality gate scans temporary session directories>
  */
 import { describe, test, expect, beforeEach, afterEach } from "vitest"
 import { spawnSync } from "node:child_process"

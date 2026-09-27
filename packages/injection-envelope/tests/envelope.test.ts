@@ -9,6 +9,7 @@
  *
  * Rule enforced by CI: raw `additionalContext` emission is not allowed
  * outside this package. See `tools/lint-injection-emitters.ts`.
+ * @reach fs-walk <fixture-only: envelope tests scan temporary directories>
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest"

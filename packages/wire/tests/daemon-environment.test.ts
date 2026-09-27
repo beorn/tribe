@@ -4,6 +4,7 @@
  *          list of empty environment overrides to prevent that leak.
  * @level   l0
  * @consumer root hab.yml wire service
+ * @reach fs-walk vendor/tribe/packages/**
  */
 
 import { closeSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"

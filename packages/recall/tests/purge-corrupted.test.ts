@@ -4,6 +4,7 @@
  * Sets up a temp chats dir with mixed clean/corrupted markdown, runs
  * scanChats(), and asserts that only the corrupted files are flagged.
  * Then exercises the CLI with --dry-run and --yes paths.
+ * @reach fs-walk <fixture-only: purge CLI scans temporary chats and quarantine trees>
  */
 import { describe, test, expect, beforeEach, afterEach } from "vitest"
 import { spawnSync } from "node:child_process"

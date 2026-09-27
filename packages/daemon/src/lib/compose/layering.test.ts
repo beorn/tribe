@@ -2,6 +2,7 @@
  * @failure L2 Tribe regrows L3 Tent subprocess tools or dead bead-era observers.
  * @level   L3
  * @consumer Standalone Tribe users and the hh composition layer
+ * @reach fs-walk vendor/tribe/packages/**
  */
 
 import { existsSync, readdirSync, readFileSync } from "node:fs"

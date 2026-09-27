@@ -1,3 +1,6 @@
+/**
+ * @reach fs-walk <fixture-only: Codex indexer tests walk temporary session trees>
+ */
 import { Database } from "bun:sqlite"
 import { writeFileSync, mkdtempSync, chmodSync, mkdirSync, utimesSync, existsSync, statSync } from "node:fs"
 import { createHash } from "node:crypto"

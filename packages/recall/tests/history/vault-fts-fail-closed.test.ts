@@ -4,6 +4,7 @@
  * @failure Recall vault reads can mutate database content or reach km startup through unparsed module edges.
  * @level l2
  * @consumer tribe-recall vault history adapter
+ * @reach fs-walk vendor/tribe/packages/daemon/src/** vendor/tribe/packages/recall/src/**
  *
  * The recall/injection pipeline may merge matches from the km vault
  * (`.km/state.db`) into its results. These guards pin that this integration

@@ -1,3 +1,6 @@
+/**
+ * @reach fs-walk <fixture-only: export streaming scans temporary session trees>
+ */
 import { describe, test, expect, beforeAll, afterAll } from "vitest"
 import { mkdtempSync, writeFileSync, rmSync, appendFileSync, mkdirSync, readdirSync, statSync } from "node:fs"
 import { spawnSync } from "node:child_process"

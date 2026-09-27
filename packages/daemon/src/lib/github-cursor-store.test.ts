@@ -4,6 +4,7 @@
  *   appeared as a second PM-state mutation and rolled every create back.
  * @level l2 — real files, Git porcelain, and legacy-to-XDG adoption.
  * @consumer githubPlugin.start cursor persistence.
+ * @reach fs-walk <fixture-only: Git cursor tests walk temporary project directories>
  */
 import { execFileSync, spawn } from "node:child_process"
 import {
