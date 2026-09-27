@@ -1,11 +1,13 @@
 import { describe, test, expect, beforeAll } from "vitest"
 import * as fs from "fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { parseTimeToMs, setRecallLogging, boostedRank, expandQueryVariants } from "../../src/history/recall"
 import type { RecallResult } from "../../src/history/recall"
 import { synthesizeResults } from "../../src/history/synthesize"
 import { SynthesisFailure } from "../../src/history/recall-shared"
 import type { LlmBackend, LlmModel } from "../../src/lib/llm-backend"
-import { toFts5Query, DB_PATH } from "../../src/history/db"
+import { toFts5Query, DB_PATH, closeDb, getDb } from "../../src/history/db"
 
 // Suppress verbose [recall] logging during tests
 beforeAll(() => {
@@ -293,7 +295,7 @@ describe("expandQueryVariants", () => {
 })
 
 // ============================================================================
-// recall() integration tests (only run if the production DB exists)
+// recall() integration tests (live DB rows skip when it is absent)
 // ============================================================================
 
 describe("recall integration", () => {
@@ -333,21 +335,42 @@ describe("recall integration", () => {
     15_000,
   )
 
-  test.skipIf(!dbExists)(
-    "returns fewer results for narrow time filter",
-    async () => {
+  test("returns fewer results for narrow time filter", async () => {
+    const previousDbPath = process.env.RECALL_DB_PATH
+    const fixtureDir = fs.mkdtempSync(join(tmpdir(), "recall-time-filter-"))
+    closeDb()
+    process.env.RECALL_DB_PATH = join(fixtureDir, "fixture.db")
+    try {
+      const db = getDb()
+      const now = Date.now()
+      const insertSession = db.prepare(
+        `INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count, title)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      const insertMessage = db.prepare(
+        "INSERT INTO messages (uuid, session_id, type, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+      )
+      for (const [id, ageMs] of [
+        ["recent", 30 * 60_000],
+        ["older", 2 * 60 * 60_000],
+      ] as const) {
+        const timestamp = now - ageMs
+        insertSession.run(id, "/fixture", `/fixture/${id}.jsonl`, timestamp, timestamp, 1, id)
+        insertMessage.run(`message-${id}`, id, "user", "timewindowfixture", timestamp)
+      }
+
       const recall = await getRecall()
-      // Compare 30d (default) vs 1h — narrower window should have <= results
-      const wideResult = await recall("test", { raw: true, limit: 20 })
-      const narrowResult = await recall("test", {
-        raw: true,
-        limit: 20,
-        since: "1h",
-      })
-      expect(narrowResult.results.length).toBeLessThanOrEqual(wideResult.results.length)
-    },
-    15_000,
-  )
+      const wideResult = await recall("timewindowfixture", { raw: true, limit: 20 })
+      const narrowResult = await recall("timewindowfixture", { raw: true, limit: 20, since: "1h" })
+      expect(wideResult.results.map((result) => result.sessionId).sort()).toEqual(["older", "recent"])
+      expect(narrowResult.results.map((result) => result.sessionId)).toEqual(["recent"])
+    } finally {
+      closeDb()
+      if (previousDbPath === undefined) delete process.env.RECALL_DB_PATH
+      else process.env.RECALL_DB_PATH = previousDbPath
+      fs.rmSync(fixtureDir, { recursive: true, force: true })
+    }
+  }, 15_000)
 
   test.skipIf(!dbExists)(
     "returns empty when since is invalid",
