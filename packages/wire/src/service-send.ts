@@ -74,7 +74,7 @@ export function tribeDaemonCalls(
  */
 export type LaunchSender =
   | Readonly<{ kind: "service"; name: string; idToken: string }>
-  | Readonly<{ kind: "seat"; name: string; launchId: string }>
+  | Readonly<{ kind: "seat"; name: string; launchId: string; idToken: string }>
 
 /**
  * Who `producer` sends as. A hab service's token (act.kind "service") registers as that service, on its token; a
@@ -98,7 +98,7 @@ export function launchSender(producer: string, env: Readonly<NodeJS.ProcessEnv>)
   }
   return claims.kind === "service"
     ? { kind: "service", name: claims.actor, idToken }
-    : { kind: "seat", name: claims.actor, launchId: claims.sid }
+    : { kind: "seat", name: claims.actor, launchId: claims.sid, idToken }
 }
 
 /**
@@ -161,6 +161,7 @@ export async function registerLaunchSender(
   }
   const seat = await resolveLaunchSeat((method, params) => client.call(method, params), {
     launchId: sender.launchId,
+    idToken: sender.idToken,
     persona: sender.name,
   })
   const registered = mcpJsonContent(

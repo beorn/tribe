@@ -151,15 +151,16 @@ describe("the one sender registers as what its launch's token names (25074 3d-1c
 
   it("a seat-run producer registers as the seat under the daemon's launch tuple, presenting no token of its own", async () => {
     const { socketPath, calls } = await fakeDaemon()
+    const token = launchToken(SEAT_SID, SEAT)
 
     const outcome = await tribeDaemonCalls("onfail", {
       socketPath,
-      env: { HAB_ID_TOKEN: launchToken(SEAT_SID, SEAT) },
+      env: { HAB_ID_TOKEN: token },
     }).sendAs({ to: "@chief", message: "m" })
 
     expect(outcome, JSON.stringify(outcome)).toMatchObject({ kind: "ok" })
     expect(calls.map((call) => call.method)).toEqual(["cli_inbox_status_by_launch_v1", "register", "tribe.send"])
-    expect(calls[0]?.params).toEqual({ launch_id: SEAT_SID, persona: SEAT })
+    expect(calls[0]?.params).toEqual({ launch_id: SEAT_SID, id_token: token, persona: SEAT })
     expect(calls[1]?.params).toMatchObject({
       name: SEAT,
       launchId: SEAT_TUPLE.launch_id,

@@ -42,11 +42,12 @@ export type LaunchSeat = Readonly<{
  */
 export async function resolveLaunchSeat(
   call: DaemonCall,
-  launch: Readonly<{ launchId: string; persona?: string | null }>,
+  launch: Readonly<{ launchId: string; idToken: string; persona?: string | null }>,
 ): Promise<LaunchSeat> {
   const status = mcpJsonContent(
     await call("cli_inbox_status_by_launch_v1", {
       launch_id: launch.launchId,
+      id_token: launch.idToken,
       ...(launch.persona ? { persona: launch.persona } : {}),
     }),
   ) as Record<string, unknown>

@@ -33,9 +33,9 @@ import { randomUUID, timingSafeEqual } from "node:crypto"
 import { type Socket as NetSocket } from "node:net"
 import { isAbsolute } from "node:path"
 import { createLogger } from "loggily"
-import { DEFAULT_INBOX_WAIT_SESSION, resolveInboxWaitOptions } from "tribe-wire"
+import { DEFAULT_INBOX_WAIT_SESSION, incidentKey, resolveInboxWaitOptions } from "tribe-wire"
 import { deriveTribePersonaLaunchIdentity, providerLaunchIdOf } from "tribe-wire/lib/persona-launch-identity"
-import { HAB_ID_TOKEN_ENV } from "tribe-wire/lib/identity-token"
+import { HAB_ID_TOKEN_ENV, MANAGED_INBOX_TOKEN_REQUIRED } from "tribe-wire/lib/identity-token"
 import {
   createLineParser,
   isRequest,
@@ -97,6 +97,7 @@ import {
 } from "../identity-verifier.ts"
 
 const log = createLogger("tribe:dispatcher")
+const IDENTITY_VERIFIER_INCIDENT = { emitter: "wire", subject: "identity-verifier", condition: "fault" } as const
 
 export interface DispatcherRuntimeHooks {
   /** Called from accept(). Default: no-op. Wire to withIdleQuit. */
@@ -211,6 +212,51 @@ export function withDispatcher<
     const suppressWindowMs = hooks.suppressWindowMs ?? (process.env.TRIBE_NO_SUPPRESS ? 0 : 10_000)
     const sessionAnnounceGate = createSessionAnnounceGate(suppressWindowMs)
     const channelJoinAnnounced = new Set<string>()
+    const priorIdentityIncident = stmts.selectIncidentCondition.get({
+      $request_id: incidentKey(IDENTITY_VERIFIER_INCIDENT),
+      $recipient: "@chief",
+    }) as { summary: string | null } | null
+    if (priorIdentityIncident !== null && !priorIdentityIncident.summary) {
+      throw new Error("open identity-verifier incident has no diagnostic summary")
+    }
+    let identityVerifierFaultIssue = priorIdentityIncident?.summary ?? null
+
+    function recordIdentityVerifierFault(verifier: string, cause: string): void {
+      const issue = `identity verifier ${verifier} failed: ${cause}`
+      if (identityVerifierFaultIssue === issue) return
+      sendMessage(
+        daemonCtx,
+        "@chief",
+        `${issue}. Managed identity reads refuse until the verifier works again.`,
+        "health:identity-verifier-fault",
+        undefined,
+        undefined,
+        "direct",
+        {
+          delivery: "push",
+          topic: "health:identity-verifier-fault",
+          summary: issue,
+        },
+        { incident: { ...IDENTITY_VERIFIER_INCIDENT, active: true } },
+      )
+      identityVerifierFaultIssue = issue
+    }
+
+    function clearIdentityVerifierFault(): void {
+      if (identityVerifierFaultIssue === null) return
+      sendMessage(
+        daemonCtx,
+        "@chief",
+        "identity verifier repaired; a verified token succeeded and the identity-verifier incident is cleared.",
+        "health:identity-verifier-fault",
+        undefined,
+        undefined,
+        "direct",
+        { delivery: "push", topic: "health:identity-verifier-fault", summary: "identity verifier repaired" },
+        { incident: { ...IDENTITY_VERIFIER_INCIDENT, active: false } },
+      )
+      identityVerifierFaultIssue = null
+    }
 
     function identityLogFields(client: ClientSession): {
       connection_id: string
@@ -409,7 +455,15 @@ export function withDispatcher<
      * when the token verifies, and named in the refusal only when nothing verifies (rider 1), so a caller learns the
      * credential it carried is no longer accepted rather than seeing it silently dropped.
      */
-    async function resolveSessionAuthority(value: unknown, idToken: unknown): Promise<SessionAuthorityResolution> {
+    type VerifiedOneShotToken = { verdict: Extract<IdentityVerdict, { result: "verified" }> }
+
+    const redactIdentityToken = (message: string, token: string): string =>
+      token.length === 0 ? message : message.replaceAll(token, "[redacted identity token]")
+
+    async function verifyOneShotToken(
+      value: unknown,
+      idToken: unknown,
+    ): Promise<VerifiedOneShotToken | Extract<SessionAuthorityResolution, { errorCode: number }>> {
       const token = requiredNonEmptyString(idToken)
       const verifier = hooks.identityVerifier
       const refuse = (
@@ -434,7 +488,8 @@ export function withDispatcher<
       try {
         verdict = await verifier.verify(token)
       } catch (error) {
-        const fault = error instanceof Error ? error.message : String(error)
+        const fault = redactIdentityToken(error instanceof Error ? error.message : String(error), token)
+        recordIdentityVerifierFault(verifier.path, fault)
         log.error?.(`identity verifier ${verifier.path} failed on a one-shot caller's token: ${fault}`)
         return refuse(
           rejected(
@@ -443,57 +498,66 @@ export function withDispatcher<
           ),
         )
       }
+      if (verdict.result === "verified") clearIdentityVerifierFault()
       switch (verdict.result) {
         case "contradicted":
           return refuse(
             rejected(
               "identity-contradicted",
-              `current session authority was rejected: the identity token is contradicted: ${verdict.reason}`,
+              `current session authority was rejected: the identity token is contradicted: ${redactIdentityToken(verdict.reason, token)}`,
             ),
           )
         case "unreadable":
           return refuse(
             rejected(
               "identity-token-unreadable",
-              `current session authority was rejected: the ${HAB_ID_TOKEN_ENV} is unreadable: ${verdict.reason}`,
+              `current session authority was rejected: the ${HAB_ID_TOKEN_ENV} is unreadable: ${redactIdentityToken(verdict.reason, token)}`,
             ),
           )
         case "absent":
           return refuse(authorityMissing(`the identity verifier found no identity in the ${HAB_ID_TOKEN_ENV}`))
-        case "verified": {
-          // The sid is the launch's; the session its adapter registered under it keeps that sid through a runtime
-          // rename, so its name is the token's actor only until the seat renames. Its own-named row wins; a sole row
-          // under the sid is that session renamed (the bearer used to serve this read); more than one is refused.
-          const rows = (
-            db
-              .prepare(`SELECT ${AUTHORITY_ROW_COLUMNS} FROM sessions WHERE identity_sid = $sid`)
-              .all({ $sid: verdict.sid }) as AuthorityRow[]
-          ).filter((candidate) => !isTombstonedSessionName(candidate.name))
-          const row =
-            rows.find((candidate) => candidate.name === verdict.actor) ?? (rows.length === 1 ? rows[0] : undefined)
-          if (row === undefined && rows.length > 1) {
-            return rejected(
-              "identity-ambiguous",
-              `current session authority was rejected: ${verdict.actor}'s token is verified, but ${rows.length} ` +
-                `sessions are registered under its sid ${verdict.sid} (${rows.map((candidate) => candidate.name).join(", ")}) ` +
-                `and none is named ${verdict.actor}; read with --session <name>`,
-            )
-          }
-          if (row === undefined) {
-            return rejected(
-              "identity-not-registered",
-              `current session authority was rejected: ${verdict.actor}'s token is verified, but no session is ` +
-                `registered under its sid ${verdict.sid} yet; the adapter registers with the token on its next ` +
-                "connect, so retry after it does",
-            )
-          }
-          return contextForAuthorityRow(row)
-        }
+        case "verified":
+          return { verdict }
         default: {
           const unreachable: never = verdict
           throw new Error(`identity verifier returned an unknown verdict ${JSON.stringify(unreachable)}`)
         }
       }
+    }
+
+    async function resolveSessionAuthority(value: unknown, idToken: unknown): Promise<SessionAuthorityResolution> {
+      const verified = await verifyOneShotToken(value, idToken)
+      return "verdict" in verified ? contextForVerifiedToken(verified.verdict) : verified
+    }
+
+    function contextForVerifiedToken(
+      verdict: Extract<IdentityVerdict, { result: "verified" }>,
+    ): SessionAuthorityResolution {
+      // A runtime rename keeps the sid. The actor's own row wins; a sole row under the sid is its renamed session.
+      const rows = (
+        db
+          .prepare(`SELECT ${AUTHORITY_ROW_COLUMNS} FROM sessions WHERE identity_sid = $sid`)
+          .all({ $sid: verdict.sid }) as AuthorityRow[]
+      ).filter((candidate) => !isTombstonedSessionName(candidate.name))
+      const row =
+        rows.find((candidate) => candidate.name === verdict.actor) ?? (rows.length === 1 ? rows[0] : undefined)
+      if (row === undefined && rows.length > 1) {
+        return rejected(
+          "identity-ambiguous",
+          `current session authority was rejected: ${verdict.actor}'s token is verified, but ${rows.length} ` +
+            `sessions are registered under its sid ${verdict.sid} (${rows.map((candidate) => candidate.name).join(", ")}) ` +
+            `and none is named ${verdict.actor}; read with --session <name>`,
+        )
+      }
+      if (row === undefined) {
+        return rejected(
+          "identity-not-registered",
+          `current session authority was rejected: ${verdict.actor}'s token is verified, but no session is ` +
+            `registered under its sid ${verdict.sid} yet; the adapter registers with the token on its next ` +
+            "connect, so retry after it does",
+        )
+      }
+      return contextForAuthorityRow(row)
     }
 
     /** No verifiable identity: a managed seat inherits the token; a hand session names its seat or sends anonymously. */
@@ -645,10 +709,11 @@ export function withDispatcher<
      * env. The daemon derives the parent-pid half of the authoritative
      * tuple from its own persisted session row and fails closed on ambiguity.
      */
-    function resolveInboxTarget(
+    async function resolveInboxTarget(
       params: Record<string, unknown>,
       opts: { mode: "launch" } | { mode: "explicit"; defaultSession?: string },
-    ): InboxTargetResolution {
+      connId: string,
+    ): Promise<InboxTargetResolution> {
       const hasSession = Object.prototype.hasOwnProperty.call(params, "session")
       const hasLaunchId = Object.prototype.hasOwnProperty.call(params, "launch_id")
       const hasLaunchParentPid = Object.prototype.hasOwnProperty.call(params, "launch_parent_pid")
@@ -663,10 +728,23 @@ export function withDispatcher<
         return { errorCode: -32602, errorMessage: "Explicit inbox request requires session" }
       }
 
+      // A by-launch read is an authenticated self-read. The token's verified sid and registered session select the
+      // target; the caller's launch_id is only a consistency check until old callers stop sending it.
+      if (requiredNonEmptyString(params.id_token) === null) {
+        return {
+          errorCode: -32004,
+          errorMessage: `Managed inbox refused: ${MANAGED_INBOX_TOKEN_REQUIRED}`,
+          errorData: { kind: "could-not-evaluate", reason: "session-authority-missing" },
+        }
+      }
+      const verified = await verifyOneShotToken(undefined, params.id_token)
+      if (!("verdict" in verified)) return verified
+      const verifiedSid = verified.verdict.sid
+
       if (hasSession || hasLaunchParentPid || hasLaunchParentPids) {
         return {
           errorCode: -32602,
-          errorMessage: "Managed inbox request accepts only launch_id; parent identity is daemon-derived",
+          errorMessage: "Managed inbox request accepts a token and launch_id, not a session or parent identity",
         }
       }
       if (!hasLaunchId) {
@@ -680,11 +758,46 @@ export function withDispatcher<
           errorMessage: "Managed inbox request requires a non-empty launch_id",
         }
       }
-      const derivedPrefix = `${launchId}::`
+      const personaLaunchId = deriveTribePersonaLaunchIdentity(verified.verdict.actor, verifiedSid).launchId
+      if (launchId !== verifiedSid && launchId !== personaLaunchId) {
+        const claimedSid = providerLaunchIdOf(launchId)
+        const claimedDerivedPrefix = `${claimedSid}::`
+        const claimedVerifiedPrefix = `${claimedSid}@`
+        const claimedDerivedUpper = derivedLaunchPrefixUpperBound(claimedDerivedPrefix)
+        const claimedVerifiedUpper = derivedLaunchPrefixUpperBound(claimedVerifiedPrefix)
+        if (claimedDerivedUpper !== null && claimedVerifiedUpper !== null) {
+          const targetRows = stmts.getSessionsByProviderLaunchId.all({
+            $launch_id: claimedSid,
+            $derived_prefix: claimedDerivedPrefix,
+            $derived_prefix_upper: claimedDerivedUpper,
+            $verified_prefix: claimedVerifiedPrefix,
+            $verified_prefix_upper: claimedVerifiedUpper,
+          }) as Array<LaunchAuthorityRow & { name: string }>
+          const rightful = targetRows.filter(hasLaunchAuthority)
+          const exact = rightful.filter((row) => row.launch_id === launchId)
+          const target = exact.length === 1 ? exact[0] : rightful.length === 1 ? rightful[0] : undefined
+          if (target !== undefined && (claimedSid !== verifiedSid || target.name !== verified.verdict.actor)) {
+            registry.recordForeignIdentityTransport(target.id, {
+              name: verified.verdict.actor,
+              launch_id: verifiedSid,
+              pid: clients.get(connId)?.pid ?? 0,
+              refused_at: new Date().toISOString(),
+            })
+          }
+        }
+        return {
+          errorCode: -32003,
+          errorMessage: `Managed inbox refused: launch_id ${launchId} is not this token's verified sid or persona launch ${verifiedSid}`,
+          errorData: { kind: "unauthenticated", reason: "identity-sid-mismatch" },
+        }
+      }
+      const authority = contextForVerifiedToken(verified.verdict)
+      if (!("context" in authority)) return authority
+      const derivedPrefix = `${verifiedSid}::`
       const derivedPrefixUpper = derivedLaunchPrefixUpperBound(derivedPrefix)
       // A verified session is keyed by its provider launch, `<sid>@<gen>`, whether the caller's environment carries
       // that bare launch id (a seat) or its persona form `<launch>::<persona>` (a hab job's one-shot).
-      const verifiedPrefix = `${providerLaunchIdOf(launchId)}@`
+      const verifiedPrefix = `${verifiedSid}@`
       const verifiedPrefixUpper = derivedLaunchPrefixUpperBound(verifiedPrefix)
       if (derivedPrefixUpper === null || verifiedPrefixUpper === null) {
         // Unreachable: launchId is non-empty above, so the prefix is too. A
@@ -693,7 +806,7 @@ export function withDispatcher<
         return { errorCode: -32602, errorMessage: "Managed inbox request requires a non-empty launch_id" }
       }
       const launchSessions = stmts.getSessionsByProviderLaunchId.all({
-        $launch_id: launchId,
+        $launch_id: verifiedSid,
         $derived_prefix: derivedPrefix,
         $derived_prefix_upper: derivedPrefixUpper,
         $verified_prefix: verifiedPrefix,
@@ -711,20 +824,11 @@ export function withDispatcher<
       if (hasPersona && persona.length === 0) {
         return { errorCode: -32602, errorMessage: "Managed inbox persona must be a non-empty string" }
       }
-      // A launch can legitimately host distinct named bridges. Launch
-      // authority remains the trust boundary; persona only narrows an
-      // otherwise ambiguous set already proven to belong to that launch. For
-      // a sole session, ignore a stale spawn-time persona so runtime rename
-      // recovery retains the launch-only behavior.
-      const resolvedLaunchSessions =
-        routableLaunchSessions.length > 1 && persona.length > 0
-          ? routableLaunchSessions.filter(
-              (session) =>
-                session.launch_id === deriveTribePersonaLaunchIdentity(persona, launchId).launchId ||
-                ((session.launch_id === launchId || session.launch_id?.startsWith(verifiedPrefix) === true) &&
-                  session.name === persona),
-            )
-          : routableLaunchSessions
+      // A launch can host distinct bridges. The verified token's registered session selects exactly one;
+      // the caller's persona remains only a syntax-checked hint, including after a runtime rename.
+      const resolvedLaunchSessions = routableLaunchSessions.filter(
+        (session) => session.id === authority.context.sessionId,
+      )
       const launchSession = resolvedLaunchSessions[0]
       if (resolvedLaunchSessions.length !== 1 || launchSession === undefined) {
         return {
@@ -931,6 +1035,7 @@ export function withDispatcher<
       recallVaultRefusal: t.config.vaultDbRefusal ?? null,
       identityVerifierPath: hooks.identityVerifier?.path ?? null,
       identityVerifierSuppliesGen: hooks.identityVerifier ? hooks.identityVerifier.suppliesGen : null,
+      getIdentityVerifierFault: () => identityVerifierFaultIssue,
       // tribe.stop actuator — absent (handler refuses loudly) unless the
       // composing daemon supplied its shutdown.
       triggerStop: hooks.triggerShutdown,
@@ -990,7 +1095,8 @@ export function withDispatcher<
       try {
         verdict = await verifier.verify(token)
       } catch (error) {
-        const fault = error instanceof Error ? error.message : String(error)
+        const fault = redactIdentityToken(error instanceof Error ? error.message : String(error), token)
+        recordIdentityVerifierFault(verifier.path, fault)
         log.error?.(`identity verifier ${verifier.path} failed on the token ${claimed} presented: ${fault}`)
         return {
           refusal: {
@@ -999,6 +1105,7 @@ export function withDispatcher<
           },
         }
       }
+      if (verdict.result === "verified") clearIdentityVerifierFault()
       switch (verdict.result) {
         case "verified":
           if (verdict.actor === requestedName) return { sid: verdict.sid, gen: verdict.gen ?? null }
@@ -1011,12 +1118,14 @@ export function withDispatcher<
         case "contradicted":
           return {
             refusal: {
-              message: `register refused: the identity token ${claimed} presented is contradicted: ${verdict.reason}`,
-              data: { kind: "identity-contradicted", claimed, reason: verdict.reason },
+              message: `register refused: the identity token ${claimed} presented is contradicted: ${redactIdentityToken(verdict.reason, token)}`,
+              data: { kind: "identity-contradicted", claimed, reason: redactIdentityToken(verdict.reason, token) },
             },
           }
         case "unreadable":
-          log.warn?.(`register: ${claimed}'s identity token is unreadable (${verdict.reason}); not verified`)
+          log.warn?.(
+            `register: ${claimed}'s identity token is unreadable (${redactIdentityToken(verdict.reason, token)}); not verified`,
+          )
           return { sid: null, gen: null }
         case "absent":
           return { sid: null, gen: null }
@@ -2017,21 +2126,46 @@ export function withDispatcher<
             })
           }
 
+          /**
+           * A turn receipt is a liveness fact without mailbox content. Any verified identity may read another
+           * session's receipt by explicit name; the by-launch form remains a token-bound self-read. If receipts ever
+           * contain message content, the explicit form must inherit mailbox-read authorization.
+           */
+          case "cli_turn_start_receipt":
           case "cli_turn_start_receipt_by_launch_v1": {
-            const target = resolveInboxTarget(p, { mode: "launch" })
+            const explicit = method === "cli_turn_start_receipt"
+            const target = await resolveInboxTarget(p, explicit ? { mode: "explicit" } : { mode: "launch" }, connId)
             if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage, target.errorData)
-            if (target.launchId === undefined || target.launchParentPid === undefined) {
+            if (explicit) {
+              const verified = await verifyOneShotToken(undefined, p.id_token)
+              if (!("verdict" in verified)) {
+                return makeError(id, verified.errorCode, verified.errorMessage, verified.errorData)
+              }
+            }
+            const named = explicit
+              ? (db
+                  .prepare(
+                    "SELECT launch_id, launch_parent_pid FROM sessions WHERE name = $name ORDER BY updated_at DESC LIMIT 1",
+                  )
+                  .get({ $name: target.sessionName }) as {
+                  launch_id: string | null
+                  launch_parent_pid: number | null
+                } | null)
+              : null
+            const launchId = explicit ? named?.launch_id : target.launchId
+            const launchParentPid = explicit ? named?.launch_parent_pid : target.launchParentPid
+            if (launchId == null || launchParentPid == null) {
               return makeError(id, -32003, "Turn-start receipt launch authority is incomplete")
             }
             const receipt = stmts.getLatestTurnStartReceipt.get({
               $session: target.sessionName,
-              $launch_id: target.launchId,
-              $launch_parent_pid: target.launchParentPid,
+              $launch_id: launchId,
+              $launch_parent_pid: launchParentPid,
             }) as Record<string, unknown> | null
             return makeResponse(id, {
               session: target.sessionName,
-              launch_id: target.launchId,
-              launch_parent_pid: target.launchParentPid,
+              launch_id: launchId,
+              launch_parent_pid: launchParentPid,
               receipt_seq: receipt?.receipt_seq ?? null,
               controller_session_id: receipt?.controller_session_id ?? null,
               provider_session_id: receipt?.provider_session_id ?? null,
@@ -2252,11 +2386,12 @@ export function withDispatcher<
            */
           case "cli_inbox_status":
           case "cli_inbox_status_by_launch_v1": {
-            const target = resolveInboxTarget(
+            const target = await resolveInboxTarget(
               p,
               method === "cli_inbox_status_by_launch_v1"
                 ? { mode: "launch" }
                 : { mode: "explicit", defaultSession: "@chief" },
+              connId,
             )
             if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage, target.errorData)
             // G9 P0 row 7: a seat's tribe adapter can die while the seat keeps
@@ -2308,7 +2443,7 @@ export function withDispatcher<
            * absent from MCP tools so a wedged MCP transport is not load-bearing.
            */
           case "cli_inbox_delivery_by_launch_v1": {
-            const target = resolveInboxTarget(p, { mode: "launch" })
+            const target = await resolveInboxTarget(p, { mode: "launch" }, connId)
             if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage, target.errorData)
             const messageSeq = p.message_seq
             const messageId = requiredNonEmptyString(p.message_id)
@@ -2490,11 +2625,12 @@ export function withDispatcher<
             }
             let sessionName = authenticatedName ?? ""
             if (operatorAuthorized) {
-              const target = resolveInboxTarget(
+              const target = await resolveInboxTarget(
                 p,
                 method === "cli_inbox_drain_by_launch_v1"
                   ? { mode: "launch" }
                   : { mode: "explicit", defaultSession: DEFAULT_INBOX_WAIT_SESSION },
+                connId,
               )
               if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage, target.errorData)
               sessionName = target.sessionName
@@ -2516,11 +2652,12 @@ export function withDispatcher<
 
           case "cli_inbox_wait":
           case "cli_inbox_wait_by_launch_v1": {
-            const target = resolveInboxTarget(
+            const target = await resolveInboxTarget(
               p,
               method === "cli_inbox_wait_by_launch_v1"
                 ? { mode: "launch" }
                 : { mode: "explicit", defaultSession: DEFAULT_INBOX_WAIT_SESSION },
+              connId,
             )
             if ("errorCode" in target) return makeError(id, target.errorCode, target.errorMessage, target.errorData)
             const { timeoutMs, wakeOnCorrelatedReply } = resolveInboxWaitOptions(p)
