@@ -183,6 +183,31 @@ export type BallTracker = {
   incident?: IncidentIdentity & { active?: boolean }
 }
 
+type IncidentTransition = "opened" | "changed" | "repeated" | "cleared"
+
+/** Read the standing condition inside sendMessage's transaction, beside the upsert it classifies. */
+function incidentTransitionForSend(
+  ctx: TribeContext,
+  input: {
+    kind: MessageKind
+    requestId: string | null
+    active: boolean
+    suppressOpen: boolean
+    recipient: string
+    summary: string | null
+  },
+): IncidentTransition | undefined {
+  if (input.kind !== "direct" || input.requestId === null) return undefined
+  if (!input.active) return "cleared"
+  if (input.suppressOpen) return undefined
+  const standing = ctx.stmts.selectIncidentCondition.get({
+    $request_id: input.requestId,
+    $recipient: input.recipient,
+  }) as { summary: string | null } | null
+  if (standing === null) return "opened"
+  return standing.summary === input.summary ? "repeated" : "changed"
+}
+
 export const DEFAULT_BALL_TTL_MS_BY_CLASS = {
   request: 20 * 60_000,
   query: 20 * 60_000,
@@ -449,6 +474,10 @@ export function sendMessage(
   rowid: number
   tracker?: { request_id: string; closed: number }
   deduplicated?: boolean
+  incident?: {
+    transition: "opened" | "changed" | "repeated" | "cleared"
+    wakesOwner: boolean
+  }
 } {
   const id = classification.messageId ?? randomUUID()
   const ts = Date.now()
@@ -535,19 +564,15 @@ export function sendMessage(
     // 25662 P3 3: an incident send that opens its ball, or changes its condition (the summary), is an edge that wakes
     // the owner's inbox-wait. Decided here, in the same transaction as the upsert below, so a concurrent repeat
     // cannot read a half-written row. A repeat of the same condition and the clear never wake.
-    let wakesOwner = false
-    if (
-      resolvedKind === "direct" &&
-      incidentRequestId !== null &&
-      incidentActive &&
-      ballTracker.suppressOpen !== true
-    ) {
-      const standing = ctx.stmts.selectIncidentCondition.get({
-        $request_id: incidentRequestId,
-        $recipient: ballTracker.owner ?? recipient,
-      }) as { summary: string | null } | null
-      wakesOwner = standing === null || standing.summary !== (classification.summary ?? null)
-    }
+    const incidentTransition = incidentTransitionForSend(ctx, {
+      kind: resolvedKind,
+      requestId: incidentRequestId,
+      active: incidentActive,
+      suppressOpen: ballTracker.suppressOpen === true,
+      recipient: ballTracker.owner ?? recipient,
+      summary: classification.summary ?? null,
+    })
+    const wakesOwner = incidentTransition === "opened" || incidentTransition === "changed"
     const result = ctx.stmts.insertMessage.run({
       $id: id,
       $type: type,
@@ -576,7 +601,16 @@ export function sendMessage(
     if (result.changes === 0) {
       const existing = ctx.stmts.selectMessageById.get({ $id: id }) as { rowid: number; ts: number } | undefined
       if (existing === undefined) throw new Error(`message idempotency row disappeared for ${id}`)
-      return { rowid: existing.rowid, ts: existing.ts, openedOwners, deduplicated: true as const }
+      return {
+        rowid: existing.rowid,
+        ts: existing.ts,
+        openedOwners,
+        deduplicated: true as const,
+        tracker: undefined,
+        correlatedReply: null,
+        wakesOwner: false,
+        ...(incidentRequestId === null ? {} : { incident: { transition: "repeated" as const, wakesOwner: false } }),
+      }
     }
     const rowid = Number(result.lastInsertRowid)
     // sendMessage knows one durable recipient string. Explicit broadcast
@@ -647,10 +681,36 @@ export function sendMessage(
         if (opened.changes > 0) openedOwners.push(owner)
       }
     }
-    return { rowid, ts, tracker, correlatedReply, openedOwners, wakesOwner }
+    return {
+      rowid,
+      ts,
+      tracker,
+      correlatedReply,
+      openedOwners,
+      wakesOwner,
+      deduplicated: false as const,
+      ...(incidentTransition === undefined ? {} : { incident: { transition: incidentTransition, wakesOwner } }),
+    }
   })
-  const { rowid, ts: persistedTs, tracker, correlatedReply, openedOwners, deduplicated, wakesOwner } = persist()
-  if (deduplicated) return { id, ts: persistedTs, rowid, deduplicated: true }
+  const {
+    rowid,
+    ts: persistedTs,
+    tracker,
+    correlatedReply,
+    openedOwners,
+    deduplicated,
+    wakesOwner,
+    incident: incidentOutcome,
+  } = persist()
+  if (deduplicated) {
+    return {
+      id,
+      ts: persistedTs,
+      rowid,
+      deduplicated: true,
+      ...(incidentOutcome === undefined ? {} : { incident: incidentOutcome }),
+    }
+  }
   ctx.onMessageInserted?.({
     id,
     ts,
@@ -669,7 +729,13 @@ export function sendMessage(
     correlatedReply,
     wakesOwner: wakesOwner === true,
   })
-  return { id, ts: persistedTs, rowid, ...(tracker ? { tracker } : {}) }
+  return {
+    id,
+    ts: persistedTs,
+    rowid,
+    ...(tracker ? { tracker } : {}),
+    ...(incidentOutcome === undefined ? {} : { incident: incidentOutcome }),
+  }
 }
 
 /**
