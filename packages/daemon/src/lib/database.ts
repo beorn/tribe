@@ -14,7 +14,22 @@ export function openDatabase(path: string): Database {
   db.run("PRAGMA busy_timeout = 5000")
   db.run("PRAGMA journal_mode = WAL")
 
-  db.run(`CREATE TABLE IF NOT EXISTS sessions (
+  // Acquire the writer lock before reading the version. A second opener must
+  // see the committed version, not choose migrations from a stale read.
+  try {
+    db.run("BEGIN IMMEDIATE")
+  } catch (error) {
+    db.close()
+    if ((error as { code?: string }).code === "SQLITE_BUSY") {
+      throw new Error(`Tribe schema migration lock unavailable after waiting up to 5000 ms: ${path}`, {
+        cause: error,
+      })
+    }
+    throw error
+  }
+
+  try {
+    db.run(`CREATE TABLE IF NOT EXISTS sessions (
 		id         TEXT PRIMARY KEY,
 		name       TEXT NOT NULL UNIQUE,
 		role       TEXT NOT NULL,
@@ -47,33 +62,43 @@ export function openDatabase(path: string): Database {
 		adapter_exit_record TEXT
 	)`)
 
-  // Migrations table — tracks schema version so we can evolve the DB without
-  // relying on try/catch soup. Each row in MIGRATIONS is run exactly once,
-  // in order, for databases whose version < migration.version. Fresh installs
-  // skip all migrations because the CREATE TABLE statements above already
-  // reflect the latest schema.
-  db.run("CREATE TABLE IF NOT EXISTS _schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-  const versionRow = db.prepare("SELECT value FROM _schema_meta WHERE key = 'version'").get() as {
-    value: string
-  } | null
-  const currentVersion = versionRow ? Number(versionRow.value) : 0
+    // Migrations table — tracks schema version so we can evolve the DB without
+    // relying on try/catch soup. Each row in MIGRATIONS is run exactly once,
+    // in order, for databases whose version < migration.version. Fresh installs
+    // skip all migrations because the CREATE TABLE statements above already
+    // reflect the latest schema.
+    db.run("CREATE TABLE IF NOT EXISTS _schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    const versionRow = db.prepare("SELECT value FROM _schema_meta WHERE key = 'version'").get() as {
+      value: string
+    } | null
+    const currentVersion = versionRow ? Number(versionRow.value) : 0
 
-  for (const migration of MIGRATIONS) {
-    if (migration.version <= currentVersion) continue
-    migration.up(db)
-  }
-  const latestMigration = MIGRATIONS.at(-1)
-  if (latestMigration !== undefined && latestMigration.version > currentVersion) {
-    const latest = latestMigration.version
-    db.run("INSERT INTO _schema_meta (key, value) VALUES ('version', $v) ON CONFLICT(key) DO UPDATE SET value = $v", {
-      $v: String(latest),
-    } as never)
-  } else if (versionRow === null && latestMigration !== undefined) {
-    // Fresh install — stamp the current version so future migrations start from here.
-    const latest = latestMigration.version
-    db.run("INSERT OR IGNORE INTO _schema_meta (key, value) VALUES ('version', $v)", {
-      $v: String(latest),
-    } as never)
+    for (const migration of MIGRATIONS) {
+      if (migration.version <= currentVersion) continue
+      migration.up(db)
+    }
+    const latestMigration = MIGRATIONS.at(-1)
+    if (latestMigration !== undefined && latestMigration.version > currentVersion) {
+      const latest = latestMigration.version
+      db.run("INSERT INTO _schema_meta (key, value) VALUES ('version', $v) ON CONFLICT(key) DO UPDATE SET value = $v", {
+        $v: String(latest),
+      } as never)
+    } else if (versionRow === null && latestMigration !== undefined) {
+      // Fresh install — stamp the current version so future migrations start from here.
+      const latest = latestMigration.version
+      db.run("INSERT OR IGNORE INTO _schema_meta (key, value) VALUES ('version', $v)", {
+        $v: String(latest),
+      } as never)
+    }
+
+    // The legacy index is retired on every open. Keep its removal atomic with
+    // the migration decision and version stamp, including already-current DBs.
+    db.run("DROP INDEX IF EXISTS idx_messages_plugin_kind_ts")
+    db.run("COMMIT")
+  } catch (error) {
+    if (db.inTransaction) db.run("ROLLBACK")
+    db.close()
+    throw error
   }
 
   db.run(`CREATE TABLE IF NOT EXISTS messages (
@@ -280,7 +305,6 @@ export function openDatabase(path: string): Database {
   // instead. See the wedge report for the numbers.
   db.run("CREATE INDEX IF NOT EXISTS idx_coordination_project ON coordination(project_id)")
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_delivery_ts ON messages(delivery, ts)")
-  db.run("DROP INDEX IF EXISTS idx_messages_plugin_kind_ts")
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_topic_ts ON messages(topic, ts)")
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_room_ts ON messages(room_id, ts)")
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_archive_ts ON messages_archive(ts)")
@@ -1015,9 +1039,8 @@ const MIGRATIONS: readonly Migration[] = [
         optionalCursorMax(db, "mailbox_cursors", "last_actionable_seq"),
       )
 
-      db.run("BEGIN IMMEDIATE")
-      try {
-        db.run(`CREATE TABLE messages_v22 (
+      // openDatabase owns the transaction for this rebuild and its version stamp.
+      db.run(`CREATE TABLE messages_v22 (
 			rowid      INTEGER PRIMARY KEY AUTOINCREMENT,
 			id         TEXT NOT NULL UNIQUE,
 			type       TEXT NOT NULL,
@@ -1035,7 +1058,7 @@ const MIGRATIONS: readonly Migration[] = [
 			reply      TEXT,
 			summary    TEXT
 		)`)
-        db.run(`INSERT INTO messages_v22 (
+      db.run(`INSERT INTO messages_v22 (
 			rowid, id, type, sender, recipient, kind, content, bead_id, ref, ts,
 			delivery, topic, room_id, request, reply, summary
 		)
@@ -1044,26 +1067,21 @@ const MIGRATIONS: readonly Migration[] = [
 			delivery, topic, room_id, request, reply, summary
         FROM messages
         ORDER BY rowid`)
-        db.run("DROP TABLE messages")
-        db.run("ALTER TABLE messages_v22 RENAME TO messages")
-        const currentSequence = db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'messages'").get() as {
-          seq: number
-        } | null
-        if (durableHighWater > (currentSequence?.seq ?? 0)) {
-          if (currentSequence === null) {
-            db.run("INSERT INTO sqlite_sequence (name, seq) VALUES ('messages', $seq)", {
-              $seq: durableHighWater,
-            } as never)
-          } else {
-            db.run("UPDATE sqlite_sequence SET seq = $seq WHERE name = 'messages'", {
-              $seq: durableHighWater,
-            } as never)
-          }
+      db.run("DROP TABLE messages")
+      db.run("ALTER TABLE messages_v22 RENAME TO messages")
+      const currentSequence = db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'messages'").get() as {
+        seq: number
+      } | null
+      if (durableHighWater > (currentSequence?.seq ?? 0)) {
+        if (currentSequence === null) {
+          db.run("INSERT INTO sqlite_sequence (name, seq) VALUES ('messages', $seq)", {
+            $seq: durableHighWater,
+          } as never)
+        } else {
+          db.run("UPDATE sqlite_sequence SET seq = $seq WHERE name = 'messages'", {
+            $seq: durableHighWater,
+          } as never)
         }
-        db.run("COMMIT")
-      } catch (error) {
-        db.run("ROLLBACK")
-        throw error
       }
     },
   },

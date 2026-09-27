@@ -16,7 +16,7 @@ import { join } from "node:path"
 import { safeRemoveSync } from "removely"
 import { describe, expect, it } from "vitest"
 
-import { openDatabase } from "./database.ts"
+import { CURRENT_SCHEMA_VERSION, openDatabase } from "./database.ts"
 
 const TEST_ROOT = realpathSync(tmpdir())
 
@@ -111,4 +111,124 @@ describe("openDatabase", () => {
       safeRemoveSync(dir, { within: TEST_ROOT, allowMissing: true })
     }
   }, 15_000)
+
+  /**
+   * @failure Two processes read schema v29 before either adds principal_class;
+   *          the loser exits on a duplicate column despite a valid upgraded DB.
+   * @level   l2
+   * @consumer Tribe daemon processes opening the same existing database
+   *
+   * The first real Bun opener pauses at its v30 ALTER. A second process can
+   * complete the upgrade before it resumes on the old migration runner.
+   */
+  it("serializes two v29 openers before they decide which migrations to run", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "tribe-v29-concurrent-open-")))
+    const path = join(dir, "tribe.sqlite")
+    const children: Array<ReturnType<typeof Bun.spawn>> = []
+
+    try {
+      const seed = new Database(path, { create: true })
+      try {
+        seed.run("CREATE TABLE _schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        seed.run("INSERT INTO _schema_meta VALUES ('version', '29')")
+        seed.run(`CREATE TABLE sessions (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, role TEXT NOT NULL,
+          domains TEXT NOT NULL DEFAULT '[]', pid INTEGER NOT NULL, cwd TEXT,
+          project_id TEXT, claude_session_id TEXT, claude_session_name TEXT,
+          identity_token TEXT, mailbox_authority_hash TEXT,
+          launch_id TEXT, launch_parent_pid INTEGER,
+          started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+          last_delivered_ts INTEGER, last_delivered_seq INTEGER NOT NULL DEFAULT 0,
+          last_inbox_pull_seq INTEGER NOT NULL DEFAULT 0,
+          filter_mode TEXT NOT NULL DEFAULT 'normal', filter_until INTEGER,
+          filter_mute TEXT, delivery TEXT NOT NULL DEFAULT 'push', account TEXT,
+          provider TEXT
+        )`)
+        seed.run(
+          "INSERT INTO sessions (id, name, role, pid, started_at, updated_at) VALUES ('a', '@a', 'agent', 1, 1, 1)",
+        )
+        expect(seed.prepare("PRAGMA table_info(sessions)").all()).not.toContainEqual(
+          expect.objectContaining({ name: "principal_class" }),
+        )
+      } finally {
+        seed.close()
+      }
+
+      const childCode = `
+        import { Database } from "bun:sqlite"
+        const [modulePath, dbPath, slow] = process.argv.slice(-3)
+        if (slow === "true") {
+          const original = Database.prototype.run
+          Database.prototype.run = function (sql, ...args) {
+            if (sql.startsWith("ALTER TABLE sessions ADD COLUMN principal_class")) {
+              process.stdout.write("at-v30\\n")
+              Bun.sleepSync(1000)
+            }
+            return original.call(this, sql, ...args)
+          }
+        }
+        const { openDatabase } = await import(modulePath)
+        const db = openDatabase(dbPath)
+        db.close()
+      `
+      const spawnOpener = (slow: boolean) => {
+        const child = Bun.spawn({
+          cmd: [
+            process.execPath,
+            "--eval",
+            childCode,
+            "--",
+            new URL("./database.ts", import.meta.url).pathname,
+            path,
+            String(slow),
+          ],
+          stdout: "pipe",
+          stderr: "pipe",
+        })
+        children.push(child)
+        return child
+      }
+
+      const first = spawnOpener(true)
+      const reader = first.stdout.getReader()
+      const timer = setTimeout(() => first.kill(), 10_000)
+      try {
+        const signal = await reader.read()
+        expect(signal.done).toBe(false)
+        expect(new TextDecoder().decode(signal.value)).toContain("at-v30")
+      } finally {
+        clearTimeout(timer)
+        reader.releaseLock()
+      }
+
+      const second = spawnOpener(false)
+      const [firstExit, secondExit, firstErr, secondErr] = await Promise.all([
+        first.exited,
+        second.exited,
+        new Response(first.stderr).text(),
+        new Response(second.stderr).text(),
+      ])
+      expect(firstExit, firstErr).toBe(0)
+      expect(secondExit, secondErr).toBe(0)
+
+      const upgraded = new Database(path)
+      try {
+        expect(upgraded.prepare("SELECT value FROM _schema_meta WHERE key = 'version'").get()).toEqual({
+          value: String(CURRENT_SCHEMA_VERSION),
+        })
+        const columns = upgraded.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>
+        expect(columns.filter((column) => column.name === "principal_class")).toHaveLength(1)
+        expect(upgraded.prepare("SELECT name, principal_class FROM sessions WHERE id = 'a'").get()).toEqual({
+          name: "@a",
+          principal_class: "agent",
+        })
+      } finally {
+        upgraded.close()
+      }
+    } finally {
+      for (const child of children) if (child.exitCode === null) child.kill()
+      await Promise.all(children.map((child) => child.exited))
+      safeRemoveSync(dir, { within: TEST_ROOT, allowMissing: true })
+    }
+  }, 20_000)
 })
