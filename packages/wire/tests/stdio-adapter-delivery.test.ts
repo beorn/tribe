@@ -765,10 +765,17 @@ describe("stdio adapter delivery modes", () => {
       "automatic reconnect after repeated conflicts",
       { timeoutMs: 10_000 },
     )
-    const liveReplyPromise = waitForLine(child, (line) => line.id === 4, { timeoutMs: 10_000 })
-    writeJson(child, callToolPayload(4, "members", {}))
-    const liveReply = (await liveReplyPromise) as {
-      result?: { isError?: boolean; content?: Array<{ text?: string }> }
+    // The daemon seeing the 4th register does not mean the client has installed
+    // its successor yet; until it does, a call rejects with exactly the 22994
+    // reconnect text and callers retry. Retry past only that text.
+    type ToolReply = { result?: { isError?: boolean; content?: Array<{ text?: string }> } }
+    let liveReply: ToolReply = {}
+    for (let id = 4; id < 4 + 50; id++) {
+      const replyPromise = waitForLine(child, (line) => line.id === id, { timeoutMs: 10_000 })
+      writeJson(child, callToolPayload(id, "members", {}))
+      liveReply = (await replyPromise) as ToolReply
+      if (!liveReply.result?.content?.[0]?.text?.includes("daemon connection closed; reconnecting")) break
+      await new Promise((resolveTick) => setTimeout(resolveTick, 100))
     }
 
     expect(child.exitCode).toBeNull()
