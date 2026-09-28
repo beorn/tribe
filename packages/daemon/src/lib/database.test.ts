@@ -17,6 +17,7 @@ import { safeRemoveSync } from "removely"
 import { describe, expect, it } from "vitest"
 
 import { CURRENT_SCHEMA_VERSION, openDatabase } from "./database.ts"
+import { fileURLToPath } from "node:url"
 
 const TEST_ROOT = realpathSync(tmpdir())
 
@@ -178,7 +179,7 @@ describe("openDatabase", () => {
             "--eval",
             childCode,
             "--",
-            new URL("./database.ts", import.meta.url).pathname,
+            fileURLToPath(new URL("./database.ts", import.meta.url)),
             path,
             String(slow),
           ],

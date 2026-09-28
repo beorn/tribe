@@ -9,6 +9,7 @@ import { Database } from "bun:sqlite"
 import * as fs from "fs"
 import * as path from "path"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
+import { fileURLToPath } from "node:url"
 
 const corpus = vi.hoisted(() => ({ projects: "", plans: [] as string[], todos: [] as string[] }))
 vi.mock("../../src/history/db", async (original) => ({
@@ -26,7 +27,7 @@ const { initSchema, runMigrations, closeDb, getIndexMeta, setIndexMeta } = await
 const { ftsSearchWithSnippet } = await import("../../src/history/db-queries")
 const { recall } = await import("../../src/history/search")
 
-const FIXTURES_DIR = path.join(path.dirname(new URL(import.meta.url).pathname), "../fixtures/subagent-migration")
+const FIXTURES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "../fixtures/subagent-migration")
 
 let root: string
 let db: Database

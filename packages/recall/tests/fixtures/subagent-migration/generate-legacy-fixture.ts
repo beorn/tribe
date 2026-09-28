@@ -2,8 +2,9 @@ import { Database as SqliteDb } from "bun:sqlite"
 import * as fs from "fs"
 import * as path from "path"
 import { spawnSync } from "child_process"
+import { fileURLToPath } from "node:url"
 
-const outDir = path.dirname(new URL(import.meta.url).pathname)
+const outDir = path.dirname(fileURLToPath(import.meta.url))
 const tmp = fs.mkdtempSync("/tmp/gen-legacy-fixture-")
 const pdir = path.join(tmp, "projects")
 const proj = path.join(pdir, "test-legacy-proj")

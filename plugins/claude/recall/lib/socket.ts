@@ -18,6 +18,7 @@ import {
   type DaemonClient,
   type ReconnectingClientOpts as ClientReconnectingClientOpts,
 } from "tribe-wire"
+import { fileURLToPath } from "node:url"
 
 // ---------------------------------------------------------------------------
 // Re-exports from tribe-wire
@@ -92,7 +93,7 @@ export type ReconnectingClientOpts = {
 
 function defaultDaemonScript(): string {
   // plugins/claude/recall/lib/socket.ts → packages/daemon/src/daemon.ts
-  return resolve(dirname(new URL(import.meta.url).pathname), "../../../../packages/daemon/src/daemon.ts")
+  return resolve(dirname(fileURLToPath(import.meta.url)), "../../../../packages/daemon/src/daemon.ts")
 }
 
 function toClientOpts(opts?: ConnectOrStartOpts): ClientConnectOrStartOpts {
