@@ -27,6 +27,7 @@ import { safeRemoveSync } from "removely"
 // wikilink find) mismatch unless TMPDIR is already canonical.
 mkdirSync(`/tmp/tribe-vitest-${process.getuid?.() ?? 0}`, { recursive: true })
 const TEST_TMP_BASE = realpathSync(`/tmp/tribe-vitest-${process.getuid?.() ?? 0}`)
+process.env.TMPDIR = TEST_TMP_BASE
 const STALE_CUTOFF_MS = Date.now() - 24 * 60 * 60 * 1000
 for (const name of readdirSync(TEST_TMP_BASE)) {
   const stale = join(TEST_TMP_BASE, name)
@@ -47,8 +48,6 @@ for (const name of readdirSync(TEST_TMP_BASE)) {
   }
   if (mtimeMs < STALE_CUTOFF_MS) safeRemoveSync(stale, { within: TEST_TMP_BASE, allowMissing: true })
 }
-process.env.TMPDIR = TEST_TMP_BASE
-
 // Socket guard — tests must NEVER reach the real per-user tribe daemon.
 // resolveSocketPath() falls back TRIBE_SOCKET -> XDG_RUNTIME_DIR ->
 // ~/.local/share/tribe/tribe.sock, so an unset env in a test-spawned CLI or
