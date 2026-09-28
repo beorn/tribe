@@ -76,11 +76,7 @@ export function reloadReplacementForEnvironment(
 }
 
 export function hotReloadSourceWatchEnabled(env: Readonly<NodeJS.ProcessEnv>, disableWatch = false): boolean {
-  return (
-    !disableWatch &&
-    !env[HAB_SERVICE_NAME_ENV]?.trim() &&
-    !env.TRIBE_NO_AUTORELOAD
-  )
+  return !disableWatch && !env[HAB_SERVICE_NAME_ENV]?.trim() && !env.TRIBE_NO_AUTORELOAD
 }
 
 function buildSourceFiles(sourceDir: string, libTribeDir: string): string[] {

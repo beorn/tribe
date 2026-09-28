@@ -41,7 +41,7 @@ function incomplete(reads: readonly (typeof read)[]): CanonicalProcessObservatio
 describe("the snapshot's pending /proc reads reach the monitor (24248)", () => {
   const readPayload = async (payload: unknown) => {
     const source = createHealthProcessSource({
-      env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+      env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
       runCommand: async () => ({ exitCode: 0, stderr: "", stdout: `${JSON.stringify(payload)}\n` }),
     })
     if (source.kind !== "managed") throw new Error("expected managed source")

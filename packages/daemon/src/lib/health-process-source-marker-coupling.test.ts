@@ -63,7 +63,6 @@ describe("the markers list and the standalone sanitizer agree on one vocabulary"
 
   const habLaunchedEnvironment = (): NodeJS.ProcessEnv => ({
     ...Object.fromEntries(SAMPLE_HAB_SESSION_VARIABLES.map((name) => [name, `value-of-${name}`])),
-    HAB_SERVICE_KIND: "agent",
     HAB_SERVICE_NAME: "tribe-daemon",
     PATH: "/usr/bin",
   })

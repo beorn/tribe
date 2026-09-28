@@ -71,12 +71,16 @@ describe("Tribe daemon environment ownership", () => {
       TRIBE_DAEMON_SUPERVISOR_PID: "999",
       TRIBE_OPERATOR_CAPABILITY_FD: "3",
     }
-    expect(sanitizeDaemonProcessEnvironment(env, 999)).toEqual(name.trim() ? { HAB_SERVICE_NAME: name } : {
-      HAB_SERVICE_NAME: name,
-      TRIBE_DAEMON_RELOAD_EXIT_CODE: "75",
-      TRIBE_DAEMON_SUPERVISOR_PID: "999",
-      TRIBE_OPERATOR_CAPABILITY_FD: "3",
-    })
+    expect(sanitizeDaemonProcessEnvironment(env, 999)).toEqual(
+      name.trim()
+        ? { HAB_SERVICE_NAME: name }
+        : {
+            HAB_SERVICE_NAME: name,
+            TRIBE_DAEMON_RELOAD_EXIT_CODE: "75",
+            TRIBE_DAEMON_SUPERVISOR_PID: "999",
+            TRIBE_OPERATOR_CAPABILITY_FD: "3",
+          },
+    )
   })
 
   test("standalone pre-spawn sanitation also drops stale lifecycle ownership", () => {
