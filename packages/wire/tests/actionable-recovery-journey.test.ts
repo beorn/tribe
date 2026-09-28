@@ -26,7 +26,16 @@
  *   exit-2 path. This journey adds no standalone gate surface.
  */
 
-import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -404,7 +413,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
   function spawnDaemon(
     socketPath: string,
     dbPath: string,
-    opts: { operatorCapabilityFd?: number; identityVerifier?: string } = {},
+    opts: { operatorCapabilityFd?: number; identityVerifier?: string; env?: NodeJS.ProcessEnv } = {},
   ): ChildProcessWithoutNullStreams {
     const verifierArgs = opts.identityVerifier === undefined ? [] : ["--identity-verifier", opts.identityVerifier]
     const daemonArgs = [DAEMON, "--socket", socketPath, "--db", dbPath, "--foreground", "--no-lore", ...verifierArgs]
@@ -419,6 +428,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         DEBUG: "tribe:*",
         DEBUG_LOG: join(tmpDir, "daemon.log"),
         LOG_FILE: join(tmpDir, "daemon.log"),
+        ...opts.env,
       },
       stdio:
         opts.operatorCapabilityFd === undefined
@@ -846,8 +856,13 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const capability = "operator-lifecycle-secret"
     const capabilityPath = join(tmpDir, "operator-capability")
     writeFileSync(capabilityPath, capability, { mode: 0o600 })
+    const daemonHome = join(tmpDir, "daemon-home")
+    mkdirSync(daemonHome, { recursive: true })
     const capabilityFd = openSync(capabilityPath, "r")
-    daemonProc = spawnDaemon(socketPath, dbPath, { operatorCapabilityFd: capabilityFd })
+    daemonProc = spawnDaemon(socketPath, dbPath, {
+      operatorCapabilityFd: capabilityFd,
+      env: { HOME: daemonHome },
+    })
     closeSync(capabilityFd)
     await waitForDaemonSocket(daemonProc, socketPath, "operator lifecycle daemon socket")
 
@@ -855,6 +870,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       cwd: tmpDir,
       env: {
         ...BASE_ENV,
+        HOME: daemonHome,
         TRIBE_DB: dbPath,
         TRIBE_DELIVERY: "pull",
         TRIBE_PULL_TRANSPORT: "mcp",
@@ -910,7 +926,8 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     successor.client.close()
 
     // 25664: the tests' daemons write to their own sink, never the production daemon-stderr log
-    const productionLog = join(activityLogDir(), daemonStderrLogFilename(new Date()))
+    // Evaluated under daemonHome so concurrent/prior tests sharing suite HOME do not collide.
+    const productionLog = join(activityLogDir({ HOME: daemonHome }), daemonStderrLogFilename(new Date()))
     expect(existsSync(productionLog), `production daemon-stderr log ${productionLog} was created by test`).toBe(false)
     const ownSink = join(tmpDir, "daemon-stderr.log")
     expect(existsSync(ownSink), `test daemon stderr sink ${ownSink} was not created`).toBe(true)
