@@ -421,20 +421,22 @@ exec bun "${tsPath}" "$@"
 
   function makeRealAg(isolatedHome?: string): string {
     const realAgEntry = process.env.AG_BIN || join(__dirname, "../../../../../../ag/packages/ag-cli/src/bin/ag.ts")
-    if (existsSync(realAgEntry) && process.env.USE_FIXTURE_PRODUCER !== "1") {
-      const scriptPath = join(tempDir, `real-ag-${Math.random().toString(36).slice(2)}.sh`)
-      const homeVal = isolatedHome ?? tempDir
-      writeFileSync(
-        scriptPath,
-        `#!/bin/sh
+    if (!existsSync(realAgEntry)) {
+      throw new Error(
+        `makeRealAg: real ag producer entry does not exist at ${realAgEntry}. Real-producer variant refuses loudly when ag is absent instead of switching silently.`,
+      )
+    }
+    const scriptPath = join(tempDir, `real-ag-${Math.random().toString(36).slice(2)}.sh`)
+    const homeVal = isolatedHome ?? tempDir
+    writeFileSync(
+      scriptPath,
+      `#!/bin/sh
 export HOME="${homeVal}"
 exec bun "${realAgEntry}" "$@"
 `,
-      )
-      chmodSync(scriptPath, 0o755)
-      return scriptPath
-    }
-    return makeFixtureProducer(isolatedHome)
+    )
+    chmodSync(scriptPath, 0o755)
+    return scriptPath
   }
 
   describe("resolveAgBin", () => {
@@ -1697,124 +1699,275 @@ if (args.includes("list")) {
     })
   })
 
-  describe("Chief Review 2106: Correction 2 - Real Producer Skip, Growth & Ambiguous Copies", () => {
-    test("real producer two-pass skip exports 0 paths on second pass", async () => {
-      const codexHome = join(tempDir, "codex-home-skip")
-      const realAg = makeRealAg(codexHome)
-      const sessionDir = join(codexHome, ".codex/sessions/2026/09/21")
-      mkdirSync(sessionDir, { recursive: true })
-      const rolloutFile = join(sessionDir, "rollout-2026-09-21T10-00-00-019fce85-test-skip.jsonl")
-      writeFileSync(
-        rolloutFile,
-        JSON.stringify({
-          type: "session_meta",
-          payload: { id: "019fce85-test-skip", cwd: "/home/work", timestamp: "2026-09-21T10:00:00.000Z" },
-        }) +
-          "\n" +
-          JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Real producer message 1" } }) +
-          "\n",
-      )
-
-      // Pass 1: explicit path indexing
-      const pass1 = await indexCodexTranscripts(db, { agBin: realAg, path: rolloutFile })
-      expect(pass1.sessions).toBe(1)
-      expect(pass1.rows).toBe(1)
-      expect(pass1.skipped).toBe(0)
-
-      // Pass 2: catalog indexing with same unchanged file -> 0 paths exported, 1 skipped
-      const pass2 = await indexCodexTranscripts(db, { agBin: realAg })
-      expect(pass2.sessions).toBe(0)
-      expect(pass2.rows).toBe(0)
-      expect(pass2.skipped).toBe(1)
-    })
-
-    test("real producer grown file selects and updates session", async () => {
-      const codexHome = join(tempDir, "codex-home-growth")
-      const realAg = makeRealAg(codexHome)
-      const sessionDir = join(codexHome, ".codex/sessions/2026/09/21")
-      mkdirSync(sessionDir, { recursive: true })
-      const rolloutFile = join(sessionDir, "rollout-2026-09-21T11-00-00-019fce85-test-grow.jsonl")
-      writeFileSync(
-        rolloutFile,
-        JSON.stringify({
-          type: "session_meta",
-          payload: { id: "019fce85-test-grow", cwd: "/home/work", timestamp: "2026-09-21T11:00:00.000Z" },
-        }) +
-          "\n" +
-          JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Initial message" } }) +
-          "\n",
-      )
-
-      const pass1 = await indexCodexTranscripts(db, { agBin: realAg })
-      expect(pass1.sessions).toBe(1)
-      expect(pass1.rows).toBe(1)
-
-      // Grow file by adding a second message
-      writeFileSync(
-        rolloutFile,
-        JSON.stringify({
-          type: "session_meta",
-          payload: { id: "019fce85-test-grow", cwd: "/home/work", timestamp: "2026-09-21T11:00:00.000Z" },
-        }) +
-          "\n" +
-          JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Initial message" } }) +
-          "\n" +
+  describe("Chief Review 2106: Correction 2 - Skip, Growth & Ambiguous Copies", () => {
+    describe("fixture producer", () => {
+      test("fixture producer two-pass skip exports 0 paths on second pass", async () => {
+        const codexHome = join(tempDir, "codex-home-skip-fixture")
+        const producerAg = makeFixtureProducer(codexHome)
+        const sessionDir = join(codexHome, ".codex/sessions/2026/09/21")
+        mkdirSync(sessionDir, { recursive: true })
+        const rolloutFile = join(sessionDir, "rollout-2026-09-21T10-00-00-019fce85-test-skip.jsonl")
+        writeFileSync(
+          rolloutFile,
           JSON.stringify({
-            type: "response_item",
-            payload: { type: "message", role: "assistant", content: [{ type: "text", text: "Grown message 2" }] },
+            type: "session_meta",
+            payload: { id: "019fce85-test-skip", cwd: "/home/work", timestamp: "2026-09-21T10:00:00.000Z" },
           }) +
-          "\n",
-      )
+            "\n" +
+            JSON.stringify({
+              type: "event_msg",
+              payload: { type: "user_message", message: "Fixture producer message 1" },
+            }) +
+            "\n",
+        )
 
-      const pass2 = await indexCodexTranscripts(db, { agBin: realAg })
-      expect(pass2.sessions).toBe(1)
-      expect(pass2.rows).toBe(2)
-      expect(pass2.skipped).toBe(0)
+        // Pass 1: explicit path indexing
+        const pass1 = await indexCodexTranscripts(db, { agBin: producerAg, path: rolloutFile })
+        expect(pass1.sessions).toBe(1)
+        expect(pass1.rows).toBe(1)
+        expect(pass1.skipped).toBe(0)
 
-      const sess = getSession(db, "codex:019fce85-test-grow")
-      expect(sess?.message_count).toBe(2)
+        // Pass 2: catalog indexing with same unchanged file -> 0 paths exported, 1 skipped
+        const pass2 = await indexCodexTranscripts(db, { agBin: producerAg })
+        expect(pass2.sessions).toBe(0)
+        expect(pass2.rows).toBe(0)
+        expect(pass2.skipped).toBe(1)
+      })
+
+      test("fixture producer grown file selects and updates session", async () => {
+        const codexHome = join(tempDir, "codex-home-growth-fixture")
+        const producerAg = makeFixtureProducer(codexHome)
+        const sessionDir = join(codexHome, ".codex/sessions/2026/09/21")
+        mkdirSync(sessionDir, { recursive: true })
+        const rolloutFile = join(sessionDir, "rollout-2026-09-21T11-00-00-019fce85-test-grow.jsonl")
+        writeFileSync(
+          rolloutFile,
+          JSON.stringify({
+            type: "session_meta",
+            payload: { id: "019fce85-test-grow", cwd: "/home/work", timestamp: "2026-09-21T11:00:00.000Z" },
+          }) +
+            "\n" +
+            JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Initial message" } }) +
+            "\n",
+        )
+
+        const pass1 = await indexCodexTranscripts(db, { agBin: producerAg })
+        expect(pass1.sessions).toBe(1)
+        expect(pass1.rows).toBe(1)
+
+        // Grow file by adding a second message
+        writeFileSync(
+          rolloutFile,
+          JSON.stringify({
+            type: "session_meta",
+            payload: { id: "019fce85-test-grow", cwd: "/home/work", timestamp: "2026-09-21T11:00:00.000Z" },
+          }) +
+            "\n" +
+            JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Initial message" } }) +
+            "\n" +
+            JSON.stringify({
+              type: "response_item",
+              payload: { type: "message", role: "assistant", content: [{ type: "text", text: "Grown message 2" }] },
+            }) +
+            "\n",
+        )
+
+        const pass2 = await indexCodexTranscripts(db, { agBin: producerAg })
+        expect(pass2.sessions).toBe(1)
+        expect(pass2.rows).toBe(2)
+        expect(pass2.skipped).toBe(0)
+
+        const sess = getSession(db, "codex:019fce85-test-grow")
+        expect(sess?.message_count).toBe(2)
+      })
+
+      test("fixture producer indexes genuinely ambiguous copies under distinct keys", async () => {
+        const codexHome = join(tempDir, "codex-home-ambig-fixture")
+        const producerAg = makeFixtureProducer(codexHome)
+        mkdirSync(join(codexHome, ".codex/sessions"), { recursive: true })
+        const acc1Dir = join(codexHome, ".config/ag/profiles/codex/work/sessions/2026/09/21")
+        const acc2Dir = join(codexHome, ".config/ag/profiles/codex/personal/sessions/2026/09/21")
+        mkdirSync(acc1Dir, { recursive: true })
+        mkdirSync(acc2Dir, { recursive: true })
+
+        const file1 = join(acc1Dir, "rollout-2026-09-21T12-00-00-019fce85-test-ambig.jsonl")
+        const file2 = join(acc2Dir, "rollout-2026-09-21T12-00-00-019fce85-test-ambig.jsonl")
+
+        const content =
+          JSON.stringify({
+            type: "session_meta",
+            payload: { id: "019fce85-test-ambig", cwd: "/home/work", timestamp: "2026-09-21T12:00:00.000Z" },
+          }) +
+          "\n" +
+          JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Ambiguous message" } }) +
+          "\n"
+        writeFileSync(file1, content)
+        writeFileSync(file2, content)
+        const fixedTime = new Date("2026-09-21T12:00:00.000Z")
+        utimesSync(file1, fixedTime, fixedTime)
+        utimesSync(file2, fixedTime, fixedTime)
+
+        const result = await indexCodexTranscripts(db, { agBin: producerAg })
+        expect(result.sessions).toBe(1)
+        expect(result.ambiguous).toBe(1)
+
+        const allSessions = db.prepare("SELECT id, status, size_bytes FROM sessions WHERE id LIKE 'codex:%'").all() as {
+          id: string
+          status: string
+          size_bytes: number
+        }[]
+        expect(allSessions).toHaveLength(2)
+        expect(allSessions[0]?.id).not.toBe(allSessions[1]?.id)
+        for (const s of allSessions) {
+          expect(s.status).toBe("complete")
+        }
+      })
     })
 
-    test("real producer indexes genuinely ambiguous copies under distinct keys", async () => {
-      const codexHome = join(tempDir, "codex-home-ambig")
-      const realAg = makeRealAg(codexHome)
-      mkdirSync(join(codexHome, ".codex/sessions"), { recursive: true })
-      const acc1Dir = join(codexHome, ".config/ag/profiles/codex/work/sessions/2026/09/21")
-      const acc2Dir = join(codexHome, ".config/ag/profiles/codex/personal/sessions/2026/09/21")
-      mkdirSync(acc1Dir, { recursive: true })
-      mkdirSync(acc2Dir, { recursive: true })
+    describe("real producer", () => {
+      const runReal = Boolean(
+        process.env.TEST_REAL_PRODUCER === "1" ||
+        process.env.RUN_REAL_PRODUCER === "1" ||
+        (process.env.AG_BIN && existsSync(process.env.AG_BIN)),
+      )
 
-      const file1 = join(acc1Dir, "rollout-2026-09-21T12-00-00-019fce85-test-ambig.jsonl")
-      const file2 = join(acc2Dir, "rollout-2026-09-21T12-00-00-019fce85-test-ambig.jsonl")
+      test("real producer variant refuses loudly when ag is absent instead of switching silently", () => {
+        const origAgBin = process.env.AG_BIN
+        try {
+          process.env.AG_BIN = join(tempDir, "nonexistent-ag-bin.ts")
+          expect(() => makeRealAg()).toThrow(
+            /makeRealAg: real ag producer entry does not exist at .* Real-producer variant refuses loudly when ag is absent instead of switching silently\./,
+          )
+        } finally {
+          if (origAgBin === undefined) {
+            delete process.env.AG_BIN
+          } else {
+            process.env.AG_BIN = origAgBin
+          }
+        }
+      })
 
-      const content =
-        JSON.stringify({
-          type: "session_meta",
-          payload: { id: "019fce85-test-ambig", cwd: "/home/work", timestamp: "2026-09-21T12:00:00.000Z" },
-        }) +
-        "\n" +
-        JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Ambiguous message" } }) +
-        "\n"
-      writeFileSync(file1, content)
-      writeFileSync(file2, content)
-      const fixedTime = new Date("2026-09-21T12:00:00.000Z")
-      utimesSync(file1, fixedTime, fixedTime)
-      utimesSync(file2, fixedTime, fixedTime)
+      test.runIf(runReal)("real producer two-pass skip exports 0 paths on second pass", async () => {
+        const codexHome = join(tempDir, "codex-home-skip-real")
+        const realAg = makeRealAg(codexHome)
+        const sessionDir = join(codexHome, ".codex/sessions/2026/09/21")
+        mkdirSync(sessionDir, { recursive: true })
+        const rolloutFile = join(sessionDir, "rollout-2026-09-21T10-00-00-019fce85-test-skip.jsonl")
+        writeFileSync(
+          rolloutFile,
+          JSON.stringify({
+            type: "session_meta",
+            payload: { id: "019fce85-test-skip", cwd: "/home/work", timestamp: "2026-09-21T10:00:00.000Z" },
+          }) +
+            "\n" +
+            JSON.stringify({
+              type: "event_msg",
+              payload: { type: "user_message", message: "Real producer message 1" },
+            }) +
+            "\n",
+        )
 
-      const result = await indexCodexTranscripts(db, { agBin: realAg })
-      expect(result.sessions).toBe(1)
-      expect(result.ambiguous).toBe(1)
+        // Pass 1: explicit path indexing
+        const pass1 = await indexCodexTranscripts(db, { agBin: realAg, path: rolloutFile })
+        expect(pass1.sessions).toBe(1)
+        expect(pass1.rows).toBe(1)
+        expect(pass1.skipped).toBe(0)
 
-      const allSessions = db.prepare("SELECT id, status, size_bytes FROM sessions WHERE id LIKE 'codex:%'").all() as {
-        id: string
-        status: string
-        size_bytes: number
-      }[]
-      expect(allSessions).toHaveLength(2)
-      expect(allSessions[0]?.id).not.toBe(allSessions[1]?.id)
-      for (const s of allSessions) {
-        expect(s.status).toBe("complete")
-      }
+        // Pass 2: catalog indexing with same unchanged file -> 0 paths exported, 1 skipped
+        const pass2 = await indexCodexTranscripts(db, { agBin: realAg })
+        expect(pass2.sessions).toBe(0)
+        expect(pass2.rows).toBe(0)
+        expect(pass2.skipped).toBe(1)
+      })
+
+      test.runIf(runReal)("real producer grown file selects and updates session", async () => {
+        const codexHome = join(tempDir, "codex-home-growth-real")
+        const realAg = makeRealAg(codexHome)
+        const sessionDir = join(codexHome, ".codex/sessions/2026/09/21")
+        mkdirSync(sessionDir, { recursive: true })
+        const rolloutFile = join(sessionDir, "rollout-2026-09-21T11-00-00-019fce85-test-grow.jsonl")
+        writeFileSync(
+          rolloutFile,
+          JSON.stringify({
+            type: "session_meta",
+            payload: { id: "019fce85-test-grow", cwd: "/home/work", timestamp: "2026-09-21T11:00:00.000Z" },
+          }) +
+            "\n" +
+            JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Initial message" } }) +
+            "\n",
+        )
+
+        const pass1 = await indexCodexTranscripts(db, { agBin: realAg })
+        expect(pass1.sessions).toBe(1)
+        expect(pass1.rows).toBe(1)
+
+        // Grow file by adding a second message
+        writeFileSync(
+          rolloutFile,
+          JSON.stringify({
+            type: "session_meta",
+            payload: { id: "019fce85-test-grow", cwd: "/home/work", timestamp: "2026-09-21T11:00:00.000Z" },
+          }) +
+            "\n" +
+            JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Initial message" } }) +
+            "\n" +
+            JSON.stringify({
+              type: "response_item",
+              payload: { type: "message", role: "assistant", content: [{ type: "text", text: "Grown message 2" }] },
+            }) +
+            "\n",
+        )
+
+        const pass2 = await indexCodexTranscripts(db, { agBin: realAg })
+        expect(pass2.sessions).toBe(1)
+        expect(pass2.rows).toBe(2)
+        expect(pass2.skipped).toBe(0)
+
+        const sess = getSession(db, "codex:019fce85-test-grow")
+        expect(sess?.message_count).toBe(2)
+      })
+
+      test.runIf(runReal)("real producer indexes genuinely ambiguous copies under distinct keys", async () => {
+        const codexHome = join(tempDir, "codex-home-ambig-real")
+        const realAg = makeRealAg(codexHome)
+        mkdirSync(join(codexHome, ".codex/sessions"), { recursive: true })
+        const acc1Dir = join(codexHome, ".config/ag/profiles/codex/work/sessions/2026/09/21")
+        const acc2Dir = join(codexHome, ".config/ag/profiles/codex/personal/sessions/2026/09/21")
+        mkdirSync(acc1Dir, { recursive: true })
+        mkdirSync(acc2Dir, { recursive: true })
+
+        const file1 = join(acc1Dir, "rollout-2026-09-21T12-00-00-019fce85-test-ambig.jsonl")
+        const file2 = join(acc2Dir, "rollout-2026-09-21T12-00-00-019fce85-test-ambig.jsonl")
+
+        const content =
+          JSON.stringify({
+            type: "session_meta",
+            payload: { id: "019fce85-test-ambig", cwd: "/home/work", timestamp: "2026-09-21T12:00:00.000Z" },
+          }) +
+          "\n" +
+          JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Ambiguous message" } }) +
+          "\n"
+        writeFileSync(file1, content)
+        writeFileSync(file2, content)
+        const fixedTime = new Date("2026-09-21T12:00:00.000Z")
+        utimesSync(file1, fixedTime, fixedTime)
+        utimesSync(file2, fixedTime, fixedTime)
+
+        const result = await indexCodexTranscripts(db, { agBin: realAg })
+        expect(result.sessions).toBe(1)
+        expect(result.ambiguous).toBe(1)
+
+        const allSessions = db.prepare("SELECT id, status, size_bytes FROM sessions WHERE id LIKE 'codex:%'").all() as {
+          id: string
+          status: string
+          size_bytes: number
+        }[]
+        expect(allSessions).toHaveLength(2)
+        expect(allSessions[0]?.id).not.toBe(allSessions[1]?.id)
+        for (const s of allSessions) {
+          expect(s.status).toBe("complete")
+        }
+      })
     })
   })
 
@@ -1870,11 +2023,11 @@ if (args.includes("list")) {
       writeFileSync(codexFile, codexLines.join("\n") + "\n", "utf8")
       utimesSync(codexFile, new Date(fortyFiveDaysAgo), new Date(fortyFiveDaysAgo))
 
-      const realAg = makeRealAg(codexHome)
+      const fixtureAg = makeFixtureProducer(codexHome)
 
       // Ingest via public path/indexer
       await rebuildIndex(db, { path: claudeFile, skipCodex: true })
-      await rebuildIndex(db, { path: codexFile, agBin: realAg })
+      await rebuildIndex(db, { path: codexFile, agBin: fixtureAg })
 
       // Verify both sessions and messages exist in SQLite
       const claudeSess = getSession(db, "claude-45d")
@@ -1895,7 +2048,7 @@ if (args.includes("list")) {
       expect(extendedSearch.results.length).toBeGreaterThanOrEqual(2)
 
       // Actual public incremental rebuild with native fixtures preserves them across prune
-      await rebuildIndex(db, { incremental: true, agBin: realAg })
+      await rebuildIndex(db, { incremental: true, agBin: fixtureAg })
 
       const claudeSessAfter = getSession(db, "claude-45d")
       expect(claudeSessAfter).toBeDefined()
@@ -2108,10 +2261,10 @@ if (args.includes("list")) {
       ]
       writeFileSync(rolloutPath, v1Lines.join("\n") + "\n", "utf8")
 
-      const realAg = makeRealAg(codexHome)
+      const fixtureAg = makeFixtureProducer(codexHome)
 
       // Initial rebuild via full public rebuild branch
-      await rebuildIndex(db, { full: true, agBin: realAg })
+      await rebuildIndex(db, { full: true, agBin: fixtureAg })
       const initialSess = getSession(db, "codex:019fce85-test-shrink")
       expect(initialSess?.message_count).toBe(3)
       expect(initialSess?.status).toBe("complete")
@@ -2129,7 +2282,7 @@ if (args.includes("list")) {
       utimesSync(rolloutPath, later, later)
 
       // Full public rebuild without force (exercises full unreferenced pruning branch)
-      await rebuildIndex(db, { full: true, agBin: realAg })
+      await rebuildIndex(db, { full: true, agBin: fixtureAg })
 
       // Prior rows are PRESERVED, not pruned or deleted!
       const shrunkSess = getSession(db, "codex:019fce85-test-shrink")
@@ -2151,7 +2304,7 @@ if (args.includes("list")) {
       expect(failedEntry?.shrink_new_count).toBe(1)
 
       // Now re-run with force: should recover and update status to complete, clearing failure fields
-      await rebuildIndex(db, { path: rolloutPath, agBin: realAg, force: true })
+      await rebuildIndex(db, { path: rolloutPath, agBin: fixtureAg, force: true })
       const forcedSess = getSessionStatus(db, "codex:019fce85-test-shrink")
       expect(forcedSess?.status).toBe("complete")
       expect(forcedSess?.messageCount).toBe(1)
@@ -2194,8 +2347,8 @@ if (args.includes("list")) {
         ]
         writeFileSync(rolloutPath, v1Lines.join("\n") + "\n", "utf8")
 
-        const realAg = makeRealAg(codexHome)
-        process.env.AG_BIN = realAg
+        const fixtureAg = makeFixtureProducer(codexHome)
+        process.env.AG_BIN = fixtureAg
 
         // Initial run via cmdIndex: exitCode should be 0
         const logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
