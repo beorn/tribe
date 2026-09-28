@@ -147,7 +147,7 @@ describe("neutral health process source", () => {
    */
   it("reads the journal again when the root is injected, with the lifecycle marker still stripped", async () => {
     // THE CURE, and the shape of it matters: the daemon is NOT told it is
-    // hab-managed — `HAB_SESSION_DIR` and `HAB_SERVICE_KIND` stay stripped, so
+    // hab-managed — `HAB_SESSION_DIR` and `HAB_SERVICE_NAME` stay stripped, so
     // it still cannot inherit hab's idle-quit and still retires correctly. It
     // is told only WHERE THE JOURNAL IS. Lifecycle and journal access were one
     // variable; this is them apart.
@@ -276,7 +276,7 @@ describe("neutral health process source", () => {
       stdout: `${JSON.stringify(argv.includes("scalars") ? scalarPayload : availablePayload)}\n`,
     }))
     const source = createHealthProcessSource({
-      env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+      env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
       runCommand,
     })
     expect(source.kind).toBe("managed")
@@ -296,7 +296,7 @@ describe("neutral health process source", () => {
 
   it("fails closed on command failure and names query, location, and excluded fallback", async () => {
     const source = createHealthProcessSource({
-      env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+      env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
       runCommand: async () => ({ exitCode: 1, stderr: "journal unreadable", stdout: "" }),
     })
     if (source.kind !== "managed") throw new Error("expected managed source")
@@ -323,7 +323,7 @@ describe("neutral health process source", () => {
       },
     }
     const source = createHealthProcessSource({
-      env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+      env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
       runCommand: async () => ({ exitCode: 0, stderr: "", stdout: `${JSON.stringify(payload)}\n` }),
     })
     if (source.kind !== "managed") throw new Error("expected managed source")
@@ -338,7 +338,7 @@ describe("neutral health process source", () => {
 
   it("fails closed on malformed command output instead of returning an empty process list", async () => {
     const source = createHealthProcessSource({
-      env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+      env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
       runCommand: async () => ({ exitCode: 0, stderr: "", stdout: '{"kind":"available","processes":[]}\n' }),
     })
     if (source.kind !== "managed") throw new Error("expected managed source")
@@ -353,7 +353,7 @@ describe("neutral health process source", () => {
     const payload = structuredClone(availablePayload) as any
     delete payload.processes[0].process.command
     const source = createHealthProcessSource({
-      env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+      env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
       runCommand: async () => ({ exitCode: 0, stderr: "", stdout: `${JSON.stringify(payload)}\n` }),
     })
     if (source.kind !== "managed") throw new Error("expected managed source")
@@ -371,7 +371,7 @@ describe("neutral health process source", () => {
       process: { ...payload.processes[0].process, startTime: "linux:boot:reused" },
     })
     const source = createHealthProcessSource({
-      env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+      env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
       runCommand: async () => ({ exitCode: 0, stderr: "", stdout: `${JSON.stringify(payload)}\n` }),
     })
     if (source.kind !== "managed") throw new Error("expected managed source")
@@ -385,7 +385,7 @@ describe("neutral health process source", () => {
   it("keeps hab sysmon's excludedRows, and refuses a malformed one as a protocol error (hh 25917)", async () => {
     const read = async (excludedRows: unknown) => {
       const source = createHealthProcessSource({
-        env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+        env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
         runCommand: async () => ({
           exitCode: 0,
           stderr: "",
@@ -419,7 +419,7 @@ describe("neutral health process source", () => {
       },
     })
     const source = createHealthProcessSource({
-      env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+      env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
       runCommand: async () => ({ exitCode: 0, stderr: "", stdout: `${JSON.stringify(payload)}\n` }),
     })
     if (source.kind !== "managed") throw new Error("expected managed source")
@@ -470,7 +470,7 @@ describe("neutral health process source", () => {
     const payload = structuredClone(availablePayload) as any
     mutate(payload)
     const source = createHealthProcessSource({
-      env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+      env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
       runCommand: async () => ({ exitCode: 0, stderr: "", stdout: `${JSON.stringify(payload)}\n` }),
     })
     if (source.kind !== "managed") throw new Error("expected managed source")
@@ -499,7 +499,7 @@ describe("neutral health process source", () => {
     const payload = structuredClone(scalarPayload) as any
     mutate(payload)
     const source = createHealthProcessSource({
-      env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+      env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
       runCommand: async () => ({ exitCode: 0, stderr: "", stdout: `${JSON.stringify(payload)}\n` }),
     })
     if (source.kind !== "managed") throw new Error("expected managed source")
@@ -514,7 +514,7 @@ describe("neutral health process source", () => {
     const payload = structuredClone(scalarPayload) as any
     payload.values.swap.value = { freeBytes: 900.5, totalBytes: 1_000, usedBytes: 99.5 }
     const source = createHealthProcessSource({
-      env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+      env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
       runCommand: async () => ({ exitCode: 0, stderr: "", stdout: `${JSON.stringify(payload)}\n` }),
     })
     if (source.kind !== "managed") throw new Error("expected managed source")
@@ -617,7 +617,7 @@ describe("neutral health process source", () => {
         })
       })
       const source = createHealthProcessSource({
-        env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+        env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
         runCommand,
       })
       if (source.kind !== "managed") throw new Error("expected managed source")
@@ -639,7 +639,7 @@ describe("neutral health process source", () => {
         })
       })
       const source = createHealthProcessSource({
-        env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+        env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
         runCommand,
       })
       if (source.kind !== "managed") throw new Error("expected managed source")
@@ -660,7 +660,7 @@ describe("neutral health process source", () => {
         })
       })
       const source = createHealthProcessSource({
-        env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+        env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
         runCommand,
         now: () => nowMs,
         circuitFailures: 2,
@@ -723,7 +723,7 @@ describe("neutral health process source", () => {
         }
       })
       const source = createHealthProcessSource({
-        env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+        env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
         runCommand,
       })
       if (source.kind !== "managed") throw new Error("expected managed source")
@@ -763,7 +763,7 @@ describe("neutral health process source", () => {
         }
       })
       const source = createHealthProcessSource({
-        env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+        env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
         runCommand,
         now: () => nowMs,
       })
@@ -788,7 +788,7 @@ describe("neutral health process source", () => {
         throw new BoundedProcessCommandError({ kind: "timeout", message: "timeout", settlementFailures: [] })
       })
       const source = createHealthProcessSource({
-        env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+        env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
         runCommand,
       })
       if (source.kind !== "managed") throw new Error("expected managed source")
@@ -808,7 +808,7 @@ describe("neutral health process source", () => {
     it("does not open the circuit on ordinary exit-nonzero failures", async () => {
       const runCommand = vi.fn(async () => ({ exitCode: 1, stderr: "journal unreadable", stdout: "" }))
       const source = createHealthProcessSource({
-        env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+        env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
         runCommand,
         circuitFailures: 2,
       })
@@ -835,7 +835,7 @@ describe("neutral health process source", () => {
         }
       })
       const source = createHealthProcessSource({
-        env: { HAB_SERVICE_KIND: "service", HAB_SESSION_DIR: "/hab/tribe" },
+        env: { HAB_SERVICE_NAME: "wire", HAB_SESSION_DIR: "/hab/tribe" },
         runCommand,
         circuitFailures: 2,
         circuitOpenMs: 60_000,

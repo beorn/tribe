@@ -44,7 +44,7 @@ describe("Tribe daemon environment ownership", () => {
   test("a Hab-owned daemon deletes ambient seat identity and capability in place", () => {
     const env: NodeJS.ProcessEnv = {
       ...ambientIdentity,
-      HAB_SERVICE_KIND: "service",
+      HAB_SERVICE_NAME: "wire",
       PATH: "/bin",
       TRIBE_DAEMON_RELOAD_EXIT_CODE: "75",
       TRIBE_DAEMON_SUPERVISOR_PID: "999",
@@ -56,21 +56,27 @@ describe("Tribe daemon environment ownership", () => {
 
     expect(sanitizeDaemonProcessEnvironment(env, 999)).toBe(env)
     expect(env).toEqual({
-      HAB_SERVICE_KIND: "service",
+      HAB_SERVICE_NAME: "wire",
       PATH: "/bin",
       TRIBE_DELIVERY_FALLBACKS: '[{"prefix":"@dev/","to":"@dev"}]',
       TRIBE_SOCKET: "/tmp/tribe.sock",
     })
   })
 
-  test("a name-only Hab service cannot inherit standalone ownership", () => {
+  // Managed identity requires a nonempty service name; blank values retain standalone ownership.
+  test.each(["wire", "", "  "])("service name %j determines standalone ownership", (name) => {
     const env: NodeJS.ProcessEnv = {
-      HAB_SERVICE_NAME: "wire",
+      HAB_SERVICE_NAME: name,
       TRIBE_DAEMON_RELOAD_EXIT_CODE: "75",
       TRIBE_DAEMON_SUPERVISOR_PID: "999",
       TRIBE_OPERATOR_CAPABILITY_FD: "3",
     }
-    expect(sanitizeDaemonProcessEnvironment(env, 999)).toEqual({ HAB_SERVICE_NAME: "wire" })
+    expect(sanitizeDaemonProcessEnvironment(env, 999)).toEqual(name.trim() ? { HAB_SERVICE_NAME: name } : {
+      HAB_SERVICE_NAME: name,
+      TRIBE_DAEMON_RELOAD_EXIT_CODE: "75",
+      TRIBE_DAEMON_SUPERVISOR_PID: "999",
+      TRIBE_OPERATOR_CAPABILITY_FD: "3",
+    })
   })
 
   test("standalone pre-spawn sanitation also drops stale lifecycle ownership", () => {

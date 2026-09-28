@@ -5,7 +5,7 @@ import {
   runBoundedProcessCommand,
   type BoundedProcessCommandResult,
 } from "../../../recall/src/lib/bounded-process.ts"
-import { HAB_SERVICE_KIND_ENV, HAB_SERVICE_NAME_ENV, HAB_SESSION_DIR_ENV } from "tribe-wire/lib/hab-session-env"
+import { HAB_SERVICE_NAME_ENV, HAB_SESSION_DIR_ENV } from "tribe-wire/lib/hab-session-env"
 
 const PROCESS_OBSERVATION_SCHEMA = "process-observation/1" as const
 const HOST_SCALAR_OBSERVATION_SCHEMA = "host-scalar-observation/1" as const
@@ -658,7 +658,7 @@ export function createHealthProcessSource(options: HealthProcessSourceOptions = 
     }
     return { kind: "standalone-os" }
   }
-  if (!env[HAB_SERVICE_KIND_ENV]?.trim() && !env[HAB_SERVICE_NAME_ENV]?.trim()) return { kind: "standalone-os" }
+  if (!env[HAB_SERVICE_NAME_ENV]?.trim()) return { kind: "standalone-os" }
   // The legacy path keeps its own derivation, per the precedence rule: an
   // environment that still carries `HAB_SESSION_DIR` behaves exactly as it did
   // before this change. The `habmod` literal survives HERE and only here; it

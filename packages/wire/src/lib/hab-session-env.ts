@@ -18,8 +18,6 @@ export const HAB_SESSION_HABITAT_NAME_ENV = "HAB_SESSION_HABITAT_NAME"
 export const HAB_SESSION_INSTRUCTION_ANCHOR_ENV = "HAB_SESSION_INSTRUCTION_ANCHOR"
 /** Injected by a Hab supervisor into the process it runs; a seat carries none. */
 export const HAB_SESSION_DIR_ENV = "HAB_SESSION_DIR"
-/** The kind of hab service a supervised process is. */
-export const HAB_SERVICE_KIND_ENV = "HAB_SERVICE_KIND"
 /** The name of the hab service a supervised process is. */
 export const HAB_SERVICE_NAME_ENV = "HAB_SERVICE_NAME"
 /** The launch's signed identity token (25074 3b); hab sets it per launch, so it is one of this family. */

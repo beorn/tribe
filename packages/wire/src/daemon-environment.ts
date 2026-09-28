@@ -10,7 +10,6 @@ import { existsSync, fstatSync } from "node:fs"
 import { join } from "node:path"
 import { launchIdentityEnvironmentNames, tribeSessionIdentityEnvironmentNames } from "./launch-environment.ts"
 import {
-  HAB_SERVICE_KIND_ENV,
   HAB_SERVICE_NAME_ENV,
   HAB_SESSION_DIR_ENV,
   HAB_SESSION_HABITAT_NAME_ENV,
@@ -24,7 +23,7 @@ export { HAB_SESSION_HABITAT_ROOT_ENV }
 /**
  * Variables that prove hab launched this process, WITHOUT proving it is
  * hab-managed. `sanitizeStandaloneDaemonEnvironment` deliberately strips the
- * management markers (`HAB_SESSION_DIR`, `HAB_SERVICE_KIND`, `HAB_SERVICE_NAME`)
+ * management markers (`HAB_SESSION_DIR`, `HAB_SERVICE_NAME`)
  * and leaves these, so these are exactly the evidence that hab is present when
  * the management markers are gone. Defined beside the sanitizer that makes that
  * true; the daemon's health source and the client spawn gate both read it here. The names are defined once, in
@@ -58,7 +57,7 @@ export const TRIBE_DAEMON_SUPERVISOR_PID_ENV = "TRIBE_DAEMON_SUPERVISOR_PID"
 export const TRIBE_DAEMON_RELOAD_EXIT_CODE_ENV = "TRIBE_DAEMON_RELOAD_EXIT_CODE"
 
 export function hasStandaloneDaemonOwner(env: Readonly<NodeJS.ProcessEnv>, parentPid = process.ppid): boolean {
-  if (env[HAB_SERVICE_KIND_ENV] !== undefined || env[HAB_SERVICE_NAME_ENV] !== undefined) return false
+  if (env[HAB_SERVICE_NAME_ENV]?.trim()) return false
   const supervisorPid = Number(env[TRIBE_DAEMON_SUPERVISOR_PID_ENV])
   const reloadExitCode = Number(env[TRIBE_DAEMON_RELOAD_EXIT_CODE_ENV])
   return (
@@ -81,7 +80,7 @@ function isOpenInheritedFd(fd: number): boolean {
 }
 
 function hasDirectInheritedOperatorCapability(env: Readonly<NodeJS.ProcessEnv>): boolean {
-  if (env[HAB_SERVICE_KIND_ENV] !== undefined || env[HAB_SERVICE_NAME_ENV] !== undefined) return false
+  if (env[HAB_SERVICE_NAME_ENV]?.trim()) return false
   const fd = Number(env[TRIBE_OPERATOR_CAPABILITY_FD_ENV])
   return Number.isSafeInteger(fd) && fd >= 3 && isOpenInheritedFd(fd)
 }
@@ -106,7 +105,8 @@ export function sanitizeDaemonProcessEnvironment(env: NodeJS.ProcessEnv, parentP
 export function sanitizeStandaloneDaemonEnvironment(source: Readonly<NodeJS.ProcessEnv>): NodeJS.ProcessEnv {
   const env = { ...source }
   sanitizeDaemonProcessEnvironment(env)
-  delete env[HAB_SERVICE_KIND_ENV]
+  // Legacy inherited context is stripped; it never selects managed identity.
+  delete env.HAB_SERVICE_KIND
   // HAB_SERVICE_NAME drives the hab-managed idle-quit default (never quit).
   // A standalone daemon minted FROM a hab-supervised session is not itself
   // hab-managed — without this strip it would inherit the marker and never

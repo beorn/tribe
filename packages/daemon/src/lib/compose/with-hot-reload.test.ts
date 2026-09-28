@@ -17,8 +17,8 @@ vi.mock("tribe-wire", () => ({ spawnStandaloneDaemonSupervisor }))
 
 describe("daemon reload lifecycle ownership", () => {
   it("leaves source watching to explicit reload when Hab owns lifecycle", () => {
-    expect(hotReloadSourceWatchEnabled({ HAB_SERVICE_KIND: "service" })).toBe(false)
-    expect(hotReloadSourceWatchEnabled({ HAB_SERVICE_KIND: "watcher" })).toBe(false)
+    expect(hotReloadSourceWatchEnabled({ HAB_SERVICE_NAME: "" })).toBe(true)
+    expect(hotReloadSourceWatchEnabled({ HAB_SERVICE_NAME: "  " })).toBe(true)
     expect(hotReloadSourceWatchEnabled({ HAB_SERVICE_NAME: "wire" })).toBe(false)
     expect(hotReloadSourceWatchEnabled({ TRIBE_NO_AUTORELOAD: "1" })).toBe(false)
     expect(hotReloadSourceWatchEnabled({}, true)).toBe(false)
@@ -147,13 +147,13 @@ describe("daemon reload lifecycle ownership", () => {
   it("selects replacement for Hab and the daemon's actual standalone supervisor", () => {
     const shutdown = vi.fn()
 
-    const supervised = reloadReplacementForEnvironment({ HAB_SERVICE_KIND: "service" }, shutdown)
+    const supervised = reloadReplacementForEnvironment({ HAB_SERVICE_NAME: "wire" }, shutdown)
     expect(supervised).toBeTypeOf("function")
     supervised?.("operator requested reload")
     expect(shutdown).toHaveBeenCalledOnce()
 
     expect(reloadReplacementForEnvironment({}, shutdown)).toBeUndefined()
-    const supervisedWatcher = reloadReplacementForEnvironment({ HAB_SERVICE_KIND: "watcher" }, shutdown)
+    const supervisedWatcher = reloadReplacementForEnvironment({ HAB_SERVICE_NAME: "watcher" }, shutdown)
     expect(supervisedWatcher).toBeTypeOf("function")
     supervisedWatcher?.("operator requested reload")
     expect(shutdown).toHaveBeenCalledTimes(2)
