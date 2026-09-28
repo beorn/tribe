@@ -27,6 +27,7 @@ import {
   writeTribeConfig,
   type TribeAutostart,
 } from "./autostart-config.ts"
+import { fileURLToPath } from "node:url"
 
 // ---------------------------------------------------------------------------
 // Marker — used to identify tribe-installed hook entries
@@ -73,7 +74,7 @@ export interface InstallEnv {
 
 export function defaultInstallEnv(overrides: Partial<InstallEnv> = {}): InstallEnv {
   const claudeDir = overrides.claudeSettingsPath ? dirname(overrides.claudeSettingsPath) : resolve(homedir(), ".claude")
-  const cliDir = dirname(new URL(import.meta.url).pathname)
+  const cliDir = dirname(fileURLToPath(import.meta.url))
   // packages/daemon/src/lib → packages/daemon/src
   const daemonSrcDir = resolve(cliDir, "..")
   const repoRoot = resolve(cliDir, "..", "..", "..", "..")

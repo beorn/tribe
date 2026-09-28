@@ -24,9 +24,10 @@ import { safeRemoveSync } from "removely"
 import { afterEach, describe, expect, test } from "vitest"
 
 import { openGitHubCursorStore, resolveGitHubCursorPath, type GitHubCursorState } from "./github-cursor-store.ts"
+import { fileURLToPath } from "node:url"
 
 const tempRoot = realpathSync(tmpdir())
-const tribeRoot = realpathSync(join(dirname(new URL(import.meta.url).pathname), "../../../.."))
+const tribeRoot = realpathSync(join(dirname(fileURLToPath(import.meta.url)), "../../../.."))
 const roots: Array<{ path: string; within: string }> = []
 
 afterEach(() => {
@@ -187,7 +188,7 @@ describe("GitHub cursor machine-state ownership", () => {
   test("concurrent legacy adoption serializes through the process-shared migration lock", async () => {
     const f = fixture("concurrent")
     writeFileSync(f.legacyPath, `${JSON.stringify(state)}\n`)
-    const modulePath = new URL("./github-cursor-store.ts", import.meta.url).pathname
+    const modulePath = fileURLToPath(new URL("./github-cursor-store.ts", import.meta.url))
     const script = [
       `import { openGitHubCursorStore } from ${JSON.stringify(modulePath)}`,
       "const options = JSON.parse(process.env.TRIBE_CURSOR_TEST_OPTIONS ?? '')",

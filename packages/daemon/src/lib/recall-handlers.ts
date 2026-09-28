@@ -56,6 +56,8 @@ import {
 } from "../../../../plugins/claude/recall/lib/rpc.ts"
 import { summarizeTail, type SummarizerMode } from "../../../../plugins/claude/recall/lib/summarizer.ts"
 import { createSingleFlightRunner } from "./single-flight-ticker.ts"
+import { fileURLToPath } from "node:url"
+
 // ---------------------------------------------------------------------------
 // Deep-recall engine — in-repo since the 19273 move (packages/recall)
 // ---------------------------------------------------------------------------
@@ -106,7 +108,7 @@ async function loadDeepRecallEngine(log: ReturnType<typeof createLogger>): Promi
   deepRecallProbe = (async () => {
     // In-repo engine is the default since the 19273 move; the env var is an
     // override seam for forks/experiments only.
-    const dir = process.env.TRIBE_RECALL_ENGINE_DIR ?? new URL("../../../recall/src", import.meta.url).pathname
+    const dir = process.env.TRIBE_RECALL_ENGINE_DIR ?? fileURLToPath(new URL("../../../recall/src", import.meta.url))
     try {
       const [agent, plan, context, sessionContext, shared, injectCore, search] = await Promise.all([
         import(`${dir}/lib/agent.ts`) as Promise<typeof import("../../../recall/src/lib/agent.ts")>,

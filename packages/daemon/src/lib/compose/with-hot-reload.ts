@@ -31,6 +31,7 @@ import type { WithBroadcast } from "./with-broadcast.ts"
 import type { WithConfig } from "./with-config.ts"
 import type { WithSocketServer } from "./with-socket-server.ts"
 import { HAB_SERVICE_NAME_ENV } from "tribe-wire/lib/hab-session-env"
+import { fileURLToPath } from "node:url"
 
 const log = createLogger("tribe:hot-reload")
 
@@ -218,7 +219,7 @@ export function withHotReload<T extends BaseTribe & WithBroadcast & WithConfig &
     // Source-file watcher — auto-SIGHUP on code changes.
     const watchers: FSWatcher[] = []
     if (hotReloadSourceWatchEnabled(process.env, opts.disableWatch)) {
-      const sourceDir = pathDirname(new URL(import.meta.url).pathname)
+      const sourceDir = pathDirname(fileURLToPath(import.meta.url))
       // Resolve relative to the actual tribe-daemon location (one level up
       // from this compose/ dir; lib/tribe sits next to it).
       const toolsDir = pathResolve(sourceDir, "../../../")

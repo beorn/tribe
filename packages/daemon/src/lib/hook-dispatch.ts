@@ -44,6 +44,7 @@ import { resolveVaultDbFlag } from "../../../recall/src/lib/vault-db.ts"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { parseArgs } from "node:util"
+import { fileURLToPath } from "node:url"
 
 export type HookEvent = "session-start" | "prompt" | "session-end" | "pre-compact"
 
@@ -86,7 +87,7 @@ type InjectionDebug = {
 
 /** In-repo engine is the default since the 19273 move; the env var is an override seam for forks/experiments only. */
 function engineDir(): string {
-  return process.env.TRIBE_RECALL_ENGINE_DIR ?? new URL("../../../recall/src", import.meta.url).pathname
+  return process.env.TRIBE_RECALL_ENGINE_DIR ?? fileURLToPath(new URL("../../../recall/src", import.meta.url))
 }
 
 let hookEngineProbe: Promise<HookEngine | null> | undefined
@@ -119,7 +120,7 @@ async function loadInjectionDebug(): Promise<InjectionDebug | null> {
     // In-repo recorder is the default since the 19273 move; the env var is an
     // override seam for forks/experiments only.
     const dir =
-      process.env.TRIBE_INJECTION_DEBUG_DIR ?? new URL("../../../injection-envelope/src", import.meta.url).pathname
+      process.env.TRIBE_INJECTION_DEBUG_DIR ?? fileURLToPath(new URL("../../../injection-envelope/src", import.meta.url))
     try {
       const mod = await (import(`${dir}/debug.ts`) as Promise<
         typeof import("../../../injection-envelope/src/debug.ts")

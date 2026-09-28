@@ -9,6 +9,7 @@ import { createHash } from "node:crypto"
 import { existsSync, readdirSync, readFileSync, watch, type FSWatcher } from "node:fs"
 import { dirname, resolve } from "node:path"
 import { spawn } from "node:child_process"
+import { fileURLToPath } from "node:url"
 import { createLogger } from "loggily"
 
 const log = createLogger("tribe:reload")
@@ -49,7 +50,7 @@ export function setupHotReload(opts: HotReloadOpts): Disposable | null {
   // Only activate for source runs (file:// URLs in the repo)
   if (!importMetaUrl.startsWith("file://")) return null
 
-  const scriptPath = new URL(importMetaUrl).pathname
+  const scriptPath = fileURLToPath(importMetaUrl)
   const reloadScriptName =
     scriptPath
       .split("/")

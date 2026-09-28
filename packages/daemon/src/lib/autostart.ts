@@ -25,6 +25,7 @@ import { createLogger } from "loggily"
 import { spawnStandaloneDaemonSupervisor } from "tribe-wire"
 import { resolveAutostart, type TribeAutostart } from "./autostart-config.ts"
 import { resolveSocketPath as resolveTribeSocketPath } from "tribe-wire/lib/socket"
+import { fileURLToPath } from "node:url"
 
 // Diagnostic output goes through loggily — never `process.stderr.write`.
 // Hook entry points (`tools/lib/tribe/hook-dispatch.ts`) call
@@ -83,7 +84,7 @@ export function isDaemonAlive(socketPath: string, timeoutMs = 200): Promise<bool
 /** Location of the tribe coordination daemon script (relative to this file). */
 export function resolveTribeDaemonScriptPath(): string {
   // packages/daemon/src/lib/autostart.ts → packages/daemon/src/daemon.ts
-  const thisDir = dirname(new URL(import.meta.url).pathname)
+  const thisDir = dirname(fileURLToPath(import.meta.url))
   return resolve(thisDir, "..", "daemon.ts")
 }
 
