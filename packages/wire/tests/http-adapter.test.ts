@@ -1,11 +1,20 @@
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { createServer, type Server, type Socket } from "node:net"
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { startTribeHttpMcpServer, type TribeHttpMcpServer } from "../src/http-adapter.ts"
 import { createLineParser } from "../src/parser.ts"
 import { isRequest, makeResponse } from "../src/rpc.ts"
+import { HAB_ID_TOKEN_ENV } from "../src/lib/identity-token.ts"
+import { launchToken, writeClaimsVerifier } from "./launch-token.ts"
+import { connectToDaemon, TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
+import { tribeAmbientEnvironmentNames } from "../src/daemon-environment.ts"
+
+afterEach(() => {
+  vi.unstubAllEnvs()
+  vi.restoreAllMocks()
+})
 
 type HttpFetch = (
   request: Request,
@@ -63,6 +72,119 @@ async function waitForRegistrationCount(daemon: FakeDaemon, count: number): Prom
 }
 
 describe("HTTP MCP adapter", () => {
+  /**
+   * @failure HTTP tools advertise the current protocol but lose managed authority or persisted rename on reconnect.
+   * @level l3
+   * @consumer CTO 9c5bc9de: registration, one real tool call and reconnect must agree against the current daemon.
+   */
+  it("current daemon preserves verified HTTP identity and rename through reconnect", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "tribe-http-protocol-"))
+    const socketPath = join(tempDir, "tribe.sock")
+    const verifierPath = join(tempDir, "claims-verifier.ts")
+    writeClaimsVerifier(verifierPath)
+    vi.stubEnv(HAB_ID_TOKEN_ENV, launchToken("http-protocol", "@codi/hermes"))
+    const childEnv = { ...process.env }
+    for (const name of tribeAmbientEnvironmentNames()) delete childEnv[name]
+    childEnv.TRIBE_NO_PLUGINS = "1"
+    childEnv.XDG_STATE_HOME = tempDir
+    childEnv.XDG_CONFIG_HOME = tempDir
+    childEnv.XDG_DATA_HOME = tempDir
+    childEnv.TRIBE_ACTIVITY_LOG = join(tempDir, "activity.jsonl")
+    childEnv.TRIBE_DAEMON_STDERR_LOG = join(tempDir, "daemon-stderr.log")
+    const startDaemon = async () => {
+      const child = Bun.spawn(
+        [
+          process.execPath,
+          resolve(import.meta.dirname, "../../daemon/src/daemon.ts"),
+          "--socket",
+          socketPath,
+          "--db",
+          join(tempDir, "tribe.db"),
+          "--foreground",
+          "--no-lore",
+          "--identity-verifier",
+          verifierPath,
+        ],
+        { cwd: tempDir, env: childEnv, stdin: "ignore", stdout: "ignore", stderr: "pipe" },
+      )
+      const stderr = new Response(child.stderr).text()
+      let lastError: unknown
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if (child.exitCode !== null) throw new Error(`isolated HTTP daemon exited ${child.exitCode}: ${await stderr}`)
+        try {
+          const probe = await connectToDaemon(socketPath)
+          probe.close()
+          return { child, stderr }
+        } catch (error) {
+          lastError = error
+          await new Promise<void>((resolve) => setTimeout(resolve, 25))
+        }
+      }
+      child.kill()
+      await child.exited
+      throw new Error(`isolated HTTP daemon did not open ${socketPath}: ${String(lastError)}; ${await stderr}`)
+    }
+    let daemon: Awaited<ReturnType<typeof startDaemon>> | undefined
+    let bridge: TribeHttpMcpServer | undefined
+    try {
+      daemon = await startDaemon()
+      bridge = await startTribeHttpMcpServer({ socketPath, name: "@codi/hermes", pullTransport: "host-stream" })
+      const tool = async (name: string, args: Record<string, unknown> = {}) => {
+        if (bridge === undefined) throw new Error("HTTP journey has no bridge")
+        const response = await fetch(bridge.url, {
+          method: "POST",
+          headers: { accept: "application/json, text/event-stream", "content-type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+        })
+        expect(response.status).toBe(200)
+        const payload = (await response.json()) as {
+          result?: { content?: Array<{ text?: string }>; isError?: boolean }
+          error?: unknown
+        }
+        expect(payload.error).toBeUndefined()
+        expect(payload.result?.isError).not.toBe(true)
+        const resultText = payload.result?.content?.[0]?.text
+        if (resultText === undefined) throw new Error(`HTTP ${name} returned no text: ${JSON.stringify(payload)}`)
+        if (resultText.startsWith("Error:")) throw new Error(`HTTP ${name}: ${resultText}`)
+        return JSON.parse(resultText) as {
+          sessions?: Array<Record<string, unknown>>
+          name?: string
+        }
+      }
+      const initial = (await tool("members")).sessions?.find((row) => row.name === "@codi/hermes")
+      expect(initial).toMatchObject({
+        authority: "verified",
+        launch_id: "http-protocol@1",
+        version_state: "current",
+        protocol_versions: [TRIBE_PROTOCOL_VERSION],
+      })
+      await tool("rename", { new_name: "@codi/renamed" })
+      daemon.child.kill("SIGTERM")
+      await daemon.child.exited
+      await daemon.stderr
+      daemon = await startDaemon()
+      await vi.waitFor(
+        async () => {
+          const renamed = (await tool("members")).sessions?.find((row) => row.name === "@codi/renamed")
+          expect(renamed).toMatchObject({
+            authority: "verified",
+            launch_id: "http-protocol@1",
+            version_state: "current",
+          })
+        },
+        { timeout: 5_000 },
+      )
+    } finally {
+      bridge?.close()
+      if (daemon !== undefined) {
+        daemon.child.kill("SIGTERM")
+        await daemon.child.exited
+        await daemon.stderr
+      }
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it("disables Bun's request timeout while forwarding the public HTTP MCP wait contract", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "tribe-http-adapter-wait-"))
     const socketPath = join(tempDir, "tribe.sock")
@@ -96,7 +218,7 @@ describe("HTTP MCP adapter", () => {
         return { port: 41_729, stop }
       }) as unknown as typeof Bun.serve
       if (!Reflect.set(Bun, "serve", fakeServe)) throw new Error("could not replace Bun.serve for HTTP adapter test")
-      bridge = await startTribeHttpMcpServer({ socketPath, name: "@agent/http", requireJoin: false })
+      bridge = await startTribeHttpMcpServer({ socketPath, name: "codex", requireJoin: false })
       if (!Reflect.set(Bun, "serve", originalServe)) {
         throw new Error("could not restore Bun.serve after HTTP adapter test")
       }
@@ -166,20 +288,68 @@ describe("HTTP MCP adapter", () => {
     }
   })
 
-  it("registers the launcher identity used to join its roster row", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "tribe-http-adapter-"))
-    const socketPath = join(tempDir, "tribe.sock")
-    const daemon = await spawnFakeDaemon(socketPath)
+  /**
+   * @failure Named SSH tools register without the signed launch identity and cannot read their managed mailbox.
+   * @level l1
+   * @consumer 25886 / WA-R7: the HTTP adapter presents the same named identity contract as stdio.
+   */
+  it.each([
+    { kind: "named", name: "@codi/hermes", token: launchToken("http-launch", "@codi/hermes") },
+    { kind: "unnamed", name: undefined, token: launchToken("http-launch", "@codi/hermes") },
+    { kind: "malformed", name: "@codi/hermes", token: "malformed-fixture" },
+    { kind: "absent", name: "@codi/hermes", token: "" },
+  ])("$kind launch presents only its permitted identity and names missing proof", async ({ kind, name, token }) => {
+    const tempDir = mkdtempSync(join(tmpdir(), "tribe-http-identity-"))
+    const daemon = await spawnFakeDaemon(join(tempDir, "tribe.sock"))
+    vi.stubEnv(HAB_ID_TOKEN_ENV, token)
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
     let bridge: TribeHttpMcpServer | undefined
     try {
-      bridge = await startTribeHttpMcpServer({ socketPath, launchId: "  launch-current-app  " })
-      const register = daemon.requests.find((request) => request.method === "register")
-      expect(register?.params).toMatchObject({
-        launchId: "launch-current-app",
-        launchParentPid: process.pid,
-      })
+      // Default requireJoin must not postpone an explicitly named persona's FIRST registration.
+      bridge = await startTribeHttpMcpServer({ socketPath: join(tempDir, "tribe.sock"), name })
+      const registration = daemon.requests.find((request) => request.method === "register")?.params
+      expect(registration).toBeDefined()
+      if (name) expect(registration).toHaveProperty("name", name)
+      if (kind === "named") {
+        expect(registration).toMatchObject({
+          idToken: token,
+          launchId: "http-launch::%40codi%2Fhermes",
+          launchParentPid: process.pid,
+        })
+      } else if (kind === "malformed") {
+        expect(registration).toHaveProperty("idToken", token)
+        expect(registration).not.toHaveProperty("launchId")
+        expect(stderr.mock.calls.map(([text]) => String(text)).join("")).toContain("HAB_ID_TOKEN is malformed")
+      } else {
+        expect(registration).not.toHaveProperty("idToken")
+        expect(registration).not.toHaveProperty("launchId")
+        expect(registration).not.toHaveProperty("launchParentPid")
+        if (kind === "absent") {
+          expect(stderr.mock.calls.map(([text]) => String(text)).join("")).toContain(
+            "persona without launch token: claimed",
+          )
+        }
+      }
     } finally {
       bridge?.close()
+      for (const client of daemon.clients) client.destroy()
+      await new Promise<void>((resolve) => daemon.server.close(() => resolve()))
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  /** @failure A published launchId option is accepted while identity actually comes from another source.
+   * @level l1
+   * @consumer CTO 9c5bc9de: one transitional release refuses the published legacy option with its real cure.
+   */
+  it("refuses the published legacy launchId option instead of silently ignoring it", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "tribe-http-old-option-"))
+    const daemon = await spawnFakeDaemon(join(tempDir, "tribe.sock"))
+    const attempt = startTribeHttpMcpServer({ socketPath: join(tempDir, "tribe.sock"), launchId: "legacy-launch" })
+    try {
+      await expect(attempt).rejects.toThrow(/launchId.*remove.*launch token/s)
+    } finally {
+      ;(await attempt.catch(() => undefined))?.close()
       for (const client of daemon.clients) client.destroy()
       await new Promise<void>((resolve) => daemon.server.close(() => resolve()))
       rmSync(tempDir, { recursive: true, force: true })
@@ -190,13 +360,13 @@ describe("HTTP MCP adapter", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "tribe-http-adapter-reconnect-"))
     const socketPath = join(tempDir, "tribe.sock")
     const daemon = await spawnFakeDaemon(socketPath)
+    vi.stubEnv(HAB_ID_TOKEN_ENV, launchToken("inherited-parent", "@codi/hermes"))
     let bridge: TribeHttpMcpServer | undefined
     try {
       bridge = await startTribeHttpMcpServer({
         socketPath,
         name: "codex",
         requireJoin: true,
-        launchId: "launch-current-app",
       })
       const first = daemon.requests.find((request) => request.method === "register")
       expect(first?.params).not.toHaveProperty("name")
@@ -205,6 +375,8 @@ describe("HTTP MCP adapter", () => {
       await waitForRegistrationCount(daemon, 2)
       const registrations = daemon.requests.filter((request) => request.method === "register")
       expect(registrations[1]?.params).toMatchObject({ name: "@agent/http" })
+      expect(registrations[1]?.params).not.toHaveProperty("idToken")
+      expect(registrations[1]?.params).not.toHaveProperty("launchId")
     } finally {
       bridge?.close()
       for (const client of daemon.clients) client.destroy()

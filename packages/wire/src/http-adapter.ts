@@ -15,7 +15,9 @@ import { createHash, randomUUID } from "node:crypto"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
-import { deriveTribePersonaLaunchIdentity } from "./lib/persona-launch-identity.ts"
+import { adapterLaunchIdentity } from "./lib/adapter-launch-identity.ts"
+import { readIdentityTokenFromEnvironment } from "./lib/identity-token.ts"
+import { isExplicitTribePersonaName } from "./lib/persona-name.ts"
 import {
   resolveSocketPath,
   createReconnectingClient,
@@ -50,16 +52,37 @@ export type StartTribeHttpMcpServerOptions = {
   readonly projectName?: string
   readonly projectId?: string
   readonly requireJoin?: boolean
-  /** Caller-minted host launch identity. Blank values preserve legacy registration. */
+  /** @deprecated Remove this option: identity comes from the inherited launch token. Nonblank values refuse.
+   * Remove this transitional declaration after the first wire release containing that refusal. */
   readonly launchId?: string
 }
 
 export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptions = {}): Promise<TribeHttpMcpServer> {
+  // oxlint-disable-next-line typescript/no-deprecated -- one-release refusal of the published legacy option, not a consumer
+  if (opts.launchId?.trim()) {
+    throw new Error(
+      "tribe HTTP adapter launchId is obsolete: remove the launchId option; identity comes from the launch token",
+    )
+  }
   const socketPath = resolveSocketPath(opts.socketPath)
   const initialFilterMode = initialFilterModeFromEnv(process.env.TRIBE_FILTER_MODE)
   const requireJoin = opts.requireJoin !== false
   const initialName = opts.name?.trim() || undefined
-  const providerLaunchId = opts.launchId?.trim() || undefined
+  // A named persona binds on the first registration. An unnamed child may inherit the environment,
+  // but it never presents that host's mailbox authority (the stdio adapter's 25074 3b rule).
+  const personaLaunch = initialName !== undefined && isExplicitTribePersonaName(initialName)
+  const launchToken = personaLaunch ? readIdentityTokenFromEnvironment(process.env) : null
+  const launchRead = personaLaunch
+    ? adapterLaunchIdentity({ env: process.env, launchName: initialName, resolveParentPid: () => process.pid })
+    : { identity: null, malformedToken: null }
+  if (launchRead.malformedToken !== null) {
+    process.stderr.write(`tribe HTTP adapter: ${launchRead.malformedToken}; the daemon's verifier judges it\n`)
+  }
+  if (personaLaunch && launchToken === null) {
+    process.stderr.write(
+      `tribe HTTP adapter ${initialName}: persona without launch token: claimed; launch through hab to read the managed mailbox\n`,
+    )
+  }
   const deliveryCapability = resolveDeliveryCapability({
     delivery: opts.delivery ?? "pull",
     channel: false,
@@ -68,6 +91,7 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
   const sessionId = randomUUID()
   let myName = "pending"
   let myRole = opts.role ?? "member"
+  // Correlation handle for adapter join calls; never mailbox authority.
   const identityToken = createHash("sha256")
     .update(`${sessionId}|${opts.project ?? process.cwd()}|${myRole}`)
     .digest("hex")
@@ -78,12 +102,14 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
     maxAttempts: 30,
     noSpawn: true,
     async onConnect(client) {
-      const registerName = myName !== "pending" ? myName : !requireJoin ? initialName : undefined
-      const identityPersona = registerName ?? initialName
-      const launchId =
-        providerLaunchId !== undefined && identityPersona !== undefined
-          ? deriveTribePersonaLaunchIdentity(identityPersona, providerLaunchId).launchId
-          : providerLaunchId
+      // Re-present the original persona with its token; the daemon reapplies persisted runtime renames.
+      const registerName = personaLaunch
+        ? initialName
+        : myName !== "pending"
+          ? myName
+          : !requireJoin
+            ? initialName
+            : undefined
       const reg = (await client.call("register", {
         ...(registerName !== undefined ? { name: registerName } : {}),
         role: myRole,
@@ -91,13 +117,18 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
         project: opts.project ?? process.cwd(),
         projectName: opts.projectName ?? process.cwd().split("/").pop() ?? "silvercode",
         projectId: opts.projectId,
-        protocolVersion: TRIBE_PROTOCOL_VERSION - 1,
+        protocolVersion: TRIBE_PROTOCOL_VERSION,
         supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
         peerSocket: null,
         pid: process.pid,
         identityToken,
-        ...(launchId !== undefined ? { launchId, launchParentPid: process.pid } : {}),
-        delivery: requireJoin ? "pull" : deliveryCapability.delivery,
+        ...(launchToken === null ? {} : { idToken: launchToken }),
+        ...(launchRead.identity !== null
+          ? { launchId: launchRead.identity.id, launchParentPid: launchRead.identity.parentPid }
+          : launchToken !== null
+            ? { launchParentPid: process.pid }
+            : {}),
+        delivery: !personaLaunch && requireJoin ? "pull" : deliveryCapability.delivery,
         ...(initialFilterMode === undefined ? {} : { filterMode: initialFilterMode }),
       })) as { name?: string; role?: string }
       if (reg.name) myName = reg.name
@@ -123,6 +154,7 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
         identityToken,
         defaultDelivery: deliveryCapability.delivery,
         deliveryCapability,
+        requireJoin: !personaLaunch && requireJoin,
         getName: () => myName,
         setName: (name) => {
           myName = name
@@ -160,6 +192,7 @@ function createMcpServer(opts: {
   readonly identityToken: string
   readonly defaultDelivery: TribeDelivery
   readonly deliveryCapability: TribeDeliveryCapability
+  readonly requireJoin: boolean
   readonly getName: () => string
   readonly setName: (name: string) => void
   readonly setRole: (role: string) => void
@@ -171,7 +204,11 @@ function createMcpServer(opts: {
     { name: "tribe", version: "0.14.1" },
     {
       capabilities: { tools: {} },
-      instructions: `Tribe coordination is available through MCP tools. Call tribe.join(name, delivery) before relying on tribe notifications or inbox routing. ${deliveryCapabilityInstruction(opts.deliveryCapability)}`,
+      instructions: `Tribe coordination is available through MCP tools. ${
+        opts.requireJoin
+          ? "Call tribe.join(name, delivery) before relying on tribe notifications or inbox routing."
+          : `Already registered as ${opts.getName()}; no join is required. Use this registered name for your mailbox.`
+      } ${deliveryCapabilityInstruction(opts.deliveryCapability)}`,
     },
   )
 
