@@ -37,6 +37,6 @@
     "node": ">=23.6.0"
   },
   "trustedDependencies": [
-    "better-sqlite3"
+    "tribe-recall"
   ]
 }

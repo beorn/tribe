@@ -63,11 +63,13 @@ bun tools/recall.ts export --catchup --hook
 
 ## qmd runtime and native ABI repair
 
-Recall search is FTS-backed; qmd is pinned at `2.5.3` only for the transcript
-export/index workflow. The package root trusts `better-sqlite3` so Bun installs
-the native addon that qmd's Node launcher will load. The hh checkout exposes
-that exact package through `tools/installed/qmd`; it never falls back to an
-unmanaged global qmd cache.
+Recall search is FTS-backed; qmd is pinned at `2.8.3` only for the transcript
+export/index workflow. Its `better-sqlite3` 13 dependency ships native binaries
+for the supported platforms. The package root trusts only the first-party
+`tribe-recall` workspace package, excluding Bun's default trusted list: running
+the SQLite build during a clean install requires an unavailable `node-gyp`.
+The hh checkout exposes that exact qmd package through `tools/installed/qmd`;
+it never falls back to an unmanaged global qmd cache.
 
 The 2026-08-01 failure was a mixed-runtime install: the native addon had Bun's
 embedded Node ABI while the qmd launcher used system Node. Repair the repo-owned

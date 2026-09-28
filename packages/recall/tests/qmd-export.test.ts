@@ -75,7 +75,7 @@ describe("qmd export boundary", () => {
     const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
       dependencies?: Record<string, string>
     }
-    expect(manifest.dependencies?.["@tobilu/qmd"]).toBe("2.5.3")
+    expect(manifest.dependencies?.["@tobilu/qmd"]).toBe("2.8.3")
 
     const qmdRoot = realpathSync(fileURLToPath(new URL("../node_modules/@tobilu/qmd/", import.meta.url)))
     const qmdNodeModules = dirname(dirname(qmdRoot))
@@ -100,6 +100,6 @@ describe("qmd export boundary", () => {
       stdio: ["ignore", "pipe", "pipe"],
     })
     expect(versionProbe.status, versionProbe.stderr).toBe(0)
-    expect(versionProbe.stdout.trim()).toMatch(/^qmd 2\.5\.3(?:\s|$)/)
+    expect(versionProbe.stdout.trim()).toMatch(/^qmd 2\.8\.3(?:\s|$)/)
   })
 })
