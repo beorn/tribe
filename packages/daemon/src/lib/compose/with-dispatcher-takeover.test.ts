@@ -1000,6 +1000,103 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
     expect(harness.healthLogs).toEqual([])
   })
 
+  /**
+   * @failure A tokenless bare session registers successfully, then claims an explicit persona through join or rename.
+   * @level l1
+   * @consumer 26524: runtime identity changes obey the same managed-persona proof rule as register.
+   */
+  it.each([
+    { method: "tribe.join", params: { name: "@dev/9" } },
+    { method: "tribe.rename", params: { new_name: "@dev/9" } },
+  ])(
+    "refuses a tokenless runtime persona claim through $method while preserving the session",
+    async ({ method, params }) => {
+      const harness = createDispatcherHarness({ identityVerifier })
+      cleanup = harness.dispose
+      harness.addPendingClient("conn-bare")
+      parseResult<RegisterResult>(
+        await harness.register("conn-bare", { name: "standalone", pid: 4102, project: "/tmp/p" }),
+      )
+      const refusal = parseError(
+        await harness.dispatcher.handleRequest(
+          { jsonrpc: "2.0", id: `runtime-${method}`, method, params },
+          "conn-bare",
+        ),
+      )
+      expect(refusal).toMatchObject({ code: -32003, data: { kind: "identity-token-missing" } })
+      expect(refusal.message).toContain("@dev/9")
+      expect(refusal.message).toContain("HAB_ID_TOKEN")
+      expect(harness.db.prepare("SELECT name FROM sessions WHERE name = 'standalone'").get()).toEqual({
+        name: "standalone",
+      })
+      expect(harness.db.prepare("SELECT count(*) AS n FROM sessions WHERE name = '@dev/9'").get()).toEqual({ n: 0 })
+      expect(await membersAuthority(harness)).toMatchObject({ standalone: "claimed" })
+    },
+  )
+
+  /**
+   * @failure A stale launch rename re-applies a persona to a tokenless bare register.
+   * @level l1
+   * @consumer 26524: persisted identity cannot bypass the managed register guard.
+   */
+  it("skips a persisted persona rename when the registering launch has no verified token", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.db
+      .prepare("INSERT INTO launch_renames (launch_id, launch_parent_pid, name, renamed_at) VALUES (?, ?, ?, ?)")
+      .run("bare-launch", 4101, "@dev/9", Date.now())
+    harness.addPendingClient("conn-bare")
+    const registered = parseResult<RegisterResult>(
+      await harness.register("conn-bare", {
+        name: "standalone",
+        pid: 4102,
+        project: "/tmp/p",
+        launchId: "bare-launch",
+        launchParentPid: 4101,
+      }),
+    )
+    expect(registered.name).toBe("standalone")
+    expect(await membersAuthority(harness)).toMatchObject({ standalone: "claimed" })
+    expect(vi.mocked(console.warn).mock.calls.flat().join(" ")).toContain('skipped persisted persona rename "@dev/9"')
+  })
+
+  it("refuses an implicit persona adoption through runtime join from a tokenless session", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-prior")
+    parseResult<RegisterResult>(
+      await harness.register("conn-prior", {
+        name: "@dev/7",
+        pid: 4101,
+        project: "/tmp/p",
+        idToken: "token-dev7",
+        identityToken: "adoption-token",
+        launchId: "sid-dev7",
+        launchParentPid: 4100,
+      }),
+    )
+    harness.dropClient("conn-prior")
+    harness.addPendingClient("conn-bare")
+    parseResult<RegisterResult>(
+      await harness.register("conn-bare", { name: "standalone", pid: 4102, project: "/tmp/p" }),
+    )
+    const refusal = parseError(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "implicit-runtime-join",
+          method: "tribe.join",
+          params: { identity_token: "adoption-token" },
+        },
+        "conn-bare",
+      ),
+    )
+    expect(refusal).toMatchObject({ code: -32003, data: { kind: "identity-token-missing" } })
+    expect(harness.db.prepare("SELECT name FROM sessions WHERE name = 'standalone'").get()).toEqual({
+      name: "standalone",
+    })
+  })
+
   // 25074 step 3 went live at 2026-09-24 08:02 PDT and every verified seat's `tribe inbox-status` answered "resolved to
   // 0 sessions": the CLI asks by the seat's bare launch id (HAB_SESSION_LAUNCH_ID, which IS the token's sid), and a
   // verified session is keyed "<sid>@<gen>", which neither the exact nor the "<id>::" arm of the lookup matched.

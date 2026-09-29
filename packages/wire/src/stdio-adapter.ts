@@ -67,6 +67,7 @@ import {
   TRIBE_PLUGIN_ADAPTER_CHILD_ENV,
   TRIBE_PLUGIN_ADAPTER_EXIT_RECORD_ENV,
   TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV,
+  TRIBE_PLUGIN_PERSONA_REFUSAL_EXIT_CODE_ENV,
   TRIBE_PLUGIN_REEXEC_EXIT_CODE_ENV,
   TRIBE_PLUGIN_RESUME_JOINED_ENV,
   TRIBE_TAKEOVER_ENV,
@@ -491,10 +492,15 @@ function failManagedPersonaRegistration(err: unknown): never {
   setRequiredMcpTransportHealth("closed", reason)
   daemon?.close()
   proxyAc.abort()
-  process.exitCode = 2
+  const refusalExit = Number(process.env[TRIBE_PLUGIN_PERSONA_REFUSAL_EXIT_CODE_ENV])
+  const exitCode =
+    isIdentityTokenMissingRefusal(err) && Number.isSafeInteger(refusalExit) && refusalExit > 0 && refusalExit <= 252
+      ? refusalExit
+      : 2
+  process.exitCode = exitCode
   if (!isIdentityTokenMissingRefusal(err)) process.exit(2)
   // Leave one flush window for an already-arrived MCP tool call to receive this refusal before stdio closes.
-  setTimeout(() => process.exit(2), 100)
+  setTimeout(() => process.exit(exitCode), 100)
   throw err
 }
 

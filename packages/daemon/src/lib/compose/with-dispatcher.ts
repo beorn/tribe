@@ -1099,6 +1099,14 @@ export function withDispatcher<
 
     type RegistrationRefusal = { readonly message: string; readonly data: Record<string, unknown> }
 
+    function missingPersonaTokenRefusal(claimed: string, reason: "missing" | "malformed" | "absent", action: string) {
+      const message =
+        `${action} refused: explicit persona ${claimed} has a ${reason} ${HAB_ID_TOKEN_ENV}; ` +
+        "launch through hab so the token reaches this process, or join without a persona name"
+      broadcast.log(`tribe:dispatcher: ${message}`, "health:identity-token-missing")
+      return { message, data: { kind: "identity-token-missing", claimed, reason } } as const
+    }
+
     /** 25074 3b, 26524 — verify a register's identity token through the composing layer's verifier. A managed
      *  daemon refuses an explicit persona with no usable token; standalone, bare and unnamed joins stay claimed.
      *  A cryptographically unreadable token still uses the existing claimed fallback. */
@@ -1110,14 +1118,10 @@ export function withDispatcher<
     > {
       const verifier = hooks.identityVerifier
       const claimed = typeof requestedName === "string" ? requestedName : "(no name)"
-      const managedPersona = verifier !== null && verifier !== undefined && isExplicitTribePersonaName(claimed)
-      const refuseMissingPersonaToken = (reason: "missing" | "malformed" | "absent") => {
-        const message =
-          `register refused: explicit persona ${claimed} has a ${reason} ${HAB_ID_TOKEN_ENV}; ` +
-          "launch through hab so the token reaches this process, or join without a persona name"
-        broadcast.log(`tribe:dispatcher: ${message}`, "health:identity-token-missing")
-        return { refusal: { message, data: { kind: "identity-token-missing", claimed, reason } } } as const
-      }
+      const managedPersona = !!verifier && isExplicitTribePersonaName(claimed)
+      const refuseMissingPersonaToken = (reason: "missing" | "malformed" | "absent") => ({
+        refusal: missingPersonaTokenRefusal(claimed, reason, "register"),
+      })
       if (token === null) return managedPersona ? refuseMissingPersonaToken("missing") : { sid: null, gen: null }
       if (!verifier) return { sid: null, gen: null }
       if (managedPersona && readTokenLaunch({ [HAB_ID_TOKEN_ENV]: token }).malformedToken !== null) {
@@ -1698,23 +1702,34 @@ export function withDispatcher<
                 $launch_parent_pid: launchIdentity.parentPid,
               }) as { name: string } | null
               if (persistedRename && persistedRename.name !== resolvedName) {
-                const liveHolder = Array.from(clients.values()).find(
-                  (client) => client.id !== connId && client.name === persistedRename.name,
-                )
-                const differentLaunchHolder =
-                  liveHolder !== undefined &&
-                  !(
-                    liveHolder.launchId === launchIdentity.id && liveHolder.launchParentPid === launchIdentity.parentPid
-                  )
-                if (differentLaunchHolder) {
+                if (
+                  hooks.identityVerifier &&
+                  verifiedSid === null &&
+                  isExplicitTribePersonaName(persistedRename.name)
+                ) {
                   log.warn?.(
-                    `persisted rename "${persistedRename.name}" for launch ${launchIdentity.id} is held by a live different-launch session; registering as "${resolvedName}"`,
+                    `skipped persisted persona rename "${persistedRename.name}" for launch ${launchIdentity.id}: ${HAB_ID_TOKEN_ENV} did not verify; registering as "${resolvedName}"`,
                   )
                 } else {
-                  log.info?.(
-                    `re-applied persisted runtime rename: ${resolvedName} → ${persistedRename.name} (launch ${launchIdentity.id})`,
+                  const liveHolder = Array.from(clients.values()).find(
+                    (client) => client.id !== connId && client.name === persistedRename.name,
                   )
-                  resolvedName = persistedRename.name
+                  const differentLaunchHolder =
+                    liveHolder !== undefined &&
+                    !(
+                      liveHolder.launchId === launchIdentity.id &&
+                      liveHolder.launchParentPid === launchIdentity.parentPid
+                    )
+                  if (differentLaunchHolder) {
+                    log.warn?.(
+                      `persisted rename "${persistedRename.name}" for launch ${launchIdentity.id} is held by a live different-launch session; registering as "${resolvedName}"`,
+                    )
+                  } else {
+                    log.info?.(
+                      `re-applied persisted runtime rename: ${resolvedName} → ${persistedRename.name} (launch ${launchIdentity.id})`,
+                    )
+                    resolvedName = persistedRename.name
+                  }
                 }
               }
             }
@@ -2225,6 +2240,34 @@ export function withDispatcher<
           case TRIBE_COORD_METHODS.pending: {
             const client = clients.get(connId)
             const ctx = client?.ctx ?? daemonCtx
+            if (
+              hooks.identityVerifier &&
+              client &&
+              (method === TRIBE_COORD_METHODS.join || method === TRIBE_COORD_METHODS.rename)
+            ) {
+              const requestedName = method === TRIBE_COORD_METHODS.rename ? p.new_name : p.name
+              let targetName = typeof requestedName === "string" ? requestedName : null
+              if (method === TRIBE_COORD_METHODS.join && targetName === null) {
+                const adoptionToken = p.identity_token ?? p.identityToken
+                if (typeof adoptionToken === "string" && adoptionToken.length > 0) {
+                  const prior = db
+                    .prepare(
+                      "SELECT id, name FROM sessions WHERE identity_token = ? AND id != ? ORDER BY updated_at DESC LIMIT 1",
+                    )
+                    .get(adoptionToken, ctx.sessionId) as { id: string; name: string } | null
+                  if (prior && !registry.hasActiveTransport(prior.id)) targetName = prior.name
+                }
+              }
+              if (targetName !== null && isExplicitTribePersonaName(targetName)) {
+                const identity = db.prepare("SELECT identity_sid FROM sessions WHERE id = ?").get(ctx.sessionId) as {
+                  identity_sid: string | null
+                } | null
+                if (!identity?.identity_sid) {
+                  const refusal = missingPersonaTokenRefusal(targetName, "missing", method)
+                  return makeError(id, -32003, refusal.message, refusal.data)
+                }
+              }
+            }
             const result = await handleToolCall(ctx, method, p, DAEMON_HANDLER_OPTS, connId)
             if ((method === TRIBE_COORD_METHODS.join || method === TRIBE_COORD_METHODS.rename) && client) {
               client.name = ctx.getName()
