@@ -7,7 +7,7 @@
  * 4.2 stays green with the migration's UPDATE removed. This row seeds the skip condition, so only the migration can pass it.
  */
 import { Database } from "bun:sqlite"
-import { expect, test } from "vitest"
+import { expect, test, vi } from "vitest"
 import { mkdirSync, mkdtempSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -36,12 +36,14 @@ test("review2: a legacy relative row the incremental scan skips is rewritten abs
   ).run(id, "/p1", join("-p1", `${id}.jsonl`), Date.now(), Date.now(), 1, "complete", stats.mtime.getTime(), stats.size)
   const saved = process.env.CLAUDE_DIR
   try {
+    vi.stubEnv("RECALL_SKIP_PROVIDER_TRANSCRIPTS", "1")
     process.env.CLAUDE_DIR = claudeDir
     const result = await rebuildIndex(db, { incremental: true, skipCodex: true })
     // The scan skipped the unchanged file, so the path can only have moved through the migration.
     expect(result.messages ?? 0).toBe(0)
     expect(getSession(db, id)?.jsonl_path).toBe(file)
   } finally {
+    vi.unstubAllEnvs()
     if (saved !== undefined) process.env.CLAUDE_DIR = saved
     else delete process.env.CLAUDE_DIR
     db.close()

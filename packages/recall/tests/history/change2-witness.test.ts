@@ -18,6 +18,7 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
   let origDbPath: string | undefined
 
   beforeEach(() => {
+    vi.stubEnv("RECALL_SKIP_PROVIDER_TRANSCRIPTS", "1")
     tempDir = mkdtempSync(join(tmpdir(), "recall-change2-witness-"))
     origClaudeDir = process.env.CLAUDE_DIR
     origDbPath = process.env.RECALL_DB_PATH
@@ -48,6 +49,7 @@ describe("Change 2 Witness Tests (A7 & A8 — CTO Ruling 2026-09-22)", () => {
     }
     process.exitCode = 0
     vi.restoreAllMocks()
+    vi.unstubAllEnvs()
     safeRemoveSync(tempDir, { within: tmpdir() })
   })
 

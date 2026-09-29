@@ -74,6 +74,12 @@ export interface CodexIndexOptions {
   onProgress?: (progress: { sessionsProcessed: number; messagesIndexed: number; currentSession?: string }) => void
 }
 
+/** One source policy shared by the provider consumer and rebuild/prune owner. */
+export function excludedTranscriptProviders(skipCodex = false): ReadonlySet<string> {
+  if (process.env.RECALL_SKIP_PROVIDER_TRANSCRIPTS === "1") return new Set(["codex", "grok", "agy"])
+  return new Set(skipCodex || process.env.RECALL_SKIP_CODEX === "1" ? ["codex"] : [])
+}
+
 export interface CodexFailureRecord {
   kind: "unreadable" | "skipped" | "error"
   path?: string
@@ -369,7 +375,36 @@ export async function validateAgReadiness(agBin?: string): Promise<CodexCatalog>
 /**
  * Ingest provider transcripts into SQLite database using `ag transcript export`.
  */
-export async function indexCodexTranscripts(db: Database, options: CodexIndexOptions = {}): Promise<CodexIndexResult> {
+export async function indexCodexTranscripts(
+  db: Database,
+  options: CodexIndexOptions = {},
+  // Internal propagation from rebuildIndex: resolve policy once per pipeline.
+  excludedProviders: ReadonlySet<string> = excludedTranscriptProviders(options.skipCodex),
+): Promise<CodexIndexResult> {
+  if (excludedProviders.size === 3) {
+    if (options.path) {
+      throw new Error(`Provider transcript path ${options.path} is excluded by RECALL_SKIP_PROVIDER_TRANSCRIPTS=1`)
+    }
+    const retained = db
+      .prepare("SELECT id FROM sessions WHERE id LIKE 'codex:%' OR id LIKE 'grok:%' OR id LIKE 'agy:%'")
+      .all() as { id: string }[]
+    const reason =
+      "RECALL_SKIP_PROVIDER_TRANSCRIPTS=1: excluded codex, grok, agy catalog/export; existing provider rows retained"
+    return {
+      discovered: 0,
+      canonical: 0,
+      ambiguous: 0,
+      sessions: 0,
+      rows: 0,
+      skipped: 0,
+      unreadable: 0,
+      errors: 0,
+      failures: [{ kind: "skipped", reason, timestamp: Date.now() }],
+      reasonCounts: { [reason]: 1 },
+      indexedSessionIds: [],
+      retainedSessionIds: retained.map((row) => row.id),
+    }
+  }
   const agBin = resolveAgBin(options.agBin)
 
   let catalogSessions: TranscriptCatalogSession[] = []
@@ -382,7 +417,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
 
   if (!options.path) {
     const catalog = options.catalog ?? (await fetchCodexCatalog(agBin))
-    catalogSessions = catalog.sessions.filter((session) => !options.skipCodex || session.provider !== "codex")
+    catalogSessions = catalog.sessions.filter((session) => !excludedProviders.has(session.provider))
     failedProviders = catalog.failedProviders ?? (catalog.failures.length ? ["codex", "grok", "agy"] : [])
     discovered = catalog.discovered
     canonical = catalog.canonical
@@ -404,7 +439,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
     .filter(
       (row) =>
         failedProviders.some((provider) => row.id.startsWith(`${provider}:`)) ||
-        (options.skipCodex && row.id.startsWith("codex:")),
+        Array.from(excludedProviders).some((provider) => row.id.startsWith(`${provider}:`)),
     )
     .map((row) => row.id)
 

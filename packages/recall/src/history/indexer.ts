@@ -15,6 +15,7 @@ import { spawnSync } from "node:child_process"
 import { gitEnvironmentWithoutRootOverrides } from "removely"
 import {
   indexCodexTranscripts,
+  excludedTranscriptProviders,
   validateAgReadiness,
   type CodexFailureRecord,
   type CodexCatalog,
@@ -1016,6 +1017,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     throw new Error(`Recall project source is not a directory: ${options.projectRoot}`)
   }
 
+  const excludedProviders = excludedTranscriptProviders(options.skipCodex)
   const seenSessionIds = new Set<string>()
   const protectedProviderSessionIds = new Set<string>()
 
@@ -1060,7 +1062,10 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
 
   // Pre-flight ag binary and schema readiness before any index modification (A3: reuse catalog)
   let preloadedCatalog: CodexCatalog | undefined
-  if (!options.path || !isClaudeTarget) {
+  if (options.path && !isClaudeTarget && excludedProviders.size === 3) {
+    throw new Error(`Provider transcript path ${options.path} is excluded by RECALL_SKIP_PROVIDER_TRANSCRIPTS=1`)
+  }
+  if ((!options.path || !isClaudeTarget) && excludedProviders.size < 3) {
     preloadedCatalog = await validateAgReadiness(options.agBin)
   }
 
@@ -1277,25 +1282,29 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   let codexReasonCounts: Record<string, number> = {}
 
   if (!options.path || !isClaudeTarget) {
-    const codexResult = await indexCodexTranscripts(db, {
-      incremental: options.incremental,
-      full: options.full,
-      force: options.force,
-      path: options.path,
-      projectRoot: options.projectRoot,
-      agBin: options.agBin,
-      catalog: preloadedCatalog,
-      skipCodex: options.skipCodex || process.env.RECALL_SKIP_CODEX === "1",
-      cutoffTime: options.full ? undefined : cutoffTime,
-      onProgress: (p) => {
-        options.onProgress?.({
-          filesProcessed: totalFiles + p.sessionsProcessed,
-          messagesIndexed: totalMessages + p.messagesIndexed,
-          writesIndexed: totalWrites,
-          currentFile: p.currentSession ?? "",
-        })
+    const codexResult = await indexCodexTranscripts(
+      db,
+      {
+        incremental: options.incremental,
+        full: options.full,
+        force: options.force,
+        path: options.path,
+        projectRoot: options.projectRoot,
+        agBin: options.agBin,
+        catalog: preloadedCatalog,
+        skipCodex: options.skipCodex,
+        cutoffTime: options.full ? undefined : cutoffTime,
+        onProgress: (p) => {
+          options.onProgress?.({
+            filesProcessed: totalFiles + p.sessionsProcessed,
+            messagesIndexed: totalMessages + p.messagesIndexed,
+            writesIndexed: totalWrites,
+            currentFile: p.currentSession ?? "",
+          })
+        },
       },
-    })
+      excludedProviders,
+    )
     codexSessions = codexResult.sessions
     codexMessages = codexResult.rows
     codexSkipped = codexResult.skipped
@@ -1444,9 +1453,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     if (!options.incremental && !options.path) {
       const allDbSessions = db.prepare("SELECT id FROM sessions").all() as { id: string }[]
       let unreferencedIds = allDbSessions.map((s) => s.id).filter((id) => !seenSessionIds.has(id))
-      if (options.skipCodex || process.env.RECALL_SKIP_CODEX === "1") {
-        unreferencedIds = unreferencedIds.filter((id) => !id.startsWith("codex:"))
-      }
+      unreferencedIds = unreferencedIds.filter((id) => !excludedProviders.has(id.split(":")[0] ?? ""))
       if (unreferencedIds.length > 0) {
         const placeholders = unreferencedIds.map(() => "?").join(",")
         db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...unreferencedIds)
@@ -1470,13 +1477,14 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
         const toPrune: Array<{ id: string; jsonl_path: string }> = []
 
         for (const s of dbSessions) {
+          if (protectedProviderSessionIds.has(s.id)) continue
           if (seenSessionIds.has(s.id)) {
             if (s.status === "stale-missing") {
               updateSessionStatus(db, s.id, "complete")
             }
             continue
           }
-          if ((options.skipCodex || process.env.RECALL_SKIP_CODEX === "1") && s.id.startsWith("codex:")) {
+          if (excludedProviders.has(s.id.split(":")[0] ?? "")) {
             continue
           }
 
