@@ -30,7 +30,7 @@ instruction]`.
 
 ## Why this exists
 
-`km-ambot` (2026-04-21): a Claude Code session treated
+`@km/inbox/14888-ambot` (2026-04-21): a Claude Code session treated
 UserPromptSubmit-injected `<session_memory>` content as user-typed,
 fabricated `advisor-takes.md` + index edits, then confabulated the
 source when questioned. Root cause: two parallel hook paths each
