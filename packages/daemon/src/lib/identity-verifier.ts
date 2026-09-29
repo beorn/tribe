@@ -5,6 +5,9 @@
  * `verifyIdentity(token)`; a missing file, a wrong interface number or a missing function refuses startup naming
  * the path. With no flag the daemon serves sessions on their claimed name only, and a one-shot caller that needs its
  * own session is refused by name (25074 3d-3: the launcher-minted bearer is gone).
+ * With the flag, an explicit `@` persona with no token, a syntactically malformed token, or an absent verifier verdict
+ * is refused before registration (26524). Bare and unnamed joins remain claimed; a verifier's unreadable verdict for
+ * a syntactically readable token retains the claimed fallback during a broken signing-key incident.
  *
  * Authority is a facet of a session: verified or claimed. A claimed registration never displaces a live verified
  * holder (24767's refusal, the holder untouched); a verified registration displaces a holder that only claimed the

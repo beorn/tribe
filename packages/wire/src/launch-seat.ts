@@ -71,14 +71,15 @@ export async function resolveLaunchSeat(
   return { session, launchId, launchParentPid, status }
 }
 
-/** The register a one-shot sender makes: its name, and the launch tuple when it speaks as that launch's seat. */
+/** The register a one-shot sender makes: its name, token, and daemon-resolved launch tuple when it speaks as a seat. */
 export function oneShotRegisterParams(
-  as: Readonly<{ name: string; launchId?: string; launchParentPid?: number }>,
+  as: Readonly<{ name: string; idToken?: string; launchId?: string; launchParentPid?: number }>,
   cwd: string = process.cwd(),
   pid: number = process.pid,
 ): Record<string, unknown> {
   return {
     name: as.name,
+    ...(as.idToken === undefined ? {} : { idToken: as.idToken }),
     role: "member",
     domains: [],
     delivery: "pull",

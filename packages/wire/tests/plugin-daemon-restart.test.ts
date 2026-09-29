@@ -552,6 +552,9 @@ process.exit(await child.exited)
     expect(mcpToolJson(stdout, 10)).toMatchObject({ joined: true, name: PERSONA, delivery: "push" })
     await firstDaemon.client.call("register", {
       name: "@agent/restart-sender",
+      idToken: launchToken("restart-sender", "@agent/restart-sender"),
+      launchId: "restart-sender",
+      launchParentPid: process.pid,
       role: "member",
       domains: ["test"],
       project: tmpDir,
@@ -672,6 +675,9 @@ process.exit(await child.exited)
     })
     await secondSuccessor.client.call("register", {
       name: "@agent/restart-sender",
+      idToken: launchToken("restart-sender", "@agent/restart-sender"),
+      launchId: "restart-sender",
+      launchParentPid: process.pid,
       role: "member",
       domains: ["test"],
       project: tmpDir,
@@ -1278,7 +1284,11 @@ process.exit(await child.exited)
       )
       if (candidate) rejoined = candidate
       return rejoined !== undefined
-    }, "launch-less wrapper process re-registration")
+    }, "launch-less wrapper process re-registration").catch((error: unknown) => {
+      throw new Error(
+        `${String(error)}\nplugin stderr:\n${pluginStderr}\nadapter log:\n${existsSync(adapterLog) ? readFileSync(adapterLog, "utf8").slice(-5_000) : "(missing)"}`,
+      )
+    })
 
     expect(rejoined).toMatchObject({
       member_id: initial?.member_id,
@@ -1385,7 +1395,11 @@ process.exit(await child.exited)
       },
       "join-during-wait re-exec'd adapter registration",
       pacedRestartBudgetMs(3),
-    )
+    ).catch((error: unknown) => {
+      throw new Error(
+        `${String(error)}\nplugin stderr:\n${pluginStderr}\nadapter log:\n${existsSync(adapterLog) ? readFileSync(adapterLog, "utf8").slice(-5_000) : "(missing)"}`,
+      )
+    })
     expect(rejoined, pluginStderr).toMatchObject({ name: "@cto", transport_state: "connected" })
     for (const pid of rejoined?.transport_pids ?? []) adapterPids.add(pid)
     expect(plugin.exitCode, pluginStderr).toBeNull()

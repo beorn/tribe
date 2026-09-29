@@ -8,6 +8,7 @@ import { createScope, type InboxWaitResult } from "tribe-wire"
 import { TRIBE_PROTOCOL_VERSION, type JsonRpcRequest } from "tribe-wire/lib/socket"
 import type { TribeRole } from "tribe-wire/lib/config"
 import { deriveTribePersonaLaunchIdentity } from "tribe-wire/lib/persona-launch-identity"
+import { readUnverifiedTokenClaims } from "tribe-wire/lib/identity-token"
 import { createTribeContext } from "../context.ts"
 import { openDatabase, createStatements } from "../database.ts"
 import { sendMessage } from "../messaging.ts"
@@ -17,14 +18,18 @@ import type { ClientSession } from "./with-client-registry.ts"
 import { withDispatcher } from "./with-dispatcher.ts"
 import type { LoadedIdentityVerifier } from "../identity-verifier.ts"
 
-const managedToken = (name: string, sid: string) => `${name}|${sid}`
+const managedToken = (name: string, sid: string) =>
+  `e30.${Buffer.from(JSON.stringify({ sid, act: { sub: name } })).toString("base64url")}.sig`
 const managedVerifier: LoadedIdentityVerifier = {
   path: "/test/managed-verifier",
   suppliesGen: false,
   verify: async (token) => {
-    const separator = token.indexOf("|")
-    if (separator < 1 || separator === token.length - 1) return { result: "unreadable", reason: "invalid test token" }
-    return { result: "verified", actor: token.slice(0, separator), sid: token.slice(separator + 1) }
+    try {
+      const claims = readUnverifiedTokenClaims(token)
+      return { result: "verified", actor: claims.actor, sid: claims.sid }
+    } catch {
+      return { result: "unreadable", reason: "invalid test token" }
+    }
   },
 }
 
@@ -1866,7 +1871,16 @@ describe("dispatcher inbox-wait parsing", () => {
           }),
         )
       } else {
-        await registerMember(harness, connId, name, identitySid)
+        parseResult(
+          await harness.register(connId, {
+            name,
+            pid: liveHolderPid,
+            project: "/tmp/km-wt6",
+            launchId: identitySid,
+            launchParentPid: process.pid,
+            idToken: managedToken(name, identitySid),
+          }),
+        )
       }
     }
 
@@ -2335,15 +2349,19 @@ describe("dispatcher inbox-wait parsing", () => {
       idToken: managedToken(cliSeat, launchId),
     })
     const mcpOwner = harness.connectClient()
-    await harness.register(mcpOwner.connId, {
-      name: mcpSeat,
-      pid: liveHolderPid,
-      project: "/tmp/km-wt-consumer-mcp",
-      identitySid: "sid-0d",
-    })
+    parseResult(
+      await harness.register(mcpOwner.connId, {
+        name: mcpSeat,
+        pid: liveHolderPid,
+        project: "/tmp/km-wt-consumer-mcp",
+        launchId: "sid-0d",
+        launchParentPid: process.pid,
+        idToken: managedToken(mcpSeat, "sid-0d"),
+      }),
+    )
     const watcher = harness.connectClient()
     await harness.register(watcher.connId, {
-      name: "@agent/watcher",
+      name: "watcher",
       pid: liveHolderPid,
       project: "/tmp/km-wt-watcher",
     })
