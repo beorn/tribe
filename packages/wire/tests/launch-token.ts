@@ -18,8 +18,8 @@ export function launchToken(launchId: string, actor = "test-seat", kind?: "servi
  * token, so an inherited runner token never decides a fixture's launch. No launcher projects TRIBE_LAUNCH_ID since
  * 25074 3d-2b and nothing reads it, so a fixture carries only the token.
  */
-export function launchEnvironment(launchId: string): { HAB_ID_TOKEN: string } {
-  return { HAB_ID_TOKEN: launchId === "" ? "" : launchToken(launchId) }
+export function launchEnvironment(launchId: string, actor = "test-seat"): { HAB_ID_TOKEN: string } {
+  return { HAB_ID_TOKEN: launchId === "" ? "" : launchToken(launchId, actor) }
 }
 
 /**

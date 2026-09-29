@@ -14,6 +14,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { connectToDaemon, type DaemonClient } from "tribe-wire"
+import { launchToken } from "../../../wire/tests/launch-token.ts"
 
 const DAEMON = resolve(import.meta.dirname, "../daemon.ts")
 const BUN_BIN = process.versions.bun ? process.execPath : "bun"
@@ -87,12 +88,13 @@ describe("the daemon's --identity-verifier boot check (25074 3b)", () => {
 
   it("boots with a stub verifier, names it and its gen supply, and serves a token-keyed registration as verified", async () => {
     const verifierPath = join(dir, "verifier.ts")
+    const token = launchToken("sid-dev7", "@dev/7")
     writeFileSync(
       verifierPath,
       `export const IDENTITY_VERIFIER_INTERFACE = 1
        export const IDENTITY_VERIFIER_SUPPLIES_GEN = true
        export async function verifyIdentity(token) {
-         return token === "token-dev7"
+         return token === ${JSON.stringify(token)}
            ? { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 1 }
            : { result: "absent" }
        }`,
@@ -109,7 +111,7 @@ describe("the daemon's --identity-verifier boot check (25074 3b)", () => {
       project: dir,
       delivery: "pull",
       launchParentPid: process.pid,
-      idToken: "token-dev7",
+      idToken: token,
     })
     const health = (
       (await client.call("cli_health")) as {

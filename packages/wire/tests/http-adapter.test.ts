@@ -520,6 +520,11 @@ describe("HTTP MCP adapter", () => {
     vi.stubEnv(HAB_ID_TOKEN_ENV, launchToken("http-reconnect", "@codi/hermes"))
     const originalServe = Bun.serve
     const stop = vi.fn()
+    const refusalLines: string[] = []
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      refusalLines.push(String(chunk))
+      return true
+    })
     let bridge: TribeHttpMcpServer | undefined
     try {
       const fakeServe = (() => ({ port: 41_731, stop })) as unknown as typeof Bun.serve
@@ -529,7 +534,9 @@ describe("HTTP MCP adapter", () => {
       await waitForRegistrationCount(daemon, 2)
       await vi.waitFor(() => expect(stop).toHaveBeenCalledTimes(1), { timeout: 2_000 })
       expect(daemon.requests.filter((request) => request.method === "register")).toHaveLength(2)
+      expect(refusalLines.join("")).toContain("register refused: explicit persona @codi/hermes")
     } finally {
+      stderr.mockRestore()
       if (!Reflect.set(Bun, "serve", originalServe)) throw new Error("could not restore Bun.serve")
       bridge?.close()
       for (const client of daemon.clients) client.destroy()

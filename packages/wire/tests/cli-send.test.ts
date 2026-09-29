@@ -1128,7 +1128,7 @@ describe("registerSendCommands", () => {
               ...process.env,
               TRIBE_SOCKET: socketPath,
               TRIBE_NAME: sender,
-              ...launchEnvironment(`launch-${sender}`),
+              ...launchEnvironment(`launch-${sender}`, sender),
             },
             stdio: ["ignore", "ignore", "pipe"],
           })
@@ -1299,7 +1299,7 @@ describe("send warns when it should have been a reply (22990)", () => {
             ...process.env,
             TRIBE_SOCKET: socketPath,
             TRIBE_SESSION_NAME: "@chief",
-            ...launchEnvironment("launch-22990"),
+            ...launchEnvironment("launch-22990", "@chief"),
           },
           stdio: ["ignore", "pipe", "pipe"],
         })
@@ -1656,7 +1656,7 @@ describe("reply and taking convenience commands (25028)", () => {
             ...process.env,
             TRIBE_SOCKET: socketPath,
             TRIBE_SESSION_NAME: "@dev/8",
-            ...launchEnvironment("launch-25028"),
+            ...launchEnvironment("launch-25028", "@dev/8"),
           },
           stdio: ["ignore", "pipe", "pipe"],
         })

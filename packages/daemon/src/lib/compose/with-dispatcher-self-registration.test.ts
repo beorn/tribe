@@ -1041,12 +1041,14 @@ describe("dispatcher bounded mailbox drain", () => {
 
     for (const index of [1, 2, 3]) {
       const { connId } = harness.connectClient()
+      const name = `@chief-dead-${String(index).padStart(8, "0")}`
       await harness.register(connId, {
-        name: `@chief-dead-${String(index).padStart(8, "0")}`,
+        name,
         pid: liveHolderPid + index,
         project: "/tmp/hh",
         launchId,
         launchParentPid: process.pid,
+        idToken: managedToken(name, launchId),
       })
     }
 

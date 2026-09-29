@@ -149,7 +149,7 @@ describe("the one sender registers as what its launch's token names (25074 3d-1c
     })
   }
 
-  it("a seat-run producer registers as the seat under the daemon's launch tuple, presenting no token of its own", async () => {
+  it("a seat-run producer registers as the seat under the daemon's launch tuple with its launch token", async () => {
     const { socketPath, calls } = await fakeDaemon()
     const token = launchToken(SEAT_SID, SEAT)
 
@@ -166,7 +166,8 @@ describe("the one sender registers as what its launch's token names (25074 3d-1c
       launchId: SEAT_TUPLE.launch_id,
       launchParentPid: SEAT_TUPLE.launch_parent_pid,
     })
-    expect(calls[1]?.params).not.toHaveProperty("idToken")
+    // 26524: a verifier-backed daemon refuses an explicit persona without this launch's token.
+    expect(calls[1]?.params).toHaveProperty("idToken", token)
   })
 
   it("a process with no token is refused before the daemon, naming HAB_ID_TOKEN, the producer and the cure", async () => {
