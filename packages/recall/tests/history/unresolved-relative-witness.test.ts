@@ -37,6 +37,7 @@ test("review2: a legacy relative row another profile's root holds survives two r
   insertMessage(db, "m4", id, "user", "other profile", null, null, Date.now())
   const saved = process.env.CLAUDE_DIR
   try {
+    vi.stubEnv("RECALL_SKIP_PROVIDER_TRANSCRIPTS", "1")
     process.env.CLAUDE_DIR = here
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
     for (const _run of [1, 2, 3]) {
@@ -51,6 +52,7 @@ test("review2: a legacy relative row another profile's root holds survives two r
       warn.mock.calls.flat().filter((line) => String(line).includes("1 legacy session(s) have relative paths")),
     ).toHaveLength(3)
   } finally {
+    vi.unstubAllEnvs()
     vi.restoreAllMocks()
     if (saved !== undefined) process.env.CLAUDE_DIR = saved
     else delete process.env.CLAUDE_DIR

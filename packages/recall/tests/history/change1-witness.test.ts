@@ -67,7 +67,7 @@ describe("Change 1 Witness Tests (CTO Ruling 2026-09-22)", () => {
     } else {
       delete process.env.AG_BIN
     }
-    delete process.env.RECALL_SKIP_CODEX
+    delete process.env.RECALL_SKIP_PROVIDER_TRANSCRIPTS
     process.exitCode = 0
     safeRemoveSync(tempDir, { within: tmpdir() })
   })
@@ -551,7 +551,7 @@ if (args[0] === "transcript" && args[1] === "list") {
   // A5: Incremental negative-caching of failed sessions
   // --------------------------------------------------------------------------
   test("A5: new Claude failure exits 5, unchanged failed file is cached and exits 0", async () => {
-    process.env.RECALL_SKIP_CODEX = "1"
+    process.env.RECALL_SKIP_PROVIDER_TRANSCRIPTS = "1"
     const proj = join(projectsDir, "proj-fail")
     mkdirSync(proj, { recursive: true })
     const badFile = join(proj, "bad-session.jsonl")
@@ -578,7 +578,7 @@ if (args[0] === "transcript" && args[1] === "list") {
   // Item 5: cmdIndex prints skipped sessions older than 180 days
   // --------------------------------------------------------------------------
   test("Item 5: cmdIndex prints '(skipped N sessions older than 180 days)' when skippedOld > 0", async () => {
-    process.env.RECALL_SKIP_CODEX = "1"
+    process.env.RECALL_SKIP_PROVIDER_TRANSCRIPTS = "1"
     const proj = join(projectsDir, "proj-old")
     mkdirSync(proj, { recursive: true })
     const oldFile = join(proj, "old-session.jsonl")

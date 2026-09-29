@@ -36,7 +36,7 @@ describe("Change 1 Tier B1 Witness Tests (CTO Ruling 2026-09-22: B1)", () => {
     dbPath = join(tempDir, "test.db")
     process.env.RECALL_DB_PATH = dbPath
     db = new Database(dbPath)
-    process.env.RECALL_SKIP_CODEX = "1"
+    process.env.RECALL_SKIP_PROVIDER_TRANSCRIPTS = "1"
   })
 
   afterEach(() => {
@@ -52,7 +52,7 @@ describe("Change 1 Tier B1 Witness Tests (CTO Ruling 2026-09-22: B1)", () => {
     } else {
       delete process.env.RECALL_DB_PATH
     }
-    delete process.env.RECALL_SKIP_CODEX
+    delete process.env.RECALL_SKIP_PROVIDER_TRANSCRIPTS
     safeRemoveSync(tempDir, { within: tmpdir() })
   })
 

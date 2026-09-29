@@ -89,7 +89,7 @@ fs.writeFileSync(path.join(srcDir, "codex-indexer.ts"), oldCodexCode)
 fs.writeFileSync(path.join(srcDir, "formatters.ts"), oldFormattersCode)
 
 process.env.CLAUDE_DIR = tmp
-process.env.RECALL_SKIP_CODEX = "1"
+process.env.RECALL_SKIP_PROVIDER_TRANSCRIPTS = "1"
 
 const { initSchema } = await import(path.join(srcDir, "db.ts"))
 const { rebuildIndex } = await import(path.join(srcDir, "indexer.ts"))
