@@ -146,7 +146,7 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
   const http = Bun.serve({
     hostname: "127.0.0.1",
     port: opts.port ?? 0,
-    async fetch(req, server) {
+    async fetch(req, server): Promise<Response> {
       const url = new URL(req.url)
       if (url.pathname === "/health") return Response.json({ ok: true })
       if (url.pathname !== "/mcp") return new Response("not found", { status: 404 })
