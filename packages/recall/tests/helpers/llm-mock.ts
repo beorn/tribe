@@ -10,6 +10,8 @@
  * without burning API credits or requiring network access.
  *
  * NOT imported from source code — tests only. Keep it dependency-light.
+ *
+ * @fakes tribe-recall
  */
 
 import type { LlmModel } from "../../src/lib/llm-backend.ts"
