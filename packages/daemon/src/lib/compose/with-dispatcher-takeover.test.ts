@@ -1125,6 +1125,71 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
     ])
   })
 
+  /**
+   * @failure A bare register with an unusable token adopts a prior persona through pid/cwd and erases its verified sid.
+   * @level l1
+   * @consumer 26524: judge the effective name against the token verdict before reusing the prior session row.
+   */
+  it.each([
+    { label: "malformed", idToken: "not-a-jws", reason: "malformed" },
+    { label: "verifier-absent", idToken: "token-absent", reason: "absent" },
+  ])("refuses a bare $label token adopting an explicit persona by pid and cwd", async ({ idToken, reason }) => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-prior")
+    parseResult<RegisterResult>(
+      await harness.register("conn-prior", {
+        name: "@dev/7",
+        pid: 4101,
+        project: "/tmp/p",
+        idToken: "token-dev7",
+        launchId: "sid-dev7",
+        launchParentPid: 4100,
+      }),
+    )
+    harness.dropClient("conn-prior")
+    harness.addPendingClient("conn-bare")
+    const refusal = parseError(
+      await harness.register("conn-bare", { name: "standalone", pid: 4101, project: "/tmp/p", idToken }),
+    )
+    expect(refusal).toMatchObject({ code: -32003, data: { kind: "identity-token-missing", reason } })
+    expect(refusal.message).toContain("@dev/7")
+    expect(harness.db.prepare("SELECT count(*) AS n FROM sessions WHERE name = 'standalone'").get()).toEqual({ n: 0 })
+    expect(identitySid(harness, "@dev/7")).toBe("sid-dev7")
+    expect(harness.healthLogs).toEqual([
+      { type: "health:identity-token-missing", message: expect.stringContaining("@dev/7") },
+    ])
+  })
+
+  it("keeps a readable token with an unreadable signature claimed after pid/cwd adoption", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-prior")
+    parseResult<RegisterResult>(
+      await harness.register("conn-prior", {
+        name: "@dev/7",
+        pid: 4101,
+        project: "/tmp/p",
+        idToken: "token-dev7",
+        launchId: "sid-dev7",
+        launchParentPid: 4100,
+      }),
+    )
+    harness.dropClient("conn-prior")
+    harness.addPendingClient("conn-bare")
+    const result = parseResult<RegisterResult>(
+      await harness.register("conn-bare", {
+        name: "standalone",
+        pid: 4101,
+        project: "/tmp/p",
+        idToken: TOKEN_WITH_UNREADABLE_SIGNATURE,
+      }),
+    )
+    expect(result.name).toBe("@dev/7")
+    expect(identitySid(harness, "@dev/7")).toBeNull()
+    expect(await membersAuthority(harness)).toMatchObject({ "@dev/7": "claimed" })
+  })
+
   // 25074 step 3 went live at 2026-09-24 08:02 PDT and every verified seat's `tribe inbox-status` answered "resolved to
   // 0 sessions": the CLI asks by the seat's bare launch id (HAB_SESSION_LAUNCH_ID, which IS the token's sid), and a
   // verified session is keyed "<sid>@<gen>", which neither the exact nor the "<id>::" arm of the lookup matched.
