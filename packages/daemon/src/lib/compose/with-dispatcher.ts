@@ -1099,8 +1099,9 @@ export function withDispatcher<
     }
 
     type RegistrationRefusal = { readonly message: string; readonly data: Record<string, unknown> }
+    type PersonaTokenDefect = "missing" | "malformed" | "absent"
 
-    function missingPersonaTokenRefusal(claimed: string, reason: "missing" | "malformed" | "absent", action: string) {
+    function missingPersonaTokenRefusal(claimed: string, reason: PersonaTokenDefect, action: string) {
       const message =
         `${action} refused: explicit persona ${claimed} has a ${reason} ${HAB_ID_TOKEN_ENV}; ` +
         "launch through hab so the token reaches this process, or join without a persona name"
@@ -1115,17 +1116,23 @@ export function withDispatcher<
       token: string | null,
       requestedName: unknown,
     ): Promise<
-      { readonly sid: string | null; readonly gen: number | null } | { readonly refusal: RegistrationRefusal }
+      | { readonly sid: string | null; readonly gen: number | null; readonly personaTokenDefect?: PersonaTokenDefect }
+      | { readonly refusal: RegistrationRefusal }
     > {
       const verifier = hooks.identityVerifier
       const claimed = typeof requestedName === "string" ? requestedName : "(no name)"
       const managedPersona = !!verifier && isExplicitTribePersonaName(claimed)
-      const refuseMissingPersonaToken = (reason: "missing" | "malformed" | "absent") => ({
+      const refuseMissingPersonaToken = (reason: PersonaTokenDefect) => ({
         refusal: missingPersonaTokenRefusal(claimed, reason, "register"),
       })
-      if (token === null) return managedPersona ? refuseMissingPersonaToken("missing") : { sid: null, gen: null }
+      if (token === null) {
+        return managedPersona
+          ? refuseMissingPersonaToken("missing")
+          : { sid: null, gen: null, personaTokenDefect: "missing" }
+      }
       if (!verifier) return { sid: null, gen: null }
-      if (managedPersona && readTokenLaunch({ [HAB_ID_TOKEN_ENV]: token }).malformedToken !== null) {
+      const malformedToken = readTokenLaunch({ [HAB_ID_TOKEN_ENV]: token }).malformedToken !== null
+      if (managedPersona && malformedToken) {
         return refuseMissingPersonaToken("malformed")
       }
       let verdict: IdentityVerdict
@@ -1145,7 +1152,13 @@ export function withDispatcher<
       if (verdict.result === "verified") clearIdentityVerifierFault()
       switch (verdict.result) {
         case "verified":
-          if (verdict.actor === requestedName) return { sid: verdict.sid, gen: verdict.gen ?? null }
+          if (verdict.actor === requestedName) {
+            return {
+              sid: verdict.sid,
+              gen: verdict.gen ?? null,
+              ...(malformedToken && { personaTokenDefect: "malformed" as const }),
+            }
+          }
           return {
             refusal: {
               message: `register refused: this transport claims ${claimed}, but its identity token names ${verdict.actor}`,
@@ -1163,9 +1176,11 @@ export function withDispatcher<
           log.warn?.(
             `register: ${claimed}'s identity token is unreadable (${redactIdentityToken(verdict.reason, token)}); not verified`,
           )
-          return { sid: null, gen: null }
+          return { sid: null, gen: null, ...(malformedToken && { personaTokenDefect: "malformed" as const }) }
         case "absent":
-          return managedPersona ? refuseMissingPersonaToken("absent") : { sid: null, gen: null }
+          return managedPersona
+            ? refuseMissingPersonaToken("absent")
+            : { sid: null, gen: null, personaTokenDefect: malformedToken ? "malformed" : "absent" }
       }
     }
 
@@ -1736,8 +1751,8 @@ export function withDispatcher<
             }
             // A bare request may resolve to a persona through pid/cwd or launch
             // adoption. Judge the effective name before any row is reused.
-            if (hooks.identityVerifier && p.idToken === undefined && isExplicitTribePersonaName(resolvedName)) {
-              const refusal = missingPersonaTokenRefusal(resolvedName, "missing", "register")
+            if (hooks.identityVerifier && identity.personaTokenDefect && isExplicitTribePersonaName(resolvedName)) {
+              const refusal = missingPersonaTokenRefusal(resolvedName, identity.personaTokenDefect, "register")
               return makeError(id, -32003, refusal.message, refusal.data)
             }
             // Class belongs to the resolved identity, not the optional caller
