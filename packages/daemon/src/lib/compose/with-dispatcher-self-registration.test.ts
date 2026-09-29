@@ -1866,7 +1866,16 @@ describe("dispatcher inbox-wait parsing", () => {
           }),
         )
       } else {
-        await registerMember(harness, connId, name, identitySid)
+        parseResult(
+          await harness.register(connId, {
+            name,
+            pid: liveHolderPid,
+            project: "/tmp/km-wt6",
+            launchId: identitySid,
+            launchParentPid: process.pid,
+            idToken: managedToken(name, identitySid),
+          }),
+        )
       }
     }
 
@@ -2335,15 +2344,19 @@ describe("dispatcher inbox-wait parsing", () => {
       idToken: managedToken(cliSeat, launchId),
     })
     const mcpOwner = harness.connectClient()
-    await harness.register(mcpOwner.connId, {
-      name: mcpSeat,
-      pid: liveHolderPid,
-      project: "/tmp/km-wt-consumer-mcp",
-      identitySid: "sid-0d",
-    })
+    parseResult(
+      await harness.register(mcpOwner.connId, {
+        name: mcpSeat,
+        pid: liveHolderPid,
+        project: "/tmp/km-wt-consumer-mcp",
+        launchId: "sid-0d",
+        launchParentPid: process.pid,
+        idToken: managedToken(mcpSeat, "sid-0d"),
+      }),
+    )
     const watcher = harness.connectClient()
     await harness.register(watcher.connId, {
-      name: "@agent/watcher",
+      name: "watcher",
       pid: liveHolderPid,
       project: "/tmp/km-wt-watcher",
     })

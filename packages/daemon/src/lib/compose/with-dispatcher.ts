@@ -35,7 +35,8 @@ import { isAbsolute } from "node:path"
 import { createLogger } from "loggily"
 import { DEFAULT_INBOX_WAIT_SESSION, incidentKey, resolveInboxWaitOptions } from "tribe-wire"
 import { deriveTribePersonaLaunchIdentity, providerLaunchIdOf } from "tribe-wire/lib/persona-launch-identity"
-import { HAB_ID_TOKEN_ENV, MANAGED_INBOX_TOKEN_REQUIRED } from "tribe-wire/lib/identity-token"
+import { HAB_ID_TOKEN_ENV, MANAGED_INBOX_TOKEN_REQUIRED, readTokenLaunch } from "tribe-wire/lib/identity-token"
+import { isExplicitTribePersonaName } from "tribe-wire/lib/persona-name"
 import {
   createLineParser,
   isRequest,
@@ -1098,9 +1099,9 @@ export function withDispatcher<
 
     type RegistrationRefusal = { readonly message: string; readonly data: Record<string, unknown> }
 
-    /** 25074 3b — verify a register's identity token through the composing layer's verifier. The sid is null when
-     *  the session is served on its claimed name: no token, no verifier, or a token the verifier could
-     *  not read. A token that is contradicted, names another actor, or makes the verifier fail refuses. */
+    /** 25074 3b, 26524 — verify a register's identity token through the composing layer's verifier. A managed
+     *  daemon refuses an explicit persona with no usable token; standalone, bare and unnamed joins stay claimed.
+     *  A cryptographically unreadable token still uses the existing claimed fallback. */
     async function verifyRegistrationIdentity(
       token: string | null,
       requestedName: unknown,
@@ -1108,8 +1109,17 @@ export function withDispatcher<
       { readonly sid: string | null; readonly gen: number | null } | { readonly refusal: RegistrationRefusal }
     > {
       const verifier = hooks.identityVerifier
-      if (token === null || !verifier) return { sid: null, gen: null }
       const claimed = typeof requestedName === "string" ? requestedName : "(no name)"
+      const managedPersona = verifier !== undefined && isExplicitTribePersonaName(claimed)
+      const refuseMissingPersonaToken = (reason: "missing" | "malformed" | "absent") => {
+        const message =
+          `register refused: explicit persona ${claimed} has a ${reason} ${HAB_ID_TOKEN_ENV}; ` +
+          "launch through hab so the token reaches this process, or join without a persona name"
+        broadcast.log(`tribe:dispatcher: ${message}`, "health:identity-token-missing")
+        return { refusal: { message, data: { kind: "identity-token-missing", claimed, reason } } } as const
+      }
+      if (token === null) return managedPersona ? refuseMissingPersonaToken("missing") : { sid: null, gen: null }
+      if (!verifier) return { sid: null, gen: null }
       let verdict: IdentityVerdict
       try {
         verdict = await verifier.verify(token)
@@ -1142,12 +1152,15 @@ export function withDispatcher<
             },
           }
         case "unreadable":
+          if (managedPersona && readTokenLaunch({ [HAB_ID_TOKEN_ENV]: token }).malformedToken !== null) {
+            return refuseMissingPersonaToken("malformed")
+          }
           log.warn?.(
             `register: ${claimed}'s identity token is unreadable (${redactIdentityToken(verdict.reason, token)}); not verified`,
           )
           return { sid: null, gen: null }
         case "absent":
-          return { sid: null, gen: null }
+          return managedPersona ? refuseMissingPersonaToken("absent") : { sid: null, gen: null }
       }
     }
 
