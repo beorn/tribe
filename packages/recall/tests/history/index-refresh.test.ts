@@ -63,6 +63,25 @@ afterEach(() => {
 })
 
 describe("Recall refresh completion", () => {
+  /** @failure Explicit Claude-only rebuilds required Ag and could prune excluded provider history (26469). */
+  test.each(["full", "incremental"] as const)("explicit provider exclusion needs no Ag and retains all provider rows in %s mode", async (mode) => {
+    vi.stubEnv("RECALL_SKIP_PROVIDER_TRANSCRIPTS", "1")
+    vi.stubEnv("AG_BIN", join(root, "absent-ag"))
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    for (const provider of ["codex", "grok", "agy"]) {
+      db.prepare("INSERT INTO sessions (id, project_path, jsonl_path, created_at, updated_at, message_count) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(`${provider}:retained`, root, join(root, `${provider}-missing.jsonl`), 1, 1, 1)
+      db.prepare("INSERT INTO messages (uuid, session_id, type, content, timestamp) VALUES (?, ?, ?, ?, ?)")
+        .run(`${provider}:message`, `${provider}:retained`, "user", `${provider} retained history`, 1)
+    }
+    await rebuildIndex(db, { full: mode === "full", incremental: mode === "incremental" })
+    expect(db.prepare("SELECT id FROM sessions ORDER BY id").all()).toEqual([
+      {id:"agy:retained"}, {id:"codex:retained"}, {id:"grok:retained"},
+    ])
+    expect(db.prepare("SELECT COUNT(*) AS n FROM messages_fts WHERE messages_fts MATCH 'retained'").get()).toEqual({n:3})
+    expect(warn.mock.calls.flat().join(" ")).toContain("RECALL_SKIP_PROVIDER_TRANSCRIPTS=1: excluded codex, grok, agy catalog/export; existing provider rows retained")
+  })
+
   test("preserves prior success timestamp and stamps run_started_at on run start (B3)", async () => {
     db.exec("CREATE TRIGGER refuse_prune BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT, 'prune failed'); END")
     db.prepare(
