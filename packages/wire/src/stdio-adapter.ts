@@ -47,6 +47,7 @@ import { dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 import { readIdentityTokenFromEnvironment } from "./lib/identity-token.ts"
 import { isIdentityTokenMissingRefusal } from "./lib/identity-token-missing-refusal.ts"
+import { TRIBE_PLUGIN_PERSONA_REFUSAL_EXIT_CODE_ENV } from "./lib/session-identity-env.ts"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
@@ -67,7 +68,6 @@ import {
   TRIBE_PLUGIN_ADAPTER_CHILD_ENV,
   TRIBE_PLUGIN_ADAPTER_EXIT_RECORD_ENV,
   TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV,
-  TRIBE_PLUGIN_PERSONA_REFUSAL_EXIT_CODE_ENV,
   TRIBE_PLUGIN_REEXEC_EXIT_CODE_ENV,
   TRIBE_PLUGIN_RESUME_JOINED_ENV,
   TRIBE_TAKEOVER_ENV,
