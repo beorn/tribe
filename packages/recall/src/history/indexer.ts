@@ -820,6 +820,7 @@ export interface IndexResult {
 export function pruneOldSessions(
   db: Database,
   cutoffTime: number,
+  protectedSessionIds: ReadonlySet<string> = new Set(),
 ): { sessions: number; messages: number; writes: number } {
   // Get sessions to prune
   const oldSessions = db
@@ -832,7 +833,8 @@ export function pruneOldSessions(
     return { sessions: 0, messages: 0, writes: 0 }
   }
 
-  const sessionIds = oldSessions.map((s) => s.id)
+  const sessionIds = oldSessions.map((s) => s.id).filter((id) => !protectedSessionIds.has(id))
+  if (sessionIds.length === 0) return { sessions: 0, messages: 0, writes: 0 }
 
   // Batch delete for efficiency
   const placeholders = sessionIds.map(() => "?").join(",")
@@ -860,7 +862,10 @@ export function pruneOldSessions(
  * Run on every rebuild (full or incremental) so quarantine takes effect
  * the first time the indexer runs after the ignore file is updated.
  */
-export function pruneIgnoredSessions(db: Database): { sessions: number; messages: number; writes: number } {
+export function pruneIgnoredSessions(
+  db: Database,
+  protectedSessionIds: ReadonlySet<string> = new Set(),
+): { sessions: number; messages: number; writes: number } {
   const allSessions = db.prepare(`SELECT id, jsonl_path FROM sessions`).all() as {
     id: string
     jsonl_path: string
@@ -869,7 +874,7 @@ export function pruneIgnoredSessions(db: Database): { sessions: number; messages
   const ignoredIds: string[] = []
   for (const s of allSessions) {
     const abs = path.isAbsolute(s.jsonl_path) ? s.jsonl_path : path.join(currentProjectsDir(), s.jsonl_path)
-    if (isRecallIgnored(abs)) ignoredIds.push(s.id)
+    if (!protectedSessionIds.has(s.id) && isRecallIgnored(abs)) ignoredIds.push(s.id)
   }
 
   if (ignoredIds.length === 0) return { sessions: 0, messages: 0, writes: 0 }
@@ -1012,6 +1017,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   }
 
   const seenSessionIds = new Set<string>()
+  const protectedProviderSessionIds = new Set<string>()
 
   let isClaudeTarget = false
   if (options.path) {
@@ -1054,7 +1060,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
 
   // Pre-flight ag binary and schema readiness before any index modification (A3: reuse catalog)
   let preloadedCatalog: CodexCatalog | undefined
-  if (!options.skipCodex && process.env.RECALL_SKIP_CODEX !== "1" && (!options.path || !isClaudeTarget)) {
+  if (!options.path || !isClaudeTarget) {
     preloadedCatalog = await validateAgReadiness(options.agBin)
   }
 
@@ -1270,7 +1276,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
   let codexFailures: CodexFailureRecord[] = []
   let codexReasonCounts: Record<string, number> = {}
 
-  if (!options.skipCodex && process.env.RECALL_SKIP_CODEX !== "1" && (!options.path || !isClaudeTarget)) {
+  if (!options.path || !isClaudeTarget) {
     const codexResult = await indexCodexTranscripts(db, {
       incremental: options.incremental,
       full: options.full,
@@ -1279,6 +1285,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
       projectRoot: options.projectRoot,
       agBin: options.agBin,
       catalog: preloadedCatalog,
+      skipCodex: options.skipCodex || process.env.RECALL_SKIP_CODEX === "1",
       cutoffTime: options.full ? undefined : cutoffTime,
       onProgress: (p) => {
         options.onProgress?.({
@@ -1305,6 +1312,7 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
     }
     if (codexResult.retainedSessionIds) {
       for (const sid of codexResult.retainedSessionIds) {
+        protectedProviderSessionIds.add(sid)
         seenSessionIds.add(sid)
       }
     }
@@ -1446,12 +1454,12 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
         db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...unreferencedIds)
         db.prepare("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')").run()
       }
-      pruneIgnoredSessions(db)
+      pruneIgnoredSessions(db, protectedProviderSessionIds)
     } else if (!options.path) {
       if (cutoffTime !== undefined) {
-        pruneOldSessions(db, cutoffTime)
+        pruneOldSessions(db, cutoffTime, protectedProviderSessionIds)
       }
-      pruneIgnoredSessions(db)
+      pruneIgnoredSessions(db, protectedProviderSessionIds)
 
       // A8: Safe two-miss pruning of vanished files in incremental mode
       if (options.incremental) {

@@ -62,13 +62,15 @@ export async function cmdIndex(opts: {
     console.log(`\n\n\u2713 Indexed content:`)
     console.log(`  ${result.messages.toLocaleString()} messages from ${result.files} session files`)
     if (result.codexSessions !== undefined && result.codexSessions > 0) {
-      console.log(`  ${result.codexMessages?.toLocaleString()} messages from ${result.codexSessions} Codex transcripts`)
+      console.log(
+        `  ${result.codexMessages?.toLocaleString()} messages from ${result.codexSessions} provider transcripts`,
+      )
     }
     if (result.codexSkipped !== undefined && result.codexSkipped > 0) {
-      console.log(`  (skipped ${result.codexSkipped} unchanged Codex transcripts)`)
+      console.log(`  (skipped ${result.codexSkipped} unchanged provider transcripts)`)
     }
     if (result.codexUnreadable !== undefined && result.codexUnreadable > 0) {
-      console.log(`  (${result.codexUnreadable} unreadable Codex transcripts)`)
+      console.log(`  (${result.codexUnreadable} unreadable provider transcripts)`)
     }
     if (result.codexReasonCounts && Object.keys(result.codexReasonCounts).length > 0) {
       const breakdown = Object.entries(result.codexReasonCounts)
@@ -77,7 +79,7 @@ export async function cmdIndex(opts: {
       console.log(`  (Codex wire status: ${breakdown})`)
     }
     if (result.codexFailures && result.codexFailures.length > 0) {
-      console.log(`  (${result.codexFailures.length} Codex transcript issues):`)
+      console.log(`  (${result.codexFailures.length} provider transcript issues):`)
       for (const f of result.codexFailures.slice(0, 5)) {
         const pathPart = f.path ? ` [${f.path}]` : ""
         console.log(`    - ${f.kind}: ${f.reason}${pathPart}`)

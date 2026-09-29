@@ -1,5 +1,5 @@
 /**
- * codex-indexer.ts - Ingests Codex transcripts exported via `ag transcript export`
+ * codex-indexer.ts - Ingests provider transcripts exported via `ag transcript export`
  *
  * Adheres strictly to CTO Correction 1-4 rulings on `ag transcript list` and `ag transcript export`.
  */
@@ -58,6 +58,7 @@ export interface CodexCatalog {
   stale: number
   invalid: number
   failures: CodexFailureRecord[]
+  failedProviders?: ("codex" | "grok" | "agy")[]
 }
 
 export interface CodexIndexOptions {
@@ -68,6 +69,7 @@ export interface CodexIndexOptions {
   projectRoot?: string
   agBin?: string
   catalog?: CodexCatalog
+  skipCodex?: boolean
   cutoffTime?: number
   onProgress?: (progress: { sessionsProcessed: number; messagesIndexed: number; currentSession?: string }) => void
 }
@@ -100,7 +102,7 @@ export interface CodexIndexResult {
 
 interface TranscriptCatalogSession {
   kind: "session"
-  provider: "codex"
+  provider: "codex" | "grok" | "agy"
   nativeId: string
   canonicalPath: string | null
   copies: Array<{
@@ -120,7 +122,7 @@ interface TranscriptCatalogSession {
 
 interface TranscriptExportSessionRecord {
   kind: "session"
-  provider: "codex"
+  provider: "codex" | "grok" | "agy"
   nativeId: string
   sessionKey: string | null
   key: string | null
@@ -210,29 +212,22 @@ export function resolveAgBin(explicitBin?: string): string {
   if (whichResult.status === 0 && whichResult.stdout.trim()) {
     return whichResult.stdout.trim()
   }
-  throw new Error("Ag binary is not available on PATH and AG_BIN is not set; cannot export Codex transcripts.")
+  throw new Error("Ag binary is not available on PATH and AG_BIN is not set; cannot export provider transcripts.")
 }
 
 /**
- * Fetch the full catalog of Codex transcripts using `ag transcript list --provider codex --json`.
+ * Fetch the provider catalog using `ag transcript list --provider all --json`.
  */
-export async function fetchCodexCatalog(agBin: string): Promise<{
-  sessions: TranscriptCatalogSession[]
-  discovered: number
-  canonical: number
-  ambiguous: number
-  stale: number
-  invalid: number
-  failures: CodexFailureRecord[]
-}> {
+export async function fetchCodexCatalog(agBin: string): Promise<CodexCatalog> {
   return new Promise((resolve, reject) => {
-    const child = spawn(agBin, ["transcript", "list", "--provider", "codex", "--json"], {
+    const child = spawn(agBin, ["transcript", "list", "--provider", "all", "--json"], {
       stdio: ["ignore", "pipe", "pipe"],
     })
 
     const sessions: TranscriptCatalogSession[] = []
     const failures: CodexFailureRecord[] = []
     let doneRecord: Record<string, unknown> | null = null
+    let scopeFailures: ("codex" | "grok" | "agy")[] | undefined
     let isFirstLine = true
     let stderr = ""
 
@@ -279,6 +274,29 @@ export async function fetchCodexCatalog(agBin: string): Promise<{
           timestamp: Date.now(),
         })
       } else if (record.kind === "done") {
+        if (record.providerScopes !== undefined) {
+          if (!Array.isArray(record.providerScopes)) {
+            reject(new Error("Malformed ag catalog providerScopes: expected array"))
+            child.kill()
+            return false
+          }
+          scopeFailures = []
+          for (const value of record.providerScopes as unknown[]) {
+            if (
+              value === null ||
+              typeof value !== "object" ||
+              !("provider" in value) ||
+              !("status" in value) ||
+              (value.provider !== "codex" && value.provider !== "grok" && value.provider !== "agy") ||
+              (value.status !== "complete" && value.status !== "incomplete")
+            ) {
+              reject(new Error(`Malformed ag catalog provider scope: ${JSON.stringify(value)}`))
+              child.kill()
+              return false
+            }
+            if (value.status === "incomplete") scopeFailures.push(value.provider)
+          }
+        }
         doneRecord = record
       }
       return true
@@ -332,6 +350,7 @@ export async function fetchCodexCatalog(agBin: string): Promise<{
         stale: Number(doneRecord.stale ?? 0),
         invalid: Number(doneRecord.invalid ?? 0),
         failures,
+        failedProviders: scopeFailures ?? (hasCatalogIssues ? ["codex", "grok", "agy"] : []),
       })
     })
   })
@@ -348,7 +367,7 @@ export async function validateAgReadiness(agBin?: string): Promise<CodexCatalog>
 }
 
 /**
- * Ingest Codex transcripts into SQLite database using `ag transcript export`.
+ * Ingest provider transcripts into SQLite database using `ag transcript export`.
  */
 export async function indexCodexTranscripts(db: Database, options: CodexIndexOptions = {}): Promise<CodexIndexResult> {
   const agBin = resolveAgBin(options.agBin)
@@ -359,10 +378,12 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
   let ambiguous = 0
   const failures: CodexFailureRecord[] = []
   const reasonCounts: Record<string, number> = {}
+  let failedProviders: ("codex" | "grok" | "agy")[] = []
 
   if (!options.path) {
     const catalog = options.catalog ?? (await fetchCodexCatalog(agBin))
-    catalogSessions = catalog.sessions
+    catalogSessions = catalog.sessions.filter((session) => !options.skipCodex || session.provider !== "codex")
+    failedProviders = catalog.failedProviders ?? (catalog.failures.length ? ["codex", "grok", "agy"] : [])
     discovered = catalog.discovered
     canonical = catalog.canonical
     ambiguous = catalog.ambiguous
@@ -374,6 +395,19 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
     }
   }
 
+  // A failed catalog scope is not an empty provider. Preserve its indexed identities during pruning.
+  const protectedSessionIds = (
+    db.prepare("SELECT id FROM sessions WHERE id LIKE 'codex:%' OR id LIKE 'grok:%' OR id LIKE 'agy:%'").all() as {
+      id: string
+    }[]
+  )
+    .filter(
+      (row) =>
+        failedProviders.some((provider) => row.id.startsWith(`${provider}:`)) ||
+        (options.skipCodex && row.id.startsWith("codex:")),
+    )
+    .map((row) => row.id)
+
   // Filter which transcripts need export
   const pathsToExport: string[] = []
   const skippedSessionIds: string[] = []
@@ -384,7 +418,9 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
   } else {
     const storedCodexMap = new Map<string, SessionRecord>()
     if (options.incremental) {
-      const codexRows = db.prepare("SELECT * FROM sessions WHERE id LIKE 'codex:%'").all() as SessionRecord[]
+      const codexRows = db
+        .prepare("SELECT * FROM sessions WHERE id LIKE 'codex:%' OR id LIKE 'grok:%' OR id LIKE 'agy:%'")
+        .all() as SessionRecord[]
       for (const row of codexRows) {
         storedCodexMap.set(row.id, row)
       }
@@ -454,7 +490,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         let allCopiesSkipped = true
         for (const c of session.copies) {
           if (!c.path) continue
-          const copyKey = c.key ?? `codex:${session.nativeId}`
+          const copyKey = c.key ?? `${session.provider}:${session.nativeId}`
           const stored = options.incremental ? storedCodexMap.get(copyKey) : getSession(db, copyKey)
           if (isUnchangedStoredCopy(stored, c.path, c)) {
             // this copy unchanged
@@ -469,7 +505,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
         }
       } else {
         const targetPath = session.canonicalPath ?? copy.path
-        const copyKey = session.key ?? session.sessionKey ?? `codex:${session.nativeId}`
+        const copyKey = session.key ?? session.sessionKey ?? `${session.provider}:${session.nativeId}`
         const stored = options.incremental ? storedCodexMap.get(copyKey) : getSession(db, copyKey)
         if (targetPath && isUnchangedStoredCopy(stored, targetPath, copy)) {
           skipped++
@@ -483,7 +519,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
     }
   }
 
-  if (pathsToExport.length === 0 && (!options.full || options.path)) {
+  if (pathsToExport.length === 0) {
     return {
       discovered,
       canonical,
@@ -491,8 +527,9 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
       sessions: 0,
       rows: 0,
       skipped,
-      unreadable: 0,
-      errors: 0,
+      unreadable: failures.filter((failure) => failure.kind === "unreadable").length,
+      errors: failures.filter((failure) => failure.kind === "error").length,
+      retainedSessionIds: protectedSessionIds,
       failures,
       reasonCounts,
       indexedSessionIds: skippedSessionIds,
@@ -500,13 +537,9 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
   }
 
   // Pass ALL changed paths in ONE call (CTO ruling: "Recall must pass ALL changed paths in ONE call, never one call per file")
-  const exportArgs = ["transcript", "export", "--provider", "codex", "--json"]
-  if (options.full && !options.path) {
-    // empty --path flags = ag transcript export exports everything
-  } else {
-    for (const p of pathsToExport) {
-      exportArgs.push("--path", p)
-    }
+  const exportArgs = ["transcript", "export", "--provider", "all", "--json"]
+  for (const p of pathsToExport) {
+    exportArgs.push("--path", p)
   }
 
   const batchResult = await new Promise<{
@@ -597,7 +630,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
             ? currentSession.keys
             : currentSession.sessionKey
               ? [currentSession.sessionKey]
-              : [`codex:${nativeId}`]
+              : [`${currentSession.provider ?? "codex"}:${nativeId}`]
 
         currentExistingCounts.clear()
         for (const key of keys) {
@@ -618,7 +651,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
 
         try {
           // Delete old rows for this native id inside the transaction by explicit keys list (A1: fully indexed)
-          deleteCodexSessionKeys(db, [`codex:${nativeId}`, ...keys])
+          deleteCodexSessionKeys(db, [`${currentSession.provider ?? "codex"}:${nativeId}`, ...keys])
         } catch (err) {
           safeRollback(db)
           inTx = false
@@ -724,7 +757,7 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
             ? currentSession.keys
             : currentSession.sessionKey
               ? [currentSession.sessionKey]
-              : [`codex:${nativeId}`]
+              : [`${currentSession.provider ?? "codex"}:${nativeId}`]
         const createdAtMs = currentSession.createdAt ? new Date(currentSession.createdAt).getTime() : Date.now()
 
         if (status === "bad-header" || status === "unreadable") {
@@ -994,6 +1027,6 @@ export async function indexCodexTranscripts(db: Database, options: CodexIndexOpt
     failures: batchResult.failures,
     reasonCounts: batchResult.reasonCounts,
     indexedSessionIds: [...skippedSessionIds, ...batchResult.indexedSessionIds],
-    retainedSessionIds: batchResult.retainedSessionIds,
+    retainedSessionIds: [...protectedSessionIds, ...batchResult.retainedSessionIds],
   }
 }

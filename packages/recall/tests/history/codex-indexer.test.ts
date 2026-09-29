@@ -2,7 +2,16 @@
  * @reach fs-walk <fixture-only: Codex indexer tests walk temporary session trees>
  */
 import { Database } from "bun:sqlite"
-import { writeFileSync, mkdtempSync, chmodSync, mkdirSync, utimesSync, existsSync, statSync } from "node:fs"
+import {
+  writeFileSync,
+  readFileSync,
+  mkdtempSync,
+  chmodSync,
+  mkdirSync,
+  utimesSync,
+  existsSync,
+  statSync,
+} from "node:fs"
 import { createHash } from "node:crypto"
 import { tmpdir, homedir } from "node:os"
 import { join, resolve } from "node:path"
@@ -438,6 +447,81 @@ exec bun "${realAgEntry}" "$@"
     chmodSync(scriptPath, 0o755)
     return scriptPath
   }
+
+  /**
+   * @failure native conversations absent from Recall despite an Ag-readable transcript
+   * @level l2
+   * @consumer Recall index and FTS search through the runtime Ag producer
+   * @testonly none
+   */
+  function makeNativeFixture(provider: "grok" | "agy"): string {
+    const fixtures = join(__dirname, "../../../../../../ag/packages/ag-cli/tests/fixtures/transcripts")
+    const id = "native-sample"
+    mkdirSync(join(tempDir, ".codex", "sessions"), { recursive: true })
+    let file: string
+    if (provider === "grok") {
+      const dir = join(tempDir, ".grok", "sessions", "%2Ffixture%2Fproject", id)
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, "summary.json"), readFileSync(join(fixtures, "grok-summary.json")))
+      file = join(dir, "chat_history.jsonl")
+      writeFileSync(file, readFileSync(join(fixtures, "grok-history.jsonl")))
+    } else {
+      const dir = join(tempDir, ".gemini", "antigravity-cli", "brain", id, ".system_generated", "logs")
+      mkdirSync(dir, { recursive: true })
+      file = join(dir, "transcript.jsonl")
+      writeFileSync(file, readFileSync(join(fixtures, "agy-transcript.jsonl")))
+    }
+    return file
+  }
+
+  test.each(["grok", "agy"] as const)(
+    "indexes and searches %s through the real Ag catalog/export",
+    async (provider) => {
+      const id = "native-sample"
+      const file = makeNativeFixture(provider)
+      const result = await indexCodexTranscripts(db, { agBin: makeRealAg(tempDir), full: true })
+      expect(result.sessions).toBe(1)
+      expect(result.rows).toBe(2)
+      expect(getSession(db, `${provider}:${id}`)).toMatchObject({ jsonl_path: file, message_count: 2 })
+      expect(ftsSearchWithSnippet(db, `${provider} catalog`).results.length).toBeGreaterThan(0)
+    },
+  )
+
+  // Full rebuild must not interpret a failed provider census as permission to prune its old rows.
+  test.each(["full", "incremental"] as const)(
+    "retains a failed Grok scope through %s rebuild pruning",
+    async (mode) => {
+      makeNativeFixture("agy")
+      const saved = process.env.GROK_HOME
+      const missing = join(tempDir, "missing-configured-grok")
+      process.env.GROK_HOME = missing
+      try {
+        upsertSession(db, "grok:retained", "", join(missing, "old.jsonl"), 1000, 1000, 1)
+        insertMessage(db, "grok:retained:1", "grok:retained", "user", "retained grok history", null, null, Date.now())
+        const result = await rebuildIndex(db, {
+          agBin: makeRealAg(tempDir),
+          full: mode === "full",
+          incremental: mode === "incremental",
+        })
+        expect(result.codexFailures?.some((failure) => failure.path === missing)).toBe(true)
+        expect(getSession(db, "grok:retained")?.message_count).toBe(1)
+        expect(getSession(db, "agy:native-sample")?.message_count).toBe(2)
+        expect(ftsSearchWithSnippet(db, "retained grok history").results.length).toBe(1)
+      } finally {
+        if (saved === undefined) delete process.env.GROK_HOME
+        else process.env.GROK_HOME = saved
+      }
+    },
+  )
+
+  test("skipCodex still indexes Agy and preserves existing Codex rows", async () => {
+    makeNativeFixture("agy")
+    upsertSession(db, "codex:retained", "", join(tempDir, ".codex", "old.jsonl"), Date.now(), Date.now(), 1)
+    insertMessage(db, "codex:retained:1", "codex:retained", "user", "retained codex history", null, null, Date.now())
+    await rebuildIndex(db, { agBin: makeRealAg(tempDir), full: true, skipCodex: true })
+    expect(getSession(db, "codex:retained")?.message_count).toBe(1)
+    expect(getSession(db, "agy:native-sample")?.message_count).toBe(2)
+  })
 
   describe("resolveAgBin", () => {
     test("returns explicit valid binary path", () => {
