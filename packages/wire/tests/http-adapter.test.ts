@@ -2,10 +2,11 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { createServer, type Server, type Socket } from "node:net"
+import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { startTribeHttpMcpServer, type TribeHttpMcpServer } from "../src/http-adapter.ts"
 import { createLineParser } from "../src/parser.ts"
-import { isRequest, makeResponse } from "../src/rpc.ts"
+import { isRequest, makeError, makeResponse } from "../src/rpc.ts"
 import { HAB_ID_TOKEN_ENV } from "../src/lib/identity-token.ts"
 import { launchToken, writeClaimsVerifier } from "./launch-token.ts"
 import { connectToDaemon, TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
@@ -34,6 +35,7 @@ function spawnFakeDaemon(
     name: "@agent/http",
     role: "member",
   }),
+  opts: { registerError?: { code: number; message: string; data?: unknown }; registerErrorAfter?: number } = {},
 ): Promise<FakeDaemon> {
   const clients: Socket[] = []
   const requests: FakeDaemon["requests"] = []
@@ -43,6 +45,16 @@ function spawnFakeDaemon(
       const parse = createLineParser((message) => {
         if (!isRequest(message)) return
         requests.push(message)
+        if (
+          message.method === "register" &&
+          opts.registerError !== undefined &&
+          requests.filter((request) => request.method === "register").length >= (opts.registerErrorAfter ?? 1)
+        ) {
+          socket.write(
+            makeError(message.id, opts.registerError.code, opts.registerError.message, opts.registerError.data),
+          )
+          return
+        }
         void Promise.resolve(respond(message)).then((result) => {
           if (!socket.destroyed) socket.write(makeResponse(message.id, result))
         })
@@ -140,7 +152,8 @@ describe("HTTP MCP adapter", () => {
     const socketPath = join(tempDir, "tribe.sock")
     const verifierPath = join(tempDir, "claims-verifier.ts")
     writeClaimsVerifier(verifierPath)
-    vi.stubEnv(HAB_ID_TOKEN_ENV, launchToken("http-protocol", "@codi/hermes"))
+    const validToken = launchToken("http-protocol", "@codi/hermes")
+    vi.stubEnv(HAB_ID_TOKEN_ENV, validToken)
     const childEnv = { ...process.env }
     for (const name of tribeAmbientEnvironmentNames()) delete childEnv[name]
     childEnv.TRIBE_NO_PLUGINS = "1"
@@ -220,6 +233,44 @@ describe("HTTP MCP adapter", () => {
         version_state: "current",
         protocol_versions: [TRIBE_PROTOCOL_VERSION],
       })
+      // 26524: this actual verifier daemon must refuse a tokenless named HTTP launch before an HTTP listener exists.
+      vi.stubEnv(HAB_ID_TOKEN_ENV, "")
+      const originalServe = Bun.serve
+      let tokenlessListenerStarts = 0
+      try {
+        const countedServe = ((options: Parameters<typeof Bun.serve>[0]) => {
+          tokenlessListenerStarts += 1
+          return originalServe(options)
+        }) as typeof Bun.serve
+        if (!Reflect.set(Bun, "serve", countedServe)) throw new Error("could not count Bun.serve calls")
+        const refused = await startTribeHttpMcpServer({ socketPath, name: "@codi/mac" }).then(
+          (server) => {
+            server.close()
+            return null
+          },
+          (error: unknown) => error,
+        )
+        expect(refused).toBeInstanceOf(Error)
+        expect(String(refused)).toContain("@codi/mac")
+        expect(String(refused)).toContain("HAB_ID_TOKEN")
+        expect(tokenlessListenerStarts).toBe(0)
+        await vi.waitFor(() => {
+          const db = new Database(join(tempDir, "tribe.db"), { readonly: true })
+          try {
+            const health = db
+              .prepare("SELECT recipient, content FROM messages WHERE type = 'health:identity-token-missing'")
+              .all() as Array<{ recipient: string; content: string }>
+            expect(health).toHaveLength(1)
+            expect(health[0]).toMatchObject({ recipient: "*", content: expect.stringContaining("@codi/mac") })
+            expect(health[0]?.content).toContain("launch through hab")
+          } finally {
+            db.close()
+          }
+        })
+      } finally {
+        if (!Reflect.set(Bun, "serve", originalServe)) throw new Error("could not restore Bun.serve")
+        vi.stubEnv(HAB_ID_TOKEN_ENV, validToken)
+      }
       await tool("rename", { new_name: "@codi/renamed" })
       daemon.child.kill("SIGTERM")
       await daemon.child.exited
@@ -390,7 +441,7 @@ describe("HTTP MCP adapter", () => {
         expect(registration).not.toHaveProperty("launchParentPid")
         if (kind === "absent") {
           expect(stderr.mock.calls.map(([text]) => String(text)).join("")).toContain(
-            "persona without launch token: claimed",
+            "persona without launch token: a managed daemon will refuse",
           )
         }
       }
@@ -442,6 +493,44 @@ describe("HTTP MCP adapter", () => {
       expect(registrations[1]?.params).not.toHaveProperty("idToken")
       expect(registrations[1]?.params).not.toHaveProperty("launchId")
     } finally {
+      bridge?.close()
+      for (const client of daemon.clients) client.destroy()
+      await new Promise<void>((resolve) => daemon.server.close(() => resolve()))
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * @failure A refused re-register leaves a named HTTP listener alive while the client retries the same refusal.
+   * @level l1
+   * @consumer 26524: a managed identity refusal ends service on reconnect.
+   */
+  it("closes the HTTP listener after a missing-token refusal on reconnect", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "tribe-http-refused-reconnect-"))
+    const socketPath = join(tempDir, "tribe.sock")
+    const daemon = await spawnFakeDaemon(socketPath, undefined, {
+      registerErrorAfter: 2,
+      registerError: {
+        code: -32003,
+        message:
+          "register refused: explicit persona @codi/hermes has a missing HAB_ID_TOKEN; launch through hab or join without a persona name",
+        data: { kind: "identity-token-missing" },
+      },
+    })
+    vi.stubEnv(HAB_ID_TOKEN_ENV, launchToken("http-reconnect", "@codi/hermes"))
+    const originalServe = Bun.serve
+    const stop = vi.fn()
+    let bridge: TribeHttpMcpServer | undefined
+    try {
+      const fakeServe = (() => ({ port: 41_731, stop })) as unknown as typeof Bun.serve
+      if (!Reflect.set(Bun, "serve", fakeServe)) throw new Error("could not replace Bun.serve for reconnect test")
+      bridge = await startTribeHttpMcpServer({ socketPath, name: "@codi/hermes" })
+      daemon.disconnectClients()
+      await waitForRegistrationCount(daemon, 2)
+      await vi.waitFor(() => expect(stop).toHaveBeenCalledTimes(1), { timeout: 2_000 })
+      expect(daemon.requests.filter((request) => request.method === "register")).toHaveLength(2)
+    } finally {
+      if (!Reflect.set(Bun, "serve", originalServe)) throw new Error("could not restore Bun.serve")
       bridge?.close()
       for (const client of daemon.clients) client.destroy()
       await new Promise<void>((resolve) => daemon.server.close(() => resolve()))

@@ -167,7 +167,13 @@ export async function registerLaunchSender(
   const registered = mcpJsonContent(
     await client.call(
       "register",
-      oneShotRegisterParams({ name: seat.session, launchId: seat.launchId, launchParentPid: seat.launchParentPid }),
+      oneShotRegisterParams({
+        // The token names the spawn-time actor; the daemon reapplies any runtime rename from the launch tuple.
+        name: sender.name,
+        idToken: sender.idToken,
+        launchId: seat.launchId,
+        launchParentPid: seat.launchParentPid,
+      }),
     ),
   ) as { readonly name?: unknown }
   if (registered.name !== seat.session) {

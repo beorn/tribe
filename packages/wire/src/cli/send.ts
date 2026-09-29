@@ -30,7 +30,11 @@ import {
 import { resolveDbPath } from "../lib/config.ts"
 import { INCIDENT_KEY_SEPARATOR, parseIncidentKey, type IncidentIdentity } from "../lib/incident.ts"
 import { formatMarkdown, generateRetro, parseDuration } from "../lib/retro.ts"
-import { readIdentityTokenFromEnvironment, readLaunchIdFromToken } from "../lib/identity-token.ts"
+import {
+  readIdentityTokenFromEnvironment,
+  readLaunchIdFromToken,
+  readUnverifiedTokenClaims,
+} from "../lib/identity-token.ts"
 import {
   LAUNCH_UNROUTABLE,
   LAUNCH_UNROUTABLE_EXIT_CODE,
@@ -87,7 +91,7 @@ export function classifyIdentityGrant(
  * of that launch instead of colliding on the name. A bare TRIBE_NAME caller
  * omits the launch fields.
  */
-type SendCaller = { name: string; launchId?: string; launchParentPid?: number }
+type SendCaller = { name: string; idToken?: string; launchId?: string; launchParentPid?: number }
 
 async function callDaemon(
   method: string,
@@ -109,7 +113,12 @@ async function callDaemon(
     // TRIBE_NAME caller (no launch), we omit it; the grant check below then
     // decides between fail-loud abort (tracked reply) and attributed warn.
     if (as) {
-      const registered = mcpJsonContent(await client.call("register", oneShotRegisterParams(as))) as { name?: string }
+      // A runtime rename changes the live session name, while the token still names its spawn-time actor.
+      // Register under that actor so the daemon can verify it, then reapply the rename from the launch tuple.
+      const registerAs = as.idToken === undefined ? as : { ...as, name: readUnverifiedTokenClaims(as.idToken).actor }
+      const registered = mcpJsonContent(await client.call("register", oneShotRegisterParams(registerAs))) as {
+        name?: string
+      }
       const grant = classifyIdentityGrant(as.name, registered?.name, requireIdentity)
       if (!grant.ok) {
         if (grant.fatal) {
@@ -387,7 +396,7 @@ async function resolveSendCaller(reply?: string, anonymous = false): Promise<Sen
         persona: replyOwnerFromEnv(),
       })
       warnIfSelfTransportDown("send", seat.status)
-      return { name: seat.session, launchId: seat.launchId, launchParentPid: seat.launchParentPid }
+      return { name: seat.session, idToken, launchId: seat.launchId, launchParentPid: seat.launchParentPid }
     } catch (error) {
       unroutable = isLaunchUnroutable(error)
       failure = `cannot resolve launch identity ${launchId}: ${error instanceof Error ? error.message : String(error)}`
