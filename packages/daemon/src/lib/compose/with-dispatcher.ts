@@ -62,6 +62,7 @@ import {
   removedTribeMethodMessage,
   TRIBE_COORD_METHODS,
   readSeatTransportFacts,
+  resolveRuntimeJoinIdentity,
 } from "../handlers.ts"
 import { createLifecycleStore } from "../lifecycle-store.ts"
 import type { TribePluginHandle } from "../plugin-api.ts"
@@ -2246,18 +2247,12 @@ export function withDispatcher<
               (method === TRIBE_COORD_METHODS.join || method === TRIBE_COORD_METHODS.rename)
             ) {
               const requestedName = method === TRIBE_COORD_METHODS.rename ? p.new_name : p.name
-              let targetName = typeof requestedName === "string" ? requestedName : null
-              if (method === TRIBE_COORD_METHODS.join && targetName === null) {
-                const adoptionToken = p.identity_token ?? p.identityToken
-                if (typeof adoptionToken === "string" && adoptionToken.length > 0) {
-                  const prior = db
-                    .prepare(
-                      "SELECT id, name FROM sessions WHERE identity_token = ? AND id != ? ORDER BY updated_at DESC LIMIT 1",
-                    )
-                    .get(adoptionToken, ctx.sessionId) as { id: string; name: string } | null
-                  if (prior && !registry.hasActiveTransport(prior.id)) targetName = prior.name
-                }
-              }
+              const targetName =
+                method === TRIBE_COORD_METHODS.join
+                  ? resolveRuntimeJoinIdentity(ctx, p, (sessionId) => registry.hasActiveTransport(sessionId)).joinName
+                  : typeof requestedName === "string"
+                    ? requestedName
+                    : null
               if (targetName !== null && isExplicitTribePersonaName(targetName)) {
                 const identity = db.prepare("SELECT identity_sid FROM sessions WHERE id = ?").get(ctx.sessionId) as {
                   identity_sid: string | null
