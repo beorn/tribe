@@ -1648,7 +1648,9 @@ export function withDispatcher<
             // adoption-by-identityToken removal note in resolve-name.ts).
             const clientPid = Number(p.pid ?? 0)
             const clientCwd = String(p.project ?? "")
-            const pidCwdAdopted = adoptByPidCwd(db, clientPid, clientCwd, isActive)
+            // A verified token names its own launch. A different session in the same process may share pid/cwd;
+            // adopting that session would silently replace the token's actor with its name.
+            const pidCwdAdopted = verifiedSid === null ? adoptByPidCwd(db, clientPid, clientCwd, isActive) : null
             const launchPersisted =
               launchIdentity && typeof p.name === "string"
                 ? (db
