@@ -46,6 +46,7 @@ import { constants as osConstants } from "node:os"
 import { dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 import { readIdentityTokenFromEnvironment } from "./lib/identity-token.ts"
+import { isIdentityTokenMissingRefusal } from "./lib/identity-token-missing-refusal.ts"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
@@ -483,6 +484,7 @@ function isForeignIdentityRefusal(err: unknown): boolean {
 function failManagedPersonaRegistration(err: unknown): never {
   const reason = errorMessage(err)
   log.warn?.(`tribe registration failed for explicit launch persona ${LAUNCH_NAME}: ${reason}`)
+  process.stderr.write(`tribe stdio adapter: ${reason}\n`)
   daemon?.close()
   proxyAc.abort()
   process.exitCode = 2
@@ -673,6 +675,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
         reg = (await client.call("register", registerParamsForConnection())) as typeof reg
       } catch (err) {
         const reason = errorMessage(err)
+        if (isIdentityTokenMissingRefusal(err)) failManagedPersonaRegistration(err)
         if (/protocol version mismatch/i.test(reason)) {
           protocolMismatchReason = reason
           const daemonVersions = protocolVersionsFromMismatch(reason)

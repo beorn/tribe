@@ -17,6 +17,7 @@ import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
 import { adapterLaunchIdentity } from "./lib/adapter-launch-identity.ts"
 import { readIdentityTokenFromEnvironment } from "./lib/identity-token.ts"
+import { isIdentityTokenMissingRefusal } from "./lib/identity-token-missing-refusal.ts"
 import { isExplicitTribePersonaName } from "./lib/persona-name.ts"
 import {
   resolveSocketPath,
@@ -80,7 +81,7 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
   }
   if (personaLaunch && launchToken === null) {
     process.stderr.write(
-      `tribe HTTP adapter ${initialName}: persona without launch token: claimed; launch through hab to read the managed mailbox\n`,
+      `tribe HTTP adapter ${initialName}: persona without launch token: a managed daemon will refuse this registration; launch through hab or join without a persona name\n`,
     )
   }
   const deliveryCapability = resolveDeliveryCapability({
@@ -97,6 +98,8 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
     .digest("hex")
     .slice(0, 16)
 
+  let activeDaemon: DaemonClient | null = null
+  let stopHttp: (() => void) | null = null
   const daemon = await createReconnectingClient({
     socketPath,
     maxAttempts: 30,
@@ -110,31 +113,47 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
           : !requireJoin
             ? initialName
             : undefined
-      const reg = (await client.call("register", {
-        ...(registerName !== undefined ? { name: registerName } : {}),
-        role: myRole,
-        domains: [...(opts.domains ?? [])],
-        project: opts.project ?? process.cwd(),
-        projectName: opts.projectName ?? process.cwd().split("/").pop() ?? "silvercode",
-        projectId: opts.projectId,
-        protocolVersion: TRIBE_PROTOCOL_VERSION,
-        supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
-        peerSocket: null,
-        pid: process.pid,
-        identityToken,
-        ...(launchToken === null ? {} : { idToken: launchToken }),
-        ...(launchRead.identity !== null
-          ? { launchId: launchRead.identity.id, launchParentPid: launchRead.identity.parentPid }
-          : launchToken !== null
-            ? { launchParentPid: process.pid }
-            : {}),
-        delivery: !personaLaunch && requireJoin ? "pull" : deliveryCapability.delivery,
-        ...(initialFilterMode === undefined ? {} : { filterMode: initialFilterMode }),
-      })) as { name?: string; role?: string }
+      let reg: { name?: string; role?: string }
+      try {
+        reg = (await client.call("register", {
+          ...(registerName !== undefined ? { name: registerName } : {}),
+          role: myRole,
+          domains: [...(opts.domains ?? [])],
+          project: opts.project ?? process.cwd(),
+          projectName: opts.projectName ?? process.cwd().split("/").pop() ?? "silvercode",
+          projectId: opts.projectId,
+          protocolVersion: TRIBE_PROTOCOL_VERSION,
+          supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
+          peerSocket: null,
+          pid: process.pid,
+          identityToken,
+          ...(launchToken === null ? {} : { idToken: launchToken }),
+          ...(launchRead.identity !== null
+            ? { launchId: launchRead.identity.id, launchParentPid: launchRead.identity.parentPid }
+            : launchToken !== null
+              ? { launchParentPid: process.pid }
+              : {}),
+          delivery: !personaLaunch && requireJoin ? "pull" : deliveryCapability.delivery,
+          ...(initialFilterMode === undefined ? {} : { filterMode: initialFilterMode }),
+        })) as typeof reg
+      } catch (error) {
+        if (isIdentityTokenMissingRefusal(error)) {
+          const refusal = Object.assign(new Error(`tribe HTTP adapter: ${error.message}`, { cause: error }), {
+            code: error.code,
+            data: error.data,
+          })
+          process.stderr.write(`${refusal.message}\n`)
+          stopHttp?.()
+          activeDaemon?.close()
+          throw refusal
+        }
+        throw error
+      }
       if (reg.name) myName = reg.name
       if (reg.role) myRole = reg.role
     },
   })
+  activeDaemon = daemon
 
   const http = Bun.serve({
     hostname: "127.0.0.1",
@@ -173,6 +192,9 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
       return response
     },
   })
+  stopHttp = () => {
+    void http.stop(true)
+  }
 
   const port = http.port
   if (port === undefined) throw new Error("tribe HTTP MCP bridge failed to bind a loopback port")

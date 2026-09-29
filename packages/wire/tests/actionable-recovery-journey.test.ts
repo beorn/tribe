@@ -791,6 +791,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     try {
       await sender.call("register", {
         name: "@chief",
+        idToken: launchToken("notification-sender", "@chief"),
+        launchId: "notification-sender",
+        launchParentPid: process.pid,
         role: "member",
         domains: ["test"],
         project: tmpDir,
@@ -1170,6 +1173,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const requester = await connectToDaemon(socketPath)
     await requester.call("register", {
       name: "@agent/3",
+      idToken: launchToken("successor-requester", "@agent/3"),
+      launchId: "successor-requester",
+      launchParentPid: process.pid,
       role: "member",
       domains: ["test"],
       project: tmpDir,
@@ -1617,6 +1623,9 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     const requester = await connectToDaemon(socketPath)
     await requester.call("register", {
       name: "@requester",
+      idToken: launchToken("reply-requester", "@requester"),
+      launchId: "reply-requester",
+      launchParentPid: process.pid,
       role: "member",
       domains: ["test"],
       project: tmpDir,
@@ -2140,7 +2149,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
         TRIBE_NAME: NAME,
         TRIBE_TAKEOVER: "1",
         TRIBE_LAUNCH_ID: launchId,
-        HAB_ID_TOKEN: launchToken(launchId),
+        HAB_ID_TOKEN: launchToken(launchId, NAME),
         TRIBE_NO_AUTOSTART: "1",
       },
       stdio: ["ignore", "pipe", "pipe"],

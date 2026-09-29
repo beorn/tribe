@@ -552,6 +552,9 @@ process.exit(await child.exited)
     expect(mcpToolJson(stdout, 10)).toMatchObject({ joined: true, name: PERSONA, delivery: "push" })
     await firstDaemon.client.call("register", {
       name: "@agent/restart-sender",
+      idToken: launchToken("restart-sender", "@agent/restart-sender"),
+      launchId: "restart-sender",
+      launchParentPid: process.pid,
       role: "member",
       domains: ["test"],
       project: tmpDir,
@@ -672,6 +675,9 @@ process.exit(await child.exited)
     })
     await secondSuccessor.client.call("register", {
       name: "@agent/restart-sender",
+      idToken: launchToken("restart-sender", "@agent/restart-sender"),
+      launchId: "restart-sender",
+      launchParentPid: process.pid,
       role: "member",
       domains: ["test"],
       project: tmpDir,

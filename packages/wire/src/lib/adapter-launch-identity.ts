@@ -4,7 +4,8 @@
  * Adapters forward a complete launcher-given identity or nothing; they never mint one. The launch is the identity
  * token's sid, for a launch-named adapter and an unnamed child alike: for a hab seat that is the value TRIBE_LAUNCH_ID
  * used to carry, so a live seat and its children key exactly as before. TRIBE_LAUNCH_ID is never read (3d-2): a
- * tokenless process has no launch identity, and registers as its bare name. Reading the sid presents nothing; only
+ * tokenless process has no launch identity; its explicit persona name is refused by a managed daemon, while a bare
+ * name remains available. Reading the sid presents nothing; only
  * a launch-named adapter presents the token (stdio-adapter), and the daemon verifies it.
  */
 

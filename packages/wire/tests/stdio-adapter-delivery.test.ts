@@ -424,6 +424,85 @@ describe("stdio adapter delivery modes", () => {
     expect(register?.params?.delivery).toBe("pull")
   })
 
+  /**
+   * @failure A managed daemon refuses a tokenless persona but stdio stays alive with advertised tools and retries.
+   * @level l1
+   * @consumer 26524: the daemon refusal is terminal and visible to the host.
+   */
+  it("exits on a managed daemon's missing identity token refusal before serving tools", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath, {
+      registerError: {
+        code: -32003,
+        message:
+          "register refused: explicit persona @chief has a missing HAB_ID_TOKEN; launch through hab or join without a persona name",
+        data: { kind: "identity-token-missing" },
+      },
+    })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@chief"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        HAB_ID_TOKEN: "",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stderr = new Promise<string>((resolveStderr) => {
+      let output = ""
+      child!.stderr.on("data", (chunk: Buffer | string) => {
+        output += chunk.toString()
+      })
+      child!.stderr.on("close", () => resolveStderr(output))
+    })
+    const [exit, errorText] = await Promise.all([waitForExit(child), stderr])
+    expect(exit.code).toBe(2)
+    expect(errorText).toContain("@chief")
+    expect(errorText).toContain("HAB_ID_TOKEN")
+    expect(daemon.requests.filter((request) => request.method === "register")).toHaveLength(1)
+  })
+
+  it("exits after a missing-token refusal on re-register instead of retrying", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath, {
+      registerErrorAfter: 2,
+      registerError: {
+        code: -32003,
+        message:
+          "register refused: explicit persona @chief has a missing HAB_ID_TOKEN; launch through hab or join without a persona name",
+        data: { kind: "identity-token-missing" },
+      },
+    })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@chief"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        HAB_ID_TOKEN: "",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stderr = new Promise<string>((resolveStderr) => {
+      let output = ""
+      child!.stderr.on("data", (chunk: Buffer | string) => {
+        output += chunk.toString()
+      })
+      child!.stderr.on("close", () => resolveStderr(output))
+    })
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    await waitForCondition(
+      () => daemon!.requests.some((request) => request.method === "tribe.members"),
+      "initial registration",
+    )
+    daemon.clients.at(-1)?.destroy()
+    const [exit, errorText] = await Promise.all([waitForExit(child), stderr])
+    expect(exit.code).toBe(2)
+    expect(errorText).toContain("HAB_ID_TOKEN")
+    expect(daemon.requests.filter((request) => request.method === "register")).toHaveLength(2)
+  })
+
   it("21768: seeds a nested successor persona at initial register", async () => {
     // Live 2026-07-22: `@chief/@ci/next` failed the pre-seed predicate at the
     // SECOND sigil, so the seat registered unnamed and sat as `unknown-cmayz`
