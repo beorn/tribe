@@ -55,7 +55,7 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
     process.env.RECALL_DB_PATH = dbPath
     db = new Database(dbPath)
     initSchema(db)
-    process.env.RECALL_SKIP_CODEX = "1"
+    process.env.RECALL_SKIP_PROVIDER_TRANSCRIPTS = "1"
   })
 
   afterEach(() => {
@@ -73,7 +73,7 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
     } else {
       delete process.env.RECALL_DB_PATH
     }
-    delete process.env.RECALL_SKIP_CODEX
+    delete process.env.RECALL_SKIP_PROVIDER_TRANSCRIPTS
     safeRemoveSync(tempDir, { within: tmpdir() })
   })
 
@@ -962,6 +962,7 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
   })
 
   test("B3.9: codex-indexer populates sessions.cwd from codex transcript cwd", async () => {
+    delete process.env.RECALL_SKIP_PROVIDER_TRANSCRIPTS // This row explicitly exercises the mocked provider producer.
     const mockAg = join(tempDir, "mock-ag.sh")
     writeFileSync(
       mockAg,
