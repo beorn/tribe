@@ -3132,21 +3132,15 @@ function handleRename(
   })
 }
 
-function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
+/** Resolve the name the join handler will actually write, including inactive-session token adoption. */
+export function resolveRuntimeJoinIdentity(
+  ctx: TribeContext,
+  a: ToolArgs,
+  hasActiveTransport: HandlerOpts["hasActiveTransport"],
+): { joinName: string; joinRole: string; identityToken: string | null } {
   let joinName = a.name as string
   let joinRole = (a.role as string) ?? ctx.sessionRole
-  const joinDomains = (a.domains as string[]) ?? ctx.domains
   const identityToken = (a.identity_token as string) ?? (a.identityToken as string) ?? null
-  // @km/tribe/19975 — a join/refresh is authoritative for the session's
-  // account/provider label. ag sets these from TRIBE_ACCOUNT / TRIBE_PROVIDER
-  // and the stdio-adapter forwards them on every join, so re-joining (which
-  // /up does each session start) self-corrects a stale label. NULL when the
-  // launch context didn't set them — `updateSessionMeta` COALESCEs so an
-  // unlabelled join never wipes a good label.
-  const joinAccount = (a.account as string) ?? null
-  const joinProvider = (a.provider as string) ?? null
-  const selfInfo = opts.getActiveSessionInfo().find((session) => session.id === ctx.sessionId)
-
   // Identity-token adoption: if the caller supplies a token that matches a
   // non-active prior session, inherit its name/role when the caller didn't
   // pass them explicitly. Symmetric with the register path in tribe-daemon.
@@ -3160,13 +3154,26 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       name: string
       role: string
     } | null
-    if (prior) {
-      if (!opts.hasActiveTransport(prior.id)) {
-        if (!a.name) joinName = prior.name
-        if (!a.role) joinRole = prior.role
-      }
+    if (prior && !hasActiveTransport(prior.id)) {
+      if (!a.name) joinName = prior.name
+      if (!a.role) joinRole = prior.role
     }
   }
+  return { joinName, joinRole, identityToken }
+}
+
+function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
+  const { joinName, joinRole, identityToken } = resolveRuntimeJoinIdentity(ctx, a, opts.hasActiveTransport)
+  const joinDomains = (a.domains as string[]) ?? ctx.domains
+  // @km/tribe/19975 — a join/refresh is authoritative for the session's
+  // account/provider label. ag sets these from TRIBE_ACCOUNT / TRIBE_PROVIDER
+  // and the stdio-adapter forwards them on every join, so re-joining (which
+  // /up does each session start) self-corrects a stale label. NULL when the
+  // launch context didn't set them — `updateSessionMeta` COALESCEs so an
+  // unlabelled join never wipes a good label.
+  const joinAccount = (a.account as string) ?? null
+  const joinProvider = (a.provider as string) ?? null
+  const selfInfo = opts.getActiveSessionInfo().find((session) => session.id === ctx.sessionId)
 
   // Validate name format
   const joinNameError = validateName(joinName)

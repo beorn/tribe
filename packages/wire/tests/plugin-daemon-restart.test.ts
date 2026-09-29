@@ -11,6 +11,7 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
+import { Database } from "bun:sqlite"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { connectToDaemon, type DaemonClient } from "../src/client.ts"
 import { deriveTribePersonaLaunchIdentity } from "../src/lib/persona-launch-identity.ts"
@@ -297,6 +298,61 @@ process.exit(await child.exited)
     plugins.add(child)
     return child
   }
+
+  /**
+   * @failure A decided managed-persona refusal exits the adapter, but the stable wrapper retries it forever.
+   * @level l1
+   * @consumer 26524: one real wrapper and verifier daemon stop after one refusal and one health row.
+   */
+  it("stops after one tokenless managed-persona refusal", async () => {
+    const dbPath = join(tmpDir, "tribe-tokenless-persona.db")
+    const verifierPath = join(tmpDir, "verifier.ts")
+    const launchStateDir = join(tmpDir, "tokenless-persona-state")
+    mkdirSync(launchStateDir)
+    const recordPath = join(launchStateDir, "tribe-adapter-exits.jsonl")
+    writeClaimsVerifier(verifierPath, { gen: false })
+    spawnTestDaemon(dbPath, join(tmpDir, "daemon-tokenless-persona.log"), {}, { identityVerifier: verifierPath })
+    await waitFor(() => existsSync(socketPath), "tokenless-persona daemon socket")
+    const daemon = await connectToGeneration(socketPath)
+    daemonPids.add(daemon.pid)
+
+    const plugin = spawnTestPlugin({
+      dbPath,
+      logPath: join(tmpDir, "adapter-tokenless-persona.log"),
+      name: PERSONA,
+      launchId: "tokenless-persona-launch",
+      idToken: "",
+      launchStateDir,
+      delivery: "pull",
+      requireJoin: false,
+    })
+    let stderr = ""
+    plugin.stderr.on("data", (chunk: Buffer | string) => {
+      stderr += chunk.toString()
+    })
+    writeJson(plugin, initializePayload(60))
+    await waitFor(() => plugin.exitCode !== null, "tokenless-persona wrapper stop", 5_000)
+    expect(plugin.exitCode).not.toBe(0)
+    expect(stderr.match(/tribe stdio adapter: register refused: explicit persona/g)).toHaveLength(1)
+    expect(stderr).toContain("HAB_ID_TOKEN")
+    expect(stderr).not.toContain("retrying in")
+
+    const exits = readFileSync(recordPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as JsonObject)
+    expect(exits).toHaveLength(1)
+    expect(exits[0]).toMatchObject({ decision: "stop" })
+    const db = new Database(dbPath, { readonly: true })
+    try {
+      expect(
+        db.prepare("SELECT count(*) AS n FROM messages WHERE type = 'health:identity-token-missing'").get(),
+      ).toEqual({ n: 1 })
+    } finally {
+      db.close()
+    }
+    daemon.client.close()
+  }, 10_000)
 
   /**
    * The always-restart-a..d multi-seat journey above, parameterized by a

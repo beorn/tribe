@@ -16,7 +16,11 @@ import { spawn, type ChildProcess } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { isTribeNameShape } from "tribe-wire/lib/persona-name"
 import { evaluateAdapterRestart, PROVIDER_PARENT_REMEDY, resolveProviderParentPid } from "./supervisor-policy.ts"
-import { buildPluginAdapterEnvironment, PLUGIN_REEXEC_EXIT_CODE } from "./supervisor-environment.ts"
+import {
+  buildPluginAdapterEnvironment,
+  PLUGIN_PERSONA_REFUSAL_EXIT_CODE,
+  PLUGIN_REEXEC_EXIT_CODE,
+} from "./supervisor-environment.ts"
 import { recordAdapterExit, resolveAdapterExitRecord } from "./supervisor-exit-record.ts"
 import { TRIBE_NAME_ENV, TRIBE_PLUGIN_ADAPTER_CHILD_ENV } from "tribe-wire/lib/session-identity-env"
 
@@ -127,6 +131,13 @@ async function superviseAdapter(): Promise<void> {
     if (!result.error && result.code === 0) {
       recordAdapterExit(exitRecord, { ...exit, decision: "clean-exit" })
       process.exitCode = 0
+      return
+    }
+    if (!result.error && result.code === PLUGIN_PERSONA_REFUSAL_EXIT_CODE) {
+      // The adapter already printed the daemon's repair message. This exit is
+      // reserved for that decided refusal, so neither retry nor print again.
+      recordAdapterExit(exitRecord, { ...exit, decision: "stop" })
+      process.exitCode = 2
       return
     }
 
