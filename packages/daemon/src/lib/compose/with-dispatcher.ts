@@ -1110,7 +1110,7 @@ export function withDispatcher<
     > {
       const verifier = hooks.identityVerifier
       const claimed = typeof requestedName === "string" ? requestedName : "(no name)"
-      const managedPersona = verifier !== undefined && isExplicitTribePersonaName(claimed)
+      const managedPersona = verifier !== null && verifier !== undefined && isExplicitTribePersonaName(claimed)
       const refuseMissingPersonaToken = (reason: "missing" | "malformed" | "absent") => {
         const message =
           `register refused: explicit persona ${claimed} has a ${reason} ${HAB_ID_TOKEN_ENV}; ` +
@@ -1120,6 +1120,9 @@ export function withDispatcher<
       }
       if (token === null) return managedPersona ? refuseMissingPersonaToken("missing") : { sid: null, gen: null }
       if (!verifier) return { sid: null, gen: null }
+      if (managedPersona && readTokenLaunch({ [HAB_ID_TOKEN_ENV]: token }).malformedToken !== null) {
+        return refuseMissingPersonaToken("malformed")
+      }
       let verdict: IdentityVerdict
       try {
         verdict = await verifier.verify(token)
@@ -1152,9 +1155,6 @@ export function withDispatcher<
             },
           }
         case "unreadable":
-          if (managedPersona && readTokenLaunch({ [HAB_ID_TOKEN_ENV]: token }).malformedToken !== null) {
-            return refuseMissingPersonaToken("malformed")
-          }
           log.warn?.(
             `register: ${claimed}'s identity token is unreadable (${redactIdentityToken(verdict.reason, token)}); not verified`,
           )

@@ -41,6 +41,20 @@ import type { ForeignIdentityTransport } from "../session-transport-state.ts"
 // distinct from 26524's absent or malformed-token refusal on a managed persona.
 const TOKEN_WITH_UNREADABLE_SIGNATURE = `e30.${Buffer.from(JSON.stringify({ sid: "unreadable-sid", act: { sub: "@dev/7" } })).toString("base64url")}.sig`
 
+// Most older verifier fixtures name synthetic tokens by a short key. Present those keys in a readable JWT envelope
+// at register, so the new daemon syntax gate tests the real shape while each stub still receives its original key.
+const fixtureToken = (key: string) =>
+  `e30.${Buffer.from(JSON.stringify({ sid: "fixture-sid", act: { sub: "@fixture" }, fixture: key })).toString("base64url")}.sig`
+const fixtureKey = (token: string) => {
+  const payload = token.split(".")[1]
+  if (payload === undefined) return token
+  try {
+    return (JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { fixture?: string }).fixture ?? token
+  } catch {
+    return token
+  }
+}
+
 beforeEach(() => {
   // Takeover specimens intentionally exercise the dispatcher's loud ownership
   // handoff diagnostics; behavioral assertions below prove the displacement.
@@ -741,7 +755,28 @@ function createDispatcherHarness(
       handedOff: false,
     },
   }
-  const daemon = withDispatcher({ suppressWindowMs: Number.MAX_SAFE_INTEGER, ...hooks })(shape)
+  const verifier = hooks.identityVerifier
+  const daemon = withDispatcher({
+    suppressWindowMs: Number.MAX_SAFE_INTEGER,
+    ...hooks,
+    ...(verifier === undefined || verifier === null
+      ? {}
+      : {
+          identityVerifier: {
+            ...verifier,
+            async verify(token: string) {
+              const key = fixtureKey(token)
+              try {
+                return await verifier.verify(key)
+              } catch (error) {
+                // Preserve the real verifier's leakage shape: its fault may echo the presented token, not our key.
+                if (key !== token && error instanceof Error) throw new Error(error.message.replaceAll(key, token))
+                throw error
+              }
+            },
+          },
+        }),
+  })(shape)
 
   return {
     dispatcher: daemon.dispatcher,
@@ -753,6 +788,12 @@ function createDispatcherHarness(
         method: "register",
         params: {
           ...params,
+          ...(hooks.identityVerifier &&
+          params.idToken &&
+          params.idToken !== "not-a-jws" &&
+          !params.idToken.includes(".")
+            ? { idToken: fixtureToken(params.idToken) }
+            : {}),
           role: "member",
           projectName: "km-wt9",
           projectId: "test-project",
@@ -1738,7 +1779,7 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
     expect(sessionRow(harness, holder.sessionId)).toMatchObject({
       identity_sid: "sid-dev7",
       identity_gen: 3,
-      verified_id_token: "token-g3",
+      verified_id_token: fixtureToken("token-g3"),
     })
   })
 
@@ -1760,7 +1801,7 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
     expect(sessionRow(harness, holder.sessionId)).toMatchObject({
       identity_sid: "sid-dev7",
       identity_gen: 3,
-      verified_id_token: "token-g3",
+      verified_id_token: fixtureToken("token-g3"),
     })
   })
 
@@ -1801,7 +1842,7 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
       identity_sid: "sid-dev7",
       filter_mode: "focus",
       identity_gen: 3,
-      verified_id_token: "token-g3",
+      verified_id_token: fixtureToken("token-g3"),
     })
   })
 
