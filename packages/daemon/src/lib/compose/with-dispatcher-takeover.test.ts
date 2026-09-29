@@ -1097,6 +1097,34 @@ describe("dispatcher identity verification on register (25074 3b)", () => {
     })
   })
 
+  it("refuses a bare tokenless register that would adopt a prior explicit persona by pid and cwd", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-prior")
+    parseResult<RegisterResult>(
+      await harness.register("conn-prior", {
+        name: "@dev/7",
+        pid: 4101,
+        project: "/tmp/p",
+        idToken: "token-dev7",
+        launchId: "sid-dev7",
+        launchParentPid: 4100,
+      }),
+    )
+    harness.dropClient("conn-prior")
+    harness.addPendingClient("conn-bare")
+    const refusal = parseError(
+      await harness.register("conn-bare", { name: "standalone", pid: 4101, project: "/tmp/p" }),
+    )
+    expect(refusal).toMatchObject({ code: -32003, data: { kind: "identity-token-missing" } })
+    expect(refusal.message).toContain("@dev/7")
+    expect(harness.db.prepare("SELECT count(*) AS n FROM sessions WHERE name = 'standalone'").get()).toEqual({ n: 0 })
+    expect(identitySid(harness, "@dev/7")).toBe("sid-dev7")
+    expect(harness.healthLogs).toEqual([
+      { type: "health:identity-token-missing", message: expect.stringContaining("@dev/7") },
+    ])
+  })
+
   // 25074 step 3 went live at 2026-09-24 08:02 PDT and every verified seat's `tribe inbox-status` answered "resolved to
   // 0 sessions": the CLI asks by the seat's bare launch id (HAB_SESSION_LAUNCH_ID, which IS the token's sid), and a
   // verified session is keyed "<sid>@<gen>", which neither the exact nor the "<id>::" arm of the lookup matched.

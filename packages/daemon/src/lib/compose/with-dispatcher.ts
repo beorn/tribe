@@ -1734,6 +1734,12 @@ export function withDispatcher<
                 }
               }
             }
+            // A bare request may resolve to a persona through pid/cwd or launch
+            // adoption. Judge the effective name before any row is reused.
+            if (hooks.identityVerifier && p.idToken === undefined && isExplicitTribePersonaName(resolvedName)) {
+              const refusal = missingPersonaTokenRefusal(resolvedName, "missing", "register")
+              return makeError(id, -32003, refusal.message, refusal.data)
+            }
             // Class belongs to the resolved identity, not the optional caller
             // name. PID/cwd adoption and persisted renames must not turn an
             // expired service into an agent with disconnected recovery rights.
