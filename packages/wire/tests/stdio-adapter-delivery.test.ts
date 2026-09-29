@@ -456,6 +456,12 @@ describe("stdio adapter delivery modes", () => {
       })
       child!.stderr.on("close", () => resolveStderr(output))
     })
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    const tool = await writeJsonAndWaitForLine(child, callToolPayload(2, "members", {}), (line) => line.id === 2)
+    expect(tool).toMatchObject({
+      result: { isError: true, content: [{ text: expect.stringContaining("HAB_ID_TOKEN") }] },
+    })
     const [exit, errorText] = await Promise.all([waitForExit(child), stderr])
     expect(exit.code).toBe(2)
     expect(errorText).toContain("@chief")

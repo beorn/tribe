@@ -481,14 +481,21 @@ function isForeignIdentityRefusal(err: unknown): boolean {
   return kind === "foreign-identity-transport" || kind === "identity-contradicted" || kind === "identity-name-mismatch"
 }
 
+let fatalRegistrationRefusal: string | null = null
 function failManagedPersonaRegistration(err: unknown): never {
   const reason = errorMessage(err)
+  if (fatalRegistrationRefusal !== null) throw err
+  fatalRegistrationRefusal = reason
   log.warn?.(`tribe registration failed for explicit launch persona ${LAUNCH_NAME}: ${reason}`)
   process.stderr.write(`tribe stdio adapter: ${reason}\n`)
+  setRequiredMcpTransportHealth("closed", reason)
   daemon?.close()
   proxyAc.abort()
   process.exitCode = 2
-  process.exit()
+  if (!isIdentityTokenMissingRefusal(err)) process.exit(2)
+  // Leave one flush window for an already-arrived MCP tool call to receive this refusal before stdio closes.
+  setTimeout(() => process.exit(2), 100)
+  throw err
 }
 
 function reportProtocolVersion(reason: string): void {
@@ -796,7 +803,10 @@ function startDaemonConnection(): Promise<DaemonClient> {
 let degradeAnnounced = false
 function armDegradeNotice(p: Promise<DaemonClient>): void {
   p.catch((err: unknown) => {
-    if (isManagedPersonaRegistrationConflict(err)) failManagedPersonaRegistration(err)
+    if (fatalRegistrationRefusal !== null) return
+    if (isManagedPersonaRegistrationConflict(err)) {
+      failManagedPersonaRegistration(err)
+    }
 
     daemonDegradedReason = errorMessage(err)
     if (degradeAnnounced) return
@@ -1028,6 +1038,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const a = (toolArgs ?? {}) as Record<string, unknown>
 
   try {
+    if (fatalRegistrationRefusal !== null) {
+      return { content: [{ type: "text", text: fatalRegistrationRefusal }], isError: true }
+    }
+    if (REGISTER_WITH_LAUNCH_NAME && hasAttemptedRegistration && requiredMcpTransportHealth.status === "advertised") {
+      try {
+        await daemonReady
+      } catch (error) {
+        if (isIdentityTokenMissingRefusal(error)) {
+          return { content: [{ type: "text", text: errorMessage(error) }], isError: true }
+        }
+      }
+    }
     if (foreignIdentityRefusal !== null) {
       return { content: [{ type: "text", text: foreignIdentityRefusal }], isError: true }
     }

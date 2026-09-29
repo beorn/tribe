@@ -1284,7 +1284,11 @@ process.exit(await child.exited)
       )
       if (candidate) rejoined = candidate
       return rejoined !== undefined
-    }, "launch-less wrapper process re-registration")
+    }, "launch-less wrapper process re-registration").catch((error: unknown) => {
+      throw new Error(
+        `${String(error)}\nplugin stderr:\n${pluginStderr}\nadapter log:\n${existsSync(adapterLog) ? readFileSync(adapterLog, "utf8").slice(-5_000) : "(missing)"}`,
+      )
+    })
 
     expect(rejoined).toMatchObject({
       member_id: initial?.member_id,
@@ -1391,7 +1395,11 @@ process.exit(await child.exited)
       },
       "join-during-wait re-exec'd adapter registration",
       pacedRestartBudgetMs(3),
-    )
+    ).catch((error: unknown) => {
+      throw new Error(
+        `${String(error)}\nplugin stderr:\n${pluginStderr}\nadapter log:\n${existsSync(adapterLog) ? readFileSync(adapterLog, "utf8").slice(-5_000) : "(missing)"}`,
+      )
+    })
     expect(rejoined, pluginStderr).toMatchObject({ name: "@cto", transport_state: "connected" })
     for (const pid of rejoined?.transport_pids ?? []) adapterPids.add(pid)
     expect(plugin.exitCode, pluginStderr).toBeNull()
