@@ -251,9 +251,11 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
   })
 
   it("starts reconnect grace only after the last launch sibling transport closes", async () => {
-    const harness = createDispatcherHarness()
+    // 26524: a verifier-backed one-shot carries the seat token; closing it must not retire the live adapter.
+    const harness = createDispatcherHarness({ identityVerifier: managedVerifier })
     cleanup = harness.dispose
     const launch = { launchId: "shared-grace-launch", launchParentPid: process.pid }
+    const idToken = managedToken("@agent/9", launch.launchId)
 
     const firstClient = harness.connectClient()
     const first = parseResult<RegisterResult>(
@@ -262,6 +264,7 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
         pid: liveHolderPid,
         project: "/tmp/km-wt9",
         ...launch,
+        idToken,
       }),
     )
     const secondClient = harness.connectClient()
@@ -271,6 +274,7 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
         pid: otherLivePid,
         project: "/tmp/km-wt9",
         ...launch,
+        idToken,
       }),
     )
 
@@ -280,10 +284,17 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
       { type: "connected", sessionId: first.sessionId },
     ])
 
-    firstClient.socket.emitClose()
-    expect(harness.transportLifetimeEvents().some((event) => event.type === "disconnected")).toBe(false)
-
     secondClient.socket.emitClose()
+    expect(harness.transportLifetimeEvents().some((event) => event.type === "disconnected")).toBe(false)
+    const members = parseResult<{ structuredContent: { sessions: Array<{ name: string }> } }>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "seat-still-serving", method: "tribe.members", params: {} },
+        firstClient.connId,
+      ),
+    ).structuredContent.sessions
+    expect(members).toContainEqual(expect.objectContaining({ name: "@agent/9" }))
+
+    firstClient.socket.emitClose()
     expect(harness.transportLifetimeEvents().at(-1)).toEqual({ type: "disconnected", sessionId: first.sessionId })
   })
 
