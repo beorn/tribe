@@ -73,6 +73,64 @@ async function waitForRegistrationCount(daemon: FakeDaemon, count: number): Prom
 
 describe("HTTP MCP adapter", () => {
   /**
+   * @failure A discovered loopback port lets an unauthenticated caller invoke the seat's daemon tools.
+   * @level l2
+   * @consumer CTO 2d40fcfc/e92ae0b2: bearer admission, exact Host and identity-free health.
+   */
+  it("admits MCP tools only with the launch secret and an exact local Host", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "tribe-http-admission-"))
+    const daemon = await spawnFakeDaemon(join(tempDir, "tribe.sock"))
+    let bridge: TribeHttpMcpServer | undefined
+    try {
+      bridge = await startTribeHttpMcpServer({ socketPath: join(tempDir, "tribe.sock"), requireJoin: false })
+      const initialRequests = daemon.requests.length
+      const invoke = (authorization?: string, host = `127.0.0.1:${bridge!.port}`) =>
+        fetch(bridge!.url, {
+          method: "POST",
+          headers: {
+            accept: "application/json, text/event-stream",
+            "content-type": "application/json",
+            host,
+            ...(authorization === undefined ? {} : { authorization }),
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: { name: "members", arguments: {} },
+          }),
+        })
+      for (const authorization of [undefined, `Bearer ${"0".repeat(64)}`, "Bearer short", "Basic fixture"]) {
+        const response = await invoke(authorization)
+        expect(response.status).toBe(401)
+        expect(daemon.requests).toHaveLength(initialRequests)
+        expect(await response.text()).not.toContain(bridge.secret)
+      }
+      expect(bridge.secret).toMatch(/^[a-f0-9]{64}$/)
+      const health = await fetch(new URL("/health", bridge.url))
+      expect(health.status).toBe(200)
+      expect(await health.json()).toEqual({ ok: true })
+      for (const host of ["attacker.invalid", `127.0.0.1:${bridge.port + 1}`]) {
+        expect((await invoke(`Bearer ${bridge.secret}`, host)).status).toBe(403)
+        expect(daemon.requests).toHaveLength(initialRequests)
+      }
+      for (const host of [`127.0.0.1:${bridge.port}`, `localhost:${bridge.port}`]) {
+        const response = await invoke(`Bearer ${bridge.secret}`, host)
+        expect(response.status).toBe(200)
+        const payload = (await response.json()) as { result?: { isError?: boolean }; error?: unknown }
+        expect(payload.error).toBeUndefined()
+        expect(payload.result?.isError).not.toBe(true)
+      }
+      expect(daemon.requests).toHaveLength(initialRequests + 2)
+    } finally {
+      bridge?.close()
+      for (const client of daemon.clients) client.destroy()
+      await new Promise<void>((resolve) => daemon.server.close(() => resolve()))
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  /**
    * @failure HTTP tools advertise the current protocol but lose managed authority or persisted rename on reconnect.
    * @level l3
    * @consumer CTO 9c5bc9de: registration, one real tool call and reconnect must agree against the current daemon.
@@ -133,7 +191,11 @@ describe("HTTP MCP adapter", () => {
         if (bridge === undefined) throw new Error("HTTP journey has no bridge")
         const response = await fetch(bridge.url, {
           method: "POST",
-          headers: { accept: "application/json, text/event-stream", "content-type": "application/json" },
+          headers: {
+            accept: "application/json, text/event-stream",
+            "content-type": "application/json",
+            authorization: `Bearer ${bridge.secret}`,
+          },
           body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
         })
         expect(response.status).toBe(200)
@@ -228,6 +290,8 @@ describe("HTTP MCP adapter", () => {
         headers: {
           accept: "application/json, text/event-stream",
           "content-type": "application/json",
+          authorization: `Bearer ${bridge.secret}`,
+          host: `127.0.0.1:${bridge.port}`,
         },
         body: JSON.stringify({
           jsonrpc: "2.0",

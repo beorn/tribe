@@ -6,12 +6,16 @@
  * `http://127.0.0.1:<port>/mcp` MCP server, while SSH forwards that remote
  * loopback port back to this local process. No tribe socket, daemon, bunx, or
  * npx needs to exist on the SSH host.
+ * Every /mcp request needs `Authorization: Bearer <receipt.secret>`. SSH
+ * clients also send `Host: 127.0.0.1:<receipt.port>`: the forwarded URL's port
+ * differs from the exact local hosts admitted by the SDK. Keep the secret out
+ * of logs and configuration echoes. /health exposes only {ok:true}.
  */
 
 import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js"
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
-import { createHash, randomUUID } from "node:crypto"
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto"
 import { toolListForDeliveryCapability } from "./lib/tools-list.ts"
 import { callTribeTool } from "./lib/tool-daemon-call.ts"
 import { initialFilterModeFromEnv } from "./lib/filter-mode.ts"
@@ -37,6 +41,7 @@ import {
 export type TribeHttpMcpServer = {
   readonly port: number
   readonly url: string
+  readonly secret: string
   close(): void
 }
 
@@ -89,6 +94,8 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
     pullTransport: opts.pullTransport,
   })
   const sessionId = randomUUID()
+  const secret = randomBytes(32).toString("hex")
+  const expectedAuthorization = Buffer.from(`Bearer ${secret}`)
   let myName = "pending"
   let myRole = opts.role ?? "member"
   // Correlation handle for adapter join calls; never mailbox authority.
@@ -141,8 +148,15 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
     port: opts.port ?? 0,
     async fetch(req, server) {
       const url = new URL(req.url)
-      if (url.pathname === "/health") return Response.json({ ok: true, name: myName })
+      if (url.pathname === "/health") return Response.json({ ok: true })
       if (url.pathname !== "/mcp") return new Response("not found", { status: 404 })
+      const authorization = Buffer.from(req.headers.get("authorization") ?? "")
+      if (
+        authorization.length !== expectedAuthorization.length ||
+        !timingSafeEqual(authorization, expectedAuthorization)
+      ) {
+        return new Response("unauthorized", { status: 401 })
+      }
 
       // Tribe preflights MCP inbox.wait against the measured host ceiling.
       // Disable Bun's separate per-request idle timeout so it cannot create a
@@ -166,6 +180,8 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
         enableJsonResponse: true,
+        enableDnsRebindingProtection: true,
+        allowedHosts: [`127.0.0.1:${http.port}`, `localhost:${http.port}`],
       })
       await mcp.connect(transport)
       const response = await transport.handleRequest(req)
@@ -180,6 +196,7 @@ export async function startTribeHttpMcpServer(opts: StartTribeHttpMcpServerOptio
   return {
     port,
     url: `http://127.0.0.1:${port}/mcp`,
+    secret,
     close() {
       void http.stop(true)
       daemon.close()
