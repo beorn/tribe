@@ -237,6 +237,11 @@ describe("HTTP MCP adapter", () => {
       vi.stubEnv(HAB_ID_TOKEN_ENV, "")
       const originalServe = Bun.serve
       let tokenlessListenerStarts = 0
+      const refusalLines: string[] = []
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+        refusalLines.push(String(chunk))
+        return true
+      })
       try {
         const countedServe = ((options: Parameters<typeof Bun.serve>[0]) => {
           tokenlessListenerStarts += 1
@@ -254,6 +259,9 @@ describe("HTTP MCP adapter", () => {
         expect(String(refused)).toContain("@codi/mac")
         expect(String(refused)).toContain("HAB_ID_TOKEN")
         expect(tokenlessListenerStarts).toBe(0)
+        expect(refusalLines).toHaveLength(2)
+        expect(refusalLines[0]).toContain("@codi/mac: persona without launch token")
+        expect(refusalLines[1]).toContain("register refused: explicit persona @codi/mac")
         await vi.waitFor(() => {
           const db = new Database(join(tempDir, "tribe.db"), { readonly: true })
           try {
@@ -268,6 +276,7 @@ describe("HTTP MCP adapter", () => {
           }
         })
       } finally {
+        stderr.mockRestore()
         if (!Reflect.set(Bun, "serve", originalServe)) throw new Error("could not restore Bun.serve")
         vi.stubEnv(HAB_ID_TOKEN_ENV, validToken)
       }
