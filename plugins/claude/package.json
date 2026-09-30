@@ -24,7 +24,7 @@
   },
   "dependencies": {
     "@bearly/pacing": "0.2.0",
-    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "tribe-daemon": "workspace:*",
     "tribe-wire": "workspace:*"
   },
