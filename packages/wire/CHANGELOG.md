@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Changed
+
+- **Requires Bun (0.3.0).** `engines` declares Bun only; the Node promise is
+  dropped. The library imports `bun:sqlite` and so never imported under Node,
+  which a fresh Node consumer probe shows (hh #26691). The `tribe-wire` bin keeps
+  its Bun shebang.
+
 ### Added
 
 - **Narrow library imports.** External consumers can use
