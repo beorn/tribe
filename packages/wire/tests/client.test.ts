@@ -1010,7 +1010,7 @@ const wave = Math.ceil(count() / 4)
 const deadline = Date.now() + 15_000
 while (Number(readFileSync(gate, "utf8")) < wave && Date.now() < deadline) await Bun.sleep(10)
 if (Number(readFileSync(gate, "utf8")) < wave) throw new Error(\`starter gate timed out for wave ${"${wave}"}\`)
-await import(${JSON.stringify(new URL(`file://${daemon}`).href)})
+process.exitCode = await (await import(${JSON.stringify(new URL(`file://${daemon}`).href)})).main(process.argv)
 `,
     )
 

@@ -145,7 +145,7 @@ appendFileSync(${JSON.stringify(daemonEnvLog)}, JSON.stringify({
   reloadExitCode: process.env.TRIBE_DAEMON_RELOAD_EXIT_CODE ?? null,
   supervisorPid: process.env.TRIBE_DAEMON_SUPERVISOR_PID ?? null,
 }) + "\\n")
-await import(${JSON.stringify(pathToFileURL(DAEMON).href)})
+process.exitCode = await (await import(${JSON.stringify(pathToFileURL(DAEMON).href)})).main(process.argv)
 `,
     )
     writeFileSync(
@@ -269,7 +269,7 @@ appendFileSync(${JSON.stringify(daemonEnvLog)}, JSON.stringify({
   reloadExitCode: process.env.TRIBE_DAEMON_RELOAD_EXIT_CODE ?? null,
   supervisorPid: process.env.TRIBE_DAEMON_SUPERVISOR_PID ?? null,
 }) + "\\n")
-await import(${JSON.stringify(pathToFileURL(DAEMON).href)})
+process.exitCode = await (await import(${JSON.stringify(pathToFileURL(DAEMON).href)})).main(process.argv)
 `,
     )
     const env = { ...process.env }

@@ -9,6 +9,12 @@
   which a fresh Node consumer probe shows (hh #26691). The `tribe-wire` bin keeps
   its Bun shebang.
 
+- **`tribe-wire/cli` no longer runs on import (0.3.0).** The module exports
+  `main(argv)`, which resolves to the exit code and never exits the process; the
+  file runs it only as the process entry (the `tribe-wire` bin). A host that ran the
+  CLI by importing `tribe-wire/cli` now calls
+  `process.exitCode = await (await import("tribe-wire/cli")).main(process.argv)`.
+
 ### Added
 
 - **Narrow library imports.** External consumers can use
