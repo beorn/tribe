@@ -33,20 +33,26 @@
  *     tribe-daemon package).
  */
 
+import { isEntryModule } from "./lib/entry-module.ts"
+
 const ARGV_FORWARDED_SUBCOMMANDS = new Set(["mcp"])
 const VERSION_FLAGS = new Set(["--version", "-V", "-v", "version"])
 
-async function main(): Promise<void> {
-  const argv = process.argv.slice(2)
-  const sub = argv[0]
+/**
+ * Run the tribe-wire CLI over `argv` (process.argv's shape: runtime, script, then arguments) and resolve to its exit
+ * code. It never exits the process itself; the entry below, or a host such as hh's `tribe` bin, sets process.exitCode
+ * from it. `mcp` still reads process.argv, because the stdio adapter parses its own flags and re-execs from it.
+ */
+export async function main(argv: readonly string[]): Promise<number> {
+  const args = argv.slice(2)
+  const sub = args[0]
 
   // Private process boundary used by connectOrStart and ownerless standalone
   // reload adoption. It is intentionally absent from Commander/help: callers
   // use the typed client helper, not this argv protocol.
   if (sub === "__standalone-supervisor") {
     const { runStandaloneSupervisor } = await import("./standalone-supervisor.ts")
-    process.exitCode = await runStandaloneSupervisor(argv.slice(1))
-    return
+    return await runStandaloneSupervisor(args.slice(1))
   }
 
   // Version identity runs BEFORE Commander, short-circuited like `mcp`, so the
@@ -56,7 +62,7 @@ async function main(): Promise<void> {
   if (sub && VERSION_FLAGS.has(sub)) {
     const { tribeWireRuntimeId } = await import("./runtime-id.ts")
     process.stdout.write(`tribe-wire ${tribeWireRuntimeId()}\n`)
-    return
+    return 0
   }
 
   // argv-forwarded subcommands run BEFORE Commander parses, so the child can
@@ -72,13 +78,16 @@ async function main(): Promise<void> {
         // `process.argv.slice(1)` which preserves the cli.ts entry — re-exec
         // re-enters this dispatcher cleanly.
         await import("./stdio-adapter.ts")
-        return
+        return exitCodeSoFar()
     }
   }
 
   // Commander-routed subcommands (Phase A.2 verb families).
-  const { Command } = await import("@silvery/commander")
+  const { Command, CommanderError } = await import("@silvery/commander")
   const program = new Command("tribe-wire")
+  // Help, a usage error or an unknown command throws its exit code back here instead of exiting the process;
+  // subcommands registered below inherit this.
+  program.exitOverride()
   program.description("tribe-wire CLI — coordinate through the tribe daemon")
   program.addHelpText(
     "after",
@@ -93,10 +102,20 @@ async function main(): Promise<void> {
   registerReadCommands(program)
   registerSendCommands(program)
 
-  // Defer to Commander — it handles --help, unknown-subcommand errors, and exits.
-  await program.parseAsync(process.argv)
+  // Commander handles --help and unknown-subcommand errors, and answers them as an exit code.
+  try {
+    await program.parseAsync([...argv])
+  } catch (error) {
+    if (error instanceof CommanderError) return error.exitCode
+    throw error
+  }
+  return exitCodeSoFar()
 }
 
-await main()
+/** A subcommand that failed says so through process.exitCode; main hands that on as its answer. */
+function exitCodeSoFar(): number {
+  return typeof process.exitCode === "number" ? process.exitCode : 0
+}
 
-export {}
+// Run only as the entry, never on import: importing ./cli must not act (hh #26691, @cto 2259658a).
+if (isEntryModule(import.meta.url)) process.exitCode = await main(process.argv)
