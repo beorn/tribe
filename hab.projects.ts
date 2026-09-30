@@ -32,6 +32,9 @@ export default {
       // oxfmt-ignore
       stateRoots: ["${TRIBE_DB:-${XDG_DATA_HOME:-$HOME/.local/share}/tribe/tribe.db}", "${TRIBE_SOCKET:-${XDG_RUNTIME_DIR:-$HOME/.local/share/tribe}/tribe.sock}"],
       health: { command: "tribe health --json" },
+      // It runs from an immutable landing; when a promoted landing carries a new vendor/tribe, the hab
+      // controller restarts it onto that landing (26774, @cto 9e7a89d2). A km-only landing leaves it running.
+      landingMigration: { mechanism: "restart-at-promotion" as const },
     },
   },
 }
