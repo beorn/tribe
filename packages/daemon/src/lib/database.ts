@@ -1552,7 +1552,8 @@ const TRACKED_ATTENTION_FETCH_COLUMNS_SQL = `COALESCE(m.id, a.id) AS id,
   COALESCE(m.room_id, a.room_id) AS room_id,
   COALESCE(m.summary, a.summary) AS summary,
   COALESCE(m.attention_required, a.attention_required) AS attention_required,
-  COALESCE(m.sender_authority, a.sender_authority) AS sender_authority`
+  COALESCE(m.sender_authority, a.sender_authority) AS sender_authority,
+  COALESCE(m.session_id, a.session_id) AS session_id`
 
 /** Tracked attention belongs to a mailbox through its existing pending owner
  * row, independent of whether the original message was direct or broadcast.
@@ -2505,7 +2506,8 @@ export function createStatements(db: Database) {
      *  per-call `topics` snapshot — that one filters rows the seat IS owed. */
     getInboxRows: db.prepare(`
 		SELECT m.id, m.rowid, m.type, m.sender, m.recipient, m.content, m.bead_id, m.ref, m.ts,
-			m.delivery, m.topic, m.room_id, m.summary, m.attention_required, m.wakes_owner, m.sender_authority
+			m.delivery, m.topic, m.room_id, m.summary, m.attention_required, m.wakes_owner, m.sender_authority,
+			m.session_id
 		FROM messages AS m
 		WHERE m.rowid > $since
 			AND (m.recipient = $name OR m.recipient = '*')
@@ -2630,7 +2632,7 @@ export function createStatements(db: Database) {
      */
     selectUnackedAttention: db.prepare(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-             attention_required, wakes_owner, sender_authority
+             attention_required, wakes_owner, sender_authority, session_id
       FROM messages AS m
       WHERE m.recipient = $name
         AND m.kind = 'direct'
@@ -2656,10 +2658,10 @@ export function createStatements(db: Database) {
      */
     selectAttention: db.prepare(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-             attention_required, sender_authority
+             attention_required, sender_authority, session_id
       FROM (
         SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-               attention_required, sender_authority
+               attention_required, sender_authority, session_id
         FROM messages AS m
         WHERE m.recipient = $name
           AND m.kind = 'direct'

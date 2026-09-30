@@ -3842,6 +3842,8 @@ export type FetchRow = {
   wakes_owner: number
   /** 25074 3d-1a — the sender's authority at insert, 'unrecorded' before v37; null for the daemon's own voice. */
   sender_authority?: SenderAuthority | null
+  /** Daemon session that inserted this message. It is stable even after that session leaves. */
+  session_id?: string | null
 }
 
 export type FetchEvent = {
@@ -3863,6 +3865,8 @@ export type FetchEvent = {
    * written before 3d-3 deleted the bearer, 'unrecorded' for one older than that record, null for the daemon's voice.
    */
   from_authority: SenderAuthority | null
+  /** Correlate a reply to the member_id captured from a verified current launch. */
+  from_session_id: string | null
 }
 
 export function fetchEvent(row: FetchRow): FetchEvent {
@@ -3881,6 +3885,7 @@ export function fetchEvent(row: FetchRow): FetchEvent {
     room_id: row.room_id,
     summary: row.summary,
     from_authority: row.sender_authority ?? null,
+    from_session_id: row.sender_authority === null ? null : (row.session_id ?? null),
   }
 }
 
@@ -4018,7 +4023,7 @@ function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRo
   const rows = ctx.db
     .prepare(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-             attention_required, wakes_owner, sender_authority
+             attention_required, wakes_owner, sender_authority, session_id
       FROM messages
       WHERE ${conditions.join("\n        AND ")}
       ORDER BY rowid ${order}
@@ -4127,7 +4132,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
     rows = ctx.db
       .prepare(`
         SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-               attention_required, wakes_owner, sender_authority
+               attention_required, wakes_owner, sender_authority, session_id
         FROM messages
         WHERE id IN (${placeholders})
           AND kind != 'event'

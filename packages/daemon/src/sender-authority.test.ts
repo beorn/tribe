@@ -94,6 +94,41 @@ describe("every envelope carries its sender's authority (25074 3d-1a)", () => {
     expect(fetchedAuthorities()).toEqual({ "@dev/1": "verified", "hand-shell": "claimed" })
   })
 
+  test("a fetched reply carries the sending daemon session for launch correlation", () => {
+    const current = sender("current-launch", "@dev/1", "verified")
+    const reply = sendMessage(
+      current,
+      RECIPIENT,
+      "parked: resume work",
+      "response",
+      undefined,
+      undefined,
+      "direct",
+      {},
+      { reply: "park-request" },
+    )
+    const reader = context("reader-launch", RECIPIENT)
+    const result = handleToolCall(reader, "tribe.fetch", { limit: 10 }, opts()) as { content: Array<{ text: string }> }
+    const events = (
+      JSON.parse(result.content[0]?.text ?? "{}") as {
+        events?: Array<{ from: string; from_authority: string | null; from_session_id: string | null }>
+      }
+    ).events
+    expect(events?.find((event) => event.from === "@dev/1")).toMatchObject({
+      from_authority: "verified",
+      from_session_id: "current-launch",
+    })
+    const byId = handleToolCall(reader, "tribe.fetch", { ids: [reply.id] }, opts()) as {
+      content: Array<{ text: string }>
+    }
+    expect(
+      (JSON.parse(byId.content[0]?.text ?? "{}") as { events?: Array<Record<string, unknown>> }).events?.[0],
+    ).toMatchObject({
+      from_authority: "verified",
+      from_session_id: "current-launch",
+    })
+  })
+
   test("a pre-3d-3 session row's bearer hash earns nothing; a message written then still reads bearer", () => {
     // A row an adapter registered before 3d-3 still carries its bearer's hash: the sender only claims its name now.
     const preCut = sender("s-pre-cut", "@dev/2", "claimed")
@@ -123,6 +158,12 @@ describe("every envelope carries its sender's authority (25074 3d-1a)", () => {
   test("a message the daemon originates carries no sender authority", () => {
     sendMessage(context("daemon", "daemon", "daemon"), RECIPIENT, "a daemon notice", "notify")
     expect(fetchedAuthorities()).toEqual({ daemon: null })
+    const reader = context("reader-daemon", RECIPIENT)
+    const result = handleToolCall(reader, "tribe.fetch", { limit: 10 }, opts()) as { content: Array<{ text: string }> }
+    expect(
+      (JSON.parse(result.content[0]?.text ?? "{}") as { events?: Array<{ from_session_id: string | null }> })
+        .events?.[0]?.from_session_id,
+    ).toBeNull()
   })
 
   test("a row the daemon attributes to itself carries none, even when a verified client's call provoked it", () => {
