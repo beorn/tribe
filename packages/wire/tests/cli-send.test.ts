@@ -16,6 +16,9 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import {
+  ANDON_OWNER,
+  buildAlarmAckInput,
+  buildAlarmSetInput,
   buildSendPayload,
   deriveFirstLineSummary,
   registerSendCommands,
@@ -629,6 +632,29 @@ describe("registerSendCommands", () => {
     const cmd = findCmd(buildProgram(), "alarm-ack")
     expect(cmd).toBeDefined()
     expect(cmd!.description()).toMatch(/clear|unblock/i)
+  })
+
+  test("26899: tribe alarm is an incident send to the owner; the reason is the body, never the identity", () => {
+    expect(ANDON_OWNER).toBe("@chief")
+    const set = buildAlarmSetInput("fleet is stopped because the line cannot drain")
+    expect(set.to).toBe("@chief")
+    expect(set.message).toBe("fleet is stopped because the line cannot drain")
+    expect(set.incident).toBe("andon:fleet-stop:active")
+    expect(set.incident).not.toContain("fleet is stopped")
+    const payload = buildSendPayload(set)
+    expect(payload.incident).toEqual({
+      emitter: "andon",
+      subject: "fleet-stop",
+      condition: "active",
+    })
+    const ack = buildSendPayload(buildAlarmAckInput())
+    expect(ack.to).toBe("@chief")
+    expect(ack.incident).toEqual({
+      emitter: "andon",
+      subject: "fleet-stop",
+      condition: "active",
+      active: false,
+    })
   })
 
   test("retro verb accepts --since, --format, and --db", () => {

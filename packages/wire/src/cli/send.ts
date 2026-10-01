@@ -28,7 +28,18 @@ import {
   type TribeMessageType as MessageType,
 } from "../command-descriptors.ts"
 import { resolveDbPath } from "../lib/config.ts"
-import { INCIDENT_KEY_SEPARATOR, parseIncidentKey, type IncidentIdentity } from "../lib/incident.ts"
+import {
+  ANDON_CONDITION,
+  ANDON_EMITTER,
+  ANDON_OWNER,
+  ANDON_SUBJECT,
+  INCIDENT_KEY_SEPARATOR,
+  incidentKey,
+  parseIncidentKey,
+  type IncidentIdentity,
+} from "../lib/incident.ts"
+
+export { ANDON_CONDITION, ANDON_EMITTER, ANDON_OWNER, ANDON_SUBJECT }
 import { formatMarkdown, generateRetro, parseDuration } from "../lib/retro.ts"
 import {
   readIdentityTokenFromEnvironment,
@@ -717,47 +728,100 @@ async function cmdJoin(
 }
 
 /**
- * Andon-pull alarm — `tribe alarm <reason>` sets a project-wide stop-the-line
- * flag. The chief-drain-check.sh PreToolUse hook reads it and HARD-BLOCKS
- * chief's tool calls until `tribe alarm-ack` clears it.
- * Delivery-attention lineage: @ag/tribe/21626-per-seat-inbox-staleness-alarm.
+ * Andon-pull alarm — `tribe alarm <reason>` is an incident send to the owner
+ * (`ANDON_OWNER`, no seat name on the CLI). The reason is the body; identity is
+ * andon:fleet-stop:active so a second pull upserts one ball. `alarm-ack` is the
+ * same identity with active:false. `alarm-status` reads that row.
+ * Layer 3 still greps alarm-status --json for `"active":true` until a live pull
+ * is observed (26899); the daemon `cli_alarm_*` cases stay until that delete.
  */
-async function cmdAlarmSet(reason: string, opts: { by?: string }): Promise<void> {
-  const by = opts.by ?? process.env.USER ?? "anonymous"
-  const result = (await callDaemon("cli_alarm_set", { reason, by })) as { ok: boolean }
-  if (!result.ok) {
-    console.error("tribe.alarm: set failed - daemon refused")
-    process.exit(1)
+export function buildAlarmSetInput(reason: string, opts: { by?: string } = {}): SendPayloadInput {
+  const trimmed = reason.trim()
+  if (trimmed.length === 0) {
+    throw new Error("tribe.alarm: reason is required and lives in the body, never in the identity")
   }
-  console.log(`ALARM SET — chief tool calls will block until 'tribe alarm-ack' is run.`)
-  console.log(`  Reason: ${reason}`)
-  console.log(`  By:     ${by}`)
+  const by = opts.by?.trim()
+  return {
+    to: ANDON_OWNER,
+    message: by === undefined || by.length === 0 ? trimmed : `${trimmed}\nBy: ${by}`,
+    type: "notify",
+    summary: `${ANDON_CONDITION}: ${ANDON_SUBJECT}`,
+    incident: incidentKey({ emitter: ANDON_EMITTER, subject: ANDON_SUBJECT, condition: ANDON_CONDITION }),
+  }
+}
+
+export function buildAlarmAckInput(): SendPayloadInput {
+  return {
+    to: ANDON_OWNER,
+    message: "andon cleared",
+    type: "notify",
+    summary: `${ANDON_CONDITION} cleared: ${ANDON_SUBJECT}`,
+    incident: incidentKey({ emitter: ANDON_EMITTER, subject: ANDON_SUBJECT, condition: ANDON_CONDITION }),
+    incidentCleared: true,
+  }
+}
+
+async function cmdAlarmSet(reason: string, opts: { by?: string }): Promise<void> {
+  try {
+    const input = buildAlarmSetInput(reason, opts)
+    await cmdSend(input)
+    console.log(`ALARM SET — incident ${input.incident} on ${ANDON_OWNER}.`)
+    console.log(`  Reason: ${reason}`)
+    if (opts.by !== undefined) console.log(`  By:     ${opts.by}`)
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error))
+    process.exit(2)
+  }
+}
+
+type AndonPendingRow = {
+  request_id?: string
+  sender?: string
+  summary?: string
+  content?: string
+  opened_at?: string
 }
 
 async function cmdAlarmStatus(opts: { json?: boolean }): Promise<void> {
-  const result = (await callDaemon("cli_alarm_get")) as
-    | { active: false }
-    | { active: true; reason: string; by: string; ts: number; age_min: number }
-  if (opts.json) {
-    await writeJsonStdout(result)
-    return
+  const key = incidentKey({ emitter: ANDON_EMITTER, subject: ANDON_SUBJECT, condition: ANDON_CONDITION })
+  const res = mcpJsonContent(await callDaemon("tribe.pending", { owner: ANDON_OWNER })) as {
+    error?: string
+    pending?: AndonPendingRow[]
   }
-  if (!result.active) {
+  if (typeof res.error === "string" && res.error.length > 0) {
+    console.error(`tribe.alarm-status: pending read failed - ${res.error}`)
+    process.exit(1)
+  }
+  const row = (res.pending ?? []).find((item) => item.request_id === key)
+  if (row === undefined) {
+    if (opts.json) {
+      await writeJsonStdout({ active: false })
+      return
+    }
     console.log("No alarm active.")
     return
   }
-  console.log(`ALARM ACTIVE (${result.age_min}min):`)
-  console.log(`  Reason: ${result.reason}`)
-  console.log(`  By:     ${result.by}`)
+  const openedAtRaw = row.opened_at
+  const openedAt = typeof openedAtRaw === "string" ? Date.parse(openedAtRaw) : Number.NaN
+  const ts = Number.isFinite(openedAt) ? openedAt : Date.now()
+  const ageMin = Math.max(0, Math.floor((Date.now() - ts) / 60_000))
+  const reasonText = row.content ?? row.summary ?? ""
+  const reason = reasonText.trim()
+  const by = (row.sender ?? "").trim()
+  const payload = { active: true as const, reason, by, ts, age_min: ageMin, request_id: key }
+  if (opts.json) {
+    await writeJsonStdout(payload)
+    return
+  }
+  console.log(`ALARM ACTIVE (${ageMin}min):`)
+  console.log(`  Reason: ${reason}`)
+  console.log(`  By:     ${by}`)
+  console.log(`  Key:    ${key}`)
 }
 
 async function cmdAlarmAck(): Promise<void> {
-  const result = (await callDaemon("cli_alarm_ack")) as { ok: boolean }
-  if (!result.ok) {
-    console.error("tribe.alarm-ack: clear failed - daemon refused")
-    process.exit(1)
-  }
-  console.log("ALARM CLEARED — chief tool calls unblocked.")
+  await cmdSend(buildAlarmAckInput())
+  console.log("ALARM CLEARED — andon incident falling edge sent.")
 }
 
 async function cmdRetro(opts: { since?: string; format: string; db?: string }): Promise<void> {
@@ -1045,19 +1109,19 @@ export function registerSendCommands(program: Command): void {
 
   program
     .command("alarm <reason>")
-    .description("Andon-pull stop-the-line — blocks chief tool calls until 'alarm-ack' (Layer 3)")
+    .description("Andon-pull stop-the-line — incident send to the owner; 'alarm-ack' clears it")
     .option("--by <name>", "Set the author of the alarm (default: $USER)")
     .action((reason: string, opts: { by?: string }) => void cmdAlarmSet(reason, opts))
 
   program
     .command("alarm-status")
-    .description("Show current andon-pull alarm state (active reason + age, or 'no alarm active')")
+    .description("Read the andon incident row (active reason + age, or 'no alarm active')")
     .option("--json", "Emit machine-readable JSON (for hooks)")
     .action((opts: { json?: boolean }) => cmdAlarmStatus(opts))
 
   program
     .command("alarm-ack")
-    .description("Clear the andon-pull alarm — unblocks chief tool calls")
+    .description("Clear the andon incident — same identity with active:false")
     .action(() => void cmdAlarmAck())
 
   program

@@ -36,6 +36,10 @@ export {
 // One-ball-per-incident identity, shared by the CLI (which parses the
 // `--incident` key) and the daemon (which keys the ball on it).
 export {
+  ANDON_CONDITION,
+  ANDON_EMITTER,
+  ANDON_OWNER,
+  ANDON_SUBJECT,
   INCIDENT_KEY_SEPARATOR,
   incidentKey,
   isIncidentKey,
