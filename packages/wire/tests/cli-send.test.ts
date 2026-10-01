@@ -718,9 +718,7 @@ describe("registerSendCommands", () => {
             TRIBE_SOCKET: socketPath,
             ...launchEnvironment(""),
           }
-          delete env.HAB_ID_TOKEN
-          delete env.TRIBE_NAME
-          delete env.TRIBE_SESSION_NAME
+          for (const name of tribeAmbientEnvironmentNames()) delete env[name]
           const child = spawn(BUN_BIN, [CLI, ...args], {
             env,
             stdio: ["ignore", "pipe", "pipe"],
