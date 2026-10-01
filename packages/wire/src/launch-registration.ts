@@ -10,6 +10,7 @@ import {
   tribeSessionIdentityEnvironmentNames,
 } from "./launch-environment.ts"
 import { TRIBE_PROTOCOL_VERSION, TRIBE_SUPPORTED_PROTOCOL_VERSIONS } from "./lib/socket.ts"
+import { validateDeliveryAcknowledgement } from "./lib/delivery.ts"
 
 export interface TribeLaunchRequest {
   readonly name: string
@@ -213,6 +214,9 @@ async function registerLaunch(
         readonly principalClass?: unknown
         readonly launchId?: unknown
         readonly launchParentPid?: unknown
+        readonly protocolVersion?: unknown
+        readonly transportDelivery?: unknown
+        readonly delivery?: unknown
       }
       if (registration.name !== request.name) {
         throw new Error(
@@ -225,6 +229,19 @@ async function registerLaunch(
         )
       }
       const launchId = keyedLaunchId(registration, identity.launchId, byToken, processId)
+      // Transitional v10 daemons have no transport ACK. Only their existing strict
+      // stored-pull certification is safe; remove this arm when 10 leaves the window.
+      const legacyStoredPull =
+        TRIBE_SUPPORTED_PROTOCOL_VERSIONS.includes(10) &&
+        (registration.protocolVersion === 10 || registration.protocolVersion === undefined) &&
+        registration.transportDelivery === undefined &&
+        registration.delivery === undefined
+      if (!legacyStoredPull) {
+        const acknowledgement = validateDeliveryAcknowledgement(registration, "pull")
+        if (!acknowledgement.acknowledged) {
+          throw new Error(`Tribe delivery acknowledgement did not certify ${request.name}: ${acknowledgement.cause}`)
+        }
+      }
       const certification = exactLaunchMember(await client.call("tribe.members", {}), {
         persona: request.name,
         launchId,
@@ -233,6 +250,7 @@ async function registerLaunch(
         account: request.account,
         cwd: request.cwd,
         requireMailboxAuthority: request.requireMailboxAuthority === true,
+        legacyStoredPull,
       })
       if (certification.member === null) {
         throw new Error(
@@ -340,6 +358,7 @@ function exactLaunchMember(
     readonly account?: string
     readonly cwd: string
     readonly requireMailboxAuthority: boolean
+    readonly legacyStoredPull: boolean
   },
 ): { readonly member: object | null; readonly mailboxReadCapabilityDetail: string | null } {
   const text = (result as { readonly content?: readonly [{ readonly text?: unknown }] }).content?.[0]?.text
@@ -362,7 +381,7 @@ function exactLaunchMember(
       member["launch_id"] !== expected.launchId ||
       member["launch_parent_pid"] !== expected.launchParentPid ||
       member["transport_state"] !== "connected" ||
-      member["delivery"] !== "pull" ||
+      (expected.legacyStoredPull && member["delivery"] !== "pull") ||
       member["alive"] !== true ||
       (expected.provider === undefined
         ? member["provider"] !== undefined && member["provider"] !== null

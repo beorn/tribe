@@ -2,6 +2,36 @@ export type TribeDelivery = "push" | "pull"
 export type TribePullTransport = "mcp" | "cli" | "host-stream"
 export type TribeIdleStrategy = "channel" | "host-stream" | "cli-inbox-wait"
 
+/** The caller's accepted declaration and the independently derived session mode. */
+export type TribeDeliveryAcknowledgement =
+  | { readonly acknowledged: true; readonly transportDelivery: TribeDelivery; readonly delivery: TribeDelivery }
+  | { readonly acknowledged: false; readonly cause: string }
+
+export function validateDeliveryAcknowledgement(
+  reply: unknown,
+  requestedDelivery: TribeDelivery,
+): TribeDeliveryAcknowledgement {
+  const ack = typeof reply === "object" && reply !== null ? (reply as Record<string, unknown>) : null
+  const transportDelivery = ack?.transportDelivery
+  const delivery = ack?.delivery
+  if (transportDelivery !== "push" && transportDelivery !== "pull") {
+    return { acknowledged: false, cause: `transportDelivery is missing or malformed: ${String(transportDelivery)}` }
+  }
+  if (delivery !== "push" && delivery !== "pull") {
+    return { acknowledged: false, cause: `session delivery is missing or malformed: ${String(delivery)}` }
+  }
+  if (transportDelivery !== requestedDelivery) {
+    return {
+      acknowledged: false,
+      cause: `accepted transportDelivery=${transportDelivery} contradicts requested ${requestedDelivery}`,
+    }
+  }
+  if (transportDelivery === "push" && delivery !== "push") {
+    return { acknowledged: false, cause: "accepted push transport contradicts session delivery=pull" }
+  }
+  return { acknowledged: true, transportDelivery, delivery }
+}
+
 export type TribeDeliveryCapability = {
   readonly delivery: TribeDelivery
   readonly channel: boolean

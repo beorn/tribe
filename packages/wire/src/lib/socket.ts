@@ -25,7 +25,8 @@ import {
 
 /**
  * Wire-protocol version. Bump on any payload-shape change a client cares about.
- * v10 (current) adds the private reconnect-stable inbox-wait baseline.
+ * v11 (current) acknowledges own transport delivery separately from derived session delivery.
+ * v10 adds the private reconnect-stable inbox-wait baseline.
  * v9 adds the typed inbox-wait terminal status and MCP host-cut
  * preflight result.
  * v8 added the effective inbox-wait timeout and optional correlated-
@@ -41,7 +42,7 @@ import {
  * `tribe.release-chief` / `tribe.debug`. See ../CHANGELOG.md for the wire
  * protocol history.
  */
-export const TRIBE_PROTOCOL_VERSION = 10
+export const TRIBE_PROTOCOL_VERSION = 11
 
 /**
  * Protocol versions this checkout can speak during a rolling daemon update.

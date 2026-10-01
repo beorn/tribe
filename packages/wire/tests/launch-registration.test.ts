@@ -7,6 +7,7 @@
  * daemon plus this client keeps joining (@cto 57e5f42a). sessionId alone never certifies.
  */
 import { describe, expect, it, vi } from "vitest"
+import { TRIBE_SUPPORTED_PROTOCOL_VERSIONS } from "../src/lib/socket.ts"
 import {
   REREGISTER_WINDOW_MS,
   connectTribeLaunch,
@@ -32,12 +33,21 @@ function tokenWithClaims(claims: Record<string, unknown>): string {
 }
 
 /** A daemon that answers register with `registered` and lists one member row keyed `rowLaunchId`. */
-function fakeDaemon(registered: Record<string, unknown>, rowLaunchId: string) {
+function fakeDaemon(registered: Record<string, unknown>, rowLaunchId: string, member: Record<string, unknown> = {}) {
   const calls: Array<{ method: string; params: Record<string, unknown> }> = []
   const connect: TribeLaunchDeps["connect"] = async () => ({
     call: vi.fn(async (method: string, params: Record<string, unknown> = {}) => {
       calls.push({ method, params })
-      if (method === "register") return { name: REQUEST.name, principalClass: "agent", ...registered }
+      if (method === "register") {
+        return {
+          name: REQUEST.name,
+          principalClass: "agent",
+          protocolVersion: 11,
+          transportDelivery: "pull",
+          delivery: "pull",
+          ...registered,
+        }
+      }
       const row = {
         name: REQUEST.name,
         launch_id: rowLaunchId,
@@ -46,6 +56,7 @@ function fakeDaemon(registered: Record<string, unknown>, rowLaunchId: string) {
         delivery: "pull",
         alive: true,
         cwd: REQUEST.cwd,
+        ...member,
       }
       return { content: [{ text: JSON.stringify({ sessions: [row] }) }] }
     }) as never,
@@ -57,6 +68,41 @@ function fakeDaemon(registered: Record<string, unknown>, rowLaunchId: string) {
 }
 
 describe("connectTribeLaunch certifies the launch identity the daemon keyed (25074)", () => {
+  // @failure 26564: aggregate push from a genuine sibling must not invalidate the bootstrap's own pull ACK.
+  // @level l2 @consumer managed provider launch bootstrap
+  it("certifies its own pull ACK beside a push sibling", async () => {
+    const { deps, calls } = fakeDaemon({ delivery: "push" }, DERIVED, { delivery: "push" })
+    const joined = await connectTribeLaunch(REQUEST, deps)
+    expect(joined.launchId).toBe(DERIVED)
+    expect(calls.find((call) => call.method === "register")?.params.delivery).toBe("pull")
+    await joined.ensureRegistered()
+    expect(joined.isConnected()).toBe(true)
+    joined.close()
+  })
+
+  // The member row cannot rescue an absent, malformed or contradictory v11 ACK.
+  it.each([
+    { transportDelivery: undefined },
+    { transportDelivery: "sometimes" },
+    { transportDelivery: "push", delivery: "push" },
+    { delivery: undefined },
+    { delivery: "sometimes" },
+  ])("refuses a v11 delivery ACK it cannot certify: %j", async (ack) => {
+    const { deps } = fakeDaemon(ack, DERIVED)
+    await expect(connectTribeLaunch(REQUEST, deps)).rejects.toThrow(/delivery acknowledgement/i)
+  })
+
+  // retire-when: protocol 10 leaves the supported window; remove the strict stored-pull compatibility arm then.
+  it("keeps v10 strict stored-pull certification only while protocol 10 remains supported", async () => {
+    expect(TRIBE_SUPPORTED_PROTOCOL_VERSIONS.includes(10), "Remove the v10 strict stored-pull bootstrap arm").toBe(true)
+    const ack = { protocolVersion: 10, transportDelivery: undefined, delivery: undefined }
+    const legacy = fakeDaemon(ack, DERIVED)
+    const joined = await connectTribeLaunch(REQUEST, legacy.deps)
+    joined.close()
+    const sibling = fakeDaemon(ack, DERIVED, { delivery: "push" })
+    await expect(connectTribeLaunch(REQUEST, sibling.deps)).rejects.toThrow("member row did not certify")
+  })
+
   it("a token register sends its launch id too, certifies the returned <sid>@<gen>, and its child env projects no launch id (3d-2b)", async () => {
     const { deps, calls } = fakeDaemon({ launchId: "sid-dev7@3", launchParentPid: PID }, "sid-dev7@3")
 
@@ -194,7 +240,7 @@ describe("connectTribeLaunch certifies the launch identity the daemon keyed (250
  */
 describe("ensureRegistered re-registers a launch the daemon dropped (25074 acceptance 4)", () => {
   /** A daemon whose owner socket can be dropped, and whose connects can be refused while it restarts. */
-  function restartableDaemon() {
+  function restartableDaemon(delivery: "push" | "pull" = "pull") {
     const sockets: Array<{ destroyed: boolean; dead: boolean }> = []
     let refuseConnects = 0
     let pid = PID
@@ -213,14 +259,22 @@ describe("ensureRegistered re-registers a launch the daemon dropped (25074 accep
           if (method === "cli_daemon") return { pid: 1 }
           if (method === "register") {
             registers.push(params)
-            return { name: REQUEST.name, principalClass: "service", launchId: DERIVED, launchParentPid: pid }
+            return {
+              name: REQUEST.name,
+              principalClass: "service",
+              launchId: DERIVED,
+              launchParentPid: pid,
+              protocolVersion: 11,
+              transportDelivery: "pull",
+              delivery,
+            }
           }
           const row = {
             name: REQUEST.name,
             launch_id: DERIVED,
             launch_parent_pid: pid,
             transport_state: "connected",
-            delivery: "pull",
+            delivery,
             alive: true,
             cwd: REQUEST.cwd,
           }
@@ -264,6 +318,20 @@ describe("ensureRegistered re-registers a launch the daemon dropped (25074 accep
     }
   }
   const SERVICE: TribeLaunchRequest = { ...REQUEST, principalClass: "service" }
+
+  it("re-certifies its own pull transport while a sibling keeps the effective session push", async () => {
+    const daemon = restartableDaemon("push")
+    const joined = await connectTribeLaunch(SERVICE, daemon.deps)
+    daemon.restart(0)
+    expect(joined.isConnected()).toBe(false)
+    await joined.ensureRegistered()
+    expect(daemon.registers).toHaveLength(2)
+    expect(daemon.registers[1]).toEqual(daemon.registers[0])
+    expect(daemon.registers[1]?.delivery).toBe("pull")
+    expect(joined.launchId).toBe(DERIVED)
+    expect(joined.isConnected()).toBe(true)
+    joined.close()
+  })
 
   it("is a no-op while the owner transport is connected", async () => {
     const daemon = restartableDaemon()
