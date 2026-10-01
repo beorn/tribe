@@ -1901,6 +1901,7 @@ export async function waitForInboxWithReconnect(opts: {
   let attempted = false
   let afterSeq: number | undefined
   let consecutiveRetryableErrors = 0
+  let unavailableSince: number | undefined
 
   while (true) {
     const remainingMs = Math.max(0, deadline - now())
@@ -1917,6 +1918,7 @@ export async function waitForInboxWithReconnect(opts: {
         ...(afterSeq === undefined ? {} : { afterSeq }),
       })
       consecutiveRetryableErrors = 0
+      unavailableSince = undefined
       if (Number.isSafeInteger(result.baseline_seq) && Number(result.baseline_seq) >= 0) {
         afterSeq = Number(result.baseline_seq)
       }
@@ -1939,8 +1941,13 @@ export async function waitForInboxWithReconnect(opts: {
       const kind = inboxWaitErrorKind(err)
       if (!kind) throw err
       lastRetryableError = err
-      if (kind === "daemon-unavailable" && latestResult === undefined && now() - startedAt >= unavailableGraceMs) {
-        throw err
+      if (kind === "daemon-unavailable") {
+        // A restart's socket gap begins after the established wait closes;
+        // the logical wait's age must not consume this absence grace.
+        unavailableSince ??= now()
+        if (latestResult === undefined && now() - unavailableSince >= unavailableGraceMs) throw err
+      } else {
+        unavailableSince = undefined
       }
       const afterErrorRemainingMs = Math.max(0, deadline - now())
       if (afterErrorRemainingMs <= 0) {
