@@ -33,7 +33,15 @@ import { randomUUID, timingSafeEqual } from "node:crypto"
 import { type Socket as NetSocket } from "node:net"
 import { isAbsolute } from "node:path"
 import { createLogger } from "loggily"
-import { DEFAULT_INBOX_WAIT_SESSION, incidentKey, resolveInboxWaitOptions } from "tribe-wire"
+import {
+  ANDON_CONDITION,
+  ANDON_EMITTER,
+  ANDON_OWNER,
+  ANDON_SUBJECT,
+  DEFAULT_INBOX_WAIT_SESSION,
+  incidentKey,
+  resolveInboxWaitOptions,
+} from "tribe-wire"
 import { deriveTribePersonaLaunchIdentity, providerLaunchIdOf } from "tribe-wire/lib/persona-launch-identity"
 import { HAB_ID_TOKEN_ENV, MANAGED_INBOX_TOKEN_REQUIRED, readTokenLaunch } from "tribe-wire/lib/identity-token"
 import { isExplicitTribePersonaName } from "tribe-wire/lib/persona-name"
@@ -2853,8 +2861,24 @@ export function withDispatcher<
             return makeResponse(id, { ok: true, reason, by })
           }
 
-          /** Layer 3 — read current alarm state (or {active:false}). */
+          /** Layer 3 — keyed read of the andon incident row, else the legacy coordination key. */
           case "cli_alarm_get": {
+            const key = incidentKey({ emitter: ANDON_EMITTER, subject: ANDON_SUBJECT, condition: ANDON_CONDITION })
+            const standing = stmts.selectIncidentCondition.get({
+              $request_id: key,
+              $recipient: ANDON_OWNER,
+            }) as { summary: string | null; content: string | null; sender: string; opened_at: number } | null
+            if (standing !== null) {
+              const ts = standing.opened_at
+              return makeResponse(id, {
+                active: true,
+                reason: (standing.content ?? standing.summary ?? "").trim(),
+                by: standing.sender,
+                ts,
+                age_min: Math.max(0, Math.floor((Date.now() - ts) / 60_000)),
+                request_id: key,
+              })
+            }
             const row = db
               .prepare("SELECT value FROM coordination WHERE project_id = ? AND key = ?")
               .get("", "alarm.active") as { value: string | null } | undefined

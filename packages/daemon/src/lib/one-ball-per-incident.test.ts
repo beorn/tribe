@@ -139,6 +139,21 @@ describe("one ball per incident (habwire stage 2(d))", () => {
     expect(cleared.tracker?.closed).toBe(1)
   })
 
+  it("26899: ack by a seat other than the puller closes 1; a second pull leaves one ball", () => {
+    const puller = makeContext(db, stmts, "@dev/13")
+    const acker = makeContext(db, stmts, "@dev/fixer")
+    const andon = { emitter: "andon", subject: "fleet-stop", condition: "active" }
+    observe(puller, andon)
+    expect(openKeys("@chief")).toEqual([incidentKey(andon)])
+
+    const cleared = observe(acker, andon, false)
+    expect(cleared.tracker?.closed).toBe(1)
+    expect(openKeys("@chief")).toHaveLength(0)
+
+    observe(puller, andon)
+    expect(openKeys("@chief")).toEqual([incidentKey(andon)])
+  })
+
   it("re-arms after clearing: the same condition returning opens one ball again", () => {
     const watcher = makeContext(db, stmts, "@fleet")
     observe(watcher, { subject: "@dev/5", condition: "transport-wedged" })

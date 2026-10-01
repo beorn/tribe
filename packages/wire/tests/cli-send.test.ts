@@ -657,6 +657,109 @@ describe("registerSendCommands", () => {
     })
   })
 
+  test("26899: an unidentified shell still pulls and clears; status is cli_alarm_get; ack prints tracker.closed", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "tribe-wire-alarm-unidentified-"))
+    const socketPath = join(tmp, "tribe.sock")
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = []
+    let closedOnAck = 1
+    let alarmActive = false
+    const server = createServer((socket) => {
+      let buffer = ""
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8")
+        let newline = buffer.indexOf("\n")
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          buffer = buffer.slice(newline + 1)
+          newline = buffer.indexOf("\n")
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as {
+            id: number
+            method: string
+            params?: Record<string, unknown>
+          }
+          calls.push({ method: request.method, params: request.params ?? {} })
+          let result: unknown
+          if (request.method === "tribe.send") {
+            const incident = request.params?.incident as { active?: boolean } | undefined
+            alarmActive = incident?.active !== false
+            result = { sent: true, tracker: { closed: incident?.active === false ? closedOnAck : 0 } }
+          } else if (request.method === "cli_alarm_get") {
+            result = alarmActive
+              ? {
+                  active: true,
+                  reason: "fleet stopped",
+                  by: "tester",
+                  ts: Date.now(),
+                  age_min: 0,
+                  request_id: "andon:fleet-stop:active",
+                }
+              : { active: false }
+          } else {
+            result = { error: `unexpected call ${request.method}` }
+          }
+          socket.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\n")
+        }
+      })
+    })
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen)
+        server.listen(socketPath, () => {
+          server.off("error", rejectListen)
+          resolveListen()
+        })
+      })
+      const runCli = (args: string[]) =>
+        new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveProc) => {
+          const env: NodeJS.ProcessEnv = {
+            ...process.env,
+            TRIBE_SOCKET: socketPath,
+            ...launchEnvironment(""),
+          }
+          delete env.HAB_ID_TOKEN
+          delete env.TRIBE_NAME
+          delete env.TRIBE_SESSION_NAME
+          const child = spawn(BUN_BIN, [CLI, ...args], {
+            env,
+            stdio: ["ignore", "pipe", "pipe"],
+          })
+          let stdout = ""
+          let stderr = ""
+          child.stdout.on("data", (chunk) => (stdout += chunk.toString("utf8")))
+          child.stderr.on("data", (chunk) => (stderr += chunk.toString("utf8")))
+          child.on("close", (code) => resolveProc({ code, stdout, stderr }))
+        })
+
+      const pulled = await runCli(["alarm", "fleet stopped", "--by", "tester"])
+      expect(pulled).toMatchObject({ code: 0 })
+      expect(pulled.stderr).not.toContain("no daemon-validated launch identity")
+      expect(pulled.stdout).toContain("ALARM SET")
+      expect(pulled.stdout).toContain("tester (unverified)")
+      expect(calls.map((call) => call.method)).toContain("tribe.send")
+      expect(calls.map((call) => call.method)).not.toContain("tribe.pending")
+
+      const status = await runCli(["alarm-status", "--json"])
+      expect(status).toMatchObject({ code: 0 })
+      expect(JSON.parse(status.stdout)).toMatchObject({ active: true, request_id: "andon:fleet-stop:active" })
+      expect(calls.map((call) => call.method)).toContain("cli_alarm_get")
+      expect(calls.some((call) => call.method === "tribe.pending")).toBe(false)
+
+      const ack = await runCli(["alarm-ack"])
+      expect(ack).toMatchObject({ code: 0 })
+      expect(ack.stdout).toContain("tracker.closed=1")
+
+      closedOnAck = 0
+      const idle = await runCli(["alarm-ack"])
+      expect(idle).toMatchObject({ code: 0 })
+      expect(idle.stdout).toContain("no alarm was active")
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
+    }
+  })
+
   test("retro verb accepts --since, --format, and --db", () => {
     const cmd = findCmd(buildProgram(), "retro")
     expect(cmd).toBeDefined()

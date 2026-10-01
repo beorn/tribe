@@ -1758,7 +1758,10 @@ export function createStatements(db: Database) {
      *  CHANGED. Both are edges that wake the owner. The summary is the condition and the body the observation, so a
      *  repeat carrying a new count or timestamp compares equal (@cto 66284cb6). */
     selectIncidentCondition: db.prepare(`
-		SELECT COALESCE(m.summary, a.summary) AS summary
+		SELECT COALESCE(m.summary, a.summary) AS summary,
+			COALESCE(m.content, a.content) AS content,
+			p.sender AS sender,
+			p.opened_at AS opened_at
 		FROM pending_request AS p
 		LEFT JOIN messages AS m ON m.id = p.message_id
 		LEFT JOIN messages_archive AS a ON a.id = p.message_id

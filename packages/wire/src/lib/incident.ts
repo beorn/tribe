@@ -41,7 +41,6 @@ export const INCIDENT_KEY_SEPARATOR = ":"
 export const ANDON_EMITTER = "andon"
 export const ANDON_SUBJECT = "fleet-stop"
 export const ANDON_CONDITION = "active"
-/** Matches hab-core DEFAULT_SERVICE_HEALTH_OWNER without importing hab. */
 export const ANDON_OWNER = "@chief"
 
 const INCIDENT_KEY_PART_COUNT = 3

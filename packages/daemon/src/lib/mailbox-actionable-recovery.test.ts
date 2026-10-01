@@ -42,7 +42,12 @@ type FetchJson = ToolJson & {
   attention?: {
     actionable_unread?: FetchEvent[]
     pending_balls?: AttentionBall[]
-    pending_balls_summary?: { total: number; oldest_age_ms: number; truncated: boolean }
+    pending_balls_summary?: {
+      total: number
+      oldest_age_ms: number
+      truncated: boolean
+      withheld?: { total: number; by_kind: { request: number; incident: number } }
+    }
   }
   events?: FetchEvent[]
   cursor?: number
@@ -669,6 +674,61 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     }
     expect(explicit.count).toBe(total)
     expect(explicit.pending).toHaveLength(total)
+  })
+
+  it("26899: eleven open requests still wake and count a withheld andon in the events window", () => {
+    const live = connectAs("sess-eleven-andon-owner", NAME)
+    const chief = connectAs("sess-eleven-andon-chief", "@chief")
+    const puller = connectAs("sess-eleven-andon-puller", "@dev/13")
+
+    for (let i = 0; i < 11; i++) {
+      const sent = parseToolJson(
+        handleToolCall(
+          chief,
+          "tribe.send",
+          {
+            to: NAME,
+            message: `please answer request ${i}`,
+            type: "request",
+            request: `eleven-req-${i}`,
+          },
+          opts,
+        ),
+      ) as { request_id: string }
+      db.prepare("UPDATE pending_request SET opened_at = ? WHERE request_id = ?").run(
+        now - (20 - i) * 60_000,
+        sent.request_id,
+      )
+    }
+
+    const andon = parseToolJson(
+      handleToolCall(
+        puller,
+        "tribe.send",
+        {
+          to: NAME,
+          message: "fleet is stopped because the line cannot drain",
+          summary: "active: fleet-stop",
+          incident: { emitter: "andon", subject: "fleet-stop", condition: "active" },
+        },
+        opts,
+      ),
+    ) as { id: string; request_id: string }
+
+    const fetched = fetchJson(live, opts).json
+    expect(fetched.attention?.pending_balls).toHaveLength(10)
+    expect(fetched.attention?.pending_balls?.some((ball) => ball.request_id === andon.request_id)).toBe(false)
+    expect(fetched.attention?.pending_balls_summary).toEqual({
+      total: 12,
+      oldest_age_ms: expect.any(Number),
+      truncated: true,
+      withheld: {
+        total: 2,
+        by_kind: { request: 1, incident: 1 },
+      },
+    })
+    expect(fetched.events?.some((event) => event.id === andon.id)).toBe(true)
+    expect(fetched.attention?.actionable_unread?.length).toBeGreaterThan(0)
   })
 
   it("keeps a fresh peer request visible when ten older incidents fill the attention preview", () => {

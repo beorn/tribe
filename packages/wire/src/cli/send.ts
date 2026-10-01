@@ -730,8 +730,11 @@ async function cmdJoin(
 /**
  * Andon-pull alarm — `tribe alarm <reason>` is an incident send to the owner
  * (`ANDON_OWNER`, no seat name on the CLI). The reason is the body; identity is
- * andon:fleet-stop:active so a second pull upserts one ball. `alarm-ack` is the
- * same identity with active:false. `alarm-status` reads that row.
+ * andon:fleet-stop:active so a second pull upserts one ball. Unidentified shells
+ * still pull and clear: the send skips launch identity and records `--by` as
+ * unverified. `alarm-ack` is the same identity with active:false and prints
+ * tracker.closed. `alarm-status` is a keyed read-only of that row (`cli_alarm_get`
+ * / selectIncidentCondition), never tribe.pending.
  * Layer 3 still greps alarm-status --json for `"active":true` until a live pull
  * is observed (26899); the daemon `cli_alarm_*` cases stay until that delete.
  */
@@ -762,66 +765,59 @@ export function buildAlarmAckInput(): SendPayloadInput {
 }
 
 async function cmdAlarmSet(reason: string, opts: { by?: string }): Promise<void> {
+  const by = (opts.by ?? process.env.USER ?? "anonymous").trim() || "anonymous"
   try {
-    const input = buildAlarmSetInput(reason, opts)
-    await cmdSend(input)
+    const input = buildAlarmSetInput(reason, { by })
+    // Unidentified shells still pull: skip launch identity. The daemon accepts
+    // this one key the way cli_alarm_set does (26899 0f215a89). --by is unverified.
+    const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input))) as { error?: string }
+    if (typeof result.error === "string" && result.error.length > 0) {
+      console.error(result.error)
+      process.exit(1)
+    }
     console.log(`ALARM SET — incident ${input.incident} on ${ANDON_OWNER}.`)
     console.log(`  Reason: ${reason}`)
-    if (opts.by !== undefined) console.log(`  By:     ${opts.by}`)
+    console.log(`  By:     ${by} (unverified)`)
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error))
     process.exit(2)
   }
 }
 
-type AndonPendingRow = {
-  request_id?: string
-  sender?: string
-  summary?: string
-  content?: string
-  opened_at?: string
-}
-
 async function cmdAlarmStatus(opts: { json?: boolean }): Promise<void> {
   const key = incidentKey({ emitter: ANDON_EMITTER, subject: ANDON_SUBJECT, condition: ANDON_CONDITION })
-  const res = mcpJsonContent(await callDaemon("tribe.pending", { owner: ANDON_OWNER })) as {
-    error?: string
-    pending?: AndonPendingRow[]
+  const result = (await callDaemon("cli_alarm_get")) as
+    | { active: false }
+    | { active: true; reason: string; by: string; ts: number; age_min: number; request_id?: string }
+  if (opts.json) {
+    await writeJsonStdout(result)
+    return
   }
-  if (typeof res.error === "string" && res.error.length > 0) {
-    console.error(`tribe.alarm-status: pending read failed - ${res.error}`)
-    process.exit(1)
-  }
-  const row = (res.pending ?? []).find((item) => item.request_id === key)
-  if (row === undefined) {
-    if (opts.json) {
-      await writeJsonStdout({ active: false })
-      return
-    }
+  if (!result.active) {
     console.log("No alarm active.")
     return
   }
-  const openedAtRaw = row.opened_at
-  const openedAt = typeof openedAtRaw === "string" ? Date.parse(openedAtRaw) : Number.NaN
-  const ts = Number.isFinite(openedAt) ? openedAt : Date.now()
-  const ageMin = Math.max(0, Math.floor((Date.now() - ts) / 60_000))
-  const reasonText = row.content ?? row.summary ?? ""
-  const reason = reasonText.trim()
-  const by = (row.sender ?? "").trim()
-  const payload = { active: true as const, reason, by, ts, age_min: ageMin, request_id: key }
-  if (opts.json) {
-    await writeJsonStdout(payload)
-    return
-  }
-  console.log(`ALARM ACTIVE (${ageMin}min):`)
-  console.log(`  Reason: ${reason}`)
-  console.log(`  By:     ${by}`)
-  console.log(`  Key:    ${key}`)
+  console.log(`ALARM ACTIVE (${result.age_min}min):`)
+  console.log(`  Reason: ${result.reason}`)
+  console.log(`  By:     ${result.by}`)
+  console.log(`  Key:    ${result.request_id ?? key}`)
 }
 
 async function cmdAlarmAck(): Promise<void> {
-  await cmdSend(buildAlarmAckInput())
-  console.log("ALARM CLEARED — andon incident falling edge sent.")
+  const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(buildAlarmAckInput()))) as {
+    error?: string
+    tracker?: { closed?: number }
+  }
+  if (typeof result.error === "string" && result.error.length > 0) {
+    console.error(result.error)
+    process.exit(1)
+  }
+  const closed = result.tracker?.closed ?? 0
+  if (closed === 0) {
+    console.log("ALARM CLEARED — no alarm was active.")
+    return
+  }
+  console.log(`ALARM CLEARED — tracker.closed=${closed} andon incident falling edge sent.`)
 }
 
 async function cmdRetro(opts: { since?: string; format: string; db?: string }): Promise<void> {

@@ -138,6 +138,7 @@ export {
   incidentConditionSummary,
   type IncidentIdentity,
 } from "./barrels/records.ts"
+export { ANDON_CONDITION, ANDON_EMITTER, ANDON_OWNER, ANDON_SUBJECT } from "./lib/incident.ts"
 
 // Inbox-wait option parsing shared by CLI and MCP/raw daemon call paths.
 export type {
