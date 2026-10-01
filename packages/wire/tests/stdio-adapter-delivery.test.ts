@@ -40,6 +40,8 @@ function spawnFakeDaemon(
     registerError?: { code: number; message: string; data?: unknown }
     registerErrorAfter?: number
     registerErrorUntil?: number
+    registerAck?: Record<string, unknown>
+    joinAck?: Record<string, unknown>
   } = {},
 ): Promise<FakeDaemon> {
   const clients: Socket[] = []
@@ -63,7 +65,19 @@ function spawnFakeDaemon(
             )
             return
           }
-          socket.write(makeResponse(msg.id, { sessionId: "daemon-s1", name: "@agent/test", role: "member", chief: "" }))
+          const delivery = (msg.params as Record<string, unknown>)?.delivery
+          socket.write(
+            makeResponse(msg.id, {
+              sessionId: "daemon-s1",
+              name: "@agent/test",
+              role: "member",
+              chief: "",
+              protocolVersion: 11,
+              transportDelivery: delivery,
+              delivery,
+              ...opts.registerAck,
+            }),
+          )
           return
         }
         if (msg.method === "tribe.members") {
@@ -81,7 +95,9 @@ function spawnFakeDaemon(
                     name: "@agent/test",
                     role: "member",
                     domains: ["silvercode"],
-                    delivery: "push",
+                    transportDelivery: (msg.params as Record<string, unknown>)?.delivery,
+                    delivery: (msg.params as Record<string, unknown>)?.delivery,
+                    ...opts.joinAck,
                   }),
                 },
               ],
@@ -314,11 +330,13 @@ function initInstructions(init: Record<string, unknown>): string {
 }
 
 /** The delivery capability a tools/list response advertises on inbox.wait. */
-function inboxWaitCapability(list: Record<string, unknown>): { delivery?: string } | undefined {
+function inboxWaitCapability(
+  list: Record<string, unknown>,
+): { delivery?: string; acknowledgement?: { acknowledged: boolean; cause?: string } } | undefined {
   const tools = (list.result as { tools?: Array<{ name?: string; _meta?: Record<string, unknown> }> } | undefined)
     ?.tools
   return tools?.find((tool) => tool.name === "inbox.wait")?._meta?.["tribe.deliveryCapability"] as
-    | { delivery?: string }
+    | { delivery?: string; acknowledgement?: { acknowledged: boolean; cause?: string } }
     | undefined
 }
 
@@ -340,9 +358,53 @@ describe("stdio adapter delivery modes", () => {
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
+  // @failure 26564: configured push is not confirmed push; malformed register ACK must leave stdio/tools usable.
+  // @level l2 @consumer native MCP delivery capability and startup confirmation
+  it.each([
+    { transportDelivery: undefined },
+    { transportDelivery: "sometimes" },
+    { delivery: undefined },
+    { delivery: "pull" },
+  ])("keeps tools open and capability pull for invalid register ACK %j", async (registerAck) => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath, { registerAck })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_REQUIRE_JOIN: "0",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+    const init = await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await waitForCondition(() => daemon!.requests.some((r) => r.method === "tribe.members"), "registration banner")
+    const list = await writeJsonAndWaitForLine(child, toolsListPayload(2), (line) => line.id === 2)
+    expect(inboxWaitCapability(list)).toMatchObject({
+      delivery: "pull",
+      acknowledgement: { acknowledged: false, cause: expect.any(String) },
+    })
+    expect(initInstructions(init)).toContain("startup banner")
+    const members = await writeJsonAndWaitForLine(child, callToolPayload(3, "members", {}), (line) => line.id === 3)
+    expect(members).toHaveProperty("result.content")
+    expect(child.exitCode).toBeNull()
+    await waitForCondition(
+      () => stdout.some((line) => JSON.stringify(line).includes("unacknowledged")),
+      "unacknowledged startup cause",
+    )
+    await waitForCondition(
+      () => readFileSync(join(tmpDir, "adapter.log"), "utf8").includes("delivery acknowledgement"),
+      "acknowledgement diagnostic log",
+    )
+  })
+
   it("pull delivery does not advertise or emit Claude-only channel notifications", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
-    daemon = await spawnFakeDaemon(socketPath)
+    daemon = await spawnFakeDaemon(socketPath, { registerAck: { delivery: "push" } })
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
@@ -362,7 +424,12 @@ describe("stdio adapter delivery modes", () => {
     expect(JSON.stringify(init)).toContain("This session is pull-delivery")
 
     writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
-    await writeJsonAndWaitForLine(child, toolsListPayload(2), (line) => line.id === 2)
+    await waitForCondition(
+      () => daemon!.requests.some((request) => request.method === "tribe.members"),
+      "own pull ACK beside push sibling",
+    )
+    const list = await writeJsonAndWaitForLine(child, toolsListPayload(2), (line) => line.id === 2)
+    expect(inboxWaitCapability(list)).toMatchObject({ delivery: "pull", acknowledgement: { acknowledged: true } })
 
     daemon.clients[0]?.write(makeNotification("channel", { from: "chief", type: "request", content: "status?" }))
     await new Promise((resolveTick) => setTimeout(resolveTick, 250))
@@ -1112,7 +1179,8 @@ describe("stdio adapter delivery modes", () => {
 
   it("push delivery registers explicit persona as pull, says so, and suppresses channel notifications until tribe.join", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
-    daemon = await spawnFakeDaemon(socketPath)
+    const joinAck: Record<string, unknown> = { joined: false, error: "join refused" }
+    daemon = await spawnFakeDaemon(socketPath, { joinAck })
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
@@ -1153,14 +1221,23 @@ describe("stdio adapter delivery modes", () => {
 
     daemon.clients[0]?.write(makeNotification("channel", { from: "chief", type: "request", content: "before" }))
     await new Promise((resolveTick) => setTimeout(resolveTick, 250))
-    expect(stdout.some((line) => line.method === "notifications/claude/channel")).toBe(false)
+    expect(
+      stdout.some(
+        (line) => line.method === "notifications/claude/channel" && JSON.stringify(line).includes('"before"'),
+      ),
+    ).toBe(false)
 
     await writeJsonAndWaitForLine(child, callToolPayload(3, "join", { name: "@agent/test" }), (line) => line.id === 3)
+    const refusedList = await writeJsonAndWaitForLine(child, toolsListPayload(4), (line) => line.id === 4)
+    expect(inboxWaitCapability(refusedList)?.delivery).toBe("pull")
+    delete joinAck.joined
+    delete joinAck.error
+    await writeJsonAndWaitForLine(child, callToolPayload(5, "join", { name: "@agent/test" }), (line) => line.id === 5)
     const joinRequest = daemon.requests.find((msg) => msg.method === "tribe.join") as
       | { params?: { delivery?: string } }
       | undefined
     expect(joinRequest?.params?.delivery).toBe("push")
-    const listAfterJoin = await writeJsonAndWaitForLine(child, toolsListPayload(4), (line) => line.id === 4)
+    const listAfterJoin = await writeJsonAndWaitForLine(child, toolsListPayload(6), (line) => line.id === 6)
     expect(inboxWaitCapability(listAfterJoin)?.delivery).toBe(joinRequest?.params?.delivery)
 
     daemon.clients[0]?.write(makeNotification("channel", { from: "chief", type: "request", content: "after" }))
@@ -1168,7 +1245,7 @@ describe("stdio adapter delivery modes", () => {
     expect(JSON.stringify(channel)).toContain("after")
   })
 
-  it("a push persona bound at registration is told push from its first instruction", async () => {
+  it("a push persona starts conservatively and confirms push only after its own registration ACK", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath)
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
@@ -1186,12 +1263,13 @@ describe("stdio adapter delivery modes", () => {
 
     const init = await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
     const instructions = initInstructions(init)
-    expect(instructions).toContain("delivery=push; idleStrategy=channel")
-    expect(instructions).toContain("you do not need to fetch to receive them")
-    expect(instructions).not.toContain("This session is pull-delivery")
+    expect(instructions).toContain("delivery=pull")
+    expect(instructions).toContain("startup banner")
+    expect(instructions).not.toContain("you do not need to fetch to receive them")
     expect(instructions).not.toContain("until this session calls tribe.join")
 
     writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await waitForCondition(() => daemon!.requests.some((msg) => msg.method === "tribe.members"), "registration ACK")
     const list = await writeJsonAndWaitForLine(child, toolsListPayload(2), (line) => line.id === 2)
     await waitForCondition(() => daemon!.requests.some((msg) => msg.method === "register"), "register")
     const register = daemon.requests.find((msg) => msg.method === "register") as
@@ -1289,10 +1367,19 @@ describe("stdio adapter delivery modes", () => {
     await waitForStdout(
       child,
       stdout,
-      () => stdout.filter((line) => line.method === "notifications/claude/channel").length === MAX_REPLAY_EVENTS,
+      () =>
+        stdout.filter(
+          (line) =>
+            line.method === "notifications/claude/channel" &&
+            (line.params as { meta?: { from?: string } })?.meta?.from !== "tribe-startup",
+        ).length === MAX_REPLAY_EVENTS,
     )
 
-    const channels = stdout.filter((line) => line.method === "notifications/claude/channel")
+    const channels = stdout.filter(
+      (line) =>
+        line.method === "notifications/claude/channel" &&
+        (line.params as { meta?: { from?: string } })?.meta?.from !== "tribe-startup",
+    )
     const payloads = channels.map((line) => JSON.stringify(line))
     expect(payloads.some((payload) => payload.includes("old-stale"))).toBe(false)
     expect(payloads.some((payload) => payload.includes("fresh-0"))).toBe(true)
@@ -1351,7 +1438,11 @@ describe("stdio adapter delivery modes", () => {
       stdout.some((line) => JSON.stringify(line).includes("REVISE before continuing ordinary work")),
     )
 
-    const channels = stdout.filter((line) => line.method === "notifications/claude/channel")
+    const channels = stdout.filter(
+      (line) =>
+        line.method === "notifications/claude/channel" &&
+        (line.params as { meta?: { from?: string } })?.meta?.from !== "tribe-startup",
+    )
     const verdict = channels.find((line) => JSON.stringify(line).includes("late-verdict"))
     expect(verdict).toBeDefined()
     expect(channels.indexOf(verdict!)).toBe(0)

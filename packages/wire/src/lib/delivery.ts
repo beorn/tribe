@@ -40,6 +40,7 @@ export type TribeDeliveryCapability = {
   readonly summary: string
   readonly command?: string
   readonly mcpTool?: string
+  readonly acknowledgement?: TribeDeliveryAcknowledgement
 }
 
 export const DEFAULT_TRIBE_DELIVERY_CAPABILITY: TribeDeliveryCapability = Object.freeze({

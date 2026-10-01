@@ -61,6 +61,8 @@ import {
   deliveryCapabilityInstruction,
   resolveDeliveryCapability,
   resolveJoinDelivery,
+  validateDeliveryAcknowledgement,
+  type TribeDeliveryAcknowledgement,
   type TribeDeliveryCapability,
 } from "./lib/delivery.ts"
 import { adapterLaunchIdentity } from "./lib/adapter-launch-identity.ts"
@@ -142,14 +144,37 @@ if (LAUNCH_NAME !== undefined && !isTribeNameShape(LAUNCH_NAME)) {
 const REGISTER_WITH_LAUNCH_NAME =
   LAUNCH_NAME !== undefined && (!REQUIRE_EXPLICIT_JOIN || isExplicitTribePersonaName(LAUNCH_NAME))
 let joined = !REQUIRE_EXPLICIT_JOIN || process.env[TRIBE_PLUGIN_RESUME_JOINED_ENV] === "1"
+let deliveryAcknowledgement: TribeDeliveryAcknowledgement = {
+  acknowledged: false,
+  cause: "awaiting daemon registration",
+}
 /**
- * The delivery this session has now. Registration declares it to the daemon and
- * the model is told the same thing: a push session that has not called
- * tribe.join is pull until it does (G9 P0 row 1, where the model was told
- * "delivery=push ... do not poll" while every push was withheld).
+ * Confirmed delivery follows this transport's ACK; neither configuration nor
+ * a sibling's effective session push mode confirms this adapter's capability.
  */
 function currentDeliveryCapability(): TribeDeliveryCapability {
-  return joined ? DELIVERY_CAPABILITY : UNJOINED_DELIVERY_CAPABILITY
+  const capability =
+    joined && deliveryAcknowledgement.acknowledged
+      ? resolveDeliveryCapability({
+          delivery: deliveryAcknowledgement.transportDelivery,
+          channel: CLAUDE_CHANNEL_ENABLED,
+          pullTransport: PULL_TRANSPORT,
+        })
+      : UNJOINED_DELIVERY_CAPABILITY
+  return { ...capability, acknowledgement: deliveryAcknowledgement }
+}
+
+function deliveryAcknowledgementSummary(): string {
+  return deliveryAcknowledgement.acknowledged
+    ? `acknowledged transportDelivery=${deliveryAcknowledgement.transportDelivery}; session delivery=${deliveryAcknowledgement.delivery}`
+    : `unacknowledged: ${deliveryAcknowledgement.cause}; delivery=pull`
+}
+
+function acceptDeliveryAcknowledgement(reply: unknown, requested: "push" | "pull"): void {
+  deliveryAcknowledgement = validateDeliveryAcknowledgement(reply, requested)
+  if (!deliveryAcknowledgement.acknowledged) {
+    log.warn?.(`tribe delivery acknowledgement ${deliveryAcknowledgementSummary()}`)
+  }
 }
 // 20703 — managed spawns set TRIBE_TAKEOVER=1 so an explicit-persona
 // respawn can supersede a stale live holder once. The capability is consumed
@@ -266,7 +291,7 @@ let daemonDegradedReason: string | null = null
  * message_id) — not user-visible content — so it's left as-is.
  */
 function sendChannel(content: string, meta: Record<string, string | undefined>): void {
-  if (!joined) return
+  if (meta.from !== "tribe-startup" && (!joined || !currentDeliveryCapability().channel)) return
   if (!CLAUDE_CHANNEL_ENABLED) return
   if (!mcp) return // Not yet initialized
   const safeContent = defangModelInput(content)
@@ -443,7 +468,7 @@ function registerParamsForConnection(): typeof baseRegisterParams & {
   return {
     ...baseRegisterParams,
     ...protocolVersionAdvertisement(selectedProtocolVersion),
-    delivery: currentDeliveryCapability().delivery,
+    delivery: joined ? DELIVERY_CAPABILITY.delivery : UNJOINED_DELIVERY_CAPABILITY.delivery,
     ...(TAKEOVER && !hasRegistered ? { takeover: true as const } : {}),
   }
 }
@@ -682,10 +707,14 @@ function startDaemonConnection(): Promise<DaemonClient> {
         role: string
         chief: string
         protocolVersion?: number
+        transportDelivery?: unknown
+        delivery?: unknown
         daemon?: { pid?: number }
       }
       try {
-        reg = (await client.call("register", registerParamsForConnection())) as typeof reg
+        const registration = registerParamsForConnection()
+        reg = (await client.call("register", registration)) as typeof reg
+        acceptDeliveryAcknowledgement(reg, registration.delivery)
       } catch (err) {
         const reason = errorMessage(err)
         if (isIdentityTokenMissingRefusal(err)) failManagedPersonaRegistration(err)
@@ -771,7 +800,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
             .join(", ") || "(solo)"
 
         const shortSocket = SOCKET_PATH.replace(process.env.HOME ?? "", "~")
-        const banner = `**tribe** ${myName} (${myRole}) · chief: ${chief} · ${DELIVERY} · peers: ${peers} · ${shortSocket}`
+        const banner = `**tribe** ${myName} (${myRole}) · chief: ${chief} · ${deliveryAcknowledgementSummary()} · peers: ${peers} · ${shortSocket}`
         sendChannel(banner, { from: "tribe-startup", type: "system" })
       } catch {
         // Non-fatal — banner is diagnostic, don't block startup
@@ -779,6 +808,7 @@ function startDaemonConnection(): Promise<DaemonClient> {
       }
     },
     onDisconnect() {
+      deliveryAcknowledgement = { acknowledged: false, cause: "daemon connection closed; reconnecting" }
       reconnectWatchdog.markReconnecting()
       if (REGISTER_WITH_LAUNCH_NAME) {
         setRequiredMcpTransportHealth("advertised", "daemon connection closed; reconnecting")
@@ -868,15 +898,12 @@ armDegradeNotice(daemonReady)
 // ---------------------------------------------------------------------------
 
 const joinInstruction = `When you call tribe.join, omit the role parameter — the daemon registers every session as a plain "member"; it does NOT assign "chief" by connect order. "chief" is a bead-lease hat (claimed via /up / the bead lease system), not a daemon-assigned role. No need to call tribe.members or tribe.fetch afterward.`
-// Instructions are fixed at initialize. A push session that starts unjoined is
-// pull until tribe.join, so it is told pull and what the join switches it to;
-// tools/list follows the live state instead.
+// Instructions are fixed at initialize and remain conservative. The existing
+// startup banner and tools/list report subsequent acknowledged delivery.
 const initialDeliveryCapability = currentDeliveryCapability()
-const pullUntilJoin = initialDeliveryCapability.delivery !== DELIVERY_CAPABILITY.delivery
-const channelEnvelopeIntro = `${pullUntilJoin ? "Once this session has called tribe.join, messages" : "Messages"} from other Claude Code sessions arrive as <channel source="tribe" from="..." type="..." bead="...">.`
-const deliveryInstruction = pullUntilJoin
-  ? `${deliveryCapabilityInstruction(initialDeliveryCapability)} Nothing arrives as a channel notification until this session calls tribe.join, which switches it to ${DELIVERY_CAPABILITY.summary}.`
-  : deliveryCapabilityInstruction(DELIVERY_CAPABILITY)
+const channelEnvelopeIntro =
+  'After the startup banner confirms acknowledged transportDelivery=push, messages from other Claude Code sessions can arrive as <channel source="tribe" from="..." type="..." bead="...">.'
+const deliveryInstruction = `${deliveryCapabilityInstruction(initialDeliveryCapability)} Read your turn-start inbox until the startup banner confirms your acknowledged transportDelivery. ${REQUIRE_EXPLICIT_JOIN ? "Push remains unavailable until this session calls tribe.join and receives its acknowledgement. " : ""}An unacknowledged banner names the cause; tools/list reports the current confirmed delivery capability.`
 const attentionProjectionInstruction =
   "- Default fetch exposes `attention.actionable_unread` (request/query/verdict/assign, direct responses, and direct status/notify from another named seat whose ref names an open request ball you own or sent) and up to 10 `attention.pending_balls`, prioritizing peer requests over watcher incidents, ahead of ambient events; `attention.pending_balls_summary` reports the full total/oldest age and any omitted request/incident counts, while `tribe.pending` returns the full pile. Responses and those status/notify rows remain quiet for default inbox waits. These are facts projected from the existing mailbox and ball tracker, not another queue."
 
@@ -1110,8 +1137,25 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     const d = daemon ?? (await daemonReady)
     const result = await callTribeTool(d, name, payload)
     // Update local name/role after join/rename
-    if (name === "join") joined = true
-    if (name === "join" || name === "rename") {
+    if (name === "join") {
+      const data = parseToolText<Record<string, unknown>>(result)
+      if (data?.joined === true && (result as { isError?: boolean }).isError !== true) {
+        acceptDeliveryAcknowledgement(data, payload.delivery as "push" | "pull")
+        joined = deliveryAcknowledgement.acknowledged
+      } else {
+        joined = false
+        deliveryAcknowledgement = {
+          acknowledged: false,
+          cause: `join refused: ${String(data?.error ?? "no joined acknowledgement")}`,
+        }
+        log.warn?.(`tribe delivery acknowledgement ${deliveryAcknowledgementSummary()}`)
+      }
+      sendChannel(`**tribe** ${myName} · ${deliveryAcknowledgementSummary()}`, {
+        from: "tribe-startup",
+        type: "system",
+      })
+    }
+    if ((name === "join" && joined) || name === "rename") {
       const r = result as { content: Array<{ type: string; text: string }> }
       try {
         const data = JSON.parse(r.content[0]?.text ?? "{}") as Record<string, string>
