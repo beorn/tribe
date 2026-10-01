@@ -137,8 +137,6 @@ function globMatch(pattern: string, value: string): boolean {
 // ---------------------------------------------------------------------------
 
 export interface Broadcast {
-  /** Direct JSON-RPC notification to every connected client (or all-but-one). */
-  notify(method: string, params?: Record<string, unknown>, exclude?: string): void
   /** Push a single event to one client (helper for replay/bootstrap). */
   pushToClient(connId: string, method: string, params?: Record<string, unknown>): void
   /** Persist `sessions.last_delivered_{ts,seq}` for a recipient. Idempotent. */
@@ -179,18 +177,6 @@ export function withBroadcast<T extends BaseTribe & WithDatabase & WithDaemonCon
         client.socket.writable &&
         (client.role === "watch" || registry.isPushTransport(connId)),
       )
-    }
-
-    function notify(method: string, params?: Record<string, unknown>, exclude?: string): void {
-      const msg = makeNotification(method, params)
-      for (const [connId, client] of clients) {
-        if (connId === exclude) continue
-        try {
-          client.socket.write(msg)
-        } catch {
-          /* dead client — cleaned up on disconnect */
-        }
-      }
     }
 
     function pushToClient(connId: string, method: string, params?: Record<string, unknown>): void {
@@ -346,7 +332,6 @@ export function withBroadcast<T extends BaseTribe & WithDatabase & WithDaemonCon
     log.info?.("broadcast pipeline ready (coalescer + scrubber + bounded health admission)")
 
     const broadcast: Broadcast = {
-      notify,
       pushToClient,
       persistDeliveredCursor,
       toConnected,
