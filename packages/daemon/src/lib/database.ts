@@ -122,6 +122,7 @@ export function openDatabase(path: string): Database {
 		session_id TEXT,
 		attention_required INTEGER NOT NULL DEFAULT 0,
 		wakes_owner INTEGER NOT NULL DEFAULT 0,
+		is_incident INTEGER NOT NULL DEFAULT 0,
 		sender_authority TEXT
 	)`)
 
@@ -147,6 +148,7 @@ export function openDatabase(path: string): Database {
 		session_id  TEXT,
 		attention_required INTEGER NOT NULL DEFAULT 0,
 		wakes_owner INTEGER NOT NULL DEFAULT 0,
+		is_incident INTEGER NOT NULL DEFAULT 0,
 		sender_authority TEXT
 	)`)
 
@@ -1352,6 +1354,27 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 38,
+    name: "message-incident-identity",
+    /** Incident identity is fixed at insertion, including repeats and clears.
+     * Only legacy waking edges establish that identity; other old rows remain unknown. */
+    up(db) {
+      for (const table of ["messages", "messages_archive"]) {
+        const exists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='${table}'`).get() as {
+          name: string
+        } | null
+        if (!exists) continue
+        const columns = new Set(
+          (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name),
+        )
+        if (!columns.has("is_incident")) {
+          db.run(`ALTER TABLE ${table} ADD COLUMN is_incident INTEGER NOT NULL DEFAULT 0`)
+        }
+        db.run(`UPDATE ${table} SET is_incident = 1 WHERE wakes_owner = 1`)
+      }
+    },
+  },
 ]
 
 /** The schema terminus `openDatabase` upgrades to — derived from the same
@@ -1386,25 +1409,52 @@ export const CORRELATED_REPLY_TYPES_SQL = CORRELATED_REPLY_TYPES.map((type) => `
  * plus rows atomically classified at insertion (currently direct responses). */
 export const ATTENTION_PREDICATE_SQL = `(type IN (${ACTIONABLE_TYPES_SQL}) OR attention_required = 1)`
 
-/** What wakes an idle owner's inbox-wait: an actionable type, or an incident edge (its open, or an upsert whose
- * summary changed), stamped on the row at insert (25662, @cto 66284cb6). The live insert path wakes on the same
- * bit, so the two halves of the wake cannot disagree. An edge is not attention: it never enters actionable_unread. */
+/** What wakes an idle owner's inbox-wait: an incident edge, or an ordinary actionable type.
+ * getLatestInboxWaitMessage also applies edge OR noOpenIncidentAttentionPredicateSql, so this type-or-edge
+ * predicate together with that exclusion means edge OR (actionable AND NOT incident), matching live insertion.
+ * An edge is not attention: it never enters actionable_unread. */
 export function wakePredicateSql(alias: string): string {
   return `(${alias}.type IN (${ACTIONABLE_TYPES_SQL}) OR ${alias}.wakes_owner = 1)`
 }
 
-/** An open incident is emitter-owned state, never recipient-actionable work.
- * Key this exclusion from the tracker classification rather than the message
- * type: the public send surface permits an incident to carry any message type. */
+/** Incident observations are emitter-owned state, never recipient-actionable work.
+ * Identity survives subsequent observations and clear. Keep the tracker exclusion for legacy rows whose
+ * identity was not recorded; the public send surface permits an incident to carry any message type. */
 export function noOpenIncidentAttentionPredicateSql(alias: string, owner = `${alias}.recipient`): string {
-  return `NOT EXISTS (
+  return `(${alias}.is_incident = 0 AND NOT EXISTS (
     SELECT 1
     FROM pending_request AS incident_pending
     WHERE incident_pending.message_id = ${alias}.id
       AND incident_pending.recipient = ${owner}
       AND incident_pending.request_kind = 'incident'
-  )`
+  ))`
 }
+
+/** Every durable message column except rowid, which archive writers map to seq.
+ * Both archive owners use this list on both sides of their copy. */
+export const MESSAGE_ARCHIVE_COLUMNS = [
+  "id",
+  "type",
+  "sender",
+  "recipient",
+  "kind",
+  "content",
+  "bead_id",
+  "ref",
+  "ts",
+  "delivery",
+  "topic",
+  "room_id",
+  "request",
+  "reply",
+  "correlated_reply_requester",
+  "summary",
+  "session_id",
+  "attention_required",
+  "wakes_owner",
+  "is_incident",
+  "sender_authority",
+].join(", ")
 
 type TakingStatusSubjectSql = {
   readonly owner: string
@@ -1644,7 +1694,7 @@ export function createStatements(db: Database) {
     insertMessage: db.prepare(`
 		INSERT OR IGNORE INTO messages (id, type, sender, recipient, kind, content, bead_id, ref, ts,
 			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id, sender_authority,
-			wakes_owner, attention_required)
+			wakes_owner, is_incident, attention_required)
 		VALUES ($id, $type, $sender, $recipient, $kind, $content, $bead_id, $ref, $ts,
 			$delivery, $topic, $room_id, $request, $reply, $correlated_reply_requester, $summary, $session_id,
 			-- 25074 3d-1a: the sending session's authority at insert (sessionAuthority); NULL for a daemon-originated row.
@@ -1652,6 +1702,7 @@ export function createStatements(db: Database) {
 			-- Optional like the other classification params: an omitted $wakes_owner binds NULL, and INSERT OR IGNORE
 			-- would silently drop the row on the NOT NULL column instead of failing.
 			COALESCE($wakes_owner, 0),
+			COALESCE($is_incident, 0),
 			CASE
 				WHEN $attention_required = 1 THEN 1
 				WHEN $kind = 'direct' AND $sender != $recipient AND $type = 'response' THEN 1
@@ -2404,22 +2455,15 @@ export function createStatements(db: Database) {
     cleanupDedup: db.prepare("DELETE FROM dedup WHERE ts < $cutoff AND key NOT LIKE 'launch-takeover:%'"),
 
     /**
-     * Explicit column lists on BOTH sides, so a column added to `messages`
-     * without being added here is dropped on archival with no error — which is
-     * exactly what happened to `attention_required` between v24 and v26. When
-     * you add a column to `messages`, add it in three places: the CREATE, this
-     * SELECT, and this INSERT.
+     * Both archive owners carry the same complete message column list on both sides.
+     * Add new message columns to MESSAGE_ARCHIVE_COLUMNS as well as the schema.
      */
     archiveExpiredMessages: db.prepare(`
 		INSERT OR IGNORE INTO messages_archive (
-			seq, id, type, sender, recipient, kind, content, bead_id, ref, ts,
-			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id,
-			attention_required, wakes_owner, sender_authority, archived_at
+			seq, ${MESSAGE_ARCHIVE_COLUMNS}, archived_at
 		)
 		SELECT
-			rowid, id, type, sender, recipient, kind, content, bead_id, ref, ts,
-			delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id,
-			attention_required, wakes_owner, sender_authority, $archived_at
+			rowid, ${MESSAGE_ARCHIVE_COLUMNS}, $archived_at
 		FROM messages AS m
 		WHERE m.ts < $cutoff
 			AND NOT (${protectedUnreadAttentionPredicateSql("m")})
@@ -2503,6 +2547,8 @@ export function createStatements(db: Database) {
 			AND (m.recipient = $name OR m.recipient = '*')
 			AND m.kind != 'event'
 			AND m.sender != $name
+			-- Quiet incident observations remain journal/tracker state in every subscription mode.
+			AND NOT (m.is_incident = 1 AND m.wakes_owner = 0)
 			AND (
 				$filter_mode = 'ambient'
 				-- Focus diets FLEET traffic, never your own mail. A row addressed

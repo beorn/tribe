@@ -78,9 +78,21 @@ type SessionFilter = {
 }
 
 export function shouldDeliver(
-  info: { kind: MessageKind; type: string; replyHint: ReplyHint; topic: string | null; settlesOwnRequest: boolean },
+  info: {
+    kind: MessageKind
+    type: string
+    replyHint: ReplyHint
+    topic: string | null
+    settlesOwnRequest: boolean
+    isIncident?: boolean
+    wakesOwner?: boolean
+  },
   filter: SessionFilter | undefined,
 ): boolean {
+  // Quiet observations are journal/tracker state, even without a session filter.
+  if (info.isIncident === true && info.wakesOwner !== true) return false
+  // Incident edges interrupt their owner regardless of the ordinary notification diet.
+  if (info.wakesOwner === true) return true
   if (!filter) return true // No session row yet — default-allow
   const mode = filter.filter_mode || "normal"
   if (mode === "ambient") return true
@@ -282,7 +294,15 @@ export function withBroadcast<T extends BaseTribe & WithDatabase & WithDaemonCon
           const settlesOwnRequest = settlesRequestOpenedBy(info, client.name)
           if (
             !shouldDeliver(
-              { kind: info.kind, type: info.type, replyHint, topic: info.topic, settlesOwnRequest },
+              {
+                kind: info.kind,
+                type: info.type,
+                replyHint,
+                topic: info.topic,
+                settlesOwnRequest,
+                isIncident: info.isIncident,
+                wakesOwner: info.wakesOwner,
+              },
               sessionFilter,
             )
           ) {

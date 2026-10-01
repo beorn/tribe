@@ -80,7 +80,7 @@
 
 import type { Database } from "bun:sqlite"
 import { createLogger } from "loggily"
-import type { TribeStatements } from "./database.ts"
+import { MESSAGE_ARCHIVE_COLUMNS, type TribeStatements } from "./database.ts"
 import { CURSOR_WARNING_MS } from "./health-cadence.ts"
 
 const log = createLogger("tribe:retention")
@@ -248,14 +248,10 @@ function archiveMoveBatch(db: Database, ids: readonly string[], archivedAt: numb
   return db.transaction(() => {
     db.prepare(
       `INSERT OR IGNORE INTO messages_archive (
-				seq, id, type, sender, recipient, kind, content, bead_id, ref, ts,
-				delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id,
-				attention_required, wakes_owner, archived_at
+				seq, ${MESSAGE_ARCHIVE_COLUMNS}, archived_at
 			)
 			SELECT
-				rowid, id, type, sender, recipient, kind, content, bead_id, ref, ts,
-				delivery, topic, room_id, request, reply, correlated_reply_requester, summary, session_id,
-				attention_required, wakes_owner, ?
+				rowid, ${MESSAGE_ARCHIVE_COLUMNS}, ?
 			FROM messages WHERE id IN (${placeholders})`,
     ).run(archivedAt, ...ids)
     const res = db.prepare(`DELETE FROM messages WHERE id IN (${placeholders})`).run(...ids)

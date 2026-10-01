@@ -182,7 +182,12 @@ export function createInboxWaitManager(
         info.kind === "broadcast" && info.pendingOwners?.includes(waiter.session) === true
       if (!directForWaiter && !trackedBroadcastForWaiter) continue
       if (info.rowid <= waiter.baselineSeq) continue
-      if (waiter.wakeOnCorrelatedReply && settlesRequestOpenedBy(info, waiter.session)) {
+      // SQL excludes quiet incidents even from opt-in correlated replies; match that durable qualification.
+      if (
+        (info.isIncident !== true || info.wakesOwner === true) &&
+        waiter.wakeOnCorrelatedReply &&
+        settlesRequestOpenedBy(info, waiter.session)
+      ) {
         settle(waiter, { timedOut: false, aborted: false }, info.rowid)
         continue
       }
@@ -193,7 +198,10 @@ export function createInboxWaitManager(
       // (@dev/3 sat in inbox-wait while type=assign had already landed).
       // Self-sends are excluded (same filter as getUnreadDms: sender != name).
       // 25662 P3 3: an incident edge wakes the same way (wakePredicateSql is the SQL half of this test).
-      if ((ACTIONABLE_TYPES.has(info.type) || info.wakesOwner === true) && info.sender !== waiter.session) {
+      if (
+        (info.wakesOwner === true || (ACTIONABLE_TYPES.has(info.type) && info.isIncident !== true)) &&
+        info.sender !== waiter.session
+      ) {
         settle(waiter, { timedOut: false, aborted: false }, info.rowid)
       }
     }

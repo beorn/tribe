@@ -159,12 +159,6 @@ export type BallTracker = {
    * class policy; deadline passage never settles ownership. */
   expiresInMs?: number
   /**
-   * 24588 row 4: skip opening a pending row even when this send would
-   * otherwise auto-track. The message still delivers. Used when sender and
-   * recipient are both declared expected:false so a ball cannot accrue.
-   */
-  suppressOpen?: boolean
-  /**
    * Ambient incident identity — habwire stage 2(d), "one ball per incident".
    *
    * A watcher that fires on every tick would otherwise mint one obligation per
@@ -192,14 +186,12 @@ function incidentTransitionForSend(
     kind: MessageKind
     requestId: string | null
     active: boolean
-    suppressOpen: boolean
     recipient: string
     summary: string | null
   },
 ): IncidentTransition | undefined {
   if (input.kind !== "direct" || input.requestId === null) return undefined
   if (!input.active) return "cleared"
-  if (input.suppressOpen) return undefined
   const standing = ctx.stmts.selectIncidentCondition.get({
     $request_id: input.requestId,
     $recipient: input.recipient,
@@ -568,7 +560,6 @@ export function sendMessage(
       kind: resolvedKind,
       requestId: incidentRequestId,
       active: incidentActive,
-      suppressOpen: ballTracker.suppressOpen === true,
       recipient: ballTracker.owner ?? recipient,
       summary: classification.summary ?? null,
     })
@@ -595,6 +586,7 @@ export function sendMessage(
       $summary: classification.summary ?? null,
       $attention_required: classification.attentionRequired === true ? 1 : 0,
       $wakes_owner: wakesOwner ? 1 : 0,
+      $is_incident: incident === undefined ? 0 : 1,
       $between_personas: isExplicitTribePersonaName(sender) && isExplicitTribePersonaName(recipient) ? 1 : 0,
       $sender_authority: senderAuthorityOf(ctx, sender),
     })
@@ -617,7 +609,7 @@ export function sendMessage(
     // snapshots remain handleSend's responsibility; direct rows are complete
     // before this transaction returns.
     if (resolvedKind === "direct") {
-      if (requestId && ballTracker.suppressOpen !== true) {
+      if (requestId) {
         const openRequest = incidentRequestId === null ? ctx.stmts.openPendingRequest : ctx.stmts.openIncidentRequest
         openRequest.run({
           $request_id: requestId,
@@ -728,6 +720,7 @@ export function sendMessage(
     ...(resolvedKind === "broadcast" && requestId !== null ? { pendingOwners: openedOwners } : {}),
     correlatedReply,
     wakesOwner: wakesOwner === true,
+    isIncident: incident !== undefined,
   })
   return {
     id,

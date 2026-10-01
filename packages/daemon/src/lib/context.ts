@@ -44,6 +44,8 @@ export type MessageInsertedInfo = {
   /** 25662 P3 3 — this row is an incident edge (its open, or a changed condition) and wakes its owner's inbox-wait
    *  like an actionable type. Mirrors the row's durable `wakes_owner` column. */
   wakesOwner?: boolean
+  /** Immutable incident identity, including repeat observations and clear; mirrors durable is_incident. */
+  isIncident?: boolean
   /** Mailboxes that received an open pending row for this tracked broadcast.
    * Absent for direct, untracked broadcast, and journal-only messages. */
   pendingOwners?: readonly string[]
