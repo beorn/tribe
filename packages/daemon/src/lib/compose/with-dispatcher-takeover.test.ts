@@ -90,6 +90,7 @@ type JsonRpcResponse<T> = {
 }
 
 type RegisterParams = {
+  delivery?: "push" | "pull"
   name?: string
   pid: number
   project: string
@@ -797,7 +798,7 @@ function createDispatcherHarness(
           role: "member",
           projectName: "km-wt9",
           projectId: "test-project",
-          delivery: "pull",
+          delivery: params.delivery ?? "pull",
           protocolVersion: TRIBE_PROTOCOL_VERSION,
         },
       }
@@ -1994,6 +1995,50 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
       verified_id_token: fixtureToken("token-g3"),
     })
   })
+
+  // @failure A later pull bootstrap demotes push, or a push adapter fans in without updating delivery.
+  // @level l2
+  // @consumer Fresh managed Claude launches with both bootstrap and adapter (26564).
+  it.each([
+    ["pull", "push"],
+    ["push", "pull"],
+  ] as const)(
+    "keeps a mixed verified launch push in attachment order %s then %s",
+    async (firstDelivery, secondDelivery) => {
+      const harness = createDispatcherHarness({ identityVerifier })
+      cleanup = harness.dispose
+      harness.addPendingClient("conn-first-delivery")
+      const first = parseResult<RegisterResult>(
+        await harness.register("conn-first-delivery", {
+          name: "@dev/7",
+          pid: 5101,
+          project: "/tmp/p",
+          takeover: true,
+          launchParentPid: 5100,
+          idToken: "token-g3",
+          delivery: firstDelivery,
+        }),
+      )
+      harness.addPendingClient("conn-second-delivery")
+      const second = parseResult<RegisterResult>(
+        await harness.register("conn-second-delivery", {
+          name: "@dev/7",
+          pid: 5102,
+          project: "/tmp/p",
+          takeover: true,
+          launchParentPid: 5100,
+          idToken: "token-g3",
+          delivery: secondDelivery,
+        }),
+      )
+      expect(second.sessionId).toBe(first.sessionId)
+      expect(harness.db.prepare("SELECT delivery FROM sessions WHERE id = ?").get(first.sessionId)).toEqual({
+        delivery: "push",
+      })
+      expect(first).toMatchObject({ transportDelivery: firstDelivery, delivery: firstDelivery })
+      expect(second).toMatchObject({ transportDelivery: secondDelivery, delivery: "push" })
+    },
+  )
 
   it("the bootstrap and the adapter of one generation fan into ONE session keyed sid@gen, and the filter applies", async () => {
     const harness = createDispatcherHarness({ identityVerifier })
