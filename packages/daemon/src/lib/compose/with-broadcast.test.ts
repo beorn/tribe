@@ -238,7 +238,7 @@ describe("G9 self-inbox P0: a focus seat is woken by the reply that settles its 
         } as never)
       }
     }
-    withBroadcast()({
+    const subject = withBroadcast()({
       scope,
       stmts: {
         getSessionDeliveryById: { get: () => ({ delivery: "push" }) },
@@ -268,6 +268,8 @@ describe("G9 self-inbox P0: a focus seat is woken by the reply that settles its 
       writes,
       pullWrites,
       delivered,
+      registry,
+      broadcast: subject.broadcast,
       reply,
       tap: daemonCtx.onMessageInserted!,
       dispose: () => deferred.reverse().forEach((fn) => fn()),
@@ -282,6 +284,37 @@ describe("G9 self-inbox P0: a focus seat is woken by the reply that settles its 
     try {
       fanout.tap(fanout.reply({ requestId: "r-own", requester: "@seat" }))
       await vi.waitFor(() => expect(fanout.writes).toHaveLength(1))
+      expect(fanout.pullWrites).toEqual([])
+      expect(fanout.delivered).toHaveBeenCalledTimes(1)
+    } finally {
+      fanout.dispose()
+    }
+  })
+
+  // @failure 26564: queued writes must recheck a demoted transport while preserving the explicit watch exception.
+  // @level l2 @consumer queued ordinary fanout and delivery cursor credit
+  test("rechecks own delivery at queued flush and keeps a live pull-declared watch eligible", async () => {
+    vi.useFakeTimers()
+    const fanout = focusSeatFanout(true)
+    const watchWrites: string[] = []
+    try {
+      const seat = fanout.registry.clients.get("conn-seat")!
+      fanout.registry.attachTransport("watch", {
+        ...seat,
+        id: "watch",
+        role: "watch",
+        delivery: "pull",
+        socket: { destroyed: false, writable: true, write: (m: string) => watchWrites.push(m) },
+      } as never)
+      await fanout.broadcast.toConnected({ ...fanout.reply(null), kind: "broadcast", type: "request", recipient: "*" })
+      expect(fanout.writes).toEqual([])
+      expect(watchWrites).toEqual([])
+      fanout.registry.setTransportDelivery("conn-seat", "pull")
+      fanout.broadcast.flushConnection("conn-seat")
+      expect(fanout.writes).toEqual([])
+      expect(fanout.delivered).not.toHaveBeenCalled()
+      fanout.broadcast.flushConnection("watch")
+      expect(watchWrites).toHaveLength(1)
       expect(fanout.pullWrites).toEqual([])
       expect(fanout.delivered).toHaveBeenCalledTimes(1)
     } finally {
