@@ -66,7 +66,7 @@ function context(sessionId: string, name: string, onMessageInserted?: TribeConte
   })
 }
 
-function rig() {
+function rig(type = "health:bridge-lost") {
   const reader = context("attention-reader", "@attention-reader")
   const status = (session: string): InboxStatus => ({
     session,
@@ -89,7 +89,7 @@ function rig() {
       watcher,
       OWNER,
       body,
-      "health:bridge-lost",
+      type,
       undefined,
       undefined,
       "direct",
@@ -122,13 +122,14 @@ describe("an incident wakes its idle owner", () => {
     expect(woken.attention.actionable_unread).toEqual([])
   })
 
-  test("a repeat whose body carries a new observation does not wake; a changed summary does", async () => {
-    const { manager, page } = rig()
+  test.each(["health:bridge-lost", "request", "notify"])("%s incident repeat stays quiet; a changed summary wakes", async (type) => {
+    const { manager, page } = rig(type)
     page("@dev/3's tribe bridge is lost", "lost 3 min")
     const baseline = latestWakeSeq(OWNER, false)
 
     const repeat = manager.wait(OWNER, "conn-repeat", QUIET_MS, { afterSeq: baseline })
     page("@dev/3's tribe bridge is lost", "lost 4 min")
+    expect(latestWakeSeq(OWNER, false)).toBe(baseline)
     await expect(repeat).resolves.toMatchObject({ status: "timeout" })
 
     const changed = manager.wait(OWNER, "conn-changed", 5_000, { afterSeq: latestWakeSeq(OWNER, false) })
@@ -136,8 +137,8 @@ describe("an incident wakes its idle owner", () => {
     await expect(changed).resolves.toMatchObject({ status: "woken" })
   })
 
-  test("the clear settles the ball and never wakes", async () => {
-    const { manager, page } = rig()
+  test.each(["health:bridge-lost", "request", "notify"])("%s incident clear settles the ball and never wakes", async (type) => {
+    const { manager, page } = rig(type)
     page("@dev/3's tribe bridge is lost", "lost 3 min")
     const cleared = manager.wait(OWNER, "conn-clear", QUIET_MS, { afterSeq: latestWakeSeq(OWNER, false) })
     page("@dev/3's tribe bridge is lost", "cleared: @dev/3's transport is live again", false)
