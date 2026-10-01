@@ -103,9 +103,13 @@ describe("tribe-wire's consumer subpaths", () => {
     const daemonEnvironment = closureOf(entry("./lib/daemon-environment"))
     for (const graph of [root, client, records, sender, daemonEnvironment]) expect(graph.cycles).toEqual([])
     expect(root.files.size).toBeGreaterThan(sender.files.size)
-    expect(client.files.size).toBeLessThanOrEqual(16)
+    // 26564 adds the shared own-transport ACK validator to launch certification.
+    // Its delivery leaf is the sole additional file; the broad graph stays excluded.
+    expect(client.files.has(realpathSync(resolve(PACKAGE, "src/lib/delivery.ts")))).toBe(true)
+    expect(client.files.size).toBeLessThanOrEqual(17)
     expect(records.files.size).toBeLessThanOrEqual(10)
-    expect(sender.files.size).toBeLessThanOrEqual(18)
+    expect(sender.files.has(realpathSync(resolve(PACKAGE, "src/lib/delivery.ts")))).toBe(true)
+    expect(sender.files.size).toBeLessThanOrEqual(19)
     expect(records.files.has(realpathSync(resolve(PACKAGE, "src/client.ts")))).toBe(false)
     for (const exclusive of ["src/service-send.ts", "src/launch-seat.ts", "src/cli/mcp-json-content.ts"]) {
       expect(client.files.has(realpathSync(resolve(PACKAGE, exclusive))), exclusive).toBe(false)

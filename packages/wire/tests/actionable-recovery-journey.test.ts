@@ -260,7 +260,13 @@ function callToolPayload(id: number, name: string, args: Record<string, unknown>
 }
 
 function channelNotifications(lines: Record<string, unknown>[]): Record<string, unknown>[] {
-  return lines.filter((line) => line.method === "notifications/claude/channel")
+  // Startup ACK confirmations are control messages, not recovered mailbox rows.
+  // Keep every other channel frame: ambient replay must still fail the journeys.
+  return lines.filter(
+    (line) =>
+      line.method === "notifications/claude/channel" &&
+      (line.params as { meta?: { from?: string } } | undefined)?.meta?.from !== "tribe-startup",
+  )
 }
 
 function toolResult(lines: Record<string, unknown>[], id: number): unknown {

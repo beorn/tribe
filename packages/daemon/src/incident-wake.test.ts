@@ -208,7 +208,12 @@ describe("an incident wakes its idle owner", () => {
     const { manager, page } = rig()
     const ownerCtx = context("sess-owner", "boot-sess-owner", manager.onMessageInserted)
     active.add("sess-owner")
-    handleToolCall(ownerCtx, "tribe.join", { name: OWNER, delivery: "pull" }, regOpts)
+    // This direct handler fixture owns identity only. An explicit delivery
+    // declaration requires the real dispatcher's transport registry.
+    const joined = handleToolCall(ownerCtx, "tribe.join", { name: OWNER }, regOpts) as {
+      content: Array<{ text: string }>
+    }
+    expect(JSON.parse(joined.content[0]!.text)).toMatchObject({ joined: true, name: OWNER })
     registerSession(ownerCtx, undefined, regOpts.hasActiveTransport, null, 0, "pull", undefined, null, null, null, null)
     // A readable mailbox: the sid its verified identity token recorded on the row (25074 3d-3).
     db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = 1 WHERE id = ?").run(
