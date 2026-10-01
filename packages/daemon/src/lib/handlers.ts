@@ -268,6 +268,11 @@ export type HandlerOpts = {
   isReconnectGraceProtected?: (sessionId: string, nowMs: number) => boolean
   /** Realtime snapshot of connected sessions (daemon clients Map). */
   getActiveSessionInfo: () => ActiveSessionInfo[]
+  /** The registered caller's declaration owner; absent in identity-only direct handler calls. */
+  declareTransportDelivery?: (delivery?: "push" | "pull") => {
+    transportDelivery: "push" | "pull"
+    delivery: "push" | "pull"
+  }
   /** 24767: the latest transport refused for presenting this session's
    * authority under another seat's identity, until a real transport connects. */
   getForeignIdentityTransport?: (sessionId: string) => ForeignIdentityTransport | undefined
@@ -3163,6 +3168,12 @@ export function resolveRuntimeJoinIdentity(
 }
 
 function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResult {
+  if (a.delivery !== undefined && a.delivery !== "push" && a.delivery !== "pull") {
+    return jsonResult({ error: "tribe.join delivery must be push or pull" })
+  }
+  if (a.delivery !== undefined && !opts.declareTransportDelivery) {
+    return jsonResult({ error: "tribe.join delivery needs a registered transport; invoke through the dispatcher" })
+  }
   const { joinName, joinRole, identityToken } = resolveRuntimeJoinIdentity(ctx, a, opts.hasActiveTransport)
   const joinDomains = (a.domains as string[]) ?? ctx.domains
   // @km/tribe/19975 — a join/refresh is authoritative for the session's
@@ -3195,7 +3206,7 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       (sessionId) => opts.hasActiveTransport(sessionId),
       identityToken,
       selfInfo?.pid ?? 0,
-      requestedDelivery,
+      requestedDelivery ?? "pull",
       selfInfo?.cwd ?? process.cwd(),
       joinAccount,
       joinProvider,
@@ -3267,22 +3278,12 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
   // means the daemon fans events out on the MCP channel; `pull` queues them
   // and the agent drains via tribe.fetch. MCP-only clients (codex, gemini,
   // etc.) without a notification reader should join with `pull`.
-  const deliveryRaw = a.delivery
-  if (deliveryRaw === "push" || deliveryRaw === "pull") {
-    ctx.stmts.setSessionDelivery.run({
-      $id: ctx.sessionId,
-      $delivery: deliveryRaw,
-      $now: Date.now(),
-    })
-  }
-  const delivery =
-    deliveryRaw === "push" || deliveryRaw === "pull"
-      ? deliveryRaw
-      : ((
-          ctx.db.prepare("SELECT delivery FROM sessions WHERE id = $id").get({ $id: ctx.sessionId }) as
-            | { delivery: string }
-            | undefined
-        )?.delivery ?? "push")
+  const acknowledged = opts.declareTransportDelivery?.(a.delivery as "push" | "pull" | undefined)
+  const row = ctx.db.prepare("SELECT delivery FROM sessions WHERE id = ?").get(ctx.sessionId) as {
+    delivery: "push" | "pull"
+  } | null
+  if (!row) throw new Error(`tribe.join lost session row ${ctx.sessionId}`)
+  const delivery = acknowledged?.delivery ?? row.delivery
 
   // Attention-mailbox recovery (19442, 21757): claiming a name inherits its
   // durable mailbox — any unacknowledged attention directs surface on the next
@@ -3312,6 +3313,7 @@ function handleJoin(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     previous_name: joinName !== prevName ? prevName : undefined,
     // 15654 Part 1 — notification-semantics primer. See TRIBE_JOIN_PRIMER docstring.
     primer: TRIBE_JOIN_PRIMER,
+    ...(acknowledged ? { transportDelivery: acknowledged.transportDelivery } : {}),
     ...(recoveredAttention > 0 ? { recovered_actionables: recoveredAttention } : {}),
   })
 }

@@ -171,6 +171,16 @@ export function withBroadcast<T extends BaseTribe & WithDatabase & WithDaemonCon
     const { stmts, daemonCtx, registry } = t
     const { clients } = registry
 
+    function canFanout(connId: string): boolean {
+      const client = clients.get(connId)
+      return Boolean(
+        client &&
+        !client.socket.destroyed &&
+        client.socket.writable &&
+        (client.role === "watch" || registry.isPushTransport(connId)),
+      )
+    }
+
     function notify(method: string, params?: Record<string, unknown>, exclude?: string): void {
       const msg = makeNotification(method, params)
       for (const [connId, client] of clients) {
@@ -185,7 +195,7 @@ export function withBroadcast<T extends BaseTribe & WithDatabase & WithDaemonCon
 
     function pushToClient(connId: string, method: string, params?: Record<string, unknown>): void {
       const client = clients.get(connId)
-      if (!client) return
+      if (!client || !canFanout(connId)) return
       try {
         client.socket.write(makeNotification(method, params))
       } catch {
@@ -209,7 +219,7 @@ export function withBroadcast<T extends BaseTribe & WithDatabase & WithDaemonCon
         batched: batchedNotification,
         write(connId, payload) {
           const client = clients.get(connId)
-          if (!client) return false
+          if (!client || !canFanout(connId)) return false
           try {
             client.socket.write(payload)
             return true
@@ -276,12 +286,7 @@ export function withBroadcast<T extends BaseTribe & WithDatabase & WithDaemonCon
         // already durable in SQLite from the sendMessage tap. `watch` clients
         // (TUI dashboards) always get push regardless of recipient mode so the
         // live view stays current.
-        if (!isWatch) {
-          const recipientDelivery = stmts.getSessionDeliveryById.get({ $id: client.ctx.sessionId }) as
-            | { delivery: string }
-            | undefined
-          if (recipientDelivery?.delivery === "pull") continue
-        }
+        if (!canFanout(connId)) continue
 
         // km-tribe.filter-collapse: per-session unified filter. Direct messages
         // bypass normal mute/until; opted-in focus seats keep actionable DMs

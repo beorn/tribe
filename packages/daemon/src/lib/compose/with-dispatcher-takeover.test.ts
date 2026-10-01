@@ -1993,6 +1993,27 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
       })
       expect(first).toMatchObject({ transportDelivery: firstDelivery, delivery: firstDelivery })
       expect(second).toMatchObject({ transportDelivery: secondDelivery, delivery: "push" })
+      // A refresh by the pull transport cannot demote its still-connected push sibling.
+      const pullConn = firstDelivery === "pull" ? "conn-first-delivery" : "conn-second-delivery"
+      const pushConn = firstDelivery === "push" ? "conn-first-delivery" : "conn-second-delivery"
+      const joined = parseResult<{ content: Array<{ text: string }> }>(
+        await harness.dispatcher.handleRequest(
+          { jsonrpc: "2.0", id: "pull-refresh", method: "tribe.join", params: { name: "@dev/7", delivery: "pull" } },
+          pullConn,
+        ),
+      )
+      expect(JSON.parse(joined.content[0]!.text)).toMatchObject({
+        joined: true,
+        transportDelivery: "pull",
+        delivery: "push",
+      })
+      expect(harness.db.prepare("SELECT delivery FROM sessions WHERE id = ?").get(first.sessionId)).toEqual({
+        delivery: "push",
+      })
+      harness.dropClient(pushConn)
+      expect(harness.db.prepare("SELECT delivery FROM sessions WHERE id = ?").get(first.sessionId)).toEqual({
+        delivery: "pull",
+      })
     },
   )
 

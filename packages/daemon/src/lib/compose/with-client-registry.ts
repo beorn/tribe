@@ -88,6 +88,7 @@ export interface ClientRegistry {
   setTransportDelivery(connId: string, delivery: "push" | "pull"): void
   clearTransports(): void
   getSessionDelivery(sessionId: string): "push" | "pull"
+  isPushTransport(connId: string): boolean
   /** Synchronous, DB-free lifecycle signal; the composing listener owns persistence. */
   onTransportsChanged(listener: (sessionId: string) => void): () => void
   /** socket → connId — reverse index for socket-keyed cleanup */
@@ -189,19 +190,21 @@ export function withClientRegistry<T extends BaseTribe>(): (t: T) => T & WithCli
         for (const sessionId of sessions) changed(sessionId)
       },
       getSessionDelivery(sessionId) {
-        for (const client of clients.values()) {
-          if (
-            isParticipant(client) &&
-            client.ctx.sessionId === sessionId &&
-            client.delivery === "push" &&
-            client.socket &&
-            !client.socket.destroyed &&
-            client.socket.writable
-          ) {
-            return "push"
-          }
+        for (const [connId, client] of clients) {
+          if (client.ctx.sessionId === sessionId && registry.isPushTransport(connId)) return "push"
         }
         return "pull"
+      },
+      isPushTransport(connId) {
+        const client = clients.get(connId)
+        return Boolean(
+          client &&
+          isParticipant(client) &&
+          client.delivery === "push" &&
+          client.socket &&
+          !client.socket.destroyed &&
+          client.socket.writable,
+        )
       },
       onTransportsChanged(listener) {
         transportChangeListeners.add(listener)

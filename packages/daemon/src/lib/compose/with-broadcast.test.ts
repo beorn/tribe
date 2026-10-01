@@ -11,6 +11,7 @@ import { defangModelInput } from "tribe-injection-envelope"
 import type { MessageInsertedInfo } from "../context.ts"
 import { withBroadcast } from "./with-broadcast.ts"
 import { withHotReload } from "./with-hot-reload.ts"
+import { withClientRegistry } from "./with-client-registry.ts"
 
 type InsertedRow = Record<string, unknown>
 
@@ -210,25 +211,42 @@ describe("22514 daemon health-log broadcast admission", () => {
 })
 
 describe("G9 self-inbox P0: a focus seat is woken by the reply that settles its own request", () => {
-  function focusSeatFanout() {
+  function focusSeatFanout(extraPullSockets = false) {
     const writes: string[] = []
+    const pullWrites: string[] = []
+    const delivered = vi.fn()
     const deferred: Array<() => void> = []
+    const scope = { defer: (fn: () => void) => deferred.push(fn) }
+    const { registry } = withClientRegistry()({ scope, startedAt: 0 } as never)
     const daemonCtx: { onMessageInserted?: (info: MessageInsertedInfo) => void } = {}
     const seat = {
+      id: "conn-seat",
       name: "@seat",
       role: "member",
+      delivery: "push",
       ctx: { sessionId: "seat" },
-      socket: { write: (m: string) => writes.push(m) },
+      socket: { destroyed: false, writable: true, write: (m: string) => writes.push(m) },
+    }
+    registry.attachTransport("conn-seat", seat as never)
+    if (extraPullSockets) {
+      for (const id of ["bootstrap", "pull-cli"]) {
+        registry.attachTransport(id, {
+          ...seat,
+          id,
+          delivery: "pull",
+          socket: { destroyed: false, writable: true, write: (m: string) => pullWrites.push(m) },
+        } as never)
+      }
     }
     withBroadcast()({
-      scope: { defer: (fn: () => void) => deferred.push(fn) },
+      scope,
       stmts: {
         getSessionDeliveryById: { get: () => ({ delivery: "push" }) },
         getSessionFilter: { get: () => ({ filter_mode: "focus", filter_until: null, filter_mute: null }) },
-        updateLastDelivered: { run: () => {} },
+        updateLastDelivered: { run: delivered },
       },
       daemonCtx,
-      registry: { clients: new Map([["conn-seat", seat]]) },
+      registry,
     } as never)
     const reply = (correlatedReply: MessageInsertedInfo["correlatedReply"]): MessageInsertedInfo => ({
       id: "reply",
@@ -246,8 +264,30 @@ describe("G9 self-inbox P0: a focus seat is woken by the reply that settles its 
       roomId: null,
       correlatedReply,
     })
-    return { writes, reply, tap: daemonCtx.onMessageInserted!, dispose: () => deferred.reverse().forEach((fn) => fn()) }
+    return {
+      writes,
+      pullWrites,
+      delivered,
+      reply,
+      tap: daemonCtx.onMessageInserted!,
+      dispose: () => deferred.reverse().forEach((fn) => fn()),
+    }
   }
+
+  // @failure A shared push row writes to bootstrap/pull sockets and credits delivery more than once.
+  // @level l2
+  // @consumer withBroadcast's ordinary channel fanout
+  test("writes and credits only the push socket beside two pull transports", async () => {
+    const fanout = focusSeatFanout(true)
+    try {
+      fanout.tap(fanout.reply({ requestId: "r-own", requester: "@seat" }))
+      await vi.waitFor(() => expect(fanout.writes).toHaveLength(1))
+      expect(fanout.pullWrites).toEqual([])
+      expect(fanout.delivered).toHaveBeenCalledTimes(1)
+    } finally {
+      fanout.dispose()
+    }
+  })
 
   test("wakes for its own settlement, and still not for a plain reply or one settling another seat's request", async () => {
     const fanout = focusSeatFanout()

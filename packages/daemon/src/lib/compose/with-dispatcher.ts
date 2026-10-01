@@ -2306,10 +2306,28 @@ export function withDispatcher<
                 }
               }
             }
-            const result = await handleToolCall(ctx, method, p, DAEMON_HANDLER_OPTS, connId)
-            if ((method === TRIBE_COORD_METHODS.join || method === TRIBE_COORD_METHODS.rename) && client) {
-              client.name = ctx.getName()
-              client.role = ctx.getRole()
+            const opts =
+              client && client.role !== "pending"
+                ? {
+                    ...DAEMON_HANDLER_OPTS,
+                    declareTransportDelivery(delivery?: "push" | "pull") {
+                      const registered = clients.get(connId)
+                      if (!registered || registered.role === "pending" || registered.ctx.sessionId !== ctx.sessionId) {
+                        throw new Error(`tribe.join has no registered transport ${connId} for ${ctx.sessionId}`)
+                      }
+                      registered.name = ctx.getName()
+                      registered.role = ctx.getRole()
+                      const transportDelivery = delivery ?? registered.delivery ?? "push"
+                      registry.setTransportDelivery(connId, transportDelivery)
+                      return { transportDelivery, delivery: registry.getSessionDelivery(ctx.sessionId) }
+                    },
+                  }
+                : DAEMON_HANDLER_OPTS
+            const result = await handleToolCall(ctx, method, p, opts, connId)
+            const current = clients.get(connId)
+            if ((method === TRIBE_COORD_METHODS.join || method === TRIBE_COORD_METHODS.rename) && current) {
+              current.name = ctx.getName()
+              current.role = ctx.getRole()
             }
             return makeResponse(id, result)
           }

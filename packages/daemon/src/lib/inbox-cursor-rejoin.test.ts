@@ -101,7 +101,9 @@ describe("@km/tribe/20032 - pull cursor monotonicity across same-session join", 
     expect(firstDrain.events?.map((event) => event.content)).toEqual(["already drained"])
     expect(firstDrain.cursor).toBe(drainedRowid)
 
-    const rejoin = parseToolJson(handleToolCall(ctx, "tribe.join", { name: NAME, delivery: "pull" }, opts))
+    const refusedMode = parseToolJson(handleToolCall(ctx, "tribe.join", { name: NAME, delivery: "pull" }, opts))
+    expect(refusedMode.error).toContain("registered transport")
+    const rejoin = parseToolJson(handleToolCall(ctx, "tribe.join", { name: NAME }, opts))
     expect(rejoin.replayed_cursor).toBeUndefined()
 
     const afterRejoin = parseToolJson(handleToolCall(ctx, "tribe.fetch", { limit: 50 }, opts)) as FetchJson
