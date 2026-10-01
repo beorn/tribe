@@ -32,7 +32,14 @@ const NAME = "@seat"
 const ACTIVE_UNTIL = Date.now() + 3_600_000
 const EXPIRED_UNTIL = Date.now() - 3_600_000
 
-type Row = { kind: MessageKind; topic: string | null; type: string }
+type Row = {
+  kind: MessageKind
+  topic: string | null
+  type: string
+  isIncident?: boolean
+  wakesOwner?: boolean
+}
+type IncidentPolicyInfo = Parameters<typeof shouldDeliver>[0] & { isIncident: boolean; wakesOwner: boolean }
 type Filter = { filter_mode: string; filter_mute: string | null; filter_until: number | null }
 
 const ROWS: Row[] = [
@@ -66,6 +73,14 @@ describe("push filter and pull predicate agree on every subscription case", () =
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "delivery-parity-"))
     db = openDatabase(join(tmpDir, "tribe.db"))
+    const messageColumns = new Set(
+      (db.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>).map((row) => row.name),
+    )
+    // Keep this policy test runnable before and after the owning schema migration.
+    // The migration/backfill contract has its own schema test owner.
+    if (!messageColumns.has("is_incident")) {
+      db.run("ALTER TABLE messages ADD COLUMN is_incident INTEGER NOT NULL DEFAULT 0")
+    }
     stmts = createStatements(db)
   })
 
@@ -77,22 +92,19 @@ describe("push filter and pull predicate agree on every subscription case", () =
   /** What the PULL predicate says, by asking it for real. */
   function sqlAdmits(row: Row, filter: Filter, index: number): boolean {
     const id = `m-${index}`
-    stmts.insertMessage.run({
-      $id: id,
-      $type: row.type,
-      $sender: "@someone-else",
-      $recipient: row.kind === "direct" ? NAME : "*",
-      $kind: row.kind,
-      $content: "body",
-      $bead_id: null,
-      $ref: null,
-      $ts: Date.now() - 60_000,
-      $delivery: "pull",
-      $topic: row.topic,
-      $room_id: null,
-      $request: null,
-      $reply: null,
-    })
+    db.prepare(`
+      INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, topic, is_incident, wakes_owner)
+      VALUES (?, ?, '@someone-else', ?, ?, 'body', ?, 'pull', ?, ?, ?)
+    `).run(
+      id,
+      row.type,
+      row.kind === "direct" ? NAME : "*",
+      row.kind,
+      Date.now() - 60_000,
+      row.topic,
+      row.isIncident === true ? 1 : 0,
+      row.wakesOwner === true ? 1 : 0,
+    )
     const got = stmts.getInboxRows.all({
       $since: 0,
       $name: NAME,
@@ -111,10 +123,16 @@ describe("push filter and pull predicate agree on every subscription case", () =
     for (const filter of FILTERS) {
       for (const row of ROWS.filter((r) => r.kind === "broadcast")) {
         index += 1
-        const push = shouldDeliver(
-          { kind: row.kind, type: row.type, replyHint: "no", topic: row.topic, settlesOwnRequest: false },
-          filter,
-        )
+        const pushInfo: IncidentPolicyInfo = {
+          kind: row.kind,
+          type: row.type,
+          replyHint: "no",
+          topic: row.topic,
+          settlesOwnRequest: false,
+          isIncident: row.isIncident === true,
+          wakesOwner: row.wakesOwner === true,
+        }
+        const push = shouldDeliver(pushInfo, filter)
         const pull = sqlAdmits(row, filter, index)
         if (push !== pull) {
           disagreements.push(
@@ -157,13 +175,48 @@ describe("push filter and pull predicate agree on every subscription case", () =
     let index = 1000
     for (const row of ROWS) {
       index += 1
-      expect(
-        shouldDeliver(
-          { kind: row.kind, type: row.type, replyHint: "no", topic: row.topic, settlesOwnRequest: false },
-          undefined,
-        ),
-      ).toBe(true)
+      const pushInfo: IncidentPolicyInfo = {
+        kind: row.kind,
+        type: row.type,
+        replyHint: "no",
+        topic: row.topic,
+        settlesOwnRequest: false,
+        isIncident: row.isIncident === true,
+        wakesOwner: row.wakesOwner === true,
+      }
+      expect(shouldDeliver(pushInfo, undefined)).toBe(true)
       expect(sqlAdmits(row, openFilter, index)).toBe(true)
+    }
+  })
+
+  it("refuses quiet incidents in every mode but admits incident edges and ordinary requests", () => {
+    const quietRequest: Row = { kind: "direct", topic: null, type: "request", isIncident: true, wakesOwner: false }
+    const quietNotify: Row = { kind: "direct", topic: null, type: "notify", isIncident: true, wakesOwner: false }
+    const edgeNotify: Row = { kind: "direct", topic: null, type: "notify", isIncident: true, wakesOwner: true }
+    const ordinaryRequest: Row = { kind: "direct", topic: null, type: "request" }
+    const everyMode: Array<Filter | undefined> = [...FILTERS, undefined]
+    let index = 3000
+
+    for (const [label, row, expected] of [
+      ["quiet request", quietRequest, false],
+      ["quiet notify", quietNotify, false],
+      ["edge notify", edgeNotify, true],
+      ["ordinary request", ordinaryRequest, true],
+    ] as const) {
+      for (const filter of everyMode) {
+        index += 1
+        const pushInfo: IncidentPolicyInfo = {
+          ...row,
+          replyHint: "no",
+          settlesOwnRequest: false,
+          isIncident: row.isIncident === true,
+          wakesOwner: row.wakesOwner === true,
+        }
+        const push = shouldDeliver(pushInfo, filter)
+        const pull = sqlAdmits(row, filter ?? { filter_mode: "normal", filter_mute: null, filter_until: null }, index)
+        expect(push, `${label} push mode=${filter?.filter_mode ?? "default"}`).toBe(expected)
+        expect(pull, `${label} drain mode=${filter?.filter_mode ?? "default"}`).toBe(expected)
+      }
     }
   })
 })

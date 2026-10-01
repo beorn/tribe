@@ -16,7 +16,7 @@ import { join } from "node:path"
 import { safeRemoveSync } from "removely"
 import { describe, expect, it } from "vitest"
 
-import { CURRENT_SCHEMA_VERSION, openDatabase } from "./database.ts"
+import { createStatements, CURRENT_SCHEMA_VERSION, openDatabase } from "./database.ts"
 import { fileURLToPath } from "node:url"
 
 const TEST_ROOT = realpathSync(tmpdir())
@@ -92,6 +92,102 @@ async function expectLockHolderToExitSuccessfully(
 }
 
 describe("openDatabase", () => {
+  /**
+   * @failure Legacy incident edges become ordinary mail after a schema upgrade,
+   *          or archive rows lose the same incident classification as live rows.
+   * @level l1
+   * @consumer Tribe incident recipients reconnecting against a v37 journal
+   *
+   * 26936: only wakes_owner is a recoverable legacy incident fact. Existing
+   * migration lock tests do not exercise this two-table semantic backfill.
+   */
+  it("upgrades v37 incident edges in both journals without guessing non-edge identity", () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "tribe-v37-incident-")))
+    const path = join(dir, "tribe.sqlite")
+    let db: ReturnType<typeof openDatabase> | undefined
+    try {
+      db = openDatabase(path)
+      for (const table of ["messages", "messages_archive"]) {
+        const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+        // The same historical fixture works before and after the v38 repair.
+        if (columns.some((column) => column.name === "is_incident")) {
+          db.run(`ALTER TABLE ${table} DROP COLUMN is_incident`)
+        }
+        const sequence = table === "messages_archive" ? "seq, archived_at, " : ""
+        const sequenceValues = table === "messages_archive" ? "?, 10, " : ""
+        const insert = db.prepare(`INSERT INTO ${table}
+          (${sequence}id, type, sender, recipient, content, ts, summary, wakes_owner, sender_authority)
+          VALUES (${sequenceValues}?, 'request', 'daemon', '@chief', 'legacy body', 1,
+            'incident-looking text is not identity', ?, 'unrecorded')`)
+        if (table === "messages_archive") {
+          insert.run(1, "edge", 1)
+          insert.run(2, "non-edge", 0)
+        } else {
+          insert.run("edge", 1)
+          insert.run("non-edge", 0)
+        }
+      }
+      db.run("UPDATE _schema_meta SET value = '37' WHERE key = 'version'")
+      db.close()
+      db = undefined
+
+      for (let reopen = 0; reopen < 2; reopen++) {
+        db = openDatabase(path)
+        expect(db.prepare("SELECT value FROM _schema_meta WHERE key = 'version'").get()).toEqual({
+          value: String(CURRENT_SCHEMA_VERSION),
+        })
+        for (const table of ["messages", "messages_archive"]) {
+          expect(db.prepare(`PRAGMA table_info(${table})`).all()).toContainEqual(
+            expect.objectContaining({ name: "is_incident", type: "INTEGER", notnull: 1, dflt_value: "0" }),
+          )
+          expect(
+            db
+              .prepare(`SELECT id, is_incident, wakes_owner, content, sender_authority
+            FROM ${table} ORDER BY id`)
+              .all(),
+          ).toEqual([
+            { id: "edge", is_incident: 1, wakes_owner: 1, content: "legacy body", sender_authority: "unrecorded" },
+            { id: "non-edge", is_incident: 0, wakes_owner: 0, content: "legacy body", sender_authority: "unrecorded" },
+          ])
+          expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE is_incident=0 AND wakes_owner=1`).get()).toEqual({
+            n: 0,
+          })
+        }
+        db.close()
+        db = undefined
+      }
+      db = openDatabase(join(dir, "fresh.sqlite"))
+      for (const table of ["messages", "messages_archive"]) {
+        expect(db.prepare(`PRAGMA table_info(${table})`).all()).toContainEqual(
+          expect.objectContaining({ name: "is_incident", type: "INTEGER", notnull: 1, dflt_value: "0" }),
+        )
+      }
+      createStatements(db).insertMessage.run({
+        $id: "ordinary",
+        $type: "notify",
+        $sender: "@sender",
+        $recipient: "@chief",
+        $kind: "direct",
+        $content: "ordinary",
+        $bead_id: null,
+        $ref: null,
+        $ts: 1,
+        $delivery: "pull",
+        $topic: null,
+        $room_id: null,
+        $request: null,
+        $reply: null,
+      })
+      expect(db.prepare("SELECT is_incident, wakes_owner FROM messages WHERE id='ordinary'").get()).toEqual({
+        is_incident: 0,
+        wakes_owner: 0,
+      })
+    } finally {
+      db?.close()
+      safeRemoveSync(dir, { within: TEST_ROOT, allowMissing: true })
+    }
+  })
+
   it("waits for a transient exclusive lock before enabling WAL", async () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "tribe-wal-startup-")))
     const path = join(dir, "tribe.sqlite")

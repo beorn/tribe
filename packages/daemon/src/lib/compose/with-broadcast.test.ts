@@ -336,4 +336,50 @@ describe("G9 self-inbox P0: a focus seat is woken by the reply that settles its 
       fanout.dispose()
     }
   })
+
+  test("pushes incident edges once, suppresses quiet recipient frames and cursor credit, and keeps watch history live", async () => {
+    const fanout = focusSeatFanout(true)
+    const watchWrites: string[] = []
+    const seat = fanout.registry.clients.get("conn-seat")!
+    fanout.registry.attachTransport("watch", {
+      ...seat,
+      id: "watch",
+      name: "wait-watch",
+      role: "watch",
+      delivery: "pull",
+      ctx: { sessionId: "watch" },
+      socket: { destroyed: false, writable: true, write: (m: string) => watchWrites.push(m) },
+    } as never)
+    const incident = (id: string, rowid: number, type: string, wakesOwner: boolean): MessageInsertedInfo =>
+      Object.assign(
+        {
+          ...fanout.reply(null),
+          id,
+          rowid,
+          type,
+          content: `${id} observation`,
+        },
+        { isIncident: true, wakesOwner },
+      )
+
+    try {
+      // The notify edge must reach a focus seat even though type alone would
+      // otherwise suppress it; row semantics decide admission.
+      await fanout.broadcast.toConnected(incident("opened", 1, "notify", true))
+      expect(fanout.writes).toHaveLength(1)
+      expect(watchWrites).toHaveLength(1)
+      expect(fanout.delivered.mock.calls.map(([args]) => args.$id)).toEqual(expect.arrayContaining(["seat", "watch"]))
+
+      fanout.delivered.mockClear()
+      await fanout.broadcast.toConnected(incident("repeat", 2, "request", false))
+      await fanout.broadcast.toConnected(incident("clear", 3, "request", false))
+
+      expect(fanout.writes).toHaveLength(1)
+      expect(watchWrites).toHaveLength(3)
+      expect(fanout.delivered.mock.calls.map(([args]) => args.$id)).toEqual(["watch", "watch"])
+      expect(fanout.pullWrites).toEqual([])
+    } finally {
+      fanout.dispose()
+    }
+  })
 })

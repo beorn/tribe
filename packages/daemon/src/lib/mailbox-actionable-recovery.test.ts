@@ -1326,4 +1326,50 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       expect(readAttentionProjection(owner, NAME).actionableCount).toBe(0)
     },
   )
+
+  it("keeps a typed request incident in history but out of attention and repeat drain after its edge is read", () => {
+    const owner = connectAs("sess-request-incident-owner", NAME)
+    const watcher = connectAs("sess-request-incident-watcher", "wait-watch")
+    const incident = {
+      emitter: "wait-watch",
+      subject: "seat @dev/9",
+      condition: "busy-not-draining",
+    }
+    const send = (message: string, active = true) =>
+      parseToolJson(
+        handleToolCall(
+          watcher,
+          "tribe.send",
+          {
+            to: NAME,
+            message,
+            type: "request",
+            summary: incident.condition,
+            incident: { ...incident, active },
+          },
+          opts,
+        ),
+      ) as { id: string }
+
+    const opened = send("initial observation")
+    const firstDrain = fetchJson(owner, opts).json
+    expect(firstDrain.events?.map((event) => event.id)).toContain(opened.id)
+    expect(firstDrain.attention?.actionable_unread).toEqual([])
+
+    const repeated = [send("second observation"), send("third observation")]
+    const cleared = send("condition cleared", false)
+    const incidentIds = [opened.id, ...repeated.map((message) => message.id), cleared.id]
+
+    // The open edge was acknowledged above. The three quiet observations
+    // must not reappear in the model's next default drain.
+    const afterQuietRows = fetchJson(owner, opts).json
+    expect(afterQuietRows.events).toEqual([])
+    expect(afterQuietRows.attention?.actionable_unread).toEqual([])
+    expect((stmts.getUnreadDms.get({ $name: NAME }) as { count: number }).count).toBe(0)
+    expect(readAttentionProjection(owner, NAME).actionableCount).toBe(0)
+    expect(afterQuietRows.attention?.pending_balls).toEqual([])
+
+    const history = fetchJson(owner, opts, { ids: incidentIds }).json
+    expect(history.events?.map((event) => event.id)).toEqual(incidentIds)
+  })
 })

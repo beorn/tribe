@@ -181,6 +181,62 @@ describe("journal retention sweep", () => {
   // -------------------------------------------------------------------
 
   describe("archive-move phase", () => {
+    /**
+     * @failure Archiving silently turns a claimed sender into the daemon's
+     *          voice or drops incident identity and other message facts.
+     * @level l1
+     * @consumer Tribe journal history and incident recipients after retention
+     *
+     * 26936 requires every message column through both existing movers. The
+     * selected-field tests miss retention's omitted sender_authority column.
+     */
+    it.each(["prepared", "bounded"] as const)("%s archive preserves the complete message row", (mover) => {
+      const { db, stmts } = setup()
+      const now = 2_000_000_000_000
+      try {
+        db.prepare(`INSERT INTO messages
+          (id, type, sender, recipient, kind, content, bead_id, ref, ts, delivery,
+            topic, room_id, request, reply, correlated_reply_requester, summary,
+            session_id, attention_required, wakes_owner, sender_authority)
+          VALUES ('complete-row', 'request', '@sender', '@chief', 'direct', 'body',
+            'bead', 'reference', ?, 'pull', 'topic', 'room', 'request-id', 'reply-id',
+            '@requester', 'condition', 'sender-session', 1, 1, 'claimed')`).run(now - 20 * DAY)
+        const liveColumns = (db.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>).map(
+          (column) => column.name,
+        )
+        if (liveColumns.includes("is_incident")) {
+          db.prepare("UPDATE messages SET is_incident=1 WHERE id='complete-row'").run()
+        }
+        const before = db.prepare("SELECT * FROM messages WHERE id='complete-row'").get() as Record<string, unknown>
+        const archiveColumns = (db.prepare("PRAGMA table_info(messages_archive)").all() as Array<{ name: string }>).map(
+          (column) => column.name,
+        )
+        expect(
+          archiveColumns
+            .filter((column) => column !== "archived_at")
+            .map((column) => (column === "seq" ? "rowid" : column))
+            .sort(),
+        ).toEqual([...liveColumns].sort())
+
+        if (mover === "prepared") {
+          stmts.archiveExpiredMessages.run({ $cutoff: now - 14 * DAY, $archived_at: now, $live_cutoff: now - 7 * DAY })
+        } else {
+          const result = runRetentionSweep(db, stmts, enabledConfig({ deleteEnabled: false }), now)
+          expect(result.archiveMove.moved).toBe(1)
+          expect(liveIds(db)).toEqual([])
+        }
+        const archived = db.prepare("SELECT * FROM messages_archive WHERE id='complete-row'").get() as Record<
+          string,
+          unknown
+        >
+        const { rowid, ...payload } = before
+        expect(archived).toEqual({ ...payload, seq: rowid, archived_at: now })
+        expect(archived.is_incident).toBe(1)
+      } finally {
+        db.close()
+      }
+    })
+
     it("moves a live message older than the archive window into messages_archive", () => {
       const { db, stmts } = setup()
       try {
