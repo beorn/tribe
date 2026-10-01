@@ -358,45 +358,53 @@ describe("waitForInboxWithReconnect", () => {
     pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
   }
 
-  test("retries retryable transport close without losing the original absolute deadline", async () => {
-    let now = 1_000
-    const chunkCalls: number[] = []
-    const result = await waitForInboxWithReconnect({
-      session: "@ci",
-      timeoutMs: 65_000,
-      maxChunkMs: 30_000,
-      retryDelayMs: 250,
-      now: () => now,
-      sleep: async (ms) => {
-        now += ms
-      },
-      call: async ({ timeoutMs }) => {
-        chunkCalls.push(timeoutMs)
-        if (chunkCalls.length === 1) {
-          now += 12_000
-          throw new Error("Connection closed")
-        }
-        now += 5_000
-        return {
-          status: "woken",
-          session: "@ci",
-          unread_count: 1,
-          oldest_unread_age_min: 0,
-          oldest_unread_ts: now,
-          waited_ms: 5_000,
-          effective_timeout_ms: timeoutMs,
-          timed_out: false,
-          aborted: false,
-          attention: EMPTY_ATTENTION,
-        }
-      },
-    })
+  test.each([false, true])(
+    "retries transport close without losing the absolute deadline (restart socket gap: %s)",
+    async (socketGap) => {
+      let now = 1_000
+      const chunkCalls: number[] = []
+      const result = await waitForInboxWithReconnect({
+        session: "@ci",
+        timeoutMs: 65_000,
+        maxChunkMs: 30_000,
+        retryDelayMs: 250,
+        now: () => now,
+        sleep: async (ms) => {
+          now += ms
+        },
+        call: async ({ timeoutMs }) => {
+          chunkCalls.push(timeoutMs)
+          if (chunkCalls.length === 1) {
+            now += 12_000
+            throw new Error("Connection closed")
+          }
+          // A restart can remove the socket after an established wait closes.
+          // Its absence grace must start at this outage, not at the wait's age.
+          if (socketGap && chunkCalls.length === 2) {
+            throw Object.assign(new Error("connect ENOENT /tmp/tribe.sock"), { code: "ENOENT" })
+          }
+          now += 5_000
+          return {
+            status: "woken",
+            session: "@ci",
+            unread_count: 1,
+            oldest_unread_age_min: 0,
+            oldest_unread_ts: now,
+            waited_ms: 5_000,
+            effective_timeout_ms: timeoutMs,
+            timed_out: false,
+            aborted: false,
+            attention: EMPTY_ATTENTION,
+          }
+        },
+      })
 
-    expect(chunkCalls).toEqual([30_000, 30_000])
-    expect(result.unread_count).toBe(1)
-    expect(result.waited_ms).toBe(17_250)
-    expect(result.timed_out).toBe(false)
-  })
+      expect(chunkCalls).toEqual(socketGap ? [30_000, 30_000, 30_000] : [30_000, 30_000])
+      expect(result.unread_count).toBe(1)
+      expect(result.waited_ms).toBe(socketGap ? 17_750 : 17_250)
+      expect(result.timed_out).toBe(false)
+    },
+  )
 
   test("backs off consecutive transport redials and caps the retry delay", async () => {
     let now = 0
