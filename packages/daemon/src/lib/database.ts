@@ -2138,16 +2138,6 @@ export function createStatements(db: Database) {
       "SELECT id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, identity_sid, launch_id, launch_parent_pid, started_at, updated_at, filter_mode, filter_until, filter_mute, last_inbox_pull_seq, delivery FROM sessions",
     ),
 
-    /** Look up a connected session's delivery mode by id. Used by the broadcast
-     *  pipeline to skip socket fanout for pull-mode recipients
-     *  (km-bearly.tribe-dm-delivery-gap). Delivery is a per-connection
-     *  transport property; duplicate visible names can exist when a host
-     *  adapter and a backend tool adapter both represent one agent identity. */
-    getSessionDeliveryById: db.prepare("SELECT delivery FROM sessions WHERE id = $id LIMIT 1"),
-
-    /** Update a session's delivery mode in place. */
-    setSessionDelivery: db.prepare("UPDATE sessions SET delivery = $delivery, updated_at = $now WHERE id = $id"),
-
     messageHistory: db.prepare(`
 		SELECT * FROM messages
 		WHERE (sender = $name OR recipient = $name OR recipient = '*')

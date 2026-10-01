@@ -241,7 +241,6 @@ describe("G9 self-inbox P0: a focus seat is woken by the reply that settles its 
     const subject = withBroadcast()({
       scope,
       stmts: {
-        getSessionDeliveryById: { get: () => ({ delivery: "push" }) },
         getSessionFilter: { get: () => ({ filter_mode: "focus", filter_until: null, filter_mute: null }) },
         updateLastDelivered: { run: delivered },
       },

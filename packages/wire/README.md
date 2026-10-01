@@ -113,6 +113,20 @@ import { deriveTribePersonaLaunchIdentity } from "tribe-wire/lib/persona-launch-
 
 JSON-RPC client, reconnecting client, line parser, composition primitives (pipe / Scope / Tool registry), and the canonical provider-launch + persona derivation shared by wire and durable writer consumers. See `src/lib/socket.ts` and `src/lib/persona-launch-identity.ts`.
 
+**Delivery acknowledgement.** Protocol 11 registration and join replies report
+`transportDelivery` for the calling connection and `delivery` for its session.
+The session stays push while a connected writable push transport exists; a pull
+bootstrap or CLI sibling keeps its own pull mode and receives no channel fanout.
+The daemon applies an adapter's exit record before making that transport eligible.
+
+The stdio adapter exposes confirmed own delivery through `tools/list` metadata
+and its existing startup banner. Before a valid ACK, after disconnect, or after
+a refused join, it reports pull with an acknowledgement cause and keeps tools
+available. Initialize tells the model to read its turn-start inbox until that
+banner confirms delivery. Bootstrap certifies its own pull ACK even beside a
+push sibling; protocol 10's no-ACK compatibility path still requires stored pull
+and is removed when version 10 leaves the supported window.
+
 `members --all` is the daemon-side rejoin verdict. `transport_state` is derived
 from the authenticated socket registry; `owner_state` is separate process
 evidence. `last_seen_sec` reports activity age only. A host MCP dialog may say

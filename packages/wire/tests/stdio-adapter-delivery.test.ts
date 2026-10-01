@@ -833,7 +833,9 @@ describe("stdio adapter delivery modes", () => {
     expect(registrations[1]?.params && "takeover" in registrations[1].params).toBe(false)
   })
 
-  it("21049: repeated legacy reconnect conflicts keep native MCP alive, report the exact cause, and recover", async () => {
+  // @failure 26564: a disconnected push adapter must withdraw its acknowledged push capability.
+  // @level l2 @consumer tools/list through the native adapter during reconnect and recovery
+  it("21049: repeated legacy reconnect conflicts keep native MCP alive, withdraw push, and recover", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     daemon = await spawnFakeDaemon(socketPath, {
       registerError: {
@@ -848,7 +850,9 @@ describe("stdio adapter delivery modes", () => {
       cwd: tmpDir,
       env: {
         ...process.env,
-        TRIBE_DELIVERY: "pull",
+        TRIBE_DELIVERY: "push",
+        TRIBE_REQUIRE_JOIN: "0",
+        TRIBE_PLUGIN_RESUME_JOINED: "0",
         TRIBE_TAKEOVER: "1",
         ...launchEnvironment(""),
         TRIBE_NO_AUTOSTART: "1",
@@ -872,6 +876,9 @@ describe("stdio adapter delivery modes", () => {
     )
     await new Promise((resolveTick) => setTimeout(resolveTick, 50))
 
+    const initialList = await writeJsonAndWaitForLine(child, toolsListPayload(1000), (line) => line.id === 1000)
+    expect(inboxWaitCapability(initialList)).toMatchObject({ delivery: "push" })
+
     daemon.clients.at(-1)?.destroy()
     await waitForCondition(
       () => daemon!.requests.filter((msg) => msg.method === "register").length === 2,
@@ -880,6 +887,11 @@ describe("stdio adapter delivery modes", () => {
     )
 
     expect(child.exitCode).toBeNull()
+    const disconnectedList = await writeJsonAndWaitForLine(child, toolsListPayload(1001), (line) => line.id === 1001)
+    expect(inboxWaitCapability(disconnectedList)).toMatchObject({
+      delivery: "pull",
+      acknowledgement: { acknowledged: false, cause: expect.any(String) },
+    })
     const closedReplyPromise = waitForLine(child, (line) => line.id === 2, { timeoutMs: 10_000 })
     writeJson(child, callToolPayload(2, "members", {}))
     const closedReply = (await closedReplyPromise) as {
@@ -933,6 +945,11 @@ describe("stdio adapter delivery modes", () => {
     expect(child.exitCode).toBeNull()
     expect(liveReply.result?.isError).not.toBe(true)
     expect(liveReply.result?.content?.[0]?.text).toContain('"sessions":[]')
+    const recoveredList = await writeJsonAndWaitForLine(child, toolsListPayload(1002), (line) => line.id === 1002)
+    expect(inboxWaitCapability(recoveredList)).toMatchObject({
+      delivery: "push",
+      acknowledgement: { acknowledged: true },
+    })
     const registrations = daemon.requests.filter((msg) => msg.method === "register") as Array<{
       params?: { takeover?: boolean }
     }>
