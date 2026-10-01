@@ -32,6 +32,7 @@ import type { TribeRole } from "tribe-wire/lib/config"
 import { createTribeContext } from "../context.ts"
 import { openDatabase, createStatements } from "../database.ts"
 import { sendMessage } from "../messaging.ts"
+import { registerSession } from "../session.ts"
 import { withClientRegistry } from "./with-client-registry.ts"
 import { createBaseTribe } from "./base.ts"
 import { withDispatcher, type DispatcherRuntimeHooks } from "./with-dispatcher.ts"
@@ -91,6 +92,7 @@ type JsonRpcResponse<T> = {
 
 type RegisterParams = {
   delivery?: "push" | "pull"
+  adapterExitRecord?: unknown
   name?: string
   pid: number
   project: string
@@ -737,6 +739,7 @@ function createDispatcherHarness(
 
   return {
     dispatcher: daemon.dispatcher,
+    registry,
     healthLogs,
     register(connId: string, params: RegisterParams) {
       const req: JsonRpcRequest = {
@@ -1963,6 +1966,15 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
     async (firstDelivery, secondDelivery) => {
       const harness = createDispatcherHarness({ identityVerifier })
       cleanup = harness.dispose
+      const exitRecord = "/tmp/tribe-test-adapter-exit.json"
+      const eligibleExitRecords: unknown[] = []
+      const stopObservation = harness.registry.onTransportsChanged((sessionId) => {
+        if (harness.registry.getSessionDelivery(sessionId) === "push") {
+          eligibleExitRecords.push(
+            harness.db.prepare("SELECT adapter_exit_record FROM sessions WHERE id = ?").get(sessionId),
+          )
+        }
+      })
       harness.addPendingClient("conn-first-delivery")
       const first = parseResult<RegisterResult>(
         await harness.register("conn-first-delivery", {
@@ -1973,6 +1985,7 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
           launchParentPid: 5100,
           idToken: "token-g3",
           delivery: firstDelivery,
+          ...(firstDelivery === "push" ? { adapterExitRecord: exitRecord } : {}),
         }),
       )
       harness.addPendingClient("conn-second-delivery")
@@ -1985,14 +1998,21 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
           launchParentPid: 5100,
           idToken: "token-g3",
           delivery: secondDelivery,
+          ...(secondDelivery === "push" ? { adapterExitRecord: exitRecord } : {}),
         }),
       )
       expect(second.sessionId).toBe(first.sessionId)
+      expect(harness.db.prepare("SELECT adapter_exit_record FROM sessions WHERE id = ?").get(first.sessionId)).toEqual({
+        adapter_exit_record: exitRecord,
+      })
       expect(harness.db.prepare("SELECT delivery FROM sessions WHERE id = ?").get(first.sessionId)).toEqual({
         delivery: "push",
       })
       expect(first).toMatchObject({ transportDelivery: firstDelivery, delivery: firstDelivery })
       expect(second).toMatchObject({ transportDelivery: secondDelivery, delivery: "push" })
+      expect(eligibleExitRecords.length).toBeGreaterThan(0)
+      for (const row of eligibleExitRecords) expect(row).toEqual({ adapter_exit_record: exitRecord })
+      stopObservation()
       // A refresh by the pull transport cannot demote its still-connected push sibling.
       const pullConn = firstDelivery === "pull" ? "conn-first-delivery" : "conn-second-delivery"
       const pushConn = firstDelivery === "push" ? "conn-first-delivery" : "conn-second-delivery"
@@ -2010,12 +2030,78 @@ describe("token-keyed launch identity (25074 3c-2a)", () => {
       expect(harness.db.prepare("SELECT delivery FROM sessions WHERE id = ?").get(first.sessionId)).toEqual({
         delivery: "push",
       })
+      expect(harness.db.prepare("SELECT adapter_exit_record FROM sessions WHERE id = ?").get(first.sessionId)).toEqual({
+        adapter_exit_record: exitRecord,
+      })
       harness.dropClient(pushConn)
       expect(harness.db.prepare("SELECT delivery FROM sessions WHERE id = ?").get(first.sessionId)).toEqual({
         delivery: "pull",
       })
     },
   )
+
+  // @failure 26564: an old daemon's persisted push mode must not certify a consumer after startup.
+  // @level l2 @consumer restarted daemon session delivery projection
+  it("resets a stale disconnected push projection before accepting registrations", () => {
+    const harness = createDispatcherHarness({}, (ctx) => {
+      const stale = createTribeContext({
+        ...ctx,
+        sessionId: "stale-push-session",
+        sessionRole: "member",
+        initialName: "stale-push-member",
+      })
+      registerSession(stale, "test-project", undefined, undefined, 0, "push")
+      expect(ctx.db.prepare("SELECT delivery FROM sessions WHERE id = ?").get(stale.sessionId)).toEqual({
+        delivery: "push",
+      })
+    })
+    cleanup = harness.dispose
+    expect(harness.db.prepare("SELECT delivery FROM sessions WHERE id = ?").get("stale-push-session")).toEqual({
+      delivery: "pull",
+    })
+    expect(harness.registry.getSessionDelivery("stale-push-session")).toBe("pull")
+  })
+
+  // @failure 26564: a fan-in cannot accept unusable exit metadata and then expose the push transport.
+  // @level l2 @consumer adapter registration refusal and the surviving bootstrap
+  it.each(["relative-exit.json", null, 42])("refuses fan-in with invalid adapterExitRecord %s", async (badPath) => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("exit-bootstrap")
+    const bootstrap = parseResult<RegisterResult>(
+      await harness.register("exit-bootstrap", {
+        name: "@dev/7",
+        pid: 5101,
+        project: "/tmp/p",
+        takeover: true,
+        launchParentPid: 5100,
+        idToken: "token-g3",
+        delivery: "pull",
+      }),
+    )
+    harness.addPendingClient("bad-exit-adapter")
+    const refusal = parseError(
+      await harness.register("bad-exit-adapter", {
+        name: "@dev/7",
+        pid: 5102,
+        project: "/tmp/p",
+        takeover: true,
+        launchParentPid: 5100,
+        idToken: "token-g3",
+        delivery: "push",
+        adapterExitRecord: badPath,
+      }),
+    )
+    expect(refusal.code).toBe(-32602)
+    expect(refusal.message).toContain("adapterExitRecord must be an absolute file path")
+    expect(harness.registry.isPushTransport("bad-exit-adapter")).toBe(false)
+    expect(
+      harness.db.prepare("SELECT delivery, adapter_exit_record FROM sessions WHERE id = ?").get(bootstrap.sessionId),
+    ).toEqual({
+      delivery: "pull",
+      adapter_exit_record: null,
+    })
+  })
 
   it("the bootstrap and the adapter of one generation fan into ONE session keyed sid@gen, and the filter applies", async () => {
     const harness = createDispatcherHarness({ identityVerifier })
