@@ -768,8 +768,8 @@ async function cmdAlarmSet(reason: string, opts: { by?: string }): Promise<void>
   const by = (opts.by ?? process.env.USER ?? "anonymous").trim() || "anonymous"
   try {
     const input = buildAlarmSetInput(reason, { by })
-    // Unidentified shells still pull: skip launch identity. The daemon accepts
-    // this one key the way cli_alarm_set does (26899 0f215a89). --by is unverified.
+    // Unidentified shells still pull: skip launch identity. The daemon gates no
+    // send by identity (handlers.ts send path). --by is unverified body text.
     const result = mcpJsonContent(await callDaemon("tribe.send", buildSendPayload(input))) as { error?: string }
     if (typeof result.error === "string" && result.error.length > 0) {
       console.error(result.error)
@@ -814,7 +814,7 @@ async function cmdAlarmAck(): Promise<void> {
   }
   const closed = result.tracker?.closed ?? 0
   if (closed === 0) {
-    console.log("ALARM CLEARED — no alarm was active.")
+    console.log("no alarm was active")
     return
   }
   console.log(`ALARM CLEARED — tracker.closed=${closed} andon incident falling edge sent.`)

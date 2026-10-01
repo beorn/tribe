@@ -2844,67 +2844,25 @@ export function withDispatcher<
             return makeResponse(id, publicResult)
           }
 
-          /**
-           * Layer 3 — andon-pull alarm set. Anyone (user via CLI, agent via
-           * tribe.send wrapper) can invoke. Stores reason + author in the
-           * coordination table under a fixed key. The chief-drain-check.sh
-           * PreToolUse hook reads it and hard-blocks chief tool calls until
-           * `cli_alarm_ack` clears it.
-           */
-          case "cli_alarm_set": {
-            const reason = String(p.reason ?? "(no reason given)")
-            const by = String(p.by ?? "anonymous")
-            const value = JSON.stringify({ reason, by, ts: Date.now() })
-            db.prepare(
-              "INSERT OR REPLACE INTO coordination (project_id, key, value, updated_by, updated_at) VALUES (?, ?, ?, ?, ?)",
-            ).run("", "alarm.active", value, by, Date.now())
-            return makeResponse(id, { ok: true, reason, by })
-          }
-
-          /** Layer 3 — keyed read of the andon incident row, else the legacy coordination key. */
+          /** Layer 3 — keyed read of the andon incident row. One store. */
           case "cli_alarm_get": {
             const key = incidentKey({ emitter: ANDON_EMITTER, subject: ANDON_SUBJECT, condition: ANDON_CONDITION })
             const standing = stmts.selectIncidentCondition.get({
               $request_id: key,
               $recipient: ANDON_OWNER,
             }) as { summary: string | null; content: string | null; sender: string; opened_at: number } | null
-            if (standing !== null) {
-              const ts = standing.opened_at
-              return makeResponse(id, {
-                active: true,
-                reason: (standing.content ?? standing.summary ?? "").trim(),
-                by: standing.sender,
-                ts,
-                age_min: Math.max(0, Math.floor((Date.now() - ts) / 60_000)),
-                request_id: key,
-              })
-            }
-            const row = db
-              .prepare("SELECT value FROM coordination WHERE project_id = ? AND key = ?")
-              .get("", "alarm.active") as { value: string | null } | undefined
-            if (!row?.value) {
+            if (standing === null) {
               return makeResponse(id, { active: false })
             }
-            try {
-              const parsed = JSON.parse(row.value) as { reason: string; by: string; ts: number }
-              return makeResponse(id, {
-                active: true,
-                reason: parsed.reason,
-                by: parsed.by,
-                ts: parsed.ts,
-                age_min: Math.floor((Date.now() - parsed.ts) / 60_000),
-              })
-            } catch {
-              return makeResponse(id, { active: false })
-            }
-          }
-
-          /** Layer 3 — clear the alarm. Caller is expected to have already
-           *  sent a verdict-typed acknowledgement to @user describing the
-           *  action taken (the CLI surfaces this as `tribe alarm-ack`). */
-          case "cli_alarm_ack": {
-            db.prepare("DELETE FROM coordination WHERE project_id = ? AND key = ?").run("", "alarm.active")
-            return makeResponse(id, { ok: true })
+            const ts = standing.opened_at
+            return makeResponse(id, {
+              active: true,
+              reason: (standing.content ?? standing.summary ?? "").trim(),
+              by: standing.sender,
+              ts,
+              age_min: Math.max(0, Math.floor((Date.now() - ts) / 60_000)),
+              request_id: key,
+            })
           }
 
           case "cli_daemon": {

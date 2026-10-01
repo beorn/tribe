@@ -125,6 +125,83 @@ describe("dispatcher self-registration collision handling (@ag/tribe/19594)", ()
     expect(harness.messageSender(sent.id)).toBe(client.name)
   })
 
+  it("26899: an unidentified socket still pulls the andon cord; cli_alarm_get records pending-<connId> as by", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    const client = harness.connectClient()
+    expect(client.name).toBe(`pending-${client.connId}`)
+
+    const pulled = parseResult<{
+      structuredContent: SendResult & { tracker?: { closed?: number } }
+    }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "andon-pull",
+          method: "tribe.send",
+          params: {
+            to: "@chief",
+            message: "fleet stopped\nBy: tester",
+            type: "notify",
+            summary: "active: fleet-stop",
+            incident: { emitter: "andon", subject: "fleet-stop", condition: "active" },
+          },
+        },
+        client.connId,
+      ),
+    ).structuredContent
+    expect(pulled.sent).toBe(true)
+    expect(harness.messageSender(pulled.id)).toBe(client.name)
+
+    const active = parseResult<{
+      active: boolean
+      by?: string
+      reason?: string
+      request_id?: string
+    }>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "andon-get", method: "cli_alarm_get", params: {} },
+        client.connId,
+      ),
+    )
+    expect(active).toMatchObject({
+      active: true,
+      by: client.name,
+      request_id: "andon:fleet-stop:active",
+    })
+    expect(active.by).not.toBe("tester")
+    expect(active.reason).toContain("By: tester")
+
+    const cleared = parseResult<{
+      structuredContent: SendResult & { tracker?: { closed?: number } }
+    }>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "andon-ack",
+          method: "tribe.send",
+          params: {
+            to: "@chief",
+            message: "andon cleared",
+            type: "notify",
+            summary: "active cleared: fleet-stop",
+            incident: { emitter: "andon", subject: "fleet-stop", condition: "active", active: false },
+          },
+        },
+        client.connId,
+      ),
+    ).structuredContent
+    expect(cleared.tracker?.closed).toBe(1)
+
+    const inactive = parseResult<{ active: boolean }>(
+      await harness.dispatcher.handleRequest(
+        { jsonrpc: "2.0", id: "andon-get-after", method: "cli_alarm_get", params: {} },
+        client.connId,
+      ),
+    )
+    expect(inactive).toEqual({ active: false })
+  })
+
   it("persists a startup notification filter before the session becomes connected", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose

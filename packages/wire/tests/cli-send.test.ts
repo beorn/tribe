@@ -754,6 +754,7 @@ describe("registerSendCommands", () => {
       const idle = await runCli(["alarm-ack"])
       expect(idle).toMatchObject({ code: 0 })
       expect(idle.stdout).toContain("no alarm was active")
+      expect(idle.stdout).not.toContain("ALARM CLEARED")
     } finally {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
       safeRemoveSync(tmp, { within: TEST_ROOT, allowMissing: true })
