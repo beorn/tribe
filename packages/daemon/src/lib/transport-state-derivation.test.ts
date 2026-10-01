@@ -116,6 +116,7 @@ function activeInfoFor(
     launchId: launch?.id ?? null,
     launchParentPid: launch?.parentPid ?? null,
     transportPids: [pid],
+    pushTransportPids: [],
   }
 }
 

@@ -225,6 +225,7 @@ describe("generic direct-message delivery resolution", () => {
           launchId: null,
           launchParentPid: null,
           transportPids: [process.pid],
+          pushTransportPids: [],
         },
         {
           id: "sess-manager",
@@ -237,6 +238,7 @@ describe("generic direct-message delivery resolution", () => {
           launchId: null,
           launchParentPid: null,
           transportPids: [process.pid],
+          pushTransportPids: [],
         },
       ],
       resolveDelivery: ({ recipient, answerableNames }) =>

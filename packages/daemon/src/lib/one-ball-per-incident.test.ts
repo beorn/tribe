@@ -239,6 +239,7 @@ describe("one ball per incident (habwire stage 2(d))", () => {
             launchId: null,
             launchParentPid: null,
             transportPids: [process.pid],
+            pushTransportPids: [],
           })),
       }
     }

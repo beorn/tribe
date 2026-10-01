@@ -85,6 +85,7 @@ function makeOpts(activeIds: () => Set<string>, db: Database): HandlerOpts {
                 launchId: null,
                 launchParentPid: null,
                 transportPids: [process.pid],
+                pushTransportPids: [],
               },
             ]
       }),
@@ -186,7 +187,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
   function connectAs(sessionId: string, name: string): TribeContext {
     const ctx = makeContext(db, stmts, sessionId, `boot-${sessionId}`)
     active.add(sessionId)
-    parseToolJson(handleToolCall(ctx, "tribe.join", { name, delivery: "pull" }, opts))
+    parseToolJson(handleToolCall(ctx, "tribe.join", { name }, opts))
     // Join must reset the tail first; registration then supplies this adapter's readable mailbox authority.
     registerSession(ctx, undefined, opts.hasActiveTransport, null, 0, "pull", undefined, null, null, null, null)
     // A readable mailbox: the sid its verified identity token recorded on the row (25074 3d-3).
@@ -861,7 +862,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
 
     const ctx = makeContext(db, stmts, "sess-b", "boot-sess-b")
     active.add("sess-b")
-    const joined = parseToolJson(handleToolCall(ctx, "tribe.join", { name: NAME, delivery: "pull" }, opts))
+    const joined = parseToolJson(handleToolCall(ctx, "tribe.join", { name: NAME }, opts))
     expect(joined.recovered_actionables).toBe(1)
     expect(joined.replayed_cursor).toBeUndefined()
   })
@@ -936,7 +937,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     // operation; ordinary tribe.join fails loud and leaves the mailbox put.
     const d = makeContext(db, stmts, "sess-d", "boot-sess-d")
     active.add("sess-d")
-    const joined = parseToolJson(handleToolCall(d, "tribe.join", { name: NAME, delivery: "pull" }, opts))
+    const joined = parseToolJson(handleToolCall(d, "tribe.join", { name: NAME }, opts))
 
     expect(joined.error).toContain(`Name "${NAME}" is already taken`)
     expect(fetchEvents(d, opts)).toEqual([])
@@ -1234,7 +1235,7 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       ts: now - 60_000,
     })
     expect(fetchEvents(b, opts).map((e) => e.id)).toEqual(["seen"])
-    const rejoin = parseToolJson(handleToolCall(b, "tribe.join", { name: NAME, delivery: "pull" }, opts))
+    const rejoin = parseToolJson(handleToolCall(b, "tribe.join", { name: NAME }, opts))
     expect(rejoin.recovered_actionables).toBeUndefined()
     expect(fetchEvents(b, opts)).toEqual([])
   })

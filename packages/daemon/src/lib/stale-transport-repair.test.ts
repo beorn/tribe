@@ -197,6 +197,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
           launchId: null,
           launchParentPid: null,
           transportPids: [process.pid],
+          pushTransportPids: [],
         },
       ],
     } as HandlerOpts
@@ -339,6 +340,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
           launchId: "launch-fleet",
           launchParentPid: process.pid,
           transportPids: [process.pid],
+          pushTransportPids: [],
         },
       ],
       retiredNames: new Set(["@fleet"]),
@@ -415,6 +417,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
           launchId: "launch-a6",
           launchParentPid: 6006,
           transportPids: [6007],
+          pushTransportPids: [],
         },
       ],
     } as HandlerOpts

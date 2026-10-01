@@ -142,6 +142,7 @@ describe("answer capability requires a mailbox consumer (24664)", () => {
         launchId: null,
         launchParentPid: null,
         transportPids: [process.pid],
+        pushTransportPids: seat.delivery === "push" ? [process.pid] : [],
       })
     }
     if (seat.lastReadAgeMs !== null) {

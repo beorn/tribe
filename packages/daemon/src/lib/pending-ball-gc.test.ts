@@ -696,6 +696,7 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
           launchId: null,
           launchParentPid: null,
           transportPids: [process.pid],
+          pushTransportPids: [],
         },
       ]
 

@@ -3,6 +3,7 @@ import {
   projectSessionLiveness,
   projectSessionTransportEvidence,
   projectSessionTransportState,
+  observeMailboxConsumers,
 } from "./session-transport-state.ts"
 
 const NOW = 1_800_000_000_000
@@ -11,6 +12,37 @@ const LIVE_TRANSPORT = { transportConnected: true, transportPids: [41], agentPid
 const CONSUMED = { consumers: ["push-client"] as const, mailboxReadable: true, lastMailboxReadAt: null }
 
 describe("daemon-authoritative session transport state", () => {
+  // @failure A surviving pull socket makes a missing/dead push adapter look able to answer.
+  // @level l1
+  // @consumer Member and pending-owner answer-capability projections
+  it.each([{ pushTransportPids: [] }, { pushTransportPids: [43] }])(
+    "does not infer a push consumer from surviving pull PID 41, push PIDs $pushTransportPids",
+    ({ pushTransportPids }) => {
+      const facts = {
+        delivery: "push",
+        clientRegistered: true,
+        pushTransportPids,
+        ownerWaiting: false,
+        probe: (pid: number) => (pid === 43 ? ("dead" as const) : ("live" as const)),
+      }
+      expect(
+        projectSessionTransportEvidence({
+          ...LIVE_TRANSPORT,
+          transportPids: [41, ...pushTransportPids],
+          probe: facts.probe,
+          consumers: observeMailboxConsumers(facts),
+          mailboxReadable: true,
+          lastMailboxReadAt: null,
+        }),
+      ).toMatchObject({
+        transport_state: "connected",
+        answer_capability: "not-observed",
+        answer_reason: "connected-no-consumer",
+      })
+      expect(observeMailboxConsumers({ ...facts, pushTransportPids: [44] })).toEqual(["push-client"])
+    },
+  )
+
   it("treats an authenticated registry entry with no contrary pid evidence as connected", () => {
     expect(projectSessionTransportState({ transportConnected: true })).toEqual({
       transport_registered: true,

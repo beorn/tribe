@@ -243,6 +243,7 @@ export type ActiveSessionInfo = {
   launchId: string | null
   launchParentPid: number | null
   transportPids: number[]
+  pushTransportPids: number[]
   protocolVersions?: number[]
 }
 
@@ -371,18 +372,14 @@ function readLastMailboxReadAt(stmts: TribeContext["stmts"], name: string): numb
 }
 
 function ownerTransportObservationProjector(ctx: TribeContext, opts: HandlerOpts, observedAt: number) {
-  const sessionRows = ctx.db
-    .prepare("SELECT id, name, identity_sid, delivery, updated_at FROM sessions")
-    .all() as Array<{
+  const sessionRows = ctx.db.prepare("SELECT id, name, identity_sid, updated_at FROM sessions").all() as Array<{
     id: string
     name: string
     identity_sid: string | null
-    delivery: string
     updated_at: number
   }>
   const knownNames = new Set(sessionRows.map((row) => row.name))
   const lastSeenByName = new Map(sessionRows.map((row) => [row.name, row.updated_at]))
-  const deliveryBySessionId = new Map(sessionRows.map((row) => [row.id, row.delivery]))
   const mailboxDeafNames = new Set<string>()
   const mailboxDeafReasons = new Map<string, MailboxReadCapability["reason"]>()
   for (const row of sessionRows) {
@@ -438,8 +435,7 @@ function ownerTransportObservationProjector(ctx: TribeContext, opts: HandlerOpts
         transportPids: info.transportPids,
         agentPid: info.launchParentPid ?? info.pid,
         consumers: observeMailboxConsumers({
-          delivery: deliveryBySessionId.get(info.id),
-          clientRegistered: true,
+          pushTransportPids: info.pushTransportPids,
           ownerWaiting,
         }),
         ...mailbox,
@@ -2874,8 +2870,8 @@ export function projectSessionRowTransport(
     probe: (pid) => (pidStillAlive(pid) ? "live" : "dead"),
     foreignIdentityTransport: foreignIdentityTransport !== undefined,
     consumers: observeMailboxConsumers({
-      delivery: row.delivery,
-      clientRegistered: transportConnected,
+      pushTransportPids: active?.pushTransportPids ?? [],
+      probe: (pid) => (pidStillAlive(pid) ? "live" : "dead"),
       ownerWaiting: mailbox.hasLiveWaiter?.(row.name) === true,
     }),
     mailboxReadable: projectMailboxReadCapability(row).state === "available",

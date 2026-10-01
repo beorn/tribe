@@ -56,6 +56,7 @@ function makeOpts(activeIds: readonly string[]): HandlerOpts {
         launchId: null,
         launchParentPid: null,
         transportPids: [process.pid],
+        pushTransportPids: [],
       })),
   }
 }

@@ -69,11 +69,15 @@ describe("a registration is collected by its own lifecycle", () => {
         socket: { destroyed: false, writable: true },
       }) as ClientSession
     try {
-      registry.attachTransport("pull", client("pull", "pull"))
-      registry.attachTransport("push-a", client("push-a", "push"))
-      registry.attachTransport("push-b", client("push-b", "push"))
+      registry.attachTransport("pull", { ...client("pull", "pull"), pid: 100 })
+      registry.attachTransport("push-a", { ...client("push-a", "push"), pid: 101 })
+      registry.attachTransport("push-b", { ...client("push-b", "push"), pid: 102 })
+      expect(registry.getActiveSessionInfo()).toMatchObject([
+        { transportPids: [100, 101, 102], pushTransportPids: [101, 102] },
+      ])
       registry.removeTransport("push-a")
       expect(registry.getSessionDelivery("launch")).toBe("push")
+      expect(registry.getActiveSessionInfo()).toMatchObject([{ pushTransportPids: [102] }])
       registry.setTransportDelivery("push-b", "pull")
       expect(registry.getSessionDelivery("launch")).toBe("pull")
       registry.setTransportDelivery("pull", "push")

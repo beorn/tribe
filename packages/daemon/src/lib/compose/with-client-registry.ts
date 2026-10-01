@@ -106,6 +106,7 @@ export interface ClientRegistry {
     launchId: string | null
     launchParentPid: number | null
     transportPids: number[]
+    pushTransportPids: number[]
     protocolVersions?: number[]
   }>
   /** True for any authenticated, fully registered transport, including watch
@@ -234,15 +235,19 @@ export function withClientRegistry<T extends BaseTribe>(): (t: T) => T & WithCli
             launchId: string | null
             launchParentPid: number | null
             transportPids: number[]
+            pushTransportPids: number[]
             protocolVersions: number[]
           }
         >()
-        for (const client of clients.values()) {
+        for (const [connId, client] of clients) {
           if (!isParticipant(client)) continue
           const id = client.ctx.sessionId
           const member = members.get(id)
           if (member) {
             if (client.pid > 0 && !member.transportPids.includes(client.pid)) member.transportPids.push(client.pid)
+            if (registry.isPushTransport(connId) && client.pid > 0 && !member.pushTransportPids.includes(client.pid)) {
+              member.pushTransportPids.push(client.pid)
+            }
             if (
               typeof client.protocolVersion === "number" &&
               !member.protocolVersions.includes(client.protocolVersion)
@@ -263,6 +268,7 @@ export function withClientRegistry<T extends BaseTribe>(): (t: T) => T & WithCli
             launchId: client.launchId,
             launchParentPid: client.launchParentPid,
             transportPids: client.pid > 0 ? [client.pid] : [],
+            pushTransportPids: registry.isPushTransport(connId) && client.pid > 0 ? [client.pid] : [],
             protocolVersions: typeof client.protocolVersion === "number" ? [client.protocolVersion] : [],
           })
         }

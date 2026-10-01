@@ -215,6 +215,7 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
           launchId: null,
           launchParentPid: null,
           transportPids: [4242],
+          pushTransportPids: [],
           cwd: clientCwd,
         },
       ],
@@ -223,7 +224,7 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
     // NO registerSession first — the join's late-registration branch
     // (hasSelfRow=false) previously hardcoded pid 0, planting rows that defeat
     // every isPidAlive liveness check downstream (the 19442 pid-0 ghost class).
-    handleToolCall(ctx, "tribe.join", { name: "@agent/7", delivery: "pull" }, opts)
+    handleToolCall(ctx, "tribe.join", { name: "@agent/7" }, opts)
 
     const row = db.prepare("SELECT pid, cwd FROM sessions WHERE id = ?").get(sessionId) as {
       pid: number
@@ -249,6 +250,7 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
           launchId: null,
           launchParentPid: null,
           transportPids: [94093],
+          pushTransportPids: [],
           cwd: clientCwd,
         },
       ],
@@ -259,7 +261,7 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
       db.prepare("SELECT pid, cwd FROM sessions WHERE id = ?").get(sessionId) as { pid: number; cwd: string }
     expect(persisted()).toEqual({ pid: 6266, cwd: "/repo/daemon" })
 
-    handleToolCall(ctx, "tribe.join", { name: "@agent/4", delivery: "pull" }, opts)
+    handleToolCall(ctx, "tribe.join", { name: "@agent/4" }, opts)
 
     expect(persisted()).toEqual({ pid: 94093, cwd: clientCwd })
     expect(membersFor(ctx, opts, "@agent/4")).toMatchObject({ pid: 94093, cwd: clientCwd })
@@ -313,7 +315,7 @@ describe("@km/tribe/19975 — join/refresh corrects provider/account", () => {
       $reply: null,
     })
 
-    handleToolCall(ctx, "tribe.join", { name: "@chief", delivery: "pull", provider: "codex" }, opts)
+    handleToolCall(ctx, "tribe.join", { name: "@chief", provider: "codex" }, opts)
 
     const row = db
       .prepare("SELECT id, name, role, delivery, provider, last_inbox_pull_seq FROM sessions WHERE id = ?")

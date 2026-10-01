@@ -735,6 +735,7 @@ describe("21757 — retention live window, unread protection, prune notice", () 
                   launchId: null,
                   launchParentPid: null,
                   transportPids: [process.pid],
+                  pushTransportPids: [],
                 },
               ]
         }),
@@ -933,7 +934,7 @@ describe("21757 — retention live window, unread protection, prune notice", () 
         JSON.parse((result as { content: Array<{ text: string }> }).content[0]?.text ?? "{}") as {
           attention?: { pruned?: { count: number } }
         }
-      parse(handleToolCall(dormant, "tribe.join", { name: "@dormant", delivery: "pull" }, opts))
+      parse(handleToolCall(dormant, "tribe.join", { name: "@dormant" }, opts))
 
       const first = parse(handleToolCall(dormant, "tribe.fetch", { limit: 50 }, opts))
       expect(first.attention?.pruned).toEqual({ count: 1, before: expect.any(String), recorded_at: expect.any(String) })

@@ -309,6 +309,7 @@ describe("membership projection: a finished launch is history, not a degraded me
             launchId: "launch-12-new",
             launchParentPid: 12013,
             transportPids: [12013],
+            pushTransportPids: [],
           },
         ],
       })

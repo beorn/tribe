@@ -303,6 +303,7 @@ describe("membership projection: declared-roster membership is a function of a p
             launchId: "launch-exp-3",
             launchParentPid: 30003,
             transportPids: [30003],
+            pushTransportPids: [],
           },
         ],
       })
@@ -474,6 +475,7 @@ describe("membership projection: declared-roster membership is a function of a p
           launchId: "launch-sib-2",
           launchParentPid: 30108,
           transportPids: [30108],
+          pushTransportPids: [],
         },
       ],
     })
@@ -506,6 +508,7 @@ describe("membership projection: declared-roster membership is a function of a p
           launchId: "launch-for-2",
           launchParentPid: 30109,
           transportPids: [30109],
+          pushTransportPids: [],
         },
       ],
     })
@@ -720,6 +723,7 @@ describe("membership projection: declared-roster membership is a function of a p
           launchId: "launch-probe-1",
           launchParentPid: 30099,
           transportPids: [30099],
+          pushTransportPids: [],
         },
         {
           id: "exp-10",
@@ -732,6 +736,7 @@ describe("membership projection: declared-roster membership is a function of a p
           launchId: "launch-exp-10",
           launchParentPid: 30100,
           transportPids: [30100],
+          pushTransportPids: [],
         },
       ],
     })
@@ -791,6 +796,7 @@ describe("membership projection: declared-roster membership is a function of a p
             launchId: "launch-exp-12",
             launchParentPid: 30112,
             transportPids: [30112],
+            pushTransportPids: [],
           },
         ],
       })

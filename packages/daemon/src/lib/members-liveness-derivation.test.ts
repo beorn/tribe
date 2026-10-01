@@ -88,6 +88,7 @@ function activeInfoFor(id: string, name: string, pid: number): ActiveSessionInfo
     launchId: null,
     launchParentPid: null,
     transportPids: [pid],
+    pushTransportPids: [],
   }
 }
 

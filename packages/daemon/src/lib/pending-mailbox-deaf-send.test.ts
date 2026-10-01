@@ -66,6 +66,7 @@ function liveInfo(id: string, name: string): ActiveSessionInfo {
     launchId: null,
     launchParentPid: null,
     transportPids: [process.pid],
+    pushTransportPids: [],
   }
 }
 

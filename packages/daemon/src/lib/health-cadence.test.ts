@@ -106,6 +106,7 @@ function activeSession(id: string, name: string, role: string, cwd: string, now:
     launchId: null,
     launchParentPid: null,
     transportPids: [],
+    pushTransportPids: [],
   }
 }
 

@@ -189,15 +189,15 @@ export function projectSessionLiveness(input: {
 
 /** Turn what the daemon can see into the consumer inputs of the answer projection. */
 export function observeMailboxConsumers(input: {
-  /** `sessions.delivery`, the mode registered at join. */
-  readonly delivery: string | undefined
-  /** A participating client is registered, so a push has a socket to reach. */
-  readonly clientRegistered: boolean
+  /** PIDs of connected writable transports whose own declaration is push. */
+  readonly pushTransportPids: readonly number[]
+  readonly probe?: (pid: number) => OwnerState
   /** The mailbox owner has an inbox.wait parked right now. */
   readonly ownerWaiting: boolean
 }): MailboxConsumer[] {
   const consumers: MailboxConsumer[] = []
-  if (input.delivery === "push" && input.clientRegistered) consumers.push("push-client")
+  const probe = input.probe ?? probeProcessState
+  if (input.pushTransportPids.some((pid) => probe(pid) === "live")) consumers.push("push-client")
   if (input.ownerWaiting) consumers.push("inbox-wait")
   return consumers
 }
