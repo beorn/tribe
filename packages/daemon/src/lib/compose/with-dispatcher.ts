@@ -206,6 +206,13 @@ export function withDispatcher<
   return (t) => {
     const { db, stmts, daemonCtx, recall: recallHandlers, registry, broadcast, socket } = t
     const { clients, socketToClient } = registry
+    // A persisted push row from the previous daemon is not a connected consumer.
+    db.prepare("UPDATE sessions SET delivery = 'pull' WHERE delivery <> 'pull'").run()
+    const persistDelivery = db.prepare("UPDATE sessions SET delivery = ? WHERE id = ?")
+    const stopDeliveryProjection = registry.onTransportsChanged((sessionId) => {
+      persistDelivery.run(registry.getSessionDelivery(sessionId), sessionId)
+    })
+    t.scope.defer(stopDeliveryProjection)
     const onActiveClient = hooks.onActiveClient ?? (() => {})
     const onIdle = hooks.onIdle ?? (() => {})
     const getActivePluginNames = hooks.getActivePluginNames ?? (() => [])
@@ -1348,7 +1355,7 @@ export function withDispatcher<
       broadcast.flushConnection(client.id)
       broadcast.discardConnection(client.id)
       channelJoinAnnounced.delete(client.id)
-      clients.delete(client.id)
+      registry.removeTransport(client.id)
       socketToClient.delete(client.socket)
       if (recallHandlers) recallHandlers.dropConn(client.recall.sessionId)
       client.socket.destroy()
@@ -1371,10 +1378,18 @@ export function withDispatcher<
         peerSocket: string | null
         ctx: TribeContext
         protocolVersion: number | null
+        delivery: "push" | "pull"
+        adapterExitRecord: string | null
       },
     ): ClientSession {
       const existing = clients.get(connId)
       if (existing === undefined) throw new Error(`cannot apply unknown client ${connId}`)
+      if (fields.adapterExitRecord !== null) {
+        db.prepare("UPDATE sessions SET adapter_exit_record = ? WHERE id = ?").run(
+          fields.adapterExitRecord,
+          fields.ctx.sessionId,
+        )
+      }
       const client: ClientSession = {
         socket: existing.socket,
         id: connId,
@@ -1396,8 +1411,9 @@ export function withDispatcher<
         lastActivityAt: Date.now(),
         recall: existing.recall,
         protocolVersion: fields.protocolVersion,
+        delivery: fields.delivery,
       }
-      clients.set(connId, client)
+      registry.attachTransport(connId, client)
       onActiveClient()
       return client
     }
@@ -1494,6 +1510,10 @@ export function withDispatcher<
         }
         switch (method) {
           case "register": {
+            const delivery = p.delivery ?? "push"
+            if (delivery !== "push" && delivery !== "pull") {
+              return makeError(id, -32602, "register delivery must be push or pull")
+            }
             // 24604 (a): the holders this registration displaced by its own authority (takeover, identity precedence,
             // same-pid replacement). registerSession may replace their rows; any other live durable launch keeps its name.
             const displacedSessionIds = new Set<string>()
@@ -1835,6 +1855,8 @@ export function withDispatcher<
                 peerSocket,
                 ctx: holder.ctx,
                 protocolVersion: negotiatedProtocolVersion ?? null,
+                delivery,
+                adapterExitRecord,
               })
               registry.markTransportConnected(client.ctx.sessionId)
               log.debug?.("transport.attached", {
@@ -1854,6 +1876,8 @@ export function withDispatcher<
                 name: client.name,
                 role: client.role,
                 principalClass: client.principalClass,
+                transportDelivery: client.delivery,
+                delivery: registry.getSessionDelivery(client.ctx.sessionId),
                 protocolVersion: negotiatedProtocolVersion ?? TRIBE_PROTOCOL_VERSION,
                 supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
                 coordinationState: coordState,
@@ -2038,8 +2062,6 @@ export function withDispatcher<
               onMessageInserted,
             })
 
-            const deliveryRaw = (p.delivery as string) ?? "push"
-            const delivery: "push" | "pull" = deliveryRaw === "pull" ? "pull" : "push"
             // @km/infra/15641 Phase 1 — per-session account/provider label
             // sourced from `ag` (which sets TRIBE_ACCOUNT/TRIBE_PROVIDER env
             // vars at backend-launch time). Tribe just stores the label so
@@ -2092,12 +2114,6 @@ export function withDispatcher<
             // G9 P0 row 7 — the launch's adapter-exit record, named by the plugin
             // supervisor that appends to it. Omission keeps a reconnecting
             // session's stored path, as it does for account and provider.
-            if (adapterExitRecord !== null) {
-              db.prepare("UPDATE sessions SET adapter_exit_record = ? WHERE id = ?").run(
-                adapterExitRecord,
-                clientCtx.sessionId,
-              )
-            }
             // Apply launch-declared admission before applyClient makes this
             // session visible to the broadcast fanout. Omission preserves a
             // reconnecting session's stored preference; an explicit mode is
@@ -2119,6 +2135,8 @@ export function withDispatcher<
               peerSocket,
               ctx: clientCtx,
               protocolVersion: negotiatedProtocolVersion ?? null,
+              delivery,
+              adapterExitRecord,
             })
             registry.markTransportConnected(client.ctx.sessionId)
 
@@ -2143,6 +2161,8 @@ export function withDispatcher<
               role,
               principalClass,
               protocolVersion: negotiatedProtocolVersion ?? TRIBE_PROTOCOL_VERSION,
+              transportDelivery: client.delivery,
+              delivery: registry.getSessionDelivery(client.ctx.sessionId),
               supportedProtocolVersions: [...TRIBE_SUPPORTED_PROTOCOL_VERSIONS],
               coordinationState: coordState,
               daemon: { pid: process.pid, uptime: Math.floor((Date.now() - socket.startedAt) / 1000) },
@@ -3041,7 +3061,7 @@ export function withDispatcher<
         recall: { sessionId: null, claudePid: null },
         protocolVersion: null,
       }
-      clients.set(connId, placeholder)
+      registry.attachTransport(connId, placeholder)
       socketToClient.set(sock, connId)
       onActiveClient()
 
@@ -3108,7 +3128,7 @@ export function withDispatcher<
         broadcast.flushConnection(connId)
         broadcast.discardConnection(connId)
         inboxWait.cancelConnection(connId)
-        clients.delete(connId)
+        registry.removeTransport(connId)
         socketToClient.delete(sock)
         if (client && client.role !== "pending" && !registry.hasActiveTransport(client.ctx.sessionId)) {
           registry.markTransportDisconnected(client.ctx.sessionId)

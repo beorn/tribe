@@ -14,7 +14,8 @@ import { openDatabase, createStatements } from "../database.ts"
 import { sendMessage } from "../messaging.ts"
 import { runRetentionSweep } from "../retention.ts"
 import { STARTUP_SHA, TRIBE_SOURCE_ROOT } from "../code-pin.ts"
-import type { ClientSession } from "./with-client-registry.ts"
+import { withClientRegistry } from "./with-client-registry.ts"
+import { createBaseTribe } from "./base.ts"
 import { withDispatcher } from "./with-dispatcher.ts"
 import type { LoadedIdentityVerifier } from "../identity-verifier.ts"
 
@@ -2445,8 +2446,8 @@ function createDispatcherHarness(
     claudeSessionName: null,
     onMessageInserted: undefined,
   })
-  const clients = new Map<string, ClientSession>()
-  const socketToClient = new Map<NetSocket, string>()
+  const { registry } = withClientRegistry()(createBaseTribe({ scope }))
+  const { clients, socketToClient } = registry
   const transportLifetimeEvents: Array<{ type: "connected" | "disconnected"; sessionId: string }> = []
   const healthLogs: Array<{ message: string; type: string }> = []
   const fakeServer = createFakeServer()
@@ -2476,81 +2477,14 @@ function createDispatcherHarness(
     daemonCtx,
     recall: null,
     registry: {
-      clients,
-      socketToClient,
-      getActiveSessionIds(): Set<string> {
-        return new Set(Array.from(clients.values(), (c) => c.ctx.sessionId))
-      },
-      hasActiveTransport(sessionId: string): boolean {
-        return Array.from(clients.values()).some(
-          (client) => client.role !== "pending" && client.ctx.sessionId === sessionId,
-        )
-      },
+      ...registry,
       markTransportConnected(sessionId: string) {
         transportLifetimeEvents.push({ type: "connected", sessionId })
+        registry.markTransportConnected(sessionId)
       },
       markTransportDisconnected(sessionId: string) {
         transportLifetimeEvents.push({ type: "disconnected", sessionId })
-      },
-      isReconnectGraceProtected(): boolean {
-        return false
-      },
-      startupReconnectGraceRemainingMs(): number {
-        return 0
-      },
-      forgetTransportSessions() {},
-      recordForeignIdentityTransport() {},
-      getForeignIdentityTransport() {
-        return undefined
-      },
-      onTransportDisconnected() {},
-      getActiveSessionInfo() {
-        const members = new Map<
-          string,
-          {
-            id: string
-            name: string
-            pid: number
-            cwd: string
-            role: TribeRole
-            claudeSessionId: string | null
-            registeredAt: number
-            launchId: string | null
-            launchParentPid: number | null
-            transportPids: number[]
-            protocolVersions: number[]
-          }
-        >()
-        for (const client of clients.values()) {
-          if (client.role !== "member") continue
-          const id = client.ctx.sessionId
-          const member = members.get(id)
-          if (member) {
-            if (client.pid > 0 && !member.transportPids.includes(client.pid)) member.transportPids.push(client.pid)
-            if (
-              typeof client.protocolVersion === "number" &&
-              !member.protocolVersions.includes(client.protocolVersion)
-            ) {
-              member.protocolVersions.push(client.protocolVersion)
-            }
-            member.registeredAt = Math.min(member.registeredAt, client.registeredAt)
-            continue
-          }
-          members.set(id, {
-            id,
-            name: client.name,
-            pid: client.pid,
-            cwd: client.project,
-            role: client.role,
-            claudeSessionId: client.claudeSessionId,
-            registeredAt: client.registeredAt,
-            launchId: client.launchId,
-            launchParentPid: client.launchParentPid,
-            transportPids: client.pid > 0 ? [client.pid] : [],
-            protocolVersions: typeof client.protocolVersion === "number" ? [client.protocolVersion] : [],
-          })
-        }
-        return Array.from(members.values())
+        registry.markTransportDisconnected(sessionId)
       },
     },
     broadcast: {
@@ -2764,7 +2698,7 @@ function createDispatcherHarness(
         claudeSessionName: null,
         onMessageInserted: daemonCtx.onMessageInserted,
       })
-      clients.set(connId, {
+      registry.attachTransport(connId, {
         socket,
         id: connId,
         name: pendingName,
@@ -2791,7 +2725,7 @@ function createDispatcherHarness(
       const canonical = clients.get(canonicalConnId)
       if (!canonical) throw new Error(`canonical client ${canonicalConnId} not found`)
       const socket = createTestSocket()
-      clients.set(connId, {
+      registry.attachTransport(connId, {
         ...canonical,
         socket,
         id: connId,
@@ -2865,6 +2799,8 @@ function createTestSocket(): TestSocket {
   const handlers = new Map<string, Array<(...args: unknown[]) => void>>()
   const socket = {
     destroyedByDispatcher: false,
+    destroyed: false,
+    writable: true,
     writes: [] as string[],
     write(payload: string | Uint8Array) {
       this.writes.push(String(payload))
@@ -2872,6 +2808,8 @@ function createTestSocket(): TestSocket {
     },
     destroy() {
       this.destroyedByDispatcher = true
+      this.destroyed = true
+      this.writable = false
       return this
     },
     end() {

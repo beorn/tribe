@@ -29,6 +29,8 @@ import { createStatements, openDatabase, type TribeStatements } from "./database
 import { registerSession, reapStaleTransportRows } from "./session.ts"
 import { DEFAULT_RECONNECT_GRACE_MS, withClientRegistry } from "./compose/with-client-registry.ts"
 import { withRuntime } from "./compose/with-runtime.ts"
+import { createBaseTribe } from "./compose/base.ts"
+import type { ClientSession } from "./compose/with-client-registry.ts"
 
 const PROJECT_ID = "registration-lifecycle-collection"
 
@@ -49,6 +51,40 @@ describe("a registration is collected by its own lifecycle", () => {
   })
 
   const countRows = (): number => (db.prepare("SELECT count(*) c FROM sessions").get() as { c: number }).c
+
+  // @failure A pull sibling or one departing push socket demotes the whole launch.
+  // @level l1
+  // @consumer ClientRegistry's transport-change projection
+  it("derives delivery through partial departures and connection declaration changes", async () => {
+    const scope = createScope("mixed-delivery-lifecycle")
+    const { registry } = withClientRegistry()(createBaseTribe({ scope }))
+    const changes: string[] = []
+    registry.onTransportsChanged((sessionId) => changes.push(registry.getSessionDelivery(sessionId)))
+    const client = (id: string, delivery: "push" | "pull"): ClientSession =>
+      ({
+        id,
+        role: "member",
+        ctx: { sessionId: "launch" },
+        delivery,
+        socket: { destroyed: false, writable: true },
+      }) as ClientSession
+    try {
+      registry.attachTransport("pull", client("pull", "pull"))
+      registry.attachTransport("push-a", client("push-a", "push"))
+      registry.attachTransport("push-b", client("push-b", "push"))
+      registry.removeTransport("push-a")
+      expect(registry.getSessionDelivery("launch")).toBe("push")
+      registry.setTransportDelivery("push-b", "pull")
+      expect(registry.getSessionDelivery("launch")).toBe("pull")
+      registry.setTransportDelivery("pull", "push")
+      registry.clearTransports()
+      expect(registry.getSessionDelivery("launch")).toBe("pull")
+      expect(changes).toEqual(["pull", "push", "push", "push", "pull", "push", "pull"])
+      expect(() => registry.setTransportDelivery("missing", "push")).toThrow("missing")
+    } finally {
+      await scope[Symbol.asyncDispose]()
+    }
+  })
 
   /** One anonymous register/die cycle: a fresh connection id and a fresh name. */
   function registerAnonymous(index: number): string {
@@ -193,7 +229,7 @@ describe("a registration is collected by its own lifecycle", () => {
       // Every session starts with a live transport, so nothing is reapable
       // until it actually departs.
       for (let i = 0; i < CHURN; i++) {
-        registry.clients.set(`conn-${i}`, connectedClient(`conn-${i}`) as never)
+        registry.attachTransport(`conn-${i}`, connectedClient(`conn-${i}`) as never)
       }
 
       const shape = {
@@ -235,7 +271,7 @@ describe("a registration is collected by its own lifecycle", () => {
       // at its own time, not at the first departure's.
       for (let i = 0; i < CHURN; i++) {
         await vi.advanceTimersByTimeAsync(i === 0 ? 0 : STAGGER_MS)
-        registry.clients.delete(`conn-${i}`)
+        registry.removeTransport(`conn-${i}`)
         registry.markTransportDisconnected(`conn-${i}`, Date.now())
       }
 
@@ -262,8 +298,8 @@ describe("a registration is collected by its own lifecycle", () => {
       const scope = createScope("registration-lifecycle-reconnect-test")
       const base = { scope, startedAt: T0 } as unknown as Parameters<ReturnType<typeof withClientRegistry>>[0]
       const { registry } = withClientRegistry()(base)
-      registry.clients.set("conn-1", connectedClient("conn-1") as never)
-      registry.clients.set("conn-2", connectedClient("conn-2") as never)
+      registry.attachTransport("conn-1", connectedClient("conn-1") as never)
+      registry.attachTransport("conn-2", connectedClient("conn-2") as never)
 
       const shape = {
         scope,
@@ -298,15 +334,15 @@ describe("a registration is collected by its own lifecycle", () => {
         publishShutdown: () => {},
       })(shape as never)
 
-      registry.clients.delete("conn-1")
+      registry.removeTransport("conn-1")
       registry.markTransportDisconnected("conn-1", Date.now())
-      registry.clients.delete("conn-2")
+      registry.removeTransport("conn-2")
       registry.markTransportDisconnected("conn-2", Date.now())
 
       // conn-1 comes back before its grace expires — the pull-delivery seat
       // shape this whole deferral exists to protect.
       await vi.advanceTimersByTimeAsync(60_000)
-      registry.clients.set("conn-1", connectedClient("conn-1") as never)
+      registry.attachTransport("conn-1", connectedClient("conn-1") as never)
 
       await vi.advanceTimersByTimeAsync(DEFAULT_RECONNECT_GRACE_MS + 5_000)
 

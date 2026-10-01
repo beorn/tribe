@@ -119,7 +119,7 @@ describe("stale transport registration repair (@ag/tribe/21669)", () => {
     registry.markTransportConnected("legacy")
     expect(registry.isReconnectGraceProtected("legacy", disconnectedAt + DEFAULT_RECONNECT_GRACE_MS - 1)).toBe(false)
 
-    registry.clients.set("watch-conn", {
+    registry.attachTransport("watch-conn", {
       role: "watch",
       ctx: { sessionId: "watch-session" },
     } as never)

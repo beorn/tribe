@@ -32,10 +32,10 @@ import type { TribeRole } from "tribe-wire/lib/config"
 import { createTribeContext } from "../context.ts"
 import { openDatabase, createStatements } from "../database.ts"
 import { sendMessage } from "../messaging.ts"
-import type { ClientSession } from "./with-client-registry.ts"
+import { withClientRegistry } from "./with-client-registry.ts"
+import { createBaseTribe } from "./base.ts"
 import { withDispatcher, type DispatcherRuntimeHooks } from "./with-dispatcher.ts"
 import type { IdentityVerdict } from "../identity-verifier.ts"
-import type { ForeignIdentityTransport } from "../session-transport-state.ts"
 
 // Syntactically readable claims whose signature the stub verifier cannot read. This keeps WA-R31's claimed fallback
 // distinct from 26524's absent or malformed-token refusal on a managed persona.
@@ -662,9 +662,8 @@ function createDispatcherHarness(
     onMessageInserted: undefined,
   })
   seed?.(daemonCtx)
-  const clients = new Map<string, ClientSession>()
-  const socketToClient = new Map<NetSocket, string>()
-  const foreignIdentityTransports = new Map<string, ForeignIdentityTransport>()
+  const { registry } = withClientRegistry()(createBaseTribe({ scope }))
+  const { clients, socketToClient } = registry
   const healthLogs: Array<{ type: string; message: string }> = []
   const fakeServer = createFakeServer()
 
@@ -691,50 +690,7 @@ function createDispatcherHarness(
     stmts,
     daemonCtx,
     recall: null,
-    registry: {
-      clients,
-      socketToClient,
-      getActiveSessionIds(): Set<string> {
-        return new Set(Array.from(clients.values(), (c) => c.ctx.sessionId))
-      },
-      hasActiveTransport(sessionId: string): boolean {
-        return Array.from(clients.values()).some(
-          (client) => client.role !== "pending" && client.ctx.sessionId === sessionId,
-        )
-      },
-      markTransportConnected() {},
-      markTransportDisconnected() {},
-      isReconnectGraceProtected(): boolean {
-        return false
-      },
-      startupReconnectGraceRemainingMs(): number {
-        return 0
-      },
-      forgetTransportSessions() {},
-      recordForeignIdentityTransport(sessionId: string, transport: ForeignIdentityTransport) {
-        foreignIdentityTransports.set(sessionId, transport)
-      },
-      getForeignIdentityTransport(sessionId: string) {
-        return foreignIdentityTransports.get(sessionId)
-      },
-      onTransportDisconnected() {},
-      getActiveSessionInfo() {
-        return Array.from(clients.values())
-          .filter((client) => client.role === "member")
-          .map((client) => ({
-            id: client.ctx.sessionId,
-            name: client.name,
-            pid: client.pid,
-            cwd: client.project,
-            role: client.role,
-            claudeSessionId: client.claudeSessionId,
-            registeredAt: client.registeredAt,
-            launchId: client.launchId,
-            launchParentPid: client.launchParentPid,
-            transportPids: client.pid > 0 ? [client.pid] : [],
-          }))
-      },
-    },
+    registry,
     broadcast: {
       notify() {},
       pushToClient() {},
@@ -819,7 +775,7 @@ function createDispatcherHarness(
     dropClient(connId: string): void {
       const client = clients.get(connId)
       if (client) socketToClient.delete(client.socket)
-      clients.delete(connId)
+      registry.removeTransport(connId)
     },
     addWatchTransport(connId: string, sessionId: string): TestSocket {
       const member = Array.from(clients.values()).find(
@@ -827,7 +783,7 @@ function createDispatcherHarness(
       )
       if (!member) throw new Error(`cannot attach watch transport: member session ${sessionId} is not connected`)
       const socket = createTestSocket()
-      clients.set(connId, {
+      registry.attachTransport(connId, {
         ...member,
         socket,
         id: connId,
@@ -871,7 +827,7 @@ function createDispatcherHarness(
         claudeSessionName: null,
         onMessageInserted: daemonCtx.onMessageInserted,
       })
-      clients.set(connId, {
+      registry.attachTransport(connId, {
         socket,
         id: connId,
         name: pendingName,
@@ -2963,6 +2919,8 @@ function parseError(line: string): { code: number; message: string; data?: { hol
 function createTestSocket(): TestSocket {
   const socket = {
     destroyedByDispatcher: false,
+    destroyed: false,
+    writable: true,
     writes: [] as string[],
     write(payload: string | Uint8Array) {
       this.writes.push(String(payload))
@@ -2970,6 +2928,8 @@ function createTestSocket(): TestSocket {
     },
     destroy() {
       this.destroyedByDispatcher = true
+      this.destroyed = true
+      this.writable = false
       return this
     },
     end() {

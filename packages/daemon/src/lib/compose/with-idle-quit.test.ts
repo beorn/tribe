@@ -55,7 +55,7 @@ type Harness = {
   markIdle: () => void
   stop: () => void
   countDurableSessions: ReturnType<typeof vi.fn>
-  clients: Map<string, ClientSession>
+  attachTransport: (connId: string, client: ClientSession) => void
   setDurable: (n: number) => void
   advance: (ms: number) => void
   /** Let the real (short-interval) tick run a few times. */
@@ -91,7 +91,7 @@ async function makeHarness(
     markIdle: () => shape.idleQuit.markIdle(),
     stop: () => shape.idleQuit.stop(),
     countDurableSessions,
-    clients: shape.registry.clients,
+    attachTransport: shape.registry.attachTransport,
     setDurable: (n) => {
       durable = n
     },
@@ -103,7 +103,7 @@ async function makeHarness(
 }
 
 function fakeMemberClient(): ClientSession {
-  return { role: "member", registeredAt: Date.now() } as unknown as ClientSession
+  return { role: "member", ctx: { sessionId: "test-member" }, registeredAt: Date.now() } as unknown as ClientSession
 }
 
 afterEach(async () => {
@@ -154,7 +154,7 @@ describe("withIdleQuit client census", () => {
 
   it("a connected socket holds the daemon up exactly as before", async () => {
     const h = await makeHarness()
-    h.clients.set("conn-1", fakeMemberClient())
+    h.attachTransport("conn-1", fakeMemberClient())
     await h.settle()
     expect(h.getDeadline()).toBeNull()
     h.advance(10 * THIRTY_MIN_MS)

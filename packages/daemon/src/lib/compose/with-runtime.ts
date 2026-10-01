@@ -307,7 +307,7 @@ export function withRuntime<T extends RuntimeShape>(opts: RuntimeOpts<T>): (t: T
           /* ignore */
         }
       }
-      t.registry.clients.clear()
+      t.registry.clearTransports()
       // Cascade everything else through scope.dispose. Server.close + socket
       // file unlink + db close + watcher close all live in scope-deferred
       // disposers registered by their factories.

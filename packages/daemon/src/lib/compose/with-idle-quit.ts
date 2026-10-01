@@ -248,7 +248,7 @@ export function withIdleQuit<T extends BaseTribe & WithConfig & WithClientRegist
           log.info?.(
             `Expiring stale pending session: ${client.name} (age=${Math.floor((nowMs - client.registeredAt) / 1000)}s)`,
           )
-          clients.delete(connId)
+          t.registry.removeTransport(connId)
           socketToClient.delete(client.socket)
           try {
             client.socket.destroy()

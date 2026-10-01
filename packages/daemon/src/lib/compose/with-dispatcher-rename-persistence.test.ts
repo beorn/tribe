@@ -37,7 +37,8 @@ import { TRIBE_PROTOCOL_VERSION, type JsonRpcRequest } from "tribe-wire/lib/sock
 import type { TribeRole } from "tribe-wire/lib/config"
 import { createTribeContext } from "../context.ts"
 import { openDatabase, createStatements } from "../database.ts"
-import type { ClientSession } from "./with-client-registry.ts"
+import { withClientRegistry } from "./with-client-registry.ts"
+import { createBaseTribe } from "./base.ts"
 import { withDispatcher } from "./with-dispatcher.ts"
 
 type TestSocket = NetSocket & {
@@ -409,8 +410,8 @@ function createDispatcherHarness(dir: string) {
     claudeSessionName: null,
     onMessageInserted: undefined,
   })
-  const clients = new Map<string, ClientSession>()
-  const socketToClient = new Map<NetSocket, string>()
+  const { registry } = withClientRegistry()(createBaseTribe({ scope }))
+  const { clients, socketToClient } = registry
   const fakeServer = createFakeServer()
 
   const shape = {
@@ -436,50 +437,7 @@ function createDispatcherHarness(dir: string) {
     stmts,
     daemonCtx,
     recall: null,
-    registry: {
-      clients,
-      socketToClient,
-      getActiveSessionIds(): Set<string> {
-        return new Set(
-          Array.from(clients.values())
-            .filter((client) => client.role === "member")
-            .map((client) => client.ctx.sessionId),
-        )
-      },
-      hasActiveTransport(sessionId: string): boolean {
-        return Array.from(clients.values()).some(
-          (client) => client.role !== "pending" && client.ctx.sessionId === sessionId,
-        )
-      },
-      markTransportConnected() {},
-      markTransportDisconnected() {},
-      isReconnectGraceProtected(): boolean {
-        return false
-      },
-      startupReconnectGraceRemainingMs(): number {
-        return 0
-      },
-      forgetTransportSessions() {},
-      recordForeignIdentityTransport() {},
-      getForeignIdentityTransport() {
-        return undefined
-      },
-      onTransportDisconnected() {},
-      getActiveSessionInfo() {
-        return Array.from(clients.values()).map((c) => ({
-          id: c.ctx.sessionId,
-          name: c.name,
-          pid: c.pid,
-          cwd: c.project,
-          role: c.role,
-          claudeSessionId: c.claudeSessionId,
-          registeredAt: c.registeredAt,
-          launchId: c.launchId,
-          launchParentPid: c.launchParentPid,
-          transportPids: c.pid > 0 ? [c.pid] : [],
-        }))
-      },
-    },
+    registry,
     broadcast: {
       notify() {},
       pushToClient() {},
@@ -540,7 +498,7 @@ function createDispatcherHarness(dir: string) {
     dropClient(connId: string): void {
       const client = clients.get(connId)
       if (client) socketToClient.delete(client.socket)
-      clients.delete(connId)
+      registry.removeTransport(connId)
     },
     addWatchTransport(connId: string, sessionId: string): TestSocket {
       const member = Array.from(clients.values()).find(
@@ -548,7 +506,7 @@ function createDispatcherHarness(dir: string) {
       )
       if (!member) throw new Error(`cannot attach watch transport: member session ${sessionId} is not connected`)
       const socket = createTestSocket()
-      clients.set(connId, {
+      registry.attachTransport(connId, {
         ...member,
         socket,
         id: connId,
@@ -574,7 +532,7 @@ function createDispatcherHarness(dir: string) {
         claudeSessionName: null,
         onMessageInserted: daemonCtx.onMessageInserted,
       })
-      clients.set(connId, {
+      registry.attachTransport(connId, {
         socket,
         id: connId,
         name: pendingName,
@@ -620,6 +578,8 @@ function parseToolJson<T>(line: string): T {
 function createTestSocket(): TestSocket {
   const socket = {
     destroyedByDispatcher: false,
+    destroyed: false,
+    writable: true,
     writes: [] as string[],
     write(payload: string | Uint8Array) {
       this.writes.push(String(payload))
@@ -627,6 +587,8 @@ function createTestSocket(): TestSocket {
     },
     destroy() {
       this.destroyedByDispatcher = true
+      this.destroyed = true
+      this.writable = false
       return this
     },
     end() {

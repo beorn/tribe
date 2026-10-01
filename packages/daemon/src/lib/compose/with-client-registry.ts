@@ -76,11 +76,20 @@ export type ClientSession = {
   recall: RecallConnState
   /** Wire version negotiated for this transport; null before registration. */
   protocolVersion?: number | null
+  /** Accepted declaration for this transport; pending sockets have none. */
+  readonly delivery?: "push" | "pull"
 }
 
 export interface ClientRegistry {
   /** connId → session */
-  readonly clients: Map<string, ClientSession>
+  readonly clients: ReadonlyMap<string, ClientSession>
+  attachTransport(connId: string, client: ClientSession): void
+  removeTransport(connId: string): ClientSession | undefined
+  setTransportDelivery(connId: string, delivery: "push" | "pull"): void
+  clearTransports(): void
+  getSessionDelivery(sessionId: string): "push" | "pull"
+  /** Synchronous, DB-free lifecycle signal; the composing listener owns persistence. */
+  onTransportsChanged(listener: (sessionId: string) => void): () => void
   /** socket → connId — reverse index for socket-keyed cleanup */
   readonly socketToClient: Map<NetSocket, string>
   /** ctx.sessionIds of every currently-connected participating member. */
@@ -135,10 +144,71 @@ export function withClientRegistry<T extends BaseTribe>(): (t: T) => T & WithCli
     const disconnectedAtBySession = new Map<string, number>()
     const foreignIdentityTransportBySession = new Map<string, ForeignIdentityTransport>()
     const transportDisconnectListeners: Array<(sessionId: string, nowMs: number) => void> = []
+    const transportChangeListeners = new Set<(sessionId: string) => void>()
+    function changed(sessionId: string): void {
+      for (const listener of transportChangeListeners) listener(sessionId)
+    }
 
     const registry: ClientRegistry = {
       clients,
       socketToClient,
+      attachTransport(connId, client): void {
+        const previous = clients.get(connId)
+        if (previous?.socket) socketToClient.delete(previous.socket)
+        const accepted = client.role === "pending" ? client : { ...client, delivery: client.delivery ?? "push" }
+        clients.set(connId, accepted)
+        if (accepted.socket) socketToClient.set(accepted.socket, connId)
+        if (previous && isParticipant(previous) && previous.ctx.sessionId !== accepted.ctx.sessionId) {
+          changed(previous.ctx.sessionId)
+        }
+        if (isParticipant(accepted)) changed(accepted.ctx.sessionId)
+      },
+      removeTransport(connId) {
+        const client = clients.get(connId)
+        if (!client) return undefined
+        clients.delete(connId)
+        if (client.socket) socketToClient.delete(client.socket)
+        if (isParticipant(client)) changed(client.ctx.sessionId)
+        return client
+      },
+      setTransportDelivery(connId, delivery): void {
+        const client = clients.get(connId)
+        if (!client || client.role === "pending") {
+          throw new Error(`cannot declare delivery for unregistered transport ${connId}`)
+        }
+        if (delivery !== "push" && delivery !== "pull") {
+          throw new Error(`invalid transport delivery: ${String(delivery)}`)
+        }
+        clients.set(connId, { ...client, delivery })
+        if (isParticipant(client)) changed(client.ctx.sessionId)
+      },
+      clearTransports(): void {
+        const sessions = registry.getActiveSessionIds()
+        clients.clear()
+        socketToClient.clear()
+        for (const sessionId of sessions) changed(sessionId)
+      },
+      getSessionDelivery(sessionId) {
+        for (const client of clients.values()) {
+          if (
+            isParticipant(client) &&
+            client.ctx.sessionId === sessionId &&
+            client.delivery === "push" &&
+            client.socket &&
+            !client.socket.destroyed &&
+            client.socket.writable
+          ) {
+            return "push"
+          }
+        }
+        return "pull"
+      },
+      onTransportsChanged(listener) {
+        transportChangeListeners.add(listener)
+        return () => {
+          transportChangeListeners.delete(listener)
+        }
+      },
       getActiveSessionIds(): Set<string> {
         const ids = new Set<string>()
         for (const c of clients.values()) {
@@ -236,8 +306,8 @@ export function withClientRegistry<T extends BaseTribe>(): (t: T) => T & WithCli
     // Drop all client refs on shutdown so disposal doesn't leave dangling
     // sockets in the maps. Actual socket teardown is the socket-server's job.
     t.scope.defer(() => {
-      clients.clear()
-      socketToClient.clear()
+      registry.clearTransports()
+      transportChangeListeners.clear()
       disconnectedAtBySession.clear()
       foreignIdentityTransportBySession.clear()
     })
