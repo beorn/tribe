@@ -116,6 +116,50 @@ afterEach(async () => {
 })
 
 describe("dispatcher explicit-persona takeover (@ag/tribe/20703)", () => {
+  // @failure 26564: explicit malformed delivery must not silently inherit the omitted declaration's push default.
+  // @level l2 @consumer raw registration validation before any transport becomes eligible
+  it("refuses malformed delivery and retains push only for an omitted declaration", async () => {
+    const harness = createDispatcherHarness()
+    cleanup = harness.dispose
+    harness.addPendingClient("delivery-validation")
+    const params = {
+      name: "delivery-validation-member",
+      role: "member",
+      pid: 5101,
+      project: "/tmp/p",
+      protocolVersion: TRIBE_PROTOCOL_VERSION,
+    }
+    for (const delivery of [null, "invalid", 42, {}]) {
+      const refusal = parseError(
+        await harness.dispatcher.handleRequest(
+          {
+            jsonrpc: "2.0",
+            id: "invalid-delivery",
+            method: "register",
+            params: { ...params, delivery },
+          },
+          "delivery-validation",
+        ),
+      )
+      expect(refusal.code).toBe(-32602)
+      expect(refusal.message).toContain("register delivery must be push or pull")
+      expect(harness.registry.isPushTransport("delivery-validation")).toBe(false)
+    }
+    const accepted = parseResult<RegisterResult>(
+      await harness.dispatcher.handleRequest(
+        {
+          jsonrpc: "2.0",
+          id: "omitted-delivery",
+          method: "register",
+          params,
+        },
+        "delivery-validation",
+      ),
+    )
+    expect(accepted).toMatchObject({ transportDelivery: "push", delivery: "push" })
+    expect(harness.registry.isPushTransport("delivery-validation")).toBe(true)
+  })
+
   it("rejects partial launch identity instead of silently downgrading to legacy registration", async () => {
     const harness = createDispatcherHarness()
     cleanup = harness.dispose

@@ -1510,7 +1510,7 @@ export function withDispatcher<
         }
         switch (method) {
           case "register": {
-            const delivery = p.delivery ?? "push"
+            const delivery = p.delivery === undefined ? "push" : p.delivery
             if (delivery !== "push" && delivery !== "pull") {
               return makeError(id, -32602, "register delivery must be push or pull")
             }
