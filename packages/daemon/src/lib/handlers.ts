@@ -333,7 +333,7 @@ export type HandlerOpts = {
    * opportunistic nudge). See `countUnackedAttention` in messaging.ts and
    * the mailbox injection in `handleFetch`.
    */
-  notifyWakeupForReplay?: (sessionId: string, claimedName: string, targetConnId?: string) => void
+  notifyWakeupForReplay?: (sessionId: string, claimedName: string) => void
   /** Daemon-owned bounded cleanup. Omitted in direct handler harnesses that do
    * not compose the authenticated transport registry. */
   reapStaleTransports?: () => StaleTransportReapReport
@@ -3046,7 +3046,7 @@ function handleRename(
     hasActiveTransport: (sessionId: string) => boolean
     isReconnectGraceProtected?: (sessionId: string, nowMs: number) => boolean
     /** Optional: opportunistic socket wakeup after a name-claim replay rewind. */
-    notifyWakeupForReplay?: (sessionId: string, claimedName: string, targetConnId?: string) => void
+    notifyWakeupForReplay?: (sessionId: string, claimedName: string) => void
   },
 ): ToolResult {
   const newName = a.new_name as string

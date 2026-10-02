@@ -42,7 +42,6 @@ function spawnFakeDaemon(
     registerErrorUntil?: number
     registerAck?: Record<string, unknown>
     joinAck?: Record<string, unknown>
-    wakeupDuringRegister?: boolean
   } = {},
 ): Promise<FakeDaemon> {
   const clients: Socket[] = []
@@ -65,9 +64,6 @@ function spawnFakeDaemon(
               makeError(msg.id, opts.registerError.code, opts.registerError.message, opts.registerError.data),
             )
             return
-          }
-          if (opts.wakeupDuringRegister) {
-            socket.write(makeNotification("wakeup", { reason: "actionable-recovery" }))
           }
           const delivery = (msg.params as Record<string, unknown>)?.delivery
           socket.write(
@@ -1619,59 +1615,5 @@ describe("stdio adapter delivery modes", () => {
           (line) => line.method === "notifications/claude/channel" && JSON.stringify(line).includes(summaryText),
         ).length === 2,
     )
-  })
-
-  it("drains and pushes attention when wakeup arrives within the register round-trip (#26969 row 5)", async () => {
-    const socketPath = join(tmpDir, "tribe.sock")
-    const fetchAttention = {
-      actionable_unread: [
-        {
-          id: "mid-reg-order",
-          type: "request",
-          from: "@chief",
-          content: "delivered despite wakeup during register",
-          ts: new Date().toISOString(),
-        },
-      ],
-      pending_balls: [],
-    }
-    daemon = await spawnFakeDaemon(socketPath, {
-      wakeupDuringRegister: true,
-      fetchAttention,
-    })
-    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
-      cwd: tmpDir,
-      env: {
-        ...process.env,
-        TRIBE_DELIVERY: "push",
-        TRIBE_NO_AUTOSTART: "1",
-        TRIBE_REQUIRE_JOIN: "0",
-        DEBUG_LOG: join(tmpDir, "adapter.log"),
-      },
-      stdio: ["pipe", "pipe", "pipe"],
-    })
-    const stdout = collectStdoutJson(child)
-
-    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
-    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
-
-    await waitForStdout(
-      child,
-      stdout,
-      () =>
-        stdout.some(
-          (line) =>
-            line.method === "notifications/claude/channel" &&
-            JSON.stringify(line).includes("delivered despite wakeup during register"),
-        ),
-      { timeoutMs: 10_000 },
-    )
-
-    const delivered = stdout.find(
-      (line) =>
-        line.method === "notifications/claude/channel" &&
-        JSON.stringify(line).includes("delivered despite wakeup during register"),
-    )
-    expect(delivered).toBeDefined()
   })
 })
