@@ -38,7 +38,7 @@ const ambientIdentity = {
 
 describe("Tribe daemon environment ownership", () => {
   test("the portable Hab declaration names the accountable owner", () => {
-    expect(tribeProject.services.wire.owner).toBe("@chief")
+    expect(tribeProject.habitants.wire.owner).toBe("@chief")
   })
 
   test("a Hab-owned daemon deletes ambient seat identity and capability in place", () => {
