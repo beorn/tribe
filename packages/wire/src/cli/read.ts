@@ -1785,10 +1785,12 @@ interface InboxDrainFailureProjection {
   kind: string
   message: string
   reason: string
+  stallSample?: unknown
 }
 
 function projectInboxDrainFailure(error: unknown): InboxDrainFailureProjection {
-  const failure = error instanceof Error ? (error as Error & { code?: unknown; data?: unknown }) : undefined
+  const failure =
+    error instanceof Error ? (error as Error & { code?: unknown; data?: unknown; stallSample?: unknown }) : undefined
   const data =
     typeof failure?.data === "object" && failure.data !== null ? (failure.data as Record<string, unknown>) : undefined
   const timedOut = failure?.name === "DaemonCallTimeoutError" || failure?.code === "TRIBE_DAEMON_CALL_TIMEOUT"
@@ -1803,6 +1805,7 @@ function projectInboxDrainFailure(error: unknown): InboxDrainFailureProjection {
       : typeof data?.reason === "string"
         ? data.reason
         : "unclassified-authority-failure",
+    ...(timedOut && failure?.stallSample !== undefined ? { stallSample: failure.stallSample } : {}),
   }
 }
 

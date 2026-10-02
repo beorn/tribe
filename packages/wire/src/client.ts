@@ -30,6 +30,7 @@ import {
 import { isNotification, isResponse, makeNotification, makeRequest } from "./rpc.ts"
 import { sanitizeStandaloneDaemonEnvironment } from "./daemon-environment.ts"
 import { createTimers } from "./timers.ts"
+import { readIoReadBytes, readPeerPid, sampleConnectedDaemon, type StallSample } from "./stall-sample.ts"
 
 const log = createLogger("tribe-client:client")
 
@@ -61,36 +62,56 @@ class DaemonCallTimeoutError extends Error {
   constructor(
     readonly method: string,
     readonly timeoutMs: number,
+    readonly stallSample?: StallSample,
   ) {
     super(`Request ${method} timed out after ${timeoutMs}ms; check Tribe daemon health before retrying`)
     this.name = "DaemonCallTimeoutError"
   }
 }
 
+/** Default delay before one stall-time /proc sample. @cto 666b47e8 / #27089. */
+export const STALL_SAMPLE_AFTER_MS = 5_000
+
 export type ConnectToDaemonOpts = {
   /** Per-call request timeout. Default: 10000 ms. */
   callTimeoutMs?: number
+  /**
+   * Delay before one stall-time sample of the daemon. Default 5000 ms.
+   * A call whose deadline is at or below this delay is not sampled.
+   */
+  stallSampleAfterMs?: number
+  /** @internal test seam — replace the /proc+WAL collector. */
+  stallSample?: () => StallSample | Promise<StallSample>
 }
 
 export function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts): Promise<DaemonClient> {
   const callTimeoutMs = opts?.callTimeoutMs ?? 10_000
+  const stallSampleAfterMs = opts?.stallSampleAfterMs ?? STALL_SAMPLE_AFTER_MS
   return new Promise((resolvePromise, reject) => {
     const socket = createConnection(socketPath)
     type PendingCall = {
       resolve: (value: unknown) => void
       reject: (error: Error) => void
       timer?: ReturnType<typeof globalThis.setTimeout>
+      sampleTimer?: ReturnType<typeof globalThis.setTimeout>
+      stallSample?: StallSample
     }
     const pending = new Map<number | string, PendingCall>()
     const notificationHandlers: Array<(method: string, params?: Record<string, unknown>) => void> = []
     let nextId = 1
+    let peerPid: number | null = null
 
     const ac = new AbortController()
     const timers = createTimers(ac.signal)
 
+    function clearCallTimers(p: PendingCall): void {
+      if (p.timer !== undefined) timers.clearTimeout(p.timer)
+      if (p.sampleTimer !== undefined) timers.clearTimeout(p.sampleTimer)
+    }
+
     function rejectPending(err: Error): void {
       for (const [, p] of pending) {
-        if (p.timer !== undefined) timers.clearTimeout(p.timer)
+        clearCallTimers(p)
         p.reject(err)
       }
       pending.clear()
@@ -102,10 +123,10 @@ export function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts):
         const p = pending.get(msg.id)
         if (p) {
           pending.delete(msg.id)
-          if (p.timer !== undefined) timers.clearTimeout(p.timer)
-          if (msg.error)
+          clearCallTimers(p)
+          if (msg.error) {
             p.reject(Object.assign(new Error(msg.error.message), { code: msg.error.code, data: msg.error.data }))
-          else p.resolve(msg.result)
+          } else p.resolve(msg.result)
         }
       } else if (isNotification(msg)) {
         for (const h of notificationHandlers) h(msg.method, msg.params)
@@ -143,6 +164,10 @@ export function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts):
       })
 
       let timeouts = 0
+      void (async () => {
+        const peer = await readPeerPid(socket)
+        if (peer.ok) peerPid = peer.pid
+      })()
       const client: DaemonClient = {
         call(method, params, callOpts) {
           return new Promise((res, rej) => {
@@ -155,9 +180,28 @@ export function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts):
             const pendingCall: PendingCall = { resolve: res, reject: rej }
             pending.set(id, pendingCall)
             socket.write(makeRequest(id, method, params))
+            const ioBaseline = peerPid !== null ? readIoReadBytes(peerPid) : null
+            // Generic 10 s CLI deadlines sample once at 5 s. Explicit long-polls
+            // are supposed to wait; sampling them would fire on healthy holds.
+            if (explicitTimeoutMs === undefined && stallSampleAfterMs < requestTimeoutMs) {
+              pendingCall.sampleTimer = timers.setTimeout(() => {
+                void (async () => {
+                  try {
+                    const take = opts?.stallSample ? opts.stallSample() : sampleConnectedDaemon(socket, ioBaseline)
+                    pendingCall.stallSample = await take
+                  } catch (error) {
+                    pendingCall.stallSample = {
+                      sampledAtMs: Date.now(),
+                      unavailable: error instanceof Error ? error.message : String(error),
+                    }
+                  }
+                })()
+              }, stallSampleAfterMs)
+            }
             pendingCall.timer = timers.setTimeout(() => {
               if (!pending.delete(id)) return
-              rej(new DaemonCallTimeoutError(method, requestTimeoutMs))
+              if (pendingCall.sampleTimer !== undefined) timers.clearTimeout(pendingCall.sampleTimer)
+              rej(new DaemonCallTimeoutError(method, requestTimeoutMs, pendingCall.stallSample))
               // A caller-owned long-poll deadline is an expected outcome, not
               // evidence that the daemon connection is unhealthy.
               if (explicitTimeoutMs === undefined && ++timeouts >= 3) {
@@ -716,7 +760,7 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
 
   return new Proxy(current, {
     get(_, prop) {
-      if (prop === "call")
+      if (prop === "call") {
         return (...args: Parameters<DaemonClient["call"]>) => {
           // 22994 — after a disconnect, `current` still names the retired
           // client until the bounded reconnect loop installs its successor.
@@ -730,18 +774,21 @@ export async function createReconnectingClient(opts: ReconnectingClientOpts): Pr
           }
           return current.call(...args)
         }
-      if (prop === "close")
+      }
+      if (prop === "close") {
         return () => {
           closed = true
           reconnectAc?.abort()
           current.close()
           current.socket.unref()
         }
-      if (prop === "onNotification")
+      }
+      if (prop === "onNotification") {
         return (handler: (method: string, params?: Record<string, unknown>) => void) => {
           notificationHandlers.push(handler)
           current.onNotification(handler)
         }
+      }
       return (current as Record<string | symbol, unknown>)[prop]
     },
   }) as DaemonClient

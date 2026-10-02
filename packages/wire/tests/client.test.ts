@@ -243,6 +243,39 @@ describe("connectToDaemon", () => {
     }
   })
 
+  it("attaches one stall sample to a timeout that outlives the sample delay", async () => {
+    // #27089: @cto 666b47e8 — capture the next pressure event, no scheduling.
+    const sock = join(tmpDir, "d.sock")
+    const { server } = await spawnFakeDaemon(sock)
+    const stallSample = {
+      sampledAtMs: 1,
+      pid: 2677788,
+      wchan: "futex_wait_queue",
+      state: "D",
+      vmRssKb: 241000,
+      vmSwapKb: 4096,
+      ioReadBytes: 5000,
+      ioReadBytesDelta: 1000,
+      walBytes: 38,
+    }
+    let client: DaemonClient | undefined
+    try {
+      client = await connectToDaemon(sock, {
+        callTimeoutMs: 80,
+        stallSampleAfterMs: 15,
+        stallSample: () => stallSample,
+      })
+      await expect(client.call("never")).rejects.toMatchObject({
+        name: "DaemonCallTimeoutError",
+        code: "TRIBE_DAEMON_CALL_TIMEOUT",
+        stallSample,
+      })
+    } finally {
+      client?.close()
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+    }
+  })
+
   it("rejects with ENOENT when the socket file does not exist", async () => {
     const missing = join(tmpDir, "nope.sock")
     await expect(connectToDaemon(missing)).rejects.toMatchObject({ code: "ENOENT" })
