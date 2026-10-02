@@ -270,6 +270,7 @@ describe("connectToDaemon", () => {
         name: "DaemonCallTimeoutError",
         code: "TRIBE_DAEMON_CALL_TIMEOUT",
         stallSample,
+        message: expect.stringContaining("futex_wait_queue"),
       })
     } finally {
       client?.close()
