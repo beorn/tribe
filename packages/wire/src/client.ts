@@ -64,7 +64,8 @@ class DaemonCallTimeoutError extends Error {
     readonly timeoutMs: number,
     readonly stallSample?: StallSample,
   ) {
-    super(`Request ${method} timed out after ${timeoutMs}ms; check Tribe daemon health before retrying`)
+    const base = `Request ${method} timed out after ${timeoutMs}ms; check Tribe daemon health before retrying`
+    super(stallSample === undefined ? base : `${base}; stallSample=${JSON.stringify(stallSample)}`)
     this.name = "DaemonCallTimeoutError"
   }
 }
