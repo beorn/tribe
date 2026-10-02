@@ -1,6 +1,6 @@
 export default {
   name: "tribe",
-  services: {
+  habitants: {
     wire: {
       owner: "@chief",
       // --idle-quit-after never: this daemon never stops itself. Set 2026-08-11
