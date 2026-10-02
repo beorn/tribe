@@ -34,7 +34,10 @@ export default {
       health: { command: "tribe health --json" },
       // It runs from an immutable landing; when a promoted landing carries a new vendor/tribe, the hab
       // controller restarts it onto that landing (26774, @cto 9e7a89d2). A km-only landing leaves it running.
+      // With sourceDigest it does so only when the daemon's closure changed: a tribe move touching nothing it
+      // loads keeps it, and every connected seat's call, running (27085, @cto 5d9ac8bc).
       landingMigration: { mechanism: "restart-at-promotion" as const },
+      sourceDigest: "bun-closure" as const,
     },
   },
 }
