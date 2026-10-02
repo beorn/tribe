@@ -96,6 +96,7 @@ describe("connectToDaemon", () => {
   })
 
   afterEach(() => {
+    connectDelayMs = 0
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
@@ -243,10 +244,67 @@ describe("connectToDaemon", () => {
     }
   })
 
+  it("attaches one stall sample to a timeout that outlives the sample delay", async () => {
+    // #27089: @cto 666b47e8 — capture the next pressure event, no scheduling.
+    const sock = join(tmpDir, "d.sock")
+    const { server } = await spawnFakeDaemon(sock)
+    const stallSample = {
+      sampledAtMs: 1,
+      pid: 2677788,
+      wchan: "futex_wait_queue",
+      state: "D",
+      vmRssKb: 241000,
+      vmSwapKb: 4096,
+      ioReadBytes: 5000,
+      ioReadBytesDelta: 1000,
+      walBytes: 38,
+    }
+    let client: DaemonClient | undefined
+    try {
+      client = await connectToDaemon(sock, {
+        callTimeoutMs: 80,
+        stallSampleAfterMs: 15,
+        stallSample: () => stallSample,
+      })
+      await expect(client.call("never")).rejects.toMatchObject({
+        name: "DaemonCallTimeoutError",
+        code: "TRIBE_DAEMON_CALL_TIMEOUT",
+        stallSample,
+        message: expect.stringContaining("futex_wait_queue"),
+      })
+    } finally {
+      client?.close()
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+    }
+  })
+
   it("rejects with ENOENT when the socket file does not exist", async () => {
     const missing = join(tmpDir, "nope.sock")
     await expect(connectToDaemon(missing)).rejects.toMatchObject({ code: "ENOENT" })
   })
+
+  it("rejects when unix connect has not completed before callTimeoutMs", async () => {
+    // #27100: WATCH pid 2307485 sat State S on ep_poll for 5h with one socket.
+    // callTimeoutMs armed only after 'connect'; a peer that never accepts
+    // never started that timer. connectDelayMs holds Socket.connect itself.
+    const sock = join(tmpDir, "hang.sock")
+    connectDelayMs = 10_000
+    const started = Date.now()
+    const outcome = await Promise.race([
+      connectToDaemon(sock, { callTimeoutMs: 80 }).then(
+        () => "resolved" as const,
+        (error: unknown) => error,
+      ),
+      new Promise<"hung">((resolve) => {
+        setTimeout(() => resolve("hung"), 1_000)
+      }),
+    ])
+    expect(outcome, "connectToDaemon must settle before the unix connect completes").not.toBe("hung")
+    expect(outcome).toBeInstanceOf(Error)
+    expect((outcome as Error).message).toMatch(/connect .* timed out after 80ms/)
+    expect(Date.now() - started).toBeLessThan(1_000)
+    connectDelayMs = 0
+  }, 2_000)
 })
 
 describe("withDaemonCall", () => {

@@ -140,8 +140,8 @@ export type BallTracker = {
    */
   owner?: string
   /**
-   * If set, this message CLOSES the request with the given id. The ball is
-   * released from the recipient(s).
+   * If set, this message CLOSES the referenced ordinary request. Incident-keyed
+   * rows stay open: only `--incident-cleared` / `active:false` settles them.
    */
   reply?: string
   /**
@@ -548,7 +548,13 @@ export function sendMessage(
         ? (ctx.stmts.selectPendingForReplyRecipient.get({
             $reply_id: replyId,
             $recipient: sender,
-          }) as { request_id: string; fanout: string; expires_at: number | null; sender: string } | null)
+          }) as {
+            request_id: string
+            fanout: string
+            expires_at: number | null
+            sender: string
+            request_kind: "request" | "incident"
+          } | null)
         : null
     const canonicalReplyId = pendingReply?.request_id ?? replyId
     const correlatedReply = pendingReply ? { requestId: pendingReply.request_id, requester: pendingReply.sender } : null
@@ -637,8 +643,10 @@ export function sendMessage(
         }
       }
       // A daemon boundary settles expired rows before this send path runs.
-      // Any still-open row is therefore closed by an explicit reply here.
-      if (canonicalReplyId) {
+      // An ordinary still-open request is closed by an explicit reply here.
+      // Incident-keyed rows stay until the emitter's --incident-cleared edge
+      // (pending --close already refuses the same kind).
+      if (canonicalReplyId && pendingReply?.request_kind !== "incident") {
         if (pendingReply?.fanout === "first") {
           const rows = ctx.stmts.selectPendingSettlementsForRequest.all({
             $request_id: canonicalReplyId,
