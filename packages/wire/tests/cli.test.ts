@@ -1582,6 +1582,48 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     }
   })
 
+  it("inbox --json timeout writes an error object to stdout, not an empty document", async () => {
+    // #27089: a silent daemon used to leave stdout empty, so jq of the file
+    // read as an empty inbox. The client deadline is 10s; keep this above it.
+    const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-timeout-"))
+    const socketPath = join(dir, "tribe.sock")
+    const server = createServer((socket) => {
+      socket.on("error", () => {
+        /* ignore */
+      })
+      socket.on("data", () => {
+        /* hold the request; never reply so the client deadline owns the outcome */
+      })
+    })
+
+    try {
+      await new Promise<void>((listening) => server.listen(socketPath, listening))
+      const result = await runCliAsync(
+        ["inbox", "--json"],
+        {
+          ...process.env,
+          TRIBE_SOCKET: socketPath,
+          TRIBE_NO_AUTOSTART: "1",
+          HAB_ID_TOKEN: launchToken("sid-dev13", "@dev/13"),
+        },
+        { timeoutMs: 20_000 },
+      )
+
+      expect(result.code).toBe(1)
+      expect(result.stdout.trim().length).toBeGreaterThan(0)
+      const body = JSON.parse(result.stdout) as {
+        error?: { code?: unknown; kind?: unknown }
+        attention?: unknown
+      }
+      expect(body.error?.code).toBe("TRIBE_DAEMON_CALL_TIMEOUT")
+      expect(body.attention).toBeUndefined()
+      expect(result.stderr).toMatch(/timed out after 10000ms/)
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 25_000)
+
   it("keeps a pre-existing deadline response visible without publishing a new JSON wake", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tribe-wire-inbox-wait-attention-"))
     const socketPath = join(dir, "tribe.sock")

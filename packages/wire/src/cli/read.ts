@@ -1791,13 +1791,18 @@ function projectInboxDrainFailure(error: unknown): InboxDrainFailureProjection {
   const failure = error instanceof Error ? (error as Error & { code?: unknown; data?: unknown }) : undefined
   const data =
     typeof failure?.data === "object" && failure.data !== null ? (failure.data as Record<string, unknown>) : undefined
+  const timedOut = failure?.name === "DaemonCallTimeoutError" || failure?.code === "TRIBE_DAEMON_CALL_TIMEOUT"
   return {
     code: typeof failure?.code === "number" || typeof failure?.code === "string" ? failure.code : null,
     // An older daemon can return -32003 without saying whether it evaluated a
     // credential. That evidence is indeterminate, never proof of rejection.
-    kind: typeof data?.kind === "string" ? data.kind : "could-not-evaluate",
+    kind: timedOut ? "timeout" : typeof data?.kind === "string" ? data.kind : "could-not-evaluate",
     message: failure?.message ?? String(error),
-    reason: typeof data?.reason === "string" ? data.reason : "unclassified-authority-failure",
+    reason: timedOut
+      ? "daemon-call-timeout"
+      : typeof data?.reason === "string"
+        ? data.reason
+        : "unclassified-authority-failure",
   }
 }
 
@@ -1808,6 +1813,11 @@ function renderInboxDrainFailure(error: unknown, json: boolean): void {
     return
   }
   console.error(`tribe inbox-drain: ${failure.kind} — ${failure.message} (reason=${failure.reason})`)
+}
+
+/** Machine-readable failure for `tribe inbox --json`. Stdout must not be empty: an empty document reads as an empty inbox (#27089). */
+async function writeInboxJsonFailure(error: unknown): Promise<void> {
+  await writeJsonStdout({ error: projectInboxDrainFailure(error) })
 }
 
 type InboxWaitErrorKind = "transport-close" | "daemon-unavailable" | null
@@ -2307,6 +2317,7 @@ export function registerReadCommands(program: Command): void {
       try {
         await cmdInbox(opts)
       } catch (error) {
+        if (opts.json) await writeInboxJsonFailure(error)
         console.error(error instanceof Error ? error.message : String(error))
         process.exitCode = 1
       }
