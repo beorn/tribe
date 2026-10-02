@@ -1,0 +1,10 @@
+{
+  "modules": [
+    "release",
+    "verify"
+  ],
+  "vars": {
+    "testCommand": "bun run test",
+    "bunVersion": "1.4.2"
+  }
+}
