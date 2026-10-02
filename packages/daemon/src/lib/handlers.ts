@@ -946,11 +946,11 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
       ...(summaryDerived ? { summary_derived: true } : {}),
     })
   }
-  const tracker = withCloseCause(ctx, sender, result.tracker)
+  const replyReport = committedReplyReport(ctx, sender, [recipients], result.tracker)
   const warning = combineWarnings(
     maybeDerivedSummaryWarning(summaryDerived),
     maybeTruncationWarning(truncation),
-    trackerMissWarning(ctx, sender, [recipients], tracker),
+    replyReport.warning,
     maybeUntrackedDeliveryNote(msgType, recipients, willTrack, transport),
   )
   return jsonResult({
@@ -959,9 +959,9 @@ function handleSend(ctx: TribeContext, a: ToolArgs, opts: HandlerOpts): ToolResu
     ...(effectiveRequestId ? { request_id: effectiveRequestId } : {}),
     ...(result.incident ? { incident: result.incident } : {}),
     delivery: deliveryReport([{ recipient: recipients, resolution }], transport)[0],
-    ...(tracker ? { tracker } : {}),
+    ...(replyReport.tracker ? { tracker: replyReport.tracker } : {}),
     ...(result.deduplicated ? { deduplicated: true } : {}),
-    ...replyCloseFailure(tracker),
+    ...replyReport.replyCloseFailed,
     summary,
     ...(summaryDerived ? { summary_derived: true } : {}),
     ...truncationReport(truncation),
@@ -1044,11 +1044,16 @@ function handleMultiSend(input: {
     persistDeadLetter(input.ctx, resolution, input.content, input.args, input.classification, sharedRequestId)
     return { ...result, recipient, resolution }
   })
-  const tracker = withCloseCause(input.ctx, input.sender, aggregateReplyTracker(results, input.replyId))
+  const replyReport = committedReplyReport(
+    input.ctx,
+    input.sender,
+    input.recipients,
+    aggregateReplyTracker(results, input.replyId),
+  )
   const warning = combineWarnings(
     maybeDerivedSummaryWarning(input.summaryDerived),
     maybeTruncationWarning(input.truncation),
-    trackerMissWarning(input.ctx, input.sender, input.recipients, tracker),
+    replyReport.warning,
     maybeUntrackedDeliveryNote(input.msgType, input.recipients, input.willTrack, input.transport),
   )
   const deliveries = deliveryReport(results, input.transport)
@@ -1064,8 +1069,8 @@ function handleMultiSend(input: {
     id: results[0]?.id ?? null,
     ids: results.map((result) => result.id),
     ...(sharedRequestId ? { request_id: sharedRequestId } : {}),
-    ...(tracker ? { tracker } : {}),
-    ...replyCloseFailure(tracker),
+    ...(replyReport.tracker ? { tracker: replyReport.tracker } : {}),
+    ...replyReport.replyCloseFailed,
     deliveries,
     summary: input.summary,
     ...(input.summaryDerived ? { summary_derived: true } : {}),
@@ -2010,6 +2015,36 @@ function trackerMissWarning(
  */
 function replyCloseFailure(tracker: Tracker | undefined): { reply_close_failed: true } | undefined {
   return tracker?.closed === 0 ? { reply_close_failed: true } : undefined
+}
+
+/**
+ * 27123: an owner `response + reply` on an incident-keyed ball delivers and
+ * reports closed 0. That is a kind refusal, not a wrong id, so
+ * `reply_close_failed` stays unset and the warning reuses the `--close`
+ * `--incident-cleared` breadcrumb. True misses still get the journal cause
+ * and `reply_close_failed`.
+ */
+function committedReplyReport(
+  ctx: TribeContext,
+  owner: string,
+  peers: readonly string[],
+  tracker: Tracker | undefined,
+): {
+  tracker: Tracker | undefined
+  warning?: string
+  replyCloseFailed?: { reply_close_failed: true }
+} {
+  if (tracker === undefined || tracker.closed !== 0) return { tracker }
+  const incidentWarning = incidentCloseRefusal(ctx, owner, [tracker.request_id])
+  if (incidentWarning !== undefined) {
+    return { tracker: { ...tracker, cause: incidentWarning }, warning: incidentWarning }
+  }
+  const withCause = withCloseCause(ctx, owner, tracker)
+  return {
+    tracker: withCause,
+    warning: trackerMissWarning(ctx, owner, peers, withCause),
+    replyCloseFailed: replyCloseFailure(withCause),
+  }
 }
 
 function allPendingBalls(ctx: TribeContext, now: number): PendingBall[] {

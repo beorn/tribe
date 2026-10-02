@@ -298,6 +298,111 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
     }
   })
 
+  it("owner response+reply on an incident-keyed ball leaves it open (27123)", () => {
+    const { db, stmts } = setup()
+    try {
+      const emitter = makeContext(db, stmts, "@fleet")
+      const owner = makeContext(db, stmts)
+      registerSession(emitter, "pending-gc", () => true, null, 2001, "push", "/repo", null, "claude", null, null)
+      registerSession(owner, "pending-gc", () => true, null, 2002, "push", "/repo", null, "claude", null, null)
+      db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = 1 WHERE id = ?").run(
+        `sid-${emitter.sessionId}`,
+        emitter.sessionId,
+      )
+      db.prepare("UPDATE sessions SET identity_sid = ?, identity_gen = 1 WHERE id = ?").run(
+        `sid-${owner.sessionId}`,
+        owner.sessionId,
+      )
+      const incident = { emitter: "quota-wall", subject: "xai bjorn@stabell.org 7d", condition: "warn" }
+      const incidentId = incidentKey(incident)
+      sendMessage(emitter, "@chief", "xai weekly at 90%", "notify", undefined, undefined, "direct", {}, { incident })
+
+      const reply = sendMessage(
+        owner,
+        "@fleet",
+        "working the warn",
+        "response",
+        undefined,
+        undefined,
+        "direct",
+        { summary: "working the warn" },
+        { reply: incidentId },
+      )
+      expect(reply.tracker).toEqual({ request_id: incidentId, closed: 0 })
+      expect(openIds(stmts, "@chief")).toEqual([incidentId])
+      expect(settlementFacts(db)).toEqual([])
+
+      const opts = makeOpts([
+        {
+          id: owner.sessionId,
+          name: "@chief",
+          pid: process.pid,
+          cwd: "/repo",
+          role: "member",
+          claudeSessionId: null,
+          registeredAt: Date.now(),
+          launchId: null,
+          launchParentPid: null,
+          transportPids: [process.pid],
+          pushTransportPids: [],
+        },
+        {
+          id: emitter.sessionId,
+          name: "@fleet",
+          pid: process.pid,
+          cwd: "/repo",
+          role: "member",
+          claudeSessionId: null,
+          registeredAt: Date.now(),
+          launchId: null,
+          launchParentPid: null,
+          transportPids: [process.pid],
+          pushTransportPids: [],
+        },
+      ])
+      const jsonReply = parseToolJson(
+        handleToolCall(
+          owner,
+          "tribe.send",
+          {
+            to: "@fleet",
+            message: "still working the warn",
+            type: "response",
+            reply: incidentId,
+            summary: "still working the warn",
+          },
+          opts,
+        ),
+      )
+      expect(jsonReply.sent).toBe(true)
+      expect(jsonReply.reply_close_failed).toBeUndefined()
+      expect(jsonReply.tracker).toEqual(expect.objectContaining({ request_id: incidentId, closed: 0 }))
+      expect(String(jsonReply.warning)).toContain("--incident-cleared")
+      expect(String((jsonReply.tracker as { cause?: string }).cause)).toContain("--incident-cleared")
+      expect(openIds(stmts, "@chief")).toEqual([incidentId])
+
+      const close = parseToolJson(handleToolCall(owner, "tribe.pending", { close: incidentId }, opts))
+      expect(String(close.error)).toContain("--incident-cleared")
+      expect(openIds(stmts, "@chief")).toEqual([incidentId])
+
+      const cleared = sendMessage(
+        emitter,
+        "@chief",
+        "warn cleared",
+        "notify",
+        undefined,
+        undefined,
+        "direct",
+        {},
+        { incident: { ...incident, active: false } },
+      )
+      expect(cleared.tracker?.closed).toBe(1)
+      expect(openIds(stmts, "@chief")).toEqual([])
+    } finally {
+      db.close()
+    }
+  })
+
   it("closes an ordinary request whose explicit id has the same three-part spelling as an incident key", () => {
     const { db, stmts } = setup()
     try {
