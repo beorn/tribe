@@ -75,7 +75,13 @@ import {
 import { createLifecycleStore } from "../lifecycle-store.ts"
 import type { TribePluginHandle } from "../plugin-api.ts"
 import { createInboxWaitManager, readInboxWaitWokenBy } from "../inbox-wait.ts"
-import { isTerminalSessionLeftReason, logEvent, logSessionLeft, sendMessage } from "../messaging.ts"
+import {
+  countUnackedAttention,
+  isTerminalSessionLeftReason,
+  logEvent,
+  logSessionLeft,
+  sendMessage,
+} from "../messaging.ts"
 import { registerSession, NameConflictError, reapStaleTransportRows, activeLaunchIds } from "../session.ts"
 import {
   adoptByPidCwd,
@@ -1022,12 +1028,20 @@ export function withDispatcher<
      * pick them up on their next poll regardless — the wakeup is
      * opportunistic, not load-bearing.
      */
-    function notifyWakeupForReplay(sessionId: string, claimedName: string): void {
-      let connId: string | undefined
-      for (const [cid, c] of clients) {
-        if (c.ctx.sessionId === sessionId) {
-          connId = cid
-          break
+    function notifyWakeupForReplay(sessionId: string, claimedName: string, targetConnId?: string): void {
+      let connId: string | undefined = targetConnId
+      if (connId !== undefined) {
+        const client = clients.get(connId)
+        if (!client || client.ctx.sessionId !== sessionId || client.delivery !== "push") {
+          connId = undefined
+        }
+      }
+      if (connId === undefined) {
+        for (const [cid, c] of clients) {
+          if (c.ctx.sessionId === sessionId && c.delivery === "push") {
+            connId = cid
+            break
+          }
         }
       }
       if (!connId) return
@@ -1872,6 +1886,11 @@ export function withDispatcher<
                 operation: "register",
                 transport_class: transportClass,
               })
+              if (client.delivery === "push" && countUnackedAttention(client.ctx, client.name) > 0) {
+                setImmediate(() => {
+                  notifyWakeupForReplay(client.ctx.sessionId, client.name, connId)
+                })
+              }
               const coordState = db
                 .prepare("SELECT key, value FROM coordination WHERE project_id = ?")
                 .all(projectId) as Array<{ key: string; value: string | null }>
@@ -2154,6 +2173,11 @@ export function withDispatcher<
               ...identityLogFields(client),
               operation: "register",
             })
+            if (client.delivery === "push" && countUnackedAttention(client.ctx, client.name) > 0) {
+              setImmediate(() => {
+                notifyWakeupForReplay(client.ctx.sessionId, client.name, connId)
+              })
+            }
 
             const coordState = db
               .prepare("SELECT key, value FROM coordination WHERE project_id = ?")

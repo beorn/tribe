@@ -261,6 +261,7 @@ let mcp: Server
 // call sites either `await daemonReady` (when they need a guaranteed
 // client) or use `daemon?.` (best-effort).
 let daemon: DaemonClient | undefined
+let registrationInFlight: Promise<unknown> | null = null
 // oxlint-disable-next-line eslint(prefer-const) -- assigned in the daemon block below
 let daemonReady: Promise<DaemonClient>
 // Daemon-unavailable degrade ("loud but soft", km 19851): when the daemon can
@@ -711,10 +712,18 @@ function startDaemonConnection(): Promise<DaemonClient> {
         delivery?: unknown
         daemon?: { pid?: number }
       }
+      daemon = client
+      client.onNotification(handleDaemonNotification)
       try {
         const registration = registerParamsForConnection()
-        reg = (await client.call("register", registration)) as typeof reg
-        acceptDeliveryAcknowledgement(reg, registration.delivery)
+        const registerPromise = client.call("register", registration)
+        registrationInFlight = registerPromise
+        try {
+          reg = (await registerPromise) as typeof reg
+          acceptDeliveryAcknowledgement(reg, registration.delivery)
+        } finally {
+          registrationInFlight = null
+        }
       } catch (err) {
         const reason = errorMessage(err)
         if (isIdentityTokenMissingRefusal(err)) failManagedPersonaRegistration(err)
@@ -1377,6 +1386,13 @@ function drainDaemonInbox(): void {
   drainInFlight = true
   void (async () => {
     try {
+      if (registrationInFlight) {
+        try {
+          await registrationInFlight
+        } catch {
+          // silent-fallback-allow: registration rejection is handled by startDaemonConnection's own try/catch
+        }
+      }
       do {
         drainAgain = false
         // 19442: against a current daemon this drain returns only unacked
@@ -1424,47 +1440,44 @@ function drainDaemonInbox(): void {
   })()
 }
 
-// Forward daemon notifications to Claude Code. Registered once the
-// background daemon connect resolves; handlers persist across reconnects.
-// The trailing catch keeps a degraded (never-started) daemon from turning
-// this chain into an unhandled rejection — the degrade notice is owned by
-// the daemonReady.catch above.
-void daemonReady
-  .then((d) =>
-    d.onNotification((method, params) => {
-      if (method === "wakeup") {
-        drainDaemonInbox()
-        return
+function handleDaemonNotification(method: string, params?: Record<string, unknown>): void {
+  if (method === "wakeup") {
+    drainDaemonInbox()
+    return
+  }
+  if (method === "channel") {
+    const content = String(params?.content ?? "")
+    const type = markedType(String(params?.type ?? "notify"))
+    // Auto-rename on bead claim by this session — runs even when the forward is
+    // capped below; the rename is opportunistic and idempotent (durable in the DB).
+    if (type === "bead:claimed") tryAutoRenameOnClaim(content)
+    // km 19442 — bound a stale daemon's connect-time body-push burst. Steady-state
+    // live messages pass freely; only an over-cap (re)connect storm is dropped here
+    // (the rows stay durable in the daemon journal and remain fetchable via tribe.fetch).
+    if (!connectReplayGate.admit(Date.now())) {
+      if (connectReplayGate.dropped === 1) {
+        log.warn?.(
+          `tribe channel-push: connect-replay burst over cap ${MAX_REPLAY_EVENTS} — dropping excess body-pushes (durable + fetchable). Likely a stale tribe plugin/daemon; see km 19442.`,
+        )
       }
-      if (method === "channel") {
-        const content = String(params?.content ?? "")
-        const type = markedType(String(params?.type ?? "notify"))
-        // Auto-rename on bead claim by this session — runs even when the forward is
-        // capped below; the rename is opportunistic and idempotent (durable in the DB).
-        if (type === "bead:claimed") tryAutoRenameOnClaim(content)
-        // km 19442 — bound a stale daemon's connect-time body-push burst. Steady-state
-        // live messages pass freely; only an over-cap (re)connect storm is dropped here
-        // (the rows stay durable in the daemon journal and remain fetchable via tribe.fetch).
-        if (!connectReplayGate.admit(Date.now())) {
-          if (connectReplayGate.dropped === 1) {
-            log.warn?.(
-              `tribe channel-push: connect-replay burst over cap ${MAX_REPLAY_EVENTS} — dropping excess body-pushes (durable + fetchable). Likely a stale tribe plugin/daemon; see km 19442.`,
-            )
-          }
-          return
-        }
-        sendChannel(content, {
-          from: String(params?.from ?? "unknown"),
-          type,
-          bead: params?.bead_id ? String(params.bead_id) : undefined,
-          message_id: params?.message_id ? String(params.message_id) : undefined,
-        })
-      } else if (method === "session.joined" || method === "session.left") {
-        const action = method === "session.joined" ? "joined" : "left"
-        sendChannel(`${String(params?.name ?? "unknown")} ${action} the tribe`, { from: "daemon", type: "status" })
-      }
-    }),
-  )
-  .catch(() => {
-    /* daemon never came up — the CallTool handler surfaces this to callers */
-  })
+      return
+    }
+    sendChannel(content, {
+      from: String(params?.from ?? "unknown"),
+      type,
+      bead: params?.bead_id ? String(params.bead_id) : undefined,
+      message_id: params?.message_id ? String(params.message_id) : undefined,
+    })
+  } else if (method === "session.joined" || method === "session.left") {
+    const action = method === "session.joined" ? "joined" : "left"
+    sendChannel(`${String(params?.name ?? "unknown")} ${action} the tribe`, { from: "daemon", type: "status" })
+  }
+}
+
+// Forward daemon notifications to Claude Code. Registered in onConnect before
+// registration (26969 condition 3). The trailing catch keeps a degraded daemon
+// from turning this chain into an unhandled rejection — the degrade notice is
+// owned by the daemonReady.catch.
+void daemonReady.catch(() => {
+  /* daemon never came up — the CallTool handler surfaces this to callers */
+})
