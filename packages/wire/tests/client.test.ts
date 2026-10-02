@@ -96,6 +96,7 @@ describe("connectToDaemon", () => {
   })
 
   afterEach(() => {
+    connectDelayMs = 0
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
@@ -280,6 +281,29 @@ describe("connectToDaemon", () => {
     const missing = join(tmpDir, "nope.sock")
     await expect(connectToDaemon(missing)).rejects.toMatchObject({ code: "ENOENT" })
   })
+
+  it("rejects when unix connect has not completed before callTimeoutMs", async () => {
+    // #27100: WATCH pid 2307485 sat State S on ep_poll for 5h with one socket.
+    // callTimeoutMs armed only after 'connect'; a peer that never accepts
+    // never started that timer. connectDelayMs holds Socket.connect itself.
+    const sock = join(tmpDir, "hang.sock")
+    connectDelayMs = 10_000
+    const started = Date.now()
+    const outcome = await Promise.race([
+      connectToDaemon(sock, { callTimeoutMs: 80 }).then(
+        () => "resolved" as const,
+        (error: unknown) => error,
+      ),
+      new Promise<"hung">((resolve) => {
+        setTimeout(() => resolve("hung"), 1_000)
+      }),
+    ])
+    expect(outcome, "connectToDaemon must settle before the unix connect completes").not.toBe("hung")
+    expect(outcome).toBeInstanceOf(Error)
+    expect((outcome as Error).message).toMatch(/connect .* timed out after 80ms/)
+    expect(Date.now() - started).toBeLessThan(1_000)
+    connectDelayMs = 0
+  }, 2_000)
 })
 
 describe("withDaemonCall", () => {

@@ -5,7 +5,7 @@
  * Three layers, lowest to highest:
  *
  *  1. `connectToDaemon(socketPath, opts?)` — plain connect; rejects on
- *     ECONNREFUSED / ENOENT. Per-call timeout configurable.
+ *     ECONNREFUSED / ENOENT / connect deadline. Per-call timeout configurable.
  *  2. `connectOrStart(socketPath, opts)` — connect; if no daemon, start one
  *     through a stable standalone lifecycle owner and retry with exponential
  *     backoff.
@@ -73,7 +73,7 @@ class DaemonCallTimeoutError extends Error {
 export const STALL_SAMPLE_AFTER_MS = 5_000
 
 export type ConnectToDaemonOpts = {
-  /** Per-call request timeout. Default: 10000 ms. */
+  /** Connect wait and per-call request timeout. Default: 10000 ms. */
   callTimeoutMs?: number
   /**
    * Delay before one stall-time sample of the daemon. Default 5000 ms.
@@ -103,6 +103,25 @@ export function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts):
 
     const ac = new AbortController()
     const timers = createTimers(ac.signal)
+    let connectSettled = false
+    // Ref'd so a caller whose only handle is this connecting socket cannot
+    // drain the loop and miss the deadline (WATCH #27100: 5h ep_poll hang).
+    const connectHold = setTimeout(() => {}, callTimeoutMs + 1_000)
+    const failConnect = (err: Error) => {
+      if (connectSettled) return
+      connectSettled = true
+      clearTimeout(connectHold)
+      timers.clearTimeout(connectTimer)
+      ac.abort()
+      if (!socket.destroyed) socket.destroy()
+      reject(err)
+    }
+    const connectTimer = timers.setTimeout(() => {
+      failConnect(new Error(`connect to ${socketPath} timed out after ${callTimeoutMs}ms`))
+    }, callTimeoutMs)
+    const onConnectError = (err: Error) => {
+      failConnect(err)
+    }
 
     function clearCallTimers(p: PendingCall): void {
       if (p.timer !== undefined) timers.clearTimeout(p.timer)
@@ -134,9 +153,16 @@ export function connectToDaemon(socketPath: string, opts?: ConnectToDaemonOpts):
     })
 
     socket.on("data", parse)
-    socket.on("error", reject)
+    socket.on("error", onConnectError)
     socket.once("connect", () => {
-      socket.removeListener("error", reject)
+      if (connectSettled) {
+        socket.destroy()
+        return
+      }
+      connectSettled = true
+      clearTimeout(connectHold)
+      timers.clearTimeout(connectTimer)
+      socket.removeListener("error", onConnectError)
       socket.on("error", (err) => {
         log.error?.(`Connection error: ${err.message}`)
         rejectPending(err)
