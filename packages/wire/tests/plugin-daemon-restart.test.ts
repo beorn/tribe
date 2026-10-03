@@ -15,7 +15,7 @@ import { Database } from "bun:sqlite"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { connectToDaemon, type DaemonClient } from "../src/client.ts"
 import { deriveTribePersonaLaunchIdentity } from "../src/lib/persona-launch-identity.ts"
-import { RELOAD_SLOT_MS } from "../src/lib/reload-pacing.ts"
+import { RELOAD_REJOIN_MAX_MS, RELOAD_SLOT_MS } from "../src/lib/reload-pacing.ts"
 import { REEXEC_BACKOFF_BASE_MS, REEXEC_BACKOFF_MAX_MS } from "../../../plugins/claude/supervisor-policy.ts"
 import { TRIBE_PROTOCOL_VERSION } from "../src/lib/socket.ts"
 import { launchEnvironment, launchToken, writeClaimsVerifier } from "./launch-token.ts"
@@ -93,10 +93,11 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, label: strin
 
 /**
  * How long every seat may take to re-exec after a daemon generation change. Seats no longer re-exec at once: each waits
- * for its rank's slot (25663), so the last of `seats` goes within seats × RELOAD_SLOT_MS, plus its own rejoin.
+ * for its rank's slot (25663), so the last of `seats` goes within seats × RELOAD_SLOT_MS, plus its own rejoin — the
+ * module's own slowest measured rejoin, not a smaller literal that a CI-loaded rejoin can outrun.
  */
 function pacedRestartBudgetMs(seats: number): number {
-  return seats * RELOAD_SLOT_MS + 10_000
+  return seats * RELOAD_SLOT_MS + RELOAD_REJOIN_MAX_MS
 }
 
 /**
