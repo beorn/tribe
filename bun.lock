@@ -20,6 +20,7 @@
       },
       "dependencies": {
         "@bearly/flock": "^0.1.0",
+        "@bearly/sqlite": "0.1.0",
         "loggily": "^0.11.0",
         "removely": "^0.3.0",
         "tribe-injection-envelope": "workspace:*",
@@ -42,6 +43,7 @@
       },
       "dependencies": {
         "@bearly/flock": "^0.1.0",
+        "@bearly/sqlite": "0.1.0",
         "@silvery/commander": "^0.24.0",
         "@tobilu/qmd": "2.8.3",
         "loggily": "^0.11.0",
@@ -87,6 +89,8 @@
     "@bearly/flock": ["@bearly/flock@0.1.0", "", {}, "sha512-L9qQPH3Df+xKaFfOoYOamyL00CmRltbvilx0XfXzylFw76MRMN4SrhydxrVc4ROsZ5nkVZE0prl3G3zv3ZOH5w=="],
 
     "@bearly/pacing": ["@bearly/pacing@0.2.0", "", {}, "sha512-3PxvuxHWpm1X5GNXE9OUQvkSk8R7UDSmUP7cavGjnS5qN43J5kh7ot7YPhLFCDtfLFk6isZH4m0YUINJa0RvHA=="],
+
+    "@bearly/sqlite": ["@bearly/sqlite@0.1.0", "", {}, "sha512-z9jVGioKjj77lHy9+2OkXIpBgnMfIK7Kte/2ypS5bD6z5c/xnlmklFtxO0wlYJ0soX966G9fDJNiV25u5oz66w=="],
 
     "@emnapi/core": ["@emnapi/core@1.10.0", "", { "dependencies": { "@emnapi/wasi-threads": "1.2.1", "tslib": "^2.4.0" } }, "sha512-yq6OkJ4p82CAfPl0u9mQebQHKPJkY7WrIuk205cTYnYe+k2Z8YBh11FrbRG/H6ihirqcacOgl2BIO8oyMQLeXw=="],
 
