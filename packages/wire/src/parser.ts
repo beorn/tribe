@@ -16,12 +16,20 @@ export function createLineParser(
   // logger's sink wiring (see tribe-client parser.test.ts / km 19471).
   onInvalid?: (line: string, error: unknown) => void,
 ): (chunk: Buffer) => void {
-  let buffer = ""
+  let fragments: Buffer[] = []
+  let bufferedBytes = 0
   return (chunk: Buffer) => {
-    buffer += chunk.toString()
-    const lines = buffer.split("\n")
-    buffer = lines.pop()! // Keep incomplete line in buffer
-    for (const line of lines) {
+    let start = 0
+    for (let end = chunk.indexOf(10, start); end !== -1; end = chunk.indexOf(10, start)) {
+      const part = chunk.subarray(start, end)
+      // Scan only new bytes; decode once the complete line is available. This
+      // also preserves UTF-8 characters split across socket chunks.
+      const line = fragments.length
+        ? Buffer.concat([...fragments, part], bufferedBytes + part.length).toString()
+        : part.toString()
+      fragments = []
+      bufferedBytes = 0
+      start = end + 1
       const trimmed = line.trim()
       if (!trimmed) continue
       try {
@@ -30,6 +38,11 @@ export function createLineParser(
         log.warn?.(`Invalid JSON: ${trimmed.slice(0, 100)}`)
         onInvalid?.(trimmed, error)
       }
+    }
+    if (start < chunk.length) {
+      const tail = Buffer.from(chunk.subarray(start))
+      fragments.push(tail)
+      bufferedBytes += tail.length
     }
   }
 }

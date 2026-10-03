@@ -1,8 +1,31 @@
 import { describe, expect, it, vi } from "vitest"
 import { createLineParser } from "../src/parser.ts"
-import type { JsonRpcMessage } from "../src/rpc.ts"
+import { makeResponse, type JsonRpcMessage } from "../src/rpc.ts"
 
 describe("createLineParser", () => {
+  /**
+   * @failure A fragmented full-history response exhausts the RPC deadline while framing.
+   * @level l0
+   * @consumer daemon client callers, including tribe log --all
+   * @testonly none
+   * #27274: tiny messages never expose repeated scans of a growing prefix.
+   * The ten-second budget is the existing RPC deadline, with ample headroom
+   * for linear framing of this much smaller than live-history response.
+   */
+  it("frames a large fragmented response within the RPC budget without losing values", () => {
+    const result = { content: "x".repeat(8 * 1024 * 1024), tail: "complete" }
+    const encoded = Buffer.from(makeResponse(7, result))
+    const out: JsonRpcMessage[] = []
+    const parse = createLineParser((message) => out.push(message))
+    const started = performance.now()
+    for (let offset = 0; offset < encoded.length; offset += 128) {
+      parse(encoded.subarray(offset, offset + 128))
+    }
+    const elapsed = performance.now() - started
+    expect(out).toEqual([{ jsonrpc: "2.0", id: 7, result }])
+    expect(elapsed).toBeLessThan(10_000)
+  }, 90_000)
+
   it("emits one message per complete \\n-terminated JSON line", () => {
     const out: JsonRpcMessage[] = []
     const parse = createLineParser((m) => out.push(m))

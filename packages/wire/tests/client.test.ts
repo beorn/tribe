@@ -64,6 +64,12 @@ function spawnFakeDaemon(socketPath: string): Promise<{ server: Server; clients:
         if (isRequest(msg)) {
           if (msg.method === "echo") {
             socket.write(makeResponse(msg.id, { echoed: msg.params }))
+          } else if (msg.method === "fragmented") {
+            const response = Buffer.from(makeResponse(msg.id, { echoed: msg.params }))
+            // Deliberately split the final UTF-8 code point across writes.
+            const split = response.lastIndexOf(Buffer.from("🌍")) + 1
+            socket.write(response.subarray(0, split))
+            setImmediate(() => socket.write(response.subarray(split)))
           } else if (msg.method === "slow") {
             setTimeout(() => socket.write(makeResponse(msg.id, { delayed: true })), 30)
           } else if (msg.method === "never") {
@@ -110,6 +116,29 @@ describe("connectToDaemon", () => {
       client.close()
     } finally {
       await new Promise<void>((r) => server.close(() => r()))
+    }
+  })
+
+  /**
+   * @failure Socket fragmentation corrupts full response values before call resolution.
+   * @level l2
+   * @consumer DaemonClient.call
+   * @testonly none
+   * Unlike the parser cost test, this exercises real socket delivery and the
+   * pending-call mapping. Existing echo values fit in a single small chunk.
+   */
+  it("resolves a large fragmented socket response with every value intact", async () => {
+    const sock = join(tmpDir, "d.sock")
+    const { server, clients } = await spawnFakeDaemon(sock)
+    const values = { content: "x".repeat(2 * 1024 * 1024) + "🌍", tail: "complete" }
+    let client: DaemonClient | undefined
+    try {
+      client = await connectToDaemon(sock)
+      expect(await client.call("fragmented", values)).toEqual({ echoed: values })
+    } finally {
+      client?.close()
+      for (const socket of clients) socket.destroy()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
     }
   })
 
