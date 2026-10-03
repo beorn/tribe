@@ -1,0 +1,12 @@
+{
+  "schema": "vendor-kit/source-siblings/v1",
+  "siblings": [
+    {
+      "name": "@bearly/sqlite",
+      "repository": "beorn/bearly",
+      "commit": "aaa348754c44dc703bc3a9398c0b416060e5012c",
+      "directory": "packages/sqlite",
+      "pack": true
+    }
+  ]
+}

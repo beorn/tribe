@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite"
+import { assertSingleStatement } from "@bearly/sqlite"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 import { chmodSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -1057,7 +1058,7 @@ if (args[0] === "transcript" && args[1] === "list") {
     function runnerWithSchemaBeforeCheck(d: Database) {
       const ver = (d.prepare("PRAGMA user_version").get() as { user_version: number }).user_version
       // Defect: runs SCHEMA before gate!
-      d.exec(SCHEMA)
+      for (const sql of SCHEMA) d.exec(assertSingleStatement(sql))
       if (ver > 0 && ver < 3) {
         throw new Error("refused")
       }
@@ -1117,7 +1118,7 @@ if (args[0] === "transcript" && args[1] === "list") {
           throw new Error("refused")
         }
       }
-      d.exec(SCHEMA)
+      for (const sql of SCHEMA) d.exec(assertSingleStatement(sql))
       runMigrations(d)
     }
 

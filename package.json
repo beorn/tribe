@@ -26,6 +26,7 @@
     "fmt:check": "oxfmt --check ."
   },
   "devDependencies": {
+    "@bearly/sqlite": "0.1.0",
     "@types/bun": "1.4.2",
     "oxfmt": "0.38.0",
     "removely": "^0.3.0",
