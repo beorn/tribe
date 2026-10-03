@@ -331,6 +331,16 @@ export function withDispatcher<
       })
     }
 
+    /** 24284 — the caller's transport is still there to receive the response.
+     * True when no client/socket is known (identity-only direct calls, tests,
+     * MCP), so only a socket that is already gone can suppress an ack. */
+    function callerDeliveryAlive(connId: string): boolean {
+      const client = clients.get(connId)
+      if (!client) return true
+      const socket = client.socket as { destroyed?: boolean } | undefined
+      return socket === undefined || socket.destroyed !== true
+    }
+
     function readInboxStatus(sessionName: string): {
       session: string
       unread_count: number
@@ -665,7 +675,7 @@ export function withDispatcher<
               resolution.context,
               TRIBE_COORD_METHODS.fetch,
               { limit: capability.limit, advance: capability.peek ? false : undefined },
-              DAEMON_HANDLER_OPTS,
+              { ...DAEMON_HANDLER_OPTS, callerDeliveryAlive: () => callerDeliveryAlive(connId) },
               connId,
             ),
           }
@@ -2804,7 +2814,8 @@ export function withDispatcher<
             const tail = stmts.getAttentionTailSeq.get() as { seq: number } | null
             const rows = readUnackedAttentionRows(daemonCtx, sessionName, tail?.seq ?? 0, limit)
             const last = rows.at(-1)
-            if (last && p.peek !== true) {
+            // 24284 — acknowledge only a drain whose caller can still receive it.
+            if (last && p.peek !== true && callerDeliveryAlive(connId)) {
               stmts.advanceMailboxCursor.run({ $recipient: sessionName, $seq: last.rowid, $now: Date.now() })
             }
             return makeResponse(id, {

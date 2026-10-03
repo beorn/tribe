@@ -268,6 +268,16 @@ export type HandlerOpts = {
    */
   hasActiveTransport: (sessionId: string) => boolean
   isReconnectGraceProtected?: (sessionId: string, nowMs: number) => boolean
+  /**
+   * 24284 — whether the caller can still receive the response this handler is
+   * about to build. A one-shot CLI (`cli_self_inbox_v1` / `cli_inbox_drain*`)
+   * writes into a socket whose client may have already hit its 10 s
+   * daemon-call deadline and exited; acknowledging its mailbox then retires
+   * rows into a session that never saw them (@dev/10's 2026-10-03 verdict
+   * e054850c). Defaults to true so identity-only direct handler calls, MCP
+   * `tools/call`, and tests keep the existing acknowledgement semantics.
+   */
+  callerDeliveryAlive?: () => boolean
   /** Realtime snapshot of connected sessions (daemon clients Map). */
   getActiveSessionInfo: () => ActiveSessionInfo[]
   /** The registered caller's declaration owner; absent in identity-only direct handler calls. */
@@ -566,7 +576,7 @@ export function handleToolCall(
     case TRIBE_COORD_METHODS.send:
       return handleSend(ctx, a, opts)
     case TRIBE_COORD_METHODS.fetch:
-      return handleFetch(ctx, a)
+      return handleFetch(ctx, a, opts)
     case TRIBE_COORD_METHODS.members:
       return handleSessions(ctx, a, opts)
     case TRIBE_COORD_METHODS.inboxWait:
@@ -4112,7 +4122,10 @@ function inboxFilterParams(ctx: TribeContext): {
   }
 }
 
-function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
+function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolResult {
+  // 24284 — acknowledgement rides delivery. Read once here; the socket can die
+  // between now and the write, which is exactly the case this gate covers.
+  const deliveryAlive = (): boolean => opts?.callerDeliveryAlive?.() ?? true
   const limit = typeof a.limit === "number" && a.limit > 0 && a.limit <= 500 ? a.limit : 50
   const topics = normalizeStringArray(a.topics)
   if (a.topics !== undefined && topics === null) {
@@ -4260,7 +4273,9 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
         lastAttention = Math.max(lastAttention, row.rowid)
       }
     }
-    if (lastAttention > 0) {
+    // 24284 — a read whose response never reaches the caller must not retire
+    // the rows it "returned".
+    if (lastAttention > 0 && deliveryAlive()) {
       ctx.stmts.advanceMailboxCursor.run({ $recipient: currentName, $seq: lastAttention, $now: Date.now() })
     }
   }
@@ -4272,7 +4287,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
   // wake-up drain that touched this stamp would reset the staleness clock
   // health:inbox-stale pages a dark seat by, and would clear a prune notice
   // no model ever saw.
-  if (attention !== null && isReceipt) {
+  if (attention !== null && isReceipt && deliveryAlive()) {
     ctx.stmts.touchMailboxAttentionRead.run({ $recipient: currentName, $now: Date.now() })
     // 21757 — the prune notice was delivered in this canonical read (it rides
     // the projection built above); one notice per pruning episode.

@@ -38,6 +38,12 @@ type TestSocket = NetSocket & {
   destroyedByDispatcher: boolean
   emitClose(hadError?: boolean): void
   emitError(error: Error): void
+  /** Drive one inbound line through the socket's registered data handler, so
+   * the dispatcher's post-write continuation (and only that path) runs. */
+  emitData(payload: string | Uint8Array): void
+  /** Model the peer going away (its own timeout fired and it exited), without
+   * the dispatcher's destroy path — `destroyed` is readonly on NetSocket. */
+  markDestroyed(): void
   writes: string[]
 }
 
@@ -2911,6 +2917,14 @@ function createTestSocket(): TestSocket {
       handlers.set(event, eventHandlers)
       return this
     },
+    emitData(payload: string | Uint8Array) {
+      const chunk = Buffer.from(payload)
+      for (const handler of handlers.get("data") ?? []) handler(chunk)
+    },
+    markDestroyed() {
+      this.destroyed = true
+      this.writable = false
+    },
     emitClose(hadError = false) {
       for (const handler of handlers.get("close") ?? []) handler(hadError)
     },
@@ -2948,3 +2962,93 @@ function createFakeServer(): Server {
   }
   return server as unknown as Server
 }
+
+// 24284 — a CLI one-shot read that never reaches the caller must not retire
+// the caller's mailbox. `cli_self_inbox_v1` advances the mailbox cursor inside
+// the fetch handler today, before the dispatcher writes the response, so a
+// caller whose 10 s daemon-call deadline fires first (its socket is gone by the
+// time the handler finishes) loses the rows it never saw: @dev/10's 2026-10-03
+// verdict `e054850c` went unread this way. Acknowledgement must ride delivery.
+describe("24284 — a read whose response is not delivered must not acknowledge the mailbox", () => {
+  const token = managedToken("@dev/7", "sid-dev7")
+  /** The launch-minted token carries a generation; the daemon keys the session
+   * by (sid, gen), so the harness verifier must supply one. */
+  const identityVerifier: LoadedIdentityVerifier = {
+    path: "/stub/identity-verifier.ts",
+    suppliesGen: true,
+    verify: async (candidate) =>
+      candidate === token
+        ? { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 1 }
+        : { result: "unreadable", reason: "malformed token" },
+  }
+
+  function build() {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    const client = harness.connectClient()
+    return { harness, client }
+  }
+
+  async function registerSeat(harness: ReturnType<typeof createDispatcherHarness>, connId: string) {
+    await harness.register(connId, {
+      name: "@dev/7",
+      pid: 4107,
+      project: "/tmp/p",
+      launchParentPid: 4106,
+      idToken: token,
+      identitySid: "sid-dev7",
+    })
+  }
+
+  function selfInboxRequest(id: string) {
+    return JSON.stringify({
+      jsonrpc: "2.0",
+      id,
+      method: "cli_self_inbox_v1",
+      params: { authority: null, idToken: token, limit: 5 },
+    })
+  }
+
+  async function until(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+    const start = Date.now()
+    while (!predicate()) {
+      if (Date.now() - start > timeoutMs) throw new Error("timed out waiting for the mailbox cursor to move")
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+  }
+
+  it("leaves the cursor parked when the response is never written (client already gone)", async () => {
+    const { harness, client } = build()
+    await registerSeat(harness, client.connId)
+    harness.sendActionable("@dev/7", "verdict for you", "req-24284-undelivered")
+    expect(harness.mailboxCursorSeq("@dev/7")).toBe(0)
+
+    // The caller's deadline fired and its one-shot process exited: the socket
+    // is gone before the handler returns, so the dispatcher drops the response.
+    client.socket.markDestroyed()
+    const raw = await harness.dispatcher.handleRequest(
+      JSON.parse(selfInboxRequest("inbox-undelivered")) as JsonRpcRequest,
+      client.connId,
+    )
+    const result = JSON.parse(raw) as JsonRpcResponse<{ attention?: { actionable_unread?: unknown[] } }>
+    if (client.socket.destroyed) expect(result.error).toBeUndefined()
+
+    expect(harness.mailboxCursorSeq("@dev/7"), "a response that was never written advanced the mailbox cursor").toBe(0)
+    // And the row is still there for a retry.
+    expect(harness.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE recipient = '@dev/7'").get()).toMatchObject({
+      n: 1,
+    })
+  })
+
+  it("acknowledges once the response is written to a live socket", async () => {
+    const { harness, client } = build()
+    await registerSeat(harness, client.connId)
+    harness.sendActionable("@dev/7", "verdict for you", "req-24284-delivered")
+
+    client.socket.emitData(selfInboxRequest("inbox-delivered") + "\n")
+    await until(() => harness.mailboxCursorSeq("@dev/7") > 0)
+
+    expect(client.socket.writes.length).toBeGreaterThan(0)
+    expect(harness.mailboxCursorSeq("@dev/7")).toBeGreaterThan(0)
+  })
+})
