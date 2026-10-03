@@ -77,6 +77,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@bearly/pacing": "0.2.0",
+        "@bearly/sqlite": "0.1.0",
         "@modelcontextprotocol/sdk": "1.31.0",
         "tribe-daemon": "workspace:*",
         "tribe-wire": "workspace:*",
