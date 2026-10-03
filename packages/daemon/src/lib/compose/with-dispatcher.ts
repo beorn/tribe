@@ -332,13 +332,24 @@ export function withDispatcher<
     }
 
     /** 24284 — the caller's transport is still there to receive the response.
-     * True when no client/socket is known (identity-only direct calls, tests,
-     * MCP), so only a socket that is already gone can suppress an ack. */
-    function callerDeliveryAlive(connId: string): boolean {
-      const client = clients.get(connId)
-      if (!client) return true
-      const socket = client.socket as { destroyed?: boolean } | undefined
-      return socket === undefined || socket.destroyed !== true
+     * The socket is captured when the request arrives and re-read here at
+     * acknowledgement time, because the ordinary close handler calls
+     * `registry.removeTransport(connId)`: by then `clients.get(connId)` is gone,
+     * and a missing entry can no longer tell a dead transport from an
+     * identity-only direct call (MCP `tools/call`, tests) that never had one.
+     * A call with no transport keeps the existing acknowledgement semantics;
+     * only a socket the dispatcher would refuse to write to suppresses an ack,
+     * and that is the same `destroyed` flag the response write is gated on. */
+    function callerDeliveryAlive(socket: { destroyed?: boolean } | undefined): boolean {
+      if (socket === undefined) return true
+      return socket.destroyed !== true
+    }
+
+    /** 24284 — hold the transport a request arrived on. The socket close handler
+     * deletes the registry entry, so liveness must be read from the socket the
+     * request came in on, never re-looked-up from `clients` at ack time. */
+    function captureCallerTransport(connId: string): { destroyed?: boolean } | undefined {
+      return clients.get(connId)?.socket as { destroyed?: boolean } | undefined
     }
 
     function readInboxStatus(sessionName: string): {
@@ -638,6 +649,7 @@ export function withDispatcher<
       | { result: Awaited<ReturnType<typeof handleToolCall>> }
       | { errorCode: number; errorMessage: string; errorData: Record<string, unknown> }
     > {
+      const callerSocket = captureCallerTransport(connId)
       const resolution = await resolveSessionAuthority(credentials.authority, credentials.idToken)
       if (!("context" in resolution)) {
         if (capability.kind === "pending-close" || capability.kind === "pending-prune") {
@@ -675,7 +687,7 @@ export function withDispatcher<
               resolution.context,
               TRIBE_COORD_METHODS.fetch,
               { limit: capability.limit, advance: capability.peek ? false : undefined },
-              { ...DAEMON_HANDLER_OPTS, callerDeliveryAlive: () => callerDeliveryAlive(connId) },
+              { ...DAEMON_HANDLER_OPTS, callerDeliveryAlive: () => callerDeliveryAlive(callerSocket) },
               connId,
             ),
           }
@@ -1509,6 +1521,7 @@ export function withDispatcher<
     async function dispatchRequest(req: JsonRpcRequest, connId: string): Promise<string> {
       const { method, params, id } = req
       const p = (params ?? {}) as Record<string, unknown>
+      const callerSocket = captureCallerTransport(connId)
 
       // Touch lastActivityAt for THIS client on every inbound request —
       // drives the idle column in `tribe sessions` / `tribe health`.
@@ -2815,7 +2828,7 @@ export function withDispatcher<
             const rows = readUnackedAttentionRows(daemonCtx, sessionName, tail?.seq ?? 0, limit)
             const last = rows.at(-1)
             // 24284 — acknowledge only a drain whose caller can still receive it.
-            if (last && p.peek !== true && callerDeliveryAlive(connId)) {
+            if (last && p.peek !== true && callerDeliveryAlive(callerSocket)) {
               stmts.advanceMailboxCursor.run({ $recipient: sessionName, $seq: last.rowid, $now: Date.now() })
             }
             return makeResponse(id, {
