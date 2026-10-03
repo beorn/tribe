@@ -4,6 +4,7 @@
  */
 
 import { Database } from "bun:sqlite"
+import { assertSingleStatement } from "@bearly/sqlite"
 import * as path from "path"
 import * as os from "os"
 import * as fs from "node:fs"
@@ -20,7 +21,8 @@ export const MAX_CONTENT_SIZE = 1024 * 1024 // 1MB - store content for files sma
 // 2. New sessions table for session metadata
 // 3. New messages table for all message types
 // 4. FTS5 virtual table for fast full-text search
-export const SCHEMA = `
+export const SCHEMA: readonly string[] = [
+  `
 -- Original writes table (backwards compatible)
 CREATE TABLE IF NOT EXISTS writes (
   id INTEGER PRIMARY KEY,
@@ -32,13 +34,13 @@ CREATE TABLE IF NOT EXISTS writes (
   content_hash TEXT NOT NULL,
   content_size INTEGER NOT NULL,
   content TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_writes_path ON writes(file_path);
-CREATE INDEX IF NOT EXISTS idx_writes_timestamp ON writes(timestamp);
-CREATE INDEX IF NOT EXISTS idx_writes_session ON writes(session_id);
-CREATE INDEX IF NOT EXISTS idx_writes_hash ON writes(content_hash);
-
+);`,
+  `
+CREATE INDEX IF NOT EXISTS idx_writes_path ON writes(file_path);`,
+  `CREATE INDEX IF NOT EXISTS idx_writes_timestamp ON writes(timestamp);`,
+  `CREATE INDEX IF NOT EXISTS idx_writes_session ON writes(session_id);`,
+  `CREATE INDEX IF NOT EXISTS idx_writes_hash ON writes(content_hash);`,
+  `
 -- Session metadata
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
@@ -62,11 +64,11 @@ CREATE TABLE IF NOT EXISTS sessions (
   tail_offset INTEGER DEFAULT 0,
   head_fingerprint TEXT,
   tail_fingerprint TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_path);
-CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at);
-
+);`,
+  `
+CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_path);`,
+  `CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at);`,
+  `
 -- All messages (user, assistant, tool_use, tool_result, etc.)
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY,
@@ -80,14 +82,14 @@ CREATE TABLE IF NOT EXISTS messages (
   duplicate_of INTEGER,
   line INTEGER,
   UNIQUE(session_id, uuid)
-);
-
-CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
-CREATE INDEX IF NOT EXISTS idx_messages_type ON messages(type);
-CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
-CREATE INDEX IF NOT EXISTS idx_messages_tool ON messages(tool_name);
-CREATE INDEX IF NOT EXISTS idx_messages_uuid ON messages(uuid);
-
+);`,
+  `
+CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);`,
+  `CREATE INDEX IF NOT EXISTS idx_messages_type ON messages(type);`,
+  `CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);`,
+  `CREATE INDEX IF NOT EXISTS idx_messages_tool ON messages(tool_name);`,
+  `CREATE INDEX IF NOT EXISTS idx_messages_uuid ON messages(uuid);`,
+  `
 -- FTS5 virtual table for fast full-text search
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
   content,
@@ -96,32 +98,32 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
   content='messages',
   content_rowid='id',
   tokenize='porter unicode61'
-);
-
+);`,
+  `
 -- Triggers to keep FTS in sync
 CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
   INSERT INTO messages_fts(rowid, content, tool_name, file_paths)
   VALUES (new.id, new.content, new.tool_name, new.file_paths);
-END;
-
+END;`,
+  `
 CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
   INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, file_paths)
   VALUES ('delete', old.id, old.content, old.tool_name, old.file_paths);
-END;
-
+END;`,
+  `
 CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
   INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, file_paths)
   VALUES ('delete', old.id, old.content, old.tool_name, old.file_paths);
   INSERT INTO messages_fts(rowid, content, tool_name, file_paths)
   VALUES (new.id, new.content, new.tool_name, new.file_paths);
-END;
-
+END;`,
+  `
 -- Metadata table
 CREATE TABLE IF NOT EXISTS index_meta (
   key TEXT PRIMARY KEY,
   value TEXT
-);
-
+);`,
+  `
 -- Unified content table for searching everything
 CREATE TABLE IF NOT EXISTS content (
   id INTEGER PRIMARY KEY,
@@ -131,13 +133,13 @@ CREATE TABLE IF NOT EXISTS content (
   title TEXT,
   content TEXT NOT NULL,
   timestamp INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_content_type ON content(content_type);
-CREATE INDEX IF NOT EXISTS idx_content_source ON content(source_id);
-CREATE INDEX IF NOT EXISTS idx_content_project ON content(project_path);
-CREATE INDEX IF NOT EXISTS idx_content_timestamp ON content(timestamp);
-
+);`,
+  `
+CREATE INDEX IF NOT EXISTS idx_content_type ON content(content_type);`,
+  `CREATE INDEX IF NOT EXISTS idx_content_source ON content(source_id);`,
+  `CREATE INDEX IF NOT EXISTS idx_content_project ON content(project_path);`,
+  `CREATE INDEX IF NOT EXISTS idx_content_timestamp ON content(timestamp);`,
+  `
 -- Unified FTS5 for searching all content
 CREATE VIRTUAL TABLE IF NOT EXISTS content_fts USING fts5(
   title,
@@ -145,29 +147,29 @@ CREATE VIRTUAL TABLE IF NOT EXISTS content_fts USING fts5(
   content='content',
   content_rowid='id',
   tokenize='porter unicode61'
-);
-
+);`,
+  `
 -- Triggers for content FTS
 CREATE TRIGGER IF NOT EXISTS content_ai AFTER INSERT ON content BEGIN
   INSERT INTO content_fts(rowid, title, content)
   VALUES (new.id, new.title, new.content);
-END;
-
+END;`,
+  `
 CREATE TRIGGER IF NOT EXISTS content_ad AFTER DELETE ON content BEGIN
   INSERT INTO content_fts(content_fts, rowid, title, content)
   VALUES ('delete', old.id, old.title, old.content);
-END;
-
+END;`,
+  `
 -- Unique index for upsert support on content table
-CREATE UNIQUE INDEX IF NOT EXISTS idx_content_type_source ON content(content_type, source_id);
--- Update trigger for content FTS (needed for upsert)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_content_type_source ON content(content_type, source_id);`,
+  `-- Update trigger for content FTS (needed for upsert)
 CREATE TRIGGER IF NOT EXISTS content_au AFTER UPDATE ON content BEGIN
   INSERT INTO content_fts(content_fts, rowid, title, content)
   VALUES ('delete', old.id, old.title, old.content);
   INSERT INTO content_fts(rowid, title, content)
   VALUES (new.id, new.title, new.content);
-END;
-`
+END;`,
+]
 
 export interface MigrationStep {
   version: number
@@ -593,9 +595,9 @@ export function initSchema(db: Database, options?: InitSchemaOptions): void {
 
   if (versionBefore > 0) {
     runMigrations(db)
-    db.exec(SCHEMA)
+    for (const sql of SCHEMA) db.exec(assertSingleStatement(sql))
   } else {
-    db.exec(SCHEMA)
+    for (const sql of SCHEMA) db.exec(assertSingleStatement(sql))
     runMigrations(db)
   }
 }
