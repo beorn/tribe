@@ -1,3 +1,4 @@
+import { assertSingleStatement } from "@bearly/sqlite"
 /**
  * bounded-status — `recall status` must return prompt index/hook diagnostics
  * without blocking on LLM round-trips during chief recovery (km-bead
@@ -104,11 +105,14 @@ describe("recall status (bounded by default)", () => {
     mkdirSync(claudeDir, { recursive: true })
     const dbPath = join(claudeDir, "session-index.db")
     const db = new Database(dbPath)
-    db.exec(`
-      PRAGMA user_version = 3;
-      CREATE TABLE sessions (id TEXT PRIMARY KEY, project_path TEXT, jsonl_path TEXT);
-      CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT);
-    `)
+    for (const sql of [
+      `
+      PRAGMA user_version = 3;`,
+      `      CREATE TABLE sessions (id TEXT PRIMARY KEY, project_path TEXT, jsonl_path TEXT);`,
+      `      CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT);`,
+    ]) {
+      db.exec(assertSingleStatement(sql))
+    }
     db.close()
 
     const { status, stdout, stderr } = runStatus([])

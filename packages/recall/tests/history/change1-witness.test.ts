@@ -96,7 +96,9 @@ describe("Change 1 Witness Tests (CTO Ruling 2026-09-22)", () => {
     expect(deleteMsgSql).toBeDefined()
     expect(deleteMsgSql).toBe(buildDeleteCodexMessagesSql(keys))
 
-    const plan = db.prepare(`EXPLAIN QUERY PLAN ${deleteMsgSql}`).all(...keys) as Array<{ detail: string }>
+    const plan = db.prepare(assertSingleStatement(`EXPLAIN QUERY PLAN ${deleteMsgSql}`)).all(...keys) as Array<{
+      detail: string
+    }>
 
     const planDetails = plan.map((p) => p.detail).join(" ")
     expect(planDetails).not.toContain("SCAN messages")
@@ -108,7 +110,9 @@ describe("Change 1 Witness Tests (CTO Ruling 2026-09-22)", () => {
     const placeholders = keys.map(() => "?").join(",")
     // Simulating regression: adding LIKE inside delete statement
     const regressionSql = `DELETE FROM messages WHERE session_id IN (${placeholders}) OR session_id LIKE ?`
-    const plan = db.prepare(`EXPLAIN QUERY PLAN ${regressionSql}`).all(...keys, "codex:sess1%") as Array<{
+    const plan = db
+      .prepare(assertSingleStatement(`EXPLAIN QUERY PLAN ${regressionSql}`))
+      .all(...keys, "codex:sess1%") as Array<{
       detail: string
     }>
     const planDetails = plan.map((p) => p.detail).join(" ")
@@ -805,7 +809,7 @@ if (args[0] === "transcript" && args[1] === "list") {
           d.exec("BEGIN TRANSACTION")
           // Defect: does NOT re-read user_version inside transaction! Uses stale initialVersion!
           step.up(d)
-          d.exec(`PRAGMA user_version = ${step.version}`)
+          d.exec(assertSingleStatement(`PRAGMA user_version = ${step.version}`))
           d.exec("COMMIT")
         }
       }
@@ -901,9 +905,10 @@ if (args[0] === "transcript" && args[1] === "list") {
   // --------------------------------------------------------------------------
   function createRealV2Fixture(dbPath: string): void {
     const fixtureDb = new Database(dbPath)
-    fixtureDb.exec(`
-      PRAGMA user_version = 2;
-      CREATE TABLE writes (
+    for (const sql of [
+      `
+      PRAGMA user_version = 2;`,
+      `      CREATE TABLE writes (
         id INTEGER PRIMARY KEY,
         session_id TEXT NOT NULL,
         session_file TEXT NOT NULL,
@@ -913,12 +918,12 @@ if (args[0] === "transcript" && args[1] === "list") {
         content_hash TEXT NOT NULL,
         content_size INTEGER NOT NULL,
         content TEXT
-      );
-      CREATE INDEX idx_writes_path ON writes(file_path);
-      CREATE INDEX idx_writes_timestamp ON writes(timestamp);
-      CREATE INDEX idx_writes_session ON writes(session_id);
-      CREATE INDEX idx_writes_hash ON writes(content_hash);
-
+      );`,
+      `      CREATE INDEX idx_writes_path ON writes(file_path);`,
+      `      CREATE INDEX idx_writes_timestamp ON writes(timestamp);`,
+      `      CREATE INDEX idx_writes_session ON writes(session_id);`,
+      `      CREATE INDEX idx_writes_hash ON writes(content_hash);`,
+      `
       CREATE TABLE sessions (
         id TEXT PRIMARY KEY,
         project_path TEXT NOT NULL,
@@ -937,9 +942,9 @@ if (args[0] === "transcript" && args[1] === "list") {
         shrink_new_count INTEGER,
         parent_session_id TEXT,
         agent_id TEXT
-      );
-      CREATE INDEX idx_sessions_parent ON sessions(parent_session_id);
-
+      );`,
+      `      CREATE INDEX idx_sessions_parent ON sessions(parent_session_id);`,
+      `
       CREATE TABLE messages (
         id INTEGER PRIMARY KEY,
         uuid TEXT UNIQUE,
@@ -951,34 +956,36 @@ if (args[0] === "transcript" && args[1] === "list") {
         timestamp INTEGER NOT NULL,
         duplicate_of INTEGER,
         line INTEGER
-      );
-      CREATE INDEX idx_messages_session ON messages(session_id);
-      CREATE INDEX idx_messages_type ON messages(type);
-      CREATE INDEX idx_messages_timestamp ON messages(timestamp);
-      CREATE INDEX idx_messages_tool ON messages(tool_name);
-
+      );`,
+      `      CREATE INDEX idx_messages_session ON messages(session_id);`,
+      `      CREATE INDEX idx_messages_type ON messages(type);`,
+      `      CREATE INDEX idx_messages_timestamp ON messages(timestamp);`,
+      `      CREATE INDEX idx_messages_tool ON messages(tool_name);`,
+      `
       CREATE VIRTUAL TABLE messages_fts USING fts5(
         content,
         tool_name,
         file_paths,
         content='messages',
         content_rowid='id'
-      );
-      CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
+      );`,
+      `      CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
         INSERT INTO messages_fts(rowid, content, tool_name, file_paths)
         VALUES (new.id, new.content, new.tool_name, new.file_paths);
-      END;
-      CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+      END;`,
+      `      CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
         INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, file_paths)
         VALUES ('delete', old.id, old.content, old.tool_name, old.file_paths);
-      END;
-      CREATE TRIGGER messages_au AFTER UPDATE ON messages BEGIN
+      END;`,
+      `      CREATE TRIGGER messages_au AFTER UPDATE ON messages BEGIN
         INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, file_paths)
         VALUES ('delete', old.id, old.content, old.tool_name, old.file_paths);
         INSERT INTO messages_fts(rowid, content, tool_name, file_paths)
         VALUES (new.id, new.content, new.tool_name, new.file_paths);
-      END;
-    `)
+      END;`,
+    ]) {
+      fixtureDb.exec(assertSingleStatement(sql))
+    }
     fixtureDb.close()
   }
 

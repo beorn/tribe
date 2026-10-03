@@ -1,3 +1,4 @@
+import { assertSingleStatement } from "@bearly/sqlite"
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -78,7 +79,8 @@ function seedRankedMessage(id: string, content: string, toolName: string | null)
 // node is enough to prove rawSearch() reaches the vault at all.
 function seedVaultDb(dbPath: string, content: string, secondContent?: string): void {
   const db = new Database(dbPath)
-  db.exec(`
+  for (const sql of [
+    `
     CREATE TABLE nodes (
       rowid INTEGER PRIMARY KEY,
       id TEXT,
@@ -87,19 +89,21 @@ function seedVaultDb(dbPath: string, content: string, secondContent?: string): v
       name TEXT,
       title TEXT,
       content TEXT
-    );
-    CREATE VIRTUAL TABLE nodes_fts USING fts5(
+    );`,
+    `    CREATE VIRTUAL TABLE nodes_fts USING fts5(
       id, name, title, content,
       content='nodes',
       content_rowid='rowid',
       prefix='2,3,4',
       tokenize='unicode61 tokenchars ''@#+~'''
-    );
-    CREATE TRIGGER nodes_ai AFTER INSERT ON nodes BEGIN
+    );`,
+    `    CREATE TRIGGER nodes_ai AFTER INSERT ON nodes BEGIN
       INSERT INTO nodes_fts(rowid, id, name, title, content)
       VALUES (new.rowid, new.id, new.name, new.title, new.content);
-    END;
-  `)
+    END;`,
+  ]) {
+    db.exec(assertSingleStatement(sql))
+  }
   const insert = db.prepare("INSERT INTO nodes (id, fs_path, name, title, content) VALUES (?, ?, ?, ?, ?)")
   insert.run("@i/vault-raw-fixture", "hub/vault-raw-fixture.md", "vault-raw-fixture", "Vault raw-mode fixture", content)
   if (secondContent !== undefined) {

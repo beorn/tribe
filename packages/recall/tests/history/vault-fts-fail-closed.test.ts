@@ -1,3 +1,4 @@
+import { assertSingleStatement } from "@bearly/sqlite"
 /**
  * Fail-closed guards for the vault FTS adapter (recall → km vault read path).
  *
@@ -62,7 +63,8 @@ const VAULT_FTS_SRC = resolve(HERE, "../../src/history/vault-fts.ts")
 // (km/packages/km-storage/src/db/schema.ts). Default (delete) journal mode so
 // the read-only open needs no sidecar -wal/-shm files.
 function seedKmVaultDb(db: Database): void {
-  db.exec(`
+  for (const sql of [
+    `
     CREATE TABLE nodes (
       rowid INTEGER PRIMARY KEY,
       id TEXT,
@@ -71,8 +73,8 @@ function seedKmVaultDb(db: Database): void {
       name TEXT,
       title TEXT,
       content TEXT
-    );
-    CREATE VIRTUAL TABLE nodes_fts USING fts5(
+    );`,
+    `    CREATE VIRTUAL TABLE nodes_fts USING fts5(
       id,
       name,
       title,
@@ -81,12 +83,14 @@ function seedKmVaultDb(db: Database): void {
       content_rowid='rowid',
       prefix='2,3,4',
       tokenize='unicode61 tokenchars ''@#+~'''
-    );
-    CREATE TRIGGER nodes_ai AFTER INSERT ON nodes BEGIN
+    );`,
+    `    CREATE TRIGGER nodes_ai AFTER INSERT ON nodes BEGIN
       INSERT INTO nodes_fts(rowid, id, name, title, content)
       VALUES (new.rowid, new.id, new.name, new.title, new.content);
-    END;
-  `)
+    END;`,
+  ]) {
+    db.exec(assertSingleStatement(sql))
+  }
   const insert = db.prepare(
     "INSERT INTO nodes (id, parent_id, fs_path, name, title, content) VALUES (?, ?, ?, ?, ?, ?)",
   )

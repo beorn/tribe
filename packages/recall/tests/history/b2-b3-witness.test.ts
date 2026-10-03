@@ -1,3 +1,4 @@
+import { assertSingleStatement } from "@bearly/sqlite"
 /**
  * @failure  Incremental recall index rewrites every session or blocks prompt hooks on writer lock
  * @level    l2
@@ -582,9 +583,10 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
   test("B3.5: migration from v3 schema succeeds and populates cwd via migration 4 & 5", () => {
     const v3Path = join(tempDir, "v3-migration-test.db")
     const v3Db = new Database(v3Path)
-    v3Db.exec(`
-      PRAGMA user_version = 3;
-      CREATE TABLE sessions (
+    for (const sql of [
+      `
+      PRAGMA user_version = 3;`,
+      `      CREATE TABLE sessions (
         id TEXT PRIMARY KEY,
         project_path TEXT NOT NULL,
         jsonl_path TEXT UNIQUE NOT NULL,
@@ -602,10 +604,10 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
         shrink_new_count INTEGER,
         parent_session_id TEXT,
         agent_id TEXT
-      );
-      CREATE INDEX idx_sessions_project ON sessions(project_path);
-      CREATE INDEX idx_sessions_updated ON sessions(updated_at);
-      CREATE TABLE messages (
+      );`,
+      `      CREATE INDEX idx_sessions_project ON sessions(project_path);`,
+      `      CREATE INDEX idx_sessions_updated ON sessions(updated_at);`,
+      `      CREATE TABLE messages (
         id INTEGER PRIMARY KEY,
         uuid TEXT,
         session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -617,8 +619,10 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
         duplicate_of INTEGER,
         line INTEGER,
         UNIQUE(session_id, uuid)
-      );
-    `)
+      );`,
+    ]) {
+      v3Db.exec(assertSingleStatement(sql))
+    }
 
     // Seed session 1 with JSONL file on disk that contains cwd
     const s1File = join(tempDir, "s1.jsonl")
@@ -665,9 +669,10 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
   test("B3.6: Claude session with cwd past 64KB migrates exact cwd and does not fall back to dash-split project_path", () => {
     const v3Path = join(tempDir, "v3-deep-cwd-test.db")
     const v3Db = new Database(v3Path)
-    v3Db.exec(`
-      PRAGMA user_version = 3;
-      CREATE TABLE sessions (
+    for (const sql of [
+      `
+      PRAGMA user_version = 3;`,
+      `      CREATE TABLE sessions (
         id TEXT PRIMARY KEY,
         project_path TEXT NOT NULL,
         jsonl_path TEXT UNIQUE NOT NULL,
@@ -685,10 +690,10 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
         shrink_new_count INTEGER,
         parent_session_id TEXT,
         agent_id TEXT
-      );
-      CREATE INDEX idx_sessions_project ON sessions(project_path);
-      CREATE INDEX idx_sessions_updated ON sessions(updated_at);
-      CREATE TABLE messages (
+      );`,
+      `      CREATE INDEX idx_sessions_project ON sessions(project_path);`,
+      `      CREATE INDEX idx_sessions_updated ON sessions(updated_at);`,
+      `      CREATE TABLE messages (
         id INTEGER PRIMARY KEY,
         uuid TEXT,
         session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -700,8 +705,10 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
         duplicate_of INTEGER,
         line INTEGER,
         UNIQUE(session_id, uuid)
-      );
-    `)
+      );`,
+    ]) {
+      v3Db.exec(assertSingleStatement(sql))
+    }
 
     // 1. Session with cwd past 64KB: 40 padding summary lines (80 KB) before user line with cwd
     const deepFile = join(tempDir, "deep.jsonl")
@@ -772,9 +779,10 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
   test("B3.7: migration 6 repairs contradicted subagent cwd rows on v5 database and nulls unverified rows", () => {
     const v5Path = join(tempDir, "v5-repair-test.db")
     const v5Db = new Database(v5Path)
-    v5Db.exec(`
-      PRAGMA user_version = 5;
-      CREATE TABLE sessions (
+    for (const sql of [
+      `
+      PRAGMA user_version = 5;`,
+      `      CREATE TABLE sessions (
         id TEXT PRIMARY KEY,
         project_path TEXT NOT NULL,
         jsonl_path TEXT UNIQUE NOT NULL,
@@ -793,8 +801,8 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
         parent_session_id TEXT,
         agent_id TEXT,
         cwd TEXT
-      );
-      CREATE TABLE messages (
+      );`,
+      `      CREATE TABLE messages (
         id INTEGER PRIMARY KEY,
         uuid TEXT,
         session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -803,8 +811,10 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
         tool_name TEXT,
         file_paths TEXT,
         timestamp INTEGER NOT NULL
-      );
-    `)
+      );`,
+    ]) {
+      v5Db.exec(assertSingleStatement(sql))
+    }
 
     // 1. Contradicted Claude subagent session: stored cwd is lossy /hh/dev/wt6, transcript has /hh/dev-wt6 past 64KB
     const subagentFile = join(tempDir, "subagent.jsonl")
@@ -897,9 +907,10 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
   test("B3.8: Codex rollout with cwd only in payload.cwd backfills via migration 4", () => {
     const v3Path = join(tempDir, "v3-payload-cwd-test.db")
     const v3Db = new Database(v3Path)
-    v3Db.exec(`
-      PRAGMA user_version = 3;
-      CREATE TABLE sessions (
+    for (const sql of [
+      `
+      PRAGMA user_version = 3;`,
+      `      CREATE TABLE sessions (
         id TEXT PRIMARY KEY,
         project_path TEXT NOT NULL,
         jsonl_path TEXT UNIQUE NOT NULL,
@@ -917,8 +928,8 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
         shrink_new_count INTEGER,
         parent_session_id TEXT,
         agent_id TEXT
-      );
-      CREATE TABLE messages (
+      );`,
+      `      CREATE TABLE messages (
         id INTEGER PRIMARY KEY,
         uuid TEXT,
         session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -927,8 +938,10 @@ describe("Change 2 Tier B2 & B3 Witness Tests (CTO Ruling 2026-09-22: B2, B3)", 
         tool_name TEXT,
         file_paths TEXT,
         timestamp INTEGER NOT NULL
-      );
-    `)
+      );`,
+    ]) {
+      v3Db.exec(assertSingleStatement(sql))
+    }
 
     // Codex rollout transcript where cwd is only in payload.cwd, no top-level cwd
     const rolloutFile = join(tempDir, "codex-rollout.jsonl")

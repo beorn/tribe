@@ -1,3 +1,4 @@
+import { assertSingleStatement } from "@bearly/sqlite"
 import { Database } from "bun:sqlite"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
@@ -97,7 +98,8 @@ describe("Change 1 Tier B1 Witness Tests (CTO Ruling 2026-09-22: B1)", () => {
   // --------------------------------------------------------------------------
   test("B1.1: migration v3 converts garage sessionId:uuid rows back to raw uuid, resets codex to NULL, and clears stale-unreadable", () => {
     // Construct old schema: version 2 with uuid TEXT UNIQUE on messages
-    db.exec(`
+    for (const sql of [
+      `
       CREATE TABLE sessions (
         id TEXT PRIMARY KEY,
         project_path TEXT,
@@ -116,8 +118,8 @@ describe("Change 1 Tier B1 Witness Tests (CTO Ruling 2026-09-22: B1)", () => {
         shrink_new_count INTEGER,
         parent_session_id TEXT,
         agent_id TEXT
-      );
-
+      );`,
+      `
       CREATE TABLE messages (
         id INTEGER PRIMARY KEY,
         uuid TEXT UNIQUE,
@@ -129,21 +131,21 @@ describe("Change 1 Tier B1 Witness Tests (CTO Ruling 2026-09-22: B1)", () => {
         timestamp INTEGER NOT NULL,
         duplicate_of INTEGER,
         line INTEGER
-      );
-
+      );`,
+      `
       CREATE VIRTUAL TABLE messages_fts USING fts5(
         content,
         tool_name,
         file_paths,
         content='messages',
         content_rowid='id'
-      );
-
+      );`,
+      `
       CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
         INSERT INTO messages_fts(rowid, content, tool_name, file_paths)
         VALUES (new.id, new.content, new.tool_name, new.file_paths);
-      END;
-
+      END;`,
+      `
       CREATE TABLE content (
         id INTEGER PRIMARY KEY,
         content_type TEXT NOT NULL,
@@ -152,10 +154,12 @@ describe("Change 1 Tier B1 Witness Tests (CTO Ruling 2026-09-22: B1)", () => {
         title TEXT,
         content TEXT NOT NULL,
         timestamp INTEGER NOT NULL
-      );
-
-      PRAGMA user_version = 2;
-    `)
+      );`,
+      `
+      PRAGMA user_version = 2;`,
+    ]) {
+      db.exec(assertSingleStatement(sql))
+    }
 
     // Insert sessions: one normal, one stale-unreadable due to UNIQUE constraint
     insertV2Session(db, "sess-garage-1", "/p1", "/p1/s1.jsonl", 100, 100, 1)
@@ -595,9 +599,10 @@ describe("Change 1 Tier B1 Witness Tests (CTO Ruling 2026-09-22: B1)", () => {
   test("B1.9 (Chief Directive 2): Migration v3 from live index actual half-applied state", () => {
     // Construct exact live index state as found at /home/hh/.claude/session-index.db:
     // Schema has user_version = 2, messages table has UNIQUE(session_id, uuid)
-    db.exec(`
-      PRAGMA user_version = 2;
-      CREATE TABLE sessions (
+    for (const sql of [
+      `
+      PRAGMA user_version = 2;`,
+      `      CREATE TABLE sessions (
         id TEXT PRIMARY KEY,
         project_path TEXT NOT NULL,
         jsonl_path TEXT UNIQUE NOT NULL,
@@ -615,8 +620,8 @@ describe("Change 1 Tier B1 Witness Tests (CTO Ruling 2026-09-22: B1)", () => {
         shrink_new_count INTEGER,
         parent_session_id TEXT,
         agent_id TEXT
-      );
-      CREATE TABLE messages (
+      );`,
+      `      CREATE TABLE messages (
         id INTEGER PRIMARY KEY,
         uuid TEXT,
         session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -628,35 +633,37 @@ describe("Change 1 Tier B1 Witness Tests (CTO Ruling 2026-09-22: B1)", () => {
         duplicate_of INTEGER,
         line INTEGER,
         UNIQUE(session_id, uuid)
-      );
-      CREATE INDEX idx_messages_session ON messages(session_id);
-      CREATE INDEX idx_messages_type ON messages(type);
-      CREATE INDEX idx_messages_timestamp ON messages(timestamp);
-      CREATE INDEX idx_messages_tool ON messages(tool_name);
-      CREATE INDEX idx_messages_uuid ON messages(uuid);
-
+      );`,
+      `      CREATE INDEX idx_messages_session ON messages(session_id);`,
+      `      CREATE INDEX idx_messages_type ON messages(type);`,
+      `      CREATE INDEX idx_messages_timestamp ON messages(timestamp);`,
+      `      CREATE INDEX idx_messages_tool ON messages(tool_name);`,
+      `      CREATE INDEX idx_messages_uuid ON messages(uuid);`,
+      `
       CREATE VIRTUAL TABLE messages_fts USING fts5(
         content,
         tool_name,
         file_paths,
         content='messages',
         content_rowid='id'
-      );
-      CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
+      );`,
+      `      CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
         INSERT INTO messages_fts(rowid, content, tool_name, file_paths)
         VALUES (new.id, new.content, new.tool_name, new.file_paths);
-      END;
-      CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+      END;`,
+      `      CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
         INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, file_paths)
         VALUES ('delete', old.id, old.content, old.tool_name, old.file_paths);
-      END;
-      CREATE TRIGGER messages_au AFTER UPDATE ON messages BEGIN
+      END;`,
+      `      CREATE TRIGGER messages_au AFTER UPDATE ON messages BEGIN
         INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, file_paths)
         VALUES ('delete', old.id, old.content, old.tool_name, old.file_paths);
         INSERT INTO messages_fts(rowid, content, tool_name, file_paths)
         VALUES (new.id, new.content, new.tool_name, new.file_paths);
-      END;
-    `)
+      END;`,
+    ]) {
+      db.exec(assertSingleStatement(sql))
+    }
 
     // Pre-populate with:
     // 1. Garage sessionId:uuid rows
