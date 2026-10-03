@@ -115,4 +115,17 @@ describe("recall --vault-db <path> <verb>: a leading global binding (25149 d)", 
     expect(errText()).toMatch(/unknown option '--vault-db'/)
     expect(calls).toEqual([])
   })
+
+  test.each([
+    ["two leading flags", () => ["--vault-db", vault, "--vault-db", vault, "summarize"]],
+    ["two leading flags with =", () => [`--vault-db=${vault}`, `--vault-db=${vault}`, "summarize"]],
+    ["leading and trailing flag", () => ["--vault-db", vault, "search", "q", "--vault-db", vault]],
+    ["leading and trailing flag with =", () => ["--vault-db", vault, "search", "q", `--vault-db=${vault}`]],
+    ["two trailing flags", () => ["search", "q", "--vault-db", vault, "--vault-db", vault]],
+  ])("repeated --vault-db (%s) refuses with exit 2 naming the repeat fault", async (_name, getArgv) => {
+    await expect(main([...getArgv()])).rejects.toThrow("process.exit(2)")
+    expect(errText()).toMatch(/option '--vault-db' cannot be repeated/)
+    expect(errText()).not.toMatch(/unknown option '--vault-db'/)
+    expect(calls).toEqual([])
+  })
 })

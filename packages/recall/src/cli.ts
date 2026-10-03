@@ -270,6 +270,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   // A leading --vault-db binds the vault for the whole process (25149 d), so every verb routes as before and
   // reads it; it is stripped before the search-prepend below, which would otherwise search for its path.
   const leading = takeLeadingVaultDb(argv)
+  if (hasRepeatedVaultDb(leading.rest, leading.raw)) {
+    console.error("[recall] error: option '--vault-db' cannot be repeated")
+    process.exit(2)
+  }
   try {
     const bound = resolveVaultDbFlag(leading.raw)
     if (bound !== null) bindVaultDb(bound)
@@ -329,9 +333,24 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
 /** Split a leading `--vault-db <path>` / `--vault-db=<path>` off argv; a valueless flag carries `true`. */
 function takeLeadingVaultDb(argv: string[]): { raw: string | boolean | undefined; rest: string[] } {
   const first = argv[0]
-  if (first === "--vault-db") return { raw: argv.length > 1 ? argv[1] : true, rest: argv.slice(2) }
+  if (first === "--vault-db") {
+    const second = argv[1]
+    const hasValue = second !== undefined && !second.startsWith("-")
+    return { raw: hasValue ? second : true, rest: hasValue ? argv.slice(2) : argv.slice(1) }
+  }
   if (first?.startsWith("--vault-db=")) return { raw: first.slice("--vault-db=".length), rest: argv.slice(1) }
   return { raw: undefined, rest: argv }
+}
+
+/** Check whether `--vault-db` was provided more than once in option positions (before `--`). */
+function hasRepeatedVaultDb(rest: string[], leadingRaw: string | boolean | undefined): boolean {
+  const dashDashIndex = rest.indexOf("--")
+  const optionTokens = dashDashIndex === -1 ? rest : rest.slice(0, dashDashIndex)
+  const restCount = optionTokens.filter((arg) => arg === "--vault-db" || arg.startsWith("--vault-db=")).length
+  if (leadingRaw !== undefined) {
+    return restCount > 0
+  }
+  return restCount > 1
 }
 
 if (import.meta.main) {
