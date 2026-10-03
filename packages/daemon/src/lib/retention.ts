@@ -78,6 +78,7 @@
  * to be a CLI flag). See resolveRetentionConfig for names/defaults.
  */
 
+import { assertSingleStatement } from "@bearly/sqlite"
 import type { Database } from "bun:sqlite"
 import { createLogger } from "loggily"
 import { MESSAGE_ARCHIVE_COLUMNS, type TribeStatements } from "./database.ts"
@@ -247,14 +248,14 @@ function archiveMoveBatch(db: Database, ids: readonly string[], archivedAt: numb
   const placeholders = ids.map(() => "?").join(",")
   return db.transaction(() => {
     db.prepare(
-      `INSERT OR IGNORE INTO messages_archive (
+      assertSingleStatement(`INSERT OR IGNORE INTO messages_archive (
 				seq, ${MESSAGE_ARCHIVE_COLUMNS}, archived_at
 			)
 			SELECT
 				rowid, ${MESSAGE_ARCHIVE_COLUMNS}, ?
-			FROM messages WHERE id IN (${placeholders})`,
+			FROM messages WHERE id IN (${placeholders})`),
     ).run(archivedAt, ...ids)
-    const res = db.prepare(`DELETE FROM messages WHERE id IN (${placeholders})`).run(...ids)
+    const res = db.prepare(assertSingleStatement(`DELETE FROM messages WHERE id IN (${placeholders})`)).run(...ids)
     return res.changes ?? 0
   })()
 }
@@ -263,7 +264,9 @@ function archiveDeleteBatch(db: Database, ids: readonly string[]): number {
   if (ids.length === 0) return 0
   const placeholders = ids.map(() => "?").join(",")
   return db.transaction(() => {
-    const res = db.prepare(`DELETE FROM messages_archive WHERE id IN (${placeholders})`).run(...ids)
+    const res = db
+      .prepare(assertSingleStatement(`DELETE FROM messages_archive WHERE id IN (${placeholders})`))
+      .run(...ids)
     return res.changes ?? 0
   })()
 }
@@ -322,7 +325,9 @@ export function recordArchiveAttentionLoss(
 ): Array<{ recipient: string; lost: number; before_ts: number }> {
   if (ids.length === 0) return []
   const placeholders = ids.map(() => "?").join(",")
-  const loss = db.prepare(stmts.selectArchiveMoveAttentionLossSql(placeholders)).all(...ids) as Array<{
+  const loss = db
+    .prepare(assertSingleStatement(stmts.selectArchiveMoveAttentionLossSql(placeholders)))
+    .all(...ids) as Array<{
     recipient: string
     lost: number
     before_ts: number

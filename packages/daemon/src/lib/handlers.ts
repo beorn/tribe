@@ -2,6 +2,7 @@
  * Tribe tool handlers — all MCP tool case implementations.
  */
 
+import { assertSingleStatement } from "@bearly/sqlite"
 import { createLogger } from "loggily"
 import { randomUUID } from "node:crypto"
 import {
@@ -671,13 +672,15 @@ function activeBroadcastRecipients(ctx: TribeContext, answerableNames: ReadonlyS
   // recipients. The membership table was never a room concept here; it was an
   // accidental liveness predicate.
   const rows = ctx.db
-    .prepare(`
+    .prepare(
+      assertSingleStatement(`
       SELECT s.name
       FROM sessions s
       WHERE s.name IN (${placeholders})
         AND s.role = 'member'
       ORDER BY s.name ASC
-    `)
+    `),
+    )
     .all(...names) as Array<{ name: string }>
   return rows.map((row) => row.name)
 }
@@ -4054,14 +4057,16 @@ function querySnapshotRows(ctx: TribeContext, filters: SnapshotFilters): FetchRo
 
   const order = filters.since !== null ? "ASC" : "DESC"
   const rows = ctx.db
-    .prepare(`
+    .prepare(
+      assertSingleStatement(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
              attention_required, wakes_owner, sender_authority, session_id
       FROM messages
       WHERE ${conditions.join("\n        AND ")}
       ORDER BY rowid ${order}
       LIMIT $limit
-    `)
+    `),
+    )
     .all(params) as FetchRow[]
   return filters.since !== null ? rows : rows.reverse()
 }
@@ -4163,7 +4168,8 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
   if (ids && ids.length > 0) {
     const placeholders = ids.map(() => "?").join(", ")
     rows = ctx.db
-      .prepare(`
+      .prepare(
+        assertSingleStatement(`
         SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
                attention_required, wakes_owner, sender_authority, session_id
         FROM messages
@@ -4171,7 +4177,8 @@ function handleFetch(ctx: TribeContext, a: ToolArgs): ToolResult {
           AND kind != 'event'
         ORDER BY rowid ASC
         LIMIT ?
-      `)
+      `),
+      )
       .all(...ids, limit) as FetchRow[]
     const byId = new Map(rows.map((r) => [r.id, r]))
     rows = ids

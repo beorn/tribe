@@ -5,6 +5,7 @@
  */
 
 import { Database } from "bun:sqlite"
+import { assertSingleStatement } from "@bearly/sqlite"
 import { spawn, spawnSync } from "node:child_process"
 import { StringDecoder } from "node:string_decoder"
 import { fileURLToPath } from "node:url"
@@ -45,8 +46,8 @@ export function buildDeleteCodexSessionsSql(keys: string[]): string {
 export function deleteCodexSessionKeys(db: Database, keys: string[]): { messages: number; sessions: number } {
   if (keys.length === 0) return { messages: 0, sessions: 0 }
   const uniqueKeys = Array.from(new Set(keys))
-  const msgRes = db.prepare(buildDeleteCodexMessagesSql(uniqueKeys)).run(...uniqueKeys)
-  const sessRes = db.prepare(buildDeleteCodexSessionsSql(uniqueKeys)).run(...uniqueKeys)
+  const msgRes = db.prepare(assertSingleStatement(buildDeleteCodexMessagesSql(uniqueKeys))).run(...uniqueKeys)
+  const sessRes = db.prepare(assertSingleStatement(buildDeleteCodexSessionsSql(uniqueKeys))).run(...uniqueKeys)
   return { messages: msgRes.changes, sessions: sessRes.changes }
 }
 

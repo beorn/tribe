@@ -3,6 +3,7 @@
  */
 
 import { statSync } from "node:fs"
+import { assertSingleStatement } from "@bearly/sqlite"
 import { getDb, acquireIndexWriter, DB_BUSY_TIMEOUT_MS } from "./db.ts"
 import { indexProjectSources } from "./indexer.ts"
 import { log } from "./recall-shared.ts"
@@ -41,7 +42,7 @@ export function ensureProjectSourcesIndexed(): void {
     }
     throw error
   } finally {
-    db.run(`PRAGMA busy_timeout = ${DB_BUSY_TIMEOUT_MS}`)
+    db.run(assertSingleStatement(`PRAGMA busy_timeout = ${DB_BUSY_TIMEOUT_MS}`))
   }
   try {
     refreshProjectSources(db, projectRoot)

@@ -183,7 +183,7 @@ export const MIGRATION_STEPS: MigrationStep[] = [
     name: "baseline-columns-and-indexes",
     up: (db: Database) => {
       const getColumns = (table: string): Set<string> => {
-        const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+        const rows = db.prepare(assertSingleStatement(`PRAGMA table_info(${table})`)).all() as Array<{ name: string }>
         return new Set(rows.map((r) => r.name))
       }
 
@@ -228,9 +228,15 @@ export const MIGRATION_STEPS: MigrationStep[] = [
       if (clobbered.length > 0) {
         const ids = clobbered.map((s) => s.id)
         const placeholders = ids.map(() => "?").join(",")
-        const msgDel = db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...ids)
-        const wrDel = db.prepare(`DELETE FROM writes WHERE session_id IN (${placeholders})`).run(...ids)
-        const sessDel = db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...ids)
+        const msgDel = db
+          .prepare(assertSingleStatement(`DELETE FROM messages WHERE session_id IN (${placeholders})`))
+          .run(...ids)
+        const wrDel = db
+          .prepare(assertSingleStatement(`DELETE FROM writes WHERE session_id IN (${placeholders})`))
+          .run(...ids)
+        const sessDel = db
+          .prepare(assertSingleStatement(`DELETE FROM sessions WHERE id IN (${placeholders})`))
+          .run(...ids)
         console.log(
           `[migration] Cleaned ${sessDel.changes} clobbered subagent session(s), ${msgDel.changes} message(s), ${wrDel.changes} write(s); will re-index cleanly.`,
         )
@@ -249,7 +255,9 @@ export const MIGRATION_STEPS: MigrationStep[] = [
       }>
       for (const idx of indexList) {
         if (idx.unique) {
-          const cols = db.prepare(`PRAGMA index_info('${idx.name}')`).all() as Array<{ name: string }>
+          const cols = db.prepare(assertSingleStatement(`PRAGMA index_info('${idx.name}')`)).all() as Array<{
+            name: string
+          }>
           if (cols.length === 1 && cols[0]?.name === "uuid") {
             needsTableRecreation = true
             break
@@ -379,7 +387,7 @@ export const MIGRATION_STEPS: MigrationStep[] = [
     name: "session-tail-and-cwd-contract",
     up: (db: Database) => {
       const getColumns = (table: string): Set<string> => {
-        const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+        const rows = db.prepare(assertSingleStatement(`PRAGMA table_info(${table})`)).all() as Array<{ name: string }>
         return new Set(rows.map((r) => r.name))
       }
 
@@ -561,7 +569,7 @@ export function runMigrations(db: Database): void {
       const currentVersion = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version
       if (currentVersion < step.version) {
         step.up(db)
-        db.exec(`PRAGMA user_version = ${step.version}`)
+        db.exec(assertSingleStatement(`PRAGMA user_version = ${step.version}`))
       }
       db.exec("COMMIT")
     } catch (err) {

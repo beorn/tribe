@@ -29,6 +29,7 @@
  * via `server.on("connection", handler)`.
  */
 
+import { assertSingleStatement } from "@bearly/sqlite"
 import { randomUUID, timingSafeEqual } from "node:crypto"
 import { type Socket as NetSocket } from "node:net"
 import { isAbsolute } from "node:path"
@@ -560,7 +561,7 @@ export function withDispatcher<
       // A runtime rename keeps the sid. The actor's own row wins; a sole row under the sid is its renamed session.
       const rows = (
         db
-          .prepare(`SELECT ${AUTHORITY_ROW_COLUMNS} FROM sessions WHERE identity_sid = $sid`)
+          .prepare(assertSingleStatement(`SELECT ${AUTHORITY_ROW_COLUMNS} FROM sessions WHERE identity_sid = $sid`))
           .all({ $sid: verdict.sid }) as AuthorityRow[]
       ).filter((candidate) => !isTombstonedSessionName(candidate.name))
       const row =
@@ -2518,9 +2519,9 @@ export function withDispatcher<
             // structural status API above, not as an accidental log field.
             let rows = db
               .prepare(
-                `SELECT id, type, sender, recipient, kind, content, bead_id, ref,
+                assertSingleStatement(`SELECT id, type, sender, recipient, kind, content, bead_id, ref,
                         ts, delivery, topic, room_id, request, reply, summary
-                 FROM messages${where} ORDER BY ts DESC${limitSql}`,
+                 FROM messages${where} ORDER BY ts DESC${limitSql}`),
               )
               .all(...values) as Array<{ id: string; ts: number }>
             if (refPrefix) {

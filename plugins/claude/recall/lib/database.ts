@@ -6,6 +6,7 @@
  */
 
 import { Database } from "bun:sqlite"
+import { assertSingleStatement } from "@bearly/sqlite"
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -69,7 +70,7 @@ export function openRecallDatabase(path: string): Database {
     `ALTER TABLE session_focus ADD COLUMN summary_cost REAL`,
   ]) {
     try {
-      db.run(col)
+      db.run(assertSingleStatement(col))
     } catch {
       /* column already present */
     }

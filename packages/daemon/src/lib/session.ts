@@ -2,6 +2,7 @@
  * Tribe session — registration, delivery offsets, transcript naming, cleanup.
  */
 
+import { assertSingleStatement } from "@bearly/sqlite"
 import { createLogger } from "loggily"
 import type { Database } from "bun:sqlite"
 import { readTranscriptSlug } from "tribe-wire/lib/transcript"
@@ -282,9 +283,9 @@ export function sweepDeadSessionRows(
   const activeClause = activeIds.length > 0 ? ` AND id NOT IN (${activeIds.map(() => "?").join(", ")})` : ""
   const candidates = db
     .prepare(
-      `SELECT id, name FROM sessions
+      assertSingleStatement(`SELECT id, name FROM sessions
        WHERE updated_at < ?
-         AND name GLOB '*-dead-*'${activeClause}`,
+         AND name GLOB '*-dead-*'${activeClause}`),
     )
     .all(cutoff, ...activeIds) as Array<{ id: string; name: string }>
   if (candidates.length === 0) return 0
@@ -292,8 +293,8 @@ export function sweepDeadSessionRows(
   const ids = candidates.map((candidate) => candidate.id)
   const placeholders = ids.map(() => "?").join(", ")
   return db.transaction(() => {
-    db.prepare(`DELETE FROM room_members WHERE session_id IN (${placeholders})`).run(...ids)
-    const res = db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...ids)
+    db.prepare(assertSingleStatement(`DELETE FROM room_members WHERE session_id IN (${placeholders})`)).run(...ids)
+    const res = db.prepare(assertSingleStatement(`DELETE FROM sessions WHERE id IN (${placeholders})`)).run(...ids)
     return Number(res.changes ?? 0)
   })()
 }
@@ -317,7 +318,9 @@ export function countDurableSessionRows(db: Database, retiredNames: ReadonlySet<
   const exclusion = retired.length === 0 ? "" : ` AND name NOT IN (${retired.map(() => "?").join(", ")})`
   const row = db
     .query(
-      `SELECT COUNT(*) AS n FROM sessions WHERE (launch_id IS NOT NULL OR launch_parent_pid IS NOT NULL)${exclusion}`,
+      assertSingleStatement(
+        `SELECT COUNT(*) AS n FROM sessions WHERE (launch_id IS NOT NULL OR launch_parent_pid IS NOT NULL)${exclusion}`,
+      ),
     )
     .get(...retired) as { n: number }
   return row.n

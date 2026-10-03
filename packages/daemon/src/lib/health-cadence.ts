@@ -1,3 +1,4 @@
+import { assertSingleStatement } from "@bearly/sqlite"
 import type { Database } from "bun:sqlite"
 import {
   ATTENTION_PREDICATE_SQL,
@@ -438,7 +439,8 @@ function inboxLagProjection(
       AND sender != $session
       AND (recipient = $session OR recipient = '*')
   `)
-  const actionableLagQueryMessages = db.prepare(`
+  const actionableLagQueryMessages = db.prepare(
+    assertSingleStatement(`
     SELECT COUNT(*) AS rows, MIN(ts) AS oldest_ts
     FROM messages AS m
     WHERE m.rowid > COALESCE(
@@ -451,8 +453,10 @@ function inboxLagProjection(
       AND ${ATTENTION_PREDICATE_SQL}
       AND ${noOpenIncidentAttentionPredicateSql("m", "$session")}
       AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "rowid" })}
-  `)
-  const actionableLagQueryArchive = db.prepare(`
+  `),
+  )
+  const actionableLagQueryArchive = db.prepare(
+    assertSingleStatement(`
     SELECT COUNT(*) AS rows, MIN(ts) AS oldest_ts
     FROM messages_archive AS m
     WHERE m.seq > COALESCE(
@@ -465,12 +469,14 @@ function inboxLagProjection(
       AND ${ATTENTION_PREDICATE_SQL}
       AND ${noOpenIncidentAttentionPredicateSql("m", "$session")}
       AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "seq" })}
-  `)
+  `),
+  )
   // Selects the shared seq/rowid position too (absent from the original
   // SELECT list, which only ever needed it in ORDER BY against the single
   // CTE) so olderCandidate() below can compare the two halves' candidates the
   // same way `ORDER BY m.seq ASC LIMIT 1` did against the union.
-  const oldestActionableQueryMessages = db.prepare(`
+  const oldestActionableQueryMessages = db.prepare(
+    assertSingleStatement(`
     SELECT m.id, m.type, m.sender, m.summary, m.ts, m.rowid AS seq
     FROM messages AS m
     WHERE m.rowid > COALESCE(
@@ -485,8 +491,10 @@ function inboxLagProjection(
       AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "rowid" })}
     ORDER BY m.rowid ASC
     LIMIT 1
-  `)
-  const oldestActionableQueryArchive = db.prepare(`
+  `),
+  )
+  const oldestActionableQueryArchive = db.prepare(
+    assertSingleStatement(`
     SELECT m.id, m.type, m.sender, m.summary, m.ts, m.seq AS seq
     FROM messages_archive AS m
     WHERE m.seq > COALESCE(
@@ -501,7 +509,8 @@ function inboxLagProjection(
       AND ${unretiredAttentionPredicateSql("m", { relation: "journal", sequence: "seq" })}
     ORDER BY m.seq ASC
     LIMIT 1
-  `)
+  `),
+  )
 
   const rows = [...new Set(connectedSessionNames)].sort().map((session) => {
     const cursor = cursorQuery.get({ $session: session }) as {

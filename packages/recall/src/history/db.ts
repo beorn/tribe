@@ -7,6 +7,7 @@
  */
 
 import { Database } from "bun:sqlite"
+import { assertSingleStatement } from "@bearly/sqlite"
 import { tryAcquireFlock } from "@bearly/flock"
 import * as path from "path"
 import * as fs from "fs"
@@ -44,7 +45,7 @@ export function getDb(options?: GetDbOptions): Database {
   // Enable WAL mode for concurrent access (multiple Claude sessions)
   // WAL allows readers to not block writers and vice versa
   db.run("PRAGMA journal_mode = WAL")
-  db.run(`PRAGMA busy_timeout = ${DB_BUSY_TIMEOUT_MS}`)
+  db.run(assertSingleStatement(`PRAGMA busy_timeout = ${DB_BUSY_TIMEOUT_MS}`))
 
   try {
     initSchema(db, { allowMigration: options?.allowMigration })
