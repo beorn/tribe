@@ -1,3 +1,4 @@
+import { assertSingleStatement } from "@bearly/sqlite"
 /**
  * Unified search command — FTS5 search with optional LLM synthesis, grep, and raw filters.
  */
@@ -899,7 +900,7 @@ function rawSearch(query: string | undefined, options: RawSearchOptions): void {
     if (project) params.push(`%${project.replace(/\*/g, "")}%`)
     params.push(limit)
 
-    const results = db.prepare(recentQuery).all(...params) as (MessageRecord & {
+    const results = db.prepare(assertSingleStatement(recentQuery)).all(...params) as (MessageRecord & {
       snippet: string
       project_path: string
       cwd?: string | null

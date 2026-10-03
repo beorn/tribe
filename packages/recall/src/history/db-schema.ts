@@ -266,11 +266,12 @@ export const MIGRATION_STEPS: MigrationStep[] = [
       }
 
       if (needsTableRecreation) {
-        db.exec(`
-          DROP TRIGGER IF EXISTS messages_ai;
-          DROP TRIGGER IF EXISTS messages_ad;
-          DROP TRIGGER IF EXISTS messages_au;
-          CREATE TABLE messages_new (
+        const statements = [
+          `
+          DROP TRIGGER IF EXISTS messages_ai;`,
+          `          DROP TRIGGER IF EXISTS messages_ad;`,
+          `          DROP TRIGGER IF EXISTS messages_au;`,
+          `          CREATE TABLE messages_new (
             id INTEGER PRIMARY KEY,
             uuid TEXT,
             session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -282,33 +283,34 @@ export const MIGRATION_STEPS: MigrationStep[] = [
             duplicate_of INTEGER,
             line INTEGER,
             UNIQUE(session_id, uuid)
-          );
-          INSERT OR IGNORE INTO messages_new (id, uuid, session_id, type, content, tool_name, file_paths, timestamp, duplicate_of, line)
+          );`,
+          `          INSERT OR IGNORE INTO messages_new (id, uuid, session_id, type, content, tool_name, file_paths, timestamp, duplicate_of, line)
           SELECT id, uuid, session_id, type, content, tool_name, file_paths, timestamp, duplicate_of, line
-          FROM messages;
-          DROP TABLE messages;
-          ALTER TABLE messages_new RENAME TO messages;
-          CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
-          CREATE INDEX IF NOT EXISTS idx_messages_type ON messages(type);
-          CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
-          CREATE INDEX IF NOT EXISTS idx_messages_tool ON messages(tool_name);
-          CREATE INDEX IF NOT EXISTS idx_messages_uuid ON messages(uuid);
-
+          FROM messages;`,
+          `          DROP TABLE messages;`,
+          `          ALTER TABLE messages_new RENAME TO messages;`,
+          `          CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);`,
+          `          CREATE INDEX IF NOT EXISTS idx_messages_type ON messages(type);`,
+          `          CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);`,
+          `          CREATE INDEX IF NOT EXISTS idx_messages_tool ON messages(tool_name);`,
+          `          CREATE INDEX IF NOT EXISTS idx_messages_uuid ON messages(uuid);`,
+          `
           CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
             INSERT INTO messages_fts(rowid, content, tool_name, file_paths)
             VALUES (new.id, new.content, new.tool_name, new.file_paths);
-          END;
-          CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+          END;`,
+          `          CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
             INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, file_paths)
             VALUES ('delete', old.id, old.content, old.tool_name, old.file_paths);
-          END;
-          CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+          END;`,
+          `          CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
             INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, file_paths)
             VALUES ('delete', old.id, old.content, old.tool_name, old.file_paths);
             INSERT INTO messages_fts(rowid, content, tool_name, file_paths)
             VALUES (new.id, new.content, new.tool_name, new.file_paths);
-          END;
-        `)
+          END;`,
+        ]
+        for (const sql of statements) db.exec(assertSingleStatement(sql))
       } else {
         db.exec("CREATE INDEX IF NOT EXISTS idx_messages_uuid ON messages(uuid)")
       }

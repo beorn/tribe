@@ -1,3 +1,4 @@
+import { assertSingleStatement } from "@bearly/sqlite"
 /**
  * context.ts — Build a rich context bundle for the query planner.
  *
@@ -233,8 +234,8 @@ function loadRecentSessions(db: Database, max: number): RecentSession[] {
   try {
     const promptRows = db
       .prepare(
-        `SELECT source_id, content FROM content
-         WHERE content_type = 'first_prompt' AND source_id IN (${placeholders})`,
+        assertSingleStatement(`SELECT source_id, content FROM content
+         WHERE content_type = 'first_prompt' AND source_id IN (${placeholders})`),
       )
       .all(...ids) as { source_id: string; content: string }[]
     for (const r of promptRows) firstPrompts.set(r.source_id, r.content)
@@ -245,9 +246,9 @@ function loadRecentSessions(db: Database, max: number): RecentSession[] {
   try {
     const summaryRows = db
       .prepare(
-        `SELECT source_id, content, timestamp FROM content
+        assertSingleStatement(`SELECT source_id, content, timestamp FROM content
          WHERE content_type = 'summary' AND source_id IN (${placeholders})
-         ORDER BY timestamp DESC`,
+         ORDER BY timestamp DESC`),
       )
       .all(...ids) as { source_id: string; content: string; timestamp: number }[]
     // First (newest) summary per session wins

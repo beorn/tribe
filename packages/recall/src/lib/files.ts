@@ -1,3 +1,4 @@
+import { assertSingleStatement } from "@bearly/sqlite"
 /**
  * File write commands — list, search, and restore file writes.
  */
@@ -45,7 +46,7 @@ async function listWrites(date?: string): Promise<void> {
 
   query += ` ORDER BY timestamp DESC LIMIT 100`
 
-  const rows = db.prepare(query).all(...params) as WriteRecord[]
+  const rows = db.prepare(assertSingleStatement(query)).all(...params) as WriteRecord[]
 
   if (rows.length === 0) {
     console.log(date ? `No writes found for date: ${date}` : "No writes found")

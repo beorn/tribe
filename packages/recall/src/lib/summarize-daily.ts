@@ -1,3 +1,4 @@
+import { assertSingleStatement } from "@bearly/sqlite"
 /**
  * Daily and weekly summary rollups from per-session summaries.
  *
@@ -147,7 +148,7 @@ export async function summarizeDay(
 
     const params = opts.projectFilter ? [startMs, endMs, `%${opts.projectFilter}%`] : [startMs, endMs]
 
-    rows = db.prepare(query).all(...params) as SessionRecord[]
+    rows = db.prepare(assertSingleStatement(query)).all(...params) as SessionRecord[]
   } finally {
     closeDb()
   }
