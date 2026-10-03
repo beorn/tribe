@@ -1847,4 +1847,13 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
     expect(res.stderr ?? "").toContain('"name":"tribe:stdio-adapter"')
     expect(res.stderr ?? "").toContain("Connecting to daemon at /tmp/no-tribe.sock")
   })
+
+  it("pending --help documents its exit-code contract (27235)", () => {
+    const { stdout, code } = runCli(["pending", "--help"])
+    expect(code).toBe(0)
+    expect(stdout).toMatch(/Exit codes:/)
+    expect(stdout).toMatch(/0\s+a typed snapshot was produced/)
+    expect(stdout).toMatch(/2\s+the daemon refused or returned an unusable snapshot/)
+    expect(stdout).toMatch(/1\s+the JSON payload could not be written/)
+  })
 })
