@@ -10,6 +10,7 @@
  */
 
 import { Database } from "bun:sqlite"
+import { assertSingleStatement } from "@bearly/sqlite"
 import { mkdtempSync, realpathSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -108,17 +109,21 @@ describe("openDatabase", () => {
     try {
       db = openDatabase(path)
       for (const table of ["messages", "messages_archive"]) {
-        const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+        const columns = db.prepare(assertSingleStatement(`PRAGMA table_info(${table})`)).all() as Array<{
+          name: string
+        }>
         // The same historical fixture works before and after the v38 repair.
         if (columns.some((column) => column.name === "is_incident")) {
-          db.run(`ALTER TABLE ${table} DROP COLUMN is_incident`)
+          db.run(assertSingleStatement(`ALTER TABLE ${table} DROP COLUMN is_incident`))
         }
         const sequence = table === "messages_archive" ? "seq, archived_at, " : ""
         const sequenceValues = table === "messages_archive" ? "?, 10, " : ""
-        const insert = db.prepare(`INSERT INTO ${table}
+        const insert = db.prepare(
+          assertSingleStatement(`INSERT INTO ${table}
           (${sequence}id, type, sender, recipient, content, ts, summary, wakes_owner, sender_authority)
           VALUES (${sequenceValues}?, 'request', 'daemon', '@chief', 'legacy body', 1,
-            'incident-looking text is not identity', ?, 'unrecorded')`)
+            'incident-looking text is not identity', ?, 'unrecorded')`),
+        )
         if (table === "messages_archive") {
           insert.run(1, "edge", 1)
           insert.run(2, "non-edge", 0)
@@ -137,19 +142,27 @@ describe("openDatabase", () => {
           value: String(CURRENT_SCHEMA_VERSION),
         })
         for (const table of ["messages", "messages_archive"]) {
-          expect(db.prepare(`PRAGMA table_info(${table})`).all()).toContainEqual(
+          expect(db.prepare(assertSingleStatement(`PRAGMA table_info(${table})`)).all()).toContainEqual(
             expect.objectContaining({ name: "is_incident", type: "INTEGER", notnull: 1, dflt_value: "0" }),
           )
           expect(
             db
-              .prepare(`SELECT id, is_incident, wakes_owner, content, sender_authority
-            FROM ${table} ORDER BY id`)
+              .prepare(
+                assertSingleStatement(`SELECT id, is_incident, wakes_owner, content, sender_authority
+            FROM ${table} ORDER BY id`),
+              )
               .all(),
           ).toEqual([
             { id: "edge", is_incident: 1, wakes_owner: 1, content: "legacy body", sender_authority: "unrecorded" },
             { id: "non-edge", is_incident: 0, wakes_owner: 0, content: "legacy body", sender_authority: "unrecorded" },
           ])
-          expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE is_incident=0 AND wakes_owner=1`).get()).toEqual({
+          expect(
+            db
+              .prepare(
+                assertSingleStatement(`SELECT COUNT(*) AS n FROM ${table} WHERE is_incident=0 AND wakes_owner=1`),
+              )
+              .get(),
+          ).toEqual({
             n: 0,
           })
         }
@@ -158,7 +171,7 @@ describe("openDatabase", () => {
       }
       db = openDatabase(join(dir, "fresh.sqlite"))
       for (const table of ["messages", "messages_archive"]) {
-        expect(db.prepare(`PRAGMA table_info(${table})`).all()).toContainEqual(
+        expect(db.prepare(assertSingleStatement(`PRAGMA table_info(${table})`)).all()).toContainEqual(
           expect.objectContaining({ name: "is_incident", type: "INTEGER", notnull: 1, dflt_value: "0" }),
         )
       }

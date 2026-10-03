@@ -5,6 +5,7 @@
  */
 
 import { Database } from "bun:sqlite"
+import { assertSingleStatement } from "@bearly/sqlite"
 import { createHash } from "crypto"
 import { Glob } from "bun"
 import * as path from "path"
@@ -476,7 +477,7 @@ export async function indexSessionFile(
       }
 
       const spId = "sp_claude_tail_" + Date.now() + "_" + Math.random().toString(36).slice(2)
-      db.run(`SAVEPOINT ${spId}`)
+      db.run(assertSingleStatement(`SAVEPOINT ${spId}`))
 
       try {
         let lineNum = 0
@@ -575,11 +576,11 @@ export async function indexSessionFile(
           lastTimestamp,
           extractedCwd,
         )
-        db.run(`RELEASE SAVEPOINT ${spId}`)
+        db.run(assertSingleStatement(`RELEASE SAVEPOINT ${spId}`))
         return { messages: newMessageCount, writes: newWriteCount }
       } catch (err) {
-        db.run(`ROLLBACK TO SAVEPOINT ${spId}`)
-        db.run(`RELEASE SAVEPOINT ${spId}`)
+        db.run(assertSingleStatement(`ROLLBACK TO SAVEPOINT ${spId}`))
+        db.run(assertSingleStatement(`RELEASE SAVEPOINT ${spId}`))
         throw err
       }
     } finally {
@@ -601,7 +602,7 @@ export async function indexSessionFile(
 
     if (validEnd === 0) {
       const spId = "sp_claude_empty_" + Date.now() + "_" + Math.random().toString(36).slice(2)
-      db.run(`SAVEPOINT ${spId}`)
+      db.run(assertSingleStatement(`SAVEPOINT ${spId}`))
       try {
         db.prepare("DELETE FROM messages WHERE session_id = ?").run(sessionId)
         db.prepare("DELETE FROM writes WHERE session_id = ?").run(sessionId)
@@ -616,10 +617,10 @@ export async function indexSessionFile(
           headFingerprint: null,
           tailFingerprint: null,
         })
-        db.run(`RELEASE SAVEPOINT ${spId}`)
+        db.run(assertSingleStatement(`RELEASE SAVEPOINT ${spId}`))
       } catch (err) {
-        db.run(`ROLLBACK TO SAVEPOINT ${spId}`)
-        db.run(`RELEASE SAVEPOINT ${spId}`)
+        db.run(assertSingleStatement(`ROLLBACK TO SAVEPOINT ${spId}`))
+        db.run(assertSingleStatement(`RELEASE SAVEPOINT ${spId}`))
         throw err
       }
       return { messages: 0, writes: 0 }
@@ -647,7 +648,7 @@ export async function indexSessionFile(
     let lastMismatchedSessionId: string | null = null
 
     const spId = "sp_claude_full_" + Date.now() + "_" + Math.random().toString(36).slice(2)
-    db.run(`SAVEPOINT ${spId}`)
+    db.run(assertSingleStatement(`SAVEPOINT ${spId}`))
 
     try {
       db.prepare("DELETE FROM messages WHERE session_id = ?").run(sessionId)
@@ -767,11 +768,11 @@ export async function indexSessionFile(
           shrinkNewCount: isShrink ? messageCount : null,
         },
       )
-      db.run(`RELEASE SAVEPOINT ${spId}`)
+      db.run(assertSingleStatement(`RELEASE SAVEPOINT ${spId}`))
       return { messages: messageCount, writes: writeCount }
     } catch (err) {
-      db.run(`ROLLBACK TO SAVEPOINT ${spId}`)
-      db.run(`RELEASE SAVEPOINT ${spId}`)
+      db.run(assertSingleStatement(`ROLLBACK TO SAVEPOINT ${spId}`))
+      db.run(assertSingleStatement(`RELEASE SAVEPOINT ${spId}`))
       throw err
     }
   } finally {
@@ -840,13 +841,17 @@ export function pruneOldSessions(
   // Batch delete for efficiency
   const placeholders = sessionIds.map(() => "?").join(",")
 
-  const messagesResult = db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...sessionIds)
+  const messagesResult = db
+    .prepare(assertSingleStatement(`DELETE FROM messages WHERE session_id IN (${placeholders})`))
+    .run(...sessionIds)
   const messagesDeleted = messagesResult.changes
 
-  const writesResult = db.prepare(`DELETE FROM writes WHERE session_id IN (${placeholders})`).run(...sessionIds)
+  const writesResult = db
+    .prepare(assertSingleStatement(`DELETE FROM writes WHERE session_id IN (${placeholders})`))
+    .run(...sessionIds)
   const writesDeleted = writesResult.changes
 
-  db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...sessionIds)
+  db.prepare(assertSingleStatement(`DELETE FROM sessions WHERE id IN (${placeholders})`)).run(...sessionIds)
 
   // Rebuild FTS index to remove deleted data
   db.prepare("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')").run()
@@ -881,9 +886,13 @@ export function pruneIgnoredSessions(
   if (ignoredIds.length === 0) return { sessions: 0, messages: 0, writes: 0 }
 
   const placeholders = ignoredIds.map(() => "?").join(",")
-  const messagesResult = db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...ignoredIds)
-  const writesResult = db.prepare(`DELETE FROM writes WHERE session_id IN (${placeholders})`).run(...ignoredIds)
-  db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...ignoredIds)
+  const messagesResult = db
+    .prepare(assertSingleStatement(`DELETE FROM messages WHERE session_id IN (${placeholders})`))
+    .run(...ignoredIds)
+  const writesResult = db
+    .prepare(assertSingleStatement(`DELETE FROM writes WHERE session_id IN (${placeholders})`))
+    .run(...ignoredIds)
+  db.prepare(assertSingleStatement(`DELETE FROM sessions WHERE id IN (${placeholders})`)).run(...ignoredIds)
   db.prepare("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')").run()
 
   return {
@@ -1456,9 +1465,13 @@ export async function rebuildIndex(db: Database, options: IndexOptions = {}): Pr
       unreferencedIds = unreferencedIds.filter((id) => !excludedProviders.has(id.split(":")[0] ?? ""))
       if (unreferencedIds.length > 0) {
         const placeholders = unreferencedIds.map(() => "?").join(",")
-        db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...unreferencedIds)
-        db.prepare(`DELETE FROM writes WHERE session_id IN (${placeholders})`).run(...unreferencedIds)
-        db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...unreferencedIds)
+        db.prepare(assertSingleStatement(`DELETE FROM messages WHERE session_id IN (${placeholders})`)).run(
+          ...unreferencedIds,
+        )
+        db.prepare(assertSingleStatement(`DELETE FROM writes WHERE session_id IN (${placeholders})`)).run(
+          ...unreferencedIds,
+        )
+        db.prepare(assertSingleStatement(`DELETE FROM sessions WHERE id IN (${placeholders})`)).run(...unreferencedIds)
         db.prepare("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')").run()
       }
       pruneIgnoredSessions(db, protectedProviderSessionIds)
