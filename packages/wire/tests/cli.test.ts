@@ -1294,7 +1294,7 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
           `pin=${EXPECTED_HOST_PIN}`,
       )
       expect(result.stderr).toContain(
-        "REMEDY — the daemon is running a different module root; restarting will not help. Advance the daemon module root, then re-run `tribe doctor`",
+        `REMEDY — compare the selected Tribe source root with the daemon-reported root ${TRIBE_ROOT}; reload the daemon from the intended source, then re-run \`tribe doctor\``,
       )
       expect(result.stdout).toContain("OK — rail canary message=00000000-0000-4000-8000-000000000001")
       expect(result.stderr).toContain("FINAL FAIL — derived from the worst doctor check")

@@ -140,7 +140,7 @@ describe("status-backed doctor checks", () => {
     expect(check).toMatchObject({ severity: "OK", values: { running: "abc123", on_disk: "abc123", pin: "abc123" } })
   })
 
-  test("running vs disk mismatch is CRITICAL with a diagnosis-derived restart remedy", () => {
+  test("running vs disk mismatch is CRITICAL without assuming a different source root", () => {
     const check = evaluateDoctorIdentity(
       { cert: "old123", root: "/repo/vendor/tribe" },
       { onDisk: success("new456"), superprojectPin: success("new456") },
@@ -148,8 +148,12 @@ describe("status-backed doctor checks", () => {
     )
     expect(check).toMatchObject({ severity: "CRITICAL" })
     expect(check.diagnosis).toContain("running=old123 on_disk=new456")
-    expect(check.remedy).toContain("restarting will not help")
-    expect(check.remedy).toContain("daemon module root")
+    expect(check.remedy).toContain("/repo/vendor/tribe")
+    expect(check.remedy).toContain("compare")
+    expect(check.remedy).toContain("reload")
+    expect(check.remedy).toContain("tribe doctor")
+    expect(check.remedy).not.toContain("different module root")
+    expect(check.remedy).not.toContain("restarting will not help")
   })
 
   test("disk vs superproject pin mismatch is WARNING with the exact source root, checkout-behind", () => {
@@ -271,7 +275,12 @@ describe("status-backed doctor checks", () => {
     )
     expect(check).toMatchObject({ severity: "CRITICAL" })
     expect(check.diagnosis).toContain("running=old123 on_disk=new456")
-    expect(check.remedy).toContain("restarting will not help")
+    expect(check.remedy).toContain("/repo/tribe")
+    expect(check.remedy).toContain("compare")
+    expect(check.remedy).toContain("reload")
+    expect(check.remedy).toContain("tribe doctor")
+    expect(check.remedy).not.toContain("different module root")
+    expect(check.remedy).not.toContain("restarting will not help")
   })
 
   test("a non-EMPTY_RESULT superproject probe failure stays UNKNOWN", () => {
