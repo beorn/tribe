@@ -217,7 +217,13 @@ function olderCandidate(
   return a.seq <= b.seq ? a : b
 }
 
-function responseLatencyProjection(
+/**
+ * Exported for the 24284 equivalence test, which compares its rows against the
+ * pre-fix `journal` UNION ALL query kept there as a frozen oracle. Bucketing,
+ * percentile and warning logic below are unchanged. Not part of the daemon
+ * package's public surface (package.json maps only `./src/daemon.ts`).
+ */
+export function responseLatencyProjection(
   db: Database,
   now: number,
 ): {
@@ -225,29 +231,53 @@ function responseLatencyProjection(
   rows: ResponseLatencyRow[]
   warnings: string[]
 } {
+  // 24284 (@cto ruling 2026-10-03): the response half of the journal is
+  // bounded by the window this projection REPORTS, inside each physical arm,
+  // so each arm walks its existing `ts` index instead of unioning the whole
+  // live+archive journal into one materialized CTE (measured 470,867 page
+  // reads / ~1.9 GB for ONE call with zero connected sessions, which blocked
+  // the single-threaded daemon past the wire client's 10 s deadline).
+  //
+  // The request half is NOT windowed — a request older than $cutoff must still
+  // pair with an in-window response — so it is joined once per physical table
+  // through the partial `request IS NOT NULL` indexes (migration v39), the two
+  // joins combined with UNION ALL. Deliberately NOT one join against a second
+  // journal CTE, and NOT dual LEFT JOIN + COALESCE: `request` is not unique, so
+  // a request key present in BOTH tables must keep contributing one row per
+  // physical row, exactly as the old two-sided journal join did. Two separate
+  // indexed joins preserve that multiplicity, role, message_type and pairing.
   const rows = db
-    .prepare(`
-      WITH journal AS (
-        SELECT id, type, sender, recipient, ts, request, reply FROM messages
+    .prepare(
+      assertSingleStatement(`
+      WITH response_journal AS (
+        SELECT sender, ts, reply FROM messages
+        WHERE reply IS NOT NULL AND ts >= $cutoff AND ts <= $now
         UNION ALL
-        SELECT id, type, sender, recipient, ts, request, reply FROM messages_archive
+        SELECT sender, ts, reply FROM messages_archive
+        WHERE reply IS NOT NULL AND ts >= $cutoff AND ts <= $now
       )
       SELECT
         COALESCE(s.role, 'unknown') AS role,
-        response_message.sender AS sender,
-        request_message.type AS message_type,
-        response_message.ts - request_message.ts AS latency_ms
-      FROM journal response_message
-      JOIN journal request_message
-        ON response_message.reply IS NOT NULL
-        AND request_message.request IS NOT NULL
-        AND response_message.reply = request_message.request
-      LEFT JOIN sessions s ON s.name = response_message.sender
-      WHERE response_message.ts >= $cutoff
-        AND response_message.ts <= $now
-        AND response_message.ts >= request_message.ts
+        r.sender AS sender,
+        q.type AS message_type,
+        r.ts - q.ts AS latency_ms
+      FROM response_journal r
+      JOIN messages q
+        ON q.request IS NOT NULL AND q.request = r.reply AND r.ts >= q.ts
+      LEFT JOIN sessions s ON s.name = r.sender
+      UNION ALL
+      SELECT
+        COALESCE(s.role, 'unknown') AS role,
+        r.sender AS sender,
+        q.type AS message_type,
+        r.ts - q.ts AS latency_ms
+      FROM response_journal r
+      JOIN messages_archive q
+        ON q.request IS NOT NULL AND q.request = r.reply AND r.ts >= q.ts
+      LEFT JOIN sessions s ON s.name = r.sender
       ORDER BY role, message_type, latency_ms
-    `)
+    `),
+    )
     .all({ $cutoff: now - DAY, $now: now }) as ResponseLatencyRow[]
 
   const grouped = new Map<string, { role: string; messageType: string; values: number[] }>()

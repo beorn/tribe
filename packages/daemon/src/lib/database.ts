@@ -370,6 +370,18 @@ export function openDatabase(path: string): Database {
   db.run(
     "CREATE INDEX IF NOT EXISTS idx_messages_archive_status_ref_retire ON messages_archive(sender, recipient, ref) WHERE kind = 'direct' AND type = 'status' AND ref IS NOT NULL",
   )
+  // The health response-latency projection pairs every in-window response with
+  // the request it answers (`reply = request`) once per physical table. No
+  // index led with `request`, so that half of the join was a scan of the whole
+  // journal — measured 470,867 page reads (~1.9 GB) for ONE tribe.health call
+  // with zero connected sessions (24284, @cto ruling 2026-10-03). Partial
+  // because only reply/request-bearing rows can be a request half; both tables
+  // need one, or the archived half simply moves the scan. Migration v39
+  // declares the same pair for databases that predate it.
+  db.run("CREATE INDEX IF NOT EXISTS idx_messages_request ON messages(request) WHERE request IS NOT NULL")
+  db.run(
+    "CREATE INDEX IF NOT EXISTS idx_messages_archive_request ON messages_archive(request) WHERE request IS NOT NULL",
+  )
 
   return db
 }
@@ -1403,6 +1415,38 @@ const MIGRATIONS: readonly Migration[] = [
           db.run(assertSingleStatement(`ALTER TABLE ${table} ADD COLUMN is_incident INTEGER NOT NULL DEFAULT 0`))
         }
         db.run(assertSingleStatement(`UPDATE ${table} SET is_incident = 1 WHERE wakes_owner = 1`))
+      }
+    },
+  },
+  {
+    version: 39,
+    name: "message-request-key-index",
+    /**
+     * 24284 (@cto ruling 2026-10-03): the health response-latency projection joins each in-window
+     * response to the request it answers via `reply = request` — once against `messages` and once
+     * against `messages_archive`, the two halves combined with UNION ALL. No index led with
+     * `request`, so the request side of that join was a scan of the whole journal: 470,867 page
+     * reads (~1.9 GB) for ONE tribe.health call with zero connected sessions, on a daemon that
+     * serializes every RPC behind it.
+     *
+     * Partial because only request-bearing rows can be the request half. Both tables are required;
+     * covering only `messages` would leave the archived half a full scan. Idempotent, and a
+     * failure throws out of openDatabase before the version is stamped, so a half-indexed database
+     * is never recorded as migrated.
+     */
+    up(db) {
+      for (const table of ["messages", "messages_archive"]) {
+        const exists = db
+          .prepare(assertSingleStatement(`SELECT name FROM sqlite_master WHERE type='table' AND name='${table}'`))
+          .get() as {
+          name: string
+        } | null
+        if (!exists) continue
+        db.run(
+          assertSingleStatement(
+            `CREATE INDEX IF NOT EXISTS idx_${table}_request ON ${table}(request) WHERE request IS NOT NULL`,
+          ),
+        )
       }
     },
   },
