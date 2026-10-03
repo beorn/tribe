@@ -1,10 +1,14 @@
 {
   "modules": [
     "release",
-    "verify"
+    "verify",
+    "source-siblings"
   ],
   "vars": {
     "testCommand": "bun run test",
     "bunVersion": "1.4.2"
+  },
+  "overrides": {
+    "source-siblings-install-order:.github/workflows/verify.yml#verify": "Generated verification intentionally tests published ranges; authored CI uses source siblings."
   }
 }
