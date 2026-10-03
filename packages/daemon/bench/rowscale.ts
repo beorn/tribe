@@ -24,6 +24,7 @@
  * a silent-zero instrument are worse than no numbers, so the seed is asserted
  * before anything is timed.
  */
+import { assertSingleStatement } from "@bearly/sqlite"
 import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -60,8 +61,10 @@ function build(rowCount: number, topic: string) {
   const stmts = createStatements(db)
 
   const insertSession = db.prepare(
-    "INSERT INTO sessions (id, name, role, domains, pid, cwd, project_id, started_at, updated_at, launch_id, launch_parent_pid) " +
-      "VALUES ($id, $name, 'member', '[]', 1, '/repo', 'p', 0, 0, $launch_id, $ppid)",
+    assertSingleStatement(
+      "INSERT INTO sessions (id, name, role, domains, pid, cwd, project_id, started_at, updated_at, launch_id, launch_parent_pid) " +
+        "VALUES ($id, $name, 'member', '[]', 1, '/repo', 'p', 0, 0, $launch_id, $ppid)",
+    ),
   )
   // `db.transaction(fn)` RETURNS a function; it must be invoked. See header.
   db.transaction(() => {
@@ -76,8 +79,10 @@ function build(rowCount: number, topic: string) {
   })()
 
   const insertMessage = db.prepare(
-    "INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, topic, attention_required) " +
-      "VALUES ($id, 'request', $sender, '@reader', 'direct', 'x', 0, 'pull', $topic, 1)",
+    assertSingleStatement(
+      "INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, topic, attention_required) " +
+        "VALUES ($id, 'request', $sender, '@reader', 'direct', 'x', 0, 'pull', $topic, 1)",
+    ),
   )
   db.transaction(() => {
     for (let i = 0; i < ATTENTION_ROWS; i++) {

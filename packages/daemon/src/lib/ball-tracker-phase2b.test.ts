@@ -5,6 +5,7 @@
  * single-recipient substrate.
  */
 
+import { assertSingleStatement } from "@bearly/sqlite"
 import type { Database } from "bun:sqlite"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -691,7 +692,9 @@ describe("ball-tracker Phase 2b — broadcast and multi-target fanout", () => {
     // The shared RPC preflight must seek the request's facts in both tiers.
     // Existing exactly-once assertions stayed green while this scanned the archive.
     const sql = chief.stmts.selectExpiredPendingRequests.toString()
-    const plan = db.query(`EXPLAIN QUERY PLAN ${sql}`).all({ $now: Date.now() }) as Array<{ detail: string }>
+    const plan = db.query(assertSingleStatement(`EXPLAIN QUERY PLAN ${sql}`)).all({ $now: Date.now() }) as Array<{
+      detail: string
+    }>
     for (const table of ["messages", "messages_archive"]) {
       expect(plan.some(({ detail }) => detail.startsWith(`SEARCH ${table} `) && /\bref=\?/.test(detail))).toBe(true)
     }

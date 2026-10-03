@@ -1,3 +1,4 @@
+import { assertSingleStatement } from "@bearly/sqlite"
 import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it } from "vitest"
 import { mkdtempSync, realpathSync } from "node:fs"
@@ -44,9 +45,9 @@ describe("validated reply correlation schema (migration v25)", () => {
     const db = openDatabase(path)
     try {
       for (const table of ["messages", "messages_archive"]) {
-        const columns = (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(
-          (row) => row.name,
-        )
+        const columns = (
+          db.prepare(assertSingleStatement(`PRAGMA table_info(${table})`)).all() as Array<{ name: string }>
+        ).map((row) => row.name)
         expect(columns).toContain("correlated_reply_requester")
       }
       expect(db.prepare("SELECT id, correlated_reply_requester FROM messages").get()).toEqual({

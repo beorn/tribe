@@ -16,6 +16,7 @@
  * Real SQLite throughout (openDatabase on a tmp file) — no fakes.
  */
 
+import { assertSingleStatement } from "@bearly/sqlite"
 import { Database } from "bun:sqlite"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -1003,7 +1004,9 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(fetchEvents(d, opts)).toEqual([])
     expect(fetchEvents(b, opts).map((e) => e.id)).toEqual(["r-live"])
     expect(db.prepare("SELECT name FROM sessions WHERE id = 'sess-b'").get()).toEqual({ name: NAME })
-    expect(db.prepare(`SELECT name FROM sessions WHERE name LIKE '${NAME}-dead-%'`).all()).toEqual([])
+    expect(
+      db.prepare(assertSingleStatement(`SELECT name FROM sessions WHERE name LIKE '${NAME}-dead-%'`)).all(),
+    ).toEqual([])
   })
 
   it("normal live fetch acknowledges in-window actionables so a successor does not re-recover them", () => {
