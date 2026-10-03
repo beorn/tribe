@@ -16,6 +16,7 @@
  * Semantics under test: many ids in ONE call and ONE transaction, a result row
  * per id so nothing is silently skipped, and no all-or-nothing failure.
  */
+import { assertSingleStatement } from "@bearly/sqlite"
 import { Database } from "bun:sqlite"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -66,12 +67,16 @@ describe("closing a ball backlog in one call", () => {
 
   function openBall(requestId: string, recipient = OWNER, sender = "@fleet"): void {
     db.prepare(
-      "INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, summary, request) " +
-        "VALUES ($mid, 'request', $sender, $recipient, 'direct', 'q', 1000, 'push', 'sum', $rid)",
+      assertSingleStatement(
+        "INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, summary, request) " +
+          "VALUES ($mid, 'request', $sender, $recipient, 'direct', 'q', 1000, 'push', 'sum', $rid)",
+      ),
     ).run({ $mid: `msg-${requestId}`, $sender: sender, $recipient: recipient, $rid: requestId })
     db.prepare(
-      "INSERT INTO pending_request (request_id, recipient, sender, opened_at, expires_at, message_id, fanout) " +
-        "VALUES ($rid, $recipient, $sender, 1000, NULL, $mid, 'first')",
+      assertSingleStatement(
+        "INSERT INTO pending_request (request_id, recipient, sender, opened_at, expires_at, message_id, fanout) " +
+          "VALUES ($rid, $recipient, $sender, 1000, NULL, $mid, 'first')",
+      ),
     ).run({ $rid: requestId, $recipient: recipient, $sender: sender, $mid: `msg-${requestId}` })
   }
 

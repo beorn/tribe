@@ -13,6 +13,7 @@
  * connection that never registered has no session row and so only claims its name.
  */
 
+import { assertSingleStatement } from "@bearly/sqlite"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -200,7 +201,9 @@ describe("every envelope carries its sender's authority (25074 3d-1a)", () => {
   test("a row written before v37 reads unrecorded, so null stays the daemon's own voice (@cto a534d184)", () => {
     const path = join(dir, "v36.db")
     const v36 = openDatabase(path)
-    for (const table of ["messages", "messages_archive"]) v36.run(`ALTER TABLE ${table} DROP COLUMN sender_authority`)
+    for (const table of ["messages", "messages_archive"]) {
+      v36.run(assertSingleStatement(`ALTER TABLE ${table} DROP COLUMN sender_authority`))
+    }
     v36.run("UPDATE _schema_meta SET value = '36' WHERE key = 'version'")
     const insert = v36.prepare(
       "INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery) VALUES (?, 'notify', ?, ?, 'direct', 'before v37', 1, 'push')",

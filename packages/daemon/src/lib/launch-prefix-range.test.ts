@@ -10,6 +10,7 @@
  * planner actually uses an index for it (an equivalent query that still scans
  * would pass a rows-returned assertion while fixing nothing).
  */
+import { assertSingleStatement } from "@bearly/sqlite"
 import { Database } from "bun:sqlite"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -64,8 +65,10 @@ describe("trust filtering after the roster short-circuit", () => {
     stmts = createStatements(db)
     // Only "@rostered" is a registered member. "@stranger" never joined.
     db.prepare(
-      "INSERT INTO sessions (id, name, role, domains, pid, cwd, project_id, started_at, updated_at) " +
-        "VALUES ('s1', '@rostered', 'member', '[]', 1, '/repo', 'p', 0, 0)",
+      assertSingleStatement(
+        "INSERT INTO sessions (id, name, role, domains, pid, cwd, project_id, started_at, updated_at) " +
+          "VALUES ('s1', '@rostered', 'member', '[]', 1, '/repo', 'p', 0, 0)",
+      ),
     ).run()
   })
 
@@ -76,8 +79,10 @@ describe("trust filtering after the roster short-circuit", () => {
 
   function seed(id: string, sender: string, topic: string | null): void {
     db.prepare(
-      "INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, topic, attention_required) " +
-        "VALUES ($id, 'request', $sender, '@reader', 'direct', 'x', 0, 'pull', $topic, 1)",
+      assertSingleStatement(
+        "INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, topic, attention_required) " +
+          "VALUES ($id, 'request', $sender, '@reader', 'direct', 'x', 0, 'pull', $topic, 1)",
+      ),
     ).run({ $id: id, $sender: sender, $topic: topic })
   }
 
@@ -131,8 +136,10 @@ describe("getSessionsByProviderLaunchId", () => {
     db = openDatabase(join(tmpDir, "tribe.db"))
     stmts = createStatements(db)
     const insert = db.prepare(
-      "INSERT INTO sessions (id, name, role, domains, pid, cwd, project_id, started_at, updated_at, launch_id, launch_parent_pid) " +
-        "VALUES ($id, $name, 'member', '[]', 1, '/repo', 'p', 0, 0, $launch_id, 1)",
+      assertSingleStatement(
+        "INSERT INTO sessions (id, name, role, domains, pid, cwd, project_id, started_at, updated_at, launch_id, launch_parent_pid) " +
+          "VALUES ($id, $name, 'member', '[]', 1, '/repo', 'p', 0, 0, $launch_id, 1)",
+      ),
     )
     const rows: Array<[string, string, string | null]> = [
       ["s1", "exact", "launch-1"],
@@ -183,9 +190,11 @@ describe("getSessionsByProviderLaunchId", () => {
   it("agrees exactly with the substr predicate it replaced", () => {
     const legacy = db
       .prepare(
-        "SELECT name FROM sessions WHERE launch_id = $launch_id " +
-          "OR substr(launch_id, 1, length($derived_prefix)) = $derived_prefix " +
-          "OR substr(launch_id, 1, length($verified_prefix)) = $verified_prefix ORDER BY id",
+        assertSingleStatement(
+          "SELECT name FROM sessions WHERE launch_id = $launch_id " +
+            "OR substr(launch_id, 1, length($derived_prefix)) = $derived_prefix " +
+            "OR substr(launch_id, 1, length($verified_prefix)) = $verified_prefix ORDER BY id",
+        ),
       )
       .all({ $launch_id: "launch-1", $derived_prefix: "launch-1::", $verified_prefix: "launch-1@" }) as Array<{
       name: string
@@ -196,10 +205,12 @@ describe("getSessionsByProviderLaunchId", () => {
   it("uses an index instead of scanning the sessions table", () => {
     const plan = db
       .prepare(
-        "EXPLAIN QUERY PLAN SELECT name, launch_id, launch_parent_pid FROM sessions " +
-          "WHERE launch_id = $launch_id " +
-          "OR (launch_id >= $derived_prefix AND launch_id < $derived_prefix_upper) " +
-          "OR (launch_id >= $verified_prefix AND launch_id < $verified_prefix_upper) ORDER BY id",
+        assertSingleStatement(
+          "EXPLAIN QUERY PLAN SELECT name, launch_id, launch_parent_pid FROM sessions " +
+            "WHERE launch_id = $launch_id " +
+            "OR (launch_id >= $derived_prefix AND launch_id < $derived_prefix_upper) " +
+            "OR (launch_id >= $verified_prefix AND launch_id < $verified_prefix_upper) ORDER BY id",
+        ),
       )
       .all({
         $launch_id: "launch-1",

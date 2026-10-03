@@ -10,6 +10,7 @@
  * @ag/tribe/tribe-membership-projection-counts-permanent-history-as-degraded
  */
 
+import { assertSingleStatement } from "@bearly/sqlite"
 import { Database } from "bun:sqlite"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -401,7 +402,9 @@ describe("membership projection: a finished launch is history, not a degraded me
     // The answer alone passed on the 336 MB journal while 20 lookups took 2s.
     // Inspect the actual statement's access path, avoiding host-load-sensitive timing.
     const sql = stmts.selectLatestSessionLeftFactForMember.toString()
-    const plan = db.query(`EXPLAIN QUERY PLAN ${sql}`).all({ $member_id: "archived-1" }) as Array<{
+    const plan = db
+      .query(assertSingleStatement(`EXPLAIN QUERY PLAN ${sql}`))
+      .all({ $member_id: "archived-1" }) as Array<{
       detail: string
     }>
     for (const table of ["messages", "messages_archive"]) {
