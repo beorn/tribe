@@ -3,6 +3,7 @@
  */
 
 import { Database } from "bun:sqlite"
+import { assertSingleStatement } from "@bearly/sqlite"
 import { TRIBE_ACTIONABLE_TYPES, TRIBE_AUTO_TRACK_TYPES } from "../../../wire/src/command-descriptors.ts"
 
 // ---------------------------------------------------------------------------
@@ -394,11 +395,13 @@ function optionalCursorMax(db: Database, table: string, column: string): number 
   if (exists === null) return 0
 
   const columns = new Set(
-    (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name),
+    (db.prepare(assertSingleStatement(`PRAGMA table_info(${table})`)).all() as Array<{ name: string }>).map(
+      (row) => row.name,
+    ),
   )
   if (!columns.has(column)) return 0
 
-  const row = db.prepare(`SELECT COALESCE(MAX(${column}), 0) AS value FROM ${table}`).get() as {
+  const row = db.prepare(assertSingleStatement(`SELECT COALESCE(MAX(${column}), 0) AS value FROM ${table}`)).get() as {
     value: number
   }
   if (!Number.isSafeInteger(row.value) || row.value < 0) {
@@ -426,7 +429,7 @@ const MIGRATIONS: readonly Migration[] = [
         ["last_delivered_seq", "INTEGER DEFAULT 0"],
       ]
       for (const [name, spec] of wanted) {
-        if (!cols.has(name)) db.run(`ALTER TABLE sessions ADD COLUMN ${name} ${spec}`)
+        if (!cols.has(name)) db.run(assertSingleStatement(`ALTER TABLE sessions ADD COLUMN ${name} ${spec}`))
       }
     },
   },
@@ -917,14 +920,18 @@ const MIGRATIONS: readonly Migration[] = [
       // Existing databases get a nullable column; fresh installs already have it
       // from the CREATE TABLE blocks above. Idempotent — introspect before ALTER.
       for (const table of ["messages", "messages_archive"]) {
-        const exists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='${table}'`).get() as {
+        const exists = db
+          .prepare(assertSingleStatement(`SELECT name FROM sqlite_master WHERE type='table' AND name='${table}'`))
+          .get() as {
           name: string
         } | null
         if (!exists) continue
         const cols = new Set(
-          (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((r) => r.name),
+          (db.prepare(assertSingleStatement(`PRAGMA table_info(${table})`)).all() as Array<{ name: string }>).map(
+            (r) => r.name,
+          ),
         )
-        if (!cols.has("summary")) db.run(`ALTER TABLE ${table} ADD COLUMN summary TEXT`)
+        if (!cols.has("summary")) db.run(assertSingleStatement(`ALTER TABLE ${table} ADD COLUMN summary TEXT`))
       }
     },
   },
@@ -1131,15 +1138,19 @@ const MIGRATIONS: readonly Migration[] = [
     name: "validated-reply-correlation",
     up(db) {
       for (const table of ["messages", "messages_archive"]) {
-        const exists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='${table}'`).get() as {
+        const exists = db
+          .prepare(assertSingleStatement(`SELECT name FROM sqlite_master WHERE type='table' AND name='${table}'`))
+          .get() as {
           name: string
         } | null
         if (!exists) continue
         const columns = new Set(
-          (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name),
+          (db.prepare(assertSingleStatement(`PRAGMA table_info(${table})`)).all() as Array<{ name: string }>).map(
+            (row) => row.name,
+          ),
         )
         if (!columns.has("correlated_reply_requester")) {
-          db.run(`ALTER TABLE ${table} ADD COLUMN correlated_reply_requester TEXT`)
+          db.run(assertSingleStatement(`ALTER TABLE ${table} ADD COLUMN correlated_reply_requester TEXT`))
         }
       }
     },
@@ -1185,14 +1196,18 @@ const MIGRATIONS: readonly Migration[] = [
      */
     up(db) {
       for (const table of ["messages", "messages_archive"]) {
-        const exists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='${table}'`).get() as {
+        const exists = db
+          .prepare(assertSingleStatement(`SELECT name FROM sqlite_master WHERE type='table' AND name='${table}'`))
+          .get() as {
           name: string
         } | null
         if (!exists) continue
         const columns = new Set(
-          (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name),
+          (db.prepare(assertSingleStatement(`PRAGMA table_info(${table})`)).all() as Array<{ name: string }>).map(
+            (row) => row.name,
+          ),
         )
-        if (!columns.has("session_id")) db.run(`ALTER TABLE ${table} ADD COLUMN session_id TEXT`)
+        if (!columns.has("session_id")) db.run(assertSingleStatement(`ALTER TABLE ${table} ADD COLUMN session_id TEXT`))
         if (table === "messages_archive" && !columns.has("attention_required")) {
           db.run("ALTER TABLE messages_archive ADD COLUMN attention_required INTEGER NOT NULL DEFAULT 0")
         }
@@ -1317,15 +1332,19 @@ const MIGRATIONS: readonly Migration[] = [
      */
     up(db) {
       for (const table of ["messages", "messages_archive"]) {
-        const exists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='${table}'`).get() as {
+        const exists = db
+          .prepare(assertSingleStatement(`SELECT name FROM sqlite_master WHERE type='table' AND name='${table}'`))
+          .get() as {
           name: string
         } | null
         if (!exists) continue
         const columns = new Set(
-          (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name),
+          (db.prepare(assertSingleStatement(`PRAGMA table_info(${table})`)).all() as Array<{ name: string }>).map(
+            (row) => row.name,
+          ),
         )
         if (!columns.has("wakes_owner")) {
-          db.run(`ALTER TABLE ${table} ADD COLUMN wakes_owner INTEGER NOT NULL DEFAULT 0`)
+          db.run(assertSingleStatement(`ALTER TABLE ${table} ADD COLUMN wakes_owner INTEGER NOT NULL DEFAULT 0`))
         }
       }
     },
@@ -1341,16 +1360,24 @@ const MIGRATIONS: readonly Migration[] = [
      */
     up(db) {
       for (const table of ["messages", "messages_archive"]) {
-        const exists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='${table}'`).get() as {
+        const exists = db
+          .prepare(assertSingleStatement(`SELECT name FROM sqlite_master WHERE type='table' AND name='${table}'`))
+          .get() as {
           name: string
         } | null
         if (!exists) continue
         const columns = new Set(
-          (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name),
+          (db.prepare(assertSingleStatement(`PRAGMA table_info(${table})`)).all() as Array<{ name: string }>).map(
+            (row) => row.name,
+          ),
         )
-        if (!columns.has("sender_authority")) db.run(`ALTER TABLE ${table} ADD COLUMN sender_authority TEXT`)
+        if (!columns.has("sender_authority")) {
+          db.run(assertSingleStatement(`ALTER TABLE ${table} ADD COLUMN sender_authority TEXT`))
+        }
         // One pass over 705k live rows measured 1.2 s (2026-09-25), once, at the daemon's hand restart.
-        db.run(`UPDATE ${table} SET sender_authority = 'unrecorded' WHERE sender_authority IS NULL`)
+        db.run(
+          assertSingleStatement(`UPDATE ${table} SET sender_authority = 'unrecorded' WHERE sender_authority IS NULL`),
+        )
       }
     },
   },
@@ -1361,17 +1388,21 @@ const MIGRATIONS: readonly Migration[] = [
      * Only legacy waking edges establish that identity; other old rows remain unknown. */
     up(db) {
       for (const table of ["messages", "messages_archive"]) {
-        const exists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='${table}'`).get() as {
+        const exists = db
+          .prepare(assertSingleStatement(`SELECT name FROM sqlite_master WHERE type='table' AND name='${table}'`))
+          .get() as {
           name: string
         } | null
         if (!exists) continue
         const columns = new Set(
-          (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name),
+          (db.prepare(assertSingleStatement(`PRAGMA table_info(${table})`)).all() as Array<{ name: string }>).map(
+            (row) => row.name,
+          ),
         )
         if (!columns.has("is_incident")) {
-          db.run(`ALTER TABLE ${table} ADD COLUMN is_incident INTEGER NOT NULL DEFAULT 0`)
+          db.run(assertSingleStatement(`ALTER TABLE ${table} ADD COLUMN is_incident INTEGER NOT NULL DEFAULT 0`))
         }
-        db.run(`UPDATE ${table} SET is_incident = 1 WHERE wakes_owner = 1`)
+        db.run(assertSingleStatement(`UPDATE ${table} SET is_incident = 1 WHERE wakes_owner = 1`))
       }
     },
   },
@@ -1697,7 +1728,7 @@ export function createStatements(db: Database) {
 			wakes_owner, is_incident, attention_required)
 		VALUES ($id, $type, $sender, $recipient, $kind, $content, $bead_id, $ref, $ts,
 			$delivery, $topic, $room_id, $request, $reply, $correlated_reply_requester, $summary, $session_id,
-			-- 25074 3d-1a: the sending session's authority at insert (sessionAuthority); NULL for a daemon-originated row.
+			-- 25074 3d-1a: the sending session's authority at insert (sessionAuthority), NULL for a daemon-originated row.
 			$sender_authority,
 			-- Optional like the other classification params: an omitted $wakes_owner binds NULL, and INSERT OR IGNORE
 			-- would silently drop the row on the NOT NULL column instead of failing.
@@ -1963,7 +1994,8 @@ export function createStatements(db: Database) {
     /** Open balls that still need an owner receipt. A later status ref marks
      *  the ball taken for attention only; the pending_request row remains the
      *  delivery/deadline authority until a structured reply settles it. */
-    selectUntakenPendingForRecipient: db.prepare(`
+    selectUntakenPendingForRecipient: db.prepare(
+      assertSingleStatement(`
 		SELECT p.request_id
 		FROM pending_request p
 		LEFT JOIN messages pending_message ON pending_message.id = p.message_id
@@ -1972,10 +2004,12 @@ export function createStatements(db: Database) {
 			AND ${untakenPendingBallPredicateSql("p", "COALESCE(pending_message.rowid, pending_archive.seq)")}
 		ORDER BY p.opened_at ASC
 	`),
+    ),
 
     /** Cursor-independent status evidence for requests the caller sent OR owns.
      * Retention uses the same match; archive moves cannot hide these receipts. */
-    getOpenRequestStatus: db.prepare(`
+    getOpenRequestStatus: db.prepare(
+      assertSingleStatement(`
       WITH caller_pending AS (
         SELECT p.*, COALESCE(m.rowid, a.seq) AS original_seq
         FROM pending_request p
@@ -1996,11 +2030,13 @@ export function createStatements(db: Database) {
         CASE WHEN available THEN (SELECT MAX(seq) FROM receipts) END AS latest_open_request_status_seq
       FROM availability
     `),
+    ),
 
     /** Ref-filtered recovery for the receipts counted above. Materializing
      * matching requests before probing either retention tier keeps the archive
      * lookup indexed instead of scanning all retained statuses. */
-    getOpenRequestStatusesForRefPrefix: db.prepare(`
+    getOpenRequestStatusesForRefPrefix: db.prepare(
+      assertSingleStatement(`
       WITH matched_pending AS MATERIALIZED (
         SELECT p.*, COALESCE(m.rowid, a.seq) AS original_seq
         FROM pending_request p
@@ -2021,6 +2057,7 @@ export function createStatements(db: Database) {
       WHERE ${takingStatusForOpenRequestMatchSql("r", "seq", "p", "p.original_seq")}
       ORDER BY ts DESC LIMIT $limit
     `),
+    ),
 
     /** Full active pending surface for one owner. Unlike the attention query
      *  above, this deliberately joins question bodies in the same statement
@@ -2092,12 +2129,14 @@ export function createStatements(db: Database) {
      *  unbounded archiveExpiredMessages (session.ts cleanupOldData, which
      *  keeps running unchanged); this bounded, independently-configurable
      *  batch is a defense-in-depth second mover, not a replacement. */
-    selectMessagesToArchiveBatch: db.prepare(`
+    selectMessagesToArchiveBatch: db.prepare(
+      assertSingleStatement(`
 		SELECT rowid, id FROM messages AS m
 		WHERE m.ts < $cutoff
 			AND NOT (${protectedUnreadAttentionPredicateSql("m")})
 		ORDER BY m.rowid ASC LIMIT $limit
 	`),
+    ),
 
     /** 21757 — the unread direct actionables an archive-move batch is about
      *  to take out of attention, grouped by recipient. selectAttention's
@@ -2161,7 +2200,8 @@ export function createStatements(db: Database) {
      *  body and TAKING receipt remain durable until settlement, so a ball
      *  neither outlives its question nor silently becomes actionable again.
      *  Oldest-first, LIMIT-bounded. */
-    selectArchiveDeleteBatch: db.prepare(`
+    selectArchiveDeleteBatch: db.prepare(
+      assertSingleStatement(`
 		SELECT a.id, a.seq
 		FROM messages_archive a
 		WHERE a.ts < $cutoff
@@ -2171,6 +2211,7 @@ export function createStatements(db: Database) {
 		ORDER BY a.seq ASC
 		LIMIT $limit
 	`),
+    ),
 
     /** Diagnostic companion to selectArchiveDeleteBatch: same age predicate,
      *  reports how many rows the cursor/open-ball rules are holding back so a
@@ -2178,7 +2219,8 @@ export function createStatements(db: Database) {
      *  from its logged counts rather than silently doing nothing (NO SILENT
      *  ERRORS). Bounded to the ts<cutoff slice via idx_messages_archive_ts —
      *  not a full-table scan. */
-    selectArchiveDeleteDiagnostics: db.prepare(`
+    selectArchiveDeleteDiagnostics: db.prepare(
+      assertSingleStatement(`
 		SELECT
 			COUNT(*) AS eligible_by_age,
 			SUM(CASE WHEN a.seq > $cursor_floor THEN 1 ELSE 0 END) AS excluded_by_cursor,
@@ -2187,6 +2229,7 @@ export function createStatements(db: Database) {
 		FROM messages_archive a
 		WHERE a.ts < $cutoff
 	`),
+    ),
 
     allSessions: db.prepare(
       "SELECT id, name, role, domains, pid, cwd, project_id, claude_session_id, claude_session_name, identity_sid, launch_id, launch_parent_pid, started_at, updated_at, filter_mode, filter_until, filter_mute, last_inbox_pull_seq, delivery FROM sessions",
@@ -2206,8 +2249,10 @@ export function createStatements(db: Database) {
 
     // 21454 — runtime-rename write-through + register-time re-application.
     upsertLaunchRename: db.prepare(
-      "INSERT INTO launch_renames (launch_id, launch_parent_pid, name, renamed_at) VALUES ($launch_id, $launch_parent_pid, $name, $now) " +
-        "ON CONFLICT(launch_id, launch_parent_pid) DO UPDATE SET name = $name, renamed_at = $now",
+      assertSingleStatement(
+        "INSERT INTO launch_renames (launch_id, launch_parent_pid, name, renamed_at) VALUES ($launch_id, $launch_parent_pid, $name, $now) " +
+          "ON CONFLICT(launch_id, launch_parent_pid) DO UPDATE SET name = $name, renamed_at = $now",
+      ),
     ),
     getLaunchRename: db.prepare(
       "SELECT name FROM launch_renames WHERE launch_id = $launch_id AND launch_parent_pid = $launch_parent_pid",
@@ -2227,12 +2272,14 @@ export function createStatements(db: Database) {
     // BINARY collation — while remaining a range scan idx_sessions_launch_id
     // can serve. See derivedLaunchPrefixUpperBound for the upper bound.
     getSessionsByProviderLaunchId: db.prepare(
-      "SELECT id, name, principal_class, launch_id, launch_parent_pid, updated_at, delivery, identity_sid FROM sessions " +
-        "WHERE launch_id = $launch_id " +
-        "OR (launch_id >= $derived_prefix AND launch_id < $derived_prefix_upper) " +
-        // A verified session is keyed "<sid>@<gen>" (25074 3c-2b), and the managed launch id's provider part IS that
-        // sid: the same index-served half-open range, over "<provider launch id>@".
-        "OR (launch_id >= $verified_prefix AND launch_id < $verified_prefix_upper) ORDER BY id",
+      assertSingleStatement(
+        "SELECT id, name, principal_class, launch_id, launch_parent_pid, updated_at, delivery, identity_sid FROM sessions " +
+          "WHERE launch_id = $launch_id " +
+          "OR (launch_id >= $derived_prefix AND launch_id < $derived_prefix_upper) " +
+          // A verified session is keyed "<sid>@<gen>" (25074 3c-2b), and the managed launch id's provider part IS that
+          // sid: the same index-served half-open range, over "<provider launch id>@".
+          "OR (launch_id >= $verified_prefix AND launch_id < $verified_prefix_upper) ORDER BY id",
+      ),
     ),
     insertTurnStartReceipt: db.prepare(`
       INSERT OR IGNORE INTO turn_start_receipts (
@@ -2291,7 +2338,8 @@ export function createStatements(db: Database) {
     // direct attention plus tracked actionable messages that still lack an
     // owner TAKING receipt. UNION makes a fresh direct request one row even
     // though it is represented by both the mailbox and its pending owner.
-    getUnreadDms: db.prepare(`
+    getUnreadDms: db.prepare(
+      assertSingleStatement(`
       SELECT
         COUNT(*) AS count,
         COALESCE(MIN(ts), 0) AS oldest_ts
@@ -2313,11 +2361,13 @@ export function createStatements(db: Database) {
           AND ${TRACKED_ACTIONABLE_TYPE_SQL}
       )
     `),
+    ),
 
     /** Fleet-wide form of getUnreadDms for health. Keep this beside the
      * per-mailbox query so health cannot drift into counting pending-only
      * incidents or hiding tracked actionables behind an advanced cursor. */
-    getAllUnreadDms: db.prepare(`
+    getAllUnreadDms: db.prepare(
+      assertSingleStatement(`
       SELECT recipient, COUNT(*) AS count
       FROM (
         SELECT m.recipient, m.id
@@ -2341,11 +2391,13 @@ export function createStatements(db: Database) {
       )
       GROUP BY recipient
     `),
+    ),
 
     /** Structural tail of the same actionable-mailbox projection. Await
      * supervisors use this cursor/id/type tuple to plan delivery without
      * copying message content across the control plane. */
-    getLatestActionableAttention: db.prepare(`
+    getLatestActionableAttention: db.prepare(
+      assertSingleStatement(`
       SELECT rowid, id, type
       FROM messages AS m
       WHERE m.recipient = $name
@@ -2358,12 +2410,14 @@ export function createStatements(db: Database) {
       ORDER BY m.rowid DESC
       LIMIT 1
     `),
+    ),
 
     /** One qualifying-tail predicate with two explicit projections. Fresh
      * waits request the cursor-aware current tail; reconnecting chunks request
      * the durable tail so a row inserted and acknowledged between transports
      * is still observed relative to the logical wait baseline. */
-    getLatestInboxWaitMessage: db.prepare(`
+    getLatestInboxWaitMessage: db.prepare(
+      assertSingleStatement(`
       SELECT rowid
       FROM messages AS m
       WHERE m.recipient = $name
@@ -2386,6 +2440,7 @@ export function createStatements(db: Database) {
       ORDER BY m.rowid DESC
       LIMIT 1
     `),
+    ),
 
     /** 25662 row 17 — the row an inbox wait woke on, by the sequence its wake read. A tracked broadcast's sequence can
      *  name an archived row (TRACKED_ATTENTION_SEQUENCE_SQL), so the archive is read second. */
@@ -2402,7 +2457,8 @@ export function createStatements(db: Database) {
       LIMIT 1
     `),
 
-    getLatestTrackedInboxWaitMessage: db.prepare(`
+    getLatestTrackedInboxWaitMessage: db.prepare(
+      assertSingleStatement(`
       SELECT MAX(${TRACKED_ATTENTION_SEQUENCE_SQL}) AS rowid
       ${TRACKED_ATTENTION_MESSAGE_JOIN_SQL}
       WHERE ${trackedAttentionPredicateSql()}
@@ -2410,12 +2466,14 @@ export function createStatements(db: Database) {
         AND ${TRACKED_ACTIONABLE_TYPE_SQL}
       HAVING COUNT(*) > 0
     `),
+    ),
 
     /** Exact OOB delivery envelope selected by the structural cursor. This is
      * read-only and remains launch/session constrained in the dispatcher; the
      * caller must present both cursor and message id so a racing tail cannot
      * substitute a different payload. */
-    getActionableAttentionDelivery: db.prepare(`
+    getActionableAttentionDelivery: db.prepare(
+      assertSingleStatement(`
       SELECT rowid AS seq, id, type, sender, content, bead_id, ref,
              request, reply, ts
       FROM messages AS m
@@ -2430,8 +2488,10 @@ export function createStatements(db: Database) {
         AND m.rowid > COALESCE((SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = $name), 0)
       LIMIT 1
     `),
+    ),
 
-    getTrackedAttentionDelivery: db.prepare(`
+    getTrackedAttentionDelivery: db.prepare(
+      assertSingleStatement(`
       SELECT ${TRACKED_ATTENTION_SEQUENCE_SQL} AS seq,
              COALESCE(m.id, a.id) AS id,
              COALESCE(m.type, a.type) AS type,
@@ -2450,6 +2510,7 @@ export function createStatements(db: Database) {
         AND COALESCE(m.id, a.id) = $id
       LIMIT 1
     `),
+    ),
 
     // Cleanup short-lived poll/event dedup entries. Launch takeover keys are
     // durable authority fences, not race-window suppression: expiring one
@@ -2461,7 +2522,8 @@ export function createStatements(db: Database) {
      * Both archive owners carry the same complete message column list on both sides.
      * Add new message columns to MESSAGE_ARCHIVE_COLUMNS as well as the schema.
      */
-    archiveExpiredMessages: db.prepare(`
+    archiveExpiredMessages: db.prepare(
+      assertSingleStatement(`
 		INSERT OR IGNORE INTO messages_archive (
 			seq, ${MESSAGE_ARCHIVE_COLUMNS}, archived_at
 		)
@@ -2471,11 +2533,13 @@ export function createStatements(db: Database) {
 		WHERE m.ts < $cutoff
 			AND NOT (${protectedUnreadAttentionPredicateSql("m")})
 	`),
+    ),
 
     /** Must carry exactly the archive statement's predicate: a row the
      *  archive skipped as protected but the delete took would be gone
      *  unarchived — worse than the 21757 defect this protection closes. */
-    deleteExpiredMessages: db.prepare(`
+    deleteExpiredMessages: db.prepare(
+      assertSingleStatement(`
 		DELETE FROM messages
 		WHERE rowid IN (
 			SELECT m.rowid FROM messages AS m
@@ -2483,11 +2547,13 @@ export function createStatements(db: Database) {
 				AND NOT (${protectedUnreadAttentionPredicateSql("m")})
 		)
 	`),
+    ),
 
     /** 21757 — what cleanupOldData's unbounded mover is about to take out of
      *  attention, per dormant recipient (live recipients are protected, so
      *  every row here belongs to a seat that will be told on its next read). */
-    selectExpiredAttentionLoss: db.prepare(`
+    selectExpiredAttentionLoss: db.prepare(
+      assertSingleStatement(`
 		SELECT m.recipient AS recipient, COUNT(*) AS lost, MAX(m.ts) AS before_ts
 		FROM messages AS m
 		WHERE m.ts < $cutoff
@@ -2495,6 +2561,7 @@ export function createStatements(db: Database) {
 			AND NOT (${protectedUnreadAttentionPredicateSql("m")})
 		GROUP BY m.recipient
 	`),
+    ),
 
     updateLastDelivered: db.prepare(
       "UPDATE sessions SET last_delivered_ts = $ts, last_delivered_seq = $seq, updated_at = $ts WHERE id = $id",
@@ -2541,7 +2608,8 @@ export function createStatements(db: Database) {
      *  `kind = 'event'`. A row this seat unsubscribed from was never owed to it,
      *  so skipping it is not the message loss that 19785 rejected for the
      *  per-call `topics` snapshot — that one filters rows the seat IS owed. */
-    getInboxRows: db.prepare(`
+    getInboxRows: db.prepare(
+      assertSingleStatement(`
 		SELECT m.id, m.rowid, m.type, m.sender, m.recipient, m.content, m.bead_id, m.ref, m.ts,
 			m.delivery, m.topic, m.room_id, m.summary, m.attention_required, m.wakes_owner, m.sender_authority,
 			m.session_id
@@ -2596,6 +2664,7 @@ export function createStatements(db: Database) {
 		ORDER BY m.rowid ASC
 		LIMIT $limit
 	`),
+    ),
 
     /**
      * Highest rowid in the journal, read BEFORE the inbox window so it can only
@@ -2669,7 +2738,8 @@ export function createStatements(db: Database) {
      * NO age horizon — recovery is lossless by design; only a mailbox-cursor
      * acknowledgement retires a row from this view.
      */
-    selectUnackedAttention: db.prepare(`
+    selectUnackedAttention: db.prepare(
+      assertSingleStatement(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
              attention_required, wakes_owner, sender_authority, session_id
       FROM messages AS m
@@ -2677,7 +2747,7 @@ export function createStatements(db: Database) {
         AND m.kind = 'direct'
         AND m.sender != $name
         -- 25662 P3 3: an unacknowledged incident edge is recovered too, so an edge a relay saw (receipt:false) is
-        -- re-offered until the owner's own read acknowledges it; otherwise every fresh inbox-wait would wake on it.
+        -- re-offered until the owner's own read acknowledges it, otherwise every fresh inbox-wait would wake on it.
         AND (m.type IN (${ACTIONABLE_TYPES_SQL}) OR m.attention_required = 1 OR m.wakes_owner = 1)
         AND (m.wakes_owner = 1 OR ${noOpenIncidentAttentionPredicateSql("m", "$name")})
         AND ${unretiredAttentionPredicateSql("m")}
@@ -2686,6 +2756,7 @@ export function createStatements(db: Database) {
       ORDER BY m.rowid ASC
       LIMIT $limit
     `),
+    ),
 
     /**
      * Read-only turn-attention view (17199, 21757): every unacknowledged
@@ -2695,7 +2766,8 @@ export function createStatements(db: Database) {
      * later verdict/request/response from sitting behind that ambient page. It
      * reuses the recipient mailbox cursor — no second queue, cursor, or store.
      */
-    selectAttention: db.prepare(`
+    selectAttention: db.prepare(
+      assertSingleStatement(`
       SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
              attention_required, sender_authority, session_id
       FROM (
@@ -2718,9 +2790,11 @@ export function createStatements(db: Database) {
       )
       ORDER BY rowid ASC
     `),
+    ),
 
     /** Count-only form of the recovery view — join/rename recovery reporting. */
-    countUnackedAttention: db.prepare(`
+    countUnackedAttention: db.prepare(
+      assertSingleStatement(`
       SELECT COUNT(*) AS count
       FROM (
         SELECT m.id
@@ -2740,6 +2814,7 @@ export function createStatements(db: Database) {
           AND ${TRACKED_ACTIONABLE_TYPE_SQL}
       )
     `),
+    ),
 
     /**
      * Apply a session's filter — single update covering persistent mode +
