@@ -13,6 +13,7 @@
  *    reverted to 0. There was no test crossing this boundary, which is why
  *    nobody noticed.
  */
+import { assertSingleStatement } from "@bearly/sqlite"
 import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it } from "vitest"
 import { mkdtempSync, realpathSync } from "node:fs"
@@ -34,7 +35,11 @@ function freshDb(label: string): { path: string; db: Database } {
 }
 
 const columnsOf = (db: Database, table: string) =>
-  new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((r) => r.name))
+  new Set(
+    (db.prepare(assertSingleStatement(`PRAGMA table_info(${table})`)).all() as Array<{ name: string }>).map(
+      (r) => r.name,
+    ),
+  )
 
 describe("message provenance (migration v26)", () => {
   it("puts session_id on both the live table and the archive", () => {

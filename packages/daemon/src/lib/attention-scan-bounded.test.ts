@@ -42,6 +42,7 @@
  * zero reads — an instrument that cannot fail is not a gate.
  */
 
+import { assertSingleStatement } from "@bearly/sqlite"
 import { mkdtempSync, rmSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -154,7 +155,7 @@ function costPerCall(stmts: TribeStatements, session: string): number {
 function planFor(fixture: Fixture, session: string): string {
   const sql = (fixture.stmts.getLatestInboxWaitMessage as unknown as { toString(): string }).toString()
   const rows = fixture.db
-    .query(`EXPLAIN QUERY PLAN ${sql}`)
+    .query(assertSingleStatement(`EXPLAIN QUERY PLAN ${sql}`))
     .all({ $name: session, $include_correlated_replies: 0, $unacknowledged_only: 0 }) as { detail: string }[]
   return rows.map((row) => row.detail).join("\n")
 }
@@ -203,7 +204,11 @@ describe("attention projection drives off the recipient, not the whole journal",
   it("drives tracked attention reads off the recipient's pending rows", () => {
     const fixture = buildJournal(200, 200)
     const sql = (fixture.stmts.selectAttention as unknown as { toString(): string }).toString()
-    const plan = (fixture.db.query(`EXPLAIN QUERY PLAN ${sql}`).all({ $name: HUB }) as Array<{ detail: string }>)
+    const plan = (
+      fixture.db.query(assertSingleStatement(`EXPLAIN QUERY PLAN ${sql}`)).all({ $name: HUB }) as Array<{
+        detail: string
+      }>
+    )
       .map((row) => row.detail)
       .join("\n")
 

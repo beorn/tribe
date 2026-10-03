@@ -13,6 +13,7 @@
  *
  * Usage: bun closescale.ts
  */
+import { assertSingleStatement } from "@bearly/sqlite"
 import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -38,12 +39,16 @@ function build(pile: number) {
   const stmts = createStatements(db)
 
   const insertMessage = db.prepare(
-    "INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, summary, request) " +
-      "VALUES ($id, 'request', '@fleet', $owner, 'direct', $content, $ts, 'push', $summary, $rid)",
+    assertSingleStatement(
+      "INSERT INTO messages (id, type, sender, recipient, kind, content, ts, delivery, summary, request) " +
+        "VALUES ($id, 'request', '@fleet', $owner, 'direct', $content, $ts, 'push', $summary, $rid)",
+    ),
   )
   const insertPending = db.prepare(
-    "INSERT INTO pending_request (request_id, recipient, sender, opened_at, expires_at, message_id, fanout) " +
-      "VALUES ($rid, $owner, '@fleet', $opened, NULL, $mid, 'first')",
+    assertSingleStatement(
+      "INSERT INTO pending_request (request_id, recipient, sender, opened_at, expires_at, message_id, fanout) " +
+        "VALUES ($rid, $owner, '@fleet', $opened, NULL, $mid, 'first')",
+    ),
   )
   db.transaction(() => {
     for (let i = 0; i < pile; i++) {
