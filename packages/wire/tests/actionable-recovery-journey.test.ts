@@ -113,8 +113,7 @@ function readLifecycleRows(dbPath: string): Array<{ type: string; sender: string
   try {
     return db
       .prepare(
-        "SELECT type, sender, content FROM messages " +
-          "WHERE type IN ('session', 'event.session.joined', 'event.session.left') ORDER BY rowid ASC",
+        "SELECT type, sender, content FROM messages WHERE type IN ('session', 'event.session.joined', 'event.session.left') ORDER BY rowid ASC",
       )
       .all() as Array<{ type: string; sender: string; content: string }>
   } finally {
@@ -1539,8 +1538,7 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
       ])
       const refusedEvents = db
         .prepare(
-          "SELECT type, sender, ref, content FROM messages " +
-            "WHERE type IN ('event.ball.close-refused', 'event.session.capability-refused') ORDER BY rowid",
+          "SELECT type, sender, ref, content FROM messages WHERE type IN ('event.ball.close-refused', 'event.session.capability-refused') ORDER BY rowid",
         )
         .all() as Array<{ type: string; sender: string; ref: string | null; content: string }>
       expect(refusedEvents.map((event) => ({ ...event, content: JSON.parse(event.content) }))).toEqual([
