@@ -2229,6 +2229,15 @@ export function registerReadCommands(program: Command): void {
   program
     .command(PENDING_CLI.name)
     .description(PENDING_CLI.description)
+    // 27235: a documented exit-code contract. Every non-zero path above prints its cause first; this
+    // footer is what a caller reads before deciding whether non-zero means "failure" or "finding".
+    .addHelpText(
+      "after",
+      "\nExit codes:\n" +
+        "  0  a typed snapshot was produced, including an empty one\n" +
+        "  2  the daemon refused or returned an unusable snapshot; the reason is on stderr\n" +
+        "  1  the JSON payload could not be written\n",
+    )
     .option(pendingAll.flags, pendingAll.description)
     .option(pendingJson.flags, pendingJson.description)
     .option(pendingExpired.flags, pendingExpired.description)
