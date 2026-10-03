@@ -1092,8 +1092,7 @@ export function evaluateDoctorIdentity(
         diagnosis:
           `daemon code integrity mismatch running=${reported.cert} on_disk=${resolved.onDisk.value} ` +
           "pin=none (standalone checkout, no superproject)",
-        remedy:
-          "the daemon is running a different module root; restarting will not help. Advance the daemon module root, then re-run `tribe doctor`",
+        remedy: `compare the selected Tribe source root with the daemon-reported root ${reported.root}; reload the daemon from the intended source, then re-run \`tribe doctor\``,
       }
     }
     return {
@@ -1111,8 +1110,7 @@ export function evaluateDoctorIdentity(
       severity: "CRITICAL",
       values,
       diagnosis: `daemon code integrity mismatch running=${values.running} on_disk=${values.on_disk} pin=${values.pin}`,
-      remedy:
-        "the daemon is running a different module root; restarting will not help. Advance the daemon module root, then re-run `tribe doctor`",
+      remedy: `compare the selected Tribe source root with the daemon-reported root ${reported.root}; reload the daemon from the intended source, then re-run \`tribe doctor\``,
     }
   }
   if (values.on_disk !== values.pin) {
