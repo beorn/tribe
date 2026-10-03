@@ -3052,3 +3052,133 @@ describe("24284 — a read whose response is not delivered must not acknowledge 
     expect(harness.mailboxCursorSeq("@dev/7")).toBeGreaterThan(0)
   })
 })
+
+// 24284 (fix-forward, @dev/review2 HOLD 1fe60b03) — the gate must keep the
+// transport that carried the request, not re-look-it-up when it is read. The
+// ordinary socket close handler calls `registry.removeTransport(connId)`, so a
+// read that is still in flight when its caller's 10 s deadline fires resumes
+// with the entry already gone: the old missing-client-true default then resumes
+// and acknowledges a mailbox whose socket is destroyed. These rows drive the
+// real close path (`markDestroyed` + `emitClose`), not a method call after one.
+describe("24284 — a transport that closes while the read is in flight must not acknowledge the mailbox", () => {
+  const token = managedToken("@dev/7", "sid-dev7")
+
+  /** A verifier that can hold the one-shot read open, so the socket can close
+   * inside the request rather than after it. */
+  function pausableVerifier() {
+    let paused = false
+    const releases: Array<() => void> = []
+    const verifier: LoadedIdentityVerifier = {
+      path: "/stub/pausable-identity-verifier.ts",
+      suppliesGen: true,
+      verify: async (candidate) => {
+        if (candidate !== token) return { result: "unreadable", reason: "malformed token" }
+        if (paused) await new Promise<void>((resolve) => releases.push(resolve))
+        return { result: "verified", actor: "@dev/7", sid: "sid-dev7", gen: 1 }
+      },
+    }
+    return {
+      verifier,
+      pause() {
+        paused = true
+      },
+      resume() {
+        paused = false
+        for (const release of releases.splice(0)) release()
+      },
+    }
+  }
+
+  async function registerSeat(harness: ReturnType<typeof createDispatcherHarness>, connId: string): Promise<void> {
+    await harness.register(connId, {
+      name: "@dev/7",
+      pid: 4107,
+      project: "/tmp/p",
+      launchParentPid: 4106,
+      idToken: token,
+      identitySid: "sid-dev7",
+    })
+  }
+
+  function selfInboxRequest(id: string): JsonRpcRequest {
+    return {
+      jsonrpc: "2.0",
+      id,
+      method: "cli_self_inbox_v1",
+      params: { authority: null, idToken: token, limit: 5 },
+    } as JsonRpcRequest
+  }
+
+  it("leaves the cursor parked when the socket closes while the one-shot read is in flight", async () => {
+    const gate = pausableVerifier()
+    const harness = createDispatcherHarness({ identityVerifier: gate.verifier })
+    cleanup = harness.dispose
+    const client = harness.connectClient()
+    await registerSeat(harness, client.connId)
+    harness.sendActionable("@dev/7", "verdict for you", "req-24284-close-inflight")
+    expect(harness.mailboxCursorSeq("@dev/7")).toBe(0)
+
+    gate.pause()
+    const pending = harness.dispatcher.handleRequest(selfInboxRequest("inbox-close-inflight"), client.connId)
+    // The caller's deadline fired and its one-shot process exited while the
+    // handler was still running: the close removes the registry entry.
+    client.socket.markDestroyed()
+    client.socket.emitClose()
+    gate.resume()
+
+    const raw = await pending
+    expect((JSON.parse(raw) as JsonRpcResponse<unknown>).error).toBeUndefined()
+    expect(client.socket.writes.length, "the dispatcher must not write to a closed socket").toBe(0)
+    expect(harness.mailboxCursorSeq("@dev/7"), "a closed transport acknowledged the mailbox").toBe(0)
+    expect(harness.mailboxAttentionReadAt("@dev/7"), "a closed transport stamped the attention read").toBeNull()
+    // The row is still there for a retry.
+    expect(harness.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE recipient = '@dev/7'").get()).toMatchObject({
+      n: 1,
+    })
+  })
+
+  it("leaves the drain cursor parked when the socket closes while the drain is in flight", async () => {
+    const harness = createDispatcherHarness({ operatorCapability: "operator-test-secret" })
+    cleanup = harness.dispose
+    const client = harness.connectClient()
+    await harness.register(client.connId, { name: "@dev/7", pid: 4107, project: "/tmp/p" })
+    harness.sendActionable("@dev/7", "verdict for you", "req-24284-drain-close")
+    expect(harness.mailboxCursorSeq("@dev/7")).toBe(0)
+
+    // The operator drain awaits its target resolution; the close lands inside
+    // that window and removes the registry entry, as the real handler does.
+    queueMicrotask(() => {
+      client.socket.markDestroyed()
+      client.socket.emitClose()
+    })
+    await harness.dispatcher.handleRequest(
+      {
+        jsonrpc: "2.0",
+        id: "drain-close-inflight",
+        method: "cli_inbox_drain",
+        params: { session: "@dev/7", limit: 5, operator_capability: "operator-test-secret" },
+      },
+      client.connId,
+    )
+
+    expect(harness.mailboxCursorSeq("@dev/7"), "a closed transport advanced the drain cursor").toBe(0)
+  })
+
+  it("acknowledges when the same in-flight read resumes on a live socket", async () => {
+    const gate = pausableVerifier()
+    const harness = createDispatcherHarness({ identityVerifier: gate.verifier })
+    cleanup = harness.dispose
+    const client = harness.connectClient()
+    await registerSeat(harness, client.connId)
+    harness.sendActionable("@dev/7", "verdict for you", "req-24284-live-control")
+
+    gate.pause()
+    const pending = harness.dispatcher.handleRequest(selfInboxRequest("inbox-live-control"), client.connId)
+    // No close: the socket is still connected when the handler resumes.
+    gate.resume()
+    await pending
+
+    expect(harness.mailboxCursorSeq("@dev/7")).toBeGreaterThan(0)
+    expect(harness.mailboxAttentionReadAt("@dev/7")).not.toBeNull()
+  })
+})
