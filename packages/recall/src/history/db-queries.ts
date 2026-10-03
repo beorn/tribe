@@ -3,6 +3,7 @@
  */
 
 import { Database } from "bun:sqlite"
+import { assertSingleStatement } from "@bearly/sqlite"
 import * as path from "path"
 import * as fs from "fs"
 import type { SessionRecord, MessageRecord, ContentType, ContentRecord, SessionIndexEntry } from "./types.ts"
@@ -242,7 +243,7 @@ export function getCachedStatement(db: Database, sql: string) {
   }
   let stmt = map.get(sql)
   if (!stmt) {
-    stmt = db.prepare(sql)
+    stmt = db.prepare(assertSingleStatement(sql))
     map.set(sql, stmt)
   }
   return stmt
@@ -432,8 +433,8 @@ export function ftsSearch(
 
   searchQuery += ` ORDER BY rank LIMIT ? OFFSET ?`
 
-  const totalRow = db.prepare(countQuery).get(...params) as { total: number }
-  const results = db.prepare(searchQuery).all(...params, limit, offset) as (MessageRecord & {
+  const totalRow = db.prepare(assertSingleStatement(countQuery)).get(...params) as { total: number }
+  const results = db.prepare(assertSingleStatement(searchQuery)).all(...params, limit, offset) as (MessageRecord & {
     cwd?: string | null
     project_path?: string
     rank?: number
@@ -561,7 +562,7 @@ export function ftsSearchWithSnippet(
   `
   const params = [ftsQuery, ...filter.params]
   const total = countMessages(db, ftsQuery, filter)
-  const results = db.prepare(searchQuery).all(...params, limit, offset) as MessageSearchHit[]
+  const results = db.prepare(assertSingleStatement(searchQuery)).all(...params, limit, offset) as MessageSearchHit[]
 
   return { results, total }
 }
@@ -570,11 +571,11 @@ export function ftsSearchWithSnippet(
 function countMessages(db: Database, ftsQuery: string, filter: { sql: string; params: (string | number)[] }): number {
   const row = db
     .prepare(
-      `SELECT COUNT(*) as total
+      assertSingleStatement(`SELECT COUNT(*) as total
        FROM messages_fts f
        JOIN messages m ON f.rowid = m.id
        JOIN sessions s ON m.session_id = s.id
-       WHERE messages_fts MATCH ? AND ${filter.sql}`,
+       WHERE messages_fts MATCH ? AND ${filter.sql}`),
     )
     .get(ftsQuery, ...filter.params) as { total: number }
   return row.total
@@ -598,12 +599,12 @@ function hookMessageSearch(
   // One row past the cap says whether the cap cut the window, without a COUNT (B1).
   const ranked = db
     .prepare(
-      `SELECT m.id AS id, m.session_id AS session_id, ${MESSAGE_RANK_SQL} AS rank
+      assertSingleStatement(`SELECT m.id AS id, m.session_id AS session_id, ${MESSAGE_RANK_SQL} AS rank
        FROM messages_fts f
        JOIN messages m ON f.rowid = m.id
        JOIN sessions s ON m.session_id = s.id
        WHERE messages_fts MATCH ? AND ${filter.sql}
-       ORDER BY rank LIMIT ?`,
+       ORDER BY rank LIMIT ?`),
     )
     .all(ftsQuery, ...filter.params, HOOK_CANDIDATE_LIMIT + 1) as Candidate[]
   const survivors = ranked.slice(0, HOOK_CANDIDATE_LIMIT)
@@ -634,9 +635,9 @@ function hookMessageSearch(
   if (top.length === 0) return { results: [], total, hook }
   const rows = db
     .prepare(
-      `SELECT ${MESSAGE_HIT_COLUMNS_SQL}
+      assertSingleStatement(`SELECT ${MESSAGE_HIT_COLUMNS_SQL}
        FROM messages m JOIN sessions s ON m.session_id = s.id
-       WHERE m.id IN (${top.map(() => "?").join(",")})`,
+       WHERE m.id IN (${top.map(() => "?").join(",")})`),
     )
     .all(...top.map((t) => t.id)) as (MessageRecord & { project_path: string })[]
   const byId = new Map(rows.map((row) => [row.id, row]))
@@ -801,7 +802,7 @@ export function getIndexMeta(db: Database, key: string): string | undefined {
 
 export function clearTables(db: Database, tables: ("writes" | "sessions" | "messages")[]): void {
   for (const table of tables) {
-    db.prepare(`DELETE FROM ${table}`).run()
+    db.prepare(assertSingleStatement(`DELETE FROM ${table}`)).run()
   }
   if (tables.includes("messages")) {
     // Rebuild FTS index
@@ -1077,9 +1078,9 @@ export function searchAll(
     LIMIT ? OFFSET ?
   `
 
-  const results = db.prepare(searchQuery).all(...params, limit, offset) as ContentSearchHit[]
+  const results = db.prepare(assertSingleStatement(searchQuery)).all(...params, limit, offset) as ContentSearchHit[]
   if (mode === "hook") return { results, total: null }
-  const totalRow = db.prepare(countQuery).get(...params) as { total: number }
+  const totalRow = db.prepare(assertSingleStatement(countQuery)).get(...params) as { total: number }
   return { results, total: totalRow.total }
 }
 
