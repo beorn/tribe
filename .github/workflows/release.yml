@@ -1,4 +1,4 @@
-# vendor-kit: release@28f764490684 — generated; edit km/packages/km-infra/vendor-kit/templates/release.yml in km, then re-sync
+# vendor-kit: release@ba6da10e399a — generated; edit km/packages/km-infra/vendor-kit/templates/release.yml in km, then re-sync
 name: Release
 
 on:
@@ -35,7 +35,7 @@ jobs:
           registry-url: https://registry.npmjs.org
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
-          bun-version-file: .bun-version
+          bun-version: 1.4.2
 
       - name: Validate dispatch identity and planned package versions
         env:
@@ -98,7 +98,7 @@ jobs:
       - run: mkdir "$RUNNER_TEMP/verified-tarballs"
       - name: Verify the repository and retain its exact tarballs
         id: verify
-        uses: beorn/verify-publishable@b557335762d5eb9569223e083ce732f35f3cd3f3
+        uses: beorn/verify-publishable@732ee852662d7620fd88997d9a4e98cb4f656f09
         with:
           output-dir: ${{ runner.temp }}/verified-tarballs
       - name: Keep the verifier's report beside the tarballs
