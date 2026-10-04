@@ -131,4 +131,22 @@ describe("27346 a re-presented attention row names itself a replay", () => {
 
     expect(row).toMatchObject({ id: "req-27346", replay: false })
   })
+
+  it("does not surface a SETTLED, already-read row to the pane feed", () => {
+    const { stmts, ctx } = fixture()
+    const seq = openBall(stmts)
+    stmts.advanceMailboxCursor.run({ $recipient: SEAT, $seq: seq + 100, $now: FIRST_SENT_MS + 600_000 })
+    // Settlement CLOSES the pending row, so the tracked branch (22203) cannot
+    // return it and the cursor gates the untracked branch: the pane feed the
+    // drain forwards carries no attention row for it. The bead's specimens were
+    // this shape; what reached their pane was the launch-goal replay (#27362).
+    stmts.closePendingRequest.run({ $request_id: "req-27346", $recipient: SEAT })
+
+    const projected = readAttentionProjection(ctx, SEAT)
+    expect(projected.attention.actionable_unread.find((event) => event.id === "req-27346")).toBeUndefined()
+
+    // Not presented as new is not the same as lost: the row stays durable in
+    // history (fetchable by id), it is simply not attention.
+    expect(stmts.selectMessageById.get({ $id: "req-27346" })).toMatchObject({ rowid: seq })
+  })
 })
