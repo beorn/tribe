@@ -1,10 +1,13 @@
 import { settlesRequestOpenedBy, type MessageInsertedInfo } from "./context.ts"
+import { createLogger } from "loggily"
 import type { InboxWaitResult as WireInboxWaitResult, InboxWaitWokenBy } from "tribe-wire"
 import {
   ACTIONABLE_TYPES_SET as ACTIONABLE_TYPES,
   CORRELATED_REPLY_TYPES_SET,
   type TribeStatements,
 } from "./database.ts"
+
+const log = createLogger("tribe:inbox-wait")
 
 /** 25662 row 17 — name the row a wait woke on. `settles_request_id` is set only when the wait opted into correlated
  *  replies and this row settled a request `session` opened, which is the only case where a reply is the wake. */
@@ -131,7 +134,17 @@ export function createInboxWaitManager(
     flags: { timedOut: boolean; aborted: boolean },
   ): InboxWaitWokenBy | undefined {
     if (flags.timedOut || flags.aborted || readWokenBy === undefined) return undefined
-    return readWokenBy(session, seq, wakeOnCorrelatedReply)
+    const woken = readWokenBy(session, seq, wakeOnCorrelatedReply)
+    // 27407 - a wake that names a row the mailbox cursor is already past is a
+    // REPLAY, not news. Say so in the daemon log so the showing path is
+    // observable: the settled specimens surfaced exactly this way, named by the
+    // durable qualifying tail on a resumed chunk rather than by a fresh wait.
+    if (woken.kind === "message" && woken.replay === true) {
+      log.info?.(
+        `inbox-wait: waking ${session} on a REPLAY of row ${woken.seq} (${woken.message_id ?? "unknown"}) first sent ${woken.sent_at}`,
+      )
+    }
+    return woken
   }
 
   /** The sequence a snapshot wake fired on: a fresh wait wakes on the newest unacknowledged row, a resumed wait on
