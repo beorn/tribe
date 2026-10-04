@@ -3988,6 +3988,7 @@ export function readAttentionProjection(
   ctx: TribeContext,
   owner: string,
   now = Date.now(),
+  alreadyDeliveredSeq = 0,
 ): {
   attentionRows: FetchRow[]
   untakenPendingBalls: PendingBall[]
@@ -4005,6 +4006,16 @@ export function readAttentionProjection(
     last_actionable_seq: number
   } | null
   const lastActionableSeq = mailboxCursor?.last_actionable_seq ?? 0
+  // 27346 - "already shown" has two delivery records, and the row is a replay
+  // once either is past it: the mailbox cursor (a MODEL read acknowledged it)
+  // and the ambient session cursor (this seat's transport was handed it). The
+  // pane drain reads with `receipt:false` (21757), so it never advances the
+  // mailbox cursor — yet it does deliver every returned row to the pane and
+  // advance the ambient cursor. Consulting only the mailbox cursor made the
+  // second drain re-forward the same unacknowledged row as `replay=false`
+  // (@dev/11 review1837 counterexample: an OPEN tracked row above the cursor,
+  // and a settled row the cursor never reached, both read as new).
+  const shownThrough = Math.max(lastActionableSeq, alreadyDeliveredSeq)
   const pendingBalls = pendingBallsForOwner(ctx, owner, now)
   const untakenRequestIds = untakenPendingRequestIds(ctx, owner)
   const untakenPendingBalls = pendingBalls.filter((ball) => untakenRequestIds.has(ball.request_id))
@@ -4043,7 +4054,7 @@ export function readAttentionProjection(
     actionableCount,
     attention: {
       ...pruned,
-      actionable_unread: attentionRows.map((row) => fetchEvent(row, row.rowid <= lastActionableSeq)),
+      actionable_unread: attentionRows.map((row) => fetchEvent(row, row.rowid <= shownThrough)),
       pending_balls: pendingPreview,
       pending_balls_summary: {
         total: pendingBalls.length,
@@ -4222,7 +4233,11 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
     shouldAdvance = !topicsAreSnapshot && since !== null && a.advance === true
   } else {
     if (!topicsAreSnapshot) {
-      const projected = readAttentionProjection(ctx, currentName)
+      // 27346 - the ambient session cursor is this caller's delivery record:
+      // rows at or below it were already handed to this seat's transport, so a
+      // re-presentation names itself a replay. Read before the advance below,
+      // so the first delivery of a row still reads as fresh.
+      const projected = readAttentionProjection(ctx, currentName, Date.now(), cursor?.last_inbox_pull_seq ?? 0)
       attentionRows = projected.attentionRows
       attention = projected.attention
     }

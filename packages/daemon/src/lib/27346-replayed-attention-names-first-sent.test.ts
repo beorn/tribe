@@ -22,12 +22,25 @@
  * either, and every re-presentation becomes a fresh <channel> envelope the
  * pane reads as new (specimens ab0dbd7e, daf2f96f).
  *
+ * "Already shown" therefore has two delivery records and the row is a replay
+ * once EITHER is past it: the mailbox cursor (a MODEL read acknowledged it)
+ * and the ambient per-session cursor (the seat's transport was handed it, which
+ * the `receipt:false` drain does advance). The first half of this file pins the
+ * projection; the `paneDrain` cases at the end drive the exact
+ * `tribe.fetch {limit:500, receipt:false}` call the wire adapter's
+ * `drainDaemonInbox` makes, twice, so the counterexample on review1837 — a
+ * second drain re-forwarded as `replay=false` — is covered at that boundary.
+ * A fresh case is retained: the first drain of a never-delivered row is
+ * `replay=false`.
+ *
  * 27407 named the WAKE rail of this family. This is the FETCH/pane rail:
  * before this change an attention row carried no `replay` flag, so a
  * re-presented row was indistinguishable from a fresh one.
  *
  * RED-first: this file fails on the pre-fix projection, which carries no
- * `replay` on a row the mailbox cursor is already past.
+ * `replay` on a row the mailbox cursor is already past, and stamps a second
+ * `receipt:false` drain of the same row `replay=false`. Receipt:
+ * /hh/var/@dev/luna6/27346-pane-boundary/RED-boundary-before-fix.log.
  */
 import type { Database } from "bun:sqlite"
 import { mkdtempSync, rmSync } from "node:fs"
@@ -37,7 +50,8 @@ import { afterEach, describe, expect, it } from "vitest"
 
 import { createTribeContext, type TribeContext } from "./context.ts"
 import { createStatements, openDatabase, type TribeStatements } from "./database.ts"
-import { readAttentionProjection } from "./handlers.ts"
+import { handleToolCall, readAttentionProjection, type HandlerOpts } from "./handlers.ts"
+import { registerSession } from "./session.ts"
 
 const SEAT = "@dev/3"
 const SENDER = "@chief"
@@ -60,6 +74,11 @@ function fixture(): Fixture {
     claudeSessionId: null,
     claudeSessionName: null,
   })
+  // The pane drain advances the AMBIENT cursor through a real sessions row
+  // (`advanceInboxCursor` is an UPDATE on sessions). Without a registered seat
+  // the boundary under test silently no-ops, which is exactly the kind of gap
+  // the boundary test exists to close.
+  registerSession(ctx, undefined, () => false, null, 0, "pull")
   const built = { dir, db, stmts, ctx }
   opened.push(built)
   return built
@@ -71,6 +90,36 @@ afterEach(() => {
     rmSync(item.dir, { recursive: true, force: true })
   }
 })
+
+const handlerOpts = (): HandlerOpts => ({
+  cleanup: () => {},
+  userRenamed: false,
+  setUserRenamed: () => {},
+  getActiveSessionIds: () => new Set<string>(),
+  hasActiveTransport: () => false,
+  getActiveSessionInfo: () => [],
+})
+
+type DrainRow = { id: string; rowid: number; ts?: string; replay?: boolean }
+type DrainResult = { attention?: { actionable_unread?: DrainRow[] }; events?: DrainRow[] }
+
+/**
+ * The exact call the pane drain makes: `drainDaemonInbox` in
+ * packages/wire/src/stdio-adapter.ts issues `tribe.fetch {limit:500,
+ * receipt:false}` and forwards each `attention.actionable_unread` row as a
+ * <channel> envelope. Nothing here advances a cursor by hand — that is the
+ * point (21757): a `receipt:false` read must not be assumed to move the
+ * mailbox cursor.
+ */
+async function paneDrain(ctx: TribeContext): Promise<DrainResult> {
+  const result = await handleToolCall(ctx, "tribe.fetch", { limit: 500, receipt: false }, handlerOpts())
+  const text = (result as { content: Array<{ text: string }> }).content[0]?.text ?? "{}"
+  return JSON.parse(text) as DrainResult
+}
+
+function rowById(result: DrainResult, id: string): DrainRow | undefined {
+  return result.attention?.actionable_unread?.find((row) => row.id === id)
+}
 
 /** One tracked ball: a direct request to SEAT with an open pending row. */
 function openBall(stmts: TribeStatements): number {
@@ -147,6 +196,59 @@ describe("27346 a re-presented attention row names itself a replay", () => {
 
     // Not presented as new is not the same as lost: the row stays durable in
     // history (fetchable by id), it is simply not attention.
+    expect(stmts.selectMessageById.get({ $id: "req-27346" })).toMatchObject({ rowid: seq })
+  })
+
+  it("names the row a replay on the SECOND receipt:false drain, with its first-sent time", async () => {
+    const { stmts, ctx } = fixture()
+    openBall(stmts)
+
+    // The pane rail never acknowledges the mailbox cursor (21757), so the two
+    // drains below each see the same owned, untaken row. Before the fix the
+    // replay determination only consulted the mailbox cursor, so the SECOND
+    // presentation of the same row was stamped replay=false — a pane read it
+    // as a second, fresh instruction (@dev/11 counterexample on review1837).
+    const first = await paneDrain(ctx)
+    expect(rowById(first, "req-27346")).toMatchObject({
+      id: "req-27346",
+      replay: false,
+      ts: new Date(FIRST_SENT_MS).toISOString(),
+    })
+    expect(stmts.getMailboxCursor.get({ $recipient: SEAT })).toBeNull()
+
+    const second = await paneDrain(ctx)
+    expect(rowById(second, "req-27346")).toMatchObject({
+      id: "req-27346",
+      replay: true,
+      ts: new Date(FIRST_SENT_MS).toISOString(),
+    })
+  })
+
+  it("presents a settled ball through the pane drain as a replay, never as new", async () => {
+    const { stmts, ctx } = fixture()
+    const seq = openBall(stmts)
+
+    // First drain: the ball is open and genuinely new, so its envelope is a
+    // fresh instruction (replay=false) and carries no first-sent time to
+    // misread. This envelope may already be queued in the host when the ball
+    // settles below.
+    const first = await paneDrain(ctx)
+    expect(rowById(first, "req-27346")).toMatchObject({ replay: false })
+
+    stmts.closePendingRequest.run({ $request_id: "req-27346", $recipient: SEAT })
+
+    // Second drain: the row is still unacknowledged (receipt:false never moved
+    // the mailbox cursor, 21757), so the projection still carries it — but the
+    // ambient cursor the first drain advanced says it was already handed to the
+    // pane, so it names itself a replay with its original send time instead of
+    // reading as a second new instruction. AC2/AC3.
+    const second = await paneDrain(ctx)
+    expect(rowById(second, "req-27346")).toMatchObject({
+      id: "req-27346",
+      replay: true,
+      ts: new Date(FIRST_SENT_MS).toISOString(),
+    })
+    // A replay is not a loss: the row stays durable in history.
     expect(stmts.selectMessageById.get({ $id: "req-27346" })).toMatchObject({ rowid: seq })
   })
 })
