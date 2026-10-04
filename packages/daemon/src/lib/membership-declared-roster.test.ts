@@ -94,6 +94,7 @@ function baseOpts(overrides: Partial<HandlerOpts> = {}): HandlerOpts {
     getActiveSessionIds: () => new Set<string>(),
     hasActiveTransport: () => false,
     getActiveSessionInfo: () => [],
+    isPidAlive: () => true,
     ...overrides,
   } as HandlerOpts
 }
@@ -217,7 +218,13 @@ describe("membership projection: declared-roster membership is a function of a p
       ])
       // 25662: the same row is what the bridge-lost check pages about.
       const seats = readSeatTransportFacts(opCtx, opts)
-      expect(seats.missing).toEqual([{ name: "@agent/restart-onfailure", launchParentPid: 30002 }])
+      expect(seats.missing).toEqual([
+        {
+          name: "@agent/restart-onfailure",
+          launchParentPid: 30002,
+          expectedRecord: "declared roster TRIBE_EXPECTED_MEMBERS",
+        },
+      ])
       expect(seats.exited).toEqual(new Map())
     } finally {
       nowSpy.mockRestore()
@@ -252,6 +259,36 @@ describe("membership projection: declared-roster membership is a function of a p
       expect(seats.missing).toEqual([])
       expect(seats.exited).toEqual(new Map())
       expect(seats.unreachable).toEqual(new Map([["@agent/refused", "foreign-identity-transport"]]))
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+
+  it("2c. expected seat stopped by hab (dead launch parent): exited for bridge-lost, not missing (#27420)", () => {
+    let now = 30_250_000
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now)
+    try {
+      const ctx = addSession(db, stmts, "exp-2c", "@agent/stopped", { id: "launch-exp-2c", parentPid: 30003 })
+      now += 1_000
+      logSessionLeft(ctx, {
+        memberId: "exp-2c",
+        name: "@agent/stopped",
+        role: "member",
+        domains: [],
+        launchId: "launch-exp-2c",
+        launchParentPid: 30003,
+        reason: "transport-closed",
+      })
+      const opCtx = makeContext(db, stmts, "operator", "@operator")
+      const opts = baseOpts({
+        getExpectedMembers: () => roster([{ name: "@agent/stopped", expected: true }]),
+        isPidAlive: (pid) => pid !== 30003,
+      })
+      // 27420: an intentionally stopped seat whose launch parent is dead is classified
+      // as exited (not missing) by readSeatTransportFacts, so checkBridgeLost never pages it.
+      const seats = readSeatTransportFacts(opCtx, opts)
+      expect(seats.missing).toEqual([])
+      expect(seats.exited).toEqual(new Map([["@agent/stopped", "launch parent 30003 dead"]]))
     } finally {
       nowSpy.mockRestore()
     }

@@ -271,6 +271,8 @@ export type HandlerOpts = {
    * authority for destructive reclaim decisions.
    */
   hasActiveTransport: (sessionId: string) => boolean
+  /** Probe whether a process is still alive. Defaults to pidStillAlive (process.kill(pid, 0)). */
+  isPidAlive?: (pid: number) => boolean
   isReconnectGraceProtected?: (sessionId: string, nowMs: number) => boolean
   /**
    * 24284 — whether the caller can still receive the response this handler is
@@ -3443,18 +3445,35 @@ export function readSeatTransportFacts(
   ctx: TribeContext,
   opts: HandlerOpts,
 ): {
-  missing: Array<{ name: string; launchParentPid: number | null }>
+  missing: Array<{ name: string; launchParentPid: number | null; expectedRecord?: string }>
   exited: Map<string, string>
   connected: Set<string>
   unreachable: Map<string, string>
 } {
   const { liveSessions, discrepancy } = projectHealthMembership(ctx, opts)
-  const missing: Array<{ name: string; launchParentPid: number | null }> = []
+  const isAlive = opts.isPidAlive ?? pidStillAlive
+  const roster = opts.getExpectedMembers?.()
+  const expectedRecord = roster?.loadedAt
+    ? `declared roster tribe-expected-members.json loaded ${new Date(roster.loadedAt).toISOString()}`
+    : roster !== undefined
+      ? "declared roster TRIBE_EXPECTED_MEMBERS"
+      : undefined
+
+  const missing: Array<{ name: string; launchParentPid: number | null; expectedRecord?: string }> = []
   const exited = new Map<string, string>()
   const unreachable = new Map<string, string>()
   for (const launch of discrepancy?.missing ?? []) {
     if (launch.state === "missing-transport") {
-      missing.push({ name: launch.name, launchParentPid: launch.launch_parent_pid })
+      const pid = launch.launch_parent_pid
+      if (pid !== null && pid > 0 && !isAlive(pid)) {
+        exited.set(launch.name, `launch parent ${pid} dead`)
+      } else {
+        missing.push({
+          name: launch.name,
+          launchParentPid: pid,
+          ...(expectedRecord !== undefined ? { expectedRecord } : {}),
+        })
+      }
     }
     // The only settled left-fact is a harness exit (isTerminalSessionLeftReason).
     else if (launch.state === "exited-not-remounted") exited.set(launch.name, `harness-exited at ${launch.left_at}`)

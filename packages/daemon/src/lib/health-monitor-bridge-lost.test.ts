@@ -78,6 +78,39 @@ describe("checkBridgeLost", () => {
     expect(checkBridgeLost(held, T0 + 4 * MIN, firstSeen, CONFIG)).toEqual([])
   })
 
+  test("names the record that said expected-up in the page content (#27420)", () => {
+    const mem = memory([["@dev/3", T0 - CONFIG.graceMs]])
+    const lostWithRecord = facts({
+      missing: [
+        {
+          name: "@dev/3",
+          launchParentPid: 4242,
+          expectedRecord: "declared roster tribe-expected-members.json loaded 2026-10-04T12:00:00.000Z",
+        },
+      ],
+      connected: new Set(["@chief"]),
+    })
+    const [page] = checkBridgeLost(lostWithRecord, T0, mem, CONFIG)
+    expect(page?.content).toBe(
+      "@dev/3's tribe bridge is lost 3 min: hab expects it up (declared roster tribe-expected-members.json loaded 2026-10-04T12:00:00.000Z), its launch parent 4242 has no transport. Repair from its pane: /mcp, plugin:tribe:tribe, Reconnect.",
+    )
+  })
+
+  test("a seat that hab stopped (launch parent dead in exited facts) clears an open incident (#27420)", () => {
+    const mem = memory()
+    const stopped = facts({
+      exited: new Map([["@dev/3", "launch parent 4242 dead"]]),
+      openIncidents: [{ subject: "@dev/3", recipient: "@chief" }],
+    })
+    const [clear] = checkBridgeLost(stopped, T0, mem, CONFIG)
+    expect(clear).toMatchObject({
+      kind: "clear",
+      recipient: "@chief",
+      content: "cleared: @dev/3 exited (launch parent 4242 dead); hab owns the restart",
+      summary: "cleared: @dev/3 exited (launch parent 4242 dead); hab owns the restart",
+    })
+  })
+
   test("@chief's own bridge pages the next owner, and a lost owner is skipped", () => {
     const chiefLost = facts({ missing: [lost("@chief")], connected: new Set(["@cto", "@adhoc/0"]) })
     expect(checkBridgeLost(chiefLost, T0, memory([["@chief", T0 - CONFIG.graceMs]]), CONFIG)).toMatchObject([

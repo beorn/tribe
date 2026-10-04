@@ -150,7 +150,7 @@ export interface TribeClientApi {
    * maps a seat with no live transport in any other membership state (a refused reconnect, no row) to that state.
    */
   getSeatTransportFacts?(): {
-    missing: Array<{ name: string; launchParentPid: number | null }>
+    missing: Array<{ name: string; launchParentPid: number | null; expectedRecord?: string }>
     exited: Map<string, string>
     connected: Set<string>
     unreachable: Map<string, string>

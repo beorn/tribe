@@ -1235,7 +1235,11 @@ export function parseBridgeLostConfig(
 /** What one tick knows: transport projection plus the durable ball tracker's open bridge-lost incidents. */
 export interface BridgeLostFacts {
   /** Seats hab expects up whose transport is gone (membership state `missing-transport`). */
-  readonly missing: ReadonlyArray<{ readonly name: string; readonly launchParentPid: number | null }>
+  readonly missing: ReadonlyArray<{
+    readonly name: string
+    readonly launchParentPid: number | null
+    readonly expectedRecord?: string
+  }>
   /** Names with a live transport now. */
   readonly connected: ReadonlySet<string>
   /** Seats whose launch exited with a settled reason, mapped to that reason. */
@@ -1353,8 +1357,9 @@ export function checkBridgeLost(
     memory.firstSeen.set(seat.name, since)
     if (now - since < config.graceMs || open.has(seat.name)) continue
     const minutes = Math.floor((now - since) / 60_000)
+    const expectedSource = seat.expectedRecord ? ` (${seat.expectedRecord})` : " (declared roster)"
     const content =
-      `${seat.name}'s tribe bridge is lost ${minutes} min: hab expects it up, its launch parent ` +
+      `${seat.name}'s tribe bridge is lost ${minutes} min: hab expects it up${expectedSource}, its launch parent ` +
       `${seat.launchParentPid ?? "unknown"} has no transport. Repair from its pane: /mcp, plugin:tribe:tribe, Reconnect.`
     // Only an owner with a live transport can read the page: a lost, exited or never-registered owner cannot.
     const owner = config.owners.find((candidate) => candidate !== seat.name && facts.connected.has(candidate))
