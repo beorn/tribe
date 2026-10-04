@@ -10,6 +10,13 @@ import {
   resolveInboxWaitControls,
   type InboxWaitResult,
 } from "../lib/inbox-wait-options.ts"
+import { inboxWaitErrorKind } from "../lib/inbox-wait-errors.ts"
+
+// The retryable transport-error classifier has ONE owner now
+// (../lib/inbox-wait-errors.ts, also exported as tribe-wire/lib/inbox-wait-errors
+// for the seat-side consumer). Re-export it so this module's CLI surface is
+// unchanged and no caller migrates (27397).
+export { inboxWaitErrorKind, isRetryableInboxWaitError } from "../lib/inbox-wait-errors.ts"
 import {
   connectToDaemon,
   resolveSocketPath,
@@ -1819,24 +1826,6 @@ function renderInboxDrainFailure(error: unknown, json: boolean): void {
 /** Machine-readable failure for `tribe inbox --json`. Stdout must not be empty: an empty document reads as an empty inbox (#27089). */
 async function writeInboxJsonFailure(error: unknown): Promise<void> {
   await writeJsonStdout({ error: projectInboxDrainFailure(error) })
-}
-
-type InboxWaitErrorKind = "transport-close" | "daemon-unavailable" | null
-
-function inboxWaitErrorKind(err: unknown): InboxWaitErrorKind {
-  const code = (err as NodeJS.ErrnoException | undefined)?.code
-  if (code === "ENOENT" || code === "ECONNREFUSED") return "daemon-unavailable"
-  if (code === "ECONNRESET" || code === "EPIPE") return "transport-close"
-  const message = err instanceof Error ? err.message : String(err)
-  return /connection closed|socket closed|socket hang up|closed before response|request cli_inbox_wait timed out/i.test(
-    message,
-  )
-    ? "transport-close"
-    : null
-}
-
-export function isRetryableInboxWaitError(err: unknown): boolean {
-  return inboxWaitErrorKind(err) !== null
 }
 
 function totalWaited(

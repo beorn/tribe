@@ -57,6 +57,7 @@
     "./lib/session-identity-env": "./src/lib/session-identity-env.ts",
     "./lib/ag-host-env": "./src/lib/ag-host-env.ts",
     "./lib/daemon-environment": "./src/lib/daemon-environment.ts",
+    "./lib/inbox-wait-errors": "./src/lib/inbox-wait-errors.ts",
     "./http": "./src/http-adapter.ts"
   },
   "publishConfig": {
@@ -164,6 +165,10 @@
         "types": "./dist/lib/daemon-environment.d.mts",
         "import": "./dist/lib/daemon-environment.mjs"
       },
+      "./lib/inbox-wait-errors": {
+        "types": "./dist/lib/inbox-wait-errors.d.mts",
+        "import": "./dist/lib/inbox-wait-errors.mjs"
+      },
       "./http": {
         "types": "./dist/http-adapter.d.mts",
         "import": "./dist/http-adapter.mjs"
@@ -216,6 +221,7 @@
       "src/lib/session-identity-env.ts",
       "src/lib/ag-host-env.ts",
       "src/lib/daemon-environment.ts",
+      "src/lib/inbox-wait-errors.ts",
       "src/http-adapter.ts"
     ],
     "format": "esm"
