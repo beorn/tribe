@@ -213,12 +213,16 @@ type ToolArgs = Record<string, unknown>
  *
  * Spec: @km/infra/15623-mcp-tools-structuredcontent.
  */
-function jsonResult(payload: unknown, opts?: { text?: string }): ToolResult {
+function jsonResult(payload: unknown, opts?: { text?: string; isError?: boolean }): ToolResult {
   const structured = ensureRecord(payload)
   const text = opts?.text ?? JSON.stringify(payload, null, 2)
   return {
     content: [{ type: "text", text }],
     structuredContent: structured,
+    // 27425 — a refusal the caller must not read as a normal empty result
+    // rides the MCP `isError` envelope (a transport-level failure), so an
+    // adapter/CLI surfaces it as non-zero rather than a successful read.
+    ...(opts?.isError ? { isError: true } : {}),
   }
 }
 
@@ -4208,26 +4212,6 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
     return jsonResult({ error: "ids must be an array of strings." })
   }
 
-  // 27425 — an abbreviated id must be refused BY NAME, never answered as an
-  // empty list (NO SILENT ERRORS): the lookup below is an exact match, so a
-  // short id could only ever match nothing, and the caller read that empty
-  // result as "no such message" — the id was merely abbreviated.
-  if (ids && ids.length > 0) {
-    const abbreviated = ids.filter((id) => !isFullMessageId(id))
-    if (abbreviated.length > 0) {
-      const shown = abbreviated.slice(0, MISS_WARNING_EXAMPLES)
-      const elided = abbreviated.length - shown.length
-      const more = elided > 0 ? `, and ${elided} more` : ""
-      const noun = abbreviated.length === 1 ? "entry is" : "entries are"
-      return jsonResult({
-        error:
-          `not a full message id: ${shown.join(", ")}${more} — ` +
-          `${abbreviated.length} ${noun} abbreviated; a message id is a full uuid ` +
-          `(for example 44ea2480-2763-46a9-a08c-82566a1b5637). Full-id lookups are unchanged.`,
-      })
-    }
-  }
-
   if (ids && ids.length > 0) {
     const placeholders = ids.map(() => "?").join(", ")
     rows = ctx.db
@@ -4244,6 +4228,29 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
       )
       .all(...ids, limit) as FetchRow[]
     const byId = new Map(rows.map((r) => [r.id, r]))
+    // 27425 — an id that matched nothing and is not a canonical uuid was
+    // ABBREVIATED: refuse it BY NAME as a transport error, never answer an
+    // empty list the caller reads as "no such message" (NO SILENT ERRORS).
+    // The exact-match lookup above runs FIRST, so a persisted id that is not
+    // a uuid (tribe.send accepts any non-empty client id) still resolves —
+    // the refusal is only for ids that matched nothing and cannot be one.
+    const abbreviated = ids.filter((id) => !byId.has(id) && !isFullMessageId(id))
+    if (abbreviated.length > 0) {
+      const shown = abbreviated.slice(0, MISS_WARNING_EXAMPLES)
+      const elided = abbreviated.length - shown.length
+      const more = elided > 0 ? `, and ${elided} more` : ""
+      const count = abbreviated.length
+      const noun = count === 1 ? "id is" : "ids are"
+      const pronoun = count === 1 ? "it" : "they"
+      return jsonResult(
+        {
+          error:
+            `not a full message id: ${shown.join(", ")}${more} — ${count} ${noun} abbreviated, so ${pronoun} matched no message. ` +
+            `A message id is a full uuid (for example 44ea2480-2763-46a9-a08c-82566a1b5637); full-id lookups are unchanged.`,
+        },
+        { isError: true },
+      )
+    }
     rows = ids
       .map((id) => byId.get(id))
       .filter((r): r is FetchRow => !!r)
