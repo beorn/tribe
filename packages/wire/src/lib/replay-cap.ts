@@ -92,8 +92,16 @@ export function replayEnvelopeMeta(event: { ts?: string; replay?: boolean }): {
   replay?: string
   sent_at?: string
 } {
-  if (event.replay !== true) return {}
-  return { replay: "true", ...(event.ts ? { sent_at: String(event.ts) } : {}) }
+  // Every attention envelope carries the row's ORIGINAL send time, not just a
+  // re-presented one: the envelope is built once at drain time and settlement
+  // cannot revise it, so an envelope already queued in the host when the ball
+  // settles must still be readable as old. A re-presented row additionally
+  // names itself a replay. A row with no timestamp carries no age claim
+  // (fail open — a malformed row is never hidden).
+  return {
+    ...(event.replay === true ? { replay: "true" } : {}),
+    ...(event.ts ? { sent_at: String(event.ts) } : {}),
+  }
 }
 
 /**

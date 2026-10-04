@@ -228,10 +228,11 @@ describe("27346 a re-presented attention row names itself a replay", () => {
     const { stmts, ctx } = fixture()
     const seq = openBall(stmts)
 
-    // First drain: the ball is open and genuinely new, so its envelope is a
-    // fresh instruction (replay=false) and carries no first-sent time to
-    // misread. This envelope may already be queued in the host when the ball
-    // settles below.
+    // First drain: the ball is open and genuinely new, so its row is
+    // replay=false. Its envelope still carries the first-sent time (the wire
+    // `replayEnvelopeMeta` stamps it on every row), because this envelope may
+    // already be queued in the host when the ball settles below and it cannot
+    // be revised afterwards.
     const first = await paneDrain(ctx)
     expect(rowById(first, "req-27346")).toMatchObject({ replay: false })
 

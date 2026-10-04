@@ -141,8 +141,11 @@ describe("createConnectReplayGate (km 19442 channel-push connect-burst cap)", ()
 
 // 27346 - the tracked branch of the daemon's selectAttention re-presents an
 // untaken ball past the mailbox cursor on purpose (22203). A pane that drains
-// the envelope hours later must be told the row is a replay, and when it was
-// FIRST sent, or it reads the old row as a fresh instruction.
+// the envelope hours later must be told when the row was FIRST sent, or it
+// reads the old row as a fresh instruction. A re-presented row also names
+// itself a replay. The FIRST (fresh) envelope carries the same first-sent time:
+// it is built once and cannot be revised when the ball later settles, so an
+// envelope already queued in the host must still be readable as old.
 describe("replayEnvelopeMeta (27346 re-presented attention row)", () => {
   it("names a re-presented row a replay and carries its original send time", () => {
     expect(replayEnvelopeMeta({ replay: true, ts: "2026-10-04T06:00:00.000Z" })).toEqual({
@@ -151,9 +154,15 @@ describe("replayEnvelopeMeta (27346 re-presented attention row)", () => {
     })
   })
 
-  it("adds nothing to a fresh row", () => {
-    expect(replayEnvelopeMeta({ replay: false, ts: "2026-10-04T06:00:00.000Z" })).toEqual({})
-    expect(replayEnvelopeMeta({ ts: "2026-10-04T06:00:00.000Z" })).toEqual({})
+  it("carries the first-sent time on a fresh row too, so a queued envelope is never read as new", () => {
+    expect(replayEnvelopeMeta({ replay: false, ts: "2026-10-04T06:00:00.000Z" })).toEqual({
+      sent_at: "2026-10-04T06:00:00.000Z",
+    })
+    expect(replayEnvelopeMeta({ ts: "2026-10-04T06:00:00.000Z" })).toEqual({
+      sent_at: "2026-10-04T06:00:00.000Z",
+    })
+    // Fail open on a missing timestamp: a row we cannot age carries no claim.
+    expect(replayEnvelopeMeta({ replay: false })).toEqual({})
   })
 
   it("still names the replay when the row carries no timestamp", () => {
