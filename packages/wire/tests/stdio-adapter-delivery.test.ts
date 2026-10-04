@@ -43,6 +43,7 @@ function spawnFakeDaemon(
     registerAck?: Record<string, unknown>
     joinAck?: Record<string, unknown>
     wakeupDuringRegister?: boolean
+    toolError?: { code: number; message: string; method?: string }
   } = {},
 ): Promise<FakeDaemon> {
   const clients: Socket[] = []
@@ -82,6 +83,14 @@ function spawnFakeDaemon(
               ...opts.registerAck,
             }),
           )
+          return
+        }
+        if (
+          opts.toolError !== undefined &&
+          msg.method !== "register" &&
+          (opts.toolError.method === undefined || msg.method === opts.toolError.method)
+        ) {
+          socket.write(makeError(msg.id, opts.toolError.code, opts.toolError.message))
           return
         }
         if (msg.method === "tribe.members") {
@@ -404,6 +413,39 @@ describe("stdio adapter delivery modes", () => {
       () => readFileSync(join(tmpDir, "adapter.log"), "utf8").includes("delivery acknowledgement"),
       "acknowledgement diagnostic log",
     )
+  })
+
+  /**
+   * @failure A tool call that throws inside the stdio adapter is caught and returned as a normal
+   *          result with no isError, so a host that keys on isError reads a transport failure as
+   *          success (@ag/tribe/27428).
+   * @level l2
+   * @consumer MCP CallToolResult consumers of both wire adapters
+   */
+  it("marks a thrown tool call as an error result instead of a successful one", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    daemon = await spawnFakeDaemon(socketPath, {
+      toolError: { code: -32010, message: "daemon refused the tool call", method: "tribe.pending" },
+    })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    const refusal = await writeJsonAndWaitForLine(
+      child,
+      callToolPayload(2, "pending", { owner: "@agent/test" }),
+      (line) => line.id === 2,
+    )
+    expect(refusal).toMatchObject({
+      result: { isError: true, content: [{ text: expect.stringContaining("daemon refused the tool call") }] },
+    })
   })
 
   it("pull delivery does not advertise or emit Claude-only channel notifications", async () => {

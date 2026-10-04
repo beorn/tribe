@@ -283,7 +283,11 @@ function createMcpServer(opts: {
       }
       return result as { content: Array<{ type: string; text: string }> }
     } catch (err) {
-      return { content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }] }
+      // @ag/tribe/27428 — a caught throw must reach the host as a tool error; see stdio-adapter.ts.
+      return {
+        content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      }
     }
   })
 

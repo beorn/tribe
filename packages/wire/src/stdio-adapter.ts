@@ -1185,6 +1185,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   } catch (err) {
     return {
       content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+      // @ag/tribe/27428 — a caught throw must reach the host as a tool error. Without this, an
+      // MCP client that keys on isError reads a transport failure as a successful result whose
+      // payload happens to be a string.
+      isError: true,
     }
   }
 })

@@ -35,7 +35,11 @@ function spawnFakeDaemon(
     name: "@agent/http",
     role: "member",
   }),
-  opts: { registerError?: { code: number; message: string; data?: unknown }; registerErrorAfter?: number } = {},
+  opts: {
+    registerError?: { code: number; message: string; data?: unknown }
+    registerErrorAfter?: number
+    toolError?: { code: number; message: string }
+  } = {},
 ): Promise<FakeDaemon> {
   const clients: Socket[] = []
   const requests: FakeDaemon["requests"] = []
@@ -53,6 +57,10 @@ function spawnFakeDaemon(
           socket.write(
             makeError(message.id, opts.registerError.code, opts.registerError.message, opts.registerError.data),
           )
+          return
+        }
+        if (opts.toolError !== undefined && message.method !== "register") {
+          socket.write(makeError(message.id, opts.toolError.code, opts.toolError.message))
           return
         }
         void Promise.resolve(respond(message)).then((result) => {
@@ -136,6 +144,49 @@ describe("HTTP MCP adapter", () => {
       expect(daemon.requests).toHaveLength(initialRequests + 2)
     } finally {
       bridge?.close()
+      for (const client of daemon.clients) client.destroy()
+      await new Promise<void>((resolve) => daemon.server.close(() => resolve()))
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * @failure A tool call that throws inside the HTTP adapter is caught and returned as a normal
+   *          result with no isError, so an MCP client that keys on isError reads a transport
+   *          failure as success (@ag/tribe/27428).
+   * @level l2
+   * @consumer MCP CallToolResult consumers of both wire adapters
+   */
+  it("marks a thrown tool call as an error result instead of a successful one", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "tribe-http-tool-error-"))
+    const daemon = await spawnFakeDaemon(join(tempDir, "tribe.sock"), undefined, {
+      toolError: { code: -32010, message: "daemon refused the tool call" },
+    })
+    const bridge = await startTribeHttpMcpServer({ socketPath: join(tempDir, "tribe.sock"), requireJoin: false })
+    try {
+      const response = await fetch(bridge.url, {
+        method: "POST",
+        headers: {
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+          host: `127.0.0.1:${bridge.port}`,
+          authorization: `Bearer ${bridge.secret}`,
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "members", arguments: {} },
+        }),
+      })
+      expect(response.status).toBe(200)
+      const payload = (await response.json()) as {
+        result?: { isError?: boolean; content?: Array<{ text?: string }> }
+      }
+      expect(payload.result?.isError).toBe(true)
+      expect(payload.result?.content?.[0]?.text ?? "").toContain("daemon refused the tool call")
+    } finally {
+      bridge.close()
       for (const client of daemon.clients) client.destroy()
       await new Promise<void>((resolve) => daemon.server.close(() => resolve()))
       rmSync(tempDir, { recursive: true, force: true })
