@@ -1524,7 +1524,7 @@ type PendingBallSummary = {
 
 const ATTENTION_PENDING_BALL_LIMIT = 10
 
-/** Example balls named in a close-miss warning; the count carries the rest. */
+/** Examples named in a bounded diagnostic (a pending close-miss, or 27425's abbreviated fetch ids); the count carries the rest. */
 const MISS_WARNING_EXAMPLES = 5
 
 /** Ids one `tribe.pending` close batch may carry. See the batch branch. */
@@ -4208,6 +4208,26 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
     return jsonResult({ error: "ids must be an array of strings." })
   }
 
+  // 27425 — an abbreviated id must be refused BY NAME, never answered as an
+  // empty list (NO SILENT ERRORS): the lookup below is an exact match, so a
+  // short id could only ever match nothing, and the caller read that empty
+  // result as "no such message" — the id was merely abbreviated.
+  if (ids && ids.length > 0) {
+    const abbreviated = ids.filter((id) => !isFullMessageId(id))
+    if (abbreviated.length > 0) {
+      const shown = abbreviated.slice(0, MISS_WARNING_EXAMPLES)
+      const elided = abbreviated.length - shown.length
+      const more = elided > 0 ? `, and ${elided} more` : ""
+      const noun = abbreviated.length === 1 ? "entry is" : "entries are"
+      return jsonResult({
+        error:
+          `not a full message id: ${shown.join(", ")}${more} — ` +
+          `${abbreviated.length} ${noun} abbreviated; a message id is a full uuid ` +
+          `(for example 44ea2480-2763-46a9-a08c-82566a1b5637). Full-id lookups are unchanged.`,
+      })
+    }
+  }
+
   if (ids && ids.length > 0) {
     const placeholders = ids.map(() => "?").join(", ")
     rows = ctx.db
@@ -4336,6 +4356,16 @@ function normalizeStringArray(value: unknown): string[] | null {
   if (value === undefined) return []
   if (!Array.isArray(value) || value.some((s) => typeof s !== "string")) return null
   return value as string[]
+}
+
+/**
+ * 27425 — a message id is a canonical uuid (`randomUUID` at insert). The fetch
+ * `ids` lookup matches `id IN (...)` EXACTLY, so anything shorter matched
+ * nothing and must be refused by name instead of answered as an empty list.
+ */
+const FULL_MESSAGE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu
+function isFullMessageId(value: string): boolean {
+  return FULL_MESSAGE_ID_PATTERN.test(value)
 }
 
 function matchesGlob(globs: string[], value: string | null): boolean {
