@@ -83,10 +83,12 @@ export type ConnectReplayGate = {
  *
  * The tracked branch of the daemon's `selectAttention` keeps an untaken ball
  * visible past the mailbox cursor on purpose (22203), so the same row is
- * surfaced again on later drains. A re-presented row (the daemon marked
- * `replay`) must name itself a replay AND carry the ORIGINAL send time (`ts`),
- * so a pane that drains the envelope hours later does not read it as a fresh
- * instruction. A fresh row contributes nothing — the envelope stays as it was.
+ * surfaced again on later drains. EVERY attention envelope carries the row's
+ * ORIGINAL send time (`sent_at`): the envelope is built once at drain time and
+ * settlement cannot revise it, so an envelope already queued in the host when
+ * the ball settles must still be readable as old. A re-presented row (the
+ * daemon marked `replay`) additionally names itself a replay. A row with no
+ * timestamp carries no age claim.
  */
 export function replayEnvelopeMeta(event: { ts?: string; replay?: boolean }): {
   replay?: string
