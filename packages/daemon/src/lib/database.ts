@@ -2145,6 +2145,30 @@ export function createStatements(db: Database) {
 		ORDER BY p.recipient ASC, p.opened_at ASC
 	`),
 
+    /** 27440 — the owner's latest durable TAKING receipt per open ball, so the
+     *  health owner summary can bind a deadline and its receipt to the SAME
+     *  oldest ball it reports an age for. Same match the close and retention
+     *  paths use; an archived receipt still counts. */
+    selectTakingReceiptsForOpenBalls: db.prepare(
+      assertSingleStatement(`
+		SELECT request_id, MAX(taking_receipt_at_ms) AS taking_receipt_at_ms
+		FROM (
+			SELECT p.request_id AS request_id, r.ts AS taking_receipt_at_ms
+			FROM pending_request p
+			LEFT JOIN messages pending_message ON pending_message.id = p.message_id
+			LEFT JOIN messages_archive pending_archive ON pending_archive.id = p.message_id
+			JOIN messages r ON ${takingStatusForOpenRequestMatchSql("r", "rowid", "p", "COALESCE(pending_message.rowid, pending_archive.seq)")}
+			UNION ALL
+			SELECT p.request_id AS request_id, r.ts AS taking_receipt_at_ms
+			FROM pending_request p
+			LEFT JOIN messages pending_message ON pending_message.id = p.message_id
+			LEFT JOIN messages_archive pending_archive ON pending_archive.id = p.message_id
+			JOIN messages_archive r ON ${takingStatusForOpenRequestMatchSql("r", "seq", "p", "COALESCE(pending_message.rowid, pending_archive.seq)")}
+		)
+		GROUP BY request_id
+	`),
+    ),
+
     /** Ball-tracker GC (@km/tribe/20008): delete pending rows opened before a
      *  cutoff. A ball that never got a reply (dead recipient, out-of-band close,
      *  bead-closed handoff) otherwise stays "open" forever and pollutes

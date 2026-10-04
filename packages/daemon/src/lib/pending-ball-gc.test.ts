@@ -94,6 +94,49 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
     )
   }
 
+  /** One owner TAKING receipt: a direct status threaded on the ball's ref. */
+  function insertTaking(
+    stmts: TribeStatements,
+    o: { id: string; ballId: string; owner: string; requester: string; ts: number },
+  ): void {
+    stmts.insertMessage.run({
+      $id: o.id,
+      $type: "status",
+      $sender: o.owner,
+      $recipient: o.requester,
+      $kind: "direct",
+      $content: `TAKING ${o.ballId} · owner ${o.owner} · ETA in an hour`,
+      $bead_id: null,
+      $ref: o.ballId,
+      $ts: o.ts,
+      $delivery: "push",
+      $topic: null,
+      $room_id: null,
+      $request: null,
+      $reply: null,
+    })
+  }
+
+  /** The ball's originating message — the sequence a TAKING receipt must postdate. */
+  function insertBallMessage(stmts: TribeStatements, o: { id: string; openedAt: number }): void {
+    stmts.insertMessage.run({
+      $id: `${o.id}-msg`,
+      $type: "request",
+      $sender: "@chief",
+      $recipient: "@agent/9",
+      $kind: "direct",
+      $content: `ball ${o.id}`,
+      $bead_id: null,
+      $ref: null,
+      $ts: o.openedAt,
+      $delivery: "push",
+      $topic: null,
+      $room_id: null,
+      $request: o.id,
+      $reply: null,
+    })
+  }
+
   function settlementFacts(db: ReturnType<typeof openDatabase>): Array<Record<string, unknown>> {
     return (
       db
@@ -1242,12 +1285,105 @@ describe("pending-ball GC (@km/tribe/20008)", () => {
         stale: { count: 1, owner_count: 1, oldest_age_ms: expect.any(Number) },
       })
       expect(health.pending_balls?.owners).toEqual([
-        { owner: "@agent/8", count: 201, oldest_age_ms: expect.any(Number) },
-        { owner: "@ci", count: 1, oldest_age_ms: expect.any(Number) },
+        {
+          owner: "@agent/8",
+          count: 201,
+          oldest_age_ms: expect.any(Number),
+          oldest_deadline_at_ms: null,
+          oldest_taking_receipt_at_ms: null,
+        },
+        {
+          owner: "@ci",
+          count: 1,
+          oldest_age_ms: expect.any(Number),
+          oldest_deadline_at_ms: null,
+          oldest_taking_receipt_at_ms: null,
+        },
       ])
       expect(health.pending_balls?.owners.every((owner) => owner.pending === undefined)).toBe(true)
       expect(health.issues).toEqual([expect.stringMatching(/1 stale pending ball.*1 owner.*remains open and owned/i)])
       expect(JSON.stringify(health.pending_balls).length).toBeLessThan(2_048)
+    } finally {
+      db.close()
+    }
+  })
+
+  /**
+   * @failure The owner summary's deadline/receipt evidence is read off a
+   * different ball than the one its age reports, or a receipt is not seen.
+   * @level l0 @consumer tribe.health pending_balls owner summary (27440)
+   */
+  it("27440 binds the owner summary deadline and TAKING receipt to the OLDEST owned ball", () => {
+    const { db, stmts } = setup()
+    try {
+      const ctx = createTribeContext({
+        db,
+        stmts,
+        sessionId: "sess-chief",
+        sessionRole: "member",
+        initialName: "@chief",
+        domains: [],
+        claudeSessionId: null,
+        claudeSessionName: null,
+      })
+      const now = Date.now()
+      const olderOpenedAt = now - 30 * 60_000
+      const olderDeadline = now + 10 * 60_000
+      const newerOpenedAt = now - 60_000
+      const newerDeadline = now + 99 * 60_000
+      // The ball's originating message is the sequence a TAKING receipt must postdate.
+      insertBallMessage(stmts, { id: "older", openedAt: olderOpenedAt })
+      insertBallMessage(stmts, { id: "newer", openedAt: newerOpenedAt })
+      openBall(stmts, { id: "older", recipient: "@agent/9", openedAt: olderOpenedAt, expiresAt: olderDeadline })
+      openBall(stmts, { id: "newer", recipient: "@agent/9", openedAt: newerOpenedAt, expiresAt: newerDeadline })
+      // A receipt on the YOUNGER ball must never become the oldest ball's receipt.
+      insertTaking(stmts, {
+        id: "taking-newer",
+        ballId: "newer",
+        owner: "@agent/9",
+        requester: "@chief",
+        ts: now - 30_000,
+      })
+
+      const health = parseToolJson(handleToolCall(ctx, "tribe.health", {}, makeOpts())) as {
+        pending_balls?: {
+          owners: Array<{
+            owner: string
+            count: number
+            oldest_age_ms: number
+            oldest_deadline_at_ms: number | null
+            oldest_taking_receipt_at_ms: number | null
+          }>
+        }
+      }
+
+      expect(health.pending_balls?.owners).toEqual([
+        {
+          owner: "@agent/9",
+          count: 2,
+          oldest_age_ms: expect.any(Number),
+          oldest_deadline_at_ms: olderDeadline,
+          oldest_taking_receipt_at_ms: null,
+        },
+      ])
+
+      // A receipt on the OLDEST ball is the one the summary reports.
+      insertTaking(stmts, {
+        id: "taking-older",
+        ballId: "older",
+        owner: "@agent/9",
+        requester: "@chief",
+        ts: now - 20_000,
+      })
+      const receipted = parseToolJson(handleToolCall(ctx, "tribe.health", {}, makeOpts())) as {
+        pending_balls?: {
+          owners: Array<{ oldest_deadline_at_ms: number | null; oldest_taking_receipt_at_ms: number | null }>
+        }
+      }
+      expect(receipted.pending_balls?.owners[0]).toMatchObject({
+        oldest_deadline_at_ms: olderDeadline,
+        oldest_taking_receipt_at_ms: now - 20_000,
+      })
     } finally {
       db.close()
     }

@@ -2082,7 +2082,10 @@ function sortPendingBalls<T extends PendingBall>(rows: readonly T[]): T[] {
   })
 }
 
-function pendingOwnerGroups<T extends PendingBall>(pending: readonly T[]) {
+function pendingOwnerGroups<T extends PendingBall>(
+  pending: readonly T[],
+  takingReceipts?: ReadonlyMap<string, number>,
+) {
   const byOwner = new Map<string, T[]>()
   for (const ball of pending) {
     const rows = byOwner.get(ball.recipient) ?? []
@@ -2093,17 +2096,42 @@ function pendingOwnerGroups<T extends PendingBall>(pending: readonly T[]) {
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([owner, rows]) => {
       const oldestFirst = sortPendingBalls(rows)
-      return {
+      const oldest = oldestFirst.reduce((older, row) => (row.age_ms > older.age_ms ? row : older))
+      const summary = {
         owner,
         count: oldestFirst.length,
-        oldest_age_ms: oldestFirst.reduce((oldest, row) => Math.max(oldest, row.age_ms), 0),
+        oldest_age_ms: oldestFirst.reduce((max, row) => Math.max(max, row.age_ms), 0),
+      }
+      if (takingReceipts === undefined) return { ...summary, pending: oldestFirst }
+      return {
+        ...summary,
+        // 27440 — deadline and TAKING receipt both bound to the SAME oldest
+        // ball the age above reports; a receipt on a younger ball in the same
+        // group must never stand in for it.
+        oldest_deadline_at_ms: oldest.expires_at === null ? null : Date.parse(oldest.expires_at),
+        oldest_taking_receipt_at_ms: takingReceipts.get(oldest.request_id) ?? null,
         pending: oldestFirst,
       }
     })
 }
 
-function pendingOwnerSummaries(pending: readonly PendingBall[]) {
-  return pendingOwnerGroups(pending).map(({ pending: _pending, ...summary }) => summary)
+function pendingOwnerSummaries(pending: readonly PendingBall[], takingReceipts?: ReadonlyMap<string, number>) {
+  return pendingOwnerGroups(pending, takingReceipts).map(({ pending: _pending, ...summary }) => summary)
+}
+
+/**
+ * 27440 — the durable TAKING receipts owners sent on their open balls, keyed
+ * by request_id. The health owner summary binds one to the oldest ball it
+ * reports, so a consumer can tell "owner took it and promised an ETA" from
+ * "nobody answered". Both retention tiers are read; an archived receipt is
+ * still the owner's evidence.
+ */
+function takingReceiptsForOpenBalls(ctx: TribeContext): ReadonlyMap<string, number> {
+  const rows = ctx.stmts.selectTakingReceiptsForOpenBalls.all() as Array<{
+    request_id: string
+    taking_receipt_at_ms: number
+  }>
+  return new Map(rows.map((row) => [row.request_id, row.taking_receipt_at_ms]))
 }
 
 function pendingExplicitOwner(value: unknown): string | undefined {
@@ -3550,7 +3578,7 @@ function handleHealth(ctx: TribeContext, opts: HandlerOpts): ToolResult {
   // another role is blocked, so health carries the all-owner projection and a
   // bounded aggregate warning for active rows older than two hours.
   const pending = allPendingBalls(ctx, now)
-  const pendingOwners = pendingOwnerSummaries(pending)
+  const pendingOwners = pendingOwnerSummaries(pending, takingReceiptsForOpenBalls(ctx))
   const stalePending = pending.filter((ball) => ball.age_ms >= 2 * 60 * 60 * 1000)
   const staleOwnerCount = new Set(stalePending.map((ball) => ball.recipient)).size
   const oldestStaleAgeMs = stalePending.reduce((oldest, ball) => Math.max(oldest, ball.age_ms), 0)
