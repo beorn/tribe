@@ -11,6 +11,7 @@ import {
   createConnectReplayGate,
   MAX_REPLAY_AGE_MS,
   MAX_REPLAY_EVENTS,
+  replayEnvelopeMeta,
   selectReplayEvents,
 } from "../src/lib/replay-cap.ts"
 
@@ -135,5 +136,27 @@ describe("createConnectReplayGate (km 19442 channel-push connect-burst cap)", ()
     expect(verdicts.filter(Boolean)).toHaveLength(MAX_REPLAY_EVENTS)
     expect(gate.dropped).toBe(25)
     expect(gate.admit(T0 + CONNECT_REPLAY_WINDOW_MS)).toBe(true) // past window → steady state
+  })
+})
+
+// 27346 - the tracked branch of the daemon's selectAttention re-presents an
+// untaken ball past the mailbox cursor on purpose (22203). A pane that drains
+// the envelope hours later must be told the row is a replay, and when it was
+// FIRST sent, or it reads the old row as a fresh instruction.
+describe("replayEnvelopeMeta (27346 re-presented attention row)", () => {
+  it("names a re-presented row a replay and carries its original send time", () => {
+    expect(replayEnvelopeMeta({ replay: true, ts: "2026-10-04T06:00:00.000Z" })).toEqual({
+      replay: "true",
+      sent_at: "2026-10-04T06:00:00.000Z",
+    })
+  })
+
+  it("adds nothing to a fresh row", () => {
+    expect(replayEnvelopeMeta({ replay: false, ts: "2026-10-04T06:00:00.000Z" })).toEqual({})
+    expect(replayEnvelopeMeta({ ts: "2026-10-04T06:00:00.000Z" })).toEqual({})
+  })
+
+  it("still names the replay when the row carries no timestamp", () => {
+    expect(replayEnvelopeMeta({ replay: true })).toEqual({ replay: "true" })
   })
 })

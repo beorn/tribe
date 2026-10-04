@@ -79,6 +79,24 @@ export type ConnectReplayGate = {
 }
 
 /**
+ * 27346 - channel-envelope metadata for one forwarded attention row.
+ *
+ * The tracked branch of the daemon's `selectAttention` keeps an untaken ball
+ * visible past the mailbox cursor on purpose (22203), so the same row is
+ * surfaced again on later drains. A re-presented row (the daemon marked
+ * `replay`) must name itself a replay AND carry the ORIGINAL send time (`ts`),
+ * so a pane that drains the envelope hours later does not read it as a fresh
+ * instruction. A fresh row contributes nothing — the envelope stays as it was.
+ */
+export function replayEnvelopeMeta(event: { ts?: string; replay?: boolean }): {
+  replay?: string
+  sent_at?: string
+} {
+  if (event.replay !== true) return {}
+  return { replay: "true", ...(event.ts ? { sent_at: String(event.ts) } : {}) }
+}
+
+/**
  * Bound the legacy `channel` content-push burst a pre-`wakeup` daemon dumps
  * right after (re)connect (km 19442).
  *

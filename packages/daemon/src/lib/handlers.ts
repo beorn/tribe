@@ -3913,9 +3913,18 @@ export type FetchEvent = {
   from_authority: SenderAuthority | null
   /** Correlate a reply to the member_id captured from a verified current launch. */
   from_session_id: string | null
+  /**
+   * 27346 - true when the mailbox cursor is already past this row, so the seat
+   * has been shown it before and its re-presentation is a replay, not news.
+   * Set on attention rows only: the tracked branch of selectAttention keeps an
+   * untaken ball visible past the cursor (22203), so a re-presented row must
+   * say so instead of reading as a fresh instruction. `ts` is the original
+   * send time. Absent on ambient window rows, which are new by construction.
+   */
+  replay?: boolean
 }
 
-export function fetchEvent(row: FetchRow): FetchEvent {
+export function fetchEvent(row: FetchRow, replay?: boolean): FetchEvent {
   return {
     id: row.id,
     rowid: row.rowid,
@@ -3932,6 +3941,7 @@ export function fetchEvent(row: FetchRow): FetchEvent {
     summary: row.summary,
     from_authority: row.sender_authority ?? null,
     from_session_id: row.sender_authority === null ? null : (row.session_id ?? null),
+    ...(replay === undefined ? {} : { replay }),
   }
 }
 
@@ -3986,6 +3996,15 @@ export function readAttentionProjection(
 } {
   const params = { $name: owner }
   const attentionRows = filterRowsByTrust(ctx, ctx.stmts.selectAttention.all(params) as FetchRow[])
+  // 27346 - what the mailbox cursor has already shown this seat. The tracked
+  // branch of selectAttention keeps an untaken ball visible past the cursor on
+  // purpose (22203), so a row at or below it is being RE-presented: it must say
+  // so instead of reading as a fresh instruction. The untracked branch is
+  // already gated above the cursor by SQL, so those rows mark replay=false.
+  const mailboxCursor = ctx.stmts.getMailboxCursor.get({ $recipient: owner }) as {
+    last_actionable_seq: number
+  } | null
+  const lastActionableSeq = mailboxCursor?.last_actionable_seq ?? 0
   const pendingBalls = pendingBallsForOwner(ctx, owner, now)
   const untakenRequestIds = untakenPendingRequestIds(ctx, owner)
   const untakenPendingBalls = pendingBalls.filter((ball) => untakenRequestIds.has(ball.request_id))
@@ -4024,7 +4043,7 @@ export function readAttentionProjection(
     actionableCount,
     attention: {
       ...pruned,
-      actionable_unread: attentionRows.map(fetchEvent),
+      actionable_unread: attentionRows.map((row) => fetchEvent(row, row.rowid <= lastActionableSeq)),
       pending_balls: pendingPreview,
       pending_balls_summary: {
         total: pendingBalls.length,
@@ -4294,7 +4313,7 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
     if (attention.pruned !== undefined) ctx.stmts.deleteMailboxPrune.run({ $recipient: currentName })
   }
 
-  const events = filtered.map(fetchEvent)
+  const events = filtered.map((row) => fetchEvent(row))
   return jsonResult(attention === null ? { events, cursor: outputCursor } : { attention, events, cursor: outputCursor })
 }
 

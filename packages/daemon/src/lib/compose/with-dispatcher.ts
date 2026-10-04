@@ -2834,7 +2834,7 @@ export function withDispatcher<
             return makeResponse(id, {
               ...readInboxStatus(sessionName),
               drained_count: rows.length,
-              events: rows.map(fetchEvent),
+              events: rows.map((row) => fetchEvent(row)),
             })
           }
 

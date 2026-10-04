@@ -55,7 +55,7 @@ import { isExplicitTribePersonaName, isTribeNameShape, TRIBE_NAME_SHAPE_ERROR } 
 import { createLogger, setSuppressConsole } from "loggily"
 import { createTimers } from "./timers.ts"
 import { defangModelInput } from "./lib/defang.ts"
-import { createConnectReplayGate, MAX_REPLAY_EVENTS, selectReplayEvents } from "./lib/replay-cap.ts"
+import { createConnectReplayGate, MAX_REPLAY_EVENTS, replayEnvelopeMeta, selectReplayEvents } from "./lib/replay-cap.ts"
 import { evaluateCwdPolicy, probeCwd, readCwdPolicyFromEnv, type CwdEvaluation } from "./lib/cwd-guardrail.ts"
 import {
   deliveryCapabilityInstruction,
@@ -312,18 +312,30 @@ function markedType(type: string): string {
   return isNotificationOnlyType(type) ? `${NOTIFICATION_ONLY_MARKER}:${type}` : type
 }
 
+/** One row of a `tribe.fetch` result — the same shape for the attention
+ * projection and the ambient event window. */
+type TribeFetchResultRow = {
+  id?: string
+  type?: string
+  from?: string
+  content?: string
+  bead?: string | null
+  topic?: string | null
+  ts?: string
+  from_authority?: string | null
+  /**
+   * 27346 - the daemon sets this true when the mailbox cursor is already past
+   * the row, so this presentation is a re-presentation of something the seat
+   * has already been shown (the tracked branch of selectAttention keeps an
+   * untaken ball visible past the cursor on purpose, 22203). Never set on an
+   * ambient window row, which is new by construction.
+   */
+  replay?: boolean
+}
+
 type TribeFetchResult = {
   attention?: {
-    actionable_unread?: Array<{
-      id?: string
-      type?: string
-      from?: string
-      content?: string
-      bead?: string | null
-      topic?: string | null
-      ts?: string
-      from_authority?: string | null
-    }>
+    actionable_unread?: TribeFetchResultRow[]
     pending_balls?: Array<{
       request_id?: string
       sender?: string
@@ -343,16 +355,7 @@ type TribeFetchResult = {
       }
     }
   }
-  events?: Array<{
-    id?: string
-    type?: string
-    from?: string
-    content?: string
-    bead?: string | null
-    topic?: string | null
-    ts?: string
-    from_authority?: string | null
-  }>
+  events?: TribeFetchResultRow[]
 }
 
 function parseToolText<T>(result: unknown): T | null {
@@ -913,7 +916,7 @@ const channelEnvelopeIntro =
   'After the startup banner confirms acknowledged transportDelivery=push, messages from other Claude Code sessions can arrive as <channel source="tribe" from="..." type="..." bead="...">.'
 const deliveryInstruction = `${deliveryCapabilityInstruction(initialDeliveryCapability)} Read your turn-start inbox until the startup banner confirms your acknowledged transportDelivery. ${REQUIRE_EXPLICIT_JOIN ? "Push remains unavailable until this session calls tribe.join and receives its acknowledgement. " : ""}An unacknowledged banner names the cause; tools/list reports the current confirmed delivery capability.`
 const attentionProjectionInstruction =
-  "- Default fetch exposes `attention.actionable_unread` (request/query/verdict/assign, direct responses, and direct status/notify from another named seat whose ref names an open request ball you own or sent) and up to 10 `attention.pending_balls`, prioritizing peer requests over watcher incidents, ahead of ambient events; `attention.pending_balls_summary` reports the full total/oldest age and any omitted request/incident counts, while `tribe.pending` returns the full pile. Responses and those status/notify rows remain quiet for default inbox waits. These are facts projected from the existing mailbox and ball tracker, not another queue."
+  "- Default fetch exposes `attention.actionable_unread` (request/query/verdict/assign, direct responses, and direct status/notify from another named seat whose ref names an open request ball you own or sent) and up to 10 `attention.pending_balls`, prioritizing peer requests over watcher incidents, ahead of ambient events; `attention.pending_balls_summary` reports the full total/oldest age and any omitted request/incident counts, while `tribe.pending` returns the full pile. Responses and those status/notify rows remain quiet for default inbox waits. These are facts projected from the existing mailbox and ball tracker, not another queue. A row whose `replay` is true was already shown to this mailbox — the ball tracker deliberately keeps an untaken ball visible past the mailbox cursor — so it is a re-presentation, not a new instruction: never act on one as new and never re-acknowledge it, and read its `ts` as when it was first sent."
 
 // Shared turn-start inbox guidance for every role variant. Kept deliberately
 // SMALL: the turn-start call is a small catch-up drain, NOT a full replay. The
@@ -1338,6 +1341,10 @@ function forwardFetchedEvent(event: NonNullable<TribeFetchResult["events"]>[numb
     // 25074 3d-1a (@cto 2bfc1935 Q0): whether the sender is verified, a bearer, or only claims its name. A row from
     // before the daemon recorded it, or one the daemon sent, carries none.
     authority: event.from_authority ? String(event.from_authority) : undefined,
+    // 27346 - a re-presented attention row names itself a replay and when it
+    // was first sent, so a pane that drains hours later does not read it as a
+    // fresh instruction.
+    ...replayEnvelopeMeta(event),
   })
 }
 
