@@ -624,6 +624,16 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
                 summary: { type: ["string", "null"] },
                 request_id: { type: ["string", "null"] },
                 settles_request_id: { type: ["string", "null"] },
+                sent_at: {
+                  type: "string",
+                  description:
+                    "27407: when the waking row was first sent (ISO). A re-presented ball keeps its original timestamp.",
+                },
+                replay: {
+                  type: "boolean",
+                  description:
+                    "27407: true when the wake re-presents a row the mailbox already passed (untaken ball, 22203); do not treat it as new.",
+                },
               },
               required: ["kind"],
             },

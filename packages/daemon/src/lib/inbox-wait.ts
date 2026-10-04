@@ -19,6 +19,7 @@ export function readInboxWaitWokenBy(
     type: string
     sender: string
     summary: string | null
+    ts: number
     request: string | null
     reply: string | null
     correlated_reply_requester: string | null
@@ -26,6 +27,12 @@ export function readInboxWaitWokenBy(
   if (row === null) return { kind: "row-retired", seq }
   const settles =
     wakeOnCorrelatedReply && CORRELATED_REPLY_TYPES_SET.has(row.type) && row.correlated_reply_requester === session
+  // 27407 - a wake must not read like a fresh instruction. The tracker keeps an
+  // untaken ball actionable past the mailbox cursor (22203), so the wake is not
+  // suppressed; it names the row's ORIGINAL send time and says it is a replay
+  // when the mailbox has already been shown this row.
+  const cursor = stmts.getMailboxCursor.get({ $recipient: session }) as { last_actionable_seq: number } | null
+  const replay = cursor !== null && seq <= cursor.last_actionable_seq
   return {
     kind: "message",
     seq,
@@ -35,6 +42,8 @@ export function readInboxWaitWokenBy(
     summary: row.summary,
     request_id: row.request,
     settles_request_id: settles ? row.reply : null,
+    sent_at: new Date(row.ts).toISOString(),
+    replay,
   }
 }
 

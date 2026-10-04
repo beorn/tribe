@@ -2489,12 +2489,12 @@ export function createStatements(db: Database) {
     /** 25662 row 17 — the row an inbox wait woke on, by the sequence its wake read. A tracked broadcast's sequence can
      *  name an archived row (TRACKED_ATTENTION_SEQUENCE_SQL), so the archive is read second. */
     selectInboxWaitWakeRow: db.prepare(`
-      SELECT id, type, sender, summary, request, reply, correlated_reply_requester
+      SELECT id, type, sender, summary, ts, request, reply, correlated_reply_requester
       FROM (
-        SELECT 0 AS source, id, type, sender, summary, request, reply, correlated_reply_requester
+        SELECT 0 AS source, id, type, sender, summary, ts, request, reply, correlated_reply_requester
         FROM messages WHERE rowid = $seq
         UNION ALL
-        SELECT 1 AS source, id, type, sender, summary, request, reply, correlated_reply_requester
+        SELECT 1 AS source, id, type, sender, summary, ts, request, reply, correlated_reply_requester
         FROM messages_archive WHERE seq = $seq
       )
       ORDER BY source

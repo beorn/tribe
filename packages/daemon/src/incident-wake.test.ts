@@ -122,28 +122,34 @@ describe("an incident wakes its idle owner", () => {
     expect(woken.attention.actionable_unread).toEqual([])
   })
 
-  test.each(["health:bridge-lost", "request", "notify"])("%s incident repeat stays quiet; a changed summary wakes", async (type) => {
-    const { manager, page } = rig(type)
-    page("@dev/3's tribe bridge is lost", "lost 3 min")
-    const baseline = latestWakeSeq(OWNER, false)
+  test.each(["health:bridge-lost", "request", "notify"])(
+    "%s incident repeat stays quiet; a changed summary wakes",
+    async (type) => {
+      const { manager, page } = rig(type)
+      page("@dev/3's tribe bridge is lost", "lost 3 min")
+      const baseline = latestWakeSeq(OWNER, false)
 
-    const repeat = manager.wait(OWNER, "conn-repeat", QUIET_MS, { afterSeq: baseline })
-    page("@dev/3's tribe bridge is lost", "lost 4 min")
-    expect(latestWakeSeq(OWNER, false)).toBe(baseline)
-    await expect(repeat).resolves.toMatchObject({ status: "timeout" })
+      const repeat = manager.wait(OWNER, "conn-repeat", QUIET_MS, { afterSeq: baseline })
+      page("@dev/3's tribe bridge is lost", "lost 4 min")
+      expect(latestWakeSeq(OWNER, false)).toBe(baseline)
+      await expect(repeat).resolves.toMatchObject({ status: "timeout" })
 
-    const changed = manager.wait(OWNER, "conn-changed", 5_000, { afterSeq: latestWakeSeq(OWNER, false) })
-    page("@dev/3 still lost: membership reads it foreign-identity-transport", "refused reconnect")
-    await expect(changed).resolves.toMatchObject({ status: "woken" })
-  })
+      const changed = manager.wait(OWNER, "conn-changed", 5_000, { afterSeq: latestWakeSeq(OWNER, false) })
+      page("@dev/3 still lost: membership reads it foreign-identity-transport", "refused reconnect")
+      await expect(changed).resolves.toMatchObject({ status: "woken" })
+    },
+  )
 
-  test.each(["health:bridge-lost", "request", "notify"])("%s incident clear settles the ball and never wakes", async (type) => {
-    const { manager, page } = rig(type)
-    page("@dev/3's tribe bridge is lost", "lost 3 min")
-    const cleared = manager.wait(OWNER, "conn-clear", QUIET_MS, { afterSeq: latestWakeSeq(OWNER, false) })
-    page("@dev/3's tribe bridge is lost", "cleared: @dev/3's transport is live again", false)
-    await expect(cleared).resolves.toMatchObject({ status: "timeout" })
-  })
+  test.each(["health:bridge-lost", "request", "notify"])(
+    "%s incident clear settles the ball and never wakes",
+    async (type) => {
+      const { manager, page } = rig(type)
+      page("@dev/3's tribe bridge is lost", "lost 3 min")
+      const cleared = manager.wait(OWNER, "conn-clear", QUIET_MS, { afterSeq: latestWakeSeq(OWNER, false) })
+      page("@dev/3's tribe bridge is lost", "cleared: @dev/3's transport is live again", false)
+      await expect(cleared).resolves.toMatchObject({ status: "timeout" })
+    },
+  )
 
   test("a request still wakes, as before", async () => {
     const { manager, peer } = rig()
@@ -280,6 +286,8 @@ describe("an incident wakes its idle owner", () => {
       summary: "@dev/13's tribe bridge is lost",
       request_id: request.request,
       settles_request_id: null,
+      sent_at: new Date(edge.ts).toISOString(),
+      replay: false,
     })
     // A fresh wait that wakes at once, on the SQL path, names the newest unread edge the same way.
     const fresh = await manager.wait(OWNER, "conn-edge-fresh", 5_000)

@@ -61,6 +61,13 @@ export type InboxWaitWokenBy =
       readonly request_id: string | null
       /** Set only when a correlated reply woke a `wake_on_correlated_reply` wait: the request of yours it settled. */
       readonly settles_request_id: string | null
+      /** 27407 - when the waking row was FIRST SENT (ISO). A re-presented ball keeps its original
+       *  timestamp, so a reader can tell an old instruction from a fresh one. */
+      readonly sent_at: string
+      /** 27407 - true when the row is already at or below the mailbox cursor: this wake re-presents work the
+       *  seat has already been shown (the tracker keeps an untaken ball actionable past the cursor, 22203).
+       *  Named so the seat does not pay a record check, or act, as if the row were new. */
+      readonly replay: boolean
     }
   /** The daemon is shutting down; the caller redials (`reconnect: true`). */
   | { readonly kind: "daemon-shutdown" }
@@ -199,7 +206,9 @@ function isValidWokenBy(value: unknown): value is InboxWaitWokenBy | undefined {
     typeof value.sender === "string" &&
     nullableString(value.summary) &&
     nullableString(value.request_id) &&
-    nullableString(value.settles_request_id)
+    nullableString(value.settles_request_id) &&
+    typeof value.sent_at === "string" &&
+    typeof value.replay === "boolean"
   )
 }
 

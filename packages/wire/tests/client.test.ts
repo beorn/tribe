@@ -518,6 +518,8 @@ describe("callTribeTool", () => {
       summary: "@dev/13's tribe bridge is lost",
       request_id: "tribe-health\u001f@dev/13\u001fbridge-lost",
       settles_request_id: null,
+      sent_at: "2026-10-04T00:00:00.000Z",
+      replay: false,
     }
     const woken = { ...canonicalInboxWaitResult, status: "woken", timed_out: false, woken_by: wokenBy }
     const passes = await callTribeTool({ call: vi.fn(async () => woken) } as unknown as DaemonClient, "inbox.wait", {
