@@ -4214,27 +4214,31 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
 
   if (ids && ids.length > 0) {
     const placeholders = ids.map(() => "?").join(", ")
-    rows = ctx.db
-      .prepare(
-        assertSingleStatement(`
-        SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
-               attention_required, wakes_owner, sender_authority, session_id
-        FROM messages
-        WHERE id IN (${placeholders})
-          AND kind != 'event'
-        ORDER BY rowid ASC
-        LIMIT ?
-      `),
-      )
-      .all(...ids, limit) as FetchRow[]
-    const byId = new Map(rows.map((r) => [r.id, r]))
+    // 27425 — requested-id EXISTENCE is decided over EVERY requested id, with no result
+    // window: the response `LIMIT` below must not make a persisted custom (non-uuid) id
+    // look like an abbreviation. The rows that come back keep their existing limit,
+    // filter and order — only this existence set is independent of them.
+    const persistedIds = new Set(
+      (
+        ctx.db
+          .prepare(
+            assertSingleStatement(`
+            SELECT id
+            FROM messages
+            WHERE id IN (${placeholders})
+              AND kind != 'event'
+          `),
+          )
+          .all(...ids) as Array<{ id: string }>
+      ).map((r) => r.id),
+    )
     // 27425 — an id that matched nothing and is not a canonical uuid was
     // ABBREVIATED: refuse it BY NAME as a transport error, never answer an
     // empty list the caller reads as "no such message" (NO SILENT ERRORS).
     // The exact-match lookup above runs FIRST, so a persisted id that is not
     // a uuid (tribe.send accepts any non-empty client id) still resolves —
     // the refusal is only for ids that matched nothing and cannot be one.
-    const abbreviated = ids.filter((id) => !byId.has(id) && !isFullMessageId(id))
+    const abbreviated = ids.filter((id) => !persistedIds.has(id) && !isFullMessageId(id))
     if (abbreviated.length > 0) {
       const shown = abbreviated.slice(0, MISS_WARNING_EXAMPLES)
       const elided = abbreviated.length - shown.length
@@ -4251,6 +4255,20 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
         { isError: true },
       )
     }
+    rows = ctx.db
+      .prepare(
+        assertSingleStatement(`
+        SELECT id, rowid, type, sender, recipient, content, bead_id, ref, ts, delivery, topic, room_id, summary,
+               attention_required, wakes_owner, sender_authority, session_id
+        FROM messages
+        WHERE id IN (${placeholders})
+          AND kind != 'event'
+        ORDER BY rowid ASC
+        LIMIT ?
+      `),
+      )
+      .all(...ids, limit) as FetchRow[]
+    const byId = new Map(rows.map((r) => [r.id, r]))
     rows = ids
       .map((id) => byId.get(id))
       .filter((r): r is FetchRow => !!r)

@@ -93,6 +93,11 @@ describe("tribe.fetch ids — an abbreviated id is refused by name", () => {
     return parseToolJson(handleToolCall(ctx, "tribe.fetch", { ids }, makeOpts()))
   }
 
+  function fetchIdsWithLimit(ids: string[], limit: number): ToolJson {
+    const ctx = makeContext(db, stmts, RECIPIENT, RECIPIENT_ID)
+    return parseToolJson(handleToolCall(ctx, "tribe.fetch", { ids, limit }, makeOpts()))
+  }
+
   function fetchRaw(ids: string[]): { isError?: boolean; content: Array<{ text: string }> } {
     const ctx = makeContext(db, stmts, RECIPIENT, RECIPIENT_ID)
     return handleToolCall(ctx, "tribe.fetch", { ids }, makeOpts()) as {
@@ -152,5 +157,23 @@ describe("tribe.fetch ids — an abbreviated id is refused by name", () => {
 
     expect(res.error).toBeUndefined()
     expect((res.events as Array<{ id: string }>).map((event) => event.id)).toEqual([customId])
+  })
+
+  it("does not refuse a persisted custom id that falls outside the result limit", () => {
+    // AC3: a valid lookup's result shape must not change because of the response
+    // LIMIT. Two stored custom ids fetched with limit=1: the second id is outside
+    // the returned window but IS persisted, so it must not be called abbreviated.
+    const firstId = sendWithId("custom-note-first")
+    const secondId = sendWithId("custom-note-second")
+    expect(firstId).toBe("custom-note-first")
+    expect(secondId).toBe("custom-note-second")
+
+    const limited = fetchIdsWithLimit([firstId, secondId], 1)
+    expect(limited.error, JSON.stringify(limited)).toBeUndefined()
+    expect((limited.events as Array<{ id: string }>).map((event) => event.id)).toEqual([firstId])
+
+    const both = fetchIdsWithLimit([firstId, secondId], 2)
+    expect(both.error).toBeUndefined()
+    expect((both.events as Array<{ id: string }>).map((event) => event.id).sort()).toEqual([firstId, secondId].sort())
   })
 })
