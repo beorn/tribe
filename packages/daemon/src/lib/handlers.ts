@@ -213,12 +213,16 @@ type ToolArgs = Record<string, unknown>
  *
  * Spec: @km/infra/15623-mcp-tools-structuredcontent.
  */
-function jsonResult(payload: unknown, opts?: { text?: string }): ToolResult {
+function jsonResult(payload: unknown, opts?: { text?: string; isError?: boolean }): ToolResult {
   const structured = ensureRecord(payload)
   const text = opts?.text ?? JSON.stringify(payload, null, 2)
   return {
     content: [{ type: "text", text }],
     structuredContent: structured,
+    // 27425 — a refusal the caller must not read as a normal empty result
+    // rides the MCP `isError` envelope (a transport-level failure), so an
+    // adapter/CLI surfaces it as non-zero rather than a successful read.
+    ...(opts?.isError ? { isError: true } : {}),
   }
 }
 
@@ -1524,7 +1528,7 @@ type PendingBallSummary = {
 
 const ATTENTION_PENDING_BALL_LIMIT = 10
 
-/** Example balls named in a close-miss warning; the count carries the rest. */
+/** Examples named in a bounded diagnostic (a pending close-miss, or 27425's abbreviated fetch ids); the count carries the rest. */
 const MISS_WARNING_EXAMPLES = 5
 
 /** Ids one `tribe.pending` close batch may carry. See the batch branch. */
@@ -4210,6 +4214,47 @@ function handleFetch(ctx: TribeContext, a: ToolArgs, opts?: HandlerOpts): ToolRe
 
   if (ids && ids.length > 0) {
     const placeholders = ids.map(() => "?").join(", ")
+    // 27425 — requested-id EXISTENCE is decided over EVERY requested id, with no result
+    // window: the response `LIMIT` below must not make a persisted custom (non-uuid) id
+    // look like an abbreviation. The rows that come back keep their existing limit,
+    // filter and order — only this existence set is independent of them.
+    const persistedIds = new Set(
+      (
+        ctx.db
+          .prepare(
+            assertSingleStatement(`
+            SELECT id
+            FROM messages
+            WHERE id IN (${placeholders})
+              AND kind != 'event'
+          `),
+          )
+          .all(...ids) as Array<{ id: string }>
+      ).map((r) => r.id),
+    )
+    // 27425 — an id that matched nothing and is not a canonical uuid was
+    // ABBREVIATED: refuse it BY NAME as a transport error, never answer an
+    // empty list the caller reads as "no such message" (NO SILENT ERRORS).
+    // The exact-match lookup above runs FIRST, so a persisted id that is not
+    // a uuid (tribe.send accepts any non-empty client id) still resolves —
+    // the refusal is only for ids that matched nothing and cannot be one.
+    const abbreviated = ids.filter((id) => !persistedIds.has(id) && !isFullMessageId(id))
+    if (abbreviated.length > 0) {
+      const shown = abbreviated.slice(0, MISS_WARNING_EXAMPLES)
+      const elided = abbreviated.length - shown.length
+      const more = elided > 0 ? `, and ${elided} more` : ""
+      const count = abbreviated.length
+      const noun = count === 1 ? "id is" : "ids are"
+      const pronoun = count === 1 ? "it" : "they"
+      return jsonResult(
+        {
+          error:
+            `not a full message id: ${shown.join(", ")}${more} — ${count} ${noun} abbreviated, so ${pronoun} matched no message. ` +
+            `A message id is a full uuid (for example 44ea2480-2763-46a9-a08c-82566a1b5637); full-id lookups are unchanged.`,
+        },
+        { isError: true },
+      )
+    }
     rows = ctx.db
       .prepare(
         assertSingleStatement(`
@@ -4336,6 +4381,16 @@ function normalizeStringArray(value: unknown): string[] | null {
   if (value === undefined) return []
   if (!Array.isArray(value) || value.some((s) => typeof s !== "string")) return null
   return value as string[]
+}
+
+/**
+ * 27425 — a message id is a canonical uuid (`randomUUID` at insert). The fetch
+ * `ids` lookup matches `id IN (...)` EXACTLY, so anything shorter matched
+ * nothing and must be refused by name instead of answered as an empty list.
+ */
+const FULL_MESSAGE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu
+function isFullMessageId(value: string): boolean {
+  return FULL_MESSAGE_ID_PATTERN.test(value)
 }
 
 function matchesGlob(globs: string[], value: string | null): boolean {
