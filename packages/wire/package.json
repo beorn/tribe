@@ -57,8 +57,8 @@
     "./lib/session-identity-env": "./src/lib/session-identity-env.ts",
     "./lib/ag-host-env": "./src/lib/ag-host-env.ts",
     "./lib/daemon-environment": "./src/lib/daemon-environment.ts",
-    "./lib/inbox-wait-errors": "./src/lib/inbox-wait-errors.ts",
-  "./lib/inbox-wait-transport": "./src/lib/inbox-wait-transport.ts",
+  "./lib/inbox-wait-errors": "./src/lib/inbox-wait-errors.ts",
+  "./lib/inbox-wait-gap": "./src/lib/inbox-wait-gap.ts",
   "./lib/delivery-report": "./src/lib/delivery-report.ts",
   "./http": "./src/http-adapter.ts"
   },
@@ -171,9 +171,9 @@
         "types": "./dist/lib/inbox-wait-errors.d.mts",
         "import": "./dist/lib/inbox-wait-errors.mjs"
       },
-      "./lib/inbox-wait-transport": {
-        "types": "./dist/lib/inbox-wait-transport.d.mts",
-        "import": "./dist/lib/inbox-wait-transport.mjs"
+      "./lib/inbox-wait-gap": {
+        "types": "./dist/lib/inbox-wait-gap.d.mts",
+        "import": "./dist/lib/inbox-wait-gap.mjs"
       },
       "./lib/delivery-report": {
         "types": "./dist/lib/delivery-report.d.mts",
@@ -232,7 +232,7 @@
       "src/lib/ag-host-env.ts",
       "src/lib/daemon-environment.ts",
       "src/lib/inbox-wait-errors.ts",
-      "src/lib/inbox-wait-transport.ts",
+      "src/lib/inbox-wait-gap.ts",
       "src/lib/delivery-report.ts",
       "src/http-adapter.ts"
     ],
