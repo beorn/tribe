@@ -205,6 +205,22 @@ async function terminateTestProcess(pid: number): Promise<void> {
   await waitFor(() => !pidExists(pid), `test process ${pid} forced exit`, 2_000)
 }
 
+async function waitForSameRootReload(dbPath: string, persona: string, occurrence: number): Promise<void> {
+  // Membership can reconnect before pacing finishes. Observe the daemon's
+  // actual decision for each generation before asserting that the PID stays.
+  const db = new Database(dbPath, { readonly: true })
+  try {
+    const decisions = db.query<{ n: number }, [string]>(
+      "SELECT count(*) AS n FROM messages WHERE type = 'event.adapter_reload_decision' " +
+        "AND json_extract(content, '$.self') = ? AND json_extract(content, '$.decision') = 'no-reexec' " +
+        "AND json_extract(content, '$.daemonRoot') = json_extract(content, '$.selfRoot')",
+    )
+    await waitFor(() => (decisions.get(persona)?.n ?? 0) >= occurrence, `same-root reload decision ${occurrence}`)
+  } finally {
+    db.close()
+  }
+}
+
 describe("Claude plugin daemon-restart self-heal", () => {
   let tmpDir: string
   let socketPath: string
@@ -566,7 +582,7 @@ process.exit(await child.exited)
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  it("keeps host stdio, re-execs the adapter, and rejoins the same member after close/unlink/fresh-bind", async () => {
+  it("keeps host stdio and the same adapter across two same-root daemon restarts", async () => {
     const dbPath = join(tmpDir, "tribe.db")
     const daemonLog = join(tmpDir, "daemon.log")
     const adapterLog = join(tmpDir, "adapter.log")
@@ -662,7 +678,7 @@ process.exit(await child.exited)
       if (
         candidate?.transport_state === "connected" &&
         candidate.transport_pids?.length === 1 &&
-        candidate.transport_pids[0] !== firstTransportPid
+        candidate.transport_pids[0] === firstTransportPid
       ) {
         rejoined = candidate
       }
@@ -678,8 +694,9 @@ process.exit(await child.exited)
     })
     for (const pid of rejoined?.transport_pids ?? []) adapterPids.add(pid)
     const firstRejoinedPid = rejoined!.transport_pids![0]!
-    expect(rejoined?.transport_pids).not.toContain(firstTransportPid)
-    await waitFor(() => !pidExists(firstTransportPid), "replaced adapter process exit")
+    await waitForSameRootReload(dbPath, PERSONA, 1)
+    expect(rejoined?.transport_pids).toEqual([firstTransportPid])
+    expect(pidExists(firstTransportPid)).toBe(true)
     expect(plugin.exitCode, pluginStderr).toBeNull()
 
     writeJson(plugin, callToolPayload(3, "members", { all: true }))
@@ -705,7 +722,7 @@ process.exit(await child.exited)
       if (
         candidate?.transport_state === "connected" &&
         candidate.transport_pids?.length === 1 &&
-        candidate.transport_pids[0] !== firstRejoinedPid
+        candidate.transport_pids[0] === firstRejoinedPid
       ) {
         secondRejoined = candidate
       }
@@ -720,7 +737,9 @@ process.exit(await child.exited)
       owner_state: "live",
     })
     for (const pid of secondRejoined?.transport_pids ?? []) adapterPids.add(pid)
-    await waitFor(() => !pidExists(firstRejoinedPid), "second replaced adapter process exit")
+    await waitForSameRootReload(dbPath, PERSONA, 2)
+    expect(secondRejoined?.transport_pids).toEqual([firstRejoinedPid])
+    expect(pidExists(firstRejoinedPid)).toBe(true)
     expect(plugin.exitCode, pluginStderr).toBeNull()
 
     writeJson(plugin, callToolPayload(4, "members", { all: true }))
