@@ -2098,7 +2098,12 @@ describe("stdio adapter delivery modes", () => {
       () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > before,
       "REVISE restore drain",
     )
-    await new Promise((resolveTick) => setTimeout(resolveTick, 250))
+    // The fetch request is not a completed drain: wait for the adapter's first
+    // persist rather than reading the seed ledger while the child is delayed.
+    await waitForCondition(
+      () => (JSON.parse(readFileSync(ledgerPath, "utf8")) as { updatedAtMs: number }).updatedAtMs > windowStartMs,
+      "REVISE resumed window persisted",
+    )
 
     const ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as {
       windowStartMs: number
