@@ -23,7 +23,12 @@ const SESSION_ID = "sess-chief"
 const PROJECT_ID = "cursor-rejoin-proj"
 
 type ToolJson = Record<string, unknown>
-type FetchJson = ToolJson & { events?: Array<{ id: string; rowid: number; content: string }>; cursor?: number }
+type FetchEvent = { id: string; rowid: number; content: string }
+type FetchJson = ToolJson & {
+  attention?: { actionable_unread?: FetchEvent[] }
+  events?: FetchEvent[]
+  cursor?: number
+}
 
 function makeContext(db: Database, stmts: TribeStatements): TribeContext {
   return createTribeContext({
@@ -98,7 +103,10 @@ describe("@km/tribe/20032 - pull cursor monotonicity across same-session join", 
     const drainedRowid = insertDirect(stmts, "already drained")
 
     const firstDrain = parseToolJson(handleToolCall(ctx, "tribe.fetch", { limit: 50 }, opts)) as FetchJson
-    expect(firstDrain.events?.map((event) => event.content)).toEqual(["already drained"])
+    // 27488 must-hold A — a body appears once per read: the actionable row is
+    // carried by attention and is not repeated in events.
+    expect(firstDrain.attention?.actionable_unread?.map((event) => event.content)).toEqual(["already drained"])
+    expect(firstDrain.events?.map((event) => event.content)).toEqual([])
     expect(firstDrain.cursor).toBe(drainedRowid)
 
     const refusedMode = parseToolJson(handleToolCall(ctx, "tribe.join", { name: NAME, delivery: "pull" }, opts))
