@@ -1603,12 +1603,29 @@ function handleDaemonNotification(method: string, params?: Record<string, unknow
       }
       return
     }
+    // #27459 gap-1 — the live push path is the SAME pane inbox as the drain
+    // paths. A reconnect re-push of a row this pane already holds must not
+    // re-present it: the daemon's `replay` flag is cursor-relative and is NOT
+    // that fact (see createForwardedAttentionTracker), so the one forwarded-id
+    // record decides. A push with no message id fails open, and a suppressed
+    // push stays durable in the mailbox for the model's own read (21757: a
+    // model-backed receipt, not transport, retires custody).
+    const pushedId = params?.message_id ? String(params.message_id) : undefined
+    if (pushedId !== undefined && forwardedAttention.has(pushedId)) return
     sendChannel(content, {
       from: String(params?.from ?? "unknown"),
       type,
       bead: params?.bead_id ? String(params.bead_id) : undefined,
       message_id: params?.message_id ? String(params.message_id) : undefined,
     })
+    if (pushedId !== undefined) {
+      // Marked only AFTER the handoff, and persisted, so an adapter restart
+      // cannot make the daemon's reconnect re-push read as a fresh delivery.
+      ensureDeliveryLedger(Date.now())
+      forwardedAttention.remember(pushedId)
+      deliveryCounter.deliver(pushedId, Buffer.byteLength(content, "utf8"))
+      persistDeliveryLedger(Date.now())
+    }
   } else if (method === "session.joined" || method === "session.left") {
     const action = method === "session.joined" ? "joined" : "left"
     sendChannel(`${String(params?.name ?? "unknown")} ${action} the tribe`, { from: "daemon", type: "status" })

@@ -1991,6 +1991,141 @@ describe("stdio adapter delivery modes", () => {
     expect(secondText().filter((line) => line.includes("AMBIENT-RESTART"))).toHaveLength(0)
   })
 
+  // #27459 gap-1 acceptance (@cto 202142ab §3): 20 drains plus 2 adapter
+  // restarts over an UNCHANGED inbox — and a reconnect re-push of rows the pane
+  // already holds — must hand each message id to the pane exactly once. Every
+  // path (attention drain, ambient events, and the live `channel` push) shares
+  // ONE forwarded-id record, and the durable ledger keeps it across restarts.
+  it("hands each id to the pane once across 20 drains, 2 restarts, and a reconnect re-push (#27459 gap-1)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const recentTs = new Date().toISOString()
+    const fetchAttention = {
+      actionable_unread: [
+        { id: "gap1-attention-a", type: "request", from: "@chief", content: "GAP1-ATTENTION-A", ts: recentTs },
+        { id: "gap1-attention-b", type: "verdict", from: "@ci", content: "GAP1-ATTENTION-B", ts: recentTs },
+      ],
+      pending_balls: [],
+    }
+    // An ambient twin of an already-forwarded attention id must stay out; a
+    // distinct ambient row is the third id this pane may see exactly once.
+    const fetchEvents: Array<Record<string, unknown>> = [
+      { id: "gap1-attention-a", type: "notify", from: "@chief", content: "GAP1-AMBIENT-TWIN", ts: recentTs },
+      { id: "gap1-ambient-c", type: "notify", from: "@chief", content: "GAP1-AMBIENT-C", ts: recentTs },
+    ]
+    const env = {
+      ...process.env,
+      TRIBE_DELIVERY: "push",
+      TRIBE_NO_AUTOSTART: "1",
+      TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
+      DEBUG_LOG: join(tmpDir, "adapter.log"),
+    }
+    daemon = await spawnFakeDaemon(socketPath, { fetchAttention, fetchEvents })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const forwarders: Array<() => string[]> = []
+    const collect = () => {
+      const stdout = collectStdoutJson(child!)
+      forwarders.push(() =>
+        stdout
+          .filter((line) => line.method === "notifications/claude/channel")
+          .map((line) => JSON.stringify(line) as string),
+      )
+    }
+    collect()
+    const text = () => forwarders.flatMap((forwarded) => forwarded())
+    const count = (needle: string) => text().filter((line) => line.includes(needle)).length
+    const handshake = async () => {
+      await writeJsonAndWaitForLine(child!, initializePayload(1), (line) => line.id === 1)
+      writeJson(child!, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+      await writeJsonAndWaitForLine(
+        child!,
+        callToolPayload(2, "join", { name: "@agent/test" }),
+        (line) => line.id === 2,
+      )
+    }
+    const drain = async (label: string) => {
+      const before = daemon!.requests.filter((request) => request.method === "tribe.fetch").length
+      daemon!.clients.at(-1)?.write(makeNotification("wakeup", {}))
+      await waitForCondition(
+        () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > before,
+        label,
+      )
+      await new Promise((resolveTick) => setTimeout(resolveTick, 120))
+    }
+    const restart = async (label: string) => {
+      child!.kill("SIGTERM")
+      await waitForExit(child!)
+      child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+        cwd: tmpDir,
+        env,
+        stdio: ["pipe", "pipe", "pipe"],
+      })
+      collect()
+      await handshake()
+      await drain(label)
+    }
+
+    await handshake()
+    await drain("first gap-1 drain")
+    for (let index = 2; index <= 20; index += 1) await drain(`gap-1 drain ${index}`)
+
+    expect(count("GAP1-ATTENTION-A")).toBe(1)
+    expect(count("GAP1-ATTENTION-B")).toBe(1)
+    expect(count("GAP1-AMBIENT-C")).toBe(1)
+    expect(count("GAP1-AMBIENT-TWIN")).toBe(0)
+
+    await restart("gap-1 post-restart-1 drain")
+    await restart("gap-1 post-restart-2 drain")
+
+    expect(count("GAP1-ATTENTION-A")).toBe(1)
+    expect(count("GAP1-ATTENTION-B")).toBe(1)
+    expect(count("GAP1-AMBIENT-C")).toBe(1)
+
+    // A reconnect re-push of ids this pane already holds must not re-present
+    // them; a genuinely new pushed id still forwards, exactly once.
+    daemon.clients.at(-1)?.write(
+      makeNotification("channel", {
+        from: "chief",
+        type: "notify",
+        content: "GAP1-RECONNECT-A",
+        message_id: "gap1-attention-a",
+      }),
+    )
+    daemon.clients.at(-1)?.write(
+      makeNotification("channel", {
+        from: "chief",
+        type: "notify",
+        content: "GAP1-RECONNECT-C",
+        message_id: "gap1-ambient-c",
+      }),
+    )
+    daemon.clients.at(-1)?.write(
+      makeNotification("channel", {
+        from: "chief",
+        type: "notify",
+        content: "GAP1-RECONNECT-NEW",
+        message_id: "gap1-pushed-d",
+      }),
+    )
+    await waitForCondition(() => count("GAP1-RECONNECT-NEW") === 1, "new pushed row forwarded")
+    await new Promise((resolveTick) => setTimeout(resolveTick, 300))
+    expect(count("GAP1-RECONNECT-A")).toBe(0)
+    expect(count("GAP1-RECONNECT-C")).toBe(0)
+    expect(count("GAP1-RECONNECT-NEW")).toBe(1)
+
+    const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
+    await waitForCondition(() => existsSync(ledgerPath), "gap-1 delivery ledger written")
+    const ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as {
+      ids: string[]
+      counters: Record<string, number>
+    }
+    expect([...ledger.ids].sort()).toEqual(["gap1-ambient-c", "gap1-attention-a", "gap1-attention-b", "gap1-pushed-d"])
+    expect(ledger.counters.duplicateDeliveries).toBe(0)
+  })
+
   it("drains and pushes attention when wakeup arrives within the register round-trip (#26969 row 5)", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const fetchAttention = {
