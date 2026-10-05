@@ -2354,4 +2354,55 @@ describe("stdio adapter delivery modes", () => {
     )
     expect(delivered).toBeDefined()
   })
+
+  // #27488 phase 0 (must-hold A) - a MODEL-requested read is measured: the bytes
+  // it returned, and a body returned twice inside the ONE response
+  // (attention.actionable_unread AND events). Phase 0 counts it; phase 1 fixes it.
+  describe("model read cost (#27488 phase 0)", () => {
+    it("counts a model fetch's bytes and the bodies it returned twice in one response", async () => {
+      const socketPath = join(tmpDir, "tribe.sock")
+      const recentTs = new Date().toISOString()
+      const rowA = { id: "read-dup-a", type: "request", from: "@chief", content: "READ-DUP-A", ts: recentTs }
+      const rowB = { id: "read-b", type: "notify", from: "pending-1", content: "READ-B", ts: recentTs }
+      const fetchAttention = {
+        actionable_unread: [rowA],
+        pending_balls: [],
+        pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
+      }
+      daemon = await spawnFakeDaemon(socketPath, { fetchAttention, fetchEvents: [rowA, rowB] })
+      child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+        cwd: tmpDir,
+        env: {
+          ...process.env,
+          TRIBE_DELIVERY: "push",
+          TRIBE_NO_AUTOSTART: "1",
+          TRIBE_DELIVERY_LEDGER_DIR: tmpDir,
+          DEBUG_LOG: join(tmpDir, "adapter.log"),
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      })
+      collectStdoutJson(child)
+
+      await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+      writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+      await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+      await writeJsonAndWaitForLine(child, callToolPayload(3, "fetch", { limit: 10 }), (line) => line.id === 3)
+
+      const ledgerPath = join(tmpDir, "tribe-delivery-@agent_test.json")
+      await waitForCondition(() => existsSync(ledgerPath), "cost ledger written")
+      const cost = (
+        JSON.parse(readFileSync(ledgerPath, "utf8")) as {
+          counters: {
+            cost?: { readPulls: number; readPullBytes: number; readRepeatBodies: number; readRepeatBytes: number }
+          }
+        }
+      ).counters.cost
+      expect(cost?.readPulls).toBe(1)
+      expect(cost?.readRepeatBodies).toBe(1)
+      expect(cost?.readRepeatBytes).toBe(Buffer.byteLength("READ-DUP-A", "utf8"))
+      expect(cost?.readPullBytes).toBe(
+        2 * Buffer.byteLength("READ-DUP-A", "utf8") + Buffer.byteLength("READ-B", "utf8"),
+      )
+    })
+  })
 })

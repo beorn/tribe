@@ -23,11 +23,21 @@ import {
   type DeliveryLedgerCoverage,
   type DeliveryLedgerState,
 } from "./delivery-ledger.ts"
+import type { DeliveryClassStat } from "./replay-cap.ts"
 
 /** @cto 9a077460 - strictly above this duplicateDelivery rate, with enough volume. */
 export const DELIVERY_DUPLICATE_ALERT_RATE = 0.2
 /** @cto 9a077460 - the minimum successful deliveries before the rate is actionable. */
 export const DELIVERY_DUPLICATE_ALERT_MIN_DELIVERIES = 100
+/**
+ * #27488 phase 0 - @chief's measured harness wrapper from the 2026-10-04
+ * composition window: every queued delivery carried ~460 chars of identical
+ * harness text. An ESTIMATE (the harness is not ours to measure), named here so
+ * the report can state it and no reader takes it for a measurement.
+ */
+export const HARNESS_WRAPPER_CHARS_PER_DELIVERY = 460
+/** The composition report's token rule: chars / 4. */
+export const CHARS_PER_TOKEN = 4
 
 const LEDGER_FILE = /^tribe-delivery-(.+)\.json$/
 
@@ -55,6 +65,74 @@ export type SeatDeliveryReport = {
   alertInconclusive: boolean
   /** The page-edge half (@chief/hab); null in wire, joined by the 4h report owner. */
   pageEdges: null
+  /**
+   * #27488 phase 0 - the cost half. null when the ledger predates cost counting
+   * (a v1 file), never a silent zero.
+   */
+  cost: SeatDeliveryCost | null
+}
+
+/** One class row of the cost block, heaviest first. */
+export type SeatDeliveryClassRow = { class: string } & DeliveryClassStat
+
+export type SeatDeliveryCost = {
+  /** Content bytes the pane was handed, as tokens (chars/4). */
+  envelopeTokens: number
+  /** deliveries x HARNESS_WRAPPER_CHARS_PER_DELIVERY, as tokens. */
+  wrapperTokens: number
+  /** Content bytes model-requested reads returned, as tokens. */
+  readPullTokens: number
+  totalTokens: number
+  /** When the cost measurement began (== windowStartMs unless a v1 ledger was upgraded mid-window). */
+  costStartMs: number
+  /** Over the COST span; a younger measurement is never extrapolated to the window. */
+  observedMs: number
+  tokensPerHour: number
+  /** noActionBytes / deliveredBytes; null when nothing was delivered (no invented zero). */
+  noActionShare: number | null
+  /** Bodies a model read returned twice in one response (#27488 must-hold A). */
+  readRepeatBodies: number
+  readRepeatBytes: number
+  readPulls: number
+  byClass: SeatDeliveryClassRow[]
+}
+
+/**
+ * The cost half of one seat row. A ledger with no cost block (v1) yields null:
+ * the report names it unmeasured rather than reading it as zero. Components the
+ * adapter cannot see (hook injections, CLI `tribe inbox` reads) are not counted
+ * here and the format function says so.
+ */
+function buildSeatCost(
+  counters: DeliveryLedgerState["counters"],
+  costStartMs: number,
+  observedThroughMs: number,
+): SeatDeliveryCost | null {
+  const cost = counters.cost
+  if (cost === undefined) return null
+  const envelopeTokens = cost.deliveredBytes / CHARS_PER_TOKEN
+  const wrapperTokens = (counters.deliveries * HARNESS_WRAPPER_CHARS_PER_DELIVERY) / CHARS_PER_TOKEN
+  const readPullTokens = cost.readPullBytes / CHARS_PER_TOKEN
+  const totalTokens = envelopeTokens + wrapperTokens + readPullTokens
+  const byClass = Object.entries(cost.byClass)
+    .map(([key, stat]) => ({ class: key, ...stat }))
+    .sort((left, right) => right.bytes - left.bytes)
+  const noActionBytes = byClass.reduce((sum, row) => sum + row.noActionBytes, 0)
+  const span = Math.max(1, observedThroughMs - costStartMs)
+  return {
+    envelopeTokens,
+    wrapperTokens,
+    readPullTokens,
+    totalTokens,
+    costStartMs,
+    observedMs: span,
+    tokensPerHour: totalTokens / (span / 3_600_000),
+    noActionShare: cost.deliveredBytes > 0 ? noActionBytes / cost.deliveredBytes : null,
+    readRepeatBodies: cost.readRepeatBodies,
+    readRepeatBytes: cost.readRepeatBytes,
+    readPulls: cost.readPulls,
+    byClass,
+  }
 }
 
 export type DeliveryReportGap = {
@@ -109,6 +187,7 @@ export function buildSeatDeliveryReport(state: DeliveryLedgerState, now: number)
       counters.deliveries >= DELIVERY_DUPLICATE_ALERT_MIN_DELIVERIES,
     alertInconclusive: coverage.gap,
     pageEdges: null,
+    cost: buildSeatCost(counters, state.costSinceMs ?? state.windowStartMs, state.updatedAtMs),
   }
 }
 
@@ -201,6 +280,29 @@ function formatPercent(rate: number | null): string {
   return rate === null ? "n/a" : `${(rate * 100).toFixed(1)}%`
 }
 
+function formatSpan(ms: number): string {
+  const minutes = ms / 60_000
+  if (minutes < 1) return "<1m"
+  if (minutes < 120) return `${Math.round(minutes)}m`
+  return `${(minutes / 60).toFixed(1)}h`
+}
+
+/** #27488 phase 0 - one cost line per seat, or an explicit "unmeasured". */
+function formatSeatCost(cost: SeatDeliveryCost | null, windowStartMs: number): string {
+  if (cost === null) return "cost: unmeasured (ledger predates cost counting)"
+  const classes = cost.byClass
+    .slice(0, 4)
+    .map((row) => `${row.class} ${row.deliveries}/${formatBytes(row.bytes)}`)
+    .join(", ")
+  const lateStart = cost.costStartMs > windowStartMs ? ` (cost from ${new Date(cost.costStartMs).toISOString()})` : ""
+  return (
+    `cost: ~${Math.round(cost.totalTokens)} tokens over ${formatSpan(cost.observedMs)}${lateStart}` +
+    ` (envelope ~${Math.round(cost.envelopeTokens)}, wrapper ~${Math.round(cost.wrapperTokens)} est @${HARNESS_WRAPPER_CHARS_PER_DELIVERY} chars/delivery, reads ~${Math.round(cost.readPullTokens)} over ${cost.readPulls} pull(s))` +
+    ` - no-action ${formatPercent(cost.noActionShare)} - read repeats ${cost.readRepeatBodies} bodies/${formatBytes(cost.readRepeatBytes)}` +
+    ` - classes: ${classes === "" ? "none" : classes}`
+  )
+}
+
 /** One briefing-ready block. Says WHERE it looked, and never prints a bare zero. */
 export function formatFleetDeliveryReport(report: FleetDeliveryReport): string {
   const hours = (report.windowMs / 3_600_000).toFixed(0)
@@ -221,6 +323,12 @@ export function formatFleetDeliveryReport(report: FleetDeliveryReport): string {
       const window = `${new Date(seat.windowStartMs).toISOString()}..${new Date(seat.windowEndMs).toISOString()}`
       lines.push(
         `  ${seat.pane}  ${seat.deliveries} delivered (${seat.newDeliveries} new, ${seat.duplicateDeliveries} duplicate, ${rate}) - ${formatBytes(seat.duplicateBytes)} duplicate bytes - ${seat.suppressed} suppressed - restarts ${seat.coverage.restarts} - window ${window}${flags.length > 0 ? `  [${flags.join(" ")}]` : ""}`,
+      )
+      lines.push(`      ${formatSeatCost(seat.cost, seat.windowStartMs)}`)
+    }
+    if (report.seats.some((seat) => seat.cost !== null)) {
+      lines.push(
+        "  cost components measured: envelope + harness wrapper (estimate) + model reads; NOT visible to the adapter: hook injections, CLI reads (name them; never read them as zero).",
       )
     }
   }

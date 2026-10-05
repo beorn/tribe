@@ -35,6 +35,19 @@ function tempPath(): string {
   return join(dir, "ledger.json")
 }
 
+/** #27488 phase 0 - the cost block a costing adapter writes; fixtures are v2 ledgers. */
+function costBlock(over: Partial<NonNullable<DeliveryLedgerState["counters"]["cost"]>> = {}) {
+  return {
+    deliveredBytes: 0,
+    byClass: {},
+    readRepeatBodies: 0,
+    readRepeatBytes: 0,
+    readPulls: 0,
+    readPullBytes: 0,
+    ...over,
+  }
+}
+
 const counters = (over: Partial<DeliveryLedgerState["counters"]> = {}): DeliveryLedgerState["counters"] => ({
   presentations: 0,
   newPresentations: 0,
@@ -44,6 +57,7 @@ const counters = (over: Partial<DeliveryLedgerState["counters"]> = {}): Delivery
   duplicateDeliveries: 0,
   duplicateBytes: 0,
   suppressed: 0,
+  cost: costBlock(),
   ...over,
 })
 
@@ -297,5 +311,99 @@ describe("openDeliveryLedgerWindow (#27459)", () => {
       now: NOW + DELIVERY_LEDGER_WINDOW_MS + 1,
     })
     expect(rolled.pendingBallSummary).toEqual(summary)
+  })
+})
+
+describe("delivery ledger cost (#27488 phase 0)", () => {
+  it("round-trips the cost block", () => {
+    const path = tempPath()
+    const state: DeliveryLedgerState = {
+      version: DELIVERY_LEDGER_VERSION,
+      pane: "@dev/luna6",
+      windowStartMs: NOW,
+      updatedAtMs: NOW + 1_000,
+      ids: ["row-a"],
+      counters: counters({
+        deliveries: 2,
+        cost: costBlock({
+          deliveredBytes: 500,
+          readPulls: 1,
+          readPullBytes: 200,
+          readRepeatBodies: 1,
+          readRepeatBytes: 50,
+          byClass: { "watch/notify": { deliveries: 2, bytes: 500, noActionDeliveries: 2, noActionBytes: 500 } },
+        }),
+      }),
+      pendingBallSummary: null,
+      costSinceMs: null,
+      coverage: { restarts: 0, gap: false, gapReason: "none" },
+    }
+    saveDeliveryLedger(path, state)
+    const loaded = loadDeliveryLedger(path)
+    expect(loaded.coverage.gap).toBe(false)
+    expect(loaded.state?.counters.cost?.deliveredBytes).toBe(500)
+    expect(loaded.state?.counters.cost?.byClass["watch/notify"]?.noActionBytes).toBe(500)
+    expect(loaded.state?.counters.cost?.readRepeatBodies).toBe(1)
+  })
+
+  it("resumes a pre-cost v1 window and records that cost began at the resume", () => {
+    const path = tempPath()
+    writeFileSync(
+      path,
+      JSON.stringify({
+        version: 1,
+        pane: "@dev/luna6",
+        windowStartMs: NOW,
+        updatedAtMs: NOW,
+        ids: ["row-a"],
+        counters: {
+          presentations: 4,
+          newPresentations: 2,
+          duplicatePresentations: 2,
+          deliveries: 2,
+          newDeliveries: 2,
+          duplicateDeliveries: 0,
+          duplicateBytes: 0,
+          suppressed: 2,
+        },
+        pendingBallSummary: null,
+        coverage: { restarts: 0, gap: false, gapReason: "none" },
+      }),
+      "utf8",
+    )
+    const loaded = loadDeliveryLedger(path)
+    expect(loaded.coverage.gap).toBe(false)
+    expect(loaded.state?.counters.cost).toBeUndefined()
+    const opened = openDeliveryLedgerWindow({
+      existing: loaded.state,
+      coverage: loaded.coverage,
+      pane: "@dev/luna6",
+      now: NOW + 60_000,
+    })
+    expect(opened.windowStartMs).toBe(NOW)
+    expect(opened.counters.deliveries).toBe(2)
+    expect(opened.counters.cost).toBeUndefined()
+    expect(opened.costSinceMs).toBe(NOW + 60_000)
+  })
+
+  it("names a v2 ledger whose cost block is malformed a schema gap, never a partial total", () => {
+    const path = tempPath()
+    writeFileSync(
+      path,
+      JSON.stringify({
+        version: DELIVERY_LEDGER_VERSION,
+        pane: "@dev/luna6",
+        windowStartMs: NOW,
+        updatedAtMs: NOW,
+        ids: [],
+        counters: { ...counters(), cost: { deliveredBytes: "lots" } },
+        pendingBallSummary: null,
+        coverage: { restarts: 0, gap: false, gapReason: "none" },
+      }),
+      "utf8",
+    )
+    const loaded = loadDeliveryLedger(path)
+    expect(loaded.state).toBeNull()
+    expect(loaded.coverage.gapReason).toBe("schema")
   })
 })

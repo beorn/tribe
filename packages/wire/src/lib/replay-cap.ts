@@ -140,13 +140,117 @@ export type DeliveryCounters = {
   duplicateBytes: number
   /** Presentations the once-per-row filter withheld. */
   suppressed: number
+  /**
+   * #27488 phase 0 cost block. Optional on the TYPE so a ledger from a
+   * pre-costing adapter (v1) still type-checks and loads; delivery-ledger rolls
+   * such a window rather than reporting a partial total as if it were whole.
+   */
+  cost?: DeliveryCost
+}
+
+/**
+ * #27488 phase 0 - the cost half of the per-pane counter (@cto 6918f2b5).
+ *
+ * H13: the duplicate KPI read 0% while most of the window's tokens were waste,
+ * so the counter must also measure, per seat and window: content bytes over
+ * every handoff (the envelope half of the token estimate), the same by delivery
+ * class, the no-action share, and the bodies a READ response returned twice
+ * (must-hold A). Wrapper overhead is deliberately NOT counted here - the harness
+ * wrapper is not ours to measure; the report applies @chief's measured constant.
+ */
+export type DeliveryClassStat = {
+  deliveries: number
+  /** Content bytes over every handoff of this class (not just duplicates). */
+  bytes: number
+  /** Handoffs of this class that changed nothing anyone would do (@chief's (J) rule). */
+  noActionDeliveries: number
+  noActionBytes: number
+}
+
+export type DeliveryCost = {
+  /** Content bytes over EVERY successful handoff in this window. */
+  deliveredBytes: number
+  /** Successful handoffs by class key, bounded to DELIVERY_CLASS_MAX keys. */
+  byClass: Record<string, DeliveryClassStat>
+  /**
+   * Bodies a MODEL-requested read returned twice in ONE response
+   * (attention.actionable_unread and events; #27488 must-hold A) and their
+   * bytes. Counts occurrences, so the read-side fix drives it to 0.
+   */
+  readRepeatBodies: number
+  readRepeatBytes: number
+  /** Model-requested reads served, and the content bytes they returned. */
+  readPulls: number
+  readPullBytes: number
+}
+
+/** The notification-only marker a channel envelope's type carries (shared with the adapter renderer). */
+export const NOTIFICATION_ONLY_MARKER = "notification-only:do-not-acknowledge-or-respond-to"
+
+/** A class key with no declared vocabulary slot (unbounded senders fold here). */
+export const DELIVERY_CLASS_OTHER = "other"
+/** Hard cap on distinct class keys per window; the vocabulary is bounded, not a second store. */
+export const DELIVERY_CLASS_MAX = 32
+
+export type DeliveryClassRow = { from?: string | null; type?: string | null; content?: string | null }
+
+/** The composition report's sender kind (@chief flood-composition.py `kind`), unchanged. */
+function deliverySenderKind(from: string): string {
+  if (from === "telegram" || from.startsWith("@user/")) return "operator"
+  if (from.startsWith("@")) return "seat"
+  if (from.startsWith("pending-")) return "watch"
+  return `machine:${from === "" ? "unknown" : from}`
+}
+
+/**
+ * The class key the composition report groups by: `senderKind/type`, with the
+ * notification-only marker folded to `status`. Pure - the ONE classifier, so the
+ * adapter's counting and the report's reading cannot drift.
+ */
+export function deliveryClassKey(row: DeliveryClassRow): string {
+  const raw = String(row.type ?? "")
+  const type = raw.startsWith(NOTIFICATION_ONLY_MARKER) ? "status" : raw === "" ? "unknown" : raw
+  return `${deliverySenderKind(String(row.from ?? ""))}/${type}`
+}
+
+/**
+ * @chief's (J) rule for the 2026-10-04 composition window as a bounded
+ * predicate: the classes that changed nothing anyone would do. Machine pages,
+ * watch notices/resolutions, the open-ball summary and system rows are no-action
+ * outright; a seat status or response is no-action only when it names no
+ * transition and no ask. Operator rows and seat requests are always actions.
+ */
+const TRANSITION_MARKERS =
+  /\b(TAKING|SUBMITTED|MERGED|CLOSED|LANDED|DELIVERED|BLOCKED|DONE|READY|ASK|ASKING|QUESTION|REQUEST|REQUESTS|REPLY|REPLIES)\b/
+const NO_ACTION_MACHINE_CLASSES: readonly string[] = [
+  "machine:tribe/attention:pending-balls",
+  "machine:page-mailbox-projection/request",
+  "machine:dark-work/request",
+  "machine:attention-watch/notify",
+  "machine:tribe-startup/status",
+  "machine:daemon/status",
+]
+
+export function isNoActionDelivery(row: DeliveryClassRow): boolean {
+  const key = deliveryClassKey(row)
+  if (key.startsWith("watch/")) return true
+  if (NO_ACTION_MACHINE_CLASSES.includes(key)) return true
+  if (key === "seat/status" || key === "seat/response") {
+    return !TRANSITION_MARKERS.test(String(row.content ?? ""))
+  }
+  return false
 }
 
 export type DeliveryCounter = {
   /** The daemon exposed this id to this pane's adapter this drain. */
   present(id: string | undefined): DeliveryOutcome
-  /** A successful handoff of this id to the pane. */
-  deliver(id: string | undefined, bytes?: number): DeliveryOutcome
+  /**
+   * A successful handoff of this id to the pane. `row` (when given) classifies
+   * the handoff for the cost block; it is never used for identity.
+   */
+  deliver(id: string | undefined, bytes?: number, row?: DeliveryClassRow): DeliveryOutcome
+  /** Record one MODEL-requested read: returned bytes and bodies it repeated. */
+  recordReadPull(input: { bytes: number; repeatBodies: number; repeatBytes: number }): void
   snapshot(): DeliveryCounters
   /** Bounded first-successful-handoff ids, for the durable per-pane ledger. */
   firstHandoffIds(): string[]
@@ -202,7 +306,16 @@ export function createDeliveryCounter(opts?: { maxIds?: number }): DeliveryCount
   const maxIds = opts?.maxIds ?? MAX_FORWARDED_ATTENTION_IDS
   const presented = boundedIdSet(maxIds)
   const handedOff = boundedIdSet(maxIds)
+  const zeroCost = (): DeliveryCost => ({
+    deliveredBytes: 0,
+    byClass: {},
+    readRepeatBodies: 0,
+    readRepeatBytes: 0,
+    readPulls: 0,
+    readPullBytes: 0,
+  })
   const zero = (): DeliveryCounters => ({
+    cost: zeroCost(),
     presentations: 0,
     newPresentations: 0,
     duplicatePresentations: 0,
@@ -224,19 +337,48 @@ export function createDeliveryCounter(opts?: { maxIds?: number }): DeliveryCount
       counters.duplicatePresentations++
       return "duplicate"
     },
-    deliver(id, bytes = 0) {
+    deliver(id, bytes = 0, row) {
       counters.deliveries++
+      const contentBytes = Math.max(0, Math.floor(bytes))
+      const cost = (counters.cost ??= zeroCost())
+      let key = row === undefined ? DELIVERY_CLASS_OTHER : deliveryClassKey(row)
+      if (cost.byClass[key] === undefined && Object.keys(cost.byClass).length >= DELIVERY_CLASS_MAX) {
+        key = DELIVERY_CLASS_OTHER
+      }
+      const stat = (cost.byClass[key] ??= { deliveries: 0, bytes: 0, noActionDeliveries: 0, noActionBytes: 0 })
+      stat.deliveries++
+      stat.bytes += contentBytes
+      cost.deliveredBytes += contentBytes
+      if (row !== undefined && isNoActionDelivery(row)) {
+        stat.noActionDeliveries++
+        stat.noActionBytes += contentBytes
+      }
       if (id === undefined || !handedOff.has(id)) {
         counters.newDeliveries++
         if (id !== undefined) handedOff.add(id)
         return "new"
       }
       counters.duplicateDeliveries++
-      counters.duplicateBytes += Math.max(0, Math.floor(bytes))
+      counters.duplicateBytes += contentBytes
       return "duplicate"
     },
+    recordReadPull(input) {
+      const cost = (counters.cost ??= zeroCost())
+      cost.readPulls++
+      cost.readPullBytes += Math.max(0, Math.floor(input.bytes))
+      cost.readRepeatBodies += Math.max(0, Math.floor(input.repeatBodies))
+      cost.readRepeatBytes += Math.max(0, Math.floor(input.repeatBytes))
+    },
     snapshot() {
-      return { ...counters, suppressed: counters.presentations - counters.deliveries }
+      const cost = counters.cost ?? zeroCost()
+      return {
+        ...counters,
+        suppressed: counters.presentations - counters.deliveries,
+        cost: {
+          ...cost,
+          byClass: Object.fromEntries(Object.entries(cost.byClass).map(([key, stat]) => [key, { ...stat }])),
+        },
+      }
     },
     firstHandoffIds() {
       return handedOff.ids()
@@ -246,6 +388,9 @@ export function createDeliveryCounter(opts?: { maxIds?: number }): DeliveryCount
         presented.add(id)
         handedOff.add(id)
       }
+      // A legacy counters object (no `cost`) is kept verbatim: cost then begins
+      // at the first handoff of THIS process, never back-filled with a zero.
+      // delivery-ledger rolls such a window so no partial total reads as whole.
       if (restored !== undefined) counters = { ...restored }
     },
     resetCounters() {

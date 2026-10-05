@@ -26,6 +26,19 @@ import { DELIVERY_LEDGER_VERSION, type DeliveryLedgerState } from "../src/lib/de
 
 const NOW = Date.UTC(2026, 4, 30, 12, 0, 0)
 
+/** #27488 phase 0 - the cost block a costing adapter writes; fixtures are v2 ledgers. */
+function costBlock(over: Partial<NonNullable<DeliveryLedgerState["counters"]["cost"]>> = {}) {
+  return {
+    deliveredBytes: 0,
+    byClass: {},
+    readRepeatBodies: 0,
+    readRepeatBytes: 0,
+    readPulls: 0,
+    readPullBytes: 0,
+    ...over,
+  }
+}
+
 function counters(over: Partial<DeliveryLedgerState["counters"]> = {}): DeliveryLedgerState["counters"] {
   return {
     presentations: 0,
@@ -36,6 +49,7 @@ function counters(over: Partial<DeliveryLedgerState["counters"]> = {}): Delivery
     duplicateDeliveries: 0,
     duplicateBytes: 0,
     suppressed: 0,
+    cost: costBlock(),
     ...over,
   }
 }
@@ -266,5 +280,67 @@ describe("delivery report output (#27459)", () => {
     expect(text).toContain("25.0% (inconclusive)")
     expect(text).toContain("GAP:unreadable")
     expect(text).not.toContain("ALERT")
+  })
+})
+
+describe("delivery cost report (#27488 phase 0)", () => {
+  const classStat = (deliveries: number, bytes: number, noActionDeliveries: number, noActionBytes: number) => ({
+    deliveries,
+    bytes,
+    noActionDeliveries,
+    noActionBytes,
+  })
+
+  it("reports envelope, wrapper, reads and the no-action share over the cost span", () => {
+    const row = buildSeatDeliveryReport(
+      ledger({
+        counters: counters({
+          deliveries: 4,
+          newDeliveries: 4,
+          cost: costBlock({
+            deliveredBytes: 4000,
+            readPullBytes: 400,
+            readPulls: 2,
+            readRepeatBodies: 1,
+            readRepeatBytes: 40,
+            byClass: {
+              "watch/notify": classStat(3, 3000, 3, 3000),
+              "seat/request": classStat(1, 1000, 0, 0),
+            },
+          }),
+        }),
+      }),
+      NOW,
+    )
+    expect(row.cost?.envelopeTokens).toBe(1000)
+    // deliveries x 460 chars / 4 = deliveries x 115 tokens.
+    expect(row.cost?.wrapperTokens).toBe(4 * 115)
+    expect(row.cost?.readPullTokens).toBe(100)
+    expect(row.cost?.totalTokens).toBe(1000 + 460 + 100)
+    expect(row.cost?.noActionShare).toBeCloseTo(0.75)
+    expect(row.cost?.readRepeatBodies).toBe(1)
+    expect(row.cost?.readRepeatBytes).toBe(40)
+    expect(row.cost?.byClass[0]?.class).toBe("watch/notify")
+  })
+
+  it("reads a ledger with no cost block as unmeasured, never as zero", () => {
+    const row = buildSeatDeliveryReport(ledger({ counters: { ...counters(), cost: undefined } }), NOW)
+    expect(row.cost).toBeNull()
+    const text = formatFleetDeliveryReport(
+      buildFleetDeliveryReport({
+        states: [ledger({ counters: { ...counters(), cost: undefined } })],
+        now: NOW,
+        source: "/tmp/kpi",
+      }),
+    )
+    expect(text).toContain("cost: unmeasured")
+  })
+
+  it("says which cost components it measured and which it cannot see", () => {
+    const text = formatFleetDeliveryReport(
+      buildFleetDeliveryReport({ states: [ledger()], now: NOW, source: "/tmp/kpi" }),
+    )
+    expect(text).toContain("cost components measured")
+    expect(text).toContain("CLI reads")
   })
 })

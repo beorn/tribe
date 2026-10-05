@@ -29,7 +29,15 @@ export const DELIVERY_LEDGER_WINDOW_MS = 4 * 60 * 60 * 1_000
 export const TRIBE_DELIVERY_LEDGER_ENV = "TRIBE_DELIVERY_LEDGER"
 /** Ledger directory override; default is `<habitatRoot>/kpi`. */
 export const TRIBE_DELIVERY_LEDGER_DIR_ENV = "TRIBE_DELIVERY_LEDGER_DIR"
-export const DELIVERY_LEDGER_VERSION = 1
+/**
+ * #27488 phase 0 - version 2 adds the `counters.cost` block. A version 1 file
+ * (the same 8 counters, no cost) is READABLE and RESUMES its window: the window
+ * keeps its counts, and `costSinceMs` records that cost measurement began at the
+ * upgrade, so a partial cost total is never read as a whole window. Any other
+ * version is a schema gap, never a silently-empty read.
+ */
+export const DELIVERY_LEDGER_VERSION = 2
+const DELIVERY_LEDGER_VERSION_LEGACY = 1
 
 export type DeliveryGapReason = "none" | "unreadable" | "schema"
 
@@ -57,6 +65,13 @@ export type DeliveryLedgerState = {
    * summary is sent once - fail open toward showing it, never toward hiding it.
    */
   pendingBallSummary: PendingBallSummaryState | null
+  /**
+   * #27488 phase 0 - when this window's cost measurement began. null/absent
+   * means the cost block covers the whole window; a resumed pre-cost (v1)
+   * ledger sets it to the resume time, so the report reads a shorter cost span
+   * instead of pretending the partial total is the window's.
+   */
+  costSinceMs?: number | null
   coverage: DeliveryLedgerCoverage
 }
 
@@ -89,6 +104,14 @@ export function deliveryLedgerPath(opts: { pane: string; env: NodeJS.ProcessEnv 
 
 function zeroCounters(): DeliveryCounters {
   return {
+    cost: {
+      deliveredBytes: 0,
+      byClass: {},
+      readRepeatBodies: 0,
+      readRepeatBytes: 0,
+      readPulls: 0,
+      readPullBytes: 0,
+    },
     presentations: 0,
     newPresentations: 0,
     duplicatePresentations: 0,
@@ -140,6 +163,20 @@ function isCounters(value: unknown): value is DeliveryCounters {
   return COUNTER_KEYS.every((key) => typeof (value as Record<string, unknown>)[key] === "number")
 }
 
+/** #27488 phase 0 - the cost block must be all numbers or the window is a gap. */
+function isCost(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false
+  const candidate = value as Record<string, unknown>
+  const numbers = ["deliveredBytes", "readRepeatBodies", "readRepeatBytes", "readPulls", "readPullBytes"]
+  if (!numbers.every((key) => typeof candidate[key] === "number")) return false
+  if (typeof candidate.byClass !== "object" || candidate.byClass === null) return false
+  return Object.values(candidate.byClass as Record<string, unknown>).every((stat) => {
+    if (typeof stat !== "object" || stat === null) return false
+    const row = stat as Record<string, unknown>
+    return ["deliveries", "bytes", "noActionDeliveries", "noActionBytes"].every((key) => typeof row[key] === "number")
+  })
+}
+
 /**
  * A Date-representable epoch-ms value: finite, and inside the ECMAScript
  * TimeClip range (|t| <= 8.64e15) so `new Date(t).toISOString()` cannot throw.
@@ -170,8 +207,11 @@ export function loadDeliveryLedger(path: string): {
   }
   try {
     const parsed = JSON.parse(raw) as Partial<DeliveryLedgerState>
+    // The persisted version is a number, not the union of versions this build
+    // accepts, so a v1 file is comparable rather than a type error.
+    const version: number | undefined = (parsed as { version?: number }).version
     if (
-      parsed?.version !== DELIVERY_LEDGER_VERSION ||
+      (version !== DELIVERY_LEDGER_VERSION_LEGACY && version !== DELIVERY_LEDGER_VERSION) ||
       typeof parsed.pane !== "string" ||
       typeof parsed.windowStartMs !== "number" ||
       !isRepresentableTime(parsed.windowStartMs) ||
@@ -180,7 +220,9 @@ export function loadDeliveryLedger(path: string): {
         (typeof parsed.updatedAtMs !== "number" || !isRepresentableTime(parsed.updatedAtMs))) ||
       !Array.isArray(parsed.ids) ||
       parsed.ids.some((id) => typeof id !== "string") ||
-      !isCounters(parsed.counters)
+      !isCounters(parsed.counters) ||
+      (parsed.counters.cost !== undefined && !isCost(parsed.counters.cost)) ||
+      (version === DELIVERY_LEDGER_VERSION && parsed.counters.cost === undefined)
     ) {
       return { state: null, coverage: { restarts: 0, gap: true, gapReason: "schema" } }
     }
@@ -201,6 +243,7 @@ export function loadDeliveryLedger(path: string): {
         ids: parsed.ids as string[],
         counters: parsed.counters as DeliveryCounters,
         pendingBallSummary: parsePendingBallSummary(parsed.pendingBallSummary),
+        costSinceMs: typeof parsed.costSinceMs === "number" ? parsed.costSinceMs : null,
         coverage: { restarts, gap, gapReason },
       },
       coverage: { restarts, gap, gapReason },
@@ -226,6 +269,9 @@ export function openDeliveryLedgerWindow(input: {
     return {
       ...existing,
       pane,
+      // #27488 phase 0 - a pre-cost (v1) window resumes its counts; cost is
+      // measured from here and the shorter span is recorded, never back-filled.
+      costSinceMs: existing.counters.cost === undefined ? now : (existing.costSinceMs ?? null),
       coverage: { restarts: coverage.restarts + 1, gap: coverage.gap, gapReason: coverage.gapReason },
     }
   }
@@ -241,6 +287,7 @@ export function openDeliveryLedgerWindow(input: {
       // The summary throttle is orthogonal to the 4h counter window: carry its
       // fingerprint across a roll so a roll does not re-present an unchanged line.
       pendingBallSummary: existing.pendingBallSummary,
+      costSinceMs: null,
       coverage: { restarts: 0, gap: false, gapReason: "none" },
     }
   }
@@ -252,6 +299,7 @@ export function openDeliveryLedgerWindow(input: {
     ids: [],
     counters: zeroCounters(),
     pendingBallSummary: null,
+    costSinceMs: null,
     coverage: { restarts: 0, gap: coverage.gap, gapReason: coverage.gapReason },
   }
 }
