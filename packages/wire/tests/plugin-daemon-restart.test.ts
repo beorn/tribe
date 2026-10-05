@@ -215,7 +215,13 @@ async function waitForSameRootReload(dbPath: string, persona: string, occurrence
         "AND json_extract(content, '$.self') = ? AND json_extract(content, '$.decision') = 'no-reexec' " +
         "AND json_extract(content, '$.daemonRoot') = json_extract(content, '$.selfRoot')",
     )
-    await waitFor(() => (decisions.get(persona)?.n ?? 0) >= occurrence, `same-root reload decision ${occurrence}`)
+    await waitFor(
+      () => (decisions.get(persona)?.n ?? 0) >= occurrence,
+      `${persona} same-root reload decision ${occurrence}`,
+    ).catch((error: unknown) => {
+      const events = db.query("SELECT content FROM messages WHERE type = 'event.adapter_reload_decision'").all()
+      throw new Error(`${String(error)}; observed decisions: ${JSON.stringify(events)}`, { cause: error })
+    })
   } finally {
     db.close()
   }
@@ -490,7 +496,7 @@ process.exit(await child.exited)
                 session.name === persona &&
                 session.transport_state === "connected" &&
                 session.transport_pids?.length === 1 &&
-                session.transport_pids[0] !== priorTransportPids.get(persona),
+                session.transport_pids[0] === priorTransportPids.get(persona),
             )
             if (candidate) rejoined.set(persona, candidate)
           }
@@ -499,6 +505,8 @@ process.exit(await child.exited)
         `all ${opts.label} memberships after daemon restart ${restart}`,
         pacedRestartBudgetMs(expectedPersonas.length),
       )
+
+      await Promise.all(expectedPersonas.map((persona) => waitForSameRootReload(dbPath, persona, restart)))
 
       // 25663 P3: each adapter read cli_status just after its own re-register, yet every one ranked itself from the
       // declared roster, so each took its roster place and no two shared a slot. Ranking on sessions[].name collided.
@@ -1278,7 +1286,7 @@ process.exit(await child.exited)
     expect(pluginStderr).not.toContain("valid provider-parent provenance")
   })
 
-  it("restores a runtime-joined name when a launch-less Claude wrapper re-execs", async () => {
+  it("keeps a runtime-joined name when a launch-less Claude wrapper reconnects to the same root", async () => {
     const dbPath = join(tmpDir, "tribe-runtime-name.db")
     const daemonLog = join(tmpDir, "daemon-runtime-name.log")
     const adapterLog = join(tmpDir, "adapter-runtime-name.log")
@@ -1289,7 +1297,7 @@ process.exit(await child.exited)
 
     // Standalone Claude plugin installs do not have Ag's durable launch tuple.
     // Their model-issued join is therefore the only canonical identity source,
-    // and the wrapper must carry that effective name across child re-exec.
+    // and the adapter must keep that effective name across a same-root reconnect.
     const plugin = spawn(BUN_BIN, [PLUGIN_SERVER, "--socket", socketPath], {
       cwd: tmpDir,
       env: {
@@ -1355,7 +1363,7 @@ process.exit(await child.exited)
           session.member_id === initial?.member_id &&
           session.transport_state === "connected" &&
           session.transport_pids?.length === 1 &&
-          session.transport_pids[0] !== initialTransportPid,
+          session.transport_pids[0] === initialTransportPid,
       )
       if (candidate) rejoined = candidate
       return rejoined !== undefined
@@ -1372,7 +1380,8 @@ process.exit(await child.exited)
       owner_state: "live",
     })
     for (const pid of rejoined?.transport_pids ?? []) adapterPids.add(pid)
-    await waitFor(() => !pidExists(initialTransportPid), "runtime-name replaced adapter process exit")
+    await waitForSameRootReload(dbPath, "@cto", 1)
+    expect(pidExists(initialTransportPid)).toBe(true)
     expect(plugin.exitCode, pluginStderr).toBeNull()
     successor.client.close()
   }, 45_000)
@@ -1698,7 +1707,7 @@ process.exit(await child.exited)
                 session.name === persona &&
                 session.transport_state === "connected" &&
                 session.transport_pids?.length === 1 &&
-                session.transport_pids[0] !== priorTransportPids.get(persona),
+                session.transport_pids[0] === priorTransportPids.get(persona),
             )
             if (candidate) rejoined.set(persona, candidate)
           }
@@ -1707,6 +1716,8 @@ process.exit(await child.exited)
         `all multi-seat memberships after daemon restart ${restart}`,
         pacedRestartBudgetMs(expectedPersonas.length),
       )
+
+      await Promise.all(expectedPersonas.map((persona) => waitForSameRootReload(dbPath, persona, restart)))
 
       for (const persona of expectedPersonas) {
         const member = rejoined.get(persona)!
