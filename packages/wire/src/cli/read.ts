@@ -51,6 +51,7 @@ import { TRIBE_NAME_ENV, TRIBE_SESSION_NAME_ENV } from "../launch-environment.ts
 
 const PENDING_CLI = visibleCliProjectionForMcp("pending")
 const MEMBERS_CLI = visibleCliProjectionForMcp("members")
+const FETCH_CLI = visibleCliProjectionForMcp("fetch")
 const INBOX_WAIT_CLI = visibleCliProjectionForMcp("inbox.wait")
 const REPAIR_CLI = visibleCliProjectionForMcp("repair")
 
@@ -423,6 +424,106 @@ async function cmdMembers(showAll: boolean): Promise<void> {
     process.exit(1)
   }
   await writeJsonStdout(result)
+}
+
+/** Split a comma-separated CLI option into a trimmed, non-empty list; undefined when the option is absent. */
+function parseCommaList(value: string | undefined): string[] | undefined {
+  if (value === undefined) return undefined
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+}
+
+/**
+ * `tribe-wire fetch` — the MCP fetch handler's SNAPSHOT lookups over a
+ * one-shot CLI, for scripts (27519, @cto ruling 1c688dbc).
+ *
+ * The live default read already exists as `tribe inbox` (and the MCP fetch
+ * tool); a CLI `fetch` that ran the default drain would be a SECOND verb that
+ * acknowledges the mailbox, marking rows read that no model saw (the 21757
+ * hazard). So this verb is snapshot-only: at least one of --ids/--topics/
+ * --since/--with/--from/--to is required, it never advances the cursor, and it
+ * exposes no advance/receipt knob. `log` remains the daemon-log view.
+ *
+ * A one-shot CLI socket starts under a pending-* placeholder, so the caller's
+ * session — needed to name the `with`/`from`/`to` peer — comes from the launch
+ * identity token, exactly as `tribe pending` and `tribe inbox` do. The daemon
+ * runs the canonical `handleFetch` unchanged, so the JSON printed here is the
+ * same result the MCP fetch tool returns for the same snapshot arguments.
+ */
+async function cmdFetch(opts: {
+  ids?: string
+  topics?: string
+  since?: string
+  with?: string
+  from?: string
+  to?: string
+  limit?: number
+  json?: boolean
+}): Promise<void> {
+  const params: Record<string, unknown> = {}
+  const ids = parseCommaList(opts.ids)
+  if (ids !== undefined) params.ids = ids
+  const topics = parseCommaList(opts.topics)
+  if (topics !== undefined) params.topics = topics
+  if (opts.since !== undefined) {
+    const since = Number(opts.since)
+    if (!Number.isSafeInteger(since) || since < 0) {
+      console.error(`tribe fetch: bad --since '${opts.since}' (expected a non-negative integer row id)`)
+      process.exit(2)
+    }
+    params.since = since
+  }
+  if (opts.with !== undefined) params.with = opts.with
+  if (opts.from !== undefined) params.from = opts.from
+  if (opts.to !== undefined) params.to = opts.to
+  // At least one snapshot selector; `--limit` only bounds a window, so it does
+  // not count. A selector-less call is refused HERE and in the daemon RPC's own
+  // contract, and the refusal names the verb that owns the live read.
+  const hasSelector =
+    ids !== undefined ||
+    topics !== undefined ||
+    opts.since !== undefined ||
+    opts.with !== undefined ||
+    opts.from !== undefined ||
+    opts.to !== undefined
+  if (!hasSelector) {
+    console.error(
+      "tribe fetch: snapshot lookups require at least one selector (--ids, --topics, --since, --with, --from, --to). " +
+        "The live read is `tribe inbox`; `tribe log` is the daemon log.",
+    )
+    process.exit(2)
+  }
+  if (opts.limit !== undefined) params.limit = opts.limit
+  const idToken = readIdentityTokenFromEnvironment(process.env)
+  if (idToken !== null) params.idToken = idToken
+
+  let raw: unknown
+  try {
+    raw = await callDaemon("cli_session_fetch_read_v1", params)
+  } catch (error) {
+    console.error(`tribe fetch: ${error instanceof Error ? error.message : String(error)}`)
+    process.exitCode = 2
+    return
+  }
+  const payload = mcpJsonContent(raw)
+  if (payload === null || typeof payload !== "object") {
+    console.error(
+      "tribe fetch: daemon returned no fetch result. Run 'tribe doctor' to compare the running daemon with this checkout before retrying.",
+    )
+    process.exitCode = 2
+    return
+  }
+  // A daemon refusal (including the tokenless one) is a SUCCESSFUL response
+  // carrying `error`, not a thrown RPC fault; without this it would print as a
+  // well-formed empty read.
+  if (typeof (payload as { error?: unknown }).error === "string") {
+    console.error(`tribe fetch: ${(payload as { error: string }).error}`)
+    process.exitCode = 2
+    return
+  }
+  await writeJsonStdout(payload)
 }
 
 function fmtMsg(m: Msg): void {
@@ -2200,11 +2301,45 @@ export function registerReadCommands(program: Command): void {
     .action((opts: { all?: boolean }) => void cmdSessions(!!opts.all))
 
   const membersAll = cliOption(MEMBERS_CLI, "all")
+  const membersJson = cliOption(MEMBERS_CLI, "json")
   program
     .command(MEMBERS_CLI.name)
     .description(MEMBERS_CLI.description)
     .option(membersAll.flags, membersAll.description)
+    .option(membersJson.flags, membersJson.description)
     .action((opts: { all?: boolean }) => cmdMembers(!!opts.all))
+
+  const fetchIds = cliOption(FETCH_CLI, "ids")
+  const fetchTopics = cliOption(FETCH_CLI, "topics")
+  const fetchSince = cliOption(FETCH_CLI, "since")
+  const fetchWith = cliOption(FETCH_CLI, "with")
+  const fetchFrom = cliOption(FETCH_CLI, "from")
+  const fetchTo = cliOption(FETCH_CLI, "to")
+  const fetchLimit = cliOption(FETCH_CLI, "limit")
+  const fetchJson = cliOption(FETCH_CLI, "json")
+  program
+    .command(FETCH_CLI.name)
+    .description(FETCH_CLI.description)
+    .option(fetchIds.flags, fetchIds.description)
+    .option(fetchTopics.flags, fetchTopics.description)
+    .option(fetchSince.flags, fetchSince.description)
+    .option(fetchWith.flags, fetchWith.description)
+    .option(fetchFrom.flags, fetchFrom.description)
+    .option(fetchTo.flags, fetchTo.description)
+    .option(fetchLimit.flags, fetchLimit.description, int)
+    .option(fetchJson.flags, fetchJson.description)
+    .action(
+      async (opts: {
+        ids?: string
+        topics?: string
+        since?: string
+        with?: string
+        from?: string
+        to?: string
+        limit?: number
+        json?: boolean
+      }) => cmdFetch(opts),
+    )
 
   const pendingOwner = cliOption(PENDING_CLI, "owner")
   const pendingAll = cliOption(PENDING_CLI, "all")

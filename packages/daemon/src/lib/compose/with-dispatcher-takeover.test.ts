@@ -2724,6 +2724,96 @@ describe("one-shot session authority by identity token (25074 3b)", () => {
     expect(row?.mailbox_read_capability).toMatchObject({ state: "available", reason: "self-mailbox-authority-token" })
   })
 
+  // 27519 (@cto 1c688dbc) — `tribe fetch` is the MCP fetch handler's SNAPSHOT
+  // lookups behind a one-shot CLI. The token resolves the caller's session; the
+  // boundary forbids identity self-assertion, refuses the selector-less default
+  // drain (the live read is `tribe inbox`), refuses advance, and never moves the
+  // mailbox cursor.
+  it("a verified seat runs read-only snapshot lookups, and the RPC refuses identity, default, and advance", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-fetch-seat")
+    parseResult<RegisterResult>(
+      await harness.register("conn-fetch-seat", {
+        name: "@dev/7",
+        pid: 4701,
+        project: "/tmp/p",
+        launchParentPid: 4700,
+        idToken: "token-dev7",
+      }),
+    )
+    const cursor = (): number =>
+      (
+        harness.db.prepare("SELECT last_inbox_pull_seq FROM sessions WHERE name = '@dev/7'").get() as {
+          last_inbox_pull_seq: number
+        } | null
+      )?.last_inbox_pull_seq ?? 0
+
+    const before = cursor()
+    const fetched = parseResult<{ content: Array<{ text: string }> }>(
+      await harness.request("cli_session_fetch_read_v1", { authority: null, idToken: "token-dev7", since: 0 }),
+    )
+    const payload = JSON.parse(fetched.content[0]!.text) as { events?: unknown[]; cursor?: number }
+    expect(Array.isArray(payload.events)).toBe(true)
+    expect(typeof payload.cursor).toBe("number")
+    expect(cursor()).toBe(before)
+
+    // Condition 1 (@cto 1c688dbc): a topics-only read is the one snapshot
+    // selector whose read-only behaviour lives in the DEFAULT branch
+    // (topicsAreSnapshot builds no attention projection and leaves
+    // shouldAdvance false). Assert BOTH cursors stay put and no attention is
+    // returned, so a topics scan can never be mistaken for checking the inbox.
+    const mailboxCursor = (): number =>
+      (
+        harness.db.prepare("SELECT last_actionable_seq FROM mailbox_cursors WHERE recipient = '@dev/7'").get() as {
+          last_actionable_seq: number
+        } | null
+      )?.last_actionable_seq ?? 0
+    const mailboxBefore = mailboxCursor()
+    const ambientBefore = cursor()
+    const topicsRead = parseResult<{ content: Array<{ text: string }> }>(
+      await harness.request("cli_session_fetch_read_v1", {
+        authority: null,
+        idToken: "token-dev7",
+        topics: ["github:*"],
+      }),
+    )
+    const topicsPayload = JSON.parse(topicsRead.content[0]!.text) as { attention?: unknown; events?: unknown[] }
+    expect(topicsPayload.attention).toBeUndefined()
+    expect(Array.isArray(topicsPayload.events)).toBe(true)
+    expect(mailboxCursor()).toBe(mailboxBefore)
+    expect(cursor()).toBe(ambientBefore)
+
+    // The default drain is refused by name, not run against a placeholder.
+    expect(
+      parseError(await harness.request("cli_session_fetch_read_v1", { authority: null, idToken: "token-dev7" })),
+    ).toMatchObject({ code: -32602, message: expect.stringContaining("snapshot selector") })
+
+    // No cursor-moving or acknowledgement knob crosses the RPC boundary.
+    expect(
+      parseError(
+        await harness.request("cli_session_fetch_read_v1", {
+          authority: null,
+          idToken: "token-dev7",
+          since: 0,
+          advance: true,
+        }),
+      ),
+    ).toMatchObject({ code: -32602, message: expect.stringContaining("snapshot-only") })
+
+    // Identity self-assertion cannot pick another seat's mailbox.
+    expect(
+      parseError(
+        await harness.request("cli_session_fetch_read_v1", {
+          authority: null,
+          idToken: "token-dev7",
+          with: "@dev/8",
+          session: "@dev/8",
+        }),
+      ),
+    ).toMatchObject({ code: -32602, message: expect.stringContaining("identity and owner overrides are forbidden") })
+  })
+
   it("refuses a verified token no session registered under, and a contradicted token", async () => {
     const harness = createDispatcherHarness({ identityVerifier })
     cleanup = harness.dispose
