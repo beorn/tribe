@@ -2724,6 +2724,70 @@ describe("one-shot session authority by identity token (25074 3b)", () => {
     expect(row?.mailbox_read_capability).toMatchObject({ state: "available", reason: "self-mailbox-authority-token" })
   })
 
+  // 27519 (@cto 1c688dbc) — `tribe fetch` is the MCP fetch handler's SNAPSHOT
+  // lookups behind a one-shot CLI. The token resolves the caller's session; the
+  // boundary forbids identity self-assertion, refuses the selector-less default
+  // drain (the live read is `tribe inbox`), refuses advance, and never moves the
+  // mailbox cursor.
+  it("a verified seat runs read-only snapshot lookups, and the RPC refuses identity, default, and advance", async () => {
+    const harness = createDispatcherHarness({ identityVerifier })
+    cleanup = harness.dispose
+    harness.addPendingClient("conn-fetch-seat")
+    parseResult<RegisterResult>(
+      await harness.register("conn-fetch-seat", {
+        name: "@dev/7",
+        pid: 4701,
+        project: "/tmp/p",
+        launchParentPid: 4700,
+        idToken: "token-dev7",
+      }),
+    )
+    const cursor = (): number =>
+      (
+        harness.db.prepare("SELECT last_inbox_pull_seq FROM sessions WHERE name = '@dev/7'").get() as {
+          last_inbox_pull_seq: number
+        } | null
+      )?.last_inbox_pull_seq ?? 0
+
+    const before = cursor()
+    const fetched = parseResult<{ content: Array<{ text: string }> }>(
+      await harness.request("cli_session_fetch_read_v1", { authority: null, idToken: "token-dev7", since: 0 }),
+    )
+    const payload = JSON.parse(fetched.content[0]!.text) as { events?: unknown[]; cursor?: number }
+    expect(Array.isArray(payload.events)).toBe(true)
+    expect(typeof payload.cursor).toBe("number")
+    expect(cursor()).toBe(before)
+
+    // The default drain is refused by name, not run against a placeholder.
+    expect(
+      parseError(await harness.request("cli_session_fetch_read_v1", { authority: null, idToken: "token-dev7" })),
+    ).toMatchObject({ code: -32602, message: expect.stringContaining("snapshot selector") })
+
+    // No cursor-moving or acknowledgement knob crosses the RPC boundary.
+    expect(
+      parseError(
+        await harness.request("cli_session_fetch_read_v1", {
+          authority: null,
+          idToken: "token-dev7",
+          since: 0,
+          advance: true,
+        }),
+      ),
+    ).toMatchObject({ code: -32602, message: expect.stringContaining("snapshot-only") })
+
+    // Identity self-assertion cannot pick another seat's mailbox.
+    expect(
+      parseError(
+        await harness.request("cli_session_fetch_read_v1", {
+          authority: null,
+          idToken: "token-dev7",
+          with: "@dev/8",
+          session: "@dev/8",
+        }),
+      ),
+    ).toMatchObject({ code: -32602, message: expect.stringContaining("identity and owner overrides are forbidden") })
+  })
+
   it("refuses a verified token no session registered under, and a contradicted token", async () => {
     const harness = createDispatcherHarness({ identityVerifier })
     cleanup = harness.dispose

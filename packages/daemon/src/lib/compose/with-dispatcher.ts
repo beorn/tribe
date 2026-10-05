@@ -416,11 +416,22 @@ export function withDispatcher<
       return typeof value === "string" && value.trim().length > 0 ? value.trim() : null
     }
 
+    type FetchReadArgs = {
+      ids?: string[]
+      topics?: string[]
+      since?: number
+      withPeer?: string
+      from?: string
+      to?: string
+      limit?: number
+    }
+
     type AuthenticatedSessionCapability =
       | { kind: "inbox-ack"; limit: unknown; peek: boolean }
       | { kind: "pending-read"; expired: boolean; owed: boolean; staleMs?: number }
       | { kind: "pending-close"; owner: string; close: string | string[] }
       | { kind: "pending-prune"; owner: string; staleMs: number }
+      | { kind: "fetch-read"; args: FetchReadArgs }
 
     type SessionAuthorityResolution =
       | { context: TribeContext }
@@ -438,6 +449,55 @@ export function withDispatcher<
         (typeof params.stale_ms !== "number" || !Number.isFinite(params.stale_ms) || params.stale_ms < 0)
       ) {
         return "Authenticated pending read filter 'stale_ms' must be a finite non-negative number"
+      }
+      return undefined
+    }
+
+    /**
+     * 27519 (@cto ruling 1c688dbc) — the authenticated fetch read is SNAPSHOT-
+     * ONLY. The live default read is `tribe inbox` / the MCP fetch tool; a
+     * selector-less CLI fetch would be a second verb that acknowledges the
+     * mailbox (the 21757 hazard — rows marked read that no model saw), and an
+     * advance would move the caller's cursor. Both are refused by the daemon's
+     * OWN contract, not only by the CLI parser, so no transport can reach the
+     * advancing branch. The canonical handleFetch then owns the semantics and
+     * returns the same `{error}` the MCP tool does, so the two cannot drift.
+     */
+    const FETCH_READ_SELECTOR_KEYS = ["ids", "topics", "since", "with", "from", "to"] as const
+
+    function invalidFetchReadFilter(params: Record<string, unknown>): string | undefined {
+      const isStringArray = (value: unknown): value is string[] =>
+        Array.isArray(value) && value.every((entry) => typeof entry === "string")
+      if (params.ids !== undefined && !isStringArray(params.ids)) {
+        return "Authenticated fetch read filter 'ids' must be an array of strings"
+      }
+      if (params.topics !== undefined && !isStringArray(params.topics)) {
+        return "Authenticated fetch read filter 'topics' must be an array of strings"
+      }
+      if (
+        params.since !== undefined &&
+        (typeof params.since !== "number" || !Number.isFinite(params.since) || params.since < 0)
+      ) {
+        return "Authenticated fetch read filter 'since' must be a finite non-negative number"
+      }
+      for (const key of ["with", "from", "to"] as const) {
+        if (params[key] !== undefined && typeof params[key] !== "string") {
+          return `Authenticated fetch read filter '${key}' must be a string`
+        }
+      }
+      if (
+        params.limit !== undefined &&
+        (typeof params.limit !== "number" || !Number.isFinite(params.limit) || params.limit <= 0)
+      ) {
+        return "Authenticated fetch read filter 'limit' must be a positive finite number"
+      }
+      for (const key of ["advance", "receipt"] as const) {
+        if (Object.prototype.hasOwnProperty.call(params, key)) {
+          return `Authenticated fetch read is snapshot-only; '${key}' is not accepted`
+        }
+      }
+      if (!FETCH_READ_SELECTOR_KEYS.some((key) => Object.prototype.hasOwnProperty.call(params, key))) {
+        return "Authenticated fetch read requires a snapshot selector (ids, topics, since, with, from, to); the live read is tribe inbox"
       }
       return undefined
     }
@@ -722,6 +782,24 @@ export function withDispatcher<
               TRIBE_COORD_METHODS.pending,
               { owner: capability.owner, prune: true, stale_ms: capability.staleMs },
               DAEMON_HANDLER_OPTS,
+              connId,
+            ),
+          }
+        case "fetch-read":
+          return {
+            result: await handleToolCall(
+              resolution.context,
+              TRIBE_COORD_METHODS.fetch,
+              {
+                ...(capability.args.ids === undefined ? {} : { ids: capability.args.ids }),
+                ...(capability.args.topics === undefined ? {} : { topics: capability.args.topics }),
+                ...(capability.args.since === undefined ? {} : { since: capability.args.since }),
+                ...(capability.args.withPeer === undefined ? {} : { with: capability.args.withPeer }),
+                ...(capability.args.from === undefined ? {} : { from: capability.args.from }),
+                ...(capability.args.to === undefined ? {} : { to: capability.args.to }),
+                ...(capability.args.limit === undefined ? {} : { limit: capability.args.limit }),
+              },
+              { ...DAEMON_HANDLER_OPTS, callerDeliveryAlive: () => callerDeliveryAlive(callerSocket) },
               connId,
             ),
           }
@@ -2753,6 +2831,48 @@ export function withDispatcher<
             const outcome = await dispatchAuthenticatedSessionCapability(
               { authority: p.authority, idToken: p.idToken },
               { kind: "pending-close", owner, close },
+              connId,
+            )
+            if (!("result" in outcome)) {
+              return makeError(id, outcome.errorCode, outcome.errorMessage, outcome.errorData)
+            }
+            return makeResponse(id, outcome.result)
+          }
+
+          /**
+           * Authenticated current-session fetch read for a one-shot CLI (27519).
+           * The token resolves the caller's session — and therefore its cursor —
+           * then the canonical fetch handler owns attention projection, snapshot
+           * filters, and cursor advance, so the CLI and the MCP fetch tool return
+           * the same result for the same arguments. Identity and owner selectors
+           * are forbidden; a tokenless call is refused by name, never drained
+           * against a pending-* placeholder.
+           */
+          case "cli_session_fetch_read_v1": {
+            if (
+              ["session", "name", "launch_id", "launch_parent_pid", "pid", "owner"].some((key) =>
+                Object.prototype.hasOwnProperty.call(p, key),
+              )
+            ) {
+              return makeError(
+                id,
+                -32602,
+                "Fetch read derives caller identity from authority; identity and owner overrides are forbidden",
+              )
+            }
+            const invalidFilter = invalidFetchReadFilter(p)
+            if (invalidFilter !== undefined) return makeError(id, -32602, invalidFilter)
+            const fetchArgs: FetchReadArgs = {}
+            if (Array.isArray(p.ids)) fetchArgs.ids = p.ids as string[]
+            if (Array.isArray(p.topics)) fetchArgs.topics = p.topics as string[]
+            if (typeof p.since === "number") fetchArgs.since = p.since
+            if (typeof p.with === "string") fetchArgs.withPeer = p.with
+            if (typeof p.from === "string") fetchArgs.from = p.from
+            if (typeof p.to === "string") fetchArgs.to = p.to
+            if (typeof p.limit === "number") fetchArgs.limit = p.limit
+            const outcome = await dispatchAuthenticatedSessionCapability(
+              { authority: p.authority, idToken: p.idToken },
+              { kind: "fetch-read", args: fetchArgs },
               connId,
             )
             if (!("result" in outcome)) {

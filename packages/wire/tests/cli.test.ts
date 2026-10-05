@@ -137,6 +137,50 @@ async function runManagedPendingCliAgainst(outcomeFor: (request: OneShotRpcReque
   }
 }
 
+/** A one-shot `tribe fetch` against a mock daemon, returning the RPC calls it made (27519). */
+async function runManagedFetchCliAgainst(
+  args: string[],
+  outcomeFor: (request: OneShotRpcRequest) => OneShotRpcOutcome,
+): Promise<{
+  result: Awaited<ReturnType<typeof runCliAsync>>
+  calls: Array<{ method: string; params?: Record<string, unknown> }>
+}> {
+  const dir = mkdtempSync(join(tmpdir(), "tribe-wire-fetch-response-"))
+  const socketPath = join(dir, "tribe.sock")
+  const calls: Array<{ method: string; params?: Record<string, unknown> }> = []
+  const server = createServer((socket) => {
+    let buffer = ""
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8")
+      const newline = buffer.indexOf("\n")
+      if (newline < 0) return
+      const request = JSON.parse(buffer.slice(0, newline)) as OneShotRpcRequest
+      calls.push({ method: request.method, params: request.params })
+      socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, ...outcomeFor(request) })}\n`)
+    })
+  })
+
+  try {
+    await new Promise<void>((resolveListen, rejectListen) => {
+      server.once("error", rejectListen)
+      server.listen(socketPath, () => {
+        server.off("error", rejectListen)
+        resolveListen()
+      })
+    })
+    const result = await runCliAsync(args, {
+      ...process.env,
+      TRIBE_SOCKET: socketPath,
+      TRIBE_NO_AUTOSTART: "1",
+      HAB_ID_TOKEN: MANAGED_PENDING_TOKEN,
+    })
+    return { result, calls }
+  } finally {
+    await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 async function waitForSocket(socketPath: string, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -503,6 +547,108 @@ describe("tribe-wire CLI — Commander dispatcher", () => {
         "with this checkout before retrying.\n",
     })
     expect(calls).toEqual([{ method: "cli_session_pending_read_v1", params: { idToken: MANAGED_PENDING_TOKEN } }])
+  })
+
+  // 27519 — `tribe fetch` is the MCP fetch handler over a one-shot CLI: the
+  // token resolves the caller's session/cursor, and the printed JSON is the
+  // same payload the MCP tool returns.
+  it("fetch drains the token-resolved session through the canonical handler and prints the MCP JSON", async () => {
+    const payload = {
+      attention: {
+        actionable_unread: [],
+        pending_balls: [],
+        pending_balls_summary: { total: 0, oldest_age_ms: 0, truncated: false },
+      },
+      events: [{ id: "m1", type: "notify", from: "@chief", to: "@dev/2", content: "hi" }],
+      cursor: 42,
+    }
+    const { result, calls } = await runManagedFetchCliAgainst(
+      ["fetch", "--json", "--with", "@chief", "--limit", "10"],
+      () => ({
+        result: { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload },
+      }),
+    )
+
+    expect(result).toEqual({ code: 0, signal: null, stdout: `${JSON.stringify(payload)}\n`, stderr: "" })
+    expect(calls).toEqual([
+      { method: "cli_session_fetch_read_v1", params: { idToken: MANAGED_PENDING_TOKEN, with: "@chief", limit: 10 } },
+    ])
+  })
+
+  it("fetch forwards snapshot filters and csv lists, and never sends advance or receipt", async () => {
+    const empty = { events: [], cursor: 0 }
+    const { result, calls } = await runManagedFetchCliAgainst(
+      [
+        "fetch",
+        "--ids",
+        "a,b",
+        "--topics",
+        "github:*,git:commit",
+        "--since",
+        "42",
+        "--from",
+        "@dev/1",
+        "--to",
+        "@dev/2",
+      ],
+      () => ({ result: { content: [{ type: "text", text: JSON.stringify(empty) }], structuredContent: empty } }),
+    )
+
+    expect(result).toMatchObject({ code: 0, stderr: "" })
+    expect(calls).toEqual([
+      {
+        method: "cli_session_fetch_read_v1",
+        params: {
+          idToken: MANAGED_PENDING_TOKEN,
+          ids: ["a", "b"],
+          topics: ["github:*", "git:commit"],
+          since: 42,
+          from: "@dev/1",
+          to: "@dev/2",
+        },
+      },
+    ])
+  })
+
+  it("fetch refuses a selector-less call before connecting, naming tribe inbox", async () => {
+    const { result, calls } = await runManagedFetchCliAgainst(["fetch", "--limit", "10", "--json"], () => ({
+      result: { content: [{ type: "text", text: JSON.stringify({ events: [], cursor: 0 }) }] },
+    }))
+
+    expect(result).toEqual({
+      code: 2,
+      signal: null,
+      stdout: "",
+      stderr:
+        "tribe fetch: snapshot lookups require at least one selector (--ids, --topics, --since, --with, --from, --to). " +
+        "The live read is `tribe inbox`; `tribe log` is the daemon log.\n",
+    })
+    expect(calls).toEqual([])
+  })
+
+  it("fetch surfaces the daemon's typed refusal with exit 2 instead of an empty read", async () => {
+    const { result } = await runManagedFetchCliAgainst(["fetch", "--json", "--since", "0"], () => ({
+      result: {
+        content: [{ type: "text", text: JSON.stringify({ error: "topics must be an array of strings." }) }],
+        structuredContent: { error: "topics must be an array of strings." },
+      },
+    }))
+
+    expect(result).toEqual({
+      code: 2,
+      signal: null,
+      stdout: "",
+      stderr: "tribe fetch: topics must be an array of strings.\n",
+    })
+  })
+
+  it("members accepts --json for scripts and still emits the JSON rows", async () => {
+    const snapshot = { sessions: [{ id: "member-1", name: "@agent/1", launch_id: "launch-1" }] }
+    const { result } = await runManagedFetchCliAgainst(["members", "--json"], () => ({
+      result: { content: [{ type: "text", text: JSON.stringify(snapshot) }], structuredContent: snapshot },
+    }))
+
+    expect(result).toEqual({ code: 0, signal: null, stdout: `${JSON.stringify(snapshot)}\n`, stderr: "" })
   })
 
   it("pending --all renders every owner and --json preserves the typed snapshot", async () => {
