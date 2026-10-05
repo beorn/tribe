@@ -39,7 +39,7 @@ import {
 } from "./lib/socket.ts"
 import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
 import { createReconnectWatchdog } from "./lib/reconnect-watchdog.ts"
-import { resolveCheckoutCodeIdentity } from "./lib/code-identity.ts"
+import { parseDaemonCodeView, resolveCheckoutCodeIdentity } from "./lib/code-identity.ts"
 import { pacedReexec, type ReloadDaemonView, type ReloadPeers } from "./lib/reload-pacing.ts"
 import { createHash } from "node:crypto"
 import { constants as osConstants } from "node:os"
@@ -616,23 +616,23 @@ function parseReloadPeers(raw: unknown): ReloadPeers | null {
   }
 }
 
-/** The daemon view a paced reload reads: the peers for this adapter's rank, and the code the daemon runs. */
+/** The daemon view a paced reload reads: the peers for this adapter's rank, and the code (root, cert) the daemon runs. */
 async function readReloadDaemonView(): Promise<ReloadDaemonView> {
   const probe = await connectToDaemon(SOCKET_PATH, { callTimeoutMs: 1_000 })
   try {
     const status = (await probe.call("cli_status")) as {
       sessions?: Array<{ name?: unknown }>
       reload_peers?: unknown
-      daemon?: { code_identity?: { cert?: unknown } }
     }
     const liveNames = (status.sessions ?? []).flatMap((session) =>
       typeof session.name === "string" ? [session.name] : [],
     )
-    const cert = status.daemon?.code_identity?.cert
+    const code = parseDaemonCodeView(status)
     return {
       liveNames,
       peers: parseReloadPeers(status.reload_peers),
-      runningCert: typeof cert === "string" ? cert : null,
+      runningCert: code.cert,
+      runningRoot: code.root,
     }
   } finally {
     probe.close()

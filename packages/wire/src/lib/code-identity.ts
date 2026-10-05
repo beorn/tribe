@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process"
 import { dirname, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+import { connectToDaemon } from "./socket.ts"
 
 /** 27531 — the one place each process kind's source-root depth is spelled. The
  *  depth is the shape of the checkout: `<root>/packages/wire/src`,
@@ -24,6 +25,63 @@ export function sourceRootFromWireModule(fileUrl: string): string {
 /** The tribe root enclosing `plugins/claude/server.ts` (the plugin entry). */
 export function sourceRootFromPluginEntry(fileUrl: string): string {
   return sourceRootFrom(fileUrl, PLUGIN_ENTRY_SOURCE_ROOT_DEPTH)
+}
+
+/** cli_status `daemon.code_identity`: the landing root the daemon runs from and the commit it runs. */
+export interface DaemonCodeView {
+  /** The landing root the daemon runs from, or null from a daemon that publishes none. */
+  readonly root: string | null
+  /** The commit the daemon runs, or null from a daemon that publishes none. */
+  readonly cert: string | null
+}
+
+/** The bound on one cli_status read of the daemon's code view (27531). */
+export const DAEMON_CODE_VIEW_CALL_TIMEOUT_MS = 1_000
+
+function identityField(identity: Record<string, unknown>, field: "root" | "cert"): string | null {
+  const value = identity[field]
+  if (value === undefined || value === null) return null
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(
+      `cli_status daemon.code_identity.${field} is present but not a non-empty string (${typeof value}); ` +
+        "that is a broken daemon, not a legacy one",
+    )
+  }
+  return value
+}
+
+/**
+ * The daemon's published code identity. A daemon that publishes no
+ * `code_identity`, or only one half of it, predates or omits the field: that is
+ * two named nulls, never a guessed root. A present-but-malformed field throws,
+ * so no caller can read a partial identity as agreement.
+ */
+export function parseDaemonCodeView(status: unknown): DaemonCodeView {
+  if (typeof status !== "object" || status === null) {
+    throw new Error(`cli_status is not an object (${typeof status}); daemon.code_identity cannot be read`)
+  }
+  const identity = (status as { daemon?: { code_identity?: unknown } }).daemon?.code_identity
+  if (identity === undefined || identity === null) return { root: null, cert: null }
+  if (typeof identity !== "object") {
+    throw new Error(`cli_status daemon.code_identity is not an object (${typeof identity})`)
+  }
+  const record = identity as Record<string, unknown>
+  return { root: identityField(record, "root"), cert: identityField(record, "cert") }
+}
+
+/** One bounded read of the daemon's code view, over one connection it closes. */
+export async function readDaemonCodeView(
+  socketPath: string,
+  opts: { readonly callTimeoutMs?: number } = {},
+): Promise<DaemonCodeView> {
+  const probe = await connectToDaemon(socketPath, {
+    callTimeoutMs: opts.callTimeoutMs ?? DAEMON_CODE_VIEW_CALL_TIMEOUT_MS,
+  })
+  try {
+    return parseDaemonCodeView(await probe.call("cli_status"))
+  } finally {
+    probe.close()
+  }
 }
 
 export type GitProbe =

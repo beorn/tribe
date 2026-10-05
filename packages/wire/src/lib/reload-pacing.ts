@@ -123,6 +123,8 @@ export interface ReloadDaemonView {
   readonly peers: ReloadPeers | null
   /** cli_status `daemon.code_identity.cert`: the commit the daemon is running, or null when it reports none. */
   readonly runningCert: string | null
+  /** cli_status `daemon.code_identity.root`: the landing root the daemon runs from, or null when it reports none. */
+  readonly runningRoot: string | null
 }
 
 export interface PacedReexecDeps {

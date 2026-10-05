@@ -193,6 +193,7 @@ describe("pacedReexec", () => {
     liveNames: declared,
     peers: { declared, liveUndeclared: [] },
     runningCert,
+    runningRoot: runningCert === null ? null : "/landing",
   })
   function harness(views: Array<ReloadDaemonView | Error | "hang">, onDisk: string | null = "abc") {
     let now = 0
@@ -257,7 +258,7 @@ describe("pacedReexec", () => {
   })
 
   test("a daemon older than reload_peers ranks on sessions[].name and says so", async () => {
-    const run = harness([{ liveNames: ["@chief", "@dev/3"], peers: null, runningCert: "abc" }])
+    const run = harness([{ liveNames: ["@chief", "@dev/3"], peers: null, runningCert: "abc", runningRoot: "/landing" }])
     await pacedReexec(run.deps, "x")
     expect(run.sleeps[0]).toBe(RELOAD_SLOT_MS)
     expect(run.log[0]).toMatch(/cli_status carries no reload_peers .*; ranking on sessions\[\]\.name/u)
@@ -265,7 +266,7 @@ describe("pacedReexec", () => {
 
   test("a daemon with no declared roster ranks on the live adapters and says so", async () => {
     const run = harness([
-      { liveNames: ["@dev/3"], peers: { declared: [], liveUndeclared: ["@dev/3"] }, runningCert: "abc" },
+      { liveNames: ["@dev/3"], peers: { declared: [], liveUndeclared: ["@dev/3"] }, runningCert: "abc", runningRoot: "/landing" },
     ])
     await pacedReexec(run.deps, "x")
     expect(run.log[0]).toMatch(/the daemon has no declared roster; ranking on the live adapters alone/u)
@@ -273,7 +274,7 @@ describe("pacedReexec", () => {
 
   test("an undeclared adapter ranks after the roster and says an unseen one can share its slot", async () => {
     const run = harness([
-      { liveNames: ["@dev/3"], peers: { declared: ["@chief"], liveUndeclared: ["@dev/3"] }, runningCert: "abc" },
+      { liveNames: ["@dev/3"], peers: { declared: ["@chief"], liveUndeclared: ["@dev/3"] }, runningCert: "abc", runningRoot: "/landing" },
     ])
     await pacedReexec(run.deps, "x")
     expect(run.sleeps[0]).toBe(RELOAD_SLOT_MS)
@@ -307,7 +308,7 @@ describe("pacedReexec", () => {
 
   test("only an undeclared adapter past a full roster shares the last slot, and says so", async () => {
     const run = harness([
-      { liveNames: ["@grok/1"], peers: { declared: roster(28), liveUndeclared: ["@grok/1"] }, runningCert: "abc" },
+      { liveNames: ["@grok/1"], peers: { declared: roster(28), liveUndeclared: ["@grok/1"] }, runningCert: "abc", runningRoot: "/landing" },
     ])
     await pacedReexec({ ...run.deps, self: "@grok/1" }, "x")
     expect(run.sleeps[0]).toBe(27 * RELOAD_SLOT_MS)
