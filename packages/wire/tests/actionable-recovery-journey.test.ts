@@ -1038,12 +1038,15 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     })
     expect(foreignRead.exitCode, foreignRead.stderr).toBe(0)
     const foreignReadJson = JSON.parse(foreignRead.stdout) as {
-      attention?: { actionable_unread?: Array<{ content: string }> }
-      events?: Array<{ content: string }>
+      attention?: { actionable_unread?: Array<{ id?: string; content: string }> }
+      events?: Array<{ id?: string; content: string }>
     }
-    // 27488 must-hold A — an actionable body is carried by
-    // attention.actionable_unread and is not repeated in events.
+    // 27488 must-hold A — the delivered view is the UNION of attention and
+    // events, each body once: an actionable body is carried by
+    // attention.actionable_unread and is never repeated in events.
     const foreignRows = [...(foreignReadJson.attention?.actionable_unread ?? []), ...(foreignReadJson.events ?? [])]
+    const foreignIds = foreignRows.map((event) => event.id).filter((id): id is string => id !== undefined)
+    expect(new Set(foreignIds).size).toBe(foreignIds.length)
     expect(foreignRows.some((event) => event.content === "foreign launch request")).toBe(true)
     expect(foreignRows.some((event) => event.content === "own launch request")).toBe(false)
     const postForeignObserver = await connectToDaemon(socketPath)
@@ -1057,11 +1060,15 @@ describe("19442 actionable-recovery journey (real daemon + real adapter)", () =>
     expect(drainRun.exitCode, drainRun.stderr).toBe(0)
 
     const drained = JSON.parse(drainRun.stdout) as {
-      attention: { actionable_unread: Array<{ content: string }> }
-      events: Array<{ content: string }>
+      attention: { actionable_unread: Array<{ id?: string; content: string }> }
+      events: Array<{ id?: string; content: string }>
     }
     expect(drained.attention.actionable_unread).toEqual([expect.objectContaining({ content: "own launch request" })])
-    // 27488 must-hold A — the body appears once: in attention, not repeated in events.
+    // 27488 must-hold A — the body appears once over attention ∪ events.
+    const drainedIds = [...drained.attention.actionable_unread, ...drained.events]
+      .map((event) => event.id)
+      .filter((id): id is string => id !== undefined)
+    expect(new Set(drainedIds).size).toBe(drainedIds.length)
     expect(drained.events.some((event) => event.content === "own launch request")).toBe(false)
     expect(drained.events.some((event) => event.content === "foreign launch request")).toBe(false)
 

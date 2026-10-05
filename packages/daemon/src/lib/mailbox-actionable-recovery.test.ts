@@ -167,10 +167,24 @@ function insertAmbientFlood(stmts: TribeStatements, ts: number): void {
  * chronological page is the rest. This is the same projection `tribe inbox`
  * and the wire adapter already render (attention first, then events minus the
  * attention ids).
+ *
+ * 27488 must-hold A states the lossless contract over the UNION: attention ∪
+ * events carries every actionable exactly once. Assembling the union here is
+ * not the assertion — every read through this helper asserts the no-duplicate
+ * half, so a regression that puts a body back into both lists fails here
+ * rather than passing silently on a moved expectation.
  */
+function deliveredRows(out: FetchJson): FetchEvent[] {
+  const attention = out.attention?.actionable_unread ?? []
+  const events = out.events ?? []
+  const ids = [...attention, ...events].map((row) => row.id)
+  expect(new Set(ids).size, `one body per read — an id is in both lists: ${ids.join(", ")}`).toBe(ids.length)
+  return [...attention, ...events]
+}
+
 function fetchDeliveredRows(ctx: TribeContext, opts: HandlerOpts, args: Record<string, unknown> = {}): FetchEvent[] {
   const out = parseToolJson(handleToolCall(ctx, "tribe.fetch", { limit: 50, ...args }, opts)) as FetchJson
-  return [...(out.attention?.actionable_unread ?? []), ...(out.events ?? [])]
+  return deliveredRows(out)
 }
 
 function fetchJson(
@@ -1055,7 +1069,41 @@ describe("19442 mailbox-cursor actionable recovery", () => {
     expect(fetchDeliveredRows(b, opts).map((e) => e.id)).toEqual(["old-request"])
   })
 
-  it("a bounded page read stays lossless because attention returns every actionable before acknowledgement (27488 must-hold A)", () => {
+  it("a bounded page is lossless over attention ∪ events, each id exactly once (27488 must-hold A)", () => {
+    const a = connectAs("sess-a", NAME)
+    disconnect("sess-a")
+    void a
+    const rowid: Record<string, number> = {}
+    for (const [i, id] of ["p1", "p2", "p3"].entries()) {
+      rowid[id] = insertRow(stmts, {
+        id,
+        type: "request",
+        sender: "@chief",
+        recipient: NAME,
+        kind: "direct",
+        content: `pending ${id}`,
+        ts: now - 60_000 + i,
+      })
+    }
+    const b = connectAs("sess-b", NAME)
+    const first = fetchJson(b, opts, { limit: 2 })
+    // 27488 must-hold A — the lossless contract is over the UNION. The page
+    // limit (2) bounds the chronological window, never what the read delivers:
+    // p3 rides attention so nothing is lost to the bound, and no id is in both
+    // lists (deliveredRows asserts the no-duplicate half).
+    const page = deliveredRows(first.json)
+    expect(page.map((event) => event.id).sort()).toEqual(["p1", "p2", "p3"])
+    // The chronological window really was bounded — p3 is carried by attention,
+    // not repeated as an event.
+    expect(first.json.events?.map((event) => event.id)).toEqual([])
+    expect(first.json.attention?.actionable_unread?.map((event) => event.id)).toEqual(["p1", "p2", "p3"])
+    // The cursor covers the bounded page (p1..p2). The acknowledging drain
+    // consumes all three, so the next default read replays nothing.
+    expect(first.json.cursor).toBeGreaterThanOrEqual(rowid.p2!)
+    expect(fetchDeliveredRows(b, opts)).toEqual([])
+  })
+
+  it("a wake-up drain is not an acknowledgement: the model's own read still carries p3, once (27488/21757)", () => {
     const a = connectAs("sess-a", NAME)
     disconnect("sess-a")
     void a
@@ -1071,14 +1119,20 @@ describe("19442 mailbox-cursor actionable recovery", () => {
       })
     }
     const b = connectAs("sess-b", NAME)
-    const first = fetchJson(b, opts, { limit: 2 }).json
-    // 27488 must-hold A — a body appears once per read: the bounded page rows
-    // are carried by attention, never repeated in events.
-    expect(first.events?.map((event) => event.id)).toEqual([])
-    // Lossless: the page limit (2) no longer bounds what the read surfaces —
-    // attention returns every actionable before acknowledgement.
-    expect(first.attention?.actionable_unread?.map((event) => event.id)).toEqual(["p1", "p2", "p3"])
-    expect(fetchDeliveredRows(b, opts)).toEqual([])
+    // 21757 — the adapter's wake-up drain (receipt:false) surfaces each body
+    // once (p3 included) but acknowledges nothing.
+    const wake = fetchJson(b, opts, { limit: 2, receipt: false }).json
+    expect(
+      deliveredRows(wake)
+        .map((event) => event.id)
+        .sort(),
+    ).toEqual(["p1", "p2", "p3"])
+    // ...so the model's own next read carries the still-unacknowledged p3, once
+    // (attention), never duplicated into events.
+    const own = fetchJson(b, opts, { limit: 50 }).json
+    const ownIds = deliveredRows(own).map((event) => event.id)
+    expect(ownIds).toContain("p3")
+    expect(ownIds.sort()).toEqual(["p1", "p2", "p3"])
   })
 
   it("advance:false returns recovered actionables WITHOUT acknowledging them", () => {
