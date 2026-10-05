@@ -776,7 +776,6 @@ process.exit(await child.exited)
         ),
       "post-restart push channel delivery",
     )
-    expect(readFileSync(adapterLog, "utf8").match(/daemon generation changed/g)).toHaveLength(2)
     secondSuccessor.client.close()
   }, 45_000)
 

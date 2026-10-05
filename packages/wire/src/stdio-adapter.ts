@@ -690,9 +690,13 @@ function requestPacedReexec(reason: string, supervisedExitCode: () => number | n
       },
     },
     reason,
-  ).catch((error: unknown) =>
-    requestPluginReexec(`${reason}; paced re-exec failed: ${errorMessage(error)}`, supervisedExitCode()),
   )
+    .catch((error: unknown) =>
+      requestPluginReexec(`${reason}; paced re-exec failed: ${errorMessage(error)}`, supervisedExitCode()),
+    )
+    .finally(() => {
+      pacedReexecPending = false
+    })
 }
 
 const reconnectWatchdog = createReconnectWatchdog({
