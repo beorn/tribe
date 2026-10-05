@@ -276,6 +276,8 @@ describe("the ambient names tribe reads", () => {
     union.delete("AG_SESSION_AUTH")
     // 25074 3d-1: the launch token tribe presents and now reads its launch from, which no replaced list carried.
     union.add("HAB_ID_TOKEN")
+    // 27314 B1: the token travels as a 0600 file now, so a disposable fixture must not inherit its path either.
+    union.add("HAB_ID_TOKEN_FILE")
     const names = tribeAmbientEnvironmentNames()
     expect(new Set(names).size).toBe(names.length)
     expect([...names].sort()).toEqual([...union].sort())

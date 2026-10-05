@@ -1,4 +1,5 @@
 import { writeFileSync } from "node:fs"
+import { join } from "node:path"
 
 /**
  * A test process's launch identity (25074 3d-1). Tribe's managed CLI and a launch-named adapter read their launch from
@@ -40,4 +41,14 @@ export async function verifyIdentity(token) {
 }
 `,
   )
+}
+
+/**
+ * The FILE half of a test launch identity (27314 B1): the same token `launchToken` mints, written 0600 and handed by
+ * PATH, so a fixture can exercise the `_FILE` reader a producer will emit after the cutover.
+ */
+export function launchTokenFile(dir: string, launchId: string, actor = "test-seat"): { HAB_ID_TOKEN_FILE: string } {
+  const path = join(dir, `hab-id-token-${launchId}`)
+  writeFileSync(path, `${launchToken(launchId, actor)}\n`, { mode: 0o600 })
+  return { HAB_ID_TOKEN_FILE: path }
 }

@@ -52,6 +52,7 @@
     "./lib/code-identity": "./src/lib/code-identity.ts",
     "./lib/reload-pacing": "./src/lib/reload-pacing.ts",
     "./lib/identity-token": "./src/lib/identity-token.ts",
+    "./lib/credential-file": "./src/lib/credential-file.ts",
     "./lib/hab-session-env": "./src/lib/hab-session-env.ts",
     "./lib/session-identity-env": "./src/lib/session-identity-env.ts",
     "./lib/ag-host-env": "./src/lib/ag-host-env.ts",

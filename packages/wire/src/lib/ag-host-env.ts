@@ -41,6 +41,12 @@ export const AG_HOST_RESUME_TOKEN_ENV = "AG_HOST_RESUME_TOKEN"
 /** Neutral host-projected identity shared by exit evidence and reload transport. */
 export const AG_HOST_RUNTIME_KEY_ENV = "AG_HOST_RUNTIME_KEY"
 
+/**
+ * The PATH of the 0600 file holding {@link AG_HOST_RUNTIME_KEY_ENV} (27314 B1). The name lives here so every reader
+ * (tribe's plugin included) sees one definition; only the READER lives in @ag/harness, the key's owner.
+ */
+export const AG_HOST_RUNTIME_KEY_FILE_ENV = "AG_HOST_RUNTIME_KEY_FILE"
+
 /** Optional opaque host surface reference used only in diagnostic artifacts. */
 export const AG_HOST_SURFACE_REF_ENV = "AG_HOST_SURFACE_REF"
 

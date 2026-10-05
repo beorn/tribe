@@ -1,6 +1,6 @@
 import { decorrelatedJitter, type RandomUnit } from "@bearly/pacing"
 import { isAbsolute, join } from "node:path"
-import { HAB_ID_TOKEN_ENV } from "tribe-wire/lib/hab-session-env"
+import { HAB_ID_TOKEN_ENV, HAB_ID_TOKEN_FILE_ENV } from "tribe-wire/lib/hab-session-env"
 import { TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV } from "tribe-wire/lib/session-identity-env"
 
 /** Longer than the adapter's 60s fresh-daemon reconnect watchdog. */
@@ -141,7 +141,9 @@ export function resolveProviderParentPid(
   warn: (line: string) => void,
 ): number {
   const raw = env[TRIBE_PLUGIN_PROVIDER_PARENT_PID_ENV]?.trim() ?? ""
-  const managed = (env[HAB_ID_TOKEN_ENV]?.trim() ?? "").length > 0
+  // Presence of EITHER name means a managed launch (27314 B1): after the producer cutover only the file path rides.
+  const managed =
+    (env[HAB_ID_TOKEN_ENV]?.trim() ?? "").length > 0 || (env[HAB_ID_TOKEN_FILE_ENV]?.trim() ?? "").length > 0
   if (raw.length === 0) {
     if (managed) warn(LEGACY_PARENT_WARNING)
     return self.ppid

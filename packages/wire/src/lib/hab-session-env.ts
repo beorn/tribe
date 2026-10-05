@@ -22,3 +22,9 @@ export const HAB_SESSION_DIR_ENV = "HAB_SESSION_DIR"
 export const HAB_SERVICE_NAME_ENV = "HAB_SERVICE_NAME"
 /** The launch's signed identity token (25074 3b); hab sets it per launch, so it is one of this family. */
 export const HAB_ID_TOKEN_ENV = "HAB_ID_TOKEN"
+/**
+ * The PATH of the 0600 file holding the launch's signed identity token (27314 B1). The file is per launch, under that
+ * launch's runtime directory, and lives exactly as long as the launch. Preferred over {@link HAB_ID_TOKEN_ENV}: a
+ * value in the environment reaches a session through an unfiltered dump.
+ */
+export const HAB_ID_TOKEN_FILE_ENV = "HAB_ID_TOKEN_FILE"

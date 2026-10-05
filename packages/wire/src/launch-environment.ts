@@ -4,7 +4,7 @@
  * parent hint below is still projected by a certified launch registration, so a new launch clears an inherited one.
  */
 
-import { HAB_ID_TOKEN_ENV } from "./lib/identity-token.ts"
+import { HAB_ID_TOKEN_ENV, HAB_ID_TOKEN_FILE_ENV } from "./lib/identity-token.ts"
 import {
   BD_ACTOR_ENV,
   CLAUDE_SESSION_ID_ENV,
@@ -88,5 +88,12 @@ export function tribeSessionIdentityEnvironmentNames(): readonly string[] {
  * not here; tribeAmbientEnvironmentNames adds it for fixtures.
  */
 export function launchIdentityEnvironmentNames(): readonly string[] {
-  return [...SESSION_IDENTITY_ENV, HAB_ID_TOKEN_ENV, CLAUDE_SESSION_ID_ENV, CLAUDE_SESSION_NAME_ENV, BD_ACTOR_ENV]
+  return [
+    ...SESSION_IDENTITY_ENV,
+    HAB_ID_TOKEN_ENV,
+    HAB_ID_TOKEN_FILE_ENV,
+    CLAUDE_SESSION_ID_ENV,
+    CLAUDE_SESSION_NAME_ENV,
+    BD_ACTOR_ENV,
+  ]
 }

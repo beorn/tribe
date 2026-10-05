@@ -5,15 +5,22 @@
  * a managed daemon refuses an explicit persona name, while a standalone daemon may serve it as claimed. The variable's
  * name is defined once, in the hab-session-env leaf (25074 S2c, @cto c04ba94d).
  */
-import { HAB_ID_TOKEN_ENV } from "./hab-session-env.ts"
+import { readCredentialFile } from "./credential-file.ts"
+import { HAB_ID_TOKEN_ENV, HAB_ID_TOKEN_FILE_ENV } from "./hab-session-env.ts"
 
-export { HAB_ID_TOKEN_ENV }
+export { HAB_ID_TOKEN_ENV, HAB_ID_TOKEN_FILE_ENV }
 
 export const MANAGED_INBOX_TOKEN_REQUIRED =
   `a managed inbox request requires this launch's identity token (${HAB_ID_TOKEN_ENV}), which a hab seat carries; ` +
   "use --session for an explicit operator target"
 
+/**
+ * One reader for the launch's identity token (27314 B1, @cto c13452cd): the `_FILE` path first, then — during the
+ * accept-both step — the legacy value. Every reader routes through this one function, so the cutover is one edit.
+ */
 export function readIdentityTokenFromEnvironment(env: Readonly<NodeJS.ProcessEnv>): string | null {
+  const fromFile = readCredentialFile(env[HAB_ID_TOKEN_FILE_ENV])
+  if (fromFile !== null) return fromFile
   const raw = env[HAB_ID_TOKEN_ENV]
   return raw === undefined || raw.length === 0 ? null : raw
 }
