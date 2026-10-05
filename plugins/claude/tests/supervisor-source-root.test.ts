@@ -34,6 +34,30 @@ describe("SUPERVISOR_CODE_ROOT_WINDOW_MS", () => {
     expect(codeRootWaitWindowMs({ [PLUGIN_CODE_ROOT_WINDOW_ENV]: "soon" })).toBe(SUPERVISOR_CODE_ROOT_WINDOW_MS)
     expect(codeRootWaitWindowMs({})).toBe(SUPERVISOR_CODE_ROOT_WINDOW_MS)
   })
+
+  it("a present but malformed override warns once, naming the bad value and the default (27531)", () => {
+    const lines: string[] = []
+    expect(codeRootWaitWindowMs({ [PLUGIN_CODE_ROOT_WINDOW_ENV]: "soon" }, (line) => lines.push(line))).toBe(
+      SUPERVISOR_CODE_ROOT_WINDOW_MS,
+    )
+    expect(lines).toEqual([
+      `tribe plugin supervisor: ${PLUGIN_CODE_ROOT_WINDOW_ENV}="soon" is not a positive integer; using the default ${SUPERVISOR_CODE_ROOT_WINDOW_MS} ms`,
+    ])
+    const zero: string[] = []
+    expect(codeRootWaitWindowMs({ [PLUGIN_CODE_ROOT_WINDOW_ENV]: "0" }, (line) => zero.push(line))).toBe(
+      SUPERVISOR_CODE_ROOT_WINDOW_MS,
+    )
+    expect(zero).toEqual([
+      `tribe plugin supervisor: ${PLUGIN_CODE_ROOT_WINDOW_ENV}="0" is not a positive integer; using the default ${SUPERVISOR_CODE_ROOT_WINDOW_MS} ms`,
+    ])
+  })
+
+  it("a valid override and an absent one warn nothing (27531)", () => {
+    const lines: string[] = []
+    expect(codeRootWaitWindowMs({ [PLUGIN_CODE_ROOT_WINDOW_ENV]: "300" }, (line) => lines.push(line))).toBe(300)
+    expect(codeRootWaitWindowMs({}, (line) => lines.push(line))).toBe(SUPERVISOR_CODE_ROOT_WINDOW_MS)
+    expect(lines).toEqual([])
+  })
 })
 
 describe("evaluateCodeRootWait", () => {

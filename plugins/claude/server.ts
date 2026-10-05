@@ -93,7 +93,7 @@ function processExists(pid: number): boolean {
  * only when a cold start exhausted its window.
  */
 async function resolveAdapterCodeRoot(isFirstSpawn: () => boolean): Promise<string | null> {
-  const windowMs = codeRootWaitWindowMs(process.env)
+  const windowMs = codeRootWaitWindowMs(process.env, (line) => process.stderr.write(`${line}\n`))
   const waitStartedAt = Date.now()
   let attempt = 0
   for (;;) {

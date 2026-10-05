@@ -672,7 +672,6 @@ function requestPacedReexec(reason: string, supervisedExitCode: () => number | n
         return onDisk.ok ? onDisk.value : null
       },
       selfRoot: () => ADAPTER_SOURCE_ROOT,
-      now: () => Date.now(),
       sleep: reloadDelay,
       timeout: reloadDelay,
       warn: (message) => log.warn?.(message),

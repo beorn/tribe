@@ -528,7 +528,7 @@ describe("stdio adapter — protocol version skew", () => {
     expect(child.exitCode).toBeNull()
   }, 20_000)
 
-  it("re-execs current disk code when a reconnect observes a new daemon pid", async () => {
+  it("does NOT re-exec when a reconnect observes a new daemon pid on the same landing (27531)", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
     const logPath = join(tmpDir, "generation-test.log")
     const generationDaemon = await spawnGenerationDaemon(socketPath)
@@ -562,32 +562,30 @@ describe("stdio adapter — protocol version skew", () => {
     generationDaemon.setPid(2002)
     for (const socket of generationDaemon.clients.splice(0)) socket.destroy()
 
-    // ARCHITECTURAL FINDING (@km/tribe/ci-deflake-version-skew), reported
-    // rather than guess-fixed here per this round's own scope: this is NOT
-    // "genuinely slow." Reproduced 4 times across 28 constrained runs
-    // (~14%), always identical — registrations frozen at 1/3 for the full
-    // wait, proc (PLUGIN_SERVER) alive, its stderr empty, and its DEBUG_LOG
-    // silent after the initial registration even at LOG_LEVEL=debug. A
-    // temporary production-side probe (client.ts's createReconnectingClient,
-    // reverted — never committed) confirmed setupReconnect's `close`
-    // listener attaches exactly once and never fires: the process tree at
-    // failure shows only the ORIGINAL inner adapter, never a replacement.
-    // The socket's own "close" event is the sole trigger for this client's
-    // entire reconnect path (packages/wire/src/client.ts, createReconnectingClient) —
-    // under contention it can apparently go unobserved indefinitely, not
-    // just late, leaving a live adapter that will never self-heal from a
-    // real daemon restart either. That is a self-heal-path bug, not a test
-    // budget problem; the underlying diagnosis needs someone with authority
-    // over client.ts, not a guessed patch from this test file.
+    // 27531: the daemon restarted on the SAME landing (root TRIBE_ROOT) with a
+    // different cert, so the paced gate names both sides and does NOT re-exec.
+    // The reconnect re-registers (a 2nd registration) and no replacement child
+    // appears. The self-heal-path caveat from the pre-27531 round still holds
+    // (@km/tribe/ci-deflake-version-skew, ~14% of constrained runs): setupReconnect's
+    // `close` listener is this client's sole reconnect trigger and can go
+    // unobserved under contention, so the wait below stays generous.
     await waitForRegistrations(
       child,
       () => generationDaemon.registrations.length,
-      3,
+      2,
       40_000,
-      "replacement registration",
+      "re-registration after the daemon restart",
       logPath,
     )
-    expect(generationDaemon.registrations).toEqual([1001, 2002, 2002])
+    expect(generationDaemon.registrations).toEqual([1001, 2002])
     expect(child.exitCode).toBeNull()
+    // The paced gate waits its rank slot before deciding; wait for the named
+    // decision, then prove no replacement child (a 3rd registration) appeared.
+    await waitFor(
+      () => (existsSync(logPath) ? readFileSync(logPath, "utf8") : "").includes("this adapter stays put"),
+      15_000,
+      "the paced gate's stays-put decision",
+    )
+    expect(generationDaemon.registrations).toEqual([1001, 2002])
   }, 60_000)
 })

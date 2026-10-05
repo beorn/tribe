@@ -196,6 +196,13 @@ describe("pacedReexec", () => {
     runningCert,
     runningRoot: runningCert === null ? null : "/landing",
   })
+  /** A daemon on an arbitrary landing root, for the 27531 move / no-move decision rows. */
+  const daemonOn = (declared: string[], root: string | null, cert: string | null): ReloadDaemonView => ({
+    liveNames: declared,
+    peers: { declared, liveUndeclared: [] },
+    runningCert: cert,
+    runningRoot: root,
+  })
   function harness(
     views: Array<ReloadDaemonView | Error | "hang">,
     onDisk: string | null = "abc",
@@ -225,7 +232,6 @@ describe("pacedReexec", () => {
         },
         onDiskCert: () => onDisk,
         selfRoot: () => selfRoot,
-        now: () => now,
         sleep: async (ms: number) => {
           sleeps.push(ms)
           now += ms
@@ -238,12 +244,15 @@ describe("pacedReexec", () => {
     }
   }
 
-  test("waits for its rank's slot, then for a daemon on the disk's code, then re-execs", async () => {
+  test("waits for its rank's slot, then adopts the daemon's DIFFERENT landing (27531)", async () => {
     const live = ["@chief", "@dev/2", "@dev/3"]
-    const run = harness([view(live, "abc"), view(live, "old"), view(live, "abc")])
+    const run = harness([daemonOn(live, "/hh/dev-landings/r2", "abc")])
     await pacedReexec(run.deps, "source changed")
     expect(run.sleeps[0]).toBe(2 * RELOAD_SLOT_MS)
-    expect(run.infos).toEqual([`reload pacing: @dev/3 rank 2 of 3 peers, slot 2; waiting ${2 * RELOAD_SLOT_MS} ms`])
+    expect(run.infos).toEqual([
+      `reload pacing: @dev/3 rank 2 of 3 peers, slot 2; waiting ${2 * RELOAD_SLOT_MS} ms`,
+      "reload pacing: the daemon moved to /hh/dev-landings/r2; this adapter runs /landing and re-execs onto the daemon's landing",
+    ])
     expect(run.log).toEqual(["reexec: source changed"])
   })
 
@@ -306,7 +315,8 @@ describe("pacedReexec", () => {
     for (const self of declared) {
       const run = harness([view(declared, "abc")])
       await pacedReexec({ ...run.deps, self }, "x")
-      expect(run.log, self).toEqual(["reexec: x"])
+      // Same landing as the daemon: the paced reload decides not to re-exec, and says nothing above info.
+      expect(run.log, self).toEqual([])
       slots.push(run.sleeps[0]! / RELOAD_SLOT_MS)
     }
     expect(slots).toEqual([...declared.keys()])
@@ -337,43 +347,44 @@ describe("pacedReexec", () => {
     expect(run.log[1]).toMatch(/rank 28 of 29 peers shares the last slot \(27\) inside the 112000 ms cap/u)
   })
 
-  test("a daemon that publishes no landing root is NOT ready: named once, then re-exec at the timeout (27531)", async () => {
+  test("a daemon that publishes no landing root warns once and does NOT re-exec (27531)", async () => {
     const run = harness([view(["@dev/3"], null)])
     await pacedReexec(run.deps, "x")
     expect(run.log).toEqual([
-      "warn: reload pacing: the daemon published no landing root (daemon.code_identity.root absent); readiness waits for the daemon to run the same landing and commit",
-      "warn: reload pacing: daemon not ready after 30000 ms (the daemon runs other code than the disk); re-execing anyway",
-      "reexec: x",
+      "warn: reload pacing: the daemon published no landing root (daemon.code_identity.root absent); this adapter stays put, because a re-exec cannot change what the daemon runs",
     ])
   })
 
-  test("an adapter whose own root or commit is unresolved waits too, naming which side is missing (27531)", async () => {
+  test("an adapter whose own root or commit is unresolved warns once and does NOT re-exec (27531)", async () => {
     const noRoot = harness([view(["@dev/3"], "abc")], "abc", null)
     await pacedReexec(noRoot.deps, "x")
-    expect(noRoot.log[0]).toBe(
-      "warn: reload pacing: this adapter could not resolve its own landing root; readiness waits for the daemon to run the same landing and commit",
-    )
+    expect(noRoot.log).toEqual([
+      "warn: reload pacing: this adapter could not resolve its own landing root; this adapter stays put, because a re-exec cannot change what the daemon runs",
+    ])
     const noCommit = harness([view(["@dev/3"], "abc")], null)
     await pacedReexec(noCommit.deps, "x")
-    expect(noCommit.log[0]).toBe(
-      "warn: reload pacing: this adapter's tree at /landing has no resolved commit; readiness waits for the daemon to run the same landing and commit",
+    expect(noCommit.log).toEqual([
+      "warn: reload pacing: this adapter's tree at /landing has no resolved commit; this adapter stays put, because a re-exec cannot change what the daemon runs",
+    ])
+  })
+
+  test("a daemon running a DIFFERENT landing re-execs at once, with no ready-timeout warning (27531)", async () => {
+    const run = harness([daemonOn(["@dev/3"], "/hh/dev-landings/other", "abc")])
+    await pacedReexec(run.deps, "x")
+    expect(run.log).toEqual(["reexec: x"])
+    expect(run.log.join("\n")).not.toMatch(/not ready|re-execing anyway/u)
+    expect(run.infos.at(-1)).toBe(
+      "reload pacing: the daemon moved to /hh/dev-landings/other; this adapter runs /landing and re-execs onto the daemon's landing",
     )
   })
 
-  test("a daemon running a DIFFERENT landing is named with both roots and re-execs at the timeout (27531)", async () => {
-    const other: ReloadDaemonView = {
-      liveNames: ["@dev/3"],
-      peers: { declared: ["@dev/3"], liveUndeclared: [] },
-      runningCert: "abc",
-      runningRoot: "/hh/dev-landings/other",
-    }
-    const run = harness([other])
-    await pacedReexec(run.deps, "x")
-    expect(run.log[0]).toBe(
-      "warn: reload pacing: the daemon runs /hh/dev-landings/other, this adapter runs /landing; readiness waits for the daemon to run the same landing and commit",
+  test("a same-landing daemon restart is a no-op: no re-exec (27531)", async () => {
+    const run = harness([view(["@dev/3"], "abc")])
+    await pacedReexec(run.deps, "generation changed")
+    expect(run.log).toEqual([])
+    expect(run.infos.at(-1)).toBe(
+      "reload pacing: this adapter already runs the daemon's landing (/landing); no re-exec",
     )
-    expect(run.log[1]).toMatch(/daemon not ready after 30000 ms/u)
-    expect(run.log[2]).toBe("reexec: x")
   })
 
   test("describeCodeIdentityMismatch names the first difference and agrees only on both values (27531)", () => {
@@ -389,24 +400,24 @@ describe("pacedReexec", () => {
     expect(describeCodeIdentityMismatch({ ...same, daemonCert: "d" })).toMatch(/commit d at \/r.*is at c/u)
   })
 
-  test("a daemon never on the disk's code re-execs anyway at the timeout, loudly", async () => {
+  test("a daemon at the same root with a different cert warns once and does NOT re-exec (27531)", async () => {
     const run = harness([view(["@dev/3"], "old")])
     await pacedReexec(run.deps, "x")
-    expect(run.log[0]).toMatch(
-      /daemon not ready after 30000 ms \(the daemon runs other code than the disk\); re-execing anyway/u,
-    )
-    expect(run.log[1]).toBe("reexec: x")
+    expect(run.log).toEqual([
+      "warn: reload pacing: the daemon runs commit old at /landing, this adapter's tree is at abc; this adapter stays put, because a re-exec cannot change what the daemon runs",
+    ])
   })
 
-  test.each([0, 0.999])(
-    "a daemon that never answers still re-execs, loudly, within the deadline (random %d)",
-    async (unit) => {
-      const run = harness(["hang"])
-      await pacedReexec({ ...run.deps, random: () => unit }, "x")
-      expect(run.log[0]).toMatch(/cli_status read failed \(cli_status did not answer within 2000 ms\)/u)
-      expect(run.log.at(-2)).toMatch(/daemon not ready after \d+ ms \(cli_status did not answer within 2000 ms\)/u)
-      expect(run.log.at(-1)).toBe("reexec: x")
-      expect(run.elapsed()).toBeLessThanOrEqual(RELOAD_DEADLINE_MS)
-    },
-  )
+  test.each([0, 0.999])("a daemon that never answers warns and does NOT re-exec (random %d, 27531)", async (unit) => {
+    const run = harness(["hang"])
+    await pacedReexec({ ...run.deps, random: () => unit }, "x")
+    expect(run.log[0]).toMatch(
+      /cli_status read failed \(cli_status did not answer within 2000 ms\); spreading over the \d+ ms cap/u,
+    )
+    expect(run.log.at(-1)).toMatch(
+      /cli_status read failed \(cli_status did not answer within 2000 ms\); cannot tell which landing the daemon runs/u,
+    )
+    expect(run.log.join("\n")).not.toMatch(/reexec/u)
+    expect(run.elapsed()).toBeLessThanOrEqual(RELOAD_DEADLINE_MS)
+  })
 })

@@ -7,7 +7,7 @@
  * adapters it does not name), so no coordinator is needed (@cto ce976914, bf0417a0).
  */
 
-import { awaitReady, fullJitter, type RandomUnit } from "@bearly/pacing"
+import { fullJitter, type RandomUnit } from "@bearly/pacing"
 
 // Derivation (@cto ce976914). Whoever measures a larger rejoin recomputes these instead of guessing.
 /** The slowest rejoin measured: 16 s, at the 08:02 and 08:15 PDT generation re-execs on 2026-09-24. */
@@ -27,7 +27,11 @@ export const RELOAD_SLOT_MS = Math.ceil(RELOAD_REJOIN_MAX_MS / RELOAD_MAX_ABSENT
 export const RELOAD_WINDOW_CAP_MS = 112_000
 /** The most declared seats the window gives a slot each: 28. */
 export const RELOAD_MAX_DECLARED = Math.floor(RELOAD_WINDOW_CAP_MS / RELOAD_SLOT_MS)
-/** How long an adapter waits for the daemon to answer on the new code before it re-execs anyway, loudly. */
+/**
+ * Headroom kept in RELOAD_DEADLINE_MS for a daemon that is slow to answer. The 27531 gate no longer waits it out: a
+ * paced reload makes ONE bounded read after its rank slot and decides from it (see pacedReexec). Kept and exported
+ * so RELOAD_DEADLINE_MS, and 25662's bridge-lost grace derived from it, do not move in this change.
+ */
 export const RELOAD_READY_TIMEOUT_MS = 30_000
 /**
  * How long one cli_status read may take before it counts as unanswered. The readiness gate checks its timeout only
@@ -35,9 +39,9 @@ export const RELOAD_READY_TIMEOUT_MS = 30_000
  */
 export const RELOAD_PROBE_TIMEOUT_MS = 2_000
 /**
- * The longest a paced reload can take: 146 s. That is the window cap and the ready timeout, plus one probe timeout for
- * the rank read and one for the gate's last probe, which may start just before the ready timeout. 25662's default
- * bridge-lost grace is this plus one tick plus a margin, and an explicit grace is validated against it.
+ * The longest a paced reload can take: 146 s. That is the window cap, the ready-timeout headroom (no longer waited
+ * out; see RELOAD_READY_TIMEOUT_MS), and one probe timeout for the rank read and one for the decision read. 25662's
+ * default bridge-lost grace is this plus one tick plus a margin, and an explicit grace is validated against it.
  */
 export const RELOAD_DEADLINE_MS = RELOAD_WINDOW_CAP_MS + RELOAD_READY_TIMEOUT_MS + 2 * RELOAD_PROBE_TIMEOUT_MS
 
@@ -137,7 +141,6 @@ export interface PacedReexecDeps {
   readonly onDiskCert: () => string | null
   /** This adapter's OWN landing root (27531), derived from its own file location; never the daemon's. */
   readonly selfRoot: () => string | null
-  readonly now: () => number
   readonly sleep: (ms: number) => Promise<void>
   readonly warn: (message: string) => void
   /** The rank and slot each reload takes, so an operator (and the journey witness) can see who shared a slot. */
@@ -187,15 +190,19 @@ function boundedRead(deps: PacedReexecDeps): Promise<ReloadDaemonView> {
 }
 
 /**
- * Wait for this adapter's slot, then for a daemon running the code on disk, then re-exec, within RELOAD_DEADLINE_MS.
- * Nothing here fails silently:
+ * Wait for this adapter's slot, then adopt the landing the daemon runs from, re-execing iff it differs from this
+ * adapter's own (27531). The trigger is a daemon generation change, so the daemon either moved to a new landing
+ * (this adapter must follow it) or restarted on the same one (nothing to do). One bounded read after the rank slot
+ * decides; readiness is not a wait for a match. Nothing here fails silently:
  * - a failed or unanswered list read spreads over the cap and warns;
  * - a daemon without reload_peers or without a roster ranks on the live list and warns;
  * - a missing self goes last and warns; an undeclared self, or one clipped into a shared last slot, warns;
  * - a declared roster larger than the window warns with the count and the cap (reloadCapacityRefusal);
- * - a daemon that reports no code identity, or an adapter whose own disk commit is unresolved, is judged on liveness
- *   alone, warned once and named for 25670;
- * - a daemon never ready re-execs anyway at the timeout, with a warning naming the last probe error.
+ * - a daemon on a DIFFERENT landing re-execs, so the next child runs the daemon's code;
+ * - a daemon on the SAME landing is left alone, so a same-landing restart re-execs nothing;
+ * - a daemon we cannot read, one that publishes no landing root, an adapter whose own root is unresolved, or a
+ *   same-root cert difference warns once naming both sides and does NOT re-exec: a re-exec cannot change what the
+ *   daemon runs, and with no root the supervisor's respawn would wait forever.
  */
 export async function pacedReexec(deps: PacedReexecDeps, reason: string): Promise<void> {
   let rank: number | null = null
@@ -246,37 +253,35 @@ export async function pacedReexec(deps: PacedReexecDeps, reason: string): Promis
   }
   await deps.sleep(delay)
 
-  let identityGapWarned = false
-  const outcome = await awaitReady(
-    async () => {
-      const view = await boundedRead(deps)
-      const daemonRoot = view.runningRoot
-      const daemonCert = view.runningCert
-      const selfRoot = deps.selfRoot()
-      const selfCert = deps.onDiskCert()
-      const mismatch = describeCodeIdentityMismatch({
-        daemonRoot,
-        daemonCert,
-        selfRoot,
-        selfCert,
-      })
-      if (mismatch !== null) {
-        // A same-root, both-complete cert difference is the normal wait for the daemon to catch up; every other
-        // mismatch is structural (a missing root, an unresolvable own identity, a DIFFERENT landing) and is named.
-        const certLag = daemonRoot !== null && daemonRoot === selfRoot && daemonCert !== null && selfCert !== null
-        if (!certLag && !identityGapWarned) {
-          identityGapWarned = true
-          deps.warn(`reload pacing: ${mismatch}; readiness waits for the daemon to run the same landing and commit`)
-        }
-        return false
-      }
-      return true
-    },
-    { timeoutMs: RELOAD_READY_TIMEOUT_MS, retryMs: 500, now: deps.now, sleep: deps.sleep, random: deps.random },
-  )
-  if (!outcome.ready) {
-    const why = "lastError" in outcome ? errorText(outcome.lastError) : "the daemon runs other code than the disk"
-    deps.warn(`reload pacing: daemon not ready after ${outcome.waitedMs} ms (${why}); re-execing anyway`)
+  // One bounded read decides (27531). A daemon we cannot read leaves us where we are: re-execing blind would run the
+  // next child from a root the supervisor cannot hold (it never guesses, and never reuses the last child's).
+  let view: ReloadDaemonView
+  try {
+    view = await boundedRead(deps)
+  } catch (error) {
+    deps.warn(
+      `reload pacing: cli_status read failed (${errorText(error)}); cannot tell which landing the daemon runs, so this adapter stays put`,
+    )
+    return
   }
-  deps.reexec(reason)
+  const daemonRoot = view.runningRoot
+  const selfRoot = deps.selfRoot()
+  if (daemonRoot !== null && selfRoot !== null && daemonRoot !== selfRoot) {
+    deps.info(
+      `reload pacing: the daemon moved to ${daemonRoot}; this adapter runs ${selfRoot} and re-execs onto the daemon's landing`,
+    )
+    deps.reexec(reason)
+    return
+  }
+  const mismatch = describeCodeIdentityMismatch({
+    daemonRoot,
+    daemonCert: view.runningCert,
+    selfRoot,
+    selfCert: deps.onDiskCert(),
+  })
+  if (mismatch === null) {
+    deps.info(`reload pacing: this adapter already runs the daemon's landing (${selfRoot}); no re-exec`)
+    return
+  }
+  deps.warn(`reload pacing: ${mismatch}; this adapter stays put, because a re-exec cannot change what the daemon runs`)
 }

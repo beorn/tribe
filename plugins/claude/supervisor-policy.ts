@@ -22,14 +22,18 @@ export const REEXEC_BACKOFF_MAX_MS = 30_000
 export const SUPERVISOR_CODE_ROOT_WINDOW_MS = 6_000
 export const CODE_ROOT_WAIT_BASE_MS = 250
 export const CODE_ROOT_WAIT_MAX_MS = 2_000
-/** Test/ops override for the cold-start window; an absent or malformed value falls back to the measured default. */
+/** Test/ops override for the cold-start window; an absent value falls back silently, a malformed one warns. */
 export const PLUGIN_CODE_ROOT_WINDOW_ENV = "TRIBE_PLUGIN_CODE_ROOT_WINDOW_MS"
 
-export function codeRootWaitWindowMs(env: Readonly<NodeJS.ProcessEnv>): number {
+export function codeRootWaitWindowMs(env: Readonly<NodeJS.ProcessEnv>, warn?: (line: string) => void): number {
   const raw = env[PLUGIN_CODE_ROOT_WINDOW_ENV]?.trim()
   if (raw === undefined || raw === "") return SUPERVISOR_CODE_ROOT_WINDOW_MS
   const parsed = Number(raw)
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : SUPERVISOR_CODE_ROOT_WINDOW_MS
+  if (Number.isSafeInteger(parsed) && parsed > 0) return parsed
+  warn?.(
+    `tribe plugin supervisor: ${PLUGIN_CODE_ROOT_WINDOW_ENV}=${JSON.stringify(raw)} is not a positive integer; using the default ${SUPERVISOR_CODE_ROOT_WINDOW_MS} ms`,
+  )
+  return SUPERVISOR_CODE_ROOT_WINDOW_MS
 }
 
 export interface CodeRootWaitDecision {
