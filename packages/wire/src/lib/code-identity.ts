@@ -1,5 +1,30 @@
 import { execFileSync } from "node:child_process"
-import { relative } from "node:path"
+import { dirname, relative, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
+
+/** 27531 — the one place each process kind's source-root depth is spelled. The
+ *  depth is the shape of the checkout: `<root>/packages/wire/src`,
+ *  `<root>/plugins/claude`, `<root>/packages/daemon/src/lib`. A process derives
+ *  its own root from its own file location, so the daemon, the plugin
+ *  supervisor's child and the adapter all name the SAME landing, and the
+ *  (root, cert) gate can agree. */
+export const WIRE_MODULE_SOURCE_ROOT_DEPTH = "../../.."
+export const PLUGIN_ENTRY_SOURCE_ROOT_DEPTH = "../.."
+export const DAEMON_LIB_SOURCE_ROOT_DEPTH = "../../../.."
+
+function sourceRootFrom(fileUrl: string, depth: string): string {
+  return resolve(dirname(fileURLToPath(fileUrl)), depth)
+}
+
+/** The tribe root enclosing `packages/wire/src/*` (the adapter module). */
+export function sourceRootFromWireModule(fileUrl: string): string {
+  return sourceRootFrom(fileUrl, WIRE_MODULE_SOURCE_ROOT_DEPTH)
+}
+
+/** The tribe root enclosing `plugins/claude/server.ts` (the plugin entry). */
+export function sourceRootFromPluginEntry(fileUrl: string): string {
+  return sourceRootFrom(fileUrl, PLUGIN_ENTRY_SOURCE_ROOT_DEPTH)
+}
 
 export type GitProbe =
   | { ok: true; value: string }
