@@ -764,10 +764,47 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
         "Default fetch result: { attention, events, cursor }; snapshot result: { events, cursor }; { error } on validation failure.",
       ),
     },
-    cli: hidden(
-      "MCP fetch is a live-session cursor/snapshot primitive; the existing CLI log command is a daemon-log view and must not be treated as fetch parity.",
-      "log",
-    ),
+    cli: available({
+      name: "fetch",
+      description:
+        "Snapshot lookup over the MCP fetch handler: --ids returns exactly those rows, and --with/--from/--to/--since/--topics read history without moving the mailbox cursor. The live read is `tribe inbox` (or the MCP fetch tool); `log` is the daemon log. At least one selector is required — a selector-less call would be a second default read that acknowledges the mailbox.",
+      lifetime: "one-shot",
+      mapsToMcp: "fetch",
+      options: [
+        {
+          name: "ids",
+          flags: "--ids <ids>",
+          description: "Comma-separated message IDs; returns exactly those rows without advancing the cursor",
+          transform: "csv-list",
+        },
+        {
+          name: "topics",
+          flags: "--topics <globs>",
+          description: "Comma-separated topic globs (e.g. github:*,git:commit); a topics read is a snapshot",
+          transform: "csv-list",
+        },
+        {
+          name: "since",
+          flags: "--since <rowid>",
+          description: "Scan rows with rowid greater than this; read-only, never advances the cursor",
+        },
+        { name: "with", flags: "--with <session>", description: "Bilateral history with this session name" },
+        { name: "from", flags: "--from <sender>", description: "One-sided history from this sender" },
+        { name: "to", flags: "--to <recipient>", description: "One-sided history to this recipient" },
+        {
+          name: "limit",
+          flags: "-n, --limit <count>",
+          description: "Maximum chronological event rows to return (default 50, max 500)",
+          default: "50",
+        },
+        {
+          name: "json",
+          flags: "--json",
+          description:
+            "Accepted for parity with the other one-shot reads; this verb always emits the JSON fetch result",
+        },
+      ],
+    }),
   },
   {
     id: "tribe.members",
@@ -834,6 +871,11 @@ export const TRIBE_COMMAND_DESCRIPTORS = [
           flags: "-a, --all",
           description: "Include disconnected historical session rows",
           default: false,
+        },
+        {
+          name: "json",
+          flags: "--json",
+          description: "Accepted for parity with the other one-shot reads; this verb always emits the JSON member rows",
         },
       ],
     }),

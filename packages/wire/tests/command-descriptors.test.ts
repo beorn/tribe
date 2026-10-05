@@ -15,11 +15,6 @@ function visibleCliProjection(descriptor: TribeCommandDescriptor): Extract<Tribe
   return descriptor.cli as Extract<TribeCliProjection, { kind: "available" }>
 }
 
-function hiddenCliProjection(descriptor: TribeCommandDescriptor): Extract<TribeCliProjection, { kind: "hidden" }> {
-  expect(descriptor.cli?.kind).toBe("hidden")
-  return descriptor.cli as Extract<TribeCliProjection, { kind: "hidden" }>
-}
-
 function buildProgram(): Command {
   const program = new Command("tribe-test")
   registerReadCommands(program)
@@ -198,7 +193,7 @@ describe("Tribe command descriptors", () => {
     }
   })
 
-  test("keeps MCP fetch explicitly hidden from CLI so it is not confused with log", () => {
+  test("projects MCP fetch to a distinct one-shot CLI verb, not the log view", () => {
     const fetch = commandDescriptorByMcpName("fetch")
     expect(fetch).toBeDefined()
     expect(fetch!.mcp.outputSchema.properties?.attention).toMatchObject({
@@ -229,9 +224,33 @@ describe("Tribe command descriptors", () => {
         },
       },
     })
-    const cli = hiddenCliProjection(fetch!)
-    expect(cli.reason).toMatch(/log/i)
-    expect(cli.reason).toMatch(/snapshot/i)
+    // The verb is snapshot-only (27519, @cto 1c688dbc): the live read stays
+    // `tribe inbox`, this is the snapshot lookup, and `log` is the daemon log.
+    const cli = visibleCliProjection(fetch!)
+    expect(cli.name).toBe("fetch")
+    expect(cli.mapsToMcp).toBe("fetch")
+    expect(cli.lifetime).toBe("one-shot")
+    expect(cli.description).toMatch(/snapshot/i)
+    expect(cli.description).toMatch(/tribe inbox/i)
+    expect(cli.description).toMatch(/log/i)
+    expect(cli.options?.map((option) => option.name)).toEqual([
+      "ids",
+      "topics",
+      "since",
+      "with",
+      "from",
+      "to",
+      "limit",
+      "json",
+    ])
+    // Snapshot-only: no cursor-moving or acknowledgement knob is projected.
+    expect(cli.options?.some((option) => option.name === "advance")).toBe(false)
+    expect(cli.options?.some((option) => option.name === "receipt")).toBe(false)
+  })
+
+  test("members carries a --json flag for scripts (27519)", () => {
+    const members = visibleCliProjection(commandDescriptorByMcpName("members")!)
+    expect(members.options?.find((option) => option.name === "json")?.flags).toContain("--json")
   })
 
   test("pins semantic actionable ownership without inventing a delivery-ack surface", () => {
