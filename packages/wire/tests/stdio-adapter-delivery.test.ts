@@ -1569,56 +1569,55 @@ describe("stdio adapter delivery modes", () => {
     expect(modelFetches.at(-1)?.params?.receipt).not.toBe(false)
   })
 
-  it("forwards one compact pending-ball summary on every wakeup", async () => {
+  it("forwards one compact pending-ball summary, then suppresses an unchanged re-drain", async () => {
     const socketPath = join(tmpDir, "tribe.sock")
-    daemon = await spawnFakeDaemon(socketPath, {
-      fetchAttention: {
-        actionable_unread: [],
-        pending_balls_summary: {
-          total: 108,
-          oldest_age_ms: 9 * 24 * 60 * 60 * 1_000,
-          truncated: true,
-          withheld: {
-            total: 98,
-            by_kind: { request: 8, incident: 90 },
-          },
+    const fetchAttention = {
+      actionable_unread: [],
+      pending_balls_summary: {
+        total: 108,
+        oldest_age_ms: 9 * 24 * 60 * 60 * 1_000,
+        truncated: true,
+        withheld: {
+          total: 98,
+          by_kind: { request: 8, incident: 90 },
         },
-        pending_balls: [
-          {
-            request_id: "review-r3",
-            sender: "@chief",
-            message_id: "original-review-request",
-            fanout: "first",
-            age_ms: 2 * 60 * 60 * 1_000,
-            summary: "Review the architecture revision",
-          },
-          {
-            request_id: "query-r4",
-            sender: "@agent/4",
-            message_id: "second-query",
-            fanout: "first",
-            age_ms: 70 * 60 * 1_000,
-            summary: "Confirm the migration invariant",
-          },
-          {
-            request_id: "assign-r5",
-            sender: "@chief",
-            message_id: "third-assignment",
-            fanout: "first",
-            age_ms: 30 * 60 * 1_000,
-            summary: "Run the focused verification",
-          },
-          {
-            request_id: "request-r6",
-            sender: "@agent/6",
-            message_id: "fourth-request",
-            fanout: "first",
-            age_ms: 10 * 60 * 1_000,
-            summary: "This fourth summary must be omitted",
-          },
-        ],
       },
-    })
+      pending_balls: [
+        {
+          request_id: "review-r3",
+          sender: "@chief",
+          message_id: "original-review-request",
+          fanout: "first",
+          age_ms: 2 * 60 * 60 * 1_000,
+          summary: "Review the architecture revision",
+        },
+        {
+          request_id: "query-r4",
+          sender: "@agent/4",
+          message_id: "second-query",
+          fanout: "first",
+          age_ms: 70 * 60 * 1_000,
+          summary: "Confirm the migration invariant",
+        },
+        {
+          request_id: "assign-r5",
+          sender: "@chief",
+          message_id: "third-assignment",
+          fanout: "first",
+          age_ms: 30 * 60 * 1_000,
+          summary: "Run the focused verification",
+        },
+        {
+          request_id: "request-r6",
+          sender: "@agent/6",
+          message_id: "fourth-request",
+          fanout: "first",
+          age_ms: 10 * 60 * 1_000,
+          summary: "This fourth summary must be omitted",
+        },
+      ],
+    }
+    daemon = await spawnFakeDaemon(socketPath, { fetchAttention })
     child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
       cwd: tmpDir,
       env: {
@@ -1630,37 +1629,167 @@ describe("stdio adapter delivery modes", () => {
       stdio: ["pipe", "pipe", "pipe"],
     })
     const stdout = collectStdoutJson(child)
+    const summaryLines = (text: string) =>
+      stdout.filter((line) => line.method === "notifications/claude/channel" && JSON.stringify(line).includes(text))
 
     await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
     writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
     await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
-    daemon.clients[0]?.write(makeNotification("wakeup", {}))
 
     const summaryText =
       "You own 108 balls, oldest 9d. Top: Review the architecture revision | Confirm the migration invariant | Run the focused verification Preview withheld 98 (8 request, 90 incident)."
-    await waitForStdout(child, stdout, () => stdout.some((line) => JSON.stringify(line).includes(summaryText)))
+    daemon.clients[0]?.write(makeNotification("wakeup", {}))
+    await waitForStdout(child, stdout, () => summaryLines(summaryText).length === 1)
 
-    const pending = stdout.filter(
-      (line) => line.method === "notifications/claude/channel" && JSON.stringify(line).includes(summaryText),
-    )
+    const pending = summaryLines(summaryText)
     expect(pending).toHaveLength(1)
     expect(JSON.stringify(pending[0])).toContain('"type":"attention:pending-balls"')
     expect(JSON.stringify(pending[0])).not.toContain("This fourth summary must be omitted")
 
+    // 27346: a re-drain of the SAME set fetches again but must not repeat the line.
     const fetchesBeforeSecondWake = daemon.requests.filter((request) => request.method === "tribe.fetch").length
     daemon.clients[0]?.write(makeNotification("wakeup", {}))
     await waitForCondition(
       () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > fetchesBeforeSecondWake,
       "second pending-ball fetch",
     )
-    await waitForStdout(
-      child,
-      stdout,
-      () =>
-        stdout.filter(
-          (line) => line.method === "notifications/claude/channel" && JSON.stringify(line).includes(summaryText),
-        ).length === 2,
+    await new Promise((resolveTick) => setTimeout(resolveTick, 300))
+    expect(summaryLines(summaryText)).toHaveLength(1)
+
+    // A new ball outside the preview changes the total → the line re-surfaces.
+    fetchAttention.pending_balls_summary.total = 109
+    fetchAttention.pending_balls.push({
+      request_id: "request-r7",
+      sender: "@agent/7",
+      message_id: "fifth-request",
+      fanout: "first",
+      age_ms: 1_000,
+      summary: "A newly arrived ball",
+    })
+    daemon.clients[0]?.write(makeNotification("wakeup", {}))
+    const grownText =
+      "You own 109 balls, oldest 9d. Top: Review the architecture revision | Confirm the migration invariant | Run the focused verification Preview withheld 98 (8 request, 90 incident)."
+    await waitForStdout(child, stdout, () => summaryLines(grownText).length === 1)
+    expect(summaryLines(summaryText)).toHaveLength(1)
+  })
+
+  it("re-surfaces an unchanged pending-ball summary once the window elapses (#27346)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const fetchAttention = {
+      actionable_unread: [],
+      pending_balls_summary: { total: 1, oldest_age_ms: 60_000, truncated: false },
+      pending_balls: [{ request_id: "only-r1", sender: "@chief", age_ms: 60_000, summary: "The only ball" }],
+    }
+    daemon = await spawnFakeDaemon(socketPath, { fetchAttention })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        // 27346: shrunk window so the 10-minute recurrence is testable without waiting.
+        TRIBE_PENDING_BALL_SUMMARY_WINDOW_MS: "300",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+    const summaryText = "You own 1 ball, oldest 1m. Top: The only ball"
+    const summaryLines = () =>
+      stdout.filter(
+        (line) => line.method === "notifications/claude/channel" && JSON.stringify(line).includes(summaryText),
+      )
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+
+    daemon.clients[0]?.write(makeNotification("wakeup", {}))
+    await waitForStdout(child, stdout, () => summaryLines().length === 1)
+
+    const fetchesBefore = daemon.requests.filter((request) => request.method === "tribe.fetch").length
+    await new Promise((resolveTick) => setTimeout(resolveTick, 600))
+    daemon.clients[0]?.write(makeNotification("wakeup", {}))
+    await waitForCondition(
+      () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > fetchesBefore,
+      "window-elapsed pending-ball fetch",
     )
+    await waitForStdout(child, stdout, () => summaryLines().length === 2)
+  })
+
+  it("forwards each attention row once, keeping re-presented rows and ambient twins out (#27346)", async () => {
+    const socketPath = join(tmpDir, "tribe.sock")
+    const recentTs = new Date().toISOString()
+    // A durable-mailbox RECOVERY row that predates this seat: the daemon marks it
+    // `replay:true` (registration tail-reset) even though this pane never saw it,
+    // so it MUST still forward on its first delivery.
+    const recoveryRow = {
+      id: "recovered-request",
+      type: "request",
+      from: "@chief",
+      content: "RECOVERY-ROW",
+      ts: recentTs,
+      replay: true,
+    }
+    // A row with no `replay` field at all (legacy daemon) must forward (fail open).
+    const legacyRow = { id: "legacy-verdict", type: "verdict", from: "@ci", content: "LEGACY-NO-FIELD", ts: recentTs }
+    const fetchAttention: {
+      actionable_unread: Array<Record<string, unknown>>
+      pending_balls: Array<Record<string, unknown>>
+    } = { actionable_unread: [legacyRow, recoveryRow], pending_balls: [] }
+    // Same id as the recovery row: the ambient path must NOT re-forward it.
+    const fetchEvents = [
+      { id: "recovered-request", type: "status", from: "daemon", content: "RECOVERY-AMBIENT", ts: recentTs },
+    ]
+    daemon = await spawnFakeDaemon(socketPath, { fetchAttention, fetchEvents })
+    child = spawn(BUN_BIN, [ADAPTER, "--socket", socketPath, "--name", "@agent/test"], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        TRIBE_DELIVERY: "push",
+        TRIBE_NO_AUTOSTART: "1",
+        DEBUG_LOG: join(tmpDir, "adapter.log"),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    const stdout = collectStdoutJson(child)
+    const channelText = () =>
+      stdout
+        .filter((line) => line.method === "notifications/claude/channel")
+        .map((line) => JSON.stringify(line) as string)
+    const drain = async (label: string) => {
+      const before = daemon!.requests.filter((request) => request.method === "tribe.fetch").length
+      daemon!.clients[0]?.write(makeNotification("wakeup", {}))
+      await waitForCondition(
+        () => daemon!.requests.filter((request) => request.method === "tribe.fetch").length > before,
+        label,
+      )
+      await new Promise((resolveTick) => setTimeout(resolveTick, 250))
+    }
+
+    await writeJsonAndWaitForLine(child, initializePayload(1), (line) => line.id === 1)
+    writeJson(child, { jsonrpc: "2.0", method: "notifications/initialized", params: {} })
+    await writeJsonAndWaitForLine(child, callToolPayload(2, "join", { name: "@agent/test" }), (line) => line.id === 2)
+
+    // First delivery: both actionable rows forward (the recovery row despite
+    // replay:true); the ambient twin does not.
+    await drain("first replay-filter fetch")
+    expect(channelText().some((line) => line.includes("LEGACY-NO-FIELD"))).toBe(true)
+    expect(channelText().some((line) => line.includes("RECOVERY-ROW"))).toBe(true)
+    expect(channelText().some((line) => line.includes("RECOVERY-AMBIENT"))).toBe(false)
+
+    // Second drain of the same rows → nothing new reaches the pane.
+    await drain("second replay-filter fetch")
+    expect(channelText().filter((line) => line.includes("LEGACY-NO-FIELD"))).toHaveLength(1)
+    expect(channelText().filter((line) => line.includes("RECOVERY-ROW"))).toHaveLength(1)
+
+    // A genuinely new row still forwards on arrival.
+    fetchAttention.actionable_unread = [
+      ...fetchAttention.actionable_unread,
+      { id: "fresh-verdict", type: "verdict", from: "@ci", content: "FRESH-ROW", ts: recentTs },
+    ]
+    await drain("third replay-filter fetch")
+    expect(channelText().filter((line) => line.includes("FRESH-ROW"))).toHaveLength(1)
   })
 
   it("drains and pushes attention when wakeup arrives within the register round-trip (#26969 row 5)", async () => {

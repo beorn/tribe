@@ -9,8 +9,11 @@ import { describe, expect, it } from "vitest"
 import {
   CONNECT_REPLAY_WINDOW_MS,
   createConnectReplayGate,
+  createForwardedAttentionTracker,
+  decidePendingBallSummary,
   MAX_REPLAY_AGE_MS,
   MAX_REPLAY_EVENTS,
+  PENDING_BALL_SUMMARY_WINDOW_MS,
   replayEnvelopeMeta,
   selectReplayEvents,
 } from "../src/lib/replay-cap.ts"
@@ -167,5 +170,137 @@ describe("replayEnvelopeMeta (27346 re-presented attention row)", () => {
 
   it("still names the replay when the row carries no timestamp", () => {
     expect(replayEnvelopeMeta({ replay: true })).toEqual({ replay: "true" })
+  })
+})
+
+// 27346 — each wakeup drain re-forwarded the open-ball summary line, so a push
+// seat's pane repeated "You own N balls ..." on every arrival. decidePendingBallSummary
+// is the pure in-memory throttle: the line is re-surfaced only when the ball set
+// changed or the window elapsed. `now` is passed, never read — deterministic.
+describe("decidePendingBallSummary (27346 open-ball summary throttle)", () => {
+  const NOW = 1_000_000
+  const ball = (request_id: string) => ({ request_id })
+
+  it("sends the first nonempty set and records its fingerprint", () => {
+    const r = decidePendingBallSummary(
+      { balls: [ball("r1"), ball("r2")], summary: { total: 2 } },
+      { now: NOW, state: null },
+    )
+    expect(r.send).toBe(true)
+    expect(r.state).toMatchObject({ previewIds: "r1,r2", total: 2, withheld: 0, sentAt: NOW })
+  })
+
+  it("suppresses an unchanged immediate re-drain, keeping the original sentAt", () => {
+    const first = decidePendingBallSummary({ balls: [ball("r1")], summary: { total: 1 } }, { now: NOW, state: null })
+    const second = decidePendingBallSummary(
+      { balls: [ball("r1")], summary: { total: 1 } },
+      { now: NOW + 60_000, state: first.state },
+    )
+    expect(second.send).toBe(false)
+    expect(second.state).toEqual(first.state)
+  })
+
+  it("ignores a changing age and only re-surfaces once the window elapses", () => {
+    const first = decidePendingBallSummary(
+      { balls: [ball("r1")], summary: { total: 1, oldest_age_ms: 1_000 } },
+      { now: NOW, state: null },
+    )
+    const justBefore = decidePendingBallSummary(
+      { balls: [ball("r1")], summary: { total: 1, oldest_age_ms: 999_000 } },
+      { now: NOW + PENDING_BALL_SUMMARY_WINDOW_MS - 1, state: first.state },
+    )
+    expect(justBefore.send).toBe(false)
+    const atWindow = decidePendingBallSummary(
+      { balls: [ball("r1")], summary: { total: 1, oldest_age_ms: 999_999 } },
+      { now: NOW + PENDING_BALL_SUMMARY_WINDOW_MS, state: first.state },
+    )
+    expect(atWindow.send).toBe(true)
+    expect(atWindow.state?.sentAt).toBe(NOW + PENDING_BALL_SUMMARY_WINDOW_MS)
+  })
+
+  it("re-surfaces when the preview request_id set changes", () => {
+    const first = decidePendingBallSummary({ balls: [ball("r1")], summary: { total: 1 } }, { now: NOW, state: null })
+    const changed = decidePendingBallSummary(
+      { balls: [ball("r1"), ball("r2")], summary: { total: 2 } },
+      { now: NOW + 1, state: first.state },
+    )
+    expect(changed.send).toBe(true)
+    expect(changed.state?.previewIds).toBe("r1,r2")
+  })
+
+  it("re-surfaces when the total changes even though the preview is unchanged", () => {
+    const first = decidePendingBallSummary(
+      { balls: [ball("r1"), ball("r2")], summary: { total: 2 } },
+      { now: NOW, state: null },
+    )
+    const grown = decidePendingBallSummary(
+      { balls: [ball("r1"), ball("r2")], summary: { total: 108 } },
+      { now: NOW + 1, state: first.state },
+    )
+    expect(grown.send).toBe(true)
+    expect(grown.state?.total).toBe(108)
+  })
+
+  it("re-surfaces when the withheld count changes", () => {
+    const first = decidePendingBallSummary(
+      { balls: [ball("r1")], summary: { total: 9, withheld: { total: 8 } } },
+      { now: NOW, state: null },
+    )
+    const changed = decidePendingBallSummary(
+      { balls: [ball("r1")], summary: { total: 9, withheld: { total: 4 } } },
+      { now: NOW + 1, state: first.state },
+    )
+    expect(changed.send).toBe(true)
+    expect(changed.state?.withheld).toBe(4)
+  })
+
+  it("resets on empty and treats the next nonempty set as a first send", () => {
+    const first = decidePendingBallSummary({ balls: [ball("r1")], summary: { total: 1 } }, { now: NOW, state: null })
+    const empty = decidePendingBallSummary({ balls: [], summary: { total: 0 } }, { now: NOW + 1, state: first.state })
+    expect(empty.send).toBe(false)
+    expect(empty.state).toBeNull()
+    const again = decidePendingBallSummary(
+      { balls: [ball("r1")], summary: { total: 1 } },
+      { now: NOW + 2, state: empty.state },
+    )
+    expect(again.send).toBe(true)
+  })
+})
+
+// 27346 — the daemon's `replay` flag is cursor-based, and registration
+// tail-resets the session cursor to the log tail, so a never-delivered recovery
+// row reads replay:true. Delivery-to-this-pane is adapter-local: this filter
+// admits each attention row once, and only once.
+describe("createForwardedAttentionTracker (27346 per-pane delivery record)", () => {
+  it("does not count a row before the handoff is recorded", () => {
+    const tracker = createForwardedAttentionTracker()
+    expect(tracker.has("row-a")).toBe(false)
+    tracker.remember("row-a")
+    expect(tracker.has("row-a")).toBe(true)
+  })
+
+  it("keeps suppressing an id once its handoff is recorded", () => {
+    const tracker = createForwardedAttentionTracker()
+    tracker.remember("row-a")
+    expect(tracker.has("row-a")).toBe(true)
+    expect(tracker.has("row-b")).toBe(false)
+    tracker.remember("row-b")
+    expect(tracker.has("row-b")).toBe(true)
+  })
+
+  it("never reports an undefined id as forwarded — never withhold a row we cannot key", () => {
+    const tracker = createForwardedAttentionTracker()
+    expect(tracker.has(undefined)).toBe(false)
+    tracker.remember(undefined)
+    expect(tracker.has(undefined)).toBe(false)
+  })
+
+  it("evicts the oldest id past the bound rather than growing without limit", () => {
+    const tracker = createForwardedAttentionTracker(2)
+    tracker.remember("row-a")
+    tracker.remember("row-b")
+    tracker.remember("row-c") // evicts row-a
+    expect(tracker.has("row-b")).toBe(true)
+    expect(tracker.has("row-a")).toBe(false) // evicted, so admissible again
   })
 })

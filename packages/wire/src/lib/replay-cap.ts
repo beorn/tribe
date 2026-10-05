@@ -69,6 +69,117 @@ export function selectReplayEvents<T extends ReplayCandidate>(
  */
 export const CONNECT_REPLAY_WINDOW_MS = 5_000
 
+/**
+ * How long an UNCHANGED open-ball summary may go un-repeated before it is
+ * re-surfaced. 10 minutes.
+ */
+export const PENDING_BALL_SUMMARY_WINDOW_MS = 10 * 60 * 1_000
+
+/** Bound on remembered forwarded attention ids (insertion-ordered eviction). */
+export const MAX_FORWARDED_ATTENTION_IDS = 10_000
+
+/**
+ * 27346 - "has THIS pane already been handed this attention row?"
+ *
+ * The daemon's `replay` flag cannot answer that. Registration tail-resets
+ * `sessions.last_inbox_pull_seq` to the log tail (session.ts:620-627), and
+ * `shownThrough = max(mailboxCursor, last_inbox_pull_seq)` (handlers.ts:4058-4076),
+ * so a durable-mailbox RECOVERY row that predates this seat reads `replay:true`
+ * on its FIRST-ever delivery (measured: fetched=2 replay=2 forwarded=0 on the
+ * "claiming a parked name" journey). Delivery to this pane is an adapter-local
+ * fact, so the adapter records it here: a row is admitted once, then suppressed
+ * until this filter is recreated (process restart). A row with no id is always
+ * admitted - never withhold a row we cannot key (fail open).
+ */
+export type ForwardedAttentionTracker = {
+  /** Whether this id was already handed to this pane (an undefined id never is). */
+  has(id: string | undefined): boolean
+  /** Record a COMPLETED handoff; never call before the forward succeeded. */
+  remember(id: string | undefined): void
+}
+
+export function createForwardedAttentionTracker(maxIds = MAX_FORWARDED_ATTENTION_IDS): ForwardedAttentionTracker {
+  const forwarded = new Set<string>()
+  return {
+    has(id) {
+      return id !== undefined && forwarded.has(id)
+    },
+    remember(id) {
+      if (id === undefined || forwarded.has(id)) return
+      forwarded.add(id)
+      if (forwarded.size > maxIds) {
+        const oldest = forwarded.values().next().value
+        if (oldest !== undefined) forwarded.delete(oldest)
+      }
+    },
+  }
+}
+
+/** The preview slice of a ball the summary line is built from. */
+export type PendingBallPreview = { request_id?: string | null }
+
+export type PendingBallSummaryInput = {
+  balls: readonly PendingBallPreview[]
+  summary?:
+    | {
+        total?: number
+        /** Deliberately NOT part of the fingerprint: it changes every minute. */
+        oldest_age_ms?: number
+        withheld?: { total?: number }
+      }
+    | undefined
+}
+
+/** In-memory adapter state for the open-ball summary throttle. */
+export type PendingBallSummaryState = {
+  /** Sorted request_ids the last summary previewed. */
+  previewIds: string
+  total: number
+  withheld: number
+  sentAt: number
+}
+
+export type PendingBallSummaryDecision = {
+  /** Whether the caller should forward the summary line this drain. */
+  send: boolean
+  /** State to retain; null when there is nothing to summarize (reset on empty). */
+  state: PendingBallSummaryState | null
+}
+
+/**
+ * 27346 - throttle the open-ball summary line.
+ *
+ * Every wakeup drain re-forwarded the same "You own N balls ..." line, so a push
+ * seat's pane repeated it on every arrival. Re-surface an unchanged set only when
+ * it actually changed (preview request_id set, total, withheld count) or when the
+ * window has elapsed. The AGE is deliberately excluded: it always changes, so it
+ * would defeat the throttle. An EMPTY set resets the state, so the next ball is a
+ * first send. `now`/`state` are passed in - pure, no timer, no second store.
+ */
+export function decidePendingBallSummary(
+  input: PendingBallSummaryInput,
+  opts: { now: number; windowMs?: number; state: PendingBallSummaryState | null },
+): PendingBallSummaryDecision {
+  const total = input.summary?.total ?? input.balls.length
+  if (total <= 0) return { send: false, state: null }
+  const previewIds = Array.from(
+    new Set(input.balls.map((ball) => ball.request_id).filter((id): id is string => Boolean(id))),
+  )
+    .sort()
+    .join(",")
+  const withheld = input.summary?.withheld?.total ?? 0
+  const previous = opts.state
+  if (previous === null) {
+    return { send: true, state: { previewIds, total, withheld, sentAt: opts.now } }
+  }
+  const changed = previous.previewIds !== previewIds || previous.total !== total || previous.withheld !== withheld
+  const windowMs = opts.windowMs ?? PENDING_BALL_SUMMARY_WINDOW_MS
+  if (changed || opts.now - previous.sentAt >= windowMs) {
+    return { send: true, state: { previewIds, total, withheld, sentAt: opts.now } }
+  }
+  return { send: false, state: previous }
+}
+
 export type ConnectReplayGate = {
   /** Reset the window — call on every (re)connect. */
   reset(now: number): void
