@@ -93,6 +93,43 @@ describe("loadDeliveryLedger (#27459)", () => {
     rmSync(path, { force: true })
   })
 
+  it("names a non-representable timestamp as a schema gap, never a crash", () => {
+    // Written as raw text: JSON.parse reads the literal 1e400 as Infinity, while
+    // JSON.stringify would have collapsed it to null. The report formats
+    // windowStartMs as ISO, and one such row must not take the healthy rows down.
+    const path = tempPath()
+    writeFileSync(
+      path,
+      `{"version":${DELIVERY_LEDGER_VERSION},"pane":"@dev/luna6","windowStartMs":1e400,"ids":[],` +
+        `"counters":${JSON.stringify(counters())},"coverage":{"restarts":0,"gap":false,"gapReason":"none"}}`,
+      "utf8",
+    )
+    const loaded = loadDeliveryLedger(path)
+    expect(loaded.state).toBeNull()
+    expect(loaded.coverage).toMatchObject({ gap: true, gapReason: "schema" })
+    rmSync(path, { force: true })
+  })
+
+  it("rejects a representable start whose four-hour window end overflows TimeClip", () => {
+    const path = tempPath()
+    writeFileSync(
+      path,
+      JSON.stringify({
+        version: DELIVERY_LEDGER_VERSION,
+        pane: "@dev/luna6",
+        windowStartMs: 8_640_000_000_000_000, // the last valid Date, but +4h is not
+        ids: [],
+        counters: counters(),
+        coverage: { restarts: 0, gap: false, gapReason: "none" },
+      }),
+      "utf8",
+    )
+    const loaded = loadDeliveryLedger(path)
+    expect(loaded.state).toBeNull()
+    expect(loaded.coverage).toMatchObject({ gap: true, gapReason: "schema" })
+    rmSync(path, { force: true })
+  })
+
   it("round-trips a saved state", () => {
     const path = tempPath()
     const state = openDeliveryLedgerWindow({
