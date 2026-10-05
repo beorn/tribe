@@ -19,6 +19,7 @@
 
 import { describe, expect, test } from "vitest"
 import {
+  describeCodeIdentityMismatch,
   RELOAD_DEADLINE_MS,
   RELOAD_MAX_ABSENT,
   RELOAD_MAX_DECLARED,
@@ -195,7 +196,11 @@ describe("pacedReexec", () => {
     runningCert,
     runningRoot: runningCert === null ? null : "/landing",
   })
-  function harness(views: Array<ReloadDaemonView | Error | "hang">, onDisk: string | null = "abc") {
+  function harness(
+    views: Array<ReloadDaemonView | Error | "hang">,
+    onDisk: string | null = "abc",
+    selfRoot: string | null = "/landing",
+  ) {
     let now = 0
     const log: string[] = []
     const infos: string[] = []
@@ -219,6 +224,7 @@ describe("pacedReexec", () => {
           now += ms
         },
         onDiskCert: () => onDisk,
+        selfRoot: () => selfRoot,
         now: () => now,
         sleep: async (ms: number) => {
           sleeps.push(ms)
@@ -316,22 +322,54 @@ describe("pacedReexec", () => {
     expect(run.log[1]).toMatch(/rank 28 of 29 peers shares the last slot \(27\) inside the 112000 ms cap/u)
   })
 
-  test("a daemon with no code identity is judged on liveness, warned once, naming 25670", async () => {
+  test("a daemon that publishes no landing root is NOT ready: named once, then re-exec at the timeout (27531)", async () => {
     const run = harness([view(["@dev/3"], null)])
     await pacedReexec(run.deps, "x")
     expect(run.log).toEqual([
-      "warn: reload pacing: no code identity to compare (daemon reports none, disk abc); readiness is liveness alone until 25670",
+      "warn: reload pacing: the daemon published no landing root (daemon.code_identity.root absent); readiness waits for the daemon to run the same landing and commit",
+      "warn: reload pacing: daemon not ready after 30000 ms (the daemon runs other code than the disk); re-execing anyway",
       "reexec: x",
     ])
   })
 
-  test("an adapter whose disk commit is unresolved is judged on liveness too, never waiting out the timeout", async () => {
-    const run = harness([view(["@dev/3"], "abc")], null)
+  test("an adapter whose own root or commit is unresolved waits too, naming which side is missing (27531)", async () => {
+    const noRoot = harness([view(["@dev/3"], "abc")], "abc", null)
+    await pacedReexec(noRoot.deps, "x")
+    expect(noRoot.log[0]).toBe(
+      "warn: reload pacing: this adapter could not resolve its own landing root; readiness waits for the daemon to run the same landing and commit",
+    )
+    const noCommit = harness([view(["@dev/3"], "abc")], null)
+    await pacedReexec(noCommit.deps, "x")
+    expect(noCommit.log[0]).toBe(
+      "warn: reload pacing: this adapter's tree at /landing has no resolved commit; readiness waits for the daemon to run the same landing and commit",
+    )
+  })
+
+  test("a daemon running a DIFFERENT landing is named with both roots and re-execs at the timeout (27531)", async () => {
+    const other: ReloadDaemonView = {
+      liveNames: ["@dev/3"],
+      peers: { declared: ["@dev/3"], liveUndeclared: [] },
+      runningCert: "abc",
+      runningRoot: "/hh/dev-landings/other",
+    }
+    const run = harness([other])
     await pacedReexec(run.deps, "x")
-    expect(run.log).toEqual([
-      "warn: reload pacing: no code identity to compare (daemon abc, disk unresolved); readiness is liveness alone until 25670",
-      "reexec: x",
-    ])
+    expect(run.log[0]).toBe(
+      "warn: reload pacing: the daemon runs /hh/dev-landings/other, this adapter runs /landing; readiness waits for the daemon to run the same landing and commit",
+    )
+    expect(run.log[1]).toMatch(/daemon not ready after 30000 ms/u)
+    expect(run.log[2]).toBe("reexec: x")
+  })
+
+  test("describeCodeIdentityMismatch names the first difference and agrees only on both values (27531)", () => {
+    const same = { daemonRoot: "/r", daemonCert: "c", selfRoot: "/r", selfCert: "c" }
+    expect(describeCodeIdentityMismatch(same)).toBeNull()
+    expect(describeCodeIdentityMismatch({ ...same, daemonRoot: null })).toMatch(/published no landing root/u)
+    expect(describeCodeIdentityMismatch({ ...same, selfRoot: null })).toMatch(/its own landing root/u)
+    expect(describeCodeIdentityMismatch({ ...same, daemonRoot: "/other" })).toMatch(/the daemon runs \/other, this adapter runs \/r/u)
+    expect(describeCodeIdentityMismatch({ ...same, daemonCert: null })).toMatch(/published no cert/u)
+    expect(describeCodeIdentityMismatch({ ...same, selfCert: null })).toMatch(/no resolved commit/u)
+    expect(describeCodeIdentityMismatch({ ...same, daemonCert: "d" })).toMatch(/commit d at \/r.*is at c/u)
   })
 
   test("a daemon never on the disk's code re-execs anyway at the timeout, loudly", async () => {

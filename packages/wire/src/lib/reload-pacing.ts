@@ -135,6 +135,8 @@ export interface PacedReexecDeps {
   readonly timeout: (ms: number) => Promise<void>
   /** The commit on disk the adapter will re-exec into. */
   readonly onDiskCert: () => string | null
+  /** This adapter's OWN landing root (27531), derived from its own file location; never the daemon's. */
+  readonly selfRoot: () => string | null
   readonly now: () => number
   readonly sleep: (ms: number) => Promise<void>
   readonly warn: (message: string) => void
@@ -145,6 +147,34 @@ export interface PacedReexecDeps {
 }
 
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+
+/**
+ * Whether the daemon's published code identity differs from this adapter's own, and how (27531). Returns null only
+ * on agreement of BOTH values, so a daemon that publishes no landing root can never be read as agreement. The
+ * returned reason names both sides, because the operator deciding whether to wait or re-exec needs to see which
+ * tree each one runs.
+ */
+export function describeCodeIdentityMismatch(input: {
+  readonly daemonRoot: string | null
+  readonly daemonCert: string | null
+  readonly selfRoot: string | null
+  readonly selfCert: string | null
+}): string | null {
+  if (input.daemonRoot === null) return "the daemon published no landing root (daemon.code_identity.root absent)"
+  if (input.selfRoot === null) return "this adapter could not resolve its own landing root"
+  if (input.daemonRoot !== input.selfRoot) {
+    return `the daemon runs ${input.daemonRoot}, this adapter runs ${input.selfRoot}`
+  }
+  if (input.daemonCert === null) return `the daemon published no cert for landing ${input.daemonRoot}`
+  if (input.selfCert === null) return `this adapter's tree at ${input.selfRoot} has no resolved commit`
+  if (input.daemonCert !== input.selfCert) {
+    return (
+      `the daemon runs commit ${input.daemonCert} at ${input.daemonRoot}, ` +
+      `this adapter's tree is at ${input.selfCert}`
+    )
+  }
+  return null
+}
 
 /** One cli_status read that fails, loudly, once RELOAD_PROBE_TIMEOUT_MS passes without an answer. */
 function boundedRead(deps: PacedReexecDeps): Promise<ReloadDaemonView> {
@@ -220,17 +250,29 @@ export async function pacedReexec(deps: PacedReexecDeps, reason: string): Promis
   const outcome = await awaitReady(
     async () => {
       const view = await boundedRead(deps)
-      const onDisk = deps.onDiskCert()
-      if (view.runningCert === null || onDisk === null) {
-        if (!identityGapWarned) {
+      const daemonRoot = view.runningRoot
+      const daemonCert = view.runningCert
+      const selfRoot = deps.selfRoot()
+      const selfCert = deps.onDiskCert()
+      const mismatch = describeCodeIdentityMismatch({
+        daemonRoot,
+        daemonCert,
+        selfRoot,
+        selfCert,
+      })
+      if (mismatch !== null) {
+        // A same-root, both-complete cert difference is the normal wait for the daemon to catch up; every other
+        // mismatch is structural (a missing root, an unresolvable own identity, a DIFFERENT landing) and is named.
+        const certLag = daemonRoot !== null && daemonRoot === selfRoot && daemonCert !== null && selfCert !== null
+        if (!certLag && !identityGapWarned) {
           identityGapWarned = true
           deps.warn(
-            `reload pacing: no code identity to compare (daemon ${view.runningCert ?? "reports none"}, disk ${onDisk ?? "unresolved"}); readiness is liveness alone until 25670`,
+            `reload pacing: ${mismatch}; readiness waits for the daemon to run the same landing and commit`,
           )
         }
-        return true
+        return false
       }
-      return view.runningCert === onDisk
+      return true
     },
     { timeoutMs: RELOAD_READY_TIMEOUT_MS, retryMs: 500, now: deps.now, sleep: deps.sleep, random: deps.random },
   )

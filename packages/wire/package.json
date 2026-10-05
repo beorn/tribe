@@ -44,7 +44,6 @@
     "./lib/config": "./src/lib/config.ts",
     "./lib/tools-list": "./src/lib/tools-list.ts",
     "./lib/cwd-guardrail": "./src/lib/cwd-guardrail.ts",
-    "./lib/hot-reload": "./src/lib/hot-reload.ts",
     "./lib/transcript": "./src/lib/transcript.ts",
     "./lib/defang": "./src/lib/defang.ts",
     "./lib/persona-name": "./src/lib/persona-name.ts",
@@ -114,10 +113,6 @@
       "./lib/cwd-guardrail": {
         "types": "./dist/lib/cwd-guardrail.d.mts",
         "import": "./dist/lib/cwd-guardrail.mjs"
-      },
-      "./lib/hot-reload": {
-        "types": "./dist/lib/hot-reload.d.mts",
-        "import": "./dist/lib/hot-reload.mjs"
       },
       "./lib/transcript": {
         "types": "./dist/lib/transcript.d.mts",
@@ -218,7 +213,6 @@
       "src/lib/config.ts",
       "src/lib/tools-list.ts",
       "src/lib/cwd-guardrail.ts",
-      "src/lib/hot-reload.ts",
       "src/lib/transcript.ts",
       "src/lib/defang.ts",
       "src/lib/persona-name.ts",

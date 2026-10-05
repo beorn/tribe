@@ -39,7 +39,11 @@ import {
 } from "./lib/socket.ts"
 import { shouldAttemptDaemonRecovery } from "./lib/daemon-recovery.ts"
 import { createReconnectWatchdog } from "./lib/reconnect-watchdog.ts"
-import { parseDaemonCodeView, resolveCheckoutCodeIdentity } from "./lib/code-identity.ts"
+import {
+  parseDaemonCodeView,
+  resolveCheckoutCodeIdentity,
+  sourceRootFromWireModule,
+} from "./lib/code-identity.ts"
 import { pacedReexec, type ReloadDaemonView, type ReloadPeers } from "./lib/reload-pacing.ts"
 import { createHash } from "node:crypto"
 import { constants as osConstants } from "node:os"
@@ -640,6 +644,8 @@ async function readReloadDaemonView(): Promise<ReloadDaemonView> {
 }
 
 const ADAPTER_SOURCE_DIR = dirname(fileURLToPath(import.meta.url))
+/** This adapter's OWN landing root (27531), from its own file location; compared with the daemon's at every read. */
+const ADAPTER_SOURCE_ROOT = sourceRootFromWireModule(import.meta.url)
 
 function reloadDelay(ms: number): Promise<void> {
   return new Promise<void>((resolve) => {
@@ -669,6 +675,7 @@ function requestPacedReexec(reason: string, supervisedExitCode: () => number | n
         const onDisk = resolveCheckoutCodeIdentity(ADAPTER_SOURCE_DIR).onDisk
         return onDisk.ok ? onDisk.value : null
       },
+      selfRoot: () => ADAPTER_SOURCE_ROOT,
       now: () => Date.now(),
       sleep: reloadDelay,
       timeout: reloadDelay,
@@ -1224,15 +1231,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 // Lifecycle
 // ---------------------------------------------------------------------------
 
-// Hot-reload: re-exec on source changes (only when running from source, not bundled)
-import { setupHotReload } from "./lib/hot-reload.ts"
-using _reload = setupHotReload({
-  importMetaUrl: import.meta.url,
-  logActivity: (type, content) => {
-    daemon?.call("log_event", { type, content }).catch(() => {})
-  },
-  replaceProcess: (reason) => requestPacedReexec(reason, () => supervisedReexecExitCode()),
-})
+// Code changes reach this adapter through the DAEMON's published code identity (27531), not a source watcher: a
+// daemon generation change requests the paced re-exec, and the readiness gate then waits for the daemon's
+// (root, cert) to match this adapter's own. The shared-main/workspace source watcher (lib/hot-reload.ts) is gone
+// with it, and with the landing model there is no source tree of ours to watch.
 
 const shutdown = (exitCode = 0) => {
   proxyAc.abort()
