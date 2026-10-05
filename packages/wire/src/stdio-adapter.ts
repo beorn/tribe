@@ -55,7 +55,15 @@ import { isExplicitTribePersonaName, isTribeNameShape, TRIBE_NAME_SHAPE_ERROR } 
 import { createLogger, setSuppressConsole } from "loggily"
 import { createTimers } from "./timers.ts"
 import { defangModelInput } from "./lib/defang.ts"
-import { createConnectReplayGate, MAX_REPLAY_EVENTS, replayEnvelopeMeta, selectReplayEvents } from "./lib/replay-cap.ts"
+import {
+  createConnectReplayGate,
+  createForwardedAttentionTracker,
+  decidePendingBallSummary,
+  MAX_REPLAY_EVENTS,
+  replayEnvelopeMeta,
+  selectReplayEvents,
+  type PendingBallSummaryState,
+} from "./lib/replay-cap.ts"
 import { evaluateCwdPolicy, probeCwd, readCwdPolicyFromEnv, type CwdEvaluation } from "./lib/cwd-guardrail.ts"
 import {
   deliveryCapabilityInstruction,
@@ -231,6 +239,11 @@ const LAUNCH_IDENTITY = LAUNCH_READ.identity
 const CHANNEL_REPLAY_MAX = Number(process.env.TRIBE_CHANNEL_REPLAY_MAX) || undefined
 const CHANNEL_REPLAY_WINDOW_MS = Number(process.env.TRIBE_CHANNEL_REPLAY_WINDOW_MS) || undefined
 const connectReplayGate = createConnectReplayGate({ maxEvents: CHANNEL_REPLAY_MAX, windowMs: CHANNEL_REPLAY_WINDOW_MS })
+
+// 27346 — the wakeup drain used to re-forward the open-ball summary line on every
+// arrival. An unchanged set is now re-surfaced at most once per window. Knob exists
+// for tests (small window → deterministic recurrence).
+const PENDING_BALL_SUMMARY_WINDOW_MS = Number(process.env.TRIBE_PENDING_BALL_SUMMARY_WINDOW_MS) || undefined
 
 // Worktree-isolation guardrail (km-bearly.tribe-codex-cwd-worktree-guardrail):
 // standalone codex / non-launcher MCP clients inherit the user's invocation
@@ -1387,6 +1400,13 @@ function forwardPendingBallSummary(
 
 let drainInFlight = false
 let drainAgain = false
+// 27346 — in-memory only; the adapter process lifetime is the throttle scope.
+let pendingBallSummaryState: PendingBallSummaryState | null = null
+// 27346 — rows THIS pane has already been handed, so a re-presented attention
+// row stops re-forwarding on every wakeup. Adapter-local by necessity: the
+// daemon's `replay` flag is cursor-based and a registration tail-reset makes a
+// never-delivered recovery row read `replay:true` (see createForwardedAttentionTracker).
+const forwardedAttention = createForwardedAttentionTracker()
 
 function drainDaemonInbox(): void {
   if (drainInFlight) {
@@ -1425,13 +1445,33 @@ function drainDaemonInbox(): void {
         // receipt. On 2026-09-02 eight officer rows were drained, acked here,
         // and never seen; this is the line that lost them.
         const result = parseToolText<TribeFetchResult>(await d.call("tribe.fetch", { limit: 500, receipt: false }))
-        const attentionEvents = result?.attention?.actionable_unread ?? []
-        const attentionIds = new Set(attentionEvents.map((event) => event.id).filter(Boolean))
-        for (const event of attentionEvents) forwardFetchedEvent(event)
+        // 27346 — forward an attention row only on its FIRST delivery to this
+        // pane. The daemon's `replay` flag is NOT that fact (registration
+        // tail-resets the session cursor, so a recovered row that predates this
+        // seat reads replay:true on its first delivery), so delivery is tracked
+        // adapter-locally. Ids are remembered from ALL actionable rows, before
+        // the admission filter, so a suppressed row cannot sneak back in through
+        // the ambient-events path below.
+        const attentionEventsAll = result?.attention?.actionable_unread ?? []
+        const attentionIds = new Set(attentionEventsAll.map((event) => event.id).filter(Boolean))
+        const attentionEvents = attentionEventsAll.filter(
+          (event) => !forwardedAttention.has(event.id ? String(event.id) : undefined),
+        )
+        for (const event of attentionEvents) {
+          forwardFetchedEvent(event)
+          // Marked only AFTER the handoff, so a throw re-delivers next drain.
+          forwardedAttention.remember(event.id ? String(event.id) : undefined)
+        }
         const currentPendingBalls = result?.attention?.pending_balls ?? []
         const currentPendingBallSummary = result?.attention?.pending_balls_summary
         const currentPendingBallTotal = currentPendingBallSummary?.total ?? currentPendingBalls.length
-        forwardPendingBallSummary(currentPendingBalls, currentPendingBallSummary)
+        // 27346 — one summary per unchanged set (or per window), not per wakeup.
+        const pendingBallDecision = decidePendingBallSummary(
+          { balls: currentPendingBalls, summary: currentPendingBallSummary },
+          { now: Date.now(), windowMs: PENDING_BALL_SUMMARY_WINDOW_MS, state: pendingBallSummaryState },
+        )
+        pendingBallSummaryState = pendingBallDecision.state
+        if (pendingBallDecision.send) forwardPendingBallSummary(currentPendingBalls, currentPendingBallSummary)
         const events = (result?.events ?? []).filter((event) => !event.id || !attentionIds.has(event.id))
         const { forward, skippedOld, capped } = selectReplayEvents(events, { now: Date.now() })
         for (const event of forward) forwardFetchedEvent(event)
